@@ -2120,6 +2120,15 @@ kbd.op-kbd {
   gap: 8px;
 }
 
+/* Bulk cleanup row above the Workspace roster (user verification
+   2026-06-12): one click sweeps every merged branch. */
+.workspace-overview-bulk-cleanup {
+  display: flex;
+  justify-content: flex-end;
+  padding: var(--space-1) 0 var(--space-2);
+  border-bottom: 1px solid var(--color-border);
+}
+
 /* SPEC-2359 W16-3 (FR-390): fetched-remote-only badge — Launch creates the
    worktree on demand. */
 .workspace-overview-remote {

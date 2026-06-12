@@ -1004,6 +1004,32 @@ export function createWorkspaceKanbanSurface({
     if (workspaces.length === 0) {
       list.appendChild(createNode("div", "workspace-overview-empty", "No Workspaces"));
     } else {
+      // User verification 2026-06-12: completed local branches need a BULK
+      // cleanup path — one click opens the cleanup flow with every merged
+      // Workspace preselected (the modal still lets the user prune the set).
+      const mergedRows = workspaces.filter(
+        (workspace) => workspace.merged_into_base && workspace.branch,
+      );
+      if (mergedRows.length > 0) {
+        const bulkRow = createNode("div", "workspace-overview-bulk-cleanup");
+        const bulk = createNode(
+          "button",
+          "wizard-button is-compact",
+          `Clean Up Merged (${mergedRows.length})`,
+        );
+        bulk.type = "button";
+        bulk.dataset.action = "cleanup-merged-workspaces";
+        bulk.addEventListener("click", () =>
+          openWorkspaceCleanup?.(
+            mergedRows.map((workspace) => ({
+              branch: workspace.branch,
+              remote_delete_available: true,
+            })),
+          ),
+        );
+        bulkRow.appendChild(bulk);
+        list.appendChild(bulkRow);
+      }
       for (const workspace of workspaces) {
         list.appendChild(renderWorkspaceRow(windowId, state, workspace));
       }

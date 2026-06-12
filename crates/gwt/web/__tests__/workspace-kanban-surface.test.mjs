@@ -1027,6 +1027,76 @@ test("merged Workspace detail offers a Clean Up control for its branch", () => {
   assert.equal(cleanupCalls[0]?.branch, "work/merged");
 });
 
+// User verification 2026-06-12: completed (merged) local branches need a
+// BULK cleanup path — the list header offers "Clean Up Merged (N)" that opens
+// the cleanup flow with every merged row preselected.
+test("list header offers bulk Clean Up Merged for all merged Workspaces", () => {
+  const fixture = createFixture();
+  const cleanupCalls = [];
+  const surface = createSurface(
+    fixture,
+    {
+      id: "proj-1",
+      title: "projection",
+      status_category: "idle",
+      active_work_count: 3,
+      active_works: [
+        {
+          id: "work-work-a-12345678",
+          title: "work/a",
+          status_category: "idle",
+          lifecycle_state: "paused",
+          branch: "work/a",
+          merged_into_base: true,
+          done_equivalent: true,
+          active_agents: 0,
+          blocked_agents: 0,
+          agents: [],
+        },
+        {
+          id: "work-work-b-12345678",
+          title: "work/b",
+          status_category: "idle",
+          lifecycle_state: "paused",
+          branch: "work/b",
+          merged_into_base: true,
+          active_agents: 0,
+          blocked_agents: 0,
+          agents: [],
+        },
+        {
+          id: "work-work-open-12345678",
+          title: "work/open",
+          status_category: "idle",
+          lifecycle_state: "paused",
+          branch: "work/open",
+          active_agents: 0,
+          blocked_agents: 0,
+          agents: [],
+        },
+      ],
+      agents: [],
+    },
+    {
+      send() {},
+      openWorkspaceCleanup: (candidates) => cleanupCalls.push(candidates),
+    },
+  );
+
+  surface.mount(fixture.body, fixture.windowData, {
+    focusWindowLocally() {},
+    sendFocus() {},
+  });
+
+  const bulk = fixture.body.querySelector('[data-action="cleanup-merged-workspaces"]');
+  assert.ok(bulk, "bulk Clean Up Merged control must exist");
+  assert.match(bulk.textContent, /Clean Up Merged \(2\)/);
+  bulk.click();
+  assert.equal(cleanupCalls.length, 1);
+  const branches = cleanupCalls[0].map((candidate) => candidate.branch).sort();
+  assert.deepEqual(branches, ["work/a", "work/b"]);
+});
+
 // SPEC-2359 W16-4 (FR-391 / SC-262): a merged-and-stale Workspace presents
 // as derived Done — badge "Done" with data-derived marking it apart from an
 // explicit close — and never as Active/Paused.

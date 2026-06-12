@@ -3042,14 +3042,21 @@
       }
 
       function openWorkspaceCleanup(candidateOverride) {
-        // The Workspace detail passes the selected row (e.g. a merged
-        // branch, user verification 2026-06-12); without an override the
+        // The Workspace detail passes the selected row, the list header
+        // passes ALL merged rows (user verification 2026-06-12: completed
+        // local branches need a bulk cleanup path); without an override the
         // projection-level cleanup candidate is used.
-        const candidate = candidateOverride || activeWorkProjection?.cleanup_candidate;
-        if (!candidate?.branch) return;
+        const overrides = Array.isArray(candidateOverride)
+          ? candidateOverride
+          : [candidateOverride];
+        const candidates = (candidateOverride
+          ? overrides
+          : [activeWorkProjection?.cleanup_candidate]
+        ).filter((candidate) => candidate?.branch);
+        if (candidates.length === 0) return;
         const state = ensureBranchListState(WORKSPACE_CLEANUP_WINDOW_ID);
-        state.entries = [workspaceCleanupEntry(candidate)];
-        state.cleanupSelected = new Set([candidate.branch]);
+        state.entries = candidates.map((candidate) => workspaceCleanupEntry(candidate));
+        state.cleanupSelected = new Set(candidates.map((candidate) => candidate.branch));
         state.notice = "";
         state.cleanupModal = {
           open: true,
