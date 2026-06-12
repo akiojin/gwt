@@ -3,8 +3,8 @@ use std::io;
 use gwt_agent::{session::GWT_SESSION_ID_ENV, Session};
 use gwt_core::{
     coordination::{
-        normalize_board_audience, normalize_board_mentions, AuthorKind, BoardAudienceScope,
-        BoardEntry, BoardMention,
+        normalize_board_mentions, AuthorKind, BoardAudienceScope, BoardEntry, BoardEntryDraft,
+        BoardMention, BoardOrigin,
     },
     paths::gwt_sessions_dir,
 };
@@ -161,42 +161,10 @@ pub(super) fn run<E: CliEnv>(
                 .as_ref()
                 .map(|session| (AuthorKind::Agent, session.display_name.clone()))
                 .unwrap_or((AuthorKind::Agent, "cli".to_string()));
-            let mut entry = BoardEntry::new(
-                author_kind,
-                author,
-                kind.parse().map_err(gwt_error_to_spec_ops_error)?,
-                body,
-                None,
-                parent,
-                topics,
-                owners,
-            );
-            if let Some(title) = title {
-                entry = entry.with_title(title);
-            }
-            if let Some(title_summary) = title_summary {
-                entry = entry.with_title_summary(title_summary);
-            }
-            if let Some(session) = current_session.as_ref() {
-                if !session.branch.trim().is_empty() {
-                    entry = entry.with_origin_branch(session.branch.clone());
-                }
-                if !session.id.trim().is_empty() {
-                    entry = entry.with_origin_session_id(session.id.clone());
-                }
-                if !session.display_name.trim().is_empty() {
-                    entry = entry.with_origin_agent_id(session.display_name.clone());
-                }
-            }
-            if !targets.is_empty() {
-                entry = entry.with_target_owners(targets);
-            }
             let (workspace_audience, other_mention_args) = split_workspace_mentions(&mentions);
-            let mentions =
-                parse_mentions(&other_mention_args).map_err(gwt_error_to_spec_ops_error)?;
-            if !mentions.is_empty() {
-                entry = entry.with_mentions(mentions);
-            }
+            let mentions = normalize_board_mentions(
+                &parse_mentions(&other_mention_args).map_err(gwt_error_to_spec_ops_error)?,
+            );
             let mut audience = Vec::new();
             if !broadcast {
                 if let BoardAudienceScope::Workspace(workspace_id) = current_session_board_scope(
@@ -209,15 +177,38 @@ pub(super) fn run<E: CliEnv>(
                 }
                 audience.extend(workspace_audience);
                 audience.extend(
-                    post_audience_for_session(env.repo_path(), None, &entry.mentions, false)
+                    post_audience_for_session(env.repo_path(), None, &mentions, false)
                         .map_err(gwt_error_to_spec_ops_error)?
                         .unwrap_or_default(),
                 );
             }
-            let audience = normalize_board_audience(audience);
-            if !audience.is_empty() {
-                entry = entry.with_audience(audience);
+            // SPEC-3046: エントリの形を決める正規化・検証は
+            // BoardEntryDraft::finalize に集約されている。CLI 側は author 解決
+            // (SPEC-1974) / audience 解決 / Session→origin の受け渡しだけを担う。
+            let mut draft = BoardEntryDraft::new(
+                author_kind,
+                author,
+                kind.parse().map_err(gwt_error_to_spec_ops_error)?,
+                body,
+            );
+            draft.title = title;
+            draft.title_summary = title_summary;
+            draft.parent_id = parent;
+            draft.related_topics = topics;
+            draft.related_owners = owners;
+            draft.target_owners = targets;
+            draft.mentions = mentions;
+            draft.audience = audience;
+            if let Some(session) = current_session.as_ref() {
+                draft.origin = BoardOrigin::new(
+                    session.branch.clone(),
+                    session.id.clone(),
+                    session.display_name.clone(),
+                );
             }
+            let entry = draft
+                .finalize()
+                .map_err(|err| io_as_spec_ops_error(io::Error::other(err.to_string())))?;
             let snapshot =
                 post_entry(env.repo_path(), entry).map_err(gwt_error_to_spec_ops_error)?;
             publish_board_change(env.repo_path(), snapshot.board.entries.len());
@@ -526,6 +517,26 @@ mod tests {
         projection.id = "workspace-current".to_string();
         projection.agents = agents;
         save_workspace_projection(repo, &projection).expect("save workspace projection");
+    }
+
+    #[test]
+    fn board_family_run_post_rejects_whitespace_only_body() {
+        // SPEC-3046 受け入れシナリオ 1: GUI と同じ空 body 検証が CLI にも
+        // 適用される（whitespace-only body は保存されずエラー）。
+        let tmp = tempfile::tempdir().unwrap();
+        let mut env = crate::cli::TestEnv::new(tmp.path().to_path_buf());
+        let cmd = parse(&[s("post"), s("--kind"), s("status"), s("--body"), s("   ")]).unwrap();
+        let mut out = String::new();
+        let err = run(&mut env, cmd, &mut out).expect_err("whitespace-only body must be rejected");
+        assert!(
+            err.to_string().contains("body"),
+            "error should mention the body requirement: {err}"
+        );
+        let snapshot = gwt_core::coordination::load_snapshot(tmp.path()).unwrap();
+        assert!(
+            snapshot.board.entries.is_empty(),
+            "rejected post must not be persisted"
+        );
     }
 
     #[test]

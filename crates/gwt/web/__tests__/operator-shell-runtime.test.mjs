@@ -33,12 +33,10 @@ test("Operator shell fails open when browser storage and media APIs are unavaila
   assert.equal(briefing.hidden, true, "Mission Briefing must not block app startup");
 });
 
-test("Operator shell auto-hides chrome and exposes peek 帯 hover-reveal triggers", async () => {
-  // SPEC-2356 Phase 9 (FR-021/FR-032): chrome visibility runs through the
-  // hover-reveal state machine driven by the sidebar peek 帯, with no chip
-  // toggles, no localStorage persistence, and a one-shot legacy migration.
-  // SPEC-2356 operator chrome cleanup: window controls fold into the sidebar,
-  // so the separate window-controls peek 帯 is retired.
+test("Operator shell keeps the Command Rail always visible with no reveal state (SPEC-3038)", async () => {
+  // SPEC-3038 US-1: the rail is grid-docked, so init must not install any
+  // hover-reveal machinery or reveal dataset attributes. The one-shot legacy
+  // localStorage migration from SPEC-2356 Phase 9 stays.
   const { initOperatorShell } = await importOperatorShell();
   const { document, window } = parseHTML(html);
   const storage = memoryStorage();
@@ -70,36 +68,40 @@ test("Operator shell auto-hides chrome and exposes peek 帯 hover-reveal trigger
     assert.equal(
       document.getElementById("op-sidebar-edge-toggle"),
       null,
-      "<< chip toggle must not exist after Phase 9",
+      "<< chip toggle must not exist",
     );
     assert.equal(
       document.getElementById("op-window-controls-edge-toggle"),
       null,
-      "vv chip toggle must not exist after Phase 9",
+      "vv chip toggle must not exist",
     );
 
-    const sidebarPeek = document.querySelector(".op-sidebar-peek");
-    assert.ok(sidebarPeek, "fixture must include sidebar peek 帯");
+    assert.equal(
+      document.querySelector(".op-sidebar-peek"),
+      null,
+      "the peek 帯 is retired — the rail is always visible",
+    );
     assert.equal(
       document.querySelector(".op-window-controls-peek"),
       null,
-      "window controls peek 帯 is retired — controls live in the sidebar",
+      "window controls peek 帯 stays retired",
     );
-    assert.equal(sidebarPeek.getAttribute("aria-controls"), "op-sidebar");
+    const rail = document.getElementById("op-rail");
+    assert.ok(rail, "fixture must include the Command Rail");
 
     // FR-032: legacy keys must be removed on init.
     assert.equal(storage.getItem("gwt:ui:sidebar-collapsed"), null);
     assert.equal(storage.getItem("gwt:ui:window-controls"), null);
 
-    // Default state: no data-op-* attributes (auto-hidden).
+    // No reveal state: the rail needs no data-op-* attributes, ever.
     assert.equal(document.documentElement.dataset.opSidebar, undefined);
     assert.equal(document.documentElement.dataset.opWindowControls, undefined);
 
-    // Hover the sidebar peek 帯 → revealed (window controls reveal with it).
-    sidebarPeek.dispatchEvent(new window.Event("pointerenter", { bubbles: true }));
-    assert.equal(document.documentElement.dataset.opSidebar, "revealed");
+    // Hovering the rail must not flip any reveal state either.
+    rail.dispatchEvent(new window.Event("pointerenter", { bubbles: true }));
+    assert.equal(document.documentElement.dataset.opSidebar, undefined);
 
-    // Storage must remain untouched by hover reveal (no persistence in Phase 9).
+    // Storage must remain untouched (no chrome persistence).
     assert.equal(storage.getItem("gwt:ui:sidebar-collapsed"), null);
     assert.equal(storage.getItem("gwt:ui:window-controls"), null);
   } finally {

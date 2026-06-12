@@ -6851,6 +6851,20 @@ Context: Slack Board の General thread root mapping が .gwt/work/ (worktree-lo
 Learning: マシン内で共有すべき coordination 状態を worktree-local にだけ置くと、worktree のライフサイクル (削除/新規作成) のたびに状態が失われ重複が再生産される。git 伝播は PR merge 経由でラグがあり即時共有にならない。また各 worktree の target/debug/gwtd はビルド時期で挙動が異なるため、Board 系の不審な挙動はどのバイナリが投稿したかを先に確認する。
 Future Action: repo 単位で共有すべき状態は ~/.gwt/projects/<repo-hash>/ (home store) に置き、worktree store は git 伝播用に併用する (SPEC-2963 FR-022..024 の dual-store パターンを再利用)。
 
+## 2026-06-10 — gwtd register start --spec 0 後は phase が実IDを拒否する
+
+Type: lesson
+Context: gwt-register-spec skill の手順通り register start --spec 0 で開始後、phase --spec 3038 --label create が 'state owns SPEC-Some(0)' で exit 2 拒否された (SPEC-3038 登録時)
+Learning: skill doc は『phase で実 id を bind する』と書くが、skill_state_runtime.rs は owner_spec 不一致の phase を拒否する。start は状態を無条件上書きするため、Issue 番号確定後に register start --spec <n> で再 start して束縛し直すのが正しい運用
+Future Action: gwt-register-spec で Issue 作成後は phase の前に register start --spec <実ID> を必ず挟む。skill doc 側の記述修正も別タスクで検討
+
+## 2026-06-10 — クリーンツリーでの git stash は空振りし、pop が他人の古い stash を展開する
+
+Type: lesson
+Context: SPEC-3038 検証中、全作業コミット済みの状態で git stash -q && ... && git stash pop -q を実行。stash は『No local changes』で何も積まず、pop が リポジトリに残っていた Tauri 時代の stash@{0} を展開して CLAUDE.md 等で大規模コンフリクトが発生した
+Learning: git stash は変更ゼロだとエントリを作らないが exit 0 を返す。直後の pop はスタック先頭の既存エントリ（他セッションの遺物）を適用してしまう。比較検証で stash/pop ペアを使う前に、stash 出力か git stash list で自分のエントリが積まれたか確認が必須
+Future Action: ベースライン比較は git stash ではなく git checkout <base-commit> -- <paths> でファイル復元→検証→git checkout HEAD -- . で戻す方式を使う。stash を使う場合は push -m で名前を付け、pop ではなく stash apply/drop を名前で指定する
+
 ## 2026-06-10 — PowerShell wrapper は .cmd ターゲットへ常に Legacy passing で埋め込み quote を壊す
 
 Type: lesson
@@ -6885,6 +6899,20 @@ Type: lesson
 Context: merge 競合解決後、grep でマーカー残存を確認するコマンドと git commit/push を ; で連結したため、grep が残存 1 件を報告したのに commit と push がそのまま実行され、競合マーカー入りのファイルを push してしまった
 Learning: シェルで『検証 → 実行』を 1 行にまとめる場合、; は検証失敗でも実行を継続する。検証は実行を物理的にゲートする形（検証コマンド && 実行、または明示的な exit code 分岐）にしない限り意味を持たない
 Future Action: 競合解決後は『マーカー grep が 0 件であること』を独立したステップとして確認してから commit する。一般に、検証と destructive アクションを同一コマンドに連結する場合は && でゲートし、; を使わない
+
+## 2026-06-12 — 並行エージェント作業との UI 設計衝突は最新のユーザー検証コメントを必ず突き合わせる
+
+Type: lesson
+Context: SPEC-3038 のレール/close/ラベル設計が、develop に並行マージされた PR #3045（CTA 右下固定・実行中のみ close 確認・FR-392 Workspace 改名）と 3 点衝突。さらにユーザーへの Work/Workspace 回答を旧 SC-207 根拠で行い、FR-392 が既に SC-207 を置換していた事実を見落とした
+Learning: 同一 UI 領域の並行作業では、merge コンフリクトのテスト側コメント（user verification 日付・FR 番号）が最新のプロダクト判断の一次情報になる。SPEC の命名規則（SC-207 等）は後続 FR で置換され得るため、ユーザーへ仕様根拠を回答する前に develop 側の最新テスト契約を grep して確認する
+Future Action: UI 系 SPEC の実装前後に origin/develop の関連テスト（operator-chrome-structure 等）の diff を確認し、設計判断の衝突は AskUserQuestion で 1 問に絞って解決する。命名・配置などのプロダクト判断は両ブランチの user verification 記録を提示した上で確認する
+
+## 2026-06-12 — このマシンの gh token は read:org 不足で gwtd pr edit が常に失敗する
+
+Type: lesson
+Context: PR #3047 の本文更新で gwtd pr edit → gh pr edit が GraphQL 'login' field の read:org スコープ要求で 2 回失敗。直接 gh api PATCH はリポジトリの hook でブロックされる
+Learning: gwtd pr edit は内部の gh pr edit GraphQL がこの環境の token スコープ (repo/user/workflow 等、read:org なし) と非互換。PR 本文の事後修正はこの環境では不可
+Future Action: PR 本文は create 時に確定させる。事後の訂正・補足は gwtd pr comment で代替する。token スコープ追加はユーザーにしかできないため、必要ならユーザーへ https://github.com/settings/tokens での read:org 付与を依頼する
 
 ## 2026-06-12 — gwtd register の placeholder --spec 0 は phase で実 ID に rebind できない
 

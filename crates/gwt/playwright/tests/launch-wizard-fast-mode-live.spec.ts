@@ -103,7 +103,14 @@ test.describe.serial("Launch Wizard Claude Code Fast mode (live backend)", () =>
           `.workspace-window[data-id="${launchedWindowId}"]`,
         );
         if (await launchedWindow.count()) {
+          // SPEC-3038 US-3 Close Guard: the titlebar × always opens a confirm
+          // modal; the close only happens after the destructive confirm.
           await launchedWindow.getByLabel("Close window").click();
+          const closeConfirm = page.locator(
+            '#window-close-confirm-modal [data-role="window-close-confirm"]',
+          );
+          await expect(closeConfirm).toBeVisible();
+          await closeConfirm.click();
           await expect(launchedWindow).toHaveCount(0, { timeout: 15_000 });
         }
       }

@@ -12,6 +12,18 @@ function tabTitle(tab) {
   return String(tab?.title || "Window");
 }
 
+// SPEC-3038 US-2: tabs project the same agent telemetry the window chrome
+// shows. Both fields are optional — non-agent tabs render without telemetry.
+function tabAgentState(tab) {
+  const state = typeof tab?.agent_state === "string" ? tab.agent_state.trim() : "";
+  return state;
+}
+
+function tabAgentColor(tab) {
+  const color = typeof tab?.agent_color === "string" ? tab.agent_color.trim() : "";
+  return color;
+}
+
 function tabIdFromItem(item) {
   return item?.dataset?.windowTabId || "";
 }
@@ -25,6 +37,18 @@ function createTabButton(document, item) {
   button.type = "button";
   button.className = "window-tab";
   button.draggable = true;
+
+  // SPEC-3038 US-2: state dot + label span. The dot must precede the label so
+  // keyed in-place updates never reorder children; the title lives in its own
+  // span so updating it cannot wipe the dot.
+  const dot = document.createElement("span");
+  dot.className = "window-tab-state";
+  dot.setAttribute("aria-hidden", "true");
+  dot.hidden = true;
+  button.appendChild(dot);
+  const label = document.createElement("span");
+  label.className = "window-tab-label";
+  button.appendChild(label);
 
   button.addEventListener("click", (event) => {
     event.stopPropagation();
@@ -52,7 +76,9 @@ function createCloseButton(document, item) {
   button.addEventListener("click", (event) => {
     event.stopPropagation();
     const id = tabIdFromItem(item);
-    itemActions(item).send?.({ kind: "close_window", id });
+    // SPEC-3038 US-3: the renderer only reports close intent; the Close
+    // Guard confirm modal (app.js requestCloseWindow) owns the actual close.
+    itemActions(item).requestClose?.(id);
   });
   return button;
 }
@@ -86,7 +112,37 @@ function updateTabItem(item, tab, { activeWindowId, tooltipForWindow, actions })
   } else {
     tabButton.removeAttribute("aria-current");
   }
-  tabButton.textContent = title;
+
+  // SPEC-3038 US-2: project agent telemetry onto the tab. The dataset
+  // attributes drive the agent-color rim + state styling in app.css.
+  const agentState = tabAgentState(tab);
+  if (agentState) {
+    tabButton.dataset.agentState = agentState;
+  } else {
+    delete tabButton.dataset.agentState;
+  }
+  const agentColor = tabAgentColor(tab);
+  if (agentColor) {
+    tabButton.dataset.agentColor = agentColor;
+  } else {
+    delete tabButton.dataset.agentColor;
+  }
+
+  const stateDot = ensureChild(tabButton, ".window-tab-state", (document) => {
+    const dot = document.createElement("span");
+    dot.className = "window-tab-state";
+    dot.setAttribute("aria-hidden", "true");
+    return dot;
+  });
+  stateDot.hidden = !agentState;
+
+  const label = ensureChild(tabButton, ".window-tab-label", (document) => {
+    const span = document.createElement("span");
+    span.className = "window-tab-label";
+    return span;
+  });
+  label.textContent = title;
+
   tabButton.title =
     typeof tooltipForWindow === "function" ? tooltipForWindow(tab) : title;
 
@@ -105,6 +161,7 @@ export function renderWindowTabs({
   activeWindowId,
   tooltipForWindow,
   send,
+  requestClose,
   onTabDragStart,
   onTabDrag,
   onTabDragEnd,
@@ -117,6 +174,7 @@ export function renderWindowTabs({
   const nextIds = new Set(nextTabs.map((tab) => tab.id));
   const actions = {
     send,
+    requestClose,
     onTabDragStart,
     onTabDrag,
     onTabDragEnd,

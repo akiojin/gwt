@@ -71,7 +71,8 @@ root_js_modules! {
     "branch-list-state.js" => "applyBranchEntriesEvent",
     // SPEC-2013 FR-012: close project tab confirm modal renderer.
     "close-project-tab-confirm-modal.js" => "renderCloseProjectTabConfirmModal",
-    "window-close-guard.js" => "shouldConfirmAgentWindowClose",
+    // SPEC-3038 US-3: Close Guard — window close confirm modal renderer.
+    "window-close-confirm-modal.js" => "renderWindowCloseConfirmModal",
     "migration-modal.js" => "renderMigrationModal",
     "project-clone-modal.js" => "renderProjectCloneModal",
     "window-docking.js" => "findTitlebarDockTarget",
