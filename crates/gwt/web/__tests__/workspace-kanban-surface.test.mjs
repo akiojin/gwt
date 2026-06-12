@@ -173,19 +173,15 @@ test("Workspace detail renders Sessions under a Work, highlighting the active on
   });
 
   const sessions = Array.from(fixture.body.querySelectorAll(".workspace-detail-session"));
-  assert.equal(sessions.length, 2, "one row per conversation Session");
+  // User decision 2026-06-12: multiple Session rows per agent read as noise —
+  // only the latest conversation renders.
+  assert.equal(sessions.length, 1, "only the latest Session renders");
   const active = sessions.filter((row) => row.dataset.active === "true");
-  assert.equal(active.length, 1, "exactly one active Session");
-  // The active row carries the latest conversation's (truncated) id and a clear
-  // "Current" badge; past rows are badged "Past".
+  assert.equal(active.length, 1, "the rendered Session is the active one");
   assert.match(active[0].textContent, /conv-bbb/);
   const activeBadge = active[0].querySelector(".workspace-detail-session-badge");
   assert.equal(activeBadge.textContent, "Current");
   assert.equal(activeBadge.dataset.sessionState, "current");
-  const pastRow = sessions.find((row) => row.dataset.active !== "true");
-  const pastBadge = pastRow.querySelector(".workspace-detail-session-badge");
-  assert.equal(pastBadge.textContent, "Past");
-  assert.equal(pastBadge.dataset.sessionState, "past");
   // The full conversation id is available on hover even though the visible id is
   // truncated.
   assert.equal(
@@ -324,24 +320,17 @@ test("Each Session row carries its own Resume that resumes that conversation (SP
   assert.equal(fixture.body.querySelector("[data-action='resume-workspace']"), null);
   assert.equal(fixture.body.querySelector("[data-action='resume-work']"), null);
   const resumes = Array.from(fixture.body.querySelectorAll("[data-action='resume-session']"));
-  assert.equal(resumes.length, 2, "one Resume per conversation Session");
-  // Every Resume targets the same Work (gwt session id) but a distinct
-  // conversation (agent_session_id).
-  assert.deepEqual(
-    resumes.map((node) => node.dataset.sessionId),
-    ["work-launch-1", "work-launch-1"],
-  );
-  assert.deepEqual(
-    resumes.map((node) => node.dataset.agentSessionId),
-    ["conv-older1111", "conv-latest2222"],
-  );
+  // User decision 2026-06-12: only the latest Session renders, so exactly one
+  // Resume targeting the latest conversation.
+  assert.equal(resumes.length, 1, "one Resume for the latest Session");
+  assert.equal(resumes[0].dataset.sessionId, "work-launch-1");
+  assert.equal(resumes[0].dataset.agentSessionId, "conv-latest2222");
 
-  // Resuming the older Session resumes that exact conversation, not the latest.
   resumes[0].click();
   assert.equal(sent.length, 1);
   assert.equal(sent[0].kind, "resume_workspace_agent");
   assert.equal(sent[0].session_id, "work-launch-1");
-  assert.equal(sent[0].agent_session_id, "conv-older1111");
+  assert.equal(sent[0].agent_session_id, "conv-latest2222");
   assert.ok(sent[0].bounds, "resume carries viewport bounds for the new window");
 });
 
@@ -368,8 +357,9 @@ test("Non-resumable Sessions are history-only; a Start Fresh control keeps the W
     sendFocus() {},
   });
 
-  // Both Session rows render (history is visible) but carry no Resume control.
-  assert.equal(fixture.body.querySelectorAll(".workspace-detail-session").length, 2);
+  // Only the latest Session renders (user decision 2026-06-12) and it
+  // carries no Resume control because it is not resumable.
+  assert.equal(fixture.body.querySelectorAll(".workspace-detail-session").length, 1);
   assert.equal(fixture.body.querySelector("[data-action='resume-session']"), null);
 
   // A single Start Fresh fallback launches a new conversation on the Work.

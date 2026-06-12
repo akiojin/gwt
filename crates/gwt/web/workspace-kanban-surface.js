@@ -461,14 +461,18 @@ export function createWorkspaceKanbanSurface({
         }
         group.appendChild(empty);
       } else {
-        for (const session of sessions) {
-          group.appendChild(renderSessionRow(work, session));
-        }
-        // E1: when every Session is history-only (none resumable) on a
-        // non-running Work, no per-Session Resume appears anywhere — offer a
-        // "Start Fresh" control so the Work stays launchable. Distinct label so
-        // the user knows it starts a new conversation, not a resumed one.
-        const startFresh = renderStartFreshButton(work, sessions);
+        // User decision 2026-06-12: multiple Session rows per agent read as
+        // noise — render only the latest conversation (the active one, or the
+        // newest by order; the backend sorts oldest-first).
+        const latest =
+          sessions.find((session) => session && session.is_active) ||
+          sessions[sessions.length - 1];
+        group.appendChild(renderSessionRow(work, latest));
+        // E1: when the visible Session is history-only (not resumable) on a
+        // non-running Work, no Resume appears — offer a "Start Fresh" control
+        // so the Work stays launchable. Distinct label so the user knows it
+        // starts a new conversation, not a resumed one.
+        const startFresh = renderStartFreshButton(work, [latest]);
         if (startFresh) {
           group.appendChild(startFresh);
         }

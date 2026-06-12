@@ -14112,6 +14112,33 @@ fn attach_registry_sessions_caps_total_agents_on_the_wire() {
     );
 }
 
+/// User verification 2026-06-12: Work records written without agent metadata
+/// (older record paths) rendered as an anonymous "Agent" group. The view
+/// borrows display_name / agent_id from the ledger TOML keyed by the gwt
+/// session id, so the group is named whenever the ledger still knows it.
+#[test]
+fn agent_view_borrows_identity_from_ledger_when_record_has_none() {
+    let mut session = gwt_agent::Session::new(
+        std::path::PathBuf::from("/tmp/none"),
+        "work/foo",
+        gwt_agent::AgentId::ClaudeCode,
+    );
+    session.id = "gwt-session-anon".to_string();
+    session.display_name = "Claude Code".to_string();
+    let mut index = std::collections::HashMap::new();
+    index.insert("gwt-session-anon", &session);
+
+    let agent_ref = gwt_core::workspace_projection::WorkspaceWorkAgentRef {
+        session_id: "gwt-session-anon".to_string(),
+        agent_id: None,
+        display_name: None,
+        updated_at: chrono::Utc::now(),
+    };
+    let view = super::workspace_work_agent_view_from_ref(&agent_ref, &index);
+    assert_eq!(view.display_name.as_deref(), Some("Claude Code"));
+    assert!(view.agent_id.is_some(), "agent_id borrowed from the ledger");
+}
+
 /// User verification 2026-06-12: a Resume creates a NEW gwt session for the
 /// SAME agent conversation, so the row showed two Work groups with the same
 /// conversation id ("Agent" 15m ago + "Claude Code" 1d ago). Agents whose

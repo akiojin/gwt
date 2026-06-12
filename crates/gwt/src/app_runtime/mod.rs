@@ -2689,10 +2689,28 @@ fn workspace_work_agent_view_from_ref(
                 .collect()
         })
         .unwrap_or_default();
+    // Work records written without agent metadata (older record paths)
+    // would render as an anonymous "Agent" group (user verification
+    // 2026-06-12) — borrow identity from the ledger TOML when available.
+    let ledger = session_index.get(agent.session_id.as_str());
+    let display_name = agent
+        .display_name
+        .clone()
+        .filter(|name| !name.trim().is_empty())
+        .or_else(|| {
+            ledger
+                .map(|session| session.display_name.clone())
+                .filter(|name| !name.trim().is_empty())
+        });
+    let agent_id = agent
+        .agent_id
+        .clone()
+        .filter(|id| !id.trim().is_empty())
+        .or_else(|| ledger.map(|session| session.agent_id.command().to_string()));
     gwt::WorkspaceHistoryAgentView {
         session_id: agent.session_id.clone(),
-        agent_id: agent.agent_id.clone(),
-        display_name: agent.display_name.clone(),
+        agent_id,
+        display_name,
         updated_at: agent
             .updated_at
             .to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
