@@ -2,6 +2,26 @@ use chrono::TimeZone;
 
 use super::*;
 
+#[cfg(windows)]
+fn open_directory_for_mtime(path: &std::path::Path) -> std::io::Result<std::fs::File> {
+    use std::fs::OpenOptions;
+    use std::os::windows::fs::OpenOptionsExt;
+
+    const FILE_FLAG_BACKUP_SEMANTICS: u32 = 0x0200_0000;
+    const FILE_READ_ATTRIBUTES: u32 = 0x0080;
+    const FILE_WRITE_ATTRIBUTES: u32 = 0x0100;
+
+    OpenOptions::new()
+        .access_mode(FILE_READ_ATTRIBUTES | FILE_WRITE_ATTRIBUTES)
+        .custom_flags(FILE_FLAG_BACKUP_SEMANTICS)
+        .open(path)
+}
+
+#[cfg(not(windows))]
+fn open_directory_for_mtime(path: &std::path::Path) -> std::io::Result<std::fs::File> {
+    std::fs::File::open(path)
+}
+
 // SPEC-2359 close-latency root fix: the works.json cache must stop
 // re-parsing unchanged files, observe content changes, and never cache a
 // synthesized fallback against a missing works.json.
@@ -2230,7 +2250,7 @@ fn backfill_uses_worktree_mtime_as_baseline_timestamp() {
     let worktree = temp.path().join("repo-old");
     fs::create_dir_all(&worktree).expect("worktree dir");
     let old = std::time::SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(1_750_000_000); // 2025-06-15ish
-    let dir = fs::File::open(&worktree).expect("open dir");
+    let dir = open_directory_for_mtime(&worktree).expect("open dir");
     dir.set_times(fs::FileTimes::new().set_modified(old))
         .expect("set mtime");
     let work_items_path = temp.path().join("works.json");
