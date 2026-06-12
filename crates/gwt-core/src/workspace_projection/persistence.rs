@@ -841,7 +841,7 @@ fn bleed_identity_pair(event: &WorkEvent) -> Option<(String, String)> {
 
 /// #3065: detection-based, idempotent repair for the resume owner bleed.
 /// Detection: an identical (title, owner, next_action) resume payload stamped
-/// onto [`RESUME_OWNER_BLEED_MIN_ITEMS`]+ distinct Work items. Sanitization,
+/// onto `RESUME_OWNER_BLEED_MIN_ITEMS`+ distinct Work items. Sanitization,
 /// in two strengths:
 ///
 /// - events carrying a contaminated (title, owner) identity pair — the same
