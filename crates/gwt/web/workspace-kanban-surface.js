@@ -870,7 +870,22 @@ export function createWorkspaceKanbanSurface({
       );
       actions.appendChild(discardButton);
     }
-    if (workspace.cleanup_candidate) {
+    // "Safe to delete" comes with the actual delete action (user
+    // verification 2026-06-12): a merged row offers Clean Up for its own
+    // branch; the projection-level cleanup candidate keeps the legacy
+    // no-argument path.
+    if (workspace.merged_into_base && workspace.branch) {
+      const cleanupButton = createNode("button", "wizard-button", "Clean Up");
+      cleanupButton.type = "button";
+      cleanupButton.dataset.action = "cleanup-merged-workspace";
+      cleanupButton.addEventListener("click", () =>
+        openWorkspaceCleanup?.({
+          branch: workspace.branch,
+          remote_delete_available: true,
+        }),
+      );
+      actions.appendChild(cleanupButton);
+    } else if (workspace.cleanup_candidate) {
       const cleanupButton = createNode("button", "wizard-button", "Clean Up");
       cleanupButton.type = "button";
       cleanupButton.addEventListener("click", () => openWorkspaceCleanup?.());

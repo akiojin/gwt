@@ -586,6 +586,23 @@
           tabindex="-1"
         ></div>
       </div>
+      <!-- Agent window close confirm (user verification 2026-06-12):
+           the agent window `×` confirms while the agent process is live.
+           Shares the renderer in /close-project-tab-confirm-modal.js with
+           agent-window copy; wiring lives in /app.js. -->
+      <div
+        class="modal-backdrop"
+        id="close-agent-window-modal"
+        aria-hidden="true"
+      >
+        <div
+          class="modal-shell close-project-tab-modal-shell"
+          role="dialog"
+          aria-modal="true"
+          aria-label="Close agent window"
+          tabindex="-1"
+        ></div>
+      </div>
       <!-- SPEC-2009 amendment: Worktree Picker modal for the File Tree
            window. Renderer lives in /app.js (frontendUnits.worktreePicker).
            Opens once per File Tree window open; selection routes the tree

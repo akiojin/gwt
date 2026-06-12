@@ -990,6 +990,53 @@ test("Workspace with existing Works still offers a Launch control", () => {
   );
 });
 
+// User verification (2026-06-12): "Safe to delete" must come with an actual
+// delete action — a merged Workspace's detail offers a Clean Up control that
+// opens the cleanup flow for that row's branch.
+test("merged Workspace detail offers a Clean Up control for its branch", () => {
+  const fixture = createFixture();
+  const cleanupCalls = [];
+  const surface = createSurface(
+    fixture,
+    {
+      id: "proj-1",
+      title: "projection",
+      status_category: "idle",
+      active_work_count: 1,
+      active_works: [
+        {
+          id: "work-work-merged-12345678",
+          title: "work/merged",
+          status_category: "idle",
+          lifecycle_state: "paused",
+          branch: "work/merged",
+          merged_into_base: true,
+          active_agents: 0,
+          blocked_agents: 0,
+          agents: [],
+        },
+      ],
+      agents: [],
+    },
+    {
+      send() {},
+      openWorkspaceCleanup: (candidate) => cleanupCalls.push(candidate),
+    },
+  );
+
+  surface.mount(fixture.body, fixture.windowData, {
+    focusWindowLocally() {},
+    sendFocus() {},
+  });
+
+  const cleanup = [...fixture.body.querySelectorAll(".workspace-detail-actions button")]
+    .find((button) => button.textContent.trim() === "Clean Up");
+  assert.ok(cleanup, "merged Workspace must offer a Clean Up action");
+  cleanup.click();
+  assert.equal(cleanupCalls.length, 1);
+  assert.equal(cleanupCalls[0]?.branch, "work/merged");
+});
+
 // Design pass (2026-06-11, frontend-design): the branch name renders with a
 // dimmed namespace prefix and a strong leaf so 200+ work/* rows scan by leaf;
 // the full text content stays the verbatim branch for copy / a11y.
