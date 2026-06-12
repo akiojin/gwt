@@ -3041,6 +3041,20 @@ fn attach_registry_sessions_to_active_works(
             work.agents
                 .push(paused_work_agent_view_from_history(&history_view));
         }
+        // User verification 2026-06-12 (follow-up): ghost record agents —
+        // ledger TOML gone, no identity recorded, no conversation — render
+        // as a dead "Agent / No session yet" group whose Resume cannot work.
+        // Drop them from the view; the Work row itself stays.
+        {
+            let before = work.agents.len();
+            work.agents.retain(|agent| {
+                !agent.display_name.trim().is_empty()
+                    || !agent.agent_id.trim().is_empty()
+                    || !agent.sessions.is_empty()
+            });
+            let dropped = (before - work.agents.len()) as u32;
+            work.session_agent_total = work.session_agent_total.saturating_sub(dropped);
+        }
         // User verification 2026-06-12: a Resume creates a new gwt session for
         // the SAME agent conversation, which used to render as two Work rows
         // ("Agent" + "Claude Code") carrying one conversation id. Collapse

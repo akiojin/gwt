@@ -14112,6 +14112,77 @@ fn attach_registry_sessions_caps_total_agents_on_the_wire() {
     );
 }
 
+/// User verification 2026-06-12 (follow-up): a record agent whose ledger TOML
+/// is gone and that recorded no identity and no conversation renders as a
+/// dead "Agent / No session yet" group whose Resume cannot work. Such ghosts
+/// are dropped from the view; identifiable or conversation-bearing agents stay.
+#[test]
+fn attach_registry_sessions_drops_ghost_agents_without_identity_or_sessions() {
+    fn bare_agent(session_id: &str, display_name: &str) -> gwt::ActiveWorkAgentView {
+        gwt::ActiveWorkAgentView {
+            session_id: session_id.to_string(),
+            window_id: None,
+            agent_id: String::new(),
+            display_name: display_name.to_string(),
+            affiliation_status: "assigned".to_string(),
+            workspace_id: None,
+            status_category: "idle".to_string(),
+            current_focus: None,
+            title_summary: None,
+            branch: None,
+            worktree_path: None,
+            last_board_entry_id: None,
+            last_board_entry_kind: None,
+            coordination_scope: None,
+            updated_at: "2026-06-12T02:00:00Z".to_string(),
+            sessions: Vec::new(),
+        }
+    }
+
+    let mut works = vec![gwt::ActiveWorkItemView {
+        id: "work-work-x-12345678".to_string(),
+        title: "work/x".to_string(),
+        status_category: "idle".to_string(),
+        status_text: "Paused".to_string(),
+        summary: None,
+        owner: None,
+        next_action: None,
+        active_agents: 0,
+        blocked_agents: 0,
+        branch: Some("work/x".to_string()),
+        worktree_path: None,
+        pr_number: None,
+        pr_url: None,
+        pr_state: None,
+        board_refs: Vec::new(),
+        agents: vec![
+            bare_agent("gwt-ghost", ""),
+            bare_agent("gwt-named", "Claude Code"),
+        ],
+        lifecycle_state: "paused".to_string(),
+        closed_at: None,
+        session_agent_total: 0,
+        merged_into_base: false,
+        updated_at: String::new(),
+    }];
+
+    super::attach_registry_sessions_to_active_works(
+        &mut works,
+        &[],
+        None,
+        &std::collections::HashMap::new(),
+    );
+
+    let agents = &works[0].agents;
+    assert_eq!(
+        agents.len(),
+        1,
+        "the identity-less, session-less ghost is dropped"
+    );
+    assert_eq!(agents[0].session_id, "gwt-named");
+    assert_eq!(works[0].session_agent_total, 1);
+}
+
 /// User verification 2026-06-12: Work records written without agent metadata
 /// (older record paths) rendered as an anonymous "Agent" group. The view
 /// borrows display_name / agent_id from the ledger TOML keyed by the gwt
