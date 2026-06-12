@@ -1027,6 +1027,55 @@ test("merged Workspace detail offers a Clean Up control for its branch", () => {
   assert.equal(cleanupCalls[0]?.branch, "work/merged");
 });
 
+// SPEC-2359 W16-3 (FR-390): a fetched-remote-only Workspace shows a Remote
+// badge; the Launch Agent header action still opens the launch wizard with
+// the branch prefilled (worktree materializes on demand) and rendering the
+// badge sends nothing.
+test("remote-only Workspace shows the Remote badge and keeps the prefilled Launch", () => {
+  const fixture = createFixture();
+  const sent = [];
+  const surface = createSurface(
+    fixture,
+    {
+      id: "proj-1",
+      title: "projection",
+      status_category: "idle",
+      active_work_count: 1,
+      active_works: [
+        {
+          id: "work-work-fetched-12345678",
+          title: "work/fetched",
+          status_category: "idle",
+          lifecycle_state: "paused",
+          branch: "work/fetched",
+          remote_only: true,
+          active_agents: 0,
+          blocked_agents: 0,
+          agents: [],
+        },
+      ],
+      agents: [],
+    },
+    { send: (message) => sent.push(message) },
+  );
+
+  surface.mount(fixture.body, fixture.windowData, {
+    focusWindowLocally() {},
+    sendFocus() {},
+  });
+
+  const badge = fixture.body.querySelector(".workspace-overview-remote");
+  assert.ok(badge, "Remote badge renders for remote-only rows");
+  assert.equal(badge.textContent, "Remote");
+  assert.equal(sent.length, 0, "rendering generates no events (FR-381/FR-390)");
+
+  const launch = fixture.body.querySelector('[data-action="launch-workspace"]');
+  assert.ok(launch, "Launch Agent stays available for remote-only rows");
+  launch.click();
+  assert.equal(sent.at(-1)?.kind, "open_launch_wizard");
+  assert.equal(sent.at(-1)?.branch_name, "work/fetched");
+});
+
 // Design pass (2026-06-11, frontend-design): the branch name renders with a
 // dimmed namespace prefix and a strong leaf so 200+ work/* rows scan by leaf;
 // the full text content stays the verbatim branch for copy / a11y.

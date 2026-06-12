@@ -1123,6 +1123,11 @@ pub struct ActiveWorkItemView {
     /// Workspace row at view assembly. `None` on legacy payloads.
     #[serde(default)]
     pub workspace_key: Option<String>,
+    /// SPEC-2359 W16-3 (FR-390): the branch exists only as a fetched remote
+    /// ref — no local worktree. Display-only; launching materializes the
+    /// worktree through the existing Launch path. Default false (legacy).
+    #[serde(default)]
+    pub remote_only: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -2765,6 +2770,7 @@ mod tests {
                     session_agent_total: 0,
                     merged_into_base: false,
                     workspace_key: None,
+                    remote_only: false,
                     updated_at: "2026-01-01T00:00:00Z".to_string(),
                 }],
                 agents: vec![super::ActiveWorkAgentView {

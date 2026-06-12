@@ -2410,6 +2410,7 @@ fn active_work_items_from_projection(
                 session_agent_total: 0,
                 merged_into_base: false,
                 workspace_key: None,
+                remote_only: false,
                 updated_at: row_updated_at,
             }
         })
@@ -2495,6 +2496,7 @@ fn append_paused_work_items(
             session_agent_total: 0,
             merged_into_base: false,
             workspace_key: None,
+            remote_only: false,
             // FR-403: paused/backfill rows carry the record's last update.
             updated_at: work.updated_at.clone(),
         });
@@ -3223,6 +3225,35 @@ fn merged_branch_fallback(agents: &[gwt::ActiveWorkAgentView]) -> Option<String>
     agents.iter().find_map(|agent| agent.branch.clone())
 }
 
+/// SPEC-2359 W16-3 (FR-390): flag rows whose branch exists only as a fetched
+/// remote ref — no recorded worktree path and no local worktree for the
+/// branch. Display-only marking (FR-381/FR-390: rendering generates no
+/// events); the existing Launch path materializes a worktree on demand.
+fn mark_remote_only_active_works(
+    active_works: &mut [gwt::ActiveWorkItemView],
+    local_branches: Option<&std::collections::HashSet<String>>,
+) {
+    for work in active_works.iter_mut() {
+        let has_worktree = work
+            .worktree_path
+            .as_deref()
+            .map(str::trim)
+            .is_some_and(|path| !path.is_empty());
+        if has_worktree {
+            work.remote_only = false;
+            continue;
+        }
+        let branch_local = work
+            .branch
+            .as_deref()
+            .map(crate::runtime_support::normalize_branch_name)
+            .filter(|branch| !branch.is_empty())
+            .map(|branch| local_branches.is_some_and(|set| set.contains(&branch)));
+        // Branchless rows are never "remote": there is nothing to fetch.
+        work.remote_only = matches!(branch_local, Some(false));
+    }
+}
+
 /// SPEC-2359 W-15 (FR-386): flag rows whose branch is merged into a base on
 /// origin (background scan cache) or whose recorded PR state is merged — the
 /// "safe to delete" signal. Display-only; no automatic close (US-61).
@@ -3776,6 +3807,12 @@ pub struct AppRuntime {
     /// SPEC-2359 W-16 (FR-387): last work-events ingest per project — the
     /// 30s throttle for tab-change / post-launch triggers.
     pub(crate) last_work_events_ingest: std::cell::RefCell<HashMap<PathBuf, std::time::Instant>>,
+    /// SPEC-2359 W16-3 (FR-390): normalized branch names that currently have
+    /// a LOCAL worktree, per project — refreshed by the worktree reconcile.
+    /// The view marks `remote_only` by cache lookup alone (no git spawn on
+    /// the projection build path).
+    pub(crate) local_worktree_branches:
+        std::cell::RefCell<HashMap<PathBuf, std::collections::HashSet<String>>>,
     pub(crate) window_pty_statuses: HashMap<String, WindowProcessStatus>,
     pub(crate) window_hook_states: HashMap<String, WindowProcessStatus>,
     pub(crate) hook_forward_target: Option<HookForwardTarget>,
@@ -3892,6 +3929,7 @@ impl AppRuntime {
                 gwt_core::workspace_projection::WorkspaceWorkItemsCache::new(),
             ),
             last_work_events_ingest: std::cell::RefCell::new(HashMap::new()),
+            local_worktree_branches: std::cell::RefCell::new(HashMap::new()),
             window_pty_statuses: HashMap::new(),
             window_hook_states: HashMap::new(),
             hook_forward_target: None,
@@ -4062,6 +4100,18 @@ impl AppRuntime {
                 return;
             }
         };
+        // SPEC-2359 W16-3 (FR-390): refresh the local-worktree branch set the
+        // remote_only view marking reads (cache lookup only — no git spawn at
+        // view time).
+        let local_branches: std::collections::HashSet<String> = entries
+            .iter()
+            .filter_map(|entry| entry.branch.as_deref())
+            .map(crate::runtime_support::normalize_branch_name)
+            .filter(|branch| !branch.is_empty())
+            .collect();
+        self.local_worktree_branches
+            .borrow_mut()
+            .insert(project_root.to_path_buf(), local_branches);
         let sources = gwt::worktree_inventory::worktree_reconcile_sources(&entries);
         if sources.is_empty() {
             return;
@@ -5893,6 +5943,12 @@ impl AppRuntime {
                 &mut view.active_works,
                 self.work_merged_branches.get(&tab.project_root),
             );
+            // SPEC-2359 W16-3 (FR-390): "Remote" rows — branch known only
+            // from fetched refs, no local worktree (cache lookup only).
+            mark_remote_only_active_works(
+                &mut view.active_works,
+                self.local_worktree_branches.borrow().get(&tab.project_root),
+            );
             return Some(view);
         }
 
@@ -5945,6 +6001,7 @@ impl AppRuntime {
             session_agent_total: 0,
             merged_into_base: false,
             workspace_key: None,
+            remote_only: false,
             updated_at: now.to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
         }];
         Some(gwt::ActiveWorkProjectionView {

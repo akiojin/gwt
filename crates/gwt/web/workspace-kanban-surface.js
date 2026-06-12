@@ -158,6 +158,9 @@ export function createWorkspaceKanbanSurface({
       // SPEC-2359 W16-2 (FR-389): Workspace grouping key (backend merges
       // same-key rows before the wire; carried for tooling/tests).
       workspace_key: item?.workspace_key || null,
+      // SPEC-2359 W16-3 (FR-390): branch known only from fetched refs — no
+      // local worktree. Display-only; Launch materializes one on demand.
+      remote_only: Boolean(item?.remote_only),
       // SPEC-2359 W-15 (FR-386): merged into a base on origin (or PR merged)
       // — the "safe to delete" signal. Display-only.
       merged_into_base: Boolean(item?.merged_into_base),
@@ -289,6 +292,11 @@ export function createWorkspaceKanbanSurface({
     if (item.merged_into_base) {
       // SPEC-2359 W-15 (FR-386): branch merged into a base — safe to delete.
       titleRow.appendChild(createNode("span", "workspace-overview-merged", "Merged"));
+    }
+    if (item.remote_only) {
+      // SPEC-2359 W16-3 (FR-390): branch exists only as a fetched remote
+      // ref; Launch Agent creates the worktree on demand.
+      titleRow.appendChild(createNode("span", "workspace-overview-remote", "Remote"));
     }
     const rowRelative = formatRelativeTime(item.updated_at);
     if (rowRelative) {

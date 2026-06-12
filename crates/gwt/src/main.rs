@@ -2176,6 +2176,7 @@ mod tests {
                 gwt_core::workspace_projection::WorkspaceWorkItemsCache::new(),
             ),
             last_work_events_ingest: std::cell::RefCell::new(HashMap::new()),
+            local_worktree_branches: std::cell::RefCell::new(HashMap::new()),
             window_pty_statuses: HashMap::new(),
             window_hook_states: HashMap::new(),
             hook_forward_target: None,

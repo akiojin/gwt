@@ -1703,6 +1703,7 @@ fn sample_runtime_with_events(
             gwt_core::workspace_projection::WorkspaceWorkItemsCache::new(),
         ),
         last_work_events_ingest: std::cell::RefCell::new(HashMap::new()),
+        local_worktree_branches: std::cell::RefCell::new(HashMap::new()),
         window_pty_statuses: HashMap::new(),
         window_hook_states: HashMap::new(),
         hook_forward_target: None,
@@ -14098,6 +14099,7 @@ fn attach_registry_sessions_caps_total_agents_on_the_wire() {
         session_agent_total: 0,
         merged_into_base: false,
         workspace_key: None,
+        remote_only: false,
         updated_at: String::new(),
     }];
 
@@ -14211,6 +14213,7 @@ fn attach_registry_sessions_keeps_latest_entry_per_agent_identity() {
         session_agent_total: 0,
         merged_into_base: false,
         workspace_key: None,
+        remote_only: false,
         updated_at: String::new(),
     }];
 
@@ -14292,6 +14295,7 @@ fn attach_registry_sessions_drops_ghost_agents_without_identity_or_sessions() {
         session_agent_total: 0,
         merged_into_base: false,
         workspace_key: None,
+        remote_only: false,
         updated_at: String::new(),
     }];
 
@@ -14411,6 +14415,7 @@ fn attach_registry_sessions_dedupes_agents_sharing_a_conversation() {
         session_agent_total: 0,
         merged_into_base: false,
         workspace_key: None,
+        remote_only: false,
         updated_at: String::new(),
     }];
 
@@ -14505,6 +14510,7 @@ fn active_works_are_sorted_by_latest_update_descending() {
         session_agent_total: 0,
         merged_into_base: false,
         workspace_key: None,
+        remote_only: false,
         updated_at: updated_at.to_string(),
     };
     let mut works = vec![
@@ -14574,6 +14580,7 @@ fn mark_merged_active_works_flags_cache_and_pr_state() {
         session_agent_total: 0,
         merged_into_base: false,
         workspace_key: None,
+        remote_only: false,
         updated_at: String::new(),
     };
     let mut works = vec![
@@ -14969,6 +14976,7 @@ fn assign_and_merge_workspace_groups_unifies_same_branch_rows() {
             session_agent_total: 1,
             merged_into_base: false,
             workspace_key: None,
+            remote_only: false,
             updated_at: updated_at.to_string(),
         }
     }
@@ -15020,4 +15028,55 @@ fn assign_and_merge_workspace_groups_unifies_same_branch_rows() {
         legacy.workspace_key.as_deref(),
         Some("workspace-1748822400000")
     );
+}
+
+/// SPEC-2359 W16-3 (FR-390): a row whose branch is known only from fetched
+/// refs (no recorded worktree, not in the local-worktree set) is flagged
+/// `remote_only`; rows with a worktree or a locally checked-out branch and
+/// branchless rows are not.
+#[test]
+fn mark_remote_only_flags_fetched_branches_without_local_worktree() {
+    fn row(id: &str, branch: Option<&str>, worktree: Option<&str>) -> gwt::ActiveWorkItemView {
+        gwt::ActiveWorkItemView {
+            id: id.to_string(),
+            title: id.to_string(),
+            status_category: "idle".to_string(),
+            status_text: "Paused".to_string(),
+            summary: None,
+            owner: None,
+            next_action: None,
+            active_agents: 0,
+            blocked_agents: 0,
+            branch: branch.map(str::to_string),
+            worktree_path: worktree.map(str::to_string),
+            pr_number: None,
+            pr_url: None,
+            pr_state: None,
+            board_refs: Vec::new(),
+            agents: Vec::new(),
+            lifecycle_state: "paused".to_string(),
+            closed_at: None,
+            session_agent_total: 0,
+            merged_into_base: false,
+            workspace_key: None,
+            remote_only: false,
+            updated_at: String::new(),
+        }
+    }
+
+    let mut local = std::collections::HashSet::new();
+    local.insert("work/local".to_string());
+    let mut works = vec![
+        row("w-remote", Some("origin/work/fetched"), None),
+        row("w-local-branch", Some("work/local"), None),
+        row("w-with-worktree", Some("work/other"), Some("/tmp/x")),
+        row("w-branchless", None, None),
+    ];
+
+    super::mark_remote_only_active_works(&mut works, Some(&local));
+
+    assert!(works[0].remote_only, "fetched-only branch is Remote");
+    assert!(!works[1].remote_only, "locally checked-out branch is not");
+    assert!(!works[2].remote_only, "rows with a worktree are not");
+    assert!(!works[3].remote_only, "branchless rows are not");
 }

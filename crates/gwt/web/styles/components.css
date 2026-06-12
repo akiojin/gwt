@@ -2114,6 +2114,21 @@ kbd.op-kbd {
   gap: 8px;
 }
 
+/* SPEC-2359 W16-3 (FR-390): fetched-remote-only badge — Launch creates the
+   worktree on demand. */
+.workspace-overview-remote {
+  flex: 0 0 auto;
+  padding: 0 var(--space-2);
+  border: 1px solid var(--color-border-strong);
+  border-radius: var(--radius-sm);
+  color: var(--color-text-muted);
+  font-family: var(--font-mono);
+  font-size: 10px;
+  font-weight: 650;
+  letter-spacing: 0.06em;
+  line-height: 1.5;
+}
+
 /* SPEC-2359 W-15 (FR-386): merged-into-base badge — safe to delete. */
 .workspace-overview-merged {
   flex: 0 0 auto;
