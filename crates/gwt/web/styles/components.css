@@ -234,18 +234,16 @@ body::after {
 
 /* SPEC-2041 — unified update CTA. A single actionable surface replaces the
    earlier split toast + persistent button flow.
-   SPEC-2356 operator chrome cleanup: the CTA no longer floats in the
-   bottom-right corner; it mounts into the sidebar Update section anchor
-   (#update-cta-anchor) and flows with the sidebar surface. */
+   User verification 2026-06-12: the SPEC-2356 sidebar placement was hard to
+   notice — the CTA floats fixed bottom-right again. */
 .update-cta-shell {
-  display: flex;
-  width: 100%;
-  align-items: stretch;
+  position: fixed;
+  bottom: 20px;
+  right: 20px;
+  display: inline-flex;
+  align-items: center;
   gap: var(--space-1);
-}
-
-.update-cta-shell .update-cta {
-  flex: 1;
+  z-index: 9999;
 }
 
 .update-cta {
@@ -706,16 +704,14 @@ body::after {
 /* SPEC-2356 operator chrome cleanup: the Windows / Palette / Update sidebar
    sections lay their controls out as a vertical stack of full-width rows. */
 .op-sidebar__section--windows,
-.op-sidebar__section--palette,
-.op-sidebar__section--update {
+.op-sidebar__section--palette {
   display: flex;
   flex-direction: column;
   gap: var(--space-1);
 }
 
 .op-sidebar__section--windows .op-sidebar__heading,
-.op-sidebar__section--palette .op-sidebar__heading,
-.op-sidebar__section--update .op-sidebar__heading {
+.op-sidebar__section--palette .op-sidebar__heading {
   margin-bottom: var(--space-1);
 }
 
@@ -732,10 +728,6 @@ body::after {
 /* The window-list dropdown anchors to its trigger; keep it full width too. */
 .op-sidebar__section--windows .window-list-shell {
   width: 100%;
-}
-
-.op-sidebar__update-anchor {
-  display: flex;
 }
 
 .op-layer {

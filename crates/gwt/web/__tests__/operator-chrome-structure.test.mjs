@@ -289,10 +289,12 @@ test("Sidebar groups actionable controls into Quick / Windows / Palette / Update
   const headings = sections.map((section) =>
     section.querySelector(".op-sidebar__heading span")?.textContent?.trim(),
   );
+  // User verification 2026-06-12: the Update CTA returned to its fixed
+  // bottom-right home, so the sidebar no longer carries an Update section.
   assert.deepEqual(
     headings,
-    ["Quick", "Windows", "Palette", "Update"],
-    "Sidebar order must be Quick → Windows → Palette → Update with no Layers section",
+    ["Quick", "Windows", "Palette"],
+    "Sidebar order must be Quick → Windows → Palette (Update floats bottom-right)",
   );
   assert.ok(
     !headings.includes("Active Works"),
@@ -382,36 +384,30 @@ test("Status Strip hosts the zoom controls so canvas zoom is always reachable (S
   assert.equal(document.getElementById("zoom-reset-button").textContent.trim(), "100%");
 });
 
-test("Sidebar Update section provides the mount anchor for the Update CTA (SPEC-2356)", () => {
-  // SPEC-2356 chrome cleanup: the Update CTA moves out of the fixed bottom-right
-  // corner into a dedicated sidebar Update section. update-cta.js mounts the
-  // shell into this anchor instead of document.body.
+test("Update CTA floats fixed bottom-right, not in a sidebar section (user verification 2026-06-12)", () => {
+  // SPEC-2356 moved the Update CTA into a sidebar Update section, but the
+  // user found it undiscoverable there — the CTA returns to its previous
+  // fixed bottom-right home and the sidebar section is gone.
   const updateSection = Array.from(
     document.querySelectorAll(".op-sidebar > .op-sidebar__section"),
   ).find(
     (section) =>
       section.querySelector(".op-sidebar__heading span")?.textContent?.trim() === "Update",
   );
-  assert.ok(updateSection, "expected an Update section in the sidebar");
-  const anchor = updateSection.querySelector("#update-cta-anchor");
-  assert.ok(anchor, "expected #update-cta-anchor inside the Update section");
-});
+  assert.equal(updateSection, undefined, "the sidebar Update section must be removed");
 
-test("update-cta.js mounts into the sidebar anchor and peeks the sidebar when an update arrives (SPEC-2356)", () => {
+  const componentsCssText = readFileSync(resolve(here, "../styles/components.css"), "utf8");
+  const shellRule = componentsCssText.match(/\.update-cta-shell \{[^}]*\}/);
+  assert.ok(shellRule, "expected a .update-cta-shell rule");
+  assert.match(shellRule[0], /position: fixed/, "CTA shell floats fixed");
+  assert.match(shellRule[0], /bottom:/, "CTA shell anchors to the bottom");
+  assert.match(shellRule[0], /right:/, "CTA shell anchors to the right");
+
   const updateCtaSource = readFileSync(resolve(here, "../update-cta.js"), "utf8");
-  // The shell must prefer the sidebar anchor over document.body so the CTA
-  // lives inside the sidebar Update section.
-  assert.match(
+  assert.doesNotMatch(
     updateCtaSource,
     /update-cta-anchor/,
-    "update-cta.js must mount into the sidebar #update-cta-anchor",
-  );
-  // When an update becomes available, the sidebar must peek/badge so the user
-  // notices even though the sidebar is auto-hidden (hover not required).
-  assert.match(
-    updateCtaSource,
-    /op:update-available/,
-    "update-cta.js must signal update availability so the sidebar can peek/badge",
+    "update-cta.js mounts on document.body again, not a sidebar anchor",
   );
 });
 
