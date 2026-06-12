@@ -14,10 +14,10 @@ use gwt_core::{
     },
     paths::gwt_sessions_dir,
     repo_hash::compute_repo_hash,
-    workspace_projection::{
-        record_workspace_work_event, save_workspace_projection, WorkspaceAgentAffiliationStatus,
-        WorkspaceAgentSummary, WorkspaceProjection, WorkspaceStatusCategory, WorkspaceWorkEvent,
-        WorkspaceWorkEventKind,
+    work_projection::{
+        record_workspace_work_event, save_workspace_projection, WorkEvent, WorkEventKind,
+        WorkProjection, WorkspaceAgentAffiliationStatus, WorkspaceAgentSummary,
+        WorkspaceStatusCategory,
     },
 };
 use gwt_github::{
@@ -163,7 +163,7 @@ fn save_session(repo_path: &Path, branch: &str, linked_issue_number: Option<u64>
 }
 
 fn seed_workspace_agent_title(repo_path: &Path, session_id: &str) {
-    let mut projection = WorkspaceProjection::default_for_project(repo_path);
+    let mut projection = WorkProjection::default_for_project(repo_path);
     projection.agents.push(workspace_agent(
         session_id,
         "Testing workflow policy",
@@ -223,7 +223,7 @@ fn seed_workspace_agents(
     other_session_id: &str,
     other_title: &str,
 ) {
-    let mut projection = WorkspaceProjection::default_for_project(repo_path);
+    let mut projection = WorkProjection::default_for_project(repo_path);
     projection.title = "Workspace semantic coordination".to_string();
     projection.status_category = WorkspaceStatusCategory::Active;
     projection.summary = Some("Coordinate same-work detection across agents".to_string());
@@ -241,7 +241,7 @@ fn seed_workspace_agents(
 }
 
 fn seed_workspace_current_agent(repo_path: &Path, session_id: &str, title: &str, focus: &str) {
-    let mut projection = WorkspaceProjection::default_for_project(repo_path);
+    let mut projection = WorkProjection::default_for_project(repo_path);
     projection
         .agents
         .push(workspace_agent(session_id, focus, title));
@@ -251,17 +251,17 @@ fn seed_workspace_current_agent(repo_path: &Path, session_id: &str, title: &str,
 fn seed_workspace_work_item(
     repo_path: &Path,
     work_item_id: &str,
-    kind: WorkspaceWorkEventKind,
+    kind: WorkEventKind,
     title: &str,
     session_id: &str,
 ) {
-    let mut event = WorkspaceWorkEvent::new(kind, work_item_id, Utc::now());
+    let mut event = WorkEvent::new(kind, work_item_id, Utc::now());
     event.title = Some(title.to_string());
     event.intent = Some("Implement Workspace WorkItem lifecycle history".to_string());
     event.summary =
         Some("Workspace WorkItem history should be joined instead of duplicated.".to_string());
     event.status_category = Some(match kind {
-        WorkspaceWorkEventKind::Done => WorkspaceStatusCategory::Done,
+        WorkEventKind::Done => WorkspaceStatusCategory::Done,
         _ => WorkspaceStatusCategory::Active,
     });
     event.agent_session_id = Some(session_id.to_string());
@@ -691,7 +691,7 @@ fn active_board_claim_does_not_hard_block_mutation() {
         let repo_path = init_repo(home);
         let session_id = save_session(&repo_path, "work/current", None);
         std::env::set_var(GWT_SESSION_ID_ENV, &session_id);
-        let mut projection = WorkspaceProjection::default_for_project(&repo_path);
+        let mut projection = WorkProjection::default_for_project(&repo_path);
         projection.agents.push(workspace_agent(
             &session_id,
             "Implement Workspace semantic coordination gate",
@@ -737,7 +737,7 @@ fn unassigned_agent_does_not_inherit_projection_title_for_duplicate_gate() {
         let repo_path = init_repo(home);
         let session_id = save_session(&repo_path, "work/unassigned", None);
         std::env::set_var(GWT_SESSION_ID_ENV, &session_id);
-        let mut projection = WorkspaceProjection::default_for_project(&repo_path);
+        let mut projection = WorkProjection::default_for_project(&repo_path);
         projection.title = "Workspace affiliation fix".to_string();
         projection.summary = Some("Stale project-level workspace title".to_string());
         projection.status_category = WorkspaceStatusCategory::Active;
@@ -790,7 +790,7 @@ fn does_not_block_when_active_board_claim_is_audienced_to_other_workspace() {
         let repo_path = init_repo(home);
         let session_id = save_session(&repo_path, "work/current", None);
         std::env::set_var(GWT_SESSION_ID_ENV, &session_id);
-        let mut projection = WorkspaceProjection::default_for_project(&repo_path);
+        let mut projection = WorkProjection::default_for_project(&repo_path);
         projection.agents.push(workspace_agent(
             &session_id,
             "Implement Workspace audience scoped gate",
@@ -842,7 +842,7 @@ fn unassigned_agent_without_title_summary_is_not_title_blocked() {
         let repo_path = init_repo(home);
         let session_id = save_session(&repo_path, "work/unassigned", None);
         std::env::set_var(GWT_SESSION_ID_ENV, &session_id);
-        let mut projection = WorkspaceProjection::default_for_project(&repo_path);
+        let mut projection = WorkProjection::default_for_project(&repo_path);
         projection
             .agents
             .push(unassigned_workspace_agent(&session_id));
@@ -873,7 +873,7 @@ fn actionable_unassigned_agent_can_mutate_without_forced_workspace_affiliation()
         let repo_path = init_repo(home);
         let session_id = save_session(&repo_path, "work/unassigned", None);
         std::env::set_var(GWT_SESSION_ID_ENV, &session_id);
-        let mut projection = WorkspaceProjection::default_for_project(&repo_path);
+        let mut projection = WorkProjection::default_for_project(&repo_path);
         let mut agent = unassigned_workspace_agent(&session_id);
         agent.title_summary = Some("Workspace materialization".to_string());
         agent.current_focus = Some("Ensure actionable intent enters a Workspace".to_string());
@@ -905,7 +905,7 @@ fn actionable_unassigned_agent_can_run_workspace_ensure_command() {
         let repo_path = init_repo(home);
         let session_id = save_session(&repo_path, "work/unassigned", None);
         std::env::set_var(GWT_SESSION_ID_ENV, &session_id);
-        let mut projection = WorkspaceProjection::default_for_project(&repo_path);
+        let mut projection = WorkProjection::default_for_project(&repo_path);
         let mut agent = unassigned_workspace_agent(&session_id);
         agent.title_summary = Some("Workspace materialization".to_string());
         agent.current_focus = Some("Ensure actionable intent enters a Workspace".to_string());
@@ -935,7 +935,7 @@ fn assigned_agent_without_title_summary_remains_title_blocked() {
         let repo_path = init_repo(home);
         let session_id = save_session(&repo_path, "work/assigned", None);
         std::env::set_var(GWT_SESSION_ID_ENV, &session_id);
-        let mut projection = WorkspaceProjection::default_for_project(&repo_path);
+        let mut projection = WorkProjection::default_for_project(&repo_path);
         let mut agent = workspace_agent(&session_id, "Implement assigned work", "");
         agent.title_summary = None;
         projection.agents.push(agent);
@@ -975,7 +975,7 @@ fn incomplete_work_item_history_does_not_hard_block_mutation() {
         seed_workspace_work_item(
             &repo_path,
             "workitem-existing",
-            WorkspaceWorkEventKind::Start,
+            WorkEventKind::Start,
             "Workspace WorkItem history duplicate prevention",
             "session-other",
         );
@@ -983,7 +983,7 @@ fn incomplete_work_item_history_does_not_hard_block_mutation() {
         let event = event(
             "Edit",
             json!({
-                "file_path": "crates/gwt-core/src/workspace_projection.rs",
+                "file_path": "crates/gwt-core/src/work_projection.rs",
                 "old_string": "old",
                 "new_string": "new"
             }),
@@ -1018,14 +1018,14 @@ fn completed_work_item_history_does_not_block_new_related_work() {
         seed_workspace_work_item(
             &repo_path,
             "workitem-completed",
-            WorkspaceWorkEventKind::Done,
+            WorkEventKind::Done,
             "Workspace WorkItem history",
             "session-other",
         );
 
         let event = event(
             "Write",
-            json!({ "file_path": "crates/gwt-core/src/workspace_projection.rs", "content": "x" }),
+            json!({ "file_path": "crates/gwt-core/src/work_projection.rs", "content": "x" }),
         );
 
         let decision = workflow_policy::evaluate_with_context(

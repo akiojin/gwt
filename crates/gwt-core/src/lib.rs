@@ -41,7 +41,7 @@ pub use error::{GwtError, Result};
 #[cfg(test)]
 mod canonical_naming_tests {
     //! SPEC-2359 US-66 (T-525): canonical names are Work-based; the legacy
-    //! `workspace_projection` module / `WorkspaceProjection` type survive
+    //! `workspace_projection` module / `WorkProjection` type survive
     //! only as adapter aliases.
 
     #[test]
@@ -51,7 +51,7 @@ mod canonical_naming_tests {
             std::path::Path::new("/tmp/repo"),
         );
         // Legacy adapter spellings resolve to the SAME type.
-        let legacy: crate::workspace_projection::WorkspaceProjection = canonical;
+        let legacy: crate::work_projection::WorkProjection = canonical;
         let _ = legacy;
     }
 }

@@ -482,9 +482,9 @@ mod tests {
     use gwt_agent::{AgentId, Session, GWT_SESSION_ID_ENV};
     use gwt_core::{
         coordination::BoardEntryKind,
-        workspace_projection::{
-            save_workspace_projection, WorkspaceAgentAffiliationStatus, WorkspaceAgentSummary,
-            WorkspaceProjection, WorkspaceStatusCategory,
+        work_projection::{
+            save_workspace_projection, WorkProjection, WorkspaceAgentAffiliationStatus,
+            WorkspaceAgentSummary, WorkspaceStatusCategory,
         },
     };
 
@@ -522,7 +522,7 @@ mod tests {
     }
 
     fn save_projection(repo: &std::path::Path, agents: Vec<WorkspaceAgentSummary>) {
-        let mut projection = WorkspaceProjection::default_for_project(repo);
+        let mut projection = WorkProjection::default_for_project(repo);
         projection.id = "workspace-current".to_string();
         projection.agents = agents;
         save_workspace_projection(repo, &projection).expect("save workspace projection");
@@ -1308,7 +1308,7 @@ mod tests {
             entry.audience.is_empty(),
             "Unassigned Board posts should not auto-materialize a Workspace or audience: {entry:?}"
         );
-        let projection = gwt_core::workspace_projection::load_workspace_projection(&repo)
+        let projection = gwt_core::work_projection::load_workspace_projection(&repo)
             .expect("load projection")
             .expect("projection");
         let agent = projection
@@ -1321,11 +1321,9 @@ mod tests {
             WorkspaceAgentAffiliationStatus::Unassigned
         );
         assert!(agent.workspace_id.is_none());
-        assert!(
-            gwt_core::workspace_projection::load_workspace_work_items(&repo)
-                .expect("load workspace history")
-                .is_none()
-        );
+        assert!(gwt_core::work_projection::load_workspace_work_items(&repo)
+            .expect("load workspace history")
+            .is_none());
     }
 
     #[test]
@@ -1374,7 +1372,7 @@ mod tests {
 
         let snapshot = load_snapshot(&repo).unwrap();
         assert!(snapshot.board.entries[0].audience.is_empty());
-        let projection = gwt_core::workspace_projection::load_workspace_projection(&repo)
+        let projection = gwt_core::work_projection::load_workspace_projection(&repo)
             .expect("load projection")
             .expect("projection");
         let agent = projection
@@ -1386,11 +1384,9 @@ mod tests {
             agent.affiliation_status,
             WorkspaceAgentAffiliationStatus::Unassigned
         );
-        assert!(
-            gwt_core::workspace_projection::load_workspace_work_items(&repo)
-                .expect("load workspace history")
-                .is_none()
-        );
+        assert!(gwt_core::work_projection::load_workspace_work_items(&repo)
+            .expect("load workspace history")
+            .is_none());
     }
 
     #[test]

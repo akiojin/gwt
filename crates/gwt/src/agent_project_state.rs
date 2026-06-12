@@ -5,7 +5,7 @@ use gwt_agent::Session;
 use gwt_core::{
     error::Result,
     paths::normalize_windows_child_process_path,
-    workspace_projection::{
+    work_projection::{
         load_workspace_projection, save_workspace_projection, WorkspaceAgentSummary,
     },
 };
@@ -223,7 +223,7 @@ mod tests {
             window_id: Some("project::agent-1".to_string()),
             agent_id: "codex".to_string(),
             display_name: "Codex".to_string(),
-            status_category: gwt_core::workspace_projection::WorkspaceStatusCategory::Active,
+            status_category: gwt_core::work_projection::WorkspaceStatusCategory::Active,
             current_focus: current_focus.map(str::to_string),
             title_summary: title_summary.map(str::to_string),
             worktree_path: Some(PathBuf::from("/tmp/worktree")),
@@ -232,7 +232,7 @@ mod tests {
             last_board_entry_kind: None,
             coordination_scope: None,
             affiliation_status:
-                gwt_core::workspace_projection::WorkspaceAgentAffiliationStatus::Assigned,
+                gwt_core::work_projection::WorkspaceAgentAffiliationStatus::Assigned,
             workspace_id: None,
             updated_at,
         }

@@ -1,4 +1,4 @@
-//! Canonical orchestration for syncing `WorkspaceProjection` title surfaces
+//! Canonical orchestration for syncing `WorkProjection` title surfaces
 //! (per-agent `title_summary` / `current_focus`) into in-memory window state
 //! and emitting the consequent broadcasts in one batch.
 //!
@@ -26,7 +26,7 @@
 
 use std::path::Path;
 
-use gwt_core::workspace_projection::WorkspaceProjection;
+use gwt_core::work_projection::WorkProjection;
 
 use super::{AppRuntime, OutboundEvent};
 
@@ -53,7 +53,7 @@ impl AppRuntime {
     pub(crate) fn apply_workspace_projection_title_sync(
         &mut self,
         project_root: &Path,
-        projection: &WorkspaceProjection,
+        projection: &WorkProjection,
     ) -> Vec<OutboundEvent> {
         let dynamic_title_changed =
             self.sync_agent_window_titles_from_workspace_projection(project_root, projection);

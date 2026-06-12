@@ -4,7 +4,7 @@ use gwt_core::{
     coordination::{
         normalize_board_audience, BoardAudienceScope, BoardMention, BoardMentionTargetKind,
     },
-    workspace_projection::{load_workspace_projection, WorkspaceAgentSummary, WorkspaceProjection},
+    work_projection::{load_workspace_projection, WorkProjection, WorkspaceAgentSummary},
 };
 
 fn non_empty_string(value: &str) -> Option<String> {
@@ -13,7 +13,7 @@ fn non_empty_string(value: &str) -> Option<String> {
 }
 
 fn workspace_id_for_agent(
-    projection: &WorkspaceProjection,
+    projection: &WorkProjection,
     agent: &WorkspaceAgentSummary,
 ) -> Option<String> {
     if !agent.is_assigned() {
@@ -26,11 +26,11 @@ fn workspace_id_for_agent(
         .or_else(|| non_empty_string(&projection.id))
 }
 
-fn active_workspace_id(projection: &WorkspaceProjection) -> Option<String> {
+fn active_workspace_id(projection: &WorkProjection) -> Option<String> {
     non_empty_string(&projection.id)
 }
 
-fn gui_workspace_id(projection: &WorkspaceProjection) -> Option<String> {
+fn gui_workspace_id(projection: &WorkProjection) -> Option<String> {
     projection.assigned_agents().next()?;
     active_workspace_id(projection).or_else(|| {
         projection
@@ -49,7 +49,7 @@ fn push_unique(values: &mut Vec<String>, value: impl Into<String>) {
 
 fn push_workspace_for_session(
     values: &mut Vec<String>,
-    projection: &WorkspaceProjection,
+    projection: &WorkProjection,
     session_id: &str,
 ) -> bool {
     let Some(agent) = projection
@@ -65,11 +65,7 @@ fn push_workspace_for_session(
     true
 }
 
-fn push_workspace_for_agent(
-    values: &mut Vec<String>,
-    projection: &WorkspaceProjection,
-    target: &str,
-) {
+fn push_workspace_for_agent(values: &mut Vec<String>, projection: &WorkProjection, target: &str) {
     let target = target.trim();
     if target.is_empty() {
         return;
@@ -180,7 +176,7 @@ pub fn post_audience_for_gui(
 
 fn collect_mention_audience(
     audience: &mut Vec<String>,
-    projection: Option<&WorkspaceProjection>,
+    projection: Option<&WorkProjection>,
     mentions: &[BoardMention],
 ) {
     for mention in mentions {
@@ -205,7 +201,7 @@ fn collect_mention_audience(
 mod tests {
     use super::*;
     use chrono::Utc;
-    use gwt_core::workspace_projection::{
+    use gwt_core::work_projection::{
         save_workspace_projection, WorkspaceAgentAffiliationStatus, WorkspaceStatusCategory,
     };
     use std::path::PathBuf;
@@ -235,8 +231,8 @@ mod tests {
         }
     }
 
-    fn projection_with(id: &str, agents: Vec<WorkspaceAgentSummary>) -> WorkspaceProjection {
-        let mut projection = WorkspaceProjection::default_for_project(PathBuf::from("/tmp/p"));
+    fn projection_with(id: &str, agents: Vec<WorkspaceAgentSummary>) -> WorkProjection {
+        let mut projection = WorkProjection::default_for_project(PathBuf::from("/tmp/p"));
         projection.id = id.to_string();
         projection.agents = agents;
         projection

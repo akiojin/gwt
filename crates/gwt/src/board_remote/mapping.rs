@@ -9,7 +9,7 @@ use std::hash::{Hash, Hasher};
 use chrono::{DateTime, TimeZone, Utc};
 use gwt_core::board_remote_roots::GENERAL_THREAD_KEY;
 use gwt_core::coordination::{AuthorKind, BoardEntry, BoardEntryKind, BoardMentionTargetKind};
-use gwt_core::workspace_projection::{WorkspaceStatusCategory, WorkspaceWorkItem};
+use gwt_core::work_projection::{WorkItem, WorkspaceStatusCategory};
 
 /// Parse a Slack message timestamp (`"1700000000.123456"`) into UTC.
 pub fn slack_ts_to_datetime(ts: &str) -> Option<DateTime<Utc>> {
@@ -74,7 +74,7 @@ fn status_label(status: WorkspaceStatusCategory) -> &'static str {
 /// "—" so a placeholder root can be created and refined later (SPEC-2963).
 pub fn workspace_summary_card(
     key: &str,
-    item: Option<&WorkspaceWorkItem>,
+    item: Option<&WorkItem>,
     branch_fallback: Option<&str>,
 ) -> (String, String) {
     if key == GENERAL_THREAD_KEY {
