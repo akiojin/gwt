@@ -1,4 +1,18 @@
 //! Repo-local coordination storage for a shared board chat timeline.
+//!
+//! # Naming convention (SPEC-3046 / arch-review M1)
+//!
+//! Two prefixes coexist in this module by design:
+//!
+//! - `Board*` is the entry / posting-layer vocabulary: a single message and
+//!   its parts ([`BoardEntry`], [`BoardEntryDraft`], [`BoardMention`],
+//!   [`BoardOrigin`]) plus the rendered timeline ([`BoardProjection`]).
+//! - `Coordination*` is the aggregation-layer vocabulary: the append-only
+//!   event log and snapshot that wrap the board plus future coordination
+//!   data ([`CoordinationEvent`], [`CoordinationSnapshot`]).
+//!
+//! New types should pick the prefix matching their layer instead of mixing
+//! the two.
 
 use std::{
     collections::{HashMap, HashSet},
@@ -442,6 +456,278 @@ pub fn normalize_audience(values: Vec<String>) -> Vec<String> {
         out.push(trimmed);
     }
     out
+}
+
+/// Raw origin (session provenance) inputs for a [`BoardEntryDraft`]. Blank
+/// fields are dropped at [`BoardEntryDraft::finalize`] time, so callers can
+/// pass session fields through without pre-checking each one.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct BoardOrigin {
+    pub branch: String,
+    pub session_id: String,
+    pub agent_id: String,
+}
+
+impl BoardOrigin {
+    pub fn new(
+        branch: impl Into<String>,
+        session_id: impl Into<String>,
+        agent_id: impl Into<String>,
+    ) -> Self {
+        Self {
+            branch: branch.into(),
+            session_id: session_id.into(),
+            agent_id: agent_id.into(),
+        }
+    }
+}
+
+/// Validation failure raised by [`BoardEntryDraft::finalize`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+pub enum BoardEntryDraftError {
+    /// The post body is empty after trimming. The message is user-visible in
+    /// both surfaces (GUI BoardError reply / CLI stderr), so it keeps the
+    /// wording the GUI shipped before SPEC-3046.
+    #[error("Board entry body is required")]
+    EmptyBody,
+}
+
+/// SPEC-3046: single domain-side constructor for Board posts. Both posting
+/// surfaces (CLI `gwtd board post` and the GUI Board window) assemble a
+/// draft and call [`finalize`](Self::finalize), so the normalization and
+/// validation rules that decide an entry's persisted shape live in exactly
+/// one place. Surface-specific policy — author resolution (SPEC-1974),
+/// audience resolution, parent existence checks — stays with the caller.
+#[derive(Debug, Clone)]
+pub struct BoardEntryDraft {
+    pub author_kind: AuthorKind,
+    pub author: String,
+    pub kind: BoardEntryKind,
+    pub body: String,
+    pub title: Option<String>,
+    pub title_summary: Option<String>,
+    pub parent_id: Option<String>,
+    pub related_topics: Vec<String>,
+    pub related_owners: Vec<String>,
+    pub target_owners: Vec<String>,
+    pub mentions: Vec<BoardMention>,
+    pub audience: Vec<String>,
+    pub origin: BoardOrigin,
+}
+
+impl BoardEntryDraft {
+    pub fn new(
+        author_kind: AuthorKind,
+        author: impl Into<String>,
+        kind: BoardEntryKind,
+        body: impl Into<String>,
+    ) -> Self {
+        Self {
+            author_kind,
+            author: author.into(),
+            kind,
+            body: body.into(),
+            title: None,
+            title_summary: None,
+            parent_id: None,
+            related_topics: Vec::new(),
+            related_owners: Vec::new(),
+            target_owners: Vec::new(),
+            mentions: Vec::new(),
+            audience: Vec::new(),
+            origin: BoardOrigin::default(),
+        }
+    }
+
+    /// Apply the shared normalization / validation rules and produce the
+    /// persistable [`BoardEntry`] (SPEC-3046 FR-002 / FR-003): body is
+    /// trimmed and must be non-empty; title / title_summary / parent_id are
+    /// trimmed and dropped when blank; topics / owners / target_owners are
+    /// sanitized via [`sanitize_board_terms`]; mentions and audience go
+    /// through their existing normalizers; blank origin fields are dropped.
+    pub fn finalize(self) -> std::result::Result<BoardEntry, BoardEntryDraftError> {
+        let body = self.body.trim();
+        if body.is_empty() {
+            return Err(BoardEntryDraftError::EmptyBody);
+        }
+        let parent_id = self
+            .parent_id
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(str::to_string);
+        let mut entry = BoardEntry::new(
+            self.author_kind,
+            self.author,
+            self.kind,
+            body,
+            None,
+            parent_id,
+            sanitize_board_terms(&self.related_topics),
+            sanitize_board_terms(&self.related_owners),
+        );
+        entry.title = trimmed_or_none(self.title);
+        entry.title_summary = trimmed_or_none(self.title_summary);
+        entry.target_owners = sanitize_board_terms(&self.target_owners);
+        entry.mentions = normalize_board_mentions(&self.mentions);
+        entry.audience = normalize_board_audience(self.audience);
+        entry.origin_branch = blank_to_none(&self.origin.branch);
+        entry.origin_session_id = blank_to_none(&self.origin.session_id);
+        entry.origin_agent_id = blank_to_none(&self.origin.agent_id);
+        Ok(entry)
+    }
+}
+
+/// Trim each value, drop blanks, and dedupe first-wins while preserving
+/// order — the shared shape rule for topics / owners / target_owners
+/// (previously the GUI-local `sanitize_board_list`).
+pub fn sanitize_board_terms(values: &[String]) -> Vec<String> {
+    let mut sanitized = Vec::new();
+    for value in values {
+        let trimmed = value.trim();
+        if trimmed.is_empty() || sanitized.iter().any(|item| item == trimmed) {
+            continue;
+        }
+        sanitized.push(trimmed.to_string());
+    }
+    sanitized
+}
+
+fn trimmed_or_none(value: Option<String>) -> Option<String> {
+    value
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string)
+}
+
+fn blank_to_none(value: &str) -> Option<String> {
+    let trimmed = value.trim();
+    (!trimmed.is_empty()).then(|| trimmed.to_string())
+}
+
+#[cfg(test)]
+mod board_entry_draft_tests {
+    use super::*;
+
+    fn draft(body: &str) -> BoardEntryDraft {
+        BoardEntryDraft::new(AuthorKind::Agent, "cli", BoardEntryKind::Status, body)
+    }
+
+    #[test]
+    fn finalize_rejects_body_with_only_whitespace() {
+        let result = draft("   \n\t").finalize();
+        assert_eq!(result.unwrap_err(), BoardEntryDraftError::EmptyBody);
+    }
+
+    #[test]
+    fn finalize_trims_body() {
+        let entry = draft("  hello  ").finalize().expect("finalize");
+        assert_eq!(entry.body, "hello");
+    }
+
+    #[test]
+    fn finalize_passes_author_kind_author_and_kind_through() {
+        let entry = BoardEntryDraft::new(AuthorKind::User, "You", BoardEntryKind::Question, "b")
+            .finalize()
+            .expect("finalize");
+        assert_eq!(entry.author_kind, AuthorKind::User);
+        assert_eq!(entry.author, "You");
+        assert_eq!(entry.kind, BoardEntryKind::Question);
+    }
+
+    #[test]
+    fn finalize_trims_title_and_drops_blank_title() {
+        let mut d = draft("body");
+        d.title = Some("  subject  ".to_string());
+        d.title_summary = Some("   ".to_string());
+        let entry = d.finalize().expect("finalize");
+        assert_eq!(entry.title.as_deref(), Some("subject"));
+        assert_eq!(entry.title_summary, None);
+    }
+
+    #[test]
+    fn finalize_normalizes_parent_id_to_none_when_blank() {
+        let mut d = draft("body");
+        d.parent_id = Some("   ".to_string());
+        let entry = d.finalize().expect("finalize");
+        assert_eq!(entry.parent_id, None);
+
+        let mut d = draft("body");
+        d.parent_id = Some("  abc  ".to_string());
+        let entry = d.finalize().expect("finalize");
+        assert_eq!(entry.parent_id.as_deref(), Some("abc"));
+    }
+
+    #[test]
+    fn finalize_sanitizes_related_lists_with_first_wins_dedupe() {
+        let mut d = draft("body");
+        d.related_topics = vec![
+            " a ".to_string(),
+            String::new(),
+            "a".to_string(),
+            "b".to_string(),
+        ];
+        d.related_owners = vec!["  ".to_string(), "o1".to_string(), " o1".to_string()];
+        d.target_owners = vec!["t ".to_string(), "t".to_string()];
+        let entry = d.finalize().expect("finalize");
+        assert_eq!(entry.related_topics, vec!["a", "b"]);
+        assert_eq!(entry.related_owners, vec!["o1"]);
+        assert_eq!(entry.target_owners, vec!["t"]);
+    }
+
+    #[test]
+    fn finalize_normalizes_mentions() {
+        let mut d = draft("body");
+        d.mentions = vec![
+            BoardMention::new(BoardMentionTargetKind::Agent, "  alice  "),
+            BoardMention::new(BoardMentionTargetKind::Agent, "alice"),
+            BoardMention::new(BoardMentionTargetKind::Agent, "   "),
+        ];
+        let entry = d.finalize().expect("finalize");
+        assert_eq!(entry.mentions.len(), 1);
+        assert_eq!(entry.mentions[0].target, "alice");
+    }
+
+    #[test]
+    fn finalize_normalizes_audience() {
+        let mut d = draft("body");
+        d.audience = vec![
+            " ws-1 ".to_string(),
+            "ws-1".to_string(),
+            String::new(),
+            "ws-2".to_string(),
+        ];
+        let entry = d.finalize().expect("finalize");
+        assert_eq!(entry.audience, vec!["ws-1", "ws-2"]);
+    }
+
+    #[test]
+    fn finalize_drops_blank_origin_fields_and_keeps_nonblank() {
+        let mut d = draft("body");
+        d.origin = BoardOrigin::new("  ", "session-1", " agent-a ");
+        let entry = d.finalize().expect("finalize");
+        assert_eq!(entry.origin_branch, None);
+        assert_eq!(entry.origin_session_id.as_deref(), Some("session-1"));
+        assert_eq!(entry.origin_agent_id.as_deref(), Some("agent-a"));
+    }
+
+    #[test]
+    fn finalize_defaults_leave_optional_fields_unset() {
+        let entry = draft("body").finalize().expect("finalize");
+        assert_eq!(entry.title, None);
+        assert_eq!(entry.title_summary, None);
+        assert_eq!(entry.parent_id, None);
+        assert!(entry.related_topics.is_empty());
+        assert!(entry.related_owners.is_empty());
+        assert!(entry.target_owners.is_empty());
+        assert!(entry.mentions.is_empty());
+        assert!(entry.audience.is_empty());
+        assert_eq!(entry.origin_branch, None);
+        assert_eq!(entry.origin_session_id, None);
+        assert_eq!(entry.origin_agent_id, None);
+        assert_eq!(entry.state, None);
+    }
 }
 
 /// One record in the append-only coordination event log. Currently only
