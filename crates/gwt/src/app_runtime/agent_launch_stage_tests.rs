@@ -15,8 +15,9 @@ fn drain_lines(hub: &ProcessConsoleHub) -> Vec<String> {
 
 #[test]
 fn launch_stage_ids_are_unique_per_caller() {
-    let a = next_agent_launch_stage_id();
-    let b = next_agent_launch_stage_id();
+    let counter = std::sync::atomic::AtomicU64::new(1);
+    let a = next_agent_launch_stage_id(&counter);
+    let b = next_agent_launch_stage_id(&counter);
     assert!(b > a, "stage ids must strictly increase: {a} -> {b}");
 }
 
@@ -29,7 +30,8 @@ fn emit_agent_launch_stage_pushes_a_banner_line_to_global_hub() {
     // succeeds at most once per process; ignore the result so this
     // test cooperates with peers that also install the hub.
     let _ = gwt_core::process_console::set_global(ProcessConsoleHub::new());
-    let spawn_id = next_agent_launch_stage_id();
+    let counter = std::sync::atomic::AtomicU64::new(1);
+    let spawn_id = next_agent_launch_stage_id(&counter);
     emit_agent_launch_stage(spawn_id, "resolve_binary", "claude");
     let hub = gwt_core::process_console::global();
     let recent = hub.snapshot_kind(ProcessKind::AgentBootstrap);
