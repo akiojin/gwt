@@ -6927,3 +6927,10 @@ Type: lesson
 Context: gwtd search (SPEC-1942 US-15) で GUI の search_project_index を流用したところ、stale な issues index (source_cache_changed) で search が失敗した。runner の action_search_multi_v2 は interactive GUI 契約として no_auto_build=True を内部固定しており、呼び出し側で --no-auto-build を外しても効かない。
 Learning: auto-build / self-heal が必要な agent・CLI 検索経路は search-multi ではなく per-scope の search-issues / search-specs 等の単一 action を使う。単一 action 側 (no_auto_build=False) が EMPTY_CORPUS 診断 (Issue #2979) も担う agent 向け契約である。
 Future Action: 検索経路を追加・変更する際は、runner の action 別 auto-build 挙動 (search-multi=固定無効 / 単一 action=有効) を必ず確認し、CLI 経路では per-scope action + auto_build フラグ (search_project_index の auto_build 引数) を使う。
+
+## 2026-06-13 — 巨大ファイル分割の確立プレイブック（mod.rs 再エクスポート / deps-bag factory / 毎段ゲート）
+
+Type: lesson
+Context: arch-review P4/P5 で workspace_projection (7,382行)・app_runtime (11,157行)・launch_wizard (9,072行)・app.js (16,120行) を挙動完全互換で分割した
+Learning: (1) Rust はディレクトリモジュール化 + mod.rs の pub use / private use / cfg(test) use の 3 種 shim で外部・テスト無修正を保てる (2) JS は deps-bag factory + 分割代入の同名 const 受けで呼び出しテキスト不変にできるが、factory の初期化順で後段 const を直接参照すると TDZ で起動不能になる（遅延クロージャで渡す）。node 単体テストはブラウザのモジュールグラフを実行しないため TDZ は Playwright 実行でしか検出できない (3) 1 クラスタごとに compile+test ゲートを回す (4) A/B 切り分けで git checkout HEAD -- による復元は未コミット修正を消すため、A/B 前に修正をコミットしておく
+Future Action: 巨大ファイル分割では本プレイブック（小クラスタ先行・毎段ゲート・shim 互換層・JS は遅延バインド deps・最後に実ブラウザ実行）を再利用する
