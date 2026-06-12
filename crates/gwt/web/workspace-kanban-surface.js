@@ -155,6 +155,15 @@ export function createWorkspaceKanbanSurface({
         : Array.isArray(fallback.agents)
           ? fallback.agents
           : [],
+      // SPEC-2359 W16-2 (FR-389): Workspace grouping key (backend merges
+      // same-key rows before the wire; carried for tooling/tests).
+      workspace_key: item?.workspace_key || null,
+      // SPEC-2359 W16-3 (FR-390): branch known only from fetched refs — no
+      // local worktree. Display-only; Launch materializes one on demand.
+      remote_only: Boolean(item?.remote_only),
+      // SPEC-2359 W16-4 (FR-391): derived Done classification (merged ∧ no
+      // update after the merge). Display-only; clears on new activity.
+      done_equivalent: Boolean(item?.done_equivalent),
       // SPEC-2359 W-15 (FR-386): merged into a base on origin (or PR merged)
       // — the "safe to delete" signal. Display-only.
       merged_into_base: Boolean(item?.merged_into_base),
@@ -276,16 +285,31 @@ export function createWorkspaceKanbanSurface({
     // SPEC-2359 Phase W-12 (FR-351): each Work card surfaces its agent-session
     // lifecycle state (Active / Paused / Done / Discarded) as a dedicated badge
     // so the Work surface is the single home for Work lifecycle.
+    // SPEC-2359 W16-4 (FR-391): a merged-and-stale Workspace classifies as
+    // derived Done — the badge reads Done (data-derived marks it apart from
+    // an explicit close) and the row never presents as Active/Paused.
+    const doneEquivalent = Boolean(item.done_equivalent);
     const lifecycleBadge = createNode(
       "span",
       "workspace-overview-lifecycle",
-      formatLifecycleStateLabel(item.lifecycle_state),
+      doneEquivalent ? "Done" : formatLifecycleStateLabel(item.lifecycle_state),
     );
-    lifecycleBadge.dataset.lifecycle = String(item.lifecycle_state || "active").toLowerCase();
+    lifecycleBadge.dataset.lifecycle = doneEquivalent
+      ? "done"
+      : String(item.lifecycle_state || "active").toLowerCase();
+    if (doneEquivalent) {
+      lifecycleBadge.dataset.derived = "true";
+      lifecycleBadge.title = "Merged with no updates since — derived Done (no close recorded)";
+    }
     titleRow.appendChild(lifecycleBadge);
     if (item.merged_into_base) {
       // SPEC-2359 W-15 (FR-386): branch merged into a base — safe to delete.
       titleRow.appendChild(createNode("span", "workspace-overview-merged", "Merged"));
+    }
+    if (item.remote_only) {
+      // SPEC-2359 W16-3 (FR-390): branch exists only as a fetched remote
+      // ref; Launch Agent creates the worktree on demand.
+      titleRow.appendChild(createNode("span", "workspace-overview-remote", "Remote"));
     }
     const rowRelative = formatRelativeTime(item.updated_at);
     if (rowRelative) {
@@ -883,10 +907,13 @@ export function createWorkspaceKanbanSurface({
       cleanupButton.type = "button";
       cleanupButton.dataset.action = "cleanup-merged-workspace";
       cleanupButton.addEventListener("click", () =>
-        openWorkspaceCleanup?.({
-          branch: workspace.branch,
-          remote_delete_available: true,
-        }),
+        openWorkspaceCleanup?.(
+          {
+            branch: workspace.branch,
+            remote_delete_available: true,
+          },
+          windowId,
+        ),
       );
       actions.appendChild(cleanupButton);
     } else if (workspace.cleanup_candidate) {
@@ -980,6 +1007,33 @@ export function createWorkspaceKanbanSurface({
     if (workspaces.length === 0) {
       list.appendChild(createNode("div", "workspace-overview-empty", "No Workspaces"));
     } else {
+      // User verification 2026-06-12: completed local branches need a BULK
+      // cleanup path — one click opens the cleanup flow with every merged
+      // Workspace preselected (the modal still lets the user prune the set).
+      const mergedRows = workspaces.filter(
+        (workspace) => workspace.merged_into_base && workspace.branch,
+      );
+      if (mergedRows.length > 0) {
+        const bulkRow = createNode("div", "workspace-overview-bulk-cleanup");
+        const bulk = createNode(
+          "button",
+          "wizard-button is-compact",
+          `Clean Up Merged (${mergedRows.length})`,
+        );
+        bulk.type = "button";
+        bulk.dataset.action = "cleanup-merged-workspaces";
+        bulk.addEventListener("click", () =>
+          openWorkspaceCleanup?.(
+            mergedRows.map((workspace) => ({
+              branch: workspace.branch,
+              remote_delete_available: true,
+            })),
+            windowId,
+          ),
+        );
+        bulkRow.appendChild(bulk);
+        list.appendChild(bulkRow);
+      }
       for (const workspace of workspaces) {
         list.appendChild(renderWorkspaceRow(windowId, state, workspace));
       }

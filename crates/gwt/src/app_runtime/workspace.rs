@@ -192,9 +192,9 @@ pub(super) fn save_workspace_launch_projection(
     gwt_core::workspace_projection::save_workspace_projection(project_root, &projection)
         .map_err(|error| error.to_string())?;
     let work_event_kind = if workspace_resume_context.is_some() {
-        gwt_core::workspace_projection::WorkspaceWorkEventKind::Resume
+        gwt_core::workspace_projection::WorkEventKind::Resume
     } else {
-        gwt_core::workspace_projection::WorkspaceWorkEventKind::Start
+        gwt_core::workspace_projection::WorkEventKind::Start
     };
     let work_event =
         workspace_work_event_from_launch_projection(&projection, session, work_event_kind, now);
@@ -205,14 +205,11 @@ pub(super) fn save_workspace_launch_projection(
 fn workspace_work_event_from_launch_projection(
     projection: &gwt_core::workspace_projection::WorkspaceProjection,
     session: &ActiveAgentSession,
-    kind: gwt_core::workspace_projection::WorkspaceWorkEventKind,
+    kind: gwt_core::workspace_projection::WorkEventKind,
     updated_at: chrono::DateTime<chrono::Utc>,
-) -> gwt_core::workspace_projection::WorkspaceWorkEvent {
-    let mut event = gwt_core::workspace_projection::WorkspaceWorkEvent::new(
-        kind,
-        projection.id.clone(),
-        updated_at,
-    );
+) -> gwt_core::workspace_projection::WorkEvent {
+    let mut event =
+        gwt_core::workspace_projection::WorkEvent::new(kind, projection.id.clone(), updated_at);
     event.title = Some(projection.title.clone());
     event.intent = projection
         .summary
@@ -345,12 +342,10 @@ fn clear_workspace_cleanup_git_details_event(project_root: &Path) -> Option<Outb
     let session_index = work_session_index(&agent_sessions);
     let workspaces =
         gwt_core::workspace_projection::load_or_synthesize_workspace_work_items(project_root)
-            .unwrap_or_else(
-                |_| gwt_core::workspace_projection::WorkspaceWorkItemsProjection {
-                    updated_at: projection.updated_at,
-                    work_items: Vec::new(),
-                },
-            )
+            .unwrap_or_else(|_| gwt_core::workspace_projection::WorkItemsProjection {
+                updated_at: projection.updated_at,
+                work_items: Vec::new(),
+            })
             .work_items
             .iter()
             .map(|item| workspace_work_item_view_from_item(item, &session_index))

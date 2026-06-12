@@ -128,10 +128,9 @@ pub use protocol::{
     FileContentMode, FileContentSaveErrorKind, FocusCycleDirection, FrontendEvent,
     GitHubRepositorySearchResultView, IndexSearchMatchMode, IndexSearchResult, IndexSearchScope,
     IndexSearchTarget, ProfileEntryView, ProfileEnvEntryView, ProfileSnapshotView, ProjectTabView,
-    RecentProjectView, RunningAgentSummary, UiTraceEntry, UiTracePayload,
-    WorkspaceExecutionContainerView, WorkspaceHistoryAgentView, WorkspaceHistoryEventView,
-    WorkspaceHistorySessionView, WorkspaceHistoryView, WorkspaceJournalEntryView,
-    WorkspaceResumeSource, WorkspaceView, WorkspaceWorkAgentView, WorkspaceWorkEventView,
-    WorkspaceWorkItemView,
+    RecentProjectView, RunningAgentSummary, UiTraceEntry, UiTracePayload, WorkAgentView,
+    WorkEventView, WorkItemView, WorkspaceExecutionContainerView, WorkspaceHistoryAgentView,
+    WorkspaceHistoryEventView, WorkspaceHistorySessionView, WorkspaceHistoryView,
+    WorkspaceJournalEntryView, WorkspaceResumeSource, WorkspaceView,
 };
 pub use workspace::WorkspaceState;

@@ -49,6 +49,7 @@ mod runtime_support;
 mod session_ledger_cache;
 mod update_front_door;
 mod usage_poller;
+mod work_events_ingest;
 mod workspace_session_registry;
 
 #[cfg(test)]
@@ -924,7 +925,15 @@ enum UserEvent {
     /// so rows can show the "safe to delete" badge.
     WorkMergeStatus {
         project_root: PathBuf,
-        merged_branches: std::collections::HashSet<String>,
+        merged_branches: std::collections::HashMap<String, chrono::DateTime<chrono::Utc>>,
+    },
+    /// SPEC-2359 W-16 (FR-387): a background work-events ingest finished.
+    /// The handler runs the worktree reconcile AFTER the intake (so branches
+    /// already recorded elsewhere are not redundantly backfilled) and
+    /// rebroadcasts the Workspace projection when anything was applied.
+    WorkEventsIngested {
+        project_root: PathBuf,
+        changed: bool,
     },
     WorkspaceProjectionChanged {
         project_root: PathBuf,
@@ -1473,6 +1482,79 @@ mod tests {
             tab_group_id: None,
             tab_group_active: false,
             session_id: None,
+        }
+    }
+
+    #[test]
+    fn pane_send_input_replies_explicit_result_for_session_binding() {
+        let temp = tempdir().expect("tempdir");
+        let mut window = sample_window(WindowPreset::Claude, WindowProcessStatus::Running);
+        window.id = "claude-1".to_string();
+        window.agent_id = Some("claude".to_string());
+        window.session_id = Some("session-a".to_string());
+
+        let mut persisted = empty_workspace_state();
+        persisted.next_z_index = 2;
+        persisted.windows = vec![window];
+        let tab = ProjectTabRuntime {
+            id: "tab-1".to_string(),
+            title: "Repo".to_string(),
+            project_root: PathBuf::from("E:/gwt/test-repo"),
+            kind: gwt::ProjectKind::Git,
+            workspace: WorkspaceState::from_persisted(persisted),
+            migration_pending: false,
+            main_worktree_root_cache: std::sync::Arc::new(std::sync::OnceLock::new()),
+        };
+        let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+
+        // SPEC-3050 FR-002: 他 session を名乗る注入は拒否され、明示的な
+        // 失敗 reply が返る (silent drop 禁止: FR-005)。
+        let rejected = runtime.handle_frontend_event(
+            "client-1".to_string(),
+            gwt::FrontendEvent::PaneSendInput {
+                session_id: "session-b".to_string(),
+                text: "/goal all tests pass\r".to_string(),
+            },
+        );
+        assert_eq!(rejected.len(), 1);
+        assert!(matches!(rejected[0].target, DispatchTarget::Client(_)));
+        match &rejected[0].event {
+            gwt::BackendEvent::PaneSendResult {
+                ok,
+                window_id,
+                error,
+            } => {
+                assert!(!ok);
+                assert!(window_id.is_none());
+                assert!(error.as_deref().unwrap_or_default().contains("session-b"));
+            }
+            other => panic!("expected pane_send_result, got {other:?}"),
+        }
+
+        // SPEC-3050 FR-005: 自 session 宛でも live runtime が無ければ
+        // 明示失敗として返す (terminal_input の silent drop と差別化)。
+        let no_runtime = runtime.handle_frontend_event(
+            "client-1".to_string(),
+            gwt::FrontendEvent::PaneSendInput {
+                session_id: "session-a".to_string(),
+                text: "/goal all tests pass\r".to_string(),
+            },
+        );
+        assert_eq!(no_runtime.len(), 1);
+        match &no_runtime[0].event {
+            gwt::BackendEvent::PaneSendResult {
+                ok,
+                window_id,
+                error,
+            } => {
+                assert!(!ok);
+                assert_eq!(window_id.as_deref(), Some("tab-1::claude-1"));
+                assert!(error
+                    .as_deref()
+                    .unwrap_or_default()
+                    .contains("no live runtime"));
+            }
+            other => panic!("expected pane_send_result, got {other:?}"),
         }
     }
 
@@ -2164,8 +2246,10 @@ mod tests {
                 crate::session_ledger_cache::SessionLedgerCache::new(),
             ),
             work_items_cache: std::cell::RefCell::new(
-                gwt_core::workspace_projection::WorkspaceWorkItemsCache::new(),
+                gwt_core::workspace_projection::WorkItemsCache::new(),
             ),
+            last_work_events_ingest: std::cell::RefCell::new(HashMap::new()),
+            local_worktree_branches: std::cell::RefCell::new(HashMap::new()),
             window_pty_statuses: HashMap::new(),
             window_hook_states: HashMap::new(),
             hook_forward_target: None,
@@ -6672,6 +6756,13 @@ fn main() -> std::io::Result<()> {
             }
             Event::UserEvent(UserEvent::BoardProjectionChanged { project_root }) => {
                 let events = app.handle_board_projection_changed_events(&project_root);
+                clients.dispatch(events);
+            }
+            Event::UserEvent(UserEvent::WorkEventsIngested {
+                project_root,
+                changed,
+            }) => {
+                let events = app.handle_work_events_ingested(project_root, changed);
                 clients.dispatch(events);
             }
             Event::UserEvent(UserEvent::WorkMergeStatus {

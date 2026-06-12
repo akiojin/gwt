@@ -3,6 +3,7 @@
 //! Provides repository discovery, branch listing, worktree management,
 //! GitHub Issue/PR tracking, diff helpers, and commit log queries.
 
+pub mod blob;
 pub mod branch;
 pub mod commit;
 pub mod diff;

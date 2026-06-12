@@ -16,8 +16,8 @@ plus SPEC-2805 Memory):
 | Memory | Post-mortem entries in `.gwt/work/memory.md` | Pinpoint allowlist watcher on `.gwt/work/memory.md` + runner auto-build on first search |
 
 All vector data is stored under `~/.gwt/index/<repo-hash>/...`. Issues,
-SPECs, and Memory are repo-scoped and shared across worktrees; Files (code
-+ docs) is worktree-scoped under `worktrees/<worktree-hash>/`. The legacy
+SPECs, and Memory are repo-scoped and shared across worktrees; Files
+(code + docs) is worktree-scoped under `worktrees/<worktree-hash>/`. The legacy
 `$WORKTREE/.gwt/index/` location is no longer used and is deleted
 automatically by the gwt GUI on startup.
 
@@ -34,6 +34,12 @@ command as `"$GWT_BIN" ...`; if none exists, stop with an actionable
 `gwtd not found` error.
 
 ## Quick reference
+
+`gwt-search` is a skill, not a PATH executable. Never resolve it with
+`command -v` or `Get-Command` — the lookup finds nothing by design, and
+an empty lookup does not mean the tooling is missing. The notation below
+is conceptual scope selection only; the actual execution is always the
+Chroma runner commands under "Search commands".
 
 ```text
 gwt-search "query"              # search all four scopes (default merge)

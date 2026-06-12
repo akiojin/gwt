@@ -892,6 +892,11 @@ fn frontend_user_action_log(event: &FrontendEvent) -> Option<FrontendUserActionL
             close_kind,
         } => FrontendUserActionLog::new("close_work", "workspace")
             .target(format!("{work_id} ({close_kind})")),
+        // SPEC-3050: log the injection request without its text payload —
+        // the injected line lands in the PTY transcript anyway.
+        FrontendEvent::PaneSendInput { session_id, .. } => {
+            FrontendUserActionLog::new("pane_send_input", "terminal").target(session_id)
+        }
         // These events can contain high-volume, high-frequency, or sensitive
         // payloads. They are handled by more specific logs or diagnostics.
         FrontendEvent::StartupAutoResumeReady { .. }
@@ -2409,6 +2414,9 @@ fn active_work_items_from_projection(
                 closed_at: None,
                 session_agent_total: 0,
                 merged_into_base: false,
+                workspace_key: None,
+                remote_only: false,
+                done_equivalent: false,
                 updated_at: row_updated_at,
             }
         })
@@ -2493,6 +2501,9 @@ fn append_paused_work_items(
             closed_at: None,
             session_agent_total: 0,
             merged_into_base: false,
+            workspace_key: None,
+            remote_only: false,
+            done_equivalent: false,
             // FR-403: paused/backfill rows carry the record's last update.
             updated_at: work.updated_at.clone(),
         });
@@ -2592,7 +2603,7 @@ fn work_session_index(
 }
 
 pub(crate) fn workspace_work_item_view_from_item(
-    item: &gwt_core::workspace_projection::WorkspaceWorkItem,
+    item: &gwt_core::workspace_projection::WorkItem,
     session_index: &std::collections::HashMap<&str, &gwt_agent::Session>,
 ) -> gwt::WorkspaceHistoryView {
     gwt::WorkspaceHistoryView {
@@ -2639,7 +2650,7 @@ pub(crate) fn workspace_work_item_view_from_item(
 }
 
 fn workspace_work_agent_view_from_ref(
-    agent: &gwt_core::workspace_projection::WorkspaceWorkAgentRef,
+    agent: &gwt_core::workspace_projection::WorkAgentRef,
     session_index: &std::collections::HashMap<&str, &gwt_agent::Session>,
 ) -> gwt::WorkspaceHistoryAgentView {
     // A Work's `session_id` is the gwt session id (the launch). It keys into the
@@ -2734,7 +2745,7 @@ fn workspace_execution_container_view_from_ref(
 }
 
 fn workspace_work_event_view_from_event(
-    event: &gwt_core::workspace_projection::WorkspaceWorkEvent,
+    event: &gwt_core::workspace_projection::WorkEvent,
 ) -> gwt::WorkspaceHistoryEventView {
     gwt::WorkspaceHistoryEventView {
         id: event.id.clone(),
@@ -2759,24 +2770,24 @@ fn workspace_work_event_view_from_event(
 }
 
 fn workspace_work_event_kind_wire(
-    kind: gwt_core::workspace_projection::WorkspaceWorkEventKind,
+    kind: gwt_core::workspace_projection::WorkEventKind,
 ) -> &'static str {
-    use gwt_core::workspace_projection::WorkspaceWorkEventKind;
+    use gwt_core::workspace_projection::WorkEventKind;
 
     match kind {
-        WorkspaceWorkEventKind::Start => "start",
-        WorkspaceWorkEventKind::Claim => "claim",
-        WorkspaceWorkEventKind::Update => "update",
-        WorkspaceWorkEventKind::Blocked => "blocked",
-        WorkspaceWorkEventKind::Handoff => "handoff",
-        WorkspaceWorkEventKind::Resume => "resume",
-        WorkspaceWorkEventKind::Split => "split",
-        WorkspaceWorkEventKind::Merge => "merge",
-        WorkspaceWorkEventKind::Pr => "pr",
-        WorkspaceWorkEventKind::Pause => "pause",
-        WorkspaceWorkEventKind::Done => "done",
-        WorkspaceWorkEventKind::Discard => "discard",
-        WorkspaceWorkEventKind::Backfill => "backfill",
+        WorkEventKind::Start => "start",
+        WorkEventKind::Claim => "claim",
+        WorkEventKind::Update => "update",
+        WorkEventKind::Blocked => "blocked",
+        WorkEventKind::Handoff => "handoff",
+        WorkEventKind::Resume => "resume",
+        WorkEventKind::Split => "split",
+        WorkEventKind::Merge => "merge",
+        WorkEventKind::Pr => "pr",
+        WorkEventKind::Pause => "pause",
+        WorkEventKind::Done => "done",
+        WorkEventKind::Discard => "discard",
+        WorkEventKind::Backfill => "backfill",
     }
 }
 
@@ -3031,7 +3042,7 @@ fn attach_registry_sessions_to_active_works(
             );
         work.session_agent_total = (work.agents.len() + extra_total) as u32;
         for session in additions {
-            let agent_ref = gwt_core::workspace_projection::WorkspaceWorkAgentRef {
+            let agent_ref = gwt_core::workspace_projection::WorkAgentRef {
                 session_id: session.id.clone(),
                 agent_id: Some(session.agent_id.command().to_string()),
                 display_name: Some(session.display_name.clone()),
@@ -3150,25 +3161,150 @@ fn attach_registry_sessions_to_active_works(
     active_works.sort_by_key(|work| std::cmp::Reverse(row_sort_key(work)));
 }
 
+/// SPEC-2359 W16-2 (FR-389 / SC-259): assign every row its Workspace
+/// grouping key (canonical branch identity → canonical worktree identity →
+/// own id) and merge rows that share a key into ONE Workspace row. The
+/// newest row is the representative; agents concatenate (the identity
+/// collapse downstream dedups), numeric counts sum, and `merged_into_base`
+/// ORs. Old branchless ids keep their own key, so legacy rows never vanish
+/// or fuse.
+fn assign_and_merge_workspace_groups(
+    active_works: &mut Vec<gwt::ActiveWorkItemView>,
+    project_root: &Path,
+) {
+    for work in active_works.iter_mut() {
+        let branch = work
+            .branch
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty());
+        let worktree = work.worktree_path.as_deref().map(std::path::Path::new);
+        let key = gwt_core::workspace_projection::canonical_work_id(project_root, branch, None)
+            .or_else(|| {
+                gwt_core::workspace_projection::canonical_work_id(project_root, None, worktree)
+            })
+            .unwrap_or_else(|| work.id.clone());
+        work.workspace_key = Some(key);
+    }
+
+    let mut merged: Vec<gwt::ActiveWorkItemView> = Vec::with_capacity(active_works.len());
+    let mut index_by_key: HashMap<String, usize> = HashMap::new();
+    for work in active_works.drain(..) {
+        let key = work
+            .workspace_key
+            .clone()
+            .unwrap_or_else(|| work.id.clone());
+        match index_by_key.get(&key) {
+            Some(&slot) => {
+                let target = &mut merged[slot];
+                let newer = work.updated_at > target.updated_at;
+                let mut agents = std::mem::take(&mut target.agents);
+                agents.extend(work.agents.iter().cloned());
+                let active_agents = target.active_agents + work.active_agents;
+                let blocked_agents = target.blocked_agents + work.blocked_agents;
+                let session_agent_total = target.session_agent_total + work.session_agent_total;
+                let merged_into_base = target.merged_into_base || work.merged_into_base;
+                if newer {
+                    let key = target.workspace_key.clone();
+                    *target = work;
+                    target.workspace_key = key;
+                }
+                target.agents = agents;
+                target.active_agents = active_agents;
+                target.blocked_agents = blocked_agents;
+                target.session_agent_total = session_agent_total;
+                target.merged_into_base = merged_into_base;
+                if target.branch.is_none() {
+                    // keep any branch the group knows about
+                    target.branch = merged_branch_fallback(&target.agents);
+                }
+            }
+            None => {
+                index_by_key.insert(key, merged.len());
+                merged.push(work);
+            }
+        }
+    }
+    *active_works = merged;
+}
+
+fn merged_branch_fallback(agents: &[gwt::ActiveWorkAgentView]) -> Option<String> {
+    agents.iter().find_map(|agent| agent.branch.clone())
+}
+
+/// SPEC-2359 W16-3 (FR-390): flag rows whose branch exists only as a fetched
+/// remote ref — no recorded worktree path and no local worktree for the
+/// branch. Display-only marking (FR-381/FR-390: rendering generates no
+/// events); the existing Launch path materializes a worktree on demand.
+fn mark_remote_only_active_works(
+    active_works: &mut [gwt::ActiveWorkItemView],
+    local_branches: Option<&std::collections::HashSet<String>>,
+) {
+    for work in active_works.iter_mut() {
+        let has_worktree = work
+            .worktree_path
+            .as_deref()
+            .map(str::trim)
+            .is_some_and(|path| !path.is_empty());
+        if has_worktree {
+            work.remote_only = false;
+            continue;
+        }
+        let branch_local = work
+            .branch
+            .as_deref()
+            .map(crate::runtime_support::normalize_branch_name)
+            .filter(|branch| !branch.is_empty())
+            .map(|branch| local_branches.is_some_and(|set| set.contains(&branch)));
+        // Branchless rows are never "remote": there is nothing to fetch.
+        work.remote_only = matches!(branch_local, Some(false));
+    }
+}
+
 /// SPEC-2359 W-15 (FR-386): flag rows whose branch is merged into a base on
 /// origin (background scan cache) or whose recorded PR state is merged — the
 /// "safe to delete" signal. Display-only; no automatic close (US-61).
 fn mark_merged_active_works(
     active_works: &mut [gwt::ActiveWorkItemView],
-    merged_branches: Option<&std::collections::HashSet<String>>,
+    merged_branches: Option<&HashMap<String, chrono::DateTime<chrono::Utc>>>,
 ) {
     for work in active_works.iter_mut() {
-        let by_cache = work
+        let merge_reference = work
             .branch
             .as_deref()
             .map(crate::runtime_support::normalize_branch_name)
-            .map(|branch| merged_branches.is_some_and(|set| set.contains(&branch)))
-            .unwrap_or(false);
+            .and_then(|branch| merged_branches.and_then(|map| map.get(&branch)))
+            .copied();
         let by_pr = work
             .pr_state
             .as_deref()
             .is_some_and(|state| state.eq_ignore_ascii_case("merged"));
-        work.merged_into_base = by_cache || by_pr;
+        work.merged_into_base = merge_reference.is_some() || by_pr;
+
+        // SPEC-2359 W16-4 (FR-391): merged ∧ stale → derived Done-equivalent.
+        // Membership rides the scan verdict ONLY (pr_state stays badge-only);
+        // explicit terminal closes keep their own lifecycle; no event is ever
+        // recorded from this classification (US-61).
+        let terminal = matches!(work.lifecycle_state.as_str(), "done" | "discarded");
+        let last_activity = work
+            .agents
+            .iter()
+            .map(|agent| agent.updated_at.as_str())
+            .chain(std::iter::once(work.updated_at.as_str()))
+            .filter_map(|stamp| {
+                chrono::DateTime::parse_from_rfc3339(stamp)
+                    .ok()
+                    .map(|value| value.with_timezone(&chrono::Utc))
+            })
+            .max();
+        work.done_equivalent = !terminal
+            && last_activity.is_some_and(|last| {
+                gwt_core::workspace_projection::derive_merged_done_equivalent(
+                    merge_reference.is_some(),
+                    last,
+                    merge_reference,
+                )
+            });
     }
 }
 
@@ -3689,7 +3825,11 @@ pub struct AppRuntime {
     /// SPEC-2359 W-15 (FR-386): per-project set of branches (canonical names)
     /// fully merged into a base on origin, filled by the background merge
     /// scan. Runtime-only; never persisted.
-    pub(crate) work_merged_branches: HashMap<PathBuf, std::collections::HashSet<String>>,
+    /// SPEC-2359 W-15/W16-4 (FR-386/FR-391): merged branches per project →
+    /// merge reference time (branch tip committer time proxy). Drives the
+    /// "safe to delete" badge and the derived Done-equivalent classification.
+    pub(crate) work_merged_branches:
+        HashMap<PathBuf, HashMap<String, chrono::DateTime<chrono::Utc>>>,
     /// Incremental loader for the machine-local session ledger; keeps
     /// projection rebuilds from re-parsing thousands of unchanged TOMLs
     /// (window-close latency fix, 2026-06-11). RefCell: the runtime lives on
@@ -3698,8 +3838,16 @@ pub struct AppRuntime {
         std::cell::RefCell<crate::session_ledger_cache::SessionLedgerCache>,
     /// Same root fix for the home works.json (megabytes of Work items +
     /// events): cache hit clones instead of re-parsing per projection event.
-    pub(crate) work_items_cache:
-        std::cell::RefCell<gwt_core::workspace_projection::WorkspaceWorkItemsCache>,
+    pub(crate) work_items_cache: std::cell::RefCell<gwt_core::workspace_projection::WorkItemsCache>,
+    /// SPEC-2359 W-16 (FR-387): last work-events ingest per project — the
+    /// 30s throttle for tab-change / post-launch triggers.
+    pub(crate) last_work_events_ingest: std::cell::RefCell<HashMap<PathBuf, std::time::Instant>>,
+    /// SPEC-2359 W16-3 (FR-390): normalized branch names that currently have
+    /// a LOCAL worktree, per project — refreshed by the worktree reconcile.
+    /// The view marks `remote_only` by cache lookup alone (no git spawn on
+    /// the projection build path).
+    pub(crate) local_worktree_branches:
+        std::cell::RefCell<HashMap<PathBuf, std::collections::HashSet<String>>>,
     pub(crate) window_pty_statuses: HashMap<String, WindowProcessStatus>,
     pub(crate) window_hook_states: HashMap<String, WindowProcessStatus>,
     pub(crate) hook_forward_target: Option<HookForwardTarget>,
@@ -3813,8 +3961,10 @@ impl AppRuntime {
                 crate::session_ledger_cache::SessionLedgerCache::new(),
             ),
             work_items_cache: std::cell::RefCell::new(
-                gwt_core::workspace_projection::WorkspaceWorkItemsCache::new(),
+                gwt_core::workspace_projection::WorkItemsCache::new(),
             ),
+            last_work_events_ingest: std::cell::RefCell::new(HashMap::new()),
+            local_worktree_branches: std::cell::RefCell::new(HashMap::new()),
             window_pty_statuses: HashMap::new(),
             window_hook_states: HashMap::new(),
             hook_forward_target: None,
@@ -3839,7 +3989,7 @@ impl AppRuntime {
     pub(crate) fn apply_work_merge_status(
         &mut self,
         project_root: &Path,
-        merged_branches: std::collections::HashSet<String>,
+        merged_branches: HashMap<String, chrono::DateTime<chrono::Utc>>,
     ) -> Vec<OutboundEvent> {
         self.work_merged_branches
             .insert(project_root.to_path_buf(), merged_branches);
@@ -3852,6 +4002,73 @@ impl AppRuntime {
     /// branches for merge-into-base off the UI thread (one `git cherry` per
     /// branch). Sends [`UserEvent::WorkMergeStatus`] when anything merged is
     /// found; silent otherwise so stub-proxy tests stay quiet.
+    /// SPEC-2359 W-16 (FR-387): note an ingest attempt for `project_root`;
+    /// returns false while the 30s throttle window is still open. Bootstrap
+    /// and project-open callers pass `force` to bypass the window.
+    pub(crate) fn note_work_events_ingest_attempt(&self, project_root: &Path, force: bool) -> bool {
+        let now = std::time::Instant::now();
+        let mut last = self.last_work_events_ingest.borrow_mut();
+        if !force {
+            if let Some(previous) = last.get(project_root) {
+                if now.duration_since(*previous) < Duration::from_secs(30) {
+                    return false;
+                }
+            }
+        }
+        last.insert(project_root.to_path_buf(), now);
+        true
+    }
+
+    /// SPEC-2359 W-16 (FR-387): run the cross-machine work events ingest on a
+    /// background thread, then hand control back to the event loop via
+    /// [`UserEvent::WorkEventsIngested`] so the worktree reconcile runs in
+    /// intake → reconcile order (plan decision 9).
+    pub(crate) fn spawn_work_events_ingest(&self, project_root: PathBuf, force: bool) {
+        if !self.note_work_events_ingest_attempt(&project_root, force) {
+            return;
+        }
+        let proxy = self.proxy.clone();
+        // Resolve the home-projection paths on the calling thread: HOME is
+        // process-global and parallel unit tests scope it per test
+        // (ScopedEnvVar, #3022) — a late resolution inside the worker would
+        // race those scopes and write into another test's home.
+        let work_items_path =
+            gwt_core::paths::gwt_workspace_work_items_path_for_repo_path(&project_root);
+        let state_path = gwt_core::paths::gwt_workspace_work_events_intake_state_path_for_repo_path(
+            &project_root,
+        );
+        thread::spawn(move || {
+            let summary = crate::work_events_ingest::ingest_project_work_events_paths(
+                &project_root,
+                &work_items_path,
+                &state_path,
+            );
+            proxy.send(UserEvent::WorkEventsIngested {
+                project_root,
+                changed: summary.changed(),
+            });
+        });
+    }
+
+    /// Event-loop continuation of [`Self::spawn_work_events_ingest`]:
+    /// reconcile worktrees after the intake, kick the merge scan, and
+    /// rebroadcast the projection when the intake applied anything.
+    pub(crate) fn handle_work_events_ingested(
+        &mut self,
+        project_root: PathBuf,
+        changed: bool,
+    ) -> Vec<OutboundEvent> {
+        self.reconcile_workspace_worktrees(&project_root);
+        self.spawn_work_merge_status_scan(project_root);
+        if changed {
+            self.active_work_projection_broadcast_for_active_tab()
+                .into_iter()
+                .collect()
+        } else {
+            Vec::new()
+        }
+    }
+
     pub(crate) fn spawn_work_merge_status_scan(&self, project_root: PathBuf) {
         let proxy = self.proxy.clone();
         thread::spawn(move || {
@@ -3882,21 +4099,39 @@ impl AppRuntime {
             if branches.is_empty() {
                 return;
             }
-            let mut merged = std::collections::HashSet::new();
+            let mut merged: Vec<String> = Vec::new();
             for branch in branches {
                 if matches!(
                     gwt_git::branch::merged_base_target(&project_root, &branch),
                     Ok(Some(_))
                 ) {
-                    merged.insert(branch);
+                    merged.push(branch);
                 }
             }
             if merged.is_empty() {
                 return;
             }
+            // SPEC-2359 W16-4 (FR-391): one extra spawn resolves every tip
+            // committer time — the merge-reference-time proxy for the derived
+            // Done classification (plan decision 8).
+            let tip_times =
+                gwt_git::refs::branch_tip_committer_times(&project_root).unwrap_or_default();
+            let merged_branches: HashMap<String, chrono::DateTime<chrono::Utc>> = merged
+                .into_iter()
+                .map(|branch| {
+                    let unix = tip_times
+                        .get(&branch)
+                        .or_else(|| tip_times.get(&format!("origin/{branch}")))
+                        .copied();
+                    let reference = unix
+                        .and_then(|seconds| chrono::DateTime::from_timestamp(seconds, 0))
+                        .unwrap_or_else(chrono::Utc::now);
+                    (branch, reference)
+                })
+                .collect();
             proxy.send(UserEvent::WorkMergeStatus {
                 project_root,
-                merged_branches: merged,
+                merged_branches,
             });
         });
     }
@@ -3918,6 +4153,18 @@ impl AppRuntime {
                 return;
             }
         };
+        // SPEC-2359 W16-3 (FR-390): refresh the local-worktree branch set the
+        // remote_only view marking reads (cache lookup only — no git spawn at
+        // view time).
+        let local_branches: std::collections::HashSet<String> = entries
+            .iter()
+            .filter_map(|entry| entry.branch.as_deref())
+            .map(crate::runtime_support::normalize_branch_name)
+            .filter(|branch| !branch.is_empty())
+            .collect();
+        self.local_worktree_branches
+            .borrow_mut()
+            .insert(project_root.to_path_buf(), local_branches);
         let sources = gwt::worktree_inventory::worktree_reconcile_sources(&entries);
         if sources.is_empty() {
             return;
@@ -3961,33 +4208,22 @@ impl AppRuntime {
             let _ = gwt_core::workspace_projection_migration::migrate_workspace_projection_for_repo(
                 &tab.project_root,
             );
-            // SPEC-2359 US-37: One-shot rebuild of work_items.json from the
-            // event log. Recovers legacy installations whose work_items.json
-            // shows status=active/idle for items that already have a Done
-            // event in work_events.jsonl (caused by the old apply_event
-            // semantics that regressed Done on subsequent update events).
-            // Idempotent via `work_items.migration.json` marker.
-            let _ = gwt_core::workspace_projection::rebuild_work_items_from_events_for_repo(
-                &tab.project_root,
-            );
             // SPEC-2359 Phase W-16 (FR-393): decompose legacy mega-items
             // (pre-W-12 records keyed to one projection UUID fusing dozens of
             // branches) into canonical branch-keyed items so each branch row
             // shows its real title / sessions. Idempotent; must run before
-            // the worktree reconcile so decomposed branches are not
+            // the intake/reconcile chain so decomposed branches are not
             // redundantly backfilled.
             let _ = gwt_core::workspace_projection::decompose_legacy_multi_branch_work_items(
                 &tab.project_root,
             );
-            // SPEC-2359 Phase W-15 (FR-379/FR-382): reconcile locally existing
-            // worktrees with the Work records so every real worktree surfaces
-            // on the Workspace list (union of existing worktrees and unclosed
-            // records). Runs after the rebuild above so already-recorded
-            // branches are not redundantly backfilled.
-            self.reconcile_workspace_worktrees(&tab.project_root);
-            // SPEC-2359 W-15 (FR-386): kick the background merge scan that
-            // feeds the "safe to delete" badge.
-            self.spawn_work_merge_status_scan(tab.project_root.clone());
+            // SPEC-2359 W-16 (FR-387): cross-machine work events intake.
+            // Supersedes the one-shot `rebuild_work_items_from_events_for_repo`
+            // migration gate — the intake is a permanently-installed idempotent
+            // consumer over the same (and more) sources. Runs on a background
+            // thread; its completion event then runs the worktree reconcile
+            // (intake → reconcile order) and the merge scan.
+            self.spawn_work_events_ingest(tab.project_root.clone(), true);
             // SPEC-2359 Phase W-11 (US-58 / FR-346): one-shot, version-guarded
             // clear of legacy prompt-derived title_summary / current_focus so
             // existing broken titles ("あなたの目的は何ですか" etc.) heal via the
@@ -4499,6 +4735,9 @@ impl AppRuntime {
             ),
             FrontendEvent::CloseWindow { id } => self.close_window_events(&id),
             FrontendEvent::TerminalInput { id, data } => self.terminal_input_events(&id, &data),
+            FrontendEvent::PaneSendInput { session_id, text } => {
+                self.pane_send_input_events(client_id, &session_id, &text)
+            }
             FrontendEvent::PasteImage {
                 id,
                 data_base64,
@@ -5725,12 +5964,10 @@ impl AppRuntime {
                 .work_items_cache
                 .borrow_mut()
                 .load_or_synthesize(&tab.project_root)
-                .unwrap_or_else(
-                    |_| gwt_core::workspace_projection::WorkspaceWorkItemsProjection {
-                        updated_at,
-                        work_items: Vec::new(),
-                    },
-                )
+                .unwrap_or_else(|_| gwt_core::workspace_projection::WorkItemsProjection {
+                    updated_at,
+                    work_items: Vec::new(),
+                })
                 .work_items
                 .iter()
                 .map(|item| workspace_work_item_view_from_item(item, &session_index))
@@ -5741,6 +5978,10 @@ impl AppRuntime {
                 workspaces,
                 cleanup_candidate,
             );
+            // SPEC-2359 W16-2 (FR-389): group Works sharing a canonical
+            // branch into one Workspace row before the ledger attach, so the
+            // attach / identity-collapse / cap run once per Workspace.
+            assign_and_merge_workspace_groups(&mut view.active_works, &tab.project_root);
             // SPEC-2359 Phase W-16 (FR-402): attach the machine-local session
             // ledger to each Workspace (branch) row so sessions surface even
             // when works.json never recorded an agent for the branch.
@@ -5755,6 +5996,12 @@ impl AppRuntime {
             mark_merged_active_works(
                 &mut view.active_works,
                 self.work_merged_branches.get(&tab.project_root),
+            );
+            // SPEC-2359 W16-3 (FR-390): "Remote" rows — branch known only
+            // from fetched refs, no local worktree (cache lookup only).
+            mark_remote_only_active_works(
+                &mut view.active_works,
+                self.local_worktree_branches.borrow().get(&tab.project_root),
             );
             return Some(view);
         }
@@ -5807,6 +6054,9 @@ impl AppRuntime {
             closed_at: None,
             session_agent_total: 0,
             merged_into_base: false,
+            workspace_key: None,
+            remote_only: false,
+            done_equivalent: false,
             updated_at: now.to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
         }];
         Some(gwt::ActiveWorkProjectionView {
@@ -5950,17 +6200,17 @@ impl AppRuntime {
                 if let Some(active_tab_id) = self.active_tab_id.clone() {
                     events.extend(self.restore_open_project_windows(&active_tab_id));
                 }
-                // SPEC-2359 Phase W-15 (FR-379): reconcile the opened
-                // project's worktrees before the first Workspace broadcast so
-                // backfilled rows are part of the initial list.
+                // SPEC-2359 W-16 (FR-387): run the cross-machine intake for
+                // the opened project; its completion event reconciles the
+                // worktrees (intake → reconcile order) and kicks the merge
+                // scan, then rebroadcasts the projection.
                 if let Some(project_root) = self
                     .active_tab_id
                     .as_ref()
                     .and_then(|id| self.tabs.iter().find(|tab| &tab.id == id))
                     .map(|tab| tab.project_root.clone())
                 {
-                    self.reconcile_workspace_worktrees(&project_root);
-                    self.spawn_work_merge_status_scan(project_root);
+                    self.spawn_work_events_ingest(project_root, true);
                 }
                 if let Some(event) = self.active_work_projection_broadcast_on_tab_change() {
                     events.push(event);
@@ -6169,6 +6419,16 @@ impl AppRuntime {
         }
         let wizard_closed = self.set_active_tab(tab_id.to_string());
         let _ = self.persist();
+        // SPEC-2359 W-16 (FR-387): tab changes piggyback the cross-machine
+        // intake, throttled to once per 30s per project.
+        if let Some(project_root) = self
+            .tabs
+            .iter()
+            .find(|tab| tab.id == tab_id)
+            .map(|tab| tab.project_root.clone())
+        {
+            self.spawn_work_events_ingest(project_root, false);
+        }
         let mut events = vec![self.workspace_state_broadcast()];
         if let Some(event) = self.active_work_projection_broadcast_on_tab_change() {
             events.push(event);
@@ -6229,6 +6489,68 @@ impl AppRuntime {
             events.push(self.launch_wizard_state_broadcast(None));
         }
         events
+    }
+
+    /// SPEC-3050 FR-001/FR-002: inject one line of input into the pane bound
+    /// to `session_id`. The event carries a session id instead of a window id,
+    /// so a caller can only ever reach the pane of the session it presents;
+    /// resolution + the live-runtime check both reply with an explicit
+    /// `pane_send_result` (FR-005: no silent drop, unlike `terminal_input`).
+    pub(crate) fn pane_send_input_events(
+        &mut self,
+        client_id: ClientId,
+        session_id: &str,
+        text: &str,
+    ) -> Vec<OutboundEvent> {
+        let target = self.tabs.iter().find_map(|tab| {
+            tab.workspace
+                .persisted()
+                .windows
+                .iter()
+                .find(|window| window.session_id.as_deref() == Some(session_id))
+                .map(|window| combined_window_id(&tab.id, &window.id))
+        });
+        let Some(window_id) = target else {
+            return vec![OutboundEvent::reply(
+                client_id,
+                BackendEvent::PaneSendResult {
+                    ok: false,
+                    window_id: None,
+                    error: Some(format!("no pane bound to session {session_id}")),
+                },
+            )];
+        };
+
+        let write_result = match self.runtimes.get(&window_id) {
+            None => Err(format!("no live runtime for pane {window_id}")),
+            Some(runtime) => runtime
+                .pane
+                .lock()
+                .map_err(|error| error.to_string())
+                .and_then(|pane| {
+                    pane.write_input(text.as_bytes())
+                        .map_err(|error| error.to_string())
+                }),
+        };
+
+        match write_result {
+            Ok(()) => vec![OutboundEvent::reply(
+                client_id,
+                BackendEvent::PaneSendResult {
+                    ok: true,
+                    window_id: Some(window_id),
+                    error: None,
+                },
+            )],
+            Err(error) => vec![OutboundEvent::reply(
+                client_id,
+                BackendEvent::PaneSendResult {
+                    ok: false,
+                    window_id: Some(window_id),
+                    error: Some(error),
+                },
+            )],
+        }
     }
 
     pub(crate) fn terminal_input_events(&mut self, id: &str, data: &str) -> Vec<OutboundEvent> {
@@ -8419,6 +8741,10 @@ impl AppRuntime {
                         launch_feedback_context.clone(),
                     );
                 };
+                // SPEC-2359 W-16 (FR-387): a launch fetches origin refs, so
+                // piggyback the cross-machine intake (30s throttle keeps
+                // launch bursts cheap).
+                self.spawn_work_events_ingest(tab.project_root.clone(), false);
                 let Some(window) = tab.workspace.window(&address.raw_id) else {
                     return self.launch_error_events(
                         window_id,

@@ -923,8 +923,8 @@ mod tests {
         gwt_core::workspace_projection::save_workspace_projection(&repo, &projection)
             .expect("save projection");
 
-        let mut start = gwt_core::workspace_projection::WorkspaceWorkEvent::new(
-            gwt_core::workspace_projection::WorkspaceWorkEventKind::Start,
+        let mut start = gwt_core::workspace_projection::WorkEvent::new(
+            gwt_core::workspace_projection::WorkEventKind::Start,
             "wi-pr-merge-auto-done",
             chrono::Utc.with_ymd_and_hms(2026, 5, 13, 1, 0, 0).unwrap(),
         );
