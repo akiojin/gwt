@@ -1,6 +1,77 @@
 # Changelog
 
 All notable changes to this project will be documented in this file.
+## [9.56.0] - 2026-06-12
+
+### Bug Fixes
+
+- **workspace:** Current.json 不在でも Work record を Workspace 一覧へ表示
+- **workspace:** Launch ボタンの重なり解消と branch 重複表示の抑制
+- **workspace:** App.css の旧 flex 規則を除去し overview の grid レイアウトを復元
+- **workspace:** Workspace 行の wire agents を合計 8 件に cap し payload 肥大を防止
+- **workspace:** Session_history 未保存の TOML でも最新会話を Session 行として合成表示
+- **workspace:** Backfill 再適用で updated_at を進めず更新日時ソートの退化を解消
+- **workspace:** Backfill の基準時刻を worktree の mtime にし古い worktree が一覧上位を占めないようにする
+- **workspace:** Backfill 基準時刻を HEAD コミット時刻に変更し中位帯の順序崩れを解消
+- **workspace:** Protected base ブランチを merged 安全削除バッジから除外
+- **workspace:** Launch Agent を detail ヘッダーの primary アクションに固定配置
+- **workspace:** ウィンドウ close 等の projection 再構築遅延を session ledger 差分キャッシュで根治
+- **workspace:** Works.json 4MB の毎イベント parse もキャッシュ化しキュー渋滞を解消
+- **workspace:** Agent 停止時の Paused 記録を event loop から退避し × の数分フリーズを根治
+- **workspace:** Idle の agent window も close 確認の対象にする
+- **gui:** Update CTA をサイドバーから従来の右下固定表示へ戻す
+- **workspace:** 同一会話を指す重複 Work 行を collapse し名前欠落を補完
+- **workspace:** 無名 Agent 表示を台帳から補完し Session 表示を直近 1 件に統一
+- **workspace:** 台帳からも復元不能な ghost agent 行を表示から除外
+- **workspace:** Work 表示を agent 種別ごとに直近 1 グループへ集約
+- **skills:** Gwt-search を PATH コマンドと誤認識させない skill-not-command 明示を追加 (#3049)
+- PowerShell ラッパーの引数クォート破損で Fast モード起動が失敗する問題を修正
+- **workspace:** 一括 Clean Up を複数 branch 対応の cleanup 経路へ接続
+- **core:** Legacy alias を test module より前へ移動し CI clippy を解消
+- **skills:** Gwt-discussion の Board active-claim preflight を復元
+
+### Documentation
+
+- デバッグ用サーバー起動は browser-check skill に従う導線を AGENTS.md に明記
+- **workspace:** Session 台帳 FR の番号を W-17 と衝突しない FR-402 へ改番
+
+### Features
+
+- **workspace:** 起動/プロジェクトオープン時に worktree reconcile を配線し全 worktree を一覧へ列挙
+- **workspace:** Work の無い Workspace 行に Launch 導線を追加
+- **workspace:** Legacy mega-item を canonical branch ID へ分解し実データを branch 行に表示
+- **workspace:** 一覧と detail を branch 名主体の表示に統一
+- **workspace:** Session 台帳を branch 単位で Workspace へ対応付け sessions を表示
+- **workspace:** Workspace 一覧を更新日時の降順に並べ替え、テストの実ブラウザ起動を解消
+- **workspace:** Work を持つ Workspace にも新規エージェント起動の Launch 導線を常設
+- **workspace:** Workspace 一覧を ArrowUp/ArrowDown で選択切替できるようにする
+- **workspace:** Merged 判定の安全に削除可能バッジ・Launch Agent 統一・キーボード選択のフォーカス復帰
+- **workspace:** Workspace surface を Operator design system の意匠に統一
+- **workspace:** Agent window の × に確認ダイアログ・merged Workspace に Clean Up を追加
+- **pane:** Gwtd pane send による self-only PTY 注入と gwt-discussion Goal Start を追加 (SPEC-3050)
+- **workspace:** Cross-machine Work 骨格復元の常設 intake consumer を実装 (SPEC-2359 W16-1)
+- **workspace:** 同一 branch の Work を canonical key で 1 Workspace 行に統合 (SPEC-2359 W16-2)
+- **workspace:** Fetch 済みリモート branch の Remote 表示と launch 導線 (SPEC-2359 W16-3)
+- **workspace:** Merged+stale を derived Done として分類 (SPEC-2359 W16-4)
+- **workspace:** Merged branch の一括 Clean Up を Workspace 一覧に追加
+
+### Miscellaneous Tasks
+
+- 検証用スクリーンショット成果物を削除
+- **gwt:** Work events 追記分をコミット
+- **gwt:** Work events 追記分をコミット
+- **gwt:** Register-spec lifecycle の placeholder rebind 不可を memory に記録
+- **gwt:** Memory.md の既存 bare URL を markdownlint MD034 準拠に修正
+- **gwt:** Work events 追記分をコミット
+
+### Refactor
+
+- **core:** Canonical 名を Work 系へ段階移行 (SPEC-2359 US-66 Stage 1)
+- **core:** Work 命名 Stage 2 — 全 call site の掃き出し完了 (SPEC-2359 T-529)
+
+### Revert
+
+- **core:** WorkspaceProjection と gwtd workspace を正へ戻す（ユーザー裁定）
 ## [9.55.0] - 2026-06-12
 
 ### Bug Fixes
