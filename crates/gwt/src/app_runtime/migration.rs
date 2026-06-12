@@ -13,7 +13,7 @@ use crate::UserEvent;
 
 use super::{
     load_restored_workspace_state, recovery_state_label, AppRuntime, BackendEvent, OutboundEvent,
-    WorkspaceState,
+    WindowCanvasState,
 };
 
 impl AppRuntime {
@@ -85,7 +85,7 @@ impl AppRuntime {
             tab.kind = ProjectKind::Git;
             tab.migration_pending = false;
             match load_restored_workspace_state(&canonical) {
-                Ok(persisted) => tab.workspace = WorkspaceState::from_persisted(persisted),
+                Ok(persisted) => tab.workspace = WindowCanvasState::from_persisted(persisted),
                 Err(error) => {
                     tracing::warn!(
                         target: "gwt::migration",

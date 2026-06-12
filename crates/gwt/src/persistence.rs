@@ -108,7 +108,7 @@ pub struct PersistedWindowState {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct PersistedWorkspaceState {
+pub struct PersistedWindowCanvasState {
     #[serde(default = "default_canvas_viewport")]
     pub viewport: CanvasViewport,
     pub windows: Vec<PersistedWindowState>,
@@ -153,7 +153,7 @@ struct LegacyPersistedProjectTabState {
     pub title: String,
     pub project_root: PathBuf,
     pub kind: ProjectKind,
-    pub workspace: PersistedWorkspaceState,
+    pub workspace: PersistedWindowCanvasState,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -165,16 +165,16 @@ struct LegacyPersistedAppState {
     pub recent_projects: Vec<RecentProjectEntry>,
 }
 
-pub fn empty_workspace_state() -> PersistedWorkspaceState {
-    PersistedWorkspaceState {
+pub fn empty_workspace_state() -> PersistedWindowCanvasState {
+    PersistedWindowCanvasState {
         viewport: default_canvas_viewport(),
         windows: Vec::new(),
         next_z_index: 1,
     }
 }
 
-pub fn default_workspace_state() -> PersistedWorkspaceState {
-    PersistedWorkspaceState {
+pub fn default_workspace_state() -> PersistedWindowCanvasState {
+    PersistedWindowCanvasState {
         viewport: default_canvas_viewport(),
         windows: vec![
             PersistedWindowState {
@@ -242,7 +242,7 @@ pub fn default_session_state() -> PersistedSessionState {
     }
 }
 
-pub fn pause_process_windows_for_restore(state: &mut PersistedWorkspaceState) {
+pub fn pause_process_windows_for_restore(state: &mut PersistedWindowCanvasState) {
     for window in &mut state.windows {
         if window.preset.requires_process() {
             window.status = WindowState::Stopped;
@@ -250,7 +250,7 @@ pub fn pause_process_windows_for_restore(state: &mut PersistedWorkspaceState) {
     }
 }
 
-fn normalize_loaded_workspace_state(state: &mut PersistedWorkspaceState) {
+fn normalize_loaded_workspace_state(state: &mut PersistedWindowCanvasState) {
     state
         .windows
         .retain(|window| !window.preset.is_removed_legacy());
@@ -300,7 +300,7 @@ pub fn save_session_state(path: &Path, state: &PersistedSessionState) -> std::io
     atomic_write(path, content.as_bytes())
 }
 
-pub fn load_workspace_state(path: &Path) -> std::io::Result<PersistedWorkspaceState> {
+pub fn load_workspace_state(path: &Path) -> std::io::Result<PersistedWindowCanvasState> {
     let content = match std::fs::read_to_string(path) {
         Ok(content) => content,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
@@ -308,20 +308,23 @@ pub fn load_workspace_state(path: &Path) -> std::io::Result<PersistedWorkspaceSt
         }
         Err(error) => return Err(error),
     };
-    let mut workspace: PersistedWorkspaceState = serde_json::from_str(&content)?;
+    let mut workspace: PersistedWindowCanvasState = serde_json::from_str(&content)?;
     normalize_loaded_workspace_state(&mut workspace);
     Ok(workspace)
 }
 
 pub fn load_restored_workspace_state(
     project_root: &Path,
-) -> std::io::Result<PersistedWorkspaceState> {
+) -> std::io::Result<PersistedWindowCanvasState> {
     let mut workspace = load_workspace_state(&workspace_state_path(project_root))?;
     pause_process_windows_for_restore(&mut workspace);
     Ok(workspace)
 }
 
-pub fn save_workspace_state(path: &Path, state: &PersistedWorkspaceState) -> std::io::Result<()> {
+pub fn save_workspace_state(
+    path: &Path,
+    state: &PersistedWindowCanvasState,
+) -> std::io::Result<()> {
     if let Some(parent) = path.parent() {
         gwt_core::paths::ensure_dir(parent)
             .map_err(|error| std::io::Error::other(error.to_string()))?;
@@ -395,7 +398,7 @@ pub fn migrate_legacy_workspace_state(
                 .collect::<Vec<_>>(),
         )
     } else {
-        let workspace: PersistedWorkspaceState = serde_json::from_value(value)?;
+        let workspace: PersistedWindowCanvasState = serde_json::from_value(value)?;
         let title = project_title_from_path(fallback_project_root);
         (
             PersistedSessionState {
@@ -532,7 +535,7 @@ mod tests {
     fn save_and_load_workspace_state_round_trip() {
         let dir = tempdir().expect("tempdir");
         let path = dir.path().join("workspace.json");
-        let state = PersistedWorkspaceState {
+        let state = PersistedWindowCanvasState {
             viewport: CanvasViewport {
                 x: 120.0,
                 y: -48.0,
@@ -749,7 +752,7 @@ mod tests {
 
     #[test]
     fn pause_process_windows_for_restore_pauses_agent_windows() {
-        let mut state = PersistedWorkspaceState {
+        let mut state = PersistedWindowCanvasState {
             viewport: default_canvas_viewport(),
             windows: vec![PersistedWindowState {
                 id: "agent-1".to_string(),
@@ -911,7 +914,7 @@ mod tests {
         let dir = tempdir().expect("tempdir");
         let project_root = dir.path().join("project");
         std::fs::create_dir_all(&project_root).expect("project dir");
-        let state = PersistedWorkspaceState {
+        let state = PersistedWindowCanvasState {
             viewport: default_canvas_viewport(),
             windows: vec![
                 PersistedWindowState {
@@ -1121,7 +1124,7 @@ mod tests {
         )
         .expect("legacy workspace write");
 
-        let existing = PersistedWorkspaceState {
+        let existing = PersistedWindowCanvasState {
             viewport: CanvasViewport {
                 x: 10.0,
                 y: 20.0,
@@ -1148,7 +1151,7 @@ mod tests {
 
     #[test]
     fn pause_process_windows_for_restore_marks_only_process_windows_exited() {
-        let mut state = PersistedWorkspaceState {
+        let mut state = PersistedWindowCanvasState {
             viewport: default_canvas_viewport(),
             windows: vec![
                 PersistedWindowState {
