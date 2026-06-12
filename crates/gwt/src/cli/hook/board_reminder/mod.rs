@@ -33,7 +33,7 @@ use gwt_agent::{Session, GWT_SESSION_ID_ENV};
 use gwt_core::coordination::{
     load_reminders_state, write_reminders_state, BoardEntryKind, RemindersState,
 };
-use gwt_core::workspace_projection::WorkspaceProjection;
+use gwt_core::work_projection::WorkProjection;
 
 /// SPEC-2359 Phase U-9 (FR-178): minimum number of consecutive
 /// UserPromptSubmit turns with an unchanged `title_summary` before the
@@ -145,8 +145,7 @@ fn agent_title_summary_missing(session: &Session) -> Result<bool, HookError> {
         session,
         &session.worktree_path,
     );
-    let projection =
-        gwt_core::workspace_projection::load_workspace_projection(&project_state_root)?;
+    let projection = gwt_core::work_projection::load_workspace_projection(&project_state_root)?;
     Ok(title_summary_missing_in_projection(
         projection.as_ref(),
         &session.id,
@@ -164,7 +163,7 @@ fn agent_title_summary_missing(session: &Session) -> Result<bool, HookError> {
 /// unregistered session is treated as "not missing" so the reminder only
 /// fires once the agent is actually present in the projection.
 fn title_summary_missing_in_projection(
-    projection: Option<&gwt_core::workspace_projection::WorkspaceProjection>,
+    projection: Option<&gwt_core::work_projection::WorkProjection>,
     session_id: &str,
 ) -> bool {
     let Some(projection) = projection else {
@@ -220,7 +219,7 @@ fn append_title_summary_required_context(
 /// owned by the empty-trigger reminder path and never triggers stale.
 fn compute_title_summary_stale_state(
     event: IntentBoundaryEvent,
-    projection: Option<&WorkspaceProjection>,
+    projection: Option<&WorkProjection>,
     session_id: &str,
     current_state: &RemindersState,
 ) -> (bool, RemindersState) {
@@ -432,7 +431,7 @@ pub fn compute_plan(
         &session.worktree_path,
     );
     let projection_for_stale =
-        gwt_core::workspace_projection::load_workspace_projection(&project_state_root)?;
+        gwt_core::work_projection::load_workspace_projection(&project_state_root)?;
     let (stale, updated_state) = compute_title_summary_stale_state(
         intent_event,
         projection_for_stale.as_ref(),
@@ -472,9 +471,9 @@ mod tests {
     use gwt_agent::AgentId;
     use gwt_core::{
         coordination::{post_entry, AuthorKind, BoardEntry, BoardEntryKind},
-        workspace_projection::{
-            save_workspace_projection, WorkspaceAgentAffiliationStatus, WorkspaceAgentSummary,
-            WorkspaceProjection, WorkspaceStatusCategory,
+        work_projection::{
+            save_workspace_projection, WorkProjection, WorkspaceAgentAffiliationStatus,
+            WorkspaceAgentSummary, WorkspaceStatusCategory,
         },
     };
 
@@ -511,7 +510,7 @@ mod tests {
     }
 
     fn save_projection(repo: &Path, agents: Vec<WorkspaceAgentSummary>) {
-        let mut projection = WorkspaceProjection::default_for_project(repo);
+        let mut projection = WorkProjection::default_for_project(repo);
         projection.id = "workspace-current".to_string();
         projection.agents = agents;
         save_workspace_projection(repo, &projection).expect("save workspace projection");
@@ -893,16 +892,15 @@ mod tests {
             "sessions without a Workspace projection are Unassigned and must not require a title update"
         );
 
-        let mut projection =
-            gwt_core::workspace_projection::WorkspaceProjection::default_for_project(&repo);
+        let mut projection = gwt_core::work_projection::WorkProjection::default_for_project(&repo);
         projection
             .agents
-            .push(gwt_core::workspace_projection::WorkspaceAgentSummary {
+            .push(gwt_core::work_projection::WorkspaceAgentSummary {
                 session_id: session.id.clone(),
                 window_id: None,
                 agent_id: "codex".to_string(),
                 display_name: "Codex".to_string(),
-                status_category: gwt_core::workspace_projection::WorkspaceStatusCategory::Active,
+                status_category: gwt_core::work_projection::WorkspaceStatusCategory::Active,
                 current_focus: Some("Implement title-summary guard".to_string()),
                 title_summary: Some("Title summary guard".to_string()),
                 worktree_path: Some(repo.clone()),
@@ -911,11 +909,11 @@ mod tests {
                 last_board_entry_kind: None,
                 coordination_scope: None,
                 affiliation_status:
-                    gwt_core::workspace_projection::WorkspaceAgentAffiliationStatus::Assigned,
+                    gwt_core::work_projection::WorkspaceAgentAffiliationStatus::Assigned,
                 workspace_id: None,
                 updated_at: Utc::now(),
             });
-        gwt_core::workspace_projection::save_workspace_projection(&repo, &projection)
+        gwt_core::work_projection::save_workspace_projection(&repo, &projection)
             .expect("save projection");
 
         assert!(
@@ -934,15 +932,15 @@ mod tests {
         session.project_state_root = Some(project_root.clone());
 
         let mut projection =
-            gwt_core::workspace_projection::WorkspaceProjection::default_for_project(&project_root);
+            gwt_core::work_projection::WorkProjection::default_for_project(&project_root);
         projection
             .agents
-            .push(gwt_core::workspace_projection::WorkspaceAgentSummary {
+            .push(gwt_core::work_projection::WorkspaceAgentSummary {
                 session_id: session.id.clone(),
                 window_id: Some("project::agent-1".to_string()),
                 agent_id: "codex".to_string(),
                 display_name: "Codex".to_string(),
-                status_category: gwt_core::workspace_projection::WorkspaceStatusCategory::Active,
+                status_category: gwt_core::work_projection::WorkspaceStatusCategory::Active,
                 current_focus: Some("Implement canonical title guard".to_string()),
                 title_summary: Some("Canonical title guard".to_string()),
                 worktree_path: Some(worktree.clone()),
@@ -951,11 +949,11 @@ mod tests {
                 last_board_entry_kind: None,
                 coordination_scope: None,
                 affiliation_status:
-                    gwt_core::workspace_projection::WorkspaceAgentAffiliationStatus::Assigned,
+                    gwt_core::work_projection::WorkspaceAgentAffiliationStatus::Assigned,
                 workspace_id: None,
                 updated_at: Utc::now(),
             });
-        gwt_core::workspace_projection::save_workspace_projection(&project_root, &projection)
+        gwt_core::work_projection::save_workspace_projection(&project_root, &projection)
             .expect("save projection");
 
         assert!(
@@ -972,8 +970,8 @@ mod tests {
     /// Pure-logic test (no global store / env) to stay deterministic.
     #[test]
     fn title_summary_missing_in_projection_covers_affiliation_and_presence() {
-        use gwt_core::workspace_projection::{
-            WorkspaceAgentAffiliationStatus, WorkspaceAgentSummary, WorkspaceProjection,
+        use gwt_core::work_projection::{
+            WorkProjection, WorkspaceAgentAffiliationStatus, WorkspaceAgentSummary,
             WorkspaceStatusCategory,
         };
 
@@ -994,7 +992,7 @@ mod tests {
             workspace_id: None,
             updated_at: Utc::now(),
         };
-        let mut projection = WorkspaceProjection::default_for_project("/repo");
+        let mut projection = WorkProjection::default_for_project("/repo");
         projection.agents.push(agent.clone());
 
         // Unassigned + empty title -> missing (the fix).
@@ -1020,7 +1018,7 @@ mod tests {
         // No projection / unknown session -> not missing.
         assert!(!title_summary_missing_in_projection(None, "sess-1"));
         agent.title_summary = None;
-        let mut other = WorkspaceProjection::default_for_project("/repo");
+        let mut other = WorkProjection::default_for_project("/repo");
         other.agents.push(agent);
         assert!(!title_summary_missing_in_projection(
             Some(&other),
@@ -1466,8 +1464,8 @@ mod tests {
         session_id: &str,
         title_summary: Option<&str>,
         current_focus: Option<&str>,
-    ) -> WorkspaceProjection {
-        let mut projection = WorkspaceProjection::default_for_project(repo);
+    ) -> WorkProjection {
+        let mut projection = WorkProjection::default_for_project(repo);
         let mut agent = workspace_agent(
             session_id,
             Some("ws-stale"),

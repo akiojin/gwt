@@ -294,7 +294,7 @@ impl SlackProvider {
     ) -> Result<String> {
         let key = mapping::thread_key_for_entry(entry);
         let item =
-            gwt_core::workspace_projection::load_or_synthesize_workspace_work_items(worktree_root)
+            gwt_core::work_projection::load_or_synthesize_workspace_work_items(worktree_root)
                 .ok()
                 .and_then(|proj| proj.work_items.into_iter().find(|work| work.id == key));
         let (card_title, card_body) =

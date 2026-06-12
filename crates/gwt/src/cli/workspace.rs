@@ -2,13 +2,13 @@ use std::path::Path;
 
 use chrono::{DateTime, Utc};
 use gwt_core::paths::gwt_projects_dir;
-use gwt_core::workspace_projection::{
+use gwt_core::work_projection::{
     apply_prune_plan, classify_workspace_projections, load_or_default_workspace_projection,
     load_or_synthesize_workspace_work_items, record_workspace_work_event,
     save_workspace_projection, update_workspace_projection_with_journal, ClassifiedProjection,
-    PruneAction, PruneSkipReason, WorkspaceAgentSummary, WorkspaceExecutionContainerRef,
-    WorkspaceProjection, WorkspaceProjectionUpdate, WorkspaceRetentionConfig, WorkspaceStartUpdate,
-    WorkspaceStatusCategory, WorkspaceWorkEvent, WorkspaceWorkEventKind, WorkspaceWorkItem,
+    PruneAction, PruneSkipReason, WorkEvent, WorkEventKind, WorkItem, WorkProjection,
+    WorkspaceAgentSummary, WorkspaceExecutionContainerRef, WorkspaceProjectionUpdate,
+    WorkspaceRetentionConfig, WorkspaceStartUpdate, WorkspaceStatusCategory,
 };
 use gwt_github::{ApiError, SpecOpsError};
 
@@ -457,7 +457,7 @@ pub(super) fn run<E: CliEnv>(
             // SPEC-2359 W16-2 (FR-389): mint the canonical (machine-
             // independent, branch-keyed) Work id when the agent has a branch
             // so every machine's records join the same Workspace.
-            let canonical_id = gwt_core::workspace_projection::canonical_work_id(
+            let canonical_id = gwt_core::work_projection::canonical_work_id(
                 env.repo_path(),
                 agent.branch.as_deref(),
                 agent.worktree_path.as_deref(),
@@ -497,8 +497,7 @@ pub(super) fn run<E: CliEnv>(
                 .map(|number| format!("SPEC-{number}"))
                 .or_else(|| issue.map(|number| format!("Issue #{number}")));
             let now = Utc::now();
-            let mut event =
-                WorkspaceWorkEvent::new(WorkspaceWorkEventKind::Start, workspace_id.clone(), now);
+            let mut event = WorkEvent::new(WorkEventKind::Start, workspace_id.clone(), now);
             event.title = Some(title_summary.clone());
             event.intent = current_focus.clone();
             event.summary = current_focus
@@ -518,7 +517,7 @@ pub(super) fn run<E: CliEnv>(
                 pr_state: None,
             });
             if let Some(split_from) = split_from {
-                event.kind = WorkspaceWorkEventKind::Split;
+                event.kind = WorkEventKind::Split;
                 event.related_work_item_id = Some(split_from);
             }
             if let Some(boundary) = boundary {
@@ -548,8 +547,7 @@ pub(super) fn run<E: CliEnv>(
             // retroactive migration.
             projection.created_at = now;
             projection.creator = Some(agent_display_name);
-            projection.lifecycle_stage =
-                gwt_core::workspace_projection::WorkspaceLifecycleStage::Active;
+            projection.lifecycle_stage = gwt_core::work_projection::WorkspaceLifecycleStage::Active;
             assign_agent_to_workspace(
                 &mut projection,
                 &agent_session,
@@ -632,7 +630,7 @@ fn run_projection_list_with_scan_root<F>(
     out: &mut String,
 ) -> Result<i32, SpecOpsError>
 where
-    F: Fn(&WorkspaceProjection) -> bool,
+    F: Fn(&WorkProjection) -> bool,
 {
     let plan = classify_workspace_projections(scan_root, config, now, is_active_session);
     let filtered = filter_projection_list(&plan, stale, all);
@@ -673,7 +671,7 @@ fn run_projection_prune_with_scan_root<F>(
     out: &mut String,
 ) -> Result<i32, SpecOpsError>
 where
-    F: Fn(&WorkspaceProjection) -> bool,
+    F: Fn(&WorkProjection) -> bool,
 {
     let plan = classify_workspace_projections(scan_root, config, now, is_active_session);
     let filtered: Vec<ClassifiedProjection> = if ids.is_empty() {
@@ -752,8 +750,8 @@ pub(super) fn ensure_workspace_for_agent(
     let owner = owner_from_spec_or_issue(input.spec, input.issue);
     if agent.is_assigned() {
         if let Some(workspace_id) = agent.workspace_id.as_deref() {
-            if let Some(item) = workspace_item_by_id(repo_path, workspace_id)?
-                .filter(WorkspaceWorkItem::is_incomplete)
+            if let Some(item) =
+                workspace_item_by_id(repo_path, workspace_id)?.filter(WorkItem::is_incomplete)
             {
                 apply_workspace_item_to_projection(&mut projection, &item);
             }
@@ -777,7 +775,7 @@ pub(super) fn ensure_workspace_for_agent(
     // SPEC-2359 W16-2 (FR-389): when the canonical (branch-keyed) Work id
     // already names an incomplete item, join it directly — the similarity
     // guard never blocks same-branch convergence.
-    if let Some(canonical_id) = gwt_core::workspace_projection::canonical_work_id(
+    if let Some(canonical_id) = gwt_core::work_projection::canonical_work_id(
         repo_path,
         agent.branch.as_deref(),
         agent.worktree_path.as_deref(),
@@ -860,9 +858,9 @@ fn workspace_ensure_text(input: &WorkspaceEnsureInput, owner: Option<&str>) -> S
 }
 
 fn best_workspace_candidate<'a>(
-    work_items: &'a [WorkspaceWorkItem],
+    work_items: &'a [WorkItem],
     ensure_text: &str,
-) -> Option<&'a WorkspaceWorkItem> {
+) -> Option<&'a WorkItem> {
     work_items
         .iter()
         .filter(|item| item.is_incomplete())
@@ -887,8 +885,7 @@ fn record_workspace_join_event(
     agent: &WorkspaceAgentSummary,
 ) -> Result<(), SpecOpsError> {
     let now = Utc::now();
-    let mut event =
-        WorkspaceWorkEvent::new(WorkspaceWorkEventKind::Claim, workspace_id.to_string(), now);
+    let mut event = WorkEvent::new(WorkEventKind::Claim, workspace_id.to_string(), now);
     event.intent = input.current_focus.clone();
     event.summary = Some(format!("Joined Workspace: {}", input.title_summary));
     event.status_category = Some(WorkspaceStatusCategory::Active);
@@ -906,22 +903,21 @@ fn record_workspace_join_event(
 
 fn create_workspace_for_agent(
     repo_path: &std::path::Path,
-    projection: &mut WorkspaceProjection,
+    projection: &mut WorkProjection,
     input: &WorkspaceEnsureInput,
     owner: Option<String>,
     agent: &WorkspaceAgentSummary,
 ) -> Result<String, SpecOpsError> {
     // SPEC-2359 W16-2 (FR-389): canonical, machine-independent Work id when
     // the agent has a branch / worktree; millis fallback for branchless agents.
-    let workspace_id = gwt_core::workspace_projection::canonical_work_id(
+    let workspace_id = gwt_core::work_projection::canonical_work_id(
         repo_path,
         agent.branch.as_deref(),
         agent.worktree_path.as_deref(),
     )
     .unwrap_or_else(|| format!("workspace-{}", Utc::now().timestamp_millis()));
     let now = Utc::now();
-    let mut event =
-        WorkspaceWorkEvent::new(WorkspaceWorkEventKind::Start, workspace_id.clone(), now);
+    let mut event = WorkEvent::new(WorkEventKind::Start, workspace_id.clone(), now);
     event.title = Some(input.title_summary.clone());
     event.intent = input
         .current_focus
@@ -1022,7 +1018,7 @@ fn current_agent_intent(
 fn workspace_item_by_id(
     repo_path: &std::path::Path,
     workspace_id: &str,
-) -> Result<Option<WorkspaceWorkItem>, SpecOpsError> {
+) -> Result<Option<WorkItem>, SpecOpsError> {
     Ok(load_or_synthesize_workspace_work_items(repo_path)
         .map_err(core_error)?
         .work_items
@@ -1030,15 +1026,12 @@ fn workspace_item_by_id(
         .find(|item| item.id == workspace_id))
 }
 
-fn apply_workspace_item_to_projection(
-    projection: &mut WorkspaceProjection,
-    item: &WorkspaceWorkItem,
-) {
+fn apply_workspace_item_to_projection(projection: &mut WorkProjection, item: &WorkItem) {
     projection.apply_work_item(item, Utc::now());
 }
 
 fn assign_agent_to_workspace(
-    projection: &mut WorkspaceProjection,
+    projection: &mut WorkProjection,
     agent_session: &str,
     workspace_id: &str,
     current_focus: Option<String>,
@@ -1058,7 +1051,7 @@ fn assign_agent_to_workspace(
     Ok(())
 }
 
-fn workspace_item_text(item: &WorkspaceWorkItem) -> String {
+fn workspace_item_text(item: &WorkItem) -> String {
     let mut parts = vec![item.title.as_str()];
     if let Some(intent) = item.intent.as_deref() {
         parts.push(intent);
@@ -1131,10 +1124,10 @@ fn string_error(error: String) -> SpecOpsError {
 mod tests {
     use super::*;
     use crate::cli::env::TestEnv;
-    use gwt_core::workspace_projection::{
+    use gwt_core::work_projection::{
         load_workspace_projection, load_workspace_work_items, record_workspace_work_event,
-        save_workspace_projection, WorkspaceAgentAffiliationStatus, WorkspaceAgentSummary,
-        WorkspaceProjection,
+        save_workspace_projection, WorkProjection, WorkspaceAgentAffiliationStatus,
+        WorkspaceAgentSummary,
     };
     use std::ffi::OsString;
 
@@ -1463,7 +1456,7 @@ mod tests {
         std::fs::create_dir_all(&worktree).expect("worktree");
         write_session_with_project_state_root("session-1", &worktree, &project_root);
 
-        let mut canonical = WorkspaceProjection::default_for_project(&project_root);
+        let mut canonical = WorkProjection::default_for_project(&project_root);
         canonical.agents.push(assigned_agent_with_window(
             "session-1",
             "project::agent-1",
@@ -1526,7 +1519,7 @@ mod tests {
         std::fs::create_dir_all(&worktree).expect("worktree");
         write_session_with_project_state_root("session-1", &worktree, &project_root);
 
-        let mut canonical = WorkspaceProjection::default_for_project(&project_root);
+        let mut canonical = WorkProjection::default_for_project(&project_root);
         canonical.agents.push(assigned_agent_with_window(
             "session-1",
             "project::agent-1",
@@ -1534,7 +1527,7 @@ mod tests {
         ));
         save_workspace_projection(&project_root, &canonical).expect("save canonical projection");
 
-        let mut split = WorkspaceProjection::default_for_project(&worktree);
+        let mut split = WorkProjection::default_for_project(&worktree);
         let mut split_agent =
             assigned_agent_with_window("session-1", "project::agent-1", &worktree);
         split_agent.title_summary = Some("Split root title".to_string());
@@ -1590,14 +1583,10 @@ mod tests {
         let repo = temp.path().join("repo");
         std::fs::create_dir_all(&repo).expect("repo");
         let mut env = TestEnv::new(repo.clone());
-        let mut projection = WorkspaceProjection::default_for_project(&repo);
+        let mut projection = WorkProjection::default_for_project(&repo);
         projection.agents.push(unassigned_agent("session-1"));
         save_workspace_projection(&repo, &projection).expect("save projection");
-        let mut event = WorkspaceWorkEvent::new(
-            WorkspaceWorkEventKind::Start,
-            "workspace-existing",
-            Utc::now(),
-        );
+        let mut event = WorkEvent::new(WorkEventKind::Start, "workspace-existing", Utc::now());
         event.title = Some("Workspace history".to_string());
         event.summary = Some("Existing Workspace".to_string());
         event.status_category = Some(WorkspaceStatusCategory::Active);
@@ -1643,7 +1632,7 @@ mod tests {
         let repo = temp.path().join("repo");
         std::fs::create_dir_all(&repo).expect("repo");
         let mut env = TestEnv::new(repo.clone());
-        let mut projection = WorkspaceProjection::default_for_project(&repo);
+        let mut projection = WorkProjection::default_for_project(&repo);
         projection.agents.push(unassigned_agent("session-1"));
         save_workspace_projection(&repo, &projection).expect("save projection");
 
@@ -1691,7 +1680,7 @@ mod tests {
     /// created without `--current-focus` must still have a non-empty
     /// `summary` (auto-filled from `title_summary`), a real `created_at`
     /// timestamp, the originating Agent's `display_name` as `creator`, and
-    /// an initial `WorkspaceWorkEvent { kind: Start }` so the Workspace
+    /// an initial `WorkEvent { kind: Start }` so the Workspace
     /// Overview Lifecycle section is never empty on Day-0.
     #[test]
     fn workspace_create_autofills_summary_and_metadata_when_current_focus_missing() {
@@ -1702,7 +1691,7 @@ mod tests {
         let repo = temp.path().join("repo");
         std::fs::create_dir_all(&repo).expect("repo");
         let mut env = TestEnv::new(repo.clone());
-        let mut projection = WorkspaceProjection::default_for_project(&repo);
+        let mut projection = WorkProjection::default_for_project(&repo);
         projection.agents.push(unassigned_agent("session-1"));
         save_workspace_projection(&repo, &projection).expect("save projection");
 
@@ -1733,12 +1722,12 @@ mod tests {
         );
         assert_eq!(
             saved.lifecycle_stage,
-            gwt_core::workspace_projection::WorkspaceLifecycleStage::Active,
+            gwt_core::work_projection::WorkspaceLifecycleStage::Active,
             "lifecycle_stage must initialize to Active on workspace create"
         );
         assert_ne!(
             saved.created_at,
-            gwt_core::workspace_projection::workspace_projection_default_created_at(),
+            gwt_core::work_projection::workspace_projection_default_created_at(),
             "created_at must be a real timestamp, not the migration sentinel"
         );
         assert!(
@@ -1765,14 +1754,10 @@ mod tests {
         let repo = temp.path().join("repo");
         std::fs::create_dir_all(&repo).expect("repo");
         let mut env = TestEnv::new(repo.clone());
-        let mut projection = WorkspaceProjection::default_for_project(&repo);
+        let mut projection = WorkProjection::default_for_project(&repo);
         projection.agents.push(unassigned_agent("session-1"));
         save_workspace_projection(&repo, &projection).expect("save projection");
-        let mut event = WorkspaceWorkEvent::new(
-            WorkspaceWorkEventKind::Start,
-            "workspace-existing",
-            Utc::now(),
-        );
+        let mut event = WorkEvent::new(WorkEventKind::Start, "workspace-existing", Utc::now());
         event.title = Some("Workspace history".to_string());
         event.intent = Some("Implement Workspace history with affiliation state".to_string());
         event.status_category = Some(WorkspaceStatusCategory::Active);
@@ -1803,14 +1788,10 @@ mod tests {
         let repo = temp.path().join("repo");
         std::fs::create_dir_all(&repo).expect("repo");
         let mut env = TestEnv::new(repo.clone());
-        let mut projection = WorkspaceProjection::default_for_project(&repo);
+        let mut projection = WorkProjection::default_for_project(&repo);
         projection.agents.push(unassigned_agent("session-1"));
         save_workspace_projection(&repo, &projection).expect("save projection");
-        let mut event = WorkspaceWorkEvent::new(
-            WorkspaceWorkEventKind::Start,
-            "workspace-existing",
-            Utc::now(),
-        );
+        let mut event = WorkEvent::new(WorkEventKind::Start, "workspace-existing", Utc::now());
         event.title = Some("Workspace history".to_string());
         event.intent = Some("Implement Workspace history with affiliation state".to_string());
         event.status_category = Some(WorkspaceStatusCategory::Active);
@@ -1844,14 +1825,10 @@ mod tests {
         let repo = temp.path().join("repo");
         std::fs::create_dir_all(&repo).expect("repo");
         let mut env = TestEnv::new(repo.clone());
-        let mut projection = WorkspaceProjection::default_for_project(&repo);
+        let mut projection = WorkProjection::default_for_project(&repo);
         projection.agents.push(unassigned_agent("session-1"));
         save_workspace_projection(&repo, &projection).expect("save projection");
-        let mut event = WorkspaceWorkEvent::new(
-            WorkspaceWorkEventKind::Start,
-            "workspace-existing",
-            Utc::now(),
-        );
+        let mut event = WorkEvent::new(WorkEventKind::Start, "workspace-existing", Utc::now());
         event.title = Some("Workspace history".to_string());
         event.intent = Some("Implement Workspace history with affiliation state".to_string());
         event.status_category = Some(WorkspaceStatusCategory::Active);
@@ -1906,15 +1883,11 @@ mod tests {
         let repo = tempfile::tempdir().expect("repo");
 
         // Existing incomplete Work keyed by the canonical branch id.
-        let canonical_id = gwt_core::workspace_projection::canonical_work_id(
-            repo.path(),
-            Some("work/canonical"),
-            None,
-        )
-        .expect("canonical id");
+        let canonical_id =
+            gwt_core::work_projection::canonical_work_id(repo.path(), Some("work/canonical"), None)
+                .expect("canonical id");
         let now = Utc::now();
-        let mut start =
-            WorkspaceWorkEvent::new(WorkspaceWorkEventKind::Start, canonical_id.clone(), now);
+        let mut start = WorkEvent::new(WorkEventKind::Start, canonical_id.clone(), now);
         start.title = Some("totally different wording".to_string());
         start.status_category = Some(WorkspaceStatusCategory::Active);
         record_workspace_work_event(repo.path(), start).expect("seed canonical work");
@@ -1976,12 +1949,9 @@ mod tests {
             &agent,
         )
         .expect("create");
-        let expected = gwt_core::workspace_projection::canonical_work_id(
-            repo.path(),
-            Some("work/minted"),
-            None,
-        )
-        .expect("canonical id");
+        let expected =
+            gwt_core::work_projection::canonical_work_id(repo.path(), Some("work/minted"), None)
+                .expect("canonical id");
         assert_eq!(workspace_id, expected);
     }
 
@@ -1994,14 +1964,10 @@ mod tests {
         let repo = temp.path().join("repo");
         std::fs::create_dir_all(&repo).expect("repo");
         let mut env = TestEnv::new(repo.clone());
-        let mut projection = WorkspaceProjection::default_for_project(&repo);
+        let mut projection = WorkProjection::default_for_project(&repo);
         projection.agents.push(unassigned_agent("session-1"));
         save_workspace_projection(&repo, &projection).expect("save projection");
-        let mut event = WorkspaceWorkEvent::new(
-            WorkspaceWorkEventKind::Start,
-            "workspace-existing",
-            Utc::now(),
-        );
+        let mut event = WorkEvent::new(WorkEventKind::Start, "workspace-existing", Utc::now());
         event.title = Some("Workspace materialization".to_string());
         event.intent = Some("Ensure actionable Unassigned Agents join Workspace".to_string());
         event.status_category = Some(WorkspaceStatusCategory::Active);
@@ -2058,7 +2024,7 @@ mod tests {
         let repo = temp.path().join("repo");
         std::fs::create_dir_all(&repo).expect("repo");
         let mut env = TestEnv::new(repo.clone());
-        let mut projection = WorkspaceProjection::default_for_project(&repo);
+        let mut projection = WorkProjection::default_for_project(&repo);
         projection.agents.push(unassigned_agent("session-1"));
         save_workspace_projection(&repo, &projection).expect("save projection");
 
@@ -2111,15 +2077,11 @@ mod tests {
         let mut agent = unassigned_agent("session-1");
         agent.affiliation_status = WorkspaceAgentAffiliationStatus::Assigned;
         agent.workspace_id = Some("workspace-existing".to_string());
-        let mut projection = WorkspaceProjection::default_for_project(&repo);
+        let mut projection = WorkProjection::default_for_project(&repo);
         projection.id = "workspace-existing".to_string();
         projection.agents.push(agent);
         save_workspace_projection(&repo, &projection).expect("save projection");
-        let mut event = WorkspaceWorkEvent::new(
-            WorkspaceWorkEventKind::Start,
-            "workspace-existing",
-            Utc::now(),
-        );
+        let mut event = WorkEvent::new(WorkEventKind::Start, "workspace-existing", Utc::now());
         event.title = Some("Workspace materialization".to_string());
         event.status_category = Some(WorkspaceStatusCategory::Active);
         record_workspace_work_event(&repo, event).expect("record workspace");
@@ -2228,9 +2190,7 @@ mod tests {
         assert!(matches!(err, CliParseError::UnknownSubcommand(_)));
     }
 
-    use gwt_core::workspace_projection::{
-        save_workspace_projection_to_path, WorkspaceLifecycleStage,
-    };
+    use gwt_core::work_projection::{save_workspace_projection_to_path, WorkspaceLifecycleStage};
 
     fn seed_stale_workspace(
         scan_root: &std::path::Path,
@@ -2242,7 +2202,7 @@ mod tests {
         let project_dir = scan_root.join(hash);
         let workspace_dir = project_dir.join("workspace");
         std::fs::create_dir_all(&workspace_dir).expect("create workspace dir");
-        let mut projection = WorkspaceProjection::default_for_project(&project_dir);
+        let mut projection = WorkProjection::default_for_project(&project_dir);
         projection.id = id.to_string();
         projection.updated_at = updated_at;
         projection.lifecycle_stage = lifecycle;
@@ -2345,7 +2305,7 @@ mod tests {
         // dry-run should not mutate lifecycle_stage
         let projection_path = tmp.path().join("stale-hash/workspace/current.json");
         let loaded =
-            gwt_core::workspace_projection::load_workspace_projection_from_path(&projection_path)
+            gwt_core::work_projection::load_workspace_projection_from_path(&projection_path)
                 .expect("load")
                 .expect("present");
         assert_eq!(loaded.lifecycle_stage, WorkspaceLifecycleStage::Active);
@@ -2379,7 +2339,7 @@ mod tests {
 
         let projection_path = tmp.path().join("stale-hash/workspace/current.json");
         let loaded =
-            gwt_core::workspace_projection::load_workspace_projection_from_path(&projection_path)
+            gwt_core::work_projection::load_workspace_projection_from_path(&projection_path)
                 .expect("load")
                 .expect("present");
         assert_eq!(loaded.lifecycle_stage, WorkspaceLifecycleStage::Archived);
@@ -2417,7 +2377,7 @@ mod tests {
         .expect("prune by id");
         assert!(out.contains("APPLIED: archive=1"));
 
-        let keep = gwt_core::workspace_projection::load_workspace_projection_from_path(
+        let keep = gwt_core::work_projection::load_workspace_projection_from_path(
             &tmp.path().join("keep-hash/workspace/current.json"),
         )
         .expect("load keep")
@@ -2427,7 +2387,7 @@ mod tests {
             WorkspaceLifecycleStage::Active,
             "id filter must leave non-matching workspaces untouched",
         );
-        let take = gwt_core::workspace_projection::load_workspace_projection_from_path(
+        let take = gwt_core::work_projection::load_workspace_projection_from_path(
             &tmp.path().join("take-hash/workspace/current.json"),
         )
         .expect("load take")

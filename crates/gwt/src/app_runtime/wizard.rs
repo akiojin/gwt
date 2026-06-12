@@ -380,7 +380,7 @@ impl AppRuntime {
         let (branch_candidate, context) = match source {
             gwt::WorkspaceResumeSource::Current => {
                 let projection =
-                    gwt_core::workspace_projection::load_workspace_projection(&project_root)
+                    gwt_core::work_projection::load_workspace_projection(&project_root)
                         .ok()
                         .flatten()
                         .map(|projection| {
@@ -410,12 +410,10 @@ impl AppRuntime {
                 let Some(journal_id) = journal_id else {
                     return error_event("Work journal id is required");
                 };
-                let Ok(entries) =
-                    gwt_core::workspace_projection::load_recent_workspace_journal_entries(
-                        &project_root,
-                        WORKSPACE_OVERVIEW_JOURNAL_LIMIT,
-                    )
-                else {
+                let Ok(entries) = gwt_core::work_projection::load_recent_workspace_journal_entries(
+                    &project_root,
+                    WORKSPACE_OVERVIEW_JOURNAL_LIMIT,
+                ) else {
                     return error_event("Work journal could not be loaded");
                 };
                 let Some(entry) = entries.into_iter().find(|entry| entry.id == journal_id) else {
@@ -677,7 +675,7 @@ impl AppRuntime {
         // instead of falling back to the agent's default display name.
         let project_root = tab.project_root.clone();
         let workspace_resume_context =
-            gwt_core::workspace_projection::load_workspace_projection(&project_root)
+            gwt_core::work_projection::load_workspace_projection(&project_root)
                 .ok()
                 .flatten()
                 .map(|projection| workspace_resume_context_from_projection(&projection));
@@ -828,7 +826,7 @@ impl AppRuntime {
             ));
         }
         let workspace_resume_context =
-            gwt_core::workspace_projection::load_workspace_projection(&session.worktree_path)
+            gwt_core::work_projection::load_workspace_projection(&session.worktree_path)
                 .ok()
                 .flatten()
                 .map(|projection| workspace_resume_context_from_projection(&projection));
@@ -869,7 +867,7 @@ impl AppRuntime {
 
         let project_root = tab.project_root.clone();
         let Ok(Some(projection)) =
-            gwt_core::workspace_projection::load_workspace_projection(&project_root)
+            gwt_core::work_projection::load_workspace_projection(&project_root)
         else {
             return Vec::new();
         };
@@ -878,7 +876,7 @@ impl AppRuntime {
 
         let work_item_session_ids: Option<std::collections::HashSet<String>> = workspace_id
             .and_then(|wid| {
-                gwt_core::workspace_projection::load_workspace_work_items(&project_root)
+                gwt_core::work_projection::load_workspace_work_items(&project_root)
                     .ok()
                     .flatten()
                     .and_then(|items| {
