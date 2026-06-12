@@ -1603,14 +1603,10 @@ impl LaunchWizardState {
             && is_claude_opus_tier_model(self.model.as_str())
         {
             let mut options = CLAUDE_OPUS_REASONING_OPTIONS.to_vec();
-            // `ultracode` is opt-in and only usable on Opus 4.7/4.8 with a
-            // recent Claude Code (>= 2.1.154) and workflows enabled. The
-            // combined gate is captured once at wizard open (the wizard has no
-            // reliable installed-version field at render time). Hide ultracode
-            // otherwise so the wizard never offers an unusable option. It is
-            // the last (non-default) row, so removing it keeps every other
-            // index stable.
-            if !self.context.ultracode_supported {
+            // `ultracode` is opt-in and only usable on Opus-tier models with
+            // Claude Code >= 2.1.154 and workflows enabled. It is the last
+            // non-default row, so removing it keeps every other index stable.
+            if !self.current_claude_ultracode_supported() {
                 options.retain(|option| option.stored_value != "ultracode");
             }
             options
@@ -1618,6 +1614,17 @@ impl LaunchWizardState {
             CLAUDE_SONNET_REASONING_OPTIONS.to_vec()
         } else {
             Vec::new()
+        }
+    }
+
+    fn current_claude_ultracode_supported(&self) -> bool {
+        if !self.context.claude_workflows_enabled {
+            return false;
+        }
+        match self.version.as_str() {
+            "latest" => true,
+            "installed" | "" => self.context.ultracode_supported,
+            version => gwt_agent::supports_ultracode(version, true),
         }
     }
 

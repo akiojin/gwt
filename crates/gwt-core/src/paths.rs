@@ -39,7 +39,8 @@ fn non_empty_os(value: Option<OsString>) -> Option<OsString> {
 /// Normalize host filesystem paths before passing them to child processes.
 ///
 /// Windows APIs and PowerShell can surface provider-qualified or verbatim
-/// paths such as `Microsoft.PowerShell.Core\FileSystem::\\?\C:\repo`.
+/// paths such as `Microsoft.PowerShell.Core\FileSystem::\\?\C:\repo` or
+/// `//?/C:/repo`.
 /// Those forms are valid in some Windows APIs but confuse shells and agent
 /// CLIs when used as cwd or `GWT_PROJECT_ROOT`. Non-prefixed paths are
 /// returned unchanged.
@@ -66,7 +67,13 @@ pub fn normalize_windows_child_process_path_text(value: &str) -> String {
     if let Some(rest) = value.strip_prefix(r"\\?\UNC\") {
         return format!(r"\\{rest}");
     }
+    if let Some(rest) = value.strip_prefix("//?/UNC/") {
+        return format!(r"\\{}", rest.replace('/', r"\"));
+    }
     if let Some(rest) = value.strip_prefix(r"\\?\") {
+        return rest.to_string();
+    }
+    if let Some(rest) = value.strip_prefix("//?/") {
         return rest.to_string();
     }
     value.to_string()
@@ -557,10 +564,26 @@ mod tests {
     }
 
     #[test]
+    fn normalize_windows_child_process_path_strips_slash_drive_verbatim_prefix() {
+        assert_eq!(
+            normalize_windows_child_process_path_text("//?/E:/gwt/work/20260525-0919"),
+            "E:/gwt/work/20260525-0919"
+        );
+    }
+
+    #[test]
     fn normalize_windows_child_process_path_strips_unc_verbatim_prefix() {
         assert_eq!(
             normalize_windows_child_process_path(Path::new(r"\\?\UNC\server\share\work")),
             PathBuf::from(r"\\server\share\work")
+        );
+    }
+
+    #[test]
+    fn normalize_windows_child_process_path_strips_slash_unc_verbatim_prefix() {
+        assert_eq!(
+            normalize_windows_child_process_path_text("//?/UNC/server/share/work"),
+            r"\\server\share\work"
         );
     }
 
@@ -571,6 +594,16 @@ mod tests {
                 r"Microsoft.PowerShell.Core\FileSystem::\\?\E:\gwt\work\20260525-0919"
             )),
             PathBuf::from(r"E:\gwt\work\20260525-0919")
+        );
+    }
+
+    #[test]
+    fn normalize_windows_child_process_path_strips_provider_slash_verbatim_prefix() {
+        assert_eq!(
+            normalize_windows_child_process_path_text(
+                r"Microsoft.PowerShell.Core\FileSystem:://?/E:/gwt/work/20260525-0919"
+            ),
+            "E:/gwt/work/20260525-0919"
         );
     }
 

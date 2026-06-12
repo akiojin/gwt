@@ -1517,14 +1517,24 @@ mod tests {
             custom_agent: None,
         }];
         let mut ctx = context(branch("feature/gui"), "feature/gui");
-        // The combined version+workflows gate is captured at wizard open; tests
-        // inject it directly (the wizard has no reliable installed-version
-        // field at render time — see `current_reasoning_options`).
+        // Installed capability is captured at wizard open, while selected
+        // npm versions are evaluated from `state.version`.
         ctx.ultracode_supported = ultracode_supported;
+        ctx.claude_workflows_enabled = true;
         let mut state = LaunchWizardState::open_with(ctx, agent_options, Vec::new());
         // Drive current_reasoning_options() down the requested Claude model branch.
         state.agent_id = "claude".to_string();
         state.model = model.to_string();
+        state
+    }
+
+    fn claude_state_with_version(
+        model: &str,
+        installed_ultracode_supported: bool,
+        version: &str,
+    ) -> LaunchWizardState {
+        let mut state = claude_state(model, installed_ultracode_supported);
+        state.version = version.to_string();
         state
     }
 
@@ -1537,15 +1547,16 @@ mod tests {
     }
 
     #[test]
-    fn opus_reasoning_includes_ultracode_when_supported() {
-        let values = claude_reasoning_values(&claude_state("opus", true));
+    fn opus_reasoning_includes_ultracode_for_installed_when_supported() {
+        let values = claude_reasoning_values(&claude_state_with_version("opus", true, "installed"));
         assert!(values.contains(&"ultracode"));
         assert_eq!(values.last(), Some(&"ultracode"));
     }
 
     #[test]
-    fn opus_reasoning_excludes_ultracode_when_unsupported() {
-        let values = claude_reasoning_values(&claude_state("opus", false));
+    fn opus_reasoning_excludes_ultracode_for_installed_when_unsupported() {
+        let values =
+            claude_reasoning_values(&claude_state_with_version("opus", false, "installed"));
         assert!(!values.contains(&"ultracode"));
         // Common levels remain intact when ultracode is gated out.
         assert!(values.contains(&"xhigh"));
@@ -1569,8 +1580,41 @@ mod tests {
     }
 
     #[test]
-    fn fable_reasoning_excludes_ultracode_when_unsupported() {
-        let values = claude_reasoning_values(&claude_state("fable", false));
+    fn fable_reasoning_excludes_ultracode_for_installed_when_unsupported() {
+        let values =
+            claude_reasoning_values(&claude_state_with_version("fable", false, "installed"));
+        assert!(!values.contains(&"ultracode"));
+        assert!(values.contains(&"xhigh"));
+        assert!(values.contains(&"max"));
+    }
+
+    #[test]
+    fn fable_reasoning_includes_ultracode_for_latest_version() {
+        let values = claude_reasoning_values(&claude_state_with_version("fable", false, "latest"));
+        assert!(values.contains(&"ultracode"));
+        assert_eq!(values.last(), Some(&"ultracode"));
+    }
+
+    #[test]
+    fn fable_reasoning_includes_ultracode_for_supported_pinned_version() {
+        let values = claude_reasoning_values(&claude_state_with_version("fable", false, "2.1.154"));
+        assert!(values.contains(&"ultracode"));
+        assert_eq!(values.last(), Some(&"ultracode"));
+    }
+
+    #[test]
+    fn fable_reasoning_excludes_ultracode_for_unsupported_pinned_version() {
+        let values = claude_reasoning_values(&claude_state_with_version("fable", true, "2.1.153"));
+        assert!(!values.contains(&"ultracode"));
+        assert!(values.contains(&"xhigh"));
+        assert!(values.contains(&"max"));
+    }
+
+    #[test]
+    fn fable_reasoning_excludes_ultracode_for_latest_when_workflows_disabled() {
+        let mut state = claude_state_with_version("fable", true, "latest");
+        state.context.claude_workflows_enabled = false;
+        let values = claude_reasoning_values(&state);
         assert!(!values.contains(&"ultracode"));
         assert!(values.contains(&"xhigh"));
         assert!(values.contains(&"max"));

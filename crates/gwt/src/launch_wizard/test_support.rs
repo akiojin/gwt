@@ -79,6 +79,7 @@ pub(super) fn context(branch: BranchListEntry, normalized: &str) -> LaunchWizard
         linked_issue_number: None,
         linked_issue_kind: None,
         ultracode_supported: false,
+        claude_workflows_enabled: false,
     }
 }
 

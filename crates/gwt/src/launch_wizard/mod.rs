@@ -488,12 +488,14 @@ pub struct LaunchWizardContext {
     /// `None` for Branches-window callers, preserving non-breaking behavior.
     pub linked_issue_kind: Option<LinkedIssueKind>,
     /// Whether the locally installed Claude Code can offer the opt-in
-    /// `ultracode` reasoning option: dynamic workflows enabled (env
-    /// `CLAUDE_CODE_DISABLE_WORKFLOWS` + user `~/.claude/settings.json`) AND
-    /// installed version >= 2.1.154. Captured once at wizard open via
-    /// `gwt_agent::claude_ultracode_supported()` because the wizard has no
-    /// reliable installed-version field at render time. Defaults to `false`.
+    /// `ultracode` reasoning option. Used only when selected version is
+    /// `installed`; npm-backed `latest` and pinned versions are evaluated from
+    /// the selected version string at render time. Defaults to `false`.
     pub ultracode_supported: bool,
+    /// Whether Claude Code dynamic workflows are enabled in the current
+    /// environment. This gate applies to installed, `latest`, and pinned
+    /// versions.
+    pub claude_workflows_enabled: bool,
 }
 
 impl LaunchWizardContext {
