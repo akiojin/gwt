@@ -6920,3 +6920,10 @@ Type: lesson
 Context: gwt-register-spec skill の手順は『register start --spec 0 → issue 作成後 register phase --spec <n> --label create で実 ID を bind』と記載しているが、gwtd register phase は state の owner_spec(0) と不一致の --spec を 'phase refused' で拒否する (SPEC-2784)
 Learning: skill doc と CLI 実装が乖離しており、placeholder からの rebind 経路は存在しない。register abort --spec 0 → register start --spec <実ID> で張り直すのが現状の正しい手順。また production GWT.app の gwtd (v9.55.0) は memory add を legacy の tasks/memory.md に書くため、canonical な .gwt/work/memory.md へ届いているかを確認する
 Future Action: gwt-register-spec を使う際は issue 番号確定後に abort+start で lifecycle を実 ID に張り直す。恒久対応するなら skill doc 修正か CLI の rebind 許可のどちらかに寄せる Issue を立てる
+
+## 2026-06-12 — chroma runner の search-multi は no_auto_build をハードコードする
+
+Type: lesson
+Context: gwtd search (SPEC-1942 US-15) で GUI の search_project_index を流用したところ、stale な issues index (source_cache_changed) で search が失敗した。runner の action_search_multi_v2 は interactive GUI 契約として no_auto_build=True を内部固定しており、呼び出し側で --no-auto-build を外しても効かない。
+Learning: auto-build / self-heal が必要な agent・CLI 検索経路は search-multi ではなく per-scope の search-issues / search-specs 等の単一 action を使う。単一 action 側 (no_auto_build=False) が EMPTY_CORPUS 診断 (Issue #2979) も担う agent 向け契約である。
+Future Action: 検索経路を追加・変更する際は、runner の action 別 auto-build 挙動 (search-multi=固定無効 / 単一 action=有効) を必ず確認し、CLI 経路では per-scope action + auto_build フラグ (search_project_index の auto_build 引数) を使う。

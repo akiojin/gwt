@@ -1,6 +1,6 @@
 use crate::{
     persistence::{
-        CanvasViewport, PersistedWindowState, PersistedWorkspaceState, WindowGeometry,
+        CanvasViewport, PersistedWindowCanvasState, PersistedWindowState, WindowGeometry,
         WindowProcessStatus,
     },
     preset::WindowPreset,
@@ -15,20 +15,20 @@ const MIN_WINDOW_WIDTH: f64 = 360.0;
 const MIN_WINDOW_HEIGHT: f64 = 260.0;
 
 #[derive(Debug, Clone)]
-pub struct WorkspaceState {
-    persisted: PersistedWorkspaceState,
+pub struct WindowCanvasState {
+    persisted: PersistedWindowCanvasState,
 }
 
-impl WorkspaceState {
-    pub fn from_persisted(persisted: PersistedWorkspaceState) -> Self {
+impl WindowCanvasState {
+    pub fn from_persisted(persisted: PersistedWindowCanvasState) -> Self {
         Self { persisted }
     }
 
-    pub fn persisted(&self) -> &PersistedWorkspaceState {
+    pub fn persisted(&self) -> &PersistedWindowCanvasState {
         &self.persisted
     }
 
-    pub fn persistable_state(&self) -> PersistedWorkspaceState {
+    pub fn persistable_state(&self) -> PersistedWindowCanvasState {
         let mut persisted = self.persisted.clone();
         persisted.windows.retain(|window| window.persist);
         persisted.next_z_index = persisted.windows.len() as u32 + 1;
@@ -873,8 +873,8 @@ mod tests {
         }
     }
 
-    fn workspace_with_five_logical_windows_in_three_physical_slots() -> WorkspaceState {
-        let mut workspace = WorkspaceState::from_persisted(default_workspace_state());
+    fn workspace_with_five_logical_windows_in_three_physical_slots() -> WindowCanvasState {
+        let mut workspace = WindowCanvasState::from_persisted(default_workspace_state());
         workspace.add_window(WindowPreset::Shell, arrange_bounds());
         let file_tree = workspace.add_window(WindowPreset::FileTree, arrange_bounds());
         let branches = workspace.add_window(WindowPreset::Branches, arrange_bounds());
@@ -887,7 +887,7 @@ mod tests {
 
     #[test]
     fn focusing_window_brings_it_to_front() {
-        let mut workspace = WorkspaceState::from_persisted(default_workspace_state());
+        let mut workspace = WindowCanvasState::from_persisted(default_workspace_state());
         assert!(workspace.focus_window("claude-1", None));
         let claude = workspace
             .persisted()
@@ -901,7 +901,7 @@ mod tests {
 
     #[test]
     fn adding_window_appends_shell_with_next_z_index() {
-        let mut workspace = WorkspaceState::from_persisted(default_workspace_state());
+        let mut workspace = WindowCanvasState::from_persisted(default_workspace_state());
         let window = workspace.add_window(WindowPreset::Shell, arrange_bounds());
         assert_eq!(window.title, "Shell");
         assert_eq!(window.preset, WindowPreset::Shell);
@@ -913,7 +913,7 @@ mod tests {
 
     #[test]
     fn adding_file_tree_window_marks_it_running_without_process() {
-        let mut workspace = WorkspaceState::from_persisted(default_workspace_state());
+        let mut workspace = WindowCanvasState::from_persisted(default_workspace_state());
         let window = workspace.add_window(WindowPreset::FileTree, arrange_bounds());
         assert_eq!(window.title, "File Tree");
         assert_eq!(window.preset, WindowPreset::FileTree);
@@ -922,7 +922,7 @@ mod tests {
 
     #[test]
     fn adding_branches_window_marks_it_running_without_process() {
-        let mut workspace = WorkspaceState::from_persisted(default_workspace_state());
+        let mut workspace = WindowCanvasState::from_persisted(default_workspace_state());
         let window = workspace.add_window(WindowPreset::Branches, arrange_bounds());
         assert_eq!(window.title, "Branches");
         assert_eq!(window.preset, WindowPreset::Branches);
@@ -931,7 +931,7 @@ mod tests {
 
     #[test]
     fn adding_window_centers_in_bounds() {
-        let mut workspace = WorkspaceState::from_persisted(empty_workspace_state());
+        let mut workspace = WindowCanvasState::from_persisted(empty_workspace_state());
         let bounds = WindowGeometry {
             x: 0.0,
             y: 0.0,
@@ -948,7 +948,7 @@ mod tests {
 
     #[test]
     fn adding_multiple_windows_cascades_from_center() {
-        let mut workspace = WorkspaceState::from_persisted(empty_workspace_state());
+        let mut workspace = WindowCanvasState::from_persisted(empty_workspace_state());
         let bounds = WindowGeometry {
             x: 0.0,
             y: 0.0,
@@ -967,7 +967,7 @@ mod tests {
 
     #[test]
     fn adding_window_keeps_cascading_past_eight_to_avoid_overlap() {
-        let mut workspace = WorkspaceState::from_persisted(empty_workspace_state());
+        let mut workspace = WindowCanvasState::from_persisted(empty_workspace_state());
         let bounds = WindowGeometry {
             x: 0.0,
             y: 0.0,
@@ -997,7 +997,7 @@ mod tests {
 
     #[test]
     fn adding_window_skips_minimized_collisions() {
-        let mut workspace = WorkspaceState::from_persisted(empty_workspace_state());
+        let mut workspace = WindowCanvasState::from_persisted(empty_workspace_state());
         let bounds = WindowGeometry {
             x: 0.0,
             y: 0.0,
@@ -1016,7 +1016,7 @@ mod tests {
 
     #[test]
     fn adding_agent_window_uses_new_id_when_lower_suffix_was_closed() {
-        let mut workspace = WorkspaceState::from_persisted(PersistedWorkspaceState {
+        let mut workspace = WindowCanvasState::from_persisted(PersistedWindowCanvasState {
             viewport: default_canvas_viewport(),
             windows: vec![PersistedWindowState {
                 id: "agent-2".to_string(),
@@ -1057,7 +1057,7 @@ mod tests {
 
     #[test]
     fn updating_geometry_replaces_window_geometry() {
-        let mut workspace = WorkspaceState::from_persisted(default_workspace_state());
+        let mut workspace = WindowCanvasState::from_persisted(default_workspace_state());
         let updated = workspace.update_geometry(
             "codex-1",
             WindowGeometry {
@@ -1080,7 +1080,7 @@ mod tests {
 
     #[test]
     fn closing_window_removes_it_from_workspace() {
-        let mut workspace = WorkspaceState::from_persisted(default_workspace_state());
+        let mut workspace = WindowCanvasState::from_persisted(default_workspace_state());
         assert!(workspace.close_window("codex-1"));
         assert_eq!(workspace.persisted().windows.len(), 1);
         assert!(workspace
@@ -1092,7 +1092,7 @@ mod tests {
 
     #[test]
     fn updating_viewport_replaces_canvas_transform_state() {
-        let mut workspace = WorkspaceState::from_persisted(default_workspace_state());
+        let mut workspace = WindowCanvasState::from_persisted(default_workspace_state());
         let viewport = CanvasViewport {
             x: 180.0,
             y: -90.0,
@@ -1115,7 +1115,7 @@ mod tests {
 
     #[test]
     fn tile_arrangement_places_windows_on_a_grid() {
-        let mut workspace = WorkspaceState::from_persisted(default_workspace_state());
+        let mut workspace = WindowCanvasState::from_persisted(default_workspace_state());
         workspace.add_window(WindowPreset::FileTree, arrange_bounds());
         workspace.add_window(WindowPreset::Branches, arrange_bounds());
 
@@ -1140,7 +1140,7 @@ mod tests {
 
     #[test]
     fn stack_arrangement_overlaps_windows_with_offsets() {
-        let mut workspace = WorkspaceState::from_persisted(default_workspace_state());
+        let mut workspace = WindowCanvasState::from_persisted(default_workspace_state());
         workspace.add_window(WindowPreset::FileTree, arrange_bounds());
 
         assert!(workspace.arrange_windows(ArrangeMode::Stack, arrange_bounds()));
@@ -1162,7 +1162,7 @@ mod tests {
 
     #[test]
     fn align_arrangement_places_windows_on_grid_without_resizing() {
-        let mut workspace = WorkspaceState::from_persisted(default_workspace_state());
+        let mut workspace = WindowCanvasState::from_persisted(default_workspace_state());
         workspace.add_window(WindowPreset::FileTree, arrange_bounds());
 
         let original = workspace
@@ -1209,7 +1209,7 @@ mod tests {
 
     #[test]
     fn align_arrangement_does_not_overlap_windows_with_varying_sizes() {
-        let mut workspace = WorkspaceState::from_persisted(empty_workspace_state());
+        let mut workspace = WindowCanvasState::from_persisted(empty_workspace_state());
         let preset_sizes = [
             (800.0, 360.0),
             (420.0, 540.0),
@@ -1266,7 +1266,7 @@ mod tests {
 
     #[test]
     fn align_arrangement_restores_maximized_window_size_before_positioning() {
-        let mut workspace = WorkspaceState::from_persisted(default_workspace_state());
+        let mut workspace = WindowCanvasState::from_persisted(default_workspace_state());
         let original = workspace
             .window("claude-1")
             .expect("claude")
@@ -1289,7 +1289,7 @@ mod tests {
 
     #[test]
     fn cycling_focus_forward_brings_next_window_to_front_and_centers_it() {
-        let mut workspace = WorkspaceState::from_persisted(default_workspace_state());
+        let mut workspace = WindowCanvasState::from_persisted(default_workspace_state());
         workspace.add_window(WindowPreset::Shell, arrange_bounds());
         // Array order: [claude-1(z=1), codex-1(z=2), shell-1(z=3)]
         // Current focus: shell-1 (highest z). Forward wraps to claude-1.
@@ -1313,7 +1313,7 @@ mod tests {
 
     #[test]
     fn cycling_focus_backward_wraps_and_preserves_zoom_when_centering() {
-        let mut workspace = WorkspaceState::from_persisted(default_workspace_state());
+        let mut workspace = WindowCanvasState::from_persisted(default_workspace_state());
         workspace.add_window(WindowPreset::Shell, arrange_bounds());
         // Array order: [claude-1(z=1), codex-1(z=2), shell-1(z=3)]
         // Current focus: shell-1 (highest z). Backward goes to codex-1.
@@ -1342,7 +1342,7 @@ mod tests {
 
     #[test]
     fn cycling_focus_forward_activates_hidden_window_tab() {
-        let mut workspace = WorkspaceState::from_persisted(default_workspace_state());
+        let mut workspace = WindowCanvasState::from_persisted(default_workspace_state());
         assert!(workspace.dock_window_tab("codex-1", "claude-1"));
         workspace.add_window(WindowPreset::Shell, arrange_bounds());
         // Current focus: shell-1. Forward wraps to claude-1, which is hidden
@@ -1364,7 +1364,7 @@ mod tests {
 
     #[test]
     fn cycling_focus_backward_activates_hidden_window_tab() {
-        let mut workspace = WorkspaceState::from_persisted(default_workspace_state());
+        let mut workspace = WindowCanvasState::from_persisted(default_workspace_state());
         assert!(workspace.dock_window_tab("codex-1", "claude-1"));
         assert!(workspace.activate_window_tab("claude-1"));
         workspace.add_window(WindowPreset::Shell, arrange_bounds());
@@ -1387,7 +1387,7 @@ mod tests {
 
     #[test]
     fn cycling_focus_uses_active_window_tab_as_current_focus_when_group_z_indexes_tie() {
-        let mut workspace = WorkspaceState::from_persisted(default_workspace_state());
+        let mut workspace = WindowCanvasState::from_persisted(default_workspace_state());
         assert!(workspace.dock_window_tab("codex-1", "claude-1"));
         // Docking assigns one shared z-index to the group. The active tab is
         // codex-1, so Forward should wrap to claude-1, not treat hidden
@@ -1408,7 +1408,7 @@ mod tests {
 
     #[test]
     fn cycling_focus_restores_maximized_source_before_activating_next_window() {
-        let mut workspace = WorkspaceState::from_persisted(default_workspace_state());
+        let mut workspace = WindowCanvasState::from_persisted(default_workspace_state());
         let bounds = WindowGeometry {
             x: 0.0,
             y: 0.0,
@@ -1448,7 +1448,7 @@ mod tests {
 
     #[test]
     fn cycling_focus_restores_maximized_group_before_activating_hidden_tab() {
-        let mut workspace = WorkspaceState::from_persisted(default_workspace_state());
+        let mut workspace = WindowCanvasState::from_persisted(default_workspace_state());
         assert!(workspace.dock_window_tab("codex-1", "claude-1"));
         let bounds = arrange_bounds();
         let original = workspace.window("codex-1").expect("codex").geometry.clone();
@@ -1471,7 +1471,7 @@ mod tests {
 
     #[test]
     fn cycling_focus_keeps_single_maximized_window_maximized() {
-        let mut workspace = WorkspaceState::from_persisted(empty_workspace_state());
+        let mut workspace = WindowCanvasState::from_persisted(empty_workspace_state());
         let window = workspace.add_window(WindowPreset::Shell, arrange_bounds());
         assert!(workspace.maximize_window(&window.id, arrange_bounds()));
 
@@ -1485,7 +1485,7 @@ mod tests {
 
     #[test]
     fn maximizing_window_is_idempotent_and_uses_restore_to_revert() {
-        let mut workspace = WorkspaceState::from_persisted(default_workspace_state());
+        let mut workspace = WindowCanvasState::from_persisted(default_workspace_state());
         let original = workspace
             .window("claude-1")
             .expect("claude")
@@ -1535,7 +1535,7 @@ mod tests {
         // (`maximizedGeometry` divides the 24px screen inset by zoom). The backend
         // must NOT re-pad in world units, otherwise the inset scales with zoom and
         // the maximized window drifts off the visible viewport.
-        let mut workspace = WorkspaceState::from_persisted(default_workspace_state());
+        let mut workspace = WindowCanvasState::from_persisted(default_workspace_state());
         let geometry = WindowGeometry {
             x: 312.5,
             y: 88.0,
@@ -1553,7 +1553,7 @@ mod tests {
 
     #[test]
     fn minimizing_window_toggles_and_preserves_normal_geometry() {
-        let mut workspace = WorkspaceState::from_persisted(default_workspace_state());
+        let mut workspace = WindowCanvasState::from_persisted(default_workspace_state());
         let original = workspace
             .window("claude-1")
             .expect("claude")
@@ -1577,7 +1577,7 @@ mod tests {
 
     #[test]
     fn restoring_window_clears_maximized_and_minimized_states() {
-        let mut workspace = WorkspaceState::from_persisted(default_workspace_state());
+        let mut workspace = WindowCanvasState::from_persisted(default_workspace_state());
         let original = workspace
             .window("claude-1")
             .expect("claude")
@@ -1602,7 +1602,7 @@ mod tests {
 
     #[test]
     fn minimizing_maximized_window_restores_original_geometry_before_collapsing() {
-        let mut workspace = WorkspaceState::from_persisted(default_workspace_state());
+        let mut workspace = WindowCanvasState::from_persisted(default_workspace_state());
         let original = workspace
             .window("claude-1")
             .expect("claude")
@@ -1627,7 +1627,7 @@ mod tests {
 
     #[test]
     fn cycling_focus_skips_minimized_windows() {
-        let mut workspace = WorkspaceState::from_persisted(default_workspace_state());
+        let mut workspace = WindowCanvasState::from_persisted(default_workspace_state());
         workspace.add_window(WindowPreset::Shell, arrange_bounds());
         assert!(workspace.minimize_window("codex-1"));
 
@@ -1649,7 +1649,7 @@ mod tests {
 
     #[test]
     fn arranging_windows_skips_minimized_windows() {
-        let mut workspace = WorkspaceState::from_persisted(default_workspace_state());
+        let mut workspace = WindowCanvasState::from_persisted(default_workspace_state());
         workspace.add_window(WindowPreset::Shell, arrange_bounds());
         let minimized_geometry = workspace.window("codex-1").expect("codex").geometry.clone();
         assert!(workspace.minimize_window("codex-1"));
@@ -1766,7 +1766,7 @@ mod tests {
 
     #[test]
     fn docking_window_tabs_groups_windows_and_activates_dragged_tab() {
-        let mut workspace = WorkspaceState::from_persisted(default_workspace_state());
+        let mut workspace = WindowCanvasState::from_persisted(default_workspace_state());
         let codex_geometry = workspace.window("codex-1").expect("codex").geometry.clone();
 
         assert!(workspace.dock_window_tab("codex-1", "claude-1"));
@@ -1787,7 +1787,7 @@ mod tests {
 
     #[test]
     fn activating_window_tab_switches_active_marker_within_group() {
-        let mut workspace = WorkspaceState::from_persisted(default_workspace_state());
+        let mut workspace = WindowCanvasState::from_persisted(default_workspace_state());
         assert!(workspace.dock_window_tab("codex-1", "claude-1"));
 
         assert!(workspace.activate_window_tab("claude-1"));
@@ -1803,7 +1803,7 @@ mod tests {
 
     #[test]
     fn detaching_window_tab_restores_independent_floating_window() {
-        let mut workspace = WorkspaceState::from_persisted(default_workspace_state());
+        let mut workspace = WindowCanvasState::from_persisted(default_workspace_state());
         assert!(workspace.dock_window_tab("codex-1", "claude-1"));
         let detached_geometry = WindowGeometry {
             x: 240.0,
@@ -1825,7 +1825,7 @@ mod tests {
 
     #[test]
     fn closing_active_group_tab_promotes_another_tab() {
-        let mut workspace = WorkspaceState::from_persisted(default_workspace_state());
+        let mut workspace = WindowCanvasState::from_persisted(default_workspace_state());
         assert!(workspace.dock_window_tab("codex-1", "claude-1"));
 
         assert!(workspace.close_window("codex-1"));
@@ -1837,7 +1837,7 @@ mod tests {
 
     #[test]
     fn docking_active_tab_to_another_group_normalizes_source_group() {
-        let mut workspace = WorkspaceState::from_persisted(default_workspace_state());
+        let mut workspace = WindowCanvasState::from_persisted(default_workspace_state());
         let shell = workspace.add_window(WindowPreset::Shell, arrange_bounds());
         let file_tree = workspace.add_window(WindowPreset::FileTree, arrange_bounds());
 
@@ -1867,7 +1867,7 @@ mod tests {
     // 変更してはならない。
     #[test]
     fn geometry_update_propagates_across_grouped_tabs() {
-        let mut workspace = WorkspaceState::from_persisted(default_workspace_state());
+        let mut workspace = WindowCanvasState::from_persisted(default_workspace_state());
         assert!(workspace.dock_window_tab("codex-1", "claude-1"));
 
         let new_geometry = WindowGeometry {
@@ -1923,7 +1923,7 @@ mod tests {
 
     #[test]
     fn maximize_propagates_across_grouped_tabs() {
-        let mut workspace = WorkspaceState::from_persisted(default_workspace_state());
+        let mut workspace = WindowCanvasState::from_persisted(default_workspace_state());
         assert!(workspace.dock_window_tab("codex-1", "claude-1"));
         let pre_geometry = workspace.window("codex-1").expect("codex").geometry.clone();
 
@@ -1971,7 +1971,7 @@ mod tests {
 
     #[test]
     fn minimize_and_restore_propagate_across_grouped_tabs() {
-        let mut workspace = WorkspaceState::from_persisted(default_workspace_state());
+        let mut workspace = WindowCanvasState::from_persisted(default_workspace_state());
         assert!(workspace.dock_window_tab("codex-1", "claude-1"));
 
         assert!(workspace.minimize_window("codex-1"));
@@ -1991,7 +1991,7 @@ mod tests {
 
     #[test]
     fn activate_window_tab_preserves_grouped_chrome_state() {
-        let mut workspace = WorkspaceState::from_persisted(default_workspace_state());
+        let mut workspace = WindowCanvasState::from_persisted(default_workspace_state());
         assert!(workspace.dock_window_tab("codex-1", "claude-1"));
 
         let new_geometry = WindowGeometry {

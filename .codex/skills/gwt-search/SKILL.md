@@ -11,9 +11,9 @@ plus SPEC-2805 Memory):
 | Scope | Content | Lifecycle |
 |-------|---------|-----------|
 | SPECs | GitHub Issue cache (`~/.gwt/cache/issues/`) | Populated by `gwtd issue spec pull` or gwt GUI startup sync |
-| Issues | GitHub Issues (all states) | gwt GUI startup async refresh (TTL 15 min) + runner auto-build on first search |
-| Files | Project implementation files (excludes skill assets, SPEC trees, snapshots) | Per-worktree watcher (gwt GUI) + runner auto-build on first search |
-| Memory | Post-mortem entries in `.gwt/work/memory.md` | Pinpoint allowlist watcher on `.gwt/work/memory.md` + runner auto-build on first search |
+| Issues | GitHub Issues (all states) | gwt GUI startup async refresh (TTL 15 min) + auto-build on first search |
+| Files | Project implementation files (excludes skill assets, SPEC trees, snapshots) | Per-worktree watcher (gwt GUI) + auto-build on first search |
+| Memory | Post-mortem entries in `.gwt/work/memory.md` | Pinpoint allowlist watcher on `.gwt/work/memory.md` + auto-build on first search |
 
 All vector data is stored under `~/.gwt/index/<repo-hash>/...`. Issues,
 SPECs, and Memory are repo-scoped and shared across worktrees; Files
@@ -21,7 +21,7 @@ SPECs, and Memory are repo-scoped and shared across worktrees; Files
 `$WORKTREE/.gwt/index/` location is no longer used and is deleted
 automatically by the gwt GUI on startup.
 
-When invoked outside the gwt GUI app, the runner falls back to a
+When invoked outside the gwt GUI app, the search falls back to a
 synchronous mtime+size diff per call: results are always correct, just
 slower than the GUI watcher path.
 
@@ -37,27 +37,37 @@ command as `"$GWT_BIN" ...`; if none exists, stop with an actionable
 
 `gwt-search` is a skill, not a PATH executable. Never resolve it with
 `command -v` or `Get-Command` — the lookup finds nothing by design, and
-an empty lookup does not mean the tooling is missing. The notation below
-is conceptual scope selection only; the actual execution is always the
-Chroma runner commands under "Search commands".
+an empty lookup does not mean the tooling is missing. The executable
+command is the `search` family of the resolved `GWT_BIN` (SPEC-1942
+US-15). Run it from inside the target worktree; the repo is resolved from
+the current directory.
 
-```text
-gwt-search "query"              # search all four scopes (default merge)
-gwt-search --specs "query"      # SPECs only
-gwt-search --issues "query"     # GitHub Issues only
-gwt-search --files "query"      # implementation files only
-gwt-search --memory "query"    # post-mortem memory only
+```bash
+"$GWT_BIN" search "query" --json               # search all scopes (default merge)
+"$GWT_BIN" search --specs "query" --json       # SPECs only
+"$GWT_BIN" search --issues "query" --json      # GitHub Issues only
+"$GWT_BIN" search --files "query" --json       # implementation files only
+"$GWT_BIN" search --files-docs "query" --json  # project docs only
+"$GWT_BIN" search --memory "query" --json      # post-mortem memory only
 ```
 
 ## Filter options
 
-| Flag | Scope | Action flag |
-|------|-------|------------|
-| (none) | All four | Run all four searches |
-| `--specs` | SPECs only | `search-specs` |
-| `--issues` | Issues only | `search-issues` |
-| `--files` | Files only | `search-files` |
-| `--memory` | Memory only | `search-memory` |
+| Flag | Scope |
+|------|-------|
+| (none) | All scopes merged (same default as the GUI search window) |
+| `--specs` | SPEC Issues only |
+| `--issues` | GitHub Issues only |
+| `--files` | Implementation files only |
+| `--files-docs` | Project docs only |
+| `--memory` | Post-mortem memory only |
+| `--board` | Coordination Board entries only |
+| `--discussions` | Git-managed discussion notes only |
+
+Scope flags are repeatable and merge: `--issues --specs` searches both.
+Additional options: `--n-results <n>` limits the result count, `--json`
+emits machine-readable JSON (recommended for agents), and
+`--match-mode semantic|all_terms` selects the match mode.
 
 ## Match modes
 
@@ -67,239 +77,64 @@ term or quoted phrase must be present in a strict result.
 
 Examples:
 
-```text
-gwt-search --match-mode all_terms "Workspace 置き換え"
-gwt-search --match-mode all_terms "\"Project State\" migration"
+```bash
+"$GWT_BIN" search --match-mode all_terms "Workspace 置き換え" --json
+"$GWT_BIN" search --match-mode all_terms "\"Project State\" migration" --json
 ```
 
 In `all_terms` mode, strict results must satisfy every required term. Semantic
-suggestions may still be returned separately, but they must not be treated as
-strict matches.
+suggestions may still be returned separately (in the `suggestions` array), but
+they must not be treated as strict matches.
 
-## Environment
-
-When the gwt GUI app (WebView built with `wry + tao + axum WebSocket` and
-`xterm.js`) launches an agent pane, the following env vars are exported
-automatically:
-
-- `GWT_PROJECT_ROOT` — absolute path of the active worktree
-- `GWT_REPO_HASH` — SHA256[:16] of the normalized origin URL
-- `GWT_WORKTREE_HASH` — SHA256[:16] of the canonicalized worktree absolute path
-
-The hashes are an optimization, not a requirement: when `GWT_REPO_HASH` /
-`GWT_WORKTREE_HASH` are unset or passed empty (e.g. when the launch environment
-did not export them), the runner derives them from `--project-root`
-automatically (Issue #2933). A search therefore needs only `--project-root`,
-and works in any shell on any platform — no manual hash recomputation, and no
-dependency on `sha256sum` (which is absent on stock macOS).
-
-## Search commands
-
-```bash
-PYTHON=~/.gwt/runtime/chroma-venv/bin/python3
-RUNNER=~/.gwt/runtime/chroma_index_runner.py
-```
-
-On Windows, use `~/.gwt/runtime/chroma-venv/Scripts/python.exe`.
-
-### Search SPECs
-
-```bash
-$PYTHON $RUNNER \
-  --action search-specs \
-  --repo-hash "$GWT_REPO_HASH" \
-  --worktree-hash "$GWT_WORKTREE_HASH" \
-  --project-root "$GWT_PROJECT_ROOT" \
-  --query "your search query" \
-  --n-results 10
-```
-
-### Search GitHub Issues
-
-```bash
-$PYTHON $RUNNER \
-  --action search-issues \
-  --repo-hash "$GWT_REPO_HASH" \
-  --project-root "$GWT_PROJECT_ROOT" \
-  --query "your search query" \
-  --n-results 10
-```
-
-### Search project files (code)
-
-```bash
-$PYTHON $RUNNER \
-  --action search-files \
-  --repo-hash "$GWT_REPO_HASH" \
-  --worktree-hash "$GWT_WORKTREE_HASH" \
-  --project-root "$GWT_PROJECT_ROOT" \
-  --query "your search query" \
-  --n-results 10
-```
-
-`search-files` is implementation-focused: it excludes embedded skill assets (`.claude/`, `.codex/`), local/archived SPEC trees, local task logs, and snapshot files so code search is not dominated by docs noise.
-
-### Search project docs
-
-```bash
-$PYTHON $RUNNER \
-  --action search-files-docs \
-  --repo-hash "$GWT_REPO_HASH" \
-  --worktree-hash "$GWT_WORKTREE_HASH" \
-  --project-root "$GWT_PROJECT_ROOT" \
-  --query "your search query" \
-  --n-results 10
-```
-
-### Search Memory
-
-```bash
-$PYTHON $RUNNER \
-  --action search-memory \
-  --repo-hash "$GWT_REPO_HASH" \
-  --project-root "$GWT_PROJECT_ROOT" \
-  --query "your search query" \
-  --n-results 10
-```
-
-`search-memory` reads from the repo-scoped memory index built from
-`<project_root>/.gwt/work/memory.md`. `--worktree-hash` is accepted but ignored
-for this scope.
-
-### Search all scopes (default)
-
-Run all five search commands above (SPECs, Issues, Files-code, Files-docs,
-Memory) and merge results by scope.
-
-## Auto-build fallback
-
-When the target index does not exist, the runner builds it inline (full mode) and then performs the search. Progress is emitted as NDJSON on stderr:
-
-```text
-{"phase":"indexing","scope":"files","done":0,"total":0}
-{"phase":"complete","scope":"files","total":850}
-```
-
-Pass `--no-auto-build` to disable this behavior; in that case the runner returns:
+## Output format
 
 ```json
-{"ok": false, "error_code": "INDEX_MISSING", "error": "index not found at ..."}
+{"ok": true, "query": "...", "results": [
+  {"scope": "issues", "title": "#42 Add vector search for Issues", "subtitle": "open", "preview": "enhancement", "distance": 0.08, "target": {"kind": "issue", "number": 42}},
+  {"scope": "specs", "title": "SPEC-1939: Semantic search platform", "subtitle": "open · phase/review", "preview": "...", "distance": 0.09, "target": {"kind": "spec", "spec_id": 1939}},
+  {"scope": "files", "title": "src/git/issue.rs", "subtitle": "GitHub Issue commands", "preview": "", "distance": 0.12, "target": {"kind": "file", "path": "src/git/issue.rs"}}
+], "suggestions": []}
 ```
 
-## Empty corpus is a tooling failure, not "no results"
-
-`search-specs` and `search-issues` build their corpus from the GitHub Issue
-cache (`~/.gwt/cache/issues/<repo-hash>/`). When that cache is empty or
-unpopulated for the repo-hash, an auto-build search would index zero documents.
-Instead of silently returning `ok: true` with an empty list — which reads as
-"no existing SPEC/Issue owner" and causes duplicate creation — the runner
-returns a diagnostic:
-
-```json
-{"ok": false, "error_code": "EMPTY_CORPUS", "scope": "specs",
- "issue_cache_dir": "~/.gwt/cache/issues/<repo-hash>",
- "issue_cache_populated": false,
- "error": "specs search corpus is empty: ... Refresh the cache ... and retry ..."}
-```
-
-When you see `EMPTY_CORPUS`, **do not conclude that no owner exists.** Refresh
-the issue cache (open the project in the gwt GUI to sync, or run a `gwtd issue`
-sync) and retry the search. Only an `ok: true` result with an empty list from a
-*populated* cache means the repository genuinely has no matching SPEC/Issue.
-
-## Index update commands
-
-These are run automatically by the gwt GUI watcher (or by the runner's
-auto-build fallback). Run manually only when forcing a full rebuild.
-
-### Update SPEC index (force full)
-
-```bash
-$PYTHON $RUNNER \
-  --action index-specs \
-  --repo-hash "$GWT_REPO_HASH" \
-  --worktree-hash "$GWT_WORKTREE_HASH" \
-  --project-root "$GWT_PROJECT_ROOT" \
-  --mode full
-```
-
-### Update Issues index (force, ignore TTL)
-
-```bash
-$PYTHON $RUNNER \
-  --action index-issues \
-  --repo-hash "$GWT_REPO_HASH" \
-  --project-root "$GWT_PROJECT_ROOT"
-```
-
-Pass `--respect-ttl` to skip if the previous refresh is younger than 15 minutes.
-
-### Update file index (force full)
-
-```bash
-$PYTHON $RUNNER \
-  --action index-files \
-  --repo-hash "$GWT_REPO_HASH" \
-  --worktree-hash "$GWT_WORKTREE_HASH" \
-  --project-root "$GWT_PROJECT_ROOT" \
-  --mode full \
-  --scope files
-```
-
-For the docs collection, repeat with `--scope files-docs`.
-
-### Update memory index (force full)
-
-```bash
-$PYTHON $RUNNER \
-  --action index-memory \
-  --repo-hash "$GWT_REPO_HASH" \
-  --project-root "$GWT_PROJECT_ROOT" \
-  --mode full
-```
-
-Memory is repo-scoped; `--worktree-hash` is accepted but ignored.
-
-## Output formats
-
-### SPEC results
-
-```json
-{"ok": true, "specResults": [
-  {"spec_id": "10", "title": "Project workspace", "status": "in-progress", "phase": "Implementation", "dir_name": "SPEC-10", "distance": 0.08}
-]}
-```
-
-### Issue results
-
-```json
-{"ok": true, "issueResults": [
-  {"number": 42, "title": "Add vector search for Issues", "url": "https://github.com/...", "state": "open", "labels": ["enhancement"], "distance": 0.08}
-]}
-```
-
-### File results
-
-```json
-{"ok": true, "results": [
-  {"path": "src/git/issue.rs", "description": "GitHub Issue commands", "distance": 0.12}
-]}
-```
-
-### Memory results
-
-```json
-{"ok": true, "memoryResults": [
-  {"date": "2026-05-20", "title": "gwtd issue spec create -f は section マーカーを付けない", "heading": "## 2026-05-20 — gwtd issue spec create -f は section マーカーを付けない", "chunk_idx": 0, "distance": 0.12}
-]}
-```
+- `target` is a kind-tagged locator (`issue`, `spec`, `memory`, `discussion`,
+  `board`, `file`) for follow-up reads (`gwtd issue spec <n>`, file paths,
+  memory headings).
+- In `all_terms` mode, results may carry `matched_terms` / `missing_terms`,
+  and semantic non-strict hits arrive in `suggestions`.
+- Without `--json`, a human-readable `[scope] distance title — subtitle` list
+  is printed instead.
 
 ## Interpreting results
 
 - Lower distance values indicate higher relevance (0.0 = exact match)
 - Uses semantic similarity, not just keyword matching
-- Results are ranked by distance within each scope
+- Results are merged across scopes and ranked by distance
 - The embedding model is `intfloat/multilingual-e5-base` (multilingual; handles Japanese)
+
+## Auto-build fallback
+
+When a target index does not exist, the search builds it inline (full mode)
+and then returns results — the first call on a fresh checkout may take
+noticeably longer. To force a rebuild explicitly:
+
+```bash
+"$GWT_BIN" index rebuild --scope all
+"$GWT_BIN" index rebuild --scope issues   # or specs|memory|discussions|board|files|files-docs
+```
+
+## Empty corpus is a tooling failure, not "no results"
+
+SPEC and Issue searches build their corpus from the GitHub Issue cache
+(`~/.gwt/cache/issues/<repo-hash>/`). When that cache is empty or unpopulated,
+the search fails with an `EMPTY_CORPUS` error instead of silently returning an
+empty list — an empty list would read as "no existing SPEC/Issue owner" and
+cause duplicate creation.
+
+When you see `EMPTY_CORPUS`, **do not conclude that no owner exists.** Refresh
+the issue cache (open the project in the gwt GUI to sync, or run
+`gwtd issue spec pull --all`) and retry the search. Only a successful result
+with an empty list from a *populated* cache means the repository genuinely has
+no matching SPEC/Issue.
 
 ## When to use
 
@@ -353,7 +188,43 @@ Use 2-3 queries with different angles for thorough coverage:
 
 ## Minimum search workflow
 
-1. Run searches with 2-3 semantic queries derived from the request
-2. The runner auto-builds any missing index on the first call
+1. Resolve `GWT_BIN`, then run `"$GWT_BIN" search ... --json` with 2-3
+   semantic queries derived from the request
+2. A missing index is auto-built on the first call
 3. Pick the canonical existing spec, issue, or memory if found
 4. Only fall back to creating a new spec or issue when no suitable canonical match exists
+
+## Fallback: direct runner invocation (older binaries only)
+
+Only when `"$GWT_BIN" search` fails with `unknown command 'search'` (a gwtd
+binary older than the search family, SPEC-1942 US-15), call the embedded
+Python runner directly:
+
+```bash
+PYTHON=~/.gwt/runtime/chroma-venv/bin/python3   # Windows: ~/.gwt/runtime/chroma-venv/Scripts/python.exe
+RUNNER=~/.gwt/runtime/chroma_index_runner.py
+
+$PYTHON $RUNNER \
+  --action search-issues \
+  --repo-hash "$GWT_REPO_HASH" \
+  --project-root "$GWT_PROJECT_ROOT" \
+  --query "your search query" \
+  --n-results 10
+```
+
+Scope actions: `search-specs` / `search-issues` / `search-files` /
+`search-files-docs` / `search-memory`. `search-specs`, `search-files`, and
+`search-files-docs` additionally take `--worktree-hash "$GWT_WORKTREE_HASH"`.
+`--match-mode all_terms` is accepted by every search action.
+
+The hashes are an optimization, not a requirement: when `GWT_REPO_HASH` /
+`GWT_WORKTREE_HASH` are unset or passed empty (e.g. when the launch
+environment did not export them), the runner derives them from
+`--project-root` automatically (Issue #2933) — no manual hash recomputation,
+and no dependency on `sha256sum` (absent on stock macOS).
+
+The fallback returns legacy per-scope shapes (`specResults` / `issueResults` /
+`results` / `memoryResults`) instead of the unified `results` array, and
+emits NDJSON auto-build progress on stderr. Pass `--no-auto-build` to disable
+inline index builds; the runner then returns
+`{"ok": false, "error_code": "INDEX_MISSING", ...}`.

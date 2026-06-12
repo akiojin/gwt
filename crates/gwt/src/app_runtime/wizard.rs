@@ -66,11 +66,11 @@ use super::{
     normalize_branch_name, preferred_issue_launch_branch, resolve_shell_launch_worktree,
     synthetic_branch_entry, workspace_projection_for_current_resume,
     workspace_resume_branch_exists, workspace_resume_branch_from_journal_project_root,
-    workspace_resume_context_from_journal, workspace_resume_context_from_projection,
-    workspace_resume_owner_issue_number, AppEventProxy, AppRuntime, BackendEvent,
-    IssueLaunchWizardPrepared, LaunchFeedbackContext, LaunchWizardMemoryCache, LaunchWizardSession,
-    OutboundEvent, WindowPreset, WindowProcessStatus, WorkspaceResumeContext,
-    WORKSPACE_OVERVIEW_JOURNAL_LIMIT,
+    workspace_resume_context_for_work_item, workspace_resume_context_from_journal,
+    workspace_resume_context_from_projection, workspace_resume_owner_issue_number, AppEventProxy,
+    AppRuntime, BackendEvent, IssueLaunchWizardPrepared, LaunchFeedbackContext,
+    LaunchWizardMemoryCache, LaunchWizardSession, OutboundEvent, WindowPreset, WindowProcessStatus,
+    WorkspaceResumeContext, WORKSPACE_OVERVIEW_JOURNAL_LIMIT,
 };
 use crate::usable_worktree_path_for_branch;
 
@@ -205,6 +205,7 @@ impl AppRuntime {
                 linked_issue_number,
                 linked_issue_kind,
                 ultracode_supported: gwt_agent::claude_ultracode_supported(),
+                claude_workflows_enabled: gwt_agent::claude_workflows_enabled(),
             },
             agent_options,
             quick_start_entries,
@@ -252,6 +253,7 @@ impl AppRuntime {
                 linked_issue_number: Some(issue_number),
                 linked_issue_kind: Some(linked_issue_kind),
                 ultracode_supported: gwt_agent::claude_ultracode_supported(),
+                claude_workflows_enabled: gwt_agent::claude_workflows_enabled(),
             },
             base_branch_name,
             agent_options,
@@ -675,12 +677,13 @@ impl AppRuntime {
         // Build a Workspace Resume context so the spawned window's title
         // and the Workspace projection summary keep the prior identity
         // instead of falling back to the agent's default display name.
-        let project_root = tab.project_root.clone();
-        let workspace_resume_context =
-            gwt_core::workspace_projection::load_workspace_projection(&project_root)
-                .ok()
-                .flatten()
-                .map(|projection| workspace_resume_context_from_projection(&projection));
+        // #3065: the context comes from the resumed branch's own Work item,
+        // never from the repo-shared current projection.
+        let workspace_resume_context = Some(workspace_resume_context_for_work_item(
+            &session.worktree_path,
+            Some(session.branch.as_str()),
+            &session.worktree_path,
+        ));
 
         match self.spawn_agent_window(&tab_id, config, bounds, workspace_resume_context) {
             Ok(mut events) => {
@@ -827,11 +830,13 @@ impl AppRuntime {
                 "No resumable session found for {normalized_branch_name}"
             ));
         }
-        let workspace_resume_context =
-            gwt_core::workspace_projection::load_workspace_projection(&session.worktree_path)
-                .ok()
-                .flatten()
-                .map(|projection| workspace_resume_context_from_projection(&projection));
+        // #3065: the context comes from the resumed branch's own Work item,
+        // never from the repo-shared current projection.
+        let workspace_resume_context = Some(workspace_resume_context_for_work_item(
+            &session.worktree_path,
+            Some(session.branch.as_str()),
+            &session.worktree_path,
+        ));
 
         match self.spawn_agent_window(&tab_id, config, bounds, workspace_resume_context) {
             Ok(mut events) => {
@@ -988,6 +993,7 @@ impl AppRuntime {
                 }),
                 linked_issue_kind: None,
                 ultracode_supported: gwt_agent::claude_ultracode_supported(),
+                claude_workflows_enabled: gwt_agent::claude_workflows_enabled(),
             },
             base_branch,
             agent_options,

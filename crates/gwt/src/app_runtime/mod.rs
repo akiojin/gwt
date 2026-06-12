@@ -1925,7 +1925,7 @@ pub fn build_frontend_sync_events(
 ) -> Vec<OutboundEvent> {
     let mut events = vec![OutboundEvent::reply(
         client_id,
-        BackendEvent::WorkspaceState { workspace },
+        BackendEvent::WindowCanvasState { workspace },
     )];
 
     for (id, status, detail) in terminal_statuses {
@@ -2823,6 +2823,47 @@ fn workspace_resume_context_from_journal(
     }
 }
 
+/// #3065: build the Workspace Resume context from the resumed branch's own
+/// Work item. The repo-shared current projection (`current.json`) must NOT be
+/// the source here: it carries the identity of whatever Work last wrote it,
+/// and replaying that identity into a different Work's resume event is how
+/// one Work's owner/title leaked into every other Workspace row. When no
+/// Work item matches the container, the context is neutral — never the
+/// shared identity.
+fn workspace_resume_context_for_work_item(
+    repo_path: &Path,
+    branch: Option<&str>,
+    worktree_path: &Path,
+) -> WorkspaceResumeContext {
+    let item = gwt_core::workspace_projection::load_workspace_work_items(repo_path)
+        .ok()
+        .flatten()
+        .and_then(|projection| {
+            gwt_core::workspace_projection::find_work_item_for_container(
+                &projection,
+                repo_path,
+                branch,
+                Some(worktree_path),
+            )
+            .cloned()
+        });
+    match item {
+        Some(item) => WorkspaceResumeContext {
+            title: non_empty_workspace_text(Some(&item.title)),
+            owner: non_empty_workspace_text(item.owner.as_deref()),
+            summary: non_empty_workspace_text(item.summary.as_deref())
+                .or_else(|| non_empty_workspace_text(item.intent.as_deref())),
+            next_action: item.latest_next_action().map(str::to_string),
+        },
+        None => WorkspaceResumeContext {
+            title: None,
+            owner: None,
+            summary: None,
+            next_action: None,
+        },
+    }
+}
+
 fn workspace_resume_owner_issue_number(owner: Option<&str>) -> Option<u64> {
     let owner = owner?.trim();
     if owner.is_empty() {
@@ -3420,6 +3461,7 @@ fn save_start_work_workspace_projection(
     _base_branch: &str,
     linked_issue_number: Option<u64>,
     workspace_resume_context: Option<&WorkspaceResumeContext>,
+    live_session_ids: &std::collections::HashSet<String>,
 ) -> Result<(), String> {
     if workspace_resume_context.is_none() {
         return save_unassigned_workspace_launch_projection(project_root, session);
@@ -3431,6 +3473,7 @@ fn save_start_work_workspace_projection(
         linked_issue_number,
         workspace_resume_context,
         true,
+        live_session_ids,
     )
 }
 
@@ -3440,6 +3483,7 @@ fn save_resumed_workspace_projection(
     base_branch: Option<&str>,
     linked_issue_number: Option<u64>,
     workspace_resume_context: &WorkspaceResumeContext,
+    live_session_ids: &std::collections::HashSet<String>,
 ) -> Result<(), String> {
     save_workspace_launch_projection(
         project_root,
@@ -3448,6 +3492,7 @@ fn save_resumed_workspace_projection(
         linked_issue_number,
         Some(workspace_resume_context),
         session.branch_name.starts_with("work/"),
+        live_session_ids,
     )
 }
 
@@ -3457,7 +3502,7 @@ pub struct ProjectTabRuntime {
     pub(crate) title: String,
     pub(crate) project_root: PathBuf,
     pub(crate) kind: gwt::ProjectKind,
-    pub(crate) workspace: WorkspaceState,
+    pub(crate) workspace: WindowCanvasState,
     /// SPEC-1934 US-6: in-memory flag set when the tab was opened on a Normal
     /// Git layout that we want to migrate. The frontend sees a
     /// [`BackendEvent::MigrationDetected`] until the user picks Migrate /
@@ -3881,14 +3926,14 @@ pub struct AppRuntime {
 impl ProjectTabRuntime {
     pub(crate) fn from_persisted(
         tab: gwt::PersistedSessionTabState,
-        workspace: gwt::PersistedWorkspaceState,
+        workspace: gwt::PersistedWindowCanvasState,
     ) -> Self {
         Self {
             id: tab.id,
             title: tab.title,
             project_root: tab.project_root,
             kind: tab.kind,
-            workspace: WorkspaceState::from_persisted(workspace),
+            workspace: WindowCanvasState::from_persisted(workspace),
             // Re-detected at startup via resolve_project_target; persistence
             // does not carry the flag.
             migration_pending: false,
@@ -4037,15 +4082,30 @@ impl AppRuntime {
         let state_path = gwt_core::paths::gwt_workspace_work_events_intake_state_path_for_repo_path(
             &project_root,
         );
+        let projection_path =
+            gwt_core::paths::gwt_workspace_projection_path_for_repo_path(&project_root);
         thread::spawn(move || {
             let summary = crate::work_events_ingest::ingest_project_work_events_paths(
                 &project_root,
                 &work_items_path,
                 &state_path,
             );
+            // #3065: detection-based repair for the resume owner bleed. Runs
+            // after every ingest so re-ingested contaminated logs (from other
+            // machines / refs) self-heal; converges to a no-op on clean data.
+            let repaired = gwt_core::workspace_projection::repair_resume_owner_bleed_paths(
+                &work_items_path,
+                &projection_path,
+                chrono::Utc::now(),
+            )
+            .map(|report| report.changed())
+            .unwrap_or_else(|error| {
+                tracing::warn!(%error, "resume owner bleed repair failed");
+                false
+            });
             proxy.send(UserEvent::WorkEventsIngested {
                 project_root,
-                changed: summary.changed(),
+                changed: summary.changed() || repaired,
             });
         });
     }
@@ -4331,11 +4391,11 @@ impl AppRuntime {
             if config.session_mode != gwt_agent::SessionMode::Resume {
                 continue;
             }
-            let workspace_resume_context =
-                gwt_core::workspace_projection::load_workspace_projection(&session.worktree_path)
-                    .ok()
-                    .flatten()
-                    .map(|projection| workspace_resume_context_from_projection(&projection));
+            let workspace_resume_context = Some(workspace_resume_context_for_work_item(
+                &session.worktree_path,
+                Some(session.branch.as_str()),
+                &session.worktree_path,
+            ));
             self.pending_startup_auto_resume_sessions
                 .push(PendingStartupAutoResumeSession {
                     tab_id,
@@ -4476,13 +4536,11 @@ impl AppRuntime {
                 {
                     continue;
                 }
-                let workspace_resume_context =
-                    gwt_core::workspace_projection::load_workspace_projection(
-                        &session.worktree_path,
-                    )
-                    .ok()
-                    .flatten()
-                    .map(|projection| workspace_resume_context_from_projection(&projection));
+                let workspace_resume_context = Some(workspace_resume_context_for_work_item(
+                    &session.worktree_path,
+                    Some(session.branch.as_str()),
+                    &session.worktree_path,
+                ));
                 let fallback_geometry = window.geometry.clone();
                 let mut spawned = self.spawn_restored_agent_session(
                     tab_id,
@@ -6297,7 +6355,7 @@ impl AppRuntime {
             title: target.title.clone(),
             project_root: target.project_root.clone(),
             kind: target.kind,
-            workspace: WorkspaceState::from_persisted({
+            workspace: WindowCanvasState::from_persisted({
                 load_restored_workspace_state(&target.project_root)
                     .map_err(|error| error.to_string())?
             }),
@@ -8266,6 +8324,8 @@ impl AppRuntime {
                 &scopes,
                 worktree_hash.as_deref(),
                 match_mode,
+                // GUI interactive search: the watcher owns index builds.
+                false,
             ) {
                 Ok(outcome) => BackendEvent::ProjectIndexSearchResults {
                     id: id.clone(),
@@ -8837,6 +8897,11 @@ impl AppRuntime {
                             );
                         }
                         let mut workspace_projection_updated = false;
+                        let live_session_ids: std::collections::HashSet<String> = self
+                            .active_agent_sessions
+                            .values()
+                            .map(|session| session.session_id.clone())
+                            .collect();
                         let active_session = &self.active_agent_sessions[&window_id];
                         if let Some(context) = workspace_resume_context.as_ref() {
                             match save_resumed_workspace_projection(
@@ -8845,6 +8910,7 @@ impl AppRuntime {
                                 base_branch.as_deref(),
                                 linked_issue_number,
                                 context,
+                                &live_session_ids,
                             ) {
                                 Ok(()) => {
                                     workspace_projection_updated = true;
@@ -8865,6 +8931,7 @@ impl AppRuntime {
                                 base_branch,
                                 linked_issue_number,
                                 None,
+                                &live_session_ids,
                             ) {
                                 Ok(()) => {
                                     workspace_projection_updated = true;
@@ -9826,25 +9893,18 @@ impl AppRuntime {
                 .iter()
                 .find(|agent| agent.session_id == session_id)
         });
-        let title = agent_summary
+        // #3065: owner / summary / the title fallback must come from the
+        // session's own Work item (resolved by branch container inside the
+        // background thread below), never from the repo-shared projection —
+        // its identity belongs to whatever Work last wrote it.
+        let agent_title = agent_summary
             .and_then(|agent| {
                 agent
                     .title_summary
                     .clone()
                     .or_else(|| agent.current_focus.clone())
             })
-            .or_else(|| {
-                projection
-                    .as_ref()
-                    .map(|projection| projection.title.clone())
-            })
             .filter(|value| !value.trim().is_empty());
-        let summary = projection
-            .as_ref()
-            .and_then(|projection| projection.summary.clone());
-        let owner = projection
-            .as_ref()
-            .and_then(|projection| projection.owner.clone());
         let board_refs = projection
             .as_ref()
             .map(|projection| projection.board_refs.clone())
@@ -9895,7 +9955,37 @@ impl AppRuntime {
         let project_root = project_root.to_path_buf();
         let session_id = session_id.to_string();
         let log_session_id = session.session_id.clone();
+        let lookup_branch = execution_container
+            .as_ref()
+            .and_then(|container| container.branch.clone());
+        let lookup_worktree = execution_container
+            .as_ref()
+            .and_then(|container| container.worktree_path.clone());
         let record = thread::spawn(move || {
+            // #3065: resolve identity from the session's own Work item. The
+            // works.json IO already happens on this background thread for the
+            // record itself, so the lookup adds no UI-loop cost.
+            let own_item = gwt_core::workspace_projection::load_workspace_work_items(&project_root)
+                .ok()
+                .flatten()
+                .and_then(|works| {
+                    gwt_core::workspace_projection::find_work_item_for_container(
+                        &works,
+                        &project_root,
+                        lookup_branch.as_deref(),
+                        lookup_worktree.as_deref(),
+                    )
+                    .map(|item| {
+                        (
+                            item.title.clone(),
+                            item.summary.clone().or_else(|| item.intent.clone()),
+                            item.owner.clone(),
+                        )
+                    })
+                });
+            let (item_title, summary, owner) = own_item.unwrap_or((String::new(), None, None));
+            let title =
+                agent_title.or_else(|| Some(item_title).filter(|value| !value.trim().is_empty()));
             if let Err(error) = gwt_core::workspace_projection::record_workspace_work_paused_event(
                 &project_root,
                 &work_id,
@@ -10294,7 +10384,7 @@ impl AppRuntime {
     }
 
     pub(crate) fn workspace_state_broadcast(&self) -> OutboundEvent {
-        OutboundEvent::broadcast(BackendEvent::WorkspaceState {
+        OutboundEvent::broadcast(BackendEvent::WindowCanvasState {
             workspace: self.app_state_view(),
         })
     }

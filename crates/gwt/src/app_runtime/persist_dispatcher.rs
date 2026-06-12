@@ -28,7 +28,7 @@ use super::BlockingTaskSpawner;
 pub(crate) struct PersistSnapshot {
     pub(crate) session_path: PathBuf,
     pub(crate) session: gwt::PersistedSessionState,
-    pub(crate) workspaces: Vec<(PathBuf, gwt::PersistedWorkspaceState)>,
+    pub(crate) workspaces: Vec<(PathBuf, gwt::PersistedWindowCanvasState)>,
 }
 
 #[derive(Default)]

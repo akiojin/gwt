@@ -5,7 +5,7 @@ description: "Semantic search over all GitHub Issues using vector embeddings. Us
 
 # Issue Search
 
-gwt maintains a vector search index of GitHub Issues using ChromaDB embeddings (model: `intfloat/multilingual-e5-base`). The index is stored at `~/.gwt/index/<repo-hash>/issues/` and is Worktree-independent. The gwt GUI app (WebView built with `wry + tao + axum WebSocket` and `xterm.js`) refreshes it asynchronously at startup with a 15-minute TTL; external runner invocations get an auto-build on the first search.
+gwt maintains a vector search index of GitHub Issues using ChromaDB embeddings (model: `intfloat/multilingual-e5-base`). The index is stored at `~/.gwt/index/<repo-hash>/issues/` and is Worktree-independent. The gwt GUI app (WebView built with `wry + tao + axum WebSocket` and `xterm.js`) refreshes it asynchronously at startup with a 15-minute TTL; non-GUI invocations get an auto-build on the first search.
 
 ## gwtd resolution
 
@@ -27,7 +27,7 @@ title grep, or file search:
 
 Minimum workflow:
 
-1. Run `search-issues` with 2-3 semantic queries derived from the request (the runner auto-builds the index if missing)
+1. Run `"$GWT_BIN" search --issues ...` with 2-3 semantic queries derived from the request (a missing index is auto-built)
 2. Pick the canonical existing issue if found
 3. Only fall back to creating a new issue when no suitable canonical issue exists
 
@@ -40,49 +40,30 @@ Suggested query patterns:
 - workflow / discoverability requirement
   - `LLM should use gwt-issue-search before spec creation`
 
-## Environment
-
-When the gwt GUI app launches an agent pane, the following env vars are exported automatically:
-
-- `GWT_PROJECT_ROOT` — absolute path of the active worktree
-- `GWT_REPO_HASH` — SHA256[:16] of the normalized origin URL
-
-> `GWT_REPO_HASH` is an optimization, not a requirement: when it is unset or
-> passed empty, the runner derives it from `--project-root` automatically
-> (Issue #2933). A search therefore needs only `--project-root`, and works in
-> any shell on any platform.
-
 ## GitHub Issues search command
 
+`gwtd search` is the canonical search entry point (SPEC-1942 US-15). Run it
+from inside the target worktree; the repo is resolved from the current
+directory.
+
 ```bash
-~/.gwt/runtime/chroma-venv/bin/python3 ~/.gwt/runtime/chroma_index_runner.py \
-  --action search-issues \
-  --repo-hash "$GWT_REPO_HASH" \
-  --project-root "$GWT_PROJECT_ROOT" \
-  --query "your search query" \
-  --n-results 10
+"$GWT_BIN" search --issues "your search query" --n-results 10 --json
 ```
 
-If the Issue index does not yet exist, the runner builds it inline (full mode) by refreshing
-issue data and embedding the results, then performs the search.
+If the Issue index does not yet exist, the search builds it inline by refreshing issue data and embedding the results before returning (the first call may take longer).
 
 To force a refresh ignoring TTL:
 
 ```bash
-~/.gwt/runtime/chroma-venv/bin/python3 ~/.gwt/runtime/chroma_index_runner.py \
-  --action index-issues \
-  --repo-hash "$GWT_REPO_HASH" \
-  --project-root "$GWT_PROJECT_ROOT"
+"$GWT_BIN" index rebuild --scope issues
 ```
 
-Add `--respect-ttl` to skip when the previous refresh is younger than 15 minutes (used by the gwt GUI startup background task).
-
-## Issues search output format
+## Output format
 
 ```json
-{"ok": true, "issueResults": [
-  {"number": 42, "title": "Add vector search for Issues", "url": "https://github.com/...", "state": "open", "labels": ["enhancement"], "distance": 0.08}
-]}
+{"ok": true, "query": "...", "results": [
+  {"scope": "issues", "title": "#42 Add vector search for Issues", "subtitle": "open", "preview": "enhancement", "distance": 0.08, "target": {"kind": "issue", "number": 42}}
+], "suggestions": []}
 ```
 
 ## When to use
@@ -94,8 +75,29 @@ Add `--respect-ttl` to skip when the previous refresh is younger than 15 minutes
 
 ## Notes
 
-- The gwt GUI app refreshes the Issue index automatically at startup (TTL 15 min). External runner invocations trigger an inline build on the first search.
+- The gwt GUI app refreshes the Issue index automatically at startup (TTL 15 min); non-GUI invocations trigger an inline build on the first search
+- An `EMPTY_CORPUS` error means the Issue cache is unpopulated — refresh it and retry; do **not** conclude that no owner Issue exists
 - Uses semantic similarity (not just keyword matching)
 - Lower distance values indicate higher relevance
 - For SPEC search, use `gwt-spec-search` instead (SPECs are GitHub Issues cached at `~/.gwt/cache/issues/`)
 - For file search, use `gwt-project-search` instead
+
+## Fallback: direct runner invocation (older binaries only)
+
+Only when `"$GWT_BIN" search` fails with `unknown command 'search'` (a gwtd
+binary older than the search family), call the Python runner directly:
+
+```bash
+~/.gwt/runtime/chroma-venv/bin/python3 ~/.gwt/runtime/chroma_index_runner.py \
+  --action search-issues \
+  --repo-hash "$GWT_REPO_HASH" \
+  --project-root "$GWT_PROJECT_ROOT" \
+  --query "your search query" \
+  --n-results 10
+```
+
+On Windows, use `~/.gwt/runtime/chroma-venv/Scripts/python.exe`.
+`GWT_REPO_HASH` is an optimization, not a requirement: when unset or passed
+empty, the runner derives it from `--project-root` automatically
+(Issue #2933). The fallback returns the legacy
+`{"ok": true, "issueResults": [...]}` shape.

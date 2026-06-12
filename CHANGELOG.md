@@ -1,6 +1,33 @@
 # Changelog
 
 All notable changes to this project will be documented in this file.
+## [9.58.0] - 2026-06-12
+
+### Bug Fixes
+
+- **workspace:** Resume が共有現在作業 Projection の owner/title を別 Work へ複製する問題を修正
+- Normalize Windows Claude launch paths
+- **core:** Repair doc の private 定数への intra-doc link を解消
+
+### Features
+
+- **cli:** Gwtd search family と unknown command 誘導を追加 (SPEC-1942 US-15)
+
+### Miscellaneous Tasks
+
+- Record workspace event log
+- Merge origin develop
+- Merge origin develop
+- Merge origin/develop（workspace_projection ディレクトリ分割へ #3065 修正を移植）
+- Record workspace event log
+
+### Refactor
+
+- **github:** SPEC 構造化スキーマを gwt-github の公開モジュールへ移設する
+- **core:** Workspace_projection をディレクトリモジュールへ責務分割する
+- **gui:** WorkspaceState を WindowCanvasState へ改名し Workspace 語彙をドメインへ一意化する
+- **gui:** Launch_wizard をディレクトリモジュールへ責務分割する
+
 ## [9.57.0] - 2026-06-12
 
 ### Bug Fixes
