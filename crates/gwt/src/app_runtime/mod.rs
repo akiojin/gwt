@@ -8266,6 +8266,8 @@ impl AppRuntime {
                 &scopes,
                 worktree_hash.as_deref(),
                 match_mode,
+                // GUI interactive search: the watcher owns index builds.
+                false,
             ) {
                 Ok(outcome) => BackendEvent::ProjectIndexSearchResults {
                     id: id.clone(),

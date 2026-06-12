@@ -32,11 +32,12 @@ fn main() -> ExitCode {
     }
 
     if !gwt::cli::should_dispatch_cli(&argv) {
-        eprintln!(
-            "gwtd: unknown command '{}'",
-            argv.get(1).unwrap_or(&String::new())
+        // SPEC-1942 FR-109 / US-2 scenario 4: unknown verbs report to stderr
+        // only (usage + did-you-mean), keep stdout empty, and exit 2.
+        eprint!(
+            "{}",
+            unknown_command_message(argv.get(1).map(String::as_str).unwrap_or(""))
         );
-        print_help();
         return ExitCode::from(2);
     }
 
@@ -64,6 +65,7 @@ fn print_help() {
     println!("  board       Read/write the coordination Board (SPEC-1974)");
     println!("  hook        Dispatch Claude Code / Codex hook events");
     println!("  index       Manage the local search index");
+    println!("  search      Semantic search over SPECs, Issues, files, memory");
     println!("  memory      Append reusable project memory");
     println!("  lessons     Legacy alias for memory add");
     println!("  discuss     gwt-discussion exit CLI (SPEC-1935)");
@@ -87,6 +89,7 @@ fn family_help(family: &str) -> Option<String> {
         "board" => Some(format_board_help()),
         "hook" => Some(format_hook_help()),
         "index" => Some(format_index_help()),
+        "search" => Some(format_search_help()),
         "memory" | "lessons" => Some(format_memory_help()),
         "discuss" => Some(format_discuss_help()),
         "discussion" => Some(format_discussion_help()),
@@ -410,6 +413,93 @@ fn format_pane_help() -> String {
     .join("\n")
 }
 
+/// User-facing top-level verbs eligible for did-you-mean suggestions. Keep in
+/// sync with `print_help`; `suggestion_verbs_are_all_dispatchable` asserts
+/// every entry is accepted by `gwt::cli::should_dispatch_cli`.
+const SUGGESTION_VERBS: &[&str] = &[
+    "issue",
+    "pr",
+    "actions",
+    "board",
+    "hook",
+    "index",
+    "search",
+    "memory",
+    "lessons",
+    "discuss",
+    "discussion",
+    "plan",
+    "build",
+    "register",
+    "pane",
+    "workspace",
+    "update",
+    "daemon",
+];
+
+/// SPEC-1942 FR-109: render the stderr message for an unknown top-level verb.
+fn unknown_command_message(unknown: &str) -> String {
+    let mut message = format!("gwtd: unknown command '{unknown}'\n");
+    if let Some(suggestion) = did_you_mean(unknown) {
+        message.push_str(&format!("did you mean '{suggestion}'?\n"));
+    }
+    message.push('\n');
+    message.push_str("Usage: gwtd <command> [args]\n");
+    message.push_str("Run 'gwtd --help' for the full command list.\n");
+    message
+}
+
+/// Suggest the closest known verb for a mistyped one (edit distance <= 2).
+fn did_you_mean(input: &str) -> Option<&'static str> {
+    if input.chars().count() < 3 {
+        return None;
+    }
+    SUGGESTION_VERBS
+        .iter()
+        .map(|verb| (levenshtein(input, verb), *verb))
+        .filter(|(distance, _)| *distance <= 2)
+        .min_by_key(|(distance, _)| *distance)
+        .map(|(_, verb)| verb)
+}
+
+fn levenshtein(a: &str, b: &str) -> usize {
+    let a: Vec<char> = a.chars().collect();
+    let b: Vec<char> = b.chars().collect();
+    let mut previous: Vec<usize> = (0..=b.len()).collect();
+    let mut current = vec![0; b.len() + 1];
+    for (i, &ca) in a.iter().enumerate() {
+        current[0] = i + 1;
+        for (j, &cb) in b.iter().enumerate() {
+            let substitution = previous[j] + usize::from(ca != cb);
+            current[j + 1] = substitution.min(previous[j + 1] + 1).min(current[j] + 1);
+        }
+        std::mem::swap(&mut previous, &mut current);
+    }
+    previous[b.len()]
+}
+
+fn format_search_help() -> String {
+    [
+        "gwtd search — Semantic search over SPECs, Issues, files, board, and memory.",
+        "",
+        "Usage: gwtd search \"<query>\" [scope flags] [options]",
+        "",
+        "Scope flags (repeatable; default: same merged scopes as the GUI search):",
+        "  --specs / --issues / --files / --files-docs / --memory / --board / --discussions",
+        "",
+        "Options:",
+        "  --match-mode semantic|all_terms         semantic (default) or strict all-terms",
+        "  --n-results <n>                         Limit result count",
+        "  --json                                  Machine-readable JSON output",
+        "",
+        "Notes:",
+        "  - Missing indexes are built automatically on first search (auto-build).",
+        "  - Run from inside the target project; the repo is resolved from cwd.",
+        "",
+    ]
+    .join("\n")
+}
+
 fn format_update_help() -> String {
     [
         "gwtd update — Check / apply gwt updates.",
@@ -521,6 +611,89 @@ fn parse_owner_repo(value: &str) -> Option<(String, String)> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn did_you_mean_suggests_search_for_typo() {
+        // The motivating misuse: `gwtd serach`-style typos and invented verbs
+        // must point at the real `search` family (SPEC-1942 FR-109).
+        assert_eq!(did_you_mean("serach"), Some("search"));
+        assert_eq!(did_you_mean("baord"), Some("board"));
+    }
+
+    #[test]
+    fn did_you_mean_rejects_unrelated_input() {
+        assert_eq!(did_you_mean("frobnicate"), None);
+        assert_eq!(did_you_mean(""), None);
+        assert_eq!(did_you_mean("xy"), None);
+    }
+
+    #[test]
+    fn unknown_command_message_includes_suggestion_and_help_pointer() {
+        let message = unknown_command_message("serach");
+        assert!(
+            message.contains("unknown command 'serach'"),
+            "missing unknown-command line: {message}"
+        );
+        assert!(
+            message.contains("did you mean 'search'"),
+            "missing did-you-mean line: {message}"
+        );
+        assert!(
+            message.contains("gwtd --help"),
+            "missing help pointer: {message}"
+        );
+    }
+
+    #[test]
+    fn unknown_command_message_without_suggestion_still_points_to_help() {
+        let message = unknown_command_message("frobnicate");
+        assert!(!message.contains("did you mean"), "unexpected: {message}");
+        assert!(
+            message.contains("gwtd --help"),
+            "missing help pointer: {message}"
+        );
+        assert!(
+            message.contains("Usage: gwtd <command> [args]"),
+            "missing usage line: {message}"
+        );
+    }
+
+    #[test]
+    fn suggestion_verbs_are_all_dispatchable() {
+        for verb in SUGGESTION_VERBS {
+            assert!(
+                gwt::cli::should_dispatch_cli(&["gwtd".to_string(), (*verb).to_string()]),
+                "suggestion verb '{verb}' must be accepted by should_dispatch_cli"
+            );
+        }
+    }
+
+    #[test]
+    fn format_search_help_documents_flags() {
+        let help = format_search_help();
+        for expected in [
+            "--specs",
+            "--issues",
+            "--files",
+            "--files-docs",
+            "--memory",
+            "--board",
+            "--discussions",
+            "--match-mode",
+            "--n-results",
+            "--json",
+        ] {
+            assert!(
+                help.contains(expected),
+                "search help must document {expected}. help:\n{help}",
+            );
+        }
+    }
+
+    #[test]
+    fn family_help_resolves_search() {
+        assert!(family_help("search").is_some());
+    }
 
     #[test]
     fn format_board_help_documents_mention_flag() {
