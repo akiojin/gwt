@@ -139,9 +139,9 @@
               <span class="op-layer__label">Start Work</span>
               <kbd class="op-layer__kbd">GO</kbd>
             </button>
-            <button class="op-layer" type="button" id="op-workspace-overview-entry" aria-label="Work">
+            <button class="op-layer" type="button" id="op-workspace-overview-entry" aria-label="Workspace">
               <span class="op-layer__indicator"></span>
-              <span class="op-layer__label">Work</span>
+              <span class="op-layer__label">Workspace</span>
               <kbd class="op-layer__kbd">INFO</kbd>
             </button>
             <button class="op-layer" type="button" data-cmd="open-board" aria-label="Open Board (Cmd+B)" aria-keyshortcuts="Meta+B">
@@ -194,16 +194,6 @@
               <span class="op-palette-trigger__label">⌘K</span>
               <span class="op-palette-trigger__hint">Palette</span>
             </button>
-          </div>
-          <!-- SPEC-2356 operator chrome cleanup: the Update CTA moves from the
-               fixed bottom-right corner into this sidebar Update section. The CTA
-               shell (update-cta.js) mounts into #update-cta-anchor; the sidebar
-               peeks/badges when an update becomes available. -->
-          <div class="op-sidebar__section op-sidebar__section--update">
-            <h3 class="op-sidebar__heading">
-              <span>Update</span>
-            </h3>
-            <div id="update-cta-anchor" class="op-sidebar__update-anchor"></div>
           </div>
         </aside>
         <div class="canvas-area">
@@ -383,7 +373,7 @@
               <kbd class="op-kbd">⌘ B</kbd>
             </div>
             <div class="op-hotkey-card__row">
-              <span>Work surface</span>
+              <span>Workspace surface</span>
               <kbd class="op-kbd">⌘ G</kbd>
             </div>
             <div class="op-hotkey-card__row">
@@ -452,8 +442,8 @@
               <button class="preset-button" data-preset="work" data-category="surface">
                 <span class="preset-button__icon" aria-hidden="true">◆</span>
                 <span class="preset-button__text">
-                  <strong>Work</strong>
-                  <span>Open the Work overview</span>
+                  <strong>Workspace</strong>
+                  <span>Open the Workspace overview</span>
                 </span>
               </button>
             </div>
@@ -583,6 +573,23 @@
           role="dialog"
           aria-modal="true"
           aria-label="Close project tab"
+          tabindex="-1"
+        ></div>
+      </div>
+      <!-- Agent window close confirm (user verification 2026-06-12):
+           the agent window `×` confirms while the agent process is live.
+           Shares the renderer in /close-project-tab-confirm-modal.js with
+           agent-window copy; wiring lives in /app.js. -->
+      <div
+        class="modal-backdrop"
+        id="close-agent-window-modal"
+        aria-hidden="true"
+      >
+        <div
+          class="modal-shell close-project-tab-modal-shell"
+          role="dialog"
+          aria-modal="true"
+          aria-label="Close agent window"
           tabindex="-1"
         ></div>
       </div>

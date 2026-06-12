@@ -2282,6 +2282,12 @@ fn active_work_items_from_projection(
                 .iter()
                 .filter(|agent| agent.status_category == "blocked")
                 .count();
+            // FR-403: live rows sort by their freshest agent activity.
+            let row_updated_at = agents
+                .iter()
+                .map(|agent| agent.updated_at.clone())
+                .max()
+                .unwrap_or_default();
             let status_category = if blocked_agents > 0 {
                 "blocked".to_string()
             } else if active_agents > 0 {
@@ -2401,6 +2407,9 @@ fn active_work_items_from_projection(
                 )
                 .to_string(),
                 closed_at: None,
+                session_agent_total: 0,
+                merged_into_base: false,
+                updated_at: row_updated_at,
             }
         })
         .collect::<Vec<_>>();
@@ -2482,6 +2491,10 @@ fn append_paused_work_items(
             )
             .to_string(),
             closed_at: None,
+            session_agent_total: 0,
+            merged_into_base: false,
+            // FR-403: paused/backfill rows carry the record's last update.
+            updated_at: work.updated_at.clone(),
         });
     }
 }
@@ -2567,23 +2580,6 @@ fn workspace_journal_entry_view_from_entry(
     }
 }
 
-/// Load all persisted agent sessions from `sessions_dir` (used to enrich the
-/// Workspace history view with the Session list under each Work). Mirrors the
-/// runtime's own session loader but is callable from free functions.
-fn load_agent_sessions(sessions_dir: &Path) -> Vec<gwt_agent::Session> {
-    let Ok(entries) = std::fs::read_dir(sessions_dir) else {
-        return Vec::new();
-    };
-    entries
-        .flatten()
-        .filter_map(|entry| {
-            let path = entry.path();
-            (path.extension().and_then(|ext| ext.to_str()) == Some("toml")).then_some(path)
-        })
-        .filter_map(|path| gwt_agent::Session::load_and_migrate(&path).ok())
-        .collect()
-}
-
 /// Index agent sessions by their gwt session id (the Work / launch id) so the
 /// view builder can attach each Work's Session history.
 fn work_session_index(
@@ -2659,6 +2655,24 @@ fn workspace_work_agent_view_from_ref(
             // the append order alone is not guaranteed monotonic.
             let mut entries: Vec<_> = session.session_history.iter().collect();
             entries.sort_by_key(|entry| entry.started_at);
+            if entries.is_empty() {
+                // SPEC-2359 W-16 (FR-402 follow-up): `session_history` is newer
+                // than most ledger TOMLs (zero coverage on long-lived machines),
+                // but the latest conversation pointer still exists. Synthesize
+                // it as the single Session row instead of "No session yet".
+                return latest
+                    .map(|conversation| {
+                        vec![gwt::WorkspaceHistorySessionView {
+                            agent_session_id: conversation.to_string(),
+                            started_at: session
+                                .updated_at
+                                .to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
+                            is_active: true,
+                            resumable: session.is_resumable_conversation(conversation),
+                        }]
+                    })
+                    .unwrap_or_default();
+            }
             entries
                 .into_iter()
                 .map(|entry| gwt::WorkspaceHistorySessionView {
@@ -2675,10 +2689,28 @@ fn workspace_work_agent_view_from_ref(
                 .collect()
         })
         .unwrap_or_default();
+    // Work records written without agent metadata (older record paths)
+    // would render as an anonymous "Agent" group (user verification
+    // 2026-06-12) — borrow identity from the ledger TOML when available.
+    let ledger = session_index.get(agent.session_id.as_str());
+    let display_name = agent
+        .display_name
+        .clone()
+        .filter(|name| !name.trim().is_empty())
+        .or_else(|| {
+            ledger
+                .map(|session| session.display_name.clone())
+                .filter(|name| !name.trim().is_empty())
+        });
+    let agent_id = agent
+        .agent_id
+        .clone()
+        .filter(|id| !id.trim().is_empty())
+        .or_else(|| ledger.map(|session| session.agent_id.command().to_string()));
     gwt::WorkspaceHistoryAgentView {
         session_id: agent.session_id.clone(),
-        agent_id: agent.agent_id.clone(),
-        display_name: agent.display_name.clone(),
+        agent_id,
+        display_name,
         updated_at: agent
             .updated_at
             .to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
@@ -2967,6 +2999,179 @@ fn active_work_agent_view_from_summary(
 /// Convert a persisted Work's agent (a launch, carrying its Session history) to
 /// the active-surface agent view so Paused Workspaces render their Work →
 /// Session list instead of an empty agent list.
+/// SPEC-2359 Phase W-16 (FR-402): attach machine-local ledger sessions to
+/// each Workspace (branch) row. Sessions whose TOML carries this project's
+/// repo hash and the row's branch join the row's agents (deduped by gwt
+/// session id, capped per [`crate::workspace_session_registry`]); the
+/// uncapped count rides `session_agent_total` so the frontend can render
+/// "+N more sessions".
+fn attach_registry_sessions_to_active_works(
+    active_works: &mut [gwt::ActiveWorkItemView],
+    agent_sessions: &[gwt_agent::Session],
+    project_repo_hash: Option<gwt_core::repo_hash::RepoHash>,
+    session_index: &std::collections::HashMap<&str, &gwt_agent::Session>,
+) {
+    let registry = crate::workspace_session_registry::branch_session_registry(
+        agent_sessions,
+        project_repo_hash.as_ref().map(|hash| hash.as_str()),
+    );
+    let cap = crate::workspace_session_registry::REGISTRY_SESSION_CAP;
+    for work in active_works.iter_mut() {
+        let existing: Vec<&str> = work
+            .agents
+            .iter()
+            .map(|agent| agent.session_id.as_str())
+            .collect();
+        let (additions, extra_total) =
+            crate::workspace_session_registry::registry_sessions_for_branch(
+                &registry,
+                work.branch.as_deref(),
+                &existing,
+                cap,
+            );
+        work.session_agent_total = (work.agents.len() + extra_total) as u32;
+        for session in additions {
+            let agent_ref = gwt_core::workspace_projection::WorkspaceWorkAgentRef {
+                session_id: session.id.clone(),
+                agent_id: Some(session.agent_id.command().to_string()),
+                display_name: Some(session.display_name.clone()),
+                updated_at: session.last_activity_at,
+            };
+            let history_view = workspace_work_agent_view_from_ref(&agent_ref, session_index);
+            work.agents
+                .push(paused_work_agent_view_from_history(&history_view));
+        }
+        // User verification 2026-06-12 (follow-up): ghost record agents —
+        // ledger TOML gone, no identity recorded, no conversation — render
+        // as a dead "Agent / No session yet" group whose Resume cannot work.
+        // Drop them from the view; the Work row itself stays.
+        {
+            let before = work.agents.len();
+            work.agents.retain(|agent| {
+                !agent.display_name.trim().is_empty()
+                    || !agent.agent_id.trim().is_empty()
+                    || !agent.sessions.is_empty()
+            });
+            let dropped = (before - work.agents.len()) as u32;
+            work.session_agent_total = work.session_agent_total.saturating_sub(dropped);
+        }
+        // User verification 2026-06-12: a Resume creates a new gwt session for
+        // the SAME agent conversation, which used to render as two Work rows
+        // ("Agent" + "Claude Code") carrying one conversation id. Collapse
+        // agents whose latest conversation matches — newest updated_at wins
+        // and borrows the duplicate's display_name when its own is empty.
+        {
+            let mut sorted: Vec<gwt::ActiveWorkAgentView> = std::mem::take(&mut work.agents);
+            sorted.sort_by(|left, right| right.updated_at.cmp(&left.updated_at));
+            let mut seen_conversations: std::collections::HashMap<String, usize> =
+                std::collections::HashMap::new();
+            let mut kept: Vec<gwt::ActiveWorkAgentView> = Vec::with_capacity(sorted.len());
+            let mut dropped = 0usize;
+            for agent in sorted {
+                let conversation = agent
+                    .sessions
+                    .iter()
+                    .find(|session| session.is_active)
+                    .or_else(|| agent.sessions.first())
+                    .map(|session| session.agent_session_id.clone());
+                match conversation {
+                    Some(conversation) if !conversation.is_empty() => {
+                        if let Some(&index) = seen_conversations.get(&conversation) {
+                            if kept[index].display_name.trim().is_empty()
+                                && !agent.display_name.trim().is_empty()
+                            {
+                                kept[index].display_name = agent.display_name.clone();
+                            }
+                            dropped += 1;
+                        } else {
+                            seen_conversations.insert(conversation, kept.len());
+                            kept.push(agent);
+                        }
+                    }
+                    _ => kept.push(agent),
+                }
+            }
+            work.agents = kept;
+            work.session_agent_total = work.session_agent_total.saturating_sub(dropped as u32);
+        }
+        // User verification 2026-06-12 (screenshot): one group per historical
+        // gwt session rendered e.g. five identical "Claude Code" groups. Per
+        // agent identity only the latest history entry stays; live (active /
+        // running) agents are never collapsed away — two running panes are
+        // two real agents.
+        {
+            let mut sorted: Vec<gwt::ActiveWorkAgentView> = std::mem::take(&mut work.agents);
+            sorted.sort_by(|left, right| right.updated_at.cmp(&left.updated_at));
+            let mut seen_identities: std::collections::HashSet<String> =
+                std::collections::HashSet::new();
+            let mut kept: Vec<gwt::ActiveWorkAgentView> = Vec::with_capacity(sorted.len());
+            let mut dropped = 0usize;
+            for agent in sorted {
+                let live = matches!(
+                    agent.status_category.as_str(),
+                    "active" | "running" | "blocked"
+                );
+                let identity = if !agent.display_name.trim().is_empty() {
+                    agent.display_name.trim().to_lowercase()
+                } else {
+                    agent.agent_id.trim().to_lowercase()
+                };
+                if live || identity.is_empty() || seen_identities.insert(identity) {
+                    kept.push(agent);
+                } else {
+                    dropped += 1;
+                }
+            }
+            work.agents = kept;
+            work.session_agent_total = work.session_agent_total.saturating_sub(dropped as u32);
+        }
+        // The cap applies to the row's TOTAL agents: a decomposed legacy row
+        // can carry hundreds of record agents, and the workspace payload feeds
+        // every connected client (unbounded fan-out amplifies the WebSocket
+        // eviction storm). Keep the newest agents; the uncapped count already
+        // rides `session_agent_total`. RFC3339 UTC strings sort lexically.
+        if work.agents.len() > cap {
+            work.agents
+                .sort_by(|left, right| right.updated_at.cmp(&left.updated_at));
+            work.agents.truncate(cap);
+        }
+    }
+    // SPEC-2359 Phase W-16 (FR-403): order the list by last update, newest
+    // first — the row stamp or its freshest agent/ledger session, whichever
+    // is newer. RFC3339 UTC strings compare lexically.
+    let row_sort_key = |work: &gwt::ActiveWorkItemView| -> String {
+        work.agents
+            .iter()
+            .map(|agent| agent.updated_at.clone())
+            .chain(std::iter::once(work.updated_at.clone()))
+            .max()
+            .unwrap_or_default()
+    };
+    active_works.sort_by_key(|work| std::cmp::Reverse(row_sort_key(work)));
+}
+
+/// SPEC-2359 W-15 (FR-386): flag rows whose branch is merged into a base on
+/// origin (background scan cache) or whose recorded PR state is merged — the
+/// "safe to delete" signal. Display-only; no automatic close (US-61).
+fn mark_merged_active_works(
+    active_works: &mut [gwt::ActiveWorkItemView],
+    merged_branches: Option<&std::collections::HashSet<String>>,
+) {
+    for work in active_works.iter_mut() {
+        let by_cache = work
+            .branch
+            .as_deref()
+            .map(crate::runtime_support::normalize_branch_name)
+            .map(|branch| merged_branches.is_some_and(|set| set.contains(&branch)))
+            .unwrap_or(false);
+        let by_pr = work
+            .pr_state
+            .as_deref()
+            .is_some_and(|state| state.eq_ignore_ascii_case("merged"));
+        work.merged_into_base = by_cache || by_pr;
+    }
+}
+
 fn paused_work_agent_view_from_history(
     agent: &gwt::WorkspaceHistoryAgentView,
 ) -> gwt::ActiveWorkAgentView {
@@ -3481,6 +3686,20 @@ pub struct AppRuntime {
     pub(crate) pending_auto_resume_sources: HashMap<String, String>,
     pub(crate) pending_startup_auto_resume_sessions: Vec<PendingStartupAutoResumeSession>,
     pub(crate) active_agent_sessions: HashMap<String, ActiveAgentSession>,
+    /// SPEC-2359 W-15 (FR-386): per-project set of branches (canonical names)
+    /// fully merged into a base on origin, filled by the background merge
+    /// scan. Runtime-only; never persisted.
+    pub(crate) work_merged_branches: HashMap<PathBuf, std::collections::HashSet<String>>,
+    /// Incremental loader for the machine-local session ledger; keeps
+    /// projection rebuilds from re-parsing thousands of unchanged TOMLs
+    /// (window-close latency fix, 2026-06-11). RefCell: the runtime lives on
+    /// the single event-loop thread and the projection builder takes `&self`.
+    pub(crate) session_ledger_cache:
+        std::cell::RefCell<crate::session_ledger_cache::SessionLedgerCache>,
+    /// Same root fix for the home works.json (megabytes of Work items +
+    /// events): cache hit clones instead of re-parsing per projection event.
+    pub(crate) work_items_cache:
+        std::cell::RefCell<gwt_core::workspace_projection::WorkspaceWorkItemsCache>,
     pub(crate) window_pty_statuses: HashMap<String, WindowProcessStatus>,
     pub(crate) window_hook_states: HashMap<String, WindowProcessStatus>,
     pub(crate) hook_forward_target: Option<HookForwardTarget>,
@@ -3589,6 +3808,13 @@ impl AppRuntime {
             pending_auto_resume_sources: HashMap::new(),
             pending_startup_auto_resume_sessions: Vec::new(),
             active_agent_sessions: HashMap::new(),
+            work_merged_branches: HashMap::new(),
+            session_ledger_cache: std::cell::RefCell::new(
+                crate::session_ledger_cache::SessionLedgerCache::new(),
+            ),
+            work_items_cache: std::cell::RefCell::new(
+                gwt_core::workspace_projection::WorkspaceWorkItemsCache::new(),
+            ),
             window_pty_statuses: HashMap::new(),
             window_hook_states: HashMap::new(),
             hook_forward_target: None,
@@ -3605,6 +3831,112 @@ impl AppRuntime {
         app.seed_window_pty_statuses();
         app.seed_restored_window_details();
         Ok(app)
+    }
+
+    /// SPEC-2359 W-15 (FR-386): store the background merged-branch scan
+    /// result and rebroadcast the Workspace projection so the "safe to
+    /// delete" badge appears. Display-only; never records a close (US-61).
+    pub(crate) fn apply_work_merge_status(
+        &mut self,
+        project_root: &Path,
+        merged_branches: std::collections::HashSet<String>,
+    ) -> Vec<OutboundEvent> {
+        self.work_merged_branches
+            .insert(project_root.to_path_buf(), merged_branches);
+        self.active_work_projection_broadcast_for_active_tab()
+            .into_iter()
+            .collect()
+    }
+
+    /// SPEC-2359 W-15 (FR-386): scan the project's unclosed Workspace
+    /// branches for merge-into-base off the UI thread (one `git cherry` per
+    /// branch). Sends [`UserEvent::WorkMergeStatus`] when anything merged is
+    /// found; silent otherwise so stub-proxy tests stay quiet.
+    pub(crate) fn spawn_work_merge_status_scan(&self, project_root: PathBuf) {
+        let proxy = self.proxy.clone();
+        thread::spawn(move || {
+            let Ok(projection) =
+                gwt_core::workspace_projection::load_or_synthesize_workspace_work_items(
+                    &project_root,
+                )
+            else {
+                return;
+            };
+            let mut branches: Vec<String> = Vec::new();
+            for item in &projection.work_items {
+                if item.is_terminal() {
+                    continue;
+                }
+                for container in &item.execution_containers {
+                    if let Some(branch) = container
+                        .branch
+                        .as_deref()
+                        .map(crate::runtime_support::normalize_branch_name)
+                    {
+                        if !branch.is_empty() && !branches.contains(&branch) {
+                            branches.push(branch);
+                        }
+                    }
+                }
+            }
+            if branches.is_empty() {
+                return;
+            }
+            let mut merged = std::collections::HashSet::new();
+            for branch in branches {
+                if matches!(
+                    gwt_git::branch::merged_base_target(&project_root, &branch),
+                    Ok(Some(_))
+                ) {
+                    merged.insert(branch);
+                }
+            }
+            if merged.is_empty() {
+                return;
+            }
+            proxy.send(UserEvent::WorkMergeStatus {
+                project_root,
+                merged_branches: merged,
+            });
+        });
+    }
+
+    /// SPEC-2359 Phase W-15 (FR-379/FR-380/FR-382): reconcile locally existing
+    /// worktrees with the persisted Work records. Worktrees without a record
+    /// are backfilled (event into the worktree's own `.gwt/work/events.jsonl`
+    /// plus the home works projection) so the Workspace list shows the union
+    /// of existing worktrees and unclosed records. Errors are logged and
+    /// swallowed — reconciliation must never block startup or project open.
+    pub(crate) fn reconcile_workspace_worktrees(&self, project_root: &Path) {
+        let entries = match gwt::worktree_inventory::enumerate_worktrees(project_root, None) {
+            Ok(entries) => entries,
+            Err(error) => {
+                tracing::warn!(
+                    "workspace worktree reconcile: enumerate failed for {}: {error}",
+                    project_root.display()
+                );
+                return;
+            }
+        };
+        let sources = gwt::worktree_inventory::worktree_reconcile_sources(&entries);
+        if sources.is_empty() {
+            return;
+        }
+        match gwt_core::workspace_projection::reconcile_worktree_work_items(
+            project_root,
+            &sources,
+            chrono::Utc::now(),
+        ) {
+            Ok(0) => {}
+            Ok(count) => tracing::info!(
+                "workspace worktree reconcile: backfilled {count} worktree(s) for {}",
+                project_root.display()
+            ),
+            Err(error) => tracing::warn!(
+                "workspace worktree reconcile failed for {}: {error}",
+                project_root.display()
+            ),
+        }
     }
 
     pub(crate) fn bootstrap(&mut self) {
@@ -3638,6 +3970,24 @@ impl AppRuntime {
             let _ = gwt_core::workspace_projection::rebuild_work_items_from_events_for_repo(
                 &tab.project_root,
             );
+            // SPEC-2359 Phase W-16 (FR-393): decompose legacy mega-items
+            // (pre-W-12 records keyed to one projection UUID fusing dozens of
+            // branches) into canonical branch-keyed items so each branch row
+            // shows its real title / sessions. Idempotent; must run before
+            // the worktree reconcile so decomposed branches are not
+            // redundantly backfilled.
+            let _ = gwt_core::workspace_projection::decompose_legacy_multi_branch_work_items(
+                &tab.project_root,
+            );
+            // SPEC-2359 Phase W-15 (FR-379/FR-382): reconcile locally existing
+            // worktrees with the Work records so every real worktree surfaces
+            // on the Workspace list (union of existing worktrees and unclosed
+            // records). Runs after the rebuild above so already-recorded
+            // branches are not redundantly backfilled.
+            self.reconcile_workspace_worktrees(&tab.project_root);
+            // SPEC-2359 W-15 (FR-386): kick the background merge scan that
+            // feeds the "safe to delete" badge.
+            self.spawn_work_merge_status_scan(tab.project_root.clone());
             // SPEC-2359 Phase W-11 (US-58 / FR-346): one-shot, version-guarded
             // clear of legacy prompt-derived title_summary / current_focus so
             // existing broken titles ("あなたの目的は何ですか" etc.) heal via the
@@ -5320,9 +5670,29 @@ impl AppRuntime {
             .values()
             .filter(|session| session.tab_id == tab_id)
             .collect::<Vec<_>>();
-        if let Ok(Some(projection)) =
+        let saved_projection =
             gwt_core::workspace_projection::load_workspace_projection(&tab.project_root)
-        {
+                .ok()
+                .flatten();
+        // SPEC-2359 Phase W-15 (FR-379/FR-382): the Workspace list is the
+        // union of existing worktrees and unclosed records, independent of
+        // live agents and of whether the project was ever launched here. When
+        // no projection has been saved yet (fresh home / never-launched
+        // project) but Work records exist (e.g. worktree backfill), synthesize
+        // a default projection so the records still surface.
+        let loaded_projection = saved_projection.or_else(|| {
+            self.work_items_cache
+                .borrow_mut()
+                .load_or_synthesize(&tab.project_root)
+                .ok()
+                .filter(|works| !works.work_items.is_empty())
+                .map(|_| {
+                    gwt_core::workspace_projection::WorkspaceProjection::default_for_project(
+                        &tab.project_root,
+                    )
+                })
+        });
+        if let Some(projection) = loaded_projection {
             let mut projection = projection;
             let had_saved_agents = !projection.agents.is_empty();
             let cleanup_candidate =
@@ -5346,12 +5716,15 @@ impl AppRuntime {
                 .iter()
                 .map(workspace_journal_entry_view_from_entry)
                 .collect::<Vec<_>>();
-            let agent_sessions = load_agent_sessions(&self.sessions_dir);
+            let agent_sessions = self
+                .session_ledger_cache
+                .borrow_mut()
+                .load(&self.sessions_dir);
             let session_index = work_session_index(&agent_sessions);
-            let workspaces =
-                gwt_core::workspace_projection::load_or_synthesize_workspace_work_items(
-                    &tab.project_root,
-                )
+            let workspaces = self
+                .work_items_cache
+                .borrow_mut()
+                .load_or_synthesize(&tab.project_root)
                 .unwrap_or_else(
                     |_| gwt_core::workspace_projection::WorkspaceWorkItemsProjection {
                         updated_at,
@@ -5362,12 +5735,28 @@ impl AppRuntime {
                 .iter()
                 .map(|item| workspace_work_item_view_from_item(item, &session_index))
                 .collect::<Vec<_>>();
-            return Some(active_work_projection_from_saved_with_journal(
+            let mut view = active_work_projection_from_saved_with_journal(
                 projection,
                 journal_entries,
                 workspaces,
                 cleanup_candidate,
-            ));
+            );
+            // SPEC-2359 Phase W-16 (FR-402): attach the machine-local session
+            // ledger to each Workspace (branch) row so sessions surface even
+            // when works.json never recorded an agent for the branch.
+            attach_registry_sessions_to_active_works(
+                &mut view.active_works,
+                &agent_sessions,
+                gwt_core::repo_hash::detect_repo_hash(&tab.project_root),
+                &session_index,
+            );
+            // SPEC-2359 W-15 (FR-386): "safe to delete" badge inputs — the
+            // background merge-scan cache plus the recorded PR state.
+            mark_merged_active_works(
+                &mut view.active_works,
+                self.work_merged_branches.get(&tab.project_root),
+            );
+            return Some(view);
         }
 
         let first = sessions.first()?;
@@ -5416,6 +5805,9 @@ impl AppRuntime {
             )
             .to_string(),
             closed_at: None,
+            session_agent_total: 0,
+            merged_into_base: false,
+            updated_at: now.to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
         }];
         Some(gwt::ActiveWorkProjectionView {
             id: tab_id.to_string(),
@@ -5557,6 +5949,18 @@ impl AppRuntime {
                 // their agent panes stayed `Stopped`.
                 if let Some(active_tab_id) = self.active_tab_id.clone() {
                     events.extend(self.restore_open_project_windows(&active_tab_id));
+                }
+                // SPEC-2359 Phase W-15 (FR-379): reconcile the opened
+                // project's worktrees before the first Workspace broadcast so
+                // backfilled rows are part of the initial list.
+                if let Some(project_root) = self
+                    .active_tab_id
+                    .as_ref()
+                    .and_then(|id| self.tabs.iter().find(|tab| &tab.id == id))
+                    .map(|tab| tab.project_root.clone())
+                {
+                    self.reconcile_workspace_worktrees(&project_root);
+                    self.spawn_work_merge_status_scan(project_root);
                 }
                 if let Some(event) = self.active_work_projection_broadcast_on_tab_change() {
                     events.push(event);
@@ -8994,9 +9398,11 @@ impl AppRuntime {
     /// `None` when the Work has no recorded worktree, in which case the close is
     /// recorded without filesystem cleanup.
     fn resolve_work_worktree_path(&self, project_root: &Path, work_id: &str) -> Option<PathBuf> {
-        let projection =
-            gwt_core::workspace_projection::load_or_synthesize_workspace_work_items(project_root)
-                .ok()?;
+        let projection = self
+            .work_items_cache
+            .borrow_mut()
+            .load_or_synthesize(project_root)
+            .ok()?;
         let item = projection
             .work_items
             .iter()
@@ -9152,25 +9558,44 @@ impl AppRuntime {
                     .and_then(|details| details.pr_state.clone()),
             }
         });
-        if let Err(error) = gwt_core::workspace_projection::record_workspace_work_paused_event(
-            project_root,
-            &work_id,
-            title.as_deref(),
-            summary.as_deref(),
-            owner.as_deref(),
-            &board_refs,
-            execution_container,
-            Some(session_id),
-            chrono::Utc::now(),
-        ) {
-            tracing::warn!(
-                error = %error,
-                project_root = %project_root.display(),
-                session_id = %session.session_id,
-                work_id = %work_id,
-                "failed to persist Paused Work for stopped Agent session"
-            );
-        }
+        // Close-latency root fix (2026-06-12): the record loads + saves the
+        // home works.json (megabytes once a project has hundreds of Works).
+        // Doing that synchronously on the UI event loop made every agent
+        // window × stall for seconds (sampled: serde to_vec_pretty dominating
+        // the close handler). Inputs are gathered synchronously above from
+        // the in-memory projection; the file IO runs on a background thread
+        // and the workspace projection watcher broadcasts the refreshed rows
+        // once the write lands.
+        let project_root = project_root.to_path_buf();
+        let session_id = session_id.to_string();
+        let log_session_id = session.session_id.clone();
+        let record = thread::spawn(move || {
+            if let Err(error) = gwt_core::workspace_projection::record_workspace_work_paused_event(
+                &project_root,
+                &work_id,
+                title.as_deref(),
+                summary.as_deref(),
+                owner.as_deref(),
+                &board_refs,
+                execution_container,
+                Some(&session_id),
+                chrono::Utc::now(),
+            ) {
+                tracing::warn!(
+                    error = %error,
+                    project_root = %project_root.display(),
+                    session_id = %log_session_id,
+                    work_id = %work_id,
+                    "failed to persist Paused Work for stopped Agent session"
+                );
+            }
+        });
+        // Unit tests assert the projection immediately after a stop, so the
+        // write is joined for determinism there; production detaches it.
+        #[cfg(test)]
+        let _ = record.join();
+        #[cfg(not(test))]
+        drop(record);
     }
 
     pub(crate) fn clear_agent_window_startup_restore(&self, window_id: &str) {

@@ -42,6 +42,10 @@
       } from "/project-tabs-renderer.js";
       import { renderWindowTabs as renderWindowTabsView } from "/window-tabs-renderer.js";
       import { renderCloseProjectTabConfirmModal } from "/close-project-tab-confirm-modal.js";
+      import {
+        agentWindowDisplayName,
+        shouldConfirmAgentWindowClose,
+      } from "/window-close-guard.js";
       import { renderIndexSettingsPanel } from "/index-settings-panel.js";
       import { renderCustomAgentEnvEditor } from "/custom-agent-env-editor.js";
       import {
@@ -2490,6 +2494,88 @@
         renderCloseProjectTabModal();
       }
 
+      // Agent window close confirm (user verification 2026-06-12): the agent
+      // window `×` must not silently kill a live agent. The frontend decides
+      // (same FR-012 pattern as the project tab): live agent pane → confirm
+      // modal; anything else → close_window immediately.
+      const closeAgentWindowModalEl = document.getElementById(
+        "close-agent-window-modal",
+      );
+      const closeAgentWindowModalDialogEl = closeAgentWindowModalEl
+        ? closeAgentWindowModalEl.querySelector(".modal-shell")
+        : null;
+      let closeAgentWindowModalState = {
+        open: false,
+        tabId: null,
+        tabTitle: null,
+        runningAgents: [],
+      };
+
+      function renderCloseAgentWindowModal() {
+        if (!closeAgentWindowModalEl || !closeAgentWindowModalDialogEl) {
+          return;
+        }
+        renderCloseProjectTabConfirmModal({
+          modalEl: closeAgentWindowModalEl,
+          dialogEl: closeAgentWindowModalDialogEl,
+          state: closeAgentWindowModalState,
+          createNode,
+          copy: {
+            title: "Close agent window?",
+            summary: () => "The agent is still running and will be stopped:",
+            confirmLabel: "Close anyway",
+          },
+          onCancel: () => {
+            closeAgentWindowModalState = {
+              open: false,
+              tabId: null,
+              tabTitle: null,
+              runningAgents: [],
+            };
+            renderCloseAgentWindowModal();
+          },
+          onConfirm: () => {
+            const targetId = closeAgentWindowModalState.tabId;
+            closeAgentWindowModalState = {
+              open: false,
+              tabId: null,
+              tabTitle: null,
+              runningAgents: [],
+            };
+            renderCloseAgentWindowModal();
+            if (targetId) {
+              send({ kind: "close_window", id: targetId });
+            }
+          },
+        });
+      }
+
+      function requestCloseWindow(windowId) {
+        const windowData = workspaceWindowById(windowId);
+        if (
+          !windowData ||
+          !shouldConfirmAgentWindowClose(
+            windowData,
+            runtimeStateForWindow(windowData),
+          )
+        ) {
+          send({ kind: "close_window", id: windowId });
+          return;
+        }
+        closeAgentWindowModalState = {
+          open: true,
+          tabId: windowId,
+          tabTitle: agentWindowDisplayName(windowData),
+          runningAgents: [
+            {
+              display_name: agentWindowDisplayName(windowData),
+              branch: windowData.dynamic_title_detail || null,
+            },
+          ],
+        };
+        renderCloseAgentWindowModal();
+      }
+
       function updateProjectTabDot(buttonEl, tab) {
         updateProjectTabDotView(buttonEl, tab, { runtimeStateForWindow });
       }
@@ -2955,8 +3041,11 @@
         };
       }
 
-      function openWorkspaceCleanup() {
-        const candidate = activeWorkProjection?.cleanup_candidate;
+      function openWorkspaceCleanup(candidateOverride) {
+        // The Workspace detail passes the selected row (e.g. a merged
+        // branch, user verification 2026-06-12); without an override the
+        // projection-level cleanup candidate is used.
+        const candidate = candidateOverride || activeWorkProjection?.cleanup_candidate;
         if (!candidate?.branch) return;
         const state = ensureBranchListState(WORKSPACE_CLEANUP_WINDOW_ID);
         state.entries = [workspaceCleanupEntry(candidate)];
@@ -4567,7 +4656,15 @@
           tabs: windowTabsFor(windowData),
           activeWindowId: windowData.id,
           tooltipForWindow: windowTitleTooltip,
-          send,
+          // Tab `×` goes through the agent close confirm gate; every other
+          // tab message passes straight to the socket.
+          send: (message) => {
+            if (message && message.kind === "close_window") {
+              requestCloseWindow(message.id);
+              return;
+            }
+            send(message);
+          },
           onTabDragStart: (event, tabId) => {
             windowTabDragState = {
               id: tabId,
@@ -13386,7 +13483,7 @@
 
           closeButton.addEventListener("click", (event) => {
             event.stopPropagation();
-            send({ kind: "close_window", id: windowData.id });
+            requestCloseWindow(windowData.id);
           });
 
           titlebar.addEventListener("pointerdown", (event) => {

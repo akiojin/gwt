@@ -10,6 +10,7 @@
 //! is not allowed in new code, so the transition rules stay single-source.
 
 use std::{
+    collections::HashMap,
     fs,
     io::Write,
     path::{Path, PathBuf},
@@ -1351,36 +1352,55 @@ impl WorkspaceWorkItemsProjection {
     }
 
     fn apply_event(&mut self, event: WorkspaceWorkEvent) {
-        let index = self
+        let existing_index = self
             .work_items
             .iter()
-            .position(|item| item.id == event.work_item_id)
-            .unwrap_or_else(|| {
-                self.work_items.push(WorkspaceWorkItem {
-                    id: event.work_item_id.clone(),
-                    title: event
-                        .title
-                        .clone()
-                        .or_else(|| event.intent.clone())
-                        .unwrap_or_else(|| event.work_item_id.clone()),
-                    intent: event.intent.clone(),
-                    summary: event.summary.clone(),
-                    status_category: workspace_work_event_status(&event),
-                    owner: event.owner.clone(),
-                    created_at: event.updated_at,
-                    updated_at: event.updated_at,
-                    completed_at: None,
-                    agents: Vec::new(),
-                    execution_containers: Vec::new(),
-                    board_refs: Vec::new(),
-                    related_work_item_ids: Vec::new(),
-                    events: Vec::new(),
-                    discarded: false,
-                });
-                self.work_items.len() - 1
+            .position(|item| item.id == event.work_item_id);
+        let index = existing_index.unwrap_or_else(|| {
+            self.work_items.push(WorkspaceWorkItem {
+                id: event.work_item_id.clone(),
+                title: event
+                    .title
+                    .clone()
+                    .or_else(|| event.intent.clone())
+                    .unwrap_or_else(|| event.work_item_id.clone()),
+                intent: event.intent.clone(),
+                summary: event.summary.clone(),
+                status_category: workspace_work_event_status(&event),
+                owner: event.owner.clone(),
+                created_at: event.updated_at,
+                updated_at: event.updated_at,
+                completed_at: None,
+                agents: Vec::new(),
+                execution_containers: Vec::new(),
+                board_refs: Vec::new(),
+                related_work_item_ids: Vec::new(),
+                events: Vec::new(),
+                discarded: false,
             });
+            self.work_items.len() - 1
+        });
 
         let item = &mut self.work_items[index];
+        // SPEC-2359 Phase W-16 (FR-403): a Backfill event is a synthetic
+        // materialization marker, not activity. Applied to an existing item
+        // (a duplicated / replayed backfill line), it must not advance
+        // `updated_at`, overwrite the real title, or touch status — otherwise
+        // every materialized row collapses onto the replay instant and the
+        // recency sort degenerates. Only the execution container may merge.
+        if existing_index.is_some() && event.kind == WorkspaceWorkEventKind::Backfill {
+            if let Some(container) = event.execution_container.clone() {
+                if !item
+                    .execution_containers
+                    .iter()
+                    .any(|existing| workspace_execution_container_same(existing, &container))
+                {
+                    item.execution_containers.push(container);
+                }
+            }
+            item.events.push(event);
+            return;
+        }
         if let Some(title) = non_empty_clone(event.title.as_deref()) {
             item.title = title;
         }
@@ -1807,6 +1827,93 @@ pub fn load_or_synthesize_workspace_work_items_from_paths(
     synthesize_workspace_work_items_from_legacy_paths(current_path, journal_path, project_root)
 }
 
+/// SPEC-2359 (close-latency root fix, 2026-06-11): mtime+size-keyed cache in
+/// front of [`load_or_synthesize_workspace_work_items`]. The home works.json
+/// grows to megabytes (hundreds of Work items × thousands of events) and the
+/// UI event loop rebuilds the Workspace projection on every broadcast-bearing
+/// action; re-parsing the file each time stalls the queue. A cache hit clones
+/// the parsed projection instead. Synthesized fallbacks (works.json absent)
+/// are never cached — they must observe legacy-file changes.
+#[derive(Default)]
+pub struct WorkspaceWorkItemsCache {
+    entries: HashMap<PathBuf, CachedWorkItemsProjection>,
+    /// Lifetime parse counter; tests assert the steady state stops parsing.
+    pub parse_count: u64,
+}
+
+struct CachedWorkItemsProjection {
+    mtime: std::time::SystemTime,
+    size: u64,
+    projection: WorkspaceWorkItemsProjection,
+}
+
+impl WorkspaceWorkItemsCache {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Cached equivalent of [`load_or_synthesize_workspace_work_items`].
+    pub fn load_or_synthesize(&mut self, repo_path: &Path) -> Result<WorkspaceWorkItemsProjection> {
+        let work_items_path = gwt_workspace_work_items_path_for_repo_path(repo_path);
+        if let Some(hit) = self.lookup(&work_items_path) {
+            return Ok(hit);
+        }
+        let projection = load_or_synthesize_workspace_work_items(repo_path)?;
+        self.store(&work_items_path, &projection);
+        Ok(projection)
+    }
+
+    /// Paths-injected variant for tests and path-explicit callers (#3022).
+    pub fn load_or_synthesize_from_paths(
+        &mut self,
+        work_items_path: &Path,
+        current_path: &Path,
+        journal_path: &Path,
+        project_root: &Path,
+    ) -> Result<WorkspaceWorkItemsProjection> {
+        if let Some(hit) = self.lookup(work_items_path) {
+            return Ok(hit);
+        }
+        let projection = load_or_synthesize_workspace_work_items_from_paths(
+            work_items_path,
+            current_path,
+            journal_path,
+            project_root,
+        )?;
+        self.store(work_items_path, &projection);
+        Ok(projection)
+    }
+
+    fn lookup(&self, work_items_path: &Path) -> Option<WorkspaceWorkItemsProjection> {
+        let meta = fs::metadata(work_items_path).ok()?;
+        let mtime = meta.modified().ok()?;
+        let hit = self.entries.get(work_items_path)?;
+        (hit.mtime == mtime && hit.size == meta.len()).then(|| hit.projection.clone())
+    }
+
+    fn store(&mut self, work_items_path: &Path, projection: &WorkspaceWorkItemsProjection) {
+        self.parse_count += 1;
+        let Ok(meta) = fs::metadata(work_items_path) else {
+            // works.json absent: the result was synthesized from legacy
+            // sources — do not cache it against a missing file.
+            self.entries.remove(work_items_path);
+            return;
+        };
+        let Ok(mtime) = meta.modified() else {
+            self.entries.remove(work_items_path);
+            return;
+        };
+        self.entries.insert(
+            work_items_path.to_path_buf(),
+            CachedWorkItemsProjection {
+                mtime,
+                size: meta.len(),
+                projection: projection.clone(),
+            },
+        );
+    }
+}
+
 pub fn save_workspace_work_items_projection_to_path(
     path: &Path,
     projection: &WorkspaceWorkItemsProjection,
@@ -1936,16 +2043,130 @@ pub fn reconcile_worktree_work_items_paths(
             continue;
         };
         let events_path = gwt_repo_local_work_events_path(&source.worktree_path);
+        // FR-403: the baseline timestamp is the worktree's last real activity
+        // — the HEAD committer time for git worktrees (directory mtime is
+        // polluted by unrelated writes such as the backfill itself creating
+        // `.gwt/`), falling back to the directory mtime and finally to `now`.
+        // Reconciliation runs at bootstrap/open (not on the projection build
+        // hot path), so one git spawn per newly backfilled worktree is fine.
+        let baseline = worktree_head_commit_time(&source.worktree_path)
+            .or_else(|| {
+                fs::metadata(&source.worktree_path)
+                    .and_then(|metadata| metadata.modified())
+                    .map(DateTime::<Utc>::from)
+                    .ok()
+            })
+            .unwrap_or(now)
+            .min(now);
         record_workspace_backfill_event_paths(
             work_items_path,
             &events_path,
             work_id,
             branch,
             &source.worktree_path,
-            now,
+            baseline,
         )?;
     }
     Ok(pending.len())
+}
+
+/// HEAD committer time of a git worktree (`git log -1 --format=%ct`).
+/// Returns `None` for non-repositories or unborn branches.
+fn worktree_head_commit_time(worktree_path: &Path) -> Option<DateTime<Utc>> {
+    let output = crate::process::hidden_command("git")
+        .arg("-C")
+        .arg(worktree_path)
+        .args(["log", "-1", "--format=%ct"])
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let seconds: i64 = String::from_utf8_lossy(&output.stdout)
+        .trim()
+        .parse()
+        .ok()?;
+    DateTime::<Utc>::from_timestamp(seconds, 0)
+}
+
+/// SPEC-2359 Phase W-16 (FR-393): decompose legacy mega-items. The pre-W-12
+/// implementation keyed journal/board events to the projection's single UUID
+/// (or `workspace-<millis>`), fusing dozens of branches and thousands of
+/// sessions into one Work record. Each event still carries its own
+/// `execution_container.branch`, so any item whose events span two or more
+/// canonical branch identities is re-keyed here: its events are replayed per
+/// branch into canonical branch-derived items (`canonical_work_id`), titles
+/// and agents follow each branch's events, and the legacy shell (including
+/// branchless heartbeat events) is dropped. Canonical/per-session items have
+/// a single branch, so a second run finds nothing to decompose (idempotent —
+/// no marker file needed). Returns the number of decomposed legacy items.
+pub fn decompose_legacy_multi_branch_work_items_paths(
+    work_items_path: &Path,
+    project_root: &Path,
+) -> Result<usize> {
+    let Some(mut projection) = load_workspace_work_items_from_path(work_items_path)? else {
+        return Ok(0);
+    };
+    let mut decomposed = 0usize;
+    let mut replacement: Vec<WorkspaceWorkItem> = Vec::new();
+    let mut pending_events: Vec<WorkspaceWorkEvent> = Vec::new();
+    for item in projection.work_items.drain(..) {
+        let mut branch_identities: Vec<String> = Vec::new();
+        for event in &item.events {
+            if let Some(branch) = event
+                .execution_container
+                .as_ref()
+                .and_then(|container| container.branch.as_deref())
+                .map(canonical_work_branch_identity)
+            {
+                if !branch_identities.contains(&branch) {
+                    branch_identities.push(branch);
+                }
+            }
+        }
+        if branch_identities.len() < 2 {
+            replacement.push(item);
+            continue;
+        }
+        decomposed += 1;
+        for event in &item.events {
+            let Some(branch) = event
+                .execution_container
+                .as_ref()
+                .and_then(|container| container.branch.as_deref())
+            else {
+                // Branchless heartbeat of the legacy shell — dropped with it.
+                continue;
+            };
+            let Some(work_id) = canonical_work_id(project_root, Some(branch), None) else {
+                continue;
+            };
+            let mut event = event.clone();
+            event.work_item_id = work_id;
+            pending_events.push(event);
+        }
+    }
+    if decomposed == 0 {
+        projection.work_items = replacement;
+        return Ok(0);
+    }
+    pending_events.sort_by_key(|event| event.updated_at);
+    projection.work_items = replacement;
+    for event in pending_events {
+        projection.apply_event(event);
+    }
+    projection.updated_at = chrono::Utc::now();
+    save_workspace_work_items_projection_to_path(work_items_path, &projection)?;
+    Ok(decomposed)
+}
+
+/// Convenience wrapper resolving the home works projection for `repo_path`
+/// (with the legacy migration applied), then delegating to
+/// [`decompose_legacy_multi_branch_work_items_paths`].
+pub fn decompose_legacy_multi_branch_work_items(repo_path: &Path) -> Result<usize> {
+    let work_items_path = gwt_workspace_work_items_path_for_repo_path(repo_path);
+    let _ = migrate_legacy_workspace_work_items(repo_path, &work_items_path)?;
+    decompose_legacy_multi_branch_work_items_paths(&work_items_path, repo_path)
 }
 
 /// Convenience wrapper resolving the home works projection for `repo_path`
@@ -3257,6 +3478,120 @@ pub fn apply_prune_plan(plan: &[ClassifiedProjection], dry_run: bool) -> Result<
 
 #[cfg(test)]
 mod tests {
+    // SPEC-2359 close-latency root fix: the works.json cache must stop
+    // re-parsing unchanged files, observe content changes, and never cache a
+    // synthesized fallback against a missing works.json.
+    #[test]
+    fn work_items_cache_reuses_unchanged_file_and_reparses_on_change() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let work_items_path = tmp.path().join("works.json");
+        let current_path = tmp.path().join("current.json");
+        let journal_path = tmp.path().join("journal.jsonl");
+        let project_root = tmp.path().join("repo");
+        std::fs::create_dir_all(&project_root).expect("repo dir");
+
+        let now = chrono::Utc::now();
+        let mut projection = super::WorkspaceWorkItemsProjection::empty(now);
+        projection.apply_event(sample_work_event("work-1", now));
+        super::save_workspace_work_items_projection_to_path(&work_items_path, &projection)
+            .expect("save works.json");
+
+        let mut cache = super::WorkspaceWorkItemsCache::new();
+        let first = cache
+            .load_or_synthesize_from_paths(
+                &work_items_path,
+                &current_path,
+                &journal_path,
+                &project_root,
+            )
+            .expect("first load");
+        assert_eq!(first.work_items.len(), 1);
+        assert_eq!(cache.parse_count, 1);
+
+        let second = cache
+            .load_or_synthesize_from_paths(
+                &work_items_path,
+                &current_path,
+                &journal_path,
+                &project_root,
+            )
+            .expect("second load");
+        assert_eq!(second.work_items.len(), 1);
+        assert_eq!(
+            cache.parse_count, 1,
+            "unchanged works.json must not re-parse"
+        );
+
+        // Grow the file (extra item) so mtime granularity cannot mask the change.
+        projection.apply_event(sample_work_event(
+            "work-2",
+            now + chrono::Duration::seconds(1),
+        ));
+        super::save_workspace_work_items_projection_to_path(&work_items_path, &projection)
+            .expect("resave works.json");
+        let third = cache
+            .load_or_synthesize_from_paths(
+                &work_items_path,
+                &current_path,
+                &journal_path,
+                &project_root,
+            )
+            .expect("third load");
+        assert_eq!(third.work_items.len(), 2, "changed works.json must reload");
+        assert_eq!(cache.parse_count, 2);
+    }
+
+    #[test]
+    fn work_items_cache_never_caches_synthesized_fallback() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let work_items_path = tmp.path().join("works.json");
+        let current_path = tmp.path().join("current.json");
+        let journal_path = tmp.path().join("journal.jsonl");
+        let project_root = tmp.path().join("repo");
+        std::fs::create_dir_all(&project_root).expect("repo dir");
+
+        let mut cache = super::WorkspaceWorkItemsCache::new();
+        let synthesized = cache
+            .load_or_synthesize_from_paths(
+                &work_items_path,
+                &current_path,
+                &journal_path,
+                &project_root,
+            )
+            .expect("synthesized load");
+        assert!(synthesized.work_items.is_empty());
+
+        // works.json appears afterwards: the next load must see it.
+        let now = chrono::Utc::now();
+        let mut projection = super::WorkspaceWorkItemsProjection::empty(now);
+        projection.apply_event(sample_work_event("work-1", now));
+        super::save_workspace_work_items_projection_to_path(&work_items_path, &projection)
+            .expect("save works.json");
+        let loaded = cache
+            .load_or_synthesize_from_paths(
+                &work_items_path,
+                &current_path,
+                &journal_path,
+                &project_root,
+            )
+            .expect("post-create load");
+        assert_eq!(loaded.work_items.len(), 1);
+    }
+
+    fn sample_work_event(
+        work_id: &str,
+        updated_at: chrono::DateTime<chrono::Utc>,
+    ) -> super::WorkspaceWorkEvent {
+        let mut event = super::WorkspaceWorkEvent::new(
+            super::WorkspaceWorkEventKind::Start,
+            work_id,
+            updated_at,
+        );
+        event.status_category = Some(super::WorkspaceStatusCategory::Active);
+        event.title = Some(format!("title {work_id}"));
+        event
+    }
+
     use chrono::TimeZone;
 
     use super::*;
@@ -6667,5 +7002,280 @@ mod tests {
             WorkspaceAgentAffiliationStatus::Assigned,
         ));
         assert!(projection.has_current_agents());
+    }
+
+    fn legacy_event(
+        work_item_id: &str,
+        branch: Option<&str>,
+        title: Option<&str>,
+        session: Option<&str>,
+        at: DateTime<Utc>,
+    ) -> WorkspaceWorkEvent {
+        let mut event = WorkspaceWorkEvent::new(WorkspaceWorkEventKind::Update, work_item_id, at);
+        event.title = title.map(str::to_string);
+        event.agent_session_id = session.map(str::to_string);
+        event.execution_container = branch.map(|branch| WorkspaceExecutionContainerRef {
+            branch: Some(branch.to_string()),
+            worktree_path: None,
+            pr_number: None,
+            pr_url: None,
+            pr_state: None,
+        });
+        event
+    }
+
+    /// SPEC-2359 Phase W-16 (FR-393): a legacy mega-item whose events span
+    /// multiple branches is decomposed into canonical branch-keyed items.
+    /// Titles/agents follow each branch's events; the legacy item disappears;
+    /// a second run is a no-op (idempotent).
+    #[test]
+    fn legacy_multi_branch_work_item_is_decomposed_per_branch() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let project_root = temp.path().join("repo");
+        let work_items_path = temp.path().join("works.json");
+        let t0 = Utc.with_ymd_and_hms(2026, 6, 10, 10, 0, 0).unwrap();
+        let t1 = Utc.with_ymd_and_hms(2026, 6, 10, 11, 0, 0).unwrap();
+        let t2 = Utc.with_ymd_and_hms(2026, 6, 10, 12, 0, 0).unwrap();
+
+        let mega_id = "0c14f2ab-9f9a-4e79-94ab-db590cf88343";
+        let mut projection = WorkspaceWorkItemsProjection::empty(t0);
+        projection.apply_event(legacy_event(
+            mega_id,
+            Some("develop"),
+            Some("develop での調査"),
+            Some("sess-dev-1"),
+            t0,
+        ));
+        projection.apply_event(legacy_event(
+            mega_id,
+            Some("work/foo"),
+            Some("foo の実装"),
+            Some("sess-foo-1"),
+            t1,
+        ));
+        projection.apply_event(legacy_event(
+            mega_id,
+            Some("origin/develop"),
+            Some("develop PR 監視"),
+            Some("sess-dev-2"),
+            t2,
+        ));
+        // Branchless heartbeat: dropped with the legacy shell on decomposition.
+        projection.apply_event(legacy_event(mega_id, None, None, None, t2));
+        save_workspace_work_items_projection_to_path(&work_items_path, &projection)
+            .expect("seed works");
+
+        let decomposed =
+            decompose_legacy_multi_branch_work_items_paths(&work_items_path, &project_root)
+                .expect("decompose");
+        assert_eq!(decomposed, 1, "one legacy mega-item decomposed");
+
+        let reloaded = load_workspace_work_items_from_path(&work_items_path)
+            .expect("load works")
+            .expect("projection exists");
+        let develop_id = canonical_work_id(&project_root, Some("develop"), None).unwrap();
+        let foo_id = canonical_work_id(&project_root, Some("work/foo"), None).unwrap();
+        assert!(
+            reloaded.work_items.iter().all(|item| item.id != mega_id),
+            "legacy mega-item must be removed"
+        );
+        let develop = reloaded
+            .work_items
+            .iter()
+            .find(|item| item.id == develop_id)
+            .expect("develop item");
+        assert_eq!(
+            develop.title, "develop PR 監視",
+            "last develop event title wins (origin/develop normalizes to develop)"
+        );
+        assert_eq!(develop.events.len(), 2);
+        let develop_sessions: Vec<_> = develop
+            .agents
+            .iter()
+            .map(|agent| agent.session_id.as_str())
+            .collect();
+        assert!(develop_sessions.contains(&"sess-dev-1"));
+        assert!(develop_sessions.contains(&"sess-dev-2"));
+        let foo = reloaded
+            .work_items
+            .iter()
+            .find(|item| item.id == foo_id)
+            .expect("work/foo item");
+        assert_eq!(foo.title, "foo の実装");
+        assert_eq!(foo.agents.len(), 1);
+
+        let second =
+            decompose_legacy_multi_branch_work_items_paths(&work_items_path, &project_root)
+                .expect("second run");
+        assert_eq!(
+            second, 0,
+            "idempotent: canonical items are not re-decomposed"
+        );
+    }
+
+    /// SPEC-2359 Phase W-16 (FR-393): single-branch items (the normal
+    /// work-session shape) are left untouched by the decomposition.
+    #[test]
+    fn single_branch_work_items_are_not_decomposed() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let project_root = temp.path().join("repo");
+        let work_items_path = temp.path().join("works.json");
+        let t0 = Utc.with_ymd_and_hms(2026, 6, 10, 10, 0, 0).unwrap();
+
+        let mut projection = WorkspaceWorkItemsProjection::empty(t0);
+        projection.apply_event(legacy_event(
+            "work-session-abc",
+            Some("work/bar"),
+            Some("bar の作業"),
+            Some("sess-bar"),
+            t0,
+        ));
+        save_workspace_work_items_projection_to_path(&work_items_path, &projection)
+            .expect("seed works");
+
+        let decomposed =
+            decompose_legacy_multi_branch_work_items_paths(&work_items_path, &project_root)
+                .expect("decompose");
+        assert_eq!(decomposed, 0);
+        let reloaded = load_workspace_work_items_from_path(&work_items_path)
+            .expect("load works")
+            .expect("projection exists");
+        assert_eq!(reloaded.work_items.len(), 1);
+        assert_eq!(reloaded.work_items[0].id, "work-session-abc");
+    }
+
+    /// SPEC-2359 Phase W-16 (FR-403 follow-up): a Backfill event is a
+    /// synthetic materialization marker, not activity. Re-applying one (e.g.
+    /// replaying a duplicated backfill line) must not advance an existing
+    /// item's `updated_at` — otherwise hundreds of rows collapse onto the
+    /// replay instant and the recency sort degenerates.
+    #[test]
+    fn backfill_event_does_not_bump_updated_at_of_existing_item() {
+        let t_old = Utc.with_ymd_and_hms(2026, 5, 18, 9, 15, 0).unwrap();
+        let t_backfill = Utc.with_ymd_and_hms(2026, 6, 10, 6, 19, 47).unwrap();
+        let mut projection = WorkspaceWorkItemsProjection::empty(t_old);
+        let mut start = WorkspaceWorkEvent::new(WorkspaceWorkEventKind::Update, "work-x", t_old);
+        start.title = Some("作業中".to_string());
+        projection.apply_event(start);
+        assert_eq!(projection.work_items[0].updated_at, t_old);
+
+        let mut backfill =
+            WorkspaceWorkEvent::new(WorkspaceWorkEventKind::Backfill, "work-x", t_backfill);
+        backfill.title = Some("work/x".to_string());
+        projection.apply_event(backfill);
+
+        let item = &projection.work_items[0];
+        assert_eq!(
+            item.updated_at, t_old,
+            "backfill must not advance an existing item's updated_at"
+        );
+        assert_eq!(
+            item.title, "作業中",
+            "backfill must not overwrite a real title"
+        );
+
+        // A brand-new item still gets the backfill time as its baseline.
+        let mut fresh =
+            WorkspaceWorkEvent::new(WorkspaceWorkEventKind::Backfill, "work-new", t_backfill);
+        fresh.title = Some("work/new".to_string());
+        projection.apply_event(fresh);
+        let fresh_item = projection
+            .work_items
+            .iter()
+            .find(|item| item.id == "work-new")
+            .expect("new item");
+        assert_eq!(fresh_item.updated_at, t_backfill);
+    }
+
+    /// SPEC-2359 Phase W-16 (FR-403 follow-up): a backfilled worktree's
+    /// baseline timestamp is the worktree directory's mtime (its last real
+    /// activity), not "now" — otherwise every freshly materialized old
+    /// worktree floods the top of the recency-sorted list.
+    #[test]
+    fn backfill_uses_worktree_mtime_as_baseline_timestamp() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let project_root = temp.path().join("repo");
+        let worktree = temp.path().join("repo-old");
+        fs::create_dir_all(&worktree).expect("worktree dir");
+        let old = std::time::SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(1_750_000_000); // 2025-06-15ish
+        let dir = fs::File::open(&worktree).expect("open dir");
+        dir.set_times(fs::FileTimes::new().set_modified(old))
+            .expect("set mtime");
+        let work_items_path = temp.path().join("works.json");
+        let now = Utc.with_ymd_and_hms(2026, 6, 10, 12, 0, 0).unwrap();
+
+        reconcile_worktree_work_items_paths(
+            &work_items_path,
+            &project_root,
+            &[WorktreeReconcileSource {
+                branch: Some("work/old".to_string()),
+                worktree_path: worktree.clone(),
+            }],
+            now,
+        )
+        .expect("reconcile");
+
+        let projection = load_workspace_work_items_from_path(&work_items_path)
+            .expect("load works")
+            .expect("projection exists");
+        let item = &projection.work_items[0];
+        assert!(
+            item.updated_at < Utc.with_ymd_and_hms(2026, 1, 1, 0, 0, 0).unwrap(),
+            "baseline must be the worktree mtime (2025), not now: {}",
+            item.updated_at
+        );
+    }
+
+    /// SPEC-2359 Phase W-16 (FR-403 follow-up): for a git worktree the
+    /// backfill baseline is the HEAD committer time — directory mtime is
+    /// polluted by unrelated writes (e.g. the backfill itself creating
+    /// `.gwt/`), which collapsed mid-list ordering onto one instant.
+    #[test]
+    fn backfill_uses_head_commit_time_for_git_worktrees() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let project_root = temp.path().join("repo");
+        let worktree = temp.path().join("repo-wt");
+        fs::create_dir_all(&worktree).expect("worktree dir");
+        for args in [
+            ["init", "-q"].as_slice(),
+            ["config", "user.email", "t@example.com"].as_slice(),
+            ["config", "user.name", "T"].as_slice(),
+        ] {
+            let output = crate::process::hidden_command("git")
+                .args(args)
+                .current_dir(&worktree)
+                .output()
+                .expect("git");
+            assert!(output.status.success());
+        }
+        let mut commit = crate::process::hidden_command("git");
+        commit
+            .args(["commit", "--allow-empty", "-m", "old"])
+            .env("GIT_COMMITTER_DATE", "2025-06-15T00:00:00Z")
+            .env("GIT_AUTHOR_DATE", "2025-06-15T00:00:00Z")
+            .current_dir(&worktree);
+        assert!(commit.output().expect("commit").status.success());
+
+        let work_items_path = temp.path().join("works.json");
+        let now = Utc.with_ymd_and_hms(2026, 6, 11, 12, 0, 0).unwrap();
+        reconcile_worktree_work_items_paths(
+            &work_items_path,
+            &project_root,
+            &[WorktreeReconcileSource {
+                branch: Some("work/old".to_string()),
+                worktree_path: worktree.clone(),
+            }],
+            now,
+        )
+        .expect("reconcile");
+
+        let projection = load_workspace_work_items_from_path(&work_items_path)
+            .expect("load works")
+            .expect("projection exists");
+        assert_eq!(
+            projection.work_items[0].updated_at,
+            Utc.with_ymd_and_hms(2025, 6, 15, 0, 0, 0).unwrap(),
+            "git worktree baseline is the HEAD committer time"
+        );
     }
 }
