@@ -6903,10 +6903,12 @@ mod tests {
 
         let config = state.build_launch_config().expect("launch config");
         assert_eq!(config.agent_id, gwt_agent::AgentId::ClaudeCode);
+        // SPEC-2014 FR-106: host launches deliver fastMode via a materialized
+        // settings file path instead of inline JSON.
         assert!(config
             .args
             .windows(2)
-            .any(|pair| pair[0] == "--settings" && pair[1] == r#"{"fastMode":true}"#));
+            .any(|pair| pair[0] == "--settings" && pair[1].ends_with("claude-settings-fast.json")));
     }
 
     #[test]
@@ -6967,7 +6969,7 @@ mod tests {
                     assert_eq!(config.agent_id, gwt_agent::AgentId::ClaudeCode);
                     assert!(config.fast_mode);
                     assert!(config.args.windows(2).any(|pair| {
-                        pair[0] == "--settings" && pair[1] == r#"{"fastMode":true}"#
+                        pair[0] == "--settings" && pair[1].ends_with("claude-settings-fast.json")
                     }));
                 }
                 other => panic!("expected agent launch request, got {other:?}"),
