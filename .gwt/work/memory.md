@@ -6821,7 +6821,7 @@ Future Action: For future CPU or log-storm reports, run gwtd diagnostics cpu --j
 Type: lesson
 Context: PR #3007 で Fable 5 をモデル候補に追加した際、opus と同じ reasoning ladder (xHigh default) を共有させたが、Codex レビューで Fable 5 の Claude Code 既定 effort は high だと指摘された。検証の結果 Opus 4.8 / Sonnet 4.6 の既定も high で、gwt の xHigh/medium 既定は旧バージョン (Opus 4.7 時代) の stale な引き継ぎだった。
 Learning: Claude Code の既定 effort はモデル世代ごとに変わる (4.7=xhigh, 4.8/Fable5/Sonnet4.6=high)。モデル候補の追加・ラベル更新時にラベルだけ追従して既定値の追従が漏れると、ユーザーが意図せず高コスト effort で起動する。
-Future Action: launch_wizard のモデル一覧や既定値を更新する際は https://code.claude.com/docs/en/model-config#adjust-effort-level の "The default effort is ..." を必ず確認し、CLAUDE_*_REASONING_OPTIONS の is_default と説明文 "(... default)" を同時に更新する。
+Future Action: launch_wizard のモデル一覧や既定値を更新する際は <https://code.claude.com/docs/en/model-config#adjust-effort-level> の "The default effort is ..." を必ず確認し、CLAUDE_*_REASONING_OPTIONS の is_default と説明文 "(... default)" を同時に更新する。
 
 ## 2026-06-10 — effort 既定はハードコードせず Auto（非 export）で Claude Code に委譲する
 
@@ -6885,3 +6885,10 @@ Type: lesson
 Context: merge 競合解決後、grep でマーカー残存を確認するコマンドと git commit/push を ; で連結したため、grep が残存 1 件を報告したのに commit と push がそのまま実行され、競合マーカー入りのファイルを push してしまった
 Learning: シェルで『検証 → 実行』を 1 行にまとめる場合、; は検証失敗でも実行を継続する。検証は実行を物理的にゲートする形（検証コマンド && 実行、または明示的な exit code 分岐）にしない限り意味を持たない
 Future Action: 競合解決後は『マーカー grep が 0 件であること』を独立したステップとして確認してから commit する。一般に、検証と destructive アクションを同一コマンドに連結する場合は && でゲートし、; を使わない
+
+## 2026-06-12 — gwtd register の placeholder --spec 0 は phase で実 ID に rebind できない
+
+Type: lesson
+Context: gwt-register-spec skill の手順は『register start --spec 0 → issue 作成後 register phase --spec <n> --label create で実 ID を bind』と記載しているが、gwtd register phase は state の owner_spec(0) と不一致の --spec を 'phase refused' で拒否する (SPEC-2784)
+Learning: skill doc と CLI 実装が乖離しており、placeholder からの rebind 経路は存在しない。register abort --spec 0 → register start --spec <実ID> で張り直すのが現状の正しい手順。また production GWT.app の gwtd (v9.55.0) は memory add を legacy の tasks/memory.md に書くため、canonical な .gwt/work/memory.md へ届いているかを確認する
+Future Action: gwt-register-spec を使う際は issue 番号確定後に abort+start で lifecycle を実 ID に張り直す。恒久対応するなら skill doc 修正か CLI の rebind 許可のどちらかに寄せる Issue を立てる

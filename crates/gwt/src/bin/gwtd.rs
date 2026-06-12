@@ -396,10 +396,15 @@ fn format_pane_help() -> String {
         "  read <id> [--lines <n>]                Read recent pane output (default: 50 lines)",
         "  close <id>                             Stop and close a pane",
         "  stop <id>                              Alias for close",
+        "  send [<id>] --text <line>              Queue one input line into the calling",
+        "                                         agent's own pane (submitted after the",
+        "                                         current turn ends, e.g. a /goal line)",
         "",
         "Notes:",
         "  - Intended for gwt-launched agent panes with GWT_HOOK_FORWARD_URL set.",
         "  - GWT_PANE_WS_URL can override the derived WebSocket endpoint for tests.",
+        "  - send is self-only: it targets the pane bound to GWT_SESSION_ID and",
+        "    rejects panes owned by other sessions (SPEC-3050).",
         "",
     ]
     .join("\n")
