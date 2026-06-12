@@ -35,68 +35,44 @@ new code or spec text:
 
 Minimum workflow:
 
-1. Run `search-memory` with 2-3 semantic queries derived from the request.
+1. Run `"$GWT_BIN" search --memory ...` with 2-3 semantic queries derived
+   from the request.
 2. Pick the most relevant past memory if one exists.
 3. Read the matching section in `.gwt/work/memory.md` before deciding the
    approach. Reuse the existing prevention strategy when applicable.
 
-## Environment
-
-When the gwt GUI app (WebView built with `wry + tao + axum WebSocket` and
-`xterm.js`) launches an agent pane, the following env vars are exported
-automatically:
-
-- `GWT_PROJECT_ROOT` — absolute path of the active worktree
-- `GWT_REPO_HASH` — SHA256[:16] of the normalized origin URL
-- `GWT_WORKTREE_HASH` — SHA256[:16] of the canonicalized worktree absolute path
-
-> The hashes are an optimization, not a requirement: when `GWT_REPO_HASH` and
-> `GWT_WORKTREE_HASH` are unset or passed empty, the runner derives them from
-> `--project-root` automatically (Issue #2933). A search therefore needs only
-> `--project-root`, and works in any shell on any platform — no manual hash
-> recomputation is required.
-
 ## Memory search command
 
+`gwtd search` is the canonical search entry point (SPEC-1942 US-15). Run it
+from inside the target worktree; the repo is resolved from the current
+directory.
+
 ```bash
-~/.gwt/runtime/chroma-venv/bin/python3 ~/.gwt/runtime/chroma_index_runner.py \
-  --action search-memory \
-  --repo-hash "$GWT_REPO_HASH" \
-  --project-root "$GWT_PROJECT_ROOT" \
-  --query "your search query" \
-  --n-results 10
+"$GWT_BIN" search --memory "your search query" --n-results 10 --json
 ```
 
-If the memory index does not yet exist, the runner builds it inline (full
-mode) from `<project_root>/.gwt/work/memory.md` and emits NDJSON progress on
-stderr before returning the search result.
+If the memory index does not yet exist, the search builds it inline from
+`<project_root>/.gwt/work/memory.md` before returning results (the first call
+may take longer).
 
 To force a full re-index (normally handled by the project watcher or the
 search auto-build fallback):
 
 ```bash
-~/.gwt/runtime/chroma-venv/bin/python3 ~/.gwt/runtime/chroma_index_runner.py \
-  --action index-memory \
-  --repo-hash "$GWT_REPO_HASH" \
-  --project-root "$GWT_PROJECT_ROOT" \
-  --mode full
+"$GWT_BIN" index rebuild --scope memory
 ```
 
-`--worktree-hash` is accepted for symmetry with the other scopes but is
-ignored — memory is repo-scoped and serves every worktree from a single
-index.
-
-## Memory search output format
+## Output format
 
 ```json
-{"ok": true, "memoryResults": [
-  {"date": "2026-05-20", "title": "gwtd issue spec create -f は section マーカーを付けない", "heading": "## 2026-05-20 — gwtd issue spec create -f は section マーカーを付けない", "chunk_idx": 0, "distance": 0.12}
-]}
+{"ok": true, "query": "...", "results": [
+  {"scope": "memory", "title": "gwtd issue spec create -f は section マーカーを付けない", "subtitle": "2026-05-20", "preview": "...", "distance": 0.12, "target": {"kind": "memory", "heading": "## 2026-05-20 — gwtd issue spec create -f は section マーカーを付けない", "date": "2026-05-20"}}
+], "suggestions": []}
 ```
 
 When a memory spans multiple chunks (long body or paragraph-split), only the
-best-scoring chunk per `(date, title)` pair is surfaced. Use the `heading`
-field to locate the exact section in `.gwt/work/memory.md`.
+best-scoring chunk per `(date, title)` pair is surfaced. Use the
+`target.heading` field to locate the exact section in `.gwt/work/memory.md`.
 
 ## When to use
 
@@ -126,12 +102,33 @@ The watcher and the auto-build fallback pick up either path automatically.
 
 ## Notes
 
-- The runner auto-builds the memory index when missing (use
-  `--no-auto-build` to suppress).
+- A missing memory index is auto-built on the first search.
 - Uses semantic similarity (not just keyword matching). Lower distance values
   indicate higher relevance.
 - For SPEC search, use `gwt-spec-search`. For GitHub Issue search, use
   `gwt-issue-search`. For implementation file search, use
-  `gwt-project-search`. For a unified result across all four, use
-  the `gwt-search` skill with `--memory` (or omit filters to merge every
-  scope). These names are skills, not PATH executables.
+  `gwt-project-search`. For a unified result across all scopes, use
+  the `gwt-search` skill (omit scope flags to merge every scope). These names
+  are skills, not PATH executables — the executable command is
+  `"$GWT_BIN" search`.
+
+## Fallback: direct runner invocation (older binaries only)
+
+Only when `"$GWT_BIN" search` fails with `unknown command 'search'` (a gwtd
+binary older than the search family), call the Python runner directly:
+
+```bash
+~/.gwt/runtime/chroma-venv/bin/python3 ~/.gwt/runtime/chroma_index_runner.py \
+  --action search-memory \
+  --repo-hash "$GWT_REPO_HASH" \
+  --project-root "$GWT_PROJECT_ROOT" \
+  --query "your search query" \
+  --n-results 10
+```
+
+On Windows, use `~/.gwt/runtime/chroma-venv/Scripts/python.exe`.
+`GWT_REPO_HASH` is an optimization, not a requirement: when unset or passed
+empty, the runner derives it from `--project-root` automatically
+(Issue #2933). `--worktree-hash` is accepted for symmetry but ignored —
+memory is repo-scoped. The fallback returns the legacy
+`{"ok": true, "memoryResults": [...]}` shape.
