@@ -1,4 +1,5 @@
 import { test } from "node:test";
+import { createLaunchPendingController } from "../launch-pending-controller.js";
 import assert from "node:assert/strict";
 import { parseHTML } from "linkedom";
 import { createWorkspaceKanbanSurface } from "../workspace-kanban-surface.js";
@@ -172,19 +173,15 @@ test("Workspace detail renders Sessions under a Work, highlighting the active on
   });
 
   const sessions = Array.from(fixture.body.querySelectorAll(".workspace-detail-session"));
-  assert.equal(sessions.length, 2, "one row per conversation Session");
+  // User decision 2026-06-12: multiple Session rows per agent read as noise —
+  // only the latest conversation renders.
+  assert.equal(sessions.length, 1, "only the latest Session renders");
   const active = sessions.filter((row) => row.dataset.active === "true");
-  assert.equal(active.length, 1, "exactly one active Session");
-  // The active row carries the latest conversation's (truncated) id and a clear
-  // "Current" badge; past rows are badged "Past".
+  assert.equal(active.length, 1, "the rendered Session is the active one");
   assert.match(active[0].textContent, /conv-bbb/);
   const activeBadge = active[0].querySelector(".workspace-detail-session-badge");
   assert.equal(activeBadge.textContent, "Current");
   assert.equal(activeBadge.dataset.sessionState, "current");
-  const pastRow = sessions.find((row) => row.dataset.active !== "true");
-  const pastBadge = pastRow.querySelector(".workspace-detail-session-badge");
-  assert.equal(pastBadge.textContent, "Past");
-  assert.equal(pastBadge.dataset.sessionState, "past");
   // The full conversation id is available on hover even though the visible id is
   // truncated.
   assert.equal(
@@ -323,24 +320,17 @@ test("Each Session row carries its own Resume that resumes that conversation (SP
   assert.equal(fixture.body.querySelector("[data-action='resume-workspace']"), null);
   assert.equal(fixture.body.querySelector("[data-action='resume-work']"), null);
   const resumes = Array.from(fixture.body.querySelectorAll("[data-action='resume-session']"));
-  assert.equal(resumes.length, 2, "one Resume per conversation Session");
-  // Every Resume targets the same Work (gwt session id) but a distinct
-  // conversation (agent_session_id).
-  assert.deepEqual(
-    resumes.map((node) => node.dataset.sessionId),
-    ["work-launch-1", "work-launch-1"],
-  );
-  assert.deepEqual(
-    resumes.map((node) => node.dataset.agentSessionId),
-    ["conv-older1111", "conv-latest2222"],
-  );
+  // User decision 2026-06-12: only the latest Session renders, so exactly one
+  // Resume targeting the latest conversation.
+  assert.equal(resumes.length, 1, "one Resume for the latest Session");
+  assert.equal(resumes[0].dataset.sessionId, "work-launch-1");
+  assert.equal(resumes[0].dataset.agentSessionId, "conv-latest2222");
 
-  // Resuming the older Session resumes that exact conversation, not the latest.
   resumes[0].click();
   assert.equal(sent.length, 1);
   assert.equal(sent[0].kind, "resume_workspace_agent");
   assert.equal(sent[0].session_id, "work-launch-1");
-  assert.equal(sent[0].agent_session_id, "conv-older1111");
+  assert.equal(sent[0].agent_session_id, "conv-latest2222");
   assert.ok(sent[0].bounds, "resume carries viewport bounds for the new window");
 });
 
@@ -367,8 +357,9 @@ test("Non-resumable Sessions are history-only; a Start Fresh control keeps the W
     sendFocus() {},
   });
 
-  // Both Session rows render (history is visible) but carry no Resume control.
-  assert.equal(fixture.body.querySelectorAll(".workspace-detail-session").length, 2);
+  // Only the latest Session renders (user decision 2026-06-12) and it
+  // carries no Resume control because it is not resumable.
+  assert.equal(fixture.body.querySelectorAll(".workspace-detail-session").length, 1);
   assert.equal(fixture.body.querySelector("[data-action='resume-session']"), null);
 
   // A single Start Fresh fallback launches a new conversation on the Work.
@@ -710,3 +701,631 @@ function createNode(document, tag, className, text) {
   if (text !== undefined) node.textContent = text;
   return node;
 }
+
+// SPEC-2359 W-15 (FR-379 follow-up, user verification 2026-06-10): a
+// Workspace whose record has no Work (e.g. a backfilled worktree) must stay
+// actionable — the detail offers a Launch control that opens the launch
+// wizard prefilled with the Workspace's branch (a new Work joining this
+// Workspace), instead of a dead "No Work yet" placeholder.
+test("sessionless Workspace offers a Launch control that opens the launch wizard for its branch", () => {
+  const fixture = createFixture();
+  const sent = [];
+  const surface = createSurface(
+    fixture,
+    {
+      id: "proj-1",
+      title: "projection",
+      status_category: "idle",
+      active_work_count: 1,
+      active_works: [
+        {
+          id: "work-work-foo-12345678",
+          title: "work/foo",
+          status_category: "idle",
+          lifecycle_state: "paused",
+          branch: "work/foo",
+          active_agents: 0,
+          blocked_agents: 0,
+          agents: [],
+        },
+      ],
+      agents: [],
+    },
+    { send: (message) => sent.push(message) },
+  );
+
+  surface.mount(fixture.body, fixture.windowData, {
+    focusWindowLocally() {},
+    sendFocus() {},
+  });
+
+  const launch = fixture.body.querySelector('[data-action="launch-workspace"]');
+  assert.ok(launch, "sessionless Workspace detail must offer a Launch control");
+  launch.click();
+  assert.equal(sent.length, 1);
+  assert.equal(sent[0].kind, "open_launch_wizard");
+  assert.equal(sent[0].id, fixture.windowData.id);
+  assert.equal(sent[0].branch_name, "work/foo");
+});
+
+// Placement feedback (2026-06-11 user verification): the Launch Agent control
+// has one canonical home — the detail header actions — never an arbitrary
+// position after a variable-length Work list. A backfilled row whose title IS
+// the branch name must not repeat the same string as subtitle meta.
+test("Launch control lives in the detail header actions and duplicate branch meta is suppressed", () => {
+  const fixture = createFixture();
+  const surface = createSurface(
+    fixture,
+    {
+      id: "proj-1",
+      title: "projection",
+      status_category: "idle",
+      active_work_count: 1,
+      active_works: [
+        {
+          id: "work-work-foo-12345678",
+          title: "work/foo",
+          status_category: "idle",
+          lifecycle_state: "paused",
+          branch: "work/foo",
+          active_agents: 0,
+          blocked_agents: 0,
+          agents: [],
+        },
+      ],
+      agents: [],
+    },
+    { send() {} },
+  );
+
+  surface.mount(fixture.body, fixture.windowData, {
+    focusWindowLocally() {},
+    sendFocus() {},
+  });
+
+  const launch = fixture.body.querySelector('[data-action="launch-workspace"]');
+  assert.ok(launch, "Launch Agent control must exist");
+  assert.ok(
+    launch.parentElement.classList.contains("workspace-detail-actions"),
+    "Launch Agent belongs to the detail header actions",
+  );
+
+  const row = fixture.body.querySelector(".workspace-overview-row[data-workspace-id]");
+  const title = row.querySelector(".workspace-overview-row-title").textContent.trim();
+  const metaTexts = Array.from(
+    row.querySelectorAll(".workspace-overview-row-meta span"),
+  ).map((el) => el.textContent.trim());
+  assert.equal(title, "work/foo");
+  assert.ok(
+    !metaTexts.includes("work/foo"),
+    `branch meta must be suppressed when identical to the title: ${JSON.stringify(metaTexts)}`,
+  );
+});
+
+// SPEC-2359 W-15 (user design decision 2026-06-10): the Workspace list is a
+// branch list — the row title and the detail heading show the branch (the
+// place), while the record's own title (work summary) moves to the meta line
+// and the detail subtitle. Work / Session contents live inside the detail.
+test("Workspace rows and detail are titled by branch with the record title as meta", () => {
+  const fixture = createFixture();
+  const surface = createSurface(
+    fixture,
+    {
+      id: "proj-1",
+      title: "projection",
+      status_category: "idle",
+      active_work_count: 1,
+      active_works: [
+        {
+          id: "work-develop-7ea5aa57",
+          title: "gwt-manage-pr",
+          status_category: "idle",
+          lifecycle_state: "paused",
+          branch: "develop",
+          owner: "SPEC-2359",
+          active_agents: 0,
+          blocked_agents: 0,
+          agents: [],
+        },
+      ],
+      agents: [],
+    },
+    { send() {} },
+  );
+
+  surface.mount(fixture.body, fixture.windowData, {
+    focusWindowLocally() {},
+    sendFocus() {},
+  });
+
+  const row = fixture.body.querySelector(".workspace-overview-row[data-workspace-id]");
+  assert.equal(
+    row.querySelector(".workspace-overview-row-title").textContent.trim(),
+    "develop",
+    "row title is the branch (Workspace = place)",
+  );
+  const metaTexts = Array.from(
+    row.querySelectorAll(".workspace-overview-row-meta span"),
+  ).map((el) => el.textContent.trim());
+  assert.ok(
+    metaTexts.includes("gwt-manage-pr"),
+    `record title moves to the meta line: ${JSON.stringify(metaTexts)}`,
+  );
+
+  const heading = fixture.body.querySelector(".workspace-detail-title");
+  assert.equal(heading.textContent.trim(), "develop", "detail heading is the branch");
+  const subtitleText = fixture.body
+    .querySelector(".workspace-detail-subtitle")
+    .textContent;
+  assert.match(subtitleText, /gwt-manage-pr/, "detail subtitle carries the record title");
+});
+
+// SPEC-2359 W-16 (FR-402): the agents list is capped on the wire; the detail
+// Work section renders "+N more sessions" from session_agent_total so the
+// user can tell more ledger sessions exist beyond the rendered ones.
+test("detail shows '+N more sessions' when session_agent_total exceeds rendered agents", () => {
+  const fixture = createFixture();
+  const surface = createSurface(
+    fixture,
+    {
+      id: "proj-1",
+      title: "projection",
+      status_category: "idle",
+      active_work_count: 1,
+      active_works: [
+        {
+          id: "work-develop-7ea5aa57",
+          title: "develop",
+          status_category: "idle",
+          lifecycle_state: "paused",
+          branch: "develop",
+          active_agents: 0,
+          blocked_agents: 0,
+          session_agent_total: 20,
+          agents: Array.from({ length: 8 }, (_, index) => ({
+            session_id: `sess-${index}`,
+            agent_id: "claude",
+            display_name: `Claude ${index}`,
+            affiliation_status: "assigned",
+            status_category: "idle",
+            updated_at: "2026-06-10T12:00:00Z",
+            sessions: [],
+          })),
+        },
+      ],
+      agents: [],
+    },
+    { send() {} },
+  );
+
+  surface.mount(fixture.body, fixture.windowData, {
+    focusWindowLocally() {},
+    sendFocus() {},
+  });
+
+  const more = fixture.body.querySelector(".workspace-detail-more-sessions");
+  assert.ok(more, "expected the more-sessions label");
+  assert.equal(more.textContent.trim(), "+12 more sessions");
+});
+
+// User verification (2026-06-11): a Workspace WITH existing Works must still
+// offer a way to launch a NEW agent on its branch (a new Work joining the
+// Workspace) — previously the Launch control only existed in the empty state.
+test("Workspace with existing Works still offers a Launch control", () => {
+  const fixture = createFixture();
+  const sent = [];
+  const surface = createSurface(
+    fixture,
+    {
+      id: "proj-1",
+      title: "projection",
+      status_category: "idle",
+      active_work_count: 1,
+      active_works: [
+        {
+          id: "work-develop-7ea5aa57",
+          title: "develop",
+          status_category: "idle",
+          lifecycle_state: "paused",
+          branch: "develop",
+          active_agents: 0,
+          blocked_agents: 0,
+          agents: [
+            {
+              session_id: "sess-1",
+              agent_id: "claude",
+              display_name: "Claude Code",
+              affiliation_status: "assigned",
+              status_category: "idle",
+              updated_at: "2026-06-10T12:00:00Z",
+              sessions: [],
+            },
+          ],
+        },
+      ],
+      agents: [],
+    },
+    { send: (message) => sent.push(message) },
+  );
+
+  surface.mount(fixture.body, fixture.windowData, {
+    focusWindowLocally() {},
+    sendFocus() {},
+  });
+
+  const launch = fixture.body.querySelector('[data-action="launch-workspace"]');
+  assert.ok(launch, "Launch control must exist even when Works are present");
+  launch.click();
+  assert.equal(sent.at(-1)?.kind, "open_launch_wizard");
+  assert.equal(sent.at(-1)?.branch_name, "develop");
+
+  // Placement feedback (2026-06-11): one fixed home in the header actions —
+  // first action, before Done / Discard — and no floating row after the list.
+  const actions = fixture.body.querySelector(".workspace-detail-actions");
+  assert.ok(actions, "detail header actions container must exist");
+  assert.equal(
+    actions.firstElementChild?.dataset?.action,
+    "launch-workspace",
+    "Launch Agent is the first (primary) header action",
+  );
+  assert.equal(
+    fixture.body.querySelectorAll('[data-action="launch-workspace"]').length,
+    1,
+    "exactly one Launch control — no duplicate after the Work list",
+  );
+  assert.equal(
+    fixture.body.querySelector(".workspace-detail-launch-row"),
+    null,
+    "the post-list 'Start a new agent' row is gone",
+  );
+});
+
+// User verification (2026-06-12): "Safe to delete" must come with an actual
+// delete action — a merged Workspace's detail offers a Clean Up control that
+// opens the cleanup flow for that row's branch.
+test("merged Workspace detail offers a Clean Up control for its branch", () => {
+  const fixture = createFixture();
+  const cleanupCalls = [];
+  const surface = createSurface(
+    fixture,
+    {
+      id: "proj-1",
+      title: "projection",
+      status_category: "idle",
+      active_work_count: 1,
+      active_works: [
+        {
+          id: "work-work-merged-12345678",
+          title: "work/merged",
+          status_category: "idle",
+          lifecycle_state: "paused",
+          branch: "work/merged",
+          merged_into_base: true,
+          active_agents: 0,
+          blocked_agents: 0,
+          agents: [],
+        },
+      ],
+      agents: [],
+    },
+    {
+      send() {},
+      openWorkspaceCleanup: (candidate) => cleanupCalls.push(candidate),
+    },
+  );
+
+  surface.mount(fixture.body, fixture.windowData, {
+    focusWindowLocally() {},
+    sendFocus() {},
+  });
+
+  const cleanup = [...fixture.body.querySelectorAll(".workspace-detail-actions button")]
+    .find((button) => button.textContent.trim() === "Clean Up");
+  assert.ok(cleanup, "merged Workspace must offer a Clean Up action");
+  cleanup.click();
+  assert.equal(cleanupCalls.length, 1);
+  assert.equal(cleanupCalls[0]?.branch, "work/merged");
+});
+
+// Design pass (2026-06-11, frontend-design): the branch name renders with a
+// dimmed namespace prefix and a strong leaf so 200+ work/* rows scan by leaf;
+// the full text content stays the verbatim branch for copy / a11y.
+test("row title splits the branch namespace prefix from the leaf", () => {
+  const fixture = createFixture();
+  const surface = createSurface(
+    fixture,
+    {
+      id: "proj-1",
+      title: "projection",
+      status_category: "idle",
+      active_work_count: 1,
+      active_works: [
+        {
+          id: "work-work-foo-12345678",
+          title: "work/20260610-0120-4",
+          status_category: "idle",
+          lifecycle_state: "paused",
+          branch: "work/20260610-0120-4",
+          updated_at: "2026-06-11T05:00:00Z",
+          active_agents: 0,
+          blocked_agents: 0,
+          agents: [],
+        },
+      ],
+      agents: [],
+    },
+    { send() {} },
+  );
+
+  surface.mount(fixture.body, fixture.windowData, {
+    focusWindowLocally() {},
+    sendFocus() {},
+  });
+
+  const title = fixture.body.querySelector(".workspace-overview-row-title");
+  assert.equal(title.textContent, "work/20260610-0120-4", "verbatim branch text is preserved");
+  assert.equal(
+    title.querySelector(".workspace-branch-prefix")?.textContent,
+    "work/",
+    "namespace prefix is split for dimming",
+  );
+  assert.equal(
+    title.querySelector(".workspace-branch-leaf")?.textContent,
+    "20260610-0120-4",
+    "leaf is split for emphasis",
+  );
+  // The row carries its relative updated time, right-aligned via CSS.
+  assert.ok(
+    fixture.body.querySelector(".workspace-overview-row-time"),
+    "row shows the relative updated time",
+  );
+});
+
+// Design pass (2026-06-11): each Work group carries the agent color keyword so
+// the existing [data-agent-color] → --current-agent CSS identity system colors
+// the group rail and agent dot (SPEC-2133 agent colors).
+test("work groups carry the agent identity color keyword", () => {
+  const fixture = createFixture();
+  const surface = createSurface(
+    fixture,
+    {
+      id: "proj-1",
+      title: "projection",
+      status_category: "idle",
+      active_work_count: 1,
+      active_works: [
+        {
+          id: "work-develop-7ea5aa57",
+          title: "develop",
+          status_category: "idle",
+          lifecycle_state: "paused",
+          branch: "develop",
+          active_agents: 0,
+          blocked_agents: 0,
+          agents: [
+            {
+              session_id: "sess-claude",
+              agent_id: "claude",
+              display_name: "Claude Code",
+              affiliation_status: "assigned",
+              status_category: "idle",
+              updated_at: "2026-06-10T12:00:00Z",
+              sessions: [],
+            },
+            {
+              session_id: "sess-codex",
+              agent_id: "codex",
+              display_name: "Codex",
+              affiliation_status: "assigned",
+              status_category: "idle",
+              updated_at: "2026-06-10T11:00:00Z",
+              sessions: [],
+            },
+          ],
+        },
+      ],
+      agents: [],
+    },
+    { send() {} },
+  );
+
+  surface.mount(fixture.body, fixture.windowData, {
+    focusWindowLocally() {},
+    sendFocus() {},
+  });
+
+  const groups = [...fixture.body.querySelectorAll(".workspace-detail-work-group")];
+  assert.equal(groups.length, 2);
+  assert.equal(groups[0].dataset.agentColor, "yellow", "Claude maps to the claude color");
+  assert.equal(groups[1].dataset.agentColor, "cyan", "Codex maps to the codex color");
+});
+
+// User request (2026-06-11): ArrowUp / ArrowDown switches the Workspace list
+// selection from the keyboard, updating the detail pane.
+test("ArrowDown / ArrowUp move the Workspace list selection", () => {
+  const fixture = createFixture();
+  const works = ["work/a", "work/b", "work/c"].map((branch, index) => ({
+    id: `work-${index}`,
+    title: branch,
+    status_category: "idle",
+    lifecycle_state: "paused",
+    branch,
+    active_agents: 0,
+    blocked_agents: 0,
+    agents: [],
+  }));
+  const surface = createSurface(
+    fixture,
+    {
+      id: "proj-1",
+      title: "projection",
+      status_category: "idle",
+      active_work_count: works.length,
+      active_works: works,
+      agents: [],
+    },
+    { send() {} },
+  );
+
+  surface.mount(fixture.body, fixture.windowData, {
+    focusWindowLocally() {},
+    sendFocus() {},
+  });
+
+  const pressOnList = (key) => {
+    const list = fixture.body.querySelector(".workspace-overview-list");
+    const event = new fixture.document.defaultView.Event("keydown", { bubbles: true });
+    event.key = key;
+    list.dispatchEvent(event);
+  };
+
+  const selectedTitle = () =>
+    fixture.body
+      .querySelector('.workspace-overview-row[aria-selected="true"] .workspace-overview-row-title')
+      ?.textContent.trim();
+
+  assert.equal(selectedTitle(), "work/a", "first row selected by default");
+  pressOnList("ArrowDown");
+  assert.equal(selectedTitle(), "work/b", "ArrowDown selects the next row");
+  pressOnList("ArrowDown");
+  assert.equal(selectedTitle(), "work/c");
+  pressOnList("ArrowDown");
+  assert.equal(selectedTitle(), "work/c", "clamped at the last row");
+  pressOnList("ArrowUp");
+  assert.equal(selectedTitle(), "work/b", "ArrowUp selects the previous row");
+  assert.match(
+    fixture.body.querySelector(".workspace-detail-title").textContent,
+    /work\/b/,
+    "detail follows the keyboard selection",
+  );
+});
+
+// SPEC-2359 W-15 (FR-386): the "safe to delete" signal — a merged Workspace
+// shows a Merged badge on its row and the detail subtitle says so.
+test("merged Workspace shows the safe-to-delete badge", () => {
+  const fixture = createFixture();
+  const surface = createSurface(
+    fixture,
+    {
+      id: "proj-1",
+      title: "projection",
+      status_category: "idle",
+      active_work_count: 2,
+      active_works: [
+        {
+          id: "work-merged",
+          title: "work/merged",
+          status_category: "idle",
+          lifecycle_state: "paused",
+          branch: "work/merged",
+          merged_into_base: true,
+          active_agents: 0,
+          blocked_agents: 0,
+          agents: [],
+        },
+        {
+          id: "work-open",
+          title: "work/open",
+          status_category: "idle",
+          lifecycle_state: "paused",
+          branch: "work/open",
+          merged_into_base: false,
+          active_agents: 0,
+          blocked_agents: 0,
+          agents: [],
+        },
+      ],
+      agents: [],
+    },
+    { send() {} },
+  );
+
+  surface.mount(fixture.body, fixture.windowData, {
+    focusWindowLocally() {},
+    sendFocus() {},
+  });
+
+  const rows = Array.from(
+    fixture.body.querySelectorAll(".workspace-overview-row[data-workspace-id]"),
+  );
+  const mergedRow = rows.find((row) => row.dataset.workspaceId === "work-merged");
+  const openRow = rows.find((row) => row.dataset.workspaceId === "work-open");
+  assert.ok(
+    mergedRow.querySelector(".workspace-overview-merged"),
+    "merged row carries the Merged badge",
+  );
+  assert.equal(
+    openRow.querySelector(".workspace-overview-merged"),
+    null,
+    "unmerged row has no badge",
+  );
+
+  mergedRow.click();
+  assert.match(
+    fixture.body.querySelector(".workspace-detail-subtitle").textContent,
+    /Merged — safe to delete/,
+    "detail subtitle carries the safe-to-delete signal",
+  );
+});
+
+// SPEC-2359 W-17 (FR-398): Resume entry points show pending state and guard
+// against double-sends via the shared launch-pending controller.
+test("Resume click marks the Work pending and a re-click does not re-send", () => {
+  const projection = sampleProjection();
+  projection.works[0].agents[0].status_category = "idle";
+  projection.works[0].agents[0].session_id = "work-launch-1";
+  const fixture = createFixture();
+  const sent = [];
+  const launchPending = createLaunchPendingController({
+    setTimeoutFn: () => 1,
+    clearTimeoutFn: () => {},
+  });
+  const surface = createSurface(fixture, projection, {
+    send: (message) => sent.push(message),
+    getResumeBounds: () => ({ x: 0, y: 0, width: 800, height: 600 }),
+    launchPending,
+  });
+
+  surface.mount(fixture.body, fixture.windowData, {
+    focusWindowLocally() {},
+    sendFocus() {},
+  });
+
+  const resume = fixture.body.querySelector("[data-action='resume-work']");
+  resume.click();
+  assert.equal(sent.length, 1);
+  assert.equal(
+    launchPending.isPending("session:work-launch-1"),
+    true,
+    "click registers the Work as pending",
+  );
+
+  resume.click();
+  assert.equal(sent.length, 1, "re-click while pending must not re-send");
+});
+
+test("a pending Work renders its Resume button disabled with progress label", () => {
+  const projection = sampleProjection();
+  projection.works[0].agents[0].status_category = "idle";
+  projection.works[0].agents[0].session_id = "work-launch-1";
+  const fixture = createFixture();
+  const launchPending = createLaunchPendingController({
+    setTimeoutFn: () => 1,
+    clearTimeoutFn: () => {},
+  });
+  launchPending.begin("session:work-launch-1", "Resume");
+  const surface = createSurface(fixture, projection, {
+    getResumeBounds: () => ({ x: 0, y: 0, width: 800, height: 600 }),
+    launchPending,
+  });
+
+  surface.mount(fixture.body, fixture.windowData, {
+    focusWindowLocally() {},
+    sendFocus() {},
+  });
+
+  const resume = fixture.body.querySelector("[data-action='resume-work']");
+  assert.ok(resume, "Resume control still renders while pending");
+  assert.equal(resume.disabled, true, "pending Work disables its Resume");
+  assert.match(resume.textContent, /Resuming/);
+});

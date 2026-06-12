@@ -1208,12 +1208,9 @@ body {
   flex-direction: column;
 }
 
-.workspace-overview-shell {
-  flex: 1;
-  min-height: 0;
-  display: flex;
-  overflow: hidden;
-}
+/* The overview shell layout (grid: list pane + detail pane) is owned by
+   components.css. A stale flex declaration here let long Workspace rows grow
+   the list pane and crush the detail pane into a vertical sliver. */
 
 .workspace-overview-shell[hidden],
 .workspace-branches-shell[hidden] {

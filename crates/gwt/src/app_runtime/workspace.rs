@@ -29,11 +29,11 @@ use std::thread;
 use super::{
     active_work_cleanup_candidate_view_from_candidate,
     active_work_projection_from_saved_with_journal, cleanup_selected_branches_with_progress,
-    list_branch_entries_with_active_sessions, load_agent_sessions, non_empty_workspace_text,
-    work_session_index, workspace_journal_entry_view_from_entry,
-    workspace_work_item_view_from_item, ActiveAgentSession, AppEventProxy, BackendEvent,
-    BranchCleanupOptions, ClientId, OutboundEvent, UserEvent, WorkspaceResumeContext,
-    WORKSPACE_CLEANUP_EVENT_ID, WORKSPACE_OVERVIEW_JOURNAL_LIMIT,
+    list_branch_entries_with_active_sessions, non_empty_workspace_text, work_session_index,
+    workspace_journal_entry_view_from_entry, workspace_work_item_view_from_item,
+    ActiveAgentSession, AppEventProxy, BackendEvent, BranchCleanupOptions, ClientId, OutboundEvent,
+    UserEvent, WorkspaceResumeContext, WORKSPACE_CLEANUP_EVENT_ID,
+    WORKSPACE_OVERVIEW_JOURNAL_LIMIT,
 };
 
 pub(super) fn active_agent_summary_from_session(
@@ -338,7 +338,10 @@ fn clear_workspace_cleanup_git_details_event(project_root: &Path) -> Option<Outb
     .iter()
     .map(workspace_journal_entry_view_from_entry)
     .collect::<Vec<_>>();
-    let agent_sessions = load_agent_sessions(&gwt_core::paths::gwt_sessions_dir());
+    // Rare post-cleanup path with no runtime handle: a one-shot cache load
+    // matches the previous eager loader's cost and semantics.
+    let agent_sessions = crate::session_ledger_cache::SessionLedgerCache::new()
+        .load(&gwt_core::paths::gwt_sessions_dir());
     let session_index = work_session_index(&agent_sessions);
     let workspaces =
         gwt_core::workspace_projection::load_or_synthesize_workspace_work_items(project_root)

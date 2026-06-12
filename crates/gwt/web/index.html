@@ -142,17 +142,19 @@
                 <span class="op-rail__flyout-label">Start Work</span>
               </span>
             </button>
+            <!-- FR-392 (SPEC-2359 W-15): surface entry points say "Workspace"
+                 (Workspace = place / Work = launch / Session = conversation). -->
             <button
               class="op-rail__item"
               type="button"
               id="op-workspace-overview-entry"
-              aria-label="Work (Cmd+G)"
+              aria-label="Workspace"
               aria-keyshortcuts="Meta+G"
-              title="Work"
+              title="Workspace"
             >
               <span class="op-rail__icon" aria-hidden="true">◆</span>
               <span class="op-rail__flyout" aria-hidden="true">
-                <span class="op-rail__flyout-label">Work</span>
+                <span class="op-rail__flyout-label">Workspace</span>
                 <kbd class="op-rail__kbd">⌘ G</kbd>
               </span>
             </button>
@@ -243,10 +245,6 @@
                 <kbd class="op-rail__kbd">⌘ K</kbd>
               </span>
             </button>
-            <!-- SPEC-3038 AS-1.5: update-cta.js mounts the CTA shell here; the
-                 card pops out beside the rail and the rail badge pulses via
-                 html[data-op-rail-update="available"]. -->
-            <div id="update-cta-anchor" class="op-rail__update-anchor"></div>
           </div>
         </aside>
         <div class="canvas-area">
@@ -430,7 +428,7 @@
               <kbd class="op-kbd">⌘ B</kbd>
             </div>
             <div class="op-hotkey-card__row">
-              <span>Work surface</span>
+              <span>Workspace surface</span>
               <kbd class="op-kbd">⌘ G</kbd>
             </div>
             <div class="op-hotkey-card__row">
@@ -520,8 +518,8 @@
               <button class="preset-button" data-preset="work" data-category="surface">
                 <span class="preset-button__icon" aria-hidden="true">◆</span>
                 <span class="preset-button__text">
-                  <strong>Work</strong>
-                  <span>Open the Work overview</span>
+                  <strong>Workspace</strong>
+                  <span>Open the Workspace overview</span>
                 </span>
               </button>
             </div>

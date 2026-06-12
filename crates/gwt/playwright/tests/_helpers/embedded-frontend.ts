@@ -35,6 +35,8 @@ const ROOT_MODULES = new Set([
   // SPEC-2014 2026-05-29 — Launch Agent setting controls (reasoning slider +
   // Auto toggle, count-adaptive segmented/select, boolean toggle).
   "launch-controls.js",
+  "launch-pending-controller.js",
+  "connection-overlay.js",
   // Issue #2698 PR 1 (B7) — defer destructive wizard re-renders.
   "interaction-guard.js",
   "migration-modal.js",

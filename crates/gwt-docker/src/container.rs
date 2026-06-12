@@ -1098,6 +1098,28 @@ mod tests {
         );
     }
 
+    /// Issue #2349 follow-up: a lingering `docker info` availability probe
+    /// (e.g. an abandoned timeout thread from another test) can execute the
+    /// currently-installed fake docker and write into this test's log. The
+    /// recording scripts append (`>>`) so every invocation survives intact,
+    /// and this assertion checks that the expected invocation block was
+    /// recorded rather than requiring it to be the only one.
+    fn assert_invocation_recorded(path: &Path, expected: &str) {
+        for _ in 0..50 {
+            if let Ok(content) = fs::read_to_string(path) {
+                if content.contains(expected) {
+                    return;
+                }
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        let content = fs::read_to_string(path).unwrap_or_default();
+        panic!(
+            "expected invocation {expected:?} not recorded at {} within 500ms; log: {content:?}",
+            path.display()
+        );
+    }
+
     #[test]
     fn container_status_from_docker_state() {
         assert_eq!(
@@ -1187,7 +1209,7 @@ mod tests {
         let log_dir = tempfile::tempdir().expect("temp log dir");
         let log_path = log_dir.path().join("args.txt");
         let script = format!(
-            "#!/bin/sh\nprintf '%s\\n' \"$@\" > '{}'\n",
+            "#!/bin/sh\nprintf '%s\\n' \"$@\" >> '{}'\n",
             shell_script_path(&log_path)
         );
 
@@ -1195,7 +1217,7 @@ mod tests {
             start("abc123").expect("start container");
         });
 
-        assert_eq!(read_invocation(&log_path), "start\nabc123\n");
+        assert_invocation_recorded(&log_path, "start\nabc123\n");
     }
 
     #[test]
@@ -1203,7 +1225,7 @@ mod tests {
         let log_dir = tempfile::tempdir().expect("temp log dir");
         let log_path = log_dir.path().join("args.txt");
         let script = format!(
-            "#!/bin/sh\nprintf '%s\\n' \"$@\" > '{}'\n",
+            "#!/bin/sh\nprintf '%s\\n' \"$@\" >> '{}'\n",
             shell_script_path(&log_path)
         );
 
@@ -1211,7 +1233,7 @@ mod tests {
             stop("abc123").expect("stop container");
         });
 
-        assert_eq!(read_invocation(&log_path), "stop\nabc123\n");
+        assert_invocation_recorded(&log_path, "stop\nabc123\n");
     }
 
     #[test]
@@ -1219,7 +1241,7 @@ mod tests {
         let log_dir = tempfile::tempdir().expect("temp log dir");
         let log_path = log_dir.path().join("args.txt");
         let script = format!(
-            "#!/bin/sh\nprintf '%s\\n' \"$@\" > '{}'\n",
+            "#!/bin/sh\nprintf '%s\\n' \"$@\" >> '{}'\n",
             shell_script_path(&log_path)
         );
 
@@ -1227,7 +1249,7 @@ mod tests {
             restart("abc123").expect("restart container");
         });
 
-        assert_eq!(read_invocation(&log_path), "restart\nabc123\n");
+        assert_invocation_recorded(&log_path, "restart\nabc123\n");
     }
 
     #[test]
@@ -1407,7 +1429,7 @@ mod tests {
         )
         .expect("compose");
         let script = format!(
-            "#!/bin/sh\nprintf '%s\\n' \"$@\" > '{}'\n",
+            "#!/bin/sh\nprintf '%s\\n' \"$@\" >> '{}'\n",
             shell_script_path(&log_path)
         );
 
@@ -1415,9 +1437,9 @@ mod tests {
             compose_up(&compose_path, "app").expect("compose up");
         });
 
-        assert_eq!(
-            read_invocation(&log_path),
-            format!("compose\n-f\n{}\nup\n-d\napp\n", compose_path.display())
+        assert_invocation_recorded(
+            &log_path,
+            &format!("compose\n-f\n{}\nup\n-d\napp\n", compose_path.display()),
         );
     }
 
@@ -1451,7 +1473,7 @@ mod tests {
         )
         .expect("compose");
         let script = format!(
-            "#!/bin/sh\nprintf '%s\\n' \"$@\" > '{}'\n",
+            "#!/bin/sh\nprintf '%s\\n' \"$@\" >> '{}'\n",
             shell_script_path(&log_path)
         );
 
@@ -1459,12 +1481,12 @@ mod tests {
             compose_up_force_recreate(&compose_path, "app").expect("compose up force recreate");
         });
 
-        assert_eq!(
-            read_invocation(&log_path),
-            format!(
+        assert_invocation_recorded(
+            &log_path,
+            &format!(
                 "compose\n-f\n{}\nup\n-d\n--force-recreate\napp\n",
                 compose_path.display()
-            )
+            ),
         );
     }
 
@@ -1548,7 +1570,7 @@ mod tests {
         )
         .expect("compose");
         let script = format!(
-            "#!/bin/sh\nprintf '%s\\n' \"$@\" > '{}'\n",
+            "#!/bin/sh\nprintf '%s\\n' \"$@\" >> '{}'\n",
             shell_script_path(&log_path)
         );
 
@@ -1556,9 +1578,9 @@ mod tests {
             compose_restart(&compose_path, "app").expect("compose restart");
         });
 
-        assert_eq!(
-            read_invocation(&log_path),
-            format!("compose\n-f\n{}\nrestart\napp\n", compose_path.display())
+        assert_invocation_recorded(
+            &log_path,
+            &format!("compose\n-f\n{}\nrestart\napp\n", compose_path.display()),
         );
     }
 
@@ -1574,7 +1596,7 @@ mod tests {
         )
         .expect("compose");
         let script = format!(
-            "#!/bin/sh\nprintf '%s\\n' \"$@\" > '{}'\n",
+            "#!/bin/sh\nprintf '%s\\n' \"$@\" >> '{}'\n",
             shell_script_path(&log_path)
         );
 
@@ -1582,9 +1604,9 @@ mod tests {
             compose_stop(&compose_path, "app").expect("compose stop");
         });
 
-        assert_eq!(
-            read_invocation(&log_path),
-            format!("compose\n-f\n{}\nstop\napp\n", compose_path.display())
+        assert_invocation_recorded(
+            &log_path,
+            &format!("compose\n-f\n{}\nstop\napp\n", compose_path.display()),
         );
     }
 
@@ -1674,7 +1696,7 @@ mod tests {
         )
         .expect("compose");
         let script = format!(
-            "#!/bin/sh\nprintf '%s\\n' \"$@\" > '{}'\nif [ \"$1\" = \"compose\" ] && [ \"$4\" = \"exec\" ] && [ \"$5\" = \"-T\" ] && [ \"$6\" = \"-w\" ] && [ \"$7\" = \"/workspace\" ] && [ \"$8\" = \"app\" ]; then\n  printf 'could not determine executable to run\\n' >&2\n  exit 1\nfi\nprintf 'unexpected invocation: %s\\n' \"$*\" >&2\nexit 1\n",
+            "#!/bin/sh\nprintf '%s\\n' \"$@\" >> '{}'\nif [ \"$1\" = \"compose\" ] && [ \"$4\" = \"exec\" ] && [ \"$5\" = \"-T\" ] && [ \"$6\" = \"-w\" ] && [ \"$7\" = \"/workspace\" ] && [ \"$8\" = \"app\" ]; then\n  printf 'could not determine executable to run\\n' >&2\n  exit 1\nfi\nprintf 'unexpected invocation: %s\\n' \"$*\" >&2\nexit 1\n",
             shell_script_path(&log_path)
         );
 
@@ -1693,12 +1715,12 @@ mod tests {
 
             assert_eq!(output.status.code(), Some(1));
             assert!(String::from_utf8_lossy(&output.stderr).contains("could not determine"));
-            assert_eq!(
-                read_invocation(&log_path),
-                format!(
+            assert_invocation_recorded(
+                &log_path,
+                &format!(
                     "compose\n-f\n{}\nexec\n-T\n-w\n/workspace\napp\nbunx\n@anthropic-ai/claude-code@latest\n--version\n",
                     compose_path.display()
-                )
+                ),
             );
         });
     }

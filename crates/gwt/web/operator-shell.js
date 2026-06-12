@@ -24,7 +24,7 @@ export function initOperatorShell(deps = {}) {
   const hotkey = deps.hotkey ?? createHotkeyManager();
 
   safeWire("theme toggle", () => wireThemeToggle({ doc, themeManager }), markDegraded);
-  safeWire("rail update badge", () => wireRailUpdateBadge({ doc, win }), markDegraded);
+  safeWire("legacy chrome keys", () => removeLegacyChromeKeys(win), markDegraded);
   safeWire("rail commands", () => wireRailCommands({ doc }), markDegraded);
   safeWire("status strip clock", () => wireStatusStripClock({ doc }), markDegraded);
   if (shellDegraded) hideMissionBriefingImmediately(doc);
@@ -82,26 +82,12 @@ function hideMissionBriefingImmediately(doc) {
 }
 
 // ------------------------------------------------------------
-// Command Rail — update badge (SPEC-3038 AS-1.5)
+// Legacy chrome key migration (SPEC-2356 Phase 9, kept in the rail era)
 // ------------------------------------------------------------
-// The rail is grid-docked and always visible, so the SPEC-2356 hover-reveal
-// state machine is retired. The Update CTA mounts inside the rail System
-// group; when update-cta.js dispatches `op:update-available` we badge the
-// rail via data-op-rail-update so the anchor pulses (CSS) until the update is
-// applied or dismissed. The SPEC-2356 Phase 9 one-shot localStorage migration
-// stays so legacy keys keep getting cleaned up.
-
-function wireRailUpdateBadge({ doc, win }) {
-  removeLegacyChromeKeys(win);
-
-  const root = doc.documentElement;
-  doc.addEventListener("op:update-available", () => {
-    root.dataset.opRailUpdate = "available";
-  });
-  doc.addEventListener("op:update-dismissed", () => {
-    delete root.dataset.opRailUpdate;
-  });
-}
+// The rail is grid-docked and always visible; the hover-reveal machinery and
+// the rail update badge are gone (the Update CTA floats fixed bottom-right —
+// user verification 2026-06-12). Only the one-shot localStorage migration
+// survives so legacy keys keep getting cleaned up.
 
 function removeLegacyChromeKeys(win) {
   const storage = safeLocalStorage(win);

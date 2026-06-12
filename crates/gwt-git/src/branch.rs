@@ -169,6 +169,22 @@ fn detect_cleanable_target_for_remote(
     Ok((has_canonical_base, None))
 }
 
+/// SPEC-2359 W-15 (FR-386): the canonical base target on `origin`
+/// (develop / main / master) into which `branch` is fully merged —
+/// squash-aware via [`is_branch_merged_into`] (`git cherry`) and independent
+/// of the branch's upstream configuration. `None` when unmerged or no
+/// canonical base ref exists. Protected base branches (develop / main /
+/// master) are never reported — they are trivially merged into themselves
+/// but must not look "safe to delete". Used by the Workspace surface
+/// "safe to delete" badge; run it off the UI hot path (background scan).
+pub fn merged_base_target(repo_path: &Path, branch: &str) -> Result<Option<MergeTargetRef>> {
+    if is_protected_branch(branch) {
+        return Ok(None);
+    }
+    let (_, target) = detect_cleanable_target_for_remote(repo_path, branch, "origin")?;
+    Ok(target)
+}
+
 /// Returns the set of local branch names whose upstream tracking ref is
 /// `[gone]` (FR-018a). Used to flag branches whose remote was deleted but
 /// which still exist locally.
@@ -698,6 +714,52 @@ mod tests {
         assert!(!is_branch_merged_into(repo, "feature/unmerged", "main").unwrap());
     }
 
+    /// SPEC-2359 W-15 (FR-386): `merged_base_target` detects a squash merge
+    /// into origin/develop without requiring an upstream, and stays `None`
+    /// for unmerged branches.
+    #[test]
+    fn merged_base_target_detects_squash_merge_into_origin_develop() {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = tmp.path();
+        init_named_repo(repo);
+        run(&["checkout", "-b", "develop"], repo);
+        run(&["checkout", "-b", "work/sq"], repo);
+        make_commit(repo, "a.txt", "a\n", "feat: a");
+        run(&["checkout", "develop"], repo);
+        run(&["merge", "--squash", "work/sq"], repo);
+        run(&["commit", "-m", "feat: squashed a"], repo);
+        // Simulate the fetched remote ref the scan consults.
+        run(
+            &["update-ref", "refs/remotes/origin/develop", "develop"],
+            repo,
+        );
+
+        let target = merged_base_target(repo, "work/sq").unwrap();
+        assert!(target.is_some(), "squash-merged branch must resolve a base");
+
+        run(&["checkout", "-b", "work/unmerged", "main"], repo);
+        make_commit(repo, "b.txt", "b\n", "feat: b");
+        assert!(merged_base_target(repo, "work/unmerged").unwrap().is_none());
+    }
+
+    /// SPEC-2359 W-15 (FR-386): a protected base branch is trivially merged
+    /// into its own remote ref, but must never be reported "safe to delete".
+    #[test]
+    fn merged_base_target_excludes_protected_branches() {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = tmp.path();
+        init_named_repo(repo);
+        run(&["checkout", "-b", "develop"], repo);
+        make_commit(repo, "a.txt", "a\n", "feat: a");
+        run(
+            &["update-ref", "refs/remotes/origin/develop", "develop"],
+            repo,
+        );
+
+        assert!(merged_base_target(repo, "develop").unwrap().is_none());
+        assert!(merged_base_target(repo, "main").unwrap().is_none());
+    }
+
     #[test]
     fn is_branch_merged_into_returns_false_for_missing_base() {
         let tmp = tempfile::tempdir().unwrap();
@@ -881,15 +943,9 @@ mod tests {
     fn list_branches_in_test_repo() {
         let tmp = tempfile::tempdir().unwrap();
         let path = tmp.path();
-        gwt_core::process::hidden_command("git")
-            .args(["init", path.to_str().unwrap()])
-            .output()
-            .unwrap();
-        gwt_core::process::hidden_command("git")
-            .args(["commit", "--allow-empty", "-m", "init"])
-            .current_dir(path)
-            .output()
-            .unwrap();
+        // Configures committer identity so the fixture works on CI runners
+        // that have no global git config.
+        init_named_repo(path);
 
         let branches = list_branches(path).unwrap();
         assert!(!branches.is_empty());

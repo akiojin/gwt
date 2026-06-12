@@ -289,6 +289,8 @@ test("Command Rail groups items into Navigate / Windows / System (SPEC-3038 US-1
   const groups = Array.from(document.querySelectorAll(".op-rail > .op-rail__group")).map(
     (group) => group.getAttribute("aria-label"),
   );
+  // User verification 2026-06-12: the Update CTA returned to its fixed
+  // bottom-right home, so the sidebar no longer carries an Update section.
   assert.deepEqual(
     groups,
     ["Navigate", "Windows", "System"],
@@ -367,31 +369,26 @@ test("Status Strip hosts the zoom controls so canvas zoom is always reachable (S
   assert.equal(document.getElementById("zoom-reset-button").textContent.trim(), "100%");
 });
 
-test("Command Rail System group provides the mount anchor for the Update CTA (SPEC-3038 US-1)", () => {
-  // SPEC-3038 US-1 AS-1.5: the Update CTA mounts into the rail System group.
-  // update-cta.js keeps mounting the shell into this anchor instead of
-  // document.body; the CTA card pops out beside the rail when an update lands.
-  const systemGroup = document.querySelector('.op-rail > .op-rail__group[aria-label="System"]');
-  assert.ok(systemGroup, "expected a System group in the rail");
-  const anchor = systemGroup.querySelector("#update-cta-anchor");
-  assert.ok(anchor, "expected #update-cta-anchor inside the rail System group");
-});
-
-test("update-cta.js mounts into the rail anchor and badges the rail when an update arrives (SPEC-3038)", () => {
+test("Update CTA floats fixed bottom-right, not in the rail (user verification 2026-06-12)", () => {
+  // SPEC-2356 moved the Update CTA into the sidebar and SPEC-3038 briefly
+  // anchored it to the rail, but the user found chrome-docked placements hard
+  // to notice — the CTA returns to its fixed bottom-right home.
+  assert.equal(
+    document.getElementById("update-cta-anchor"),
+    null,
+    "no chrome-docked update anchor may remain",
+  );
   const updateCtaSource = readFileSync(resolve(here, "../update-cta.js"), "utf8");
-  // The shell must prefer the rail anchor over document.body so the CTA
-  // lives inside the rail System group.
-  assert.match(
+  assert.doesNotMatch(
     updateCtaSource,
     /update-cta-anchor/,
-    "update-cta.js must mount into the rail #update-cta-anchor",
+    "update-cta.js mounts on document.body, not a chrome anchor",
   );
-  // When an update becomes available, the rail must badge/pulse so the user
-  // notices (AS-1.5).
+  const css = readFileSync(resolve(here, "../styles/components.css"), "utf8");
   assert.match(
-    updateCtaSource,
-    /op:update-available/,
-    "update-cta.js must signal update availability so the rail can badge",
+    css,
+    /\.update-cta-shell\s*\{[^}]*position:\s*fixed/,
+    ".update-cta-shell must float fixed bottom-right",
   );
 });
 
@@ -3120,36 +3117,31 @@ test("Rail item buttons reset UA chrome so Windows WebView2 stops drawing defaul
 
 // --- SPEC-2359 Work Unification (US-49): Workspace → Work/Works labels ---
 
-test("SC-207: user-facing UI labels must not contain 'Workspace'", () => {
+// SPEC-2359 W-15 (FR-392) supersedes the former SC-207 blanket "no Workspace
+// labels" rule (US-49): the W-13 three-layer model names the place "Workspace"
+// (Workspace = place / Work = launch / Session = conversation), so surface
+// entry points say "Workspace" while launch-level rows keep "Work".
+test("FR-392: surface entry points are labelled 'Workspace' (3-layer model)", () => {
   const railLabel = document.querySelector(
     "#op-workspace-overview-entry .op-rail__flyout-label",
   );
-  assert.ok(railLabel, "expected rail Work entry to exist");
-  assert.equal(railLabel.textContent.trim(), "Work");
-  assert.doesNotMatch(railLabel.textContent, /Workspace/i);
+  assert.ok(railLabel, "expected rail Workspace entry to exist");
+  assert.equal(railLabel.textContent.trim(), "Workspace");
 
   const sidebarAria = document.querySelector("#op-workspace-overview-entry");
-  assert.doesNotMatch(sidebarAria.getAttribute("aria-label") ?? "", /workspace/i);
+  assert.equal(sidebarAria.getAttribute("aria-label"), "Workspace");
 
-  const presetSections = document.querySelectorAll(".preset-section-label");
-  for (const presetSection of presetSections) {
-    if (/workspace/i.test(presetSection.textContent)) {
-      assert.fail("preset section label must not contain 'Workspace'");
-    }
+  const paletteEntry = Array.from(document.querySelectorAll(".preset-button strong"))
+    .find((btn) => /^Work(space)?$/.test(btn.textContent.trim()));
+  if (paletteEntry) {
+    assert.equal(paletteEntry.textContent.trim(), "Workspace",
+      "palette surface entry must say 'Workspace'");
   }
 
-  const presetButtons = document.querySelectorAll(".preset-button strong");
-  for (const btn of presetButtons) {
-    assert.doesNotMatch(btn.textContent, /^Workspace$/i,
-      `preset button "${btn.textContent}" must not say 'Workspace'`);
-  }
-
-  const allAriaLabels = Array.from(document.querySelectorAll("[aria-label]"))
-    .map((el) => el.getAttribute("aria-label") ?? "");
-  for (const label of allAriaLabels) {
-    assert.doesNotMatch(label, /Workspace/i,
-      `aria-label "${label}" must not contain 'Workspace'`);
-  }
+  const hotkeyRows = Array.from(document.querySelectorAll(".op-hotkey-card__row span"))
+    .map((el) => el.textContent.trim());
+  assert.ok(!hotkeyRows.includes("Work surface"),
+    "hotkey card must name the surface 'Workspace surface', not 'Work surface'");
 });
 
 function cssBlockContaining(css, selector) {
@@ -4563,4 +4555,25 @@ test("branch_entries telemetry uses the guarded helper without the retired git l
     /window\.__operatorShell\?\.applyTelemetryCounts/,
     "branch telemetry must not call applyTelemetryCounts directly",
   );
+});
+
+// Layout regression (2026-06-10 user verification): app.css carried a stale
+// `.workspace-overview-shell { display: flex }` block that overrode the
+// canonical grid layout in components.css. Under flex, long Workspace rows
+// grow the list pane and crush the detail pane into a vertical sliver. The
+// shell's display is owned by components.css (grid) alone.
+test("app.css must not redeclare display for the Workspace overview shell", () => {
+  const appCss = readFileSync(resolve(here, "../styles/app.css"), "utf8");
+  const blocks = appCss.match(/\.workspace-overview-shell[^{]*\{[^}]*\}/g) ?? [];
+  for (const block of blocks) {
+    if (/\[hidden\]/.test(block)) continue;
+    assert.doesNotMatch(
+      block,
+      /display\s*:\s*(?!none)/,
+      `app.css must not override the overview shell display (grid lives in components.css): ${block}`,
+    );
+  }
+  const componentsCss = readFileSync(resolve(here, "../styles/components.css"), "utf8");
+  const shellBlock = componentsCss.match(/\.workspace-overview-shell\s*\{[^}]*\}/)?.[0] ?? "";
+  assert.match(shellBlock, /display\s*:\s*grid/, "components.css owns the grid layout");
 });

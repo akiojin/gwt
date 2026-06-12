@@ -12,6 +12,7 @@ export function createWorkspaceKanbanSurface({
   openWorkspaceResumePicker,
   getResumeBounds,
   branchesSurface,
+  launchPending,
 }) {
   const workspaceStateMap = new Map();
 
@@ -154,6 +155,13 @@ export function createWorkspaceKanbanSurface({
         : Array.isArray(fallback.agents)
           ? fallback.agents
           : [],
+      // SPEC-2359 W-15 (FR-386): merged into a base on origin (or PR merged)
+      // — the "safe to delete" signal. Display-only.
+      merged_into_base: Boolean(item?.merged_into_base),
+      // SPEC-2359 W-16 (FR-402): uncapped agent/session count for the
+      // "+N more sessions" label; 0 = not computed (legacy payloads).
+      session_agent_total:
+        Number(item?.session_agent_total) || Number(fallback.session_agent_total) || 0,
       events: Array.isArray(item?.events) ? item.events : [],
       cleanup_candidate: item?.cleanup_candidate || fallback.cleanup_candidate || null,
       updated_at: compactText(item?.updated_at || fallback.updated_at),
@@ -216,6 +224,38 @@ export function createWorkspaceKanbanSurface({
     appendMeta(container, value);
   }
 
+  // Design pass (2026-06-11): branch names render as a dimmed namespace
+  // prefix + strong leaf ("work/" + "20260610-0120-4") so long branch lists
+  // scan by leaf. textContent stays the verbatim branch.
+  function appendBranchLabel(container, value) {
+    const branch = String(value || "");
+    const cut = branch.lastIndexOf("/");
+    if (cut > 0 && cut < branch.length - 1) {
+      container.appendChild(
+        createNode("span", "workspace-branch-prefix", branch.slice(0, cut + 1)),
+      );
+      container.appendChild(
+        createNode("span", "workspace-branch-leaf", branch.slice(cut + 1)),
+      );
+    } else {
+      container.appendChild(createNode("span", "workspace-branch-leaf", branch));
+    }
+  }
+
+  // Map an agent name onto the established [data-agent-color] identity system
+  // (SPEC-2133) so Work groups inherit --current-agent from existing CSS.
+  function agentColorKeyword(work) {
+    const name = String(
+      (work && (work.display_name || work.agent_id)) || "",
+    ).toLowerCase();
+    if (name.includes("claude")) return "yellow";
+    if (name.includes("codex")) return "cyan";
+    if (name.includes("gemini")) return "magenta";
+    if (name.includes("opencode")) return "green";
+    if (name.includes("copilot")) return "blue";
+    return "gray";
+  }
+
   function renderWorkspaceRow(windowId, state, item) {
     const row = createNode("button", "workspace-overview-row");
     row.type = "button";
@@ -226,7 +266,13 @@ export function createWorkspaceKanbanSurface({
     const status = createNode("span", "workspace-overview-status", statusLabel(item.status_category));
     const copy = createNode("span", "workspace-overview-row-copy");
     const titleRow = createNode("span", "workspace-overview-row-title-row");
-    titleRow.appendChild(createNode("span", "workspace-overview-row-title", item.title));
+    // SPEC-2359 W-15 (user design decision 2026-06-10): the Workspace list is
+    // a branch list — the row is titled by the branch (the place); the
+    // record's own title (work summary) moves to the meta line below.
+    const rowTitle = item.branch || item.title;
+    const titleNode = createNode("span", "workspace-overview-row-title");
+    appendBranchLabel(titleNode, rowTitle);
+    titleRow.appendChild(titleNode);
     // SPEC-2359 Phase W-12 (FR-351): each Work card surfaces its agent-session
     // lifecycle state (Active / Paused / Done / Discarded) as a dedicated badge
     // so the Work surface is the single home for Work lifecycle.
@@ -237,10 +283,24 @@ export function createWorkspaceKanbanSurface({
     );
     lifecycleBadge.dataset.lifecycle = String(item.lifecycle_state || "active").toLowerCase();
     titleRow.appendChild(lifecycleBadge);
+    if (item.merged_into_base) {
+      // SPEC-2359 W-15 (FR-386): branch merged into a base — safe to delete.
+      titleRow.appendChild(createNode("span", "workspace-overview-merged", "Merged"));
+    }
+    const rowRelative = formatRelativeTime(item.updated_at);
+    if (rowRelative) {
+      const time = createNode("span", "workspace-overview-row-time", rowRelative);
+      time.title = String(item.updated_at);
+      titleRow.appendChild(time);
+    }
     copy.appendChild(titleRow);
     const meta = createNode("span", "workspace-overview-row-meta");
     appendMetaText(meta, item.owner);
-    appendMetaText(meta, item.branch);
+    // The record title adds information only when it differs from the branch
+    // shown as the row title (backfilled rows are titled by branch already).
+    if (item.title && item.title !== rowTitle) {
+      appendMetaText(meta, item.title);
+    }
     const prMeta = createWorkspacePrMeta?.(item);
     if (prMeta) {
       meta.appendChild(prMeta);
@@ -252,8 +312,19 @@ export function createWorkspaceKanbanSurface({
     row.addEventListener("click", () => {
       state.selectedId = item.id;
       renderWorkspaceOverviewWindow(windowId, true);
+      // The re-render replaced this row, dropping focus to <body> — restore
+      // it onto the freshly rendered selected row so ArrowUp / ArrowDown
+      // keyboard navigation keeps working after a mouse selection.
+      focusSelectedWorkspaceRow(windowId);
     });
     return row;
+  }
+
+  function focusSelectedWorkspaceRow(windowId) {
+    const host = windowMap.get(windowId);
+    const row = host?.querySelector?.('.workspace-overview-row[aria-selected="true"]');
+    row?.focus?.();
+    row?.scrollIntoView?.({ block: "nearest" });
   }
 
   function renderUnassignedQueue(container, agents) {
@@ -323,15 +394,43 @@ export function createWorkspaceKanbanSurface({
   // heading only appears when the Workspace has more than one Work. Persistent
   // Works always render (no live-only filtering), so Paused Workspaces are not
   // mislabelled "No assigned agents".
-  function appendWorks(container, works) {
+  // SPEC-2359 W-15 (FR-379 follow-up): Launch opens the launch wizard
+  // prefilled with the Workspace's branch; the new launch becomes a new Work
+  // joining this Workspace. Lives in the detail header actions as the primary
+  // action — one fixed home, never after the variable-length Work list
+  // (placement feedback, user verification 2026-06-11).
+  function renderLaunchWorkspaceButton(workspace, windowId) {
+    const branch = workspace && workspace.branch ? String(workspace.branch) : "";
+    if (!branch) return null;
+    // Same entry as the Branches surface "Launch Agent": opens the launch
+    // wizard for this Workspace's existing branch (user wording 2026-06-11).
+    const launch = createNode("button", "wizard-button primary", "Launch Agent");
+    launch.type = "button";
+    launch.dataset.action = "launch-workspace";
+    launch.addEventListener("click", () => {
+      send({
+        kind: "open_launch_wizard",
+        id: windowId,
+        branch_name: branch,
+      });
+    });
+    return launch;
+  }
+
+  function appendWorks(container, works, workspace) {
     const list = Array.isArray(works) ? works : [];
     if (list.length === 0) {
-      container.appendChild(createNode("div", "workspace-overview-empty", "No Work yet"));
+      // Launching lives in the detail header (one canonical home), so the
+      // empty state is a plain placeholder.
+      container.appendChild(
+        createNode("div", "workspace-overview-empty", "No Work yet"),
+      );
       return;
     }
     const wrap = createNode("div", "workspace-detail-work-list");
     for (const work of list) {
       const group = createNode("div", "workspace-detail-work-group");
+      group.dataset.agentColor = agentColorKeyword(work);
       // Each Work is one Agent (a launch). The Agent header names the agent
       // (tool); the Work's Sessions (its conversation history) are listed under
       // it as sub-rows, and Resume lives on each Session row (a single list
@@ -362,14 +461,18 @@ export function createWorkspaceKanbanSurface({
         }
         group.appendChild(empty);
       } else {
-        for (const session of sessions) {
-          group.appendChild(renderSessionRow(work, session));
-        }
-        // E1: when every Session is history-only (none resumable) on a
-        // non-running Work, no per-Session Resume appears anywhere — offer a
-        // "Start Fresh" control so the Work stays launchable. Distinct label so
-        // the user knows it starts a new conversation, not a resumed one.
-        const startFresh = renderStartFreshButton(work, sessions);
+        // User decision 2026-06-12: multiple Session rows per agent read as
+        // noise — render only the latest conversation (the active one, or the
+        // newest by order; the backend sorts oldest-first).
+        const latest =
+          sessions.find((session) => session && session.is_active) ||
+          sessions[sessions.length - 1];
+        group.appendChild(renderSessionRow(work, latest));
+        // E1: when the visible Session is history-only (not resumable) on a
+        // non-running Work, no Resume appears — offer a "Start Fresh" control
+        // so the Work stays launchable. Distinct label so the user knows it
+        // starts a new conversation, not a resumed one.
+        const startFresh = renderStartFreshButton(work, [latest]);
         if (startFresh) {
           group.appendChild(startFresh);
         }
@@ -377,6 +480,19 @@ export function createWorkspaceKanbanSurface({
       wrap.appendChild(group);
     }
     container.appendChild(wrap);
+    // SPEC-2359 W-16 (FR-402): the agents list is capped on the wire; surface
+    // how many more ledger sessions exist beyond the rendered ones.
+    // `session_agent_total === 0` means "not computed" (legacy payload).
+    const total = Number(workspace && workspace.session_agent_total) || 0;
+    if (total > list.length) {
+      container.appendChild(
+        createNode(
+          "div",
+          "workspace-detail-more-sessions workspace-overview-empty",
+          `+${total - list.length} more sessions`,
+        ),
+      );
+    }
   }
 
   function renderWorkResumeButton(work) {
@@ -394,8 +510,31 @@ export function createWorkspaceKanbanSurface({
     button.type = "button";
     button.dataset.action = "resume-work";
     button.dataset.sessionId = work.session_id;
+    if (isWorkResumePending(work.session_id)) {
+      markResumeButtonPending(button);
+    }
     button.addEventListener("click", () => resumeWork(work));
     return button;
+  }
+
+  // SPEC-2359 W-17 (FR-398): pending key shared with the Resume picker and
+  // the dispatcher's ack/error settle path.
+  function workPendingKey(sessionId) {
+    return `session:${sessionId}`;
+  }
+
+  function isWorkResumePending(sessionId) {
+    return Boolean(
+      sessionId
+        && launchPending
+        && launchPending.isPending(workPendingKey(sessionId)),
+    );
+  }
+
+  function markResumeButtonPending(button) {
+    button.disabled = true;
+    button.textContent = "Resuming...";
+    button.classList.add("is-pending");
   }
 
   function resumeWork(work) {
@@ -407,10 +546,17 @@ export function createWorkspaceKanbanSurface({
     if (!bounds) {
       return;
     }
+    if (
+      launchPending
+      && !launchPending.begin(workPendingKey(sessionId), "Resume")
+    ) {
+      return;
+    }
     // resume_workspace_agent resumes by the gwt session id (the Work / launch),
     // which is exactly work.session_id. Without an agent_session_id the Work's
     // latest conversation (or a fresh start) is resumed.
     send({ kind: "resume_workspace_agent", session_id: sessionId, bounds });
+    renderWindows();
   }
 
   function renderSessionResumeButton(work, session) {
@@ -441,6 +587,9 @@ export function createWorkspaceKanbanSurface({
     } else {
       button.setAttribute("aria-label", "Resume this conversation");
     }
+    if (isWorkResumePending(work.session_id)) {
+      markResumeButtonPending(button);
+    }
     button.addEventListener("click", () => resumeSession(work, session));
     return button;
   }
@@ -468,6 +617,9 @@ export function createWorkspaceKanbanSurface({
     button.dataset.action = "resume-work";
     button.dataset.sessionId = work.session_id;
     button.setAttribute("aria-label", "Start a fresh conversation for this Work");
+    if (isWorkResumePending(work.session_id)) {
+      markResumeButtonPending(button);
+    }
     button.addEventListener("click", () => resumeWork(work));
     wrap.appendChild(button);
     return wrap;
@@ -485,6 +637,12 @@ export function createWorkspaceKanbanSurface({
     // resume_workspace_agent loads the launch config from the gwt session id
     // (the Work) and resumes the specific conversation named by
     // agent_session_id (this Session row).
+    if (
+      launchPending
+      && !launchPending.begin(workPendingKey(sessionId), "Resume")
+    ) {
+      return;
+    }
     const agentSessionId = session && session.agent_session_id ? session.agent_session_id : null;
     send({
       kind: "resume_workspace_agent",
@@ -492,6 +650,7 @@ export function createWorkspaceKanbanSurface({
       agent_session_id: agentSessionId,
       bounds,
     });
+    renderWindows();
   }
 
   function shortSessionId(value) {
@@ -653,7 +812,7 @@ export function createWorkspaceKanbanSurface({
     });
   }
 
-  function renderWorkspaceDetail(container, workspace) {
+  function renderWorkspaceDetail(container, workspace, windowId) {
     container.innerHTML = "";
     if (!workspace) {
       const empty = createNode("div", "workspace-overview-empty", "No Workspace selected");
@@ -663,8 +822,20 @@ export function createWorkspaceKanbanSurface({
 
     const header = createNode("header", "workspace-detail-header");
     const titleWrap = createNode("div", "workspace-detail-heading");
-    titleWrap.appendChild(createNode("h2", "workspace-detail-title", workspace.title));
+    // SPEC-2359 W-15 (user design decision 2026-06-10): the detail heading is
+    // the branch (the place); the record's title joins the subtitle line.
+    const detailTitle = workspace.branch || workspace.title;
+    titleWrap.classList.add("has-brackets");
+    const detailTitleNode = createNode("h2", "workspace-detail-title");
+    appendBranchLabel(detailTitleNode, detailTitle);
+    titleWrap.appendChild(detailTitleNode);
     const subtitle = createNode("div", "workspace-detail-subtitle");
+    if (workspace.title && workspace.title !== detailTitle) {
+      appendMetaText(subtitle, workspace.title);
+    }
+    if (workspace.merged_into_base) {
+      appendMetaText(subtitle, "Merged — safe to delete");
+    }
     appendMetaText(subtitle, statusLabel(workspace.status_category));
     appendMetaText(subtitle, workspace.owner);
     appendMetaText(subtitle, formatLifecycleStageLabel(workspace.lifecycle_stage));
@@ -673,9 +844,14 @@ export function createWorkspaceKanbanSurface({
 
     const actions = createNode("div", "workspace-detail-actions");
     // SPEC-2359: Resume is a per-Work (launch) operation, so the Resume control
-    // lives on each Work row (see appendWorks / renderWorkResumeButton), not on
-    // the Workspace header. The Workspace header keeps only Workspace-level
-    // lifecycle actions (Done / Discard / Clean Up).
+    // lives on each Work row (see appendWorks / renderWorkResumeButton). The
+    // Workspace header carries Launch Agent (the primary Workspace action —
+    // a new Work joining this Workspace) plus the lifecycle closes
+    // (Done / Discard / Clean Up).
+    const launchAction = renderLaunchWorkspaceButton(workspace, windowId);
+    if (launchAction) {
+      actions.appendChild(launchAction);
+    }
     // SPEC-2359 Phase W-12 (FR-351): the Work surface owns Work lifecycle
     // closing. Done / Discard are explicit user closes (FR-350 — agent stop
     // alone never closes a Work). The actual cleanup is a follow-up slice, so
@@ -698,7 +874,22 @@ export function createWorkspaceKanbanSurface({
       );
       actions.appendChild(discardButton);
     }
-    if (workspace.cleanup_candidate) {
+    // "Safe to delete" comes with the actual delete action (user
+    // verification 2026-06-12): a merged row offers Clean Up for its own
+    // branch; the projection-level cleanup candidate keeps the legacy
+    // no-argument path.
+    if (workspace.merged_into_base && workspace.branch) {
+      const cleanupButton = createNode("button", "wizard-button", "Clean Up");
+      cleanupButton.type = "button";
+      cleanupButton.dataset.action = "cleanup-merged-workspace";
+      cleanupButton.addEventListener("click", () =>
+        openWorkspaceCleanup?.({
+          branch: workspace.branch,
+          remote_delete_available: true,
+        }),
+      );
+      actions.appendChild(cleanupButton);
+    } else if (workspace.cleanup_candidate) {
       const cleanupButton = createNode("button", "wizard-button", "Clean Up");
       cleanupButton.type = "button";
       cleanupButton.addEventListener("click", () => openWorkspaceCleanup?.());
@@ -719,7 +910,7 @@ export function createWorkspaceKanbanSurface({
     );
     container.appendChild(
       detailSection("Work", (body) => {
-        appendWorks(body, workspace.agents);
+        appendWorks(body, workspace.agents, workspace);
       }),
     );
     container.appendChild(
@@ -798,7 +989,7 @@ export function createWorkspaceKanbanSurface({
     queue.innerHTML = "";
     renderUnassignedQueue(queue, unassignedAgents);
 
-    renderWorkspaceDetail(root.querySelector(".workspace-overview-detail-pane"), selected);
+    renderWorkspaceDetail(root.querySelector(".workspace-overview-detail-pane"), selected, windowId);
   }
 
   function mountWorkSurface(parent) {
@@ -855,6 +1046,35 @@ export function createWorkspaceKanbanSurface({
       event.stopPropagation();
       renderWorkspaceOverviewWindow(windowData.id, true);
     });
+
+    // Keyboard navigation: ArrowUp / ArrowDown move the Workspace selection
+    // (user request 2026-06-11). Delegated from the mount root so the
+    // listener survives row re-renders; the existing row click path handles
+    // selection + re-render, then focus returns to the selected row so the
+    // user can keep navigating.
+    parent.addEventListener("keydown", (event) => {
+      if (event.key !== "ArrowDown" && event.key !== "ArrowUp") return;
+      const list = parent.querySelector(".workspace-overview-list");
+      if (!list) return;
+      const rows = Array.from(
+        list.querySelectorAll(".workspace-overview-row[data-workspace-id]"),
+      );
+      if (rows.length === 0) return;
+      event.preventDefault?.();
+      const current = rows.findIndex(
+        (row) => row.getAttribute("aria-selected") === "true",
+      );
+      const delta = event.key === "ArrowDown" ? 1 : -1;
+      const targetIndex = Math.min(
+        rows.length - 1,
+        Math.max(0, current === -1 ? 0 : current + delta),
+      );
+      const target = rows[targetIndex];
+      if (!target || target.getAttribute("aria-selected") === "true") return;
+      target.click();
+      focusSelectedWorkspaceRow(windowData.id);
+    });
+
     renderWorkspaceOverviewWindow(windowData.id);
   }
 

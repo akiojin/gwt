@@ -1099,6 +1099,25 @@ pub struct ActiveWorkItemView {
     /// close (Done / Discarded). None while the Work is active / paused.
     #[serde(default)]
     pub closed_at: Option<String>,
+    /// SPEC-2359 Phase W-16 (FR-402): total agents known for this Workspace
+    /// (record agents plus machine-local ledger sessions for its branch). The
+    /// `agents` list is capped on the wire, so the frontend renders
+    /// "+N more sessions" from this count. `0` means "not computed" (legacy
+    /// payloads) and must not render a label.
+    #[serde(default)]
+    pub session_agent_total: u32,
+    /// SPEC-2359 Phase W-16 (FR-403): RFC3339 timestamp of the Workspace's
+    /// last update (record `updated_at`). The list sorts by
+    /// `max(updated_at, agents[].updated_at)` descending so the most recently
+    /// touched branch is on top. Empty string for legacy payloads.
+    #[serde(default)]
+    pub updated_at: String,
+    /// SPEC-2359 Phase W-15 (FR-386): true when the Workspace's branch is
+    /// fully merged into a canonical base on origin (background scan via
+    /// `git cherry`) or its PR state is merged — i.e. the worktree/branch is
+    /// safe to delete. Display-only; no automatic close (US-61).
+    #[serde(default)]
+    pub merged_into_base: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -1446,6 +1465,15 @@ pub enum BackendEvent {
     WorkspaceResumeAgentError {
         session_id: String,
         message: String,
+    },
+    /// SPEC-2359 W-17 (FR-398): client-scoped ack that a Resume request was
+    /// accepted — a window spawn is underway or an existing live window was
+    /// focused. Lets the frontend settle its pending Resume UI
+    /// deterministically instead of guessing from broadcasts.
+    WorkspaceResumeAgentStarted {
+        session_id: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        branch: Option<String>,
     },
     LaunchProgress {
         id: String,
@@ -1995,6 +2023,13 @@ pub const BACKEND_EVENT_POLICIES: &[BackendEventPolicy] = &[
         BackendEventDeliveryClass::Error,
         BackendEventBackpressurePolicy::FailOpenError,
     ),
+    // SPEC-2359 W-17 (FR-398): Resume started ack — one-shot, client-scoped,
+    // always-deliver (same transport guarantee as errors).
+    BackendEventPolicy::new(
+        "workspace_resume_agent_started",
+        BackendEventDeliveryClass::Error,
+        BackendEventBackpressurePolicy::FailOpenError,
+    ),
     BackendEventPolicy::new(
         "launch_progress",
         BackendEventDeliveryClass::Streamed,
@@ -2225,6 +2260,7 @@ impl BackendEvent {
             BackendEvent::LaunchWizardState { .. } => "launch_wizard_state",
             BackendEvent::WorkspaceResumableAgents { .. } => "workspace_resumable_agents",
             BackendEvent::WorkspaceResumeAgentError { .. } => "workspace_resume_agent_error",
+            BackendEvent::WorkspaceResumeAgentStarted { .. } => "workspace_resume_agent_started",
             BackendEvent::LaunchProgress { .. } => "launch_progress",
             BackendEvent::ProjectIndexStatus { .. } => "project_index_status",
             BackendEvent::RuntimeHookEvent { .. } => "runtime_hook_event",
@@ -2554,6 +2590,20 @@ mod tests {
         );
     }
 
+    // SPEC-2359 W-17 (FR-398): the Resume started ack must be registered in
+    // BACKEND_EVENT_POLICIES with an always-deliver class so the transport
+    // can never drop it under queue pressure.
+    #[test]
+    fn workspace_resume_agent_started_policy_guarantees_delivery() {
+        let policy = backend_event_policy("workspace_resume_agent_started")
+            .expect("workspace_resume_agent_started registered in BACKEND_EVENT_POLICIES");
+        assert_eq!(policy.delivery, BackendEventDeliveryClass::Error);
+        assert_eq!(
+            policy.backpressure,
+            BackendEventBackpressurePolicy::FailOpenError
+        );
+    }
+
     #[test]
     fn backend_event_policy_classifies_high_risk_delivery_contract() {
         let terminal_output =
@@ -2707,6 +2757,9 @@ mod tests {
                     agents: Vec::new(),
                     lifecycle_state: "active".to_string(),
                     closed_at: None,
+                    session_agent_total: 0,
+                    merged_into_base: false,
+                    updated_at: "2026-01-01T00:00:00Z".to_string(),
                 }],
                 agents: vec![super::ActiveWorkAgentView {
                     session_id: "session-1".to_string(),

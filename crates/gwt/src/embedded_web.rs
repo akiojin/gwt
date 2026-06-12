@@ -136,6 +136,12 @@ root_js_modules! {
     "console-window.js" => "createConsoleWindow",
     // SPEC-2014 2026-05-29 amendment — Launch Agent setting controls.
     "launch-controls.js" => "buildReasoningField",
+    // SPEC-2359 W-17 (FR-398) — shared pending state for Resume/Launch
+    // requests (double-click guard + deterministic settle on backend ack).
+    "launch-pending-controller.js" => "createLaunchPendingController",
+    // SPEC-2359 W-17 (FR-399) — full-screen Reconnecting overlay while the
+    // WebSocket bridge is down.
+    "connection-overlay.js" => "createConnectionOverlay",
     // SPEC-3015 — generated protocol enum contract (wire values serde-derived
     // from the Rust enums; see crates/gwt/src/web_protocol_enums.rs).
     "protocol-enums.js" => "WINDOW_RUNTIME_STATES",

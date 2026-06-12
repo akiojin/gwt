@@ -4,9 +4,10 @@
  * hover-reveal state machine (peek 帯 + data-op-sidebar) is retired. This
  * suite asserts the rail-era operator-shell behavior:
  *   - init never sets reveal dataset attributes
- *   - `op:update-available` badges the rail via data-op-rail-update
  *   - the one-shot legacy localStorage migration stays
  *   - rail [data-cmd] items dispatch op:command
+ * (The rail update badge was retired with the Update CTA returning to its
+ * fixed bottom-right home — user verification 2026-06-12.)
  */
 
 import { test } from "node:test";
@@ -31,36 +32,6 @@ test("rail: 起動時に reveal 系 dataset 属性を一切設定しない", asy
       "peek 帯 must not exist in the rail era",
     );
     assert.ok(fixture.document.getElementById("op-rail"), "expected #op-rail");
-  } finally {
-    fixture.dispose();
-  }
-});
-
-test("rail update badge: op:update-available で data-op-rail-update が付き、dismiss で消える", async () => {
-  // SPEC-3038 AS-1.5: the Update CTA mounts inside the always-visible rail, so
-  // there is nothing to peek — the shell badges the rail (pulse handled in CSS)
-  // until the update is applied or dismissed.
-  const fixture = await mountFixture();
-  try {
-    fixture.init();
-    fixture.document.dispatchEvent(new fixture.window.CustomEvent("op:update-available"));
-    assert.equal(
-      fixture.document.documentElement.dataset.opRailUpdate,
-      "available",
-      "update availability must badge the rail",
-    );
-    assert.equal(
-      fixture.document.documentElement.dataset.opSidebar,
-      undefined,
-      "no reveal state may be involved — the rail is already visible",
-    );
-
-    fixture.document.dispatchEvent(new fixture.window.CustomEvent("op:update-dismissed"));
-    assert.equal(
-      fixture.document.documentElement.dataset.opRailUpdate,
-      undefined,
-      "dismissing the update clears the rail badge",
-    );
   } finally {
     fixture.dispose();
   }

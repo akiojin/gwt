@@ -28,6 +28,8 @@
       } from "/board-surface.js";
       import { createWorkspaceKanbanSurface as createWorkspaceOverviewSurface } from "/workspace-kanban-surface.js";
       import { createWorkspaceResumePickerController } from "/workspace-resume-picker-modal.js";
+      import { createLaunchPendingController } from "/launch-pending-controller.js";
+      import { createConnectionOverlay } from "/connection-overlay.js";
       import { createUpdateCtaController } from "/update-cta.js";
       import { createReleaseNotesWindow } from "/release-notes-window.js";
       import { createConsoleWindow } from "/console-window.js";
@@ -1655,10 +1657,17 @@
         openReleaseNotes: (version) => releaseNotesWindow.open(version || null),
       });
 
+      // SPEC-2359 W-17 (FR-399): explicit full-screen overlay while the
+      // WebSocket bridge is down — a tiny status-strip label alone reads as
+      // a frozen app when every click needs the socket.
+      const connectionOverlay = createConnectionOverlay({ document });
+
       function setConnectionState(connected) {
-        // SPEC-3038 US-4: the Status Strip is the single home for connection
-        // state (the permanent canvas hint bar is retired). The class is set
-        // on the strip element and consumed via CSS.
+        connectionOverlay.setConnected(connected);
+        // SPEC-3038 US-4: the Status Strip (plus the SPEC-2359 W-17 full-
+        // screen overlay above) is the home for connection state — the
+        // permanent canvas hint bar is retired. The class is set on the strip
+        // element and consumed via CSS.
         const strip = document.getElementById("op-status-strip");
         const connectionStatusLabel = strip?.querySelector(
           "[data-role='connection-label']",
@@ -2945,8 +2954,11 @@
         };
       }
 
-      function openWorkspaceCleanup() {
-        const candidate = activeWorkProjection?.cleanup_candidate;
+      function openWorkspaceCleanup(candidateOverride) {
+        // The Workspace detail passes the selected row (e.g. a merged
+        // branch, user verification 2026-06-12); without an override the
+        // projection-level cleanup candidate is used.
+        const candidate = candidateOverride || activeWorkProjection?.cleanup_candidate;
         if (!candidate?.branch) return;
         const state = ensureBranchListState(WORKSPACE_CLEANUP_WINDOW_ID);
         state.entries = [workspaceCleanupEntry(candidate)];
@@ -7471,12 +7483,35 @@
       // resumable agents; the response opens this modal so the user can
       // pick which previously-assigned agent to restart in-place
       // (without going through the Launch Wizard).
+      // SPEC-2359 W-17 (FR-398): shared pending state for Resume/Launch
+      // requests. Settled by the dispatcher on workspace_resume_agent_started
+      // / *_error; the timeout re-enables the UI when no reply ever arrives.
+      const launchPending = createLaunchPendingController({
+        onChange: () => {
+          try {
+            workspaceOverviewSurface.renderWindows();
+          } catch {
+            // Surface may not be mounted yet during bootstrap.
+          }
+          try {
+            workspaceResumePicker.render();
+          } catch {
+            // Picker may not be mounted yet during bootstrap.
+          }
+          const notice = launchPending.consumeTimeoutNotice();
+          if (notice) {
+            console.warn("[launch-pending]", notice);
+          }
+        },
+      });
+
       const workspaceResumePicker = createWorkspaceResumePickerController({
         modalEl: document.getElementById("workspace-resume-picker-modal"),
         dialogEl: document.querySelector("#workspace-resume-picker-modal .modal-shell"),
         createNode,
         send,
         getResumeBounds: () => visibleBounds(),
+        launchPending,
       });
 
       const workspaceOverviewSurface = createWorkspaceOverviewSurface({
@@ -7492,6 +7527,7 @@
         workspaceWindowById,
         openWorkspaceResumePicker: (workspaceId) => workspaceResumePicker.open(workspaceId),
         getResumeBounds: () => visibleBounds(),
+        launchPending,
         branchesSurface: {
           ensureBranchListState: (...a) => ensureBranchListState(...a),
           requestBranches: (...a) => requestBranches(...a),
@@ -10327,6 +10363,11 @@
         };
         const resume = () => {
           select();
+          // SPEC-2359 W-17 (FR-398): guard double-clicks while the backend
+          // materializes the resume; settled by the started ack / branch_error.
+          if (!launchPending.begin(`branch:${branchName}`, "Resume")) {
+            return;
+          }
           send({
             kind: "resume_branch_latest_agent",
             id: windowId,
@@ -12672,6 +12713,63 @@
         });
       }
 
+      function composeTeamsDefaultChannel(teamId, channelId) {
+        const team = String(teamId || "").trim();
+        const channel = String(channelId || "").trim();
+        if (!team && !channel) return "";
+        if (!team) return channel;
+        if (!channel) return team;
+        return `${team}/${channel}`;
+      }
+
+      function parseTeamsDefaultChannel(value) {
+        const raw = String(value || "").trim();
+        if (!raw) return { teamId: "", channelId: "" };
+        const slash = raw.indexOf("/");
+        if (slash === -1) return { teamId: "", channelId: raw };
+        return {
+          teamId: raw.slice(0, slash).trim(),
+          channelId: raw.slice(slash + 1).trim(),
+        };
+      }
+
+      function formatTeamsChannelLink(defaultChannel, tenantId) {
+        const { teamId, channelId } = parseTeamsDefaultChannel(defaultChannel);
+        if (!teamId || !channelId) return "";
+        const tenant = String(tenantId || "").trim();
+        const params = new URLSearchParams({ groupId: teamId });
+        if (tenant) params.set("tenantId", tenant);
+        return `https://teams.microsoft.com/l/channel/${encodeURIComponent(channelId)}/configured-channel?${params.toString()}`;
+      }
+
+      function parseTeamsChannelLink(value) {
+        const raw = String(value || "").trim();
+        if (!raw) return null;
+        let url;
+        try {
+          url = new URL(raw);
+        } catch (_) {
+          return null;
+        }
+        const teamId = (url.searchParams.get("groupId") || "").trim();
+        const segments = url.pathname.split("/").filter(Boolean);
+        const channelIndex = segments.findIndex(
+          (segment) => segment.toLowerCase() === "channel",
+        );
+        const encodedChannel =
+          channelIndex >= 0 ? segments[channelIndex + 1] || "" : "";
+        let channelId = encodedChannel.trim();
+        if (channelId) {
+          try {
+            channelId = decodeURIComponent(channelId);
+          } catch (_) {
+            // Keep the raw segment; it is still a better hint than clearing it.
+          }
+        }
+        if (!teamId && !channelId) return null;
+        return { teamId, channelId };
+      }
+
       function renderSystemPanel(panel) {
         while (panel.firstChild) panel.removeChild(panel.firstChild);
 
@@ -12829,6 +12927,7 @@
           let clientIdInput;
           let defaultChannelInput;
           let tenantIdInput;
+          let teamsChannelLinkInput;
           let secretInput;
           if (selectedProvider === "slack") {
             clientIdInput = makeField(
@@ -12880,12 +12979,23 @@
               cfg.teamsTenantId,
               { placeholder: "tenant id / common / organizations" },
             );
-            defaultChannelInput = makeField(
-              "settings-board-teams-channel",
-              "Default channel",
-              cfg.teamsDefaultChannel,
-              { placeholder: "team_id/channel_id" },
+            teamsChannelLinkInput = makeField(
+              "settings-board-teams-channel-link",
+              "Teams channel link",
+              formatTeamsChannelLink(
+                cfg.teamsDefaultChannel,
+                cfg.teamsTenantId,
+              ),
+              { placeholder: "https://teams.microsoft.com/l/channel/..." },
             );
+            const teamsChannelHelp = createNode(
+              "p",
+              "settings-help",
+              cfg.teamsDefaultChannel
+                ? "Saved channel link is shown here. Paste a new channel link to change it."
+                : "Paste the link from Teams > Get link to channel. gwt extracts the team and channel IDs when saving.",
+            );
+            configForm.appendChild(teamsChannelHelp);
           }
 
           const saveBtn = createNode(
@@ -12895,6 +13005,40 @@
           );
           saveBtn.type = "button";
           saveBtn.addEventListener("click", () => {
+            if (selectedProvider === "teams") {
+              const teamsChannelLinkValue = teamsChannelLinkInput
+                ? teamsChannelLinkInput.value.trim()
+                : "";
+              let nextTeamsDefaultChannel = cfg.teamsDefaultChannel || "";
+              if (teamsChannelLinkValue) {
+                const parsedTeamsChannel = parseTeamsChannelLink(
+                  teamsChannelLinkValue,
+                );
+                if (
+                  !parsedTeamsChannel ||
+                  !parsedTeamsChannel.teamId ||
+                  !parsedTeamsChannel.channelId
+                ) {
+                  systemSettingsState.statusMessage =
+                    "Paste a valid Teams channel link with groupId and /channel/...";
+                  systemSettingsState.statusKind = "error";
+                  renderSystemPanelStatus(panel);
+                  return;
+                }
+                nextTeamsDefaultChannel = composeTeamsDefaultChannel(
+                  parsedTeamsChannel.teamId,
+                  parsedTeamsChannel.channelId,
+                );
+              }
+              send({
+                kind: "update_board_provider_config",
+                provider: selectedProvider,
+                client_id: clientIdInput ? clientIdInput.value.trim() : "",
+                default_channel: nextTeamsDefaultChannel,
+                tenant_id: tenantIdInput ? tenantIdInput.value.trim() : "",
+              });
+              return;
+            }
             const payload = {
               kind: "update_board_provider_config",
               provider: selectedProvider,
@@ -12903,9 +13047,6 @@
                 ? defaultChannelInput.value.trim()
                 : "",
             };
-            if (selectedProvider === "teams") {
-              payload.tenant_id = tenantIdInput ? tenantIdInput.value.trim() : "";
-            }
             if (selectedProvider === "slack" && secretInput) {
               // Only send the secret when the user typed one, so an empty box
               // does not clear an already-configured secret.
@@ -14454,6 +14595,9 @@
             break;
           }
           case "branch_error": {
+            // SPEC-2359 W-17 (FR-398): a failed branch resume must re-enable
+            // its pending Resume control immediately (not via timeout).
+            launchPending.settleWhere("branch:");
             const state = frontendUnits.branchesFileTreeSurface.ensureBranchListState(
               event.id,
             );
@@ -14684,7 +14828,14 @@
             workspaceResumePicker.handleAgentsList(event);
             break;
           case "workspace_resume_agent_error":
+            launchPending.settleAck(event);
             workspaceResumePicker.handleError(event);
+            break;
+          // SPEC-2359 W-17 (FR-398): backend ack that the Resume request was
+          // accepted — settle pending UI and dismiss the picker.
+          case "workspace_resume_agent_started":
+            launchPending.settleAck(event);
+            workspaceResumePicker.handleStarted(event);
             break;
           case "launch_wizard_state":
             // Issue #2698 PR 1 (B7) — defer when user is mid-dropdown.

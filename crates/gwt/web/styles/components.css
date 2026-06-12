@@ -234,22 +234,16 @@ body::after {
 
 /* SPEC-2041 — unified update CTA. A single actionable surface replaces the
    earlier split toast + persistent button flow.
-   SPEC-3038: the CTA mounts into the Command Rail System anchor
-   (#update-cta-anchor) and pops out beside the rail as a floating card so
-   the 56px rail stays compact. */
+   User verification 2026-06-12: the SPEC-2356 sidebar placement was hard to
+   notice — the CTA floats fixed bottom-right again. */
 .update-cta-shell {
-  position: absolute;
-  left: calc(100% + 10px);
-  bottom: 0;
-  width: 300px;
-  display: flex;
-  align-items: stretch;
+  position: fixed;
+  bottom: 20px;
+  right: 20px;
+  display: inline-flex;
+  align-items: center;
   gap: var(--space-1);
-  z-index: 45;
-}
-
-.update-cta-shell .update-cta {
-  flex: 1;
+  z-index: 9999;
 }
 
 .update-cta {
@@ -757,43 +751,6 @@ body::after {
   display: none;
 }
 
-/* Update CTA mount point (SPEC-3038 AS-1.5). The CTA shell pops out beside
-   the rail; while an update is available the anchor shows a pulsing marker
-   driven by html[data-op-rail-update="available"]. */
-.op-rail__update-anchor {
-  position: relative;
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  width: 40px;
-}
-
-:root[data-op-rail-update="available"] .op-rail__update-anchor::before {
-  content: "↑";
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  width: 40px;
-  height: 40px;
-  border-radius: var(--radius-md);
-  font-size: var(--type-md);
-  line-height: 1;
-  color: var(--color-state-active);
-  background: color-mix(in oklab, var(--color-state-active) 12%, transparent);
-  animation: op-rail-update-pulse var(--motion-pulse) ease-in-out infinite;
-  pointer-events: none;
-}
-
-@keyframes op-rail-update-pulse {
-  0%, 100% { opacity: 1; }
-  50% { opacity: 0.45; }
-}
-
-@media (prefers-reduced-motion: reduce) {
-  :root[data-op-rail-update="available"] .op-rail__update-anchor::before {
-    animation: none;
-  }
-}
 
 @media (forced-colors: active) {
   .op-rail {
@@ -1822,9 +1779,10 @@ kbd.op-kbd {
    typography — no display/condensed voice here (quiet-work-ui-contract). */
 .workspace-overview-section-label {
   margin: 0 0 8px;
-  font-family: var(--font-body);
-  font-size: var(--type-xs);
+  font-family: var(--font-mono);
+  font-size: 10px;
   font-weight: 700;
+  letter-spacing: 0.12em;
   color: var(--color-text-muted);
 }
 
@@ -1836,31 +1794,80 @@ kbd.op-kbd {
   gap: 8px;
 }
 
+/* Design pass (2026-06-11): the Workspace list is a console roster — flat
+   hairline rows with a state dot rail, not a stack of cards. Selection is an
+   accent rail + elevated fill; everything transitions on the fast curve. */
+.workspace-overview-list {
+  gap: 0;
+  border-top: 1px solid var(--color-border);
+}
+
 .workspace-overview-row {
   display: grid;
   grid-template-columns: auto minmax(0, 1fr);
   gap: 10px;
+  align-items: center;
   width: 100%;
   min-width: 0;
-  padding: 10px;
-  border: 1px solid var(--color-border);
-  border-radius: var(--radius-sm);
-  background: var(--color-surface);
+  padding: 8px 10px 8px 8px;
+  border: 0;
+  border-left: 2px solid transparent;
+  border-bottom: 1px solid var(--color-border);
+  border-radius: 0;
+  background: transparent;
   color: var(--color-text);
   text-align: left;
   cursor: pointer;
+  transition:
+    background var(--motion-fast) var(--motion-curve),
+    border-color var(--motion-fast) var(--motion-curve);
+}
+
+.workspace-overview-row:hover {
+  background: color-mix(in oklab, var(--color-surface-elevated) 72%, transparent);
 }
 
 .workspace-overview-row[aria-selected="true"] {
-  border-color: var(--color-focus-ring);
+  border-left-color: var(--color-state-active);
   background: var(--color-surface-elevated);
 }
 
+.workspace-overview-row:focus-visible {
+  outline: 1px solid var(--color-focus-ring);
+  outline-offset: -1px;
+}
+
+/* State dot rail: the literal label stays in the DOM for assistive tech; the
+   dot carries the state visually (status-strip language). */
 .workspace-overview-status {
-  align-self: start;
-  font-family: var(--font-mono);
-  font-size: var(--type-xs);
-  color: var(--color-state-active);
+  align-self: center;
+  overflow: hidden;
+  font-size: 0;
+  line-height: 0;
+}
+
+.workspace-overview-status::before {
+  content: "";
+  display: block;
+  width: 7px;
+  height: 7px;
+  border-radius: var(--radius-pill);
+  background: var(--color-state-idle);
+  transition: background var(--motion-fast) var(--motion-curve);
+}
+
+.workspace-overview-row[data-status="active"] .workspace-overview-status::before,
+.workspace-overview-row[data-status="running"] .workspace-overview-status::before {
+  background: var(--color-state-active);
+  box-shadow: 0 0 6px 0 color-mix(in oklab, var(--color-state-active) 55%, transparent);
+}
+
+.workspace-overview-row[data-status="blocked"] .workspace-overview-status::before {
+  background: var(--color-state-blocked);
+}
+
+.workspace-overview-row[data-status="done"] .workspace-overview-status::before {
+  background: var(--color-state-done);
 }
 
 .workspace-overview-row-copy,
@@ -1877,10 +1884,34 @@ kbd.op-kbd {
 .workspace-overview-row-title {
   overflow: hidden;
   color: var(--color-text-strong);
+  font-family: var(--font-mono);
   font-size: var(--type-sm);
-  font-weight: 650;
+  font-weight: 500;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+/* Branch = namespace prefix (dim) + leaf (strong): 200+ work/* rows scan by
+   leaf while the verbatim branch stays selectable. */
+.workspace-branch-prefix {
+  color: var(--color-text-muted);
+  font-weight: 400;
+}
+
+.workspace-branch-leaf {
+  color: var(--color-text-strong);
+  font-weight: 700;
+}
+
+/* Relative updated time, right-aligned on the title row (FR-403 ordering made
+   visible). Tabular numerals keep the column steady while scrolling. */
+.workspace-overview-row-time {
+  flex-shrink: 0;
+  margin-left: auto;
+  color: var(--color-text-muted);
+  font-family: var(--font-mono);
+  font-size: var(--type-xs);
+  font-variant-numeric: tabular-nums;
 }
 
 /* SPEC-2359 Phase W-12 (FR-351): Work card title row pairs the title with its
@@ -1898,12 +1929,14 @@ kbd.op-kbd {
 
 .workspace-overview-lifecycle {
   flex-shrink: 0;
-  border-radius: var(--radius-pill);
+  border-radius: var(--radius-sm);
   border: 1px solid var(--color-border);
   color: var(--color-text-muted);
   font-family: var(--font-mono);
-  font-size: var(--type-xs);
-  letter-spacing: var(--tracking-mono);
+  font-size: 10px;
+  font-weight: 650;
+  letter-spacing: 0.06em;
+  line-height: 1.5;
   padding: 0 var(--space-2);
 }
 
@@ -1973,6 +2006,9 @@ kbd.op-kbd {
   flex-direction: column;
   gap: 6px;
   min-width: 0;
+  padding-left: 10px;
+  border-left: 2px solid
+    color-mix(in oklab, var(--current-agent, var(--color-border-strong)) 55%, var(--color-border));
 }
 
 /* Per-Work head: optional Work label on the left, the per-Work Resume control
@@ -1986,14 +2022,27 @@ kbd.op-kbd {
 }
 
 .workspace-detail-work-heading {
+  display: flex;
+  align-items: center;
+  gap: 6px;
   min-width: 0;
   overflow: hidden;
   font-family: var(--font-mono);
   font-size: var(--type-xs);
   font-weight: 650;
-  color: var(--color-text-muted);
+  color: var(--color-text);
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+/* Agent identity dot, colored by the [data-agent-color] system (SPEC-2133). */
+.workspace-detail-work-heading::before {
+  content: "";
+  flex-shrink: 0;
+  width: 6px;
+  height: 6px;
+  border-radius: var(--radius-pill);
+  background: var(--current-agent, var(--color-text-muted));
 }
 
 .wizard-button.is-compact {
@@ -2028,6 +2077,20 @@ kbd.op-kbd {
   align-items: center;
   justify-content: space-between;
   gap: 8px;
+}
+
+/* SPEC-2359 W-15 (FR-386): merged-into-base badge — safe to delete. */
+.workspace-overview-merged {
+  flex: 0 0 auto;
+  padding: 0 var(--space-2);
+  border: 1px solid color-mix(in oklab, var(--color-state-done) 60%, var(--color-border));
+  border-radius: var(--radius-sm);
+  color: var(--color-state-done);
+  font-family: var(--font-mono);
+  font-size: 10px;
+  font-weight: 650;
+  letter-spacing: 0.06em;
+  line-height: 1.5;
 }
 
 .workspace-overview-agent-name,
@@ -2079,23 +2142,50 @@ kbd.op-kbd {
   justify-content: flex-end;
 }
 
+.workspace-detail-more-sessions {
+  font-family: var(--font-mono);
+  font-size: var(--type-xs);
+}
+
 .workspace-detail-header {
   display: flex;
+  flex-wrap: wrap;
   align-items: flex-start;
   justify-content: space-between;
-  gap: 16px;
+  gap: 10px 16px;
   margin-bottom: 16px;
 }
 
 .workspace-detail-heading {
+  flex: 1 1 240px;
   min-width: 0;
+}
+
+/* The heading block wears the corner-bracket ornament (.has-brackets) so the
+   detail reads as the operator's focused frame. The title is the branch — a
+   code identifier — so it stays mono with the dim-prefix treatment. */
+.workspace-detail-heading.has-brackets::before,
+.workspace-detail-heading.has-brackets::after {
+  color: var(--color-state-active);
 }
 
 .workspace-detail-title {
   margin: 0 0 6px;
   color: var(--color-text-strong);
+  font-family: var(--font-mono);
   font-size: var(--type-lg);
+  font-weight: 500;
   line-height: 1.2;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* Subtitle chips separated by interpuncts instead of bare gaps. */
+.workspace-detail-subtitle > * + *::before {
+  content: "·";
+  margin-right: 6px;
+  color: var(--color-border-strong);
 }
 
 .workspace-detail-actions {
@@ -2106,15 +2196,26 @@ kbd.op-kbd {
 
 .workspace-detail-section {
   padding: 14px 0;
-  border-top: 1px solid var(--color-border);
+  border-top: 0;
 }
 
 .workspace-detail-section-title {
-  margin: 0 0 8px;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin: 0 0 10px;
   color: var(--color-text-muted);
-  font-family: var(--font-body);
-  font-size: var(--type-sm);
+  font-family: var(--font-mono);
+  font-size: 10px;
   font-weight: 700;
+  letter-spacing: 0.12em;
+}
+
+.workspace-detail-section-title::after {
+  content: "";
+  flex: 1 1 auto;
+  height: 1px;
+  background: var(--color-border);
 }
 
 .workspace-detail-section-body {
@@ -2169,7 +2270,9 @@ kbd.op-kbd {
 
 .workspace-overview-empty {
   color: var(--color-text-muted);
-  font-size: var(--type-sm);
+  font-family: var(--font-mono);
+  font-size: var(--type-xs);
+  letter-spacing: 0.02em;
 }
 
 /* SPEC-3038 FR-011 / US-5 — button hierarchy. The solid dark-block
@@ -5065,4 +5168,75 @@ kbd.op-kbd {
 .op-usage-chart__col[data-today="true"] .op-usage-chart__bar {
   background: var(--color-accent, #6fb1ff);
   opacity: 1;
+}
+
+/* SPEC-2359 W-17 (FR-399) — full-screen Reconnecting overlay while the
+   WebSocket bridge is down. Blocks interaction that could not succeed
+   anyway and clears automatically on reconnect. */
+.connection-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 4000;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: color-mix(in srgb, var(--surface-base, #0b0e14) 72%, transparent);
+  backdrop-filter: blur(2px);
+  pointer-events: all;
+}
+
+.connection-overlay__panel {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 10px;
+  padding: 28px 36px;
+  border: 1px solid var(--line-soft, rgba(255, 255, 255, 0.14));
+  border-radius: 10px;
+  background: var(--surface-raised, #131722);
+  box-shadow: 0 18px 48px rgba(0, 0, 0, 0.45);
+}
+
+.connection-overlay__spinner {
+  width: 26px;
+  height: 26px;
+  border: 3px solid var(--line-soft, rgba(255, 255, 255, 0.18));
+  border-top-color: var(--accent, #7aa2f7);
+  border-radius: 50%;
+  animation: connection-overlay-spin 0.9s linear infinite;
+}
+
+.connection-overlay__title {
+  font-size: 14px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+}
+
+.connection-overlay__detail {
+  font-size: 12px;
+  opacity: 0.75;
+}
+
+@keyframes connection-overlay-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+/* SPEC-2359 W-17 (FR-398) — pending Resume feedback. */
+.workspace-resume-picker-pending {
+  margin-top: 10px;
+  font-size: 12px;
+  opacity: 0.8;
+}
+
+.wizard-button.is-pending {
+  opacity: 0.65;
+  cursor: progress;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .connection-overlay__spinner {
+    animation: none;
+  }
 }
