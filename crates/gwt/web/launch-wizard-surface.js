@@ -734,67 +734,119 @@ export function createLaunchWizardSurface({
         if (showStartMethods) {
           const section = createLaunchSection(
             "Start methods",
-            "Choose how this agent should start on the selected branch.",
+            "Pick the safest next step for this agent on the selected branch.",
           );
 
           const methodList = createNode("div", "start-method-list");
+          const startMethodGroups = [
+            {
+              id: "recommended",
+              title: "Recommended",
+              copy: "Best next step for the current state.",
+            },
+            {
+              id: "available",
+              title: "Available",
+              copy: "Other ways to start or resume this agent.",
+            },
+            {
+              id: "unavailable",
+              title: "Unavailable",
+              copy: "Requires saved settings, saved sessions, or a running agent.",
+            },
+          ];
+          const methodsByGroup = new Map(
+            startMethodGroups.map((group) => [group.id, []]),
+          );
           for (const method of launchWizard.start_methods || []) {
-            const button = createNode("button", "start-method-button");
-            button.type = "button";
-            const isStartMethodPending =
-              launchWizardPendingAction?.kind === "use_start_method"
-                && launchWizardPendingAction.method === method.kind;
-            button.classList.toggle("is-pending", isStartMethodPending);
-            button.disabled = method.enabled === false || isLaunchActionPending;
-            const head = createNode("div", "start-method-head");
-            head.appendChild(
-              createNode(
-                "div",
-                "start-method-title",
-                isStartMethodPending ? "Preparing..." : method.label,
-              ),
-            );
-            if (method.badge) {
-              head.appendChild(createNode("div", "start-method-badge", method.badge));
+            const fallbackGroup =
+              method.enabled === false ? "unavailable" : "available";
+            const requestedGroup =
+              method.group || (method.enabled === false ? "unavailable" : "available");
+            const groupId = methodsByGroup.has(requestedGroup)
+              ? requestedGroup
+              : fallbackGroup;
+            methodsByGroup.get(groupId).push(method);
+          }
+          for (const group of startMethodGroups) {
+            const methods = methodsByGroup.get(group.id) || [];
+            if (methods.length === 0) {
+              continue;
             }
-            button.appendChild(head);
-            button.appendChild(
-              createNode("div", "start-method-summary", method.summary || ""),
+            const groupNode = createNode(
+              "div",
+              `start-method-group start-method-group--${group.id}`,
             );
-            const detail = method.enabled === false
-              ? method.disabled_reason
-              : method.detail;
-            if (detail) {
-              button.appendChild(createNode("div", "start-method-detail", detail));
+            const groupHeader = createNode("div", "start-method-group-header");
+            groupHeader.appendChild(
+              createNode("div", "start-method-group-title", group.title),
+            );
+            groupHeader.appendChild(
+              createNode("div", "start-method-group-copy", group.copy),
+            );
+            groupNode.appendChild(groupHeader);
+            for (const method of methods) {
+              const button = createNode("button", "start-method-button");
+              button.type = "button";
+              const isStartMethodPending =
+                launchWizardPendingAction?.kind === "use_start_method"
+                  && launchWizardPendingAction.method === method.kind;
+              button.classList.toggle("is-pending", isStartMethodPending);
+              if (method.recommended === true) {
+                button.classList.add("start-method-button--recommended");
+              }
+              button.disabled = method.enabled === false || isLaunchActionPending;
+              const head = createNode("div", "start-method-head");
+              head.appendChild(
+                createNode(
+                  "div",
+                  "start-method-title",
+                  isStartMethodPending ? "Preparing..." : method.label,
+                ),
+              );
+              if (method.badge) {
+                head.appendChild(createNode("div", "start-method-badge", method.badge));
+              }
+              button.appendChild(head);
+              button.appendChild(
+                createNode("div", "start-method-summary", method.summary || ""),
+              );
+              const detail = method.enabled === false
+                ? method.disabled_reason
+                : method.detail;
+              if (detail) {
+                button.appendChild(createNode("div", "start-method-detail", detail));
+              }
+              const handleStartMethodLaunchAction = () => {
+                if (
+                  !releaseWizardInteractionGuardForChromeAction()
+                  || button.disabled
+                  || launchWizardPendingAction
+                ) {
+                  return;
+                }
+                setLaunchWizardPendingAction({
+                  kind: "use_start_method",
+                  method: method.kind,
+                });
+                sendWizardAction({
+                  kind: "use_start_method",
+                  method: method.kind,
+                });
+              };
+              button.addEventListener("pointerup", (event) => {
+                if (!isPrimaryPointerActivation(event)) {
+                  return;
+                }
+                event.preventDefault();
+                handleStartMethodLaunchAction();
+              });
+              button.addEventListener("click", () => {
+                handleStartMethodLaunchAction();
+              });
+              groupNode.appendChild(button);
             }
-            const handleStartMethodLaunchAction = () => {
-              if (
-                !releaseWizardInteractionGuardForChromeAction()
-                || button.disabled
-                || launchWizardPendingAction
-              ) {
-                return;
-              }
-              setLaunchWizardPendingAction({
-                kind: "use_start_method",
-                method: method.kind,
-              });
-              sendWizardAction({
-                kind: "use_start_method",
-                method: method.kind,
-              });
-            };
-            button.addEventListener("pointerup", (event) => {
-              if (!isPrimaryPointerActivation(event)) {
-                return;
-              }
-              event.preventDefault();
-              handleStartMethodLaunchAction();
-            });
-            button.addEventListener("click", () => {
-              handleStartMethodLaunchAction();
-            });
-            methodList.appendChild(button);
+            methodList.appendChild(groupNode);
           }
           section.appendChild(methodList);
 

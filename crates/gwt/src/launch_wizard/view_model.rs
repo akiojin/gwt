@@ -1,5 +1,20 @@
 use super::*;
 
+fn start_method_group(
+    kind: LaunchWizardStartMethodKind,
+    enabled: bool,
+    recommended_method: LaunchWizardStartMethodKind,
+) -> String {
+    if !enabled {
+        return "unavailable".to_string();
+    }
+    if kind == recommended_method {
+        "recommended".to_string()
+    } else {
+        "available".to_string()
+    }
+}
+
 impl LaunchWizardState {
     pub fn view(&self) -> LaunchWizardView {
         let show_start_methods = self.show_start_methods();
@@ -111,6 +126,15 @@ impl LaunchWizardState {
         let has_previous_settings = self.has_previous_start_settings();
         let latest_session = self.latest_quick_start_entry().map(|(_, entry)| entry);
         let latest_live = self.latest_running_session().map(|(_, session)| session);
+        let recommended_method = if latest_live.is_some() {
+            LaunchWizardStartMethodKind::FocusRunningSession
+        } else if latest_session.is_some() {
+            LaunchWizardStartMethodKind::ContinueLastSession
+        } else if has_previous_settings {
+            LaunchWizardStartMethodKind::StartWithLastSettings
+        } else {
+            LaunchWizardStartMethodKind::ConfigureAndStart
+        };
 
         let mut methods = vec![
             LaunchWizardStartMethodView {
@@ -119,6 +143,12 @@ impl LaunchWizardState {
                     .to_string(),
                 label: "Configure and start".to_string(),
                 badge: "Settings".to_string(),
+                group: start_method_group(
+                    LaunchWizardStartMethodKind::ConfigureAndStart,
+                    true,
+                    recommended_method,
+                ),
+                recommended: recommended_method == LaunchWizardStartMethodKind::ConfigureAndStart,
                 summary: "Edit settings before launch".to_string(),
                 detail: None,
                 enabled: true,
@@ -130,6 +160,13 @@ impl LaunchWizardState {
                     .to_string(),
                 label: "Start with last settings".to_string(),
                 badge: "New".to_string(),
+                group: start_method_group(
+                    LaunchWizardStartMethodKind::StartWithLastSettings,
+                    has_previous_settings,
+                    recommended_method,
+                ),
+                recommended: recommended_method
+                    == LaunchWizardStartMethodKind::StartWithLastSettings,
                 summary: if has_previous_settings {
                     "New session with saved settings"
                 } else {
@@ -146,6 +183,12 @@ impl LaunchWizardState {
                     .to_string(),
                 label: "Continue last session".to_string(),
                 badge: "Session".to_string(),
+                group: start_method_group(
+                    LaunchWizardStartMethodKind::ContinueLastSession,
+                    latest_session.is_some(),
+                    recommended_method,
+                ),
+                recommended: recommended_method == LaunchWizardStartMethodKind::ContinueLastSession,
                 summary: latest_session
                     .map(|entry| {
                         if entry.resume_session_id.is_some() {
@@ -172,6 +215,12 @@ impl LaunchWizardState {
                     .to_string(),
                 label: "Open session picker".to_string(),
                 badge: "Picker".to_string(),
+                group: start_method_group(
+                    LaunchWizardStartMethodKind::OpenSessionPicker,
+                    true,
+                    recommended_method,
+                ),
+                recommended: recommended_method == LaunchWizardStartMethodKind::OpenSessionPicker,
                 summary: "Choose a saved session".to_string(),
                 detail: Some("Opens the agent's session picker".to_string()),
                 enabled: true,
@@ -184,6 +233,12 @@ impl LaunchWizardState {
                 .to_string(),
             label: "Focus running session".to_string(),
             badge: "Running".to_string(),
+            group: start_method_group(
+                LaunchWizardStartMethodKind::FocusRunningSession,
+                latest_live.is_some(),
+                recommended_method,
+            ),
+            recommended: recommended_method == LaunchWizardStartMethodKind::FocusRunningSession,
             summary: latest_live
                 .map(|session| session.name.clone())
                 .unwrap_or_else(|| "Switch to running session".to_string()),
@@ -884,6 +939,99 @@ mod tests {
             .expect("focus running method");
         assert_eq!(focus.summary, "Switch to running session");
         assert_eq!(focus.disabled_reason.as_deref(), Some("No running session"));
+    }
+
+    #[test]
+    fn start_methods_view_marks_recommended_available_and_unavailable_groups() {
+        let state = LaunchWizardState::open_with(
+            context(branch("feature/gui"), "feature/gui"),
+            sample_agent_options(),
+            Vec::new(),
+        );
+        let view = serde_json::to_value(state.view()).expect("view json");
+        let methods = view["start_methods"]
+            .as_array()
+            .expect("start methods array");
+
+        let configure = methods
+            .iter()
+            .find(|method| method["kind"] == "configure_and_start")
+            .expect("configure method");
+        assert_eq!(configure["group"], "recommended");
+        assert_eq!(configure["recommended"], true);
+
+        let picker = methods
+            .iter()
+            .find(|method| method["kind"] == "open_session_picker")
+            .expect("picker method");
+        assert_eq!(picker["group"], "available");
+        assert_eq!(picker["recommended"], false);
+
+        for kind in [
+            "start_with_last_settings",
+            "continue_last_session",
+            "focus_running_session",
+        ] {
+            let method = methods
+                .iter()
+                .find(|method| method["kind"] == kind)
+                .expect("method by kind");
+            assert_eq!(method["group"], "unavailable", "{kind}");
+            assert_eq!(method["recommended"], false, "{kind}");
+        }
+    }
+
+    #[test]
+    fn start_methods_recommend_existing_running_work_before_resume_or_new_session() {
+        let mut ctx = context(branch("feature/gui"), "feature/gui");
+        ctx.live_sessions = vec![LiveSessionEntry {
+            session_id: "session-live".to_string(),
+            window_id: "tab-1:agent-live".to_string(),
+            agent_id: "codex".to_string(),
+            kind: "agent".to_string(),
+            name: "Running Codex".to_string(),
+            detail: Some("/tmp/repo".to_string()),
+            active: true,
+            runtime_status: crate::WindowProcessStatus::Running,
+        }];
+        let state = LaunchWizardState::open_with(
+            ctx,
+            sample_agent_options(),
+            vec![quick_start_entry(
+                "session-newer",
+                "codex",
+                Some("native-newer"),
+                None,
+                gwt_agent::LaunchRuntimeTarget::Docker,
+                Some("gwt"),
+            )],
+        );
+
+        let view = serde_json::to_value(state.view()).expect("view json");
+        let methods = view["start_methods"]
+            .as_array()
+            .expect("start methods array");
+
+        let focus = methods
+            .iter()
+            .find(|method| method["kind"] == "focus_running_session")
+            .expect("focus method");
+        assert_eq!(focus["group"], "recommended");
+        assert_eq!(focus["recommended"], true);
+
+        for kind in [
+            "configure_and_start",
+            "start_with_last_settings",
+            "continue_last_session",
+            "open_session_picker",
+        ] {
+            let method = methods
+                .iter()
+                .find(|method| method["kind"] == kind)
+                .expect("method by kind");
+            assert_eq!(method["group"], "available", "{kind}");
+            assert_eq!(method["recommended"], false, "{kind}");
+        }
     }
 
     #[test]

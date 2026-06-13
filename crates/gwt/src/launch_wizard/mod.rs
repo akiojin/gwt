@@ -178,6 +178,8 @@ pub struct LaunchWizardStartMethodView {
     pub kind: String,
     pub label: String,
     pub badge: String,
+    pub group: String,
+    pub recommended: bool,
     pub summary: String,
     pub detail: Option<String>,
     pub enabled: bool,

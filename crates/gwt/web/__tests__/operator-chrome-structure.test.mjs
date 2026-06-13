@@ -687,6 +687,24 @@ test("Launch Wizard keeps session mode choices in Start methods, not settings", 
   );
 });
 
+test("Launch Wizard groups Start methods by backend UX priority", () => {
+  assert.match(
+    launchWizardSource,
+    /const\s+startMethodGroups\s*=\s*\[[\s\S]*?recommended[\s\S]*?available[\s\S]*?unavailable/,
+    "expected Start methods to render in Recommended / Available / Unavailable groups",
+  );
+  assert.match(
+    launchWizardSource,
+    /method\.group\s*\|\|[\s\S]*?method\.enabled === false[\s\S]*?unavailable/,
+    "expected backend group metadata with enabled-state fallback",
+  );
+  assert.match(
+    launchWizardSource,
+    /method\.recommended[\s\S]*?start-method-button--recommended/,
+    "expected recommended Start method to get a stronger visual treatment",
+  );
+});
+
 test("Workspace Overview is separate from live-only Active Work", () => {
   assert.ok(
     document.querySelector("#op-workspace-overview-entry"),
