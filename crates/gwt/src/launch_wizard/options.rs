@@ -448,7 +448,7 @@ impl<'a> LaunchWizardFlow<'a> {
             LaunchWizardStep::WindowsShell => self.next_after_windows_shell(),
             LaunchWizardStep::DockerServiceSelect => Some(LaunchWizardStep::DockerLifecycle),
             LaunchWizardStep::DockerLifecycle => self.next_after_docker_lifecycle(),
-            LaunchWizardStep::VersionSelect => Some(LaunchWizardStep::ExecutionMode),
+            LaunchWizardStep::VersionSelect => Some(LaunchWizardStep::SkipPermissions),
             LaunchWizardStep::ExecutionMode => Some(LaunchWizardStep::SkipPermissions),
             LaunchWizardStep::SkipPermissions => {
                 if self.state.current_agent_supports_fast_mode() {
@@ -504,7 +504,7 @@ impl<'a> LaunchWizardFlow<'a> {
             }
             LaunchWizardStep::VersionSelect => self.previous_before_version_select(),
             LaunchWizardStep::ExecutionMode => self.previous_before_execution_mode(),
-            LaunchWizardStep::SkipPermissions => Some(LaunchWizardStep::ExecutionMode),
+            LaunchWizardStep::SkipPermissions => self.previous_before_execution_mode(),
             LaunchWizardStep::CodexFastMode => Some(LaunchWizardStep::SkipPermissions),
         }
     }
@@ -553,7 +553,7 @@ impl<'a> LaunchWizardFlow<'a> {
         } else if agent_has_npm_package(self.state.effective_agent_id()) {
             Some(LaunchWizardStep::VersionSelect)
         } else {
-            Some(LaunchWizardStep::ExecutionMode)
+            Some(LaunchWizardStep::SkipPermissions)
         }
     }
 
@@ -563,7 +563,7 @@ impl<'a> LaunchWizardFlow<'a> {
         } else if agent_has_npm_package(self.state.effective_agent_id()) {
             Some(LaunchWizardStep::VersionSelect)
         } else {
-            Some(LaunchWizardStep::ExecutionMode)
+            Some(LaunchWizardStep::SkipPermissions)
         }
     }
 
@@ -1207,7 +1207,7 @@ mod tests {
         } else if agent_has_npm_package(state.effective_agent_id()) {
             Some(LaunchWizardStep::VersionSelect)
         } else {
-            Some(LaunchWizardStep::ExecutionMode)
+            Some(LaunchWizardStep::SkipPermissions)
         };
 
         assert_eq!(flow.next_after_agent_configuration(), expected_host_tail);

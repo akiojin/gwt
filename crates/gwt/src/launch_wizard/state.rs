@@ -656,6 +656,10 @@ impl LaunchWizardState {
             return;
         }
 
+        if self.manual_setup_initialized {
+            self.mode = "normal".to_string();
+            self.resume_session_id = None;
+        }
         self.finish_launch_request();
     }
 
@@ -793,6 +797,9 @@ impl LaunchWizardState {
             LaunchWizardStartMethodKind::ContinueLastSession => {
                 self.continue_latest_session();
             }
+            LaunchWizardStartMethodKind::OpenSessionPicker => {
+                self.open_agent_session_picker();
+            }
             LaunchWizardStartMethodKind::FocusRunningSession => {
                 self.focus_latest_running_session();
             }
@@ -832,10 +839,6 @@ impl LaunchWizardState {
             self.error = Some("No saved session is available".to_string());
             return;
         };
-        let Some(resume_session_id) = entry.resume_session_id.clone() else {
-            self.error = Some("No saved session is available".to_string());
-            return;
-        };
         self.selected_quick_start_index = Some(index);
         self.launch_path = LaunchWizardLaunchPath::QuickStart;
         self.start_method_selected = true;
@@ -852,8 +855,27 @@ impl LaunchWizardState {
         }
         self.skip_permissions = entry.skip_permissions;
         self.codex_fast_mode = entry.codex_fast_mode && self.current_agent_supports_fast_mode();
+        if let Some(resume_session_id) = entry.resume_session_id.clone() {
+            self.mode = "resume".to_string();
+            self.resume_session_id = Some(resume_session_id);
+        } else {
+            self.mode = "continue".to_string();
+            self.resume_session_id = None;
+        }
+        self.finish_launch_request();
+    }
+
+    fn open_agent_session_picker(&mut self) {
+        self.launch_path = LaunchWizardLaunchPath::QuickStart;
+        self.start_method_selected = true;
+        self.launch_target = LaunchTargetKind::Agent;
+        self.sync_selected_agent_options();
+        if !self.current_agent_supports_resume_picker() {
+            self.error = Some("Session picker is unavailable for this agent".to_string());
+            return;
+        }
         self.mode = "resume".to_string();
-        self.resume_session_id = Some(resume_session_id);
+        self.resume_session_id = None;
         self.finish_launch_request();
     }
 
@@ -2576,6 +2598,71 @@ mod tests {
             });
 
             assert_eq!(state.view().selected_execution_mode, mode);
+        }
+    }
+
+    #[test]
+    fn open_session_picker_start_method_launches_agent_picker() {
+        let mut state = LaunchWizardState::open_with(
+            context(branch("feature/current"), "feature/current"),
+            sample_agent_options(),
+            Vec::new(),
+        );
+
+        state.apply(LaunchWizardAction::UseStartMethod {
+            method: LaunchWizardStartMethodKind::OpenSessionPicker,
+        });
+
+        match state.completion.as_ref() {
+            Some(LaunchWizardCompletion::Launch(config)) => match config.as_ref() {
+                LaunchWizardLaunchRequest::Agent(config) => {
+                    assert_eq!(config.agent_id, gwt_agent::AgentId::ClaudeCode);
+                    assert_eq!(config.session_mode, gwt_agent::SessionMode::Resume);
+                    assert!(config.resume_session_id.is_none());
+                }
+                other => panic!("expected agent launch request, got {other:?}"),
+            },
+            other => panic!("expected launch completion, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn continue_last_session_without_exact_resume_id_uses_agent_latest_session() {
+        let mut state = LaunchWizardState::open_with(
+            context(branch("feature/current"), "feature/current"),
+            sample_agent_options(),
+            vec![quick_start_entry(
+                "session-1",
+                "codex",
+                None,
+                None,
+                gwt_agent::LaunchRuntimeTarget::Host,
+                None,
+            )],
+        );
+
+        let continue_method = state
+            .view()
+            .start_methods
+            .into_iter()
+            .find(|method| method.kind == "continue_last_session")
+            .expect("continue start method");
+        assert!(continue_method.enabled);
+
+        state.apply(LaunchWizardAction::UseStartMethod {
+            method: LaunchWizardStartMethodKind::ContinueLastSession,
+        });
+
+        match state.completion.as_ref() {
+            Some(LaunchWizardCompletion::Launch(config)) => match config.as_ref() {
+                LaunchWizardLaunchRequest::Agent(config) => {
+                    assert_eq!(config.agent_id, gwt_agent::AgentId::Codex);
+                    assert_eq!(config.session_mode, gwt_agent::SessionMode::Continue);
+                    assert!(config.resume_session_id.is_none());
+                }
+                other => panic!("expected agent launch request, got {other:?}"),
+            },
+            other => panic!("expected launch completion, got {other:?}"),
         }
     }
 
