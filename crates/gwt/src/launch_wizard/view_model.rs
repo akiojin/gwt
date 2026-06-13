@@ -1,5 +1,20 @@
 use super::*;
 
+fn start_method_group(
+    kind: LaunchWizardStartMethodKind,
+    enabled: bool,
+    recommended_method: LaunchWizardStartMethodKind,
+) -> String {
+    if !enabled {
+        return "unavailable".to_string();
+    }
+    if kind == recommended_method {
+        "recommended".to_string()
+    } else {
+        "available".to_string()
+    }
+}
+
 impl LaunchWizardState {
     pub fn view(&self) -> LaunchWizardView {
         let show_start_methods = self.show_start_methods();
@@ -78,7 +93,7 @@ impl LaunchWizardState {
             show_version: show_manual_setup
                 && self.launch_target_is_agent()
                 && agent_has_npm_package(self.effective_agent_id()),
-            show_execution_mode: show_manual_setup && self.launch_target_is_agent(),
+            show_execution_mode: false,
             show_skip_permissions: show_manual_setup && self.launch_target_is_agent(),
             show_fast_mode,
             show_codex_fast_mode: show_manual_setup
@@ -108,22 +123,34 @@ impl LaunchWizardState {
     }
 
     fn start_methods_view(&self) -> Vec<LaunchWizardStartMethodView> {
-        let settings_summary = self.start_settings_summary();
         let has_previous_settings = self.has_previous_start_settings();
-        let latest_resume = self
-            .latest_quick_start_entry()
-            .and_then(|(_, entry)| entry.resume_session_id.as_deref().map(|id| (entry, id)));
+        let latest_session = self.latest_quick_start_entry().map(|(_, entry)| entry);
         let latest_live = self.latest_running_session().map(|(_, session)| session);
+        let recommended_method = if latest_live.is_some() {
+            LaunchWizardStartMethodKind::FocusRunningSession
+        } else if latest_session.is_some() {
+            LaunchWizardStartMethodKind::ContinueLastSession
+        } else if has_previous_settings {
+            LaunchWizardStartMethodKind::StartWithLastSettings
+        } else {
+            LaunchWizardStartMethodKind::ConfigureAndStart
+        };
 
-        vec![
+        let mut methods = vec![
             LaunchWizardStartMethodView {
                 kind: LaunchWizardStartMethodKind::ConfigureAndStart
                     .value()
                     .to_string(),
                 label: "Configure and start".to_string(),
                 badge: "Settings".to_string(),
-                summary: settings_summary.clone(),
-                detail: Some("Review and edit settings before starting".to_string()),
+                group: start_method_group(
+                    LaunchWizardStartMethodKind::ConfigureAndStart,
+                    true,
+                    recommended_method,
+                ),
+                recommended: recommended_method == LaunchWizardStartMethodKind::ConfigureAndStart,
+                summary: "Edit settings before launch".to_string(),
+                detail: None,
                 enabled: true,
                 disabled_reason: None,
             },
@@ -133,13 +160,22 @@ impl LaunchWizardState {
                     .to_string(),
                 label: "Start with last settings".to_string(),
                 badge: "New".to_string(),
-                summary: settings_summary,
-                detail: Some(
-                    "Start a new session without resuming conversation history".to_string(),
+                group: start_method_group(
+                    LaunchWizardStartMethodKind::StartWithLastSettings,
+                    has_previous_settings,
+                    recommended_method,
                 ),
+                recommended: recommended_method
+                    == LaunchWizardStartMethodKind::StartWithLastSettings,
+                summary: if has_previous_settings {
+                    "New session with saved settings"
+                } else {
+                    "Use saved launch settings"
+                }
+                .to_string(),
+                detail: None,
                 enabled: has_previous_settings,
-                disabled_reason: (!has_previous_settings)
-                    .then(|| "No previous launch settings yet".to_string()),
+                disabled_reason: (!has_previous_settings).then(|| "None saved yet".to_string()),
             },
             LaunchWizardStartMethodView {
                 kind: LaunchWizardStartMethodKind::ContinueLastSession
@@ -147,70 +183,77 @@ impl LaunchWizardState {
                     .to_string(),
                 label: "Continue last session".to_string(),
                 badge: "Session".to_string(),
-                summary: latest_resume
-                    .map(|(entry, _)| quick_start_summary(entry))
-                    .unwrap_or_else(|| "No resumable session".to_string()),
-                detail: latest_resume.map(|(_, resume_id)| format!("Resume ID · {resume_id}")),
-                enabled: latest_resume.is_some(),
-                disabled_reason: latest_resume
+                group: start_method_group(
+                    LaunchWizardStartMethodKind::ContinueLastSession,
+                    latest_session.is_some(),
+                    recommended_method,
+                ),
+                recommended: recommended_method == LaunchWizardStartMethodKind::ContinueLastSession,
+                summary: latest_session
+                    .map(|entry| {
+                        if entry.resume_session_id.is_some() {
+                            "Resume conversation history"
+                        } else {
+                            "Continue latest agent session"
+                        }
+                    })
+                    .unwrap_or("Resume recent session")
+                    .to_string(),
+                detail: latest_session
+                    .and_then(|entry| entry.resume_session_id.as_deref())
+                    .map(|resume_id| format!("Resume ID · {resume_id}")),
+                enabled: latest_session.is_some(),
+                disabled_reason: latest_session
                     .is_none()
-                    .then(|| "No saved session is available".to_string()),
+                    .then(|| "No saved session".to_string()),
             },
-            LaunchWizardStartMethodView {
-                kind: LaunchWizardStartMethodKind::FocusRunningSession
+        ];
+        if self.current_agent_supports_resume_picker() {
+            methods.push(LaunchWizardStartMethodView {
+                kind: LaunchWizardStartMethodKind::OpenSessionPicker
                     .value()
                     .to_string(),
-                label: "Focus running session".to_string(),
-                badge: "Running".to_string(),
-                summary: latest_live
-                    .map(|session| session.name.clone())
-                    .unwrap_or_else(|| "No running session".to_string()),
-                detail: latest_live.and_then(|session| {
-                    session
-                        .detail
-                        .clone()
-                        .or_else(|| Some(live_session_status_label(session)))
-                }),
-                enabled: latest_live.is_some(),
-                disabled_reason: latest_live
-                    .is_none()
-                    .then(|| "No running session is available".to_string()),
-            },
-        ]
-    }
-
-    fn start_settings_summary(&self) -> String {
-        if let Some((_, entry)) = self.latest_quick_start_entry() {
-            return quick_start_summary(entry);
+                label: "Open session picker".to_string(),
+                badge: "Picker".to_string(),
+                group: start_method_group(
+                    LaunchWizardStartMethodKind::OpenSessionPicker,
+                    true,
+                    recommended_method,
+                ),
+                recommended: recommended_method == LaunchWizardStartMethodKind::OpenSessionPicker,
+                summary: "Choose a saved session".to_string(),
+                detail: Some("Opens the agent's session picker".to_string()),
+                enabled: true,
+                disabled_reason: None,
+            });
         }
-        let mut parts = vec![self
-            .selected_agent()
-            .map(|agent| agent.name.clone())
-            .unwrap_or_else(|| self.effective_agent_id().to_string())];
-        if !self.model.trim().is_empty() {
-            parts.push(self.model.clone());
-        }
-        if !self.reasoning.trim().is_empty() {
-            parts.push(self.reasoning.clone());
-        }
-        if !self.version.trim().is_empty() {
-            parts.push(self.version.clone());
-        }
-        if self.runtime_target == gwt_agent::LaunchRuntimeTarget::Docker {
-            parts.push(
-                self.docker_service
-                    .as_ref()
-                    .map(|service| format!("docker:{service}"))
-                    .unwrap_or_else(|| "docker".to_string()),
-            );
-        } else {
-            parts.push("host".to_string());
-        }
-        parts
-            .into_iter()
-            .filter(|part| !part.trim().is_empty())
-            .collect::<Vec<_>>()
-            .join(" / ")
+        methods.push(LaunchWizardStartMethodView {
+            kind: LaunchWizardStartMethodKind::FocusRunningSession
+                .value()
+                .to_string(),
+            label: "Focus running session".to_string(),
+            badge: "Running".to_string(),
+            group: start_method_group(
+                LaunchWizardStartMethodKind::FocusRunningSession,
+                latest_live.is_some(),
+                recommended_method,
+            ),
+            recommended: recommended_method == LaunchWizardStartMethodKind::FocusRunningSession,
+            summary: latest_live
+                .map(|session| session.name.clone())
+                .unwrap_or_else(|| "Switch to running session".to_string()),
+            detail: latest_live.and_then(|session| {
+                session
+                    .detail
+                    .clone()
+                    .or_else(|| Some(live_session_status_label(session)))
+            }),
+            enabled: latest_live.is_some(),
+            disabled_reason: latest_live
+                .is_none()
+                .then(|| "No running session".to_string()),
+        });
+        methods
     }
 
     fn quick_start_entries_view(&self) -> Vec<LaunchWizardQuickStartView> {
@@ -364,10 +407,6 @@ impl LaunchWizardState {
                     value: self.version.clone(),
                 });
             }
-            summary.push(LaunchWizardSummaryView {
-                label: "Mode".to_string(),
-                value: self.mode.clone(),
-            });
         }
         summary.push(LaunchWizardSummaryView {
             label: "Runtime".to_string(),
@@ -767,7 +806,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn start_methods_view_exposes_four_direct_methods() {
+    fn start_methods_view_exposes_direct_methods() {
         let mut ctx = context(branch("feature/gui"), "feature/gui");
         ctx.live_sessions = vec![LiveSessionEntry {
             session_id: "session-live".to_string(),
@@ -793,22 +832,297 @@ mod tests {
         );
 
         let methods = state.view().start_methods;
-        assert_eq!(methods.len(), 4);
+        assert_eq!(methods.len(), 5);
         assert_eq!(methods[0].kind, "configure_and_start");
         assert_eq!(methods[0].label, "Configure and start");
-        assert!(methods[0].summary.contains("Codex"));
+        assert_eq!(methods[0].summary, "Edit settings before launch");
         assert_eq!(methods[1].kind, "start_with_last_settings");
-        assert!(methods[1].summary.contains("docker:gwt"));
+        assert_eq!(methods[1].summary, "New session with saved settings");
         assert_eq!(methods[2].kind, "continue_last_session");
         assert_eq!(methods[2].badge, "Session");
+        assert_eq!(methods[2].summary, "Resume conversation history");
         assert!(methods[2]
             .detail
             .as_deref()
             .unwrap_or("")
             .contains("native-newer"));
-        assert_eq!(methods[3].kind, "focus_running_session");
-        assert_eq!(methods[3].badge, "Running");
+        assert_eq!(methods[3].kind, "open_session_picker");
+        assert_eq!(methods[3].badge, "Picker");
+        assert_eq!(methods[4].kind, "focus_running_session");
+        assert_eq!(methods[4].badge, "Running");
         assert!(methods.iter().all(|method| method.enabled));
+    }
+
+    #[test]
+    fn start_methods_use_concise_action_copy_without_repeating_settings() {
+        let state = LaunchWizardState::open_with(
+            context(branch("feature/gui"), "feature/gui"),
+            sample_agent_options(),
+            vec![quick_start_entry(
+                "session-newer",
+                "codex",
+                Some("native-newer"),
+                None,
+                gwt_agent::LaunchRuntimeTarget::Docker,
+                Some("gwt"),
+            )],
+        );
+
+        let methods = state.view().start_methods;
+        let configure = methods
+            .iter()
+            .find(|method| method.kind == "configure_and_start")
+            .expect("configure method");
+        assert_eq!(configure.summary, "Edit settings before launch");
+        assert!(configure.detail.is_none());
+
+        let saved = methods
+            .iter()
+            .find(|method| method.kind == "start_with_last_settings")
+            .expect("saved settings method");
+        assert_eq!(saved.summary, "New session with saved settings");
+        assert!(saved.detail.is_none());
+
+        let continue_method = methods
+            .iter()
+            .find(|method| method.kind == "continue_last_session")
+            .expect("continue method");
+        assert_eq!(continue_method.summary, "Resume conversation history");
+
+        let picker = methods
+            .iter()
+            .find(|method| method.kind == "open_session_picker")
+            .expect("picker method");
+        assert_eq!(picker.summary, "Choose a saved session");
+
+        for method in methods
+            .iter()
+            .filter(|method| method.kind != "focus_running_session")
+        {
+            assert!(
+                !method.summary.contains(" / "),
+                "start method summary should not repeat launch settings: {:?}",
+                method
+            );
+        }
+    }
+
+    #[test]
+    fn disabled_start_methods_keep_reason_copy_non_redundant() {
+        let state = LaunchWizardState::open_with(
+            context(branch("feature/gui"), "feature/gui"),
+            sample_agent_options(),
+            Vec::new(),
+        );
+
+        let methods = state.view().start_methods;
+        let saved = methods
+            .iter()
+            .find(|method| method.kind == "start_with_last_settings")
+            .expect("saved settings method");
+        assert_eq!(saved.summary, "Use saved launch settings");
+        assert_eq!(saved.disabled_reason.as_deref(), Some("None saved yet"));
+
+        let continue_method = methods
+            .iter()
+            .find(|method| method.kind == "continue_last_session")
+            .expect("continue method");
+        assert_eq!(continue_method.summary, "Resume recent session");
+        assert_eq!(
+            continue_method.disabled_reason.as_deref(),
+            Some("No saved session")
+        );
+
+        let focus = methods
+            .iter()
+            .find(|method| method.kind == "focus_running_session")
+            .expect("focus running method");
+        assert_eq!(focus.summary, "Switch to running session");
+        assert_eq!(focus.disabled_reason.as_deref(), Some("No running session"));
+    }
+
+    #[test]
+    fn start_methods_view_marks_recommended_available_and_unavailable_groups() {
+        let state = LaunchWizardState::open_with(
+            context(branch("feature/gui"), "feature/gui"),
+            sample_agent_options(),
+            Vec::new(),
+        );
+        let view = serde_json::to_value(state.view()).expect("view json");
+        let methods = view["start_methods"]
+            .as_array()
+            .expect("start methods array");
+
+        let configure = methods
+            .iter()
+            .find(|method| method["kind"] == "configure_and_start")
+            .expect("configure method");
+        assert_eq!(configure["group"], "recommended");
+        assert_eq!(configure["recommended"], true);
+
+        let picker = methods
+            .iter()
+            .find(|method| method["kind"] == "open_session_picker")
+            .expect("picker method");
+        assert_eq!(picker["group"], "available");
+        assert_eq!(picker["recommended"], false);
+
+        for kind in [
+            "start_with_last_settings",
+            "continue_last_session",
+            "focus_running_session",
+        ] {
+            let method = methods
+                .iter()
+                .find(|method| method["kind"] == kind)
+                .expect("method by kind");
+            assert_eq!(method["group"], "unavailable", "{kind}");
+            assert_eq!(method["recommended"], false, "{kind}");
+        }
+    }
+
+    #[test]
+    fn start_methods_recommend_existing_running_work_before_resume_or_new_session() {
+        let mut ctx = context(branch("feature/gui"), "feature/gui");
+        ctx.live_sessions = vec![LiveSessionEntry {
+            session_id: "session-live".to_string(),
+            window_id: "tab-1:agent-live".to_string(),
+            agent_id: "codex".to_string(),
+            kind: "agent".to_string(),
+            name: "Running Codex".to_string(),
+            detail: Some("/tmp/repo".to_string()),
+            active: true,
+            runtime_status: crate::WindowProcessStatus::Running,
+        }];
+        let state = LaunchWizardState::open_with(
+            ctx,
+            sample_agent_options(),
+            vec![quick_start_entry(
+                "session-newer",
+                "codex",
+                Some("native-newer"),
+                None,
+                gwt_agent::LaunchRuntimeTarget::Docker,
+                Some("gwt"),
+            )],
+        );
+
+        let view = serde_json::to_value(state.view()).expect("view json");
+        let methods = view["start_methods"]
+            .as_array()
+            .expect("start methods array");
+
+        let focus = methods
+            .iter()
+            .find(|method| method["kind"] == "focus_running_session")
+            .expect("focus method");
+        assert_eq!(focus["group"], "recommended");
+        assert_eq!(focus["recommended"], true);
+
+        for kind in [
+            "configure_and_start",
+            "start_with_last_settings",
+            "continue_last_session",
+            "open_session_picker",
+        ] {
+            let method = methods
+                .iter()
+                .find(|method| method["kind"] == kind)
+                .expect("method by kind");
+            assert_eq!(method["group"], "available", "{kind}");
+            assert_eq!(method["recommended"], false, "{kind}");
+        }
+    }
+
+    #[test]
+    fn manual_setup_hides_execution_mode_and_launches_new_session() {
+        let mut codex = sample_session_record(
+            "feature/old",
+            Path::new("/tmp/old-repo"),
+            gwt_agent::AgentId::Codex,
+            Utc.with_ymd_and_hms(2026, 6, 13, 9, 0, 0).unwrap(),
+            None,
+        );
+        codex.session_mode = gwt_agent::SessionMode::Continue;
+        let previous_profiles = previous_launch_profiles_from_sessions(&[codex]);
+        let mut state = LaunchWizardState::open_with_previous_profiles(
+            context(branch("feature/current"), "feature/current"),
+            sample_agent_options(),
+            Vec::new(),
+            previous_profiles,
+        );
+
+        state.apply(LaunchWizardAction::UseStartMethod {
+            method: LaunchWizardStartMethodKind::ConfigureAndStart,
+        });
+        let view = state.view();
+        assert!(!view.show_execution_mode);
+        assert!(!view.launch_summary.iter().any(|item| item.label == "Mode"));
+        assert_eq!(
+            next_step(LaunchWizardStep::VersionSelect, &state),
+            Some(LaunchWizardStep::SkipPermissions)
+        );
+
+        // Legacy protocol input may still arrive from an old frontend or a
+        // persisted draft, but Manual setup is a new-session path.
+        state.apply(LaunchWizardAction::SetExecutionMode {
+            mode: "continue".to_string(),
+        });
+        assert_eq!(state.view().selected_execution_mode, "continue");
+        state.apply(LaunchWizardAction::Submit); // Runtime -> Confirm
+        assert!(state.view().show_confirm);
+        state.apply(LaunchWizardAction::Submit); // Confirm -> Launch
+
+        match state.completion.as_ref() {
+            Some(LaunchWizardCompletion::Launch(config)) => match config.as_ref() {
+                LaunchWizardLaunchRequest::Agent(config) => {
+                    assert_eq!(config.session_mode, gwt_agent::SessionMode::Normal);
+                    assert!(config.resume_session_id.is_none());
+                }
+                other => panic!("expected agent launch request, got {other:?}"),
+            },
+            other => panic!("expected launch completion, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn start_methods_expose_session_picker_for_picker_capable_agents() {
+        let state = LaunchWizardState::open_with(
+            context(branch("feature/gui"), "feature/gui"),
+            sample_agent_options(),
+            Vec::new(),
+        );
+
+        let methods = state.view().start_methods;
+        assert!(methods.iter().any(|method| {
+            method.kind == "open_session_picker"
+                && method.label == "Open session picker"
+                && method.enabled
+        }));
+
+        let unsupported = AgentOption {
+            id: "proxy-agent".to_string(),
+            name: "Proxy Agent".to_string(),
+            available: true,
+            installed_version: Some("1.0.0".to_string()),
+            versions: Vec::new(),
+            custom_agent: Some(sample_custom_agent(
+                "proxy-agent",
+                "Proxy Agent",
+                gwt_agent::custom::CustomAgentType::Command,
+                "proxy-agent",
+            )),
+        };
+        let unsupported_state = LaunchWizardState::open_with(
+            context(branch("feature/gui"), "feature/gui"),
+            vec![unsupported],
+            Vec::new(),
+        );
+        assert!(!unsupported_state
+            .view()
+            .start_methods
+            .iter()
+            .any(|method| method.kind == "open_session_picker"));
     }
 
     #[test]
@@ -880,7 +1194,7 @@ mod tests {
             .find(|method| method.kind == "focus_running_session")
             .expect("focus method");
         assert!(!focus_method.enabled);
-        assert_eq!(focus_method.summary, "No running session");
+        assert_eq!(focus_method.summary, "Switch to running session");
 
         state.apply(LaunchWizardAction::UseStartMethod {
             method: LaunchWizardStartMethodKind::FocusRunningSession,

@@ -3261,6 +3261,9 @@ mod tests {
 
     #[test]
     fn runtime_status_helpers_cover_sessions_auto_close_and_launch_errors() {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let temp = tempdir().expect("tempdir");
         let repo = temp.path().join("repo");
         fs::create_dir_all(&repo).expect("create repo");
