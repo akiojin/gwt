@@ -15959,11 +15959,7 @@
 
       for (const button of modal.querySelectorAll("[data-preset]")) {
         button.addEventListener("click", () => {
-          frontendUnits.socketTransport.send({
-            kind: "create_window",
-            preset: button.dataset.preset,
-            bounds: visibleBounds(),
-          });
+          focusOrSpawnPreset(button.dataset.preset);
           closeModal();
         });
       }
@@ -15981,21 +15977,34 @@
         return false;
       }
 
+      function isSingletonSurfacePreset(preset) {
+        const sessionPresets = new Set(["agent", "shell", "claude", "codex"]);
+        return !sessionPresets.has(preset);
+      }
+
+      function openExistingSurfaceWindow(windowData) {
+        focusWindowLocally(windowData.id);
+        if (windowData.minimized) {
+          frontendUnits.socketTransport.send({
+            kind: "restore_window",
+            id: windowData.id,
+          });
+        }
+        frontendUnits.socketTransport.send({
+          kind: "focus_window",
+          id: windowData.id,
+          bounds: visibleBounds(),
+        });
+      }
+
       function focusOrSpawnPreset(preset) {
         if (preset === "branches") preset = "work";
         const allWindows = activeWorkspace().windows || [];
-        const existing = allWindows.find(
-          (w) => w.preset === preset && !w.minimized,
-        );
+        const existing = isSingletonSurfacePreset(preset)
+          ? allWindows.find((w) => w.preset === preset)
+          : null;
         if (existing) {
-          const message = {
-            kind: "focus_window",
-            id: existing.id,
-          };
-          if (isAutoMaximizedSurfacePreset(preset)) {
-            message.bounds = visibleBounds();
-          }
-          frontendUnits.socketTransport.send(message);
+          openExistingSurfaceWindow(existing);
           return existing.id;
         }
         const message = {
