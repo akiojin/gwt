@@ -1952,6 +1952,14 @@
         delete document.documentElement.dataset.opResizeActive;
       }
 
+      function hasPendingTerminalViewportRefresh(windowId) {
+        const runtime = terminalMap.get(windowId);
+        return (
+          runtime?.viewportRefreshPending === true ||
+          terminalViewportRefreshScheduler?.hasPending?.(windowId) === true
+        );
+      }
+
       function scheduleTerminalViewportRefresh(windowId) {
         const runtime = terminalMap.get(windowId);
         if (!runtime) {
@@ -2021,11 +2029,15 @@
           windowId,
           shouldFocus: false,
           shouldPersistGeometry,
+          syncGeometryOnGridChange: true,
           sendGeometry,
         });
         if (!activation.ran) {
           runtime.viewportRefreshPending = true;
-          scheduleTerminalFocusActivation(windowId, { shouldPersistGeometry });
+          scheduleTerminalFocusActivation(windowId, {
+            shouldPersistGeometry,
+            reason: "force_refresh_retry",
+          });
           return false;
         }
         runtime.viewportRefreshPending = false;
@@ -2033,7 +2045,10 @@
         return true;
       }
 
-      function rearmPendingTerminalViewportRefresh(windowId) {
+      function rearmPendingTerminalViewportRefresh(
+        windowId,
+        { shouldPersistGeometry = true } = {},
+      ) {
         const runtime = terminalMap.get(windowId);
         if (!runtime) {
           return false;
@@ -2045,8 +2060,22 @@
             runtime.viewportRefreshPending = false;
           },
           scheduleRefresh: () => {
-            forceTerminalViewportRefresh(windowId, { shouldPersistGeometry: true });
+            forceTerminalViewportRefresh(windowId, { shouldPersistGeometry });
           },
+        });
+      }
+
+      function traceTerminalActivation(windowId, activation, fields = {}) {
+        traceUi(UI_TRACE_EVENT.terminalActivation, {
+          window_id: windowId,
+          ran: activation?.ran === true,
+          fast_path: activation?.fastPath === true,
+          grid_changed: activation?.gridChanged === true,
+          geometry_sent: activation?.geometrySent === true,
+          cols: activation?.cols ?? 0,
+          rows: activation?.rows ?? 0,
+          reason: activation?.reason || "unknown",
+          ...fields,
         });
       }
 
@@ -2063,7 +2092,7 @@
 
       function scheduleTerminalFocusActivation(
         windowId,
-        { shouldPersistGeometry = true } = {},
+        { shouldPersistGeometry = true, reason = "focus_activation" } = {},
       ) {
         const runtime = terminalMap.get(windowId);
         if (!runtime || runtime.activationFrame !== null) {
@@ -2106,13 +2135,25 @@
           // Mirror completeInitialFitHandshake's bounded rAF retry instead
           // of giving up after one frame, so the focus path is not a
           // one-shot silent no-op (#2832 parity for the focus trigger).
+          const pendingOutputCount = terminalOutputBatcher.pendingCount(windowId);
+          const hasPendingRefresh = hasPendingTerminalViewportRefresh(windowId);
           const activation = runTerminalActivationSequence({
             runtime: activeRuntime,
             windowId,
             shouldFocus,
             shouldPersistGeometry,
             syncGeometryOnGridChange: true,
+            allowFastPath: true,
+            pendingOutputCount,
+            hasPendingRefresh,
             sendGeometry,
+          });
+          traceTerminalActivation(windowId, activation, {
+            activation_reason: reason,
+            pending_output_count: pendingOutputCount,
+            pending_refresh: hasPendingRefresh,
+            should_focus: shouldFocus,
+            should_persist_geometry: shouldPersistGeometry,
           });
           if (!activation.ran) {
             activeRuntime.activationAttempts =
@@ -2120,11 +2161,15 @@
             if (activeRuntime.activationAttempts <= HANDSHAKE_RETRY_LIMIT) {
               scheduleTerminalFocusActivation(windowId, {
                 shouldPersistGeometry,
+                reason,
               });
             }
             return;
           }
           activeRuntime.activationAttempts = 0;
+          if (activation.fastPath) {
+            return;
+          }
           // SPEC-2008 Phase 26.A / FR-057: if the runtime was created in
           // a hidden state, its initial fit handshake never completed
           // (completeInitialFitHandshake bails when canRefreshTerminalViewport
@@ -3995,9 +4040,21 @@
                 shouldHide: true,
                 hasTerminal: terminalMap.has(windowId),
                 onReveal: () => {
-                  terminalOutputBatcher.schedulePending(windowId);
-                  rearmPendingTerminalViewportRefresh(windowId);
-                  scheduleTerminalFocusActivation(windowId);
+                  const pendingOutputScheduled =
+                    terminalOutputBatcher.schedulePending(windowId);
+                  const pendingRefreshRearmed = rearmPendingTerminalViewportRefresh(
+                    windowId,
+                    { shouldPersistGeometry: false },
+                  );
+                  traceUi(UI_TRACE_EVENT.terminalVisibilityReveal, {
+                    window_id: windowId,
+                    pending_output_scheduled: pendingOutputScheduled,
+                    pending_refresh_rearmed: pendingRefreshRearmed,
+                  });
+                  scheduleTerminalFocusActivation(windowId, {
+                    shouldPersistGeometry: false,
+                    reason: "visibility_reveal",
+                  });
                 },
               });
             }
@@ -4055,9 +4112,21 @@
                 shouldHide: !visibleWindowData(windowData),
                 hasTerminal: terminalMap.has(windowData.id),
                 onReveal: () => {
-                  terminalOutputBatcher.schedulePending(windowData.id);
-                  rearmPendingTerminalViewportRefresh(windowData.id);
-                  scheduleTerminalFocusActivation(windowData.id);
+                  const pendingOutputScheduled =
+                    terminalOutputBatcher.schedulePending(windowData.id);
+                  const pendingRefreshRearmed = rearmPendingTerminalViewportRefresh(
+                    windowData.id,
+                    { shouldPersistGeometry: false },
+                  );
+                  traceUi(UI_TRACE_EVENT.terminalVisibilityReveal, {
+                    window_id: windowData.id,
+                    pending_output_scheduled: pendingOutputScheduled,
+                    pending_refresh_rearmed: pendingRefreshRearmed,
+                  });
+                  scheduleTerminalFocusActivation(windowData.id, {
+                    shouldPersistGeometry: false,
+                    reason: "visibility_reveal",
+                  });
                 },
               });
             }
@@ -4074,6 +4143,7 @@
               focusWindowLocally(topmostId);
               scheduleTerminalFocusActivation(topmostId, {
                 shouldPersistGeometry: false,
+                reason: "topmost_focus",
               });
             } else {
               focusedId = null;

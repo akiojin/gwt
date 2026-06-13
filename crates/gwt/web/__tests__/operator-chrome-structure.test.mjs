@@ -4624,12 +4624,12 @@ test("Terminal output writes are gated while windows are hidden", () => {
   const renderWorkspaceBody = extractFunctionBody(appSource, "renderWorkspace");
   assert.match(
     renderWorkspaceBody,
-    /onReveal:\s*\(\)\s*=>\s*\{[\s\S]*?terminalOutputBatcher\.schedulePending\(windowId\)[\s\S]*?rearmPendingTerminalViewportRefresh\(windowId\)[\s\S]*?scheduleTerminalFocusActivation\(windowId\)/,
+    /onReveal:\s*\(\)\s*=>\s*\{[\s\S]*?terminalOutputBatcher\.schedulePending\(windowId\)[\s\S]*?rearmPendingTerminalViewportRefresh\(\s*windowId,\s*\{[\s\S]*?shouldPersistGeometry:\s*false[\s\S]*?\}\s*\)[\s\S]*?scheduleTerminalFocusActivation\(\s*windowId,\s*\{[\s\S]*?shouldPersistGeometry:\s*false[\s\S]*?reason:\s*"visibility_reveal"[\s\S]*?\}\s*\)/,
     "hidden project-tab reveal must re-arm pending output before viewport/focus activation",
   );
   assert.match(
     renderWorkspaceBody,
-    /onReveal:\s*\(\)\s*=>\s*\{[\s\S]*?terminalOutputBatcher\.schedulePending\(windowData\.id\)[\s\S]*?rearmPendingTerminalViewportRefresh\(windowData\.id\)[\s\S]*?scheduleTerminalFocusActivation\(windowData\.id\)/,
+    /onReveal:\s*\(\)\s*=>\s*\{[\s\S]*?terminalOutputBatcher\.schedulePending\(windowData\.id\)[\s\S]*?rearmPendingTerminalViewportRefresh\(\s*windowData\.id,\s*\{[\s\S]*?shouldPersistGeometry:\s*false[\s\S]*?\}\s*\)[\s\S]*?scheduleTerminalFocusActivation\(\s*windowData\.id,\s*\{[\s\S]*?shouldPersistGeometry:\s*false[\s\S]*?reason:\s*"visibility_reveal"[\s\S]*?\}\s*\)/,
     "hidden window-tab reveal must re-arm pending output before viewport/focus activation",
   );
 });

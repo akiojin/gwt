@@ -2834,6 +2834,99 @@ fn app_runtime_cycle_focus_preserves_real_fit_pty_size() {
 }
 
 #[test]
+fn app_runtime_activate_maximized_window_tab_preserves_real_fit_pty_size() {
+    // SPEC-2008 Phase 34 / Issue #2937 companion: maximized tab activation
+    // changes only the active marker. The backend must not resize the PTY
+    // from shared maximized geometry, because the frontend's visible xterm
+    // fit owns the real cols/rows for the revealed tab.
+    let temp = tempdir().expect("tempdir");
+    let bounds = canvas_bounds();
+    let tab = sample_project_tab(
+        "tab-1",
+        "Repo",
+        temp.path().to_path_buf(),
+        ProjectKind::Git,
+        &[WindowPreset::Shell, WindowPreset::Claude],
+    );
+    let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+    let shell_id = combined_window_id("tab-1", "shell-1");
+    let claude_id = combined_window_id("tab-1", "claude-1");
+
+    assert_eq!(
+        runtime.dock_window_tab_events(&shell_id, &claude_id).len(),
+        1
+    );
+    assert_eq!(
+        runtime
+            .maximize_window_events(&shell_id, bounds.clone())
+            .len(),
+        1
+    );
+    let _ = runtime.activate_window_tab_events(&shell_id);
+
+    insert_test_pane_runtime(&mut runtime, &shell_id);
+    insert_test_pane_runtime(&mut runtime, &claude_id);
+
+    const REAL_COLS: u16 = 173;
+    const REAL_ROWS: u16 = 31;
+    for raw_id in ["shell-1", "claude-1"] {
+        let geometry = runtime
+            .tab("tab-1")
+            .expect("tab")
+            .workspace
+            .window(raw_id)
+            .expect("window")
+            .geometry
+            .clone();
+        assert_ne!(
+            geometry_to_pty_size(&geometry),
+            (REAL_COLS, REAL_ROWS),
+            "sentinel must differ from the maximized-geometry approximation",
+        );
+    }
+
+    for window_id in [&shell_id, &claude_id] {
+        runtime
+            .runtimes
+            .get(window_id)
+            .expect("runtime")
+            .pane
+            .lock()
+            .expect("pane")
+            .resize(REAL_COLS, REAL_ROWS)
+            .expect("resize");
+    }
+
+    let events = runtime.activate_window_tab_events(&claude_id);
+
+    assert_eq!(events.len(), 1);
+    let workspace = &runtime.tab("tab-1").expect("tab").workspace;
+    assert!(
+        workspace
+            .window("claude-1")
+            .expect("claude")
+            .tab_group_active
+    );
+    assert!(!workspace.window("shell-1").expect("shell").tab_group_active);
+    assert!(workspace.window("claude-1").expect("claude").maximized);
+    assert!(workspace.window("shell-1").expect("shell").maximized);
+    for window_id in [&shell_id, &claude_id] {
+        let pane = runtime
+            .runtimes
+            .get(window_id)
+            .expect("runtime")
+            .pane
+            .lock()
+            .expect("pane");
+        assert_eq!(
+            pane.screen().size(),
+            (REAL_ROWS, REAL_COLS),
+            "tab activation must not clobber the frontend-fitted PTY size via geometry_to_pty_size",
+        );
+    }
+}
+
+#[test]
 fn app_runtime_arrange_windows_does_not_clobber_real_fit_pty_size() {
     // Issue #2937 companion: arrange_windows shares the same all-window
     // resize fan-out as cycle_focus. The frontend re-fit (driven by the

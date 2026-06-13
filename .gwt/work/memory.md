@@ -6927,3 +6927,10 @@ Type: lesson
 Context: gwtd search (SPEC-1942 US-15) で GUI の search_project_index を流用したところ、stale な issues index (source_cache_changed) で search が失敗した。runner の action_search_multi_v2 は interactive GUI 契約として no_auto_build=True を内部固定しており、呼び出し側で --no-auto-build を外しても効かない。
 Learning: auto-build / self-heal が必要な agent・CLI 検索経路は search-multi ではなく per-scope の search-issues / search-specs 等の単一 action を使う。単一 action 側 (no_auto_build=False) が EMPTY_CORPUS 診断 (Issue #2979) も担う agent 向け契約である。
 Future Action: 検索経路を追加・変更する際は、runner の action 別 auto-build 挙動 (search-multi=固定無効 / 単一 action=有効) を必ず確認し、CLI 経路では per-scope action + auto_build フラグ (search_project_index の auto_build 引数) を使う。
+
+## 2026-06-13 — Maximized tab activation must not backend-resize PTYs
+
+Type: lesson
+Context: SPEC-2008 Phase 34 no-flash tab switching previously preserved frontend DOM/runtime but missed AppRuntime::activate_window_tab_events. In maximized tab groups, backend geometry_to_pty_size resized PTY before frontend xterm fit, causing Codex-heavy redraw on each tab switch.
+Learning: For terminal no-flash/focus fixes, check both frontend remount paths and backend handlers for resize_runtime_to_window calls. Tab activation changes only active marker/z-order; PTY size is owned by frontend real xterm fit and update_window_geometry_events.
+Future Action: When investigating terminal redraw after window/tab switching, first inspect logs for activate_window_tab followed by two PTY resize entries, then add a regression test that preserves a frontend-fitted sentinel PTY size across the backend event.

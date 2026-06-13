@@ -25,6 +25,8 @@ export const UI_TRACE_EVENT = Object.freeze({
   resizePointermoveApply: "resize_pointermove_apply",
   resizePointermoveFrame: "resize_pointermove_frame",
   resizePointermoveFrameScheduled: "resize_pointermove_frame_scheduled",
+  terminalActivation: "terminal_activation",
+  terminalVisibilityReveal: "terminal_visibility_reveal",
   writeOutput: "write_output",
 });
 
