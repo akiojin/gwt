@@ -82,6 +82,20 @@ test("existing surface helper restores minimized windows and centers focus with 
   );
 });
 
+test("existing grouped surface tabs are activated before focus", () => {
+  const helperBody = extractFunctionBody(appSource, "openExistingSurfaceWindow");
+
+  assert.match(
+    helperBody,
+    /windowData\.tab_group_id[\s\S]*kind:\s*"activate_window_tab"[\s\S]*id:\s*windowData\.id/,
+    "inactive grouped surface tabs must be activated before focus",
+  );
+  assert.ok(
+    helperBody.indexOf('kind: "activate_window_tab"') < helperBody.indexOf('kind: "focus_window"'),
+    "tab activation must be sent before focus_window so the requested tab is revealed",
+  );
+});
+
 test("Add Window surface buttons use the same reopen path as rail and palette commands", () => {
   const modalLoop = appSource.match(
     /for\s*\(\s*const\s+button\s+of\s+modal\.querySelectorAll\("\[data-preset\]"\)\s*\)\s*\{([\s\S]*?)\n\s*\}\n\s*\n\s*\/\/ SPEC-2356 "Surface Deck"/,
@@ -96,6 +110,27 @@ test("Add Window surface buttons use the same reopen path as rail and palette co
     modalLoop[1],
     /kind:\s*"create_window"/,
     "Add Window buttons must not bypass the shared surface reopen helper",
+  );
+});
+
+test("work surface aliases are normalized before singleton lookup", () => {
+  const normalizeBody = extractFunctionBody(appSource, "normalizeSurfacePreset");
+  assert.match(
+    normalizeBody,
+    /preset\s*===\s*"branches"[\s\S]*preset\s*===\s*"workspace"[\s\S]*return\s+"work"/,
+    "branches and legacy workspace presets must normalize to work",
+  );
+
+  const focusBody = extractFunctionBody(appSource, "focusOrSpawnPreset");
+  assert.match(
+    focusBody,
+    /preset\s*=\s*normalizeSurfacePreset\(preset\)/,
+    "requested preset must be canonicalized before lookup",
+  );
+  assert.match(
+    focusBody,
+    /normalizeSurfacePreset\(w\.preset\)\s*===\s*preset/,
+    "existing legacy workspace windows must match canonical work requests",
   );
 });
 
