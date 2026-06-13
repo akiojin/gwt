@@ -78,7 +78,7 @@ impl LaunchWizardState {
             show_version: show_manual_setup
                 && self.launch_target_is_agent()
                 && agent_has_npm_package(self.effective_agent_id()),
-            show_execution_mode: show_manual_setup && self.launch_target_is_agent(),
+            show_execution_mode: false,
             show_skip_permissions: show_manual_setup && self.launch_target_is_agent(),
             show_fast_mode,
             show_codex_fast_mode: show_manual_setup
@@ -110,12 +110,10 @@ impl LaunchWizardState {
     fn start_methods_view(&self) -> Vec<LaunchWizardStartMethodView> {
         let settings_summary = self.start_settings_summary();
         let has_previous_settings = self.has_previous_start_settings();
-        let latest_resume = self
-            .latest_quick_start_entry()
-            .and_then(|(_, entry)| entry.resume_session_id.as_deref().map(|id| (entry, id)));
+        let latest_session = self.latest_quick_start_entry().map(|(_, entry)| entry);
         let latest_live = self.latest_running_session().map(|(_, session)| session);
 
-        vec![
+        let mut methods = vec![
             LaunchWizardStartMethodView {
                 kind: LaunchWizardStartMethodKind::ConfigureAndStart
                     .value()
@@ -147,36 +145,59 @@ impl LaunchWizardState {
                     .to_string(),
                 label: "Continue last session".to_string(),
                 badge: "Session".to_string(),
-                summary: latest_resume
-                    .map(|(entry, _)| quick_start_summary(entry))
+                summary: latest_session
+                    .map(quick_start_summary)
                     .unwrap_or_else(|| "No resumable session".to_string()),
-                detail: latest_resume.map(|(_, resume_id)| format!("Resume ID · {resume_id}")),
-                enabled: latest_resume.is_some(),
-                disabled_reason: latest_resume
+                detail: latest_session.map(|entry| {
+                    entry
+                        .resume_session_id
+                        .as_deref()
+                        .map(|resume_id| format!("Resume ID · {resume_id}"))
+                        .unwrap_or_else(|| "Use the agent's latest session".to_string())
+                }),
+                enabled: latest_session.is_some(),
+                disabled_reason: latest_session
                     .is_none()
                     .then(|| "No saved session is available".to_string()),
             },
-            LaunchWizardStartMethodView {
-                kind: LaunchWizardStartMethodKind::FocusRunningSession
+        ];
+        if self.current_agent_supports_resume_picker() {
+            methods.push(LaunchWizardStartMethodView {
+                kind: LaunchWizardStartMethodKind::OpenSessionPicker
                     .value()
                     .to_string(),
-                label: "Focus running session".to_string(),
-                badge: "Running".to_string(),
-                summary: latest_live
-                    .map(|session| session.name.clone())
-                    .unwrap_or_else(|| "No running session".to_string()),
-                detail: latest_live.and_then(|session| {
-                    session
-                        .detail
-                        .clone()
-                        .or_else(|| Some(live_session_status_label(session)))
-                }),
-                enabled: latest_live.is_some(),
-                disabled_reason: latest_live
-                    .is_none()
-                    .then(|| "No running session is available".to_string()),
-            },
-        ]
+                label: "Open session picker".to_string(),
+                badge: "Picker".to_string(),
+                summary: self
+                    .selected_agent()
+                    .map(|agent| format!("{} session picker", agent.name))
+                    .unwrap_or_else(|| "Agent session picker".to_string()),
+                detail: Some("Choose a session in the agent CLI".to_string()),
+                enabled: true,
+                disabled_reason: None,
+            });
+        }
+        methods.push(LaunchWizardStartMethodView {
+            kind: LaunchWizardStartMethodKind::FocusRunningSession
+                .value()
+                .to_string(),
+            label: "Focus running session".to_string(),
+            badge: "Running".to_string(),
+            summary: latest_live
+                .map(|session| session.name.clone())
+                .unwrap_or_else(|| "No running session".to_string()),
+            detail: latest_live.and_then(|session| {
+                session
+                    .detail
+                    .clone()
+                    .or_else(|| Some(live_session_status_label(session)))
+            }),
+            enabled: latest_live.is_some(),
+            disabled_reason: latest_live
+                .is_none()
+                .then(|| "No running session is available".to_string()),
+        });
+        methods
     }
 
     fn start_settings_summary(&self) -> String {
@@ -364,10 +385,6 @@ impl LaunchWizardState {
                     value: self.version.clone(),
                 });
             }
-            summary.push(LaunchWizardSummaryView {
-                label: "Mode".to_string(),
-                value: self.mode.clone(),
-            });
         }
         summary.push(LaunchWizardSummaryView {
             label: "Runtime".to_string(),
@@ -767,7 +784,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn start_methods_view_exposes_four_direct_methods() {
+    fn start_methods_view_exposes_direct_methods() {
         let mut ctx = context(branch("feature/gui"), "feature/gui");
         ctx.live_sessions = vec![LiveSessionEntry {
             session_id: "session-live".to_string(),
@@ -793,7 +810,7 @@ mod tests {
         );
 
         let methods = state.view().start_methods;
-        assert_eq!(methods.len(), 4);
+        assert_eq!(methods.len(), 5);
         assert_eq!(methods[0].kind, "configure_and_start");
         assert_eq!(methods[0].label, "Configure and start");
         assert!(methods[0].summary.contains("Codex"));
@@ -806,9 +823,102 @@ mod tests {
             .as_deref()
             .unwrap_or("")
             .contains("native-newer"));
-        assert_eq!(methods[3].kind, "focus_running_session");
-        assert_eq!(methods[3].badge, "Running");
+        assert_eq!(methods[3].kind, "open_session_picker");
+        assert_eq!(methods[3].badge, "Picker");
+        assert_eq!(methods[4].kind, "focus_running_session");
+        assert_eq!(methods[4].badge, "Running");
         assert!(methods.iter().all(|method| method.enabled));
+    }
+
+    #[test]
+    fn manual_setup_hides_execution_mode_and_launches_new_session() {
+        let mut codex = sample_session_record(
+            "feature/old",
+            Path::new("/tmp/old-repo"),
+            gwt_agent::AgentId::Codex,
+            Utc.with_ymd_and_hms(2026, 6, 13, 9, 0, 0).unwrap(),
+            None,
+        );
+        codex.session_mode = gwt_agent::SessionMode::Continue;
+        let previous_profiles = previous_launch_profiles_from_sessions(&[codex]);
+        let mut state = LaunchWizardState::open_with_previous_profiles(
+            context(branch("feature/current"), "feature/current"),
+            sample_agent_options(),
+            Vec::new(),
+            previous_profiles,
+        );
+
+        state.apply(LaunchWizardAction::UseStartMethod {
+            method: LaunchWizardStartMethodKind::ConfigureAndStart,
+        });
+        let view = state.view();
+        assert!(!view.show_execution_mode);
+        assert!(!view.launch_summary.iter().any(|item| item.label == "Mode"));
+        assert_eq!(
+            next_step(LaunchWizardStep::VersionSelect, &state),
+            Some(LaunchWizardStep::SkipPermissions)
+        );
+
+        // Legacy protocol input may still arrive from an old frontend or a
+        // persisted draft, but Manual setup is a new-session path.
+        state.apply(LaunchWizardAction::SetExecutionMode {
+            mode: "continue".to_string(),
+        });
+        assert_eq!(state.view().selected_execution_mode, "continue");
+        state.apply(LaunchWizardAction::Submit); // Runtime -> Confirm
+        assert!(state.view().show_confirm);
+        state.apply(LaunchWizardAction::Submit); // Confirm -> Launch
+
+        match state.completion.as_ref() {
+            Some(LaunchWizardCompletion::Launch(config)) => match config.as_ref() {
+                LaunchWizardLaunchRequest::Agent(config) => {
+                    assert_eq!(config.session_mode, gwt_agent::SessionMode::Normal);
+                    assert!(config.resume_session_id.is_none());
+                }
+                other => panic!("expected agent launch request, got {other:?}"),
+            },
+            other => panic!("expected launch completion, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn start_methods_expose_session_picker_for_picker_capable_agents() {
+        let state = LaunchWizardState::open_with(
+            context(branch("feature/gui"), "feature/gui"),
+            sample_agent_options(),
+            Vec::new(),
+        );
+
+        let methods = state.view().start_methods;
+        assert!(methods.iter().any(|method| {
+            method.kind == "open_session_picker"
+                && method.label == "Open session picker"
+                && method.enabled
+        }));
+
+        let unsupported = AgentOption {
+            id: "proxy-agent".to_string(),
+            name: "Proxy Agent".to_string(),
+            available: true,
+            installed_version: Some("1.0.0".to_string()),
+            versions: Vec::new(),
+            custom_agent: Some(sample_custom_agent(
+                "proxy-agent",
+                "Proxy Agent",
+                gwt_agent::custom::CustomAgentType::Command,
+                "proxy-agent",
+            )),
+        };
+        let unsupported_state = LaunchWizardState::open_with(
+            context(branch("feature/gui"), "feature/gui"),
+            vec![unsupported],
+            Vec::new(),
+        );
+        assert!(!unsupported_state
+            .view()
+            .start_methods
+            .iter()
+            .any(|method| method.kind == "open_session_picker"));
     }
 
     #[test]

@@ -148,6 +148,7 @@ pub enum LaunchWizardStartMethodKind {
     ConfigureAndStart,
     StartWithLastSettings,
     ContinueLastSession,
+    OpenSessionPicker,
     FocusRunningSession,
 }
 
@@ -157,6 +158,7 @@ impl LaunchWizardStartMethodKind {
             LaunchWizardStartMethodKind::ConfigureAndStart => "configure_and_start",
             LaunchWizardStartMethodKind::StartWithLastSettings => "start_with_last_settings",
             LaunchWizardStartMethodKind::ContinueLastSession => "continue_last_session",
+            LaunchWizardStartMethodKind::OpenSessionPicker => "open_session_picker",
             LaunchWizardStartMethodKind::FocusRunningSession => "focus_running_session",
         }
     }

@@ -674,6 +674,19 @@ test("Launch Wizard focus start method renders backend-provided running session 
   );
 });
 
+test("Launch Wizard keeps session mode choices in Start methods, not settings", () => {
+  assert.match(
+    launchWizardSource,
+    /for\s*\(\s*const method of launchWizard\.start_methods \|\| \[\]\s*\)/,
+    "expected session-oriented actions to render through Start methods",
+  );
+  assert.doesNotMatch(
+    launchWizardSource,
+    /appendChoiceOrSelectField\(\s*grid,\s*"Execution mode"/,
+    "Execution mode must not be rendered as a Manual setup setting",
+  );
+});
+
 test("Workspace Overview is separate from live-only Active Work", () => {
   assert.ok(
     document.querySelector("#op-workspace-overview-entry"),

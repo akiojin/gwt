@@ -946,19 +946,6 @@ export function createLaunchWizardSurface({
                   }),
               );
             }
-            if (launchWizard.show_execution_mode) {
-              appendChoiceOrSelectField(
-                grid,
-                "Execution mode",
-                launchWizard.execution_mode_options || [],
-                launchWizard.selected_execution_mode,
-                (value) =>
-                  sendWizardAction({
-                    kind: "set_execution_mode",
-                    mode: value,
-                  }),
-              );
-            }
           } else {
             const note = createLaunchField("Shell", true);
             note.appendChild(
