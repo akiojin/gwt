@@ -2319,12 +2319,17 @@ fn active_work_items_from_projection(
             };
             gwt::ActiveWorkItemView {
                 id: work_id.clone(),
+                // SPEC-3075 FR-002/FR-004: the Work title is its *identity*
+                // (purpose). `current_focus` is the agent's live "what now"
+                // (status) and must never become the Work title — otherwise a
+                // status line like "...execution mode..." leaks in as the
+                // identity. `title_summary` is the agent-declared purpose, so it
+                // stays as a fallback; `current_focus` is removed entirely.
                 title: history
                     .map(|item| item.title.clone())
                     .filter(|value| !value.trim().is_empty())
                     .or_else(|| is_current_projection.then(|| projection.title.clone()))
                     .or_else(|| first_agent.and_then(|agent| agent.title_summary.clone()))
-                    .or_else(|| first_agent.and_then(|agent| agent.current_focus.clone()))
                     .unwrap_or(work_id),
                 status_category,
                 status_text,
@@ -3247,8 +3252,24 @@ fn assign_and_merge_workspace_groups(
                 let merged_into_base = target.merged_into_base || work.merged_into_base;
                 if newer {
                     let key = target.workspace_key.clone();
+                    // SPEC-3075 FR-004: a session-derived row's title/owner is
+                    // agent content (the live session), not the branch's
+                    // identity. When a fresher session row merges into a
+                    // branch-backed Work, take its fresher status but preserve
+                    // the branch-backed identity so another agent's content
+                    // never surfaces as this Work's title.
+                    let target_branch_backed = !target.id.starts_with("work-session-");
+                    let work_session_derived = work.id.starts_with("work-session-");
+                    let preserved_identity = (target_branch_backed && work_session_derived)
+                        .then(|| (target.title.clone(), target.owner.clone()));
                     *target = work;
                     target.workspace_key = key;
+                    if let Some((title, owner)) = preserved_identity {
+                        target.title = title;
+                        if owner.is_some() {
+                            target.owner = owner;
+                        }
+                    }
                 }
                 target.agents = agents;
                 target.active_agents = active_agents;

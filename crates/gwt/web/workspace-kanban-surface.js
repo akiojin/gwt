@@ -925,16 +925,39 @@ export function createWorkspaceKanbanSurface({
     header.appendChild(actions);
     container.appendChild(header);
 
+    // SPEC-3075 FR-002: separate the Work's *purpose* (identity — what this
+    // Work is, stable) from its *status* (current focus / next, which change
+    // over time). The old single "Summary" section conflated them, so the
+    // detail read as a status snapshot and never answered "what is this Work?".
+    const purposeText = workspace.title || workspace.intent || workspace.owner;
     container.appendChild(
-      detailSection("Summary", (body) => {
-        appendTextBlock(body, workspace.summary || workspace.status_text || workspace.intent);
-        if (workspace.intent && workspace.intent !== workspace.summary) {
-          appendTextBlock(body, workspace.intent);
-        }
-        appendTextBlock(body, workspace.next_action);
-        appendTextBlock(body, workspace.blocked_reason, "workspace-detail-text is-warning");
+      detailSection("Purpose", (body) => {
+        appendTextBlock(body, purposeText);
       }),
     );
+    const currentFocus = workspace.intent;
+    if (currentFocus || workspace.next_action || workspace.blocked_reason) {
+      container.appendChild(
+        detailSection("Status", (body) => {
+          appendDefinitionList(body, [
+            ["Now", currentFocus],
+            ["Next", workspace.next_action],
+          ]);
+          appendTextBlock(body, workspace.blocked_reason, "workspace-detail-text is-warning");
+        }),
+      );
+    }
+    // The Board-body status snapshot, demoted below purpose/status — it is the
+    // latest "what happened", not the Work's identity. Only shown when it adds
+    // something beyond the current focus / purpose.
+    const latestUpdate = workspace.summary || workspace.status_text;
+    if (latestUpdate && latestUpdate !== currentFocus && latestUpdate !== purposeText) {
+      container.appendChild(
+        detailSection("Latest update", (body) => {
+          appendTextBlock(body, latestUpdate);
+        }),
+      );
+    }
     container.appendChild(
       detailSection("Work", (body) => {
         appendWorks(body, workspace.agents, workspace);

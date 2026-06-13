@@ -141,13 +141,26 @@ test("Workspace detail renders structured body sections without preformatted dum
     detail.querySelectorAll(".workspace-detail-section-title"),
     (node) => node.textContent,
   );
+  // SPEC-3075 FR-002: the detail leads with Purpose (identity), then Status
+  // (current focus / next), then a demoted Latest update (Board snapshot) —
+  // instead of one conflated "Summary" that read as a status snapshot.
   assert.deepEqual(sectionTitles, [
-    "Summary",
+    "Purpose",
+    "Status",
+    "Latest update",
     "Work",
     "Lifecycle",
     "Work Context",
     "Coordination",
   ]);
+
+  // Purpose comes first and carries the Work identity, not the status text.
+  const purposeSection = detail.querySelectorAll(".workspace-detail-section")[0];
+  assert.equal(
+    purposeSection.querySelector(".workspace-detail-section-title").textContent,
+    "Purpose",
+  );
+  assert.match(purposeSection.textContent, /Release Notes cleanup/);
 
   const text = detail.textContent.replace(/\s+/g, " ").trim();
   assert.match(text, /Quiet Work UI redesign/);
