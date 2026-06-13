@@ -208,6 +208,19 @@ impl WorkItem {
     pub fn is_terminal(&self) -> bool {
         self.status_category == WorkspaceStatusCategory::Done || self.discarded
     }
+
+    /// #3065: the most recent non-empty `next_action` across this Work's
+    /// events. Used to build a per-work-item resume context instead of
+    /// reading the repo-shared current projection.
+    pub fn latest_next_action(&self) -> Option<&str> {
+        self.events.iter().rev().find_map(|event| {
+            event
+                .next_action
+                .as_deref()
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+        })
+    }
 }
 
 /// Materialized collection of all Work items for one project, rebuilt by

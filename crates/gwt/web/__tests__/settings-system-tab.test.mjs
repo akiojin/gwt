@@ -3,6 +3,10 @@
 // Settings ウィンドウのタブ化と System タブの Language select が
 // Operator Design tokens を使い、つぎはぎ実装になっていないことを
 // CSS とレンダラのソースパターンで検証する（kanban-structure と同じ手法）。
+//
+// SPEC-3064 Phase 3 (E4): the Settings window renderer moved from app.js to
+// settings-surface.js. Renderer/source patterns are pinned against the
+// extracted module; receive() dispatch case arms stay pinned to app.js.
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
@@ -12,6 +16,7 @@ import { dirname, resolve } from "node:path";
 
 const here = dirname(fileURLToPath(import.meta.url));
 const appSource = readFileSync(resolve(here, "../app.js"), "utf8");
+const settingsSource = readFileSync(resolve(here, "../settings-surface.js"), "utf8");
 const componentsCss = readFileSync(
   resolve(here, "../styles/components.css"),
   "utf8",
@@ -35,15 +40,15 @@ function extractFunctionSource(source, name) {
 }
 
 function loadFunction(name) {
-  return Function(`"use strict"; return (${extractFunctionSource(appSource, name)});`)();
+  return Function(`"use strict"; return (${extractFunctionSource(settingsSource, name)});`)();
 }
 
 function loadFunctionWithDeps(name, deps) {
   const dependencySources = deps
-    .map((dep) => extractFunctionSource(appSource, dep))
+    .map((dep) => extractFunctionSource(settingsSource, dep))
     .join("\n");
   return Function(
-    `"use strict"; ${dependencySources}; return (${extractFunctionSource(appSource, name)});`,
+    `"use strict"; ${dependencySources}; return (${extractFunctionSource(settingsSource, name)});`,
   )();
 }
 
@@ -120,11 +125,11 @@ test("renderSettingsWindow builds a tablist toolbar with System and Custom Agent
   // The renderer must declare role="tablist" so assistive tech sees the tab
   // group, and emit both data-settings-tab values that switchSettingsTab
   // expects.
-  assert.match(appSource, /toolbar\.className\s*=\s*"settings-toolbar"/);
-  assert.match(appSource, /tabs\.setAttribute\("role",\s*"tablist"\)/);
-  assert.match(appSource, /buildSettingsTab\("system",\s*"System"/);
+  assert.match(settingsSource, /toolbar\.className\s*=\s*"settings-toolbar"/);
+  assert.match(settingsSource, /tabs\.setAttribute\("role",\s*"tablist"\)/);
+  assert.match(settingsSource, /buildSettingsTab\("system",\s*"System"/);
   assert.match(
-    appSource,
+    settingsSource,
     /buildSettingsTab\("custom-agents",\s*"Custom Agents"/,
   );
 });
@@ -139,7 +144,7 @@ test("System tab Language select offers Auto / English / 日本語", () => {
     /value:\s*"ja",\s*text:\s*"日本語"/,
   ]) {
     assert.match(
-      appSource,
+      settingsSource,
       opt,
       `Language select missing option: ${opt}`,
     );
@@ -151,7 +156,7 @@ test("renderSystemPanel sends update_system_settings on select change", () => {
   // via the WebSocket protocol (SPEC-1933 FR-007). Verify both the kind
   // and the payload field name.
   assert.match(
-    appSource,
+    settingsSource,
     /send\(\{\s*kind:\s*"update_system_settings",\s*language:\s*next\s*\}\)/,
     "expected select onChange to send update_system_settings",
   );
@@ -159,22 +164,22 @@ test("renderSystemPanel sends update_system_settings on select change", () => {
 
 test("renderSystemPanel exposes Codex managed hook trust opt-in", () => {
   assert.match(
-    appSource,
+    settingsSource,
     /trustText\.textContent\s*=\s*"Trust gwt-managed Codex hooks"/,
     "expected System tab Codex hook trust checkbox label",
   );
   assert.match(
-    appSource,
+    settingsSource,
     /codexTrustManagedHooks:\s*true/,
     "expected Codex hook trust UI state to default on",
   );
   assert.match(
-    appSource,
+    settingsSource,
     /trustCheckbox\.checked\s*=\s*systemSettingsState\.codexTrustManagedHooks\s*!==\s*false/,
     "expected unchecked only when config explicitly disables Codex hook trust",
   );
   assert.match(
-    appSource,
+    settingsSource,
     /send\(\{\s*kind:\s*"update_system_settings",\s*language:\s*systemSettingsState\.language\s*\|\|\s*"auto",\s*codex_trust_managed_hooks:\s*next,\s*\}\)/,
     "expected checkbox onChange to send codex_trust_managed_hooks",
   );
@@ -184,13 +189,13 @@ test("System tab Board provider select offers Local/Slack/Teams as selectable (S
   // SPEC-2963 Phase 5: slack/teams are now real, selectable options (sign-in
   // gated rather than disabled "coming soon").
   assert.match(
-    appSource,
+    settingsSource,
     /id\s*=\s*"settings-system-board-provider"/,
     "expected a Board provider select with the canonical id",
   );
   for (const provider of ["local", "slack", "teams"]) {
     assert.match(
-      appSource,
+      settingsSource,
       new RegExp(`value:\\s*"${provider}"`),
       `${provider} must be a Board provider option`,
     );
@@ -198,19 +203,19 @@ test("System tab Board provider select offers Local/Slack/Teams as selectable (S
 });
 
 test("System tab exposes remote provider sign-in affordance + auth status (SPEC-2963)", () => {
-  assert.match(appSource, /"board-auth-status"/, "expected an auth status element");
+  assert.match(settingsSource, /"board-auth-status"/, "expected an auth status element");
   assert.match(
-    appSource,
+    settingsSource,
     /kind:\s*"board_provider_sign_in",\s*provider:\s*selectedProvider/,
     "Sign in button must send board_provider_sign_in",
   );
   assert.match(
-    appSource,
+    settingsSource,
     /kind:\s*"board_provider_sign_out",\s*provider:\s*selectedProvider/,
     "Sign out button must send board_provider_sign_out",
   );
   assert.match(
-    appSource,
+    settingsSource,
     /kind:\s*"get_board_auth_status"/,
     "panel must fetch board auth status",
   );
@@ -225,34 +230,34 @@ test("System tab exposes remote provider config form that saves via update_board
   // FR-006: client_id / default_channel / tenant_id / secret editable from the
   // UI instead of hand-editing config.toml.
   assert.match(
-    appSource,
+    settingsSource,
     /board-config-form/,
     "expected a provider config form container",
   );
   assert.match(
-    appSource,
+    settingsSource,
     /"settings-board-slack-client-id"/,
     "Slack client id input must exist",
   );
   assert.match(
-    appSource,
+    settingsSource,
     /"settings-board-slack-secret"/,
     "Slack client secret input must exist",
   );
   assert.match(
-    appSource,
+    settingsSource,
     /"settings-board-teams-tenant-id"/,
     "Teams tenant id input must exist",
   );
   assert.match(
-    appSource,
+    settingsSource,
     /kind:\s*"update_board_provider_config"/,
     "Save button must send update_board_provider_config",
   );
   // The secret must only be sent when the user typed one (empty box keeps the
   // stored secret), so it is conditional rather than always included.
   assert.match(
-    appSource,
+    settingsSource,
     /secretInput\.value\.length\s*>\s*0/,
     "secret must be sent only when the user typed a value",
   );
@@ -265,12 +270,12 @@ test("System tab exposes remote provider config form that saves via update_board
   // The secret field clears after Save by design; an explicit saved-state note
   // must make persistence obvious instead of looking like data loss.
   assert.match(
-    appSource,
+    settingsSource,
     /board-secret-state/,
     "a client-secret saved-state indicator must exist",
   );
   assert.match(
-    appSource,
+    settingsSource,
     /A client secret is saved/,
     "the saved-state indicator must confirm the secret persisted",
   );
@@ -278,52 +283,52 @@ test("System tab exposes remote provider config form that saves via update_board
 
 test("System tab accepts a Teams channel link without exposing Team ID fields (SPEC-2963 Phase 9)", () => {
   assert.match(
-    appSource,
+    settingsSource,
     /function\s+parseTeamsChannelLink\(/,
     "expected a helper that parses a copied Teams channel link",
   );
   assert.match(
-    appSource,
+    settingsSource,
     /function\s+composeTeamsDefaultChannel\(/,
     "expected the parsed Teams link to save as team_id/channel_id",
   );
   assert.match(
-    appSource,
+    settingsSource,
     /function\s+formatTeamsChannelLink\(/,
     "expected saved team_id/channel_id config to render back into the link field",
   );
   assert.match(
-    appSource,
+    settingsSource,
     /"settings-board-teams-channel-link"/,
     "Teams channel link paste input must exist",
   );
   assert.doesNotMatch(
-    appSource,
+    settingsSource,
     /"settings-board-teams-team-id"/,
     "Teams Team ID must not be exposed as a separate input",
   );
   assert.doesNotMatch(
-    appSource,
+    settingsSource,
     /"settings-board-teams-channel-id"/,
     "Teams Channel ID must not be exposed as a separate input",
   );
   assert.match(
-    appSource,
+    settingsSource,
     /const\s+parsedTeamsChannel\s*=\s*parseTeamsChannelLink\(\s*teamsChannelLinkValue\s*,?\s*\)/,
     "Save must parse the Teams channel link",
   );
   assert.match(
-    appSource,
+    settingsSource,
     /default_channel:\s*nextTeamsDefaultChannel/,
     "Save payload must use the parsed or preserved Teams channel",
   );
   assert.match(
-    appSource,
+    settingsSource,
     /let\s+nextTeamsDefaultChannel\s*=\s*cfg\.teamsDefaultChannel\s*\|\|\s*""/,
     "saving client/tenant settings without a new link must preserve the existing channel",
   );
   assert.match(
-    appSource,
+    settingsSource,
     /formatTeamsChannelLink\(\s*cfg\.teamsDefaultChannel,\s*cfg\.teamsTenantId,?\s*\)/,
     "saved channel must remain visible in the Teams channel link field after rerender",
   );
@@ -358,17 +363,17 @@ test("System tab exposes an editable OAuth callback port + redirect URL hint (SP
   // The OAuth redirect must use a fixed, registerable loopback port; the UI
   // exposes it (default 8765) and shows the exact URL to register.
   assert.match(
-    appSource,
+    settingsSource,
     /"settings-board-oauth-port"/,
     "OAuth callback port input must exist",
   );
   assert.match(
-    appSource,
+    settingsSource,
     /127\.0\.0\.1:\$\{[^}]+\}\/oauth\/callback/,
     "the redirect URL hint must show http://127.0.0.1:<port>/oauth/callback",
   );
   assert.match(
-    appSource,
+    settingsSource,
     /kind:\s*"update_board_oauth_port"/,
     "Save port must send update_board_oauth_port",
   );
@@ -381,7 +386,7 @@ test("System tab exposes an editable OAuth callback port + redirect URL hint (SP
 
 test("renderSystemPanel sends update_system_settings with board_provider on change (SPEC-2959)", () => {
   assert.match(
-    appSource,
+    settingsSource,
     /kind:\s*"update_system_settings",[\s\S]*?board_provider:\s*next/,
     "Board provider select onChange must send update_system_settings with board_provider",
   );
@@ -389,27 +394,27 @@ test("renderSystemPanel sends update_system_settings with board_provider on chan
 
 test("System tab exposes Launch GWT at login autostart control", () => {
   assert.match(
-    appSource,
+    settingsSource,
     /autostartEnabled:\s*false/,
     "expected System settings state to track autostart enabled status",
   );
   assert.match(
-    appSource,
+    settingsSource,
     /autostartPreviousEnabled:\s*false/,
     "expected System settings state to retain the previous autostart value for failed updates",
   );
   assert.match(
-    appSource,
+    settingsSource,
     /systemSettingsState\.autostartEnabled\s*=\s*systemSettingsState\.autostartPreviousEnabled\s*===\s*true/,
     "expected autostart update errors to restore the last confirmed value",
   );
   assert.match(
-    appSource,
+    settingsSource,
     /autostartText\.textContent\s*=\s*"Launch GWT at login"/,
     "expected System tab autostart checkbox label",
   );
   assert.match(
-    appSource,
+    settingsSource,
     /send\(\{\s*kind:\s*"update_autostart",\s*enabled:\s*next\s*\}\)/,
     "expected autostart checkbox onChange to send update_autostart",
   );
@@ -417,12 +422,12 @@ test("System tab exposes Launch GWT at login autostart control", () => {
 
 test("renderSettingsWindow requests current settings via get_system_settings", () => {
   assert.match(
-    appSource,
+    settingsSource,
     /send\(\{\s*kind:\s*"get_system_settings"\s*\}\)/,
     "expected renderSettingsWindow to send get_system_settings on open",
   );
   assert.match(
-    appSource,
+    settingsSource,
     /send\(\{\s*kind:\s*"get_autostart_status"\s*\}\)/,
     "expected renderSettingsWindow to send get_autostart_status on open",
   );
@@ -470,7 +475,7 @@ test("Custom Agents panel keeps the data-role='settings-scroll' hook for the leg
   // its target. Moving it onto the Custom Agents panel preserves the
   // existing list/edit flow without rewriting that surface.
   assert.match(
-    appSource,
+    settingsSource,
     /panelAgents\.dataset\.role\s*=\s*"settings-scroll"/,
     "Custom Agents panel must carry data-role='settings-scroll'",
   );
@@ -478,17 +483,17 @@ test("Custom Agents panel keeps the data-role='settings-scroll' hook for the leg
 
 test("Custom Agents panel wires the env editor to update_custom_agent", () => {
   assert.match(
-    appSource,
+    settingsSource,
     /from "\/custom-agent-env-editor\.js"/,
-    "app.js must import the custom agent env editor module",
+    "settings surface must import the custom agent env editor module",
   );
   assert.match(
-    appSource,
+    settingsSource,
     /renderCustomAgentEnvEditor\(\{/,
     "renderSettingsAgentList must mount the env editor",
   );
   assert.match(
-    appSource,
+    settingsSource,
     /kind:\s*"update_custom_agent",\s*agent:\s*updatedAgent/,
     "env editor save must send update_custom_agent with the edited agent",
   );
@@ -499,12 +504,12 @@ test("switchSettingsTab toggles aria-selected and hidden together", () => {
   // class on every panel except the matching one must change in lockstep.
   // Without this, screen readers and the visual state can desync.
   assert.match(
-    appSource,
+    settingsSource,
     /aria-selected/,
     "switchSettingsTab must update aria-selected",
   );
   assert.match(
-    appSource,
+    settingsSource,
     /panel\.classList\.toggle\(\s*"hidden"/,
     "switchSettingsTab must toggle hidden on non-active panels",
   );

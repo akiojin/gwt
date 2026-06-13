@@ -2261,6 +2261,8 @@ mod tests {
             file_tree_worktree_roots: HashMap::new(),
             server_url: None,
             usage_refresh: None,
+            image_paste_sequence: std::sync::atomic::AtomicU64::new(0),
+            agent_launch_stage_counter: std::sync::atomic::AtomicU64::new(1),
         };
         runtime.rebuild_window_lookup();
         runtime.seed_window_pty_statuses();

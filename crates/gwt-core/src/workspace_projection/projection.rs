@@ -593,6 +593,21 @@ impl WorkspaceProjection {
         now: DateTime<Utc>,
     ) {
         if let Some(work_id) = launch.work_id {
+            if work_id != self.id {
+                // #3065: this projection is shared per repository. A launch
+                // that re-points it at a different Work must not inherit the
+                // previous Work's identity — otherwise the stale owner/title
+                // is replayed into the new Work's event log on every resume.
+                self.owner = None;
+                self.summary = None;
+                self.next_action = None;
+                self.agents.retain(|agent| {
+                    agent
+                        .workspace_id
+                        .as_deref()
+                        .is_none_or(|assigned| assigned == work_id)
+                });
+            }
             self.id = work_id;
         }
         self.title = launch.title.unwrap_or_else(|| "Start Work".to_string());
@@ -1853,5 +1868,102 @@ mod tests {
             WorkspaceAgentAffiliationStatus::Assigned,
         ));
         assert!(projection.has_current_agents());
+    }
+
+    // #3065: a launch that re-points the shared projection at a DIFFERENT
+    // work item must not inherit the previous work's identity (owner /
+    // summary / next_action) or keep agents assigned to the previous work.
+    #[test]
+    fn apply_launch_does_not_inherit_identity_across_work_items() {
+        let mut projection = WorkspaceProjection::default_for_project("/repo");
+        projection.id = "work-old-11111111".to_string();
+        projection.owner = Some("SPEC-2359".to_string());
+        projection.summary = Some("old summary".to_string());
+        projection.next_action = Some("old next action".to_string());
+        let mut resident = us70_agent(
+            "sess-old",
+            WorkspaceStatusCategory::Active,
+            WorkspaceAgentAffiliationStatus::Assigned,
+        );
+        resident.workspace_id = Some("work-old-11111111".to_string());
+        projection.agents.push(resident);
+
+        let agent = us70_agent(
+            "sess-new",
+            WorkspaceStatusCategory::Active,
+            WorkspaceAgentAffiliationStatus::Unassigned,
+        );
+        projection.apply_launch(
+            WorkspaceLaunchUpdate {
+                work_id: Some("work-new-22222222".to_string()),
+                title: None,
+                summary: None,
+                owner: None,
+                next_action: None,
+                branch: "work/new".to_string(),
+                worktree_path: PathBuf::from("/wt-new"),
+                base_branch: None,
+                created_by_start_work: false,
+            },
+            agent,
+            Utc.timestamp_opt(8_000, 0).unwrap(),
+        );
+
+        assert_eq!(projection.id, "work-new-22222222");
+        assert_eq!(
+            projection.owner, None,
+            "owner must not leak across work items"
+        );
+        assert_eq!(
+            projection.summary, None,
+            "summary must not leak across work items"
+        );
+        assert_eq!(
+            projection.next_action.as_deref(),
+            Some("Check Board for latest updates"),
+            "next action falls back to the default, not the previous work's"
+        );
+        assert!(
+            projection
+                .agents
+                .iter()
+                .all(|agent| agent.workspace_id.as_deref() != Some("work-old-11111111")),
+            "agents assigned to the previous work item are dropped"
+        );
+        assert_eq!(projection.status_text, "Codex is running");
+    }
+
+    // #3065: resuming the SAME work item keeps the inherited identity —
+    // the boundary only applies across different work ids.
+    #[test]
+    fn apply_launch_keeps_identity_for_same_work_item() {
+        let mut projection = WorkspaceProjection::default_for_project("/repo");
+        projection.id = "work-foo-12345678".to_string();
+        projection.owner = Some("Issue #42".to_string());
+        projection.summary = Some("kept summary".to_string());
+
+        let agent = us70_agent(
+            "sess-1",
+            WorkspaceStatusCategory::Active,
+            WorkspaceAgentAffiliationStatus::Unassigned,
+        );
+        projection.apply_launch(
+            WorkspaceLaunchUpdate {
+                work_id: Some("work-foo-12345678".to_string()),
+                title: None,
+                summary: None,
+                owner: None,
+                next_action: None,
+                branch: "work/foo".to_string(),
+                worktree_path: PathBuf::from("/wt"),
+                base_branch: None,
+                created_by_start_work: false,
+            },
+            agent,
+            Utc.timestamp_opt(8_100, 0).unwrap(),
+        );
+
+        assert_eq!(projection.owner.as_deref(), Some("Issue #42"));
+        assert_eq!(projection.summary.as_deref(), Some("kept summary"));
     }
 }

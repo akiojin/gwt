@@ -597,7 +597,17 @@ fn save_assigned_workspace_projection_for_test(
         summary: Some("Assigned Workspace".to_string()),
         next_action: Some("Check Board for latest updates".to_string()),
     };
-    save_workspace_launch_projection(repo, session, Some("develop"), None, Some(&context), true)
+    let live: std::collections::HashSet<String> =
+        std::iter::once(session.session_id.clone()).collect();
+    save_workspace_launch_projection(
+        repo,
+        session,
+        Some("develop"),
+        None,
+        Some(&context),
+        true,
+        &live,
+    )
 }
 
 fn workspace_agent_summary_for_test(
@@ -622,6 +632,137 @@ fn workspace_agent_summary_for_test(
         workspace_id: workspace_id.map(str::to_string),
         updated_at: chrono::Utc::now(),
     }
+}
+
+// #3065: the Workspace Resume context must come from the resumed branch's
+// own Work item — never from the repo-shared current projection, whose
+// identity may belong to a different Work.
+#[test]
+fn workspace_resume_context_prefers_work_item_over_shared_projection() {
+    let _env_guard = env_test_lock().lock().expect("env lock");
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedEnvVar::set("HOME", temp.path());
+    let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+    let repo = temp.path().join("repo");
+    std::fs::create_dir_all(&repo).expect("repo dir");
+
+    // Shared current projection carries a foreign work's identity.
+    let mut shared =
+        gwt_core::workspace_projection::WorkspaceProjection::default_for_project(&repo);
+    shared.title = "gwt-manage-pr".to_string();
+    shared.owner = Some("SPEC-2359".to_string());
+    shared.next_action = Some("foreign next action".to_string());
+    gwt_core::workspace_projection::save_workspace_projection(&repo, &shared)
+        .expect("save shared projection");
+
+    // The resumed branch has its own Work item with its own identity.
+    let now = chrono::Utc::now();
+    let work_id = gwt_core::workspace_projection::canonical_work_id(&repo, Some("work/foo"), None)
+        .expect("canonical id");
+    let mut event = gwt_core::workspace_projection::WorkEvent::new(
+        gwt_core::workspace_projection::WorkEventKind::Start,
+        work_id,
+        now,
+    );
+    event.title = Some("fix foo".to_string());
+    event.owner = Some("Issue #42".to_string());
+    event.next_action = Some("own next action".to_string());
+    event.execution_container = Some(
+        gwt_core::workspace_projection::WorkspaceExecutionContainerRef {
+            branch: Some("work/foo".to_string()),
+            worktree_path: Some(repo.join("wt-foo")),
+            pr_number: None,
+            pr_url: None,
+            pr_state: None,
+        },
+    );
+    gwt_core::workspace_projection::record_workspace_work_event(&repo, event)
+        .expect("record work event");
+
+    let context = super::workspace_resume_context_for_work_item(
+        &repo,
+        Some("work/foo"),
+        &repo.join("wt-foo"),
+    );
+    assert_eq!(context.title.as_deref(), Some("fix foo"));
+    assert_eq!(context.owner.as_deref(), Some("Issue #42"));
+    assert_eq!(context.next_action.as_deref(), Some("own next action"));
+
+    // Unknown container: neutral context — never the shared identity.
+    let fallback = super::workspace_resume_context_for_work_item(
+        &repo,
+        Some("work/unknown"),
+        &repo.join("wt-unknown"),
+    );
+    assert_eq!(fallback.owner, None, "shared owner must not leak");
+    assert_eq!(fallback.title, None, "shared title must not leak");
+    assert_eq!(fallback.next_action, None);
+}
+
+// #3065: launch saves retain only live agent sessions in the shared
+// projection so dead entries stop accumulating ("765 active agents").
+#[test]
+fn save_workspace_launch_projection_retains_only_live_agents() {
+    let _env_guard = env_test_lock().lock().expect("env lock");
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedEnvVar::set("HOME", temp.path());
+    let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+    let repo = temp.path().join("repo");
+    std::fs::create_dir_all(&repo).expect("repo dir");
+    let session = sample_active_agent_session("tab-1", "win-1");
+
+    let work_id = gwt_core::workspace_projection::canonical_work_id(
+        &repo,
+        Some(&session.branch_name),
+        Some(&session.worktree_path),
+    )
+    .expect("canonical id");
+    let mut shared =
+        gwt_core::workspace_projection::WorkspaceProjection::default_for_project(&repo);
+    shared.id = work_id.clone();
+    shared
+        .agents
+        .push(workspace_agent_summary_for_test("dead-1", Some(&work_id)));
+    gwt_core::workspace_projection::save_workspace_projection(&repo, &shared)
+        .expect("save shared projection");
+
+    let live: std::collections::HashSet<String> =
+        std::iter::once(session.session_id.clone()).collect();
+    let context = WorkspaceResumeContext {
+        title: None,
+        owner: None,
+        summary: None,
+        next_action: None,
+    };
+    save_workspace_launch_projection(
+        &repo,
+        &session,
+        Some("develop"),
+        None,
+        Some(&context),
+        true,
+        &live,
+    )
+    .expect("save launch projection");
+
+    let stored = gwt_core::workspace_projection::load_workspace_projection(&repo)
+        .expect("load")
+        .expect("projection exists");
+    assert!(
+        stored
+            .agents
+            .iter()
+            .all(|agent| agent.session_id != "dead-1"),
+        "dead agent session is dropped"
+    );
+    assert!(
+        stored
+            .agents
+            .iter()
+            .any(|agent| agent.session_id == session.session_id),
+        "launching session is kept"
+    );
+    assert_eq!(stored.status_text, "Codex is running");
 }
 
 #[test]
@@ -1715,6 +1856,8 @@ fn sample_runtime_with_events(
         file_tree_worktree_roots: HashMap::new(),
         server_url: None,
         usage_refresh: None,
+        image_paste_sequence: std::sync::atomic::AtomicU64::new(0),
+        agent_launch_stage_counter: std::sync::atomic::AtomicU64::new(1),
     };
     runtime.rebuild_window_lookup();
     runtime.seed_window_pty_statuses();
@@ -5153,6 +5296,97 @@ fn app_runtime_active_work_projection_retains_stopped_agent_work_as_paused() {
     assert_eq!(paused.branch.as_deref(), Some("work/paused"));
 }
 
+// #3065: a stopped session's Pause record must not inherit the repo-shared
+// projection's owner/title — those belong to whatever Work last wrote the
+// projection. Owner/summary come from the session's own Work item (matched
+// by branch container); the title fallback is the matched item's title.
+#[test]
+fn paused_work_does_not_inherit_shared_projection_owner() {
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedEnvVar::set("HOME", temp.path());
+    let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+    let repo = temp.path().join("repo");
+    fs::create_dir_all(&repo).expect("create repo");
+
+    // Shared projection poisoned with a foreign Work's identity. The agent
+    // summary carries no title of its own, so the old code fell back to the
+    // shared title and copied the shared owner verbatim.
+    let mut projection =
+        gwt_core::workspace_projection::WorkspaceProjection::default_for_project(&repo);
+    projection.id = "work-foreign-99999999".to_string();
+    projection.title = "gwt-manage-pr".to_string();
+    projection.owner = Some("SPEC-2359".to_string());
+    projection.summary = Some("foreign summary".to_string());
+    projection.agents.push({
+        let mut agent = workspace_agent_summary_for_test("session-paused", Some("work-paused"));
+        agent.window_id = Some("tab-1::agent-paused".to_string());
+        agent.branch = Some("work/paused".to_string());
+        agent.title_summary = None;
+        agent.current_focus = None;
+        agent
+    });
+    gwt_core::workspace_projection::save_workspace_projection(&repo, &projection)
+        .expect("save projection");
+
+    // The session's own Work item with its own identity.
+    let now = chrono::Utc::now();
+    let work_id =
+        gwt_core::workspace_projection::canonical_work_id(&repo, Some("work/paused"), None)
+            .expect("canonical id");
+    let mut event = gwt_core::workspace_projection::WorkEvent::new(
+        gwt_core::workspace_projection::WorkEventKind::Start,
+        work_id,
+        now,
+    );
+    event.title = Some("own work title".to_string());
+    event.owner = Some("Issue #7".to_string());
+    event.execution_container = Some(
+        gwt_core::workspace_projection::WorkspaceExecutionContainerRef {
+            branch: Some("work/paused".to_string()),
+            worktree_path: Some(repo.join("work/paused")),
+            pr_number: None,
+            pr_url: None,
+            pr_state: None,
+        },
+    );
+    gwt_core::workspace_projection::record_workspace_work_event(&repo, event)
+        .expect("record work event");
+
+    let tab = sample_project_tab("tab-1", "Repo", repo.clone(), ProjectKind::Git, &[]);
+    let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+    let mut session = sample_active_agent_session("tab-1", "tab-1::agent-paused");
+    session.session_id = "session-paused".to_string();
+    session.branch_name = "work/paused".to_string();
+    session.worktree_path = repo.join("work/paused");
+    session.window_id = "tab-1::agent-paused".to_string();
+    runtime
+        .active_agent_sessions
+        .insert("tab-1::agent-paused".to_string(), session);
+
+    runtime.mark_agent_session_stopped("tab-1::agent-paused");
+
+    let works = gwt_core::workspace_projection::load_workspace_work_items(&repo)
+        .expect("load works")
+        .expect("works projection");
+    let paused = works
+        .work_items
+        .iter()
+        .find(|item| item.id == "work-session-session-paused")
+        .expect("paused session work item");
+    assert_eq!(
+        paused.owner.as_deref(),
+        Some("Issue #7"),
+        "pause must carry the session's own work owner, not the shared projection's"
+    );
+    assert_eq!(
+        paused.title, "own work title",
+        "pause title falls back to the session's own work item, not the shared projection"
+    );
+}
+
 /// SPEC-2359 Phase W-12 Slice 4 (FR-352): closing a Paused Work with
 /// `close_kind = "done"` records a terminal Done close and removes the Work
 /// from the active Work surface. No live agent owns the Work, so the close
@@ -8194,8 +8428,15 @@ fn app_runtime_stopped_agent_cleans_saved_projection_and_broadcasts_active_work_
     runtime
         .active_agent_sessions
         .insert(window_id.clone(), session.clone());
-    save_start_work_workspace_projection(&repo, &session, "origin/main", None, None)
-        .expect("save projection");
+    save_start_work_workspace_projection(
+        &repo,
+        &session,
+        "origin/main",
+        None,
+        None,
+        &std::collections::HashSet::new(),
+    )
+    .expect("save projection");
 
     let events = runtime.handle_runtime_status(
         window_id.clone(),
@@ -11244,6 +11485,7 @@ fn app_runtime_board_milestone_updates_same_session_agent_window_dynamic_title_o
         "develop",
         None,
         None,
+        &std::collections::HashSet::new(),
     )
     .expect("save projection");
     let milestone = BoardEntry::new(
@@ -11345,6 +11587,7 @@ fn app_runtime_board_milestone_broadcasts_workspace_state_for_title_sync() {
         "develop",
         None,
         None,
+        &std::collections::HashSet::new(),
     )
     .expect("save projection");
     let milestone = BoardEntry::new(
@@ -11503,6 +11746,7 @@ fn app_runtime_board_milestone_skips_workspace_state_on_identical_resync() {
         "develop",
         None,
         None,
+        &std::collections::HashSet::new(),
     )
     .expect("save projection");
     let milestone = BoardEntry::new(
@@ -11591,6 +11835,7 @@ fn app_runtime_board_milestone_uses_short_title_summary_not_long_body_for_window
         "develop",
         None,
         None,
+        &std::collections::HashSet::new(),
     )
     .expect("save projection");
     let long_body = "Implementing the title-summary contract across Board, Workspace, runtime synchronization, CLI parsing, hook reminders, and frontend titlebar rendering";
@@ -11682,6 +11927,7 @@ fn app_runtime_board_milestone_without_title_summary_keeps_existing_agent_window
         "develop",
         None,
         None,
+        &std::collections::HashSet::new(),
     )
     .expect("save projection");
     let milestone = BoardEntry::new(

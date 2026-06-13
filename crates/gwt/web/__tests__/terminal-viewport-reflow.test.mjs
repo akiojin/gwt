@@ -30,6 +30,13 @@ import {
 
 const here = dirname(fileURLToPath(import.meta.url));
 const appSource = readFileSync(resolve(here, "../app.js"), "utf8");
+// SPEC-3064 Phase 3 (E7): syncMaximizedWindowsToViewport moved from app.js
+// to project-shell-surface.js; the maximized-sync wiring assertion reads
+// the surface module while the rest of the wiring stays pinned to app.js.
+const projectShellSurfaceSource = readFileSync(
+  resolve(here, "../project-shell-surface.js"),
+  "utf8",
+);
 const appCssSource = readFileSync(resolve(here, "../styles/app.css"), "utf8");
 
 function fixtureWindow() {
@@ -894,7 +901,7 @@ test("app.js wires the reflow controller for resize, transition, and predicate",
     "host resize fan-out must route fit requests through the shared scheduler",
   );
   assert.match(
-    appSource,
+    projectShellSurfaceSource,
     /syncMaximizedWindowsToViewport[\s\S]*?scheduleTerminalFit\(windowData\.id,\s*false\)/,
     "maximized viewport sync must route visual terminal fits through the shared scheduler",
   );

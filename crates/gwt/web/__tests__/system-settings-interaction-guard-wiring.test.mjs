@@ -17,10 +17,15 @@ import { fileURLToPath } from "node:url";
 
 const here = dirname(fileURLToPath(import.meta.url));
 const appSource = readFileSync(resolve(here, "../app.js"), "utf8");
+// SPEC-3064 Phase 3 (E4): the guard instance (and the System panel state it
+// re-renders) moved into the extracted settings surface; app.js keeps the
+// document-level listener wiring and the receive() defer call sites via
+// destructured same-name consts.
+const settingsSource = readFileSync(resolve(here, "../settings-surface.js"), "utf8");
 
-test("app.js instantiates systemSettingsInteractionGuard via the factory", () => {
+test("settings surface instantiates systemSettingsInteractionGuard via the factory", () => {
   assert.match(
-    appSource,
+    settingsSource,
     /systemSettingsInteractionGuard\s*=\s*createInteractionGuard\(\s*\{\s*[\s\S]{0,400}?onFlush\s*:/,
     "expected `systemSettingsInteractionGuard = createInteractionGuard({ onFlush: ... })`",
   );
