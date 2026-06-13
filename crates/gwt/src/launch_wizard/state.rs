@@ -839,6 +839,10 @@ impl LaunchWizardState {
             self.error = Some("No saved session is available".to_string());
             return;
         };
+        if !self.quick_start_entry_supports_session_continuation(&entry) {
+            self.error = Some("Session continuation is unavailable for this agent".to_string());
+            return;
+        }
         self.selected_quick_start_index = Some(index);
         self.launch_path = LaunchWizardLaunchPath::QuickStart;
         self.start_method_selected = true;
@@ -1373,6 +1377,12 @@ impl LaunchWizardState {
         }
     }
 
+    pub(super) fn agent_option_by_id(&self, agent_id: &str) -> Option<&AgentOption> {
+        self.detected_agents
+            .iter()
+            .find(|agent| agent.id == agent_id)
+    }
+
     pub(super) fn effective_agent_id(&self) -> &str {
         self.selected_agent()
             .map(|agent| agent.id.as_str())
@@ -1415,6 +1425,43 @@ impl LaunchWizardState {
             return custom.supports_resume_picker;
         }
         agent_id_from_key(self.effective_agent_id()).supports_resume_picker()
+    }
+
+    pub(super) fn agent_supports_continue_latest(&self, agent_id: &str) -> bool {
+        if let Some(custom) = self
+            .agent_option_by_id(agent_id)
+            .and_then(|agent| agent.custom_agent.as_ref())
+        {
+            return custom
+                .mode_args
+                .as_ref()
+                .is_some_and(|args| !args.continue_mode.is_empty());
+        }
+        agent_id_from_key(agent_id).supports_continue_latest()
+    }
+
+    pub(super) fn agent_supports_resume_session_id(&self, agent_id: &str) -> bool {
+        if let Some(custom) = self
+            .agent_option_by_id(agent_id)
+            .and_then(|agent| agent.custom_agent.as_ref())
+        {
+            return custom
+                .mode_args
+                .as_ref()
+                .is_some_and(|args| !args.resume.is_empty());
+        }
+        agent_id_from_key(agent_id).supports_resume_session_id()
+    }
+
+    pub(super) fn quick_start_entry_supports_session_continuation(
+        &self,
+        entry: &QuickStartEntry,
+    ) -> bool {
+        if entry.resume_session_id.is_some() {
+            self.agent_supports_resume_session_id(&entry.agent_id)
+        } else {
+            self.agent_supports_continue_latest(&entry.agent_id)
+        }
     }
 
     pub(super) fn agent_has_models(&self) -> bool {
@@ -2659,6 +2706,104 @@ mod tests {
                     assert_eq!(config.agent_id, gwt_agent::AgentId::Codex);
                     assert_eq!(config.session_mode, gwt_agent::SessionMode::Continue);
                     assert!(config.resume_session_id.is_none());
+                }
+                other => panic!("expected agent launch request, got {other:?}"),
+            },
+            other => panic!("expected launch completion, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn continue_last_session_is_unavailable_when_agent_cannot_continue_latest() {
+        let mut state = LaunchWizardState::open_with(
+            context(branch("feature/current"), "feature/current"),
+            vec![AgentOption {
+                id: "gemini".to_string(),
+                name: "Gemini CLI".to_string(),
+                available: true,
+                installed_version: Some("1.0.0".to_string()),
+                versions: vec!["1.0.0".to_string()],
+                custom_agent: None,
+            }],
+            vec![quick_start_entry(
+                "session-1",
+                "gemini",
+                None,
+                None,
+                gwt_agent::LaunchRuntimeTarget::Host,
+                None,
+            )],
+        );
+
+        let view = state.view();
+        let continue_method = view
+            .start_methods
+            .iter()
+            .find(|method| method.kind == "continue_last_session")
+            .expect("continue start method");
+        assert!(!continue_method.enabled);
+        assert_eq!(continue_method.group, "unavailable");
+        assert!(!continue_method.recommended);
+        assert_eq!(
+            continue_method.disabled_reason.as_deref(),
+            Some("Not supported by agent")
+        );
+        assert!(view.start_methods.iter().any(|method| {
+            method.kind == "start_with_last_settings" && method.enabled && method.recommended
+        }));
+
+        state.apply(LaunchWizardAction::UseStartMethod {
+            method: LaunchWizardStartMethodKind::ContinueLastSession,
+        });
+
+        assert!(state.completion.is_none());
+        assert_eq!(
+            state.view().error.as_deref(),
+            Some("Session continuation is unavailable for this agent")
+        );
+    }
+
+    #[test]
+    fn continue_last_session_allows_exact_resume_for_non_picker_agent() {
+        let mut state = LaunchWizardState::open_with(
+            context(branch("feature/current"), "feature/current"),
+            vec![AgentOption {
+                id: "openclaw".to_string(),
+                name: "OpenClaw".to_string(),
+                available: true,
+                installed_version: Some("1.0.0".to_string()),
+                versions: vec!["1.0.0".to_string()],
+                custom_agent: None,
+            }],
+            vec![quick_start_entry(
+                "session-1",
+                "openclaw",
+                Some("resume-1"),
+                None,
+                gwt_agent::LaunchRuntimeTarget::Host,
+                None,
+            )],
+        );
+
+        let continue_method = state
+            .view()
+            .start_methods
+            .into_iter()
+            .find(|method| method.kind == "continue_last_session")
+            .expect("continue start method");
+        assert!(continue_method.enabled);
+        assert!(continue_method.recommended);
+
+        state.apply(LaunchWizardAction::UseStartMethod {
+            method: LaunchWizardStartMethodKind::ContinueLastSession,
+        });
+
+        match state.completion.as_ref() {
+            Some(LaunchWizardCompletion::Launch(config)) => match config.as_ref() {
+                LaunchWizardLaunchRequest::Agent(config) => {
+                    assert_eq!(config.agent_id, gwt_agent::AgentId::OpenClaw);
+                    assert_eq!(config.session_mode, gwt_agent::SessionMode::Resume);
+                    assert_eq!(config.resume_session_id.as_deref(), Some("resume-1"));
                 }
                 other => panic!("expected agent launch request, got {other:?}"),
             },
