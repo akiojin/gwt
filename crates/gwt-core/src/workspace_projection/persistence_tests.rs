@@ -2589,3 +2589,64 @@ fn repair_resume_owner_bleed_keeps_legitimate_duplicates_below_threshold() {
         "below-threshold duplicates keep their owner"
     );
 }
+
+// SPEC-3075 FR-003/FR-004: a Board status post carries the Work *status*
+// (a point-in-time snapshot), not its *purpose* (identity). Its body must
+// never become the Work title; only `summary` may carry the body. This is the
+// structural fix for "the summary is a status snapshot, not what the Work is".
+#[test]
+fn board_status_body_without_title_summary_keeps_work_identity() {
+    let mut projection = WorkspaceProjection::default_for_project("/repo");
+    projection.title = "Workspace 要約の目的第一化".to_string();
+
+    let entry = crate::coordination::BoardEntry::new(
+        crate::coordination::AuthorKind::Agent,
+        "agent-1",
+        crate::coordination::BoardEntryKind::Status,
+        "現在の状態: PR #3007 をマージ完了。",
+        None,
+        None,
+        Vec::new(),
+        Vec::new(),
+    );
+
+    let event = workspace_work_event_from_board_entry(&projection, &entry);
+
+    // identity (purpose) is preserved; the status body lives only in summary.
+    assert_eq!(
+        event.title.as_deref(),
+        Some("Workspace 要約の目的第一化"),
+        "Board status body must not overwrite the Work identity (title)"
+    );
+    assert_eq!(
+        event.summary.as_deref(),
+        Some("現在の状態: PR #3007 をマージ完了。"),
+        "Board body is retained as status summary only"
+    );
+}
+
+// SPEC-3075: when the agent declares a purpose via `title_summary`, that is the
+// identity — still independent of the status body.
+#[test]
+fn board_entry_title_summary_is_the_work_identity() {
+    let mut projection = WorkspaceProjection::default_for_project("/repo");
+    projection.title = "old projection title".to_string();
+
+    let mut entry = crate::coordination::BoardEntry::new(
+        crate::coordination::AuthorKind::Agent,
+        "agent-1",
+        crate::coordination::BoardEntryKind::Status,
+        "現在の状態: テスト実行中。",
+        None,
+        None,
+        Vec::new(),
+        Vec::new(),
+    );
+    entry.title_summary = Some("認証機能の実装".to_string());
+
+    let event = workspace_work_event_from_board_entry(&projection, &entry);
+
+    assert_eq!(event.title.as_deref(), Some("認証機能の実装"));
+    assert_eq!(event.intent.as_deref(), Some("認証機能の実装"));
+    assert_eq!(event.summary.as_deref(), Some("現在の状態: テスト実行中。"));
+}

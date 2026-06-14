@@ -89,10 +89,44 @@ export function createWorkspaceKanbanSurface({
   }
 
   function workspaceTitle(entry) {
-    return compactText(
-      entry?.title || entry?.intent || entry?.summary || entry?.owner,
-      "Work",
+    // SPEC-3075 FR-001: the row label is the Work *purpose* (identity), sourced
+    // from the recorded title and then the owner. `intent` (current focus) and
+    // `summary` (the demoted Board-body status snapshot) are *status*, never the
+    // label — otherwise the list reads as status reports ("Deployed PR #3007")
+    // instead of "what is this Work about".
+    return compactText(entry?.title || entry?.owner, "Work");
+  }
+
+  function isIdentifierLikeTitle(text) {
+    // Recorded-title shapes that are identifiers, not a declared purpose:
+    // resume events leak the agent's gwt-* skill name, and backfill paths leak
+    // the work-item id or a bare UUID. None answer "what is this Work?", so the
+    // purpose derivation skips them in favor of the owner / branch heading.
+    return (
+      /^gwt-[a-z0-9-]+$/.test(text) ||
+      /^work-[a-z0-9-]+-[0-9a-f]{6,}$/i.test(text) ||
+      /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(text)
     );
+  }
+
+  function workPurpose(entry) {
+    // SPEC-3075 FR-001 / US-1 / US-2: the Work *purpose* (what this Work is for /
+    // "what work was running"). The backend derives this purpose-first from the
+    // agent-declared title-summary (`work_summary`); prefer it when present.
+    const summary = compactText(entry?.work_summary);
+    if (summary) return summary;
+    // Fallback for legacy payloads without `work_summary`: a recorded title that
+    // is a real declared purpose wins, but resume events can fill the title with
+    // a gwt-* skill name and backfills fill it with the branch or a raw id —
+    // none answer "what is this Work?". In those cases fall back to the owner
+    // (SPEC / Issue) identity. When nothing distinct from the branch remains,
+    // return "" so callers omit a redundant Purpose that only echoes the branch.
+    const title = compactText(entry?.title);
+    const owner = compactText(entry?.owner);
+    const branch = compactText(entry?.branch);
+    if (title && title !== branch && !isIdentifierLikeTitle(title)) return title;
+    if (owner) return owner;
+    return "";
   }
 
   function eventTitle(event) {
@@ -125,6 +159,9 @@ export function createWorkspaceKanbanSurface({
       title: workspaceTitle(item),
       intent: compactText(item?.intent),
       summary: compactText(item?.summary || item?.status_text || item?.intent),
+      // SPEC-3075: backend-derived "what work was running" purpose summary
+      // (agent title-summary surfaced). Primary rail label; branch is the sub.
+      work_summary: compactText(item?.work_summary),
       owner: compactText(item?.owner || fallback.owner),
       status_category: item?.status_category || fallback.status_category || "idle",
       status_text: compactText(item?.status_text || item?.summary),
@@ -275,12 +312,19 @@ export function createWorkspaceKanbanSurface({
     const status = createNode("span", "workspace-overview-status", statusLabel(item.status_category));
     const copy = createNode("span", "workspace-overview-row-copy");
     const titleRow = createNode("span", "workspace-overview-row-title-row");
-    // SPEC-2359 W-15 (user design decision 2026-06-10): the Workspace list is
-    // a branch list — the row is titled by the branch (the place); the
-    // record's own title (work summary) moves to the meta line below.
-    const rowTitle = item.branch || item.title;
+    // SPEC-3075 (supersedes SPEC-2359 W-15): the row's primary label is the
+    // work *purpose* — "what work was running" (the agent-declared title-summary
+    // surfaced as work_summary). The branch (the Workspace place) moves to the
+    // meta sub-line. When no purpose is recorded (backfilled / historical rows)
+    // the branch is the primary label so the row is never blank.
+    const rowPurpose = workPurpose(item);
+    const branchLabel = item.branch || item.title;
     const titleNode = createNode("span", "workspace-overview-row-title");
-    appendBranchLabel(titleNode, rowTitle);
+    if (rowPurpose) {
+      titleNode.textContent = rowPurpose;
+    } else {
+      appendBranchLabel(titleNode, branchLabel);
+    }
     titleRow.appendChild(titleNode);
     // SPEC-2359 Phase W-12 (FR-351): each Work card surfaces its agent-session
     // lifecycle state (Active / Paused / Done / Discarded) as a dedicated badge
@@ -319,11 +363,15 @@ export function createWorkspaceKanbanSurface({
     }
     copy.appendChild(titleRow);
     const meta = createNode("span", "workspace-overview-row-meta");
-    appendMetaText(meta, item.owner);
-    // The record title adds information only when it differs from the branch
-    // shown as the row title (backfilled rows are titled by branch already).
-    if (item.title && item.title !== rowTitle) {
-      appendMetaText(meta, item.title);
+    // SPEC-3075: when the purpose is the primary label, the branch (the place)
+    // becomes the sub-line; the owner follows unless it is already the label.
+    if (rowPurpose) {
+      appendMetaText(meta, branchLabel);
+      if (item.owner && item.owner !== rowPurpose) {
+        appendMetaText(meta, item.owner);
+      }
+    } else {
+      appendMetaText(meta, item.owner);
     }
     const prMeta = createWorkspacePrMeta?.(item);
     if (prMeta) {
@@ -846,16 +894,25 @@ export function createWorkspaceKanbanSurface({
 
     const header = createNode("header", "workspace-detail-header");
     const titleWrap = createNode("div", "workspace-detail-heading");
-    // SPEC-2359 W-15 (user design decision 2026-06-10): the detail heading is
-    // the branch (the place); the record's title joins the subtitle line.
-    const detailTitle = workspace.branch || workspace.title;
+    // SPEC-3075 (supersedes SPEC-2359 W-15): the detail heading is the Work
+    // *purpose* — "what work was running" (PR title / title-summary / commit
+    // subject) — matching the rail. The branch (the place) moves to the
+    // subtitle. When no purpose is known the branch is the heading so it is
+    // never blank.
+    const detailPurpose = workPurpose(workspace);
+    const branchLabel = workspace.branch || workspace.title;
     titleWrap.classList.add("has-brackets");
     const detailTitleNode = createNode("h2", "workspace-detail-title");
-    appendBranchLabel(detailTitleNode, detailTitle);
+    if (detailPurpose) {
+      detailTitleNode.textContent = detailPurpose;
+    } else {
+      appendBranchLabel(detailTitleNode, branchLabel);
+    }
     titleWrap.appendChild(detailTitleNode);
     const subtitle = createNode("div", "workspace-detail-subtitle");
-    if (workspace.title && workspace.title !== detailTitle) {
-      appendMetaText(subtitle, workspace.title);
+    // The branch (the place) is the subtitle when the purpose is the heading.
+    if (detailPurpose && branchLabel) {
+      appendMetaText(subtitle, branchLabel);
     }
     if (workspace.merged_into_base) {
       appendMetaText(subtitle, "Merged — safe to delete");
@@ -925,16 +982,34 @@ export function createWorkspaceKanbanSurface({
     header.appendChild(actions);
     container.appendChild(header);
 
-    container.appendChild(
-      detailSection("Summary", (body) => {
-        appendTextBlock(body, workspace.summary || workspace.status_text || workspace.intent);
-        if (workspace.intent && workspace.intent !== workspace.summary) {
-          appendTextBlock(body, workspace.intent);
-        }
-        appendTextBlock(body, workspace.next_action);
-        appendTextBlock(body, workspace.blocked_reason, "workspace-detail-text is-warning");
-      }),
-    );
+    // SPEC-3075: the Work *purpose* ("what work was running") is the detail
+    // heading (see above), so it is not repeated as a body section. The body
+    // separates *status* (current focus / next) from the demoted Board-body
+    // snapshot, instead of the old conflated "Summary" that read as status.
+    const purposeText = detailPurpose;
+    const currentFocus = workspace.intent;
+    if (currentFocus || workspace.next_action || workspace.blocked_reason) {
+      container.appendChild(
+        detailSection("Status", (body) => {
+          appendDefinitionList(body, [
+            ["Now", currentFocus],
+            ["Next", workspace.next_action],
+          ]);
+          appendTextBlock(body, workspace.blocked_reason, "workspace-detail-text is-warning");
+        }),
+      );
+    }
+    // The Board-body status snapshot, demoted below purpose/status — it is the
+    // latest "what happened", not the Work's identity. Only shown when it adds
+    // something beyond the current focus / purpose.
+    const latestUpdate = workspace.summary || workspace.status_text;
+    if (latestUpdate && latestUpdate !== currentFocus && latestUpdate !== purposeText) {
+      container.appendChild(
+        detailSection("Latest update", (body) => {
+          appendTextBlock(body, latestUpdate);
+        }),
+      );
+    }
     container.appendChild(
       detailSection("Work", (body) => {
         appendWorks(body, workspace.agents, workspace);

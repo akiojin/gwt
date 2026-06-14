@@ -163,8 +163,9 @@ use workspace_views::{
 };
 #[cfg(test)]
 use workspace_views::{
-    active_work_projection_from_saved, assign_and_merge_workspace_groups,
-    attach_registry_sessions_to_active_works, mark_merged_active_works,
+    active_work_projection_from_saved, apply_work_summary_external_sources,
+    assign_and_merge_workspace_groups, attach_registry_sessions_to_active_works,
+    derive_work_summary, is_identifier_like_title, mark_merged_active_works,
     mark_remote_only_active_works, workspace_work_agent_view_from_ref,
     workspace_work_event_kind_wire,
 };
@@ -407,6 +408,16 @@ pub struct AppRuntime {
     /// "safe to delete" badge and the derived Done-equivalent classification.
     pub(crate) work_merged_branches:
         HashMap<PathBuf, HashMap<String, chrono::DateTime<chrono::Utc>>>,
+    /// SPEC-3075: per-project `branch short name -> tip commit subject`, resolved
+    /// off the hot path by [`AppRuntime::spawn_work_tip_subjects_scan`] (one
+    /// `for-each-ref` spawn). Fills the Workspace rail summary for historical
+    /// Works that never recorded a `title-summary` purpose.
+    pub(crate) work_tip_subjects: HashMap<PathBuf, HashMap<String, String>>,
+    /// SPEC-3075: per-project `branch (PR head ref) -> PR title`, resolved off
+    /// the hot path by [`AppRuntime::spawn_work_pr_titles_scan`] (one `gh pr
+    /// list` call). The PR title is the human-written purpose, so it is the
+    /// top-priority Workspace rail summary. Empty when offline / `gh` absent.
+    pub(crate) work_pr_titles: HashMap<PathBuf, HashMap<String, String>>,
     /// Incremental loader for the machine-local session ledger; keeps
     /// projection rebuilds from re-parsing thousands of unchanged TOMLs
     /// (window-close latency fix, 2026-06-11). RefCell: the runtime lives on
@@ -543,6 +554,8 @@ impl AppRuntime {
             pending_startup_auto_resume_sessions: Vec::new(),
             active_agent_sessions: HashMap::new(),
             work_merged_branches: HashMap::new(),
+            work_tip_subjects: HashMap::new(),
+            work_pr_titles: HashMap::new(),
             session_ledger_cache: std::cell::RefCell::new(
                 crate::session_ledger_cache::SessionLedgerCache::new(),
             ),
@@ -662,7 +675,9 @@ impl AppRuntime {
         changed: bool,
     ) -> Vec<OutboundEvent> {
         self.reconcile_workspace_worktrees(&project_root);
-        self.spawn_work_merge_status_scan(project_root);
+        self.spawn_work_merge_status_scan(project_root.clone());
+        self.spawn_work_tip_subjects_scan(project_root.clone());
+        self.spawn_work_pr_titles_scan(project_root);
         if changed {
             self.active_work_projection_broadcast_for_active_tab()
                 .into_iter()
@@ -735,6 +750,77 @@ impl AppRuntime {
             proxy.send(UserEvent::WorkMergeStatus {
                 project_root,
                 merged_branches,
+            });
+        });
+    }
+
+    /// SPEC-3075: cache the resolved `branch -> tip commit subject` map and
+    /// rebroadcast so the Workspace rail re-renders with the historical summary.
+    pub(crate) fn apply_work_tip_subjects(
+        &mut self,
+        project_root: &Path,
+        tip_subjects: HashMap<String, String>,
+    ) -> Vec<OutboundEvent> {
+        self.work_tip_subjects
+            .insert(project_root.to_path_buf(), tip_subjects);
+        self.active_work_projection_broadcast_for_active_tab()
+            .into_iter()
+            .collect()
+    }
+
+    /// SPEC-3075: resolve every branch's tip commit subject off the UI thread in
+    /// ONE `for-each-ref` spawn, then hand the map to the event loop via
+    /// [`UserEvent::WorkTipSubjects`]. This is the "what work was running" signal
+    /// for historical Works with no recorded purpose. Mirrors
+    /// [`Self::spawn_work_merge_status_scan`] but runs for every project (not
+    /// just merged branches) since every Workspace row benefits.
+    pub(crate) fn spawn_work_tip_subjects_scan(&self, project_root: PathBuf) {
+        let proxy = self.proxy.clone();
+        thread::spawn(move || {
+            let tip_subjects =
+                gwt_git::refs::branch_tip_subjects(&project_root).unwrap_or_default();
+            if tip_subjects.is_empty() {
+                return;
+            }
+            proxy.send(UserEvent::WorkTipSubjects {
+                project_root,
+                tip_subjects,
+            });
+        });
+    }
+
+    /// SPEC-3075: cache the resolved `branch -> PR title` map and rebroadcast so
+    /// the Workspace rail re-renders with the PR-title summary (top priority).
+    pub(crate) fn apply_work_pr_titles(
+        &mut self,
+        project_root: &Path,
+        pr_titles: HashMap<String, String>,
+    ) -> Vec<OutboundEvent> {
+        self.work_pr_titles
+            .insert(project_root.to_path_buf(), pr_titles);
+        self.active_work_projection_broadcast_for_active_tab()
+            .into_iter()
+            .collect()
+    }
+
+    /// SPEC-3075: resolve every branch's PR title off the UI thread in ONE
+    /// `gh pr list` call (the GitHub API may paginate), then hand the
+    /// `branch -> title` map to the event loop via [`UserEvent::WorkPrTitles`].
+    /// The PR title is the human-written purpose of the work — the strongest
+    /// "what work was running" signal. Network-dependent: an empty map (offline
+    /// / `gh` absent / unauthenticated) leaves the commit-subject fallback in
+    /// place. Runs once per project-open, after the events ingest.
+    pub(crate) fn spawn_work_pr_titles_scan(&self, project_root: PathBuf) {
+        let proxy = self.proxy.clone();
+        thread::spawn(move || {
+            let pr_titles =
+                gwt_git::pr_status::fetch_pr_titles_by_branch(&project_root).unwrap_or_default();
+            if pr_titles.is_empty() {
+                return;
+            }
+            proxy.send(UserEvent::WorkPrTitles {
+                project_root,
+                pr_titles,
             });
         });
     }

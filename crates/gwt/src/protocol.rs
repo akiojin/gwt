@@ -1086,6 +1086,14 @@ pub struct ActiveWorkItemView {
     pub status_category: String,
     pub status_text: String,
     pub summary: Option<String>,
+    /// SPEC-3075: human-readable "what work was running" summary for the rail
+    /// row's primary label (the branch becomes the sub-line). Surfaces the
+    /// agent-declared `title-summary` purpose (live, then journal-recorded),
+    /// then a non-identifier recorded title, then the owner. `None` when nothing
+    /// distinct from the branch is known — the UI then labels the row by branch.
+    /// Display-only; never the Work identity. Default for legacy payloads.
+    #[serde(default)]
+    pub work_summary: Option<String>,
     pub owner: Option<String>,
     pub next_action: Option<String>,
     pub active_agents: usize,
@@ -2823,6 +2831,7 @@ mod tests {
                     status_category: "active".to_string(),
                     status_text: "Launching from Project Bar".to_string(),
                     summary: Some("Launching from Project Bar".to_string()),
+                    work_summary: Some("Implement Start Work".to_string()),
                     owner: Some("SPEC-2359".to_string()),
                     next_action: Some("Run launch tests".to_string()),
                     active_agents: 1,

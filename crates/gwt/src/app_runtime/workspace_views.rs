@@ -146,7 +146,12 @@ pub(super) fn active_work_projection_from_saved_with_journal(
             .cmp(&right.display_name)
             .then_with(|| left.session_id.cmp(&right.session_id))
     });
-    let active_works = active_work_items_from_projection(&projection, &agents, &works);
+    // SPEC-3075: surface the agent-declared `title-summary` purpose recorded in
+    // the journal so historical Works whose WorkItem title is only the branch
+    // still get a human-readable rail summary.
+    let journal_title_by_session = journal_title_summary_by_session(&journal_entries);
+    let active_works =
+        active_work_items_from_projection(&projection, &agents, &works, &journal_title_by_session);
     let active_work_count = active_works.len();
 
     gwt::ActiveWorkProjectionView {
@@ -318,10 +323,168 @@ fn find_active_work_history<'a>(
     })
 }
 
+/// SPEC-3075: title shapes that are identifiers, not a declared work purpose.
+/// Resume events leak the agent's `gwt-*` skill name into the recorded title,
+/// and backfill paths leave the work-item id or a bare UUID — none answer "what
+/// work was running", so the rail summary derivation skips them.
+pub(super) fn is_identifier_like_title(text: &str) -> bool {
+    is_gwt_skill_name(text) || is_work_item_id(text) || is_uuid_like(text)
+}
+
+fn is_gwt_skill_name(text: &str) -> bool {
+    // ^gwt-[a-z0-9-]+$
+    match text.strip_prefix("gwt-") {
+        Some(rest) => {
+            !rest.is_empty()
+                && rest
+                    .chars()
+                    .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-')
+        }
+        None => false,
+    }
+}
+
+fn is_work_item_id(text: &str) -> bool {
+    // ^work-[a-z0-9-]+-[0-9a-f]{6,}$ — "work-" prefix, then a lowercase/digit/'-'
+    // body, then a final '-'-separated segment of 6+ hex chars (the id suffix).
+    let Some(rest) = text.strip_prefix("work-") else {
+        return false;
+    };
+    let Some((body, tail)) = rest.rsplit_once('-') else {
+        return false;
+    };
+    let body_ok = !body.is_empty()
+        && body
+            .chars()
+            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-');
+    let tail_ok = tail.len() >= 6 && tail.chars().all(|c| c.is_ascii_hexdigit());
+    body_ok && tail_ok
+}
+
+fn is_uuid_like(text: &str) -> bool {
+    let segments: [usize; 5] = [8, 4, 4, 4, 12];
+    let parts: Vec<&str> = text.split('-').collect();
+    parts.len() == segments.len()
+        && parts
+            .iter()
+            .zip(segments.iter())
+            .all(|(part, len)| part.len() == *len && part.chars().all(|c| c.is_ascii_hexdigit()))
+}
+
+/// SPEC-3075: a purpose candidate is non-empty text that is neither the branch
+/// name nor an identifier shape (skill name / work id / UUID).
+fn purpose_candidate(value: Option<&str>, branch: Option<&str>) -> Option<String> {
+    let branch = branch.map(str::trim).filter(|value| !value.is_empty());
+    let text = value.map(str::trim).filter(|value| !value.is_empty())?;
+    if Some(text) == branch || is_identifier_like_title(text) {
+        return None;
+    }
+    Some(text.to_string())
+}
+
+/// SPEC-3075: the agent-declared-purpose tier of the "what work was running"
+/// Workspace summary. Surfaces the `title-summary` the LLM sets — live agent
+/// focus, then the recorded journal purpose, then a non-identifier recorded
+/// title. Returns `None` when no declared purpose is known; the caller then
+/// layers the PR title / branch tip commit subject on top (see
+/// [`apply_work_summary_external_sources`]) before falling back to the branch.
+/// The owner is shown as a separate meta chip, not folded into this summary.
+/// Display-only; never mutates Work identity.
+pub(super) fn derive_work_summary(
+    agent_title_summary: Option<&str>,
+    journal_title_summary: Option<&str>,
+    recorded_title: Option<&str>,
+    branch: Option<&str>,
+) -> Option<String> {
+    purpose_candidate(agent_title_summary, branch)
+        .or_else(|| purpose_candidate(journal_title_summary, branch))
+        .or_else(|| purpose_candidate(recorded_title, branch))
+}
+
+/// SPEC-3075: most-recent agent-declared `title-summary` per agent session, read
+/// from the journal so a historical Work that recorded a purpose still surfaces
+/// it on the rail even when its WorkItem title is only the branch.
+fn journal_title_summary_by_session(
+    journal_entries: &[gwt::WorkspaceJournalEntryView],
+) -> std::collections::HashMap<String, String> {
+    let mut map: std::collections::HashMap<String, (String, String)> =
+        std::collections::HashMap::new();
+    for entry in journal_entries {
+        let (Some(session), Some(summary)) = (
+            entry.agent_session_id.as_ref(),
+            entry.agent_title_summary.as_ref(),
+        ) else {
+            continue;
+        };
+        if summary.trim().is_empty() {
+            continue;
+        }
+        match map.get(session) {
+            Some((seen_at, _)) if seen_at.as_str() >= entry.updated_at.as_str() => {}
+            _ => {
+                map.insert(session.clone(), (entry.updated_at.clone(), summary.clone()));
+            }
+        }
+    }
+    map.into_iter()
+        .map(|(session, (_, summary))| (session, summary))
+        .collect()
+}
+
+/// SPEC-3075: fill the rail row's `work_summary` "what work was running" label
+/// from the external (background-scanned) sources, in priority order.
+///
+/// First the PR title — the human-written purpose — which OVERRIDES the
+/// agent-declared `title-summary` already in `work_summary` (the user's chosen
+/// precedence). Then, for rows still missing a summary, the branch tip commit
+/// subject — the historical fallback for the ~96% of Workspaces that predate
+/// `title-summary` (for a conventional-commit repo `feat(...): ...` is
+/// readable). Both maps come from background scan caches (one `gh pr list` and
+/// one `for-each-ref` spawn), mirroring [`mark_merged_active_works`]; no git or
+/// network runs on this view-build path.
+pub(super) fn apply_work_summary_external_sources(
+    active_works: &mut [gwt::ActiveWorkItemView],
+    pr_titles: Option<&std::collections::HashMap<String, String>>,
+    tip_subjects: Option<&std::collections::HashMap<String, String>>,
+) {
+    for work in active_works.iter_mut() {
+        let Some(branch) = work
+            .branch
+            .as_deref()
+            .map(crate::runtime_support::normalize_branch_name)
+            .filter(|branch| !branch.is_empty())
+        else {
+            continue;
+        };
+        // 1. PR title — top priority, overrides any declared title-summary.
+        if let Some(title) = pr_titles
+            .and_then(|map| map.get(&branch))
+            .and_then(|title| purpose_candidate(Some(title.as_str()), Some(branch.as_str())))
+        {
+            work.work_summary = Some(title);
+            continue;
+        }
+        // 2. tip commit subject — only fills a row with no declared purpose.
+        if work.work_summary.is_some() {
+            continue;
+        }
+        if let Some(summary) = tip_subjects
+            .and_then(|map| {
+                map.get(&branch)
+                    .or_else(|| map.get(&format!("origin/{branch}")))
+            })
+            .and_then(|subject| purpose_candidate(Some(subject.as_str()), Some(branch.as_str())))
+        {
+            work.work_summary = Some(summary);
+        }
+    }
+}
+
 fn active_work_items_from_projection(
     projection: &gwt_core::workspace_projection::WorkspaceProjection,
     agents: &[gwt::ActiveWorkAgentView],
     works: &[gwt::WorkspaceHistoryView],
+    journal_title_by_session: &std::collections::HashMap<String, String>,
 ) -> Vec<gwt::ActiveWorkItemView> {
     let mut grouped: Vec<(String, Vec<gwt::ActiveWorkAgentView>)> = Vec::new();
     for agent in agents {
@@ -383,14 +546,47 @@ fn active_work_items_from_projection(
                         }
                     })
             };
+            let owner_value = history.and_then(|item| item.owner.clone()).or_else(|| {
+                is_current_projection
+                    .then(|| projection.owner.clone())
+                    .flatten()
+            });
+            let branch_value = if is_current_projection {
+                projection
+                    .git_details
+                    .as_ref()
+                    .and_then(|details| details.branch.clone())
+            } else {
+                container
+                    .and_then(|value| value.branch.clone())
+                    .or_else(|| first_agent.and_then(|agent| agent.branch.clone()))
+            };
+            // SPEC-3075: the agent-declared-purpose tier of the rail "what work
+            // was running" summary. PR title / commit subject are layered on
+            // top later (apply_work_summary_external_sources); branch is the
+            // final fallback. Display-only — never the Work identity.
+            let work_summary = derive_work_summary(
+                first_agent.and_then(|agent| agent.title_summary.as_deref()),
+                agents
+                    .iter()
+                    .find_map(|agent| journal_title_by_session.get(&agent.session_id))
+                    .map(String::as_str),
+                history.map(|item| item.title.as_str()),
+                branch_value.as_deref(),
+            );
             gwt::ActiveWorkItemView {
                 id: work_id.clone(),
+                // SPEC-3075 FR-002/FR-004: the Work title is its *identity*
+                // (purpose). `current_focus` is the agent's live "what now"
+                // (status) and must never become the Work title — otherwise a
+                // status line like "...execution mode..." leaks in as the
+                // identity. `title_summary` is the agent-declared purpose, so it
+                // stays as a fallback; `current_focus` is removed entirely.
                 title: history
                     .map(|item| item.title.clone())
                     .filter(|value| !value.trim().is_empty())
                     .or_else(|| is_current_projection.then(|| projection.title.clone()))
                     .or_else(|| first_agent.and_then(|agent| agent.title_summary.clone()))
-                    .or_else(|| first_agent.and_then(|agent| agent.current_focus.clone()))
                     .unwrap_or(work_id),
                 status_category,
                 status_text,
@@ -401,11 +597,8 @@ fn active_work_items_from_projection(
                             .then(|| projection.summary.clone())
                             .flatten()
                     }),
-                owner: history.and_then(|item| item.owner.clone()).or_else(|| {
-                    is_current_projection
-                        .then(|| projection.owner.clone())
-                        .flatten()
-                }),
+                work_summary,
+                owner: owner_value,
                 next_action: if is_current_projection {
                     projection.next_action.clone()
                 } else {
@@ -413,16 +606,7 @@ fn active_work_items_from_projection(
                 },
                 active_agents,
                 blocked_agents,
-                branch: if is_current_projection {
-                    projection
-                        .git_details
-                        .as_ref()
-                        .and_then(|details| details.branch.clone())
-                } else {
-                    container
-                        .and_then(|value| value.branch.clone())
-                        .or_else(|| first_agent.and_then(|agent| agent.branch.clone()))
-                },
+                branch: branch_value,
                 worktree_path: if is_current_projection {
                     projection.git_details.as_ref().and_then(|details| {
                         details
@@ -495,7 +679,7 @@ fn active_work_items_from_projection(
     // and by branch/worktree so a resumed (live again) Work surfaces once as
     // Active, and the launch-recorded history row (keyed by the projection id but
     // covered by a live session) never produces a phantom Paused duplicate.
-    append_paused_work_items(&mut active_works, works);
+    append_paused_work_items(&mut active_works, works, journal_title_by_session);
     active_works
 }
 
@@ -507,6 +691,7 @@ fn active_work_items_from_projection(
 fn append_paused_work_items(
     active_works: &mut Vec<gwt::ActiveWorkItemView>,
     works: &[gwt::WorkspaceHistoryView],
+    journal_title_by_session: &std::collections::HashMap<String, String>,
 ) {
     for work in works {
         // SPEC-2359 Phase W-12 Slice 4 (FR-352): terminal closes (Done and
@@ -531,6 +716,19 @@ fn append_paused_work_items(
             .clone()
             .or_else(|| work.intent.clone())
             .unwrap_or_else(|| "Paused".to_string());
+        // SPEC-3075: a paused/backfill Work has no live agent — surface the
+        // purpose recorded in the journal (agent `title-summary`), then a
+        // non-identifier recorded title. PR title / commit subject layer on top
+        // later; None falls back to the branch as the rail label.
+        let work_summary = derive_work_summary(
+            None,
+            work.agents
+                .iter()
+                .find_map(|agent| journal_title_by_session.get(&agent.session_id))
+                .map(String::as_str),
+            Some(work.title.as_str()),
+            branch.as_deref(),
+        );
         active_works.push(gwt::ActiveWorkItemView {
             id: work.id.clone(),
             title,
@@ -538,6 +736,7 @@ fn append_paused_work_items(
             status_category: "idle".to_string(),
             status_text,
             summary: work.summary.clone().or_else(|| work.intent.clone()),
+            work_summary,
             owner: work.owner.clone(),
             next_action: None,
             active_agents: 0,
@@ -1280,8 +1479,24 @@ pub(super) fn assign_and_merge_workspace_groups(
                 let merged_into_base = target.merged_into_base || work.merged_into_base;
                 if newer {
                     let key = target.workspace_key.clone();
+                    // SPEC-3075 FR-004: a session-derived row's title/owner is
+                    // agent content (the live session), not the branch's
+                    // identity. When a fresher session row merges into a
+                    // branch-backed Work, take its fresher status but preserve
+                    // the branch-backed identity so another agent's content
+                    // never surfaces as this Work's title.
+                    let target_branch_backed = !target.id.starts_with("work-session-");
+                    let work_session_derived = work.id.starts_with("work-session-");
+                    let preserved_identity = (target_branch_backed && work_session_derived)
+                        .then(|| (target.title.clone(), target.owner.clone()));
                     *target = work;
                     target.workspace_key = key;
+                    if let Some((title, owner)) = preserved_identity {
+                        target.title = title;
+                        if owner.is_some() {
+                            target.owner = owner;
+                        }
+                    }
                 }
                 target.agents = agents;
                 target.active_agents = active_agents;
@@ -1731,6 +1946,14 @@ impl AppRuntime {
                 &mut view.active_works,
                 self.work_merged_branches.get(&tab.project_root),
             );
+            // SPEC-3075: fill the rail summary — PR title (top priority) then the
+            // branch tip commit subject for Works with no recorded purpose (both
+            // from background scan caches).
+            apply_work_summary_external_sources(
+                &mut view.active_works,
+                self.work_pr_titles.get(&tab.project_root),
+                self.work_tip_subjects.get(&tab.project_root),
+            );
             // SPEC-2359 W16-3 (FR-390): "Remote" rows — branch known only
             // from fetched refs, no local worktree (cache lookup only).
             mark_remote_only_active_works(
@@ -1765,6 +1988,7 @@ impl AppRuntime {
                 format!("{active_agents} active agents")
             },
             summary: None,
+            work_summary: None,
             owner: None,
             next_action: Some("Check Board for latest updates".to_string()),
             active_agents,
