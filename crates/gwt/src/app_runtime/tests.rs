@@ -1837,6 +1837,8 @@ fn sample_runtime_with_events(
         pending_startup_auto_resume_sessions: Vec::new(),
         active_agent_sessions: HashMap::<String, ActiveAgentSession>::new(),
         work_merged_branches: HashMap::new(),
+        work_tip_subjects: HashMap::new(),
+        work_pr_titles: HashMap::new(),
         session_ledger_cache: std::cell::RefCell::new(
             crate::session_ledger_cache::SessionLedgerCache::new(),
         ),
@@ -14329,6 +14331,7 @@ fn attach_registry_sessions_caps_total_agents_on_the_wire() {
         status_category: "idle".to_string(),
         status_text: "Paused".to_string(),
         summary: None,
+        work_summary: None,
         owner: None,
         next_action: None,
         active_agents: 0,
@@ -14413,6 +14416,7 @@ fn attach_registry_sessions_keeps_latest_entry_per_agent_identity() {
         status_category: "idle".to_string(),
         status_text: "Paused".to_string(),
         summary: None,
+        work_summary: None,
         owner: None,
         next_action: None,
         active_agents: 0,
@@ -14524,6 +14528,7 @@ fn attach_registry_sessions_drops_ghost_agents_without_identity_or_sessions() {
         status_category: "idle".to_string(),
         status_text: "Paused".to_string(),
         summary: None,
+        work_summary: None,
         owner: None,
         next_action: None,
         active_agents: 0,
@@ -14636,6 +14641,7 @@ fn attach_registry_sessions_dedupes_agents_sharing_a_conversation() {
         status_category: "idle".to_string(),
         status_text: "Paused".to_string(),
         summary: None,
+        work_summary: None,
         owner: None,
         next_action: None,
         active_agents: 0,
@@ -14744,6 +14750,7 @@ fn active_works_are_sorted_by_latest_update_descending() {
         status_category: "idle".to_string(),
         status_text: "Paused".to_string(),
         summary: None,
+        work_summary: None,
         owner: None,
         next_action: None,
         active_agents: 0,
@@ -14815,6 +14822,7 @@ fn mark_merged_active_works_flags_cache_and_pr_state() {
         status_category: "idle".to_string(),
         status_text: "Paused".to_string(),
         summary: None,
+        work_summary: None,
         owner: None,
         next_action: None,
         active_agents: 0,
@@ -15214,6 +15222,7 @@ fn assign_and_merge_workspace_groups_unifies_same_branch_rows() {
             status_category: "idle".to_string(),
             status_text: "Paused".to_string(),
             summary: None,
+            work_summary: None,
             owner: None,
             next_action: None,
             active_agents: agents,
@@ -15298,6 +15307,7 @@ fn mark_remote_only_flags_fetched_branches_without_local_worktree() {
             status_category: "idle".to_string(),
             status_text: "Paused".to_string(),
             summary: None,
+            work_summary: None,
             owner: None,
             next_action: None,
             active_agents: 0,
@@ -15356,6 +15366,7 @@ fn mark_merged_classifies_done_equivalent_for_stale_merged_rows() {
             status_category: "idle".to_string(),
             status_text: "Paused".to_string(),
             summary: None,
+            work_summary: None,
             owner: None,
             next_action: None,
             active_agents: 0,
@@ -15417,4 +15428,151 @@ fn mark_merged_classifies_done_equivalent_for_stale_merged_rows() {
         "pr_state stays badge-only — membership rides the scan verdict"
     );
     assert!(works[3].merged_into_base, "pr_state still drives the badge");
+}
+
+// SPEC-3075: the rail "what work was running" summary derivation. Surfaces the
+// agent-declared title-summary purpose, with a fallback chain that skips
+// identifier-shaped titles (skill names / work ids / UUIDs) and the branch.
+#[test]
+fn derive_work_summary_prefers_live_agent_title_summary() {
+    let summary = super::derive_work_summary(
+        Some("Work 要約を目的第一に再構成"),
+        Some("journal purpose"),
+        Some("gwt-manage-pr"),
+        Some("work/20260612-1405"),
+    );
+    assert_eq!(summary.as_deref(), Some("Work 要約を目的第一に再構成"));
+}
+
+#[test]
+fn derive_work_summary_falls_back_to_journal_then_recorded_title() {
+    // No live agent purpose -> recorded journal purpose wins.
+    assert_eq!(
+        super::derive_work_summary(
+            None,
+            Some("journal recorded purpose"),
+            Some("gwt-build-spec"),
+            Some("work/x"),
+        )
+        .as_deref(),
+        Some("journal recorded purpose"),
+    );
+    // No agent / journal -> a real (non-identifier) recorded title wins.
+    assert_eq!(
+        super::derive_work_summary(None, None, Some("Release Notes cleanup"), None).as_deref(),
+        Some("Release Notes cleanup"),
+    );
+}
+
+#[test]
+fn derive_work_summary_is_none_when_no_declared_purpose() {
+    // A skill-name title is not a declared purpose -> None (the caller then
+    // fills from the branch tip commit subject). The owner is NOT folded in.
+    assert_eq!(
+        super::derive_work_summary(None, None, Some("gwt-manage-pr"), None),
+        None,
+    );
+    // Backfill Work: title == branch -> None (UI labels by branch).
+    assert_eq!(
+        super::derive_work_summary(
+            None,
+            None,
+            Some("work/20260614-0444"),
+            Some("work/20260614-0444"),
+        ),
+        None,
+    );
+    // A raw work-item id title is not a purpose.
+    assert_eq!(
+        super::derive_work_summary(
+            None,
+            None,
+            Some("work-work-20260601-0908-9ffe416f"),
+            Some("work/20260601-0908"),
+        ),
+        None,
+    );
+}
+
+#[test]
+fn apply_work_summary_external_sources_prefers_pr_title_then_commit_subject() {
+    use std::collections::HashMap;
+    let mut tip_subjects: HashMap<String, String> = HashMap::new();
+    tip_subjects.insert(
+        "work/20260614-0444".to_string(),
+        "feat(workspace): purpose-first rail".to_string(),
+    );
+    tip_subjects.insert(
+        "work/20260610-0907".to_string(),
+        "work/20260610-0907".to_string(), // subject == branch -> not a purpose
+    );
+    let mut pr_titles: HashMap<String, String> = HashMap::new();
+    // A PR title overrides even a declared title-summary already in work_summary.
+    pr_titles.insert(
+        "work/20260612-1405".to_string(),
+        "Surface work purpose in the Workspace rail".to_string(),
+    );
+
+    let base = |branch: &str, work_summary: Option<&str>| gwt::ActiveWorkItemView {
+        id: branch.to_string(),
+        title: branch.to_string(),
+        status_category: "idle".to_string(),
+        status_text: "Paused".to_string(),
+        summary: None,
+        work_summary: work_summary.map(str::to_string),
+        owner: None,
+        next_action: None,
+        active_agents: 0,
+        blocked_agents: 0,
+        branch: Some(branch.to_string()),
+        worktree_path: None,
+        pr_number: None,
+        pr_url: None,
+        pr_state: None,
+        board_refs: vec![],
+        agents: vec![],
+        lifecycle_state: "paused".to_string(),
+        closed_at: None,
+        session_agent_total: 0,
+        updated_at: String::new(),
+        merged_into_base: false,
+        workspace_key: None,
+        remote_only: false,
+        done_equivalent: false,
+    };
+    let mut works = vec![
+        base("work/20260614-0444", None), // no PR, gap -> filled by commit subject
+        base("work/20260612-1405", Some("Keep my purpose")), // PR title overrides title-summary
+        base("work/20260610-0907", None), // no PR, subject == branch -> stays None
+    ];
+    super::apply_work_summary_external_sources(&mut works, Some(&pr_titles), Some(&tip_subjects));
+    assert_eq!(
+        works[0].work_summary.as_deref(),
+        Some("feat(workspace): purpose-first rail"),
+    );
+    assert_eq!(
+        works[1].work_summary.as_deref(),
+        Some("Surface work purpose in the Workspace rail"),
+        "PR title overrides the declared title-summary",
+    );
+    assert_eq!(works[2].work_summary, None);
+}
+
+#[test]
+fn is_identifier_like_title_classifies_shapes() {
+    assert!(super::is_identifier_like_title("gwt-manage-pr"));
+    assert!(super::is_identifier_like_title("gwt-build-spec"));
+    assert!(super::is_identifier_like_title(
+        "work-work-20260601-0908-9ffe416f"
+    ));
+    assert!(super::is_identifier_like_title(
+        "550e8400-e29b-41d4-a716-446655440000"
+    ));
+    // Real purposes are not identifiers.
+    assert!(!super::is_identifier_like_title("Release Notes cleanup"));
+    assert!(!super::is_identifier_like_title(
+        "Work 要約を目的第一に再構成"
+    ));
+    assert!(!super::is_identifier_like_title("SPEC-3075"));
+    assert!(!super::is_identifier_like_title("develop"));
 }

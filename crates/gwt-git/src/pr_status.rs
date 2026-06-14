@@ -200,6 +200,85 @@ pub fn parse_pr_list_json(json: &str) -> Result<Vec<PrStatus>> {
     Ok(results)
 }
 
+/// SPEC-3075: map each branch (PR head ref) to its PR title, fetched in ONE
+/// `gh pr list` call (the GitHub API may paginate). A PR title is the
+/// human-written purpose of the work, so it is the top-priority "what work was
+/// running" summary for the Workspace rail. Returns an empty map offline / when
+/// `gh` is unavailable. When a branch has several PRs the most recent (highest
+/// number) wins.
+pub fn fetch_pr_titles_by_branch(
+    repo_path: &Path,
+) -> Result<std::collections::HashMap<String, String>> {
+    fetch_pr_titles_by_branch_with(repo_path, run_gh_command)
+}
+
+fn fetch_pr_titles_by_branch_with<F>(
+    repo_path: &Path,
+    mut run_gh: F,
+) -> Result<std::collections::HashMap<String, String>>
+where
+    F: FnMut(&Path, &[&str]) -> Result<GhCliOutput>,
+{
+    let output = run_gh(
+        repo_path,
+        &[
+            "pr",
+            "list",
+            "--json",
+            "number,title,headRefName,state",
+            "--state",
+            "all",
+            "--limit",
+            "999",
+        ],
+    )?;
+    if !output.success {
+        return Err(GwtError::Git(format!(
+            "gh pr list titles: {}",
+            output.stderr.trim()
+        )));
+    }
+    parse_pr_titles_by_branch(&output.stdout)
+}
+
+/// Parse `gh pr list --json number,title,headRefName,...` into a
+/// `branch -> PR title` map. The highest PR number per branch wins.
+pub fn parse_pr_titles_by_branch(json: &str) -> Result<std::collections::HashMap<String, String>> {
+    let arr: Vec<serde_json::Value> =
+        serde_json::from_str(json).map_err(|e| GwtError::Other(format!("gh pr list JSON: {e}")))?;
+    let mut best: std::collections::HashMap<String, (u64, String)> =
+        std::collections::HashMap::new();
+    for value in &arr {
+        let branch = value
+            .get("headRefName")
+            .and_then(serde_json::Value::as_str)
+            .map(str::trim)
+            .filter(|name| !name.is_empty());
+        let title = value
+            .get("title")
+            .and_then(serde_json::Value::as_str)
+            .map(str::trim)
+            .filter(|title| !title.is_empty());
+        let number = value
+            .get("number")
+            .and_then(serde_json::Value::as_u64)
+            .unwrap_or(0);
+        let (Some(branch), Some(title)) = (branch, title) else {
+            continue;
+        };
+        match best.get(branch) {
+            Some((seen, _)) if *seen >= number => {}
+            _ => {
+                best.insert(branch.to_string(), (number, title.to_string()));
+            }
+        }
+    }
+    Ok(best
+        .into_iter()
+        .map(|(branch, (_, title))| (branch, title))
+        .collect())
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct GhCliOutput {
     success: bool,
@@ -458,6 +537,28 @@ pub fn parse_pr_check_report_json(json: &str) -> Result<PrCheckReport> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn parse_pr_titles_by_branch_maps_head_ref_to_title_and_prefers_latest() {
+        let json = r#"[
+            {"number": 10, "title": "feat: old work on A", "headRefName": "work/a", "state": "CLOSED"},
+            {"number": 42, "title": "feat: latest work on A", "headRefName": "work/a", "state": "MERGED"},
+            {"number": 7,  "title": "fix: work on B", "headRefName": "work/b", "state": "OPEN"},
+            {"number": 8,  "title": "", "headRefName": "work/c", "state": "OPEN"}
+        ]"#;
+        let map = parse_pr_titles_by_branch(json).unwrap();
+        // Highest PR number wins for a branch with several PRs.
+        assert_eq!(
+            map.get("work/a").map(String::as_str),
+            Some("feat: latest work on A")
+        );
+        assert_eq!(
+            map.get("work/b").map(String::as_str),
+            Some("fix: work on B")
+        );
+        // Empty titles are skipped.
+        assert!(!map.contains_key("work/c"));
+    }
 
     #[test]
     fn parse_pr_status_open() {

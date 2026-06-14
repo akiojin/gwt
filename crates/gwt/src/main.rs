@@ -927,6 +927,21 @@ enum UserEvent {
         project_root: PathBuf,
         merged_branches: std::collections::HashMap<String, chrono::DateTime<chrono::Utc>>,
     },
+    /// SPEC-3075: result of the background tip-commit-subject scan. The runtime
+    /// caches the `branch -> subject` map and rebroadcasts the Workspace
+    /// projection so historical rows show "what work was running".
+    WorkTipSubjects {
+        project_root: PathBuf,
+        tip_subjects: std::collections::HashMap<String, String>,
+    },
+    /// SPEC-3075: result of the background `gh pr list` scan. The runtime caches
+    /// the `branch -> PR title` map and rebroadcasts the Workspace projection so
+    /// rows show the PR title (the human-written purpose) as the top-priority
+    /// "what work was running" summary.
+    WorkPrTitles {
+        project_root: PathBuf,
+        pr_titles: std::collections::HashMap<String, String>,
+    },
     /// SPEC-2359 W-16 (FR-387): a background work-events ingest finished.
     /// The handler runs the worktree reconcile AFTER the intake (so branches
     /// already recorded elsewhere are not redundantly backfilled) and
@@ -2242,6 +2257,8 @@ mod tests {
             pending_startup_auto_resume_sessions: Vec::new(),
             active_agent_sessions: HashMap::new(),
             work_merged_branches: HashMap::new(),
+            work_tip_subjects: HashMap::new(),
+            work_pr_titles: HashMap::new(),
             session_ledger_cache: std::cell::RefCell::new(
                 crate::session_ledger_cache::SessionLedgerCache::new(),
             ),
@@ -6773,6 +6790,20 @@ fn main() -> std::io::Result<()> {
                 merged_branches,
             }) => {
                 let events = app.apply_work_merge_status(&project_root, merged_branches);
+                clients.dispatch(events);
+            }
+            Event::UserEvent(UserEvent::WorkTipSubjects {
+                project_root,
+                tip_subjects,
+            }) => {
+                let events = app.apply_work_tip_subjects(&project_root, tip_subjects);
+                clients.dispatch(events);
+            }
+            Event::UserEvent(UserEvent::WorkPrTitles {
+                project_root,
+                pr_titles,
+            }) => {
+                let events = app.apply_work_pr_titles(&project_root, pr_titles);
                 clients.dispatch(events);
             }
             Event::UserEvent(UserEvent::WorkspaceProjectionChanged { project_root }) => {

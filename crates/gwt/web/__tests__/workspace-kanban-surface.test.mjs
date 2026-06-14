@@ -141,11 +141,10 @@ test("Workspace detail renders structured body sections without preformatted dum
     detail.querySelectorAll(".workspace-detail-section-title"),
     (node) => node.textContent,
   );
-  // SPEC-3075 FR-002: the detail leads with Purpose (identity), then Status
-  // (current focus / next), then a demoted Latest update (Board snapshot) —
-  // instead of one conflated "Summary" that read as a status snapshot.
+  // SPEC-3075: the Work purpose is the detail heading (not a body section), so
+  // the body leads with Status (current focus / next), then a demoted Latest
+  // update (Board snapshot) — instead of one conflated "Summary".
   assert.deepEqual(sectionTitles, [
-    "Purpose",
     "Status",
     "Latest update",
     "Work",
@@ -154,13 +153,12 @@ test("Workspace detail renders structured body sections without preformatted dum
     "Coordination",
   ]);
 
-  // Purpose comes first and carries the Work identity, not the status text.
-  const purposeSection = detail.querySelectorAll(".workspace-detail-section")[0];
+  // The heading carries the Work purpose ("what work was running"), not the
+  // branch and not the status text.
   assert.equal(
-    purposeSection.querySelector(".workspace-detail-section-title").textContent,
-    "Purpose",
+    detail.querySelector(".workspace-detail-title").textContent.trim(),
+    "Release Notes cleanup",
   );
-  assert.match(purposeSection.textContent, /Release Notes cleanup/);
 
   const text = detail.textContent.replace(/\s+/g, " ").trim();
   assert.match(text, /Quiet Work UI redesign/);
@@ -819,7 +817,7 @@ test("Launch control lives in the detail header actions and duplicate branch met
 // branch list — the row title and the detail heading show the branch (the
 // place), while the record's own title (work summary) moves to the meta line
 // and the detail subtitle. Work / Session contents live inside the detail.
-test("Workspace rows and detail are titled by branch with the record title as meta", () => {
+test("Workspace rows are titled by work purpose with the branch as the sub-line (SPEC-3075)", () => {
   const fixture = createFixture();
   const surface = createSurface(
     fixture,
@@ -831,7 +829,7 @@ test("Workspace rows and detail are titled by branch with the record title as me
       active_works: [
         {
           id: "work-develop-7ea5aa57",
-          title: "gwt-manage-pr",
+          title: "Tray Copy URL polish",
           status_category: "idle",
           lifecycle_state: "paused",
           branch: "develop",
@@ -854,23 +852,281 @@ test("Workspace rows and detail are titled by branch with the record title as me
   const row = fixture.body.querySelector(".workspace-overview-row[data-workspace-id]");
   assert.equal(
     row.querySelector(".workspace-overview-row-title").textContent.trim(),
-    "develop",
-    "row title is the branch (Workspace = place)",
+    "Tray Copy URL polish",
+    "row primary label is the work purpose (what work was running)",
   );
   const metaTexts = Array.from(
     row.querySelectorAll(".workspace-overview-row-meta span"),
   ).map((el) => el.textContent.trim());
   assert.ok(
-    metaTexts.includes("gwt-manage-pr"),
-    `record title moves to the meta line: ${JSON.stringify(metaTexts)}`,
+    metaTexts.includes("develop"),
+    `branch moves to the meta sub-line: ${JSON.stringify(metaTexts)}`,
+  );
+  assert.ok(
+    metaTexts.includes("SPEC-2359"),
+    `owner stays on the meta line: ${JSON.stringify(metaTexts)}`,
   );
 
   const heading = fixture.body.querySelector(".workspace-detail-title");
-  assert.equal(heading.textContent.trim(), "develop", "detail heading is the branch");
+  assert.equal(
+    heading.textContent.trim(),
+    "Tray Copy URL polish",
+    "detail heading is the work purpose (matches the rail)",
+  );
   const subtitleText = fixture.body
     .querySelector(".workspace-detail-subtitle")
     .textContent;
-  assert.match(subtitleText, /gwt-manage-pr/, "detail subtitle carries the record title");
+  assert.match(subtitleText, /develop/, "detail subtitle carries the branch (the place)");
+});
+
+// SPEC-3075 FR-001 / US-1: the rail label is the Work *purpose* (identity).
+// A Board-body status snapshot (the demoted `summary`) must never be promoted
+// to the row label even when the Work has no recorded title — otherwise the
+// list reads as a stream of status reports ("Deployed PR #3007") instead of
+// "what is this Work about". The purpose falls back to the owner identity, not
+// the status text.
+test("Workspace rail never promotes a status snapshot to the row label (SPEC-3075 FR-001)", () => {
+  const fixture = createFixture();
+  const surface = createSurface(
+    fixture,
+    {
+      id: "proj-1",
+      title: "projection",
+      status_category: "idle",
+      active_work_count: 1,
+      active_works: [
+        {
+          id: "work-status-only",
+          // No title (purpose) recorded — only a status snapshot in summary.
+          summary: "Deployed PR #3007 to production",
+          status_text: "Deployed PR #3007 to production",
+          owner: "SPEC-3075",
+          status_category: "idle",
+          lifecycle_state: "paused",
+          branch: "work/20260612-1405",
+          active_agents: 0,
+          blocked_agents: 0,
+          agents: [],
+        },
+      ],
+      agents: [],
+    },
+    { send() {} },
+  );
+
+  surface.mount(fixture.body, fixture.windowData, {
+    focusWindowLocally() {},
+    sendFocus() {},
+  });
+
+  const row = fixture.body.querySelector(".workspace-overview-row[data-workspace-id]");
+  // The status snapshot must not surface as a label anywhere on the row.
+  assert.ok(
+    !row.textContent.includes("Deployed PR #3007"),
+    `status snapshot must not become a row label: ${row.textContent}`,
+  );
+  // With no recorded purpose, the owner is the purpose anchor and becomes the
+  // primary label (never the status snapshot).
+  assert.equal(
+    row.querySelector(".workspace-overview-row-title").textContent.trim(),
+    "SPEC-3075",
+    "owner identity is the purpose fallback for the primary label",
+  );
+});
+
+// SPEC-3075: the backend-derived work_summary (the agent-declared title-summary
+// purpose, "what work was running") is the row's primary label; the branch (the
+// Workspace place) is demoted to the meta sub-line.
+test("Workspace rail leads with the work_summary purpose and demotes the branch (SPEC-3075)", () => {
+  const fixture = createFixture();
+  const surface = createSurface(
+    fixture,
+    {
+      id: "proj-1",
+      title: "projection",
+      status_category: "idle",
+      active_work_count: 1,
+      active_works: [
+        {
+          id: "work-3075",
+          title: "work/20260612-1405",
+          work_summary: "Work 要約を目的第一に再構成",
+          owner: "SPEC-3075",
+          status_category: "idle",
+          lifecycle_state: "paused",
+          branch: "work/20260612-1405",
+          active_agents: 0,
+          blocked_agents: 0,
+          agents: [],
+        },
+      ],
+      agents: [],
+    },
+    { send() {} },
+  );
+
+  surface.mount(fixture.body, fixture.windowData, {
+    focusWindowLocally() {},
+    sendFocus() {},
+  });
+
+  const row = fixture.body.querySelector(".workspace-overview-row[data-workspace-id]");
+  assert.equal(
+    row.querySelector(".workspace-overview-row-title").textContent.trim(),
+    "Work 要約を目的第一に再構成",
+    "primary label is the work_summary purpose",
+  );
+  const metaTexts = Array.from(
+    row.querySelectorAll(".workspace-overview-row-meta span"),
+  ).map((el) => el.textContent.trim());
+  assert.ok(
+    metaTexts.includes("work/20260612-1405"),
+    `branch is demoted to the meta sub-line: ${JSON.stringify(metaTexts)}`,
+  );
+});
+
+// SPEC-3075 FR-001 / FR-002: the detail must not render a Purpose section that
+// only echoes the branch heading. A Work with no owner and whose recorded
+// title is just its branch (backfilled rows) has no purpose distinct from the
+// heading, so the "Purpose" section is omitted rather than repeating the branch.
+test("Workspace detail omits a Purpose that only repeats the branch (SPEC-3075)", () => {
+  const fixture = createFixture();
+  const surface = createSurface(
+    fixture,
+    {
+      id: "proj-1",
+      title: "projection",
+      status_category: "idle",
+      active_work_count: 1,
+      active_works: [
+        {
+          id: "work-branch-only",
+          title: "work/20260614-0444",
+          status_category: "idle",
+          lifecycle_state: "paused",
+          branch: "work/20260614-0444",
+          active_agents: 0,
+          blocked_agents: 0,
+          agents: [],
+        },
+      ],
+      agents: [],
+    },
+    { send() {} },
+  );
+
+  surface.mount(fixture.body, fixture.windowData, {
+    focusWindowLocally() {},
+    sendFocus() {},
+  });
+
+  const sectionTitles = Array.from(
+    fixture.body.querySelectorAll(".workspace-detail-section-title"),
+    (node) => node.textContent,
+  );
+  assert.ok(
+    !sectionTitles.includes("Purpose"),
+    `Purpose section must be omitted when it only echoes the branch: ${JSON.stringify(sectionTitles)}`,
+  );
+});
+
+// SPEC-3075 US-1 / US-2: a recorded title can be a gwt-* skill name (resume
+// events fill it with the agent's running skill). That is not a purpose, so the
+// detail Purpose and the rail/detail meta show the owner identity instead — the
+// skill name never surfaces as what the Work is about.
+test("Workspace purpose shows the owner, not a gwt-* skill-name title (SPEC-3075)", () => {
+  const fixture = createFixture();
+  const surface = createSurface(
+    fixture,
+    {
+      id: "proj-1",
+      title: "projection",
+      status_category: "idle",
+      active_work_count: 1,
+      active_works: [
+        {
+          id: "work-skill-title",
+          title: "gwt-manage-pr",
+          owner: "SPEC-2359",
+          status_category: "idle",
+          lifecycle_state: "paused",
+          branch: "work/20260610-0120",
+          active_agents: 0,
+          blocked_agents: 0,
+          agents: [],
+        },
+      ],
+      agents: [],
+    },
+    { send() {} },
+  );
+
+  surface.mount(fixture.body, fixture.windowData, {
+    focusWindowLocally() {},
+    sendFocus() {},
+  });
+
+  const detail = fixture.body.querySelector(".workspace-overview-detail-pane");
+  // The purpose is the detail heading; a gwt-* skill name is not a purpose, so
+  // the owner identity anchors the heading instead.
+  const heading = detail.querySelector(".workspace-detail-title");
+  assert.equal(heading.textContent.trim(), "SPEC-2359", "purpose heading is the owner identity");
+  assert.ok(
+    !detail.textContent.includes("gwt-manage-pr"),
+    "the gwt-* skill name must not surface anywhere in the detail",
+  );
+});
+
+// SPEC-3075 US-1: backfill paths can leave the recorded title as a raw
+// work-item id (e.g. "work-work-20260601-0908-9ffe416f"). An identifier is not
+// a purpose, so it must never surface as the rail label or the detail purpose.
+test("Workspace purpose drops a raw work-item id title (SPEC-3075)", () => {
+  const fixture = createFixture();
+  const surface = createSurface(
+    fixture,
+    {
+      id: "proj-1",
+      title: "projection",
+      status_category: "idle",
+      active_work_count: 1,
+      active_works: [
+        {
+          id: "work-work-20260601-0908-9ffe416f",
+          title: "work-work-20260601-0908-9ffe416f",
+          status_category: "idle",
+          lifecycle_state: "paused",
+          branch: "work/20260601-0908",
+          active_agents: 0,
+          blocked_agents: 0,
+          agents: [],
+        },
+      ],
+      agents: [],
+    },
+    { send() {} },
+  );
+
+  surface.mount(fixture.body, fixture.windowData, {
+    focusWindowLocally() {},
+    sendFocus() {},
+  });
+
+  const row = fixture.body.querySelector(".workspace-overview-row[data-workspace-id]");
+  const metaTexts = Array.from(
+    row.querySelectorAll(".workspace-overview-row-meta span"),
+  ).map((el) => el.textContent.trim());
+  assert.ok(
+    !metaTexts.some((text) => text.includes("9ffe416f")),
+    `a raw work-item id must not become the rail label: ${JSON.stringify(metaTexts)}`,
+  );
+  const sectionTitles = Array.from(
+    fixture.body.querySelectorAll(".workspace-detail-section-title"),
+    (node) => node.textContent,
+  );
+  assert.ok(
+    !sectionTitles.includes("Purpose"),
+    "Purpose section is omitted when the only title is a raw work-item id",
+  );
 });
 
 // SPEC-2359 W-16 (FR-402): the agents list is capped on the wire; the detail
