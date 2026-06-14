@@ -371,6 +371,89 @@ pub struct ProjectOpenTarget {
     pub(crate) needs_migration: bool,
 }
 
+/// SPEC-3075 FR-006: at most this many Workspaces get an AI-polished summary per
+/// scan, bounding both the git calls and the AI prompt size for large repos.
+const AI_SUMMARY_BRANCH_CAP: usize = 40;
+
+/// SPEC-3075 FR-006: a tip commit subject that carries no real purpose — merge
+/// commits and release-version bumps. These are the cases the AI polish targets
+/// (it reads the underlying feature commits instead).
+fn is_summary_noise(subject: &str) -> bool {
+    let s = subject.trim();
+    s.is_empty()
+        || s.starts_with("Merge pull request")
+        || s.starts_with("Merge branch")
+        || s.starts_with("Merge remote-tracking")
+        || s.starts_with("Merge tag")
+        || s.starts_with("merge:")
+        || s.starts_with("chore: merge")
+        || s.starts_with("chore(release):")
+        || s.starts_with("chore(deps):")
+}
+
+/// SPEC-3075 FR-006: build the AI-summary inputs for a project. For every
+/// non-terminal Workspace whose branch tip is merge/release noise, gather the
+/// recent non-merge commit subjects (the real work) plus the owner. Only the
+/// noisy Workspaces are included (PR titles / clean commit subjects need no
+/// polish), and the count is capped. Pure structured meta — no transcript.
+fn build_ai_summary_inputs(project_root: &Path, cap: usize) -> Vec<gwt_ai::WorkSummaryInput> {
+    let Ok(projection) =
+        gwt_core::workspace_projection::load_or_synthesize_workspace_work_items(project_root)
+    else {
+        return Vec::new();
+    };
+    let tip_subjects = gwt_git::refs::branch_tip_subjects(project_root).unwrap_or_default();
+    let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+    let mut inputs = Vec::new();
+    for item in &projection.work_items {
+        if item.is_terminal() || inputs.len() >= cap {
+            continue;
+        }
+        let Some(branch) = item
+            .execution_containers
+            .iter()
+            .find_map(|container| container.branch.as_deref())
+            .map(crate::runtime_support::normalize_branch_name)
+            .filter(|branch| !branch.is_empty())
+        else {
+            continue;
+        };
+        if !seen.insert(branch.clone()) {
+            continue;
+        }
+        let tip = tip_subjects
+            .get(&branch)
+            .or_else(|| tip_subjects.get(&format!("origin/{branch}")))
+            .map(String::as_str)
+            .unwrap_or("");
+        // Only polish the noisy ones — a clean tip subject is already a usable
+        // summary, and a missing branch has nothing to read.
+        if !is_summary_noise(tip) {
+            continue;
+        }
+        let mut signals =
+            gwt_git::commit::branch_recent_subjects(project_root, &branch, 5).unwrap_or_default();
+        if signals.is_empty() {
+            signals = gwt_git::commit::branch_recent_subjects(
+                project_root,
+                &format!("origin/{branch}"),
+                5,
+            )
+            .unwrap_or_default();
+        }
+        signals.retain(|subject| !is_summary_noise(subject));
+        if signals.is_empty() {
+            continue;
+        }
+        inputs.push(gwt_ai::WorkSummaryInput {
+            branch,
+            owner: item.owner.clone(),
+            signals,
+        });
+    }
+    inputs
+}
+
 pub struct AppRuntime {
     pub(crate) tabs: Vec<ProjectTabRuntime>,
     pub(crate) active_tab_id: Option<String>,
@@ -418,6 +501,13 @@ pub struct AppRuntime {
     /// list` call). The PR title is the human-written purpose, so it is the
     /// top-priority Workspace rail summary. Empty when offline / `gh` absent.
     pub(crate) work_pr_titles: HashMap<PathBuf, HashMap<String, String>>,
+    /// SPEC-3075 FR-006: per-project `branch -> AI-polished summary`, generated
+    /// off the hot path by [`AppRuntime::spawn_work_ai_summaries_scan`] only when
+    /// AI is enabled (`summary_enabled` + valid endpoint/model). The AI cleans
+    /// merge/release commit noise into a human purpose; it fills the gap above
+    /// the raw commit subject but below PR title / agent title-summary. Empty
+    /// when AI is disabled — the non-AI chain then stands unchanged.
+    pub(crate) work_ai_summaries: HashMap<PathBuf, HashMap<String, String>>,
     /// Incremental loader for the machine-local session ledger; keeps
     /// projection rebuilds from re-parsing thousands of unchanged TOMLs
     /// (window-close latency fix, 2026-06-11). RefCell: the runtime lives on
@@ -556,6 +646,7 @@ impl AppRuntime {
             work_merged_branches: HashMap::new(),
             work_tip_subjects: HashMap::new(),
             work_pr_titles: HashMap::new(),
+            work_ai_summaries: HashMap::new(),
             session_ledger_cache: std::cell::RefCell::new(
                 crate::session_ledger_cache::SessionLedgerCache::new(),
             ),
@@ -677,7 +768,8 @@ impl AppRuntime {
         self.reconcile_workspace_worktrees(&project_root);
         self.spawn_work_merge_status_scan(project_root.clone());
         self.spawn_work_tip_subjects_scan(project_root.clone());
-        self.spawn_work_pr_titles_scan(project_root);
+        self.spawn_work_pr_titles_scan(project_root.clone());
+        self.spawn_work_ai_summaries_scan(project_root);
         if changed {
             self.active_work_projection_broadcast_for_active_tab()
                 .into_iter()
@@ -821,6 +913,58 @@ impl AppRuntime {
             proxy.send(UserEvent::WorkPrTitles {
                 project_root,
                 pr_titles,
+            });
+        });
+    }
+
+    /// SPEC-3075 FR-006: cache the AI-polished `branch -> summary` map and
+    /// rebroadcast so the Workspace rail re-renders with the cleaned summaries.
+    pub(crate) fn apply_work_ai_summaries(
+        &mut self,
+        project_root: &Path,
+        ai_summaries: HashMap<String, String>,
+    ) -> Vec<OutboundEvent> {
+        self.work_ai_summaries
+            .insert(project_root.to_path_buf(), ai_summaries);
+        self.active_work_projection_broadcast_for_active_tab()
+            .into_iter()
+            .collect()
+    }
+
+    /// SPEC-3075 FR-006: optional AI polish for the rail summary. Runs off the UI
+    /// thread and ONLY when AI is enabled (`summary_enabled` + valid
+    /// endpoint/model). For the Workspaces whose best non-AI summary would be
+    /// merge/release commit noise, it feeds the structured meta (owner + recent
+    /// non-merge commit subjects — never the session transcript) to the AI and
+    /// caches a cleaned one-line purpose. Sends [`UserEvent::WorkAiSummaries`]
+    /// when anything was produced; silent (no event) when AI is disabled, the
+    /// AI call fails, or nothing needed polishing — the non-AI chain then
+    /// stands unchanged (fallback always).
+    pub(crate) fn spawn_work_ai_summaries_scan(&self, project_root: PathBuf) {
+        let ai = gwt_config::Settings::load().unwrap_or_default().ai;
+        if !ai.summary_enabled || !ai.is_enabled() {
+            return;
+        }
+        let proxy = self.proxy.clone();
+        thread::spawn(move || {
+            let inputs = build_ai_summary_inputs(&project_root, AI_SUMMARY_BRANCH_CAP);
+            if inputs.is_empty() {
+                return;
+            }
+            let Ok(client) =
+                gwt_ai::AIClient::new(&ai.endpoint, ai.api_key.as_deref().unwrap_or(""), &ai.model)
+            else {
+                return;
+            };
+            let Ok(ai_summaries) = gwt_ai::summarize_work_purposes(&client, &inputs) else {
+                return;
+            };
+            if ai_summaries.is_empty() {
+                return;
+            }
+            proxy.send(UserEvent::WorkAiSummaries {
+                project_root,
+                ai_summaries,
             });
         });
     }

@@ -436,17 +436,25 @@ fn journal_title_summary_by_session(
 ///
 /// First the PR title — the human-written purpose — which OVERRIDES the
 /// agent-declared `title-summary` already in `work_summary` (the user's chosen
-/// precedence). Then, for rows still missing a summary, the branch tip commit
-/// subject — the historical fallback for the ~96% of Workspaces that predate
-/// `title-summary` (for a conventional-commit repo `feat(...): ...` is
-/// readable). Both maps come from background scan caches (one `gh pr list` and
-/// one `for-each-ref` spawn), mirroring [`mark_merged_active_works`]; no git or
-/// network runs on this view-build path.
+/// precedence). Then, for rows still missing a summary, the AI-polished summary
+/// (FR-006, present only when AI is enabled — it cleans merge/release commit
+/// noise), and finally the raw branch tip commit subject — the historical
+/// fallback for the ~96% of Workspaces that predate `title-summary`. All maps
+/// come from background scan caches, mirroring [`mark_merged_active_works`]; no
+/// git, network, or AI call runs on this view-build path.
 pub(super) fn apply_work_summary_external_sources(
     active_works: &mut [gwt::ActiveWorkItemView],
     pr_titles: Option<&std::collections::HashMap<String, String>>,
+    ai_summaries: Option<&std::collections::HashMap<String, String>>,
     tip_subjects: Option<&std::collections::HashMap<String, String>>,
 ) {
+    let lookup = |map: Option<&std::collections::HashMap<String, String>>, branch: &str| {
+        map.and_then(|map| {
+            map.get(branch)
+                .or_else(|| map.get(&format!("origin/{branch}")))
+        })
+        .and_then(|value| purpose_candidate(Some(value.as_str()), Some(branch)))
+    };
     for work in active_works.iter_mut() {
         let Some(branch) = work
             .branch
@@ -457,23 +465,18 @@ pub(super) fn apply_work_summary_external_sources(
             continue;
         };
         // 1. PR title — top priority, overrides any declared title-summary.
-        if let Some(title) = pr_titles
-            .and_then(|map| map.get(&branch))
-            .and_then(|title| purpose_candidate(Some(title.as_str()), Some(branch.as_str())))
-        {
+        if let Some(title) = lookup(pr_titles, &branch) {
             work.work_summary = Some(title);
             continue;
         }
-        // 2. tip commit subject — only fills a row with no declared purpose.
+        // 2/3. AI summary then raw commit subject — only fill a row with no
+        // declared purpose. The AI-polished summary cleans the noise the raw
+        // commit subject would otherwise show, so it wins over it.
         if work.work_summary.is_some() {
             continue;
         }
-        if let Some(summary) = tip_subjects
-            .and_then(|map| {
-                map.get(&branch)
-                    .or_else(|| map.get(&format!("origin/{branch}")))
-            })
-            .and_then(|subject| purpose_candidate(Some(subject.as_str()), Some(branch.as_str())))
+        if let Some(summary) =
+            lookup(ai_summaries, &branch).or_else(|| lookup(tip_subjects, &branch))
         {
             work.work_summary = Some(summary);
         }
@@ -1946,12 +1949,14 @@ impl AppRuntime {
                 &mut view.active_works,
                 self.work_merged_branches.get(&tab.project_root),
             );
-            // SPEC-3075: fill the rail summary — PR title (top priority) then the
-            // branch tip commit subject for Works with no recorded purpose (both
-            // from background scan caches).
+            // SPEC-3075: fill the rail summary — PR title (top), then the
+            // AI-polished summary (FR-006), then the raw branch tip commit
+            // subject for Works with no recorded purpose (all from background
+            // scan caches).
             apply_work_summary_external_sources(
                 &mut view.active_works,
                 self.work_pr_titles.get(&tab.project_root),
+                self.work_ai_summaries.get(&tab.project_root),
                 self.work_tip_subjects.get(&tab.project_root),
             );
             // SPEC-2359 W16-3 (FR-390): "Remote" rows — branch known only

@@ -1839,6 +1839,7 @@ fn sample_runtime_with_events(
         work_merged_branches: HashMap::new(),
         work_tip_subjects: HashMap::new(),
         work_pr_titles: HashMap::new(),
+        work_ai_summaries: HashMap::new(),
         session_ledger_cache: std::cell::RefCell::new(
             crate::session_ledger_cache::SessionLedgerCache::new(),
         ),
@@ -15497,7 +15498,7 @@ fn derive_work_summary_is_none_when_no_declared_purpose() {
 }
 
 #[test]
-fn apply_work_summary_external_sources_prefers_pr_title_then_commit_subject() {
+fn apply_work_summary_external_sources_prefers_pr_then_ai_then_commit_subject() {
     use std::collections::HashMap;
     let mut tip_subjects: HashMap<String, String> = HashMap::new();
     tip_subjects.insert(
@@ -15507,6 +15508,17 @@ fn apply_work_summary_external_sources_prefers_pr_title_then_commit_subject() {
     tip_subjects.insert(
         "work/20260610-0907".to_string(),
         "work/20260610-0907".to_string(), // subject == branch -> not a purpose
+    );
+    // SPEC-3075 FR-006: an AI-polished summary wins over the raw commit subject
+    // for a gap row (no PR, no title-summary).
+    tip_subjects.insert(
+        "work/20260609-1130".to_string(),
+        "Merge pull request #42 from x".to_string(), // noisy raw subject
+    );
+    let mut ai_summaries: HashMap<String, String> = HashMap::new();
+    ai_summaries.insert(
+        "work/20260609-1130".to_string(),
+        "tray の Copy URL のちらつきを修正".to_string(),
     );
     let mut pr_titles: HashMap<String, String> = HashMap::new();
     // A PR title overrides even a declared title-summary already in work_summary.
@@ -15546,8 +15558,14 @@ fn apply_work_summary_external_sources_prefers_pr_title_then_commit_subject() {
         base("work/20260614-0444", None), // no PR, gap -> filled by commit subject
         base("work/20260612-1405", Some("Keep my purpose")), // PR title overrides title-summary
         base("work/20260610-0907", None), // no PR, subject == branch -> stays None
+        base("work/20260609-1130", None), // no PR, AI summary beats noisy commit subject
     ];
-    super::apply_work_summary_external_sources(&mut works, Some(&pr_titles), Some(&tip_subjects));
+    super::apply_work_summary_external_sources(
+        &mut works,
+        Some(&pr_titles),
+        Some(&ai_summaries),
+        Some(&tip_subjects),
+    );
     assert_eq!(
         works[0].work_summary.as_deref(),
         Some("feat(workspace): purpose-first rail"),
@@ -15558,6 +15576,30 @@ fn apply_work_summary_external_sources_prefers_pr_title_then_commit_subject() {
         "PR title overrides the declared title-summary",
     );
     assert_eq!(works[2].work_summary, None);
+    assert_eq!(
+        works[3].work_summary.as_deref(),
+        Some("tray の Copy URL のちらつきを修正"),
+        "AI-polished summary wins over the raw commit subject",
+    );
+}
+
+#[test]
+fn is_summary_noise_flags_merge_and_release_commits() {
+    assert!(super::is_summary_noise(""));
+    assert!(super::is_summary_noise(
+        "Merge pull request #3078 from akiojin/work/x"
+    ));
+    assert!(super::is_summary_noise("Merge branch 'develop'"));
+    assert!(super::is_summary_noise(
+        "Merge remote-tracking branch 'origin/develop'"
+    ));
+    assert!(super::is_summary_noise("chore(release): v9.58.0"));
+    assert!(super::is_summary_noise("chore: merge origin/develop"));
+    // Real work is not noise.
+    assert!(!super::is_summary_noise(
+        "feat(workspace): purpose-first rail"
+    ));
+    assert!(!super::is_summary_noise("fix: reveal reused surface tabs"));
 }
 
 #[test]

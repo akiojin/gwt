@@ -42,6 +42,43 @@ pub fn recent_commits(repo_path: &Path, count: usize) -> Result<Vec<CommitEntry>
     Ok(parse_log_output(&stdout))
 }
 
+/// SPEC-3075 FR-006: the recent NON-merge commit subjects of a single branch,
+/// newest first (up to `count`). This is the AI summary input for branches
+/// whose tip is a merge/release commit (no informative purpose): the real work
+/// is in the underlying feature commits, so `--no-merges` skips the noise. The
+/// branch may be a local or `origin/<branch>` short ref. Empty when the branch
+/// is unknown or has only merge commits.
+pub fn branch_recent_subjects(repo_path: &Path, branch: &str, count: usize) -> Result<Vec<String>> {
+    let branch = branch.trim();
+    if branch.is_empty() {
+        return Ok(Vec::new());
+    }
+    let max_count = format!("--max-count={count}");
+    let output = gwt_core::process::run_git_logged(
+        &[
+            "log",
+            "--no-merges",
+            &max_count,
+            "--format=%s",
+            branch,
+            "--",
+        ],
+        Some(repo_path),
+    )
+    .map_err(|e| GwtError::Git(format!("log {branch}: {e}")))?;
+    if !output.status.success() {
+        // Unknown branch / empty history is not an error for this best-effort
+        // signal — return nothing so the caller falls back to other sources.
+        return Ok(Vec::new());
+    }
+    Ok(String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .map(str::to_string)
+        .collect())
+}
+
 /// Parse tab-separated git log output.
 pub fn parse_log_output(output: &str) -> Vec<CommitEntry> {
     output
@@ -64,6 +101,35 @@ pub fn parse_log_output(output: &str) -> Vec<CommitEntry> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn branch_recent_subjects_returns_non_merge_subjects_newest_first() {
+        use std::process::Command;
+        let dir = tempfile::TempDir::new().unwrap();
+        let repo = dir.path();
+        let git = |args: &[&str]| {
+            let ok = Command::new("git")
+                .args(args)
+                .current_dir(repo)
+                .output()
+                .unwrap()
+                .status
+                .success();
+            assert!(ok, "git {args:?}");
+        };
+        git(&["init", "--initial-branch=main"]);
+        git(&["config", "user.email", "t@example.com"]);
+        git(&["config", "user.name", "T"]);
+        git(&["commit", "--allow-empty", "-m", "feat: first work"]);
+        git(&["commit", "--allow-empty", "-m", "fix: second work"]);
+
+        let subjects = branch_recent_subjects(repo, "main", 5).unwrap();
+        assert_eq!(subjects, vec!["fix: second work", "feat: first work"]);
+        // Unknown branch is best-effort empty, not an error.
+        assert!(branch_recent_subjects(repo, "no/such-branch", 5)
+            .unwrap()
+            .is_empty());
+    }
 
     #[test]
     fn parse_log_output_valid() {
