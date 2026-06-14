@@ -6927,3 +6927,10 @@ Type: lesson
 Context: gwtd search (SPEC-1942 US-15) で GUI の search_project_index を流用したところ、stale な issues index (source_cache_changed) で search が失敗した。runner の action_search_multi_v2 は interactive GUI 契約として no_auto_build=True を内部固定しており、呼び出し側で --no-auto-build を外しても効かない。
 Learning: auto-build / self-heal が必要な agent・CLI 検索経路は search-multi ではなく per-scope の search-issues / search-specs 等の単一 action を使う。単一 action 側 (no_auto_build=False) が EMPTY_CORPUS 診断 (Issue #2979) も担う agent 向け契約である。
 Future Action: 検索経路を追加・変更する際は、runner の action 別 auto-build 挙動 (search-multi=固定無効 / 単一 action=有効) を必ず確認し、CLI 経路では per-scope action + auto_build フラグ (search_project_index の auto_build 引数) を使う。
+
+## 2026-06-14 — UI 表示課題は実データ全画面で検証し PR title を目的源に
+
+Type: workflow
+Context: SPEC-3075 Workspace 一覧の「何の作業か」表示で、合成 seed(3件) と rail のみの確認を繰り返し、ユーザー視覚検証で 7 回 reject された。実データは 239 Workspace の 96% が purpose 未記録（title-summary は直近のみ）。ユーザーの目的源の期待は PR title > title-summary > commit subject > branch。detail 見出しは branch のままで rail と不一致だった。
+Learning: UI/表示の課題は (1)合成seedでなく実データ規模で検証、(2)rail と detail(クリック後)など関連画面を全て確認、(3)「何の作業か」の人間可読源は PR title(gh pr list 1呼びで branch→title 一括取得)が最良、なければ commit subject(for-each-ref %(contents:subject) 1 spawn)、を使う。git/network は background-resolve+cache で hot path を避ける(#2725)。
+Future Action: 表示系 SPEC では最初から実データ全画面で確認し、historical データに普遍的に存在する源(PR title/commit subject)を優先候補にする。一画面だけ直して confirmed を急がない。
