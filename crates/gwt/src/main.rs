@@ -2278,6 +2278,8 @@ mod tests {
             file_tree_worktree_roots: HashMap::new(),
             server_url: None,
             usage_refresh: None,
+            image_paste_sequence: std::sync::atomic::AtomicU64::new(0),
+            agent_launch_stage_counter: std::sync::atomic::AtomicU64::new(1),
         };
         runtime.rebuild_window_lookup();
         runtime.seed_window_pty_statuses();
@@ -3276,6 +3278,9 @@ mod tests {
 
     #[test]
     fn runtime_status_helpers_cover_sessions_auto_close_and_launch_errors() {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let temp = tempdir().expect("tempdir");
         let repo = temp.path().join("repo");
         fs::create_dir_all(&repo).expect("create repo");

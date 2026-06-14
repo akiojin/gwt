@@ -66,6 +66,23 @@ impl AgentId {
         matches!(self, Self::ClaudeCode | Self::Codex)
     }
 
+    /// Whether this agent can continue the latest session without an explicit
+    /// session id.
+    pub fn supports_continue_latest(&self) -> bool {
+        matches!(
+            self,
+            Self::ClaudeCode | Self::Codex | Self::OpenCode | Self::Hermes
+        )
+    }
+
+    /// Whether this agent can resume a specific saved session id.
+    pub fn supports_resume_session_id(&self) -> bool {
+        matches!(
+            self,
+            Self::ClaudeCode | Self::Codex | Self::OpenCode | Self::OpenClaw | Self::Hermes
+        )
+    }
+
     /// Whether this agent exposes a Fast mode launch setting that can be
     /// enabled before the agent starts.
     ///
@@ -467,6 +484,58 @@ mod tests {
             assert!(
                 !non_picker.supports_resume_picker(),
                 "{non_picker:?} should not advertise picker support"
+            );
+        }
+    }
+
+    #[test]
+    fn supports_continue_latest_only_for_agents_with_latest_session_args() {
+        for supported in [
+            AgentId::ClaudeCode,
+            AgentId::Codex,
+            AgentId::OpenCode,
+            AgentId::Hermes,
+        ] {
+            assert!(
+                supported.supports_continue_latest(),
+                "{supported:?} should support latest-session continue"
+            );
+        }
+        for unsupported in [
+            AgentId::Gemini,
+            AgentId::OpenClaw,
+            AgentId::Copilot,
+            AgentId::Custom("aider".into()),
+        ] {
+            assert!(
+                !unsupported.supports_continue_latest(),
+                "{unsupported:?} should not advertise latest-session continue"
+            );
+        }
+    }
+
+    #[test]
+    fn supports_resume_session_id_matches_agents_with_specific_resume_args() {
+        for supported in [
+            AgentId::ClaudeCode,
+            AgentId::Codex,
+            AgentId::OpenCode,
+            AgentId::OpenClaw,
+            AgentId::Hermes,
+        ] {
+            assert!(
+                supported.supports_resume_session_id(),
+                "{supported:?} should support explicit session resume"
+            );
+        }
+        for unsupported in [
+            AgentId::Gemini,
+            AgentId::Copilot,
+            AgentId::Custom("aider".into()),
+        ] {
+            assert!(
+                !unsupported.supports_resume_session_id(),
+                "{unsupported:?} should not advertise explicit session resume"
             );
         }
     }

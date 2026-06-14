@@ -147,6 +147,46 @@ root_js_modules! {
     "protocol-enums.js" => "WINDOW_RUNTIME_STATES",
     // SPEC-3015 — window runtime state normalization extracted from app.js.
     "window-runtime-state.js" => "normalizeWindowRuntimeState",
+    // SPEC-3064 Phase 3 (E1) — provider usage & rate limits surface
+    // (SPEC-2970) extracted from app.js.
+    "provider-usage-surface.js" => "createProviderUsageSurface",
+    // SPEC-3064 Phase 3 (E2) — terminal attachments & clipboard surface
+    // (image paste / file drop / upload progress) extracted from app.js.
+    "terminal-attachments.js" => "createTerminalAttachments",
+    // SPEC-3064 Phase 3 (E3) — Project Index window surface (index status
+    // map + search state/render + Index window mount) extracted from app.js.
+    "project-index-search-surface.js" => "createProjectIndexSearchSurface",
+    // SPEC-3064 Phase 3 (E4) — Settings windows surface (tabbed Settings
+    // body, settings state stores, Teams channel converters, autostart
+    // appliers, system-settings interaction guard) extracted from app.js.
+    "settings-surface.js" => "createSettingsSurface",
+    // SPEC-3064 Phase 3 (E5) — Launch Wizard surface (wizard state +
+    // interaction guard, field builders, transitions, renderLaunchWizard,
+    // chrome listeners) extracted from app.js.
+    "launch-wizard-surface.js" => "createLaunchWizardSurface",
+    // SPEC-3064 Phase 3 (E6a) — File Tree window surface (tree state +
+    // worktree picker + text/hex viewer + window mount) extracted from
+    // app.js.
+    "file-tree-surface.js" => "createFileTreeSurface",
+    // SPEC-3064 Phase 3 (E6b) — Branches window & branch cleanup surface
+    // (branch list state, cleanup modal flow, window mount) extracted from
+    // app.js.
+    "branches-cleanup-surface.js" => "createBranchesCleanupSurface",
+    // SPEC-3064 Phase 3 (E6c) — Board & Logs window surface (board/log
+    // state, chat + logs rendering, window mounts) extracted from app.js.
+    "board-logs-surface.js" => "createBoardLogsSurface",
+    // SPEC-3064 Phase 3 (E6d) — Knowledge Bridge (Kanban) window surface
+    // (knowledge state, Kanban rendering + drawer, window mount) extracted
+    // from app.js.
+    "knowledge-kanban-surface.js" => "createKnowledgeKanbanSurface",
+    // SPEC-3064 Phase 3 (E6e) — Profile window surface (profile state +
+    // draft editing, window mount) extracted from app.js.
+    "profile-window-surface.js" => "createProfileWindowSurface",
+    // SPEC-3064 Phase 3 (E7) — Project & workspace shell chrome surface
+    // (project tabs + close-tab confirm, recent projects + open-project
+    // menu, picker/onboarding, window list dropdown, maximized viewport
+    // sync, clone/migration modal glue) extracted from app.js.
+    "project-shell-surface.js" => "createProjectShellSurface",
 }
 
 /// Embedded payload of a [`StaticAsset`].

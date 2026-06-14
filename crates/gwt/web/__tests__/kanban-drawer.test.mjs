@@ -11,7 +11,14 @@ import { fileURLToPath } from "node:url";
 import { dirname, resolve } from "node:path";
 
 const here = dirname(fileURLToPath(import.meta.url));
-const appSource = readFileSync(resolve(here, "../app.js"), "utf8");
+// SPEC-3064 Phase 3 (E6d): the Kanban renderers moved from app.js into
+// knowledge-kanban-surface.js; source-pattern asserts scan both files so
+// shared helpers kept in app.js (clamp, createKnowledgeMarkdownBody) and
+// the moved renderers stay covered.
+const appSource = [
+  readFileSync(resolve(here, "../app.js"), "utf8"),
+  readFileSync(resolve(here, "../knowledge-kanban-surface.js"), "utf8"),
+].join("\n");
 const indexHtml = readFileSync(resolve(here, "../index.html"), "utf8");
 // Combined source for chrome-structure assertions that may live in
 // either app.js (when injected dynamically) or index.html (when part

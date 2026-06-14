@@ -82,17 +82,25 @@ test(".split-button-menu-recent-row sets min-width: 0 so meta text can truncate"
 // `title` attribute carries the full path for the native hover/focus
 // tooltip. The text we point at is the same `${kind} · ${path}` payload as
 // the meta span, kept identical so tooltip and visible text never disagree.
-const appJs = readFileSync(resolve(here, "..", "app.js"), "utf8");
+// SPEC-3064 Phase 3 (E7): the Recent Projects renderers moved from app.js
+// to project-shell-surface.js; the tooltip pins read the surface module.
+const projectShellJs = readFileSync(
+  resolve(here, "..", "project-shell-surface.js"),
+  "utf8",
+);
 
 test("renderRecentProjectsIntoMenu sets row.title for the hover tooltip", () => {
   // Anchor from the function header to a unique line near its end
   // (openProjectMenuRecent.appendChild(row)) so we capture the whole loop
   // body without being fooled by an early `if (!openProjectMenuRecent)`
   // return brace.
-  const match = appJs.match(
+  const match = projectShellJs.match(
     /function\s+renderRecentProjectsIntoMenu\s*\([\s\S]*?openProjectMenuRecent\.appendChild\(row\);/,
   );
-  assert.ok(match, "expected to locate renderRecentProjectsIntoMenu in app.js");
+  assert.ok(
+    match,
+    "expected to locate renderRecentProjectsIntoMenu in project-shell-surface.js",
+  );
   assert.match(
     match[0],
     /row\.title\s*=\s*`\$\{project\.kind\}\s*·\s*\$\{project\.path\}`/,
@@ -103,10 +111,13 @@ test("renderRecentProjectsIntoMenu sets row.title for the hover tooltip", () => 
 });
 
 test("renderRecentProjects sets row.title for the hover tooltip", () => {
-  const match = appJs.match(
+  const match = projectShellJs.match(
     /function\s+renderRecentProjects\s*\([\s\S]*?recentProjectList\.appendChild\(row\);/,
   );
-  assert.ok(match, "expected to locate renderRecentProjects in app.js");
+  assert.ok(
+    match,
+    "expected to locate renderRecentProjects in project-shell-surface.js",
+  );
   assert.match(
     match[0],
     /row\.title\s*=\s*`\$\{project\.kind\}\s*·\s*\$\{project\.path\}`/,
