@@ -942,6 +942,13 @@ enum UserEvent {
         project_root: PathBuf,
         pr_titles: std::collections::HashMap<String, String>,
     },
+    /// SPEC-3075 FR-006: result of the background AI summary polish. The runtime
+    /// caches the `branch -> AI summary` map and rebroadcasts the Workspace
+    /// projection so noisy commit-subject rows show a clean human purpose.
+    WorkAiSummaries {
+        project_root: PathBuf,
+        ai_summaries: std::collections::HashMap<String, String>,
+    },
     /// SPEC-2359 W-16 (FR-387): a background work-events ingest finished.
     /// The handler runs the worktree reconcile AFTER the intake (so branches
     /// already recorded elsewhere are not redundantly backfilled) and
@@ -2259,6 +2266,7 @@ mod tests {
             work_merged_branches: HashMap::new(),
             work_tip_subjects: HashMap::new(),
             work_pr_titles: HashMap::new(),
+            work_ai_summaries: HashMap::new(),
             session_ledger_cache: std::cell::RefCell::new(
                 crate::session_ledger_cache::SessionLedgerCache::new(),
             ),
@@ -6809,6 +6817,13 @@ fn main() -> std::io::Result<()> {
                 pr_titles,
             }) => {
                 let events = app.apply_work_pr_titles(&project_root, pr_titles);
+                clients.dispatch(events);
+            }
+            Event::UserEvent(UserEvent::WorkAiSummaries {
+                project_root,
+                ai_summaries,
+            }) => {
+                let events = app.apply_work_ai_summaries(&project_root, ai_summaries);
                 clients.dispatch(events);
             }
             Event::UserEvent(UserEvent::WorkspaceProjectionChanged { project_root }) => {
