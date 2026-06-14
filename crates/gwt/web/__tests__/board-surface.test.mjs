@@ -17,7 +17,13 @@ import {
 } from "../board-surface.js";
 
 const here = dirname(fileURLToPath(import.meta.url));
-const appSource = readFileSync(resolve(here, "../app.js"), "utf8");
+// SPEC-3064 Phase 3 (E6c): the Board renderers moved from app.js into
+// board-logs-surface.js; source-pattern asserts scan both files so the
+// dispatcher case arms (app.js) and the moved renderers stay covered.
+const appSource = [
+  readFileSync(resolve(here, "../app.js"), "utf8"),
+  readFileSync(resolve(here, "../board-logs-surface.js"), "utf8"),
+].join("\n");
 // Issue #2694 Phase D: the formerly-inline <style> block lives at
 // /styles/app.css now; the styles bundle keeps the same grep surface that the
 // CSS contract tests rely on.

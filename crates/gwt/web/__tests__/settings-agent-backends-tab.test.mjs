@@ -6,6 +6,10 @@
 // Code / Codex, and that the socket dispatcher routes the new
 // `agent_backend_*` events. Full DOM tests for add/edit/delete forms will
 // land alongside the inline form work in T308 follow-up.
+//
+// SPEC-3064 Phase 3 (E4): the Settings window renderer moved from app.js to
+// settings-surface.js. Renderer patterns are pinned against the extracted
+// module; receive() dispatch case arms stay pinned to app.js.
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
@@ -15,13 +19,14 @@ import { dirname, resolve } from "node:path";
 
 const here = dirname(fileURLToPath(import.meta.url));
 const appSource = readFileSync(resolve(here, "../app.js"), "utf8");
+const settingsSource = readFileSync(resolve(here, "../settings-surface.js"), "utf8");
 
 test("renderSettingsWindow declares an Agent Backends tab next to Custom Agents", () => {
   // The tab is a stable contract surface — frontend dispatch hits
   // `data-settings-tab='agent-backends'` and the body must mount the
   // matching panel.
   assert.match(
-    appSource,
+    settingsSource,
     /buildSettingsTab\("agent-backends",\s*"Agent Backends"/,
     "Agent Backends tab declaration missing from renderSettingsWindow",
   );
@@ -29,7 +34,7 @@ test("renderSettingsWindow declares an Agent Backends tab next to Custom Agents"
 
 test("renderSettingsWindow mounts a panel with data-settings-panel='agent-backends'", () => {
   assert.match(
-    appSource,
+    settingsSource,
     /panelBackends\.dataset\.settingsPanel\s*=\s*"agent-backends"/,
     "Agent Backends panel must expose data-settings-panel='agent-backends'",
   );
@@ -37,7 +42,7 @@ test("renderSettingsWindow mounts a panel with data-settings-panel='agent-backen
 
 test("renderSettingsWindow hydrates the Agent Backends panel on open", () => {
   assert.match(
-    appSource,
+    settingsSource,
     /renderAgentBackendsPanel\(panelBackends\)/,
     "Agent Backends panel must call renderAgentBackendsPanel on open",
   );
@@ -45,12 +50,12 @@ test("renderSettingsWindow hydrates the Agent Backends panel on open", () => {
 
 test("renderSettingsWindow sends list_agent_backends for both built-ins on open", () => {
   assert.match(
-    appSource,
+    settingsSource,
     /for\s*\(const agent of \["claudeCode",\s*"codex"\]\)/,
     "Agent Backends panel must enumerate both built-ins (FR-100 default targets)",
   );
   assert.match(
-    appSource,
+    settingsSource,
     /send\(\{\s*kind:\s*"list_agent_backends",\s*agent\s*\}\)/,
     "Agent Backends panel must dispatch list_agent_backends per built-in",
   );
@@ -58,12 +63,12 @@ test("renderSettingsWindow sends list_agent_backends for both built-ins on open"
 
 test("renderAgentBackendsPanel builds per-built-in sections", () => {
   assert.match(
-    appSource,
+    settingsSource,
     /function renderAgentBackendsPanel\(panel\)\s*\{/,
     "expected renderAgentBackendsPanel function definition",
   );
   assert.match(
-    appSource,
+    settingsSource,
     /section\.dataset\.agent\s*=\s*agent/,
     "expected per-built-in section to carry data-agent attribute",
   );
@@ -71,12 +76,12 @@ test("renderAgentBackendsPanel builds per-built-in sections", () => {
 
 test("renderAgentBackendsList renders empty-state helper text for each built-in", () => {
   assert.match(
-    appSource,
+    settingsSource,
     /No Claude Code backend profiles saved\./,
     "expected Claude Code empty-state copy",
   );
   assert.match(
-    appSource,
+    settingsSource,
     /No Codex backend profiles saved\./,
     "expected Codex empty-state copy",
   );
@@ -87,12 +92,12 @@ test("renderAgentBackendsList prints redacted profile rows when backends are loa
   // api_key is masked server-side by `redacted_for_wire` before reaching
   // this layer.
   assert.match(
-    appSource,
+    settingsSource,
     /row\.dataset\.backendId\s*=\s*profile\.id/,
     "agent backend row must declare data-backend-id",
   );
   assert.match(
-    appSource,
+    settingsSource,
     /profile\.base_url\s*\|\|\s*profile\.baseUrl\s*\|\|\s*""/,
     "agent backend row must read base_url",
   );
@@ -135,7 +140,7 @@ test("knowledgeSettingsSurface exports renderAgentBackendsPanel", () => {
 
 test("agentBackendsState seeds empty lists for both built-ins", () => {
   assert.match(
-    appSource,
+    settingsSource,
     /const agentBackendsState\s*=\s*\{[\s\S]*?backends:\s*\{\s*claudeCode:\s*\[\],\s*codex:\s*\[\]\s*\}/,
     "agentBackendsState must seed backends.claudeCode and backends.codex",
   );

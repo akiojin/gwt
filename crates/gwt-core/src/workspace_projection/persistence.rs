@@ -1884,10 +1884,15 @@ pub fn workspace_work_event_from_board_entry(
         projection.id.clone(),
         entry.updated_at,
     );
+    // SPEC-3075 FR-003/FR-004: a Board post body is the Work *status*
+    // (a point-in-time snapshot), never its *purpose* (identity). The identity
+    // comes from the agent-declared `title_summary`; if absent, the existing
+    // Work title is preserved (the body must not become the title). The body is
+    // retained only as `summary`. This stops "the summary is a status snapshot,
+    // not what the Work is".
     event.title = entry
         .title_summary
         .clone()
-        .or_else(|| first_nonempty_line(&entry.body))
         .or_else(|| Some(projection.title.clone()));
     event.intent = entry.title_summary.clone();
     event.summary = Some(entry.body.clone());
@@ -1965,14 +1970,6 @@ fn workspace_execution_container_from_projection(
             pr_url: details.pr_url.clone(),
             pr_state: details.pr_state.clone(),
         })
-}
-
-fn first_nonempty_line(value: &str) -> Option<String> {
-    value
-        .lines()
-        .map(str::trim)
-        .find(|line| !line.is_empty())
-        .map(str::to_string)
 }
 
 pub(crate) fn write_atomic(path: &Path, bytes: &[u8]) -> Result<()> {

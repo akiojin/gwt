@@ -521,3 +521,89 @@ fn client_ref_forwards_issue_client_methods_to_the_underlying_fake_client() {
         );
     }
 }
+
+// Issue #3080: the CLI error prefix must reflect the invoked binary name
+// (`gwt` vs `gwtd`), not a hardcoded `"gwt"`. `gwt` and `gwtd` share this
+// `dispatch()`, so a hardcoded prefix makes `gwtd` errors read as `gwt ...`,
+// which misleads users into thinking the wrong binary was used.
+
+fn dispatch_stderr(program: &str) -> String {
+    let mut env = TestEnv::new(PathBuf::from("cache-root"));
+    let args = vec![program.to_string(), "board".to_string(), "list".to_string()];
+    // `board list` fails at parse time (board only has `show`/`post`), so the
+    // error path runs without needing a repo or board backend.
+    let code = dispatch(&mut env, &args);
+    assert_eq!(code, 2, "parse error must exit with code 2");
+    String::from_utf8(env.stderr.clone()).expect("stderr is utf8")
+}
+
+#[test]
+fn dispatch_error_prefix_reflects_gwtd_binary() {
+    let stderr = dispatch_stderr("gwtd");
+    assert!(
+        stderr.starts_with("gwtd board: unknown subcommand: list"),
+        "gwtd invocation must use a `gwtd` prefix, got: {stderr:?}"
+    );
+}
+
+#[test]
+fn dispatch_error_prefix_uses_basename_of_full_path() {
+    let stderr = dispatch_stderr("/Applications/GWT.app/Contents/MacOS/gwtd");
+    assert!(
+        stderr.starts_with("gwtd board:"),
+        "full-path invocation must derive `gwtd` from the basename, got: {stderr:?}"
+    );
+}
+
+#[test]
+fn dispatch_error_prefix_reflects_gwt_binary() {
+    let stderr = dispatch_stderr("gwt");
+    assert!(
+        stderr.starts_with("gwt board:"),
+        "gwt invocation must keep the `gwt` prefix, got: {stderr:?}"
+    );
+}
+
+// Regression guard for the OTHER changed line: the run-error arm
+// (`dispatch()` exit code 1, reached when `run()` returns `Err`). The three
+// tests above only drive the parse-error arm (exit code 2), so without this a
+// future single-line revert of the run-error arm would silently reintroduce
+// #3080 for execution failures. `board post -f <unseeded path>` parses
+// successfully then fails reading the missing file before any session/board
+// access, so it reaches the run-error arm deterministically and offline.
+#[test]
+fn dispatch_run_error_prefix_reflects_gwtd_binary() {
+    let mut env = TestEnv::new(PathBuf::from("cache-root"));
+    let args = vec![
+        "gwtd".to_string(),
+        "board".to_string(),
+        "post".to_string(),
+        "--kind".to_string(),
+        "note".to_string(),
+        "-f".to_string(),
+        "/no/such/file".to_string(),
+    ];
+    let code = dispatch(&mut env, &args);
+    assert_eq!(code, 1, "run error must exit with code 1");
+    let stderr = String::from_utf8(env.stderr.clone()).expect("stderr is utf8");
+    assert!(
+        stderr.starts_with("gwtd board:"),
+        "run-error arm must also use the invoked binary prefix, got: {stderr:?}"
+    );
+}
+
+// Lock the `program_name` contract directly (it is module-private but reachable
+// via `use super::*`): the `.exe` stripping and the fallback-to-"gwt" branches
+// are not reachable through `dispatch()` with real binary names.
+#[test]
+fn program_name_strips_exe_extension() {
+    assert_eq!(program_name(&["gwtd.exe".to_string()]), "gwtd");
+    assert_eq!(program_name(&["gwt.exe".to_string()]), "gwt");
+}
+
+#[test]
+fn program_name_falls_back_to_gwt_for_unusable_args() {
+    assert_eq!(program_name(&[]), "gwt");
+    assert_eq!(program_name(&[String::new()]), "gwt");
+    assert_eq!(program_name(&["/".to_string()]), "gwt");
+}

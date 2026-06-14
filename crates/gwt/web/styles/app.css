@@ -4561,7 +4561,39 @@ body {
 
 .start-method-list {
   display: grid;
-  gap: 8px;
+  gap: 14px;
+}
+
+.start-method-group {
+  min-width: 0;
+  display: grid;
+  gap: 6px;
+}
+
+.start-method-group-header {
+  min-width: 0;
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.start-method-group-title {
+  flex: 0 0 auto;
+  font-family: var(--font-mono);
+  font-size: var(--type-xs);
+  font-weight: 700;
+  color: var(--color-text-strong);
+  text-transform: uppercase;
+}
+
+.start-method-group-copy {
+  min-width: 0;
+  font-family: var(--font-body);
+  font-size: var(--type-xs);
+  color: var(--color-text-muted);
+  text-align: right;
+  overflow-wrap: anywhere;
 }
 
 .start-method-button {
@@ -4579,6 +4611,12 @@ body {
   cursor: pointer;
 }
 
+.start-method-button--recommended {
+  border-color: var(--color-focus-ring);
+  background: color-mix(in oklab, var(--color-state-active) 10%, var(--color-surface));
+  box-shadow: inset 3px 0 0 var(--color-focus-ring);
+}
+
 .start-method-button:hover:not(:disabled) {
   border-color: var(--color-border-strong);
   background: var(--color-surface-elevated);
@@ -4591,7 +4629,12 @@ body {
 
 .start-method-button:disabled {
   cursor: not-allowed;
-  opacity: 0.58;
+  opacity: 1;
+  background: color-mix(in oklab, var(--color-surface) 82%, var(--color-canvas));
+}
+
+.start-method-group--unavailable .start-method-button {
+  border-style: dashed;
 }
 
 .start-method-button.is-pending {
@@ -4617,6 +4660,10 @@ body {
   color: var(--color-text-strong);
 }
 
+.start-method-button:disabled .start-method-title {
+  color: var(--color-text-muted);
+}
+
 .start-method-badge {
   flex: 0 0 auto;
   padding: 2px 6px;
@@ -4635,6 +4682,15 @@ body {
   font-size: var(--type-xs);
   color: var(--color-text-muted);
   overflow-wrap: anywhere;
+}
+
+.start-method-detail {
+  color: color-mix(in oklab, var(--color-text-muted) 72%, var(--color-text));
+}
+
+.start-method-button:disabled .start-method-summary,
+.start-method-button:disabled .start-method-detail {
+  color: var(--color-text-muted);
 }
 
 .launch-note {
@@ -4656,6 +4712,16 @@ body {
 
   .wizard-progress-rail {
     grid-template-columns: repeat(auto-fit, minmax(112px, 1fr));
+  }
+
+  .start-method-group-header {
+    align-items: flex-start;
+    flex-direction: column;
+    gap: 2px;
+  }
+
+  .start-method-group-copy {
+    text-align: left;
   }
 }
 

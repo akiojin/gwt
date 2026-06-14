@@ -927,6 +927,28 @@ enum UserEvent {
         project_root: PathBuf,
         merged_branches: std::collections::HashMap<String, chrono::DateTime<chrono::Utc>>,
     },
+    /// SPEC-3075: result of the background tip-commit-subject scan. The runtime
+    /// caches the `branch -> subject` map and rebroadcasts the Workspace
+    /// projection so historical rows show "what work was running".
+    WorkTipSubjects {
+        project_root: PathBuf,
+        tip_subjects: std::collections::HashMap<String, String>,
+    },
+    /// SPEC-3075: result of the background `gh pr list` scan. The runtime caches
+    /// the `branch -> PR title` map and rebroadcasts the Workspace projection so
+    /// rows show the PR title (the human-written purpose) as the top-priority
+    /// "what work was running" summary.
+    WorkPrTitles {
+        project_root: PathBuf,
+        pr_titles: std::collections::HashMap<String, String>,
+    },
+    /// SPEC-3075 FR-006: result of the background AI summary polish. The runtime
+    /// caches the `branch -> AI summary` map and rebroadcasts the Workspace
+    /// projection so noisy commit-subject rows show a clean human purpose.
+    WorkAiSummaries {
+        project_root: PathBuf,
+        ai_summaries: std::collections::HashMap<String, String>,
+    },
     /// SPEC-2359 W-16 (FR-387): a background work-events ingest finished.
     /// The handler runs the worktree reconcile AFTER the intake (so branches
     /// already recorded elsewhere are not redundantly backfilled) and
@@ -2242,6 +2264,9 @@ mod tests {
             pending_startup_auto_resume_sessions: Vec::new(),
             active_agent_sessions: HashMap::new(),
             work_merged_branches: HashMap::new(),
+            work_tip_subjects: HashMap::new(),
+            work_pr_titles: HashMap::new(),
+            work_ai_summaries: HashMap::new(),
             session_ledger_cache: std::cell::RefCell::new(
                 crate::session_ledger_cache::SessionLedgerCache::new(),
             ),
@@ -2261,6 +2286,8 @@ mod tests {
             file_tree_worktree_roots: HashMap::new(),
             server_url: None,
             usage_refresh: None,
+            image_paste_sequence: std::sync::atomic::AtomicU64::new(0),
+            agent_launch_stage_counter: std::sync::atomic::AtomicU64::new(1),
         };
         runtime.rebuild_window_lookup();
         runtime.seed_window_pty_statuses();
@@ -3259,6 +3286,9 @@ mod tests {
 
     #[test]
     fn runtime_status_helpers_cover_sessions_auto_close_and_launch_errors() {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let temp = tempdir().expect("tempdir");
         let repo = temp.path().join("repo");
         fs::create_dir_all(&repo).expect("create repo");
@@ -6773,6 +6803,27 @@ fn main() -> std::io::Result<()> {
                 merged_branches,
             }) => {
                 let events = app.apply_work_merge_status(&project_root, merged_branches);
+                clients.dispatch(events);
+            }
+            Event::UserEvent(UserEvent::WorkTipSubjects {
+                project_root,
+                tip_subjects,
+            }) => {
+                let events = app.apply_work_tip_subjects(&project_root, tip_subjects);
+                clients.dispatch(events);
+            }
+            Event::UserEvent(UserEvent::WorkPrTitles {
+                project_root,
+                pr_titles,
+            }) => {
+                let events = app.apply_work_pr_titles(&project_root, pr_titles);
+                clients.dispatch(events);
+            }
+            Event::UserEvent(UserEvent::WorkAiSummaries {
+                project_root,
+                ai_summaries,
+            }) => {
+                let events = app.apply_work_ai_summaries(&project_root, ai_summaries);
                 clients.dispatch(events);
             }
             Event::UserEvent(UserEvent::WorkspaceProjectionChanged { project_root }) => {

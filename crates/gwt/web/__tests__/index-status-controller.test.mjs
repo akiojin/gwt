@@ -13,8 +13,22 @@ const here = dirname(fileURLToPath(import.meta.url));
 const indexHtml = readFileSync(resolve(here, "../index.html"), "utf8");
 const componentsCss = readFileSync(resolve(here, "../styles/components.css"), "utf8");
 const appSource = readFileSync(resolve(here, "../app.js"), "utf8");
+// SPEC-3064 Phase 3 (E3): the Index window search/health surface moved out
+// of app.js into a dedicated module; assertions about the moved code read
+// the module source while receive()/Settings wiring stays in app.js.
+const indexSurfaceSource = readFileSync(
+  resolve(here, "../project-index-search-surface.js"),
+  "utf8",
+);
 const projectTabsRendererSource = readFileSync(
   resolve(here, "../project-tabs-renderer.js"),
+  "utf8",
+);
+// SPEC-3064 Phase 3 (E4): the Settings window renderer, the settings:open
+// dispatch listener, and requestFullIndexStatusRefresh moved into the
+// extracted settings surface module.
+const settingsSurfaceSource = readFileSync(
+  resolve(here, "../settings-surface.js"),
   "utf8",
 );
 
@@ -64,31 +78,31 @@ test("project tab dots no longer wire Project Index health", () => {
 
 test("settings target=index opens the dedicated Index window", () => {
   assert.ok(
-    !appSource.includes('buildSettingsTab("index"'),
+    !settingsSurfaceSource.includes('buildSettingsTab("index"'),
     "Settings must not expose an Index tab",
   );
   assert.ok(
-    !appSource.includes('dataset.settingsPanel = "index"'),
+    !settingsSurfaceSource.includes('dataset.settingsPanel = "index"'),
     "Settings must not mount an Index panel",
   );
   assert.ok(
-    appSource.includes('if (target === "index")') &&
-      appSource.includes('focusOrSpawnPreset("index");'),
+    settingsSurfaceSource.includes('if (target === "index")') &&
+      settingsSurfaceSource.includes('focusOrSpawnPreset("index");'),
     "settings:open target=index must spawn the dedicated Index window",
   );
 });
 
 test("Index window exposes semantic search and health refresh contract", () => {
   assert.ok(
-    appSource.includes("function requestFullIndexStatusRefresh()"),
+    settingsSurfaceSource.includes("function requestFullIndexStatusRefresh()"),
     "expected a dedicated full index status refresh helper",
   );
   assert.ok(
-    appSource.includes('send({ kind: "refresh_index_status", project_root: activeProjectRoot })'),
+    settingsSurfaceSource.includes('send({ kind: "refresh_index_status", project_root: activeProjectRoot })'),
     "Index window Health tab must request the expensive all-worktree status on demand",
   );
   assert.ok(
-    appSource.includes('kind: "search_project_index"') &&
+    indexSurfaceSource.includes('kind: "search_project_index"') &&
       appSource.includes('case "project_index_search_results"') &&
     appSource.includes('case "project_index_search_error"'),
     "Index window must wire search request, result, and error events",
@@ -97,92 +111,92 @@ test("Index window exposes semantic search and health refresh contract", () => {
 
 test("Index search UI exposes explicit search controls and readable result scoring", () => {
   assert.ok(
-    appSource.includes("index-run-button") &&
-      appSource.includes("formatIndexSearchMatch") &&
-      appSource.includes("% match"),
+    indexSurfaceSource.includes("index-run-button") &&
+      indexSurfaceSource.includes("formatIndexSearchMatch") &&
+      indexSurfaceSource.includes("% match"),
     "Index search should have an explicit search action and user-facing match scores",
   );
   assert.ok(
-    appSource.includes("indexFileScopesSelected(state)") &&
-      appSource.includes("File worktree"),
+    indexSurfaceSource.includes("indexFileScopesSelected(state)") &&
+      indexSurfaceSource.includes("File worktree"),
     "worktree selection should be scoped to Files / Docs search instead of looking globally required",
   );
   assert.ok(
-    appSource.includes("moveIndexResultSelection") &&
-      appSource.includes('event.key === "ArrowDown"') &&
-      appSource.includes('event.key === "ArrowUp"'),
+    indexSurfaceSource.includes("moveIndexResultSelection") &&
+      indexSurfaceSource.includes('event.key === "ArrowDown"') &&
+      indexSurfaceSource.includes('event.key === "ArrowUp"'),
     "result lists should support keyboard movement",
   );
   assert.ok(
-    appSource.includes("inFlightSignature") &&
-      appSource.includes("state.searching && state.inFlightSignature === searchSignature"),
+    indexSurfaceSource.includes("inFlightSignature") &&
+      indexSurfaceSource.includes("state.searching && state.inFlightSignature === searchSignature"),
     "explicit search clicks should not duplicate an identical debounced search already in flight",
   );
   assert.ok(
-    appSource.includes("state.query = input.value;") &&
-      appSource.includes("renderProjectIndexSearch(windowData.id);\n            scheduleProjectIndexSearch(windowData.id);"),
+    indexSurfaceSource.includes("state.query = input.value;") &&
+      indexSurfaceSource.includes("renderProjectIndexSearch(windowData.id);\n            scheduleProjectIndexSearch(windowData.id);"),
     "typing in the search field should immediately enable the explicit Search button before debounce fires",
   );
 });
 
 test("Index search UI exposes semantic and all-terms match modes", () => {
   assert.ok(
-    appSource.includes("index-match-mode-list") &&
-      appSource.includes('data-match-mode="semantic"') &&
-      appSource.includes('data-match-mode="all_terms"'),
+    indexSurfaceSource.includes("index-match-mode-list") &&
+      indexSurfaceSource.includes('data-match-mode="semantic"') &&
+      indexSurfaceSource.includes('data-match-mode="all_terms"'),
     "Index search should expose a Semantic / All terms segmented control",
   );
   assert.ok(
-    appSource.includes("match_mode: state.matchMode") &&
-      appSource.includes("matchMode") &&
-      appSource.includes("searchSignature = JSON.stringify({ query, scopes, worktreeHash, matchMode"),
+    indexSurfaceSource.includes("match_mode: state.matchMode") &&
+      indexSurfaceSource.includes("matchMode") &&
+      indexSurfaceSource.includes("searchSignature = JSON.stringify({ query, scopes, worktreeHash, matchMode"),
     "match mode should be sent to the backend and included in the request signature",
   );
   assert.ok(
-    appSource.includes("state.suggestions") &&
-      appSource.includes("Semantic suggestions") &&
-      appSource.includes("Matched:") &&
-      appSource.includes("Searching all terms"),
+    indexSurfaceSource.includes("state.suggestions") &&
+      indexSurfaceSource.includes("Semantic suggestions") &&
+      indexSurfaceSource.includes("Matched:") &&
+      indexSurfaceSource.includes("Searching all terms"),
     "All terms mode should render suggestions separately, show concise matched-term evidence, and use matching loading copy",
   );
   assert.ok(
-    appSource.includes("function indexSearchPlaceholder(state)") &&
-      appSource.includes("Search by meaning, e.g. work lifecycle") &&
-      appSource.includes("All terms required, e.g. Work discussion") &&
-      appSource.includes("input.placeholder = indexSearchPlaceholder(state);"),
+    indexSurfaceSource.includes("function indexSearchPlaceholder(state)") &&
+      indexSurfaceSource.includes("Search by meaning, e.g. work lifecycle") &&
+      indexSurfaceSource.includes("All terms required, e.g. Work discussion") &&
+      indexSurfaceSource.includes("input.placeholder = indexSearchPlaceholder(state);"),
     "Index search placeholder should explain the active Semantic / All terms mode",
   );
 });
 
 test("Index search clears invalidate any in-flight request immediately", () => {
   assert.ok(
-    appSource.includes("function clearProjectIndexSearchState(state)") &&
-      appSource.includes("invalidateProjectIndexSearchRequest(state);"),
+    indexSurfaceSource.includes("function clearProjectIndexSearchState(state)") &&
+      indexSurfaceSource.includes("invalidateProjectIndexSearchRequest(state);"),
     "clearing the query should invalidate stale backend responses through a shared helper",
   );
   assert.ok(
-    appSource.includes("if (!state.query.trim()) {\n              clearProjectIndexSearchState(state);"),
+    indexSurfaceSource.includes("if (!state.query.trim()) {\n              clearProjectIndexSearchState(state);"),
     "the input handler must clear and invalidate immediately instead of waiting for debounce",
   );
 });
 
 test("Index result Open uses target numbers for Issue and SPEC hits", () => {
   assert.ok(
-    appSource.includes("function openKnowledgeIndexResultTarget(preset, target)") &&
-      appSource.includes("requestKnowledgeDetail(windowId, knowledgeKind, number)") &&
-      appSource.includes("pendingIndexOpenTargetsByPreset.set(preset"),
+    indexSurfaceSource.includes("function openKnowledgeIndexResultTarget(preset, target)") &&
+      indexSurfaceSource.includes("requestKnowledgeDetail(windowId, knowledgeKind, number)") &&
+      indexSurfaceSource.includes("pendingIndexOpenTargetsByPreset.set(preset"),
     "Issue/SPEC result Open should select the indexed target number, including newly created windows",
   );
   assert.ok(
-    appSource.includes('openKnowledgeIndexResultTarget("issue", target)') &&
-      appSource.includes('openKnowledgeIndexResultTarget("spec", target)'),
+    indexSurfaceSource.includes('openKnowledgeIndexResultTarget("issue", target)') &&
+      indexSurfaceSource.includes('openKnowledgeIndexResultTarget("spec", target)'),
     "Issue and SPEC index results must use target-aware navigation",
   );
 });
 
 test("Index search tab does not trigger full health refresh on mount", () => {
   const refreshCallCount = (
-    appSource.match(/requestFullIndexStatusRefresh\(\);/g) || []
+    indexSurfaceSource.match(/requestFullIndexStatusRefresh\(\);/g) || []
   ).length;
   assert.equal(
     refreshCallCount,

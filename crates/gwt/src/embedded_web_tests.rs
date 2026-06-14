@@ -24,6 +24,23 @@ fn window_runtime_state_js() -> &'static str {
     root_js_module_source("/window-runtime-state.js")
 }
 
+/// SPEC-3064 Phase 3 (E3) — Project Index window surface extracted from
+/// app.js.
+fn project_index_search_surface_js() -> &'static str {
+    root_js_module_source("/project-index-search-surface.js")
+}
+
+/// SPEC-3064 Phase 3 (E4) — Settings windows surface extracted from app.js.
+fn settings_surface_js() -> &'static str {
+    root_js_module_source("/settings-surface.js")
+}
+
+/// SPEC-3064 Phase 3 (E7) — Project & workspace shell chrome surface
+/// extracted from app.js.
+fn project_shell_surface_js() -> &'static str {
+    root_js_module_source("/project-shell-surface.js")
+}
+
 /// SPEC-3015 — generated protocol enum contract (see web_protocol_enums.rs).
 fn protocol_enums_js() -> &'static str {
     root_js_module_source("/protocol-enums.js")
@@ -61,7 +78,48 @@ fn frontend_bundle_source() -> &'static str {
         "\n",
         include_str!("../web/update-cta.js"),
         "\n",
-        include_str!("../web/terminal-context-menu.js")
+        include_str!("../web/terminal-context-menu.js"),
+        "\n",
+        // SPEC-3064 Phase 3 (E2) — terminal attachment/clipboard handlers
+        // moved out of app.js; bundle-level content contracts keep matching
+        // against the shipped module set.
+        include_str!("../web/terminal-attachments.js"),
+        "\n",
+        // SPEC-3064 Phase 3 (E3) — Project Index window surface moved out
+        // of app.js.
+        include_str!("../web/project-index-search-surface.js"),
+        "\n",
+        // SPEC-3064 Phase 3 (E4) — Settings windows surface moved out of
+        // app.js.
+        include_str!("../web/settings-surface.js"),
+        "\n",
+        // SPEC-3064 Phase 3 (E5) — Launch Wizard surface moved out of
+        // app.js.
+        include_str!("../web/launch-wizard-surface.js"),
+        "\n",
+        // SPEC-3064 Phase 3 (E6a) — File Tree window surface moved out of
+        // app.js.
+        include_str!("../web/file-tree-surface.js"),
+        "\n",
+        // SPEC-3064 Phase 3 (E6b) — Branches window & cleanup surface moved
+        // out of app.js.
+        include_str!("../web/branches-cleanup-surface.js"),
+        "\n",
+        // SPEC-3064 Phase 3 (E6c) — Board & Logs window surface moved out
+        // of app.js.
+        include_str!("../web/board-logs-surface.js"),
+        "\n",
+        // SPEC-3064 Phase 3 (E6d) — Knowledge Bridge (Kanban) window
+        // surface moved out of app.js.
+        include_str!("../web/knowledge-kanban-surface.js"),
+        "\n",
+        // SPEC-3064 Phase 3 (E6e) — Profile window surface moved out of
+        // app.js.
+        include_str!("../web/profile-window-surface.js"),
+        "\n",
+        // SPEC-3064 Phase 3 (E7) — Project & workspace shell chrome surface
+        // moved out of app.js.
+        include_str!("../web/project-shell-surface.js")
     )
 }
 
@@ -1184,12 +1242,17 @@ fn embedded_web_project_bar_omits_index_status_badge() {
         "SPEC-1939 Phase 13: badge formatter / toast helpers must be removed from app.js",
     );
     assert!(
-        js.contains("function setIndexStatus(projectRoot, status)")
+        // SPEC-3064 Phase 3 (E3): setIndexStatus moved to the extracted
+        // Project Index surface module; app.js keeps the receive() case.
+        project_index_search_surface_js().contains("function setIndexStatus(projectRoot, status)")
             && js.contains("case \"project_index_status\""),
         "frontend must still consume project_index_status events for the Index Health tab",
     );
     assert!(
-            !js.contains("buildSettingsTab(\"index\"") && js.contains("renderIndexSettingsPanel({"),
+            // SPEC-3064 Phase 3 (E4): the Settings window renderer moved to
+            // the extracted settings surface module.
+            !settings_surface_js().contains("buildSettingsTab(\"index\"")
+                && settings_surface_js().contains("renderIndexSettingsPanel({"),
             "SPEC-1939 Phase 15: Settings must drop Index while the Index window keeps the health panel",
         );
     assert!(
@@ -1219,14 +1282,19 @@ fn embedded_web_window_state_visualization_normalizes_runtime_state_and_separate
         runtime_js.contains("export function windowRuntimeLabel(status)"),
         "expected the extracted module to expose a dedicated runtime label helper",
     );
+    // SPEC-3064 Phase 3 (E7): the Window List dropdown renderer moved to the
+    // project shell surface; the geometry/runtime label separation is pinned
+    // against the extracted module while windowGeometryLabel stays in app.js.
+    let shell_js = project_shell_surface_js();
     assert!(
-            js.contains("const geometryLabel = windowGeometryLabel(entry);")
-                && js.contains("const runtimeState = runtimeStateForWindow(entry);")
-                && js.contains("const runtimeLabel = windowRuntimeLabel(runtimeState);"),
+            shell_js.contains("const geometryLabel = windowGeometryLabel(entry);")
+                && shell_js.contains("const runtimeState = runtimeStateForWindow(entry);")
+                && shell_js.contains("const runtimeLabel = windowRuntimeLabel(runtimeState);"),
             "expected window list rendering to derive geometry and runtime labels through separate helpers",
         );
     assert!(
-        !js.contains("function windowStateLabel(windowData)"),
+        !js.contains("function windowStateLabel(windowData)")
+            && !shell_js.contains("function windowStateLabel(windowData)"),
         "expected embedded js to stop reusing one helper for both geometry and runtime labels",
     );
 }
@@ -1412,7 +1480,10 @@ fn embedded_web_apply_status_keeps_window_list_and_badges_in_sync() {
 
 #[test]
 fn embedded_web_window_list_selection_keeps_focus_center_and_restore_contract() {
-    let js = app_js();
+    // SPEC-3064 Phase 3 (E7): the Window List dropdown renderer moved from
+    // app.js to the project shell surface; the selection contract is pinned
+    // against the extracted module.
+    let js = project_shell_surface_js();
 
     assert!(
         js.contains("focusWindowRemotely(entry.id, { center: true });"),
@@ -1699,11 +1770,14 @@ fn embedded_web_branches_surface_includes_cleanup_flow_contract() {
 
 #[test]
 fn embedded_web_branches_surface_remains_branch_browser() {
+    // SPEC-3064 Phase 3 (E6b): the Branches mount moved into the branches
+    // cleanup surface module (mountBranchesWindow), so the render block is
+    // anchored on the extracted function instead of the app.js dispatch.
     let html = frontend_bundle_source();
     let branches_block = html
-        .split("if (surface === \"branches\")")
+        .split("function mountBranchesWindow(")
         .nth(1)
-        .and_then(|tail| tail.split("if (surface === \"profile\")").next())
+        .and_then(|tail| tail.split("function clearBranchCleanupForWindow(").next())
         .expect("branches render block");
 
     assert!(
@@ -2043,9 +2117,12 @@ fn embedded_web_knowledge_bridge_waits_for_initial_cache_load_before_semantic_se
         "expected semantic search scheduling to wait for initial cache load before sending",
     );
     assert!(
+        // SPEC-3064 Phase 3 (E6d): the knowledge_entries body lives in the
+        // knowledge kanban surface and calls scheduleKnowledgeSearch
+        // directly instead of going through the frontendUnits registry.
         html.contains("const queuedQuery = state.query.trim();")
             && html.contains("if (queuedQuery)")
-            && html.contains("frontendUnits.knowledgeSettingsSurface.scheduleKnowledgeSearch("),
+            && html.contains("scheduleKnowledgeSearch("),
         "expected knowledge entries response to resume queued semantic search after cache load",
     );
 }
@@ -2129,7 +2206,9 @@ fn embedded_web_board_composer_textarea_keeps_scroll_surface_marker() {
     // `.board-scroll-surface` marker is now informational only but is
     // still applied to the composer textarea so any future Board-specific
     // styling can hang off it without reintroducing the whitelist.
-    let js = app_js();
+    // SPEC-3064 Phase 3 (E6c): the Board composer renderer moved into the
+    // extracted board & logs surface module.
+    let js = root_js_module_source("/board-logs-surface.js");
 
     assert!(
         js.contains("board-textarea board-scroll-surface"),
@@ -2177,11 +2256,14 @@ fn embedded_web_board_surface_exposes_audience_reply_and_notification_ui() {
 
 #[test]
 fn embedded_web_board_surface_does_not_render_workspace_or_planning_cards() {
+    // SPEC-3064 Phase 3 (E6c): the Board mount moved into the board & logs
+    // surface module (mountBoardWindow), so the render block is anchored on
+    // the extracted function instead of the app.js dispatch.
     let html = frontend_bundle_source();
     let board_block = html
-        .split("if (surface === \"board\")")
+        .split("function mountBoardWindow(")
         .nth(1)
-        .and_then(|tail| tail.split("if (surface === \"logs\")").next())
+        .and_then(|tail| tail.split("function mountLogsWindow(").next())
         .expect("board render block");
 
     assert!(
@@ -2514,9 +2596,12 @@ fn embedded_web_launch_wizard_actions_flow_through_named_transport() {
         "expected footer Back control to be backend-gated and dispatch the canonical back action",
     );
     assert!(
+            // SPEC-3064 Phase 3 (E5): the close helper lives in the launch
+            // wizard surface module and calls the injected transport
+            // directly instead of going through the frontendUnits registry.
             html.contains("function closeLaunchWizardFromChrome()")
                 && html.contains("closeLaunchWizardLocal();")
-                && html.contains("frontendUnits.launchWizardSurface.sendAction({ kind: \"cancel\" });"),
+                && html.contains("sendWizardAction({ kind: \"cancel\" });"),
             "expected close helper to local-close error-only state and send cancel for normal wizard state",
         );
     assert!(
@@ -2543,17 +2628,22 @@ fn embedded_web_launch_wizard_actions_flow_through_named_transport() {
             || !html.contains("closeLaunchWizardFromChrome();"),
         "expected wizard backdrop clicks to stop dismissing the wizard",
     );
-    // Issue #2698 PR 1 (B7) — the launch_wizard_state case now
-    // also defers via `wizardInteractionGuard.defer(...)` before
-    // mutating launchWizard, so the regex permits an optional
-    // guard preamble between the case label and the assignment. A
-    // null tombstone must not clear an open-error modal during reconnect.
+    // Issue #2698 PR 1 (B7) — the launch_wizard_state flow defers via
+    // `wizardInteractionGuard.defer(...)` before mutating launchWizard.
+    // SPEC-3064 Phase 3 (E5): the guarded mutation lives in the launch
+    // wizard surface applier; app.js keeps the case arm as a thin
+    // delegate. A null tombstone must not clear an open-error modal
+    // during reconnect.
     let wizard_state = regex::Regex::new(
-            r#"case\s*"launch_wizard_state":[\s\S]*?clearLaunchWizardPendingAction\(\);\s*clearLaunchWizardOpening\(\);\s*if\s*\(event\.wizard\)\s*\{[\s\S]*?launchWizardOpenError\s*=\s*null;[\s\S]*?\}\s*launchWizard\s*=\s*event\.wizard;\s*(?:renderLaunchWizard|frontendUnits\.launchWizardSurface\.render)\(\);\s*break;"#,
+            r#"function applyLaunchWizardStateEvent\(event\)\s*\{[\s\S]*?wizardInteractionGuard\.defer\([\s\S]*?clearLaunchWizardPendingAction\(\);\s*clearLaunchWizardOpening\(\);\s*if\s*\(event\.wizard\)\s*\{[\s\S]*?launchWizardOpenError\s*=\s*null;[\s\S]*?\}\s*launchWizard\s*=\s*event\.wizard;\s*renderLaunchWizard\(\);"#,
+        )
+        .expect("valid regex");
+    let wizard_state_delegate = regex::Regex::new(
+            r#"case\s*"launch_wizard_state":[\s\S]{0,300}?applyLaunchWizardStateEvent\(event\);\s*break;"#,
         )
         .expect("valid regex");
     assert!(
-        wizard_state.is_match(html),
+        wizard_state.is_match(html) && wizard_state_delegate.is_match(html),
         "expected launch wizard state updates to hydrate the shared wizard renderer",
     );
 }
@@ -2737,21 +2827,36 @@ fn embedded_web_frontend_units_receive_and_bootstrap_through_named_surfaces() {
             r#"case\s*"terminal_output":\s*frontendUnits\.terminalHost\.writeOutput\(event\.id,\s*event\.data_base64\);\s*break;\s*case\s*"terminal_snapshot":\s*frontendUnits\.terminalHost\.replaceTerminalSnapshot\(event\.id,\s*event\.data_base64\);\s*break;"#,
         )
         .expect("valid regex");
+    // SPEC-3064 Phase 3 (E6e): the profile_snapshot body lives in the
+    // profile window surface applier; the app.js case arm delegates.
     let profile_event = regex::Regex::new(
-            r#"case\s*"profile_snapshot":\s*\{\s*const state = frontendUnits\.profileSurface\.ensureProfileState\(event\.id\);[\s\S]*?frontendUnits\.profileSurface\.renderProfile\(event\.id\);\s*break;\s*\}"#,
+            r#"function applyProfileReceiveEvent\(event\)\s*\{[\s\S]*?case\s*"profile_snapshot":\s*\{\s*const state = ensureProfileState\(event\.id\);[\s\S]*?renderProfile\(event\.id\);\s*break;\s*\}"#,
         )
         .expect("valid regex");
+    let profile_event_delegate = regex::Regex::new(
+        r#"case\s*"profile_snapshot":[\s\S]{0,300}?applyProfileReceiveEvent\(event\);\s*break;"#,
+    )
+    .expect("valid regex");
     // Issue #2698 PR 1 (B7) — wizard_state / wizard_open_error
-    // now defer through `wizardInteractionGuard.defer(...)` before
-    // mutating module state, so the regex tolerates an optional
-    // guard preamble between the case label and the mutation. A
-    // null tombstone must not clear an open-error modal during reconnect.
+    // defer through `wizardInteractionGuard.defer(...)` before
+    // mutating module state. SPEC-3064 Phase 3 (E5): the guarded
+    // mutation lives in the launch wizard surface appliers; the
+    // receive() case arms are thin delegates into them. A null
+    // tombstone must not clear an open-error modal during reconnect.
     let wizard_event = regex::Regex::new(
-            r#"case\s*"launch_wizard_state":[\s\S]*?clearLaunchWizardPendingAction\(\);\s*clearLaunchWizardOpening\(\);\s*if\s*\(event\.wizard\)\s*\{[\s\S]*?launchWizardOpenError\s*=\s*null;[\s\S]*?\}\s*launchWizard\s*=\s*event\.wizard;\s*frontendUnits\.launchWizardSurface\.render\(\);\s*break;"#,
+            r#"function applyLaunchWizardStateEvent\(event\)[\s\S]*?clearLaunchWizardPendingAction\(\);\s*clearLaunchWizardOpening\(\);\s*if\s*\(event\.wizard\)\s*\{[\s\S]*?launchWizardOpenError\s*=\s*null;[\s\S]*?\}\s*launchWizard\s*=\s*event\.wizard;\s*renderLaunchWizard\(\);"#,
+        )
+        .expect("valid regex");
+    let wizard_event_delegate = regex::Regex::new(
+            r#"case\s*"launch_wizard_state":[\s\S]{0,300}?applyLaunchWizardStateEvent\(event\);\s*break;"#,
         )
         .expect("valid regex");
     let wizard_open_error_event = regex::Regex::new(
-            r#"case\s*"launch_wizard_open_error":[\s\S]*?launchWizard\s*=\s*null;[\s\S]*?launchWizardOpenError\s*=\s*\{[\s\S]*?frontendUnits\.launchWizardSurface\.render\(\);\s*break;"#,
+            r#"function applyLaunchWizardOpenErrorEvent\(event\)[\s\S]*?launchWizard\s*=\s*null;[\s\S]*?launchWizardOpenError\s*=\s*\{[\s\S]*?renderLaunchWizard\(\);"#,
+        )
+        .expect("valid regex");
+    let wizard_open_error_delegate = regex::Regex::new(
+            r#"case\s*"launch_wizard_open_error":[\s\S]{0,300}?applyLaunchWizardOpenErrorEvent\(event\);\s*break;"#,
         )
         .expect("valid regex");
 
@@ -2768,15 +2873,15 @@ fn embedded_web_frontend_units_receive_and_bootstrap_through_named_surfaces() {
         "expected terminal output and snapshot events to flow through the terminal host unit",
     );
     assert!(
-        profile_event.is_match(html),
+        profile_event.is_match(html) && profile_event_delegate.is_match(html),
         "expected profile snapshot events to flow through the dedicated profile surface unit",
     );
     assert!(
-        wizard_event.is_match(html),
+        wizard_event.is_match(html) && wizard_event_delegate.is_match(html),
         "expected launch wizard state events to render through the wizard surface unit",
     );
     assert!(
-        wizard_open_error_event.is_match(html),
+        wizard_open_error_event.is_match(html) && wizard_open_error_delegate.is_match(html),
         "expected launch wizard open errors to render through the wizard surface unit",
     );
 }
@@ -2989,7 +3094,10 @@ fn embedded_web_profile_root_is_constrained_to_window_body() {
 #[test]
 fn embedded_web_panel_surfaces_compose_with_layout_primitives() {
     let html = frontend_styles_bundle();
-    let js = app_js();
+    // SPEC-3064 Phase 3 (E6): window mounts moved into per-window surface
+    // modules, so the layout-primitive adoption contract checks the full
+    // shipped JS bundle instead of app.js alone.
+    let js = frontend_bundle_source();
 
     assert!(
             !js.contains("knowledge-toolbar"),
@@ -3001,7 +3109,7 @@ fn embedded_web_panel_surfaces_compose_with_layout_primitives() {
     );
 
     // Each panel surface must reference the `.workspace-toolbar` primitive
-    // through its mountWindowBody output. Surface-specific deltas may be
+    // through its window-mount output. Surface-specific deltas may be
     // layered alongside (e.g. `.branch-toolbar`).
     let toolbar_count = js.matches("class=\"workspace-toolbar").count();
     assert!(
@@ -3023,7 +3131,7 @@ fn embedded_web_panel_surfaces_compose_with_layout_primitives() {
     for needle in split_adopters {
         assert!(
                 js.contains(needle),
-                "expected mountWindowBody output to compose `{needle}` so split layouts share the primitive",
+                "expected window-mount output to compose `{needle}` so split layouts share the primitive",
             );
     }
 
@@ -3036,7 +3144,7 @@ fn embedded_web_panel_surfaces_compose_with_layout_primitives() {
     for needle in scroll_adopters {
         assert!(
                 js.contains(needle),
-                "expected mountWindowBody output to compose `{needle}` so scroll regions share the primitive",
+                "expected window-mount output to compose `{needle}` so scroll regions share the primitive",
             );
     }
 }
@@ -3401,14 +3509,19 @@ fn embedded_web_tab_visibility_transition_triggers_terminal_focus_activation() {
              (fit + viewport refresh + focus) so scrollback responds without a manual \
              resize (SPEC-2008 FR-051); body: {body}",
     );
+    // SPEC-3064 Phase 3 (E7): the coalesced scheduler and its pending-frame
+    // slot moved to the project shell surface; renderWorkspace (app.js)
+    // keeps the call sites.
+    let shell_js = project_shell_surface_js();
     assert!(
-        js.contains("function scheduleMaximizedWindowsToViewportSync()")
-            && js.contains("let maximizedViewportSyncFrame = null;"),
+        shell_js.contains("function scheduleMaximizedWindowsToViewportSync()")
+            && shell_js.contains("let maximizedViewportSyncFrame = null;"),
         "expected maximized viewport sync to be routed through the coalesced \
              frame scheduler (SPEC-1939 Phase 52)",
     );
     assert!(
-        !js.contains("requestAnimationFrame(syncMaximizedWindowsToViewport)"),
+        !js.contains("requestAnimationFrame(syncMaximizedWindowsToViewport)")
+            && !shell_js.contains("requestAnimationFrame(syncMaximizedWindowsToViewport)"),
         "expected renderWorkspace to avoid raw maximized viewport sync rAF fan-out",
     );
 }

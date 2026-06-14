@@ -117,6 +117,44 @@ pub fn branch_tip_committer_times(
     Ok(times)
 }
 
+/// SPEC-3075: the tip commit subject of every local / `origin/*` branch, in ONE
+/// `for-each-ref` spawn. Keys are short ref names (`work/x`, `origin/work/x`).
+/// This is the "what work was running" signal for historical Workspaces that
+/// never recorded a purpose (their title is only the timestamp branch name) —
+/// for a conventional-commit repo the tip subject (`feat(...): ...`) is a
+/// human-readable summary. Resolved off the hot path and cached, mirroring
+/// [`branch_tip_committer_times`] (Issue #2725 keeps git out of the projection
+/// build). Branches with an empty subject are skipped.
+pub fn branch_tip_subjects(repo_path: &Path) -> Result<std::collections::HashMap<String, String>> {
+    let output = gwt_core::process::run_git_logged(
+        &[
+            "for-each-ref",
+            "--format=%(refname:short)\t%(contents:subject)",
+            "refs/heads/",
+            "refs/remotes/origin/",
+        ],
+        Some(repo_path),
+    )
+    .map_err(|error| GwtError::Git(format!("for-each-ref tip subjects: {error}")))?;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+        return Err(GwtError::Git(format!(
+            "for-each-ref tip subjects: {stderr}"
+        )));
+    }
+    let subjects = String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .filter_map(|line| {
+            let (name, subject) = line.split_once('\t')?;
+            let name = name.trim();
+            let subject = subject.trim();
+            (!name.is_empty() && !subject.is_empty())
+                .then(|| (name.to_string(), subject.to_string()))
+        })
+        .collect();
+    Ok(subjects)
+}
+
 #[cfg(test)]
 mod tests {
     use std::process::Command;
@@ -179,6 +217,34 @@ mod tests {
         for time in times.values() {
             assert!(*time > 1_500_000_000, "plausible unix committer time");
         }
+    }
+
+    #[test]
+    fn branch_tip_subjects_lists_subjects_for_local_and_origin_tips() {
+        let dir = init_repo();
+        let repo = dir.path();
+        // A real conventional-commit subject on the default branch.
+        run(Command::new("git")
+            .args([
+                "commit",
+                "--allow-empty",
+                "-m",
+                "feat(workspace): purpose-first rail",
+            ])
+            .current_dir(repo));
+        create_branch(repo, "work/x");
+        create_remote_tracking_ref(repo, "refs/remotes/origin/work/y");
+
+        let subjects = branch_tip_subjects(repo).expect("tip subjects");
+        assert_eq!(
+            subjects.get("main").map(String::as_str),
+            Some("feat(workspace): purpose-first rail"),
+        );
+        assert_eq!(
+            subjects.get("work/x").map(String::as_str),
+            Some("feat(workspace): purpose-first rail"),
+        );
+        assert!(subjects.contains_key("origin/work/y"));
     }
 
     #[test]
