@@ -1,6 +1,46 @@
 # Changelog
 
 All notable changes to this project will be documented in this file.
+## [9.59.0] - 2026-06-14
+
+### Bug Fixes
+
+- Move launch session modes into start methods
+- Simplify launch start method copy
+- Improve launch start method hierarchy
+- Restore existing surface windows on reopen
+- Reveal reused surface tabs
+- **launch:** Gate continue start method by capability
+- **cli:** エラー接頭辞を実行バイナリ名(gwt/gwtd)に合わせる
+
+### Features
+
+- **workspace:** Work 要約を目的第一の情報設計に再構成し identity 取り違えを修正
+- **workspace:** Workspace 一覧と detail に「動いていた作業」要約を主見出し表示
+- **workspace:** Workspace 一覧要約に AI 磨きを追加 (SPEC-3075 FR-006)
+
+### Miscellaneous Tasks
+
+- Record workspace event log and SPEC-3075 memory
+
+### Refactor
+
+- **gui:** App_runtime/mod.rs を責務クラスタへ分割しグローバル static をフィールド化する
+- **web:** App.js から provider-usage / terminal-attachments / index-search surface を切り出す
+- **web:** App.js から settings / wizard / per-window surface 7 本を切り出す
+- **web:** App.js から project-shell surface を切り出し最終 5,483 行にする
+- **web:** Index-search factory の knowledge 依存を遅延バインドにする
+- **web:** Index-search factory の knowledge 依存を遅延バインドにする (TDZ 解消)
+
+### Testing
+
+- Serialize runtime status helper env access
+- **cli:** Cover run-error arm と program_name フォールバックの接頭辞
+
+### Ci
+
+- Re-trigger after pre-existing flaky gwt-docker probe test
+
 ## [9.58.0] - 2026-06-12
 
 ### Bug Fixes
