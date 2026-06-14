@@ -170,9 +170,32 @@ impl<'a, C: IssueClient> IssueClient for ClientRef<'a, C> {
 // DefaultCliEnv: production runtime wiring
 // ---------------------------------------------------------------------------
 
+/// Derive the user-facing program name for CLI error prefixes from `args[0]`.
+///
+/// Returns the basename without extension (so a full path like
+/// `/Applications/GWT.app/Contents/MacOS/gwtd` and a Windows `gwtd.exe` both
+/// resolve to `gwtd`). Falls back to `"gwt"` when `args[0]` is missing or has
+/// no usable file stem.
+fn program_name(args: &[String]) -> &str {
+    args.first()
+        .map(String::as_str)
+        .and_then(|raw| {
+            std::path::Path::new(raw)
+                .file_stem()
+                .and_then(|stem| stem.to_str())
+        })
+        .filter(|name| !name.is_empty())
+        .unwrap_or("gwt")
+}
+
 pub fn dispatch<E: CliEnv>(env: &mut E, args: &[String]) -> i32 {
     // args[0] is the program name. args[1] is the top-level verb we already
     // matched in `should_dispatch_cli`.
+    // Issue #3080: `gwt` and `gwtd` share this dispatcher, so the error prefix
+    // must reflect the actually-invoked binary (derived from args[0]'s
+    // basename) rather than a hardcoded "gwt"; otherwise `gwtd` errors read as
+    // `gwt ...` and mislead users into thinking the wrong binary was used.
+    let prog = program_name(args);
     let top_verb = args.get(1).map(String::as_str).unwrap_or("");
     let rest: Vec<String> = args.iter().skip(2).cloned().collect();
 
@@ -232,12 +255,12 @@ pub fn dispatch<E: CliEnv>(env: &mut E, args: &[String]) -> i32 {
         Ok(cmd) => match run(env, cmd) {
             Ok(code) => code,
             Err(e) => {
-                let _ = writeln!(env.stderr(), "gwt {top_verb}: {e}");
+                let _ = writeln!(env.stderr(), "{prog} {top_verb}: {e}");
                 1
             }
         },
         Err(e) => {
-            let _ = writeln!(env.stderr(), "gwt {top_verb}: {e}");
+            let _ = writeln!(env.stderr(), "{prog} {top_verb}: {e}");
             2
         }
     }

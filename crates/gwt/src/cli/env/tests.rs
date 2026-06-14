@@ -521,3 +521,45 @@ fn client_ref_forwards_issue_client_methods_to_the_underlying_fake_client() {
         );
     }
 }
+
+// Issue #3080: the CLI error prefix must reflect the invoked binary name
+// (`gwt` vs `gwtd`), not a hardcoded `"gwt"`. `gwt` and `gwtd` share this
+// `dispatch()`, so a hardcoded prefix makes `gwtd` errors read as `gwt ...`,
+// which misleads users into thinking the wrong binary was used.
+
+fn dispatch_stderr(program: &str) -> String {
+    let mut env = TestEnv::new(PathBuf::from("cache-root"));
+    let args = vec![program.to_string(), "board".to_string(), "list".to_string()];
+    // `board list` fails at parse time (board only has `show`/`post`), so the
+    // error path runs without needing a repo or board backend.
+    let code = dispatch(&mut env, &args);
+    assert_eq!(code, 2, "parse error must exit with code 2");
+    String::from_utf8(env.stderr.clone()).expect("stderr is utf8")
+}
+
+#[test]
+fn dispatch_error_prefix_reflects_gwtd_binary() {
+    let stderr = dispatch_stderr("gwtd");
+    assert!(
+        stderr.starts_with("gwtd board: unknown subcommand: list"),
+        "gwtd invocation must use a `gwtd` prefix, got: {stderr:?}"
+    );
+}
+
+#[test]
+fn dispatch_error_prefix_uses_basename_of_full_path() {
+    let stderr = dispatch_stderr("/Applications/GWT.app/Contents/MacOS/gwtd");
+    assert!(
+        stderr.starts_with("gwtd board:"),
+        "full-path invocation must derive `gwtd` from the basename, got: {stderr:?}"
+    );
+}
+
+#[test]
+fn dispatch_error_prefix_reflects_gwt_binary() {
+    let stderr = dispatch_stderr("gwt");
+    assert!(
+        stderr.starts_with("gwt board:"),
+        "gwt invocation must keep the `gwt` prefix, got: {stderr:?}"
+    );
+}
