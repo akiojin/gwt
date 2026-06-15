@@ -432,6 +432,10 @@ fn embedded_web_terminal_writes_refresh_viewport_after_xterm_parse() {
             r"(?s)function writeOutput\(windowId, base64\) \{[\s\S]*?terminalOutputBatcher\.enqueue\(\s*windowId,\s*base64\s*\);",
         )
         .expect("valid regex");
+    let streaming_hidden_pending = regex::Regex::new(
+            r"(?s)function writeOutput\(windowId, base64\) \{[\s\S]*?terminalOutputBatcher\.enqueue\(\s*windowId,\s*base64\s*\);\s*if \(!canRefreshTerminalViewport\(windowId\)\) \{\s*markTerminalViewportRefreshPending\(windowId\);",
+        )
+        .expect("valid regex");
     let streaming_write = regex::Regex::new(
             r"(?s)const terminalOutputBatcher = createTerminalOutputBatcher\(\{[\s\S]*?write:\s*\(windowId,\s*text,\s*onWritten\)\s*=>\s*\{[\s\S]*?runtime\.terminal\.write\(text,\s*onWritten\);[\s\S]*?onFlush:\s*\(windowId\)\s*=>\s*\{[\s\S]*?scheduleTerminalViewportRefresh\(windowId\);[\s\S]*?\},[\s\S]*?\}\);",
         )
@@ -475,6 +479,10 @@ fn embedded_web_terminal_writes_refresh_viewport_after_xterm_parse() {
     assert!(
         streaming_enqueue.is_match(html),
         "expected streaming terminal output to enqueue encoded chunks without receive-path decode",
+    );
+    assert!(
+        streaming_hidden_pending.is_match(html),
+        "expected streaming terminal output to mark hidden terminals for pending viewport refresh",
     );
     assert!(
         streaming_write.is_match(html),
@@ -2128,6 +2136,19 @@ fn embedded_web_knowledge_bridge_waits_for_initial_cache_load_before_semantic_se
 }
 
 #[test]
+fn embedded_web_knowledge_surface_receives_index_open_handoff_targets() {
+    let html = frontend_bundle_source();
+
+    assert!(
+        html.contains("pendingIndexOpenTargetsByPreset,")
+            && html.contains(
+                "const pendingIndexTarget = pendingIndexOpenTargetsByPreset.get(windowData.preset);",
+            ),
+        "expected extracted Knowledge surface to receive pending index-open targets before mounting",
+    );
+}
+
+#[test]
 fn embedded_web_knowledge_bridge_coalesces_inflight_search_and_preserves_results() {
     let html = frontend_bundle_source();
 
@@ -2490,6 +2511,21 @@ fn embedded_web_profile_surface_uses_config_backed_contract() {
             && !html.contains("Disabled OS variables")
             && !html.contains("Merged preview"),
         "expected Profile Metadata lower content to be unified into the grid",
+    );
+    assert!(
+        html.contains("const hasNewerDraft =")
+            && html.contains("state.draft && profileDraftIsDirty(state)")
+            && html.contains("profileDraftIsDirty(state)")
+            && html.contains(
+                "((wasSaveInFlight && profileHasEditableFocus(event.id)) || hasNewerDraft)",
+            ),
+        "expected delayed Profile save snapshots to preserve newer draft edits before re-rendering",
+    );
+    assert!(
+        html.contains("row.dataset.envKey")
+            && html.contains("row.dataset.envKind")
+            && html.contains("row.dataset.envKey = normalizeProfileEnvKey(keyInput.value);"),
+        "expected Profile env rows to expose stable row identity for browser automation",
     );
 }
 

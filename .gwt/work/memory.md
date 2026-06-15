@@ -6941,3 +6941,10 @@ Type: failure-pattern
 Context: During SPEC-3050 Phase E verification on 2026-06-15, the active worktree /Users/akiojin/Workbench/gwt/work/20260615-0012 disappeared while running the full cargo test matrix. Subsequent shell invocations failed until commands were run from /, and the implementation had to be reconstructed in the stable develop checkout from conversation diffs.
 Learning: When a gwt-managed worktree becomes missing or prunable during long verification, continuing from that cwd can produce getcwd/git clone failures and may lose uncommitted edits. Treat this as an environment failure, immediately switch command execution to a stable existing checkout, recover changes from recorded diffs, and rerun full tests serially if parallel tests showed cwd races.
 Future Action: Before long full verification, confirm the worktree path still exists and prefer serial `cargo test ... -- --test-threads=1` when previous runs show getcwd/tempdir interference. If a worktree vanishes, stop using that path, verify surviving checkouts with absolute `git -C`, reconstruct changes without touching unrelated untracked files, and record the incident.
+
+## 2026-06-15 — Full visual failures need root-cause contracts
+
+Type: failure-pattern
+Context: SPEC-2359 T-604 full visual verification exposed unrelated regressions in hidden terminal output refresh, extracted Knowledge surface dependency injection, Profile env row identity/save snapshots, and stale E2E session-count expectations.
+Learning: Do not classify full visual failures as unrelated until each failing surface is reproduced and its root cause is tied to a static or browser contract. Extracted surfaces must receive all former app.js dependencies explicitly; delayed backend snapshots must not clobber newer UI drafts.
+Future Action: When full visual blocks SPEC verification, reproduce targeted specs first, fix deterministic implementation or test-contract causes, and add embedded_web_tests contracts for dependency injection and race guards before re-running the full suite.
