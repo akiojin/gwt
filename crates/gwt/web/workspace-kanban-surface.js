@@ -209,7 +209,7 @@ export function createWorkspaceKanbanSurface({
       session_agent_total:
         Number(item?.session_agent_total) || Number(fallback.session_agent_total) || 0,
       events: Array.isArray(item?.events) ? item.events : [],
-      cleanup_candidate: item?.cleanup_candidate || fallback.cleanup_candidate || null,
+      cleanup_candidate: item?.cleanup_candidate || null,
       updated_at: compactText(item?.updated_at || fallback.updated_at),
     };
   }
@@ -955,28 +955,15 @@ export function createWorkspaceKanbanSurface({
       );
       actions.appendChild(discardButton);
     }
-    // "Safe to delete" comes with the actual delete action (user
-    // verification 2026-06-12): a merged row offers Clean Up for its own
-    // branch; the projection-level cleanup candidate keeps the legacy
-    // no-argument path.
-    if (workspace.merged_into_base && workspace.branch) {
+    // SPEC-2359 US-78: cleanup eligibility is backend-owned per row after the
+    // live-agent guard. `merged_into_base` is only a display badge.
+    if (workspace.cleanup_candidate) {
       const cleanupButton = createNode("button", "wizard-button", "Clean Up");
       cleanupButton.type = "button";
       cleanupButton.dataset.action = "cleanup-merged-workspace";
       cleanupButton.addEventListener("click", () =>
-        openWorkspaceCleanup?.(
-          {
-            branch: workspace.branch,
-            remote_delete_available: true,
-          },
-          windowId,
-        ),
+        openWorkspaceCleanup?.(workspace.cleanup_candidate, windowId),
       );
-      actions.appendChild(cleanupButton);
-    } else if (workspace.cleanup_candidate) {
-      const cleanupButton = createNode("button", "wizard-button", "Clean Up");
-      cleanupButton.type = "button";
-      cleanupButton.addEventListener("click", () => openWorkspaceCleanup?.());
       actions.appendChild(cleanupButton);
     }
     header.appendChild(actions);
@@ -1082,12 +1069,10 @@ export function createWorkspaceKanbanSurface({
     if (workspaces.length === 0) {
       list.appendChild(createNode("div", "workspace-overview-empty", "No Workspaces"));
     } else {
-      // User verification 2026-06-12: completed local branches need a BULK
-      // cleanup path — one click opens the cleanup flow with every merged
-      // Workspace preselected (the modal still lets the user prune the set).
-      const mergedRows = workspaces.filter(
-        (workspace) => workspace.merged_into_base && workspace.branch,
-      );
+      // User verification 2026-06-12 + SPEC-2359 US-78: completed local
+      // branches need a BULK cleanup path, but only for backend-vetted row
+      // candidates.
+      const mergedRows = workspaces.filter((workspace) => workspace.cleanup_candidate);
       if (mergedRows.length > 0) {
         const bulkRow = createNode("div", "workspace-overview-bulk-cleanup");
         const bulk = createNode(
@@ -1099,10 +1084,7 @@ export function createWorkspaceKanbanSurface({
         bulk.dataset.action = "cleanup-merged-workspaces";
         bulk.addEventListener("click", () =>
           openWorkspaceCleanup?.(
-            mergedRows.map((workspace) => ({
-              branch: workspace.branch,
-              remote_delete_available: true,
-            })),
+            mergedRows.map((workspace) => workspace.cleanup_candidate),
             windowId,
           ),
         );

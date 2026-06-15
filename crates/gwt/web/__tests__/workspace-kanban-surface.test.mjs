@@ -1249,10 +1249,10 @@ test("Workspace with existing Works still offers a Launch control", () => {
   );
 });
 
-// User verification (2026-06-12): "Safe to delete" must come with an actual
-// delete action — a merged Workspace's detail offers a Clean Up control that
-// opens the cleanup flow for that row's branch.
-test("merged Workspace detail offers a Clean Up control for its branch", () => {
+// User verification (2026-06-12) + SPEC-2359 US-78: "Safe to delete" must
+// come with an actual delete action, but only when the backend supplied a
+// cleanup candidate after applying the live-agent guard.
+test("merged Workspace detail offers Clean Up only from a backend cleanup candidate", () => {
   const fixture = createFixture();
   const cleanupCalls = [];
   const surface = createSurface(
@@ -1270,6 +1270,12 @@ test("merged Workspace detail offers a Clean Up control for its branch", () => {
           lifecycle_state: "paused",
           branch: "work/merged",
           merged_into_base: true,
+          cleanup_candidate: {
+            branch: "work/merged",
+            reason: "pr_merged",
+            default_delete_remote: false,
+            remote_delete_available: true,
+          },
           active_agents: 0,
           blocked_agents: 0,
           agents: [],
@@ -1296,6 +1302,54 @@ test("merged Workspace detail offers a Clean Up control for its branch", () => {
   assert.equal(cleanupCalls[0]?.branch, "work/merged");
 });
 
+test("merged Workspace without cleanup candidate does not offer Clean Up", () => {
+  const fixture = createFixture();
+  const cleanupCalls = [];
+  const surface = createSurface(
+    fixture,
+    {
+      id: "proj-1",
+      title: "projection",
+      status_category: "idle",
+      active_work_count: 1,
+      active_works: [
+        {
+          id: "work-work-live-12345678",
+          title: "work/live",
+          status_category: "active",
+          lifecycle_state: "active",
+          branch: "work/live",
+          merged_into_base: true,
+          active_agents: 1,
+          blocked_agents: 0,
+          agents: [
+            {
+              session_id: "session-live",
+              display_name: "Codex",
+              status_category: "active",
+            },
+          ],
+        },
+      ],
+      agents: [],
+    },
+    {
+      send() {},
+      openWorkspaceCleanup: (candidate) => cleanupCalls.push(candidate),
+    },
+  );
+
+  surface.mount(fixture.body, fixture.windowData, {
+    focusWindowLocally() {},
+    sendFocus() {},
+  });
+
+  const cleanup = [...fixture.body.querySelectorAll(".workspace-detail-actions button")]
+    .find((button) => button.textContent.trim() === "Clean Up");
+  assert.equal(cleanup, undefined);
+  assert.equal(cleanupCalls.length, 0);
+});
+
 // User verification 2026-06-12: completed (merged) local branches need a
 // BULK cleanup path — the list header offers "Clean Up Merged (N)" that opens
 // the cleanup flow with every merged row preselected.
@@ -1318,6 +1372,12 @@ test("list header offers bulk Clean Up Merged for all merged Workspaces", () => 
           branch: "work/a",
           merged_into_base: true,
           done_equivalent: true,
+          cleanup_candidate: {
+            branch: "work/a",
+            reason: "pr_merged",
+            default_delete_remote: false,
+            remote_delete_available: true,
+          },
           active_agents: 0,
           blocked_agents: 0,
           agents: [],
@@ -1329,9 +1389,32 @@ test("list header offers bulk Clean Up Merged for all merged Workspaces", () => 
           lifecycle_state: "paused",
           branch: "work/b",
           merged_into_base: true,
+          cleanup_candidate: {
+            branch: "work/b",
+            reason: "pr_merged",
+            default_delete_remote: false,
+            remote_delete_available: true,
+          },
           active_agents: 0,
           blocked_agents: 0,
           agents: [],
+        },
+        {
+          id: "work-work-live-12345678",
+          title: "work/live",
+          status_category: "active",
+          lifecycle_state: "active",
+          branch: "work/live",
+          merged_into_base: true,
+          active_agents: 1,
+          blocked_agents: 0,
+          agents: [
+            {
+              session_id: "session-live",
+              display_name: "Codex",
+              status_category: "active",
+            },
+          ],
         },
         {
           id: "work-work-open-12345678",

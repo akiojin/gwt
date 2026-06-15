@@ -670,6 +670,7 @@ fn active_work_items_from_projection(
                 workspace_key: None,
                 remote_only: false,
                 done_equivalent: false,
+                cleanup_candidate: None,
                 updated_at: row_updated_at,
             }
         })
@@ -772,6 +773,7 @@ fn append_paused_work_items(
             workspace_key: None,
             remote_only: false,
             done_equivalent: false,
+            cleanup_candidate: None,
             // FR-403: paused/backfill rows carry the record's last update.
             updated_at: work.updated_at.clone(),
         });
@@ -1600,6 +1602,44 @@ pub(super) fn mark_merged_active_works(
     }
 }
 
+/// SPEC-2359 US-78: cleanup eligibility is backend-owned per Workspace row.
+/// `merged_into_base` remains a display badge; this candidate is the action
+/// gate after filtering out live-agent branches/worktrees and remote-only rows.
+pub(super) fn mark_workspace_cleanup_candidates(
+    active_works: &mut [gwt::ActiveWorkItemView],
+    sessions: &[&ActiveAgentSession],
+) {
+    for work in active_works.iter_mut() {
+        work.cleanup_candidate = None;
+        if !work.merged_into_base || work.remote_only {
+            continue;
+        }
+        let Some(branch) = work
+            .branch
+            .as_deref()
+            .map(normalize_branch_name)
+            .filter(|branch| branch.starts_with("work/"))
+        else {
+            continue;
+        };
+        let worktree_path = work.worktree_path.as_deref().map(Path::new);
+        if sessions.iter().any(|session| {
+            active_agent_session_matches_work(session, Some(branch.as_str()), worktree_path)
+        }) {
+            continue;
+        }
+        work.cleanup_candidate = Some(gwt::ActiveWorkCleanupCandidateView {
+            branch: branch.to_string(),
+            worktree_path: work.worktree_path.clone(),
+            reason: gwt_core::workspace_projection::WorkspaceCleanupReason::PrMerged
+                .as_str()
+                .to_string(),
+            default_delete_remote: false,
+            remote_delete_available: true,
+        });
+    }
+}
+
 fn paused_work_agent_view_from_history(
     agent: &gwt::WorkspaceHistoryAgentView,
 ) -> gwt::ActiveWorkAgentView {
@@ -1965,6 +2005,7 @@ impl AppRuntime {
                 &mut view.active_works,
                 self.local_worktree_branches.borrow().get(&tab.project_root),
             );
+            mark_workspace_cleanup_candidates(&mut view.active_works, &sessions);
             return Some(view);
         }
 
@@ -2020,6 +2061,7 @@ impl AppRuntime {
             workspace_key: None,
             remote_only: false,
             done_equivalent: false,
+            cleanup_candidate: None,
             updated_at: now.to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
         }];
         Some(gwt::ActiveWorkProjectionView {
