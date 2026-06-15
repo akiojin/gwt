@@ -328,13 +328,20 @@ fn format_discuss_help() -> String {
     [
         "gwtd discuss — gwt-discussion exit CLI (SPEC-1935).",
         "",
-        "Usage: gwtd discuss <action> --proposal <label>",
+        "Usage: gwtd discuss <action> --proposal <label> [...]",
         "",
         "Actions:",
         "  resolve --proposal <label>              Mark a proposal chosen after Evidence Gate",
         "  park --proposal <label>                 Mark a proposal parked",
         "  reject --proposal <label>               Mark a proposal rejected",
         "  clear-next-question --proposal <label>  Clear the open question (Stop unblock)",
+        "  goal-pending --proposal <label> -f <file>",
+        "                                          Record pending /goal condition",
+        "  goal-started --proposal <label>         Mark pending /goal as started",
+        "  goal-failed --proposal <label> --reason <text>",
+        "                                          Mark pending /goal start as failed",
+        "  goal-skipped --proposal <label> --reason <text>",
+        "                                          Mark pending /goal start as skipped",
         "",
     ]
     .join("\n")

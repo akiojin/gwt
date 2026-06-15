@@ -193,6 +193,13 @@ pub struct ParsedProposal {
     pub(crate) fields: Vec<(String, Option<String>)>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PendingDiscussionGoal {
+    pub proposal_label: String,
+    pub proposal_title: String,
+    pub condition: String,
+}
+
 pub fn parse_proposals(content: &str) -> Vec<ParsedProposal> {
     let mut proposals: Vec<ParsedProposal> = Vec::new();
 
@@ -300,6 +307,46 @@ pub fn discussion_stop_blocker(worktree: &Path) -> io::Result<Option<PendingDisc
     Ok(select_pending_discussion_blocker(&proposals))
 }
 
+pub fn load_pending_goal(worktree: &Path) -> io::Result<Option<PendingDiscussionGoal>> {
+    let discussion_path = worktree.join(DISCUSSION_RELATIVE_PATH);
+    if !discussion_path.exists() {
+        return Ok(None);
+    }
+
+    let content = std::fs::read_to_string(discussion_path)?;
+    let proposals = parse_proposals(&content);
+    Ok(select_pending_goal(&proposals))
+}
+
+pub fn set_proposal_goal_pending_by_label(
+    worktree: &Path,
+    label: &str,
+    condition: &str,
+) -> io::Result<bool> {
+    let condition = normalize_goal_condition(condition);
+    if condition.is_empty() {
+        return Ok(false);
+    }
+    let changed = upsert_proposal_field_by_label(worktree, label, "Goal Condition", &condition)?;
+    if !changed {
+        return Ok(false);
+    }
+    upsert_proposal_field_by_label(worktree, label, "Goal State", "pending")
+}
+
+pub fn set_proposal_goal_state_by_label(
+    worktree: &Path,
+    label: &str,
+    state: &str,
+) -> io::Result<bool> {
+    upsert_proposal_field_by_label(
+        worktree,
+        label,
+        "Goal State",
+        &normalize_goal_condition(state),
+    )
+}
+
 fn select_pending_resume(proposals: &[ParsedProposal]) -> Option<PendingDiscussionResume> {
     proposals
         .iter()
@@ -343,6 +390,101 @@ fn select_pending_discussion_blocker(
                     })
                 })
         })
+}
+
+fn select_pending_goal(proposals: &[ParsedProposal]) -> Option<PendingDiscussionGoal> {
+    proposals
+        .iter()
+        .filter(|proposal| {
+            !matches!(
+                proposal.status,
+                ProposalStatus::Parked | ProposalStatus::Rejected
+            )
+        })
+        .find_map(|proposal| {
+            let state = field_value(proposal, "Goal State")?;
+            if !state.eq_ignore_ascii_case("pending") {
+                return None;
+            }
+            let condition = field_value(proposal, "Goal Condition")?;
+            let condition = condition.trim();
+            if condition.is_empty() {
+                return None;
+            }
+            Some(PendingDiscussionGoal {
+                proposal_label: proposal.label.clone(),
+                proposal_title: proposal.title.clone(),
+                condition: condition.to_string(),
+            })
+        })
+}
+
+fn upsert_proposal_field_by_label(
+    worktree: &Path,
+    label: &str,
+    field: &str,
+    value: &str,
+) -> io::Result<bool> {
+    let discussion_path = worktree.join(DISCUSSION_RELATIVE_PATH);
+    if !discussion_path.exists() {
+        return Ok(false);
+    }
+    let content = std::fs::read_to_string(&discussion_path)?;
+    let proposals = parse_proposals(&content);
+    let Some(target) = proposals.into_iter().find(|proposal| {
+        proposal.label.eq_ignore_ascii_case(label)
+            && !matches!(
+                proposal.status,
+                ProposalStatus::Parked | ProposalStatus::Rejected
+            )
+    }) else {
+        return Ok(false);
+    };
+
+    let mut lines: Vec<String> = content.lines().map(str::to_string).collect();
+    let start = target.header_line_index + 1;
+    let end = lines
+        .iter()
+        .enumerate()
+        .skip(start)
+        .find_map(|(index, line)| {
+            line.trim_start()
+                .starts_with("### Proposal ")
+                .then_some(index)
+        })
+        .unwrap_or(lines.len());
+    let prefix = format!("- {field}:");
+    for index in start..end {
+        if lines[index].trim_start().starts_with(&prefix) {
+            let indent_len = lines[index].len() - lines[index].trim_start().len();
+            let indent: String = lines[index].chars().take(indent_len).collect();
+            lines[index] = format!("{indent}- {field}: {value}");
+            write_discussion_content(&discussion_path, lines, content.ends_with('\n'))?;
+            return Ok(true);
+        }
+    }
+
+    lines.insert(start, format!("- {field}: {value}"));
+    write_discussion_content(&discussion_path, lines, content.ends_with('\n'))?;
+    Ok(true)
+}
+
+fn write_discussion_content(
+    discussion_path: &Path,
+    lines: Vec<String>,
+    had_trailing_newline: bool,
+) -> io::Result<()> {
+    let rewritten = lines.join("\n");
+    let final_content = if had_trailing_newline {
+        format!("{rewritten}\n")
+    } else {
+        rewritten
+    };
+    std::fs::write(discussion_path, final_content)
+}
+
+fn normalize_goal_condition(value: &str) -> String {
+    value.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
 fn evidence_gate_blocker(proposal: &ParsedProposal) -> Option<String> {
@@ -887,5 +1029,68 @@ mod tests {
             .unwrap()
             .expect("empty not-applicable reason should block resolve");
         assert!(blocker.contains("Official Docs Proof"));
+    }
+
+    #[test]
+    fn load_pending_goal_reads_chosen_proposal_with_pending_goal_state() {
+        let dir = tempfile::tempdir().unwrap();
+        let discussion_path = dir.path().join(DISCUSSION_RELATIVE_PATH);
+        std::fs::create_dir_all(discussion_path.parent().unwrap()).unwrap();
+        std::fs::write(
+            &discussion_path,
+            "## Discussion TODO\n\n\
+             ### Proposal A - Goal handoff [chosen]\n\
+             - Summary: Action Bundle is approved.\n\
+             - Goal Condition: finish SPEC-3050 verification handoff with tests green\n\
+             - Goal State: pending\n",
+        )
+        .unwrap();
+
+        let pending = load_pending_goal(dir.path())
+            .unwrap()
+            .expect("pending goal");
+
+        assert_eq!(
+            pending,
+            PendingDiscussionGoal {
+                proposal_label: "Proposal A".to_string(),
+                proposal_title: "Goal handoff".to_string(),
+                condition: "finish SPEC-3050 verification handoff with tests green".to_string(),
+            }
+        );
+    }
+
+    #[test]
+    fn goal_state_helpers_upsert_pending_and_started_state() {
+        let dir = tempfile::tempdir().unwrap();
+        let discussion_path = dir.path().join(DISCUSSION_RELATIVE_PATH);
+        std::fs::create_dir_all(discussion_path.parent().unwrap()).unwrap();
+        std::fs::write(
+            &discussion_path,
+            "## Discussion TODO\n\n\
+             ### Proposal A - Goal handoff [chosen]\n\
+             - Summary: Action Bundle is approved.\n\
+             - Promotable Changes: Resume Build\n",
+        )
+        .unwrap();
+
+        assert!(set_proposal_goal_pending_by_label(
+            dir.path(),
+            "Proposal A",
+            "tests green and verification handoff ready"
+        )
+        .unwrap());
+        assert_eq!(
+            load_pending_goal(dir.path())
+                .unwrap()
+                .map(|goal| goal.condition),
+            Some("tests green and verification handoff ready".to_string())
+        );
+
+        assert!(set_proposal_goal_state_by_label(dir.path(), "Proposal A", "started").unwrap());
+        assert_eq!(load_pending_goal(dir.path()).unwrap(), None);
+        let updated = std::fs::read_to_string(&discussion_path).unwrap();
+        assert!(updated.contains("- Goal State: started"));
+        assert!(updated.contains("- Goal Condition: tests green and verification handoff ready"));
     }
 }

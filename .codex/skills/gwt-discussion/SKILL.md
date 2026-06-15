@@ -419,8 +419,8 @@ This final result is the handoff point where the workflow may leave Plan Mode.
 
 ### Goal Start (after Action Bundle approval)
 
-Once the user approves the Action Bundle and the follow-up work should
-continue autonomously, start a runtime goal from the approved bundle
+When the Action Bundle is ready and follow-up work can continue
+autonomously after user approval, arm a runtime goal from the bundle
 (SPEC-3050):
 
 1. Build a goal condition from the Action Bundle: one verifiable end state
@@ -429,21 +429,33 @@ continue autonomously, start a runtime goal from the approved bundle
    condition must respect gwt's PR gate: stop at "verification handoff ready
    with a recorded User Verification Result" — never "PR created" or "PR
    merged".
-2. Start the goal per runtime:
+2. Before the final discussion response stops, write the condition to a temp
+   file and run `gwtd discuss goal-pending --proposal "<label>" -f <file>`
+   after resolving the chosen proposal. This records `Goal State: pending`
+   in `.gwt/discussion.md` so the next `UserPromptSubmit` hook can remind
+   the agent even though the approval arrives in a later turn.
+3. In the next turn, if the user approves the Action Bundle and asks the
+   follow-up work to continue autonomously, start the goal per runtime:
    - **Codex** (goals enabled; gwt launches Codex with `--enable goals`):
-     start the Goal directly with the condition as its objective — the goals
-     tool contract allows the model to start a Goal itself.
+     call `create_goal` with the condition as the objective — the goals tool
+     contract allows the model to start a Goal itself.
    - **Claude Code** (v2.1.139 or later): the built-in `/goal` command cannot
      be self-invoked by the agent. Queue it into your own pane instead:
      `gwtd pane send --text '/goal <condition>'` (resolve `GWT_BIN` first per
      the gwtd resolution section). The injected line is submitted
      automatically when the current turn ends. `pane send` is self-only: it
      targets the pane bound to `GWT_SESSION_ID` and rejects other panes.
-3. If the goal cannot be started (older Claude Code, trust dialog not
-   accepted, goals feature disabled, `pane send` failure), do not skip
-   silently: report the failure reason explicitly, print the assembled
-   `/goal <condition>` line so the user can run it manually, and continue
-   the exit. Goal start failures never block the discussion exit.
+4. After a successful goal start, run
+   `gwtd discuss goal-started --proposal "<label>"`. If the user rejects or
+   revises the Action Bundle instead, run
+   `gwtd discuss goal-skipped --proposal "<label>" --reason "<reason>"`
+   before continuing the discussion. If the goal cannot be started (older
+   Claude Code, trust dialog not accepted, goals feature disabled,
+   `pane send` failure), run
+   `gwtd discuss goal-failed --proposal "<label>" --reason "<reason>"`,
+   report the failure reason explicitly, print the assembled `/goal
+   <condition>` line so the user can run it manually, and continue the exit.
+   Goal start failures never block the discussion exit.
 
 ## Routing notes
 
