@@ -127,6 +127,23 @@ fn cli_command_family_split_round_trip_parses() {
             if proposal == "Proposal A"
     ));
 
+    // gwtd discuss goal-pending --proposal "Proposal A" -f /tmp/goal.txt
+    let cmd = parse_discuss_args(&[
+        s("goal-pending"),
+        s("--proposal"),
+        s("Proposal A"),
+        s("-f"),
+        s("/tmp/goal.txt"),
+    ])
+    .expect("parse discuss goal-pending");
+    assert!(matches!(
+        cmd,
+        CliCommand::Discuss(DiscussCommand::GoalPending {
+            ref proposal,
+            ref condition_file
+        }) if proposal == "Proposal A" && condition_file == std::path::Path::new("/tmp/goal.txt")
+    ));
+
     // gwtd plan start --spec 1942
     let cmd = parse_plan_args(&[s("start"), s("--spec"), s("1942")]).expect("parse plan start");
     assert!(matches!(

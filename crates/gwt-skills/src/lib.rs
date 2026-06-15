@@ -901,6 +901,13 @@ mod tests {
                     && discussion_skill.contains("`gwt-build-spec`"),
                 "expected discussion skill to hand off through visible task entrypoints in {relative}"
             );
+            assert!(
+                discussion_skill.contains("gwtd discuss goal-pending")
+                    && discussion_skill.contains("gwtd discuss goal-started")
+                    && discussion_skill.contains("gwtd discuss goal-failed")
+                    && discussion_skill.contains("gwtd discuss goal-skipped"),
+                "expected discussion skill to arm and settle pending Goal Start state in {relative}"
+            );
         }
 
         for relative in [
@@ -959,6 +966,13 @@ mod tests {
                     && discussion_command.contains("Park proposal")
                     && discussion_command.contains("Dismiss for now"),
                 "expected discussion command to describe the resume prompt contract in {relative}"
+            );
+            assert!(
+                discussion_command.contains("gwtd discuss goal-pending")
+                    && discussion_command.contains("goal-started")
+                    && discussion_command.contains("goal-failed")
+                    && discussion_command.contains("goal-skipped"),
+                "expected discussion command to mention pending Goal Start bookkeeping in {relative}"
             );
         }
 

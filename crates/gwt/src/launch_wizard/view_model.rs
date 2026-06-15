@@ -126,9 +126,12 @@ impl LaunchWizardState {
         let has_previous_settings = self.has_previous_start_settings();
         let latest_session = self.latest_quick_start_entry().map(|(_, entry)| entry);
         let latest_live = self.latest_running_session().map(|(_, session)| session);
+        let latest_session_can_continue = latest_session
+            .map(|entry| self.quick_start_entry_supports_session_continuation(entry))
+            .unwrap_or(false);
         let recommended_method = if latest_live.is_some() {
             LaunchWizardStartMethodKind::FocusRunningSession
-        } else if latest_session.is_some() {
+        } else if latest_session_can_continue {
             LaunchWizardStartMethodKind::ContinueLastSession
         } else if has_previous_settings {
             LaunchWizardStartMethodKind::StartWithLastSettings
@@ -185,13 +188,15 @@ impl LaunchWizardState {
                 badge: "Session".to_string(),
                 group: start_method_group(
                     LaunchWizardStartMethodKind::ContinueLastSession,
-                    latest_session.is_some(),
+                    latest_session_can_continue,
                     recommended_method,
                 ),
                 recommended: recommended_method == LaunchWizardStartMethodKind::ContinueLastSession,
                 summary: latest_session
                     .map(|entry| {
-                        if entry.resume_session_id.is_some() {
+                        if !self.quick_start_entry_supports_session_continuation(entry) {
+                            "Resume recent session"
+                        } else if entry.resume_session_id.is_some() {
                             "Resume conversation history"
                         } else {
                             "Continue latest agent session"
@@ -202,10 +207,14 @@ impl LaunchWizardState {
                 detail: latest_session
                     .and_then(|entry| entry.resume_session_id.as_deref())
                     .map(|resume_id| format!("Resume ID · {resume_id}")),
-                enabled: latest_session.is_some(),
-                disabled_reason: latest_session
-                    .is_none()
-                    .then(|| "No saved session".to_string()),
+                enabled: latest_session_can_continue,
+                disabled_reason: if latest_session.is_some() && !latest_session_can_continue {
+                    Some("Not supported by agent".to_string())
+                } else if latest_session.is_none() {
+                    Some("No saved session".to_string())
+                } else {
+                    None
+                },
             },
         ];
         if self.current_agent_supports_resume_picker() {

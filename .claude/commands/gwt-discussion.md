@@ -23,7 +23,8 @@ mid-implementation investigation.
 4. Discuss one question at a time with selection UI first. In Codex, use `request_user_input` when that UI is available.
 5. After each answer, update `Discussion TODO`, `Coverage Checks`, `Exit Blockers`, `Question Ledger`, and `Depth Gate`, then re-rank unresolved high-impact unknowns and ask the next highest-impact question before exiting.
 6. Do not leave Plan Mode until `Action Delta` and `Action Bundle` are ready, `Depth Gate: complete` or `Depth Gate: deferred(<reason>)` is recorded, and `Evidence Gate: complete` is backed by implementation proof, SPEC/Issue proof, gap-check proof, official docs proof when applicable, and external research proof when needed.
-7. If managed hooks surface an unfinished discussion prompt, use `.gwt/discussion.md` as the source of truth and choose `Resume discussion`, `Park proposal`, or `Dismiss for now`.
+7. When autonomous follow-up should start after approval, record the Action Bundle goal condition with `gwtd discuss goal-pending --proposal "<label>" -f <file>` so the next approval turn can start `/goal` and then mark `goal-started`, `goal-failed`, or `goal-skipped`.
+8. If managed hooks surface an unfinished discussion prompt, use `.gwt/discussion.md` as the source of truth and choose `Resume discussion`, `Park proposal`, or `Dismiss for now`.
 
 ## Examples
 

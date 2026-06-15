@@ -106,6 +106,14 @@ Put completion, active, blocked, and similar state in `--status`,
 `--current-focus`, `--summary`, or the Board `--body`, not in
 `--title-summary`.
 
+The Work detail renders purpose and status as separate layers — the
+purpose (your `--title-summary`) leads, with the current focus
+(`--current-focus`) and next below it, and the Board body lands only as a
+demoted latest-update snapshot. So update
+purpose and status as distinct fields;
+do not fold a status snapshot into the purpose, and do not rely on the
+Board body to convey what the Work is.
+
 ## Git environment
 
 Do not manually create, switch, or delete branches/worktrees:
@@ -234,6 +242,13 @@ activity が変わっても変えず、scope (新しい task や別 Issue / SPEC
 
 完了 / 進行中 / ブロック中などの状態は `--status`、`--current-focus`、
 `--summary`、または Board `--body` に分けます。
+
+Work detail は purpose と status を別レイヤーで表示します — purpose
+（`--title-summary`）を見出しに、その下に現在地（`--current-focus`）と
+次、Board body は降格した latest-update スナップショットとして表示
+されます。purpose と status は別フィールドとして更新し、状態スナップ
+ショットを purpose に混ぜたり、Work が何かを Board body で伝えようと
+したりしないでください。
 
 ## Git environment
 
@@ -372,6 +387,7 @@ mod tests {
             "verifying tests",
             "fixing bug",
             "title-summary = work scope",
+            "purpose and status as distinct fields",
         ]
     }
 

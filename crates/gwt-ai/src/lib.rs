@@ -13,6 +13,7 @@ pub mod error;
 pub mod issue_classify;
 pub mod models_probe;
 pub mod session_converter;
+pub mod work_summary;
 
 pub use branch_suggest::{parse_suggestions, suggest_branch_name};
 pub use client::{AIClient, ChatMessage};
@@ -26,3 +27,4 @@ pub use session_converter::{
     convert_session, get_encoder, ClaudeEncoder, CodexEncoder, GeminiEncoder, OpenCodeEncoder,
     Role, SessionEncoder, SessionMessage,
 };
+pub use work_summary::{parse_work_summaries, summarize_work_purposes, WorkSummaryInput};
