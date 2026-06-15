@@ -64,13 +64,14 @@ use super::{
     build_shell_process_launch, combined_window_id, detect_wizard_docker_context_and_status,
     knowledge_error_event, knowledge_kind_for_preset, list_branch_entries_with_active_sessions,
     normalize_branch_name, preferred_issue_launch_branch, resolve_shell_launch_worktree,
-    synthetic_branch_entry, workspace_projection_for_current_resume,
-    workspace_resume_branch_exists, workspace_resume_branch_from_journal_project_root,
-    workspace_resume_context_for_work_item, workspace_resume_context_from_journal,
-    workspace_resume_context_from_projection, workspace_resume_owner_issue_number, AppEventProxy,
-    AppRuntime, BackendEvent, IssueLaunchWizardPrepared, LaunchFeedbackContext,
-    LaunchWizardMemoryCache, LaunchWizardSession, OutboundEvent, WindowPreset, WindowProcessStatus,
-    WorkspaceResumeContext, WORKSPACE_OVERVIEW_JOURNAL_LIMIT,
+    session_exact_resume_materializable, synthetic_branch_entry,
+    workspace_projection_for_current_resume, workspace_resume_branch_exists,
+    workspace_resume_branch_from_journal_project_root, workspace_resume_context_for_work_item,
+    workspace_resume_context_from_journal, workspace_resume_context_from_projection,
+    workspace_resume_owner_issue_number, AppEventProxy, AppRuntime, BackendEvent,
+    IssueLaunchWizardPrepared, LaunchFeedbackContext, LaunchWizardMemoryCache, LaunchWizardSession,
+    OutboundEvent, WindowPreset, WindowProcessStatus, WorkspaceResumeContext,
+    WORKSPACE_OVERVIEW_JOURNAL_LIMIT,
 };
 use crate::usable_worktree_path_for_branch;
 
@@ -560,9 +561,10 @@ impl AppRuntime {
             return events;
         }
 
+        let project_root = tab.project_root.clone();
         let sessions_dir = self.sessions_dir.clone();
         let session_path = sessions_dir.join(format!("{session_id}.toml"));
-        let mut session = match gwt_agent::Session::load_and_migrate(&session_path) {
+        let session = match gwt_agent::Session::load_and_migrate(&session_path) {
             Ok(session) => session,
             Err(_) => {
                 return reply_error(
@@ -601,15 +603,11 @@ impl AppRuntime {
             return events;
         }
 
-        // SPEC-2359 D2: a Session persisted on another machine (or whose worktree
-        // was removed) carries a worktree_path that does not exist here. Validate
-        // synchronously so the user gets an immediate, clear message instead of a
-        // deferred async launch failure.
-        if !session.worktree_path.as_path().exists() {
-            return reply_error(format!(
-                "Worktree path not found on this machine ({}); this Session may have been created on another machine.",
-                session.worktree_path.display()
-            ));
+        let session_worktree_exists = session.worktree_path.as_path().exists();
+        if !session_exact_resume_materializable(&project_root, &session) {
+            return reply_error(
+                "This Session cannot be resumed on this machine because its branch is no longer available; use Workspace Continue or Launch Agent to start a new Work.".to_string(),
+            );
         }
 
         // Build a fresh LaunchConfig from the persisted Session and add the
@@ -617,7 +615,9 @@ impl AppRuntime {
         // conversation handle (Claude / Codex / opt-in custom agents).
         let agent_id = session.agent_id.clone();
         let mut builder = gwt_agent::AgentLaunchBuilder::new(agent_id.clone());
-        builder = builder.working_dir(session.worktree_path.clone());
+        if session_worktree_exists {
+            builder = builder.working_dir(session.worktree_path.clone());
+        }
         if !session.branch.is_empty() {
             builder = builder.branch(session.branch.clone());
         }
@@ -672,17 +672,21 @@ impl AppRuntime {
         if !session.display_name.is_empty() {
             config.display_name = session.display_name.clone();
         }
-        let _ = &mut session; // silence unused-mut warning
 
         // Build a Workspace Resume context so the spawned window's title
         // and the Workspace projection summary keep the prior identity
         // instead of falling back to the agent's default display name.
         // #3065: the context comes from the resumed branch's own Work item,
         // never from the repo-shared current projection.
+        let resume_context_root = if session_worktree_exists {
+            session.worktree_path.as_path()
+        } else {
+            project_root.as_path()
+        };
         let workspace_resume_context = Some(workspace_resume_context_for_work_item(
-            &session.worktree_path,
+            resume_context_root,
             Some(session.branch.as_str()),
-            &session.worktree_path,
+            resume_context_root,
         ));
 
         match self.spawn_agent_window(&tab_id, config, bounds, workspace_resume_context) {
@@ -824,7 +828,15 @@ impl AppRuntime {
             return events;
         }
 
-        let config = super::launch_config_from_persisted_session(&session);
+        if !session_exact_resume_materializable(&project_root, &session) {
+            return branch_error(format!(
+                "No resumable session found for {normalized_branch_name}"
+            ));
+        }
+        let mut config = super::launch_config_from_persisted_session(&session);
+        if !session.worktree_path.as_path().exists() {
+            config.working_dir = None;
+        }
         if config.session_mode != gwt_agent::SessionMode::Resume {
             return branch_error(format!(
                 "No resumable session found for {normalized_branch_name}"
@@ -832,10 +844,15 @@ impl AppRuntime {
         }
         // #3065: the context comes from the resumed branch's own Work item,
         // never from the repo-shared current projection.
+        let resume_context_root = if session.worktree_path.as_path().exists() {
+            session.worktree_path.as_path()
+        } else {
+            project_root.as_path()
+        };
         let workspace_resume_context = Some(workspace_resume_context_for_work_item(
-            &session.worktree_path,
+            resume_context_root,
             Some(session.branch.as_str()),
-            &session.worktree_path,
+            resume_context_root,
         ));
 
         match self.spawn_agent_window(&tab_id, config, bounds, workspace_resume_context) {
@@ -914,6 +931,9 @@ impl AppRuntime {
                     let session_path = sessions_dir.join(format!("{}.toml", agent.session_id));
                     match gwt_agent::Session::load_and_migrate(&session_path) {
                         Ok(session) => {
+                            if !session_exact_resume_materializable(&project_root, &session) {
+                                return None;
+                            }
                             let resume_kind = if session.exact_resume_session_id().is_some() {
                                 gwt::ResumableAgentResumeKind::Session
                             } else {

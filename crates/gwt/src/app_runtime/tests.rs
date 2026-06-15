@@ -556,7 +556,7 @@ fn workspace_work_agent_view_attaches_session_history() {
         display_name: Some("Codex".to_string()),
         updated_at: chrono::Utc::now(),
     };
-    let view = super::workspace_work_agent_view_from_ref(&agent_ref, &index);
+    let view = super::workspace_work_agent_view_from_ref(&agent_ref, &index, Path::new("/"));
 
     let ids: Vec<&str> = view
         .sessions
@@ -569,7 +569,8 @@ fn workspace_work_agent_view_attaches_session_history() {
 
     // A Work with no persisted Session yields an empty Session list, not a panic.
     let empty_index = super::work_session_index(&[]);
-    let empty_view = super::workspace_work_agent_view_from_ref(&agent_ref, &empty_index);
+    let empty_view =
+        super::workspace_work_agent_view_from_ref(&agent_ref, &empty_index, Path::new("/"));
     assert!(empty_view.sessions.is_empty());
 }
 
@@ -6604,11 +6605,11 @@ fn app_runtime_resume_workspace_agent_ignores_stopped_same_session_window() {
     ));
 }
 
-// SPEC-2359 D2: a Session whose worktree no longer exists on this machine
-// (created on another machine / removed repo) must fail synchronously with a
-// clear message instead of spawning and erroring asynchronously.
+// SPEC-2359 US-79: a Session whose worktree was removed on this machine can
+// still be resumed when the branch is available locally/remotely. The launch
+// path must be allowed to materialize the worktree again.
 #[test]
-fn app_runtime_resume_workspace_agent_errors_when_worktree_missing() {
+fn app_runtime_resume_workspace_agent_materializes_missing_worktree_when_branch_exists() {
     let _env_lock = env_test_lock()
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -6616,13 +6617,14 @@ fn app_runtime_resume_workspace_agent_errors_when_worktree_missing() {
     let _home = ScopedEnvVar::set("HOME", temp.path());
     let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
     let repo = temp.path().join("repo");
-    fs::create_dir_all(&repo).expect("create repo");
+    init_git_clone_with_origin(&repo);
+    let branch = "feature/ghost";
+    run_git(&repo, &["branch", branch]);
     let tab = sample_project_tab("tab-1", "Repo", repo, ProjectKind::Git, &[]);
     let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
 
     let ghost_worktree = temp.path().join("ghost-worktree");
-    let mut session =
-        gwt_agent::Session::new(&ghost_worktree, "feature/ghost", gwt_agent::AgentId::Codex);
+    let mut session = gwt_agent::Session::new(&ghost_worktree, branch, gwt_agent::AgentId::Codex);
     session.id = "session-ghost".to_string();
     session.agent_session_id = Some("conv-ghost".to_string());
     session.save(&runtime.sessions_dir).expect("save session");
@@ -6636,14 +6638,65 @@ fn app_runtime_resume_workspace_agent_errors_when_worktree_missing() {
         },
     );
 
-    let event = events
-        .first()
-        .expect("resume must reply on missing worktree");
-    assert!(matches!(
-        &event.event,
-        BackendEvent::WorkspaceResumeAgentError { session_id, message }
-            if session_id == "session-ghost" && message.contains("Worktree path not found")
-    ));
+    assert!(
+        events.iter().any(|event| matches!(
+            &event.event,
+            BackendEvent::WorkspaceResumeAgentStarted { session_id, branch: Some(started_branch) }
+                if session_id == "session-ghost" && started_branch == branch
+        )),
+        "branch-materializable missing worktree should enter launch materialization and ack"
+    );
+    assert!(
+        events.iter().all(|event| !matches!(
+            &event.event,
+            BackendEvent::WorkspaceResumeAgentError { message, .. }
+                if message.contains("Worktree path not found")
+        )),
+        "missing worktree alone must not be a synchronous resume error"
+    );
+}
+
+#[test]
+fn app_runtime_list_resumable_agents_filters_session_when_worktree_and_branch_missing() {
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedEnvVar::set("HOME", temp.path());
+    let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+    let repo = temp.path().join("repo");
+    init_git_clone_with_origin(&repo);
+    let session_id = "session-branch-gone";
+    let projection = projection_with_assigned_agent(&repo, session_id);
+    gwt_core::workspace_projection::save_workspace_projection(&repo, &projection)
+        .expect("save projection");
+    let sessions_dir = temp.path().join("sessions");
+    write_resumable_session_for_test(
+        &sessions_dir,
+        session_id,
+        &temp.path().join("deleted-worktree"),
+        "feature/deleted",
+        gwt_agent::AgentId::Codex,
+        Some("conv-deleted"),
+    );
+
+    let tab = sample_project_tab("tab-1", "Repo", repo, ProjectKind::Git, &[]);
+    let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+
+    let events = runtime.handle_frontend_event(
+        "client-1".to_string(),
+        FrontendEvent::ListResumableAgents { workspace_id: None },
+    );
+
+    match events.first().map(|outbound| &outbound.event) {
+        Some(BackendEvent::WorkspaceResumableAgents { agents, .. }) => {
+            assert!(
+                agents.is_empty(),
+                "exact Session Resume candidates require an existing worktree or materializable branch"
+            );
+        }
+        other => panic!("unexpected backend event: {other:?}"),
+    }
 }
 
 // SPEC-2359 D1: requesting a *specific* past conversation while a live window
@@ -14361,6 +14414,7 @@ fn attach_registry_sessions_caps_total_agents_on_the_wire() {
         &[],
         None,
         &std::collections::HashMap::new(),
+        Path::new("/"),
     );
 
     assert_eq!(works[0].session_agent_total, 12, "uncapped count reported");
@@ -14477,6 +14531,7 @@ fn attach_registry_sessions_keeps_latest_entry_per_agent_identity() {
         &[],
         None,
         &std::collections::HashMap::new(),
+        Path::new("/"),
     );
 
     let agents = &works[0].agents;
@@ -14561,6 +14616,7 @@ fn attach_registry_sessions_drops_ghost_agents_without_identity_or_sessions() {
         &[],
         None,
         &std::collections::HashMap::new(),
+        Path::new("/"),
     );
 
     let agents = &works[0].agents;
@@ -14595,7 +14651,7 @@ fn agent_view_borrows_identity_from_ledger_when_record_has_none() {
         display_name: None,
         updated_at: chrono::Utc::now(),
     };
-    let view = super::workspace_work_agent_view_from_ref(&agent_ref, &index);
+    let view = super::workspace_work_agent_view_from_ref(&agent_ref, &index, Path::new("/"));
     assert_eq!(view.display_name.as_deref(), Some("Claude Code"));
     assert!(view.agent_id.is_some(), "agent_id borrowed from the ledger");
 }
@@ -14683,6 +14739,7 @@ fn attach_registry_sessions_dedupes_agents_sharing_a_conversation() {
         &[],
         None,
         &std::collections::HashMap::new(),
+        Path::new("/"),
     );
 
     let agents = &works[0].agents;
@@ -14712,11 +14769,11 @@ fn attach_registry_sessions_dedupes_agents_sharing_a_conversation() {
 /// a single Session row instead of rendering "No session yet" everywhere.
 #[test]
 fn agent_view_synthesizes_latest_conversation_when_history_is_empty() {
-    let mut session = gwt_agent::Session::new(
-        std::path::PathBuf::from("/tmp/none"),
-        "work/foo",
-        gwt_agent::AgentId::ClaudeCode,
-    );
+    let temp = tempdir().expect("tempdir");
+    let worktree = temp.path().join("worktree");
+    fs::create_dir_all(&worktree).expect("create worktree");
+    let mut session =
+        gwt_agent::Session::new(&worktree, "work/foo", gwt_agent::AgentId::ClaudeCode);
     session.id = "gwt-session-1".to_string();
     session.agent_session_id = Some("conv-latest".to_string());
     session.session_history = Vec::new();
@@ -14730,7 +14787,7 @@ fn agent_view_synthesizes_latest_conversation_when_history_is_empty() {
         updated_at: chrono::Utc::now(),
     };
 
-    let view = super::workspace_work_agent_view_from_ref(&agent_ref, &index);
+    let view = super::workspace_work_agent_view_from_ref(&agent_ref, &index, temp.path());
 
     assert_eq!(
         view.sessions.len(),
@@ -14740,6 +14797,70 @@ fn agent_view_synthesizes_latest_conversation_when_history_is_empty() {
     assert_eq!(view.sessions[0].agent_session_id, "conv-latest");
     assert!(view.sessions[0].is_active);
     assert!(view.sessions[0].resumable);
+}
+
+#[test]
+fn agent_view_marks_session_history_only_when_worktree_and_branch_are_missing() {
+    let temp = tempdir().expect("tempdir");
+    let repo = temp.path().join("repo");
+    init_git_clone_with_origin(&repo);
+    let mut session = gwt_agent::Session::new(
+        temp.path().join("deleted-worktree"),
+        "feature/deleted-session-row",
+        gwt_agent::AgentId::ClaudeCode,
+    );
+    session.id = "gwt-session-missing-branch".to_string();
+    session.agent_session_id = Some("conv-latest".to_string());
+    let mut index = std::collections::HashMap::new();
+    index.insert(session.id.as_str(), &session);
+
+    let agent_ref = gwt_core::workspace_projection::WorkAgentRef {
+        session_id: session.id.clone(),
+        agent_id: Some("claude".to_string()),
+        display_name: Some("Claude Code".to_string()),
+        updated_at: chrono::Utc::now(),
+    };
+
+    let view = super::workspace_work_agent_view_from_ref(&agent_ref, &index, &repo);
+
+    assert_eq!(view.sessions.len(), 1);
+    assert!(
+        !view.sessions[0].resumable,
+        "missing worktree plus missing local/origin branch is history-only"
+    );
+}
+
+#[test]
+fn agent_view_keeps_session_resumable_when_missing_worktree_branch_exists() {
+    let temp = tempdir().expect("tempdir");
+    let repo = temp.path().join("repo");
+    init_git_clone_with_origin(&repo);
+    let branch = "feature/session-row-resume";
+    run_git(&repo, &["branch", branch]);
+    let mut session = gwt_agent::Session::new(
+        temp.path().join("deleted-worktree"),
+        branch,
+        gwt_agent::AgentId::ClaudeCode,
+    );
+    session.id = "gwt-session-existing-branch".to_string();
+    session.agent_session_id = Some("conv-latest".to_string());
+    let mut index = std::collections::HashMap::new();
+    index.insert(session.id.as_str(), &session);
+
+    let agent_ref = gwt_core::workspace_projection::WorkAgentRef {
+        session_id: session.id.clone(),
+        agent_id: Some("claude".to_string()),
+        display_name: Some("Claude Code".to_string()),
+        updated_at: chrono::Utc::now(),
+    };
+
+    let view = super::workspace_work_agent_view_from_ref(&agent_ref, &index, &repo);
+
+    assert_eq!(view.sessions.len(), 1);
+    assert!(
+        view.sessions[0].resumable,
+        "available branch lets exact Session Resume re-materialize the worktree"
+    );
 }
 
 /// SPEC-2359 Phase W-16 (FR-403): the Workspace list is ordered by last
@@ -14805,6 +14926,7 @@ fn active_works_are_sorted_by_latest_update_descending() {
         &[],
         None,
         &std::collections::HashMap::new(),
+        Path::new("/"),
     );
 
     let order: Vec<&str> = works.iter().map(|work| work.id.as_str()).collect();

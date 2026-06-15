@@ -6941,3 +6941,10 @@ Type: failure-pattern
 Context: During SPEC-3050 Phase E verification on 2026-06-15, the active worktree /Users/akiojin/Workbench/gwt/work/20260615-0012 disappeared while running the full cargo test matrix. Subsequent shell invocations failed until commands were run from /, and the implementation had to be reconstructed in the stable develop checkout from conversation diffs.
 Learning: When a gwt-managed worktree becomes missing or prunable during long verification, continuing from that cwd can produce getcwd/git clone failures and may lose uncommitted edits. Treat this as an environment failure, immediately switch command execution to a stable existing checkout, recover changes from recorded diffs, and rerun full tests serially if parallel tests showed cwd races.
 Future Action: Before long full verification, confirm the worktree path still exists and prefer serial `cargo test ... -- --test-threads=1` when previous runs show getcwd/tempdir interference. If a worktree vanishes, stop using that path, verify surviving checkouts with absolute `git -C`, reconstruct changes without touching unrelated untracked files, and record the incident.
+
+## 2026-06-15 — Session resume requires branch materializability
+
+Type: lesson
+Context: Session TOML is machine-local; a stale worktree_path can remain after another terminal launched work or the local worktree was deleted.
+Learning: Exact Session Resume should not treat missing worktree_path alone as fatal. It is safe only when the session worktree still exists or the recorded branch is materializable locally/remotely; otherwise the UI should make the session history-only and guide users to Workspace Continue or Launch Agent.
+Future Action: When touching session restore flows, gate exact Resume by worktree-or-branch materializability and keep session TOML out of cross-machine/versioned recovery assumptions.
