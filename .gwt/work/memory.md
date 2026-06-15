@@ -6948,3 +6948,24 @@ Type: lesson
 Context: Session TOML is machine-local; a stale worktree_path can remain after another terminal launched work or the local worktree was deleted.
 Learning: Exact Session Resume should not treat missing worktree_path alone as fatal. It is safe only when the session worktree still exists or the recorded branch is materializable locally/remotely; otherwise the UI should make the session history-only and guide users to Workspace Continue or Launch Agent.
 Future Action: When touching session restore flows, gate exact Resume by worktree-or-branch materializability and keep session TOML out of cross-machine/versioned recovery assumptions.
+
+## 2026-06-15 — Legacy work events need source branch context
+
+Type: lesson
+Context: During browser-check for SPEC-2359 on 2026-06-15, Work rows from origin/work/20260613-0410 showed project architecture titles without a branch because legacy .gwt/work/events.jsonl entries had execution_container:null.
+Learning: Branch-less Work rows can originate from old remote-ref events, not from frontend rendering. The ingest orchestrator knows the source ref/worktree and should provide a projection-time execution container when old events lack one, leaving the original event log unchanged.
+Future Action: When adding cross-machine event ingestion or projection recovery, test legacy execution_container:null events from origin/work/* and assert the restored Workspace still has a branch label.
+
+## 2026-06-15 — AppRuntime git fixture tests need env lock
+
+Type: lesson
+Context: SPEC-2359 verification reran cargo test -p gwt-core -p gwt --all-features and two session-resume view tests failed only under parallel execution while another test temporarily prepended fake-bin/git to PATH.
+Learning: AppRuntime tests that spawn git through init_git_clone_with_origin or run_git can observe process-global PATH mutations from fake git tests unless they hold env_test_lock.
+Future Action: When adding AppRuntime tests that spawn git or mutate HOME/USERPROFILE/PATH, take env_test_lock before creating fixtures so full parallel cargo test remains deterministic.
+
+## 2026-06-15 — Projection-time ingest fixes must invalidate source cache
+
+Type: lesson
+Context: While fixing SPEC-2359 branch-less Workspace rows, source ref context was added at ingest time. Existing work-events-intake.json entries could still hold raw blob oids/content hashes from the previous algorithm and skip the repair path.
+Learning: When ingest output changes without changing the raw source blob, the advisory fingerprint cache must include an algorithm/version salt or metadata fingerprint; otherwise existing users keep stale projections even though fresh-home verification passes.
+Future Action: For any projection-time transform in work_events_ingest or similar intake code, add a regression test that preloads the old raw fingerprint state and verifies the source is reprocessed and duplicate-event repair updates the projection.

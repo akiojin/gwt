@@ -18,10 +18,15 @@ use gwt_core::work_events_intake::{
     content_fingerprint, ingest_work_events_content, load_work_events_intake_state,
     save_work_events_intake_state, WorkEventsIntakeReport,
 };
+use gwt_core::workspace_projection::WorkspaceExecutionContainerRef;
 
 /// Where one ingested chunk of content came from (cache key prefix).
 const SOURCE_WORKTREE: &str = "worktree:";
 const SOURCE_REF: &str = "ref:";
+
+/// Bump this when projection-time source metadata changes. Older cache entries
+/// used only the raw content/blob fingerprint, which would skip the repair pass.
+const SOURCE_CONTEXT_FINGERPRINT_VERSION: &str = "source-context-v1";
 
 /// Tree path of the persistent core inside a worktree / commit.
 const EVENTS_TREE_PATH: &str = ".gwt/work/events.jsonl";
@@ -61,17 +66,20 @@ pub fn ingest_project_work_events_paths(
 
     // 1) Local worktree filesystems (base/main checkout included): committed
     //    or not, the working copy is the freshest view of each branch's log.
-    for events_path in worktree_events_files(project_root) {
+    for source in worktree_event_sources(project_root) {
+        let events_path = source.events_path;
         let Ok(content) = std::fs::read_to_string(&events_path) else {
             continue;
         };
         let key = format!("{SOURCE_WORKTREE}{}", events_path.display());
-        let fingerprint = content_fingerprint(&content);
+        let source_container = source.container.as_ref();
+        let fingerprint = source_fingerprint(&content_fingerprint(&content), source_container);
         if state.is_current(&key, &fingerprint) {
             summary.sources_skipped += 1;
             continue;
         }
-        match ingest_work_events_content(work_items_path, &content) {
+        let ingest_content = content_with_source_container(&content, source_container);
+        match ingest_work_events_content(work_items_path, &ingest_content) {
             Ok(report) => {
                 summary.absorb(&report);
                 state.record(key, fingerprint);
@@ -94,7 +102,9 @@ pub fn ingest_project_work_events_paths(
                     for ((refname, _), oid) in refs.iter().zip(oids) {
                         let Some(oid) = oid else { continue };
                         let key = format!("{SOURCE_REF}{refname}");
-                        if state.is_current(&key, &oid) {
+                        let source_container = origin_ref_execution_container(refname);
+                        let fingerprint = source_fingerprint(&oid, source_container.as_ref());
+                        if state.is_current(&key, &fingerprint) {
                             summary.sources_skipped += 1;
                             continue;
                         }
@@ -105,10 +115,12 @@ pub fn ingest_project_work_events_paths(
                                 continue;
                             }
                         };
-                        match ingest_work_events_content(work_items_path, &content) {
+                        let ingest_content =
+                            content_with_source_container(&content, source_container.as_ref());
+                        match ingest_work_events_content(work_items_path, &ingest_content) {
                             Ok(report) => {
                                 summary.absorb(&report);
-                                state.record(key, oid);
+                                state.record(key, fingerprint);
                                 state_changed = true;
                             }
                             Err(error) => {
@@ -137,12 +149,21 @@ pub fn ingest_project_work_events_paths(
 }
 
 /// The events.jsonl file of every local worktree (main checkout included).
-fn worktree_events_files(project_root: &Path) -> Vec<PathBuf> {
+fn worktree_event_sources(project_root: &Path) -> Vec<WorkEventsSource> {
     match gwt::worktree_inventory::enumerate_worktrees(project_root, None) {
         Ok(entries) => entries
             .into_iter()
-            .map(|entry| entry.path.join(EVENTS_TREE_PATH))
-            .filter(|path| path.exists())
+            .map(|entry| WorkEventsSource {
+                events_path: entry.path.join(EVENTS_TREE_PATH),
+                container: entry.branch.map(|branch| WorkspaceExecutionContainerRef {
+                    branch: Some(branch),
+                    worktree_path: Some(entry.path),
+                    pr_number: None,
+                    pr_url: None,
+                    pr_state: None,
+                }),
+            })
+            .filter(|source| source.events_path.exists())
             .collect(),
         Err(error) => {
             tracing::warn!(%error, "work events ingest: worktree enumeration failed");
@@ -151,9 +172,88 @@ fn worktree_events_files(project_root: &Path) -> Vec<PathBuf> {
     }
 }
 
+#[derive(Debug, Clone)]
+struct WorkEventsSource {
+    events_path: PathBuf,
+    container: Option<WorkspaceExecutionContainerRef>,
+}
+
+fn origin_ref_execution_container(refname: &str) -> Option<WorkspaceExecutionContainerRef> {
+    let branch = refname.strip_prefix("refs/remotes/origin/")?.trim();
+    if branch.is_empty() || branch == "HEAD" {
+        return None;
+    }
+    Some(WorkspaceExecutionContainerRef {
+        branch: Some(branch.to_string()),
+        worktree_path: None,
+        pr_number: None,
+        pr_url: None,
+        pr_state: None,
+    })
+}
+
+fn source_fingerprint(
+    raw_fingerprint: &str,
+    container: Option<&WorkspaceExecutionContainerRef>,
+) -> String {
+    let Some(container) = container else {
+        return raw_fingerprint.to_string();
+    };
+    let container_fingerprint =
+        serde_json::to_string(container).unwrap_or_else(|_| "container-serialization-error".into());
+    content_fingerprint(&format!(
+        "{SOURCE_CONTEXT_FINGERPRINT_VERSION}\n{raw_fingerprint}\n{container_fingerprint}"
+    ))
+}
+
+fn content_with_source_container(
+    content: &str,
+    container: Option<&WorkspaceExecutionContainerRef>,
+) -> String {
+    let Some(container) = container else {
+        return content.to_string();
+    };
+    let Ok(container_value) = serde_json::to_value(container) else {
+        return content.to_string();
+    };
+
+    let mut output = String::new();
+    let mut changed = false;
+    for line in content.lines() {
+        let replacement = match serde_json::from_str::<serde_json::Value>(line.trim()) {
+            Ok(mut value) => {
+                if let Some(object) = value.as_object_mut() {
+                    let missing_container = object
+                        .get("execution_container")
+                        .map(|value| value.is_null())
+                        .unwrap_or(true);
+                    if missing_container {
+                        object.insert("execution_container".to_string(), container_value.clone());
+                        changed = true;
+                    }
+                }
+                serde_json::to_string(&value).unwrap_or_else(|_| line.to_string())
+            }
+            Err(_) => line.to_string(),
+        };
+        output.push_str(&replacement);
+        output.push('\n');
+    }
+    if !content.ends_with('\n') {
+        output.pop();
+    }
+
+    if changed {
+        output
+    } else {
+        content.to_string()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use gwt_core::work_events_intake::WorkEventsIntakeState;
     use std::process::Command;
 
     fn run(cmd: &mut Command) {
@@ -283,11 +383,117 @@ mod tests {
             ids.contains(&"work-ref-bbbb2222"),
             "origin ref skeleton restored"
         );
+        let remote_item = projection
+            .work_items
+            .iter()
+            .find(|item| item.id == "work-ref-bbbb2222")
+            .expect("remote item");
+        assert!(
+            remote_item
+                .execution_containers
+                .iter()
+                .any(|container| container.branch.as_deref() == Some("work/remote-side")),
+            "legacy branch-less events imported from a source ref keep that ref's branch"
+        );
 
         // Second run: every source fingerprint is current — nothing re-reads.
         let second = ingest_project_work_events_paths(&repo, &work_items_path, &state_path);
         assert_eq!(second.events_applied, 0);
         assert_eq!(second.sources_ingested, 0);
         assert!(second.sources_skipped >= 2, "fingerprint skip: {second:?}");
+    }
+
+    #[test]
+    fn ingest_reprocesses_old_raw_fingerprint_state_to_repair_source_container() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let repo = temp.path().join("repo");
+        std::fs::create_dir_all(&repo).expect("repo dir");
+        init_repo(&repo);
+
+        run(Command::new("git")
+            .args(["checkout", "-b", "work/cache-repair"])
+            .current_dir(&repo));
+        std::fs::create_dir_all(repo.join(".gwt/work")).expect("mk .gwt/work");
+        std::fs::write(
+            repo.join(".gwt/work/events.jsonl"),
+            format!(
+                "{}\n",
+                event_line(
+                    "evt-cache-repair",
+                    "work-cache-repair-dddd4444",
+                    "cache repair",
+                    "2026-06-03T10:00:00Z"
+                )
+            ),
+        )
+        .expect("write ref events");
+        run(Command::new("git")
+            .args(["add", ".gwt/work/events.jsonl"])
+            .current_dir(&repo));
+        run(Command::new("git")
+            .args(["commit", "-m", "cache repair events"])
+            .current_dir(&repo));
+        run(Command::new("git")
+            .args([
+                "update-ref",
+                "refs/remotes/origin/work/cache-repair",
+                "HEAD",
+            ])
+            .current_dir(&repo));
+
+        let refs = gwt_git::refs::list_origin_refs_with_commit(&repo).expect("origin refs");
+        let (refname, commit) = refs
+            .iter()
+            .find(|(refname, _)| refname == "refs/remotes/origin/work/cache-repair")
+            .expect("cache repair ref");
+        let oid = gwt_git::blob::events_blob_oids_batch(
+            &repo,
+            std::slice::from_ref(commit),
+            EVENTS_TREE_PATH,
+        )
+        .expect("blob oid")
+        .pop()
+        .flatten()
+        .expect("events blob oid");
+        let legacy_content = gwt_git::blob::read_blob(&repo, &oid).expect("blob content");
+
+        let work_items_path = temp.path().join("state/works.json");
+        let state_path = temp.path().join("state/work-events-intake.json");
+
+        ingest_work_events_content(&work_items_path, &legacy_content)
+            .expect("legacy branch-less ingest");
+        let legacy_projection =
+            gwt_core::workspace_projection::load_workspace_work_items_from_path(&work_items_path)
+                .expect("load legacy")
+                .expect("legacy projection");
+        assert!(
+            legacy_projection.work_items[0]
+                .execution_containers
+                .is_empty(),
+            "pre-fix projection starts without branch context"
+        );
+
+        let mut old_state = WorkEventsIntakeState::default();
+        old_state.record(format!("{SOURCE_REF}{refname}"), oid);
+        save_work_events_intake_state(&state_path, &old_state).expect("old state");
+
+        let repaired = ingest_project_work_events_paths(&repo, &work_items_path, &state_path);
+        assert_eq!(
+            repaired.events_applied, 1,
+            "old raw fingerprint cache must not skip source-context repair"
+        );
+
+        let projection =
+            gwt_core::workspace_projection::load_workspace_work_items_from_path(&work_items_path)
+                .expect("load repaired")
+                .expect("repaired projection");
+        assert!(projection.work_items[0]
+            .execution_containers
+            .iter()
+            .any(|container| container.branch.as_deref() == Some("work/cache-repair")));
+
+        let second = ingest_project_work_events_paths(&repo, &work_items_path, &state_path);
+        assert_eq!(second.events_applied, 0);
+        assert_eq!(second.sources_ingested, 0);
     }
 }

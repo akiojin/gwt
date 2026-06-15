@@ -27,7 +27,7 @@ use serde::{Deserialize, Serialize};
 use crate::error::{GwtError, Result};
 use crate::workspace_projection::{
     load_workspace_work_items_from_path, save_workspace_work_items_projection_to_path, WorkEvent,
-    WorkEventKind, WorkItemsProjection,
+    WorkEventKind, WorkItemsProjection, WorkspaceExecutionContainerRef,
 };
 
 /// Per-run accounting so callers (and tests) can see what happened.
@@ -97,12 +97,20 @@ pub fn ingest_work_events_content(
         if !seen_event_ids.insert(event.id.clone()) {
             // Covers both already-ingested events and duplicate lines inside
             // one source (git union-merge artifacts).
-            report.skipped_duplicate += 1;
+            if repair_duplicate_event_container(&mut projection, &event) {
+                report.applied += 1;
+            } else {
+                report.skipped_duplicate += 1;
+            }
             continue;
         }
         incoming.push(event);
     }
     if incoming.is_empty() {
+        if report.applied > 0 {
+            projection.updated_at = Utc::now();
+            save_workspace_work_items_projection_to_path(work_items_path, &projection)?;
+        }
         return Ok(report);
     }
     incoming.sort_by_key(|event| event.updated_at);
@@ -128,6 +136,41 @@ pub fn ingest_work_events_content(
         save_workspace_work_items_projection_to_path(work_items_path, &projection)?;
     }
     Ok(report)
+}
+
+fn repair_duplicate_event_container(
+    projection: &mut WorkItemsProjection,
+    event: &WorkEvent,
+) -> bool {
+    let Some(container) = event.execution_container.as_ref() else {
+        return false;
+    };
+    let Some(item) = projection
+        .work_items
+        .iter_mut()
+        .find(|item| item.id == event.work_item_id)
+    else {
+        return false;
+    };
+    if item
+        .execution_containers
+        .iter()
+        .any(|existing| execution_container_same(existing, container))
+    {
+        return false;
+    }
+    item.execution_containers.push(container.clone());
+    true
+}
+
+fn execution_container_same(
+    left: &WorkspaceExecutionContainerRef,
+    right: &WorkspaceExecutionContainerRef,
+) -> bool {
+    (left.branch.is_some() && left.branch == right.branch)
+        || (left.worktree_path.is_some() && left.worktree_path == right.worktree_path)
+        || (left.pr_number.is_some() && left.pr_number == right.pr_number)
+        || (left.pr_url.is_some() && left.pr_url == right.pr_url)
 }
 
 /// Fingerprint cache mapping a source key (worktree path / ref name) to the
@@ -264,6 +307,53 @@ mod tests {
             .expect("projection");
         assert_eq!(projection.work_items.len(), 1);
         assert_eq!(projection.work_items[0].events.len(), 1);
+    }
+
+    #[test]
+    fn duplicate_event_can_repair_missing_execution_container() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let works = tmp.path().join("works.json");
+        let legacy_content = event_json(
+            "evt-legacy",
+            "work-legacy-cccc3333",
+            "update",
+            "2026-06-01T10:00:00Z",
+            ",\"title\":\"legacy work\",\"status_category\":\"active\"",
+        );
+        let repaired_content = event_json(
+            "evt-legacy",
+            "work-legacy-cccc3333",
+            "update",
+            "2026-06-01T10:00:00Z",
+            ",\"title\":\"legacy work\",\"status_category\":\"active\",\"execution_container\":{\"branch\":\"work/legacy\"}",
+        );
+
+        ingest_work_events_content(&works, &legacy_content).expect("legacy ingest");
+        let legacy_projection = load_workspace_work_items_from_path(&works)
+            .expect("load legacy")
+            .expect("legacy projection");
+        assert!(
+            legacy_projection.work_items[0]
+                .execution_containers
+                .is_empty(),
+            "legacy event starts branch-less"
+        );
+
+        let repair = ingest_work_events_content(&works, &repaired_content).expect("repair ingest");
+        assert_eq!(repair.applied, 1, "container repair is a projection change");
+
+        let projection = load_workspace_work_items_from_path(&works)
+            .expect("load repaired")
+            .expect("repaired projection");
+        assert!(projection.work_items[0]
+            .execution_containers
+            .iter()
+            .any(|container| container.branch.as_deref() == Some("work/legacy")));
+
+        let duplicate = ingest_work_events_content(&works, &repaired_content)
+            .expect("duplicate repaired ingest");
+        assert_eq!(duplicate.applied, 0);
+        assert_eq!(duplicate.skipped_duplicate, 1);
     }
 
     /// Close kinds are never ingested from any source (#3023 defence +

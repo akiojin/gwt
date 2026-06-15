@@ -3330,6 +3330,9 @@ fn app_runtime_launch_wizard_continue_resolves_runtime_context_from_worktree() {
 
 #[test]
 fn app_runtime_launch_wizard_continue_does_not_materialize_missing_worktree() {
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let temp = tempdir().expect("tempdir");
     let repo = temp.path().join("repo");
     let _origin = init_git_clone_with_origin(&repo);
@@ -14801,6 +14804,9 @@ fn agent_view_synthesizes_latest_conversation_when_history_is_empty() {
 
 #[test]
 fn agent_view_marks_session_history_only_when_worktree_and_branch_are_missing() {
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let temp = tempdir().expect("tempdir");
     let repo = temp.path().join("repo");
     init_git_clone_with_origin(&repo);
@@ -14832,6 +14838,9 @@ fn agent_view_marks_session_history_only_when_worktree_and_branch_are_missing() 
 
 #[test]
 fn agent_view_keeps_session_resumable_when_missing_worktree_branch_exists() {
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let temp = tempdir().expect("tempdir");
     let repo = temp.path().join("repo");
     init_git_clone_with_origin(&repo);
