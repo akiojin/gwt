@@ -7004,3 +7004,31 @@ Type: lesson
 Context: JSON-only gwtd migration initially had to cover hidden .claude/.codex managed assets as well as Rust sources and public docs.
 Learning: Repository-wide command-surface migrations must include hidden managed assets and generated guidance, not only normal rg-visible files.
 Future Action: Before declaring a command-surface migration complete, run rg -uu across .claude, .codex, docs, tests, and source comments, then add contract tests that reject stale guidance.
+
+## 2026-06-16 — Issue Bridge UI can stay empty while backend returns cached entries
+
+Type: failure-pattern
+Context: Issue Bridge showed all Kanban columns as 0 even though issue cache contained plain open Issues and a direct WebSocket load_knowledge_bridge request returned entries for the same window.
+Learning: When Knowledge Bridge backend/cache are healthy but the UI stays empty, inspect frontend mount/load gating, stale detail state, loading flags, and refresh button disabled state before changing cache or backend code.
+Future Action: Add or run frontend regression tests that seed stale detail without entries and stuck initial load before implementing Knowledge Bridge recovery fixes.
+
+## 2026-06-16 — Knowledge Bridge auto refresh must stay cache-first
+
+Type: failure-pattern
+Context: SPEC-2017 Issue Bridge UX verification exposed a red gh issue list HTTP 401 banner while cached issues and details were already visible. The banner appeared after browsing for about a minute in a fresh HOME without GitHub auth.
+Learning: The Knowledge Bridge auto-refresh timer must not call requestKnowledgeBridge(..., true). refresh=true forces remote GitHub sync and can surface auth/network failures over a healthy cache-backed UI. Manual refresh can remain forceful; automatic refresh should be cache-first/non-force.
+Future Action: When changing Knowledge Bridge refresh behavior, test that auto refresh sends refresh=false and that cached Issue browsing remains error-free after the timer fires. Reserve refresh=true for explicit user actions such as the refresh button.
+
+## 2026-06-16 — Hidden agent window status can leave visible tab telemetry stale
+
+Type: failure-pattern
+Context: Stop/terminal_status for an inactive tabbed agent updated runtime state and Project Tab dots, but the target window DOM was not mounted, so the visible sibling window tab strip kept data-agent-state=active and continued pulsing.
+Learning: For tabbed windows, runtime status changes must refresh every mounted tab strip in the group, not only the target window element. Missing-element branches in status handlers still need tab telemetry refresh.
+Future Action: When changing agent runtime status handling, add a regression that emits terminal_status/window_state for a hidden tab and asserts the visible sibling tab state and Project Tab dot both stop pulsing.
+
+## 2026-06-16 — Release は pre-push のカバレッジ90%ゲートでブロックされ得る
+
+Type: lesson
+Context: v9.60.0 の chore(release) commit を push した際、husky pre-push が gwt-core/gwt のフィルタ済みカバレッジ89.72%を検出して reject。release commit 自体はソース無変更だが、Web マージされた既存 PR で develop のカバレッジが閾値割れしていた。
+Learning: バージョンbumpのみの release でも pre-push はリポジトリ全体のカバレッジを再計測する。不足時は --no-verify で逃げず、最も低カバレッジな新規ファイル(今回 cli/json_envelope.rs 46%)に pure 関数の直接ユニットテストを足すのが最短。parse() 等の pure dispatcher は全 operation 分岐を envelope JSON で網羅でき一気に上がる。
+Future Action: release 前に node scripts/check-coverage-threshold.mjs target/coverage-summary.json 90 を先回り実行し、割れていれば最新機能ファイルへユニットテストを足してから release commit を積む。

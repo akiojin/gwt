@@ -56,6 +56,11 @@ import {
   updateProjectTabDot as updateProjectTabDotView,
 } from "/project-tabs-renderer.js";
 import { renderCloseProjectTabConfirmModal } from "/close-project-tab-confirm-modal.js";
+import {
+  createProjectSwitcherController,
+  nextProjectTabId,
+  shouldHandleProjectSwitcherShortcut,
+} from "/project-switcher.js";
 import { createFocusTrap } from "/focus-trap.js";
 import { maximizedGeometry } from "/window-geometry-sync.js";
 import { windowRuntimeLabel } from "/window-runtime-state.js";
@@ -88,8 +93,15 @@ export function createProjectShellSurface({
   cloneProjectDialog,
   migrationModal,
   migrationDialog,
+  isModalOpen = () => false,
 }) {
       const projectTabs = document.getElementById("project-tabs");
+      const projectSwitcherButton = document.getElementById(
+        "project-switcher-button",
+      );
+      const projectSwitcherPanel = document.getElementById(
+        "project-switcher-panel",
+      );
       const openProjectButton = document.getElementById("open-project-button");
       const openProjectMenuButton = document.getElementById(
         "open-project-menu-button",
@@ -131,6 +143,7 @@ export function createProjectShellSurface({
       let renderedProjectOnboardingKey = "";
       let renderedActionAvailabilityKey = "";
       let maximizedViewportSyncFrame = null;
+      const unreadProjectIds = new Set();
 
       function recentProjectsRenderKey(state) {
         return JSON.stringify(
@@ -141,6 +154,66 @@ export function createProjectShellSurface({
           })),
         );
       }
+
+      function desktopNotificationPermission() {
+        return window?.Notification?.permission || "unsupported";
+      }
+
+      function requestDesktopNotificationPermission() {
+        if (typeof window?.Notification?.requestPermission !== "function") {
+          return Promise.resolve(desktopNotificationPermission());
+        }
+        return window.Notification.requestPermission();
+      }
+
+      function renderProjectSwitcherButtonState() {
+        if (!projectSwitcherButton) {
+          return;
+        }
+        projectSwitcherButton.classList.toggle(
+          "has-unread",
+          unreadProjectIds.size > 0,
+        );
+      }
+
+      function renderProjectSwitcher() {
+        projectSwitcherController.render();
+        renderProjectSwitcherButtonState();
+      }
+
+      function clearProjectUnread(projectId, { render = true } = {}) {
+        if (!projectId || !unreadProjectIds.delete(projectId)) {
+          return;
+        }
+        if (render) {
+          renderProjectSwitcher();
+        }
+      }
+
+      function markProjectUnread(projectId) {
+        if (!projectId || projectId === getAppState()?.active_tab_id) {
+          return;
+        }
+        unreadProjectIds.add(projectId);
+        renderProjectSwitcher();
+      }
+
+      function closeProjectSwitcher({ restoreFocus = false } = {}) {
+        projectSwitcherController.close({ restoreFocus });
+      }
+
+      const projectSwitcherController = createProjectSwitcherController({
+        buttonEl: projectSwitcherButton,
+        panelEl: projectSwitcherPanel,
+        getState: getAppState,
+        send,
+        createNode,
+        runtimeStateForWindow,
+        unreadProjectIds,
+        clearUnreadProject: clearProjectUnread,
+        getNotificationPermission: desktopNotificationPermission,
+        requestNotificationPermission: requestDesktopNotificationPermission,
+      });
 
       function windowListRenderKey() {
         const appState = getAppState();
@@ -611,6 +684,7 @@ export function createProjectShellSurface({
 
       function renderProjectTabs() {
         const appState = getAppState();
+        clearProjectUnread(appState.active_tab_id, { render: false });
         renderProjectTabsView({
           projectTabs,
           tabs: appState.tabs || [],
@@ -618,14 +692,18 @@ export function createProjectShellSurface({
           runtimeStateForWindow,
           send,
           requestCloseProjectTab,
+          onSelectProjectTab: clearProjectUnread,
         });
+        renderProjectSwitcherButtonState();
+        if (projectSwitcherController.isOpen()) {
+          renderProjectSwitcher();
+        }
       }
 
-      // SPEC-2013 FR-012: the frontend decides whether the close request
-      // needs confirmation. When running_agent_count is 0 we send the
-      // existing close_project_tab message immediately; otherwise we open
-      // the confirm modal and only emit the message once Close anyway is
-      // pressed. Cancel never emits a message.
+      // SPEC-2013 FR-012 / 2026-06-16 amendment: project tab close always
+      // opens the confirm modal. Running agents only change the copy and
+      // destructive emphasis. Confirm emits close_project_tab; Cancel never
+      // emits a message.
       const closeProjectTabModalEl = document.getElementById(
         "close-project-tab-modal",
       );
@@ -683,15 +761,15 @@ export function createProjectShellSurface({
         const count = Number.isFinite(tab && tab.running_agent_count)
           ? tab.running_agent_count
           : runningAgents.length;
-        if (count <= 0) {
-          send({ kind: "close_project_tab", tab_id: tabId });
-          return;
-        }
+        const effectiveRunningAgents =
+          runningAgents.length > 0 || count <= 0
+            ? runningAgents
+            : Array.from({ length: count }, () => ({ display_name: "agent" }));
         closeProjectTabModalState = {
           open: true,
           tabId,
           tabTitle: (tab && tab.title) || null,
-          runningAgents,
+          runningAgents: effectiveRunningAgents,
         };
         renderCloseProjectTabModal();
       }
@@ -747,6 +825,9 @@ export function createProjectShellSurface({
             });
             recentProjectList.appendChild(row);
           }
+        }
+        if (projectSwitcherController.isOpen()) {
+          renderProjectSwitcher();
         }
       }
 
@@ -1147,6 +1228,53 @@ export function createProjectShellSurface({
         return false;
       }
 
+      function projectShellModalOrDropdownOpen() {
+        return (
+          Boolean(isModalOpen?.()) ||
+          closeProjectTabModalEl?.classList.contains("open") ||
+          cloneProjectModal?.classList.contains("open") ||
+          migrationModal?.classList.contains("open") ||
+          isOpenProjectMenuOpen() ||
+          windowListOpen ||
+          projectSwitcherController.isOpen()
+        );
+      }
+
+      function selectProjectTab(tabId) {
+        if (!tabId) {
+          return;
+        }
+        clearProjectUnread(tabId);
+        send({ kind: "select_project_tab", tab_id: tabId });
+      }
+
+      function handleProjectSwitcherShortcut(event) {
+        const appState = getAppState();
+        if (
+          !shouldHandleProjectSwitcherShortcut(event, {
+            projectCount: (appState.tabs || []).length,
+            modalOpen: projectShellModalOrDropdownOpen(),
+          })
+        ) {
+          return false;
+        }
+        event.preventDefault();
+        if (String(event.key || "").toLowerCase() === "p") {
+          projectSwitcherController.open();
+          return true;
+        }
+        const direction = event.key === "ArrowUp" ? "previous" : "next";
+        const tabId = nextProjectTabId(
+          appState.tabs || [],
+          appState.active_tab_id,
+          direction,
+        );
+        if (tabId) {
+          selectProjectTab(tabId);
+        }
+        return true;
+      }
+
       // SPEC-3064 Phase 3 (E7): project-shell chrome listeners (Open Project
       // button + picker/onboarding entry points, the Open Project
       // split-button menu, the Windows dropdown trigger, and the dropdown
@@ -1198,6 +1326,10 @@ export function createProjectShellSurface({
               event.preventDefault();
               closeOpenProjectMenu({ restoreFocus: true });
             }
+            if (event.key === "Escape" && projectSwitcherController.isOpen()) {
+              event.preventDefault();
+              closeProjectSwitcher({ restoreFocus: true });
+            }
           });
           openProjectMenu.addEventListener("keydown", (event) => {
             if (!isOpenProjectMenuOpen()) {
@@ -1228,7 +1360,23 @@ export function createProjectShellSurface({
 
         windowListButton.addEventListener("click", toggleWindowList);
 
+        window.addEventListener(
+          "keydown",
+          (event) => {
+            handleProjectSwitcherShortcut(event);
+          },
+          true,
+        );
+
         window.addEventListener("pointerdown", (event) => {
+          if (projectSwitcherController.isOpen()) {
+            const insideProjectSwitcher =
+              projectSwitcherPanel?.contains(event.target) ||
+              projectSwitcherButton?.contains(event.target);
+            if (!insideProjectSwitcher) {
+              closeProjectSwitcher();
+            }
+          }
           if (!windowListOpen) {
             return;
           }
@@ -1255,6 +1403,9 @@ export function createProjectShellSurface({
         workspaceHasVisibleMaximizedWindow,
         renderProjectTabs,
         refreshProjectTabDots,
+        markProjectUnread,
+        clearProjectUnread,
+        renderProjectSwitcher,
         renderRecentProjects,
         renderProjectPicker,
         renderProjectOnboarding,

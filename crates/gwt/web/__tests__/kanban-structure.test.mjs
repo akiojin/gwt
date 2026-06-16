@@ -59,7 +59,7 @@ test("Kanban toolbar exposes Hide done toggle id", () => {
   );
 });
 
-test("Knowledge windows install periodic force refresh for external phase changes", () => {
+test("Knowledge windows install periodic cache-first refresh for external phase changes", () => {
   assert.match(
     appSource,
     /KNOWLEDGE_AUTO_REFRESH_INTERVAL_MS/,
@@ -72,8 +72,13 @@ test("Knowledge windows install periodic force refresh for external phase change
   );
   assert.match(
     appSource,
+    /setInterval[\s\S]{0,900}?requestKnowledgeBridge\(\s*windowId,\s*knowledgeKind,\s*false\s*\)/,
+    "expected auto-refresh to stay cache-first instead of forcing remote sync",
+  );
+  assert.doesNotMatch(
+    appSource,
     /setInterval[\s\S]{0,900}?requestKnowledgeBridge\(\s*windowId,\s*knowledgeKind,\s*true\s*\)/,
-    "expected auto-refresh to force remote cache refresh with refresh=true",
+    "auto-refresh must not surface GitHub auth failures while cached entries are visible",
   );
   assert.match(
     appSource,

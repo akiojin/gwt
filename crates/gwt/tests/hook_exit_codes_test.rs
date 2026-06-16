@@ -324,3 +324,93 @@ fn event_dispatcher_codex_tool_use_fails_open_without_hook_session_id() {
     let runtime_state: RuntimeState = serde_json::from_str(&runtime_raw).unwrap();
     assert_eq!(runtime_state.status, "Running");
 }
+
+#[test]
+fn event_dispatcher_session_start_fails_open_when_session_toml_is_corrupt() {
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let tmp = tempfile::tempdir().unwrap();
+    let _home = ScopedEnvVar::set("HOME", tmp.path());
+    let _userprofile = ScopedEnvVar::set("USERPROFILE", tmp.path());
+    let sessions_dir = tmp.path().join(".gwt").join("sessions");
+    std::fs::create_dir_all(&sessions_dir).unwrap();
+    std::fs::write(
+        sessions_dir.join("session-corrupt.toml"),
+        "started_at = \"2026-06-16T04:30:00.\n320310Z\"",
+    )
+    .unwrap();
+    let runtime_path = gwt_agent::runtime_state_path(&sessions_dir, "session-corrupt");
+    let _session_id = ScopedEnvVar::set(GWT_SESSION_ID_ENV, "session-corrupt");
+    let _runtime_path = ScopedEnvVar::set(GWT_SESSION_RUNTIME_PATH_ENV, &runtime_path);
+
+    let output = event_dispatcher::handle_with_input(
+        "SessionStart",
+        r#"{"session_id":"agent-123"}"#,
+        tmp.path(),
+        Some("session-corrupt"),
+    )
+    .expect("corrupt session TOML must not make SessionStart exit 1");
+
+    assert_eq!(output, HookOutput::Silent);
+    let runtime_raw = std::fs::read_to_string(&runtime_path).unwrap();
+    let runtime_state: RuntimeState = serde_json::from_str(&runtime_raw).unwrap();
+    assert_eq!(runtime_state.status, "Idle");
+    assert_eq!(runtime_state.source_event, "SessionStart");
+}
+
+#[test]
+fn event_dispatcher_user_prompt_fails_open_when_session_toml_is_corrupt() {
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let tmp = tempfile::tempdir().unwrap();
+    let _home = ScopedEnvVar::set("HOME", tmp.path());
+    let _userprofile = ScopedEnvVar::set("USERPROFILE", tmp.path());
+    let sessions_dir = tmp.path().join(".gwt").join("sessions");
+    std::fs::create_dir_all(&sessions_dir).unwrap();
+    std::fs::write(sessions_dir.join("session-corrupt.toml"), "odex\"").unwrap();
+    let runtime_path = gwt_agent::runtime_state_path(&sessions_dir, "session-corrupt");
+    let _session_id = ScopedEnvVar::set(GWT_SESSION_ID_ENV, "session-corrupt");
+    let _runtime_path = ScopedEnvVar::set(GWT_SESSION_RUNTIME_PATH_ENV, &runtime_path);
+
+    let output = event_dispatcher::handle_with_input(
+        "UserPromptSubmit",
+        r#"{"session_id":"agent-123"}"#,
+        tmp.path(),
+        Some("session-corrupt"),
+    )
+    .expect("corrupt session TOML must not make UserPromptSubmit exit 1");
+
+    assert_eq!(output, HookOutput::Silent);
+    let runtime_raw = std::fs::read_to_string(&runtime_path).unwrap();
+    let runtime_state: RuntimeState = serde_json::from_str(&runtime_raw).unwrap();
+    assert_eq!(runtime_state.status, "Running");
+    assert_eq!(runtime_state.source_event, "UserPromptSubmit");
+}
+
+#[test]
+fn event_dispatcher_stop_fails_open_when_completed_stop_metadata_is_corrupt() {
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let tmp = tempfile::tempdir().unwrap();
+    let _home = ScopedEnvVar::set("HOME", tmp.path());
+    let _userprofile = ScopedEnvVar::set("USERPROFILE", tmp.path());
+    let sessions_dir = tmp.path().join(".gwt").join("sessions");
+    std::fs::create_dir_all(&sessions_dir).unwrap();
+    std::fs::write(sessions_dir.join("session-corrupt.toml"), "411253Z\"").unwrap();
+    let runtime_path = gwt_agent::runtime_state_path(&sessions_dir, "session-corrupt");
+    let _session_id = ScopedEnvVar::set(GWT_SESSION_ID_ENV, "session-corrupt");
+    let _runtime_path = ScopedEnvVar::set(GWT_SESSION_RUNTIME_PATH_ENV, &runtime_path);
+
+    let output =
+        event_dispatcher::handle_with_input("Stop", r#"{}"#, tmp.path(), Some("session-corrupt"))
+            .expect("corrupt session TOML must not make Stop completed-stop exit 1");
+
+    assert_eq!(output, HookOutput::Silent);
+    let runtime_raw = std::fs::read_to_string(&runtime_path).unwrap();
+    let runtime_state: RuntimeState = serde_json::from_str(&runtime_raw).unwrap();
+    assert_eq!(runtime_state.status, "Idle");
+    assert_eq!(runtime_state.source_event, "Stop");
+}

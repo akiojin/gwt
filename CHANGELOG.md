@@ -1,6 +1,28 @@
 # Changelog
 
 All notable changes to this project will be documented in this file.
+## [9.61.0] - 2026-06-16
+
+### Bug Fixes
+
+- **release:** Publish arch-specific macOS DMGs
+- Refresh hidden agent tab telemetry
+- Harden agent session persistence
+- Recover Issue Bridge cache loads
+- Restore Issue Bridge list UX
+
+### Features
+
+- Improve project tab switching UX
+
+### Miscellaneous Tasks
+
+- Update work event log
+- Merge develop into macos dmg branch
+- Merge develop into telemetry branch
+- Update work event log
+- Merge origin/develop into Issue Bridge branch
+
 ## [9.60.0] - 2026-06-16
 
 ### Bug Fixes

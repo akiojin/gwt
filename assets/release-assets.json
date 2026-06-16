@@ -12,7 +12,8 @@
     "windows-x86_64": "gwt-windows-x86_64.zip"
   },
   "installer_assets": {
-    "macos": "gwt-macos-universal.dmg",
+    "macos-aarch64": "gwt-macos-arm64.dmg",
+    "macos-x86_64": "gwt-macos-x86_64.dmg",
     "windows": "gwt-windows-x86_64.msi"
   }
 }

@@ -1,11 +1,14 @@
 //! Agent session persistence: save/load sessions as TOML files.
 
 use std::{
+    fs::{self, File, OpenOptions},
+    io,
     io::Write,
     path::{Path, PathBuf},
 };
 
 use chrono::{DateTime, Utc};
+use fs2::FileExt;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
@@ -363,11 +366,10 @@ impl Session {
     /// Save the session to a TOML file under the given directory.
     /// File is written to `<dir>/<session_id>.toml`.
     pub fn save(&self, dir: &Path) -> std::io::Result<()> {
-        std::fs::create_dir_all(dir)?;
-        let path = dir.join(format!("{}.toml", self.id));
-        let content = toml::to_string_pretty(self)
-            .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e.to_string()))?;
-        std::fs::write(path, content)
+        let content = serialize_session_toml(self)?;
+        with_session_lock(dir, &self.id, || {
+            write_session_toml_atomic(&session_file_path(dir, &self.id), &content)
+        })
     }
 
     /// Deserialize a session from a TOML file verbatim. SPEC-1921 FR-066:
@@ -426,6 +428,112 @@ impl Session {
     pub fn fast_mode_enabled(&self) -> bool {
         self.fast_mode || self.codex_fast_mode
     }
+}
+
+fn session_file_path(dir: &Path, session_id: &str) -> PathBuf {
+    dir.join(format!("{session_id}.toml"))
+}
+
+fn session_lock_path(dir: &Path, session_id: &str) -> PathBuf {
+    dir.join(format!(".{session_id}.lock"))
+}
+
+fn serialize_session_toml(session: &Session) -> io::Result<String> {
+    toml::to_string_pretty(session)
+        .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e.to_string()))
+}
+
+fn with_session_lock<T, F>(dir: &Path, session_id: &str, action: F) -> io::Result<T>
+where
+    F: FnOnce() -> io::Result<T>,
+{
+    fs::create_dir_all(dir)?;
+    let lock_path = session_lock_path(dir, session_id);
+    let lock_file = OpenOptions::new()
+        .create(true)
+        .read(true)
+        .truncate(false)
+        .write(true)
+        .open(&lock_path)?;
+    lock_file.lock_exclusive()?;
+    let result = action();
+    match lock_file.unlock() {
+        Ok(()) => result,
+        Err(unlock_error) => match result {
+            Ok(_) => Err(unlock_error),
+            Err(action_error) => Err(action_error),
+        },
+    }
+}
+
+fn write_session_toml_atomic(path: &Path, content: &str) -> io::Result<()> {
+    let parent = path.parent().ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "session TOML path must have a parent directory",
+        )
+    })?;
+    fs::create_dir_all(parent)?;
+
+    let file_name = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("session.toml");
+    let tmp_path = parent.join(format!(
+        ".{file_name}.tmp-{}-{}",
+        std::process::id(),
+        Uuid::new_v4()
+    ));
+
+    let write_result = (|| -> io::Result<()> {
+        let mut tmp = File::create(&tmp_path)?;
+        tmp.write_all(content.as_bytes())?;
+        tmp.sync_all()
+    })();
+    if let Err(error) = write_result {
+        let _ = fs::remove_file(&tmp_path);
+        return Err(error);
+    }
+
+    if cfg!(windows) && path.exists() {
+        fs::remove_file(path)?;
+    }
+
+    if let Err(error) = fs::rename(&tmp_path, path) {
+        let _ = fs::remove_file(&tmp_path);
+        return Err(error);
+    }
+
+    sync_parent_dir(parent)
+}
+
+#[cfg(unix)]
+fn sync_parent_dir(parent: &Path) -> io::Result<()> {
+    File::open(parent)?.sync_all()
+}
+
+#[cfg(not(unix))]
+fn sync_parent_dir(_parent: &Path) -> io::Result<()> {
+    Ok(())
+}
+
+/// Load, mutate, and persist one session under a per-session file lock.
+///
+/// Production read-modify-write paths should use this helper instead of
+/// loading a `Session` and later calling [`Session::save`], otherwise
+/// concurrent hook/startup updates can still overwrite each other.
+pub fn update_session<F>(sessions_dir: &Path, session_id: &str, mutate: F) -> io::Result<Session>
+where
+    F: FnOnce(&mut Session) -> io::Result<()>,
+{
+    with_session_lock(sessions_dir, session_id, || {
+        let path = session_file_path(sessions_dir, session_id);
+        let mut session = Session::load_and_migrate(&path)?;
+        mutate(&mut session)?;
+        let content = serialize_session_toml(&session)?;
+        write_session_toml_atomic(&path, &content)?;
+        Ok(session)
+    })
 }
 
 fn scrub_legacy_codex_hooks_enablement(agent_id: &AgentId, args: &mut Vec<String>) {
@@ -565,10 +673,10 @@ pub fn persist_session_status(
     session_id: &str,
     status: AgentStatus,
 ) -> std::io::Result<()> {
-    let session_path = sessions_dir.join(format!("{session_id}.toml"));
-    let mut session = Session::load_and_migrate(&session_path)?;
-    session.update_status(status);
-    session.save(sessions_dir)?;
+    update_session(sessions_dir, session_id, |session| {
+        session.update_status(status);
+        Ok(())
+    })?;
     SessionRuntimeState::new(status).save(&runtime_state_path(sessions_dir, session_id))
 }
 
@@ -577,20 +685,22 @@ pub fn persist_session_hook_event(
     session_id: &str,
     event: &str,
 ) -> std::io::Result<()> {
-    let session_path = sessions_dir.join(format!("{session_id}.toml"));
-    let mut session = Session::load_and_migrate(&session_path)?;
-    session.record_hook_event(event);
-    session.save(sessions_dir)
+    update_session(sessions_dir, session_id, |session| {
+        session.record_hook_event(event);
+        Ok(())
+    })
+    .map(|_| ())
 }
 
 pub fn persist_session_completed_stop(
     sessions_dir: &Path,
     session_id: &str,
 ) -> std::io::Result<()> {
-    let session_path = sessions_dir.join(format!("{session_id}.toml"));
-    let mut session = Session::load_and_migrate(&session_path)?;
-    session.record_completed_stop();
-    session.save(sessions_dir)
+    update_session(sessions_dir, session_id, |session| {
+        session.record_completed_stop();
+        Ok(())
+    })
+    .map(|_| ())
 }
 
 /// Persist the backing agent session id into the session TOML so quick-start
@@ -606,27 +716,28 @@ pub fn persist_agent_session_id(
         return Ok(());
     }
 
-    let session_path = sessions_dir.join(format!("{session_id}.toml"));
-    let mut session = Session::load_and_migrate(&session_path)?;
-    if session.agent_session_id.as_deref() == Some(agent_session_id) {
-        return Ok(());
-    }
-    // Forward-only Session history: record each distinct conversation UUID the
-    // first time we see it, before promoting it to the latest. Splits already
-    // arrive via the SessionStart hook, so appending here (instead of
-    // overwriting) is enough to reconstruct the full Session list under a Work.
-    if !session
-        .session_history
-        .iter()
-        .any(|entry| entry.agent_session_id == agent_session_id)
-    {
-        session.session_history.push(AgentSessionHistoryEntry {
-            agent_session_id: agent_session_id.to_string(),
-            started_at: Utc::now(),
-        });
-    }
-    session.agent_session_id = Some(agent_session_id.to_string());
-    session.save(sessions_dir)
+    update_session(sessions_dir, session_id, |session| {
+        if session.agent_session_id.as_deref() == Some(agent_session_id) {
+            return Ok(());
+        }
+        // Forward-only Session history: record each distinct conversation UUID the
+        // first time we see it, before promoting it to the latest. Splits already
+        // arrive via the SessionStart hook, so appending here (instead of
+        // overwriting) is enough to reconstruct the full Session list under a Work.
+        if !session
+            .session_history
+            .iter()
+            .any(|entry| entry.agent_session_id == agent_session_id)
+        {
+            session.session_history.push(AgentSessionHistoryEntry {
+                agent_session_id: agent_session_id.to_string(),
+                started_at: Utc::now(),
+            });
+        }
+        session.agent_session_id = Some(agent_session_id.to_string());
+        Ok(())
+    })
+    .map(|_| ())
 }
 
 /// Persist whether the GUI should recreate this session's agent window during
@@ -637,14 +748,15 @@ pub fn persist_session_restore_window_on_startup(
     session_id: &str,
     restore: bool,
 ) -> std::io::Result<()> {
-    let session_path = sessions_dir.join(format!("{session_id}.toml"));
-    let mut session = Session::load_and_migrate(&session_path)?;
-    if session.restore_window_on_startup == restore {
-        return Ok(());
-    }
-    session.restore_window_on_startup = restore;
-    session.updated_at = Utc::now();
-    session.save(sessions_dir)
+    update_session(sessions_dir, session_id, |session| {
+        if session.restore_window_on_startup == restore {
+            return Ok(());
+        }
+        session.restore_window_on_startup = restore;
+        session.updated_at = Utc::now();
+        Ok(())
+    })
+    .map(|_| ())
 }
 
 fn hook_event_status(event: &str) -> Option<AgentStatus> {
@@ -1105,6 +1217,80 @@ display_name = "Claude Code"
 
         let loaded = Session::load(&dir.path().join(format!("{session_id}.toml"))).unwrap();
         assert!(!loaded.restore_window_on_startup);
+    }
+
+    #[test]
+    fn concurrent_session_metadata_updates_preserve_history_and_parseable_toml() {
+        let dir = tempfile::tempdir().unwrap();
+        let session = Session::new("/tmp/wt", "feature/x", AgentId::Codex);
+        let session_id = session.id.clone();
+        session.save(dir.path()).unwrap();
+
+        let thread_count = 16;
+        let barrier = std::sync::Arc::new(std::sync::Barrier::new(thread_count));
+        let sessions_dir = std::sync::Arc::new(dir.path().to_path_buf());
+        let mut handles = Vec::new();
+
+        for index in 0..thread_count {
+            let barrier = std::sync::Arc::clone(&barrier);
+            let sessions_dir = std::sync::Arc::clone(&sessions_dir);
+            let session_id = session_id.clone();
+            handles.push(std::thread::spawn(move || {
+                barrier.wait();
+                let agent_session_id = format!("agent-{index:02}");
+                persist_agent_session_id(&sessions_dir, &session_id, &agent_session_id).unwrap();
+                let event = if index % 2 == 0 {
+                    "UserPromptSubmit"
+                } else {
+                    "PreToolUse"
+                };
+                persist_session_hook_event(&sessions_dir, &session_id, event).unwrap();
+            }));
+        }
+
+        for handle in handles {
+            handle.join().unwrap();
+        }
+
+        let path = dir.path().join(format!("{session_id}.toml"));
+        let raw = std::fs::read_to_string(&path).unwrap();
+        assert!(
+            toml::from_str::<toml::Value>(&raw).is_ok(),
+            "session TOML must remain parseable after concurrent metadata updates:\n{raw}"
+        );
+
+        let loaded = Session::load(&path).unwrap();
+        let mut history: Vec<_> = loaded
+            .session_history
+            .iter()
+            .map(|entry| entry.agent_session_id.as_str())
+            .collect();
+        history.sort_unstable();
+        let expected: Vec<_> = (0..thread_count)
+            .map(|index| format!("agent-{index:02}"))
+            .collect();
+        assert_eq!(
+            history,
+            expected.iter().map(String::as_str).collect::<Vec<_>>()
+        );
+        assert!(
+            matches!(
+                loaded.last_hook_event.as_deref(),
+                Some("UserPromptSubmit" | "PreToolUse")
+            ),
+            "last hook event should reflect one successful concurrent hook update"
+        );
+
+        let toml_files: Vec<_> = std::fs::read_dir(dir.path())
+            .unwrap()
+            .filter_map(Result::ok)
+            .filter(|entry| entry.path().extension().and_then(|ext| ext.to_str()) == Some("toml"))
+            .collect();
+        assert_eq!(
+            toml_files.len(),
+            1,
+            "session persistence must not leave temp files with .toml extension"
+        );
     }
 
     // SPEC-1921 Phase 53 / FR-066: Session::load must not silently rewrite

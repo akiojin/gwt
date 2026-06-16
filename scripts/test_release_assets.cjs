@@ -35,8 +35,8 @@ run("release asset names match the public portable contract", () => {
 });
 
 run("primary release asset names match the GUI-first install contract", () => {
-  assert.equal(primaryReleaseAssetName("darwin", "arm64"), "gwt-macos-universal.dmg");
-  assert.equal(primaryReleaseAssetName("darwin", "x64"), "gwt-macos-universal.dmg");
+  assert.equal(primaryReleaseAssetName("darwin", "arm64"), "gwt-macos-arm64.dmg");
+  assert.equal(primaryReleaseAssetName("darwin", "x64"), "gwt-macos-x86_64.dmg");
   assert.equal(primaryReleaseAssetName("linux", "arm64"), "gwt-linux-aarch64.tar.gz");
   assert.equal(primaryReleaseAssetName("linux", "x64"), "gwt-linux-x86_64.tar.gz");
   assert.equal(primaryReleaseAssetName("win32", "x64"), "gwt-windows-x86_64.msi");
@@ -139,6 +139,38 @@ run("macOS app bundle hides the Dock icon via LSUIElement=true (SPEC #2920)", ()
     workflow,
     /<key>LSUIElement<\/key>\s*\n\s*<true\/>/,
     "build-dmg Info.plist must declare LSUIElement=true so the tray-resident process stays out of the Dock"
+  );
+});
+
+run("macOS release workflow builds arch-specific GUI DMGs", () => {
+  const workflow = fs.readFileSync(
+    path.join(__dirname, "..", ".github", "workflows", "release.yml"),
+    "utf8"
+  );
+  assert.match(
+    workflow,
+    /dmg_name:\s*gwt-macos-arm64\.dmg/,
+    "build-dmg matrix must publish the Apple Silicon GUI installer as gwt-macos-arm64.dmg"
+  );
+  assert.match(
+    workflow,
+    /dmg_name:\s*gwt-macos-x86_64\.dmg/,
+    "build-dmg matrix must publish the Intel Mac GUI installer as gwt-macos-x86_64.dmg"
+  );
+  assert.doesNotMatch(
+    workflow,
+    /gwt-macos-universal\.dmg/,
+    "current release workflow must not publish the universal macOS GUI installer"
+  );
+  assert.match(
+    workflow,
+    /lipo -archs "dist\/GWT\.app\/Contents\/MacOS\/gwt"/,
+    "build-dmg must verify the app bundle gwt binary architecture before upload"
+  );
+  assert.match(
+    workflow,
+    /lipo -archs "dist\/GWT\.app\/Contents\/MacOS\/gwtd"/,
+    "build-dmg must verify the app bundle gwtd binary architecture before upload"
   );
 });
 
@@ -286,7 +318,9 @@ run("README install guidance points to GUI-first release assets", () => {
   const readmeJa = fs.readFileSync(path.join(__dirname, "..", "README.ja.md"), "utf8");
 
   for (const doc of [readme, readmeJa]) {
-    assert.match(doc, /gwt-macos-universal\.dmg/);
+    assert.match(doc, /gwt-macos-arm64\.dmg/);
+    assert.match(doc, /gwt-macos-x86_64\.dmg/);
+    assert.doesNotMatch(doc, /gwt-macos-universal\.dmg/);
     assert.match(doc, /gwt-windows-x86_64\.msi/);
     assert.match(doc, /gwt-linux-x86_64\.tar\.gz/);
     assert.match(doc, /bash scripts\/check-frontend-bundle\.sh/);

@@ -37,6 +37,42 @@ test.describe("Agent window tab hover title", () => {
     // agent-2 has no dynamic detail, so the tooltip falls back to the title.
     await expect(fallbackTab).toHaveAttribute("title", "Claude");
   });
+
+  test("inactive tab telemetry updates when runtime status changes", async ({
+    page,
+  }) => {
+    await installEmbeddedRoutes(page);
+    await installTabbedAgentsBackend(page);
+
+    await page.goto(APP_URL);
+
+    const activeWindow = page.locator(".workspace-window[data-id='agent-1']");
+    await expect(activeWindow).toBeVisible({ timeout: 10_000 });
+
+    const siblingTab = activeWindow.locator(
+      ".window-tab[data-window-tab-id='agent-2']",
+    );
+    const projectDot = page.locator(
+      ".project-tab[data-project-tab-id='tab-1'] [data-role='project-tab-dot']",
+    );
+    const siblingDot = siblingTab.locator(".window-tab-state");
+    await expect(siblingTab).toHaveAttribute("data-agent-state", "active");
+    await expect(projectDot).toHaveAttribute("data-state", "running");
+    await expect(siblingDot).toHaveCSS("animation-name", /window-tab-state-pulse/);
+    await expect(projectDot).toHaveCSS(
+      "animation-name",
+      /project-tab-agent-running-pulse/,
+    );
+
+    await page.evaluate(() => {
+      window.__tabbedAgentsFixture?.emitTerminalStatus("agent-2", "idle");
+    });
+
+    await expect(siblingTab).toHaveAttribute("data-agent-state", "idle");
+    await expect(projectDot).toHaveAttribute("data-state", "");
+    await expect(siblingDot).toHaveCSS("animation-name", "none");
+    await expect(projectDot).toHaveCSS("animation-name", "none");
+  });
 });
 
 async function installTabbedAgentsBackend(page) {
@@ -83,6 +119,7 @@ async function installTabbedAgentsBackend(page) {
                   ...baseWindow,
                   id: "agent-2",
                   title: "Claude",
+                  status: "running",
                   z_index: 1,
                   agent_id: "claude",
                   agent_color: "violet",
@@ -102,11 +139,13 @@ async function installTabbedAgentsBackend(page) {
       static OPEN = 1;
       static CLOSING = 2;
       static CLOSED = 3;
+      static instances = [];
 
       constructor(url) {
         super();
         this.url = url;
         this.readyState = FixtureWebSocket.CONNECTING;
+        FixtureWebSocket.instances.push(this);
         setTimeout(() => {
           this.readyState = FixtureWebSocket.OPEN;
           this.dispatchEvent(new Event("open"));
@@ -134,5 +173,12 @@ async function installTabbedAgentsBackend(page) {
       configurable: true,
       value: FixtureWebSocket,
     });
+    window.__tabbedAgentsFixture = {
+      emitTerminalStatus(windowId, status) {
+        FixtureWebSocket.instances?.forEach((socket) =>
+          socket.emit({ kind: "terminal_status", id: windowId, status }),
+        );
+      },
+    };
   });
 }

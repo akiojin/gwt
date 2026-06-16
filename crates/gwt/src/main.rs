@@ -2540,7 +2540,7 @@ mod tests {
             current: "9.20.1".to_string(),
             latest: "9.20.2".to_string(),
             release_url: "https://example.invalid/releases/v9.20.2".to_string(),
-            asset_url: Some("https://example.invalid/gwt-macos-universal.dmg".to_string()),
+            asset_url: Some("https://example.invalid/gwt-macos-arm64.dmg".to_string()),
             checked_at: Utc::now(),
         };
 

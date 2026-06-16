@@ -1,7 +1,8 @@
-// SPEC-2013 FR-012: project tab の `×` を押した際、agent preset
-// (Agent / Claude / Codex もしくは agent_id 設定済み) で
-// `WindowState::Running` の window が 1 個以上のときだけ警告 modal を
-// 表示する。modal は既存 modal の `.modal-backdrop` + `.modal-shell`
+// SPEC-2013 FR-012 / 2026-06-16 amendment: project tab の `×` は常に
+// 確認 modal を表示する。agent preset (Agent / Claude / Codex もしくは
+// agent_id 設定済み) で `WindowState::Running` の window が 1 個以上の
+// ときだけ警告 copy + destructive confirm に切り替える。
+// modal は既存 modal の `.modal-backdrop` + `.modal-shell`
 // パターンを踏襲し、focus-trap + focus 復元 + overlay click + Esc で
 // cancel をミラーする。
 //
@@ -24,6 +25,9 @@ const MAX_AGENT_LIST = 3;
 
 function appendAgentList(dialog, runningAgents, createNode) {
   const total = runningAgents.length;
+  if (total === 0) {
+    return;
+  }
   const shown = runningAgents.slice(0, MAX_AGENT_LIST);
 
   const list = createNode("ul", "close-project-tab-modal__agent-list");
@@ -100,8 +104,13 @@ function attachCancelHandlers(modalEl, dialogEl, onCancel) {
 // modal element and copy overrides.
 const DEFAULT_COPY = Object.freeze({
   title: "Close project tab?",
-  summary: (runningAgents) => `${runningAgents.length} running agent(s) will be stopped:`,
-  confirmLabel: "Close anyway",
+  summary: (runningAgents) =>
+    runningAgents.length > 0
+      ? `${runningAgents.length} running agent(s) will be stopped:`
+      : "You can reopen it from Recent projects.",
+  confirmLabel: (runningAgents) =>
+    runningAgents.length > 0 ? "Close anyway" : "Close tab",
+  destructive: (runningAgents) => runningAgents.length > 0,
 });
 
 export function renderCloseProjectTabConfirmModal({
@@ -203,10 +212,20 @@ export function renderCloseProjectTabConfirmModal({
   cancelButton.addEventListener("click", () => onCancel());
   footer.appendChild(cancelButton);
 
+  const confirmLabel =
+    typeof copy.confirmLabel === "function"
+      ? copy.confirmLabel(runningAgents)
+      : copy.confirmLabel || DEFAULT_COPY.confirmLabel(runningAgents);
+  const destructive =
+    typeof copy.destructive === "function"
+      ? copy.destructive(runningAgents)
+      : copy.destructive ?? DEFAULT_COPY.destructive(runningAgents);
   const confirmButton = createNode(
     "button",
-    "wizard-button primary destructive close-project-tab-modal__confirm",
-    copy.confirmLabel || DEFAULT_COPY.confirmLabel,
+    `wizard-button primary close-project-tab-modal__confirm${
+      destructive ? " destructive" : ""
+    }`,
+    confirmLabel,
   );
   confirmButton.type = "button";
   confirmButton.dataset.role = "close-project-tab-confirm";
