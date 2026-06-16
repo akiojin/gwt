@@ -1,10 +1,10 @@
-//! `gwtd discuss <resolve|park|reject|clear-next-question> --proposal <label>`
+//! `discuss.*` JSON exit operations.
 //!
 //! Exit CLI for the `gwt-discussion` skill (SPEC-1935 FR-014p). The LLM
-//! invokes these commands to mutate `.gwt/discussion.md` so the
+//! invokes these operations to mutate `.gwt/discussion.md` so the
 //! `skill-discussion-stop-check` handler stops blocking Stop events.
 //!
-//! All commands are idempotent: calling `resolve` on an already-resolved
+//! All operations are idempotent: calling `resolve` on an already-resolved
 //! proposal, or targeting a missing label, exits successfully with a
 //! short informational message. This matches the "LLM 忘れ漏れ耐性"
 //! design note.
@@ -18,7 +18,7 @@ use crate::discussion_resume::{
     set_proposal_status_by_label,
 };
 
-/// Sub-action for `gwtd discuss ...` (SPEC-1935 FR-014p).
+/// Sub-action for `discuss.*` operations (SPEC-1935 FR-014p).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum DiscussAction {
     Resolve {

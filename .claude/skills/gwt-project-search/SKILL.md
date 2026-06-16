@@ -17,24 +17,30 @@ command as `"$GWT_BIN" ...`; if none exists, stop with an actionable
 
 ## File search command (code)
 
-`gwtd search` is the canonical search entry point (SPEC-1942 US-15). Run it
-from inside the target worktree; the repo and worktree are resolved from the
-current directory.
+The `search` JSON operation is the canonical gwtd entry point (SPEC-1942
+US-15). Run it from inside the target worktree; the repo and worktree are
+resolved from the current directory.
 
 ```bash
-"$GWT_BIN" search --files "your search query" --n-results 10 --json
+"$GWT_BIN" <<'JSON'
+{"schema_version":1,"operation":"search","params":{"query":"your search query","scopes":["files"],"n_results":10}}
+JSON
 ```
 
 ## Project docs search
 
 ```bash
-"$GWT_BIN" search --files-docs "your search query" --n-results 10 --json
+"$GWT_BIN" <<'JSON'
+{"schema_version":1,"operation":"search","params":{"query":"your search query","scopes":["files_docs"],"n_results":10}}
+JSON
 ```
 
 To force a full re-index (normally handled by the watcher / auto-build):
 
 ```bash
-"$GWT_BIN" index rebuild --scope files
+"$GWT_BIN" <<'JSON'
+{"schema_version":1,"operation":"index.rebuild","params":{"scope":"files"}}
+JSON
 ```
 
 ## Output format
@@ -56,8 +62,8 @@ To force a full re-index (normally handled by the watcher / auto-build):
 
 - The gwt GUI watcher (2 s debounce, 100-file batch) keeps the index live; non-GUI invocations get an mtime+size diff per call
 - A missing index is auto-built on the first search
-- `--files` is implementation-focused and excludes embedded skill assets, local/archived SPEC trees, local task logs, and snapshot files
-- Project docs are indexed separately and searched with `--files-docs`
+- `params.scopes:["files"]` is implementation-focused and excludes embedded skill assets, local/archived SPEC trees, local task logs, and snapshot files
+- Project docs are indexed separately and searched with `params.scopes:["files_docs"]`
 - Uses semantic similarity (not just keyword matching)
 - Lower distance values indicate higher relevance
 - Canonical standalone skill name: `gwt-project-search`
@@ -66,9 +72,9 @@ To force a full re-index (normally handled by the watcher / auto-build):
 
 ## Fallback: direct runner invocation (older binaries only)
 
-Only when `"$GWT_BIN" search` fails with `unknown command 'search'` (a gwtd
-binary older than the search family), call the Python runner directly with
-`--action search-files` (code) or `--action search-files-docs` (docs):
+Only when the `search` JSON operation is unavailable in an older gwtd binary,
+call the Python runner directly with runner action `search-files` (code) or
+`search-files-docs` (docs):
 
 ```bash
 ~/.gwt/runtime/chroma-venv/bin/python3 ~/.gwt/runtime/chroma_index_runner.py \

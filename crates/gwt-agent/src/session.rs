@@ -56,7 +56,7 @@ pub struct Session {
     ///
     /// `worktree_path` is the process cwd, but gwt-managed worktrees may share
     /// one Workspace Home Project State. Agent title updates must write to that
-    /// canonical root so GUI panes and `gwtd workspace update` observe the same
+    /// canonical root so GUI panes and `workspace.update` observe the same
     /// projection.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub project_state_root: Option<PathBuf>,

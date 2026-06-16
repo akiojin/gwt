@@ -86,7 +86,7 @@ mod tests {
             &[
                 "gwt-build-spec for SPEC-1935",
                 "phase: red-green-refactor",
-                "gwtd build complete",
+                "build.complete",
             ],
         );
     }

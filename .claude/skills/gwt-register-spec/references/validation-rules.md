@@ -42,10 +42,10 @@ keep passing validation. Implementation: prefix match on
 
 ## Roundtrip check (post-create)
 
-After the GitHub Issue has been created and `--edit spec -f <body>` has
+After the GitHub Issue has been created and JSON operation `issue.spec.edit` has
 been called, the skill performs a roundtrip verification:
 
-1. `gwtd issue spec <n> --section spec` must exit 0.
+1. JSON operation `issue.spec.section` must exit 0.
 2. The output must be non-empty.
 3. The output must contain the H1 line of the body (`# SPEC: …`).
 

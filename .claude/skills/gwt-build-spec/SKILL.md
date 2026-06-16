@@ -41,13 +41,11 @@ SPEC-1935 FR-014r routes Stop through `skill-build-spec-stop-check`, which
 reads `.gwt/skill-state/build-spec.json` and blocks Stop while the skill is
 active. Register the skill lifecycle with the exit CLI:
 
-- `gwtd build start --spec <n>` when the skill starts an implementation pass
-- `gwtd build phase --spec <n> --label <red|green|refactor|verify|pr>` at each
-  TDD milestone (logging only)
-- `gwtd build complete --spec <n>` once the Ready PR Gate is satisfied for a
-  releaseable slice and verification passed
-- `gwtd build abort --spec <n> --reason '<text>'` when implementation cannot
-  proceed without a product decision or blocking merge conflict
+- JSON operation `build.start` with `params.spec:<n>` when the skill starts an implementation pass
+- JSON operation `build.phase` with `params.spec:<n>` and
+  `params.label:"red"|"green"|"refactor"|"verify"|"pr"` at each TDD milestone (logging only)
+- JSON operation `build.complete` with `params.spec:<n>` once the Ready PR Gate is satisfied for a releaseable slice and verification passed
+- JSON operation `build.abort` with `params.spec:<n>` and `params.reason` when implementation cannot proceed without a product decision or blocking merge conflict
 
 The Stop-block handler honours Claude Code / Codex's built-in
 `stop_hook_active` flag, so each Stop cycle allows at most one forced
@@ -58,18 +56,18 @@ continuation; a genuinely stuck turn still terminates normally.
 Determine the mode at entry:
 
 - **SPEC mode** if a SPEC ID is provided or discoverable from the current branch/context, AND
-  `gwtd issue spec <N> --section tasks` で tasks セクションが取得できる
+  JSON operation `issue.spec.section` で tasks セクションが取得できる
 - **Standalone mode** otherwise
 
 ## Phase 1: Context Load
 
 ### SPEC mode
 
-1. `gwtd issue spec <N>` で SPEC の全セクション（spec, plan, tasks）を読み込む。
+1. JSON operation `issue.spec.read` で SPEC の全セクション（spec, plan, tasks）を読み込む。
 2. Identify the next incomplete task slice in dependency order:
    - Setup before Foundational work
    - Foundational before story-specific work
-3. SPEC セクションの読み書きは `gwtd issue spec <N> --section <name>` / `gwtd issue spec <N> --edit <name> -f <file>` を使用する。
+3. SPEC セクションの読み書きは JSON operations `issue.spec.section` / `issue.spec.edit` を使用する。
 
 ### Standalone mode
 
@@ -185,7 +183,7 @@ Required checks:
 Update execution tracking:
 
 - Mark completed tasks in `tasks.md`
-- tasks セクションのチェックボックスを `gwtd issue spec <N> --edit tasks -f <file>` で更新する
+- tasks セクションのチェックボックスを JSON operation `issue.spec.edit` で更新する
 
 ### Standalone mode
 
@@ -198,7 +196,7 @@ Update execution tracking:
 
 On completion, suggest `gwt-arch-review` for code review if available, or proceed to `gwt-manage-pr` if not already done.
 
-Only call `gwtd build complete --spec <n>` after the Ready PR Gate is
+Only call JSON operation `build.complete` after the Ready PR Gate is
 satisfied for a releaseable slice. A Draft PR handoff must keep the
 remaining work visible in the report and must not be represented as a
 completed build.

@@ -1,5 +1,5 @@
 //! SPEC-2359: SessionStart hook must register the running agent session
-//! into `projection.agents[]` so that `gwtd workspace update --title-summary`
+//! into `projection.agents[]` so that `workspace.update` JSON operations
 //! reaches the matching agent record instead of being silently dropped at
 //! the `apply_update` matcher in `gwt_core::workspace_projection`.
 

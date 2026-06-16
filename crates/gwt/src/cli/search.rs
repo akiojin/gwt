@@ -1,10 +1,10 @@
-//! `gwtd search ...` family module (SPEC-1942 US-15, FR-106..FR-108).
+//! `search` JSON operation family module (SPEC-1942 US-15, FR-106..FR-108).
 //!
 //! Thin CLI wrapper over [`crate::index_search::search_project_index`] so the
-//! semantic search that skills document is a first-class subcommand instead
-//! of a Python-runner-only exception. LLM agents repeatedly pattern-complete
-//! `gwt-search` (skill name) into `gwtd search`; this family makes that exact
-//! shape the canonical invocation. Scope flags mirror
+//! semantic search that skills document is a first-class JSON operation instead
+//! of a Python-runner-only exception. LLM agents provide scopes through
+//! `params.scopes`; the legacy argv parser remains for internal command-model
+//! tests. Scope flags mirror
 //! [`IndexSearchScope`]; passing no scope flag uses the same default scope
 //! merge as the GUI search window.
 
@@ -14,7 +14,7 @@ use crate::protocol::{IndexSearchMatchMode, IndexSearchResult, IndexSearchScope}
 
 use super::{CliEnv, CliParseError};
 
-/// Parsed `gwtd search "<query>" [flags]` invocation.
+/// Parsed `search` operation.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SearchCommand {
     pub query: String,
@@ -26,7 +26,7 @@ pub struct SearchCommand {
     pub json: bool,
 }
 
-/// Parse an argv slice into a `gwtd search ...` [`super::CliCommand`]
+/// Parse a legacy search argv slice into a [`super::CliCommand`]
 /// (SPEC-1942 US-15). Lives here instead of `cli.rs` to respect the SC-025
 /// family-split size budget, mirroring `register::parse_args`.
 pub fn parse_args(args: &[String]) -> Result<super::CliCommand, CliParseError> {
@@ -35,7 +35,7 @@ pub fn parse_args(args: &[String]) -> Result<super::CliCommand, CliParseError> {
 
 /// Parse the argv tail after the `search` verb. The query is the single
 /// positional argument and may appear before, between, or after flags so the
-/// natural agent invocation `gwtd search --issues "<query>"` parses.
+/// legacy flag-first shape `search --issues "<query>"` parses.
 pub fn parse(args: &[String]) -> Result<SearchCommand, CliParseError> {
     let mut query: Option<String> = None;
     let mut scopes: Vec<IndexSearchScope> = Vec::new();
@@ -240,7 +240,7 @@ mod tests {
     #[test]
     fn parse_accepts_query_after_scope_flag() {
         // The exact misuse shape that motivated US-15:
-        // `gwtd search --issues "<query>"` must parse.
+        // Legacy flag-first shape `search --issues "<query>"` must parse.
         let cmd = parse(&s(&["--issues", "workspace owner resume"])).expect("flag-first parse");
         assert_eq!(cmd.query, "workspace owner resume");
         assert_eq!(cmd.scopes, vec![IndexSearchScope::Issues]);

@@ -12410,7 +12410,7 @@ fn handle_workspace_projection_changed_events_broadcasts_workspace_state_for_pan
         &repo,
         &window_id,
         Some("Pane heading via WindowCanvasState"),
-        Some("triggered by gwtd workspace update --title-summary"),
+        Some("triggered by workspace.update params.purpose"),
     );
     gwt_core::workspace_projection::save_workspace_projection(&repo, &projection)
         .expect("save projection");
@@ -12419,8 +12419,7 @@ fn handle_workspace_projection_changed_events_broadcasts_workspace_state_for_pan
 
     // The original handler returned only ActiveWorkProjection. Phase
     // U-2 promotes it to also broadcast WindowCanvasState in one batch so
-    // the pane heading refreshes immediately after `gwtd workspace
-    // update --title-summary`.
+    // the pane heading refreshes immediately after `workspace.update`.
     assert!(
         events
             .iter()
@@ -12645,7 +12644,7 @@ fn sync_agent_window_titles_fast_path_resolves_across_unrelated_project_root() {
     // additional `same_worktree_path(session.worktree_path,
     // project_root)` filter prevented this and caused the user-visible
     // pane heading to stay on the agent_id fallback even after
-    // `gwtd workspace update --title-summary` succeeded at the data
+    // `workspace.update` succeeded at the data
     // layer.
     let temp = tempdir().expect("tempdir");
     let repo = temp.path().join("repo");

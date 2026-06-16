@@ -97,7 +97,7 @@ impl WindowCanvasState {
     /// the stored value actually changed (after normalization) so callers
     /// can decide whether to emit a broadcast. SPEC-2359 US-26: gating on
     /// real diff avoids forcing frontend re-renders for no-op projection
-    /// reloads (e.g. repeated `gwtd workspace update` with the same title).
+    /// reloads (e.g. repeated `workspace.update` with the same title).
     pub fn set_dynamic_title(&mut self, id: &str, title: Option<String>) -> bool {
         let Some(window) = self
             .persisted

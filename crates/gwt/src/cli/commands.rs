@@ -1,4 +1,4 @@
-/// SPEC-1942 family enum for `gwtd issue ...` (includes `issue spec ...`).
+/// SPEC-1942 command model for `issue.*` and `issue.spec.*` JSON operations.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum IssueCommand {
     SpecReadAll {
@@ -98,7 +98,7 @@ pub enum IssueCommand {
     },
 }
 
-/// SPEC-1942 family enum for `gwtd pr ...`.
+/// SPEC-1942 command model for `pr.*` JSON operations.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PrCommand {
     Current,

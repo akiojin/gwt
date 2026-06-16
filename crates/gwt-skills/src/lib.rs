@@ -691,8 +691,8 @@ mod tests {
             include_str!("../../../.claude/commands/gwt-spec-search.md"),
         ] {
             assert!(
-                command.contains("/gwt:gwt-search --issues"),
-                "expected unified issue-search routing"
+                command.contains("/gwt:gwt-search {\"query\":\"...\",\"scopes\":[\"issues\"]}"),
+                "expected unified issue-search routing through JSON-scoped gwt-search"
             );
             assert!(
                 !command.contains("/gwt:gwt-issue-search"),
@@ -712,8 +712,8 @@ mod tests {
             let issue_skill = std::fs::read_to_string(workspace_root.join(relative))
                 .unwrap_or_else(|err| panic!("failed to read {relative}: {err}"));
             assert!(
-                issue_skill.contains("gwtd issue create --title ... -f ..."),
-                "expected canonical gwtd issue create guidance in {relative}"
+                issue_skill.contains("JSON operation `issue.create`"),
+                "expected canonical issue.create JSON guidance in {relative}"
             );
             assert!(
                 issue_skill
@@ -768,16 +768,12 @@ mod tests {
             let issue_skill = std::fs::read_to_string(workspace_root.join(relative))
                 .unwrap_or_else(|err| panic!("failed to read {relative}: {err}"));
             assert!(
-                issue_skill.contains("gwtd issue view"),
-                "expected canonical gwtd issue view guidance in {relative}"
+                issue_skill.contains("JSON operations `issue.view` and `issue.comments`"),
+                "expected canonical issue.view/comments JSON guidance in {relative}"
             );
             assert!(
-                issue_skill.contains("gwtd issue comments"),
-                "expected canonical gwtd issue comments guidance in {relative}"
-            );
-            assert!(
-                issue_skill.contains("gwtd issue comment"),
-                "expected canonical gwtd issue comment guidance in {relative}"
+                issue_skill.contains("JSON operation `issue.comment`"),
+                "expected canonical issue.comment JSON guidance in {relative}"
             );
             assert!(
                 issue_skill.contains("inspect_issue.py"),
@@ -804,8 +800,9 @@ mod tests {
             let discussion_skill = std::fs::read_to_string(workspace_root.join(relative))
                 .unwrap_or_else(|err| panic!("failed to read {relative}: {err}"));
             assert!(
-                discussion_skill.contains("Check open SPEC Issues: `gwtd issue spec list`."),
-                "expected discussion skill to use gwtd issue spec list in {relative}"
+                discussion_skill
+                    .contains("Check open SPEC Issues with JSON operation `issue.spec.list`."),
+                "expected discussion skill to use issue.spec.list JSON guidance in {relative}"
             );
             assert!(
                 discussion_skill.contains("After each answer:")
@@ -902,11 +899,11 @@ mod tests {
                 "expected discussion skill to hand off through visible task entrypoints in {relative}"
             );
             assert!(
-                discussion_skill.contains("gwtd discuss goal-pending")
-                    && discussion_skill.contains("gwtd discuss goal-started")
-                    && discussion_skill.contains("gwtd discuss goal-failed")
-                    && discussion_skill.contains("gwtd discuss goal-skipped"),
-                "expected discussion skill to arm and settle pending Goal Start state in {relative}"
+                discussion_skill.contains("discuss.goal_pending")
+                    && discussion_skill.contains("discuss.goal_started")
+                    && discussion_skill.contains("discuss.goal_failed")
+                    && discussion_skill.contains("discuss.goal_skipped"),
+                "expected discussion skill to arm and settle pending Goal Start state through JSON operations in {relative}"
             );
         }
 
@@ -917,7 +914,7 @@ mod tests {
             let issue_search_skill = std::fs::read_to_string(workspace_root.join(relative))
                 .unwrap_or_else(|err| panic!("failed to read {relative}: {err}"));
             assert!(
-                issue_search_skill.contains("before manual `gwtd issue view`"),
+                issue_search_skill.contains("manual `issue.view` JSON reads"),
                 "expected issue search skill to steer users away from direct issue reads in {relative}"
             );
             assert!(
@@ -968,11 +965,11 @@ mod tests {
                 "expected discussion command to describe the resume prompt contract in {relative}"
             );
             assert!(
-                discussion_command.contains("gwtd discuss goal-pending")
-                    && discussion_command.contains("goal-started")
-                    && discussion_command.contains("goal-failed")
-                    && discussion_command.contains("goal-skipped"),
-                "expected discussion command to mention pending Goal Start bookkeeping in {relative}"
+                discussion_command.contains("discuss.goal_pending")
+                    && discussion_command.contains("goal_started")
+                    && discussion_command.contains("goal_failed")
+                    && discussion_command.contains("goal_skipped"),
+                "expected discussion command to mention pending Goal Start bookkeeping through JSON operations in {relative}"
             );
         }
 
@@ -1034,20 +1031,20 @@ mod tests {
             let pr_skill = std::fs::read_to_string(workspace_root.join(relative))
                 .unwrap_or_else(|err| panic!("failed to read {relative}: {err}"));
             assert!(
-                pr_skill.contains("gwtd pr current"),
-                "expected canonical gwtd pr current guidance in {relative}"
+                pr_skill.contains("JSON operation `pr.current`"),
+                "expected canonical pr.current JSON guidance in {relative}"
             );
             assert!(
-                pr_skill.contains("gwtd pr create"),
-                "expected canonical gwtd pr create guidance in {relative}"
+                pr_skill.contains("JSON operation `pr.create`"),
+                "expected canonical pr.create JSON guidance in {relative}"
             );
             assert!(
-                pr_skill.contains("gwtd pr edit"),
-                "expected canonical gwtd pr edit guidance in {relative}"
+                pr_skill.contains("JSON operation `pr.edit`"),
+                "expected canonical pr.edit JSON guidance in {relative}"
             );
             assert!(
-                pr_skill.contains("gwtd pr review-threads"),
-                "expected canonical gwtd pr review-threads guidance in {relative}"
+                pr_skill.contains("`pr.review_threads`"),
+                "expected canonical pr.review_threads JSON guidance in {relative}"
             );
             assert!(
                 pr_skill.contains("no current pull request"),
@@ -1059,8 +1056,8 @@ mod tests {
                 "expected conflict-first mergeable guidance in {relative}"
             );
             assert!(
-                pr_skill.contains("gwtd actions logs"),
-                "expected canonical gwtd actions log guidance in {relative}"
+                pr_skill.contains("`actions.logs`"),
+                "expected canonical actions.logs JSON guidance in {relative}"
             );
             assert!(
                 pr_skill.contains("GWT_BIN_PATH") && pr_skill.contains("target/debug/gwtd"),
@@ -1095,8 +1092,8 @@ mod tests {
             let check_flow = std::fs::read_to_string(workspace_root.join(relative))
                 .unwrap_or_else(|err| panic!("failed to read {relative}: {err}"));
             assert!(
-                check_flow.contains("`gwtd pr current`"),
-                "expected canonical gwtd pr current guidance in {relative}"
+                check_flow.contains("JSON operation `pr.current`"),
+                "expected canonical pr.current JSON guidance in {relative}"
             );
             assert!(
                 check_flow.contains("no current pull request"),
@@ -1124,12 +1121,12 @@ mod tests {
             let create_flow = std::fs::read_to_string(workspace_root.join(relative))
                 .unwrap_or_else(|err| panic!("failed to read {relative}: {err}"));
             assert!(
-                create_flow.contains("Create: `gwtd pr create"),
-                "expected canonical gwtd pr create guidance in {relative}"
+                create_flow.contains("Create: JSON operation `pr.create`"),
+                "expected canonical pr.create JSON guidance in {relative}"
             );
             assert!(
-                create_flow.contains("Update: `gwtd pr edit"),
-                "expected canonical gwtd pr edit guidance in {relative}"
+                create_flow.contains("Update: JSON operation `pr.edit`"),
+                "expected canonical pr.edit JSON guidance in {relative}"
             );
             assert!(
                 create_flow.contains("no current pull request"),
@@ -1161,16 +1158,16 @@ mod tests {
             let fix_flow = std::fs::read_to_string(workspace_root.join(relative))
                 .unwrap_or_else(|err| panic!("failed to read {relative}: {err}"));
             assert!(
-                fix_flow.contains("`gwtd pr review-threads reply-and-resolve"),
-                "expected canonical gwt review-thread guidance in {relative}"
+                fix_flow.contains("JSON operation `pr.review_threads.reply_and_resolve`"),
+                "expected canonical review-thread JSON guidance in {relative}"
             );
             assert!(
-                fix_flow.contains("`gwtd pr comment"),
-                "expected canonical gwtd pr comment guidance in {relative}"
+                fix_flow.contains("JSON operation `pr.comment`"),
+                "expected canonical pr.comment JSON guidance in {relative}"
             );
             assert!(
                 !fix_flow.contains("--required-only"),
-                "unexpected nonexistent gwtd pr checks --required-only guidance in {relative}"
+                "unexpected nonexistent pr.checks required-only guidance in {relative}"
             );
             assert!(
                 !fix_flow.contains("No iteration limit"),
@@ -1182,7 +1179,7 @@ mod tests {
             );
             assert!(
                 fix_flow.contains("CI pending/queued --> check at most 3 times")
-                    && fix_flow.contains("gwtd board post --kind blocked")
+                    && fix_flow.contains("`board.post` with `params.kind:\"blocked\"`")
                     && fix_flow.contains("stop instead of sleeping indefinitely"),
                 "expected bounded CI wait handoff guidance in {relative}"
             );
@@ -1209,20 +1206,24 @@ mod tests {
             "unexpected bare gwtd fallback in release command"
         );
         assert!(
-            release_command.contains("\"$GWT_BIN\" issue comment"),
-            "expected release command to use the canonical gwtd issue comment via GWT_BIN"
+            release_command.contains("\"operation\":\"issue.comment\"")
+                || release_command.contains("\"operation\": \"issue.comment\""),
+            "expected release command to use the canonical issue.comment JSON operation"
         );
         assert!(
-            release_command.contains("\"$GWT_BIN\" pr current"),
-            "expected release command to use the canonical gwtd pr current via GWT_BIN"
+            release_command.contains("\"operation\":\"pr.current\"")
+                || release_command.contains("\"operation\": \"pr.current\""),
+            "expected release command to use the canonical pr.current JSON operation"
         );
         assert!(
-            release_command.contains("\"$GWT_BIN\" pr create"),
-            "expected release command to use the canonical gwtd pr create via GWT_BIN"
+            release_command.contains("\"operation\":\"pr.create\"")
+                || release_command.contains("\"operation\": \"pr.create\""),
+            "expected release command to use the canonical pr.create JSON operation"
         );
         assert!(
-            release_command.contains("\"$GWT_BIN\" pr edit"),
-            "expected release command to use the canonical gwtd pr edit via GWT_BIN"
+            release_command.contains("\"operation\":\"pr.edit\"")
+                || release_command.contains("\"operation\": \"pr.edit\""),
+            "expected release command to use the canonical pr.edit JSON operation"
         );
         assert!(
             !release_command.contains("gh issue comment"),
@@ -1376,10 +1377,10 @@ mod tests {
                 .unwrap_or_else(|err| panic!("failed to read {relative}: {err}"));
             assert!(
                 content.contains("Mandatory preflight")
-                    && content.contains("--specs")
-                    && content.contains("--issues")
-                    && content.contains("--files")
-                    && content.contains("--memory"),
+                    && content.contains("\"scopes\":[\"specs\"]")
+                    && content.contains("\"scopes\":[\"issues\"]")
+                    && content.contains("\"scopes\":[\"files\"]")
+                    && content.contains("\"scopes\":[\"memory\"]"),
                 "expected unified search contract in {relative}"
             );
         }
@@ -1392,15 +1393,15 @@ mod tests {
                 .unwrap_or_else(|err| panic!("failed to read {relative}: {err}"));
             assert!(
                 content.contains("Auto-detect the operation mode from arguments")
-                    && content.contains("gwtd board post")
+                    && content.contains("\"operation\":\"board.post\"")
                     && content.contains("GWT_BIN_PATH")
-                    && content.contains("gwtd pane list")
-                    && content.contains("gwtd pane read")
-                    && content.contains("gwtd pane close")
-                    && content.contains("--target")
+                    && content.contains("\"operation\":\"pane.list\"")
+                    && content.contains("\"operation\":\"pane.read\"")
+                    && content.contains("\"operation\":\"pane.close\"")
+                    && content.contains("params.targets")
                     && content.contains("handoff")
                     && content.contains("request"),
-                "expected agent Board coordination and gwtd pane contract in {relative}"
+                "expected agent Board coordination and JSON pane contract in {relative}"
             );
             assert!(
                 !content.contains("pane send")
@@ -1418,11 +1419,11 @@ mod tests {
             .unwrap_or_else(|err| panic!("failed to read gwt-agent command: {err}"));
         assert!(
             command.contains("Board")
-                && command.contains("gwtd board post")
-                && command.contains("gwtd pane")
+                && command.contains("\"operation\":\"board.post\"")
+                && command.contains("`pane.list`, `pane.read`, or `pane.close`")
                 && !command.contains("[message]")
                 && !command.contains("sending"),
-            "expected gwt-agent command to route pane operations through gwtd and communication through Board"
+            "expected gwt-agent command to route pane operations through JSON and communication through Board"
         );
 
         let agents = std::fs::read_to_string(workspace_root.join("AGENTS.md"))

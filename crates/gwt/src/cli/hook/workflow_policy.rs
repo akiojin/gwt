@@ -1202,7 +1202,7 @@ Coverage requirements.
         let event = HookEvent {
             tool_name: Some("Bash".to_string()),
             tool_input: Some(serde_json::json!({
-                "command": "gwtd board post --kind status --body 'Starting implementation'"
+                "command": "gwtd <<'JSON'\n{\"schema_version\":1,\"operation\":\"board.post\",\"params\":{\"kind\":\"status\",\"body\":\"Starting implementation\"}}\nJSON"
             })),
             transcript_path: None,
             cwd: None,

@@ -1,4 +1,4 @@
-//! `gwtd pane ...` — live agent-pane inspection for the `gwt-agent` skill.
+//! `pane.*` JSON operations for live agent-pane inspection.
 
 use std::{collections::HashMap, path::Path, time::Duration};
 
@@ -107,7 +107,7 @@ async fn send_pane_input(
         .filter(|value| !value.trim().is_empty())
         .ok_or_else(|| {
             format!(
-                "{GWT_SESSION_ID_ENV} is not set; gwtd pane send injects only into the calling agent's own pane"
+                "{GWT_SESSION_ID_ENV} is not set; pane.send injects only into the calling agent's own pane"
             )
         })?;
 
@@ -381,7 +381,7 @@ fn pane_websocket_url_from_env() -> Result<String, String> {
     }
 
     let hook_url = std::env::var(HOOK_FORWARD_URL_ENV).map_err(|_| {
-        format!("{HOOK_FORWARD_URL_ENV} is not set; run gwtd pane from a gwt-launched agent pane")
+        format!("{HOOK_FORWARD_URL_ENV} is not set; run pane.* from a gwt-launched agent pane")
     })?;
     websocket_url_from_hook_forward_url(&hook_url).ok_or_else(|| {
         format!("could not derive pane websocket URL from {HOOK_FORWARD_URL_ENV}={hook_url}")

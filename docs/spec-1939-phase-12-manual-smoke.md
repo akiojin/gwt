@@ -20,7 +20,7 @@ same frontend renders correctly when wired to the real backend.
 > Settings → Index tab for full per-scope details.
 
 Use this checklist when verifying a release candidate. Record the
-outcome in the Board (`gwtd board post --kind status --body ...`) so
+outcome in the Board with JSON operation `board.post` so
 SPEC-1939 Issue #2584 can close.
 
 ## Prerequisites
@@ -100,24 +100,15 @@ deferred — no Windows host` in the Board, and rely on the
 After running the checklist, post a status update:
 
 ```bash
-gwtd board post --kind status --owner SPEC-1939 --topic phase-12-smoke \
-  --mention user:akiojin --body $'\
-SPEC-1939 Phase 12/13 macOS smoke (T-IDX-111) 完了:\n\
-- 1 (tab dot aggregation): pass\n\
-- 2 (Settings.Index opens): pass\n\
-- 3 (health table): pass\n\
-- 4 (per-cell Rebuild → green dot): pass\n\
-- 5 (no flicker / focus loss): pass\n\
-\n\
-Windows (T-IDX-112): <pass | best-effort deferred>'
+gwtd <<'JSON'
+{"schema_version":1,"operation":"board.post","params":{"kind":"status","owners":["SPEC-1939"],"topics":["phase-12-smoke"],"mentions":["user:akiojin"],"body":"SPEC-1939 Phase 12/13 macOS smoke (T-IDX-111) 完了:\n- 1 (tab dot aggregation): pass\n- 2 (Settings.Index opens): pass\n- 3 (health table): pass\n- 4 (per-cell Rebuild → green dot): pass\n- 5 (no flicker / focus loss): pass\n\nWindows (T-IDX-112): <pass | best-effort deferred>"}}
+JSON
 ```
 
-Valid `gwtd board post` flags (per the parser at `crates/gwt/src/cli/board.rs`):
-`--kind`, `--body | -f`, `--title-summary`, `--parent`, `--topic`, `--owner`,
-`--target <session-id|branch|agent-id>`, and `--mention <kind:id>` (e.g.
-`user:akiojin`, `agent:codex`). `--target` highlights a post for a specific
-agent / branch / session; `--mention` records a typed audience marker that
-ships with the entry payload.
+Valid `board.post` JSON params include `kind`, `body`, `parent`, `topics`,
+`owners`, `targets`, `mentions`, and `broadcast`. `targets` highlights a post
+for a specific agent / branch / session; `mentions` records a typed audience
+marker that ships with the entry payload.
 
 When the smoke passes on macOS, comment on Issue #2584 with the Board
 link to close the Phase 12 / 13 verification follow-up.

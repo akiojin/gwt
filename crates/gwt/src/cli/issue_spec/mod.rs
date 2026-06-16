@@ -1,4 +1,4 @@
-//! `gwtd issue spec ...` sub-module of the Issue family (SPEC-1942 SC-027 split).
+//! Issue SPEC command model used by JSON envelope operations (SPEC-1942 SC-027 split).
 //!
 //! Hosts argv `parse` and dispatch `run` for the SPEC subcommand surface
 //! plus the family `tests` block. Structured JSON model and render / merge
@@ -28,11 +28,11 @@ use structured::{
 };
 
 const SPEC_SECTION_NAME: &str = "spec";
-const SPEC_CREATE_HELP: &str = r#"gwtd issue spec create --json --title "SPEC: <short title>" [-f <input.json>]
+const SPEC_CREATE_HELP: &str = r#"gwtd stdin JSON envelope operation: issue.spec.create
 
 Structured SPEC input is owned by gwt-github (spec_structured). Use this help
-output as the single source of truth for the JSON shape and the generated
-Markdown format.
+output as the single source of truth for the `params.spec` JSON shape and the
+generated Markdown format.
 
 Input JSON schema:
 {
@@ -65,10 +65,13 @@ Field notes:
 - "success_criteria": rendered as `SC-001`, `SC-002`, ...
 
 Examples:
-gwtd issue spec create --json --title "SPEC: Launch agents from GUI" < spec.json
-gwtd issue spec create --json --title "SPEC: Launch agents from GUI" -f spec.json
-gwtd issue spec 1942 --edit spec --json -f update.json
-gwtd issue spec 1942 --edit spec --json --replace -f replacement.json
+gwtd <<'JSON'
+{"schema_version":1,"operation":"issue.spec.create","params":{"title":"SPEC: Launch agents from GUI","spec":{"background":["..."],"user_stories":[],"functional_requirements":[],"success_criteria":[]}}}
+JSON
+
+gwtd <<'JSON'
+{"schema_version":1,"operation":"issue.spec.edit","params":{"number":1942,"section":"spec","spec":{"background":["..."],"user_stories":[],"functional_requirements":[],"success_criteria":[]},"replace":true}}
+JSON
 "#;
 
 pub(super) fn parse(args: &[&String]) -> Result<IssueCommand, CliParseError> {

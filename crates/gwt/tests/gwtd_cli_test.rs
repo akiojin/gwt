@@ -96,11 +96,41 @@ fn gwtd_no_args_dispatches_stdin_json_envelope() {
 }
 
 #[test]
+fn gwtd_rejects_legacy_family_argv_invocations() {
+    for args in [
+        ["board", "show"].as_slice(),
+        ["issue", "view", "1"].as_slice(),
+        ["hook", "register-codex-managed-hook-trust"].as_slice(),
+        ["index", "--help"].as_slice(),
+        ["workspace", "update", "--title-summary", "legacy"].as_slice(),
+    ] {
+        let output = Command::new(env!("CARGO_BIN_EXE_gwtd"))
+            .args(args)
+            .stdin(Stdio::null())
+            .output()
+            .expect("run gwtd legacy argv");
+
+        assert_eq!(
+            output.status.code(),
+            Some(2),
+            "legacy argv must exit 2 for args {args:?}; stdout={}, stderr={}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(
+            stderr.contains("stdin JSON envelope"),
+            "stderr must point agents to JSON envelope for args {args:?}, got: {stderr}"
+        );
+    }
+}
+
+#[test]
 fn gwtd_index_help_lists_every_rebuild_scope() {
     let output = Command::new(env!("CARGO_BIN_EXE_gwtd"))
-        .args(["index", "--help"])
+        .args(["--help", "index"])
         .output()
-        .expect("run gwtd index --help");
+        .expect("run gwtd --help index");
 
     assert!(output.status.success());
     let stdout = String::from_utf8_lossy(&output.stdout);
@@ -124,17 +154,26 @@ fn gwtd_hook_register_codex_managed_hook_trust_writes_requested_config() {
     }
 
     let output = Command::new(env!("CARGO_BIN_EXE_gwtd"))
-        .args([
-            "hook",
-            "register-codex-managed-hook-trust",
-            "--project-root",
-            project.path().to_str().expect("project path utf8"),
-            "--codex-config",
-            config_path.to_str().expect("config path utf8"),
-        ])
-        .stdin(Stdio::null())
-        .output()
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
         .expect("run gwtd hook register");
+    let mut child = output;
+    write!(
+        child.stdin.take().expect("stdin"),
+        "{}",
+        serde_json::json!({
+            "schema_version": 1,
+            "operation": "hook.register_codex_managed_hook_trust",
+            "params": {
+                "project_root": project.path().to_str().expect("project path utf8"),
+                "codex_config": config_path.to_str().expect("config path utf8"),
+            }
+        })
+    )
+    .expect("write JSON envelope");
+    let output = child.wait_with_output().expect("wait gwtd hook register");
 
     assert!(
         output.status.success(),
@@ -155,5 +194,25 @@ fn gwtd_hook_register_codex_managed_hook_trust_writes_requested_config() {
         config.matches("enabled = true").count(),
         5,
         "Codex config must enable every trusted managed hook, got: {config}"
+    );
+}
+
+#[test]
+fn gwtd_managed_hook_event_remains_argv_transport_exception() {
+    let output = Command::new(env!("CARGO_BIN_EXE_gwtd"))
+        .args(["hook", "event", "SessionStart"])
+        .stdin(Stdio::null())
+        .output()
+        .expect("run gwtd hook event");
+
+    assert!(
+        output.status.success(),
+        "managed hook transport should exit 0, stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        String::from_utf8_lossy(&output.stdout).contains("hookSpecificOutput"),
+        "SessionStart should keep the managed hook stdout contract, got: {}",
+        String::from_utf8_lossy(&output.stdout)
     );
 }

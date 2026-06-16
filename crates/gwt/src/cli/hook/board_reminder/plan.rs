@@ -277,12 +277,13 @@ mod tests {
                 "USER_PROMPT_REMINDER should promote coordination axis '{axis}', got:\n{text}"
             );
         }
-        assert!(text.contains("--kind claim"));
-        assert!(text.contains("--kind handoff"));
-        assert!(text.contains("--target"));
+        assert!(text.contains("params.kind:\"claim\""));
+        assert!(text.contains("params.kind:\"handoff\""));
+        assert!(text.contains("params.targets"));
         assert!(text.contains("Choose the audience before posting"));
-        assert!(text.contains("--mention user:"));
-        assert!(text.contains("--mention agent:"));
+        assert!(text.contains("params.mentions"));
+        assert!(text.contains("user:<id>"));
+        assert!(text.contains("agent:<id>"));
     }
 
     #[test]

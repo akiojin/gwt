@@ -109,11 +109,11 @@ proof fields, incomplete depth fields, or an `Evidence Gate:` that is not
 `Depth Gate:` is missing/open, or `Depth Gate: deferred(<reason>)` has no
 reason. To let Stop succeed, mark each proposal explicitly using the exit CLI:
 
-- `gwtd discuss resolve --proposal "Proposal A"` — active → chosen only after
+- `discuss.resolve` JSON operation — active → chosen only after
   `Evidence Gate: complete`
-- `gwtd discuss park --proposal "Proposal A"` — active → parked (resume later)
-- `gwtd discuss reject --proposal "Proposal A"` — active → rejected
-- `gwtd discuss clear-next-question --proposal "Proposal A"` — clear only the
+- `discuss.park` JSON operation — active → parked (resume later)
+- `discuss.reject` JSON operation — active → rejected
+- `discuss.clear_next_question` JSON operation — clear only the
   question line. It does not bypass incomplete evidence.
 
 When the `Action Bundle` is produced, call the matching exit command for each
@@ -167,14 +167,13 @@ exception path. Keep the same one-question-at-a-time discipline.
 1. Understand the user's concern, idea, or implementation gap.
 2. Use the `gwt-search` skill (a skill, not a PATH command) with 2-3
    semantic queries in Japanese and English.
-3. Check open SPEC Issues: `gwtd issue spec list`.
+3. Check open SPEC Issues with JSON operation `issue.spec.list`.
 4. If an existing Issue number or URL is already the primary owner, capture it
    in the `Intake Memo`.
 5. If a clear owner exists, present it before going further.
 6. If the clear owner is an existing SPEC, run the Board active-claim preflight
    before changing `.gwt/discussion.md` or any SPEC/plan artifacts:
-   - Read the current Board with `gwtd board show --json` when available, or
-     `gwtd board show` as the fallback.
+   - Read the current Board with JSON operation `board.show`.
    - Look for active `claim` entries from another session that mention the same
      owner (`#<N>` or `SPEC-<N>`) or the same phase/topic under discussion.
    - If a matching claim exists, pause the discussion flow and present the
@@ -343,11 +342,11 @@ When the discussion stabilizes, update the right artifacts in one batch.
 - Use `references/ddd-modeling.md` for Bounded Context and domain modeling
 - **Register the SPEC via `gwt-register-spec`** (sub-skill, SPEC-2784). The
   caller prepares title + body file from this discussion's outcome; the
-  sub-skill validates, executes the canonical `create` → `--edit spec` →
-  `--section spec` roundtrip safely, and returns the new Issue number. Add
+  sub-skill validates, executes the canonical `issue.spec.create` →
+  `issue.spec.edit` → `issue.spec.section` roundtrip safely, and returns the new Issue number. Add
   `Register Spec` to the Action Bundle. Use `references/registration.md`
   only when the sub-skill is unavailable; in that case follow its 2-step
-  flow manually and verify `--section spec` returns non-empty content
+  flow manually and verify `issue.spec.section` returns non-empty content
   before handoff.
 - Use `references/clarification.md` to remove high-impact
   `[NEEDS CLARIFICATION]` markers
@@ -407,7 +406,7 @@ Reason: <one sentence>
 
 `Register Spec` runs the `gwt-register-spec` sub-skill (SPEC-2784) to
 materialize a new SPEC Issue safely. Use it instead of manual
-`gwtd issue spec create` whenever a fresh SPEC owner is needed.
+`issue.spec.create` whenever a fresh SPEC owner is needed.
 
 This final result is the handoff point where the workflow may leave Plan Mode.
 
@@ -430,7 +429,7 @@ autonomously after user approval, arm a runtime goal from the bundle
    with a recorded User Verification Result" — never "PR created" or "PR
    merged".
 2. Before the final discussion response stops, write the condition to a temp
-   file and run `gwtd discuss goal-pending --proposal "<label>" -f <file>`
+   file and run JSON operation `discuss.goal_pending`
    after resolving the chosen proposal. This records `Goal State: pending`
    in `.gwt/discussion.md` so the next `UserPromptSubmit` hook can remind
    the agent even though the approval arrives in a later turn.
@@ -441,18 +440,17 @@ autonomously after user approval, arm a runtime goal from the bundle
      contract allows the model to start a Goal itself.
    - **Claude Code** (v2.1.139 or later): the built-in `/goal` command cannot
      be self-invoked by the agent. Queue it into your own pane instead:
-     `gwtd pane send --text '/goal <condition>'` (resolve `GWT_BIN` first per
+     JSON operation `pane.send` with `params.text:"/goal <condition>"` (resolve `GWT_BIN` first per
      the gwtd resolution section). The injected line is submitted
      automatically when the current turn ends. `pane send` is self-only: it
      targets the pane bound to `GWT_SESSION_ID` and rejects other panes.
 4. After a successful goal start, run
-   `gwtd discuss goal-started --proposal "<label>"`. If the user rejects or
-   revises the Action Bundle instead, run
-   `gwtd discuss goal-skipped --proposal "<label>" --reason "<reason>"`
+   JSON operation `discuss.goal_started`. If the user rejects or
+   revises the Action Bundle instead, run JSON operation
+   `discuss.goal_skipped`
    before continuing the discussion. If the goal cannot be started (older
    Claude Code, trust dialog not accepted, goals feature disabled,
-   `pane send` failure), run
-   `gwtd discuss goal-failed --proposal "<label>" --reason "<reason>"`,
+   `pane.send` failure), run JSON operation `discuss.goal_failed`,
    report the failure reason explicitly, print the assembled `/goal
    <condition>` line so the user can run it manually, and continue the exit.
    Goal start failures never block the discussion exit.

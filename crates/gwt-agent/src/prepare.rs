@@ -691,12 +691,16 @@ fn docker_codex_hook_trust_registration_args(
     host_gwt_bin_fallback: &str,
     codex_hook_discovery_mode: gwt_skills::CodexHookDiscoveryMode,
 ) -> Vec<String> {
+    let project_root_json = serde_json::to_string(container_cwd)
+        .expect("container cwd must serialize as a JSON string");
+    let discovery_json = serde_json::to_string(codex_hook_discovery_mode.as_cli_value())
+        .expect("discovery mode must serialize as a JSON string");
     let script = format!(
-        "set -eu\ncodex_home=\"${{CODEX_HOME:-${{HOME:-/root}}/.codex}}\"\nGWT_HOOK_BIN={} exec {} hook register-codex-managed-hook-trust --project-root {} --codex-config \"$codex_home/config.toml\" --codex-hook-discovery {}",
+        "set -eu\ncodex_home=\"${{CODEX_HOME:-${{HOME:-/root}}/.codex}}\"\ncodex_config=\"$codex_home/config.toml\"\nGWT_HOOK_BIN={} exec {} <<JSON\n{{\"schema_version\":1,\"operation\":\"hook.register_codex_managed_hook_trust\",\"params\":{{\"project_root\":{},\"codex_config\":\"$codex_config\",\"codex_hook_discovery\":{}}}}}\nJSON",
         shell_single_quote(host_gwt_bin_fallback),
         shell_single_quote(DOCKER_GWTD_BIN_PATH),
-        shell_single_quote(container_cwd),
-        shell_single_quote(codex_hook_discovery_mode.as_cli_value()),
+        project_root_json,
+        discovery_json,
     );
     vec!["sh".to_string(), "-lc".to_string(), script]
 }
@@ -2105,15 +2109,20 @@ mod tests {
             "script must derive Codex home from the active container user, got: {script}"
         );
         assert!(
-            script.contains(r#"--codex-config "$codex_home/config.toml""#),
-            "script must pass the derived Codex config path, got: {script}"
+            script.contains(r#"codex_config="$codex_home/config.toml""#)
+                && script.contains(r#""codex_config":"$codex_config""#),
+            "script must pass the derived Codex config path through JSON, got: {script}"
         );
         assert!(
-            script.contains("--codex-hook-discovery 'both'"),
-            "script must pass the resolved Codex hook discovery mode, got: {script}"
+            script.contains(r#""operation":"hook.register_codex_managed_hook_trust""#),
+            "script must use the JSON envelope hook registration operation, got: {script}"
         );
         assert!(
-            script.contains("GWT_HOOK_BIN='/host/gwt/bin/gwtd' exec '/usr/local/bin/gwtd'"),
+            script.contains(r#""codex_hook_discovery":"both""#),
+            "script must pass the resolved Codex hook discovery mode through JSON, got: {script}"
+        );
+        assert!(
+            script.contains("GWT_HOOK_BIN='/host/gwt/bin/gwtd' exec '/usr/local/bin/gwtd' <<JSON"),
             "script must invoke container-local gwtd while matching host-generated hooks, got: {script}"
         );
         assert!(

@@ -12,7 +12,7 @@ scenarios.
 
 This phase works on:
 
-GitHub Issue #<Issue番号> の spec セクション。`gwtd issue spec <Issue番号> --section spec` で取得する。
+GitHub Issue #<Issue番号> の spec セクション。JSON operation `issue.spec.section` で取得する。
 
 spec セクションは以下の構造を含む:
 
@@ -31,7 +31,9 @@ spec セクションは以下の構造を含む:
 ### Step 1: Read current spec.md
 
 ```bash
-gwtd issue spec <Issue番号> --section spec
+gwtd <<'JSON'
+{"schema_version":1,"operation":"issue.spec.section","params":{"number":123,"section":"spec"}}
+JSON
 ```
 
 If spec.md does not exist, return to Phase 3 (registration) first.
@@ -86,7 +88,9 @@ After receiving answers:
 Upload:
 
 ```bash
-gwtd issue spec <Issue番号> --edit spec -f /tmp/spec.md
+gwtd <<'JSON'
+{"schema_version":1,"operation":"issue.spec.edit","params":{"number":123,"section":"spec","body":"<updated spec body>"}}
+JSON
 ```
 
 ### Step 6: Decide next step

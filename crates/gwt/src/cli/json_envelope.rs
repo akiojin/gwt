@@ -6,8 +6,8 @@ use crate::protocol::{IndexSearchMatchMode, IndexSearchScope};
 
 use super::{
     memory::MemoryAddCommand, ActionsCommand, CliCommand, CliEnv, CliParseError, DaemonCommand,
-    DiagnosticsCommand, IndexCommand, IndexScope, IssueCommand, MemoryCommand, PaneCommand,
-    PrCommand, SearchCommand, SkillStateAction, WorkspaceCommand,
+    DiagnosticsCommand, HookCommand, IndexCommand, IndexScope, IssueCommand, MemoryCommand,
+    PaneCommand, PrCommand, SearchCommand, SkillStateAction, WorkspaceCommand,
 };
 use super::{BoardCommand, BoardPostCommand};
 
@@ -196,6 +196,9 @@ fn parse(input: &str) -> Result<ParsedEnvelope, CliParseError> {
         "daemon.start" => CliCommand::Daemon(DaemonCommand::Start),
         "daemon.status" => CliCommand::Daemon(DaemonCommand::Status),
         "daemon.subscribe" => daemon_subscribe(params)?,
+        "hook.register_codex_managed_hook_trust" | "hook.register-codex-managed-hook-trust" => {
+            hook_register_codex_trust(params)?
+        }
         "memory.add" => memory_add(params)?,
         "discussion.update" => discussion_update(params)?,
         "discuss.resolve" => discuss_proposal(params, DiscussEnvelopeAction::Resolve)?,
@@ -265,7 +268,7 @@ fn workspace_update(params: &Map<String, Value>) -> Result<CliCommand, CliParseE
     reject_key(params, "title_summary", "workspace.update uses purpose")?;
     let purpose = optional_string(params, "purpose")?;
     if let Some(value) = purpose.as_deref() {
-        super::validate_title_summary_work_name("--purpose", value)?;
+        super::validate_title_summary_work_name("params.purpose", value)?;
     }
     let current_focus = optional_string(params, "current_focus")?;
     let agent_session = agent_session_or_env(params)?;
@@ -296,7 +299,7 @@ fn workspace_join(params: &Map<String, Value>) -> Result<CliCommand, CliParseErr
     reject_key(params, "title_summary", "workspace.join uses purpose")?;
     let purpose = optional_string(params, "purpose")?;
     if let Some(value) = purpose.as_deref() {
-        super::validate_title_summary_work_name("--purpose", value)?;
+        super::validate_title_summary_work_name("params.purpose", value)?;
     }
     Ok(CliCommand::Workspace(WorkspaceCommand::Join {
         agent_session: agent_session_or_env(params)?
@@ -312,7 +315,7 @@ fn workspace_join(params: &Map<String, Value>) -> Result<CliCommand, CliParseErr
 fn workspace_create(params: &Map<String, Value>) -> Result<CliCommand, CliParseError> {
     reject_key(params, "title_summary", "workspace.create uses purpose")?;
     let purpose = required_string(params, "purpose")?;
-    super::validate_title_summary_work_name("--purpose", &purpose)?;
+    super::validate_title_summary_work_name("params.purpose", &purpose)?;
     Ok(CliCommand::Workspace(WorkspaceCommand::Create {
         agent_session: agent_session_or_env(params)?
             .ok_or(CliParseError::MissingFlag("agent_session"))?,
@@ -328,7 +331,7 @@ fn workspace_create(params: &Map<String, Value>) -> Result<CliCommand, CliParseE
 fn workspace_ensure(params: &Map<String, Value>) -> Result<CliCommand, CliParseError> {
     reject_key(params, "title_summary", "workspace.ensure uses purpose")?;
     let purpose = required_string(params, "purpose")?;
-    super::validate_title_summary_work_name("--purpose", &purpose)?;
+    super::validate_title_summary_work_name("params.purpose", &purpose)?;
     Ok(CliCommand::Workspace(WorkspaceCommand::Ensure {
         agent_session: agent_session_or_env(params)?
             .ok_or(CliParseError::MissingFlag("agent_session"))?,
@@ -431,6 +434,26 @@ fn daemon_subscribe(params: &Map<String, Value>) -> Result<CliCommand, CliParseE
         return Err(CliParseError::MissingFlag("channels"));
     }
     Ok(CliCommand::Daemon(DaemonCommand::Subscribe { channels }))
+}
+
+fn hook_register_codex_trust(params: &Map<String, Value>) -> Result<CliCommand, CliParseError> {
+    let mut rest = Vec::new();
+    if let Some(project_root) = optional_string(params, "project_root")? {
+        rest.push("--project-root".to_string());
+        rest.push(project_root);
+    }
+    if let Some(codex_config) = optional_string(params, "codex_config")? {
+        rest.push("--codex-config".to_string());
+        rest.push(codex_config);
+    }
+    if let Some(discovery) = optional_string(params, "codex_hook_discovery")? {
+        rest.push("--codex-hook-discovery".to_string());
+        rest.push(discovery);
+    }
+    Ok(CliCommand::Hook(HookCommand::Run {
+        name: "register-codex-managed-hook-trust".to_string(),
+        rest,
+    }))
 }
 
 fn discussion_update(params: &Map<String, Value>) -> Result<CliCommand, CliParseError> {

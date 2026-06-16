@@ -324,19 +324,20 @@ resolve_gwt_bin() {
 }
 
 GWT_BIN="$(resolve_gwt_bin)" || exit $?
-"$GWT_BIN" pr current
+"$GWT_BIN" <<'JSON'
+{"schema_version":1,"operation":"pr.current","params":{}}
+JSON
 ```
 
 #### 既存PRがある場合
 
-`"$GWT_BIN" pr current` の出力に PR 番号が含まれている場合、以下を実行してタイトル・ラベル・本文を更新（`## Closing Issues` を反映）：
-本文は事前に temp file へ書き出し、その path を `{PR_BODY_FILE}` として扱うこと。
+`pr.current` の JSON envelope 出力に PR 番号が含まれている場合、以下を実行してタイトル・ラベル・本文を更新（`## Closing Issues` を反映）：
+本文は `params.body` に入れること。
 
 ```bash
-"$GWT_BIN" pr edit {PR番号} \
-  --title "chore(release): v{NEW_VERSION}" \
-  -f {PR_BODY_FILE} \
-  --add-label release
+"$GWT_BIN" <<'JSON'
+{"schema_version":1,"operation":"pr.edit","params":{"number":123,"title":"chore(release): v{NEW_VERSION}","body":"<PR body>","add_labels":["release"]}}
+JSON
 ```
 
 > 「既存のRelease PR（#{PR番号}）を更新しました。」
@@ -347,12 +348,9 @@ GWT_BIN="$(resolve_gwt_bin)" || exit $?
 PRを作成：
 
 ```bash
-"$GWT_BIN" pr create \
-  --base main \
-  --head develop \
-  --title "chore(release): v{NEW_VERSION}" \
-  --label release \
-  -f {PR_BODY_FILE}
+"$GWT_BIN" <<'JSON'
+{"schema_version":1,"operation":"pr.create","params":{"base":"main","head":"develop","title":"chore(release): v{NEW_VERSION}","body":"<PR body>","labels":["release"],"draft":false}}
+JSON
 ```
 
 **PR_BODY の内容**（LLMが生成）：
@@ -371,11 +369,14 @@ PR bodyには以下を含めてください：
 
 `ISSUE_NUMBERS` が空でない場合、各 Issue に対してリリースに含まれる旨のコメントを追加する。
 
-まず、ステップ10の直後に `"$GWT_BIN" pr current` を再実行し、出力 1 行目の `#<number>` から PR 番号を取得する：
+まず、ステップ10の直後に JSON operation `pr.current` を再実行し、出力から PR 番号を取得する：
 
 ```bash
 GWT_BIN="$(resolve_gwt_bin)" || exit $?
-PR_CURRENT=$("$GWT_BIN" pr current)
+PR_CURRENT=$("$GWT_BIN" <<'JSON'
+{"schema_version":1,"operation":"pr.current","params":{}}
+JSON
+)
 PR_NUMBER=$(printf '%s\n' "$PR_CURRENT" | sed -n 's/^#\([0-9]\+\).*/\1/p' | head -1)
 ```
 
@@ -383,14 +384,25 @@ PR_NUMBER=$(printf '%s\n' "$PR_CURRENT" | sed -n 's/^#\([0-9]\+\).*/\1/p' | head
 
 ```bash
 GWT_BIN="$(resolve_gwt_bin)" || exit $?
-COMMENT_FILE=$(mktemp)
-printf 'Included in release v%s (#%s)\n' "{NEW_VERSION}" "$PR_NUMBER" > "$COMMENT_FILE"
 
 for NUM in $ISSUE_NUMBERS; do
-  "$GWT_BIN" issue comment "$NUM" -f "$COMMENT_FILE" || true
-done
+  python3 - "$NUM" "{NEW_VERSION}" "$PR_NUMBER" <<'PY' | "$GWT_BIN" || true
+import json
+import sys
 
-rm -f "$COMMENT_FILE"
+number = int(sys.argv[1])
+version = sys.argv[2]
+pr_number = sys.argv[3]
+print(json.dumps({
+    "schema_version": 1,
+    "operation": "issue.comment",
+    "params": {
+        "number": number,
+        "body": f"Included in release v{version} (#{pr_number})",
+    },
+}))
+PY
+done
 ```
 
 - `ISSUE_NUMBERS` が空の場合はこのステップ全体をスキップ

@@ -26,32 +26,15 @@ fn main() -> ExitCode {
         _ => {}
     }
 
-    // SPEC-1942 T-204: `gwtd <family> --help` mirrors `gwtd --help <family>`.
-    if matches!(argv.get(2).map(String::as_str), Some("-h" | "--help")) {
-        if let Some(family) = argv.get(1).map(String::as_str) {
-            if let Some(help_text) = family_help(family) {
-                print!("{help_text}");
-                return ExitCode::SUCCESS;
-            }
-        }
-    }
-
-    if argv.get(1).is_some() && !gwt::cli::should_dispatch_cli(&argv) {
-        // SPEC-1942 FR-109 / US-2 scenario 4: unknown verbs report to stderr
-        // only (usage + did-you-mean), keep stdout empty, and exit 2.
-        eprint!(
-            "{}",
-            unknown_command_message(argv.get(1).map(String::as_str).unwrap_or(""))
-        );
-        return ExitCode::from(2);
-    }
-
     let code = match argv.get(1).map(String::as_str) {
-        Some("issue" | "pr" | "actions") => run_repo_backed_cli(&argv),
         None => run_json_envelope_cli(&argv),
-        _ => {
+        Some(_) if is_allowed_argv_exception(&argv) => {
             let mut env = gwt::cli::DefaultCliEnv::new_for_hooks();
             gwt::cli::dispatch(&mut env, &argv)
+        }
+        _ => {
+            eprint!("{}", json_only_argv_message(&argv));
+            2
         }
     };
     ExitCode::from(code.clamp(0, 255) as u8)
@@ -113,7 +96,7 @@ fn family_help(family: &str) -> Option<String> {
 
 fn format_workspace_help() -> String {
     [
-        "gwtd workspace — Update Work current projection and summary journal via JSON envelope.",
+        "workspace.* — Update Work current projection and summary journal via JSON envelope.",
         "",
         "Usage:",
         "  gwtd <<'JSON'",
@@ -136,7 +119,7 @@ fn format_workspace_help() -> String {
 
 fn format_daemon_help() -> String {
     [
-        "gwtd daemon — Long-running runtime daemon operations via JSON envelope.",
+        "daemon.* — Long-running runtime daemon operations via JSON envelope.",
         "",
         "Usage:",
         "  gwtd <<'JSON'",
@@ -165,7 +148,7 @@ fn format_daemon_help() -> String {
 
 fn format_issue_help() -> String {
     [
-        "gwtd issue — Manage GitHub Issues and SPEC sections via JSON envelope.",
+        "issue.* — Manage GitHub Issues and SPEC sections via JSON envelope.",
         "",
         "Usage:",
         "  gwtd <<'JSON'",
@@ -191,7 +174,7 @@ fn format_issue_help() -> String {
 
 fn format_pr_help() -> String {
     [
-        "gwtd pr — Manage pull requests, reviews, checks, and threads via JSON envelope.",
+        "pr.* — Manage pull requests, reviews, checks, and threads via JSON envelope.",
         "",
         "Usage:",
         "  gwtd <<'JSON'",
@@ -211,7 +194,7 @@ fn format_pr_help() -> String {
 
 fn format_actions_help() -> String {
     [
-        "gwtd actions — Fetch GitHub Actions run/job logs via JSON envelope.",
+        "actions.* — Fetch GitHub Actions run/job logs via JSON envelope.",
         "",
         "Usage:",
         "  gwtd <<'JSON'",
@@ -231,7 +214,7 @@ fn format_actions_help() -> String {
 
 fn format_board_help() -> String {
     [
-        "gwtd board — Read/write the coordination Board (SPEC-1974) via JSON envelope.",
+        "board.* — Read/write the coordination Board (SPEC-1974) via JSON envelope.",
         "",
         "Usage:",
         "  gwtd <<'JSON'",
@@ -272,7 +255,7 @@ fn format_hook_help() -> String {
 
 fn format_index_help() -> String {
     [
-        "gwtd index — Manage the local search index via JSON envelope.",
+        "index.* — Manage the local search index via JSON envelope.",
         "",
         "Usage:",
         "  gwtd <<'JSON'",
@@ -293,7 +276,7 @@ fn format_index_help() -> String {
 
 fn format_memory_help() -> String {
     [
-        "gwtd memory — Append reusable project memory via JSON envelope.",
+        "memory.* — Append reusable project memory via JSON envelope.",
         "",
         "Usage:",
         "  gwtd <<'JSON'",
@@ -312,7 +295,7 @@ fn format_memory_help() -> String {
 
 fn format_discussion_help() -> String {
     [
-        "gwtd discussion — Persist/update Git-managed discussion notes via JSON envelope.",
+        "discussion.* — Persist/update Git-managed discussion notes via JSON envelope.",
         "",
         "Usage:",
         "  gwtd <<'JSON'",
@@ -332,7 +315,7 @@ fn format_discussion_help() -> String {
 
 fn format_discuss_help() -> String {
     [
-        "gwtd discuss — gwt-discussion exit operations via JSON envelope.",
+        "discuss.* — gwt-discussion exit operations via JSON envelope.",
         "",
         "Usage:",
         "  gwtd <<'JSON'",
@@ -354,7 +337,7 @@ fn format_discuss_help() -> String {
 
 fn format_plan_help() -> String {
     [
-        "gwtd plan — gwt-plan-spec state operations via JSON envelope.",
+        "plan.* — gwt-plan-spec state operations via JSON envelope.",
         "",
         "Usage:",
         "  gwtd <<'JSON'",
@@ -373,7 +356,7 @@ fn format_plan_help() -> String {
 
 fn format_build_help() -> String {
     [
-        "gwtd build — gwt-build-spec state operations via JSON envelope.",
+        "build.* — gwt-build-spec state operations via JSON envelope.",
         "",
         "Usage:",
         "  gwtd <<'JSON'",
@@ -392,7 +375,7 @@ fn format_build_help() -> String {
 
 fn format_register_help() -> String {
     [
-        "gwtd register — gwt-register-spec state operations via JSON envelope.",
+        "register.* — gwt-register-spec state operations via JSON envelope.",
         "",
         "Usage:",
         "  gwtd <<'JSON'",
@@ -411,7 +394,7 @@ fn format_register_help() -> String {
 
 fn format_pane_help() -> String {
     [
-        "gwtd pane — Inspect and control live agent panes via JSON envelope.",
+        "pane.* — Inspect and control live agent panes via JSON envelope.",
         "",
         "Usage:",
         "  gwtd <<'JSON'",
@@ -501,7 +484,7 @@ fn levenshtein(a: &str, b: &str) -> usize {
 
 fn format_search_help() -> String {
     [
-        "gwtd search — Semantic search over SPECs, Issues, files, board, and memory via JSON envelope.",
+        "search — Semantic search over SPECs, Issues, files, board, and memory via JSON envelope.",
         "",
         "Usage:",
         "  gwtd <<'JSON'",
@@ -544,17 +527,38 @@ fn run_json_envelope_cli(argv: &[String]) -> i32 {
     gwt::cli::dispatch(&mut env, argv)
 }
 
-fn run_repo_backed_cli(argv: &[String]) -> i32 {
-    let repo_path = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
-    let Some((owner, repo)) = resolve_repo_coordinates() else {
-        eprintln!(
-            "gwtd {}: could not resolve GitHub owner/repo from the current git remote",
-            argv.get(1).map(String::as_str).unwrap_or("issue")
-        );
-        return 2;
-    };
-    let mut env = gwt::cli::DefaultCliEnv::new(&owner, &repo, repo_path);
-    gwt::cli::dispatch(&mut env, argv)
+fn is_allowed_argv_exception(argv: &[String]) -> bool {
+    matches!(argv.get(1).map(String::as_str), Some("__internal"))
+        || matches!(
+            (
+                argv.get(1).map(String::as_str),
+                argv.get(2).map(String::as_str),
+                argv.get(3),
+                argv.get(4),
+            ),
+            (Some("hook"), Some("event"), Some(_), None)
+        )
+}
+
+fn json_only_argv_message(argv: &[String]) -> String {
+    let verb = argv.get(1).map(String::as_str).unwrap_or("");
+    let mut message = String::new();
+    if verb.is_empty() {
+        message.push_str("gwtd expects a stdin JSON envelope.\n");
+    } else if gwt::cli::should_dispatch_cli(argv) {
+        message.push_str(&format!(
+            "gwtd {verb}: legacy argv invocation is disabled; use stdin JSON envelope.\n"
+        ));
+    } else {
+        message.push_str(&unknown_command_message(verb));
+        return message;
+    }
+    message.push_str("Usage: gwtd < stdin JSON envelope\n");
+    message.push_str(
+        "Example: {\"schema_version\":1,\"operation\":\"workspace.update\",\"params\":{\"purpose\":\"<work purpose>\",\"current_focus\":\"<focus>\"}}\n",
+    );
+    message.push_str("Managed hook transport exception: gwtd hook event <Event>\n");
+    message
 }
 
 fn resolve_repo_coordinates() -> Option<(String, String)> {

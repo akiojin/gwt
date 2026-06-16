@@ -33,13 +33,11 @@ SPEC-1935 FR-014q routes Stop through `skill-plan-spec-stop-check`, which reads
 `.gwt/skill-state/plan-spec.json` and blocks Stop while the skill is active.
 Register the skill lifecycle explicitly with the exit CLI:
 
-- `gwtd plan start --spec <n>` at the beginning of the skill invocation
-- `gwtd plan phase --spec <n> --label <plan-draft|tasks-draft|quality-gate>`
-  at each internal milestone (logging only; does not affect blocking)
-- `gwtd plan complete --spec <n>` once the quality gate verdict is `CLEAR`
-  and planning artifacts are written
-- `gwtd plan abort --spec <n> --reason '<text>'` when planning cannot
-  proceed (e.g. spec gap discovered mid-planning)
+- JSON operation `plan.start` with `params.spec:<n>` at the beginning of the skill invocation
+- JSON operation `plan.phase` with `params.spec:<n>` and
+  `params.label:"plan-draft"|"tasks-draft"|"quality-gate"` at each internal milestone (logging only; does not affect blocking)
+- JSON operation `plan.complete` with `params.spec:<n>` once the quality gate verdict is `CLEAR` and planning artifacts are written
+- JSON operation `plan.abort` with `params.spec:<n>` and `params.reason` when planning cannot proceed (e.g. spec gap discovered mid-planning)
 
 The Stop-block handler honours Claude Code / Codex's built-in
 `stop_hook_active` flag, so forced continuation is capped at one per Stop
@@ -80,8 +78,7 @@ Establish the implementation landscape before designing.
    Refuse to continue only when `spec.md` is missing or a user decision still blocks planning.
 
 2. **Run Board active-claim preflight.** Once the target SPEC number is known,
-   read the current Board with `gwtd board show --json` when available, or
-   `gwtd board show` as the fallback.
+   read the current Board with JSON operation `board.show`.
    - Look for active `claim` entries from another session that mention the same
      owner (`#<N>` or `SPEC-<N>`) or the planning phase being refreshed.
    - If a matching claim exists, pause before changing artifacts and present the
@@ -232,18 +229,26 @@ When invoked without a SPEC:
 
 ## Operations
 
-Use `gwtd issue spec` CLI for artifact persistence:
+Use gwtd JSON operations for artifact persistence:
 
 ```bash
 # Read spec section
-gwtd issue spec <Issue番号> --section spec
+gwtd <<'JSON'
+{"schema_version":1,"operation":"issue.spec.section","params":{"number":123,"section":"spec"}}
+JSON
 
 # Write plan section
-gwtd issue spec <Issue番号> --edit plan -f /tmp/plan.md
+gwtd <<'JSON'
+{"schema_version":1,"operation":"issue.spec.edit","params":{"number":123,"section":"plan","body":"<plan markdown>"}}
+JSON
 
 # Write tasks section
-gwtd issue spec <Issue番号> --edit tasks -f /tmp/tasks.md
+gwtd <<'JSON'
+{"schema_version":1,"operation":"issue.spec.edit","params":{"number":123,"section":"tasks","body":"<tasks markdown>"}}
+JSON
 
 # List all SPEC Issues
-gwtd issue spec list
+gwtd <<'JSON'
+{"schema_version":1,"operation":"issue.spec.list","params":{}}
+JSON
 ```

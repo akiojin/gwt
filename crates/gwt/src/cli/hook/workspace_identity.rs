@@ -135,7 +135,7 @@ fn workspace_agent_summary_from_session(
 /// title sync layer resolves empty values through the display fallback.
 ///
 /// The hook still performs the Phase W-10 (US-57) canonical Project State
-/// split repair so that a later `gwtd workspace update --agent-session`
+/// split repair so that a later `workspace.update` JSON operation
 /// from the agent reaches the projection record that owns the live window.
 pub(crate) fn handle_user_prompt_submit(_input: &str) -> Result<(), HookError> {
     let Some(session) = current_session_from_env()? else {

@@ -173,18 +173,28 @@ the server to drain PTYs and exit gracefully. The tray-resident process is one
 per OS-login user; a second `gwt` invocation prints the existing URL and exits
 instead of starting a second server.
 
-CLI subcommands run through `gwtd` without opening a GUI window:
+gwtd operations run through stdin JSON envelopes without opening a GUI window:
 
 ```bash
-gwtd issue spec 1784 --section plan
-gwtd pr current
-gwtd board show
-gwtd hook workflow-policy
-gwtd daemon status            # inspect the per-project runtime daemon
+gwtd <<'JSON'
+{"schema_version":1,"operation":"issue.spec.section","params":{"number":1784,"section":"plan"}}
+JSON
+
+gwtd <<'JSON'
+{"schema_version":1,"operation":"pr.current","params":{}}
+JSON
+
+gwtd <<'JSON'
+{"schema_version":1,"operation":"board.show","params":{}}
+JSON
+
+gwtd <<'JSON'
+{"schema_version":1,"operation":"daemon.status","params":{}}
+JSON
 ```
 
 Managed hooks and runtime delegation use `gwtd`. On macOS and Linux,
-running `gwtd daemon start` brings up a per-project runtime daemon
+running JSON operation `daemon.start` brings up a per-project runtime daemon
 (Unix-domain socket IPC) that multi-instance event fan-out depends on
 — for example, with the daemon running, Board posts you make in one
 `gwt` window appear in another instance opened on the same repo
@@ -258,8 +268,8 @@ Linux, `Ctrl+Shift+C` also copies the current terminal selection.
 
 gwt keeps project knowledge close to the agent workspace:
 
-- `gwtd issue spec <n>` reads GitHub Issue-backed SPECs from the local cache.
-- `gwtd issue view <n>` and `gwtd issue comments <n>` provide cache-backed Issue
+- JSON operation `issue.spec.read` reads GitHub Issue-backed SPECs from the local cache.
+- JSON operations `issue.view` and `issue.comments` provide cache-backed Issue
   access through the gwt CLI surface.
 - `gwt-search` searches SPECs, Issues, source files, and docs through the shared
   ChromaDB runtime. Missing indexes are built on demand, and the desktop app can
@@ -584,19 +594,25 @@ surface combination in both themes.
 - List available SPECs:
 
 ```bash
-gwtd issue spec list
+gwtd <<'JSON'
+{"schema_version":1,"operation":"issue.spec.list","params":{}}
+JSON
 ```
 
 - Read a SPEC:
 
 ```bash
-gwtd issue spec <number>
+gwtd <<'JSON'
+{"schema_version":1,"operation":"issue.spec.read","params":{"number":1784}}
+JSON
 ```
 
 - Read one section:
 
 ```bash
-gwtd issue spec <number> --section spec|plan|tasks
+gwtd <<'JSON'
+{"schema_version":1,"operation":"issue.spec.section","params":{"number":1784,"section":"spec"}}
+JSON
 ```
 
 ## Logs
@@ -691,7 +707,7 @@ cargo fmt
 ## Specs
 
 Detailed requirements live in GitHub Issues labeled `gwt-spec`. Use
-`gwtd issue spec <n>` to inspect them locally through the cache-backed CLI.
+JSON operation `issue.spec.read` to inspect them locally through the cache-backed CLI.
 
 ## License
 

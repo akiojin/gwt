@@ -9,38 +9,48 @@ discovery confirmed the scope is right for a SPEC.
 
 ## SPEC creation
 
-SPEC の作成・更新は `gwtd issue spec` CLI で行う。
+SPEC の作成・更新は JSON operation `issue.spec.*` で行う。
 すべての要約・タイトル・更新説明は current user's language で記述する。
 
 ### コマンド
 
 ```bash
 # SPEC 一覧
-gwtd issue spec list
+gwtd <<'JSON'
+{"schema_version":1,"operation":"issue.spec.list","params":{}}
+JSON
 
 # SPEC 作成（構造化 JSON 推奨）
-gwtd issue spec create --help
-gwtd issue spec create --json --title "SPEC: <説明> — <サブタイトル>" \
-  -f <spec.json>
+gwtd <<'JSON'
+{"schema_version":1,"operation":"issue.spec.create","params":{"title":"SPEC: <説明> — <サブタイトル>","structured":true,"body":{"spec":"<structured spec body>"}}}
+JSON
 
 # SPEC 作成（既存 Markdown 断片から直接作る互換パス）
-gwtd issue spec create --title "SPEC: <説明> — <サブタイトル>" \
-  -f <spec.md>
+gwtd <<'JSON'
+{"schema_version":1,"operation":"issue.spec.create","params":{"title":"SPEC: <説明> — <サブタイトル>","body":"<spec markdown>"}}
+JSON
 
 # SPEC セクション読み取り
-gwtd issue spec <Issue番号>
-gwtd issue spec <Issue番号> --section spec
+gwtd <<'JSON'
+{"schema_version":1,"operation":"issue.spec.read","params":{"number":123}}
+JSON
+
+gwtd <<'JSON'
+{"schema_version":1,"operation":"issue.spec.section","params":{"number":123,"section":"spec"}}
+JSON
 
 # SPEC セクション更新
-gwtd issue spec <Issue番号> --edit spec -f <file>
+gwtd <<'JSON'
+{"schema_version":1,"operation":"issue.spec.edit","params":{"number":123,"section":"spec","body":"<full body>"}}
+JSON
 ```
 
 注意:
 
-- `gwtd issue spec create --help` をフォーマット、JSON スキーマ、入力例の唯一の正とする。
-- `spec create -f` はファイル内に `<!-- artifact:spec BEGIN/END -->` マーカーを期待する。
-- マーカーなしの場合は `spec create` でタイトルだけ作成し、`--edit spec -f` または
-  `--edit spec --json` で内容を投入する。
+- JSON envelope schema in `json_envelope.rs` をフォーマット、JSON スキーマ、入力例の正とする。
+- `issue.spec.create` はファイル内に `<!-- artifact:spec BEGIN/END -->` マーカーを期待する場合がある。
+- マーカーなしの場合は `issue.spec.create` でタイトルだけ作成し、
+  JSON operation `issue.spec.edit` で内容を投入する。
 
 ### Title convention
 

@@ -373,7 +373,7 @@ pub fn run_daemon_hook<E: CliEnv>(
             else {
                 let _ = writeln!(
                     env.stderr(),
-                    "gwtd hook register-codex-managed-hook-trust: missing --codex-config and home directory is unavailable"
+                    "hook.register_codex_managed_hook_trust: missing params.codex_config and home directory is unavailable"
                 );
                 return Ok(2);
             };
@@ -383,7 +383,7 @@ pub fn run_daemon_hook<E: CliEnv>(
                     None => {
                         let _ = writeln!(
                             env.stderr(),
-                            "gwtd hook register-codex-managed-hook-trust: invalid --codex-hook-discovery '{}'",
+                            "hook.register_codex_managed_hook_trust: invalid params.codex_hook_discovery '{}'",
                             value
                         );
                         return Ok(2);

@@ -208,9 +208,9 @@ Goal condition: {condition}\n\
 \n\
 If the latest user prompt approves this Action Bundle and asks work to continue autonomously, start the runtime goal before doing implementation or verification work:\n\
 - Codex: call `create_goal` with the Goal condition above as the objective.\n\
-- Claude Code: resolve `GWT_BIN`, then run `gwtd pane send --text '/goal <condition>'` using the Goal condition above.\n\
+- Claude Code: resolve `GWT_BIN`, then run JSON operation `pane.send` with `params.text:\"/goal <condition>\"` using the Goal condition above.\n\
 \n\
-After a successful start, run `gwtd discuss goal-started --proposal \"{label}\"`. If the user rejects or revises the Action Bundle, run `gwtd discuss goal-skipped --proposal \"{label}\" --reason '<reason>'`. If goal start fails, run `gwtd discuss goal-failed --proposal \"{label}\" --reason '<reason>'` and show a manual `/goal <condition>` line to the user.",
+After a successful start, run JSON operation `discuss.goal_started`. If the user rejects or revises the Action Bundle, run JSON operation `discuss.goal_skipped`. If goal start fails, run JSON operation `discuss.goal_failed` and show a manual `/goal <condition>` line to the user.",
         label = goal.proposal_label,
         title = goal.proposal_title,
         condition = goal.condition,
@@ -245,7 +245,7 @@ mod tests {
         assert!(text.contains("pending gwt-discussion Goal Start"), "{text}");
         assert!(text.contains("Proposal A - Goal handoff"), "{text}");
         assert!(text.contains("create_goal"), "{text}");
-        assert!(text.contains("gwtd pane send"), "{text}");
+        assert!(text.contains("pane.send"), "{text}");
         assert!(text.contains("verification handoff ready"), "{text}");
     }
 }

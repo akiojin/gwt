@@ -81,16 +81,16 @@ pub(crate) fn decide(
         .owner_spec
         .map(|n| format!("SPEC-{n}"))
         .unwrap_or_else(|| "the current owner".to_string());
-    let short_name = short_verb_for(skill_name);
+    let action_prefix = action_prefix_for(skill_name);
 
     HookOutput::stop_block(format!(
         "{skill_display} for {spec_clause} is still active{phase_clause}.\n\
-         Continue the {skill_display} workflow, or call `gwtd {short_name} complete --spec <n>` when the artifacts are ready, \
-         or `gwtd {short_name} abort --spec <n> --reason '<text>'` to abandon.",
+         Continue the {skill_display} workflow, or run JSON operation `{action_prefix}.complete` with `params.spec:<n>` when the artifacts are ready, \
+         or JSON operation `{action_prefix}.abort` with `params.spec:<n>` and `params.reason` to abandon.",
     ))
 }
 
-fn short_verb_for(skill_name: &str) -> &'static str {
+fn action_prefix_for(skill_name: &str) -> &'static str {
     match skill_name {
         "plan-spec" => "plan",
         "build-spec" => "build",
@@ -138,7 +138,7 @@ mod tests {
             &[
                 "gwt-plan-spec for SPEC-1935",
                 "phase: plan-draft",
-                "gwtd plan complete",
+                "plan.complete",
             ],
         );
     }

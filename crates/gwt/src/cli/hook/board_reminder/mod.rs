@@ -678,7 +678,7 @@ mod tests {
             panic!("expected additional context");
         };
         assert!(text.contains("Memory Reminder"));
-        assert!(text.contains("gwtd memory add"));
+        assert!(text.contains("memory.add"));
         assert!(text.contains(".gwt/work/memory.md"));
         assert!(text.contains("Future Action"));
     }
@@ -699,7 +699,7 @@ mod tests {
             panic!("expected non-blocking system message");
         };
         assert!(text.contains("Memory Reminder"));
-        assert!(text.contains("gwtd memory add"));
+        assert!(text.contains("memory.add"));
         assert!(text.contains(".gwt/work/memory.md"));
     }
 

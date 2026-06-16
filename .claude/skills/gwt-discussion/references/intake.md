@@ -16,7 +16,9 @@ Run these before any creation or routing decision:
 3. **Local SPEC listing** if ownership is still unclear:
 
 ```bash
-gwtd issue spec list
+gwtd <<'JSON'
+{"schema_version":1,"operation":"issue.spec.list","params":{}}
+JSON
 ```
 
 ### Search evaluation

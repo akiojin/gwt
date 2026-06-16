@@ -97,5 +97,5 @@ fail fast and the skill records `failed: tooling-missing` with the
 network error preserved verbatim. The caller may either:
 
 - Treat it as a hard block (default behavior in `gwt-build-spec` Phase 3).
-- Override with an explicit `gwtd build abort --reason ...` and have the
+- Override with an explicit JSON operation `build.abort` and have the
   user run the tests on a network-reachable host.

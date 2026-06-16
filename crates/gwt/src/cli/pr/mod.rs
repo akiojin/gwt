@@ -1,4 +1,4 @@
-//! `gwtd pr ...` family module (SPEC-1942 SC-027 split).
+//! `pr.*` JSON operation family module (SPEC-1942 SC-027 split).
 //!
 //! - `mod.rs` (this file): argv `parse`, dispatch `run`, render helpers, and
 //!   the family `tests` block.

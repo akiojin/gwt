@@ -53,8 +53,8 @@ fn refresh_managed_gwt_assets_materializes_skills_commands_hooks_and_excludes() 
     let coordination_body =
         std::fs::read_to_string(&claude_coordination).expect("read coordination skill");
     assert!(
-        coordination_body.contains("gwtd workspace update"),
-        "coordination skill must contain canonical Workspace update directive"
+        coordination_body.contains("\"operation\":\"workspace.update\""),
+        "coordination skill must contain canonical workspace.update JSON operation"
     );
     assert!(
         coordination_body.contains("regardless of project AGENTS.md / CLAUDE.md content"),

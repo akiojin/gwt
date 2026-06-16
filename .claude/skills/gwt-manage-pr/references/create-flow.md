@@ -33,7 +33,7 @@
 
 ## Step 5: Check existing PR for head branch
 
-- Use `gwtd pr current` as the normal path for current-branch PR discovery.
+- Use JSON operation `pr.current` as the normal path for current-branch PR discovery.
 - Treat the literal line `no current pull request` as the canonical no-PR sentinel.
 - Treat `merged_at` as the source of truth for "merged".
 - Treat `state == open && merged_at == null` as the source of truth for "existing active PR".
@@ -114,15 +114,15 @@
 ## Step 10: Create or update the PR
 
 - Canonical path:
-  - Create: `gwtd pr create --base <base> [--head <head>] --title "<title>" -f <file> [--label <label>]* [--draft]`
-    - Omit `--draft` only after the Ready PR Gate passes.
-    - Include `--draft` when the PR Readiness state is Draft.
-  - Update: `gwtd pr edit <number> [--title "<title>"] [-f <file>] [--add-label <label>]*`
-- Transport note: the current implementation may still use GitHub REST / `gh` internally, but agent-facing workflow should stay on the `gwtd pr` surface.
+  - Create: JSON operation `pr.create` with `params.base`, optional `params.head`, `params.title`, `params.body`, optional `params.labels`, and `params.draft`.
+    - Set `params.draft:false` only after the Ready PR Gate passes.
+    - Set `params.draft:true` when the PR Readiness state is Draft.
+  - Update: JSON operation `pr.edit` with `params.number`, optional `params.title`, optional `params.body`, and optional `params.add_labels`.
+- Transport note: the current implementation may still use GitHub REST / `gh` internally, but agent-facing workflow should stay on gwtd JSON operations.
 
 ## Step 11: Return PR URL
 
-- Read the URL from `gwtd pr create` / `gwtd pr edit` output, or use `gwtd pr view <number>`.
+- Read the URL from `pr.create` / `pr.edit` output, or use JSON operation `pr.view`.
 
 ## Step 12: Post-PR CI/merge check (automatic)
 
@@ -174,7 +174,10 @@ if [ "${behind_count:-0}" -gt 0 ]; then
 fi
 
 # Check existing PRs (canonical surface)
-pr_summary="$(gwtd pr current 2>/tmp/gwt-pr-current.err || true)"
+pr_summary="$("$GWT_BIN" <<'JSON' 2>/tmp/gwt-pr-current.err || true
+{"schema_version":1,"operation":"pr.current","params":{}}
+JSON
+)"
 merge_state="$(printf '%s\n' "$pr_summary" | sed -n 's/^mergeable: //p' | head -n1)"
 
 if printf '%s\n' "$pr_summary" | grep -qx 'no current pull request'; then
@@ -195,9 +198,13 @@ case "$action" in
   create)
     git push -u origin "$head"
     if grep -q 'State: Draft' /tmp/pr-body.md; then
-      gwtd pr create --base "$base" --head "$head" --title "..." -f /tmp/pr-body.md --draft
+      "$GWT_BIN" <<'JSON'
+{"schema_version":1,"operation":"pr.create","params":{"base":"develop","head":"<head>","title":"...","body":"<rendered PR body>","draft":true}}
+JSON
     else
-      gwtd pr create --base "$base" --head "$head" --title "..." -f /tmp/pr-body.md
+      "$GWT_BIN" <<'JSON'
+{"schema_version":1,"operation":"pr.create","params":{"base":"develop","head":"<head>","title":"...","body":"<rendered PR body>","draft":false}}
+JSON
     fi
     ;;
   fix)

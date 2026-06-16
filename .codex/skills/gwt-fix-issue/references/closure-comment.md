@@ -67,8 +67,10 @@ must not be delivery blockers for this fix.
 
 Write the comment body to a file and post it with the canonical CLI:
 
-```text
-gwtd issue comment <number> -f <body-file>
+```bash
+gwtd <<'JSON'
+{"schema_version":1,"operation":"issue.comment","params":{"number":123,"body":"<comment body>"}}
+JSON
 ```
 
 Direct `gh issue comment ...` is not part of the normal path.

@@ -11,8 +11,13 @@ Unified agent pane management. Auto-detects mode from arguments: no args lists p
 Use Board for agent-to-agent communication:
 
 ```bash
-gwtd board post --kind request --target <session-id|branch|agent-id> --body '<message>'
-gwtd board post --kind handoff --target <session-id|branch|agent-id> --body '<message>'
+gwtd <<'JSON'
+{"schema_version":1,"operation":"board.post","params":{"kind":"request","targets":["<session-id|branch|agent-id>"],"body":"<message>"}}
+JSON
+
+gwtd <<'JSON'
+{"schema_version":1,"operation":"board.post","params":{"kind":"handoff","targets":["<session-id|branch|agent-id>"],"body":"<message>"}}
+JSON
 ```
 
 ## Usage
@@ -26,7 +31,7 @@ gwtd board post --kind handoff --target <session-id|branch|agent-id> --body '<me
 1. Load `.claude/skills/gwt-agent/SKILL.md` and follow the workflow.
 2. Auto-detect the appropriate action based on provided arguments.
 3. Resolve `gwtd` as `GWT_BIN` from `GWT_BIN_PATH`, `command -v gwtd`, or `target/debug/gwtd`.
-4. Execute pane management through `gwtd pane list`, `gwtd pane read <id>`, or `gwtd pane close <id>`, and route coordination through Board.
+4. Execute pane management through JSON operations `pane.list`, `pane.read`, or `pane.close`, and route coordination through Board.
 
 ## Examples
 

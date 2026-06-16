@@ -1,49 +1,50 @@
 use std::{
     fs,
+    io::Write,
     process::{Command, Stdio},
 };
 
-fn run_gwtd_in(root: &std::path::Path, args: &[&str]) -> std::process::Output {
-    Command::new(env!("CARGO_BIN_EXE_gwtd"))
+fn run_gwtd_json(root: &std::path::Path, payload: serde_json::Value) -> std::process::Output {
+    let mut child = Command::new(env!("CARGO_BIN_EXE_gwtd"))
         .current_dir(root)
-        .args(args)
-        .stdin(Stdio::null())
-        .output()
-        .expect("run gwtd")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("run gwtd");
+    child
+        .stdin
+        .as_mut()
+        .expect("gwtd stdin")
+        .write_all(payload.to_string().as_bytes())
+        .expect("write gwtd JSON");
+    child.wait_with_output().expect("wait gwtd")
 }
 
 #[test]
 fn discussion_update_creates_single_canonical_discussions_file() {
     let repo = tempfile::tempdir().expect("repo");
 
-    let output = run_gwtd_in(
+    let output = run_gwtd_json(
         repo.path(),
-        &[
-            "discussion",
-            "update",
-            "--date",
-            "2026-05-22",
-            "--title",
-            "Workspace / Work / Discussion terminology",
-            "--status",
-            "active",
-            "--topic",
-            "workspace",
-            "--topic",
-            "work",
-            "--related-spec",
-            "2359",
-            "--summary",
-            "Workspace is being split into Project State, Work, Agent, Discussion, and Branch.",
-            "--decision",
-            "Discussion is not Work.",
-            "--decision",
-            "Discussions are saved in .gwt/work/discussions.md.",
-            "--open-question",
-            "How should Topic Stack resume across sessions?",
-            "--next",
-            "Define Project State migration.",
-        ],
+        serde_json::json!({
+            "schema_version": 1,
+            "operation": "discussion.update",
+            "params": {
+                "date": "2026-05-22",
+                "title": "Workspace / Work / Discussion terminology",
+                "status": "active",
+                "topics": ["workspace", "work"],
+                "related_specs": [2359],
+                "summary": "Workspace is being split into Project State, Work, Agent, Discussion, and Branch.",
+                "decisions": [
+                    "Discussion is not Work.",
+                    "Discussions are saved in .gwt/work/discussions.md."
+                ],
+                "open_questions": ["How should Topic Stack resume across sessions?"],
+                "next": "Define Project State migration."
+            }
+        }),
     );
 
     assert!(
@@ -75,24 +76,20 @@ fn discussion_update_rewrites_existing_section_instead_of_appending_duplicate() 
     let repo = tempfile::tempdir().expect("repo");
 
     for summary in ["First summary", "Updated summary"] {
-        let output = run_gwtd_in(
+        let output = run_gwtd_json(
             repo.path(),
-            &[
-                "discussion",
-                "update",
-                "--date",
-                "2026-05-22",
-                "--title",
-                "Workspace terminology",
-                "--status",
-                "active",
-                "--summary",
-                summary,
-                "--decision",
-                summary,
-                "--next",
-                "Continue",
-            ],
+            serde_json::json!({
+                "schema_version": 1,
+                "operation": "discussion.update",
+                "params": {
+                    "date": "2026-05-22",
+                    "title": "Workspace terminology",
+                    "status": "active",
+                    "summary": summary,
+                    "decisions": [summary],
+                    "next": "Continue"
+                }
+            }),
         );
         assert!(
             output.status.success(),
@@ -122,22 +119,19 @@ fn discussion_update_migrates_legacy_tasks_discussions_to_work_dir() {
     let legacy = "# Discussions\n\n## 2026-04-01 — legacy discussion\n\nStatus: completed\nTopics: legacy\nRelated SPECs:\nRelated Works:\nPromoted To:\n\nSummary:\nOld discussion preserved.\n\nDecisions:\n\nOpen Questions:\n\nNext:\nNothing.\n";
     fs::write(tasks.join("discussions.md"), legacy).expect("seed legacy discussions");
 
-    let output = run_gwtd_in(
+    let output = run_gwtd_json(
         repo.path(),
-        &[
-            "discussion",
-            "update",
-            "--date",
-            "2026-05-30",
-            "--title",
-            "entry after work-dir migration",
-            "--status",
-            "active",
-            "--summary",
-            "New discussion after move.",
-            "--next",
-            "Continue.",
-        ],
+        serde_json::json!({
+            "schema_version": 1,
+            "operation": "discussion.update",
+            "params": {
+                "date": "2026-05-30",
+                "title": "entry after work-dir migration",
+                "status": "active",
+                "summary": "New discussion after move.",
+                "next": "Continue."
+            }
+        }),
     );
 
     assert!(
