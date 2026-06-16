@@ -23,8 +23,10 @@
 //! Behavior-preserving move: `INFLIGHT_LAUNCH_TTL` / `inflight_launch_key`
 //! are launch-side and stay in `mod.rs` (Pass 2 moves them to `launch.rs`).
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
+
+use sysinfo::{ProcessRefreshKind, ProcessesToUpdate, System, UpdateKind};
 
 use super::{
     active_agent_summary_from_session, current_git_branch, local_branch_exists,
@@ -670,6 +672,7 @@ fn active_work_items_from_projection(
                 workspace_key: None,
                 remote_only: false,
                 done_equivalent: false,
+                cleanup_candidate: None,
                 updated_at: row_updated_at,
             }
         })
@@ -772,6 +775,7 @@ fn append_paused_work_items(
             workspace_key: None,
             remote_only: false,
             done_equivalent: false,
+            cleanup_candidate: None,
             // FR-403: paused/backfill rows carry the record's last update.
             updated_at: work.updated_at.clone(),
         });
@@ -873,6 +877,7 @@ pub(super) fn work_session_index(
 pub(crate) fn workspace_work_item_view_from_item(
     item: &gwt_core::workspace_projection::WorkItem,
     session_index: &std::collections::HashMap<&str, &gwt_agent::Session>,
+    project_root: &Path,
 ) -> gwt::WorkspaceHistoryView {
     gwt::WorkspaceHistoryView {
         id: item.id.clone(),
@@ -900,7 +905,7 @@ pub(crate) fn workspace_work_item_view_from_item(
         agents: item
             .agents
             .iter()
-            .map(|agent| workspace_work_agent_view_from_ref(agent, session_index))
+            .map(|agent| workspace_work_agent_view_from_ref(agent, session_index, project_root))
             .collect(),
         execution_containers: item
             .execution_containers
@@ -920,6 +925,7 @@ pub(crate) fn workspace_work_item_view_from_item(
 pub(super) fn workspace_work_agent_view_from_ref(
     agent: &gwt_core::workspace_projection::WorkAgentRef,
     session_index: &std::collections::HashMap<&str, &gwt_agent::Session>,
+    project_root: &Path,
 ) -> gwt::WorkspaceHistoryAgentView {
     // A Work's `session_id` is the gwt session id (the launch). It keys into the
     // persisted Session whose forward-only `session_history` is the Session list
@@ -929,6 +935,7 @@ pub(super) fn workspace_work_agent_view_from_ref(
         .get(agent.session_id.as_str())
         .map(|session| {
             let latest = session.agent_session_id.as_deref();
+            let exact_resume_available = session_exact_resume_materializable(project_root, session);
             // Render Sessions in stable chronological order (oldest first) so
             // clock skew or delayed persistence cannot scramble the timeline;
             // the append order alone is not guaranteed monotonic.
@@ -947,7 +954,8 @@ pub(super) fn workspace_work_agent_view_from_ref(
                                 .updated_at
                                 .to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
                             is_active: true,
-                            resumable: session.is_resumable_conversation(conversation),
+                            resumable: exact_resume_available
+                                && session.is_resumable_conversation(conversation),
                         }]
                     })
                     .unwrap_or_default();
@@ -962,8 +970,11 @@ pub(super) fn workspace_work_agent_view_from_ref(
                     is_active: latest == Some(entry.agent_session_id.as_str()),
                     // A Session whose conversation handle is structurally
                     // unusable (empty / Codex placeholder) is history-only; the
-                    // surface hides its Resume control.
-                    resumable: session.is_resumable_conversation(&entry.agent_session_id),
+                    // surface hides its Resume control. A machine-local ledger
+                    // whose worktree and branch are gone is also history-only;
+                    // Workspace Continue remains the fallback.
+                    resumable: exact_resume_available
+                        && session.is_resumable_conversation(&entry.agent_session_id),
                 })
                 .collect()
         })
@@ -1230,6 +1241,16 @@ pub(super) fn workspace_resume_branch_exists(project_root: &Path, branch_name: &
         .unwrap_or(false)
 }
 
+pub(super) fn session_exact_resume_materializable(
+    project_root: &Path,
+    session: &gwt_agent::Session,
+) -> bool {
+    if session.worktree_path.as_path().exists() {
+        return true;
+    }
+    workspace_resume_branch_exists(project_root, &session.branch)
+}
+
 fn active_work_agent_priority_rank(agent: &gwt::ActiveWorkAgentView) -> u8 {
     match agent.status_category.as_str() {
         "blocked" => 0,
@@ -1297,6 +1318,7 @@ pub(super) fn attach_registry_sessions_to_active_works(
     agent_sessions: &[gwt_agent::Session],
     project_repo_hash: Option<gwt_core::repo_hash::RepoHash>,
     session_index: &std::collections::HashMap<&str, &gwt_agent::Session>,
+    project_root: &Path,
 ) {
     let registry = crate::workspace_session_registry::branch_session_registry(
         agent_sessions,
@@ -1324,7 +1346,8 @@ pub(super) fn attach_registry_sessions_to_active_works(
                 display_name: Some(session.display_name.clone()),
                 updated_at: session.last_activity_at,
             };
-            let history_view = workspace_work_agent_view_from_ref(&agent_ref, session_index);
+            let history_view =
+                workspace_work_agent_view_from_ref(&agent_ref, session_index, project_root);
             work.agents
                 .push(paused_work_agent_view_from_history(&history_view));
         }
@@ -1598,6 +1621,121 @@ pub(super) fn mark_merged_active_works(
                 )
             });
     }
+}
+
+/// SPEC-2359 US-78: cleanup eligibility is backend-owned per Workspace row.
+/// `merged_into_base` remains a display badge; this candidate is the action
+/// gate after filtering out live-agent branches/worktrees and remote-only rows.
+pub(super) fn mark_workspace_cleanup_candidates(
+    active_works: &mut [gwt::ActiveWorkItemView],
+    sessions: &[&ActiveAgentSession],
+    live_process_worktree_paths: &HashSet<PathBuf>,
+) {
+    for work in active_works.iter_mut() {
+        work.cleanup_candidate = None;
+        if !work.merged_into_base || work.remote_only {
+            continue;
+        }
+        let Some(branch) = work
+            .branch
+            .as_deref()
+            .map(normalize_branch_name)
+            .filter(|branch| branch.starts_with("work/"))
+        else {
+            continue;
+        };
+        let worktree_path = work.worktree_path.as_deref().map(Path::new);
+        if sessions.iter().any(|session| {
+            active_agent_session_matches_work(session, Some(branch.as_str()), worktree_path)
+        }) {
+            continue;
+        }
+        if worktree_path
+            .and_then(normalize_existing_worktree_path)
+            .is_some_and(|path| live_process_worktree_paths.contains(&path))
+        {
+            continue;
+        }
+        work.cleanup_candidate = Some(gwt::ActiveWorkCleanupCandidateView {
+            branch: branch.to_string(),
+            worktree_path: work.worktree_path.clone(),
+            reason: gwt_core::workspace_projection::WorkspaceCleanupReason::PrMerged
+                .as_str()
+                .to_string(),
+            default_delete_remote: false,
+            remote_delete_available: true,
+        });
+    }
+}
+
+fn live_process_worktree_paths_for_cleanup(
+    active_works: &[gwt::ActiveWorkItemView],
+    projection_cleanup_candidate: Option<&gwt::ActiveWorkCleanupCandidateView>,
+) -> HashSet<PathBuf> {
+    let mut candidate_paths = active_works
+        .iter()
+        .filter(|work| work.merged_into_base && !work.remote_only)
+        .filter(|work| {
+            work.branch
+                .as_deref()
+                .map(normalize_branch_name)
+                .is_some_and(|branch| branch.starts_with("work/"))
+        })
+        .filter_map(|work| {
+            work.worktree_path
+                .as_deref()
+                .map(Path::new)
+                .and_then(normalize_existing_worktree_path)
+        })
+        .collect::<Vec<_>>();
+    if let Some(path) = projection_cleanup_candidate
+        .and_then(|candidate| candidate.worktree_path.as_deref())
+        .map(Path::new)
+        .and_then(normalize_existing_worktree_path)
+    {
+        candidate_paths.push(path);
+    }
+    candidate_paths.sort();
+    candidate_paths.dedup();
+    if candidate_paths.is_empty() {
+        return HashSet::new();
+    }
+
+    let mut system = System::new();
+    system.refresh_processes_specifics(
+        ProcessesToUpdate::All,
+        true,
+        ProcessRefreshKind::nothing().with_cwd(UpdateKind::Always),
+    );
+
+    let mut live_paths = HashSet::new();
+    for process in system.processes().values() {
+        let Some(cwd) = process.cwd().and_then(normalize_existing_worktree_path) else {
+            continue;
+        };
+        for candidate in &candidate_paths {
+            if cwd == *candidate || cwd.starts_with(candidate) {
+                live_paths.insert(candidate.clone());
+            }
+        }
+    }
+    live_paths
+}
+
+fn normalize_existing_worktree_path(path: &Path) -> Option<PathBuf> {
+    dunce::canonicalize(path).ok()
+}
+
+fn cleanup_candidate_has_live_process(
+    candidate: &gwt::ActiveWorkCleanupCandidateView,
+    live_process_worktree_paths: &HashSet<PathBuf>,
+) -> bool {
+    candidate
+        .worktree_path
+        .as_deref()
+        .map(Path::new)
+        .and_then(normalize_existing_worktree_path)
+        .is_some_and(|path| live_process_worktree_paths.contains(&path))
 }
 
 fn paused_work_agent_view_from_history(
@@ -1922,7 +2060,9 @@ impl AppRuntime {
                 })
                 .work_items
                 .iter()
-                .map(|item| workspace_work_item_view_from_item(item, &session_index))
+                .map(|item| {
+                    workspace_work_item_view_from_item(item, &session_index, &tab.project_root)
+                })
                 .collect::<Vec<_>>();
             let mut view = active_work_projection_from_saved_with_journal(
                 projection,
@@ -1942,6 +2082,7 @@ impl AppRuntime {
                 &agent_sessions,
                 gwt_core::repo_hash::detect_repo_hash(&tab.project_root),
                 &session_index,
+                &tab.project_root,
             );
             // SPEC-2359 W-15 (FR-386): "safe to delete" badge inputs — the
             // background merge-scan cache plus the recorded PR state.
@@ -1964,6 +2105,20 @@ impl AppRuntime {
             mark_remote_only_active_works(
                 &mut view.active_works,
                 self.local_worktree_branches.borrow().get(&tab.project_root),
+            );
+            let live_process_worktree_paths = live_process_worktree_paths_for_cleanup(
+                &view.active_works,
+                view.cleanup_candidate.as_ref(),
+            );
+            if view.cleanup_candidate.as_ref().is_some_and(|candidate| {
+                cleanup_candidate_has_live_process(candidate, &live_process_worktree_paths)
+            }) {
+                view.cleanup_candidate = None;
+            }
+            mark_workspace_cleanup_candidates(
+                &mut view.active_works,
+                &sessions,
+                &live_process_worktree_paths,
             );
             return Some(view);
         }
@@ -2020,6 +2175,7 @@ impl AppRuntime {
             workspace_key: None,
             remote_only: false,
             done_equivalent: false,
+            cleanup_candidate: None,
             updated_at: now.to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
         }];
         Some(gwt::ActiveWorkProjectionView {

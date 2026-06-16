@@ -1,4 +1,4 @@
-//! CLI dispatch for `gwtd issue spec ...` subcommands.
+//! CLI command models used behind `gwtd` JSON envelope operations.
 //!
 //! SPEC-12 Phase 6: when the gwt binary is invoked with arguments starting
 //! with `issue`, we treat it as a CLI call rather than a GUI launch. This
@@ -8,6 +8,7 @@
 mod actions;
 mod board;
 mod build;
+mod commands;
 pub mod daemon;
 mod diagnostics;
 mod discuss;
@@ -18,6 +19,7 @@ pub mod hook;
 pub(crate) mod index;
 mod issue;
 mod issue_spec;
+mod json_envelope;
 pub(crate) mod memory;
 pub mod open;
 mod pane;
@@ -35,7 +37,9 @@ mod workspace;
 use std::io::{self};
 
 pub use board::{BoardCommand, BoardPostCommand};
+pub use commands::{IssueCommand, PrCommand};
 pub use diagnostics::DiagnosticsCommand;
+pub use discuss::DiscussAction;
 pub use discussion::DiscussionCommand;
 pub(crate) use env::ClientRef;
 pub use env::{dispatch, CliEnv, DefaultCliEnv, TestEnv};
@@ -44,7 +48,7 @@ pub use index::{IndexCommand, IndexScope};
 pub use memory::MemoryCommand;
 pub use search::SearchCommand;
 
-/// Compact linked PR summary used by `gwtd issue linked-prs`.
+/// Compact linked PR summary used by `issue.linked_prs`.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct LinkedPrSummary {
     pub number: u64,
@@ -53,7 +57,7 @@ pub struct LinkedPrSummary {
     pub url: String,
 }
 
-/// Compact PR check entry used by `gwtd pr checks`.
+/// Compact PR check entry used by `pr.checks`.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct PrCheckItem {
     pub name: String,
@@ -65,7 +69,7 @@ pub struct PrCheckItem {
     pub workflow: String,
 }
 
-/// Render-friendly aggregate used by `gwtd pr checks`.
+/// Render-friendly aggregate used by `pr.checks`.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct PrChecksSummary {
     pub summary: String,
@@ -75,7 +79,7 @@ pub struct PrChecksSummary {
     pub checks: Vec<PrCheckItem>,
 }
 
-/// PR review summary used by `gwtd pr reviews`.
+/// PR review summary used by `pr.reviews`.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct PrReview {
     pub id: String,
@@ -95,7 +99,7 @@ pub struct PrReviewThreadComment {
     pub author: String,
 }
 
-/// Review thread snapshot used by `gwtd pr review-threads`.
+/// Review thread snapshot used by `pr.review_threads`.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct PrReviewThread {
     pub id: String,
@@ -106,7 +110,7 @@ pub struct PrReviewThread {
     pub comments: Vec<PrReviewThreadComment>,
 }
 
-/// Test-visible log entry for `gwtd pr create`.
+/// Test-visible log entry for `pr.create`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PrCreateCall {
     pub base: String,
@@ -117,7 +121,7 @@ pub struct PrCreateCall {
     pub draft: bool,
 }
 
-/// Test-visible log entry for `gwtd pr edit`.
+/// Test-visible log entry for `pr.edit`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PrEditCall {
     pub number: u64,
@@ -150,28 +154,28 @@ pub enum CliCommand {
     Pane(PaneCommand),
     /// SPEC #2920 FR-006: `gwt open` reads tray lock + opens browser.
     Open(open::OpenArgs),
-    /// SPEC-1942 US-15: `gwtd search "<query>" [flags]`.
+    /// SPEC-1942 US-15: `search` JSON operation.
     Search(SearchCommand),
 }
 
-/// SPEC-2077 family enum for `gwtd daemon ...`.
+/// SPEC-2077 command model for `daemon.*` JSON operations.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum DaemonCommand {
-    /// `gwtd daemon start` — bootstrap and serve the runtime daemon.
+    /// `daemon.start` — bootstrap and serve the runtime daemon.
     Start,
-    /// `gwtd daemon status` — print whether a daemon is registered for cwd scope.
+    /// `daemon.status` — print whether a daemon is registered for cwd scope.
     Status,
-    /// `gwtd daemon subscribe <channel>...` — connect to the running daemon,
+    /// `daemon.subscribe` — connect to the running daemon,
     /// subscribe to one or more broadcast channels, and print received events
     /// to stdout one JSON line at a time. Useful for debugging the Phase H1+
     /// fan-out pipeline.
     Subscribe { channels: Vec<String> },
 }
 
-/// SPEC-2359 family enum for `gwtd workspace ...`.
+/// SPEC-2359 command model for `workspace.*` JSON operations.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum WorkspaceCommand {
-    /// `gwtd workspace update ...` — update Workspace current projection and journal.
+    /// `workspace.update` — update Workspace current projection and journal.
     Update {
         title: Option<String>,
         status: Option<String>,
@@ -183,16 +187,16 @@ pub enum WorkspaceCommand {
         current_focus: Option<String>,
         title_summary: Option<String>,
     },
-    /// `gwtd workspace candidates --agent-session <id>` — list join candidates.
+    /// `workspace.candidates` — list join candidates.
     Candidates { agent_session: String },
-    /// `gwtd workspace join --agent-session <id> --workspace <id>`.
+    /// `workspace.join`.
     Join {
         agent_session: String,
         workspace_id: String,
         current_focus: Option<String>,
         title_summary: Option<String>,
     },
-    /// `gwtd workspace create --agent-session <id> --title-summary <name> ...`.
+    /// `workspace.create`.
     Create {
         agent_session: String,
         title_summary: String,
@@ -202,7 +206,7 @@ pub enum WorkspaceCommand {
         split_from: Option<String>,
         boundary: Option<String>,
     },
-    /// `gwtd workspace ensure --agent-session <id> --title-summary <name> ...`.
+    /// `workspace.ensure`.
     Ensure {
         agent_session: String,
         title_summary: String,
@@ -212,135 +216,39 @@ pub enum WorkspaceCommand {
         topic: Option<String>,
         boundary: Option<String>,
     },
-    /// SPEC-2359 US-41: `gwtd workspace projection-list [--stale] [--all]` —
+    /// SPEC-2359 US-41: `workspace.projection_list` —
     /// list saved Workspace projections under `~/.gwt/projects/*/workspace/`
     /// classified by [`gwt_core::workspace_projection::workspace_projection_stale_reason`].
     ProjectionList { stale: bool, all: bool },
-    /// SPEC-2359 US-41: `gwtd workspace projection-prune [--dry-run] [--id <id>]...` —
+    /// SPEC-2359 US-41: `workspace.projection_prune` —
     /// archive / delete stale Workspace projections (FR-153, FR-154).
     ProjectionPrune { dry_run: bool, ids: Vec<String> },
 }
 
-/// SPEC-1942 family enum for `gwtd issue ...` (includes `issue spec ...`).
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum IssueCommand {
-    /// `gwtd issue spec <n>` — print all sections.
-    SpecReadAll { number: u64 },
-    /// `gwtd issue spec <n> --section <name>` — print a single section.
-    SpecReadSection { number: u64, section: String },
-    /// `gwtd issue spec <n> --edit <name> -f <file>` — replace a section.
-    SpecEditSection {
-        number: u64,
-        section: String,
-        file: String,
-    },
-    /// `gwtd issue spec <n> --edit spec --json [-f <file>] [--replace]`.
-    SpecEditSectionJson {
-        number: u64,
-        section: String,
-        file: Option<String>,
-        replace: bool,
-    },
-    /// `gwtd issue spec list [--phase <name>] [--state open|closed]`.
-    SpecList {
-        phase: Option<String>,
-        state: Option<String>,
-    },
-    /// `gwtd issue spec create --title <t> -f <body_file> [--label <l>]*`.
-    SpecCreate {
-        title: String,
-        file: String,
-        labels: Vec<String>,
-    },
-    /// `gwtd issue spec create --json --title <t> [-f <file>] [--label <l>]*`.
-    SpecCreateJson {
-        title: String,
-        file: Option<String>,
-        labels: Vec<String>,
-    },
-    /// `gwtd issue spec create --help`.
-    SpecCreateHelp,
-    /// `gwtd issue spec pull [--all | <n>...]` — refresh cache from server.
-    SpecPull { all: bool, numbers: Vec<u64> },
-    /// `gwtd issue spec repair <n>` — clear cache and re-fetch from server.
-    SpecRepair { number: u64 },
-    /// `gwtd issue spec <n> --rename <title>` — update the Issue title.
-    SpecRename { number: u64, title: String },
-    /// `gwtd issue view <n> [--refresh]` — print a plain issue from cache/live.
-    View { number: u64, refresh: bool },
-    /// `gwtd issue comments <n> [--refresh]` — print issue comments.
-    Comments { number: u64, refresh: bool },
-    /// `gwtd issue linked-prs <n> [--refresh]` — print linked PR summaries.
-    LinkedPrs { number: u64, refresh: bool },
-    /// `gwtd issue create --title <t> -f <body_file> [--label <l>]*`.
-    Create {
-        title: String,
-        file: String,
-        labels: Vec<String>,
-    },
-    /// `gwtd issue comment <n> -f <body_file>` — create a plain issue comment.
-    Comment { number: u64, file: String },
-}
-
-/// SPEC-1942 family enum for `gwtd pr ...`.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum PrCommand {
-    /// `gwtd pr current`.
-    Current,
-    /// `gwtd pr create --base <branch> [--head <branch>] --title <t> -f <body_file>`.
-    Create {
-        base: String,
-        head: Option<String>,
-        title: String,
-        file: String,
-        labels: Vec<String>,
-        draft: bool,
-    },
-    /// `gwtd pr edit <n> [--title <t>] [-f <body_file>] [--add-label <label>]*`.
-    Edit {
-        number: u64,
-        title: Option<String>,
-        file: Option<String>,
-        add_labels: Vec<String>,
-    },
-    /// `gwtd pr view <n>`.
-    View { number: u64 },
-    /// `gwtd pr comment <n> -f <body_file>`.
-    Comment { number: u64, file: String },
-    /// `gwtd pr reviews <n>`.
-    Reviews { number: u64 },
-    /// `gwtd pr review-threads <n>`.
-    ReviewThreads { number: u64 },
-    /// `gwtd pr review-threads reply-and-resolve <n> -f <body_file>`.
-    ReviewThreadsReplyAndResolve { number: u64, file: String },
-    /// `gwtd pr checks <n>`.
-    Checks { number: u64 },
-}
-
-/// SPEC-1942 family enum for `gwtd actions ...`.
+/// SPEC-1942 command model for `actions.*` JSON operations.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ActionsCommand {
-    /// `gwtd actions logs --run <id>`.
+    /// `actions.logs`.
     Logs { run_id: u64 },
-    /// `gwtd actions job-logs --job <id>`.
+    /// `actions.job_logs`.
     JobLogs { job_id: u64 },
 }
 
-/// SPEC-1942 family enum for `gwtd hook ...` and `gwtd __internal daemon-hook ...`.
+/// SPEC-1942 command model for managed hook argv transport and internal daemon hooks.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum HookCommand {
-    /// `gwtd hook <name> [args...]` — visible managed hook entry.
+    /// Managed hook argv entry.
     Run { name: String, rest: Vec<String> },
     /// `gwtd __internal daemon-hook <name> [args...]` — hidden helper.
     InternalDaemon { name: String, rest: Vec<String> },
 }
 
-/// SPEC-1942 family enum for `gwtd update ...` and `gwtd __internal apply-update`/`run-installer`.
+/// SPEC-1942 command model for update and internal updater operations.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum UpdateCommand {
-    /// `gwtd update --check` — only check and report.
+    /// Update check-only mode.
     CheckOnly,
-    /// `gwtd update` — check and, with approval, download and apply.
+    /// Check and, with approval, download and apply.
     Apply,
     /// `gwtd __internal apply-update ...`.
     InternalApply { rest: Vec<String> },
@@ -348,41 +256,32 @@ pub enum UpdateCommand {
     InternalRunInstaller { rest: Vec<String> },
 }
 
-/// SPEC-1942 family enum for `gwtd discuss ...`. Backed by the legacy
+/// SPEC-1942 command model for `discuss.*`. Backed by the legacy
 /// [`DiscussAction`] alias to keep call-sites stable.
 pub type DiscussCommand = DiscussAction;
 
-/// SPEC-1942 family enum for `gwtd plan ...`. Backed by [`SkillStateAction`].
+/// SPEC-1942 command model for `plan.*`. Backed by [`SkillStateAction`].
 pub type PlanCommand = SkillStateAction;
 
-/// SPEC-1942 family enum for `gwtd build ...`. Backed by [`SkillStateAction`].
+/// SPEC-1942 command model for `build.*`. Backed by [`SkillStateAction`].
 pub type BuildCommand = SkillStateAction;
 
-/// SPEC-2784 family enum for `gwtd register ...`. Same skill-state lifecycle.
+/// SPEC-2784 command model for `register.*`. Same skill-state lifecycle.
 pub type RegisterCommand = SkillStateAction;
-/// SPEC-1935 / Issue #2529: canonical CLI surface for `gwt-agent` pane inspection and lifecycle.
+/// SPEC-1935 / Issue #2529: command model for `gwt-agent` pane inspection and lifecycle.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PaneCommand {
-    /// `gwtd pane list`.
+    /// `pane.list`.
     List,
-    /// `gwtd pane read <id> [--lines <n>]`.
+    /// `pane.read`.
     Read { id: String, lines: usize },
-    /// `gwtd pane close <id>` / `gwtd pane stop <id>`.
+    /// `pane.close` / `pane.stop`.
     Close { id: String },
-    /// `gwtd pane send [<id>] --text <line>` (SPEC-3050: self-only injection
+    /// `pane.send` (SPEC-3050: self-only injection
     /// into the calling agent's own pane).
     Send { id: Option<String>, text: String },
 }
-/// Sub-action for `gwtd discuss ...` (SPEC-1935 FR-014p).
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum DiscussAction {
-    Resolve { proposal: String },
-    Park { proposal: String },
-    Reject { proposal: String },
-    ClearNextQuestion { proposal: String },
-}
-
-/// Sub-action for `gwtd plan ...` / `gwtd build ...` (SPEC-1935 FR-014q/r).
+/// Sub-action for `plan.*` / `build.*` (SPEC-1935 FR-014q/r).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SkillStateAction {
     Start { spec: u64 },
@@ -395,6 +294,7 @@ pub enum SkillStateAction {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CliParseError {
     Usage,
+    InvalidJson(String),
     InvalidNumber(String),
     MissingFlag(&'static str),
     InvalidValue {
@@ -407,9 +307,10 @@ pub enum CliParseError {
 impl std::fmt::Display for CliParseError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
+            CliParseError::InvalidJson(message) => write!(f, "invalid JSON envelope: {message}"),
             CliParseError::Usage => write!(
                 f,
-                "usage: gwtd issue spec <n> [--section <name>|--rename <title>|--edit <name> (-f <file>|--json [-f <file>] [--replace])] | gwtd issue spec list [--phase <p>] [--state open|closed] | gwtd issue spec create (--title <t> -f <file> | --json --title <t> [-f <file>] | --help) [--label <l>]* | gwtd issue view|comments|linked-prs <n> [--refresh] | gwtd issue create --title <t> -f <file> [--label <l>]* | gwtd issue comment <n> -f <file> | gwtd pr current|create --base <b> [--head <h>] --title <t> -f <file> [--label <l>]* [--draft]|edit <n> [--title <t>] [-f <file>] [--add-label <l>]*|view <n>|comment <n> -f <file>|reviews <n>|review-threads <n>|review-threads reply-and-resolve <n> -f <file>|checks <n> | gwtd actions logs --run <id> | gwtd actions job-logs --job <id> | gwtd board show [--json] [--workspace <id>|--all] | gwtd board post --kind <kind> (--body <text> | -f <file>) [--title-summary <text>] [--parent <id>] [--topic <t>]* [--owner <n>]* [--target <id>]* [--mention <kind:id>]* [--broadcast] | gwtd memory add [--date <yyyy-mm-dd>] [--type lesson|decision|workflow|failure-pattern] --title <text> --context <text> --learning <text> --future-action <text> | gwtd discussion update [fields] | gwtd lessons add ... | gwtd workspace update [--title-summary <text>] [fields] | gwtd workspace candidates --agent-session <id> | gwtd workspace join --agent-session <id> --workspace <id> | gwtd workspace create --agent-session <id> --title-summary <text> [--current-focus <text>] [--spec <n>|--issue <n>] [--split-from <id>] [--boundary <text>] | gwtd workspace ensure --agent-session <id> --title-summary <text> [--current-focus <text>] [--spec <n>|--issue <n>] [--topic <t>] [--boundary <text>] | gwtd pane list|read <id> [--lines <n>]|close <id> | gwtd index status|rebuild [--scope all|issues|specs|memory|discussions|board|files|files-docs] | gwtd search \"<query>\" [--specs] [--issues] [--files] [--files-docs] [--memory] [--board] [--discussions] [--match-mode semantic|all_terms] [--n-results <n>] [--json] | gwtd diagnostics cpu --json"
+                "usage: gwtd < stdin JSON envelope; e.g. {{\"schema_version\":1,\"operation\":\"workspace.update\",\"params\":{{\"status\":\"active\",\"summary\":\"<summary>\"}}}}. Managed hook transport remains gwtd hook event <Event>."
             ),
             CliParseError::InvalidNumber(s) => write!(f, "invalid issue number: {s}"),
             CliParseError::MissingFlag(flag) => write!(f, "missing required flag: {flag}"),
@@ -424,7 +325,7 @@ impl std::fmt::Display for CliParseError {
 impl std::error::Error for CliParseError {}
 
 const TITLE_SUMMARY_WORK_NAME_REASON: &str =
-    "title-summary must be a work name, not a status/result; keep completion, progress, or blocker state in --status, --current-focus, --summary, or Board --body";
+    "purpose must be a work name, not a status/result; keep completion, progress, or blocker state in params.status, params.current_focus, params.summary, or Board body";
 
 fn validate_title_summary_work_name(flag: &'static str, value: &str) -> Result<(), CliParseError> {
     let trimmed = value.trim();
@@ -555,52 +456,52 @@ pub fn parse_issue_args(args: &[String]) -> Result<CliCommand, CliParseError> {
     issue::parse(args).map(CliCommand::Issue)
 }
 
-/// Parse an argv slice into a `gwtd pr ...` [`CliCommand`].
+/// Parse a legacy `pr ...` argv slice into a [`CliCommand`].
 pub fn parse_pr_args(args: &[String]) -> Result<CliCommand, CliParseError> {
     pr::parse(args).map(CliCommand::Pr)
 }
 
-/// Parse an argv slice into a `gwtd actions ...` [`CliCommand`].
+/// Parse a legacy `actions ...` argv slice into a [`CliCommand`].
 pub fn parse_actions_args(args: &[String]) -> Result<CliCommand, CliParseError> {
     actions::parse(args).map(CliCommand::Actions)
 }
 
-/// Parse an argv slice into a `gwtd board ...` [`CliCommand`].
+/// Parse a legacy `board ...` argv slice into a [`CliCommand`].
 pub fn parse_board_args(args: &[String]) -> Result<CliCommand, CliParseError> {
     board::parse(args).map(CliCommand::Board)
 }
 
-/// Parse an argv slice into a `gwtd index ...` [`CliCommand`].
+/// Parse a legacy `index ...` argv slice into a [`CliCommand`].
 pub fn parse_index_args(args: &[String]) -> Result<CliCommand, CliParseError> {
     index::parse(args).map(CliCommand::Index)
 }
 
-/// Parse an argv slice into a `gwtd diagnostics ...` [`CliCommand`].
+/// Parse a legacy `diagnostics ...` argv slice into a [`CliCommand`].
 pub fn parse_diagnostics_args(args: &[String]) -> Result<CliCommand, CliParseError> {
     diagnostics::parse(args).map(CliCommand::Diagnostics)
 }
 
-/// Parse an argv slice into a `gwtd memory ...` / `gwtd lessons ...` [`CliCommand`].
+/// Parse a legacy `memory ...` / `lessons ...` argv slice into a [`CliCommand`].
 pub fn parse_memory_args(args: &[String]) -> Result<CliCommand, CliParseError> {
     memory::parse(args).map(CliCommand::Memory)
 }
 
-/// Parse an argv slice into a `gwtd discussion ...` [`CliCommand`].
+/// Parse a legacy `discussion ...` argv slice into a [`CliCommand`].
 pub fn parse_discussion_args(args: &[String]) -> Result<CliCommand, CliParseError> {
     discussion::parse(args).map(CliCommand::Discussion)
 }
 
-/// Parse an argv slice into a `gwtd daemon ...` [`CliCommand`] (SPEC-2077).
+/// Parse a legacy `daemon ...` argv slice into a [`CliCommand`] (SPEC-2077).
 pub fn parse_daemon_args(args: &[String]) -> Result<CliCommand, CliParseError> {
     daemon::parse(args).map(CliCommand::Daemon)
 }
 
-/// Parse an argv slice into a `gwtd workspace ...` [`CliCommand`].
+/// Parse a legacy `workspace ...` argv slice into a [`CliCommand`].
 pub fn parse_workspace_args(args: &[String]) -> Result<CliCommand, CliParseError> {
     workspace::parse(args).map(CliCommand::Workspace)
 }
 
-/// Parse an argv slice into a `gwtd pane ...` [`CliCommand`].
+/// Parse a legacy `pane ...` argv slice into a [`CliCommand`].
 pub fn parse_pane_args(args: &[String]) -> Result<CliCommand, CliParseError> {
     pane::parse(args).map(CliCommand::Pane)
 }
@@ -629,10 +530,10 @@ fn ensure_no_remaining_args<'a>(
     Ok(())
 }
 
-/// Parse the tail of a `gwtd hook ...` argv slice into a
+/// Parse the tail of a managed hook argv slice into a
 /// [`CliCommand::Hook`] holding [`HookCommand::Run`].
 ///
-/// SPEC #1942 (CORE-CLI): `gwtd hook <name> [args...]` is the single entry
+/// SPEC #1942 (CORE-CLI): managed hook argv transport is the single entry
 /// point for every in-binary hook handler. The known hook names are:
 ///
 /// - `runtime-state <event>`
@@ -650,26 +551,17 @@ pub fn parse_hook_args(args: &[String]) -> Result<CliCommand, CliParseError> {
     }))
 }
 
-/// Parse `gwtd discuss <action> --proposal <label>` (SPEC-1935 FR-014p).
+/// Parse legacy discuss argv (SPEC-1935 FR-014p).
 pub fn parse_discuss_args(args: &[String]) -> Result<CliCommand, CliParseError> {
-    let (head, rest) = args.split_first().ok_or(CliParseError::Usage)?;
-    let proposal = parse_named_string(rest, "--proposal")?;
-    let action = match head.as_str() {
-        "resolve" => DiscussAction::Resolve { proposal },
-        "park" => DiscussAction::Park { proposal },
-        "reject" => DiscussAction::Reject { proposal },
-        "clear-next-question" => DiscussAction::ClearNextQuestion { proposal },
-        other => return Err(CliParseError::UnknownSubcommand(other.to_string())),
-    };
-    Ok(CliCommand::Discuss(action))
+    discuss::parse(args).map(CliCommand::Discuss)
 }
 
-/// Parse `gwtd plan <action> --spec <n> [...]` (SPEC-1935 FR-014q).
+/// Parse legacy plan argv (SPEC-1935 FR-014q).
 pub fn parse_plan_args(args: &[String]) -> Result<CliCommand, CliParseError> {
     parse_skill_state_args(args).map(CliCommand::Plan)
 }
 
-/// Parse `gwtd build <action> --spec <n> [...]` (SPEC-1935 FR-014r).
+/// Parse legacy build argv (SPEC-1935 FR-014r).
 pub fn parse_build_args(args: &[String]) -> Result<CliCommand, CliParseError> {
     parse_skill_state_args(args).map(CliCommand::Build)
 }
@@ -735,7 +627,10 @@ fn parse_named_u64(args: &[String], flag: &'static str) -> Result<u64, CliParseE
 /// We collect output into a String buffer first so the family run's borrow of
 /// `env.client()` does not conflict with the mutable borrow required by
 /// `env.stdout()` at write time.
-pub fn run<E: CliEnv>(env: &mut E, cmd: CliCommand) -> Result<i32, SpecOpsError> {
+pub(crate) fn run_collect<E: CliEnv>(
+    env: &mut E,
+    cmd: CliCommand,
+) -> Result<(i32, String), SpecOpsError> {
     let mut out = String::new();
     let code = match cmd {
         CliCommand::Issue(inner) => issue::run(env, inner, &mut out)?,
@@ -750,10 +645,28 @@ pub fn run<E: CliEnv>(env: &mut E, cmd: CliCommand) -> Result<i32, SpecOpsError>
         CliCommand::Build(action) => build::run(env, action, &mut out)?,
         CliCommand::Register(action) => register::run(env, action, &mut out)?,
         CliCommand::Hook(HookCommand::Run { name, rest }) => {
-            return hook::run_hook(env, &name, &rest);
+            let mut hook_stdout = Vec::new();
+            let code = {
+                let mut capture = env::StdoutCaptureEnv {
+                    inner: env,
+                    stdout: &mut hook_stdout,
+                };
+                hook::run_hook(&mut capture, &name, &rest)?
+            };
+            out.push_str(&String::from_utf8_lossy(&hook_stdout));
+            return Ok((code, out));
         }
         CliCommand::Hook(HookCommand::InternalDaemon { name, rest }) => {
-            return hook::run_daemon_hook(env, &name, &rest);
+            let mut hook_stdout = Vec::new();
+            let code = {
+                let mut capture = env::StdoutCaptureEnv {
+                    inner: env,
+                    stdout: &mut hook_stdout,
+                };
+                hook::run_daemon_hook(&mut capture, &name, &rest)?
+            };
+            out.push_str(&String::from_utf8_lossy(&hook_stdout));
+            return Ok((code, out));
         }
         CliCommand::Diagnostics(inner) => diagnostics::run(env, inner, &mut out)?,
         CliCommand::Update(UpdateCommand::CheckOnly) => {
@@ -774,7 +687,14 @@ pub fn run<E: CliEnv>(env: &mut E, cmd: CliCommand) -> Result<i32, SpecOpsError>
         CliCommand::Open(args) => open::run(env, args, &mut out)?,
         CliCommand::Search(inner) => search::run(env, inner, &mut out)?,
     };
-    let _ = env.stdout().write_all(out.as_bytes());
+    Ok((code, out))
+}
+
+pub fn run<E: CliEnv>(env: &mut E, cmd: CliCommand) -> Result<i32, SpecOpsError> {
+    let (code, out) = run_collect(env, cmd)?;
+    env.stdout()
+        .write_all(out.as_bytes())
+        .map_err(io_as_api_error)?;
     Ok(code)
 }
 

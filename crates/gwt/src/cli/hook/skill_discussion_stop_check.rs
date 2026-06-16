@@ -48,7 +48,7 @@ pub fn handle_with_input(worktree: &Path, input: &str) -> HookOutput {
         "Discussion is still [active] on proposal \"{title}\".\n\
          Next question, evidence blocker, or depth blocker: {question}\n\
          Continue the gwt-discussion workflow (investigate → ask the user → update Discussion TODO), \
-         or call `gwtd discuss resolve|park|reject --proposal \"{label}\"` to exit the discussion explicitly.",
+         or run JSON operation `discuss.resolve`, `discuss.park`, or `discuss.reject` with `params.proposal:\"{label}\"` to exit the discussion explicitly.",
         title = pending.proposal_title,
         question = question,
         label = pending.proposal_label,
@@ -150,7 +150,7 @@ mod tests {
             &[
                 "Hook-driven resume",
                 "Should SessionStart or UserPromptSubmit surface the resume proposal?",
-                "gwtd discuss resolve",
+                "discuss.resolve",
                 "Proposal A",
             ],
         );
@@ -166,11 +166,11 @@ mod tests {
         match handle_with_input(dir.path(), "{}") {
             HookOutput::StopBlock { reason } => {
                 assert!(
-                    reason.contains("--proposal \"Proposal A\""),
+                    reason.contains("params.proposal:\"Proposal A\""),
                     "proposal label must be double-quoted in reason; got: {reason}"
                 );
                 assert!(
-                    !reason.contains("--proposal Proposal A"),
+                    !reason.contains("params.proposal:Proposal A"),
                     "unquoted form would shell-split; got: {reason}"
                 );
             }

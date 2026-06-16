@@ -672,6 +672,16 @@ where
             .push("bunx unavailable, switching to npx...".to_string());
         return Ok(report);
     }
+    if first_npx_probe.timed_out {
+        config.command = fallback_executable;
+        config.args = fallback_args;
+        report.switched_to_fallback = true;
+        report.messages.push(format!(
+            "npx package-runner probe timed out; continuing with npx so launch output remains visible in the terminal. {}",
+            first_npx_probe.diagnostic()
+        ));
+        return Ok(report);
+    }
 
     let probe_output = first_npx_probe.combined_output();
     let repair_candidate = npx_cache_base
@@ -706,6 +716,16 @@ where
         &config.remove_env,
         cwd,
     );
+    if second_npx_probe.timed_out {
+        config.command = fallback_executable;
+        config.args = fallback_args;
+        report.switched_to_fallback = true;
+        report.messages.push(format!(
+            "npx package-runner probe timed out after cache repair; continuing with npx so launch output remains visible in the terminal. {}",
+            second_npx_probe.diagnostic()
+        ));
+        return Ok(report);
+    }
     if !second_npx_probe.success {
         return Err(format!(
             "npx package-runner probe failed after repairing npm npx cache at {}. {} Manual recovery: remove this `_npx` directory and retry the launch.",
@@ -910,6 +930,18 @@ impl PackageRunnerProbeOutcome {
             stdout: String::new(),
             stderr: stderr.to_string(),
             timed_out: false,
+            error: None,
+        }
+    }
+
+    #[cfg(all(test, windows))]
+    fn timeout() -> Self {
+        Self {
+            success: false,
+            exit_code: None,
+            stdout: String::new(),
+            stderr: String::new(),
+            timed_out: true,
             error: None,
         }
     }
@@ -2087,6 +2119,56 @@ mod tests {
         assert_eq!(repair_calls, 0);
         assert!(error.contains("npx package-runner probe failed"));
         assert!(error.contains("registry timeout"));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn checked_host_package_runner_fallback_continues_when_npx_probe_times_out() {
+        let temp = tempdir().expect("tempdir");
+        let npx_base = temp.path().join("npm-cache").join("_npx");
+        let mut config = sample_versioned_launch_config();
+        let mut probe_calls = Vec::new();
+        let mut repair_calls = 0;
+
+        let report = apply_host_package_runner_fallback_checked_with_probe_and_repair(
+            &mut config,
+            "npx".to_string(),
+            Some(npx_base),
+            |command, args, _env, _remove_env, _cwd| {
+                probe_calls.push((command.to_string(), args.clone()));
+                match probe_calls.len() {
+                    1 => PackageRunnerProbeOutcome::failure_with_stderr("bunx unavailable"),
+                    2 => PackageRunnerProbeOutcome::timeout(),
+                    _ => panic!("unexpected extra probe call: {probe_calls:?}"),
+                }
+            },
+            |_candidate| {
+                repair_calls += 1;
+                Ok(())
+            },
+        )
+        .expect("npx probe timeout should not stop host launch before PTY spawn");
+
+        assert!(report.switched_to_fallback);
+        assert!(!report.repaired_npx_cache);
+        assert_eq!(repair_calls, 0);
+        assert_eq!(probe_calls.len(), 2);
+        assert_eq!(config.command, "npx");
+        assert_eq!(
+            config.args,
+            vec![
+                "--yes".to_string(),
+                "@anthropic-ai/claude-code@latest".to_string(),
+                "--print".to_string(),
+            ],
+        );
+        assert!(
+            report
+                .messages
+                .iter()
+                .any(|message| message.contains("probe timed out")),
+            "timeout continuation should be visible in launch feedback: {report:?}",
+        );
     }
 
     // Issue #2948 — non-Windows host launches must decide the package runner by

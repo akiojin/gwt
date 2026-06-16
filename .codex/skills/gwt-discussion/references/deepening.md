@@ -24,7 +24,9 @@ break down coarse tasks through a two-phase interactive workshop.
 ### Read all SPEC artifacts
 
 ```bash
-gwtd issue spec <Issue番号>
+gwtd <<'JSON'
+{"schema_version":1,"operation":"issue.spec.read","params":{"number":123}}
+JSON
 ```
 
 Read spec.md, plan.md, and tasks.md (whichever exist).
@@ -120,13 +122,17 @@ Show the diff or new section text.
 Update the artifact:
 
 ```bash
-gwtd issue spec <Issue番号> --edit spec -f /tmp/spec.md
+gwtd <<'JSON'
+{"schema_version":1,"operation":"issue.spec.edit","params":{"number":123,"section":"spec","body":"<updated spec body>"}}
+JSON
 ```
 
 Or for tasks.md:
 
 ```bash
-gwtd issue spec <Issue番号> --edit tasks -f /tmp/tasks.md
+gwtd <<'JSON'
+{"schema_version":1,"operation":"issue.spec.edit","params":{"number":123,"section":"tasks","body":"<updated tasks body>"}}
+JSON
 ```
 
 ### Step 6: Move to next point

@@ -37,10 +37,14 @@ pub(super) fn run<E: CliEnv>(
         IssueCommand::SpecReadAll { .. }
             | IssueCommand::SpecReadSection { .. }
             | IssueCommand::SpecEditSection { .. }
+            | IssueCommand::SpecEditSectionBody { .. }
             | IssueCommand::SpecEditSectionJson { .. }
+            | IssueCommand::SpecEditSectionJsonBody { .. }
             | IssueCommand::SpecList { .. }
             | IssueCommand::SpecCreate { .. }
+            | IssueCommand::SpecCreateBody { .. }
             | IssueCommand::SpecCreateJson { .. }
+            | IssueCommand::SpecCreateJsonBody { .. }
             | IssueCommand::SpecCreateHelp
             | IssueCommand::SpecPull { .. }
             | IssueCommand::SpecRepair { .. }
@@ -79,8 +83,30 @@ pub(super) fn run<E: CliEnv>(
             ));
             0
         }
+        IssueCommand::CreateBody {
+            title,
+            body,
+            labels,
+        } => {
+            let snapshot = env.client().create_issue(&title, &body, &labels)?;
+            Cache::new(env.cache_root()).write_snapshot(&snapshot)?;
+            out.push_str(&format!(
+                "created issue #{} with labels {:?}\n",
+                snapshot.number.0, snapshot.labels
+            ));
+            0
+        }
         IssueCommand::Comment { number, file } => {
             let body = env.read_file(&file).map_err(super::io_as_api_error)?;
+            let comment = env.client().create_comment(IssueNumber(number), &body)?;
+            let _ = refresh_issue_cache(env, IssueNumber(number))?;
+            out.push_str(&format!(
+                "created comment {} on #{}\n",
+                comment.id.0, number
+            ));
+            0
+        }
+        IssueCommand::CommentBody { number, body } => {
             let comment = env.client().create_comment(IssueNumber(number), &body)?;
             let _ = refresh_issue_cache(env, IssueNumber(number))?;
             out.push_str(&format!(

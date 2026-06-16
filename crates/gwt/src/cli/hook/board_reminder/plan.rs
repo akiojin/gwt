@@ -252,7 +252,7 @@ mod tests {
         assert!(text.contains("Stop"));
         assert!(text.contains("completed"));
         assert!(text.contains("Board"));
-        assert!(text.contains("gwtd board post"));
+        assert!(text.contains("board.post"));
     }
 
     #[test]
@@ -277,12 +277,13 @@ mod tests {
                 "USER_PROMPT_REMINDER should promote coordination axis '{axis}', got:\n{text}"
             );
         }
-        assert!(text.contains("--kind claim"));
-        assert!(text.contains("--kind handoff"));
-        assert!(text.contains("--target"));
+        assert!(text.contains("params.kind:\"claim\""));
+        assert!(text.contains("params.kind:\"handoff\""));
+        assert!(text.contains("params.targets"));
         assert!(text.contains("Choose the audience before posting"));
-        assert!(text.contains("--mention user:"));
-        assert!(text.contains("--mention agent:"));
+        assert!(text.contains("params.mentions"));
+        assert!(text.contains("user:<id>"));
+        assert!(text.contains("agent:<id>"));
     }
 
     #[test]
@@ -381,7 +382,10 @@ mod tests {
             additional_context(&user_prompt.output),
             system_message(&stop.output),
         ] {
-            assert!(text.contains("gwtd workspace update"));
+            assert!(
+                text.contains("workspace.update") || text.contains("params.purpose"),
+                "{text}"
+            );
             assert!(text.contains("Board"));
             assert!(text.contains("Work"));
         }
@@ -661,7 +665,7 @@ mod tests {
         assert!(text.contains("共有 Board"));
         assert!(text.contains("現在の状態"));
         assert!(text.contains("次"));
-        assert!(text.contains("gwtd workspace update"));
+        assert!(text.contains("workspace.update"));
         assert!(text.contains("Use language: ja"));
         assert!(!text.contains("Choose the audience before posting"));
     }

@@ -10,7 +10,7 @@
 //! (3) broadcast `BackendEvent::ActiveWorkProjection`, and
 //! (4) broadcast `BackendEvent::WindowCanvasState` so the pane heading
 //! `windowData.dynamic_title` consumed by `windowDisplayTitle` on the
-//! frontend refreshes. `gwtd workspace update --title-summary` ran (1)
+//! frontend refreshes. `workspace.update` with `params.purpose` ran (1)
 //! and (3) but never (4), so the pane heading kept the `agent_id`
 //! fallback ("CLAUDE CODE") even when `projection.agents[<i>].title_summary`
 //! had a fresh value.

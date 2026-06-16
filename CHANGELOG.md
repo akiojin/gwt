@@ -1,6 +1,44 @@
 # Changelog
 
 All notable changes to this project will be documented in this file.
+## [9.60.0] - 2026-06-16
+
+### Bug Fixes
+
+- **discussion:** Start pending goal after approval
+- Restore sessions with materializable branches
+- Preserve branch labels for ingested work events
+- Reduce terminal tab activation redraw
+- Keep agent launch running after npx probe timeout
+- Gate workspace cleanup on backend candidates
+- Restore visual verification paths
+- Block cleanup for live workspace processes
+- Finish workspace cleanup modal result
+- Address gwtd hook transport PR feedback
+- Resolve outdated PR review threads
+
+### Features
+
+- Add JSON envelope for gwtd operations
+- Enforce JSON-only gwtd operation surface
+
+### Miscellaneous Tasks
+
+- Update work coordination log
+- Merge origin develop
+- Record architecture review work event
+- Merge origin develop
+- Merge origin develop
+- Record workspace cleanup verification
+- Merge origin develop into workspace cleanup branch
+- Record pr handoff state
+- Merge origin develop
+
+### Testing
+
+- Guard coordination guidance JSON examples
+- **cli:** Cover json-envelope operation parser to hold the coverage gate
+
 ## [9.59.0] - 2026-06-14
 
 ### Bug Fixes

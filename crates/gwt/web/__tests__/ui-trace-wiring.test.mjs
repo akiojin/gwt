@@ -125,16 +125,30 @@ test("UI trace wiring exposes recorder helpers and stable event constants", () =
 
   wiring.traceUi(UI_TRACE_EVENT.applyViewport, { zoom: 1 });
   wiring.tracePointer(UI_TRACE_EVENT.pointerPanMove, { pointerId: 7 }, { gesture: "pan" });
+  wiring.traceUi(UI_TRACE_EVENT.terminalActivation, {
+    window_id: "win-trace",
+    fast_path: true,
+    geometry_sent: false,
+  });
   const measured = wiring.traceMeasure(UI_TRACE_EVENT.renderWorkspace, { windows: 2 }, () => "ok");
 
   assert.equal(measured, "ok");
-  assert.deepEqual(profiler.calls.slice(-3), [
+  assert.deepEqual(profiler.calls.slice(-4), [
     { kind: "record", event: "apply_viewport", fields: { zoom: 1 } },
     {
       kind: "recordPointer",
       event: "pointer_pan_move",
       pointerId: 7,
       fields: { gesture: "pan" },
+    },
+    {
+      kind: "record",
+      event: "terminal_activation",
+      fields: {
+        window_id: "win-trace",
+        fast_path: true,
+        geometry_sent: false,
+      },
     },
     {
       kind: "measure",
@@ -189,6 +203,17 @@ test("pointer diagnostics use centralized event constants", () => {
   assert.match(appSource, /UI_TRACE_EVENT\.pointerPanMove/);
   assert.match(appSource, /UI_TRACE_EVENT\.pointerMoveIgnored/);
   assert.match(appSource, /UI_TRACE_EVENT\.resizePointermoveApply/);
+});
+
+test("terminal activation diagnostics use centralized metadata-only trace constants", () => {
+  assert.equal(UI_TRACE_EVENT.terminalActivation, "terminal_activation");
+  assert.match(appSource, /UI_TRACE_EVENT\.terminalActivation/);
+  assert.match(appSource, /traceUi\(UI_TRACE_EVENT\.terminalActivation,\s*\{/);
+  assert.doesNotMatch(
+    appSource,
+    /traceUi\(UI_TRACE_EVENT\.terminalActivation,[\s\S]{0,300}\b(?:text|data|payload|input)\b/,
+    "terminal activation trace fields must stay metadata-only",
+  );
 });
 
 test("backend UI trace save result is surfaced to the user", () => {

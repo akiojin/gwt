@@ -353,7 +353,7 @@ fn clear_workspace_cleanup_git_details_event(project_root: &Path) -> Option<Outb
             })
             .work_items
             .iter()
-            .map(|item| workspace_work_item_view_from_item(item, &session_index))
+            .map(|item| workspace_work_item_view_from_item(item, &session_index, project_root))
             .collect::<Vec<_>>();
     Some(OutboundEvent::broadcast(
         BackendEvent::ActiveWorkProjection {

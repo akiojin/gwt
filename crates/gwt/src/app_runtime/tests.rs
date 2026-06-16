@@ -85,6 +85,17 @@ struct CaptureTracingVisitor {
     fields: HashMap<String, String>,
 }
 
+#[cfg(unix)]
+struct KillOnDrop(std::process::Child);
+
+#[cfg(unix)]
+impl Drop for KillOnDrop {
+    fn drop(&mut self) {
+        let _ = self.0.kill();
+        let _ = self.0.wait();
+    }
+}
+
 impl CaptureTracingVisitor {
     fn insert(&mut self, field: &tracing::field::Field, value: impl ToString) {
         self.fields
@@ -556,7 +567,7 @@ fn workspace_work_agent_view_attaches_session_history() {
         display_name: Some("Codex".to_string()),
         updated_at: chrono::Utc::now(),
     };
-    let view = super::workspace_work_agent_view_from_ref(&agent_ref, &index);
+    let view = super::workspace_work_agent_view_from_ref(&agent_ref, &index, Path::new("/"));
 
     let ids: Vec<&str> = view
         .sessions
@@ -569,7 +580,8 @@ fn workspace_work_agent_view_attaches_session_history() {
 
     // A Work with no persisted Session yields an empty Session list, not a panic.
     let empty_index = super::work_session_index(&[]);
-    let empty_view = super::workspace_work_agent_view_from_ref(&agent_ref, &empty_index);
+    let empty_view =
+        super::workspace_work_agent_view_from_ref(&agent_ref, &empty_index, Path::new("/"));
     assert!(empty_view.sessions.is_empty());
 }
 
@@ -2837,6 +2849,99 @@ fn app_runtime_cycle_focus_preserves_real_fit_pty_size() {
 }
 
 #[test]
+fn app_runtime_activate_maximized_window_tab_preserves_real_fit_pty_size() {
+    // SPEC-2008 Phase 34 / Issue #2937 companion: maximized tab activation
+    // changes only the active marker. The backend must not resize the PTY
+    // from shared maximized geometry, because the frontend's visible xterm
+    // fit owns the real cols/rows for the revealed tab.
+    let temp = tempdir().expect("tempdir");
+    let bounds = canvas_bounds();
+    let tab = sample_project_tab(
+        "tab-1",
+        "Repo",
+        temp.path().to_path_buf(),
+        ProjectKind::Git,
+        &[WindowPreset::Shell, WindowPreset::Claude],
+    );
+    let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+    let shell_id = combined_window_id("tab-1", "shell-1");
+    let claude_id = combined_window_id("tab-1", "claude-1");
+
+    assert_eq!(
+        runtime.dock_window_tab_events(&shell_id, &claude_id).len(),
+        1
+    );
+    assert_eq!(
+        runtime
+            .maximize_window_events(&shell_id, bounds.clone())
+            .len(),
+        1
+    );
+    let _ = runtime.activate_window_tab_events(&shell_id);
+
+    insert_test_pane_runtime(&mut runtime, &shell_id);
+    insert_test_pane_runtime(&mut runtime, &claude_id);
+
+    const REAL_COLS: u16 = 173;
+    const REAL_ROWS: u16 = 31;
+    for raw_id in ["shell-1", "claude-1"] {
+        let geometry = runtime
+            .tab("tab-1")
+            .expect("tab")
+            .workspace
+            .window(raw_id)
+            .expect("window")
+            .geometry
+            .clone();
+        assert_ne!(
+            geometry_to_pty_size(&geometry),
+            (REAL_COLS, REAL_ROWS),
+            "sentinel must differ from the maximized-geometry approximation",
+        );
+    }
+
+    for window_id in [&shell_id, &claude_id] {
+        runtime
+            .runtimes
+            .get(window_id)
+            .expect("runtime")
+            .pane
+            .lock()
+            .expect("pane")
+            .resize(REAL_COLS, REAL_ROWS)
+            .expect("resize");
+    }
+
+    let events = runtime.activate_window_tab_events(&claude_id);
+
+    assert_eq!(events.len(), 1);
+    let workspace = &runtime.tab("tab-1").expect("tab").workspace;
+    assert!(
+        workspace
+            .window("claude-1")
+            .expect("claude")
+            .tab_group_active
+    );
+    assert!(!workspace.window("shell-1").expect("shell").tab_group_active);
+    assert!(workspace.window("claude-1").expect("claude").maximized);
+    assert!(workspace.window("shell-1").expect("shell").maximized);
+    for window_id in [&shell_id, &claude_id] {
+        let pane = runtime
+            .runtimes
+            .get(window_id)
+            .expect("runtime")
+            .pane
+            .lock()
+            .expect("pane");
+        assert_eq!(
+            pane.screen().size(),
+            (REAL_ROWS, REAL_COLS),
+            "tab activation must not clobber the frontend-fitted PTY size via geometry_to_pty_size",
+        );
+    }
+}
+
+#[test]
 fn app_runtime_arrange_windows_does_not_clobber_real_fit_pty_size() {
     // Issue #2937 companion: arrange_windows shares the same all-window
     // resize fan-out as cycle_focus. The frontend re-fit (driven by the
@@ -3329,6 +3434,9 @@ fn app_runtime_launch_wizard_continue_resolves_runtime_context_from_worktree() {
 
 #[test]
 fn app_runtime_launch_wizard_continue_does_not_materialize_missing_worktree() {
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let temp = tempdir().expect("tempdir");
     let repo = temp.path().join("repo");
     let _origin = init_git_clone_with_origin(&repo);
@@ -6604,11 +6712,11 @@ fn app_runtime_resume_workspace_agent_ignores_stopped_same_session_window() {
     ));
 }
 
-// SPEC-2359 D2: a Session whose worktree no longer exists on this machine
-// (created on another machine / removed repo) must fail synchronously with a
-// clear message instead of spawning and erroring asynchronously.
+// SPEC-2359 US-79: a Session whose worktree was removed on this machine can
+// still be resumed when the branch is available locally/remotely. The launch
+// path must be allowed to materialize the worktree again.
 #[test]
-fn app_runtime_resume_workspace_agent_errors_when_worktree_missing() {
+fn app_runtime_resume_workspace_agent_materializes_missing_worktree_when_branch_exists() {
     let _env_lock = env_test_lock()
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -6616,13 +6724,14 @@ fn app_runtime_resume_workspace_agent_errors_when_worktree_missing() {
     let _home = ScopedEnvVar::set("HOME", temp.path());
     let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
     let repo = temp.path().join("repo");
-    fs::create_dir_all(&repo).expect("create repo");
+    init_git_clone_with_origin(&repo);
+    let branch = "feature/ghost";
+    run_git(&repo, &["branch", branch]);
     let tab = sample_project_tab("tab-1", "Repo", repo, ProjectKind::Git, &[]);
     let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
 
     let ghost_worktree = temp.path().join("ghost-worktree");
-    let mut session =
-        gwt_agent::Session::new(&ghost_worktree, "feature/ghost", gwt_agent::AgentId::Codex);
+    let mut session = gwt_agent::Session::new(&ghost_worktree, branch, gwt_agent::AgentId::Codex);
     session.id = "session-ghost".to_string();
     session.agent_session_id = Some("conv-ghost".to_string());
     session.save(&runtime.sessions_dir).expect("save session");
@@ -6636,14 +6745,65 @@ fn app_runtime_resume_workspace_agent_errors_when_worktree_missing() {
         },
     );
 
-    let event = events
-        .first()
-        .expect("resume must reply on missing worktree");
-    assert!(matches!(
-        &event.event,
-        BackendEvent::WorkspaceResumeAgentError { session_id, message }
-            if session_id == "session-ghost" && message.contains("Worktree path not found")
-    ));
+    assert!(
+        events.iter().any(|event| matches!(
+            &event.event,
+            BackendEvent::WorkspaceResumeAgentStarted { session_id, branch: Some(started_branch) }
+                if session_id == "session-ghost" && started_branch == branch
+        )),
+        "branch-materializable missing worktree should enter launch materialization and ack"
+    );
+    assert!(
+        events.iter().all(|event| !matches!(
+            &event.event,
+            BackendEvent::WorkspaceResumeAgentError { message, .. }
+                if message.contains("Worktree path not found")
+        )),
+        "missing worktree alone must not be a synchronous resume error"
+    );
+}
+
+#[test]
+fn app_runtime_list_resumable_agents_filters_session_when_worktree_and_branch_missing() {
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedEnvVar::set("HOME", temp.path());
+    let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+    let repo = temp.path().join("repo");
+    init_git_clone_with_origin(&repo);
+    let session_id = "session-branch-gone";
+    let projection = projection_with_assigned_agent(&repo, session_id);
+    gwt_core::workspace_projection::save_workspace_projection(&repo, &projection)
+        .expect("save projection");
+    let sessions_dir = temp.path().join("sessions");
+    write_resumable_session_for_test(
+        &sessions_dir,
+        session_id,
+        &temp.path().join("deleted-worktree"),
+        "feature/deleted",
+        gwt_agent::AgentId::Codex,
+        Some("conv-deleted"),
+    );
+
+    let tab = sample_project_tab("tab-1", "Repo", repo, ProjectKind::Git, &[]);
+    let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+
+    let events = runtime.handle_frontend_event(
+        "client-1".to_string(),
+        FrontendEvent::ListResumableAgents { workspace_id: None },
+    );
+
+    match events.first().map(|outbound| &outbound.event) {
+        Some(BackendEvent::WorkspaceResumableAgents { agents, .. }) => {
+            assert!(
+                agents.is_empty(),
+                "exact Session Resume candidates require an existing worktree or materializable branch"
+            );
+        }
+        other => panic!("unexpected backend event: {other:?}"),
+    }
 }
 
 // SPEC-2359 D1: requesting a *specific* past conversation while a live window
@@ -8396,6 +8556,255 @@ fn app_runtime_active_work_projection_hides_cleanup_candidate_for_live_agent_bra
         .expect("projection view");
 
     assert_eq!(view.cleanup_candidate, None);
+}
+
+#[test]
+fn app_runtime_active_work_projection_hides_row_cleanup_candidate_for_live_agent_branch() {
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedEnvVar::set("HOME", temp.path());
+    let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+    let repo = temp.path().join("repo");
+    fs::create_dir_all(&repo).expect("create repo");
+    let tab = sample_project_tab_with_window_at(
+        "tab-1",
+        "codex-1",
+        repo.clone(),
+        WindowPreset::Codex,
+        WindowProcessStatus::Running,
+    );
+    let mut projection =
+        gwt_core::workspace_projection::WorkspaceProjection::default_for_project(&repo);
+    projection.status_category = gwt_core::workspace_projection::WorkspaceStatusCategory::Active;
+    projection.git_details = Some(gwt_core::workspace_projection::GitDetails {
+        branch: Some("work/20260615-live-cleanup".to_string()),
+        worktree_path: Some(repo.join("work/20260615-live-cleanup")),
+        base_branch: Some("origin/develop".to_string()),
+        pr_number: Some(3099),
+        pr_state: Some("MERGED".to_string()),
+        pr_url: None,
+        pr_created_at: None,
+        created_by_start_work: true,
+        created_at: chrono::Utc::now(),
+    });
+    gwt_core::workspace_projection::save_workspace_projection(&repo, &projection)
+        .expect("save projection");
+    let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+    let window_id = combined_window_id("tab-1", "codex-1");
+    runtime.active_agent_sessions.insert(
+        window_id.clone(),
+        ActiveAgentSession {
+            window_id,
+            session_id: "session-live-cleanup".to_string(),
+            agent_id: "codex".to_string(),
+            branch_name: "work/20260615-live-cleanup".to_string(),
+            display_name: "Codex".to_string(),
+            worktree_path: repo.join("work/20260615-live-cleanup"),
+            agent_project_root: repo
+                .join("work/20260615-live-cleanup")
+                .display()
+                .to_string(),
+            runtime_target: gwt_agent::LaunchRuntimeTarget::Host,
+            tab_id: "tab-1".to_string(),
+        },
+    );
+
+    let view = runtime
+        .active_work_projection_for_tab("tab-1", &runtime.tabs[0])
+        .expect("projection view");
+    let row = view
+        .active_works
+        .iter()
+        .find(|work| work.branch.as_deref() == Some("work/20260615-live-cleanup"))
+        .expect("live Workspace row");
+
+    assert!(row.merged_into_base, "merged badge remains visible");
+    assert_eq!(
+        row.cleanup_candidate, None,
+        "live Agent branch must be absent from row-level cleanup candidates"
+    );
+}
+
+#[test]
+fn app_runtime_row_cleanup_candidate_exposes_merged_workspace_without_live_agent() {
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedEnvVar::set("HOME", temp.path());
+    let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+    let repo = temp.path().join("repo");
+    fs::create_dir_all(&repo).expect("create repo");
+    gwt_core::workspace_projection::record_workspace_work_event(&repo, {
+        let mut event = gwt_core::workspace_projection::WorkEvent::new(
+            gwt_core::workspace_projection::WorkEventKind::Update,
+            "work-merged-cleanup-row",
+            chrono::Utc::now(),
+        );
+        event.title = Some("Merged cleanup row".to_string());
+        event.execution_container = Some(
+            gwt_core::workspace_projection::WorkspaceExecutionContainerRef {
+                branch: Some("work/20260615-merged-cleanup".to_string()),
+                worktree_path: Some(repo.join("work/20260615-merged-cleanup")),
+                pr_number: Some(3100),
+                pr_url: None,
+                pr_state: Some("MERGED".to_string()),
+            },
+        );
+        event
+    })
+    .expect("record work");
+    let tab = sample_project_tab("tab-1", "Repo", repo.clone(), ProjectKind::Git, &[]);
+    let runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+
+    let view = runtime
+        .active_work_projection_for_tab("tab-1", &runtime.tabs[0])
+        .expect("projection view");
+    let row = view
+        .active_works
+        .iter()
+        .find(|work| work.branch.as_deref() == Some("work/20260615-merged-cleanup"))
+        .expect("merged Workspace row");
+    let candidate = row
+        .cleanup_candidate
+        .as_ref()
+        .expect("eligible merged row should expose cleanup candidate");
+
+    assert_eq!(candidate.branch, "work/20260615-merged-cleanup");
+    assert_eq!(candidate.reason, "pr_merged");
+    assert!(!candidate.default_delete_remote);
+}
+
+#[test]
+fn app_runtime_row_cleanup_candidate_hides_grouped_live_agent_branch() {
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedEnvVar::set("HOME", temp.path());
+    let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+    let repo = temp.path().join("repo");
+    fs::create_dir_all(&repo).expect("create repo");
+    gwt_core::workspace_projection::record_workspace_work_event(&repo, {
+        let mut event = gwt_core::workspace_projection::WorkEvent::new(
+            gwt_core::workspace_projection::WorkEventKind::Update,
+            "work-merged-grouped-row",
+            chrono::Utc::now(),
+        );
+        event.title = Some("Merged grouped row".to_string());
+        event.execution_container = Some(
+            gwt_core::workspace_projection::WorkspaceExecutionContainerRef {
+                branch: Some("work/20260615-grouped-cleanup".to_string()),
+                worktree_path: Some(repo.join("work/20260615-grouped-cleanup")),
+                pr_number: Some(3101),
+                pr_url: None,
+                pr_state: Some("MERGED".to_string()),
+            },
+        );
+        event
+    })
+    .expect("record work");
+    let tab = sample_project_tab_with_window_at(
+        "tab-1",
+        "codex-1",
+        repo.clone(),
+        WindowPreset::Codex,
+        WindowProcessStatus::Running,
+    );
+    let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+    let window_id = combined_window_id("tab-1", "codex-1");
+    runtime.active_agent_sessions.insert(
+        window_id.clone(),
+        ActiveAgentSession {
+            window_id,
+            session_id: "session-grouped-cleanup".to_string(),
+            agent_id: "codex".to_string(),
+            branch_name: "work/20260615-grouped-cleanup".to_string(),
+            display_name: "Codex".to_string(),
+            worktree_path: repo.join("work/20260615-grouped-cleanup"),
+            agent_project_root: repo
+                .join("work/20260615-grouped-cleanup")
+                .display()
+                .to_string(),
+            runtime_target: gwt_agent::LaunchRuntimeTarget::Host,
+            tab_id: "tab-1".to_string(),
+        },
+    );
+
+    let view = runtime
+        .active_work_projection_for_tab("tab-1", &runtime.tabs[0])
+        .expect("projection view");
+    let row = view
+        .active_works
+        .iter()
+        .find(|work| work.branch.as_deref() == Some("work/20260615-grouped-cleanup"))
+        .expect("grouped Workspace row");
+
+    assert!(row.merged_into_base, "merged badge remains visible");
+    assert_eq!(
+        row.cleanup_candidate, None,
+        "grouped row with live Agent on the same branch must not be cleanable"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn app_runtime_row_cleanup_candidate_hides_workspace_with_live_cwd_process() {
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedEnvVar::set("HOME", temp.path());
+    let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+    let repo = temp.path().join("repo");
+    let worktree = repo.join("work/20260616-0203");
+    fs::create_dir_all(&worktree).expect("create worktree");
+    gwt_core::workspace_projection::record_workspace_work_event(&repo, {
+        let mut event = gwt_core::workspace_projection::WorkEvent::new(
+            gwt_core::workspace_projection::WorkEventKind::Update,
+            "work-live-cwd-cleanup-row",
+            chrono::Utc::now(),
+        );
+        event.title = Some("Merged live cwd row".to_string());
+        event.execution_container = Some(
+            gwt_core::workspace_projection::WorkspaceExecutionContainerRef {
+                branch: Some("work/20260616-0203".to_string()),
+                worktree_path: Some(worktree.clone()),
+                pr_number: Some(3108),
+                pr_url: None,
+                pr_state: Some("MERGED".to_string()),
+            },
+        );
+        event
+    })
+    .expect("record work");
+    let _child = KillOnDrop(
+        std::process::Command::new("sh")
+            .arg("-c")
+            .arg("sleep 30")
+            .current_dir(&worktree)
+            .spawn()
+            .expect("spawn cwd process"),
+    );
+    let tab = sample_project_tab("tab-1", "Repo", repo.clone(), ProjectKind::Git, &[]);
+    let runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+
+    let view = runtime
+        .active_work_projection_for_tab("tab-1", &runtime.tabs[0])
+        .expect("projection view");
+    let row = view
+        .active_works
+        .iter()
+        .find(|work| work.branch.as_deref() == Some("work/20260616-0203"))
+        .expect("merged Workspace row");
+
+    assert!(row.merged_into_base, "merged badge remains visible");
+    assert_eq!(
+        row.cleanup_candidate, None,
+        "Workspace whose worktree is still an agent process cwd must not be cleanable"
+    );
 }
 
 #[test]
@@ -11420,7 +11829,7 @@ fn app_runtime_agent_window_initial_title_ignores_projection_owner_for_other_bra
 }
 
 #[test]
-fn app_runtime_board_milestone_updates_same_session_agent_window_dynamic_title_only() {
+fn app_runtime_board_milestone_updates_same_session_agent_window_detail_only() {
     let _env_lock = env_test_lock()
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -11513,7 +11922,7 @@ fn app_runtime_board_milestone_updates_same_session_agent_window_dynamic_title_o
             .expect("agent 1")
             .dynamic_title
             .as_deref(),
-        Some("Implement dynamic title sync")
+        None
     );
     assert_eq!(
         tab.workspace
@@ -11533,15 +11942,14 @@ fn app_runtime_board_milestone_updates_same_session_agent_window_dynamic_title_o
     );
 }
 
-/// Phase U-5 (SPEC-2359 US-38, FR-125, FR-126): a Board post that carries
-/// `title_summary` must broadcast both `WindowCanvasState` (so the pane
-/// heading rehydrates on WS reconnect / GUI reload) and
-/// `ActiveWorkProjection` (Active Work card) in the same batch. Prior to
-/// Phase U-5 the Board path mutated `dynamic_title` in memory but
-/// silently skipped the `WindowCanvasState` broadcast, leaving the pane
-/// heading stale after reconnect.
+/// Phase U-5 (SPEC-2359 US-38, FR-125, FR-126): a Board post that updates
+/// an agent's current focus must broadcast both `WindowCanvasState` (so the
+/// pane detail rehydrates on WS reconnect / GUI reload) and
+/// `ActiveWorkProjection` (Active Work card) in the same batch. Board
+/// `title_summary` is legacy history metadata; the live pane title comes
+/// from Workspace purpose updates.
 #[test]
-fn app_runtime_board_milestone_broadcasts_workspace_state_for_title_sync() {
+fn app_runtime_board_milestone_broadcasts_workspace_state_for_focus_sync() {
     let _env_lock = env_test_lock()
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -11697,9 +12105,9 @@ fn frontend_sync_events_preserves_window_dynamic_title_for_reconnect_rehydrate()
 
 /// Phase U-5: re-asserts the diff gate from
 /// `apply_workspace_projection_title_sync_skips_workspace_state_when_same_title_resyncs`
-/// at the Board entrypoint. Re-posting an identical milestone (same
-/// `title_summary` + same body for `current_focus`) must not emit a
-/// duplicate `WindowCanvasState` broadcast on busy projections.
+/// at the Board entrypoint. Re-posting an identical milestone (same body for
+/// `current_focus`) must not emit a duplicate `WindowCanvasState` broadcast
+/// on busy projections.
 #[test]
 fn app_runtime_board_milestone_skips_workspace_state_on_identical_resync() {
     let _env_lock = env_test_lock()
@@ -11778,7 +12186,7 @@ fn app_runtime_board_milestone_skips_workspace_state_on_identical_resync() {
             !second
                 .iter()
                 .any(|event| matches!(event.event, BackendEvent::WindowCanvasState { .. })),
-            "second Board post with identical title_summary must not duplicate WindowCanvasState: {second:?}"
+            "second Board post with identical current_focus must not duplicate WindowCanvasState: {second:?}"
         );
     assert!(
         second
@@ -11789,7 +12197,7 @@ fn app_runtime_board_milestone_skips_workspace_state_on_identical_resync() {
 }
 
 #[test]
-fn app_runtime_board_milestone_uses_short_title_summary_not_long_body_for_window_title() {
+fn app_runtime_board_milestone_ignores_legacy_title_summary_for_window_title() {
     let _env_lock = env_test_lock()
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -11868,7 +12276,7 @@ fn app_runtime_board_milestone_uses_short_title_summary_not_long_body_for_window
             .expect("agent")
             .dynamic_title
             .as_deref(),
-        Some("Title summary contract")
+        None
     );
     assert_eq!(
         tab.workspace
@@ -12355,7 +12763,7 @@ fn handle_workspace_projection_changed_events_broadcasts_workspace_state_for_pan
         &repo,
         &window_id,
         Some("Pane heading via WindowCanvasState"),
-        Some("triggered by gwtd workspace update --title-summary"),
+        Some("triggered by workspace.update params.purpose"),
     );
     gwt_core::workspace_projection::save_workspace_projection(&repo, &projection)
         .expect("save projection");
@@ -12364,8 +12772,7 @@ fn handle_workspace_projection_changed_events_broadcasts_workspace_state_for_pan
 
     // The original handler returned only ActiveWorkProjection. Phase
     // U-2 promotes it to also broadcast WindowCanvasState in one batch so
-    // the pane heading refreshes immediately after `gwtd workspace
-    // update --title-summary`.
+    // the pane heading refreshes immediately after `workspace.update`.
     assert!(
         events
             .iter()
@@ -12590,7 +12997,7 @@ fn sync_agent_window_titles_fast_path_resolves_across_unrelated_project_root() {
     // additional `same_worktree_path(session.worktree_path,
     // project_root)` filter prevented this and caused the user-visible
     // pane heading to stay on the agent_id fallback even after
-    // `gwtd workspace update --title-summary` succeeded at the data
+    // `workspace.update` succeeded at the data
     // layer.
     let temp = tempdir().expect("tempdir");
     let repo = temp.path().join("repo");
@@ -14353,6 +14760,7 @@ fn attach_registry_sessions_caps_total_agents_on_the_wire() {
         workspace_key: None,
         remote_only: false,
         done_equivalent: false,
+        cleanup_candidate: None,
         updated_at: String::new(),
     }];
 
@@ -14361,6 +14769,7 @@ fn attach_registry_sessions_caps_total_agents_on_the_wire() {
         &[],
         None,
         &std::collections::HashMap::new(),
+        Path::new("/"),
     );
 
     assert_eq!(works[0].session_agent_total, 12, "uncapped count reported");
@@ -14469,6 +14878,7 @@ fn attach_registry_sessions_keeps_latest_entry_per_agent_identity() {
         workspace_key: None,
         remote_only: false,
         done_equivalent: false,
+        cleanup_candidate: None,
         updated_at: String::new(),
     }];
 
@@ -14477,6 +14887,7 @@ fn attach_registry_sessions_keeps_latest_entry_per_agent_identity() {
         &[],
         None,
         &std::collections::HashMap::new(),
+        Path::new("/"),
     );
 
     let agents = &works[0].agents;
@@ -14553,6 +14964,7 @@ fn attach_registry_sessions_drops_ghost_agents_without_identity_or_sessions() {
         workspace_key: None,
         remote_only: false,
         done_equivalent: false,
+        cleanup_candidate: None,
         updated_at: String::new(),
     }];
 
@@ -14561,6 +14973,7 @@ fn attach_registry_sessions_drops_ghost_agents_without_identity_or_sessions() {
         &[],
         None,
         &std::collections::HashMap::new(),
+        Path::new("/"),
     );
 
     let agents = &works[0].agents;
@@ -14595,7 +15008,7 @@ fn agent_view_borrows_identity_from_ledger_when_record_has_none() {
         display_name: None,
         updated_at: chrono::Utc::now(),
     };
-    let view = super::workspace_work_agent_view_from_ref(&agent_ref, &index);
+    let view = super::workspace_work_agent_view_from_ref(&agent_ref, &index, Path::new("/"));
     assert_eq!(view.display_name.as_deref(), Some("Claude Code"));
     assert!(view.agent_id.is_some(), "agent_id borrowed from the ledger");
 }
@@ -14675,6 +15088,7 @@ fn attach_registry_sessions_dedupes_agents_sharing_a_conversation() {
         workspace_key: None,
         remote_only: false,
         done_equivalent: false,
+        cleanup_candidate: None,
         updated_at: String::new(),
     }];
 
@@ -14683,6 +15097,7 @@ fn attach_registry_sessions_dedupes_agents_sharing_a_conversation() {
         &[],
         None,
         &std::collections::HashMap::new(),
+        Path::new("/"),
     );
 
     let agents = &works[0].agents;
@@ -14712,11 +15127,11 @@ fn attach_registry_sessions_dedupes_agents_sharing_a_conversation() {
 /// a single Session row instead of rendering "No session yet" everywhere.
 #[test]
 fn agent_view_synthesizes_latest_conversation_when_history_is_empty() {
-    let mut session = gwt_agent::Session::new(
-        std::path::PathBuf::from("/tmp/none"),
-        "work/foo",
-        gwt_agent::AgentId::ClaudeCode,
-    );
+    let temp = tempdir().expect("tempdir");
+    let worktree = temp.path().join("worktree");
+    fs::create_dir_all(&worktree).expect("create worktree");
+    let mut session =
+        gwt_agent::Session::new(&worktree, "work/foo", gwt_agent::AgentId::ClaudeCode);
     session.id = "gwt-session-1".to_string();
     session.agent_session_id = Some("conv-latest".to_string());
     session.session_history = Vec::new();
@@ -14730,7 +15145,7 @@ fn agent_view_synthesizes_latest_conversation_when_history_is_empty() {
         updated_at: chrono::Utc::now(),
     };
 
-    let view = super::workspace_work_agent_view_from_ref(&agent_ref, &index);
+    let view = super::workspace_work_agent_view_from_ref(&agent_ref, &index, temp.path());
 
     assert_eq!(
         view.sessions.len(),
@@ -14740,6 +15155,76 @@ fn agent_view_synthesizes_latest_conversation_when_history_is_empty() {
     assert_eq!(view.sessions[0].agent_session_id, "conv-latest");
     assert!(view.sessions[0].is_active);
     assert!(view.sessions[0].resumable);
+}
+
+#[test]
+fn agent_view_marks_session_history_only_when_worktree_and_branch_are_missing() {
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    let repo = temp.path().join("repo");
+    init_git_clone_with_origin(&repo);
+    let mut session = gwt_agent::Session::new(
+        temp.path().join("deleted-worktree"),
+        "feature/deleted-session-row",
+        gwt_agent::AgentId::ClaudeCode,
+    );
+    session.id = "gwt-session-missing-branch".to_string();
+    session.agent_session_id = Some("conv-latest".to_string());
+    let mut index = std::collections::HashMap::new();
+    index.insert(session.id.as_str(), &session);
+
+    let agent_ref = gwt_core::workspace_projection::WorkAgentRef {
+        session_id: session.id.clone(),
+        agent_id: Some("claude".to_string()),
+        display_name: Some("Claude Code".to_string()),
+        updated_at: chrono::Utc::now(),
+    };
+
+    let view = super::workspace_work_agent_view_from_ref(&agent_ref, &index, &repo);
+
+    assert_eq!(view.sessions.len(), 1);
+    assert!(
+        !view.sessions[0].resumable,
+        "missing worktree plus missing local/origin branch is history-only"
+    );
+}
+
+#[test]
+fn agent_view_keeps_session_resumable_when_missing_worktree_branch_exists() {
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    let repo = temp.path().join("repo");
+    init_git_clone_with_origin(&repo);
+    let branch = "feature/session-row-resume";
+    run_git(&repo, &["branch", branch]);
+    let mut session = gwt_agent::Session::new(
+        temp.path().join("deleted-worktree"),
+        branch,
+        gwt_agent::AgentId::ClaudeCode,
+    );
+    session.id = "gwt-session-existing-branch".to_string();
+    session.agent_session_id = Some("conv-latest".to_string());
+    let mut index = std::collections::HashMap::new();
+    index.insert(session.id.as_str(), &session);
+
+    let agent_ref = gwt_core::workspace_projection::WorkAgentRef {
+        session_id: session.id.clone(),
+        agent_id: Some("claude".to_string()),
+        display_name: Some("Claude Code".to_string()),
+        updated_at: chrono::Utc::now(),
+    };
+
+    let view = super::workspace_work_agent_view_from_ref(&agent_ref, &index, &repo);
+
+    assert_eq!(view.sessions.len(), 1);
+    assert!(
+        view.sessions[0].resumable,
+        "available branch lets exact Session Resume re-materialize the worktree"
+    );
 }
 
 /// SPEC-2359 Phase W-16 (FR-403): the Workspace list is ordered by last
@@ -14772,6 +15257,7 @@ fn active_works_are_sorted_by_latest_update_descending() {
         workspace_key: None,
         remote_only: false,
         done_equivalent: false,
+        cleanup_candidate: None,
         updated_at: updated_at.to_string(),
     };
     let mut works = vec![
@@ -14805,6 +15291,7 @@ fn active_works_are_sorted_by_latest_update_descending() {
         &[],
         None,
         &std::collections::HashMap::new(),
+        Path::new("/"),
     );
 
     let order: Vec<&str> = works.iter().map(|work| work.id.as_str()).collect();
@@ -14844,6 +15331,7 @@ fn mark_merged_active_works_flags_cache_and_pr_state() {
         workspace_key: None,
         remote_only: false,
         done_equivalent: false,
+        cleanup_candidate: None,
         updated_at: String::new(),
     };
     let mut works = vec![
@@ -15244,6 +15732,7 @@ fn assign_and_merge_workspace_groups_unifies_same_branch_rows() {
             workspace_key: None,
             remote_only: false,
             done_equivalent: false,
+            cleanup_candidate: None,
             updated_at: updated_at.to_string(),
         }
     }
@@ -15329,6 +15818,7 @@ fn mark_remote_only_flags_fetched_branches_without_local_worktree() {
             workspace_key: None,
             remote_only: false,
             done_equivalent: false,
+            cleanup_candidate: None,
             updated_at: String::new(),
         }
     }
@@ -15388,6 +15878,7 @@ fn mark_merged_classifies_done_equivalent_for_stale_merged_rows() {
             workspace_key: None,
             remote_only: false,
             done_equivalent: false,
+            cleanup_candidate: None,
             updated_at: updated_at.to_string(),
         }
     }
@@ -15553,6 +16044,7 @@ fn apply_work_summary_external_sources_prefers_pr_then_ai_then_commit_subject() 
         workspace_key: None,
         remote_only: false,
         done_equivalent: false,
+        cleanup_candidate: None,
     };
     let mut works = vec![
         base("work/20260614-0444", None), // no PR, gap -> filled by commit subject

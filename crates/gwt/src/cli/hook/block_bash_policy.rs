@@ -161,8 +161,8 @@ fn long_pr_ci_polling_sleep_block_decision(command: &str) -> HookOutput {
         "Long PR/CI polling sleeps are not allowed",
         format!(
             "Do not keep Claude Code idle while waiting for PR or CI state changes.\n\n\
-Run `gwtd pr checks <number>` once. If checks are still pending or queued, post the wait state with \
-`gwtd board post --kind blocked --body '<what is pending and how to resume>'`, then hand off instead of sleeping indefinitely.\n\n\
+Run JSON operation `pr.checks` with `params.number:<pr>` once. If checks are still pending or queued, post the wait state with \
+JSON operation `board.post` and `params.kind:\"blocked\"` plus `params.body`, then hand off instead of sleeping indefinitely.\n\n\
 Blocked command: {command}"
         ),
     )
@@ -189,11 +189,11 @@ fn github_workflow_block_decision(command: &str) -> HookOutput {
         format!(
             "Use the gwt workflow surfaces instead of direct `gh issue`, `gh pr`, `gh run`, or workflow-focused `gh api` commands.\n\n\
 Recommended alternatives:\n\
-- read: `gwtd issue view <number>`, `gwtd issue comments <number>`, `gwtd issue linked-prs <number>`\n\
-- write: `gwtd issue create --title ... -f <file>`, `gwtd issue comment <number> -f <file>`\n\
-- PR workflow: `gwtd pr current`, `gwtd pr view <number>`, `gwtd pr comment <number> -f <file>`, `gwtd pr checks <number>`\n\
-- PR reviews: `gwtd pr reviews <number>`, `gwtd pr review-threads <number>`, `gwtd pr review-threads reply-and-resolve <number> -f <file>`\n\
-- Actions logs: `gwtd actions logs --run <id>`, `gwtd actions job-logs --job <id>`\n\
+- read: JSON operations `issue.view`, `issue.comments`, `issue.linked_prs`\n\
+- write: JSON operations `issue.create`, `issue.comment`\n\
+- PR workflow: JSON operations `pr.current`, `pr.view`, `pr.comment`, `pr.checks`\n\
+- PR reviews: JSON operations `pr.reviews`, `pr.review_threads`, `pr.review_threads.reply_and_resolve`\n\
+- Actions logs: JSON operations `actions.logs`, `actions.job_logs`\n\
 - discovery: `gwt-search`, `~/.gwt/cache/issues/<repo-hash>/`\n\n\
 Blocked command: {command}"
         ),
@@ -309,7 +309,7 @@ mod tests {
             decision.summary(),
             "Long PR/CI polling sleeps are not allowed"
         );
-        assert!(decision.detail().contains("gwtd pr checks <number>"));
+        assert!(decision.detail().contains("JSON operation `pr.checks`"));
     }
 
     #[test]

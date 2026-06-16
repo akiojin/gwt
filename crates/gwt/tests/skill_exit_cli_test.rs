@@ -1,12 +1,12 @@
-//! Integration tests for the SPEC-1935 Phase 10 LLM-facing exit CLIs:
-//! `gwtd discuss <action>`, `gwtd plan <action>`, and `gwtd build <action>`.
+//! Integration tests for the SPEC-1935 Phase 10 LLM-facing exit operations:
+//! `discuss.*`, `plan.*`, and `build.*` JSON envelopes.
 //!
 //! These tests drive the real `dispatch` entry point over `TestEnv` so
 //! the end-to-end parse → run path stays covered. The underlying state
 //! file semantics are exhaustively tested at the unit level in
 //! `gwt_core::skill_state` and `crate::discussion_resume`.
 
-use gwt::cli::{dispatch, should_dispatch_cli, TestEnv};
+use gwt::cli::{dispatch, TestEnv};
 use gwt_core::skill_state::{self, SkillState};
 use tempfile::TempDir;
 
@@ -19,11 +19,25 @@ fn new_env() -> (TestEnv, TempDir) {
     (TestEnv::new(dir.path().to_path_buf()), dir)
 }
 
+fn dispatch_json(env: &mut TestEnv, operation: &str, params: serde_json::Value) -> i32 {
+    env.stdin = serde_json::json!({
+        "schema_version": 1,
+        "operation": operation,
+        "params": params,
+    })
+    .to_string();
+    dispatch(env, &argv(&["gwt"]))
+}
+
 #[test]
-fn should_dispatch_cli_recognises_the_three_new_verbs() {
-    assert!(should_dispatch_cli(&argv(&["gwt", "discuss", "resolve"])));
-    assert!(should_dispatch_cli(&argv(&["gwt", "plan", "start"])));
-    assert!(should_dispatch_cli(&argv(&["gwt", "build", "complete"])));
+fn exit_operations_dispatch_through_json_envelopes() {
+    let (mut env, _dir) = new_env();
+    let code = dispatch_json(
+        &mut env,
+        "plan.phase",
+        serde_json::json!({"spec": 1935, "label": "verify"}),
+    );
+    assert_eq!(code, 0);
 }
 
 #[test]
@@ -48,9 +62,10 @@ fn discuss_resolve_flips_active_proposal_to_chosen() {
     )
     .unwrap();
 
-    let code = dispatch(
+    let code = dispatch_json(
         &mut env,
-        &argv(&["gwt", "discuss", "resolve", "--proposal", "Proposal A"]),
+        "discuss.resolve",
+        serde_json::json!({"proposal": "Proposal A"}),
     );
     assert_eq!(code, 0);
     let updated = std::fs::read_to_string(&discussion_path).unwrap();
@@ -73,9 +88,10 @@ fn discuss_resolve_rejects_incomplete_evidence_gate() {
     )
     .unwrap();
 
-    let code = dispatch(
+    let code = dispatch_json(
         &mut env,
-        &argv(&["gwt", "discuss", "resolve", "--proposal", "Proposal A"]),
+        "discuss.resolve",
+        serde_json::json!({"proposal": "Proposal A"}),
     );
     assert_eq!(code, 2);
     let updated = std::fs::read_to_string(&discussion_path).unwrap();
@@ -105,9 +121,10 @@ fn discuss_resolve_rejects_incomplete_depth_gate() {
     )
     .unwrap();
 
-    let code = dispatch(
+    let code = dispatch_json(
         &mut env,
-        &argv(&["gwt", "discuss", "resolve", "--proposal", "Proposal A"]),
+        "discuss.resolve",
+        serde_json::json!({"proposal": "Proposal A"}),
     );
     assert_eq!(code, 2);
     let updated = std::fs::read_to_string(&discussion_path).unwrap();
@@ -127,9 +144,10 @@ fn discuss_park_and_reject_follow_the_same_pattern() {
         )
         .unwrap();
 
-        let code = dispatch(
+        let code = dispatch_json(
             &mut env,
-            &argv(&["gwt", "discuss", action, "--proposal", "Proposal B"]),
+            &format!("discuss.{action}"),
+            serde_json::json!({"proposal": "Proposal B"}),
         );
         assert_eq!(code, 0, "action={action} should exit 0");
         let body = std::fs::read_to_string(&path).unwrap();
@@ -149,15 +167,10 @@ fn discuss_clear_next_question_empties_the_field() {
     )
     .unwrap();
 
-    let code = dispatch(
+    let code = dispatch_json(
         &mut env,
-        &argv(&[
-            "gwt",
-            "discuss",
-            "clear-next-question",
-            "--proposal",
-            "Proposal A",
-        ]),
+        "discuss.clear_next_question",
+        serde_json::json!({"proposal": "Proposal A"}),
     );
     assert_eq!(code, 0);
     let body = std::fs::read_to_string(&path).unwrap();
@@ -168,7 +181,7 @@ fn discuss_clear_next_question_empties_the_field() {
 #[test]
 fn plan_start_creates_active_state_file() {
     let (mut env, dir) = new_env();
-    let code = dispatch(&mut env, &argv(&["gwt", "plan", "start", "--spec", "1935"]));
+    let code = dispatch_json(&mut env, "plan.start", serde_json::json!({"spec": 1935}));
     assert_eq!(code, 0);
 
     let state = skill_state::load(dir.path(), "plan-spec")
@@ -181,11 +194,8 @@ fn plan_start_creates_active_state_file() {
 #[test]
 fn plan_complete_marks_state_inactive() {
     let (mut env, dir) = new_env();
-    dispatch(&mut env, &argv(&["gwt", "plan", "start", "--spec", "1935"]));
-    let code = dispatch(
-        &mut env,
-        &argv(&["gwt", "plan", "complete", "--spec", "1935"]),
-    );
+    dispatch_json(&mut env, "plan.start", serde_json::json!({"spec": 1935}));
+    let code = dispatch_json(&mut env, "plan.complete", serde_json::json!({"spec": 1935}));
     assert_eq!(code, 0);
 
     let state: SkillState = skill_state::load(dir.path(), "plan-spec")
@@ -197,11 +207,8 @@ fn plan_complete_marks_state_inactive() {
 #[test]
 fn plan_complete_with_mismatched_spec_is_rejected() {
     let (mut env, dir) = new_env();
-    dispatch(&mut env, &argv(&["gwt", "plan", "start", "--spec", "1935"]));
-    let code = dispatch(
-        &mut env,
-        &argv(&["gwt", "plan", "complete", "--spec", "9999"]),
-    );
+    dispatch_json(&mut env, "plan.start", serde_json::json!({"spec": 1935}));
+    let code = dispatch_json(&mut env, "plan.complete", serde_json::json!({"spec": 9999}));
     assert_eq!(code, 2, "mismatched SPEC must refuse to finalize");
     let state: SkillState = skill_state::load(dir.path(), "plan-spec").unwrap().unwrap();
     assert!(state.active, "state must remain active on rejection");
@@ -211,16 +218,14 @@ fn plan_complete_with_mismatched_spec_is_rejected() {
 fn build_lifecycle_start_phase_complete_sequences_correctly() {
     let (mut env, dir) = new_env();
     assert_eq!(
-        dispatch(
-            &mut env,
-            &argv(&["gwt", "build", "start", "--spec", "1935"])
-        ),
+        dispatch_json(&mut env, "build.start", serde_json::json!({"spec": 1935})),
         0
     );
     assert_eq!(
-        dispatch(
+        dispatch_json(
             &mut env,
-            &argv(&["gwt", "build", "phase", "--spec", "1935", "--label", "verify"])
+            "build.phase",
+            serde_json::json!({"spec": 1935, "label": "verify"})
         ),
         0
     );
@@ -231,9 +236,10 @@ fn build_lifecycle_start_phase_complete_sequences_correctly() {
     assert_eq!(state.phase.as_deref(), Some("verify"));
 
     assert_eq!(
-        dispatch(
+        dispatch_json(
             &mut env,
-            &argv(&["gwt", "build", "complete", "--spec", "1935"])
+            "build.complete",
+            serde_json::json!({"spec": 1935})
         ),
         0
     );
@@ -246,21 +252,14 @@ fn build_lifecycle_start_phase_complete_sequences_correctly() {
 #[test]
 fn build_abort_records_reason_in_phase_field() {
     let (mut env, dir) = new_env();
-    dispatch(
+    dispatch_json(&mut env, "build.start", serde_json::json!({"spec": 1935}));
+    let code = dispatch_json(
         &mut env,
-        &argv(&["gwt", "build", "start", "--spec", "1935"]),
-    );
-    let code = dispatch(
-        &mut env,
-        &argv(&[
-            "gwt",
-            "build",
-            "abort",
-            "--spec",
-            "1935",
-            "--reason",
-            "needs clarification from product",
-        ]),
+        "build.abort",
+        serde_json::json!({
+            "spec": 1935,
+            "reason": "needs clarification from product",
+        }),
     );
     assert_eq!(code, 0);
     let state = skill_state::load(dir.path(), "build-spec")
@@ -277,11 +276,10 @@ fn build_abort_records_reason_in_phase_field() {
 #[test]
 fn plan_phase_without_active_state_exits_zero() {
     let (mut env, _dir) = new_env();
-    let code = dispatch(
+    let code = dispatch_json(
         &mut env,
-        &argv(&[
-            "gwt", "plan", "phase", "--spec", "1935", "--label", "verify",
-        ]),
+        "plan.phase",
+        serde_json::json!({"spec": 1935, "label": "verify"}),
     );
     assert_eq!(code, 0);
 }
@@ -289,17 +287,10 @@ fn plan_phase_without_active_state_exits_zero() {
 #[test]
 fn plan_abort_without_active_state_exits_zero() {
     let (mut env, _dir) = new_env();
-    let code = dispatch(
+    let code = dispatch_json(
         &mut env,
-        &argv(&[
-            "gwt",
-            "plan",
-            "abort",
-            "--spec",
-            "1935",
-            "--reason",
-            "cancelled",
-        ]),
+        "plan.abort",
+        serde_json::json!({"spec": 1935, "reason": "cancelled"}),
     );
     assert_eq!(code, 0);
 }
@@ -307,15 +298,11 @@ fn plan_abort_without_active_state_exits_zero() {
 #[test]
 fn build_phase_with_mismatched_spec_is_rejected() {
     let (mut env, _dir) = new_env();
-    dispatch(
+    dispatch_json(&mut env, "build.start", serde_json::json!({"spec": 1935}));
+    let code = dispatch_json(
         &mut env,
-        &argv(&["gwt", "build", "start", "--spec", "1935"]),
-    );
-    let code = dispatch(
-        &mut env,
-        &argv(&[
-            "gwt", "build", "phase", "--spec", "9999", "--label", "verify",
-        ]),
+        "build.phase",
+        serde_json::json!({"spec": 9999, "label": "verify"}),
     );
     assert_eq!(code, 2, "mismatched SPEC must refuse to update phase");
     let state = skill_state::load(_dir.path(), "build-spec")
@@ -328,21 +315,11 @@ fn build_phase_with_mismatched_spec_is_rejected() {
 #[test]
 fn build_abort_with_mismatched_spec_is_rejected() {
     let (mut env, dir) = new_env();
-    dispatch(
+    dispatch_json(&mut env, "build.start", serde_json::json!({"spec": 1935}));
+    let code = dispatch_json(
         &mut env,
-        &argv(&["gwt", "build", "start", "--spec", "1935"]),
-    );
-    let code = dispatch(
-        &mut env,
-        &argv(&[
-            "gwt",
-            "build",
-            "abort",
-            "--spec",
-            "9999",
-            "--reason",
-            "wrong spec",
-        ]),
+        "build.abort",
+        serde_json::json!({"spec": 9999, "reason": "wrong spec"}),
     );
     assert_eq!(code, 2, "mismatched SPEC must refuse to abort");
     let state = skill_state::load(dir.path(), "build-spec")
@@ -356,9 +333,10 @@ fn discuss_commands_exit_zero_when_discussion_md_absent() {
     // Idempotent no-op: absent file is not an error; the handler just
     // reports "no change".
     let (mut env, _dir) = new_env();
-    let code = dispatch(
+    let code = dispatch_json(
         &mut env,
-        &argv(&["gwt", "discuss", "resolve", "--proposal", "Proposal X"]),
+        "discuss.resolve",
+        serde_json::json!({"proposal": "Proposal X"}),
     );
     assert_eq!(code, 0);
 }

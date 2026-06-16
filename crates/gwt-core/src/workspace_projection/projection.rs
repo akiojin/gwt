@@ -234,8 +234,8 @@ impl WorkspaceProjection {
                     // a dedicated `blocked_reason` so the Detail pane can
                     // surface it separately from `status_text` (which other
                     // entry kinds overwrite). Trimmed empty bodies are
-                    // ignored so manual `gwtd workspace update --status
-                    // blocked` paths can still populate via flag instead.
+                    // ignored so manual `workspace.update` calls can still
+                    // populate via `params.blocked_reason` instead.
                     let trimmed = entry.body.trim();
                     if !trimmed.is_empty() {
                         self.blocked_reason = Some(trimmed.to_string());
@@ -279,13 +279,6 @@ impl WorkspaceProjection {
                 agent.last_board_entry_kind = Some(entry.kind.clone());
                 agent.coordination_scope = coordination_scope_for_entry(entry);
                 agent.current_focus = Some(entry.body.clone());
-                if let Some(title_summary) = entry
-                    .title_summary
-                    .as_ref()
-                    .filter(|value| !value.trim().is_empty())
-                {
-                    agent.title_summary = Some(title_summary.clone());
-                }
                 agent.updated_at = entry.updated_at;
                 match entry.kind {
                     BoardEntryKind::Blocked => {
@@ -377,9 +370,9 @@ impl WorkspaceProjection {
             } else if focus.is_some() || title_summary.is_some() {
                 // SPEC-2359 Phase U-6: upsert a minimal stub for sessions
                 // that the launch flow / SessionStart hook has not yet
-                // registered. Without this, `gwtd workspace update
-                // --title-summary X` would silently drop the update — see
-                // the regression tests in this module for the contract.
+                // registered. Without this, `workspace.update` with
+                // `params.title_summary = X` would silently drop the update
+                // — see the regression tests in this module for the contract.
                 self.agents.push(WorkspaceAgentSummary {
                     session_id: session_id.to_string(),
                     window_id: None,
@@ -721,7 +714,7 @@ impl WorkspaceProjection {
 }
 
 /// Partial update applied to a [`WorkspaceProjection`] (e.g. from
-/// `gwtd workspace update`); `None` fields keep their current values.
+/// `workspace.update`); `None` fields keep their current values.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WorkspaceProjectionUpdate {
     pub title: Option<String>,
@@ -1082,7 +1075,7 @@ mod tests {
     }
 
     #[test]
-    fn board_milestone_keeps_title_summary_separate_from_current_focus() {
+    fn board_milestone_never_updates_agent_title_summary_from_board_entry() {
         let mut projection = WorkspaceProjection::default_for_project("/repo");
         projection.agents.push(WorkspaceAgentSummary {
             session_id: "sess-1".to_string(),
@@ -1128,10 +1121,9 @@ mod tests {
             )
         );
         assert_eq!(
-            agent_json
-                .pointer("/title_summary")
-                .and_then(|value| value.as_str()),
-            Some("Title summary contract")
+            agent_json.pointer("/title_summary"),
+            None,
+            "Board title_summary is legacy history metadata and must not update live agent purpose"
         );
     }
 
@@ -1249,9 +1241,9 @@ mod tests {
 
     #[test]
     fn apply_update_upserts_minimal_agent_when_session_id_not_present() {
-        // SPEC-2359 Phase U-6 (real root cause fix): `gwtd workspace update
-        // --agent-session ... --title-summary X` must not silently drop the
-        // update when the session is not yet in `projection.agents[]`. The
+        // SPEC-2359 Phase U-6 (real root cause fix): `workspace.update` with
+        // `params.agent_session` and `params.title_summary` must not silently
+        // drop the update when the session is not yet in `projection.agents[]`. The
         // OLD installed gwtd lacks the SessionStart hook registration path
         // (Phase U-3) so `apply_update` is the only point where this CLI
         // path can guarantee the agent is registered.

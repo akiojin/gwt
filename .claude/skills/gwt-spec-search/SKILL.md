@@ -5,7 +5,7 @@ description: "Semantic search over SPEC Issues (GitHub Issue cache at ~/.gwt/cac
 
 # SPEC Search
 
-gwt maintains a vector search index of SPEC Issues using ChromaDB embeddings (model: `intfloat/multilingual-e5-base`). SPECs are stored as `gwt-spec` labeled GitHub Issues and cached locally at `~/.gwt/cache/issues/`. The index is stored at `~/.gwt/index/<repo-hash>/worktrees/<worktree-hash>/specs/` and is rebuilt from the cache. Use `gwtd issue spec pull --all` to refresh the cache before searching.
+gwt maintains a repo-scoped vector search index of SPEC Issues using ChromaDB embeddings (model: `intfloat/multilingual-e5-base`). SPECs are stored as `gwt-spec` labeled GitHub Issues and cached locally at `~/.gwt/cache/issues/`. The index is stored under `~/.gwt/index/<repo-hash>/` and is rebuilt from the cache. Use JSON operation `issue.spec.pull` with `{"all":true}` to refresh the cache before searching.
 
 ## gwtd resolution
 
@@ -27,18 +27,20 @@ When the user asks any of the following, use SPEC search **before** manual file 
 
 Minimum workflow:
 
-1. Run `"$GWT_BIN" search --specs ...` with 2-3 semantic queries derived from the request
+1. Run `search` JSON envelopes with `params.scopes:["specs"]` and 2-3 semantic queries derived from the request
 2. Pick the canonical existing spec if found
 3. Only fall back to creating a new spec when no suitable canonical spec exists
 
 ## SPEC search command
 
-`gwtd search` is the canonical search entry point (SPEC-1942 US-15). Run it
-from inside the target worktree; the repo is resolved from the current
-directory.
+The `search` JSON operation is the canonical gwtd entry point (SPEC-1942
+US-15). Run it from inside the target worktree; the repo is resolved from the
+current directory.
 
 ```bash
-"$GWT_BIN" search --specs "your search query" --n-results 10 --json
+"$GWT_BIN" <<'JSON'
+{"schema_version":1,"operation":"search","params":{"query":"your search query","scopes":["specs"],"n_results":10}}
+JSON
 ```
 
 If the SPEC index does not yet exist, the search builds it automatically from the repo-scoped Issue cache before returning results (the first call may take longer).
@@ -46,7 +48,9 @@ If the SPEC index does not yet exist, the search builds it automatically from th
 To force a full re-index (normally handled by the watcher / auto-build):
 
 ```bash
-"$GWT_BIN" index rebuild --scope specs
+"$GWT_BIN" <<'JSON'
+{"schema_version":1,"operation":"index.rebuild","params":{"scope":"specs"}}
+JSON
 ```
 
 ## Output format
@@ -66,9 +70,9 @@ To force a full re-index (normally handled by the watcher / auto-build):
 
 ## Notes
 
-- The search refreshes the worktree-scoped SPEC index from the repo-scoped Issue cache when invoked outside the GUI
+- The search refreshes the repo-scoped SPEC index from the repo-scoped Issue cache when invoked outside the GUI
 - A missing index is auto-built on the first search
-- An `EMPTY_CORPUS` error means the Issue cache is unpopulated — refresh the cache (`gwtd issue spec pull --all`) and retry; do **not** conclude that no SPEC owner exists
+- An `EMPTY_CORPUS` error means the Issue cache is unpopulated — refresh the cache with JSON operation `issue.spec.pull` and retry; do **not** conclude that no SPEC owner exists
 - Uses semantic similarity (not just keyword matching)
 - Lower distance values indicate higher relevance
 - For file search, use `gwt-project-search` instead
@@ -76,8 +80,8 @@ To force a full re-index (normally handled by the watcher / auto-build):
 
 ## Fallback: direct runner invocation (older binaries only)
 
-Only when `"$GWT_BIN" search` fails with `unknown command 'search'` (a gwtd
-binary older than the search family), call the Python runner directly:
+Only when the `search` JSON operation is unavailable in an older gwtd binary,
+call the Python runner directly:
 
 ```bash
 ~/.gwt/runtime/chroma-venv/bin/python3 ~/.gwt/runtime/chroma_index_runner.py \

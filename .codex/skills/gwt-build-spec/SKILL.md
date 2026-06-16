@@ -41,13 +41,11 @@ SPEC-1935 FR-014r routes Stop through `skill-build-spec-stop-check`, which
 reads `.gwt/skill-state/build-spec.json` and blocks Stop while the skill is
 active. Register the skill lifecycle with the exit CLI:
 
-- `gwtd build start --spec <n>` when the skill starts an implementation pass
-- `gwtd build phase --spec <n> --label <red|green|refactor|verify|pr>` at each
-  TDD milestone (logging only)
-- `gwtd build complete --spec <n>` once the Ready PR Gate is satisfied for a
-  releaseable slice and verification passed
-- `gwtd build abort --spec <n> --reason '<text>'` when implementation cannot
-  proceed without a product decision or blocking merge conflict
+- JSON operation `build.start` with `params.spec:<n>` when the skill starts an implementation pass
+- JSON operation `build.phase` with `params.spec:<n>` and
+  `params.label:"red"|"green"|"refactor"|"verify"|"pr"` at each TDD milestone (logging only)
+- JSON operation `build.complete` with `params.spec:<n>` once the Ready PR Gate is satisfied for a releaseable slice and verification passed
+- JSON operation `build.abort` with `params.spec:<n>` and `params.reason` when implementation cannot proceed without a product decision or blocking merge conflict
 
 The Stop-block handler honours Claude Code / Codex's built-in
 `stop_hook_active` flag, so each Stop cycle allows at most one forced
@@ -58,18 +56,17 @@ continuation; a genuinely stuck turn still terminates normally.
 Determine the mode at entry:
 
 - **SPEC mode** if a SPEC ID is provided or discoverable from the current branch/context, AND
-  `gwtd issue spec <N> --section tasks` で tasks セクションが取得できる
+  the tasks section can be read with JSON operation `issue.spec.section`
 - **Standalone mode** otherwise
 
 ## Phase 1: Context Load
 
 ### SPEC mode
 
-1. `gwtd issue spec <N>` で SPEC の全セクション（spec, plan, tasks）を読み込む。
+1. Read all SPEC sections (`spec`, `plan`, `tasks`) with JSON operation `issue.spec.read`.
 2. Run the Board active-claim preflight for the target SPEC before choosing a
    task slice:
-   - Read the current Board with `gwtd board show --json` when available, or
-     `gwtd board show` as the fallback.
+   - Read the current Board with JSON operation `board.show`.
    - Look for active `claim` entries from another session that mention the same
      owner (`#<N>` or `SPEC-<N>`) or the same phase label (`Phase <N>`,
      `Phase <label>`) as the task slice under consideration.
@@ -87,7 +84,7 @@ Determine the mode at entry:
 3. Identify the next incomplete task slice in dependency order:
    - Setup before Foundational work
    - Foundational before story-specific work
-4. SPEC セクションの読み書きは `gwtd issue spec <N> --section <name>` / `gwtd issue spec <N> --edit <name> -f <file>` を使用する。
+4. Use JSON operations `issue.spec.section` / `issue.spec.edit` for SPEC section reads and writes.
 
 ### Standalone mode
 
@@ -147,7 +144,7 @@ detects the host project's actual test runners from manifests
 *.sln / etc.) per `.codex/skills/gwt-verify/references/runner-detection.md`,
 runs the appropriate unit / integration / E2E / visual tests, emits a
 **Test Inventory** that names which tests were executed, and hands off to
-the user via a 4-step 導線 + Check Items before finalizing
+the user via a 4-step verification path + Check Items before finalizing
 `## Verification Report`. The right matrix is determined by what actually
 changed and which runners the project ships; do not hard-code a static
 cargo / pnpm / Playwright command list here.
@@ -193,9 +190,9 @@ Reconcile implemented behavior against all SPEC artifacts. See `references/compl
 Required checks:
 
 - Every completed task in `tasks.md` matches the implementation
-- tasks セクションの受け入れチェックボックスが実際の受け入れ済み動作を反映している
-- tasks セクションの TDD チェックボックスが実際の検証エビデンスを反映している
-- tasks セクションの完了マーカーがコードで裏付けられていない完了を主張していない
+- Acceptance checkboxes in the tasks section reflect behavior that has actually been accepted
+- TDD checkboxes in the tasks section reflect real verification evidence
+- Completion markers in the tasks section do not claim completion that is not backed by code
 - If artifacts disagree, return to `gwt-discussion` — do not proceed to PR
 - Ready PR Gate passed for a releaseable slice. An incomplete Draft PR
   handoff must be reported separately and does not satisfy completion.
@@ -203,7 +200,7 @@ Required checks:
 Update execution tracking:
 
 - Mark completed tasks in `tasks.md`
-- tasks セクションのチェックボックスを `gwtd issue spec <N> --edit tasks -f <file>` で更新する
+- Update tasks-section checkboxes with JSON operation `issue.spec.edit`
 
 ### Standalone mode
 
@@ -216,7 +213,7 @@ Update execution tracking:
 
 On completion, suggest `gwt-arch-review` for code review if available, or proceed to `gwt-manage-pr` if not already done.
 
-Only call `gwtd build complete --spec <n>` after the Ready PR Gate is
+Only call JSON operation `build.complete` after the Ready PR Gate is
 satisfied for a releaseable slice. A Draft PR handoff must keep the
 remaining work visible in the report and must not be represented as a
 completed build.

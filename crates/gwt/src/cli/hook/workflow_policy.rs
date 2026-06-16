@@ -38,6 +38,7 @@ pub struct WorkflowContext {
     pub has_tasks: bool,
     pub bypass: Option<WorkflowBypass>,
     pub title_summary_missing: bool,
+    pub pending_discussion_goal: bool,
 }
 
 impl WorkflowContext {
@@ -48,6 +49,7 @@ impl WorkflowContext {
             has_tasks: false,
             bypass: None,
             title_summary_missing: false,
+            pending_discussion_goal: false,
         }
     }
 
@@ -58,6 +60,7 @@ impl WorkflowContext {
             has_tasks: false,
             bypass: None,
             title_summary_missing: false,
+            pending_discussion_goal: false,
         }
     }
 
@@ -68,6 +71,7 @@ impl WorkflowContext {
             has_tasks,
             bypass: None,
             title_summary_missing: false,
+            pending_discussion_goal: false,
         }
     }
 
@@ -78,11 +82,17 @@ impl WorkflowContext {
             has_tasks: false,
             bypass: Some(bypass),
             title_summary_missing: false,
+            pending_discussion_goal: false,
         }
     }
 
     pub fn with_title_summary_missing(mut self, missing: bool) -> Self {
         self.title_summary_missing = missing;
+        self
+    }
+
+    pub fn with_pending_discussion_goal(mut self, pending: bool) -> Self {
+        self.pending_discussion_goal = pending;
         self
     }
 }
@@ -107,12 +117,23 @@ pub fn evaluate_with_context(
     if title_summary != HookOutput::Silent {
         return Ok(title_summary);
     }
+    let pending_goal =
+        evaluate_pending_discussion_goal_guard(event, context.pending_discussion_goal)?;
+    if pending_goal != HookOutput::Silent {
+        return Ok(pending_goal);
+    }
     Ok(HookOutput::Silent)
 }
 
 pub fn evaluate(event: &HookEvent, worktree_root: &Path) -> Result<HookOutput, HookError> {
     let context = resolve_workflow_context(worktree_root)
-        .with_title_summary_missing(current_agent_workspace_identity_missing(worktree_root)?);
+        .with_title_summary_missing(current_agent_workspace_identity_missing(worktree_root)?)
+        .with_pending_discussion_goal(
+            crate::discussion_resume::load_pending_goal(worktree_root)
+                .ok()
+                .flatten()
+                .is_some(),
+        );
     evaluate_with_context(event, worktree_root, &context)
 }
 
@@ -235,14 +256,109 @@ fn evaluate_title_summary_guard(
             "Agent Workspace identity is required before work starts",
             "Set both a short work name and current focus before exploration, implementation, or verification commands. This is required so Workspace can show which window is doing what.\n\n\
 Required command shape:\n\
-  gwtd workspace update --agent-session \"$GWT_SESSION_ID\" --current-focus '<current work focus>' --title-summary '<short work title>'\n\n\
-Good example: --title-summary 'Agent title improvement'\n\
-Bad example: --title-summary 'Agent title improvement complete'\n\n\
-Use the configured narrative language for the title-summary. Keep progress, completion, blocker state, and long detail in --current-focus, --summary, or Board --body.",
+  gwtd <<'JSON'\n\
+  {\"schema_version\":1,\"operation\":\"workspace.update\",\"params\":{\"purpose\":\"<short work title>\",\"current_focus\":\"<current work focus>\"}}\n\
+  JSON\n\n\
+Good example: \"purpose\":\"Agent title improvement\"\n\
+Bad example: \"purpose\":\"Agent title improvement complete\"\n\n\
+Use the configured narrative language for the purpose. Keep progress, completion, blocker state, and long detail in current_focus, summary, or Board body.",
         ));
     }
 
     Ok(HookOutput::Silent)
+}
+
+fn evaluate_pending_discussion_goal_guard(
+    event: &HookEvent,
+    pending_discussion_goal: bool,
+) -> Result<HookOutput, HookError> {
+    if !pending_discussion_goal || is_goal_start_or_bookkeeping_event(event) {
+        return Ok(HookOutput::Silent);
+    }
+    if is_mutating_work_event(event) {
+        return Ok(HookOutput::pre_tool_use_permission(
+            "pending gwt-discussion Goal Start must be handled first",
+            "A gwt-discussion Action Bundle has a pending gwt-discussion Goal Start. Start, skip, or record the goal failure before changing implementation state.\n\n\
+Codex path: call `create_goal` with the pending Goal condition, then run JSON operation `discuss.goal_started`.\n\
+Claude Code path: run JSON operation `pane.send` with the `/goal <condition>` text, then run JSON operation `discuss.goal_started`.\n\
+Skip path: if the user rejects or revises the Action Bundle, run JSON operation `discuss.goal_skipped` with a reason.\n\
+Failure path: run JSON operation `discuss.goal_failed` with a reason and show the manual `/goal <condition>` line to the user.",
+        ));
+    }
+    Ok(HookOutput::Silent)
+}
+
+fn is_mutating_work_event(event: &HookEvent) -> bool {
+    match event.tool_name.as_deref() {
+        Some("Edit" | "MultiEdit" | "Write" | "NotebookEdit" | "apply_patch") => true,
+        Some("Bash") => {
+            event.command().is_some()
+                && !is_read_only_exploration_event(event)
+                && !is_goal_start_or_bookkeeping_event(event)
+        }
+        _ => false,
+    }
+}
+
+fn is_goal_start_or_bookkeeping_event(event: &HookEvent) -> bool {
+    match event.tool_name.as_deref() {
+        Some("create_goal" | "functions.create_goal") => true,
+        Some("Bash") => event.command().is_some_and(command_segments_are_goal_safe),
+        _ => false,
+    }
+}
+
+fn command_segments_are_goal_safe(command: &str) -> bool {
+    if is_workspace_identity_update_command(command)
+        || is_json_envelope_operation(
+            command,
+            &[
+                "board.post",
+                "discuss.goal_started",
+                "discuss.goal-started",
+                "discuss.goal_failed",
+                "discuss.goal-failed",
+                "discuss.goal_skipped",
+                "discuss.goal-skipped",
+                "pane.send",
+            ],
+        )
+    {
+        return true;
+    }
+
+    let segments = super::segments::split_command_segments(command);
+    !segments.is_empty()
+        && segments.iter().all(|segment| {
+            is_goal_bookkeeping_segment(segment)
+                || is_workspace_identity_update_segment(segment)
+                || is_board_post_segment(segment)
+        })
+}
+
+fn is_goal_bookkeeping_segment(segment: &str) -> bool {
+    let tokens = segment_tokens(segment);
+    let Some(command_name) = tokens.first().map(|token| normalize_command_name(token)) else {
+        return false;
+    };
+    if command_name != "gwtd" {
+        return false;
+    }
+    matches!(
+        tokens.as_slice(),
+        [_, "pane", "send", ..]
+            | [_, "discuss", "goal-started", ..]
+            | [_, "discuss", "goal-failed", ..]
+            | [_, "discuss", "goal-skipped", ..]
+    )
+}
+
+fn is_board_post_segment(segment: &str) -> bool {
+    let tokens = segment_tokens(segment);
+    let Some(command_name) = tokens.first().map(|token| normalize_command_name(token)) else {
+        return false;
+    };
+    command_name == "gwtd" && matches!(tokens.as_slice(), [_, "board", "post", ..])
 }
 
 fn is_title_sensitive_tool(event: &HookEvent) -> bool {
@@ -260,34 +376,85 @@ fn is_workspace_identity_update_event(event: &HookEvent) -> bool {
     let Some(command) = event.command() else {
         return false;
     };
+    is_workspace_identity_update_command(command)
+}
+
+fn is_workspace_identity_update_command(command: &str) -> bool {
     let segments = super::segments::split_command_segments(command);
-    !segments.is_empty()
+    if segments.len() == 1
         && segments
-            .iter()
-            .all(|segment| is_workspace_identity_update_segment(segment))
+            .first()
+            .is_some_and(|segment| is_gwtd_only_segment(segment))
+        && is_workspace_identity_update_json_segment(command)
+    {
+        return true;
+    }
+    false
+}
+
+fn is_gwtd_only_segment(segment: &str) -> bool {
+    let tokens = segment_tokens(segment);
+    matches!(
+        tokens.as_slice(),
+        [command] if normalize_command_name(command) == "gwtd"
+    )
 }
 
 fn is_workspace_identity_update_segment(segment: &str) -> bool {
-    let tokens = segment_tokens(segment);
-    let Some(command_name) = tokens.first().map(|token| normalize_command_name(token)) else {
+    is_workspace_identity_update_json_segment(segment)
+}
+
+fn is_workspace_identity_update_json_segment(segment: &str) -> bool {
+    let Some(json) = extract_json_object(segment) else {
         return false;
     };
-    if command_name != "gwtd" {
+    let Ok(value) = serde_json::from_str::<serde_json::Value>(json) else {
+        return false;
+    };
+    let Some(operation) = value.get("operation").and_then(|value| value.as_str()) else {
+        return false;
+    };
+    if !matches!(operation, "workspace.update" | "workspace.ensure") {
         return false;
     }
-    match tokens.as_slice() {
-        [_, "workspace", "update", rest @ ..] => {
-            rest.contains(&"--agent-session")
-                && rest.contains(&"--title-summary")
-                && rest.contains(&"--current-focus")
-        }
-        [_, "workspace", "ensure", rest @ ..] => {
-            rest.contains(&"--agent-session")
-                && rest.contains(&"--title-summary")
-                && rest.contains(&"--current-focus")
-        }
-        _ => false,
+    let Some(params) = value.get("params").and_then(|value| value.as_object()) else {
+        return false;
+    };
+    params
+        .get("purpose")
+        .and_then(|value| value.as_str())
+        .is_some_and(|value| !value.trim().is_empty())
+        && params
+            .get("current_focus")
+            .and_then(|value| value.as_str())
+            .is_some_and(|value| !value.trim().is_empty())
+}
+
+fn is_json_envelope_operation(command: &str, allowed_operations: &[&str]) -> bool {
+    let segments = super::segments::split_command_segments(command);
+    if segments.len() != 1
+        || !segments
+            .first()
+            .is_some_and(|segment| is_gwtd_only_segment(segment))
+    {
+        return false;
     }
+    let Some(json) = extract_json_object(command) else {
+        return false;
+    };
+    let Ok(value) = serde_json::from_str::<serde_json::Value>(json) else {
+        return false;
+    };
+    value
+        .get("operation")
+        .and_then(|value| value.as_str())
+        .is_some_and(|operation| allowed_operations.contains(&operation))
+}
+
+fn extract_json_object(segment: &str) -> Option<&str> {
+    let start = segment.find('{')?;
+    let end = segment.rfind('}')?;
+    (start <= end).then_some(&segment[start..=end])
 }
 
 fn is_read_only_exploration_event(event: &HookEvent) -> bool {
@@ -733,9 +900,9 @@ Coverage requirements.
         let HookOutput::PreToolUsePermission { detail, .. } = output else {
             panic!("expected PreToolUsePermission");
         };
-        assert!(detail.contains("gwtd workspace update"));
-        assert!(detail.contains("--title-summary"));
-        assert!(detail.contains("--agent-session"));
+        assert!(detail.contains("gwtd <<'JSON'"));
+        assert!(detail.contains(r#""operation":"workspace.update""#));
+        assert!(detail.contains(r#""purpose""#));
         assert!(detail.contains("work name"), "{detail}");
         assert!(detail.contains("which window is doing what"), "{detail}");
     }
@@ -760,7 +927,7 @@ Coverage requirements.
     }
 
     #[test]
-    fn title_summary_guard_allows_title_update_command() {
+    fn title_summary_guard_blocks_legacy_argv_title_update_command() {
         let event = HookEvent {
             tool_name: Some("Bash".to_string()),
             tool_input: Some(serde_json::json!({
@@ -770,18 +937,18 @@ Coverage requirements.
             cwd: None,
         };
 
-        assert_eq!(
+        assert!(matches!(
             evaluate_title_summary_guard(&event, true).expect("guard output"),
-            HookOutput::Silent
-        );
+            HookOutput::PreToolUsePermission { .. }
+        ));
     }
 
     #[test]
-    fn title_summary_guard_allows_installed_gwtd_title_update_command() {
+    fn title_summary_guard_allows_json_envelope_workspace_update_command() {
         let event = HookEvent {
             tool_name: Some("Bash".to_string()),
             tool_input: Some(serde_json::json!({
-                "command": "GWT_BIN_PATH=/Applications/GWT.app/Contents/MacOS/gwtd /Applications/GWT.app/Contents/MacOS/gwtd workspace update --agent-session sess-1 --current-focus 'Fix title visibility' --title-summary 'Agent title visibility'"
+                "command": "gwtd <<'JSON'\n{\"schema_version\":1,\"operation\":\"workspace.update\",\"params\":{\"purpose\":\"Agent title visibility\",\"current_focus\":\"Fix title visibility\"}}\nJSON"
             })),
             transcript_path: None,
             cwd: None,
@@ -794,11 +961,45 @@ Coverage requirements.
     }
 
     #[test]
+    fn title_summary_guard_allows_installed_gwtd_json_envelope_workspace_update_command() {
+        let event = HookEvent {
+            tool_name: Some("Bash".to_string()),
+            tool_input: Some(serde_json::json!({
+                "command": "GWT_BIN_PATH=/Applications/GWT.app/Contents/MacOS/gwtd /Applications/GWT.app/Contents/MacOS/gwtd <<'JSON'\n{\"schema_version\":1,\"operation\":\"workspace.update\",\"params\":{\"purpose\":\"Agent title visibility\",\"current_focus\":\"Fix title visibility\"}}\nJSON"
+            })),
+            transcript_path: None,
+            cwd: None,
+        };
+
+        assert_eq!(
+            evaluate_title_summary_guard(&event, true).expect("guard output"),
+            HookOutput::Silent
+        );
+    }
+
+    #[test]
+    fn title_summary_guard_blocks_installed_legacy_argv_title_update_command() {
+        let event = HookEvent {
+            tool_name: Some("Bash".to_string()),
+            tool_input: Some(serde_json::json!({
+                "command": "GWT_BIN_PATH=/Applications/GWT.app/Contents/MacOS/gwtd /Applications/GWT.app/Contents/MacOS/gwtd workspace update --agent-session sess-1 --current-focus 'Fix title visibility' --title-summary 'Agent title visibility'"
+            })),
+            transcript_path: None,
+            cwd: None,
+        };
+
+        assert!(matches!(
+            evaluate_title_summary_guard(&event, true).expect("guard output"),
+            HookOutput::PreToolUsePermission { .. }
+        ));
+    }
+
+    #[test]
     fn title_summary_guard_blocks_chained_work_after_title_update() {
         let event = HookEvent {
             tool_name: Some("Bash".to_string()),
             tool_input: Some(serde_json::json!({
-                "command": "gwtd workspace update --agent-session sess-1 --current-focus 'Fix title visibility' --title-summary 'Agent title visibility' && cargo test -p gwt"
+                "command": "gwtd <<'JSON'\n{\"schema_version\":1,\"operation\":\"workspace.update\",\"params\":{\"purpose\":\"Agent title visibility\",\"current_focus\":\"Fix title visibility\"}}\nJSON\n&& cargo test -p gwt"
             })),
             transcript_path: None,
             cwd: None,
@@ -1001,7 +1202,7 @@ Coverage requirements.
         let event = HookEvent {
             tool_name: Some("Bash".to_string()),
             tool_input: Some(serde_json::json!({
-                "command": "gwtd board post --kind status --body 'Starting implementation'"
+                "command": "gwtd <<'JSON'\n{\"schema_version\":1,\"operation\":\"board.post\",\"params\":{\"kind\":\"status\",\"body\":\"Starting implementation\"}}\nJSON"
             })),
             transcript_path: None,
             cwd: None,
@@ -1028,6 +1229,75 @@ Coverage requirements.
             evaluate_title_summary_guard(&event, false).expect("guard output"),
             HookOutput::Silent
         );
+    }
+
+    #[test]
+    fn evaluate_with_context_blocks_mutating_tools_until_pending_discussion_goal_starts() {
+        let event = HookEvent {
+            tool_name: Some("Edit".to_string()),
+            tool_input: Some(serde_json::json!({
+                "file_path": "crates/gwt/src/lib.rs"
+            })),
+            transcript_path: None,
+            cwd: None,
+        };
+
+        let output = evaluate_with_context(
+            &event,
+            std::path::Path::new("."),
+            &WorkflowContext::unknown().with_pending_discussion_goal(true),
+        )
+        .expect("guard output");
+
+        let HookOutput::PreToolUsePermission { detail, .. } = output else {
+            panic!("expected pending goal guard");
+        };
+        assert!(
+            detail.contains("pending gwt-discussion Goal Start"),
+            "{detail}"
+        );
+        assert!(detail.contains("create_goal"), "{detail}");
+        assert!(detail.contains("discuss.goal_started"), "{detail}");
+        assert!(detail.contains("discuss.goal_skipped"), "{detail}");
+
+        let allowed = HookEvent {
+            tool_name: Some("create_goal".to_string()),
+            tool_input: Some(serde_json::json!({})),
+            transcript_path: None,
+            cwd: None,
+        };
+        assert_eq!(
+            evaluate_with_context(
+                &allowed,
+                std::path::Path::new("."),
+                &WorkflowContext::unknown().with_pending_discussion_goal(true),
+            )
+            .expect("allowed output"),
+            HookOutput::Silent
+        );
+
+        for command in [
+            "gwtd <<'JSON'\n{\"schema_version\":1,\"operation\":\"discuss.goal_started\",\"params\":{\"proposal\":\"A\"}}\nJSON",
+            "gwtd <<'JSON'\n{\"schema_version\":1,\"operation\":\"discuss.goal_failed\",\"params\":{\"proposal\":\"A\",\"reason\":\"cannot start\"}}\nJSON",
+            "gwtd <<'JSON'\n{\"schema_version\":1,\"operation\":\"workspace.update\",\"params\":{\"purpose\":\"Goal setup\",\"current_focus\":\"Starting goal\"}}\nJSON",
+        ] {
+            let allowed = HookEvent {
+                tool_name: Some("Bash".to_string()),
+                tool_input: Some(serde_json::json!({ "command": command })),
+                transcript_path: None,
+                cwd: None,
+            };
+            assert_eq!(
+                evaluate_with_context(
+                    &allowed,
+                    std::path::Path::new("."),
+                    &WorkflowContext::unknown().with_pending_discussion_goal(true),
+                )
+                .expect("allowed JSON bookkeeping output"),
+                HookOutput::Silent,
+                "{command}"
+            );
+        }
     }
 
     #[test]

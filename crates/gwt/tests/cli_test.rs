@@ -1,4 +1,4 @@
-//! Integration tests for the `gwtd issue spec` CLI dispatch (SPEC-12 Phase 6).
+//! Integration tests for issue/spec command dispatch (SPEC-12 Phase 6).
 
 use gwt::cli::{
     dispatch, parse_actions_args, parse_issue_args, parse_pr_args, should_dispatch_cli,
@@ -436,7 +436,7 @@ fn red_104a_parse_pr_create() {
         s("--head"),
         s("feature/hooks"),
         s("--title"),
-        s("feat(hooks): canonical gwtd pr create"),
+        s("feat(hooks): canonical pr.create operation"),
         s("-f"),
         s("/tmp/pr-body.md"),
         s("--label"),
@@ -449,7 +449,7 @@ fn red_104a_parse_pr_create() {
         CliCommand::Pr(PrCommand::Create {
             base: "develop".into(),
             head: Some("feature/hooks".into()),
-            title: "feat(hooks): canonical gwtd pr create".into(),
+            title: "feat(hooks): canonical pr.create operation".into(),
             file: "/tmp/pr-body.md".into(),
             labels: vec!["release".into()],
             draft: true,
@@ -878,7 +878,7 @@ fn red_88_dispatch_spec_create_help_prints_json_schema() {
     assert_eq!(code, 0);
 
     let out = String::from_utf8(env.stdout.clone()).unwrap();
-    assert!(out.contains("gwtd issue spec create --json"));
+    assert!(out.contains("issue.spec.create"));
     assert!(out.contains("\"background\""));
     assert!(out.contains("\"user_stories\""));
     assert!(out.contains("\"functional_requirements\""));
@@ -1546,6 +1546,14 @@ fn red_109d_dispatch_pr_reply_and_resolve_targets_unresolved_threads() {
                 line: Some(99),
                 comments: vec![],
             },
+            PrReviewThread {
+                id: "thread-3".to_string(),
+                is_resolved: false,
+                is_outdated: true,
+                path: "src/old.rs".to_string(),
+                line: None,
+                comments: vec![],
+            },
         ],
     );
 
@@ -1568,7 +1576,7 @@ fn red_109d_dispatch_pr_reply_and_resolve_targets_unresolved_threads() {
     );
 
     let out = String::from_utf8(env.stdout.clone()).unwrap();
-    assert!(out.contains("replied to and resolved 1 review threads on PR #42"));
+    assert!(out.contains("replied to and resolved 2 review threads on PR #42"));
 }
 
 #[test]

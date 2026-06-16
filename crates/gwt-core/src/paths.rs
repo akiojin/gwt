@@ -345,7 +345,7 @@ pub fn gwt_repo_local_work_events_path(repo_root: &Path) -> PathBuf {
 /// (`<repo_root>/.gwt/work/memory.md`).
 ///
 /// SPEC-2359 Phase W-12: project memory (post-mortem entries written by
-/// `gwtd memory add`) is a git-tracked, repo-local file living under the
+/// `memory.add`) is a git-tracked, repo-local file living under the
 /// shared `.gwt/work/` directory alongside the Work event log. The main
 /// worktree root is resolved first so every linked worktree of the same
 /// repository shares one canonical file.

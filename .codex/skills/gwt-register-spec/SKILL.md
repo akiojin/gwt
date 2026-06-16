@@ -7,8 +7,8 @@ description: "Use when gwt-discussion has produced a finished SPEC design and th
 
 Sub-skill called from `gwt-discussion` to materialize an already-decided SPEC
 design into a `gwt-spec` GitHub Issue. Encapsulates the canonical 2-step
-`gwtd issue spec create` → `gwtd issue spec --edit spec` flow so that the
-section-marker trap (an empty spec section because `create -f` does not wrap
+`issue.spec.create` → `issue.spec.edit` JSON operation flow so that the
+section-marker trap (an empty spec section because create-body transport does not wrap
 the body in `<!-- artifact:spec BEGIN/END -->` markers) cannot happen.
 
 ## gwtd resolution
@@ -31,16 +31,16 @@ command as `"$GWT_BIN" ...`; if none exists, stop with an actionable
 Do not use this when the design is still under discussion (use
 `gwt-discussion`), when the request is narrow enough for a plain Issue (use
 `gwt-register-issue`), or when an existing SPEC needs additional sections
-(use `gwt-discussion` followed by `gwtd issue spec <n> --edit <section>` —
+(use `gwt-discussion` followed by JSON operation `issue.spec.edit` —
 this skill does not edit existing SPECs).
 
 ## Ownership
 
 - Validate the provided body against the canonical SPEC contract.
 - Create the GitHub Issue safely (no orphan Issue on validation failure).
-- Inject the spec section via `--edit spec -f <body>` so the section markers
+- Inject the spec section via JSON operation `issue.spec.edit` so the section markers
   are auto-applied.
-- Roundtrip-verify by reading `--section spec` back and asserting non-empty.
+- Roundtrip-verify by reading JSON operation `issue.spec.section` back and asserting non-empty.
 - Hand off the new Issue number to the caller. Plan / tasks sections are the
   responsibility of `gwt-plan-spec` and are out of scope.
 
@@ -67,36 +67,40 @@ digraph register_spec_flow {
     "start lifecycle" -> "load body";
     "load body" -> "validate (structural + format-quality)";
     "validate" -> "report issues" [label="any Structural issue"];
-    "validate" -> "gwtd issue spec create --title <t> -f <stub>" [label="all PASS"];
+    "validate" -> "issue.spec.create JSON operation" [label="all PASS"];
     "create" -> "abort: io failure" [label="error"];
-    "create" -> "gwtd issue spec <n> --edit spec -f <body>" [label="issue created"];
+    "create" -> "issue.spec.edit JSON operation" [label="issue created"];
     "edit" -> "recovery report (orphan Issue #N)" [label="edit failure"];
-    "edit" -> "gwtd issue spec <n> --section spec" [label="edit ok"];
+    "edit" -> "issue.spec.section JSON operation" [label="edit ok"];
     "section spec" -> "abort: empty spec" [label="empty"];
     "section spec" -> "complete lifecycle, return Issue #N + URL" [label="non-empty"];
 }
 ```
 
-1. **Lifecycle start**: `gwtd register start --spec 0` (placeholder spec id;
+1. **Lifecycle start**: JSON operation `register.start` with `params.spec:0` (placeholder spec id;
    the real id is recorded via `phase` once the Issue is created).
 2. **Load body**: read `body_path` as UTF-8.
 3. **Validate**: call the validation library (see
    `references/validation-rules.md`). On any `Structural` or `Format` issue,
-   call `gwtd register abort --spec 0 --reason "validation: <summary>"` and
+   call JSON operation `register.abort` with `params.spec:0` and the validation reason, then
    return the issue list to the caller. Do not call any GitHub API.
-4. **Create shell**: `gwtd issue spec create --title "<title>" -f <stub>`
-   where `<stub>` is an empty placeholder file. Capture the new issue
-   number.
-5. **Phase create**: `gwtd register phase --spec <n> --label create` to bind
+4. **Create shell**: JSON operation `issue.spec.create` with `params.title`
+   and placeholder `params.body`. Capture the new issue number.
+5. **Phase create**: JSON operation `register.phase` with `params.spec:<n>`
+   and `params.label:"create"` to bind
    the real spec id and record the milestone.
-6. **Inject body**: `gwtd issue spec <n> --edit spec -f <body_path>`. The
-   `--edit` command auto-applies `<!-- artifact:spec BEGIN/END -->` markers.
-7. **Phase edit**: `gwtd register phase --spec <n> --label edit`.
-8. **Roundtrip verify**: `gwtd issue spec <n> --section spec`. The output
+6. **Inject body**: JSON operation `issue.spec.edit` with
+   `params.section:"spec"` and `params.body` from `body_path`. The edit
+   operation auto-applies `<!-- artifact:spec BEGIN/END -->` markers.
+7. **Phase edit**: JSON operation `register.phase` with `params.spec:<n>` and
+   `params.label:"edit"`.
+8. **Roundtrip verify**: JSON operation `issue.spec.section` with
+   `params.section:"spec"`. The output
    must be non-empty and must contain the H1 line of the body file. On
    failure, follow `references/recovery.md` and abort.
-9. **Phase roundtrip**: `gwtd register phase --spec <n> --label roundtrip`.
-10. **Complete**: `gwtd register complete --spec <n>`. Return `{ issue: <n>,
+9. **Phase roundtrip**: JSON operation `register.phase` with `params.spec:<n>` and
+   `params.label:"roundtrip"`.
+10. **Complete**: JSON operation `register.complete` with `params.spec:<n>`. Return `{ issue: <n>,
     url: "https://github.com/akiojin/gwt/issues/<n>" }` to the caller.
 
 ## Validation rules
@@ -122,10 +126,10 @@ Structural issues block create. Format issues also block create in v1
 - **Create failure** (network, auth) → no Issue created. Surface the gh / gwtd
   error verbatim and `register abort`.
 - **Edit failure after create success** → the Issue exists but is empty.
-  Follow `references/recovery.md` to either retry `--edit spec` or open the
+  Follow `references/recovery.md` to either retry `issue.spec.edit` or open the
   Issue for manual repair. Always include the orphan Issue number in the
   recovery report.
-- **Roundtrip empty** → the `--edit` call apparently succeeded but the
+- **Roundtrip empty** → the `issue.spec.edit` call apparently succeeded but the
   section is unreadable. Treat as `Edit failure after create success`.
 
 ## Recovery
@@ -135,13 +139,14 @@ See `references/recovery.md`. The skill never silently retries; the caller
 
 ## Exit CLI (Stop-block contract)
 
-The skill registers lifecycle events through `gwtd register`:
+The skill registers lifecycle events through gwtd JSON operations:
 
-- `gwtd register start --spec 0` at the beginning (placeholder spec id).
-- `gwtd register phase --spec <n> --label <validation|create|edit|roundtrip>`
+- `register.start` with `params.spec:0` at the beginning (placeholder spec id).
+- `register.phase` with `params.spec:<n>` and
+  `params.label:"validation"|"create"|"edit"|"roundtrip"`
   at each milestone.
-- `gwtd register complete --spec <n>` once the Issue is created and verified.
-- `gwtd register abort --spec <n|0> --reason '<text>'` on any failure.
+- `register.complete` with `params.spec:<n>` once the Issue is created and verified.
+- `register.abort` with `params.spec:<n|0>` and `params.reason` on any failure.
 
 State file: `<worktree>/.gwt/skill-state/register-spec.json`. The
 `skill-register-spec-stop-check` Stop hook returns

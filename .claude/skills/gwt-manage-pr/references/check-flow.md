@@ -11,8 +11,8 @@
    - `git status --porcelain`
    - Report as context only; do not mutate files.
 3. Fetch latest remote refs: `git fetch origin`
-4. Resolve the current branch PR with `gwtd pr current`.
-   - Use `gwtd pr view <number>` for detailed inspection when a PR exists.
+4. Resolve the current branch PR with JSON operation `pr.current`.
+   - Use JSON operation `pr.view` for detailed inspection when a PR exists.
    - Treat the literal line `no current pull request` as the canonical no-PR sentinel.
    - If the PR reports `mergeable: CONFLICTING`, `DIRTY`, or `BEHIND`, route to `FIX` immediately.
    - Treat any lower-level GitHub REST lookup as internal transport, not the normal path.
@@ -88,7 +88,15 @@ if [ -n "$(git status --porcelain)" ]; then dirty=1; fi
 git fetch origin
 
 commit_count="$(git rev-list --count "origin/$base..HEAD")"
-pr_summary="$(gwtd pr current 2>/tmp/gwt-pr-current.err || true)"
+if ! pr_summary="$("$GWT_BIN" <<'JSON' 2>/tmp/gwt-pr-current.err
+{"schema_version":1,"operation":"pr.current","params":{}}
+JSON
+)"; then
+  status="CHECK_FAILED"; action="MANUAL_CHECK"
+  reason="$(cat /tmp/gwt-pr-current.err)"
+  printf '!! MANUAL CHECK -- Could not determine PR status.\n   Reason: %s\n' "$reason" >&2
+  exit 1
+fi
 merge_state="$(printf '%s\n' "$pr_summary" | sed -n 's/^mergeable: //p' | head -n1)"
 
 if printf '%s\n' "$pr_summary" | grep -qx 'no current pull request'; then
@@ -101,9 +109,9 @@ else
   status="NO_ACTION"; action="NO_ACTION"
 fi
 
-# For checks/reviews/threads, continue with:
-# gwtd pr view <number>
-# gwtd pr checks <number>
-# gwtd pr reviews <number>
-# gwtd pr review-threads <number>
+# For checks/reviews/threads, continue with JSON operations:
+# {"operation":"pr.view","params":{"number":123}}
+# {"operation":"pr.checks","params":{"number":123}}
+# {"operation":"pr.reviews","params":{"number":123}}
+# {"operation":"pr.review_threads","params":{"number":123}}
 ```

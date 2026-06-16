@@ -16,18 +16,18 @@ Rules:
 - Update tasks.md after each task slice is verified, not before.
 - Do not mark tasks complete until the implementation passes verification.
 - Do not batch-mark multiple tasks; update incrementally.
-- アーティファクト操作には `gwtd issue spec <N> --edit tasks -f <file>` を使用する。
+- Use JSON operation `issue.spec.edit` for artifact updates.
 
-## 進捗追跡
+## Progress Tracking
 
-tasks セクションのチェックボックスを `gwtd issue spec <N> --edit tasks -f <file>` で更新する。
+Update tasks-section checkboxes with JSON operation `issue.spec.edit`.
 
-### ルール
+### Rules
 
-- 事実に基づき、インクリメンタルに更新する。
-- コードで裏付けられていない完了を主張しない。
-- 検証コマンドの出力（pass/fail カウント）を含める。
-- `tasks.md` の具体的なタスク ID を参照する。
+- Update incrementally from verified facts.
+- Do not claim completion unless the code supports it.
+- Include verification command output, including pass/fail counts.
+- Reference the concrete task IDs from `tasks.md`.
 
 ## Completion markers
 
@@ -54,8 +54,8 @@ Do not mark the SPEC complete during progress tracking; that is the gate's respo
 Watch for these signals that indicate premature completion claims:
 
 - Tasks marked `[x]` but related tests are not in the codebase
-- tasks セクションが "all tests pass" と主張しているが `cargo test` の出力が失敗を示している
-- tasks セクションの受け入れチェックが "accepted" だが動作が未実装
+- The tasks section claims "all tests pass" but `cargo test` output shows a failure
+- The tasks section marks acceptance as "accepted" while the behavior is still unimplemented
 - Task marked complete but the file listed in the task was not modified
 
 If any of these are detected, revert the completion marker and return to implementation.

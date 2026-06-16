@@ -82,7 +82,7 @@ pub fn derive_merged_done_equivalent(
 /// progression?" (planning → active → in review → done → archived). It is
 /// derived from `events + status_category` via
 /// `recompute_lifecycle_stage`, but may also be explicitly set by the user
-/// via `gwtd workspace update --status archived`.
+/// via the `workspace.update` operation with `params.status = "archived"`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum WorkspaceLifecycleStage {
@@ -96,7 +96,7 @@ pub enum WorkspaceLifecycleStage {
 
 /// SPEC-2359 Phase U-6 (FR-132, FR-139, FR-143): derive a coarse
 /// [`WorkspaceLifecycleStage`] from runtime activity signals. Used by
-/// `gwtd workspace update` (FR-139) to keep the lifecycle chip in sync
+/// `workspace.update` (FR-139) to keep the lifecycle chip in sync
 /// when status / events change, by the retroactive migration (FR-143) to
 /// backfill legacy data, and by the default constructor (`Planning` for
 /// fresh projections without events).

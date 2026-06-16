@@ -10,6 +10,7 @@
 //! - `tests.rs`: env integration tests (`#[cfg(test)]`).
 
 mod default;
+mod stdout_capture;
 mod test_env;
 #[cfg(test)]
 mod tests;
@@ -17,6 +18,7 @@ mod tests;
 pub use default::DefaultCliEnv;
 #[cfg(test)]
 pub use default::{IssueClientFactory, LazyIssueClient};
+pub(crate) use stdout_capture::StdoutCaptureEnv;
 pub use test_env::TestEnv;
 
 use std::{
@@ -198,6 +200,10 @@ pub fn dispatch<E: CliEnv>(env: &mut E, args: &[String]) -> i32 {
     let prog = program_name(args);
     let top_verb = args.get(1).map(String::as_str).unwrap_or("");
     let rest: Vec<String> = args.iter().skip(2).cloned().collect();
+
+    if top_verb.is_empty() {
+        return super::json_envelope::dispatch(env, prog);
+    }
 
     let parse_result = match top_verb {
         "issue" => parse_issue_args(&rest),

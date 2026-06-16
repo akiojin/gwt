@@ -1,15 +1,49 @@
 use std::{
     fs,
+    io::Write,
     process::{Command, Stdio},
 };
 
-fn run_gwtd_in(root: &std::path::Path, args: &[&str]) -> std::process::Output {
-    Command::new(env!("CARGO_BIN_EXE_gwtd"))
+fn run_gwtd_json(root: &std::path::Path, payload: serde_json::Value) -> std::process::Output {
+    let mut child = Command::new(env!("CARGO_BIN_EXE_gwtd"))
         .current_dir(root)
-        .args(args)
-        .stdin(Stdio::null())
-        .output()
-        .expect("run gwtd")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("run gwtd");
+    child
+        .stdin
+        .as_mut()
+        .expect("gwtd stdin")
+        .write_all(payload.to_string().as_bytes())
+        .expect("write gwtd JSON");
+    child.wait_with_output().expect("wait gwtd")
+}
+
+fn memory_add_payload(
+    date: &str,
+    memory_type: Option<&str>,
+    title: &str,
+    context: &str,
+    learning: &str,
+    future_action: &str,
+) -> serde_json::Value {
+    let mut params = serde_json::json!({
+        "date": date,
+        "title": title,
+        "context": context,
+        "learning": learning,
+        "future_action": future_action,
+    });
+    if let Some(memory_type) = memory_type {
+        params["type"] = serde_json::json!(memory_type);
+    }
+    serde_json::json!({
+        "schema_version": 1,
+        "operation": "memory.add",
+        "params": params,
+    })
 }
 
 fn work_dir(root: &std::path::Path) -> std::path::PathBuf {
@@ -23,24 +57,16 @@ fn memory_add_appends_typed_entry_to_existing_memory_file() {
     fs::create_dir_all(&work).expect("create work dir");
     fs::write(work.join("memory.md"), "# Memory\n\n").expect("seed memory");
 
-    let output = run_gwtd_in(
+    let output = run_gwtd_json(
         repo.path(),
-        &[
-            "memory",
-            "add",
-            "--date",
+        memory_add_payload(
             "2026-05-20",
-            "--type",
-            "workflow",
-            "--title",
+            Some("workflow"),
             "hook reminder writer",
-            "--context",
             "Hook reminders exposed memory but did not provide a writer.",
-            "--learning",
             "A durable memory loop needs a supported gwt append command.",
-            "--future-action",
-            "Use gwtd memory add before reporting reusable learning as done.",
-        ],
+            "Use memory.add before reporting reusable learning as done.",
+        ),
     );
 
     assert!(
@@ -61,35 +87,28 @@ fn memory_add_appends_typed_entry_to_existing_memory_file() {
     assert!(
         memory.contains("Learning: A durable memory loop needs a supported gwt append command.")
     );
-    assert!(memory.contains(
-        "Future Action: Use gwtd memory add before reporting reusable learning as done."
-    ));
+    assert!(memory
+        .contains("Future Action: Use memory.add before reporting reusable learning as done."));
 }
 
 #[test]
-fn lessons_add_alias_migrates_legacy_file_and_appends_entry() {
+fn memory_add_migrates_legacy_lessons_file_and_appends_entry() {
     let repo = tempfile::tempdir().expect("repo");
     let tasks = repo.path().join("tasks");
     fs::create_dir_all(&tasks).expect("create tasks dir");
     let legacy = "# Old Lessons\n\n## 2026-04-01 — old entry\n\nSome old content.\n";
     fs::write(tasks.join("lessons.md"), legacy).expect("seed lessons");
 
-    let output = run_gwtd_in(
+    let output = run_gwtd_json(
         repo.path(),
-        &[
-            "lessons",
-            "add",
-            "--date",
+        memory_add_payload(
             "2026-05-20",
-            "--title",
+            None,
             "legacy alias writer",
-            "--context",
             "Older prompts still say lessons.",
-            "--learning",
             "The lessons alias should still write canonical memory.",
-            "--future-action",
             "Keep new entries in .gwt/work/memory.md.",
-        ],
+        ),
     );
 
     assert!(
@@ -119,22 +138,16 @@ fn memory_add_migrates_legacy_tasks_memory_to_repo_local_work_dir() {
     let legacy = "# Memory\n\n## 2026-03-01 — legacy tasks entry\n\nType: lesson\nContext: old\nLearning: old\nFuture Action: old\n";
     fs::write(tasks.join("memory.md"), legacy).expect("seed tasks memory");
 
-    let output = run_gwtd_in(
+    let output = run_gwtd_json(
         repo.path(),
-        &[
-            "memory",
-            "add",
-            "--date",
+        memory_add_payload(
             "2026-05-30",
-            "--title",
+            None,
             "entry after work-dir migration",
-            "--context",
             "tasks/memory.md should move to .gwt/work/memory.md once.",
-            "--learning",
             "The move preserves prior entries.",
-            "--future-action",
             "Read .gwt/work/memory.md going forward.",
-        ],
+        ),
     );
 
     assert!(
@@ -163,22 +176,16 @@ fn memory_add_migrates_legacy_lessons_when_memory_absent() {
     let legacy = "# Lessons\n\n## 2026-03-15 — prior knowledge\n\nType: lesson\nContext: old context\nLearning: old learning\nFuture Action: old action\n";
     fs::write(tasks.join("lessons.md"), legacy).expect("seed lessons");
 
-    let output = run_gwtd_in(
+    let output = run_gwtd_json(
         repo.path(),
-        &[
-            "memory",
-            "add",
-            "--date",
+        memory_add_payload(
             "2026-05-24",
-            "--title",
+            None,
             "new entry after migration",
-            "--context",
             "Testing migration path.",
-            "--learning",
             "Legacy file should be renamed.",
-            "--future-action",
             "Verify migration is automatic.",
-        ],
+        ),
     );
 
     assert!(
@@ -212,22 +219,16 @@ fn memory_add_skips_migration_when_canonical_work_file_exists() {
     fs::write(tasks.join("memory.md"), legacy_tasks_memory).expect("seed tasks memory");
     fs::write(work.join("memory.md"), existing).expect("seed canonical memory");
 
-    let output = run_gwtd_in(
+    let output = run_gwtd_json(
         repo.path(),
-        &[
-            "memory",
-            "add",
-            "--date",
+        memory_add_payload(
             "2026-05-24",
-            "--title",
+            None,
             "no migration needed",
-            "--context",
             "Canonical work file already exists.",
-            "--learning",
             "Migration should be skipped.",
-            "--future-action",
             "Only append to .gwt/work/memory.md.",
-        ],
+        ),
     );
 
     assert!(
@@ -253,27 +254,21 @@ fn memory_add_skips_migration_when_canonical_work_file_exists() {
 fn memory_add_rejects_empty_required_values_without_writing() {
     let repo = tempfile::tempdir().expect("repo");
 
-    let output = run_gwtd_in(
+    let output = run_gwtd_json(
         repo.path(),
-        &[
-            "memory",
-            "add",
-            "--date",
+        memory_add_payload(
             "2026-05-20",
-            "--title",
+            None,
             "missing context",
-            "--context",
             "   ",
-            "--learning",
             "Learning",
-            "--future-action",
             "Action",
-        ],
+        ),
     );
 
     assert!(!output.status.success(), "empty context should fail");
     assert!(
-        String::from_utf8_lossy(&output.stderr).contains("must not be empty"),
+        String::from_utf8_lossy(&output.stderr).contains("missing required flag: context"),
         "stderr should explain validation failure, got: {}",
         String::from_utf8_lossy(&output.stderr)
     );

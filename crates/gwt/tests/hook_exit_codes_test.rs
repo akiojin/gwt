@@ -155,8 +155,8 @@ fn public_block_hook_preserves_block_json_contract_without_respawning() {
         "short summary must remain in the visible reason: {stdout}"
     );
     assert!(
-        stdout.contains("gwtd pr view"),
-        "canonical gwt alternative must be present in the visible reason: {stdout}"
+        stdout.contains("pr.view"),
+        "canonical gwt JSON operation alternative must be present in the visible reason: {stdout}"
     );
     assert!(
         !stdout.contains("\"decision\":\"block\""),

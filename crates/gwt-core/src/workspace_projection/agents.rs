@@ -16,7 +16,7 @@ fn default_workspace_agent_affiliation_status() -> WorkspaceAgentAffiliationStat
 
 /// Per-agent slice of a [`WorkspaceProjection`]: session identity, runtime
 /// status, current focus, and Board linkage. Updated from agent session
-/// events and `gwtd workspace update`.
+/// events and the `workspace.update` operation.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct WorkspaceAgentSummary {
     pub session_id: String,

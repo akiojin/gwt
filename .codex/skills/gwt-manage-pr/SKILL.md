@@ -12,7 +12,11 @@ Single skill for the full PR lifecycle: create, check status, and fix blockers. 
 Use the current user's language for decision summaries, blocker reports, and
 next-step guidance returned from this workflow.
 
-Canonical agent-facing surface is `gwtd pr ...` / `gwtd actions ...` for PR inspection, create/update, and fix flows. The current implementation may still use GitHub REST / `gh` internally as transport, while GraphQL remains the transport for unresolved review threads and thread reply/resolve.
+Canonical agent-facing surface is gwtd JSON operations `pr.*` and
+`actions.*` for PR inspection, create/update, and fix flows. The current
+implementation may still use GitHub REST / `gh` internally as transport, while
+GraphQL remains the transport for unresolved review threads and thread
+reply/resolve.
 
 ## Final Report Contract
 
@@ -105,7 +109,7 @@ impossible.**
    > whether develop has your work. Confusing the two is the root
    > cause of the MERGED-state false NO ACTION bug.
 6. **PR lookup + open-PR check:**
-   - Prefer `gwtd pr current` as the normal read path for the current branch.
+   - Prefer JSON operation `pr.current` as the normal read path for the current branch.
    - Treat the literal line `no current pull request` as the canonical no-PR sentinel.
    - If create mode needs lower-level repo/head lookup, treat it as internal transport managed by the toolchain rather than part of the agent-facing workflow.
    - `has_open_pr` = any entry with `state == "open" && merged_at == null`
@@ -192,7 +196,7 @@ Create mode is entered from the Preflight 2×2 matrix when `N > 0`.
 2. **If open PR exists and is `CONFLICTING` / `DIRTY` / `BEHIND`** → enter Fix mode before any push-only path.
 3. **If the work fails the Ready PR Gate** → create/update only as Draft PR, or return NO ACTION if the user explicitly rejects Draft.
 4. **If open PR exists and merge state is clean** → push only, return existing PR URL, enter Fix mode. A Ready/non-draft PR still requires the Ready PR Gate.
-5. **If no open PR** → create new PR; pass `--draft` unless the Ready PR Gate is satisfied.
+5. **If no open PR** → create new PR with `params.draft:true` unless the Ready PR Gate is satisfied.
 6. **Branch sync:** If behind `origin/$base`, merge `origin/$base` first (never rebase). Push after merge.
 
 ### PR Title Rules
@@ -214,13 +218,19 @@ Create mode is entered from the Preflight 2×2 matrix when `N > 0`.
 
 ### Create/Update Commands
 
-- Create: `gwtd pr create --base <base> [--head <head>] --title "<title>" -f <file> [--label <label>]* [--draft]`
-- Update: `gwtd pr edit <number> [--title "<title>"] [-f <file>] [--add-label <label>]*`
-- Transport note: the current implementation may still call GitHub REST / `gh` internally, but agent-facing workflow should stay on the `gwtd pr` surface.
+- Create: JSON operation `pr.create` with `params.base`, optional
+  `params.head`, `params.title`, `params.body`, optional `params.labels`, and
+  `params.draft`.
+- Update: JSON operation `pr.edit` with `params.number`, optional
+  `params.title`, optional `params.body`, and optional `params.add_labels`.
+- Transport note: the current implementation may still call GitHub REST / `gh`
+  internally, but agent-facing workflow should stay on gwtd JSON operations.
 
 ### Post-Create
 
-After PR creation or push, automatically enter **fix** mode and use `gwtd pr checks`, `gwtd pr reviews`, `gwtd pr review-threads`, and `gwtd actions logs/job-logs` as the normal inspection path.
+After PR creation or push, automatically enter **fix** mode and use JSON
+operations `pr.checks`, `pr.reviews`, `pr.review_threads`, `actions.logs`, and
+`actions.job_logs` as the normal inspection path.
 
 ## Mode: Check
 
@@ -230,12 +240,12 @@ Detailed logic in `references/check-flow.md`.
 
 ### Canonical Read Surface
 
-- Current branch PR: `gwtd pr current`
-- PR detail: `gwtd pr view <number>`
-- Checks: `gwtd pr checks <number>`
-- Reviews: `gwtd pr reviews <number>`
-- Unresolved threads: `gwtd pr review-threads <number>`
-- Actions logs: `gwtd actions logs --run <id>` / `gwtd actions job-logs --job <id>`
+- Current branch PR: `pr.current`
+- PR detail: `pr.view`
+- Checks: `pr.checks`
+- Reviews: `pr.reviews`
+- Unresolved threads: `pr.review_threads`
+- Actions logs: `actions.logs` / `actions.job_logs`
 
 ### Output Contract
 
@@ -351,14 +361,16 @@ Blocking items: <N>
   - Not applicable: "Not applicable: <reason why no change is needed>."
   - Already addressed: "Already addressed in commit <sha>: <summary>."
   - Acknowledged: "Acknowledged: <brief response>." for informational comments.
-- After preparing the reply body, use `gwtd pr review-threads reply-and-resolve <number> -f <file>` to reply to and resolve all unresolved threads on the PR.
+- After preparing the reply body, use JSON operation
+  `pr.review_threads.reply_and_resolve` to reply to and resolve all unresolved
+  threads on the PR.
 - If that surface is unavailable, fall back to internal GraphQL transport with `resolveReviewThread`.
 - **Verification:** After resolving, re-check that no unresolved
   threads remain. Unresolved threads block the Merge Verdict.
 
 ### Reviewer Notification (mandatory)
 
-Post a PR summary comment via `gwtd pr comment <number> -f <file>`.
+Post a PR summary comment via JSON operation `pr.comment`.
 
 ### Verify Fix (mandatory)
 
@@ -403,8 +415,8 @@ Next
 
 ## Bundled Scripts
 
-PR lifecycle work is driven through the canonical `gwtd pr ...` and
-`gwtd actions ...` surfaces. Do not depend on retired repo-local helper script
+PR lifecycle work is driven through canonical gwtd JSON operations `pr.*` and
+`actions.*`. Do not depend on retired repo-local helper script
 paths when running this workflow.
 
 ## References

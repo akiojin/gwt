@@ -35,5 +35,6 @@ or when you suspect the current bug has already been documented.
 ```
 
 For a unified search that also includes SPECs, Issues, and project files,
-use `/gwt:gwt-search "query"` (default merge) or `/gwt:gwt-search --memory
-"query"` to keep only memory results.
+use `/gwt:gwt-search {"query":"query"}` (default merge) or
+`/gwt:gwt-search {"query":"query","scopes":["memory"]}` to keep only
+memory results.

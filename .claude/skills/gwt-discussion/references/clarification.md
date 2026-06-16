@@ -12,26 +12,28 @@ scenarios.
 
 This phase works on:
 
-GitHub Issue #<Issue番号> の spec セクション。`gwtd issue spec <Issue番号> --section spec` で取得する。
+The `spec` section of GitHub Issue #<issue-number>, read with JSON operation `issue.spec.section`.
 
-spec セクションは以下の構造を含む:
+The `spec` section includes this structure:
 
-- 状態
-- 背景
-- ユビキタス言語 (Phase 2/3 で追加)
-- ユーザーストーリー
-- 受け入れシナリオ
-- エッジケース
-- 機能要件
-- 非機能要件
-- 成功基準
+- State
+- Background
+- Ubiquitous language (added in Phase 2/3)
+- User stories
+- Acceptance scenarios
+- Edge cases
+- Functional requirements
+- Non-functional requirements
+- Success criteria
 
 ## Workflow
 
 ### Step 1: Read current spec.md
 
 ```bash
-gwtd issue spec <Issue番号> --section spec
+gwtd <<'JSON'
+{"schema_version":1,"operation":"issue.spec.section","params":{"number":123,"section":"spec"}}
+JSON
 ```
 
 If spec.md does not exist, return to Phase 3 (registration) first.
@@ -86,7 +88,9 @@ After receiving answers:
 Upload:
 
 ```bash
-gwtd issue spec <Issue番号> --edit spec -f /tmp/spec.md
+gwtd <<'JSON'
+{"schema_version":1,"operation":"issue.spec.edit","params":{"number":123,"section":"spec","body":"<updated spec body>"}}
+JSON
 ```
 
 ### Step 6: Decide next step

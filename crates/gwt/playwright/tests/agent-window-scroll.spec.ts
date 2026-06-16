@@ -58,6 +58,7 @@ async function waitForScrollableTerminal(page: Page, windowId: string): Promise<
     hasScrollback: true,
     hidden: false,
   });
+  await waitForTerminalBufferIdle(page, windowId);
 }
 
 async function expectPendingRefresh(
@@ -75,6 +76,12 @@ async function expectPendingRefresh(
 
 async function expectWheelMovesScrollback(page: Page, windowId: string): Promise<void> {
   await scrollTerminalToBottom(page, windowId);
+  await expect
+    .poll(async () => {
+      const metrics = await terminalScrollMetrics(page, windowId);
+      return metrics.viewportY === metrics.baseY;
+    })
+    .toBe(true);
   const before = await terminalScrollMetrics(page, windowId);
   expect(before.hasScrollback).toBe(true);
 
@@ -92,11 +99,40 @@ async function expectWheelMovesScrollback(page: Page, windowId: string): Promise
     .toBeLessThan(before.viewportY);
 }
 
+async function waitForTerminalBufferIdle(page: Page, windowId: string): Promise<void> {
+  let previousKey = "";
+  let stableSamples = 0;
+  await expect
+    .poll(async () => {
+      const metrics = await terminalScrollMetrics(page, windowId);
+      const key = [
+        metrics.hidden,
+        metrics.baseY,
+        metrics.bufferLength,
+        metrics.viewportRefreshPending,
+      ].join(":");
+      if (
+        key === previousKey &&
+        metrics.hidden === false &&
+        metrics.hasScrollback === true &&
+        metrics.viewportRefreshPending === false
+      ) {
+        stableSamples += 1;
+      } else {
+        stableSamples = 0;
+      }
+      previousKey = key;
+      return stableSamples;
+    })
+    .toBeGreaterThanOrEqual(2);
+}
+
 async function terminalScrollMetrics(page: Page, windowId: string): Promise<{
   hidden: boolean;
   viewportY: number;
   baseY: number;
   rows: number;
+  bufferLength: number;
   hasScrollback: boolean;
   viewportRefreshPending: boolean;
 }> {
@@ -110,6 +146,7 @@ async function terminalScrollMetrics(page: Page, windowId: string): Promise<{
       viewportY: metrics?.viewportY ?? 0,
       baseY,
       rows,
+      bufferLength: metrics?.bufferLength ?? 0,
       hasScrollback: baseY > 0 && baseY + rows > rows,
       viewportRefreshPending: metrics?.viewportRefreshPending ?? false,
     };

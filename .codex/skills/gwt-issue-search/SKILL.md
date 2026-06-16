@@ -17,8 +17,8 @@ command as `"$GWT_BIN" ...`; if none exists, stop with an actionable
 
 ## Issues search first
 
-When the user asks any of the following, use GitHub Issues search before manual `gwtd issue view`,
-title grep, or file search:
+When the user asks any of the following, use GitHub Issues search before
+manual `issue.view` JSON reads, title grep, or file search:
 
 - "既存 Issue を探して"
 - "関連 Issue を探して"
@@ -27,7 +27,7 @@ title grep, or file search:
 
 Minimum workflow:
 
-1. Run `"$GWT_BIN" search --issues ...` with 2-3 semantic queries derived from the request (a missing index is auto-built)
+1. Run `search` JSON envelopes with `params.scopes:["issues"]` and 2-3 semantic queries derived from the request (a missing index is auto-built)
 2. Pick the canonical existing issue if found
 3. Only fall back to creating a new issue when no suitable canonical issue exists
 
@@ -42,12 +42,14 @@ Suggested query patterns:
 
 ## GitHub Issues search command
 
-`gwtd search` is the canonical search entry point (SPEC-1942 US-15). Run it
-from inside the target worktree; the repo is resolved from the current
-directory.
+The `search` JSON operation is the canonical gwtd entry point (SPEC-1942
+US-15). Run it from inside the target worktree; the repo is resolved from the
+current directory.
 
 ```bash
-"$GWT_BIN" search --issues "your search query" --n-results 10 --json
+"$GWT_BIN" <<'JSON'
+{"schema_version":1,"operation":"search","params":{"query":"your search query","scopes":["issues"],"n_results":10}}
+JSON
 ```
 
 If the Issue index does not yet exist, the search builds it inline by refreshing issue data and embedding the results before returning (the first call may take longer).
@@ -55,7 +57,9 @@ If the Issue index does not yet exist, the search builds it inline by refreshing
 To force a refresh ignoring TTL:
 
 ```bash
-"$GWT_BIN" index rebuild --scope issues
+"$GWT_BIN" <<'JSON'
+{"schema_version":1,"operation":"index.rebuild","params":{"scope":"issues"}}
+JSON
 ```
 
 ## Output format
@@ -84,8 +88,8 @@ To force a refresh ignoring TTL:
 
 ## Fallback: direct runner invocation (older binaries only)
 
-Only when `"$GWT_BIN" search` fails with `unknown command 'search'` (a gwtd
-binary older than the search family), call the Python runner directly:
+Only when the `search` JSON operation is unavailable in an older gwtd binary,
+call the Python runner directly:
 
 ```bash
 ~/.gwt/runtime/chroma-venv/bin/python3 ~/.gwt/runtime/chroma_index_runner.py \
