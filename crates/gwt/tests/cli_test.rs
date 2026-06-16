@@ -1546,6 +1546,14 @@ fn red_109d_dispatch_pr_reply_and_resolve_targets_unresolved_threads() {
                 line: Some(99),
                 comments: vec![],
             },
+            PrReviewThread {
+                id: "thread-3".to_string(),
+                is_resolved: false,
+                is_outdated: true,
+                path: "src/old.rs".to_string(),
+                line: None,
+                comments: vec![],
+            },
         ],
     );
 
@@ -1568,7 +1576,7 @@ fn red_109d_dispatch_pr_reply_and_resolve_targets_unresolved_threads() {
     );
 
     let out = String::from_utf8(env.stdout.clone()).unwrap();
-    assert!(out.contains("replied to and resolved 1 review threads on PR #42"));
+    assert!(out.contains("replied to and resolved 2 review threads on PR #42"));
 }
 
 #[test]

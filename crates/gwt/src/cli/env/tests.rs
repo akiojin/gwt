@@ -333,13 +333,21 @@ fn test_env_records_io_and_pr_side_effects() {
                 line: Some(20),
                 comments: Vec::new(),
             },
+            PrReviewThread {
+                id: "thread-3".to_string(),
+                is_resolved: false,
+                is_outdated: true,
+                path: "src/old.rs".to_string(),
+                line: None,
+                comments: Vec::new(),
+            },
         ],
     );
-    assert_eq!(env.fetch_pr_review_threads(7).expect("threads").len(), 2);
+    assert_eq!(env.fetch_pr_review_threads(7).expect("threads").len(), 3);
     assert_eq!(
         env.reply_and_resolve_pr_review_threads(7, "done")
             .expect("reply"),
-        1
+        2
     );
     assert_eq!(
         env.pr_reply_and_resolve_call_log,
