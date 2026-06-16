@@ -46,27 +46,27 @@ test.describe("Quiet Work UI surfaces (E2E)", () => {
     await installBackend(page);
     await page.goto(APP_URL);
 
-    // Row 0 ("Quiet Work UI redesign") is auto-selected; its single Work split
-    // into two conversation Sessions, the latest of which is active.
+    // Row 0 ("Quiet Work UI redesign") is auto-selected; its single Work keeps
+    // multiple conversation records, but the UI renders the latest Session.
     const rows = page.locator(".workspace-overview-row[data-workspace-id]");
     await expect(rows.nth(0)).toHaveAttribute("aria-selected", "true");
 
     const sessions = page.locator(".workspace-detail-session");
-    await expect(sessions).toHaveCount(2);
+    await expect(sessions).toHaveCount(1);
 
     const active = page.locator('.workspace-detail-session[data-active="true"]');
     await expect(active).toHaveCount(1);
     await expect(active).toContainText("conv-bbb");
-    // The active Session is badged "Current"; past Sessions are badged "Past".
+    // The rendered latest Session is badged "Current".
     await expect(
       active.locator('.workspace-detail-session-badge[data-session-state="current"]'),
     ).toHaveText("Current");
     await expect(
       page.locator('.workspace-detail-session-badge[data-session-state="past"]'),
-    ).toHaveText("Past");
+    ).toHaveCount(0);
 
     // Each Work renders one Agent header (the agent/tool name), always shown,
-    // so two Sessions of one Work never look like two Agents. The Session rows
+    // so conversation history never looks like multiple Agents. The Session row
     // are labelled "Session ...", not with the agent name.
     const heading = page.locator(".workspace-detail-work-heading");
     await expect(heading).toHaveCount(1);
@@ -82,18 +82,14 @@ test.describe("Quiet Work UI surfaces (E2E)", () => {
     await expect(page.locator(".workspace-overview-root .knowledge-heading")).toHaveText(
       "Workspace",
     );
-    // Resume lives on each Session row (one per conversation), not on the
+    // Resume lives on the rendered Session row, not on the
     // Workspace header and not as a single Work-level control.
     await expect(page.locator("[data-action='resume-workspace']")).toHaveCount(0);
     await expect(page.locator("[data-action='resume-work']")).toHaveCount(0);
     const sessionResume = page.locator("[data-action='resume-session']");
-    await expect(sessionResume).toHaveCount(2);
-    await expect(sessionResume.nth(0)).toHaveAttribute("data-session-id", "agent-current");
-    await expect(sessionResume.nth(0)).toHaveAttribute(
-      "data-agent-session-id",
-      "conv-aaaa1111",
-    );
-    await expect(sessionResume.nth(1)).toHaveAttribute(
+    await expect(sessionResume).toHaveCount(1);
+    await expect(sessionResume).toHaveAttribute("data-session-id", "agent-current");
+    await expect(sessionResume).toHaveAttribute(
       "data-agent-session-id",
       "conv-bbbb2222",
     );

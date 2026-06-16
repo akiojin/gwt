@@ -623,6 +623,8 @@ export function createProfileWindowSurface({
             "div",
             `profile-env-grid-row profile-env-row is-${envRow.mode}`,
           );
+          row.dataset.envKind = envRow.kind;
+          row.dataset.envKey = normalizeProfileEnvKey(envRow.key);
 
           if (envRow.kind === "os") {
             const keyCell = createNode("div", "profile-env-key", envRow.key);
@@ -657,6 +659,7 @@ export function createProfileWindowSurface({
                   envRow.key = keyInput.value;
                 }
               }
+              row.dataset.envKey = normalizeProfileEnvKey(keyInput.value);
               scheduleProfileSave(windowId);
             });
             keyInput.addEventListener("blur", () => {
@@ -808,10 +811,11 @@ export function createProfileWindowSurface({
             state.selectedProfile = event.snapshot?.selected_profile || null;
             const selectedProfileUnchanged =
               !previousProfile || previousProfile === state.selectedProfile;
+            const hasNewerDraft =
+              selectedProfileUnchanged && state.draft && profileDraftIsDirty(state);
             if (
-              wasSaveInFlight &&
               selectedProfileUnchanged &&
-              profileHasEditableFocus(event.id)
+              ((wasSaveInFlight && profileHasEditableFocus(event.id)) || hasNewerDraft)
             ) {
               updateProfileStatus(event.id);
               break;

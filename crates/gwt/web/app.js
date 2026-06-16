@@ -3052,6 +3052,9 @@
               return;
             }
             terminalOutputBatcher.enqueue(windowId, base64);
+            if (!canRefreshTerminalViewport(windowId)) {
+              markTerminalViewportRefreshPending(windowId);
+            }
           },
         );
       }
@@ -3287,6 +3290,7 @@
         createKnowledgeMarkdownBody,
         windowMap,
         workspaceWindowById,
+        pendingIndexOpenTargetsByPreset,
         knowledgeKindForPreset,
         focusWindowLocally,
         sendWindowFocus: (id) => socketTransport.send({ kind: "focus_window", id }),

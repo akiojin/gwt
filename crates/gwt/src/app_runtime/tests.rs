@@ -85,6 +85,17 @@ struct CaptureTracingVisitor {
     fields: HashMap<String, String>,
 }
 
+#[cfg(unix)]
+struct KillOnDrop(std::process::Child);
+
+#[cfg(unix)]
+impl Drop for KillOnDrop {
+    fn drop(&mut self) {
+        let _ = self.0.kill();
+        let _ = self.0.wait();
+    }
+}
+
 impl CaptureTracingVisitor {
     fn insert(&mut self, field: &tracing::field::Field, value: impl ToString) {
         self.fields
@@ -8548,6 +8559,255 @@ fn app_runtime_active_work_projection_hides_cleanup_candidate_for_live_agent_bra
 }
 
 #[test]
+fn app_runtime_active_work_projection_hides_row_cleanup_candidate_for_live_agent_branch() {
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedEnvVar::set("HOME", temp.path());
+    let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+    let repo = temp.path().join("repo");
+    fs::create_dir_all(&repo).expect("create repo");
+    let tab = sample_project_tab_with_window_at(
+        "tab-1",
+        "codex-1",
+        repo.clone(),
+        WindowPreset::Codex,
+        WindowProcessStatus::Running,
+    );
+    let mut projection =
+        gwt_core::workspace_projection::WorkspaceProjection::default_for_project(&repo);
+    projection.status_category = gwt_core::workspace_projection::WorkspaceStatusCategory::Active;
+    projection.git_details = Some(gwt_core::workspace_projection::GitDetails {
+        branch: Some("work/20260615-live-cleanup".to_string()),
+        worktree_path: Some(repo.join("work/20260615-live-cleanup")),
+        base_branch: Some("origin/develop".to_string()),
+        pr_number: Some(3099),
+        pr_state: Some("MERGED".to_string()),
+        pr_url: None,
+        pr_created_at: None,
+        created_by_start_work: true,
+        created_at: chrono::Utc::now(),
+    });
+    gwt_core::workspace_projection::save_workspace_projection(&repo, &projection)
+        .expect("save projection");
+    let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+    let window_id = combined_window_id("tab-1", "codex-1");
+    runtime.active_agent_sessions.insert(
+        window_id.clone(),
+        ActiveAgentSession {
+            window_id,
+            session_id: "session-live-cleanup".to_string(),
+            agent_id: "codex".to_string(),
+            branch_name: "work/20260615-live-cleanup".to_string(),
+            display_name: "Codex".to_string(),
+            worktree_path: repo.join("work/20260615-live-cleanup"),
+            agent_project_root: repo
+                .join("work/20260615-live-cleanup")
+                .display()
+                .to_string(),
+            runtime_target: gwt_agent::LaunchRuntimeTarget::Host,
+            tab_id: "tab-1".to_string(),
+        },
+    );
+
+    let view = runtime
+        .active_work_projection_for_tab("tab-1", &runtime.tabs[0])
+        .expect("projection view");
+    let row = view
+        .active_works
+        .iter()
+        .find(|work| work.branch.as_deref() == Some("work/20260615-live-cleanup"))
+        .expect("live Workspace row");
+
+    assert!(row.merged_into_base, "merged badge remains visible");
+    assert_eq!(
+        row.cleanup_candidate, None,
+        "live Agent branch must be absent from row-level cleanup candidates"
+    );
+}
+
+#[test]
+fn app_runtime_row_cleanup_candidate_exposes_merged_workspace_without_live_agent() {
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedEnvVar::set("HOME", temp.path());
+    let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+    let repo = temp.path().join("repo");
+    fs::create_dir_all(&repo).expect("create repo");
+    gwt_core::workspace_projection::record_workspace_work_event(&repo, {
+        let mut event = gwt_core::workspace_projection::WorkEvent::new(
+            gwt_core::workspace_projection::WorkEventKind::Update,
+            "work-merged-cleanup-row",
+            chrono::Utc::now(),
+        );
+        event.title = Some("Merged cleanup row".to_string());
+        event.execution_container = Some(
+            gwt_core::workspace_projection::WorkspaceExecutionContainerRef {
+                branch: Some("work/20260615-merged-cleanup".to_string()),
+                worktree_path: Some(repo.join("work/20260615-merged-cleanup")),
+                pr_number: Some(3100),
+                pr_url: None,
+                pr_state: Some("MERGED".to_string()),
+            },
+        );
+        event
+    })
+    .expect("record work");
+    let tab = sample_project_tab("tab-1", "Repo", repo.clone(), ProjectKind::Git, &[]);
+    let runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+
+    let view = runtime
+        .active_work_projection_for_tab("tab-1", &runtime.tabs[0])
+        .expect("projection view");
+    let row = view
+        .active_works
+        .iter()
+        .find(|work| work.branch.as_deref() == Some("work/20260615-merged-cleanup"))
+        .expect("merged Workspace row");
+    let candidate = row
+        .cleanup_candidate
+        .as_ref()
+        .expect("eligible merged row should expose cleanup candidate");
+
+    assert_eq!(candidate.branch, "work/20260615-merged-cleanup");
+    assert_eq!(candidate.reason, "pr_merged");
+    assert!(!candidate.default_delete_remote);
+}
+
+#[test]
+fn app_runtime_row_cleanup_candidate_hides_grouped_live_agent_branch() {
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedEnvVar::set("HOME", temp.path());
+    let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+    let repo = temp.path().join("repo");
+    fs::create_dir_all(&repo).expect("create repo");
+    gwt_core::workspace_projection::record_workspace_work_event(&repo, {
+        let mut event = gwt_core::workspace_projection::WorkEvent::new(
+            gwt_core::workspace_projection::WorkEventKind::Update,
+            "work-merged-grouped-row",
+            chrono::Utc::now(),
+        );
+        event.title = Some("Merged grouped row".to_string());
+        event.execution_container = Some(
+            gwt_core::workspace_projection::WorkspaceExecutionContainerRef {
+                branch: Some("work/20260615-grouped-cleanup".to_string()),
+                worktree_path: Some(repo.join("work/20260615-grouped-cleanup")),
+                pr_number: Some(3101),
+                pr_url: None,
+                pr_state: Some("MERGED".to_string()),
+            },
+        );
+        event
+    })
+    .expect("record work");
+    let tab = sample_project_tab_with_window_at(
+        "tab-1",
+        "codex-1",
+        repo.clone(),
+        WindowPreset::Codex,
+        WindowProcessStatus::Running,
+    );
+    let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+    let window_id = combined_window_id("tab-1", "codex-1");
+    runtime.active_agent_sessions.insert(
+        window_id.clone(),
+        ActiveAgentSession {
+            window_id,
+            session_id: "session-grouped-cleanup".to_string(),
+            agent_id: "codex".to_string(),
+            branch_name: "work/20260615-grouped-cleanup".to_string(),
+            display_name: "Codex".to_string(),
+            worktree_path: repo.join("work/20260615-grouped-cleanup"),
+            agent_project_root: repo
+                .join("work/20260615-grouped-cleanup")
+                .display()
+                .to_string(),
+            runtime_target: gwt_agent::LaunchRuntimeTarget::Host,
+            tab_id: "tab-1".to_string(),
+        },
+    );
+
+    let view = runtime
+        .active_work_projection_for_tab("tab-1", &runtime.tabs[0])
+        .expect("projection view");
+    let row = view
+        .active_works
+        .iter()
+        .find(|work| work.branch.as_deref() == Some("work/20260615-grouped-cleanup"))
+        .expect("grouped Workspace row");
+
+    assert!(row.merged_into_base, "merged badge remains visible");
+    assert_eq!(
+        row.cleanup_candidate, None,
+        "grouped row with live Agent on the same branch must not be cleanable"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn app_runtime_row_cleanup_candidate_hides_workspace_with_live_cwd_process() {
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedEnvVar::set("HOME", temp.path());
+    let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+    let repo = temp.path().join("repo");
+    let worktree = repo.join("work/20260616-0203");
+    fs::create_dir_all(&worktree).expect("create worktree");
+    gwt_core::workspace_projection::record_workspace_work_event(&repo, {
+        let mut event = gwt_core::workspace_projection::WorkEvent::new(
+            gwt_core::workspace_projection::WorkEventKind::Update,
+            "work-live-cwd-cleanup-row",
+            chrono::Utc::now(),
+        );
+        event.title = Some("Merged live cwd row".to_string());
+        event.execution_container = Some(
+            gwt_core::workspace_projection::WorkspaceExecutionContainerRef {
+                branch: Some("work/20260616-0203".to_string()),
+                worktree_path: Some(worktree.clone()),
+                pr_number: Some(3108),
+                pr_url: None,
+                pr_state: Some("MERGED".to_string()),
+            },
+        );
+        event
+    })
+    .expect("record work");
+    let _child = KillOnDrop(
+        std::process::Command::new("sh")
+            .arg("-c")
+            .arg("sleep 30")
+            .current_dir(&worktree)
+            .spawn()
+            .expect("spawn cwd process"),
+    );
+    let tab = sample_project_tab("tab-1", "Repo", repo.clone(), ProjectKind::Git, &[]);
+    let runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+
+    let view = runtime
+        .active_work_projection_for_tab("tab-1", &runtime.tabs[0])
+        .expect("projection view");
+    let row = view
+        .active_works
+        .iter()
+        .find(|work| work.branch.as_deref() == Some("work/20260616-0203"))
+        .expect("merged Workspace row");
+
+    assert!(row.merged_into_base, "merged badge remains visible");
+    assert_eq!(
+        row.cleanup_candidate, None,
+        "Workspace whose worktree is still an agent process cwd must not be cleanable"
+    );
+}
+
+#[test]
 fn app_runtime_stopped_agent_cleans_saved_projection_and_broadcasts_active_work_idle() {
     let _env_lock = env_test_lock()
         .lock()
@@ -14502,6 +14762,7 @@ fn attach_registry_sessions_caps_total_agents_on_the_wire() {
         workspace_key: None,
         remote_only: false,
         done_equivalent: false,
+        cleanup_candidate: None,
         updated_at: String::new(),
     }];
 
@@ -14619,6 +14880,7 @@ fn attach_registry_sessions_keeps_latest_entry_per_agent_identity() {
         workspace_key: None,
         remote_only: false,
         done_equivalent: false,
+        cleanup_candidate: None,
         updated_at: String::new(),
     }];
 
@@ -14704,6 +14966,7 @@ fn attach_registry_sessions_drops_ghost_agents_without_identity_or_sessions() {
         workspace_key: None,
         remote_only: false,
         done_equivalent: false,
+        cleanup_candidate: None,
         updated_at: String::new(),
     }];
 
@@ -14827,6 +15090,7 @@ fn attach_registry_sessions_dedupes_agents_sharing_a_conversation() {
         workspace_key: None,
         remote_only: false,
         done_equivalent: false,
+        cleanup_candidate: None,
         updated_at: String::new(),
     }];
 
@@ -14995,6 +15259,7 @@ fn active_works_are_sorted_by_latest_update_descending() {
         workspace_key: None,
         remote_only: false,
         done_equivalent: false,
+        cleanup_candidate: None,
         updated_at: updated_at.to_string(),
     };
     let mut works = vec![
@@ -15068,6 +15333,7 @@ fn mark_merged_active_works_flags_cache_and_pr_state() {
         workspace_key: None,
         remote_only: false,
         done_equivalent: false,
+        cleanup_candidate: None,
         updated_at: String::new(),
     };
     let mut works = vec![
@@ -15468,6 +15734,7 @@ fn assign_and_merge_workspace_groups_unifies_same_branch_rows() {
             workspace_key: None,
             remote_only: false,
             done_equivalent: false,
+            cleanup_candidate: None,
             updated_at: updated_at.to_string(),
         }
     }
@@ -15553,6 +15820,7 @@ fn mark_remote_only_flags_fetched_branches_without_local_worktree() {
             workspace_key: None,
             remote_only: false,
             done_equivalent: false,
+            cleanup_candidate: None,
             updated_at: String::new(),
         }
     }
@@ -15612,6 +15880,7 @@ fn mark_merged_classifies_done_equivalent_for_stale_merged_rows() {
             workspace_key: None,
             remote_only: false,
             done_equivalent: false,
+            cleanup_candidate: None,
             updated_at: updated_at.to_string(),
         }
     }
@@ -15777,6 +16046,7 @@ fn apply_work_summary_external_sources_prefers_pr_then_ai_then_commit_subject() 
         workspace_key: None,
         remote_only: false,
         done_equivalent: false,
+        cleanup_candidate: None,
     };
     let mut works = vec![
         base("work/20260614-0444", None), // no PR, gap -> filled by commit subject
