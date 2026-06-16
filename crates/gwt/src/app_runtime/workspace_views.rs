@@ -877,6 +877,7 @@ pub(super) fn work_session_index(
 pub(crate) fn workspace_work_item_view_from_item(
     item: &gwt_core::workspace_projection::WorkItem,
     session_index: &std::collections::HashMap<&str, &gwt_agent::Session>,
+    project_root: &Path,
 ) -> gwt::WorkspaceHistoryView {
     gwt::WorkspaceHistoryView {
         id: item.id.clone(),
@@ -904,7 +905,7 @@ pub(crate) fn workspace_work_item_view_from_item(
         agents: item
             .agents
             .iter()
-            .map(|agent| workspace_work_agent_view_from_ref(agent, session_index))
+            .map(|agent| workspace_work_agent_view_from_ref(agent, session_index, project_root))
             .collect(),
         execution_containers: item
             .execution_containers
@@ -924,6 +925,7 @@ pub(crate) fn workspace_work_item_view_from_item(
 pub(super) fn workspace_work_agent_view_from_ref(
     agent: &gwt_core::workspace_projection::WorkAgentRef,
     session_index: &std::collections::HashMap<&str, &gwt_agent::Session>,
+    project_root: &Path,
 ) -> gwt::WorkspaceHistoryAgentView {
     // A Work's `session_id` is the gwt session id (the launch). It keys into the
     // persisted Session whose forward-only `session_history` is the Session list
@@ -933,6 +935,7 @@ pub(super) fn workspace_work_agent_view_from_ref(
         .get(agent.session_id.as_str())
         .map(|session| {
             let latest = session.agent_session_id.as_deref();
+            let exact_resume_available = session_exact_resume_materializable(project_root, session);
             // Render Sessions in stable chronological order (oldest first) so
             // clock skew or delayed persistence cannot scramble the timeline;
             // the append order alone is not guaranteed monotonic.
@@ -951,7 +954,8 @@ pub(super) fn workspace_work_agent_view_from_ref(
                                 .updated_at
                                 .to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
                             is_active: true,
-                            resumable: session.is_resumable_conversation(conversation),
+                            resumable: exact_resume_available
+                                && session.is_resumable_conversation(conversation),
                         }]
                     })
                     .unwrap_or_default();
@@ -966,8 +970,11 @@ pub(super) fn workspace_work_agent_view_from_ref(
                     is_active: latest == Some(entry.agent_session_id.as_str()),
                     // A Session whose conversation handle is structurally
                     // unusable (empty / Codex placeholder) is history-only; the
-                    // surface hides its Resume control.
-                    resumable: session.is_resumable_conversation(&entry.agent_session_id),
+                    // surface hides its Resume control. A machine-local ledger
+                    // whose worktree and branch are gone is also history-only;
+                    // Workspace Continue remains the fallback.
+                    resumable: exact_resume_available
+                        && session.is_resumable_conversation(&entry.agent_session_id),
                 })
                 .collect()
         })
@@ -1234,6 +1241,16 @@ pub(super) fn workspace_resume_branch_exists(project_root: &Path, branch_name: &
         .unwrap_or(false)
 }
 
+pub(super) fn session_exact_resume_materializable(
+    project_root: &Path,
+    session: &gwt_agent::Session,
+) -> bool {
+    if session.worktree_path.as_path().exists() {
+        return true;
+    }
+    workspace_resume_branch_exists(project_root, &session.branch)
+}
+
 fn active_work_agent_priority_rank(agent: &gwt::ActiveWorkAgentView) -> u8 {
     match agent.status_category.as_str() {
         "blocked" => 0,
@@ -1301,6 +1318,7 @@ pub(super) fn attach_registry_sessions_to_active_works(
     agent_sessions: &[gwt_agent::Session],
     project_repo_hash: Option<gwt_core::repo_hash::RepoHash>,
     session_index: &std::collections::HashMap<&str, &gwt_agent::Session>,
+    project_root: &Path,
 ) {
     let registry = crate::workspace_session_registry::branch_session_registry(
         agent_sessions,
@@ -1328,7 +1346,8 @@ pub(super) fn attach_registry_sessions_to_active_works(
                 display_name: Some(session.display_name.clone()),
                 updated_at: session.last_activity_at,
             };
-            let history_view = workspace_work_agent_view_from_ref(&agent_ref, session_index);
+            let history_view =
+                workspace_work_agent_view_from_ref(&agent_ref, session_index, project_root);
             work.agents
                 .push(paused_work_agent_view_from_history(&history_view));
         }
@@ -2041,7 +2060,9 @@ impl AppRuntime {
                 })
                 .work_items
                 .iter()
-                .map(|item| workspace_work_item_view_from_item(item, &session_index))
+                .map(|item| {
+                    workspace_work_item_view_from_item(item, &session_index, &tab.project_root)
+                })
                 .collect::<Vec<_>>();
             let mut view = active_work_projection_from_saved_with_journal(
                 projection,
@@ -2061,6 +2082,7 @@ impl AppRuntime {
                 &agent_sessions,
                 gwt_core::repo_hash::detect_repo_hash(&tab.project_root),
                 &session_index,
+                &tab.project_root,
             );
             // SPEC-2359 W-15 (FR-386): "safe to delete" badge inputs — the
             // background merge-scan cache plus the recorded PR state.
