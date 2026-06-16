@@ -2378,7 +2378,7 @@ fn app_runtime_apply_update_uses_pending_available_update_state() {
         current: "9.20.1".to_string(),
         latest: "9.20.2".to_string(),
         release_url: "https://example.invalid/releases/v9.20.2".to_string(),
-        asset_url: Some("https://example.invalid/gwt-macos-universal.dmg".to_string()),
+        asset_url: Some("https://example.invalid/gwt-macos-arm64.dmg".to_string()),
         checked_at: chrono::Utc::now(),
     });
 
@@ -2399,7 +2399,7 @@ fn app_runtime_apply_update_uses_pending_available_update_state() {
                     },
                 } if client_id == "client-1"
                     && latest == "9.20.2"
-                    && asset_url == "https://example.invalid/gwt-macos-universal.dmg"
+                    && asset_url == "https://example.invalid/gwt-macos-arm64.dmg"
             )
         })
     });

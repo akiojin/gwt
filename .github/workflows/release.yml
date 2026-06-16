@@ -262,11 +262,21 @@ jobs:
           path: dist/gwt-windows-x86_64.msi
 
   build-dmg:
-    name: Build DMG installer (macOS)
+    name: Build DMG installer (macOS ${{ matrix.expected_arch }})
     needs: create-tag
     runs-on: macos-latest
     env:
       RELEASE_VERSION: ${{ needs.create-tag.outputs.version }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: aarch64-apple-darwin
+            expected_arch: arm64
+            dmg_name: gwt-macos-arm64.dmg
+          - target: x86_64-apple-darwin
+            expected_arch: x86_64
+            dmg_name: gwt-macos-x86_64.dmg
     steps:
       - uses: actions/checkout@v6
       - name: Reset broken pre-installed Rust on macOS runners
@@ -286,26 +296,20 @@ jobs:
           echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
       - uses: dtolnay/rust-toolchain@stable
         with:
-          targets: aarch64-apple-darwin,x86_64-apple-darwin
+          targets: ${{ matrix.target }}
       - uses: Swatinem/rust-cache@v2
         with:
-          key: gwt-dmg
+          key: gwt-dmg-${{ matrix.expected_arch }}
         continue-on-error: true
-      - name: Build gwt bundle binaries for aarch64
-        run: rustup run stable cargo build --release -p gwt --target aarch64-apple-darwin --bin gwt --bin gwtd
-      - name: Build gwt bundle binaries for x86_64
-        run: rustup run stable cargo build --release -p gwt --target x86_64-apple-darwin --bin gwt --bin gwtd
-      - name: Create universal binaries
+      - name: Build gwt bundle binaries
+        run: rustup run stable cargo build --release -p gwt --target ${{ matrix.target }} --bin gwt --bin gwtd
+      - name: Prepare arch-specific binaries
         run: |
           mkdir -p dist
-          lipo -create \
-            target/aarch64-apple-darwin/release/gwt \
-            target/x86_64-apple-darwin/release/gwt \
-            -output dist/gwt
-          lipo -create \
-            target/aarch64-apple-darwin/release/gwtd \
-            target/x86_64-apple-darwin/release/gwtd \
-            -output dist/gwtd
+          cp target/${{ matrix.target }}/release/gwt dist/gwt
+          cp target/${{ matrix.target }}/release/gwtd dist/gwtd
+          test "$(lipo -archs dist/gwt)" = "${{ matrix.expected_arch }}"
+          test "$(lipo -archs dist/gwtd)" = "${{ matrix.expected_arch }}"
       - name: Create app bundle
         run: |
           mkdir -p dist/GWT.app/Contents/MacOS
@@ -341,6 +345,8 @@ jobs:
           cp assets/icons/icon.icns dist/GWT.app/Contents/Resources/icon.icns
           chmod +x dist/GWT.app/Contents/MacOS/gwt
           chmod +x dist/GWT.app/Contents/MacOS/gwtd
+          test "$(lipo -archs "dist/GWT.app/Contents/MacOS/gwt")" = "${{ matrix.expected_arch }}"
+          test "$(lipo -archs "dist/GWT.app/Contents/MacOS/gwtd")" = "${{ matrix.expected_arch }}"
       - name: Prepare macOS signing keychain
         shell: bash
         env:
@@ -399,7 +405,7 @@ jobs:
           mkdir -p dmg_temp
           cp -R dist/GWT.app dmg_temp/GWT.app
           ln -s /Applications dmg_temp/Applications
-          hdiutil create -volname GWT -srcfolder dmg_temp -ov -format UDZO dist/gwt-macos-universal.dmg
+          hdiutil create -volname GWT -srcfolder dmg_temp -ov -format UDZO dist/${{ matrix.dmg_name }}
       - name: Sign and notarize DMG
         shell: bash
         env:
@@ -417,34 +423,36 @@ jobs:
           done
 
           codesign --force --timestamp --sign "$GWT_CODESIGN_IDENTITY" \
-            dist/gwt-macos-universal.dmg
-          codesign --verify --strict --verbose=4 dist/gwt-macos-universal.dmg
+            dist/${{ matrix.dmg_name }}
+          codesign --verify --strict --verbose=4 dist/${{ matrix.dmg_name }}
 
-          xcrun notarytool submit dist/gwt-macos-universal.dmg \
+          xcrun notarytool submit dist/${{ matrix.dmg_name }} \
             --apple-id "$APPLE_ID" \
             --password "$APPLE_ID_PASSWORD" \
             --team-id "$APPLE_TEAM_ID" \
             --wait
-          xcrun stapler staple dist/gwt-macos-universal.dmg
-          xcrun stapler validate dist/gwt-macos-universal.dmg
+          xcrun stapler staple dist/${{ matrix.dmg_name }}
+          xcrun stapler validate dist/${{ matrix.dmg_name }}
           spctl --assess --type execute --verbose=4 dist/GWT.app
           spctl --assess --type open --context context:primary-signature --verbose=4 \
-            dist/gwt-macos-universal.dmg
+            dist/${{ matrix.dmg_name }}
       - name: Validate DMG contents
         shell: bash
         run: |
           set -euo pipefail
           MOUNT_DIR="${RUNNER_TEMP}/gwt-dmg-verify"
           mkdir -p "$MOUNT_DIR"
-          hdiutil attach dist/gwt-macos-universal.dmg -mountpoint "$MOUNT_DIR" -nobrowse -quiet
+          hdiutil attach dist/${{ matrix.dmg_name }} -mountpoint "$MOUNT_DIR" -nobrowse -quiet
           trap 'hdiutil detach "$MOUNT_DIR" -quiet 2>/dev/null || true' EXIT
           test -d "$MOUNT_DIR/GWT.app"
           codesign --verify --deep --strict --verbose=4 "$MOUNT_DIR/GWT.app"
+          test "$(lipo -archs "$MOUNT_DIR/GWT.app/Contents/MacOS/gwt")" = "${{ matrix.expected_arch }}"
+          test "$(lipo -archs "$MOUNT_DIR/GWT.app/Contents/MacOS/gwtd")" = "${{ matrix.expected_arch }}"
       - name: Upload artifact
         uses: actions/upload-artifact@v7
         with:
-          name: gwt-macos-universal.dmg
-          path: dist/gwt-macos-universal.dmg
+          name: ${{ matrix.dmg_name }}
+          path: dist/${{ matrix.dmg_name }}
       - name: Cleanup macOS signing keychain
         if: always()
         shell: bash
