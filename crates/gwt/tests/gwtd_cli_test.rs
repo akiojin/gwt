@@ -1,7 +1,10 @@
 use std::{
     fs,
+    io::Write,
     process::{Command, Stdio},
 };
+
+use gwt_core::workspace_projection::load_or_default_workspace_projection;
 
 #[test]
 fn gwtd_dispatches_internal_hook_cli_without_gui_output() {
@@ -41,6 +44,55 @@ fn gwtd_help_describes_the_headless_cli_surface() {
         !stdout.contains("Launch `gwt` instead"),
         "gwtd help must not redirect agent-facing CLI users to the GUI front door"
     );
+}
+
+#[test]
+fn gwtd_no_args_dispatches_stdin_json_envelope() {
+    let project = tempfile::tempdir().expect("project tempdir");
+    let mut child = Command::new(env!("CARGO_BIN_EXE_gwtd"))
+        .current_dir(project.path())
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("run gwtd");
+
+    child
+        .stdin
+        .take()
+        .expect("stdin")
+        .write_all(
+            br#"{
+                "schema_version": 1,
+                "operation": "workspace.update",
+                "params": {
+                    "agent_session": "session-bin-json",
+                    "purpose": "Binary JSON envelope",
+                    "current_focus": "integration test"
+                }
+            }"#,
+        )
+        .expect("write stdin");
+    let output = child.wait_with_output().expect("wait gwtd");
+
+    assert!(
+        output.status.success(),
+        "gwtd JSON envelope should exit 0, stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains(r#""ok":true"#),
+        "stdout should be success JSON, got: {stdout}"
+    );
+    let projection =
+        load_or_default_workspace_projection(project.path()).expect("load workspace projection");
+    let agent = projection
+        .agents
+        .iter()
+        .find(|agent| agent.session_id == "session-bin-json")
+        .expect("agent upserted by gwtd JSON envelope");
+    assert_eq!(agent.title_summary.as_deref(), Some("Binary JSON envelope"));
 }
 
 #[test]

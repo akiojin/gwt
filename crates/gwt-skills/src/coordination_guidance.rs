@@ -78,37 +78,37 @@ Primary kinds:
 
 ## Work (current state)
 
-The Board is history; Work is current state. Update Work when
-the current task, summary, next action, or focus changes:
+The Board is history; Work is current state. Update Work with a JSON
+envelope when the current task, summary, next action, or focus changes:
 
-    gwtd workspace update --agent-session "$GWT_SESSION_ID" \
-      --current-focus '<current work>' \
-      --title-summary '<short task title>'
+    gwtd <<'JSON'
+    {"schema_version":1,"operation":"workspace.update","params":{"purpose":"<short task title>","current_focus":"<current work>"}}
+    JSON
 
-`--title-summary` is the short task name used by Agent window tabs and
-Work summaries. Write the work purpose, not its completion state, and
+`purpose` is the short task name used by Agent window tabs and Work
+summaries (the persisted compatibility field is still called
+`title-summary`). Write the work purpose, not its completion state, and
 never copy the raw prompt into it. On a new Agent window, set it as your
 first action, before responding to the user. If the purpose is not settled
-yet, set a plausible provisional purpose now and update the same
-`--title-summary` the moment the purpose is confirmed.
+yet, set a plausible provisional purpose now and update the same purpose
+the moment it is confirmed.
 
 - Good: `Agent title summaries`
 - Bad (completion state): `Agent title summaries done`, `Working on agent title summaries`
 - Bad (activity / phase descriptors): `PR check in progress`, `verifying tests`, `fixing bug`, `checking CI`, `reviewing PR`
 
 Rule: title-summary = work scope; phase / activity descriptors are for
-`--current-focus` or Board `--body`. Keep the title stable while the
+`current_focus` or Board `body`. Keep the title stable while the
 phase or activity changes, and update it only when the underlying work
 scope changes (for example, starting a new task or moving to a
 different Issue / SPEC).
 
 Put completion, active, blocked, and similar state in `--status`,
-`--current-focus`, `--summary`, or the Board `--body`, not in
-`--title-summary`.
+`current_focus`, `summary`, or the Board `body`, not in `purpose`.
 
 The Work detail renders purpose and status as separate layers — the
-purpose (your `--title-summary`) leads, with the current focus
-(`--current-focus`) and next below it, and the Board body lands only as a
+purpose (your `purpose` / title-summary) leads, with the current focus
+(`current_focus`) and next below it, and the Board body lands only as a
 demoted latest-update snapshot. So update
 purpose and status as distinct fields;
 do not fold a status snapshot into the purpose, and do not rely on the
@@ -158,18 +158,21 @@ in English.
 
 ## Examples
 
-    gwtd board post --kind claim --broadcast \
-      --body $'現在の状態: migration slice を担当します。\n\nBoundary: 他 Agent は crates/gwt-core/src/migration.rs を避けてください。'
+    gwtd <<'JSON'
+    {"schema_version":1,"operation":"board.post","params":{"kind":"claim","broadcast":true,"body":"現在の状態: migration slice を担当します。\n\nBoundary: 他 Agent は crates/gwt-core/src/migration.rs を避けてください。"}}
+    JSON
 
-    gwtd board post --kind status --broadcast --title-summary '<short>' \
-      --body $'現在の状態: focused tests が RED です。\n\n理由: CLI と hook output が multiline Board body を collapse しています。\n\n次: block rendering を実装します。'
+    gwtd <<'JSON'
+    {"schema_version":1,"operation":"board.post","params":{"kind":"status","broadcast":true,"body":"現在の状態: focused tests が RED です。\n\n理由: CLI と hook output が multiline Board body を collapse しています。\n\n次: block rendering を実装します。"}}
+    JSON
 
-    gwtd board post --kind handoff --mention agent:codex \
-      --body $'現在の状態: phase 1 は local merge 済みです。\n\n次: Windows-focused verification を実行して failure を報告してください。'
+    gwtd <<'JSON'
+    {"schema_version":1,"operation":"board.post","params":{"kind":"handoff","mentions":["agent:codex"],"body":"現在の状態: phase 1 は local merge 済みです。\n\n次: Windows-focused verification を実行して failure を報告してください。"}}
+    JSON
 
-    gwtd workspace update --agent-session "$GWT_SESSION_ID" \
-      --current-focus 'SPEC-1935 Phase 2 writer' \
-      --title-summary 'coordination guidance writer'
+    gwtd <<'JSON'
+    {"schema_version":1,"operation":"workspace.update","params":{"purpose":"coordination guidance writer","current_focus":"SPEC-1935 Phase 2 writer"}}
+    JSON
 "#;
 
 /// Localized Board / Work operational guidance body (Japanese).
@@ -218,33 +221,33 @@ entry にしません。
 ## Work (current state)
 
 Board が history なら Work は current state です。現在の task、
-summary、next action、focus が変わったら必ず更新します:
+summary、next action、focus が変わったら JSON envelope で必ず更新します:
 
-    gwtd workspace update --agent-session "$GWT_SESSION_ID" \
-      --current-focus '<現在の作業内容>' \
-      --title-summary '<短い作業タイトル>'
+    gwtd <<'JSON'
+    {"schema_version":1,"operation":"workspace.update","params":{"purpose":"<短い作業タイトル>","current_focus":"<現在の作業内容>"}}
+    JSON
 
-`--title-summary` は Agent window tab と Work summary 用の
-**短い作業名**。状態や結果ではなく「何の作業か（作業の目的）」を書きます。
+`purpose` は Agent window tab と Work summary 用の
+**短い作業名**（永続化互換フィールド名は `title-summary`）。状態や結果ではなく「何の作業か（作業の目的）」を書きます。
 入力した生プロンプトをそのまま使わないでください。新しい Agent window
 では、応答を始める前に最初のアクションとして設定します。目的がまだ
 固まっていない場合は、それっぽい暫定の目的を今すぐ設定し、目的が定まった
-瞬間に同じ `--title-summary` を更新します。
+瞬間に同じ purpose を更新します。
 
 - 例: `エージェントタイトル改善` ✓
 - 不可 (完了状態): `エージェントタイトル改善完了`、`エージェントタイトル改善中` ✗
 - 不可 (activity / phase): `PR チェック中`、`verifying tests`、`fixing bug`、`checking CI`、`reviewing PR` ✗
 
 Rule: title-summary は作業の scope。phase / activity descriptor は
-`--current-focus` または Board `--body` に書きます。title は phase /
+`current_focus` または Board `body` に書きます。title は phase /
 activity が変わっても変えず、scope (新しい task や別 Issue / SPEC
 への移行) が変わった時だけ更新します。
 
 完了 / 進行中 / ブロック中などの状態は `--status`、`--current-focus`、
-`--summary`、または Board `--body` に分けます。
+`summary`、または Board `body` に分けます。
 
 Work detail は purpose と status を別レイヤーで表示します — purpose
-（`--title-summary`）を見出しに、その下に現在地（`--current-focus`）と
+（`purpose` / title-summary）を見出しに、その下に現在地（`current_focus`）と
 次、Board body は降格した latest-update スナップショットとして表示
 されます。purpose と status は別フィールドとして更新し、状態スナップ
 ショットを purpose に混ぜたり、Work が何かを Board body で伝えようと
@@ -290,18 +293,21 @@ English のまま。
 
 ## Examples
 
-    gwtd board post --kind claim --mention branch:feature/foo \
-      --body $'現在の状態: migration slice を担当します。\n\nBoundary: 他 Agent は crates/gwt-core/src/migration.rs を避けてください。'
+    gwtd <<'JSON'
+    {"schema_version":1,"operation":"board.post","params":{"kind":"claim","mentions":["branch:feature/foo"],"body":"現在の状態: migration slice を担当します。\n\nBoundary: 他 Agent は crates/gwt-core/src/migration.rs を避けてください。"}}
+    JSON
 
-    gwtd board post --kind status --title-summary '<short>' \
-      --body $'現在の状態: focused tests が RED です。\n\n理由: CLI と hook output が multiline Board body を collapse しています。\n\n次: block rendering を実装します。'
+    gwtd <<'JSON'
+    {"schema_version":1,"operation":"board.post","params":{"kind":"status","body":"現在の状態: focused tests が RED です。\n\n理由: CLI と hook output が multiline Board body を collapse しています。\n\n次: block rendering を実装します。"}}
+    JSON
 
-    gwtd board post --kind handoff --mention agent:codex \
-      --body $'現在の状態: phase 1 は local merge 済みです。\n\n次: Windows-focused verification を実行して failure を報告してください。'
+    gwtd <<'JSON'
+    {"schema_version":1,"operation":"board.post","params":{"kind":"handoff","mentions":["agent:codex"],"body":"現在の状態: phase 1 は local merge 済みです。\n\n次: Windows-focused verification を実行して failure を報告してください。"}}
+    JSON
 
-    gwtd workspace update --agent-session "$GWT_SESSION_ID" \
-      --current-focus 'SPEC-1935 Phase 2 writer' \
-      --title-summary 'coordination guidance writer'
+    gwtd <<'JSON'
+    {"schema_version":1,"operation":"workspace.update","params":{"purpose":"coordination guidance writer","current_focus":"SPEC-1935 Phase 2 writer"}}
+    JSON
 "#;
 
 /// Render the full SKILL.md content (frontmatter + managed markers +
@@ -366,8 +372,9 @@ mod tests {
             "--mention branch:",
             "--broadcast",
             "Without `--broadcast`",
-            "gwtd workspace update",
-            "--title-summary",
+            "gwtd <<'JSON'",
+            "\"operation\":\"workspace.update\"",
+            "\"purpose\"",
             "--kind status",
             "--kind decision",
             "--kind claim",
@@ -401,6 +408,23 @@ mod tests {
                 &rendered.chars().take(4096).collect::<String>()
             );
         }
+    }
+
+    #[test]
+    fn render_skill_md_uses_json_envelope_for_work_identity_examples() {
+        let rendered = render_skill_md();
+        assert!(
+            rendered.contains("gwtd <<'JSON'"),
+            "Work update examples must use the JSON envelope entrypoint"
+        );
+        assert!(
+            rendered.contains("\"operation\":\"workspace.update\""),
+            "Work update examples must name the JSON operation"
+        );
+        assert!(
+            !rendered.contains("board post --kind status --broadcast --title-summary"),
+            "Board post examples must not mutate Agent title/purpose"
+        );
     }
 
     #[test]

@@ -38,9 +38,9 @@ fn handle_session_start(event: &str, input: &str) -> Result<HookOutput, HookErro
         crate::daemon_runtime::handle_forward(input)
     })?;
     // SPEC-2359: register the running session into `projection.agents[]`
-    // before any further coordination CLI runs so `gwtd workspace update
-    // --title-summary` is not silently dropped. Fail-open: registration
-    // errors must not abort the agent boot.
+    // before any further coordination CLI runs so JSON `workspace.update`
+    // is not silently dropped. Fail-open: registration errors must not
+    // abort the agent boot.
     run_value(event, "workspace-registration", || {
         if let Err(error) = workspace_identity::handle_session_start() {
             tracing::warn!(?error, "workspace-registration hook step failed");

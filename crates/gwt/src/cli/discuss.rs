@@ -37,6 +37,10 @@ pub enum DiscussAction {
         proposal: String,
         condition_file: std::path::PathBuf,
     },
+    GoalPendingBody {
+        proposal: String,
+        condition: String,
+    },
     GoalStarted {
         proposal: String,
     },
@@ -152,6 +156,10 @@ pub(super) fn run<E: CliEnv>(
             };
             apply_goal_pending(&worktree, &proposal, &condition, out)
         }
+        DiscussAction::GoalPendingBody {
+            proposal,
+            condition,
+        } => apply_goal_pending(&worktree, &proposal, &condition, out),
         DiscussAction::GoalStarted { proposal } => {
             apply_goal_state(&worktree, &proposal, "started", out)
         }

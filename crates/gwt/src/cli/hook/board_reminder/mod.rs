@@ -581,8 +581,10 @@ mod tests {
         };
         assert!(text.contains("existing reminder"));
         assert!(text.contains("title-summary"));
-        assert!(text.contains("gwtd workspace update"));
-        assert!(text.contains("--agent-session"));
+        assert!(text.contains("gwtd <<'JSON'"));
+        assert!(text.contains(r#""operation":"workspace.update""#));
+        assert!(text.contains(r#""purpose""#));
+        assert!(!text.contains("--title-summary"));
         assert!(text.contains("作業名"));
         assert!(text.contains("完了"));
         assert!(text.contains("Use language: ja"));
@@ -601,6 +603,12 @@ mod tests {
         // Imperative: must instruct setting the title before responding.
         assert!(ja_text.contains("応答する前に"), "{ja_text}");
         assert!(ja_text.contains("最初のアクション"), "{ja_text}");
+        assert!(
+            ja_text.contains(r#""operation":"workspace.update""#),
+            "{ja_text}"
+        );
+        assert!(ja_text.contains(r#""purpose""#), "{ja_text}");
+        assert!(!ja_text.contains("--title-summary"), "{ja_text}");
 
         let en_text = texts::title_summary_required_reminder("en");
         assert!(en_text.contains("purpose"), "{en_text}");
@@ -609,6 +617,12 @@ mod tests {
         // Imperative: must instruct setting the title before responding.
         assert!(en_text.contains("before you respond"), "{en_text}");
         assert!(en_text.contains("first action"), "{en_text}");
+        assert!(
+            en_text.contains(r#""operation":"workspace.update""#),
+            "{en_text}"
+        );
+        assert!(en_text.contains(r#""purpose""#), "{en_text}");
+        assert!(!en_text.contains("--title-summary"), "{en_text}");
     }
 
     /// SPEC-2359 Phase W-11 (US-58 / FR-347): the title-required reminder must

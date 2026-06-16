@@ -279,13 +279,6 @@ impl WorkspaceProjection {
                 agent.last_board_entry_kind = Some(entry.kind.clone());
                 agent.coordination_scope = coordination_scope_for_entry(entry);
                 agent.current_focus = Some(entry.body.clone());
-                if let Some(title_summary) = entry
-                    .title_summary
-                    .as_ref()
-                    .filter(|value| !value.trim().is_empty())
-                {
-                    agent.title_summary = Some(title_summary.clone());
-                }
                 agent.updated_at = entry.updated_at;
                 match entry.kind {
                     BoardEntryKind::Blocked => {
@@ -1082,7 +1075,7 @@ mod tests {
     }
 
     #[test]
-    fn board_milestone_keeps_title_summary_separate_from_current_focus() {
+    fn board_milestone_never_updates_agent_title_summary_from_board_entry() {
         let mut projection = WorkspaceProjection::default_for_project("/repo");
         projection.agents.push(WorkspaceAgentSummary {
             session_id: "sess-1".to_string(),
@@ -1128,10 +1121,9 @@ mod tests {
             )
         );
         assert_eq!(
-            agent_json
-                .pointer("/title_summary")
-                .and_then(|value| value.as_str()),
-            Some("Title summary contract")
+            agent_json.pointer("/title_summary"),
+            None,
+            "Board title_summary is legacy history metadata and must not update live agent purpose"
         );
     }
 

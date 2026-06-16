@@ -1,4 +1,4 @@
-use std::{path::PathBuf, process::ExitCode};
+use std::{io::IsTerminal, path::PathBuf, process::ExitCode};
 
 fn main() -> ExitCode {
     let argv: Vec<String> = std::env::args().collect();
@@ -7,7 +7,7 @@ fn main() -> ExitCode {
             println!("gwtd {}", env!("CARGO_PKG_VERSION"));
             return ExitCode::SUCCESS;
         }
-        Some("-h" | "--help") | None => {
+        Some("-h" | "--help") => {
             // SPEC-1942 T-204: `gwtd --help <family>` shows family-scoped help.
             if let Some(family) = argv.get(2).map(String::as_str) {
                 if let Some(help_text) = family_help(family) {
@@ -18,6 +18,11 @@ fn main() -> ExitCode {
             print_help();
             return ExitCode::SUCCESS;
         }
+        None if std::io::stdin().is_terminal() => {
+            print_help();
+            return ExitCode::SUCCESS;
+        }
+        None => {}
         _ => {}
     }
 
@@ -31,7 +36,7 @@ fn main() -> ExitCode {
         }
     }
 
-    if !gwt::cli::should_dispatch_cli(&argv) {
+    if argv.get(1).is_some() && !gwt::cli::should_dispatch_cli(&argv) {
         // SPEC-1942 FR-109 / US-2 scenario 4: unknown verbs report to stderr
         // only (usage + did-you-mean), keep stdout empty, and exit 2.
         eprint!(
@@ -43,6 +48,7 @@ fn main() -> ExitCode {
 
     let code = match argv.get(1).map(String::as_str) {
         Some("issue" | "pr" | "actions") => run_repo_backed_cli(&argv),
+        None => run_json_envelope_cli(&argv),
         _ => {
             let mut env = gwt::cli::DefaultCliEnv::new_for_hooks();
             gwt::cli::dispatch(&mut env, &argv)
@@ -55,7 +61,8 @@ fn print_help() {
     println!("gwtd {}", env!("CARGO_PKG_VERSION"));
     println!("Headless CLI for gwt agent, hook, and workflow automation.");
     println!();
-    println!("Usage: gwtd <command> [args]");
+    println!("Usage: gwtd < stdin-json-envelope");
+    println!("       gwtd hook event <Event>   Managed hook transport exception");
     println!("       gwtd --help <command>   Show subcommands for a family");
     println!();
     println!("Commands:");
@@ -106,22 +113,22 @@ fn family_help(family: &str) -> Option<String> {
 
 fn format_workspace_help() -> String {
     [
-        "gwtd workspace — Update Work current projection and summary journal.",
+        "gwtd workspace — Update Work current projection and summary journal via JSON envelope.",
         "",
-        "Usage: gwtd workspace update [fields]",
+        "Usage:",
+        "  gwtd <<'JSON'",
+        "  {\"schema_version\":1,\"operation\":\"workspace.update\",\"params\":{\"purpose\":\"<work purpose>\",\"current_focus\":\"<current work>\"}}",
+        "  JSON",
         "",
-        "Fields:",
-        "  --title <text>                         Current work title",
-        "  --status <active|idle|blocked|done|unknown>",
-        "                                          Stable Work status category",
-        "  --status-text <text>                   User-facing current status",
-        "  --summary <text>                       LLM-authored work summary",
-        "  --next-action <text>                   Next visible action or handoff",
-        "  --owner <text>                         Linked owner such as SPEC-2359",
-        "  --agent-session <id> --current-focus <text>",
-        "                                          Update one Agent focus summary",
-        "  --agent-session <id> --title-summary <text>",
-        "                                          Update the short Agent/window title",
+        "Operations:",
+        "  workspace.update                       Set Work status fields and Agent purpose/focus",
+        "  workspace.create | workspace.ensure    Create or ensure a Work assignment",
+        "  workspace.join | workspace.candidates  Join/list Work candidates",
+        "",
+        "Key params:",
+        "  purpose                                Short Agent/window title purpose",
+        "  current_focus                          Current phase/activity",
+        "  agent_session                          Defaults to GWT_SESSION_ID when omitted",
         "",
     ]
     .join("\n")
@@ -129,15 +136,20 @@ fn format_workspace_help() -> String {
 
 fn format_daemon_help() -> String {
     [
-        "gwtd daemon — Long-running runtime daemon (SPEC-2077).",
+        "gwtd daemon — Long-running runtime daemon operations via JSON envelope.",
         "",
-        "Usage: gwtd daemon <subcommand>",
+        "Usage:",
+        "  gwtd <<'JSON'",
+        "  {\"schema_version\":1,\"operation\":\"daemon.status\",\"params\":{}}",
+        "  JSON",
         "",
-        "Subcommands:",
-        "  start                                   Bootstrap and serve the runtime daemon",
-        "  status                                  Report whether a daemon is registered + probe its socket",
-        "  subscribe <channel>...                  Connect to the running daemon, subscribe to channels,",
-        "                                          and stream received events as JSON to stdout",
+        "Operations:",
+        "  daemon.start                            Bootstrap and serve the runtime daemon",
+        "  daemon.status                           Probe the daemon endpoint",
+        "  daemon.subscribe                         Subscribe to daemon broadcast channels",
+        "",
+        "Key params:",
+        "  channels                                Required for daemon.subscribe",
         "",
         "Notes:",
         "  - Listens on a Unix domain socket per RuntimeScope (POSIX only today).",
@@ -153,31 +165,25 @@ fn format_daemon_help() -> String {
 
 fn format_issue_help() -> String {
     [
-        "gwtd issue — Manage GitHub Issues and SPEC sections.",
+        "gwtd issue — Manage GitHub Issues and SPEC sections via JSON envelope.",
         "",
-        "Usage: gwtd issue <subcommand> [args]",
+        "Usage:",
+        "  gwtd <<'JSON'",
+        "  {\"schema_version\":1,\"operation\":\"issue.view\",\"params\":{\"number\":123}}",
+        "  JSON",
         "",
-        "Subcommands:",
-        "  spec <n>                              Print every section for an issue",
-        "  spec <n> --section <name>             Print one section only",
-        "  spec <n> --edit <name> -f <file>      Replace one section from file (- = stdin)",
-        "  spec <n> --edit spec --json [-f <f>] [--replace]",
-        "                                         Structured JSON update for the spec section",
-        "  spec <n> --rename <title>             Update the issue title",
-        "  spec list [--phase <p>] [--state open|closed]",
-        "                                         List SPEC-labeled issues",
-        "  spec create --title <t> -f <body> [--label <l>]*",
-        "                                         Create a SPEC issue",
-        "  spec create --json --title <t> [-f <f>] [--label <l>]*",
-        "                                         Create a SPEC from structured JSON",
-        "  spec pull [--all | <n>...]            Refresh cache from server",
-        "  spec repair <n>                        Clear cache and re-fetch from server",
-        "  view <n> [--refresh]                  Print a plain issue from cache or live",
-        "  comments <n> [--refresh]              Print issue comments",
-        "  linked-prs <n> [--refresh]            Print linked PR summaries",
-        "  create --title <t> -f <body> [--label <l>]*",
-        "                                         Create a plain issue",
-        "  comment <n> -f <body>                 Create a plain issue comment",
+        "Operations:",
+        "  issue.view | issue.comments | issue.linked_prs",
+        "  issue.create | issue.comment",
+        "  issue.spec.read | issue.spec.section | issue.spec.edit",
+        "  issue.spec.create | issue.spec.list | issue.spec.pull",
+        "  issue.spec.repair | issue.spec.rename",
+        "",
+        "Key params:",
+        "  number, title, section, body, labels, refresh",
+        "  structured                             Treat issue.spec body as structured JSON",
+        "  replace                                Replace structured SPEC section instead of merging",
+        "  all, numbers                           Controls issue.spec.pull",
         "",
     ]
     .join("\n")
@@ -185,23 +191,19 @@ fn format_issue_help() -> String {
 
 fn format_pr_help() -> String {
     [
-        "gwtd pr — Manage pull requests, reviews, checks, and threads.",
+        "gwtd pr — Manage pull requests, reviews, checks, and threads via JSON envelope.",
         "",
-        "Usage: gwtd pr <subcommand> [args]",
+        "Usage:",
+        "  gwtd <<'JSON'",
+        "  {\"schema_version\":1,\"operation\":\"pr.view\",\"params\":{\"number\":123}}",
+        "  JSON",
         "",
-        "Subcommands:",
-        "  current                                Print the PR for the current branch",
-        "  create --base <b> [--head <h>] --title <t> -f <body> [--label <l>]* [--draft]",
-        "                                          Create a pull request",
-        "  edit <n> [--title <t>] [-f <body>] [--add-label <l>]*",
-        "                                          Update a pull request",
-        "  view <n>                               Print a PR by number",
-        "  comment <n> -f <body>                  Add a PR issue comment",
-        "  reviews <n>                            Print PR review summaries",
-        "  review-threads <n>                     Print review thread snapshots",
-        "  review-threads reply-and-resolve <n> -f <body>",
-        "                                          Reply to + resolve unresolved threads",
-        "  checks <n>                             Print PR checks summary",
+        "Operations:",
+        "  pr.current | pr.view | pr.checks | pr.reviews | pr.review_threads",
+        "  pr.create | pr.edit | pr.comment | pr.review_threads.reply_and_resolve",
+        "",
+        "Key params:",
+        "  number, base, head, title, body, labels, add_labels, draft",
         "",
     ]
     .join("\n")
@@ -209,13 +211,19 @@ fn format_pr_help() -> String {
 
 fn format_actions_help() -> String {
     [
-        "gwtd actions — Fetch GitHub Actions run/job logs.",
+        "gwtd actions — Fetch GitHub Actions run/job logs via JSON envelope.",
         "",
-        "Usage: gwtd actions <subcommand> [args]",
+        "Usage:",
+        "  gwtd <<'JSON'",
+        "  {\"schema_version\":1,\"operation\":\"actions.logs\",\"params\":{\"run_id\":123}}",
+        "  JSON",
         "",
-        "Subcommands:",
-        "  logs --run <id>                        Print raw run logs",
-        "  job-logs --job <id>                    Print raw job logs",
+        "Operations:",
+        "  actions.logs                            Print raw run logs",
+        "  actions.job_logs                        Print raw job logs",
+        "",
+        "Key params:",
+        "  run_id, job_id",
         "",
     ]
     .join("\n")
@@ -223,16 +231,23 @@ fn format_actions_help() -> String {
 
 fn format_board_help() -> String {
     [
-        "gwtd board — Read/write the coordination Board (SPEC-1974).",
+        "gwtd board — Read/write the coordination Board (SPEC-1974) via JSON envelope.",
         "",
-        "Usage: gwtd board <subcommand> [args]",
+        "Usage:",
+        "  gwtd <<'JSON'",
+        "  {\"schema_version\":1,\"operation\":\"board.post\",\"params\":{\"kind\":\"status\",\"body\":\"Current state: ...\"}}",
+        "  JSON",
         "",
-        "Subcommands:",
-        "  show [--json]                           Print the Board snapshot",
-        "  post --kind <kind> (--body <text> | -f <file>)",
-        "       [--title-summary <text>] [--parent <id>] [--topic <t>]*",
-        "       [--owner <n>]* [--target <id>]* [--mention <kind:id>]*",
-        "                                          Append a Board entry",
+        "Operations:",
+        "  board.show                              Print the Board snapshot",
+        "  board.post                              Append a Board entry",
+        "",
+        "Key params:",
+        "  kind, body, title, topics, owners, targets, mentions, parent, broadcast",
+        "  workspace, all                           board.show filters",
+        "",
+        "Note: board.post does not accept purpose/title_summary; update Agent title",
+        "      through workspace.update params.purpose.",
         "",
         "Kinds: request, status, next, claim, impact, question, blocked, handoff, decision",
         "",
@@ -242,24 +257,14 @@ fn format_board_help() -> String {
 
 fn format_hook_help() -> String {
     [
-        "gwtd hook — Dispatch Claude Code / Codex hook events (SPEC-1935).",
+        "gwtd hook — Managed hook transport exception (SPEC-1935).",
         "",
-        "Usage: gwtd hook <name> [args]",
+        "Usage: gwtd hook event <Event>",
         "",
-        "Hook names:",
-        "  event <PreToolUse|...>                  Generic event dispatcher",
-        "  runtime-state <event>                   Runtime state telemetry",
-        "  coordination-event <event>              Coordination Board event",
-        "  board-reminder                          Board reminder injection",
-        "  workflow-policy                         PreToolUse workflow guard",
-        "  block-bash-policy                       PreToolUse Bash policy guard",
-        "  forward                                 Bridge to live event stream",
-        "  skill-discussion-stop-check             Stop-check for gwt-discussion",
-        "  skill-plan-spec-stop-check              Stop-check for gwt-plan-spec",
-        "  skill-build-spec-stop-check             Stop-check for gwt-build-spec",
-        "  skill-register-spec-stop-check          Stop-check for gwt-register-spec",
+        "Hook events:",
+        "  PreToolUse, UserPromptSubmit, Stop, SessionStart, and provider-specific names",
         "",
-        "Stdin: hooks read JSON from stdin per the Claude Code hook contract.",
+        "Stdin: hooks read provider JSON from stdin; the event name is the only argv field.",
         "",
     ]
     .join("\n")
@@ -267,14 +272,20 @@ fn format_hook_help() -> String {
 
 fn format_index_help() -> String {
     [
-        "gwtd index — Manage the local search index.",
+        "gwtd index — Manage the local search index via JSON envelope.",
         "",
-        "Usage: gwtd index <subcommand> [args]",
+        "Usage:",
+        "  gwtd <<'JSON'",
+        "  {\"schema_version\":1,\"operation\":\"index.status\",\"params\":{}}",
+        "  JSON",
         "",
-        "Subcommands:",
-        "  status                                  Show index runtime + asset status",
-        "  rebuild [--scope all|issues|specs|memory|discussions|board|files|files-docs]",
-        "                                          Rebuild a specific scope",
+        "Operations:",
+        "  index.status                            Show index runtime and asset status",
+        "  index.rebuild                           Rebuild a specific scope",
+        "",
+        "Key params:",
+        "  scope                                   all|issues|specs|memory|discussions|board|files|files-docs",
+        "                                          JSON also accepts files_docs",
         "",
     ]
     .join("\n")
@@ -282,19 +293,18 @@ fn format_index_help() -> String {
 
 fn format_memory_help() -> String {
     [
-        "gwtd memory — Append reusable project memory to .gwt/work/memory.md.",
+        "gwtd memory — Append reusable project memory via JSON envelope.",
         "",
-        "Usage: gwtd memory add [fields]",
-        "       gwtd lessons add [fields]   Legacy alias; writes .gwt/work/memory.md",
+        "Usage:",
+        "  gwtd <<'JSON'",
+        "  {\"schema_version\":1,\"operation\":\"memory.add\",\"params\":{\"title\":\"...\",\"context\":\"...\",\"learning\":\"...\",\"future_action\":\"...\"}}",
+        "  JSON",
         "",
-        "Fields:",
-        "  --date <yyyy-mm-dd>                     Entry date (defaults to today)",
-        "  --type <lesson|decision|workflow|failure-pattern>",
-        "                                          Memory entry type (defaults to lesson)",
-        "  --title <text>                          Entry heading",
-        "  --context <text>                        What happened or what was observed",
-        "  --learning <text>                       Reusable learning",
-        "  --future-action <text>                  What future agents should do",
+        "Operation:",
+        "  memory.add",
+        "",
+        "Key params:",
+        "  date, type, title, context, learning, future_action",
         "",
     ]
     .join("\n")
@@ -302,23 +312,19 @@ fn format_memory_help() -> String {
 
 fn format_discussion_help() -> String {
     [
-        "gwtd discussion — Persist/update Git-managed discussion notes.",
+        "gwtd discussion — Persist/update Git-managed discussion notes via JSON envelope.",
         "",
-        "Usage: gwtd discussion update [fields]",
+        "Usage:",
+        "  gwtd <<'JSON'",
+        "  {\"schema_version\":1,\"operation\":\"discussion.update\",\"params\":{\"title\":\"...\",\"summary\":\"...\",\"next\":\"...\"}}",
+        "  JSON",
         "",
-        "Fields:",
-        "  --date <yyyy-mm-dd>                     Entry date (defaults to today)",
-        "  --title <text>                          Discussion title",
-        "  --status <active|suspended|completed|promoted>",
-        "                                          Discussion lifecycle status",
-        "  --topic <text>                          Repeatable topic tag",
-        "  --related-spec <n>                      Repeatable related SPEC number",
-        "  --related-work <id>                     Repeatable related Work id",
-        "  --promoted-to <target>                  Repeatable target if promoted",
-        "  --summary <text>                        Current discussion summary",
-        "  --decision <text>                       Repeatable decision",
-        "  --open-question <text>                  Repeatable open question",
-        "  --next <text>                           Next discussion step",
+        "Operation:",
+        "  discussion.update",
+        "",
+        "Key params:",
+        "  date, title, status, topics, related_specs, related_works",
+        "  promoted_to, summary, decisions, open_questions, next",
         "",
     ]
     .join("\n")
@@ -326,22 +332,21 @@ fn format_discussion_help() -> String {
 
 fn format_discuss_help() -> String {
     [
-        "gwtd discuss — gwt-discussion exit CLI (SPEC-1935).",
+        "gwtd discuss — gwt-discussion exit operations via JSON envelope.",
         "",
-        "Usage: gwtd discuss <action> --proposal <label> [...]",
+        "Usage:",
+        "  gwtd <<'JSON'",
+        "  {\"schema_version\":1,\"operation\":\"discuss.resolve\",\"params\":{\"proposal\":\"A\"}}",
+        "  JSON",
         "",
-        "Actions:",
-        "  resolve --proposal <label>              Mark a proposal chosen after Evidence Gate",
-        "  park --proposal <label>                 Mark a proposal parked",
-        "  reject --proposal <label>               Mark a proposal rejected",
-        "  clear-next-question --proposal <label>  Clear the open question (Stop unblock)",
-        "  goal-pending --proposal <label> -f <file>",
-        "                                          Record pending /goal condition",
-        "  goal-started --proposal <label>         Mark pending /goal as started",
-        "  goal-failed --proposal <label> --reason <text>",
-        "                                          Mark pending /goal start as failed",
-        "  goal-skipped --proposal <label> --reason <text>",
-        "                                          Mark pending /goal start as skipped",
+        "Operations:",
+        "  discuss.resolve | discuss.park | discuss.reject",
+        "  discuss.clear_next_question",
+        "  discuss.goal_pending | discuss.goal_started",
+        "  discuss.goal_failed | discuss.goal_skipped",
+        "",
+        "Key params:",
+        "  proposal, condition, reason",
         "",
     ]
     .join("\n")
@@ -349,15 +354,18 @@ fn format_discuss_help() -> String {
 
 fn format_plan_help() -> String {
     [
-        "gwtd plan — gwt-plan-spec exit CLI (SPEC-1935).",
+        "gwtd plan — gwt-plan-spec state operations via JSON envelope.",
         "",
-        "Usage: gwtd plan <action> --spec <n> [...]",
+        "Usage:",
+        "  gwtd <<'JSON'",
+        "  {\"schema_version\":1,\"operation\":\"plan.phase\",\"params\":{\"spec\":1942,\"label\":\"research\"}}",
+        "  JSON",
         "",
-        "Actions:",
-        "  start --spec <n>                       Mark plan-spec started",
-        "  phase --spec <n> --label <stage>       Mark a phase milestone",
-        "  complete --spec <n>                    Mark plan-spec complete",
-        "  abort --spec <n> [--reason <text>]     Abort plan-spec",
+        "Operations:",
+        "  plan.start | plan.phase | plan.complete | plan.abort",
+        "",
+        "Key params:",
+        "  spec, label, reason",
         "",
     ]
     .join("\n")
@@ -365,15 +373,18 @@ fn format_plan_help() -> String {
 
 fn format_build_help() -> String {
     [
-        "gwtd build — gwt-build-spec exit CLI (SPEC-1935).",
+        "gwtd build — gwt-build-spec state operations via JSON envelope.",
         "",
-        "Usage: gwtd build <action> --spec <n> [...]",
+        "Usage:",
+        "  gwtd <<'JSON'",
+        "  {\"schema_version\":1,\"operation\":\"build.phase\",\"params\":{\"spec\":1942,\"label\":\"green\"}}",
+        "  JSON",
         "",
-        "Actions:",
-        "  start --spec <n>                       Mark build-spec started",
-        "  phase --spec <n> --label <stage>       Mark a phase milestone (red/green/...)",
-        "  complete --spec <n>                    Mark build-spec complete",
-        "  abort --spec <n> [--reason <text>]     Abort build-spec",
+        "Operations:",
+        "  build.start | build.phase | build.complete | build.abort",
+        "",
+        "Key params:",
+        "  spec, label, reason",
         "",
     ]
     .join("\n")
@@ -381,15 +392,18 @@ fn format_build_help() -> String {
 
 fn format_register_help() -> String {
     [
-        "gwtd register — gwt-register-spec exit CLI (SPEC-2784).",
+        "gwtd register — gwt-register-spec state operations via JSON envelope.",
         "",
-        "Usage: gwtd register <action> --spec <n> [...]",
+        "Usage:",
+        "  gwtd <<'JSON'",
+        "  {\"schema_version\":1,\"operation\":\"register.phase\",\"params\":{\"spec\":2784,\"label\":\"roundtrip\"}}",
+        "  JSON",
         "",
-        "Actions:",
-        "  start --spec <n>                       Mark register-spec started (use --spec 0 if id unknown)",
-        "  phase --spec <n> --label <stage>       Milestone: validation/create/edit/roundtrip",
-        "  complete --spec <n>                    Mark register-spec complete",
-        "  abort --spec <n> [--reason <text>]     Abort register-spec",
+        "Operations:",
+        "  register.start | register.phase | register.complete | register.abort",
+        "",
+        "Key params:",
+        "  spec, label, reason",
         "",
     ]
     .join("\n")
@@ -397,18 +411,18 @@ fn format_register_help() -> String {
 
 fn format_pane_help() -> String {
     [
-        "gwtd pane — Inspect and control live agent panes.",
+        "gwtd pane — Inspect and control live agent panes via JSON envelope.",
         "",
-        "Usage: gwtd pane <action> [args]",
+        "Usage:",
+        "  gwtd <<'JSON'",
+        "  {\"schema_version\":1,\"operation\":\"pane.read\",\"params\":{\"id\":\"pane-id\",\"lines\":200}}",
+        "  JSON",
         "",
-        "Actions:",
-        "  list                                   List active agent panes",
-        "  read <id> [--lines <n>]                Read recent pane output (default: 50 lines)",
-        "  close <id>                             Stop and close a pane",
-        "  stop <id>                              Alias for close",
-        "  send [<id>] --text <line>              Queue one input line into the calling",
-        "                                         agent's own pane (submitted after the",
-        "                                         current turn ends, e.g. a /goal line)",
+        "Operations:",
+        "  pane.list | pane.read | pane.close | pane.stop | pane.send",
+        "",
+        "Key params:",
+        "  id, lines, text",
         "",
         "Notes:",
         "  - Intended for gwt-launched agent panes with GWT_HOOK_FORWARD_URL set.",
@@ -451,7 +465,7 @@ fn unknown_command_message(unknown: &str) -> String {
         message.push_str(&format!("did you mean '{suggestion}'?\n"));
     }
     message.push('\n');
-    message.push_str("Usage: gwtd <command> [args]\n");
+    message.push_str("Usage: gwtd < stdin-json-envelope\n");
     message.push_str("Run 'gwtd --help' for the full command list.\n");
     message
 }
@@ -487,17 +501,19 @@ fn levenshtein(a: &str, b: &str) -> usize {
 
 fn format_search_help() -> String {
     [
-        "gwtd search — Semantic search over SPECs, Issues, files, board, and memory.",
+        "gwtd search — Semantic search over SPECs, Issues, files, board, and memory via JSON envelope.",
         "",
-        "Usage: gwtd search \"<query>\" [scope flags] [options]",
+        "Usage:",
+        "  gwtd <<'JSON'",
+        "  {\"schema_version\":1,\"operation\":\"search\",\"params\":{\"query\":\"agent title\",\"scopes\":[\"specs\",\"files\"],\"n_results\":8}}",
+        "  JSON",
         "",
-        "Scope flags (repeatable; default: same merged scopes as the GUI search):",
-        "  --specs / --issues / --files / --files-docs / --memory / --board / --discussions",
+        "Operation:",
+        "  search",
         "",
-        "Options:",
-        "  --match-mode semantic|all_terms         semantic (default) or strict all-terms",
-        "  --n-results <n>                         Limit result count",
-        "  --json                                  Machine-readable JSON output",
+        "Key params:",
+        "  query, scopes, match_mode, n_results",
+        "  scopes                                  specs, issues, files, files_docs, memory, board, discussions",
         "",
         "Notes:",
         "  - Missing indexes are built automatically on first search (auto-build).",
@@ -509,16 +525,23 @@ fn format_search_help() -> String {
 
 fn format_update_help() -> String {
     [
-        "gwtd update — Check / apply gwt updates.",
+        "gwtd update — Application-owned updater.",
         "",
-        "Usage: gwtd update [--check]",
-        "",
-        "Flags:",
-        "  --check                                 Only check, do not download/apply",
-        "  (no flag)                               Check and prompt to apply",
+        "The updater replaces or exits the current process and is not used by LLM JSON envelope workflows.",
         "",
     ]
     .join("\n")
+}
+
+fn run_json_envelope_cli(argv: &[String]) -> i32 {
+    let repo_path = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+    if let Some((owner, repo)) = resolve_repo_coordinates() {
+        let mut env = gwt::cli::DefaultCliEnv::new(&owner, &repo, repo_path);
+        return gwt::cli::dispatch(&mut env, argv);
+    }
+
+    let mut env = gwt::cli::DefaultCliEnv::new_for_hooks();
+    gwt::cli::dispatch(&mut env, argv)
 }
 
 fn run_repo_backed_cli(argv: &[String]) -> i32 {
@@ -660,7 +683,7 @@ mod tests {
             "missing help pointer: {message}"
         );
         assert!(
-            message.contains("Usage: gwtd <command> [args]"),
+            message.contains("Usage: gwtd < stdin-json-envelope"),
             "missing usage line: {message}"
         );
     }
@@ -676,23 +699,19 @@ mod tests {
     }
 
     #[test]
-    fn format_search_help_documents_flags() {
+    fn format_search_help_documents_json_params() {
         let help = format_search_help();
         for expected in [
-            "--specs",
-            "--issues",
-            "--files",
-            "--files-docs",
-            "--memory",
-            "--board",
-            "--discussions",
-            "--match-mode",
-            "--n-results",
-            "--json",
+            r#""operation":"search""#,
+            "query",
+            "scopes",
+            "files_docs",
+            "match_mode",
+            "n_results",
         ] {
             assert!(
                 help.contains(expected),
-                "search help must document {expected}. help:\n{help}",
+                "search help must document JSON param {expected}. help:\n{help}",
             );
         }
     }
@@ -703,36 +722,21 @@ mod tests {
     }
 
     #[test]
-    fn format_board_help_documents_mention_flag() {
-        // Regression: PR #2600 missed `--mention` from the board post help text
-        // even though the parser at `cli/board.rs` accepts it. The parser also
-        // collects `--mention` repeatedly (BoardPostCommand::mentions is a
-        // Vec<String>), so the help token must keep the `*` repetition marker.
-        // Asserting the closing-bracket-then-star form prevents future drift
-        // where the marker is accidentally trimmed but the bare flag survives.
+    fn format_board_help_documents_mentions_param() {
         let help = format_board_help();
         assert!(
-            help.contains("[--mention <kind:id>]*"),
-            "board help must document repeatable --mention flag (parser accepts it). help:\n{help}",
+            help.contains("mentions"),
+            "board help must document mentions JSON param. help:\n{help}",
         );
     }
 
     #[test]
-    fn format_board_help_documents_post_audience_flags() {
-        // Each entry pairs the bracketed flag token with its expected
-        // repetition marker. `--parent` is singular per the parser; the rest
-        // are Vec<String> in BoardPostCommand and must keep the `*` marker so
-        // operators know they can pass each flag multiple times.
+    fn format_board_help_documents_post_audience_params() {
         let help = format_board_help();
-        for expected in [
-            "[--target <id>]*",
-            "[--owner <n>]*",
-            "[--topic <t>]*",
-            "[--parent <id>]",
-        ] {
+        for expected in ["targets", "owners", "topics", "parent"] {
             assert!(
                 help.contains(expected),
-                "board help must document {expected}. help:\n{help}",
+                "board help must document {expected} JSON param. help:\n{help}",
             );
         }
     }

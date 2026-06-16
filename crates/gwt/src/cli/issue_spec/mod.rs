@@ -308,19 +308,25 @@ pub(super) fn run<E: CliEnv>(
             file,
         } => {
             let content = read_cli_input(env, Some(file.as_str()))?;
-            let cache = Cache::new(env.cache_root());
-            let ops = SpecOps::new(
-                ClientRef {
-                    inner: env.client(),
-                },
-                cache,
-            );
-            ops.write_section(IssueNumber(number), &SectionName(section.clone()), &content)?;
-            out.push_str(&format!(
-                "wrote {} bytes to section '{section}'\n",
-                content.len()
-            ));
-            0
+            write_spec_section(env, out, number, section, content)?
+        }
+        IssueCommand::SpecEditSectionBody {
+            number,
+            section,
+            body,
+        } => write_spec_section(env, out, number, section, body)?,
+        IssueCommand::SpecEditSectionJsonBody {
+            number,
+            section,
+            body,
+            replace,
+        } => {
+            if section != SPEC_SECTION_NAME {
+                return Err(SpecOpsError::from(ApiError::Unexpected(format!(
+                    "structured JSON edit only supports section '{SPEC_SECTION_NAME}'"
+                ))));
+            }
+            write_structured_spec_section(env, out, number, section, &body, replace)?
         }
         IssueCommand::SpecEditSectionJson {
             number,
@@ -334,32 +340,7 @@ pub(super) fn run<E: CliEnv>(
                 ))));
             }
             let raw = read_cli_input(env, file.as_deref())?;
-            let cache = Cache::new(env.cache_root());
-            let ops = SpecOps::new(
-                ClientRef {
-                    inner: env.client(),
-                },
-                cache,
-            );
-            let structured = parse_structured_spec_json(&raw)?;
-            let existing = ops.read_section(IssueNumber(number), &SectionName(section.clone()))?;
-            let title = extract_document_title(&existing).unwrap_or_else(|| {
-                ops.cache()
-                    .load_entry(IssueNumber(number))
-                    .map(|entry| normalize_spec_heading_from_title(&entry.snapshot.title))
-                    .unwrap_or_else(|| "Specification".to_string())
-            });
-            let content = if replace {
-                render_structured_spec(&title, &structured)
-            } else {
-                merge_structured_spec(&existing, &structured)
-            };
-            ops.write_section(IssueNumber(number), &SectionName(section.clone()), &content)?;
-            out.push_str(&format!(
-                "wrote {} bytes to section '{section}'\n",
-                content.len()
-            ));
-            0
+            write_structured_spec_section(env, out, number, section, &raw, replace)?
         }
         IssueCommand::SpecList { phase, state } => {
             let filter = SpecListFilter {
@@ -394,52 +375,28 @@ pub(super) fn run<E: CliEnv>(
             file,
             labels,
         } => {
-            let cache = Cache::new(env.cache_root());
-            let ops = SpecOps::new(
-                ClientRef {
-                    inner: env.client(),
-                },
-                cache,
-            );
             let raw = env.read_file(&file).map_err(|err| {
                 SpecOpsError::from(gwt_github::client::ApiError::Network(err.to_string()))
             })?;
-            let parsed = gwt_github::extract_sections(&raw)
-                .map_err(|err| SpecOpsError::from(gwt_github::body::ParseError::Section(err)))?;
-            let sections: BTreeMap<SectionName, String> = parsed
-                .into_iter()
-                .map(|section| (section.name, section.content))
-                .collect();
-            let snapshot = ops.create_spec(&title, sections, &labels)?;
-            out.push_str(&format!(
-                "created issue #{} with labels {:?}\n",
-                snapshot.number.0, snapshot.labels
-            ));
-            0
+            create_spec_from_markdown(env, out, title, &raw, labels)?
         }
+        IssueCommand::SpecCreateBody {
+            title,
+            body,
+            labels,
+        } => create_spec_from_markdown(env, out, title, &body, labels)?,
+        IssueCommand::SpecCreateJsonBody {
+            title,
+            body,
+            labels,
+        } => create_spec_from_structured_json(env, out, title, &body, labels)?,
         IssueCommand::SpecCreateJson {
             title,
             file,
             labels,
         } => {
             let raw = read_cli_input(env, file.as_deref())?;
-            let cache = Cache::new(env.cache_root());
-            let ops = SpecOps::new(
-                ClientRef {
-                    inner: env.client(),
-                },
-                cache,
-            );
-            let structured = parse_structured_spec_json(&raw)?;
-            let spec =
-                render_structured_spec(&normalize_spec_heading_from_title(&title), &structured);
-            let sections = BTreeMap::from([(SectionName(SPEC_SECTION_NAME.to_string()), spec)]);
-            let snapshot = ops.create_spec(&title, sections, &labels)?;
-            out.push_str(&format!(
-                "created issue #{} with labels {:?}\n",
-                snapshot.number.0, snapshot.labels
-            ));
-            0
+            create_spec_from_structured_json(env, out, title, &raw, labels)?
         }
         IssueCommand::SpecCreateHelp => {
             out.push_str(SPEC_CREATE_HELP);
@@ -500,5 +457,117 @@ pub(super) fn run<E: CliEnv>(
     };
     Ok(code)
 }
+
+fn write_spec_section<E: CliEnv>(
+    env: &mut E,
+    out: &mut String,
+    number: u64,
+    section: String,
+    content: String,
+) -> Result<i32, SpecOpsError> {
+    let cache = Cache::new(env.cache_root());
+    let ops = SpecOps::new(
+        ClientRef {
+            inner: env.client(),
+        },
+        cache,
+    );
+    ops.write_section(IssueNumber(number), &SectionName(section.clone()), &content)?;
+    out.push_str(&format!(
+        "wrote {} bytes to section '{section}'\n",
+        content.len()
+    ));
+    Ok(0)
+}
+
+fn write_structured_spec_section<E: CliEnv>(
+    env: &mut E,
+    out: &mut String,
+    number: u64,
+    section: String,
+    raw_json: &str,
+    replace: bool,
+) -> Result<i32, SpecOpsError> {
+    let cache = Cache::new(env.cache_root());
+    let ops = SpecOps::new(
+        ClientRef {
+            inner: env.client(),
+        },
+        cache,
+    );
+    let structured = parse_structured_spec_json(raw_json)?;
+    let existing = ops.read_section(IssueNumber(number), &SectionName(section.clone()))?;
+    let title = extract_document_title(&existing).unwrap_or_else(|| {
+        ops.cache()
+            .load_entry(IssueNumber(number))
+            .map(|entry| normalize_spec_heading_from_title(&entry.snapshot.title))
+            .unwrap_or_else(|| "Specification".to_string())
+    });
+    let content = if replace {
+        render_structured_spec(&title, &structured)
+    } else {
+        merge_structured_spec(&existing, &structured)
+    };
+    ops.write_section(IssueNumber(number), &SectionName(section.clone()), &content)?;
+    out.push_str(&format!(
+        "wrote {} bytes to section '{section}'\n",
+        content.len()
+    ));
+    Ok(0)
+}
+
+fn create_spec_from_markdown<E: CliEnv>(
+    env: &mut E,
+    out: &mut String,
+    title: String,
+    raw: &str,
+    labels: Vec<String>,
+) -> Result<i32, SpecOpsError> {
+    let cache = Cache::new(env.cache_root());
+    let ops = SpecOps::new(
+        ClientRef {
+            inner: env.client(),
+        },
+        cache,
+    );
+    let parsed = gwt_github::extract_sections(raw)
+        .map_err(|err| SpecOpsError::from(gwt_github::body::ParseError::Section(err)))?;
+    let sections: BTreeMap<SectionName, String> = parsed
+        .into_iter()
+        .map(|section| (section.name, section.content))
+        .collect();
+    let snapshot = ops.create_spec(&title, sections, &labels)?;
+    out.push_str(&format!(
+        "created issue #{} with labels {:?}\n",
+        snapshot.number.0, snapshot.labels
+    ));
+    Ok(0)
+}
+
+fn create_spec_from_structured_json<E: CliEnv>(
+    env: &mut E,
+    out: &mut String,
+    title: String,
+    raw_json: &str,
+    labels: Vec<String>,
+) -> Result<i32, SpecOpsError> {
+    let cache = Cache::new(env.cache_root());
+    let ops = SpecOps::new(
+        ClientRef {
+            inner: env.client(),
+        },
+        cache,
+    );
+    let structured = parse_structured_spec_json(raw_json)?;
+    let spec = render_structured_spec(&normalize_spec_heading_from_title(&title), &structured);
+    let sections = BTreeMap::from([(SectionName(SPEC_SECTION_NAME.to_string()), spec)]);
+    let snapshot = ops.create_spec(&title, sections, &labels)?;
+    out.push_str(&format!(
+        "created issue #{} with labels {:?}\n",
+        snapshot.number.0, snapshot.labels
+    ));
+    Ok(0)
+}
+
 #[cfg(test)]
 mod tests;

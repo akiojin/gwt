@@ -199,6 +199,10 @@ pub fn dispatch<E: CliEnv>(env: &mut E, args: &[String]) -> i32 {
     let top_verb = args.get(1).map(String::as_str).unwrap_or("");
     let rest: Vec<String> = args.iter().skip(2).cloned().collect();
 
+    if top_verb.is_empty() {
+        return super::json_envelope::dispatch(env, prog);
+    }
+
     let parse_result = match top_verb {
         "issue" => parse_issue_args(&rest),
         "pr" => parse_pr_args(&rest),
