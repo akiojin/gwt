@@ -6928,6 +6928,13 @@ Context: gwtd search (SPEC-1942 US-15) で GUI の search_project_index を流�
 Learning: auto-build / self-heal が必要な agent・CLI 検索経路は search-multi ではなく per-scope の search-issues / search-specs 等の単一 action を使う。単一 action 側 (no_auto_build=False) が EMPTY_CORPUS 診断 (Issue #2979) も担う agent 向け契約である。
 Future Action: 検索経路を追加・変更する際は、runner の action 別 auto-build 挙動 (search-multi=固定無効 / 単一 action=有効) を必ず確認し、CLI 経路では per-scope action + auto_build フラグ (search_project_index の auto_build 引数) を使う。
 
+## 2026-06-13 — Maximized tab activation must not backend-resize PTYs
+
+Type: lesson
+Context: SPEC-2008 Phase 34 no-flash tab switching previously preserved frontend DOM/runtime but missed AppRuntime::activate_window_tab_events. In maximized tab groups, backend geometry_to_pty_size resized PTY before frontend xterm fit, causing Codex-heavy redraw on each tab switch.
+Learning: For terminal no-flash/focus fixes, check both frontend remount paths and backend handlers for resize_runtime_to_window calls. Tab activation changes only active marker/z-order; PTY size is owned by frontend real xterm fit and update_window_geometry_events.
+Future Action: When investigating terminal redraw after window/tab switching, first inspect logs for activate_window_tab followed by two PTY resize entries, then add a regression test that preserves a frontend-fitted sentinel PTY size across the backend event.
+
 ## 2026-06-14 — UI 表示課題は実データ全画面で検証し PR title を目的源に
 
 Type: workflow
@@ -6941,6 +6948,27 @@ Type: failure-pattern
 Context: During SPEC-3050 Phase E verification on 2026-06-15, the active worktree /Users/akiojin/Workbench/gwt/work/20260615-0012 disappeared while running the full cargo test matrix. Subsequent shell invocations failed until commands were run from /, and the implementation had to be reconstructed in the stable develop checkout from conversation diffs.
 Learning: When a gwt-managed worktree becomes missing or prunable during long verification, continuing from that cwd can produce getcwd/git clone failures and may lose uncommitted edits. Treat this as an environment failure, immediately switch command execution to a stable existing checkout, recover changes from recorded diffs, and rerun full tests serially if parallel tests showed cwd races.
 Future Action: Before long full verification, confirm the worktree path still exists and prefer serial `cargo test ... -- --test-threads=1` when previous runs show getcwd/tempdir interference. If a worktree vanishes, stop using that path, verify surviving checkouts with absolute `git -C`, reconstruct changes without touching unrelated untracked files, and record the incident.
+
+## 2026-06-15 — Full visual failures need root-cause contracts
+
+Type: failure-pattern
+Context: SPEC-2359 T-604 full visual verification exposed unrelated regressions in hidden terminal output refresh, extracted Knowledge surface dependency injection, Profile env row identity/save snapshots, and stale E2E session-count expectations.
+Learning: Do not classify full visual failures as unrelated until each failing surface is reproduced and its root cause is tied to a static or browser contract. Extracted surfaces must receive all former app.js dependencies explicitly; delayed backend snapshots must not clobber newer UI drafts.
+Future Action: When full visual blocks SPEC verification, reproduce targeted specs first, fix deterministic implementation or test-contract causes, and add embedded_web_tests contracts for dependency injection and race guards before re-running the full suite.
+
+## 2026-06-16 — Workspace cleanup must consider live process cwd
+
+Type: failure-pattern
+Context: SPEC-2359 user verification on 2026-06-16 showed work/20260616-0203 displayed as cleanup-safe in a fresh browser-check while Codex processes still had cwd inside that worktree. The session ledger was Idle/Stop and the isolated browser-check HOME had no real session ledger entry.
+Learning: Idle session status and isolated browser-check state are insufficient for destructive cleanup gates. A merged Workspace can still be unsafe when any live OS process is running from that worktree.
+Future Action: For workspace cleanup/delete changes, add tests with a live process whose cwd is the candidate worktree and verify both action availability and UI copy in a fresh browser-check before asking for user confirmation.
+
+## 2026-06-16 — Workspace cleanup result must repaint non-Branches owners
+
+Type: lesson
+Context: SPEC-2359 user verification on 2026-06-16 showed Workspace-origin cleanup stuck at PENDING for work/20260615-0125 even though logs proved git worktree remove --force and git branch -D had both exited 0. The cleanup modal state was owned by a Workspace window id, not the synthetic cleanup id or a Branches window.
+Learning: Backend completion is insufficient for destructive UI flows: event receive paths must repaint the modal owner. renderBranches(event.id) can return before modal repaint when the owner window does not contain .branch-list, leaving stale running UI after a successful cleanup.
+Future Action: For cleanup/progress/result/error changes, add a DOM test where the cleanup owner is a Workspace window without .branch-list, and verify fresh browser-check serves the fixed JS before asking for user confirmation.
 
 ## 2026-06-15 — Session resume requires branch materializability
 

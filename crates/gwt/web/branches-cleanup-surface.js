@@ -869,6 +869,21 @@ export function createBranchesCleanupSurface({
           },
         });
       }
+
+      function renderBranchCleanupOwner(windowId) {
+        if (windowId === WORKSPACE_CLEANUP_WINDOW_ID) {
+          renderBranchCleanupModal();
+          renderWorkspaceWindows();
+          return;
+        }
+        const element = windowMap.get(windowId);
+        if (element?.querySelector(".branch-list")) {
+          renderBranches(windowId);
+          return;
+        }
+        renderBranchCleanupModal();
+        renderWorkspaceWindows();
+      }
       // SPEC-3064 Phase 3 (E6b): Branches window mount moved verbatim from
       // app.js mountWindowBody (surface === "branches" branch).
       function mountBranchesWindow(windowData, body) {
@@ -964,12 +979,7 @@ export function createBranchesCleanupSurface({
             state.cleanupModal.stage = "result";
             state.cleanupModal.results = event.results || [];
             branchCleanupWindowId = event.id;
-            if (event.id === WORKSPACE_CLEANUP_WINDOW_ID) {
-              renderBranchCleanupModal();
-              renderWorkspaceWindows();
-              break;
-            }
-            renderBranches(event.id);
+            renderBranchCleanupOwner(event.id);
             break;
           }
           case "branch_cleanup_progress": {
@@ -978,11 +988,7 @@ export function createBranchesCleanupSurface({
               event,
             );
             branchCleanupWindowId = event.id;
-            if (event.id === WORKSPACE_CLEANUP_WINDOW_ID) {
-              renderBranchCleanupModal();
-              break;
-            }
-            renderBranches(event.id);
+            renderBranchCleanupOwner(event.id);
             break;
           }
           case "branch_error": {
@@ -995,11 +1001,7 @@ export function createBranchesCleanupSurface({
             state.loading = false;
             if (state.cleanupModal.stage === "running") {
               failRunningBranchCleanup(event.id, event.message);
-              if (event.id === WORKSPACE_CLEANUP_WINDOW_ID) {
-                renderBranchCleanupModal();
-                break;
-              }
-              renderBranches(event.id);
+              renderBranchCleanupOwner(event.id);
               break;
             }
             if (state.receivedFreshEntries) {

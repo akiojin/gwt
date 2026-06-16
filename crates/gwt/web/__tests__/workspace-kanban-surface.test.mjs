@@ -458,6 +458,52 @@ test("Workspace renderWindows refreshes legacy workspace preset windows", () => 
   );
 });
 
+test("Merged Workspace without a cleanup candidate does not claim it is safe to delete", () => {
+  const fixture = createFixture();
+  const surface = createSurface(fixture, {
+    id: "cleanup-projection",
+    title: "Cleanup projection",
+    status_category: "idle",
+    active_work_count: 1,
+    active_works: [
+      {
+        id: "work-live-cwd",
+        title: "work/20260616-0203",
+        status_category: "idle",
+        lifecycle_state: "paused",
+        merged_into_base: true,
+        cleanup_candidate: null,
+        branch: "work/20260616-0203",
+        worktree_path: "/repo/work/20260616-0203",
+        agents: [],
+      },
+    ],
+  });
+
+  surface.mount(fixture.body, fixture.windowData, {
+    focusWindowLocally() {},
+    sendFocus() {},
+  });
+
+  const row = fixture.body.querySelector(
+    '.workspace-overview-row[data-workspace-id="work-live-cwd"]',
+  );
+  assert.ok(row, "expected the merged Workspace row to remain visible");
+  assert.match(row.textContent, /Merged/, "merged badge remains visible");
+  const detailText = fixture.body
+    .querySelector(".workspace-overview-detail-pane")
+    .textContent.replace(/\s+/g, " ");
+  assert.doesNotMatch(detailText, /safe to delete/i);
+  assert.equal(
+    fixture.body.querySelector("[data-action='cleanup-merged-workspace']"),
+    null,
+  );
+  assert.equal(
+    fixture.body.querySelector("[data-action='cleanup-merged-workspaces']"),
+    null,
+  );
+});
+
 test("Work surface renders a lifecycle_state badge on each Work row (SPEC-2359 W-12 FR-351)", () => {
   const fixture = createFixture();
   const surface = createSurface(fixture, {
@@ -1249,10 +1295,10 @@ test("Workspace with existing Works still offers a Launch control", () => {
   );
 });
 
-// User verification (2026-06-12): "Safe to delete" must come with an actual
-// delete action — a merged Workspace's detail offers a Clean Up control that
-// opens the cleanup flow for that row's branch.
-test("merged Workspace detail offers a Clean Up control for its branch", () => {
+// User verification (2026-06-12) + SPEC-2359 US-78: "Safe to delete" must
+// come with an actual delete action, but only when the backend supplied a
+// cleanup candidate after applying the live-agent guard.
+test("merged Workspace detail offers Clean Up only from a backend cleanup candidate", () => {
   const fixture = createFixture();
   const cleanupCalls = [];
   const surface = createSurface(
@@ -1270,6 +1316,12 @@ test("merged Workspace detail offers a Clean Up control for its branch", () => {
           lifecycle_state: "paused",
           branch: "work/merged",
           merged_into_base: true,
+          cleanup_candidate: {
+            branch: "work/merged",
+            reason: "pr_merged",
+            default_delete_remote: false,
+            remote_delete_available: true,
+          },
           active_agents: 0,
           blocked_agents: 0,
           agents: [],
@@ -1296,6 +1348,54 @@ test("merged Workspace detail offers a Clean Up control for its branch", () => {
   assert.equal(cleanupCalls[0]?.branch, "work/merged");
 });
 
+test("merged Workspace without cleanup candidate does not offer Clean Up", () => {
+  const fixture = createFixture();
+  const cleanupCalls = [];
+  const surface = createSurface(
+    fixture,
+    {
+      id: "proj-1",
+      title: "projection",
+      status_category: "idle",
+      active_work_count: 1,
+      active_works: [
+        {
+          id: "work-work-live-12345678",
+          title: "work/live",
+          status_category: "active",
+          lifecycle_state: "active",
+          branch: "work/live",
+          merged_into_base: true,
+          active_agents: 1,
+          blocked_agents: 0,
+          agents: [
+            {
+              session_id: "session-live",
+              display_name: "Codex",
+              status_category: "active",
+            },
+          ],
+        },
+      ],
+      agents: [],
+    },
+    {
+      send() {},
+      openWorkspaceCleanup: (candidate) => cleanupCalls.push(candidate),
+    },
+  );
+
+  surface.mount(fixture.body, fixture.windowData, {
+    focusWindowLocally() {},
+    sendFocus() {},
+  });
+
+  const cleanup = [...fixture.body.querySelectorAll(".workspace-detail-actions button")]
+    .find((button) => button.textContent.trim() === "Clean Up");
+  assert.equal(cleanup, undefined);
+  assert.equal(cleanupCalls.length, 0);
+});
+
 // User verification 2026-06-12: completed (merged) local branches need a
 // BULK cleanup path — the list header offers "Clean Up Merged (N)" that opens
 // the cleanup flow with every merged row preselected.
@@ -1318,6 +1418,12 @@ test("list header offers bulk Clean Up Merged for all merged Workspaces", () => 
           branch: "work/a",
           merged_into_base: true,
           done_equivalent: true,
+          cleanup_candidate: {
+            branch: "work/a",
+            reason: "pr_merged",
+            default_delete_remote: false,
+            remote_delete_available: true,
+          },
           active_agents: 0,
           blocked_agents: 0,
           agents: [],
@@ -1329,9 +1435,32 @@ test("list header offers bulk Clean Up Merged for all merged Workspaces", () => 
           lifecycle_state: "paused",
           branch: "work/b",
           merged_into_base: true,
+          cleanup_candidate: {
+            branch: "work/b",
+            reason: "pr_merged",
+            default_delete_remote: false,
+            remote_delete_available: true,
+          },
           active_agents: 0,
           blocked_agents: 0,
           agents: [],
+        },
+        {
+          id: "work-work-live-12345678",
+          title: "work/live",
+          status_category: "active",
+          lifecycle_state: "active",
+          branch: "work/live",
+          merged_into_base: true,
+          active_agents: 1,
+          blocked_agents: 0,
+          agents: [
+            {
+              session_id: "session-live",
+              display_name: "Codex",
+              status_category: "active",
+            },
+          ],
         },
         {
           id: "work-work-open-12345678",
@@ -1630,9 +1759,10 @@ test("ArrowDown / ArrowUp move the Workspace list selection", () => {
   );
 });
 
-// SPEC-2359 W-15 (FR-386): the "safe to delete" signal — a merged Workspace
-// shows a Merged badge on its row and the detail subtitle says so.
-test("merged Workspace shows the safe-to-delete badge", () => {
+// SPEC-2359 W-15 / US-78: a merged Workspace always shows the Merged badge,
+// while the stronger safe-to-delete signal is reserved for backend-vetted
+// cleanup candidates.
+test("cleanup-candidate Workspace shows the safe-to-delete detail signal", () => {
   const fixture = createFixture();
   const surface = createSurface(
     fixture,
@@ -1649,6 +1779,13 @@ test("merged Workspace shows the safe-to-delete badge", () => {
           lifecycle_state: "paused",
           branch: "work/merged",
           merged_into_base: true,
+          cleanup_candidate: {
+            branch: "work/merged",
+            worktree_path: "/repo/work/merged",
+            reason: "pr_merged",
+            default_delete_remote: false,
+            remote_delete_available: true,
+          },
           active_agents: 0,
           blocked_agents: 0,
           agents: [],
