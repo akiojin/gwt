@@ -761,3 +761,839 @@ fn optional_string_vec(
         ))),
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        parse, ActionsCommand, CliCommand, CliParseError, DaemonCommand, IndexCommand, IndexScope,
+        IssueCommand, PaneCommand, PrCommand, SkillStateAction, WorkspaceCommand,
+    };
+    use crate::protocol::{IndexSearchMatchMode, IndexSearchScope};
+    use serde_json::{json, Value};
+
+    fn envelope(operation: &str, params: Value) -> String {
+        json!({
+            "schema_version": 1,
+            "operation": operation,
+            "params": params,
+        })
+        .to_string()
+    }
+
+    fn ok(operation: &str, params: Value) -> CliCommand {
+        match parse(&envelope(operation, params)) {
+            Ok(parsed) => {
+                assert_eq!(parsed.operation, operation);
+                parsed.command
+            }
+            Err(err) => panic!("expected Ok for {operation}, got error: {err}"),
+        }
+    }
+
+    fn err(operation: &str, params: Value) -> CliParseError {
+        match parse(&envelope(operation, params)) {
+            Ok(_) => panic!("expected Err for {operation}"),
+            Err(err) => err,
+        }
+    }
+
+    #[test]
+    fn empty_or_blank_stdin_is_invalid_json() {
+        assert!(matches!(parse("   \n"), Err(CliParseError::InvalidJson(_))));
+        assert!(matches!(parse(""), Err(CliParseError::InvalidJson(_))));
+    }
+
+    #[test]
+    fn malformed_json_is_invalid_json() {
+        assert!(matches!(
+            parse("{not json"),
+            Err(CliParseError::InvalidJson(_))
+        ));
+    }
+
+    #[test]
+    fn schema_version_must_be_one() {
+        let input = json!({
+            "schema_version": 2,
+            "operation": "pr.current",
+            "params": {},
+        })
+        .to_string();
+        match parse(&input) {
+            Err(CliParseError::InvalidJson(message)) => {
+                assert!(message.contains("schema_version"), "{message}");
+            }
+            Err(other) => panic!("expected schema_version error, got {other}"),
+            Ok(_) => panic!("expected schema_version error, got Ok"),
+        }
+    }
+
+    #[test]
+    fn schema_version_defaults_to_one_when_omitted() {
+        let input = json!({
+            "operation": "pr.current",
+            "params": {},
+        })
+        .to_string();
+        assert!(parse(&input).is_ok());
+    }
+
+    #[test]
+    fn omitted_params_defaults_to_null_and_is_rejected() {
+        // `params` defaults to JSON null when omitted, and a null is not an object.
+        let input = json!({
+            "schema_version": 1,
+            "operation": "pane.list",
+        })
+        .to_string();
+        match parse(&input) {
+            Err(CliParseError::InvalidJson(message)) => {
+                assert!(message.contains("params must be an object"), "{message}");
+            }
+            Err(other) => panic!("unexpected error: {other}"),
+            Ok(_) => panic!("expected params-object error"),
+        }
+    }
+
+    #[test]
+    fn params_must_be_an_object() {
+        match err("pr.current", json!(5)) {
+            CliParseError::InvalidJson(message) => {
+                assert!(message.contains("params must be an object"), "{message}");
+            }
+            other => panic!("unexpected error: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn unknown_operation_is_rejected() {
+        match err("does.not.exist", json!({})) {
+            CliParseError::UnknownSubcommand(name) => assert_eq!(name, "does.not.exist"),
+            other => panic!("unexpected error: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn workspace_update_maps_purpose_to_title_summary() {
+        let command = ok(
+            "workspace.update",
+            json!({
+                "agent_session": "session-1",
+                "purpose": "Build envelope parser",
+                "current_focus": "writing tests",
+                "status": "active",
+                "summary": "covering parse",
+            }),
+        );
+        match command {
+            CliCommand::Workspace(WorkspaceCommand::Update {
+                agent_session,
+                title_summary,
+                current_focus,
+                ..
+            }) => {
+                assert_eq!(agent_session.as_deref(), Some("session-1"));
+                assert_eq!(title_summary.as_deref(), Some("Build envelope parser"));
+                assert_eq!(current_focus.as_deref(), Some("writing tests"));
+            }
+            other => panic!("unexpected command: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn workspace_update_rejects_title_summary_key() {
+        match err(
+            "workspace.update",
+            json!({"agent_session": "s", "title_summary": "x"}),
+        ) {
+            CliParseError::InvalidValue { flag, .. } => assert_eq!(flag, "title_summary"),
+            other => panic!("unexpected error: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn workspace_update_requires_agent_session_when_setting_purpose() {
+        // No agent_session in params; rely on env being unset for the work fields.
+        // When purpose/current_focus omitted, agent_session is optional, so test the
+        // explicit error path by providing current_focus without agent_session only
+        // when the env var is absent.
+        if std::env::var(gwt_agent::session::GWT_SESSION_ID_ENV).is_ok() {
+            return;
+        }
+        match err("workspace.update", json!({"current_focus": "x"})) {
+            CliParseError::MissingFlag(flag) => assert_eq!(flag, "agent_session"),
+            other => panic!("unexpected error: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn workspace_lifecycle_operations_parse() {
+        assert!(matches!(
+            ok("workspace.candidates", json!({"agent_session": "s"})),
+            CliCommand::Workspace(WorkspaceCommand::Candidates { .. })
+        ));
+        assert!(matches!(
+            ok(
+                "workspace.join",
+                json!({"agent_session": "s", "workspace_id": "w1", "current_focus": "f"})
+            ),
+            CliCommand::Workspace(WorkspaceCommand::Join { .. })
+        ));
+        // workspace alias for workspace_id
+        assert!(matches!(
+            ok(
+                "workspace.join",
+                json!({"agent_session": "s", "workspace": "w1"})
+            ),
+            CliCommand::Workspace(WorkspaceCommand::Join { .. })
+        ));
+        assert!(matches!(
+            ok(
+                "workspace.create",
+                json!({"agent_session": "s", "purpose": "Add parser", "spec": 7, "issue": 3})
+            ),
+            CliCommand::Workspace(WorkspaceCommand::Create { .. })
+        ));
+        assert!(matches!(
+            ok(
+                "workspace.ensure",
+                json!({"agent_session": "s", "purpose": "Add parser", "topic": "t"})
+            ),
+            CliCommand::Workspace(WorkspaceCommand::Ensure { .. })
+        ));
+        assert!(matches!(
+            ok(
+                "workspace.projection_list",
+                json!({"stale": true, "all": true})
+            ),
+            CliCommand::Workspace(WorkspaceCommand::ProjectionList {
+                stale: true,
+                all: true
+            })
+        ));
+        assert!(matches!(
+            ok("workspace.projection-list", json!({})),
+            CliCommand::Workspace(WorkspaceCommand::ProjectionList { .. })
+        ));
+        assert!(matches!(
+            ok(
+                "workspace.projection_prune",
+                json!({"dry_run": true, "ids": ["a", "b"]})
+            ),
+            CliCommand::Workspace(WorkspaceCommand::ProjectionPrune { dry_run: true, .. })
+        ));
+        assert!(matches!(
+            ok("workspace.projection-prune", json!({})),
+            CliCommand::Workspace(WorkspaceCommand::ProjectionPrune { .. })
+        ));
+    }
+
+    #[test]
+    fn workspace_join_requires_workspace_id() {
+        match err("workspace.join", json!({"agent_session": "s"})) {
+            CliParseError::MissingFlag(flag) => assert_eq!(flag, "workspace_id"),
+            other => panic!("unexpected error: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn board_operations_parse() {
+        assert!(matches!(
+            ok("board.show", json!({"workspace": "w", "all": true})),
+            CliCommand::Board(_)
+        ));
+        assert!(matches!(
+            ok(
+                "board.post",
+                json!({
+                    "kind": "status",
+                    "body": "hello",
+                    "topics": ["a"],
+                    "mentions": ["user:x"],
+                    "broadcast": true,
+                })
+            ),
+            CliCommand::Board(_)
+        ));
+    }
+
+    #[test]
+    fn board_post_rejects_work_keys() {
+        assert!(matches!(
+            err(
+                "board.post",
+                json!({"kind": "status", "body": "b", "purpose": "p"})
+            ),
+            CliParseError::InvalidValue {
+                flag: "purpose",
+                ..
+            }
+        ));
+        assert!(matches!(
+            err(
+                "board.post",
+                json!({"kind": "status", "body": "b", "title_summary": "t"})
+            ),
+            CliParseError::InvalidValue {
+                flag: "title_summary",
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn issue_operations_parse() {
+        for op in [
+            "issue.view",
+            "issue.comments",
+            "issue.linked_prs",
+            "issue.linked-prs",
+            "issue.spec.read",
+            "issue.spec.repair",
+        ] {
+            assert!(matches!(
+                ok(op, json!({"number": 12})),
+                CliCommand::Issue(_)
+            ));
+        }
+        assert!(matches!(
+            ok(
+                "issue.spec.section",
+                json!({"number": 1, "section": "spec"})
+            ),
+            CliCommand::Issue(IssueCommand::SpecReadSection { .. })
+        ));
+        assert!(matches!(
+            ok("issue.spec.list", json!({"phase": "plan", "state": "open"})),
+            CliCommand::Issue(IssueCommand::SpecList { .. })
+        ));
+        assert!(matches!(
+            ok("issue.spec.pull", json!({"all": true, "numbers": [1, 2]})),
+            CliCommand::Issue(IssueCommand::SpecPull { .. })
+        ));
+        assert!(matches!(
+            ok("issue.spec.rename", json!({"number": 1, "title": "t"})),
+            CliCommand::Issue(IssueCommand::SpecRename { .. })
+        ));
+        assert!(matches!(
+            ok(
+                "issue.create",
+                json!({"title": "t", "body": "b", "labels": ["l"]})
+            ),
+            CliCommand::Issue(IssueCommand::CreateBody { .. })
+        ));
+        assert!(matches!(
+            ok("issue.comment", json!({"number": 1, "body": "b"})),
+            CliCommand::Issue(IssueCommand::CommentBody { .. })
+        ));
+    }
+
+    #[test]
+    fn issue_spec_edit_variants() {
+        assert!(matches!(
+            ok(
+                "issue.spec.edit",
+                json!({"number": 1, "section": "spec", "body": "text"})
+            ),
+            CliCommand::Issue(IssueCommand::SpecEditSectionBody { .. })
+        ));
+        assert!(matches!(
+            ok(
+                "issue.spec.edit",
+                json!({"number": 1, "section": "spec", "body": {"k": "v"}, "structured": true, "replace": true})
+            ),
+            CliCommand::Issue(IssueCommand::SpecEditSectionJsonBody { replace: true, .. })
+        ));
+        match err(
+            "issue.spec.edit",
+            json!({"number": 1, "section": "spec", "body": "t", "replace": true}),
+        ) {
+            CliParseError::InvalidJson(message) => {
+                assert!(message.contains("replace is only valid"), "{message}");
+            }
+            other => panic!("unexpected error: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn issue_spec_create_variants() {
+        assert!(matches!(
+            ok("issue.spec.create", json!({"title": "t", "body": "b"})),
+            CliCommand::Issue(IssueCommand::SpecCreateBody { .. })
+        ));
+        assert!(matches!(
+            ok(
+                "issue.spec.create",
+                json!({"title": "t", "body": ["a", "b"], "structured": true})
+            ),
+            CliCommand::Issue(IssueCommand::SpecCreateJsonBody { .. })
+        ));
+    }
+
+    #[test]
+    fn pr_operations_parse() {
+        assert!(matches!(
+            ok("pr.current", json!({})),
+            CliCommand::Pr(PrCommand::Current)
+        ));
+        assert!(matches!(
+            ok(
+                "pr.create",
+                json!({"base": "main", "head": "develop", "title": "t", "body": "b", "labels": ["release"], "draft": true})
+            ),
+            CliCommand::Pr(PrCommand::CreateBody { draft: true, .. })
+        ));
+        assert!(matches!(
+            ok(
+                "pr.edit",
+                json!({"number": 1, "title": "t", "add_labels": ["x"]})
+            ),
+            CliCommand::Pr(PrCommand::EditBody { .. })
+        ));
+        for op in [
+            "pr.view",
+            "pr.checks",
+            "pr.reviews",
+            "pr.review_threads",
+            "pr.review-threads",
+        ] {
+            assert!(matches!(ok(op, json!({"number": 9})), CliCommand::Pr(_)));
+        }
+        assert!(matches!(
+            ok("pr.comment", json!({"number": 1, "body": "b"})),
+            CliCommand::Pr(PrCommand::CommentBody { .. })
+        ));
+        assert!(matches!(
+            ok(
+                "pr.review_threads.reply_and_resolve",
+                json!({"number": 1, "body": "b"})
+            ),
+            CliCommand::Pr(PrCommand::ReviewThreadsReplyAndResolveBody { .. })
+        ));
+        assert!(matches!(
+            ok(
+                "pr.review-threads.reply-and-resolve",
+                json!({"number": 1, "body": "b"})
+            ),
+            CliCommand::Pr(PrCommand::ReviewThreadsReplyAndResolveBody { .. })
+        ));
+    }
+
+    #[test]
+    fn actions_index_diagnostics_daemon_operations_parse() {
+        assert!(matches!(
+            ok("actions.logs", json!({"run_id": 5})),
+            CliCommand::Actions(ActionsCommand::Logs { .. })
+        ));
+        assert!(matches!(
+            ok("actions.job_logs", json!({"job_id": 5})),
+            CliCommand::Actions(ActionsCommand::JobLogs { .. })
+        ));
+        assert!(matches!(
+            ok("actions.job-logs", json!({"job_id": 5})),
+            CliCommand::Actions(ActionsCommand::JobLogs { .. })
+        ));
+        assert!(matches!(
+            ok("index.status", json!({})),
+            CliCommand::Index(IndexCommand::Status)
+        ));
+        assert!(matches!(
+            ok("index.rebuild", json!({})),
+            CliCommand::Index(IndexCommand::Rebuild { .. })
+        ));
+        assert!(matches!(
+            ok("index.rebuild", json!({"scope": "files_docs"})),
+            CliCommand::Index(IndexCommand::Rebuild { .. })
+        ));
+        match err("index.rebuild", json!({"scope": "nope"})) {
+            CliParseError::InvalidJson(message) => {
+                assert!(message.contains("unknown index scope"), "{message}");
+            }
+            other => panic!("unexpected error: {other:?}"),
+        }
+        assert!(matches!(
+            ok("diagnostics.cpu", json!({})),
+            CliCommand::Diagnostics(_)
+        ));
+        assert!(matches!(
+            ok("daemon.start", json!({})),
+            CliCommand::Daemon(DaemonCommand::Start)
+        ));
+        assert!(matches!(
+            ok("daemon.status", json!({})),
+            CliCommand::Daemon(DaemonCommand::Status)
+        ));
+        assert!(matches!(
+            ok("daemon.subscribe", json!({"channels": ["a", "b"]})),
+            CliCommand::Daemon(DaemonCommand::Subscribe { .. })
+        ));
+        match err("daemon.subscribe", json!({"channels": []})) {
+            CliParseError::MissingFlag(flag) => assert_eq!(flag, "channels"),
+            other => panic!("unexpected error: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn index_scope_accepts_all_known_values() {
+        for scope in [
+            "all",
+            "issues",
+            "specs",
+            "memory",
+            "discussions",
+            "board",
+            "files",
+            "files-docs",
+        ] {
+            assert!(matches!(
+                ok("index.rebuild", json!({"scope": scope})),
+                CliCommand::Index(IndexCommand::Rebuild { .. })
+            ));
+        }
+    }
+
+    #[test]
+    fn hook_register_codex_trust_collects_optional_flags() {
+        assert!(matches!(
+            ok("hook.register_codex_managed_hook_trust", json!({})),
+            CliCommand::Hook(_)
+        ));
+        assert!(matches!(
+            ok(
+                "hook.register-codex-managed-hook-trust",
+                json!({
+                    "project_root": "/repo",
+                    "codex_config": "/cfg",
+                    "codex_hook_discovery": "auto",
+                })
+            ),
+            CliCommand::Hook(_)
+        ));
+    }
+
+    #[test]
+    fn memory_add_parses() {
+        assert!(matches!(
+            ok(
+                "memory.add",
+                json!({
+                    "title": "t",
+                    "context": "c",
+                    "learning": "l",
+                    "future_action": "f",
+                    "type": "decision",
+                    "date": "2026-06-16",
+                })
+            ),
+            CliCommand::Memory(_)
+        ));
+    }
+
+    #[test]
+    fn discussion_update_parses() {
+        assert!(matches!(
+            ok(
+                "discussion.update",
+                json!({
+                    "title": "t",
+                    "summary": "s",
+                    "next": "n",
+                    "topics": ["x"],
+                    "related_specs": [1],
+                    "decisions": ["d"],
+                    "open_questions": ["q"],
+                })
+            ),
+            CliCommand::Discussion(_)
+        ));
+    }
+
+    #[test]
+    fn discuss_proposal_actions_parse() {
+        for op in [
+            "discuss.resolve",
+            "discuss.park",
+            "discuss.reject",
+            "discuss.clear_next_question",
+            "discuss.clear-next-question",
+            "discuss.goal_started",
+            "discuss.goal-started",
+        ] {
+            assert!(matches!(
+                ok(op, json!({"proposal": "p"})),
+                CliCommand::Discuss(_)
+            ));
+        }
+        assert!(matches!(
+            ok(
+                "discuss.goal_pending",
+                json!({"proposal": "p", "condition": "c"})
+            ),
+            CliCommand::Discuss(_)
+        ));
+        assert!(matches!(
+            ok(
+                "discuss.goal_failed",
+                json!({"proposal": "p", "reason": "r"})
+            ),
+            CliCommand::Discuss(_)
+        ));
+        assert!(matches!(
+            ok(
+                "discuss.goal_skipped",
+                json!({"proposal": "p", "reason": "r"})
+            ),
+            CliCommand::Discuss(_)
+        ));
+    }
+
+    #[test]
+    fn skill_state_operations_parse() {
+        for prefix in ["build", "plan", "register"] {
+            assert!(parse(&envelope(&format!("{prefix}.start"), json!({"spec": 1}))).is_ok());
+            assert!(parse(&envelope(
+                &format!("{prefix}.phase"),
+                json!({"spec": 1, "label": "red"})
+            ))
+            .is_ok());
+            assert!(parse(&envelope(&format!("{prefix}.complete"), json!({"spec": 1}))).is_ok());
+            assert!(parse(&envelope(
+                &format!("{prefix}.abort"),
+                json!({"spec": 1, "reason": "x"})
+            ))
+            .is_ok());
+        }
+    }
+
+    #[test]
+    fn skill_state_phase_requires_label() {
+        match err("build.phase", json!({"spec": 1})) {
+            CliParseError::MissingFlag(flag) => assert_eq!(flag, "label"),
+            other => panic!("unexpected error: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn build_start_targets_build_command() {
+        assert!(matches!(
+            ok("build.start", json!({"spec": 1})),
+            CliCommand::Build(SkillStateAction::Start { spec: 1 })
+        ));
+    }
+
+    #[test]
+    fn pane_operations_parse() {
+        assert!(matches!(
+            ok("pane.list", json!({})),
+            CliCommand::Pane(PaneCommand::List)
+        ));
+        match ok("pane.read", json!({"id": "p1"})) {
+            CliCommand::Pane(PaneCommand::Read { id, lines }) => {
+                assert_eq!(id, "p1");
+                assert_eq!(lines, 200);
+            }
+            other => panic!("unexpected command: {other:?}"),
+        }
+        assert!(matches!(
+            ok("pane.read", json!({"id": "p1", "lines": 42})),
+            CliCommand::Pane(PaneCommand::Read { .. })
+        ));
+        assert!(matches!(
+            ok("pane.close", json!({"id": "p1"})),
+            CliCommand::Pane(PaneCommand::Close { .. })
+        ));
+        assert!(matches!(
+            ok("pane.stop", json!({"id": "p1"})),
+            CliCommand::Pane(PaneCommand::Close { .. })
+        ));
+        assert!(matches!(
+            ok("pane.send", json!({"text": "hi"})),
+            CliCommand::Pane(PaneCommand::Send { .. })
+        ));
+    }
+
+    #[test]
+    fn search_parses_scopes_and_match_modes() {
+        match ok(
+            "search",
+            json!({
+                "query": "needle",
+                "scopes": ["specs", "issues", "files", "files_docs", "memory", "board", "discussions"],
+                "match_mode": "all_terms",
+                "n_results": 5,
+            }),
+        ) {
+            CliCommand::Search(command) => {
+                assert_eq!(command.query, "needle");
+                assert_eq!(command.scopes.len(), 7);
+                assert!(matches!(command.match_mode, IndexSearchMatchMode::AllTerms));
+                assert_eq!(command.n_results, Some(5));
+                assert!(command.json);
+                assert!(matches!(command.scopes[0], IndexSearchScope::Specs));
+            }
+            other => panic!("unexpected command: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn search_defaults_to_semantic_match_mode() {
+        match ok("search", json!({"query": "q"})) {
+            CliCommand::Search(command) => {
+                assert!(matches!(command.match_mode, IndexSearchMatchMode::Semantic));
+            }
+            other => panic!("unexpected command: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn search_rejects_unknown_scope_and_match_mode() {
+        assert!(matches!(
+            err("search", json!({"query": "q", "scopes": ["bogus"]})),
+            CliParseError::InvalidJson(_)
+        ));
+        assert!(matches!(
+            err("search", json!({"query": "q", "match_mode": "fuzzy"})),
+            CliParseError::InvalidJson(_)
+        ));
+    }
+
+    #[test]
+    fn required_string_missing_is_missing_flag() {
+        match err("issue.create", json!({"body": "b"})) {
+            CliParseError::MissingFlag(flag) => assert_eq!(flag, "title"),
+            other => panic!("unexpected error: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn optional_u64_accepts_numeric_string_and_rejects_garbage() {
+        assert!(matches!(
+            ok("issue.view", json!({"number": "37"})),
+            CliCommand::Issue(IssueCommand::View { .. })
+        ));
+        assert!(matches!(
+            err("issue.view", json!({"number": "not-a-number"})),
+            CliParseError::InvalidNumber(_)
+        ));
+        assert!(matches!(
+            err("issue.view", json!({"number": true})),
+            CliParseError::InvalidJson(_)
+        ));
+        match err("issue.view", json!({})) {
+            CliParseError::MissingFlag(flag) => assert_eq!(flag, "number"),
+            other => panic!("unexpected error: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn typed_helpers_reject_wrong_types() {
+        // optional_string wants a string
+        assert!(matches!(
+            err("board.show", json!({"workspace": 5})),
+            CliParseError::InvalidJson(_)
+        ));
+        // optional_bool wants a bool
+        assert!(matches!(
+            err("board.show", json!({"all": "yes"})),
+            CliParseError::InvalidJson(_)
+        ));
+        // optional_string_vec wants an array of non-empty strings
+        assert!(matches!(
+            err(
+                "issue.create",
+                json!({"title": "t", "body": "b", "labels": "x"})
+            ),
+            CliParseError::InvalidJson(_)
+        ));
+        assert!(matches!(
+            err(
+                "issue.create",
+                json!({"title": "t", "body": "b", "labels": [""]})
+            ),
+            CliParseError::InvalidJson(_)
+        ));
+        assert!(matches!(
+            err(
+                "issue.create",
+                json!({"title": "t", "body": "b", "labels": [5]})
+            ),
+            CliParseError::InvalidJson(_)
+        ));
+        // optional_u64_vec wants an array of u64
+        assert!(matches!(
+            err("issue.spec.pull", json!({"numbers": ["x"]})),
+            CliParseError::InvalidNumber(_)
+        ));
+        assert!(matches!(
+            err("issue.spec.pull", json!({"numbers": [true]})),
+            CliParseError::InvalidJson(_)
+        ));
+        assert!(matches!(
+            err("issue.spec.pull", json!({"numbers": 5})),
+            CliParseError::InvalidJson(_)
+        ));
+    }
+
+    #[test]
+    fn optional_u64_vec_accepts_numeric_strings() {
+        assert!(matches!(
+            ok("issue.spec.pull", json!({"numbers": ["1", 2]})),
+            CliCommand::Issue(IssueCommand::SpecPull { .. })
+        ));
+    }
+
+    #[test]
+    fn required_json_or_string_paths() {
+        // missing key
+        match err(
+            "issue.spec.create",
+            json!({"title": "t", "structured": true}),
+        ) {
+            CliParseError::MissingFlag(flag) => assert_eq!(flag, "body"),
+            other => panic!("unexpected error: {other:?}"),
+        }
+        // blank string is treated as missing
+        assert!(matches!(
+            err(
+                "issue.spec.create",
+                json!({"title": "t", "body": "   ", "structured": true})
+            ),
+            CliParseError::MissingFlag("body")
+        ));
+        // wrong type
+        assert!(matches!(
+            err(
+                "issue.spec.create",
+                json!({"title": "t", "body": 5, "structured": true})
+            ),
+            CliParseError::InvalidJson(_)
+        ));
+        // string body is accepted verbatim
+        assert!(matches!(
+            ok(
+                "issue.spec.create",
+                json!({"title": "t", "body": "raw", "structured": true})
+            ),
+            CliCommand::Issue(IssueCommand::SpecCreateJsonBody { .. })
+        ));
+    }
+
+    #[test]
+    fn null_values_fall_back_to_defaults() {
+        // Null optionals should behave as absent.
+        let command = ok(
+            "workspace.update",
+            json!({"agent_session": "s", "summary": Value::Null, "status": Value::Null}),
+        );
+        assert!(matches!(
+            command,
+            CliCommand::Workspace(WorkspaceCommand::Update { .. })
+        ));
+        assert!(matches!(
+            ok("index.rebuild", json!({"scope": Value::Null})),
+            CliCommand::Index(IndexCommand::Rebuild {
+                scope: IndexScope::All
+            })
+        ));
+    }
+}
