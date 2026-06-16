@@ -775,7 +775,7 @@ mod tests {
         let mut outdated = sample_thread();
         outdated.is_outdated = true;
         assert!(!should_reply_to_review_thread(&outdated, "reply"));
-        assert!(!should_resolve_review_thread(&outdated));
+        assert!(should_resolve_review_thread(&outdated));
     }
 
     #[test]

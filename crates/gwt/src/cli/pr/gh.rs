@@ -689,11 +689,13 @@ pub fn review_thread_has_comment_body(thread: &PrReviewThread, body: &str) -> bo
 }
 
 pub fn should_reply_to_review_thread(thread: &PrReviewThread, body: &str) -> bool {
-    should_resolve_review_thread(thread) && !review_thread_has_comment_body(thread, body)
+    should_resolve_review_thread(thread)
+        && !thread.is_outdated
+        && !review_thread_has_comment_body(thread, body)
 }
 
 pub fn should_resolve_review_thread(thread: &PrReviewThread) -> bool {
-    !thread.is_resolved && !thread.is_outdated
+    !thread.is_resolved
 }
 
 pub fn parse_pr_checks_items_json(json: &str) -> Result<Vec<PrCheckItem>, serde_json::Error> {
@@ -783,4 +785,28 @@ pub fn edit_or_create_repo_guard(owner: &str, repo: &str) -> io::Result<()> {
         ));
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn review_thread(is_resolved: bool, is_outdated: bool) -> PrReviewThread {
+        PrReviewThread {
+            id: "thread-1".to_string(),
+            is_resolved,
+            is_outdated,
+            path: "src/lib.rs".to_string(),
+            line: Some(12),
+            comments: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn unresolved_outdated_review_threads_are_still_resolution_targets() {
+        assert!(should_resolve_review_thread(&review_thread(false, true)));
+        assert!(should_resolve_review_thread(&review_thread(false, false)));
+        assert!(!should_resolve_review_thread(&review_thread(true, true)));
+        assert!(!should_resolve_review_thread(&review_thread(true, false)));
+    }
 }

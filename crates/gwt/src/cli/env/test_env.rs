@@ -238,12 +238,7 @@ impl CliEnv for TestEnv {
         let count = self
             .pr_review_threads
             .get(&number)
-            .map(|threads| {
-                threads
-                    .iter()
-                    .filter(|thread| !thread.is_resolved && !thread.is_outdated)
-                    .count()
-            })
+            .map(|threads| threads.iter().filter(|thread| !thread.is_resolved).count())
             .unwrap_or(0);
         Ok(count)
     }
