@@ -914,8 +914,10 @@ export function createWorkspaceKanbanSurface({
     if (detailPurpose && branchLabel) {
       appendMetaText(subtitle, branchLabel);
     }
-    if (workspace.merged_into_base) {
+    if (workspace.cleanup_candidate) {
       appendMetaText(subtitle, "Merged — safe to delete");
+    } else if (workspace.merged_into_base) {
+      appendMetaText(subtitle, "Merged");
     }
     appendMetaText(subtitle, statusLabel(workspace.status_category));
     appendMetaText(subtitle, workspace.owner);

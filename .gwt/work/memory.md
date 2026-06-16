@@ -6948,3 +6948,10 @@ Type: failure-pattern
 Context: SPEC-2359 T-604 full visual verification exposed unrelated regressions in hidden terminal output refresh, extracted Knowledge surface dependency injection, Profile env row identity/save snapshots, and stale E2E session-count expectations.
 Learning: Do not classify full visual failures as unrelated until each failing surface is reproduced and its root cause is tied to a static or browser contract. Extracted surfaces must receive all former app.js dependencies explicitly; delayed backend snapshots must not clobber newer UI drafts.
 Future Action: When full visual blocks SPEC verification, reproduce targeted specs first, fix deterministic implementation or test-contract causes, and add embedded_web_tests contracts for dependency injection and race guards before re-running the full suite.
+
+## 2026-06-16 — Workspace cleanup must consider live process cwd
+
+Type: failure-pattern
+Context: SPEC-2359 user verification on 2026-06-16 showed work/20260616-0203 displayed as cleanup-safe in a fresh browser-check while Codex processes still had cwd inside that worktree. The session ledger was Idle/Stop and the isolated browser-check HOME had no real session ledger entry.
+Learning: Idle session status and isolated browser-check state are insufficient for destructive cleanup gates. A merged Workspace can still be unsafe when any live OS process is running from that worktree.
+Future Action: For workspace cleanup/delete changes, add tests with a live process whose cwd is the candidate worktree and verify both action availability and UI copy in a fresh browser-check before asking for user confirmation.

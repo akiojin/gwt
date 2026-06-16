@@ -458,6 +458,52 @@ test("Workspace renderWindows refreshes legacy workspace preset windows", () => 
   );
 });
 
+test("Merged Workspace without a cleanup candidate does not claim it is safe to delete", () => {
+  const fixture = createFixture();
+  const surface = createSurface(fixture, {
+    id: "cleanup-projection",
+    title: "Cleanup projection",
+    status_category: "idle",
+    active_work_count: 1,
+    active_works: [
+      {
+        id: "work-live-cwd",
+        title: "work/20260616-0203",
+        status_category: "idle",
+        lifecycle_state: "paused",
+        merged_into_base: true,
+        cleanup_candidate: null,
+        branch: "work/20260616-0203",
+        worktree_path: "/repo/work/20260616-0203",
+        agents: [],
+      },
+    ],
+  });
+
+  surface.mount(fixture.body, fixture.windowData, {
+    focusWindowLocally() {},
+    sendFocus() {},
+  });
+
+  const row = fixture.body.querySelector(
+    '.workspace-overview-row[data-workspace-id="work-live-cwd"]',
+  );
+  assert.ok(row, "expected the merged Workspace row to remain visible");
+  assert.match(row.textContent, /Merged/, "merged badge remains visible");
+  const detailText = fixture.body
+    .querySelector(".workspace-overview-detail-pane")
+    .textContent.replace(/\s+/g, " ");
+  assert.doesNotMatch(detailText, /safe to delete/i);
+  assert.equal(
+    fixture.body.querySelector("[data-action='cleanup-merged-workspace']"),
+    null,
+  );
+  assert.equal(
+    fixture.body.querySelector("[data-action='cleanup-merged-workspaces']"),
+    null,
+  );
+});
+
 test("Work surface renders a lifecycle_state badge on each Work row (SPEC-2359 W-12 FR-351)", () => {
   const fixture = createFixture();
   const surface = createSurface(fixture, {
@@ -1713,9 +1759,10 @@ test("ArrowDown / ArrowUp move the Workspace list selection", () => {
   );
 });
 
-// SPEC-2359 W-15 (FR-386): the "safe to delete" signal — a merged Workspace
-// shows a Merged badge on its row and the detail subtitle says so.
-test("merged Workspace shows the safe-to-delete badge", () => {
+// SPEC-2359 W-15 / US-78: a merged Workspace always shows the Merged badge,
+// while the stronger safe-to-delete signal is reserved for backend-vetted
+// cleanup candidates.
+test("cleanup-candidate Workspace shows the safe-to-delete detail signal", () => {
   const fixture = createFixture();
   const surface = createSurface(
     fixture,
@@ -1732,6 +1779,13 @@ test("merged Workspace shows the safe-to-delete badge", () => {
           lifecycle_state: "paused",
           branch: "work/merged",
           merged_into_base: true,
+          cleanup_candidate: {
+            branch: "work/merged",
+            worktree_path: "/repo/work/merged",
+            reason: "pr_merged",
+            default_delete_remote: false,
+            remote_delete_available: true,
+          },
           active_agents: 0,
           blocked_agents: 0,
           agents: [],

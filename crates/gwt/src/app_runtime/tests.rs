@@ -85,6 +85,17 @@ struct CaptureTracingVisitor {
     fields: HashMap<String, String>,
 }
 
+#[cfg(unix)]
+struct KillOnDrop(std::process::Child);
+
+#[cfg(unix)]
+impl Drop for KillOnDrop {
+    fn drop(&mut self) {
+        let _ = self.0.kill();
+        let _ = self.0.wait();
+    }
+}
+
 impl CaptureTracingVisitor {
     fn insert(&mut self, field: &tracing::field::Field, value: impl ToString) {
         self.fields
@@ -8586,6 +8597,64 @@ fn app_runtime_row_cleanup_candidate_hides_grouped_live_agent_branch() {
     assert_eq!(
         row.cleanup_candidate, None,
         "grouped row with live Agent on the same branch must not be cleanable"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn app_runtime_row_cleanup_candidate_hides_workspace_with_live_cwd_process() {
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedEnvVar::set("HOME", temp.path());
+    let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+    let repo = temp.path().join("repo");
+    let worktree = repo.join("work/20260616-0203");
+    fs::create_dir_all(&worktree).expect("create worktree");
+    gwt_core::workspace_projection::record_workspace_work_event(&repo, {
+        let mut event = gwt_core::workspace_projection::WorkEvent::new(
+            gwt_core::workspace_projection::WorkEventKind::Update,
+            "work-live-cwd-cleanup-row",
+            chrono::Utc::now(),
+        );
+        event.title = Some("Merged live cwd row".to_string());
+        event.execution_container = Some(
+            gwt_core::workspace_projection::WorkspaceExecutionContainerRef {
+                branch: Some("work/20260616-0203".to_string()),
+                worktree_path: Some(worktree.clone()),
+                pr_number: Some(3108),
+                pr_url: None,
+                pr_state: Some("MERGED".to_string()),
+            },
+        );
+        event
+    })
+    .expect("record work");
+    let _child = KillOnDrop(
+        std::process::Command::new("sh")
+            .arg("-c")
+            .arg("sleep 30")
+            .current_dir(&worktree)
+            .spawn()
+            .expect("spawn cwd process"),
+    );
+    let tab = sample_project_tab("tab-1", "Repo", repo.clone(), ProjectKind::Git, &[]);
+    let runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+
+    let view = runtime
+        .active_work_projection_for_tab("tab-1", &runtime.tabs[0])
+        .expect("projection view");
+    let row = view
+        .active_works
+        .iter()
+        .find(|work| work.branch.as_deref() == Some("work/20260616-0203"))
+        .expect("merged Workspace row");
+
+    assert!(row.merged_into_base, "merged badge remains visible");
+    assert_eq!(
+        row.cleanup_candidate, None,
+        "Workspace whose worktree is still an agent process cwd must not be cleanable"
     );
 }
 

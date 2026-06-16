@@ -23,8 +23,10 @@
 //! Behavior-preserving move: `INFLIGHT_LAUNCH_TTL` / `inflight_launch_key`
 //! are launch-side and stay in `mod.rs` (Pass 2 moves them to `launch.rs`).
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
+
+use sysinfo::{ProcessRefreshKind, ProcessesToUpdate, System, UpdateKind};
 
 use super::{
     active_agent_summary_from_session, current_git_branch, local_branch_exists,
@@ -1608,6 +1610,7 @@ pub(super) fn mark_merged_active_works(
 pub(super) fn mark_workspace_cleanup_candidates(
     active_works: &mut [gwt::ActiveWorkItemView],
     sessions: &[&ActiveAgentSession],
+    live_process_worktree_paths: &HashSet<PathBuf>,
 ) {
     for work in active_works.iter_mut() {
         work.cleanup_candidate = None;
@@ -1628,6 +1631,12 @@ pub(super) fn mark_workspace_cleanup_candidates(
         }) {
             continue;
         }
+        if worktree_path
+            .and_then(normalize_existing_worktree_path)
+            .is_some_and(|path| live_process_worktree_paths.contains(&path))
+        {
+            continue;
+        }
         work.cleanup_candidate = Some(gwt::ActiveWorkCleanupCandidateView {
             branch: branch.to_string(),
             worktree_path: work.worktree_path.clone(),
@@ -1638,6 +1647,76 @@ pub(super) fn mark_workspace_cleanup_candidates(
             remote_delete_available: true,
         });
     }
+}
+
+fn live_process_worktree_paths_for_cleanup(
+    active_works: &[gwt::ActiveWorkItemView],
+    projection_cleanup_candidate: Option<&gwt::ActiveWorkCleanupCandidateView>,
+) -> HashSet<PathBuf> {
+    let mut candidate_paths = active_works
+        .iter()
+        .filter(|work| work.merged_into_base && !work.remote_only)
+        .filter(|work| {
+            work.branch
+                .as_deref()
+                .map(normalize_branch_name)
+                .is_some_and(|branch| branch.starts_with("work/"))
+        })
+        .filter_map(|work| {
+            work.worktree_path
+                .as_deref()
+                .map(Path::new)
+                .and_then(normalize_existing_worktree_path)
+        })
+        .collect::<Vec<_>>();
+    if let Some(path) = projection_cleanup_candidate
+        .and_then(|candidate| candidate.worktree_path.as_deref())
+        .map(Path::new)
+        .and_then(normalize_existing_worktree_path)
+    {
+        candidate_paths.push(path);
+    }
+    candidate_paths.sort();
+    candidate_paths.dedup();
+    if candidate_paths.is_empty() {
+        return HashSet::new();
+    }
+
+    let mut system = System::new();
+    system.refresh_processes_specifics(
+        ProcessesToUpdate::All,
+        true,
+        ProcessRefreshKind::nothing().with_cwd(UpdateKind::Always),
+    );
+
+    let mut live_paths = HashSet::new();
+    for process in system.processes().values() {
+        let Some(cwd) = process.cwd().and_then(normalize_existing_worktree_path) else {
+            continue;
+        };
+        for candidate in &candidate_paths {
+            if cwd == *candidate || cwd.starts_with(candidate) {
+                live_paths.insert(candidate.clone());
+            }
+        }
+    }
+    live_paths
+}
+
+fn normalize_existing_worktree_path(path: &Path) -> Option<PathBuf> {
+    dunce::canonicalize(path).ok()
+}
+
+fn cleanup_candidate_has_live_process(
+    candidate: &gwt::ActiveWorkCleanupCandidateView,
+    live_process_worktree_paths: &HashSet<PathBuf>,
+) -> bool {
+    candidate
+        .worktree_path
+        .as_deref()
+        .map(Path::new)
+        .and_then(normalize_existing_worktree_path)
+        .is_some_and(|path| live_process_worktree_paths.contains(&path))
 }
 
 fn paused_work_agent_view_from_history(
@@ -2005,7 +2084,20 @@ impl AppRuntime {
                 &mut view.active_works,
                 self.local_worktree_branches.borrow().get(&tab.project_root),
             );
-            mark_workspace_cleanup_candidates(&mut view.active_works, &sessions);
+            let live_process_worktree_paths = live_process_worktree_paths_for_cleanup(
+                &view.active_works,
+                view.cleanup_candidate.as_ref(),
+            );
+            if view.cleanup_candidate.as_ref().is_some_and(|candidate| {
+                cleanup_candidate_has_live_process(candidate, &live_process_worktree_paths)
+            }) {
+                view.cleanup_candidate = None;
+            }
+            mark_workspace_cleanup_candidates(
+                &mut view.active_works,
+                &sessions,
+                &live_process_worktree_paths,
+            );
             return Some(view);
         }
 
