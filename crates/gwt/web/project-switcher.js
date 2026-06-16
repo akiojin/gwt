@@ -1,4 +1,5 @@
 const AGENT_WINDOW_PRESETS = new Set(["agent", "claude", "codex"]);
+const XTERM_HELPER_TEXTAREA_CLASS = "xterm-helper-textarea";
 
 function normalizeRuntimeState(value) {
   return String(value || "").toLowerCase();
@@ -29,6 +30,9 @@ function runningAgentWindows(tab, runtimeStateForWindow) {
 
 function isEditableTarget(target) {
   if (!target) {
+    return false;
+  }
+  if (target.classList?.contains?.(XTERM_HELPER_TEXTAREA_CLASS)) {
     return false;
   }
   const tagName = String(target.tagName || "").toLowerCase();

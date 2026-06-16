@@ -63,8 +63,11 @@ test("nextProjectTabId cycles through open project tabs with arrow direction", (
 });
 
 test("project switcher shortcut accepts Shift+Cmd+Up/Down and Shift+Cmd+P without stealing editable input", () => {
-  const { document } = parseHTML("<input id='field'><main></main>");
+  const { document } = parseHTML(
+    "<input id='field'><textarea class='xterm-helper-textarea'></textarea><main></main>",
+  );
   const input = document.getElementById("field");
+  const xtermHelper = document.querySelector(".xterm-helper-textarea");
 
   assert.equal(
     shouldHandleProjectSwitcherShortcut(
@@ -106,6 +109,20 @@ test("project switcher shortcut accepts Shift+Cmd+Up/Down and Shift+Cmd+P withou
       { projectCount: 2 },
     ),
     false,
+  );
+  assert.equal(
+    shouldHandleProjectSwitcherShortcut(
+      keyboardEvent(document, "ArrowDown", { target: xtermHelper }),
+      { projectCount: 2 },
+    ),
+    true,
+  );
+  assert.equal(
+    shouldHandleProjectSwitcherShortcut(
+      keyboardEvent(document, "P", { target: xtermHelper }),
+      { projectCount: 2 },
+    ),
+    true,
   );
 });
 
