@@ -1,7 +1,7 @@
 //! Index audit logging (SPEC-1942 SC-027 split).
 //!
-//! Append-only JSONL audit events for `gwtd index status` / `gwtd index
-//! rebuild`: status snapshots, rebuild start / progress / result, and runner
+//! Append-only JSONL audit events for `index.status` / `index.rebuild`: status
+//! snapshots, rebuild start / progress / result, and runner
 //! failure detail. Each event is written under
 //! `gwt_project_logs_dir_for_project_path/<date>.log`.
 

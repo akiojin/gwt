@@ -10,8 +10,8 @@ SPEC-2041 FR-066 codifies this gate: **CI green is not done. Phase 19
 PRs may not be marked closed until this checklist passes on a release
 candidate.**
 
-Record the outcome in the Board
-(`gwtd board post --kind status --body ...`) and reference SPEC-2041
+Record the outcome in the Board with JSON operation `board.post`
+and reference SPEC-2041
 Phase 19 (FR-066, SC-014d).
 
 ## Prerequisites
@@ -120,13 +120,28 @@ Phase 19 (FR-066, SC-014d).
 
 Post a single Board entry summarising the outcome:
 
+```bash
+gwtd <<'JSON'
+{
+  "schema_version": 1,
+  "operation": "board.post",
+  "params": {
+    "kind": "status",
+    "body": "<paste the Message body block below>"
+  }
+}
+JSON
 ```
-gwtd board post --kind status --body $'SPEC-2041 Phase 19 Gate 3 manual smoke result:
+
+Message body:
+
+```text
+SPEC-2041 Phase 19 Gate 3 manual smoke result:
 - 3.A Restart-now: PASS / FAIL
 - 3.B Later + next-launch swap: PASS / FAIL
 - 3.C Failure UX: PASS / FAIL
 - 3.D Cancel mid-download: PASS / FAIL
-Notes: <free-form observations, screenshots, log excerpts as needed>'
+Notes: <free-form observations, screenshots, log excerpts as needed>
 ```
 
 If any sub-gate fails, do not merge dependent work and reopen the

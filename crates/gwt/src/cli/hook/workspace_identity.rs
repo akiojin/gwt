@@ -12,10 +12,10 @@ use super::HookError;
 
 /// SessionStart hook: ensure the running agent session is present in the
 /// Workspace projection's `agents[]` before any further coordination CLI
-/// runs. Without this, `gwtd workspace update --agent-session ... --title-summary ...`
-/// silently no-ops because `apply_update`'s session matcher finds nothing
-/// to update (only a journal entry is written, and no `WindowCanvasState`
-/// broadcast fires).
+/// runs. Without this, the JSON `workspace.update` operation for the
+/// running session silently no-ops because `apply_update`'s session matcher
+/// finds nothing to update (only a journal entry is written, and no
+/// `WindowCanvasState` broadcast fires).
 ///
 /// Registration is idempotent: if the launch flow has already registered
 /// the session (with `Assigned` affiliation, a workspace_id, etc.) we
@@ -130,12 +130,12 @@ fn workspace_agent_summary_from_session(
 /// SPEC-2359 Phase W-11 (US-58 / US-59 / FR-341): this hook no longer
 /// derives `title_summary` / `current_focus` from the prompt. Writing the
 /// raw prompt into the title produced titles like "あなたの目的は何ですか"
-/// instead of the work purpose. The agent now authors the purpose via
-/// `gwtd workspace update --title-summary` (provisional → confirmed), and
-/// the title sync layer resolves empty values through the display fallback.
+/// instead of the work purpose. The agent now authors the purpose via the
+/// JSON `workspace.update` operation (provisional → confirmed), and the
+/// title sync layer resolves empty values through the display fallback.
 ///
 /// The hook still performs the Phase W-10 (US-57) canonical Project State
-/// split repair so that a later `gwtd workspace update --agent-session`
+/// split repair so that a later `workspace.update` JSON operation
 /// from the agent reaches the projection record that owns the live window.
 pub(crate) fn handle_user_prompt_submit(_input: &str) -> Result<(), HookError> {
     let Some(session) = current_session_from_env()? else {

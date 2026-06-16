@@ -1,4 +1,4 @@
-//! `gwtd pr ...` family module (SPEC-1942 SC-027 split).
+//! `pr.*` JSON operation family module (SPEC-1942 SC-027 split).
 //!
 //! - `mod.rs` (this file): argv `parse`, dispatch `run`, render helpers, and
 //!   the family `tests` block.
@@ -113,6 +113,22 @@ pub(super) fn run<E: CliEnv>(
             render_pr(out, &pr);
             0
         }
+        PrCommand::CreateBody {
+            base,
+            head,
+            title,
+            body,
+            labels,
+            draft,
+        } => {
+            let pr = env
+                .create_pr(&base, head.as_deref(), &title, &body, &labels, draft)
+                .map_err(super::io_as_api_error)?;
+            sync_workspace_pr_metadata(env, &pr, head.as_deref());
+            out.push_str("created pull request\n");
+            render_pr(out, &pr);
+            0
+        }
         PrCommand::Edit {
             number,
             title,
@@ -130,6 +146,19 @@ pub(super) fn run<E: CliEnv>(
             render_pr(out, &pr);
             0
         }
+        PrCommand::EditBody {
+            number,
+            title,
+            body,
+            add_labels,
+        } => {
+            let pr = env
+                .edit_pr(number, title.as_deref(), body.as_deref(), &add_labels)
+                .map_err(super::io_as_api_error)?;
+            out.push_str("updated pull request\n");
+            render_pr(out, &pr);
+            0
+        }
         PrCommand::View { number } => {
             let pr = env.fetch_pr(number).map_err(super::io_as_api_error)?;
             render_pr(out, &pr);
@@ -137,6 +166,12 @@ pub(super) fn run<E: CliEnv>(
         }
         PrCommand::Comment { number, file } => {
             let body = env.read_file(&file).map_err(super::io_as_api_error)?;
+            env.comment_on_pr(number, &body)
+                .map_err(super::io_as_api_error)?;
+            out.push_str(&format!("created comment on PR #{number}\n"));
+            0
+        }
+        PrCommand::CommentBody { number, body } => {
             env.comment_on_pr(number, &body)
                 .map_err(super::io_as_api_error)?;
             out.push_str(&format!("created comment on PR #{number}\n"));
@@ -158,6 +193,15 @@ pub(super) fn run<E: CliEnv>(
         }
         PrCommand::ReviewThreadsReplyAndResolve { number, file } => {
             let body = env.read_file(&file).map_err(super::io_as_api_error)?;
+            let resolved = env
+                .reply_and_resolve_pr_review_threads(number, &body)
+                .map_err(super::io_as_api_error)?;
+            out.push_str(&format!(
+                "replied to and resolved {resolved} review threads on PR #{number}\n"
+            ));
+            0
+        }
+        PrCommand::ReviewThreadsReplyAndResolveBody { number, body } => {
             let resolved = env
                 .reply_and_resolve_pr_review_threads(number, &body)
                 .map_err(super::io_as_api_error)?;

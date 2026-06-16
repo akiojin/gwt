@@ -100,8 +100,8 @@ fn generate_coordination_guidance_writes_skill_for_claude_and_codex() {
             .unwrap_or_else(|e| panic!("read {}: {e}", skill_md.display()));
         assert!(content.contains("gwt-coordination"));
         assert!(
-            content.contains("gwtd board post"),
-            "guidance must instruct Board posting via gwtd"
+            content.contains("\"operation\":\"board.post\""),
+            "guidance must instruct Board posting via gwtd JSON envelopes"
         );
     }
 }
@@ -111,7 +111,7 @@ fn render_skill_md_embeds_frontmatter_name_and_description() {
     let md = render_skill_md();
     assert!(md.starts_with("---\n"), "must start with YAML frontmatter");
     assert!(md.contains("name: gwt-coordination"));
-    assert!(md.contains("gwtd board post"));
+    assert!(md.contains("\"operation\":\"board.post\""));
 }
 
 #[test]

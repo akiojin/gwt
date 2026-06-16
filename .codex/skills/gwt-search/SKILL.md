@@ -5,15 +5,18 @@ description: "Mandatory preflight before gwt-discussion, gwt-register-issue, and
 
 # Unified Search
 
-gwt maintains ChromaDB vector search indexes for four scopes (Phase 8 layout
-plus SPEC-2805 Memory):
+gwt maintains ChromaDB vector search indexes for the scopes below (Phase 8
+layout plus SPEC-2805 Memory):
 
 | Scope | Content | Lifecycle |
 |-------|---------|-----------|
-| SPECs | GitHub Issue cache (`~/.gwt/cache/issues/`) | Populated by `gwtd issue spec pull` or gwt GUI startup sync |
+| SPECs | GitHub Issue cache (`~/.gwt/cache/issues/`) | Populated by JSON operation `issue.spec.pull` or gwt GUI startup sync |
 | Issues | GitHub Issues (all states) | gwt GUI startup async refresh (TTL 15 min) + auto-build on first search |
 | Files | Project implementation files (excludes skill assets, SPEC trees, snapshots) | Per-worktree watcher (gwt GUI) + auto-build on first search |
+| Project docs | Project documentation files | Per-worktree watcher (gwt GUI) + auto-build on first search |
 | Memory | Post-mortem entries in `.gwt/work/memory.md` | Pinpoint allowlist watcher on `.gwt/work/memory.md` + auto-build on first search |
+| Board | Coordination Board entries | Repo-local event log + auto-build on first search |
+| Discussions | Git-managed discussion notes | Repo-local discussion notes + auto-build on first search |
 
 All vector data is stored under `~/.gwt/index/<repo-hash>/...`. Issues,
 SPECs, and Memory are repo-scoped and shared across worktrees; Files
@@ -33,53 +36,58 @@ then `$GWT_PROJECT_ROOT/target/debug/gwtd` or `./target/debug/gwtd`. Run the
 command as `"$GWT_BIN" ...`; if none exists, stop with an actionable
 `gwtd not found` error.
 
-## Quick reference
+## Quick Reference
 
 `gwt-search` is a skill, not a PATH executable. Never resolve it with
 `command -v` or `Get-Command` — the lookup finds nothing by design, and
 an empty lookup does not mean the tooling is missing. The executable
-command is the `search` family of the resolved `GWT_BIN` (SPEC-1942
-US-15). Run it from inside the target worktree; the repo is resolved from
-the current directory.
+entrypoint is a `search` JSON operation sent to the resolved `GWT_BIN`
+(SPEC-1942 US-15). Run it from inside the target worktree; the repo is
+resolved from the current directory.
 
 ```bash
-"$GWT_BIN" search "query" --json               # search all scopes (default merge)
-"$GWT_BIN" search --specs "query" --json       # SPECs only
-"$GWT_BIN" search --issues "query" --json      # GitHub Issues only
-"$GWT_BIN" search --files "query" --json       # implementation files only
-"$GWT_BIN" search --files-docs "query" --json  # project docs only
-"$GWT_BIN" search --memory "query" --json      # post-mortem memory only
+"$GWT_BIN" <<'JSON'
+{"schema_version":1,"operation":"search","params":{"query":"query","n_results":10}}
+JSON
+
+"$GWT_BIN" <<'JSON'
+{"schema_version":1,"operation":"search","params":{"query":"query","scopes":["specs"],"n_results":10}}
+JSON
 ```
 
-## Filter options
+## Filter Parameters
 
-| Flag | Scope |
-|------|-------|
-| (none) | All scopes merged (same default as the GUI search window) |
-| `--specs` | SPEC Issues only |
-| `--issues` | GitHub Issues only |
-| `--files` | Implementation files only |
-| `--files-docs` | Project docs only |
-| `--memory` | Post-mortem memory only |
-| `--board` | Coordination Board entries only |
-| `--discussions` | Git-managed discussion notes only |
+| JSON parameter | Scope |
+|----------------|-------|
+| omit `params.scopes` | All scopes merged (same default as the GUI search window) |
+| `"scopes":["specs"]` | SPEC Issues only |
+| `"scopes":["issues"]` | GitHub Issues only |
+| `"scopes":["files"]` | Implementation files only |
+| `"scopes":["files_docs"]` | Project docs only |
+| `"scopes":["memory"]` | Post-mortem memory only |
+| `"scopes":["board"]` | Coordination Board entries only |
+| `"scopes":["discussions"]` | Git-managed discussion notes only |
 
-Scope flags are repeatable and merge: `--issues --specs` searches both.
-Additional options: `--n-results <n>` limits the result count, `--json`
-emits machine-readable JSON (recommended for agents), and
-`--match-mode semantic|all_terms` selects the match mode.
+Scopes merge by listing multiple values, such as
+`"scopes":["issues","specs"]`. `params.n_results` limits the result count,
+and `params.match_mode:"semantic"|"all_terms"` selects the match mode.
 
 ## Match modes
 
-Use the default semantic mode for broad discovery. Use `--match-mode all_terms`
+Use the default semantic mode for broad discovery. Use `params.match_mode:"all_terms"`
 when the user or task needs FAQ-style precision and every whitespace-separated
 term or quoted phrase must be present in a strict result.
 
 Examples:
 
 ```bash
-"$GWT_BIN" search --match-mode all_terms "Workspace 置き換え" --json
-"$GWT_BIN" search --match-mode all_terms "\"Project State\" migration" --json
+"$GWT_BIN" <<'JSON'
+{"schema_version":1,"operation":"search","params":{"query":"Workspace 置き換え","match_mode":"all_terms","n_results":10}}
+JSON
+
+"$GWT_BIN" <<'JSON'
+{"schema_version":1,"operation":"search","params":{"query":"\"Project State\" migration","match_mode":"all_terms","n_results":10}}
+JSON
 ```
 
 In `all_terms` mode, strict results must satisfy every required term. Semantic
@@ -97,12 +105,12 @@ they must not be treated as strict matches.
 ```
 
 - `target` is a kind-tagged locator (`issue`, `spec`, `memory`, `discussion`,
-  `board`, `file`) for follow-up reads (`gwtd issue spec <n>`, file paths,
-  memory headings).
+  `board`, `file`) for follow-up reads with JSON operations such as
+  `issue.spec.read`, file paths, or memory headings.
 - In `all_terms` mode, results may carry `matched_terms` / `missing_terms`,
   and semantic non-strict hits arrive in `suggestions`.
-- Without `--json`, a human-readable `[scope] distance title — subtitle` list
-  is printed instead.
+- The JSON envelope entrypoint always returns the machine-readable envelope
+  response expected by agents.
 
 ## Interpreting results
 
@@ -118,8 +126,13 @@ and then returns results — the first call on a fresh checkout may take
 noticeably longer. To force a rebuild explicitly:
 
 ```bash
-"$GWT_BIN" index rebuild --scope all
-"$GWT_BIN" index rebuild --scope issues   # or specs|memory|discussions|board|files|files-docs
+"$GWT_BIN" <<'JSON'
+{"schema_version":1,"operation":"index.rebuild","params":{"scope":"all"}}
+JSON
+
+"$GWT_BIN" <<'JSON'
+{"schema_version":1,"operation":"index.rebuild","params":{"scope":"issues"}}
+JSON
 ```
 
 ## Empty corpus is a tooling failure, not "no results"
@@ -132,7 +145,7 @@ cause duplicate creation.
 
 When you see `EMPTY_CORPUS`, **do not conclude that no owner exists.** Refresh
 the issue cache (open the project in the gwt GUI to sync, or run
-`gwtd issue spec pull --all`) and retry the search. Only a successful result
+JSON operation `issue.spec.pull` with `{"all":true}`) and retry the search. Only a successful result
 with an empty list from a *populated* cache means the repository genuinely has
 no matching SPEC/Issue.
 
@@ -188,17 +201,16 @@ Use 2-3 queries with different angles for thorough coverage:
 
 ## Minimum search workflow
 
-1. Resolve `GWT_BIN`, then run `"$GWT_BIN" search ... --json` with 2-3
-   semantic queries derived from the request
+1. Resolve `GWT_BIN`, then run `search` JSON envelopes with 2-3 semantic
+   queries derived from the request
 2. A missing index is auto-built on the first call
 3. Pick the canonical existing spec, issue, or memory if found
 4. Only fall back to creating a new spec or issue when no suitable canonical match exists
 
 ## Fallback: direct runner invocation (older binaries only)
 
-Only when `"$GWT_BIN" search` fails with `unknown command 'search'` (a gwtd
-binary older than the search family, SPEC-1942 US-15), call the embedded
-Python runner directly:
+Only when the `search` JSON operation is unavailable in an older gwtd binary,
+call the embedded Python runner directly:
 
 ```bash
 PYTHON=~/.gwt/runtime/chroma-venv/bin/python3   # Windows: ~/.gwt/runtime/chroma-venv/Scripts/python.exe

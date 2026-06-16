@@ -11,11 +11,13 @@ gwt は二つの Rust バイナリ — `gwt` (GUI フロントドア) と `gwtd`
   - **`gwt`**: Wry + Tao ベースのネイティブ GUI、ローカル
     HTTP/WebSocket サーバー、WebView / ブラウザ共通のキャンバス UI、
     フックの outward-facing 入口 (`gwt hook ...`)
-  - **`gwtd`**: 同じクレート内で生成される CLI バイナリ
-    (`gwtd issue ...` / `gwtd pr ...` / `gwtd board ...` /
-    `gwtd actions ...` / `gwtd daemon ...`)。`gwtd daemon start` は
+  - **`gwtd`**: 同じクレート内で生成される JSON envelope CLI バイナリ
+    (`issue.*` / `pr.*` / `board.*` /
+    `actions.*` / `daemon.*` operations)。JSON operation `daemon.start` は
     Unix ドメインソケット経由でプロジェクト単位の runtime daemon を
-    bootstrap する (SPEC-2077 Phase H1)
+    bootstrap する (SPEC-2077 Phase H1)。Managed hook dispatch は例外で、
+    provider hooks は dedicated transport `gwtd hook event <Event>` /
+    `gwtd hook provider-event <provider> <native-event>` を使い続ける
 - `crates/gwt-core/`
   - Git / worktree / 設定 / ログ / coordination / index ランタイム、
     daemon 契約 (`DaemonEndpoint` / `ClientFrame` / `DaemonFrame` の
@@ -31,7 +33,7 @@ gwt は二つの Rust バイナリ — `gwt` (GUI フロントドア) と `gwtd`
 
 1. `gwt` を GUI モードで起動すると、ネイティブウィンドウとローカル
    HTTP/WebSocket サーバーが立ち上がる。 multi-instance daemon
-   (`gwtd daemon start`) は別途ユーザーが起動するため、 GUI 起動
+   (`daemon.start` JSON operation) は別途ユーザーが起動するため、 GUI 起動
    それ自体は IPC サーバーを bring up しない (詳細は step 5)
 2. WebView は同じサーバーへ接続し、キャンバス上のウィンドウ状態を
    同期する
@@ -39,7 +41,7 @@ gwt は二つの Rust バイナリ — `gwt` (GUI フロントドア) と `gwtd`
 4. `Branches` / `File Tree` / `Issue` などのウィンドウは Rust 側で
    データを集約し、フロントエンドへ送る
 5. multi-instance 同期 (例: Board 投稿の即時反映) を有効にするには、
-   ユーザーが明示的に `gwtd daemon start` を実行して常駐 IPC
+   ユーザーが明示的に JSON operation `daemon.start` を実行して常駐 IPC
    サーバーを立ち上げる。 daemon が live な間、 GUI ハンドラは
    `daemon_publisher::publish_event` で `ClientFrame::Publish {
    channel: "board", .. }` を発火し、 同じプロジェクトの他
@@ -47,10 +49,10 @@ gwt は二つの Rust バイナリ — `gwt` (GUI フロントドア) と `gwtd`
    遅延なく UI に反映される (SPEC-2077 Phase H1)。 daemon が起動
    していない場合は publish が `Err("daemon not running")` を返し、
    ローカルの workspace-state が引き続き source of truth となる
-6. `gwtd issue ...` などの CLI サブコマンドは GUI を起動せず、
+6. `gwtd` JSON operations は GUI を起動せず、
    同じバイナリ内で完結する。 Windows では daemon は未実装で
-   `gwtd daemon start` が "not yet implemented" を返すため、
-   multi-instance fan-out は利用できない (`gwtd daemon status` は
+   JSON operation `daemon.start` が "not yet implemented" を返すため、
+   multi-instance fan-out は利用できない (`daemon.status` は
    常に `stopped` を返す)
 
 ## Persistence

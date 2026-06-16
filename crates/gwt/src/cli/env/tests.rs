@@ -12,8 +12,13 @@ use std::{
     },
 };
 
+use gwt_agent::session::GWT_SESSION_ID_ENV;
+use gwt_core::workspace_projection::load_or_default_workspace_projection;
 use gwt_git::PrStatus;
-use gwt_github::{client::fake::FakeIssueClient, IssueNumber, SpecListFilter};
+use gwt_github::{
+    client::{fake::FakeIssueClient, IssueClient},
+    IssueNumber, SpecListFilter,
+};
 
 use super::*;
 
@@ -373,6 +378,181 @@ fn test_env_records_io_and_pr_side_effects() {
             stdin: String::new(),
         }
     );
+}
+
+#[test]
+fn dispatch_accepts_json_envelope_workspace_update_without_argv_flags() {
+    let _env_lock = crate::env_test_lock().lock().expect("env lock");
+    let temp = tempfile::tempdir().expect("tempdir");
+    let home = tempfile::tempdir().expect("home tempdir");
+    let _home = crate::cli::test_support::ScopedEnvVar::set("HOME", home.path());
+    let _session = crate::cli::test_support::ScopedEnvVar::unset(GWT_SESSION_ID_ENV);
+    let mut env = TestEnv::new(temp.path().to_path_buf());
+    env.stdin = r#"{
+        "schema_version": 1,
+        "operation": "workspace.update",
+        "params": {
+            "agent_session": "session-json",
+            "purpose": "JSON envelope contract",
+            "current_focus": "writing RED tests"
+        }
+    }"#
+    .to_string();
+
+    let code = dispatch(&mut env, &["gwtd".to_string()]);
+
+    assert_eq!(
+        code,
+        0,
+        "JSON envelope dispatch should succeed, stderr: {}",
+        String::from_utf8_lossy(&env.stderr)
+    );
+    let stdout: serde_json::Value =
+        serde_json::from_slice(&env.stdout).expect("parse JSON envelope response");
+    assert_eq!(
+        stdout.get("ok").and_then(|value| value.as_bool()),
+        Some(true),
+        "JSON envelope output must be machine-readable success JSON, got: {}",
+        String::from_utf8_lossy(&env.stdout)
+    );
+    let projection =
+        load_or_default_workspace_projection(temp.path()).expect("load workspace projection");
+    let agent = projection
+        .agents
+        .iter()
+        .find(|agent| agent.session_id == "session-json")
+        .expect("agent upserted by workspace update");
+    assert_eq!(
+        agent.title_summary.as_deref(),
+        Some("JSON envelope contract")
+    );
+    assert_eq!(agent.current_focus.as_deref(), Some("writing RED tests"));
+}
+
+#[test]
+fn dispatch_json_envelope_board_post_rejects_purpose_fields() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let mut env = TestEnv::new(temp.path().to_path_buf());
+    env.stdin = r#"{
+        "schema_version": 1,
+        "operation": "board.post",
+        "params": {
+            "kind": "status",
+            "body": "現在の状態: Board投稿です。",
+            "purpose": "Should not update title"
+        }
+    }"#
+    .to_string();
+
+    let code = dispatch(&mut env, &["gwtd".to_string()]);
+
+    assert_eq!(code, 2);
+    let stderr = String::from_utf8(env.stderr.clone()).expect("stderr utf8");
+    assert!(
+        stderr.contains("board.post") && stderr.contains("purpose"),
+        "JSON envelope must reject Board purpose mutation, got: {stderr}"
+    );
+}
+
+#[test]
+fn dispatch_json_envelope_actions_logs_uses_json_params() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let mut env = TestEnv::new(temp.path().to_path_buf());
+    env.seed_run_log(273, "run log from JSON envelope");
+    env.stdin = r#"{
+        "schema_version": 1,
+        "operation": "actions.logs",
+        "params": {
+            "run_id": 273
+        }
+    }"#
+    .to_string();
+
+    let code = dispatch(&mut env, &["gwtd".to_string()]);
+
+    assert_eq!(
+        code,
+        0,
+        "actions.logs JSON envelope should succeed, stderr: {}",
+        String::from_utf8_lossy(&env.stderr)
+    );
+    assert_eq!(env.run_log_call_log, vec![273]);
+    let stdout = String::from_utf8(env.stdout.clone()).expect("stdout utf8");
+    assert!(stdout.contains(r#""operation":"actions.logs""#), "{stdout}");
+    assert!(stdout.contains("run log from JSON envelope"), "{stdout}");
+}
+
+#[test]
+fn dispatch_json_envelope_issue_create_uses_body_param() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let mut env = TestEnv::new(temp.path().to_path_buf());
+    env.stdin = r#"{
+        "schema_version": 1,
+        "operation": "issue.create",
+        "params": {
+            "title": "JSON body issue",
+            "body": "Body supplied directly through params.body",
+            "labels": ["bug", "agent"]
+        }
+    }"#
+    .to_string();
+
+    let code = dispatch(&mut env, &["gwtd".to_string()]);
+
+    assert_eq!(
+        code,
+        0,
+        "issue.create JSON envelope should succeed, stderr: {}",
+        String::from_utf8_lossy(&env.stderr)
+    );
+    let snapshot = match env
+        .client
+        .fetch(IssueNumber(1), None)
+        .expect("created issue fetch")
+    {
+        gwt_github::client::FetchResult::Updated(snapshot) => snapshot,
+        gwt_github::client::FetchResult::NotModified => panic!("fresh fetch should update"),
+    };
+    assert_eq!(snapshot.title, "JSON body issue");
+    assert_eq!(snapshot.body, "Body supplied directly through params.body");
+    assert_eq!(snapshot.labels, vec!["bug", "agent"]);
+}
+
+#[test]
+fn dispatch_json_envelope_pr_create_uses_body_param() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let mut env = TestEnv::new(temp.path().to_path_buf());
+    env.seed_created_pr(sample_pr_status());
+    env.stdin = r#"{
+        "schema_version": 1,
+        "operation": "pr.create",
+        "params": {
+            "base": "develop",
+            "head": "work/json-envelope",
+            "title": "Wire JSON envelope",
+            "body": "PR body supplied directly through params.body",
+            "labels": ["agent"],
+            "draft": true
+        }
+    }"#
+    .to_string();
+
+    let code = dispatch(&mut env, &["gwtd".to_string()]);
+
+    assert_eq!(
+        code,
+        0,
+        "pr.create JSON envelope should succeed, stderr: {}",
+        String::from_utf8_lossy(&env.stderr)
+    );
+    assert_eq!(env.pr_create_call_log.len(), 1);
+    let call = &env.pr_create_call_log[0];
+    assert_eq!(call.base, "develop");
+    assert_eq!(call.head.as_deref(), Some("work/json-envelope"));
+    assert_eq!(call.title, "Wire JSON envelope");
+    assert_eq!(call.body, "PR body supplied directly through params.body");
+    assert_eq!(call.labels, vec!["agent"]);
+    assert!(call.draft);
 }
 
 #[test]

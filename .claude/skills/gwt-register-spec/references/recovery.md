@@ -1,8 +1,8 @@
 # Recovery from partial registration
 
 `gwt-register-spec` is designed so the only way to produce a half-baked
-SPEC Issue is for `gwtd issue spec create` to succeed and the subsequent
-`gwtd issue spec <n> --edit spec -f <body>` to fail. (Validation runs
+SPEC Issue is for JSON operation `issue.spec.create` to succeed and the subsequent
+`issue.spec.edit` JSON operation to fail. (Validation runs
 before any GitHub API call, so a `Structural` or `Format` failure never
 creates an orphan Issue.)
 
@@ -11,17 +11,17 @@ flow.
 
 ## Detect
 
-After `gwtd issue spec create` returns the new Issue number, the skill
-immediately calls `gwtd issue spec <n> --edit spec -f <body>`. If `--edit`
+After JSON operation `issue.spec.create` returns the new Issue number, the skill
+immediately calls JSON operation `issue.spec.edit`. If the edit operation
 exits non-zero, the skill stops the lifecycle with:
 
 ```
-gwtd register abort --spec <n> --reason 'edit failed: <gh/gwtd error verbatim>'
+{"schema_version":1,"operation":"register.abort","params":{"spec":123,"reason":"edit failed: <gh/gwtd error verbatim>"}}
 ```
 
-If the skill reaches the roundtrip step and `gwtd issue spec <n>
---section spec` reports empty output or the heading does not contain the
-expected H1, the skill aborts with `--reason 'roundtrip empty'`.
+If the skill reaches the roundtrip step and JSON operation `issue.spec.section`
+reports empty output or the heading does not contain the expected H1, the skill
+aborts with `params.reason:"roundtrip empty"`.
 
 In both cases the GitHub Issue still exists with an empty spec section.
 The caller and any human reviewer must see the orphan Issue number.
@@ -52,8 +52,13 @@ Once the upstream failure is understood (e.g. network restored, auth
 refreshed), the human or follow-up agent runs:
 
 ```
-gwtd issue spec <n> --edit spec -f <body_path>
-gwtd issue spec <n> --section spec | head -5      # roundtrip verify
+gwtd <<'JSON'
+{"schema_version":1,"operation":"issue.spec.edit","params":{"number":123,"section":"spec","body":"<full SPEC body>"}}
+JSON
+
+gwtd <<'JSON'
+{"schema_version":1,"operation":"issue.spec.section","params":{"number":123,"section":"spec"}}
+JSON
 ```
 
 If the roundtrip is OK, the SPEC is healed. There is no need to delete
@@ -82,7 +87,9 @@ with a short comment pointing at the canonical owner. Do not edit the
 spec section to point elsewhere — that pollutes the SPEC search index.
 
 ```
-gwtd issue comment <n> -f <comment.md>      # explain why
+gwtd <<'JSON'
+{"schema_version":1,"operation":"issue.comment","params":{"number":123,"body":"<explain why>"}}
+JSON
 # then close the Issue via the UI or `gh issue close <n>` (out of band)
 ```
 

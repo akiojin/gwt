@@ -526,8 +526,8 @@ fn spawn_board_projection_watcher(
 ///
 /// Mirrors [`BoardProjectionWatcherRegistry`] but watches
 /// `~/.gwt/projects/<repo_hash>/workspace/current.json` instead of the
-/// Board projection. Required because `gwtd workspace update
-/// --title-summary` is invoked from out-of-band CLI processes (e.g. from
+/// Board projection. Required because `workspace.update` with `params.purpose`
+/// is invoked from out-of-band CLI processes (e.g. from
 /// inside a Claude Code agent's hook) whose `publish_workspace_change`
 /// daemon path silently no-ops when no daemon endpoint is registered for
 /// the agent's worktree scope (the installed `/Applications/GWT.app`

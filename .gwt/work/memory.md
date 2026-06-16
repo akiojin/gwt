@@ -6997,3 +6997,10 @@ Type: lesson
 Context: While fixing SPEC-2359 branch-less Workspace rows, source ref context was added at ingest time. Existing work-events-intake.json entries could still hold raw blob oids/content hashes from the previous algorithm and skip the repair path.
 Learning: When ingest output changes without changing the raw source blob, the advisory fingerprint cache must include an algorithm/version salt or metadata fingerprint; otherwise existing users keep stale projections even though fresh-home verification passes.
 Future Action: For any projection-time transform in work_events_ingest or similar intake code, add a regression test that preloads the old raw fingerprint state and verifies the source is reprocessed and duplicate-event repair updates the projection.
+
+## 2026-06-16 — Audit hidden managed assets with rg -uu
+
+Type: lesson
+Context: JSON-only gwtd migration initially had to cover hidden .claude/.codex managed assets as well as Rust sources and public docs.
+Learning: Repository-wide command-surface migrations must include hidden managed assets and generated guidance, not only normal rg-visible files.
+Future Action: Before declaring a command-surface migration complete, run rg -uu across .claude, .codex, docs, tests, and source comments, then add contract tests that reject stale guidance.

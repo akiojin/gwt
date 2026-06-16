@@ -21,7 +21,7 @@ Use this command to run semantic search against the cached SPEC Issue index.
    - spec_id, title, status, phase
    - relevance summary
    - next spec(s) to inspect
-3. For Issue search, use `/gwt:gwt-search --issues` instead.
+3. For Issue search, use `/gwt:gwt-search {"query":"...","scopes":["issues"]}` instead.
 4. For file search, use `/gwt:gwt-project-search` instead.
 
 ## Examples

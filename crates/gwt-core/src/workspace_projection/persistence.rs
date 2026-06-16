@@ -1405,7 +1405,7 @@ fn write_agent_identity_reset_marker(path: &Path) -> Result<()> {
 /// SPEC-2359 Phase W-11 (US-58 / FR-346): clear legacy `title_summary` /
 /// `current_focus` from the canonical projection at `current_path` exactly
 /// once, guarded by a version marker. After this reset those fields are
-/// authored only by the agent (`gwtd workspace update` / `gwtd board post`),
+/// authored only by the agent (`workspace.update` / `board.post`),
 /// and empty values resolve through the display fallback chain. Returns
 /// `true` when the reset marker was newly written, `false` when the marker
 /// already records the current version (so agent-authored values written

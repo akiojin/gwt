@@ -18,18 +18,18 @@ use crate::{
     cli::{CliEnv, CliParseError},
 };
 
-/// SPEC-1942 family enum for `gwtd board ...`.
+/// SPEC-1942 command model for `board.*` JSON operations.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum BoardCommand {
-    /// `gwtd board show [--json] [--workspace <id>|--all]`.
+    /// `board.show` with optional `params.workspace` / `params.all`.
     Show {
         json: bool,
         workspace: Option<String>,
         all: bool,
     },
-    /// `gwtd board post --kind <kind> (--body <text> | -f <file>)
-    /// [--title <text>] [--title-summary <text>] [--parent <id>] [--topic <t>]*
-    /// [--owner <n>]* [--target <id>]* [--mention <kind:id>]*`.
+    /// `board.post` with `params.kind`, `params.body`, and optional audience
+    /// fields such as `params.targets`, `params.mentions`, and
+    /// `params.broadcast`.
     Post(Box<BoardPostCommand>),
 }
 
@@ -222,7 +222,7 @@ pub(super) fn run<E: CliEnv>(
     Ok(code)
 }
 
-/// Best-effort daemon broadcast after a CLI `gwtd board post` succeeds
+/// Best-effort daemon broadcast after a `board.post` operation succeeds
 /// (SPEC-2077 Phase H1 GREEN). Mirrors the GUI handler in
 /// `app_runtime/board.rs`: notify subscribers via the daemon so other
 /// gwt instances on the same project see the new entry without
@@ -230,7 +230,7 @@ pub(super) fn run<E: CliEnv>(
 /// level and ignored — local file is the source of truth.
 #[cfg(unix)]
 fn publish_board_change(project_root: &std::path::Path, entries_count: usize) {
-    // CLI path runs in a short-lived process: `gwtd board post`
+    // CLI path runs in a short-lived process: `board.post`
     // returns to the shell immediately, so a detached publish thread
     // would be killed before it finishes the connect/publish/ack
     // round-trip (the daemon would then never see the broadcast).
@@ -248,7 +248,7 @@ fn publish_board_change(project_root: &std::path::Path, entries_count: usize) {
             error = %err,
             project_root = %project_root.display(),
             entries_count,
-            "gwtd board post: daemon publish failed (non-fatal)"
+            "board.post: daemon publish failed (non-fatal)"
         );
     }
 }

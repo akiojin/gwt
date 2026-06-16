@@ -102,9 +102,9 @@ fn github_workflow_block_message_points_to_canonical_gwt_surfaces() {
 
     for required in [
         "GitHub workflow CLI",
-        "gwtd issue view",
-        "gwtd pr view",
-        "gwtd actions logs",
+        "issue.view",
+        "pr.view",
+        "actions.logs",
         "gwt-search",
         "Blocked command: gh pr view 1949",
     ] {
@@ -124,8 +124,8 @@ fn long_sleep_pr_ci_block_message_points_to_board_handoff() {
 
     for required in [
         "Long PR/CI polling sleeps are not allowed",
-        "gwtd pr checks <number>",
-        "gwtd board post --kind blocked",
+        "JSON operation `pr.checks`",
+        "JSON operation `board.post`",
         "instead of sleeping indefinitely",
         command,
     ] {

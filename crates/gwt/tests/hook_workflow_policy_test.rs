@@ -915,7 +915,7 @@ fn actionable_unassigned_agent_can_run_workspace_ensure_command() {
         let event = event(
             "Bash",
             json!({
-                "command": "gwtd workspace ensure --agent-session \"$GWT_SESSION_ID\" --title-summary 'Workspace materialization' --current-focus 'Ensure actionable intent enters a Workspace' --spec 2359"
+                "command": "gwtd <<'JSON'\n{\"schema_version\":1,\"operation\":\"workspace.ensure\",\"params\":{\"agent_session\":\"$GWT_SESSION_ID\",\"purpose\":\"Workspace materialization\",\"current_focus\":\"Ensure actionable intent enters a Workspace\",\"spec\":2359}}\nJSON"
             }),
         );
 

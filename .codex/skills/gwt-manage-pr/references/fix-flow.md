@@ -8,7 +8,7 @@
 
 ## Step 2: Resolve the PR
 
-- Prefer the current branch PR through `gwtd pr current`.
+- Prefer the current branch PR through JSON operation `pr.current`.
 - If the user provides a PR number or URL, use that directly.
 
 ## Step 3: Inspect based on mode
@@ -30,8 +30,9 @@
 
 ### Checks Mode (`--mode checks`)
 
-- Inspect failing CI checks through `gwtd pr checks <number>`.
-- Fetch GitHub Actions logs through `gwtd actions logs --run <id>` or `gwtd actions job-logs --job <id>` and extract failure snippets.
+- Inspect failing CI checks through JSON operation `pr.checks`.
+- Fetch GitHub Actions logs through JSON operations `actions.logs` or
+  `actions.job_logs` and extract failure snippets.
 - For external checks (Buildkite, etc.), report URL only.
 
 ### All Mode (`--mode all`)
@@ -118,7 +119,7 @@ Blocking items: <N>
 - For each unresolved thread:
   - Addressed: "Fixed: <what was done in commit abc1234>."
   - Not addressed: "Not addressed: <reason>."
-- Use `gwtd pr review-threads reply-and-resolve <number> -f <file>` with coverage for ALL threads.
+- Use JSON operation `pr.review_threads.reply_and_resolve` with coverage for ALL threads.
 - Script validates completeness; rejects if any thread missing.
 - Requires `Repository Permissions > Contents: Read and Write`.
 - Resolve threads after code fix is pushed. Do not wait for CI.
@@ -135,7 +136,7 @@ Blocking items: <N>
 
 ## Step 8: Notify reviewers (mandatory)
 
-- Post comment via `gwtd pr comment <number> -f <file>`.
+- Post comment via JSON operation `pr.comment`.
 - Include summary of what was fixed (list each B-item and action taken).
 - This step is not optional.
 
@@ -144,8 +145,10 @@ Blocking items: <N>
 - Re-run inspection with `--mode all` (regardless of initial mode).
 - Exit code 0 --> all resolved --> report success.
 - Exit code 1 --> issues remain --> go back to step 4.
-- CI pending/queued --> check at most 3 times with `gwtd pr checks <number>`, waiting no more than 30 seconds between checks.
-- If checks are still pending after the bounded checks, post `gwtd board post --kind blocked` with the PR number, pending check names, and resume command, then stop instead of sleeping indefinitely.
+- CI pending/queued --> check at most 3 times with JSON operation `pr.checks`, waiting no more than 30 seconds between checks.
+- If checks are still pending after the bounded checks, post JSON operation
+  `board.post` with `params.kind:"blocked"`, the PR number, pending check
+  names, and resume command, then stop instead of sleeping indefinitely.
 - After fix push, run the same bounded CI check path for the new run.
 
 ## Loop Safety Guard
@@ -177,16 +180,13 @@ Blocking items: <N>
 
 ## Canonical Command Reference
 
-```bash
-# Inspect current PR status
-gwtd pr current
-gwtd pr checks "<number>"
-gwtd pr reviews "<number>"
-gwtd pr review-threads "<number>"
-
-# Reply, resolve, and notify
-gwtd pr review-threads reply-and-resolve "<number>" -f /tmp/replies.json
-gwtd pr comment "<number>" -f /tmp/pr-comment.md
+```json
+{"schema_version":1,"operation":"pr.current","params":{}}
+{"schema_version":1,"operation":"pr.checks","params":{"number":123}}
+{"schema_version":1,"operation":"pr.reviews","params":{"number":123}}
+{"schema_version":1,"operation":"pr.review_threads","params":{"number":123}}
+{"schema_version":1,"operation":"pr.review_threads.reply_and_resolve","params":{"number":123,"body":"[{\"threadId\":\"PRRT_xxx123\",\"body\":\"Fixed: ...\"}]"}}
+{"schema_version":1,"operation":"pr.comment","params":{"number":123,"body":"<summary comment>"}}
 ```
 
 ## Output Examples

@@ -144,7 +144,7 @@ impl BoardMentionTargetKind {
 }
 
 /// One `@mention` carried by a [`BoardEntry`]: a typed target plus an
-/// optional display label. Written by the posting side (`gwtd board post`).
+/// optional display label. Written by the posting side (`board.post`).
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct BoardMention {
     pub target_kind: BoardMentionTargetKind,
@@ -289,7 +289,7 @@ pub fn board_entry_targets_self(entry: &BoardEntry, match_keys: &[String]) -> bo
 }
 
 /// One immutable post on the shared coordination Board. Appended by agents
-/// and the user via `gwtd board post`, persisted to the repo-local event log
+/// and the user via `board.post`, persisted to the repo-local event log
 /// (`.gwt/coordination/`), and projected into [`BoardProjection`] for the UI.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct BoardEntry {
@@ -493,7 +493,7 @@ pub enum BoardEntryDraftError {
 }
 
 /// SPEC-3046: single domain-side constructor for Board posts. Both posting
-/// surfaces (CLI `gwtd board post` and the GUI Board window) assemble a
+/// surfaces (CLI `board.post` operation and the GUI Board window) assemble a
 /// draft and call [`finalize`](Self::finalize), so the normalization and
 /// validation rules that decide an entry's persisted shape live in exactly
 /// one place. Surface-specific policy — author resolution (SPEC-1974),

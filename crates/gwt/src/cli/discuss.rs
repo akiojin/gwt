@@ -1,10 +1,10 @@
-//! `gwtd discuss <resolve|park|reject|clear-next-question> --proposal <label>`
+//! `discuss.*` JSON exit operations.
 //!
 //! Exit CLI for the `gwt-discussion` skill (SPEC-1935 FR-014p). The LLM
-//! invokes these commands to mutate `.gwt/discussion.md` so the
+//! invokes these operations to mutate `.gwt/discussion.md` so the
 //! `skill-discussion-stop-check` handler stops blocking Stop events.
 //!
-//! All commands are idempotent: calling `resolve` on an already-resolved
+//! All operations are idempotent: calling `resolve` on an already-resolved
 //! proposal, or targeting a missing label, exits successfully with a
 //! short informational message. This matches the "LLM 忘れ漏れ耐性"
 //! design note.
@@ -18,7 +18,7 @@ use crate::discussion_resume::{
     set_proposal_status_by_label,
 };
 
-/// Sub-action for `gwtd discuss ...` (SPEC-1935 FR-014p).
+/// Sub-action for `discuss.*` operations (SPEC-1935 FR-014p).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum DiscussAction {
     Resolve {
@@ -36,6 +36,10 @@ pub enum DiscussAction {
     GoalPending {
         proposal: String,
         condition_file: std::path::PathBuf,
+    },
+    GoalPendingBody {
+        proposal: String,
+        condition: String,
     },
     GoalStarted {
         proposal: String,
@@ -152,6 +156,10 @@ pub(super) fn run<E: CliEnv>(
             };
             apply_goal_pending(&worktree, &proposal, &condition, out)
         }
+        DiscussAction::GoalPendingBody {
+            proposal,
+            condition,
+        } => apply_goal_pending(&worktree, &proposal, &condition, out),
         DiscussAction::GoalStarted { proposal } => {
             apply_goal_state(&worktree, &proposal, "started", out)
         }
@@ -179,7 +187,7 @@ fn apply_goal_pending(
             out.push_str(&format!(
                 "discuss: {proposal} is not eligible for goal pending (no change)\n"
             ));
-            Ok(1)
+            Ok(0)
         }
         Err(err) => {
             out.push_str(&format!("discuss: goal pending failed: {err}\n"));

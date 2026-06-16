@@ -1,4 +1,4 @@
-//! `gwtd index ...` family module (SPEC-1942 SC-027 split).
+//! `index.*` JSON operation family module (SPEC-1942 SC-027 split).
 //!
 //! - `mod.rs` (this file): argv `parse`, top-level `run` dispatch, the
 //!   command implementations (`run_status` / `run_rebuild`), the family
@@ -25,12 +25,12 @@ use runtime::{
     resolve_index_context, run_runner_rebuild, run_runner_status,
 };
 
-/// SPEC-1942 family enum for `gwtd index ...`.
+/// SPEC-1942 command model for `index.*` JSON operations.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum IndexCommand {
-    /// `gwtd index status`.
+    /// `index.status`.
     Status,
-    /// `gwtd index rebuild [--scope <scope>]`.
+    /// `index.rebuild`.
     Rebuild { scope: IndexScope },
 }
 

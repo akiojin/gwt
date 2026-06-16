@@ -1,4 +1,4 @@
-//! `gwtd build <start|phase|complete|abort> --spec <n> [...]`
+//! `build.*` JSON lifecycle operations.
 //!
 //! Exit CLI for the `gwt-build-spec` skill (SPEC-1935 FR-014r). Writes
 //! `.gwt/skill-state/build-spec.json` via [`gwt_core::skill_state`].

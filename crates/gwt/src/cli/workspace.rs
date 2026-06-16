@@ -617,7 +617,7 @@ pub(super) fn run<E: CliEnv>(
     }
 }
 
-/// SPEC-2359 US-41 (FR-153): implement `gwtd workspace projection-list` over a
+/// SPEC-2359 US-41 (FR-153): implement `workspace.projection_list` over a
 /// caller-provided `scan_root` so the production path uses `gwt_projects_dir()`
 /// and tests can pass a tempdir. `is_active_session` bridges in the live-window
 /// registry from `app_runtime` (default `false` in CLI-only contexts).
@@ -659,7 +659,7 @@ where
     Ok(0)
 }
 
-/// SPEC-2359 US-41 (FR-153, FR-154): implement `gwtd workspace projection-prune`
+/// SPEC-2359 US-41 (FR-153, FR-154): implement `workspace.projection_prune`
 /// over a caller-provided `scan_root`. `ids` lets the user scope the prune to
 /// specific workspace IDs; empty means "every classified entry".
 fn run_projection_prune_with_scan_root<F>(
@@ -1098,7 +1098,7 @@ pub(crate) fn publish_workspace_change(project_root: &std::path::Path) {
         tracing::debug!(
             error = %err,
             project_root = %project_root.display(),
-            "gwtd workspace update: daemon publish failed (non-fatal)"
+            "workspace.update: daemon publish failed (non-fatal)"
         );
     }
 }

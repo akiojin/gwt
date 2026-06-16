@@ -1,4 +1,4 @@
-//! `gwtd register <start|phase|complete|abort> --spec <n> [...]`
+//! `register.*` JSON lifecycle operations.
 //!
 //! Exit CLI for the `gwt-register-spec` skill (SPEC-2784). Writes
 //! `.gwt/skill-state/register-spec.json` via [`gwt_core::skill_state`].
@@ -9,16 +9,17 @@
 //! `complete` / `abort` flip `active: false` so the Stop-block handler stops
 //! forcing continuation.
 //!
-//! Because the SPEC id is not known until `gwtd issue spec create` returns,
-//! `gwt-register-spec` may legitimately call `start --spec 0` and then
-//! re-emit `phase --spec <real-id>` once the Issue is created.
+//! Because the SPEC id is not known until `issue.spec.create` returns,
+//! `gwt-register-spec` may legitimately call `register.start` with
+//! `params.spec:0` and then re-emit `register.phase` with the real SPEC id once
+//! the Issue is created.
 
 use gwt_github::SpecOpsError;
 
 use super::skill_state_runtime;
 use crate::cli::{parse_skill_state_args, CliCommand, CliEnv, CliParseError, SkillStateAction};
 
-/// Parse `gwtd register <action> --spec <n> [...]` (SPEC-2784).
+/// Parse the legacy register argv model used by internal dispatcher tests.
 pub fn parse_args(args: &[String]) -> Result<CliCommand, CliParseError> {
     parse_skill_state_args(args).map(CliCommand::Register)
 }

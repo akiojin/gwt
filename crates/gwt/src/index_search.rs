@@ -20,8 +20,8 @@ pub struct ProjectIndexSearchOutcome {
 }
 
 /// `auto_build`: `false` for GUI interactive search (the watcher owns index
-/// builds; never block on inline rebuilds), `true` for CLI / agent search
-/// (`gwtd search`, SPEC-1942 FR-107) where no watcher exists and the runner
+/// builds; never block on inline rebuilds), `true` for JSON / agent search
+/// (`search`, SPEC-1942 FR-107) where no watcher exists and the runner
 /// must self-heal missing or stale indexes inline.
 pub fn search_project_index(
     project_root: &Path,
@@ -1136,7 +1136,7 @@ mod tests {
 
     #[test]
     fn scope_search_command_args_enable_auto_build_for_cli_search() {
-        // SPEC-1942 FR-107: `gwtd search` has no watcher, so the runner must
+        // SPEC-1942 FR-107: `search` has no watcher, so the runner must
         // self-heal missing or stale (source_cache_changed) indexes inline.
         let args = scope_search_command_args(
             Path::new("/repo"),

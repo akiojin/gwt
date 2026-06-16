@@ -11829,7 +11829,7 @@ fn app_runtime_agent_window_initial_title_ignores_projection_owner_for_other_bra
 }
 
 #[test]
-fn app_runtime_board_milestone_updates_same_session_agent_window_dynamic_title_only() {
+fn app_runtime_board_milestone_updates_same_session_agent_window_detail_only() {
     let _env_lock = env_test_lock()
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -11922,7 +11922,7 @@ fn app_runtime_board_milestone_updates_same_session_agent_window_dynamic_title_o
             .expect("agent 1")
             .dynamic_title
             .as_deref(),
-        Some("Implement dynamic title sync")
+        None
     );
     assert_eq!(
         tab.workspace
@@ -11942,15 +11942,14 @@ fn app_runtime_board_milestone_updates_same_session_agent_window_dynamic_title_o
     );
 }
 
-/// Phase U-5 (SPEC-2359 US-38, FR-125, FR-126): a Board post that carries
-/// `title_summary` must broadcast both `WindowCanvasState` (so the pane
-/// heading rehydrates on WS reconnect / GUI reload) and
-/// `ActiveWorkProjection` (Active Work card) in the same batch. Prior to
-/// Phase U-5 the Board path mutated `dynamic_title` in memory but
-/// silently skipped the `WindowCanvasState` broadcast, leaving the pane
-/// heading stale after reconnect.
+/// Phase U-5 (SPEC-2359 US-38, FR-125, FR-126): a Board post that updates
+/// an agent's current focus must broadcast both `WindowCanvasState` (so the
+/// pane detail rehydrates on WS reconnect / GUI reload) and
+/// `ActiveWorkProjection` (Active Work card) in the same batch. Board
+/// `title_summary` is legacy history metadata; the live pane title comes
+/// from Workspace purpose updates.
 #[test]
-fn app_runtime_board_milestone_broadcasts_workspace_state_for_title_sync() {
+fn app_runtime_board_milestone_broadcasts_workspace_state_for_focus_sync() {
     let _env_lock = env_test_lock()
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -12106,9 +12105,9 @@ fn frontend_sync_events_preserves_window_dynamic_title_for_reconnect_rehydrate()
 
 /// Phase U-5: re-asserts the diff gate from
 /// `apply_workspace_projection_title_sync_skips_workspace_state_when_same_title_resyncs`
-/// at the Board entrypoint. Re-posting an identical milestone (same
-/// `title_summary` + same body for `current_focus`) must not emit a
-/// duplicate `WindowCanvasState` broadcast on busy projections.
+/// at the Board entrypoint. Re-posting an identical milestone (same body for
+/// `current_focus`) must not emit a duplicate `WindowCanvasState` broadcast
+/// on busy projections.
 #[test]
 fn app_runtime_board_milestone_skips_workspace_state_on_identical_resync() {
     let _env_lock = env_test_lock()
@@ -12187,7 +12186,7 @@ fn app_runtime_board_milestone_skips_workspace_state_on_identical_resync() {
             !second
                 .iter()
                 .any(|event| matches!(event.event, BackendEvent::WindowCanvasState { .. })),
-            "second Board post with identical title_summary must not duplicate WindowCanvasState: {second:?}"
+            "second Board post with identical current_focus must not duplicate WindowCanvasState: {second:?}"
         );
     assert!(
         second
@@ -12198,7 +12197,7 @@ fn app_runtime_board_milestone_skips_workspace_state_on_identical_resync() {
 }
 
 #[test]
-fn app_runtime_board_milestone_uses_short_title_summary_not_long_body_for_window_title() {
+fn app_runtime_board_milestone_ignores_legacy_title_summary_for_window_title() {
     let _env_lock = env_test_lock()
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -12277,7 +12276,7 @@ fn app_runtime_board_milestone_uses_short_title_summary_not_long_body_for_window
             .expect("agent")
             .dynamic_title
             .as_deref(),
-        Some("Title summary contract")
+        None
     );
     assert_eq!(
         tab.workspace
@@ -12764,7 +12763,7 @@ fn handle_workspace_projection_changed_events_broadcasts_workspace_state_for_pan
         &repo,
         &window_id,
         Some("Pane heading via WindowCanvasState"),
-        Some("triggered by gwtd workspace update --title-summary"),
+        Some("triggered by workspace.update params.purpose"),
     );
     gwt_core::workspace_projection::save_workspace_projection(&repo, &projection)
         .expect("save projection");
@@ -12773,8 +12772,7 @@ fn handle_workspace_projection_changed_events_broadcasts_workspace_state_for_pan
 
     // The original handler returned only ActiveWorkProjection. Phase
     // U-2 promotes it to also broadcast WindowCanvasState in one batch so
-    // the pane heading refreshes immediately after `gwtd workspace
-    // update --title-summary`.
+    // the pane heading refreshes immediately after `workspace.update`.
     assert!(
         events
             .iter()
@@ -12999,7 +12997,7 @@ fn sync_agent_window_titles_fast_path_resolves_across_unrelated_project_root() {
     // additional `same_worktree_path(session.worktree_path,
     // project_root)` filter prevented this and caused the user-visible
     // pane heading to stay on the agent_id fallback even after
-    // `gwtd workspace update --title-summary` succeeded at the data
+    // `workspace.update` succeeded at the data
     // layer.
     let temp = tempdir().expect("tempdir");
     let repo = temp.path().join("repo");
