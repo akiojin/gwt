@@ -42,7 +42,10 @@ bash scripts/run-node-tests-with-linkedom.sh \
   crates/gwt/web/__tests__/wizard-interaction-guard-wiring.test.mjs \
   crates/gwt/web/__tests__/viewport-persist-throttle.test.mjs \
   crates/gwt/web/__tests__/viewport-sync.test.mjs \
+  crates/gwt/web/__tests__/agent-completion-notifications.test.mjs \
+  crates/gwt/web/__tests__/project-switcher.test.mjs \
   crates/gwt/web/__tests__/project-tabs-renderer.test.mjs \
+  crates/gwt/web/__tests__/close-project-tab.smoke.test.mjs \
   crates/gwt/web/__tests__/window-tabs-renderer.test.mjs \
   crates/gwt/web/__tests__/project-tab-style.test.mjs \
   crates/gwt/web/__tests__/playwright-embedded-routes.test.mjs \

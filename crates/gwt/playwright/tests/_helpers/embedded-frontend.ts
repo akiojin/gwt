@@ -15,6 +15,8 @@ export const APP_URL = "http://gwt-playwright.local/";
 
 const ROOT_MODULES = new Set([
   "app.js",
+  // SPEC-2013 2026-06-16 amendment — quiet Agent completion notices.
+  "agent-completion-notifications.js",
   // SPEC-3064 Phase 3 (E6c) — Board & Logs window surface.
   "board-logs-surface.js",
   "board-surface.js",
@@ -58,6 +60,8 @@ const ROOT_MODULES = new Set([
   "project-index-search-surface.js",
   // SPEC-3064 Phase 3 (E7) — Project & workspace shell chrome surface.
   "project-shell-surface.js",
+  // SPEC-2013 2026-06-16 amendment — internal Project Switcher popover.
+  "project-switcher.js",
   "project-tabs-renderer.js",
   // SPEC-3064 Phase 3 (E1) — provider usage & rate limits surface.
   "provider-usage-surface.js",

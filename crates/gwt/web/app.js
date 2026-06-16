@@ -20,6 +20,7 @@
       import { createLaunchPendingController } from "/launch-pending-controller.js";
       import { createConnectionOverlay } from "/connection-overlay.js";
       import { createUpdateCtaController } from "/update-cta.js";
+      import { createAgentCompletionNotifier } from "/agent-completion-notifications.js";
       import { createReleaseNotesWindow } from "/release-notes-window.js";
       import { createConsoleWindow } from "/console-window.js";
       import { createTerminalWheelScrollController } from "/terminal-wheel-scroll.js";
@@ -1033,6 +1034,17 @@
 
       function activeWorkspace() {
         return activeProjectTab()?.workspace || emptyWorkspace();
+      }
+
+      function projectWindowContextById(windowId) {
+        for (const tab of appState?.tabs || []) {
+          for (const windowData of tab.workspace?.windows || []) {
+            if (windowData.id === windowId) {
+              return { tab, windowData };
+            }
+          }
+        }
+        return null;
       }
 
       function allProjectWindowIds() {
@@ -2415,9 +2427,17 @@
           UI_TRACE_EVENT.applyStatus,
           { window_id: windowId, status },
           () => {
-            const windowData = workspaceWindowById(windowId);
+            const windowContext = projectWindowContextById(windowId);
+            const windowData =
+              windowContext?.windowData || workspaceWindowById(windowId);
             const runtimeState = normalizeWindowRuntimeState(status, windowData?.preset);
             windowRuntimeStateMap.set(windowId, runtimeState);
+            agentCompletionNotifier.handleRuntimeState({
+              windowId,
+              runtimeState,
+              windowData,
+              projectTab: windowContext?.tab || activeProjectTab(),
+            });
             if (detail) {
               detailMap.set(windowId, detail);
             } else if (
@@ -3368,6 +3388,40 @@
         return node;
       }
 
+      function showAgentCompletionToast(notice) {
+        const existing = document.getElementById("agent-completion-toast");
+        existing?.remove();
+        const toast = createNode("button", "agent-completion-toast");
+        toast.id = "agent-completion-toast";
+        toast.type = "button";
+        toast.setAttribute("aria-live", "polite");
+        toast.title = notice.projectTitle || notice.title || "Agent notification";
+        const title = createNode(
+          "span",
+          "agent-completion-toast__title",
+          notice.title || "Agent notification",
+        );
+        const body = createNode(
+          "span",
+          "agent-completion-toast__body",
+          notice.body || "",
+        );
+        toast.append(title, body);
+        toast.addEventListener("click", () => {
+          if (notice.projectId) {
+            frontendUnits.projectWorkspaceShell.clearProjectUnread(notice.projectId);
+            send({ kind: "select_project_tab", tab_id: notice.projectId });
+          }
+          toast.remove();
+        });
+        document.body.appendChild(toast);
+        window.setTimeout(() => {
+          if (toast.isConnected) {
+            toast.remove();
+          }
+        }, 12_000);
+      }
+
       function createKnowledgeMarkdownBody(section, className = "knowledge-section-body") {
         const node = createNode("div", `${className} knowledge-markdown-body`);
         const html = typeof section?.body_html === "string" ? section.body_html.trim() : "";
@@ -3518,6 +3572,9 @@
         workspaceHasVisibleMaximizedWindow,
         renderProjectTabs,
         refreshProjectTabDots,
+        markProjectUnread,
+        clearProjectUnread,
+        renderProjectSwitcher,
         renderRecentProjects,
         renderProjectPicker,
         renderProjectOnboarding,
@@ -3557,6 +3614,10 @@
         cloneProjectDialog,
         migrationModal,
         migrationDialog,
+        isModalOpen: () =>
+          modal.classList.contains("open") ||
+          wizardModal.classList.contains("open") ||
+          branchCleanupModal?.classList.contains("open"),
       });
 
       function mountWindowBody(windowData, element) {
@@ -4077,6 +4138,7 @@
               decoderMap.delete(windowId);
               detailMap.delete(windowId);
               windowRuntimeStateMap.delete(windowId);
+              agentCompletionNotifier.forgetWindow(windowId);
               renderedWindowElementKeys.delete(windowId);
               renderedRuntimeStatusKeys.delete(windowId);
               pendingOutputMap.delete(windowId);
@@ -4179,10 +4241,22 @@
         windowDisplayTitle,
         toggleWindowList,
         renderProjectTabs,
+        markProjectUnread,
+        clearProjectUnread,
+        renderProjectSwitcher,
         renderRecentProjects,
         renderProjectPicker,
         renderProjectOnboarding,
         renderAppState,
+      });
+
+      const agentCompletionNotifier = createAgentCompletionNotifier({
+        document,
+        window,
+        showToast: showAgentCompletionToast,
+        onProjectUnread: (projectId) => {
+          projectWorkspaceShell.markProjectUnread(projectId);
+        },
       });
 
       const workspaceWindowManager = Object.freeze({

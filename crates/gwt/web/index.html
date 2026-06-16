@@ -40,6 +40,27 @@
         <div class="project-bar">
           <div class="project-tabs" id="project-tabs"></div>
           <div class="project-actions">
+            <div class="project-switcher-shell">
+              <button
+                class="arrange-button project-switcher-button"
+                id="project-switcher-button"
+                type="button"
+                aria-label="Switch projects"
+                aria-keyshortcuts="Meta+Shift+ArrowUp Meta+Shift+ArrowDown Meta+Shift+P"
+                aria-haspopup="listbox"
+                aria-expanded="false"
+                aria-controls="project-switcher-panel"
+                title="Switch projects"
+              >Projects</button>
+              <div
+                class="project-switcher-panel"
+                id="project-switcher-panel"
+                role="listbox"
+                aria-label="Projects"
+                aria-hidden="true"
+                hidden
+              ></div>
+            </div>
             <span class="app-version" id="app-version" role="button" tabindex="0" hidden></span>
             <!-- Issue #2684 — split-button surfaces Clone from GitHub while a
                  project tab keeps the project-picker overlay hidden. The

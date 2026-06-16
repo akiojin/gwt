@@ -1,0 +1,193 @@
+import assert from "node:assert/strict";
+import test from "node:test";
+
+import { parseHTML } from "linkedom";
+
+import {
+  buildProjectSwitcherRows,
+  createProjectSwitcherController,
+  nextProjectTabId,
+  shouldHandleProjectSwitcherShortcut,
+} from "../project-switcher.js";
+
+function keyboardEvent(document, key, overrides = {}) {
+  const event = new document.defaultView.Event("keydown", {
+    bubbles: true,
+    cancelable: true,
+  });
+  Object.assign(event, {
+    key,
+    metaKey: true,
+    ctrlKey: false,
+    shiftKey: true,
+    altKey: false,
+    repeat: false,
+    target: document.body,
+    ...overrides,
+  });
+  return event;
+}
+
+function makeTabs() {
+  return [
+    {
+      id: "tab-1",
+      title: "Repo One",
+      project_root: "/repo/one",
+      workspace: {
+        windows: [
+          { id: "agent-1", preset: "codex", status: "running" },
+          { id: "shell-1", preset: "shell", status: "running" },
+        ],
+      },
+    },
+    {
+      id: "tab-2",
+      title: "Repo Two",
+      project_root: "/repo/two",
+      workspace: {
+        windows: [{ id: "agent-2", preset: "claude", status: "idle" }],
+      },
+    },
+  ];
+}
+
+test("nextProjectTabId cycles through open project tabs with arrow direction", () => {
+  const tabs = makeTabs();
+
+  assert.equal(nextProjectTabId(tabs, "tab-1", "next"), "tab-2");
+  assert.equal(nextProjectTabId(tabs, "tab-2", "next"), "tab-1");
+  assert.equal(nextProjectTabId(tabs, "tab-1", "previous"), "tab-2");
+  assert.equal(nextProjectTabId([{ id: "only" }], "only", "next"), null);
+  assert.equal(nextProjectTabId([], null, "next"), null);
+});
+
+test("project switcher shortcut accepts Shift+Cmd+Up/Down and Shift+Cmd+P without stealing editable input", () => {
+  const { document } = parseHTML("<input id='field'><main></main>");
+  const input = document.getElementById("field");
+
+  assert.equal(
+    shouldHandleProjectSwitcherShortcut(
+      keyboardEvent(document, "ArrowDown"),
+      { projectCount: 2 },
+    ),
+    true,
+  );
+  assert.equal(
+    shouldHandleProjectSwitcherShortcut(
+      keyboardEvent(document, "ArrowUp"),
+      { projectCount: 2 },
+    ),
+    true,
+  );
+  assert.equal(
+    shouldHandleProjectSwitcherShortcut(keyboardEvent(document, "P"), {
+      projectCount: 0,
+    }),
+    true,
+  );
+  assert.equal(
+    shouldHandleProjectSwitcherShortcut(
+      keyboardEvent(document, "ArrowRight"),
+      { projectCount: 2 },
+    ),
+    false,
+  );
+  assert.equal(
+    shouldHandleProjectSwitcherShortcut(
+      keyboardEvent(document, "ArrowDown", { repeat: true }),
+      { projectCount: 2 },
+    ),
+    false,
+  );
+  assert.equal(
+    shouldHandleProjectSwitcherShortcut(
+      keyboardEvent(document, "ArrowDown", { target: input }),
+      { projectCount: 2 },
+    ),
+    false,
+  );
+});
+
+test("buildProjectSwitcherRows lists open projects first with runtime and unread metadata", () => {
+  const rows = buildProjectSwitcherRows({
+    tabs: makeTabs(),
+    recentProjects: [
+      { title: "Repo Three", kind: "git", path: "/repo/three" },
+      { title: "Repo One", kind: "git", path: "/repo/one" },
+    ],
+    activeTabId: "tab-1",
+    unreadProjectIds: new Set(["tab-2"]),
+    runtimeStateForWindow: (windowData) => windowData.status,
+  });
+
+  assert.deepEqual(
+    rows.map((row) => `${row.section}:${row.title}`),
+    ["open:Repo One", "open:Repo Two", "recent:Repo Three"],
+  );
+  assert.equal(rows[0].active, true);
+  assert.equal(rows[0].runningCount, 1);
+  assert.equal(rows[1].unread, true);
+  assert.equal(rows[2].path, "/repo/three");
+});
+
+test("project switcher controller renders rows, clears unread on project select, and only requests notification permission from a click", async () => {
+  const { document } = parseHTML(`
+    <button id="project-switcher-button"></button>
+    <div id="project-switcher-panel"></div>
+  `);
+  const buttonEl = document.getElementById("project-switcher-button");
+  const panelEl = document.getElementById("project-switcher-panel");
+  const sends = [];
+  const cleared = [];
+  let requests = 0;
+  const unreadProjectIds = new Set(["tab-2"]);
+  const createNode = (tagName, className, textContent) => {
+    const node = document.createElement(tagName);
+    if (className) node.className = className;
+    if (textContent !== undefined) node.textContent = textContent;
+    return node;
+  };
+
+  const controller = createProjectSwitcherController({
+    buttonEl,
+    panelEl,
+    getState: () => ({
+      tabs: makeTabs(),
+      active_tab_id: "tab-1",
+      recent_projects: [{ title: "Repo Three", kind: "git", path: "/repo/three" }],
+    }),
+    send: (payload) => sends.push(payload),
+    createNode,
+    unreadProjectIds,
+    clearUnreadProject: (projectId) => cleared.push(projectId),
+    runtimeStateForWindow: (windowData) => windowData.status,
+    getNotificationPermission: () => "default",
+    requestNotificationPermission: async () => {
+      requests += 1;
+      return "granted";
+    },
+  });
+
+  controller.render();
+  assert.equal(requests, 0, "desktop permission must not be requested on render");
+
+  controller.open();
+  assert.equal(buttonEl.getAttribute("aria-expanded"), "true");
+  assert.match(panelEl.textContent, /Open Projects/);
+  assert.match(panelEl.textContent, /Repo Two/);
+  assert.match(panelEl.textContent, /New/);
+  assert.match(panelEl.textContent, /Recent/);
+  assert.match(panelEl.textContent, /Enable desktop notifications/);
+
+  await panelEl
+    .querySelector("[data-action='enable-desktop-notifications']")
+    .dispatchEvent(new document.defaultView.Event("click", { bubbles: true }));
+  assert.equal(requests, 1);
+
+  panelEl
+    .querySelector("[data-project-tab-id='tab-2']")
+    .dispatchEvent(new document.defaultView.Event("click", { bubbles: true }));
+  assert.deepEqual(sends, [{ kind: "select_project_tab", tab_id: "tab-2" }]);
+  assert.deepEqual(cleared, ["tab-2"]);
+});

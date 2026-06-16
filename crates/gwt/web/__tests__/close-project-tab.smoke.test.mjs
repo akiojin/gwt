@@ -38,7 +38,7 @@ function makeTab(overrides = {}) {
   };
 }
 
-test("close button sends close_project_tab immediately when no agents are running", () => {
+test("close button routes through requestCloseProjectTab even when no agents are running", () => {
   const { projectTabs } = mountTabs();
   const sends = [];
   const requestCloseCalls = [];
@@ -192,6 +192,66 @@ test("close confirm modal renders agent count + names with Cancel and Close anyw
   assert.ok(
     confirmButton.classList.contains("destructive"),
     "confirm button must carry a destructive style class",
+  );
+
+  cancelButton.dispatchEvent(
+    new cancelButton.ownerDocument.defaultView.Event("click", { bubbles: true }),
+  );
+  assert.equal(cancelCalls, 1);
+  assert.equal(confirmCalls, 0);
+
+  confirmButton.dispatchEvent(
+    new confirmButton.ownerDocument.defaultView.Event("click", { bubbles: true }),
+  );
+  assert.equal(confirmCalls, 1);
+});
+
+test("close confirm modal renders normal copy when no agents are running", () => {
+  const { modalEl, dialogEl, createNode } = mountModal();
+  let cancelCalls = 0;
+  let confirmCalls = 0;
+
+  renderCloseProjectTabConfirmModal({
+    modalEl,
+    dialogEl,
+    state: {
+      open: true,
+      tabId: "tab-1",
+      tabTitle: "Repo One",
+      runningAgents: [],
+    },
+    createNode,
+    onCancel: () => {
+      cancelCalls += 1;
+    },
+    onConfirm: () => {
+      confirmCalls += 1;
+    },
+  });
+
+  assert.equal(modalEl.classList.contains("open"), true);
+  const body = dialogEl.textContent;
+  assert.match(body, /Close project tab\?/);
+  assert.match(body, /Repo One/);
+  assert.match(body, /You can reopen it from Recent projects/);
+  assert.equal(
+    dialogEl.querySelector(".close-project-tab-modal__agent-list"),
+    null,
+    "no-running confirmation must not render an empty agent list",
+  );
+
+  const cancelButton = dialogEl.querySelector(
+    "[data-role='close-project-tab-cancel']",
+  );
+  const confirmButton = dialogEl.querySelector(
+    "[data-role='close-project-tab-confirm']",
+  );
+  assert.match(cancelButton.textContent, /Cancel/i);
+  assert.match(confirmButton.textContent, /Close tab/i);
+  assert.equal(
+    confirmButton.classList.contains("destructive"),
+    false,
+    "no-running confirmation should not use destructive emphasis",
   );
 
   cancelButton.dispatchEvent(
