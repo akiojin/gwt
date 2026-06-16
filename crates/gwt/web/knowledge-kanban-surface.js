@@ -17,6 +17,7 @@
 // - createNode / createKnowledgeMarkdownBody: shared DOM helpers owned by
 //   app.js (the markdown body renderer is shared with the Board surface).
 // - windowMap / workspaceWindowById: workspace window lookups.
+// - pendingIndexOpenTargetsByPreset: index-open handoff targets by preset.
 // - knowledgeKindForPreset(preset): issue/spec/pr kind mapping.
 // - focusWindowLocally(windowId) / sendWindowFocus(windowId): focus paths.
 // - focusOrSpawnPreset(preset): focus-or-spawn used by drawer actions.
@@ -29,6 +30,7 @@ export function createKnowledgeKanbanSurface({
   createKnowledgeMarkdownBody,
   windowMap,
   workspaceWindowById,
+  pendingIndexOpenTargetsByPreset,
   knowledgeKindForPreset,
   focusWindowLocally,
   sendWindowFocus,

@@ -57,9 +57,9 @@ test.describe("Profile environment variable grid", () => {
     await expect(tokenRow.locator(".profile-env-result")).toHaveText("Disabled");
 
     await profile.getByRole("button", { name: "+ Add variable" }).click();
-    const addedRow = profile.locator(".profile-env-row").last();
-    await expect(addedRow.locator("select")).toHaveValue("override");
-    await expect(addedRow.locator("select option")).toHaveText(["Enabled", "Disabled"]);
+    const pendingRow = profile.locator(".profile-env-row").last();
+    await expect(pendingRow.locator("select")).toHaveValue("override");
+    await expect(pendingRow.locator("select option")).toHaveText(["Enabled", "Disabled"]);
     await profile
       .locator('input[aria-label^="Environment variable key"]')
       .last()
@@ -71,11 +71,13 @@ test.describe("Profile environment variable grid", () => {
           message.env_vars.some((entry) => entry.key === "CUSTOM_FLAG"),
       ),
     );
+    const addedRow = profile.locator('.profile-env-row[data-env-key="CUSTOM_FLAG"]');
+    await expect(addedRow).toHaveCount(1);
 
-    await profile
-      .locator('input[aria-label^="Profile value"]')
-      .last()
-      .fill("1");
+    const addedValueInput = addedRow.locator('input[aria-label^="Profile value"]');
+    await addedValueInput.fill("1");
+    await expect(addedValueInput).toHaveValue("1");
+    await addedValueInput.blur();
     await page.waitForFunction(() =>
       window.__profileFixtureSends.some(
         (message) =>
@@ -85,8 +87,10 @@ test.describe("Profile environment variable grid", () => {
           ),
       ),
     );
+    await waitForProfileIdle(profile);
 
     await addedRow.locator("select").selectOption("disabled");
+    await expect(addedRow.locator("select")).toHaveValue("disabled");
     await expect(addedRow.locator(".profile-env-result")).toHaveText("Disabled");
     await page.waitForFunction(() =>
       window.__profileFixtureSends.some(
@@ -183,6 +187,10 @@ test.describe("Profile environment variable grid", () => {
     await expect(editor).toHaveJSProperty("scrollTop", 0);
   });
 });
+
+async function waitForProfileIdle(profile) {
+  await expect(profile.locator(".profile-status")).toContainText(/^Active /);
+}
 
 async function installProfileBackend(page) {
   await page.addInitScript(() => {

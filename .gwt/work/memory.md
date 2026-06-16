@@ -6942,6 +6942,27 @@ Context: During SPEC-3050 Phase E verification on 2026-06-15, the active worktre
 Learning: When a gwt-managed worktree becomes missing or prunable during long verification, continuing from that cwd can produce getcwd/git clone failures and may lose uncommitted edits. Treat this as an environment failure, immediately switch command execution to a stable existing checkout, recover changes from recorded diffs, and rerun full tests serially if parallel tests showed cwd races.
 Future Action: Before long full verification, confirm the worktree path still exists and prefer serial `cargo test ... -- --test-threads=1` when previous runs show getcwd/tempdir interference. If a worktree vanishes, stop using that path, verify surviving checkouts with absolute `git -C`, reconstruct changes without touching unrelated untracked files, and record the incident.
 
+## 2026-06-15 — Full visual failures need root-cause contracts
+
+Type: failure-pattern
+Context: SPEC-2359 T-604 full visual verification exposed unrelated regressions in hidden terminal output refresh, extracted Knowledge surface dependency injection, Profile env row identity/save snapshots, and stale E2E session-count expectations.
+Learning: Do not classify full visual failures as unrelated until each failing surface is reproduced and its root cause is tied to a static or browser contract. Extracted surfaces must receive all former app.js dependencies explicitly; delayed backend snapshots must not clobber newer UI drafts.
+Future Action: When full visual blocks SPEC verification, reproduce targeted specs first, fix deterministic implementation or test-contract causes, and add embedded_web_tests contracts for dependency injection and race guards before re-running the full suite.
+
+## 2026-06-16 — Workspace cleanup must consider live process cwd
+
+Type: failure-pattern
+Context: SPEC-2359 user verification on 2026-06-16 showed work/20260616-0203 displayed as cleanup-safe in a fresh browser-check while Codex processes still had cwd inside that worktree. The session ledger was Idle/Stop and the isolated browser-check HOME had no real session ledger entry.
+Learning: Idle session status and isolated browser-check state are insufficient for destructive cleanup gates. A merged Workspace can still be unsafe when any live OS process is running from that worktree.
+Future Action: For workspace cleanup/delete changes, add tests with a live process whose cwd is the candidate worktree and verify both action availability and UI copy in a fresh browser-check before asking for user confirmation.
+
+## 2026-06-16 — Workspace cleanup result must repaint non-Branches owners
+
+Type: lesson
+Context: SPEC-2359 user verification on 2026-06-16 showed Workspace-origin cleanup stuck at PENDING for work/20260615-0125 even though logs proved git worktree remove --force and git branch -D had both exited 0. The cleanup modal state was owned by a Workspace window id, not the synthetic cleanup id or a Branches window.
+Learning: Backend completion is insufficient for destructive UI flows: event receive paths must repaint the modal owner. renderBranches(event.id) can return before modal repaint when the owner window does not contain .branch-list, leaving stale running UI after a successful cleanup.
+Future Action: For cleanup/progress/result/error changes, add a DOM test where the cleanup owner is a Workspace window without .branch-list, and verify fresh browser-check serves the fixed JS before asking for user confirmation.
+
 ## 2026-06-15 — Session resume requires branch materializability
 
 Type: lesson
