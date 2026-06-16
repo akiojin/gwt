@@ -39,7 +39,9 @@ Download the release asset for your platform from
 
 ### macOS
 
-- GUI-first installer: `gwt-macos-universal.dmg`
+- GUI-first installer:
+  - Apple Silicon: `gwt-macos-arm64.dmg`
+  - Intel Mac: `gwt-macos-x86_64.dmg`
 - Open `GWT.app` from the mounted DMG for the native desktop launch surface
 - Use the install script when you want the `gwt` and `gwtd` CLIs in your `PATH`
 

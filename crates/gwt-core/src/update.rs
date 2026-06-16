@@ -1249,7 +1249,9 @@ pub fn asset_name_from_url(url: &str) -> Option<String> {
 fn find_installer_asset_url(platform: &Platform, assets: &[GitHubAsset]) -> Option<String> {
     match platform.os.as_str() {
         "macos" => {
-            if let Some(asset_name) = crate::release_contract::installer_asset_name(&platform.os) {
+            if let Some(asset_name) =
+                crate::release_contract::installer_asset_name(&platform.os, &platform.arch)
+            {
                 if let Some(asset) = assets
                     .iter()
                     .find(|a| a.name.eq_ignore_ascii_case(&asset_name))
@@ -1258,10 +1260,23 @@ fn find_installer_asset_url(platform: &Platform, assets: &[GitHubAsset]) -> Opti
                 }
             }
 
-            // Legacy release flow: prefer any DMG for macOS.
+            // Legacy release flow: prefer an architecture-specific DMG if a
+            // previous release used a versioned name such as
+            // `gwt_7.1.0_aarch64.dmg`.
             if let Some(asset) = assets.iter().find(|a| {
                 let lower = a.name.to_ascii_lowercase();
                 lower.ends_with(".dmg") && asset_matches_arch(&lower, &platform.arch)
+            }) {
+                return Some(asset.browser_download_url.clone());
+            }
+
+            // Compatibility for releases before the arch-specific GUI
+            // installer contract. Keep this below arch-specific lookup so
+            // Apple Silicon hosts never prefer a universal app when the
+            // arm64-only DMG is present.
+            if let Some(asset) = assets.iter().find(|a| {
+                let lower = a.name.to_ascii_lowercase();
+                lower.ends_with(".dmg") && lower.contains("universal")
             }) {
                 return Some(asset.browser_download_url.clone());
             }
@@ -1274,10 +1289,10 @@ fn find_installer_asset_url(platform: &Platform, assets: &[GitHubAsset]) -> Opti
                 }
             }
 
-            if let Some(asset) = assets
-                .iter()
-                .find(|a| a.name.to_ascii_lowercase().ends_with(".dmg"))
-            {
+            if let Some(asset) = assets.iter().find(|a| {
+                let lower = a.name.to_ascii_lowercase();
+                lower.ends_with(".dmg") && !asset_name_mentions_known_arch(&lower)
+            }) {
                 return Some(asset.browser_download_url.clone());
             }
 
@@ -1287,7 +1302,9 @@ fn find_installer_asset_url(platform: &Platform, assets: &[GitHubAsset]) -> Opti
                 .map(|a| a.browser_download_url.clone())
         }
         "windows" => {
-            if let Some(asset_name) = crate::release_contract::installer_asset_name(&platform.os) {
+            if let Some(asset_name) =
+                crate::release_contract::installer_asset_name(&platform.os, &platform.arch)
+            {
                 if let Some(asset) = assets
                     .iter()
                     .find(|a| a.name.eq_ignore_ascii_case(&asset_name))
@@ -1337,6 +1354,12 @@ fn asset_matches_arch(asset_name_lower: &str, arch: &str) -> bool {
         }
         _ => true,
     }
+}
+
+fn asset_name_mentions_known_arch(asset_name_lower: &str) -> bool {
+    ["aarch64", "arm64", "x86_64", "x64", "amd64", "universal"]
+        .iter()
+        .any(|needle| asset_name_lower.contains(needle))
 }
 
 fn installer_kind_for_url(platform: &Platform, installer_url: &str) -> Option<InstallerKind> {
@@ -2917,8 +2940,12 @@ mod tests {
             Some("gwt-windows-x86_64.zip")
         );
         assert_eq!(
-            crate::release_contract::installer_asset_name("windows").as_deref(),
+            crate::release_contract::installer_asset_name("windows", "x86_64").as_deref(),
             Some("gwt-windows-x86_64.msi")
+        );
+        assert_eq!(
+            crate::release_contract::installer_asset_name("macos", "aarch64").as_deref(),
+            Some("gwt-macos-arm64.dmg")
         );
         assert_eq!(
             crate::release_contract::bundle_binary_names("windows").expect("bundle binaries"),
@@ -3209,6 +3236,45 @@ mod tests {
 
         let url = find_installer_asset_url(&platform, &assets);
         assert_eq!(url.as_deref(), Some("https://example.com/macos-arm64.dmg"));
+    }
+
+    #[test]
+    fn find_installer_asset_url_prefers_macos_arch_specific_contract_dmg_over_universal() {
+        let platform = Platform {
+            os: "macos".to_string(),
+            arch: "aarch64".to_string(),
+        };
+        let assets = vec![
+            GitHubAsset {
+                name: "gwt-macos-universal.dmg".to_string(),
+                browser_download_url: "https://example.com/universal.dmg".to_string(),
+            },
+            GitHubAsset {
+                name: "gwt-macos-x86_64.dmg".to_string(),
+                browser_download_url: "https://example.com/x86_64.dmg".to_string(),
+            },
+            GitHubAsset {
+                name: "gwt-macos-arm64.dmg".to_string(),
+                browser_download_url: "https://example.com/arm64.dmg".to_string(),
+            },
+        ];
+
+        let url = find_installer_asset_url(&platform, &assets);
+        assert_eq!(url.as_deref(), Some("https://example.com/arm64.dmg"));
+    }
+
+    #[test]
+    fn find_installer_asset_url_does_not_cross_select_macos_dmg() {
+        let platform = Platform {
+            os: "macos".to_string(),
+            arch: "aarch64".to_string(),
+        };
+        let assets = vec![GitHubAsset {
+            name: "gwt-macos-x86_64.dmg".to_string(),
+            browser_download_url: "https://example.com/x86_64.dmg".to_string(),
+        }];
+
+        assert!(find_installer_asset_url(&platform, &assets).is_none());
     }
 
     #[test]

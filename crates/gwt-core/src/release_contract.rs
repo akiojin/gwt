@@ -45,8 +45,14 @@ pub fn portable_asset_name(os: &str, arch: &str) -> Option<String> {
     contract().portable_assets.get(&key).cloned()
 }
 
-pub fn installer_asset_name(os: &str) -> Option<String> {
-    contract().installer_assets.get(normalize_os(os)).cloned()
+pub fn installer_asset_name(os: &str, arch: &str) -> Option<String> {
+    let os = normalize_os(os);
+    let key = format!("{}-{}", os, normalize_arch(arch));
+    contract()
+        .installer_assets
+        .get(&key)
+        .or_else(|| contract().installer_assets.get(os))
+        .cloned()
 }
 
 #[cfg(test)]
@@ -60,8 +66,16 @@ mod tests {
             Some("gwt-windows-x86_64.zip")
         );
         assert_eq!(
-            installer_asset_name("windows").as_deref(),
+            installer_asset_name("windows", "x86_64").as_deref(),
             Some("gwt-windows-x86_64.msi")
+        );
+        assert_eq!(
+            installer_asset_name("macos", "aarch64").as_deref(),
+            Some("gwt-macos-arm64.dmg")
+        );
+        assert_eq!(
+            installer_asset_name("macos", "x86_64").as_deref(),
+            Some("gwt-macos-x86_64.dmg")
         );
         assert_eq!(
             bundle_binary_names("windows").expect("bundle binaries"),
@@ -74,6 +88,14 @@ mod tests {
         assert_eq!(
             portable_asset_name("win32", "x64").as_deref(),
             Some("gwt-windows-x86_64.zip")
+        );
+        assert_eq!(
+            installer_asset_name("darwin", "arm64").as_deref(),
+            Some("gwt-macos-arm64.dmg")
+        );
+        assert_eq!(
+            installer_asset_name("darwin", "x64").as_deref(),
+            Some("gwt-macos-x86_64.dmg")
         );
         assert_eq!(
             bundle_binary_names("darwin").expect("bundle binaries"),

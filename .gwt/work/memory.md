@@ -7004,3 +7004,10 @@ Type: lesson
 Context: JSON-only gwtd migration initially had to cover hidden .claude/.codex managed assets as well as Rust sources and public docs.
 Learning: Repository-wide command-surface migrations must include hidden managed assets and generated guidance, not only normal rg-visible files.
 Future Action: Before declaring a command-surface migration complete, run rg -uu across .claude, .codex, docs, tests, and source comments, then add contract tests that reject stale guidance.
+
+## 2026-06-16 — Hidden agent window status can leave visible tab telemetry stale
+
+Type: failure-pattern
+Context: Stop/terminal_status for an inactive tabbed agent updated runtime state and Project Tab dots, but the target window DOM was not mounted, so the visible sibling window tab strip kept data-agent-state=active and continued pulsing.
+Learning: For tabbed windows, runtime status changes must refresh every mounted tab strip in the group, not only the target window element. Missing-element branches in status handlers still need tab telemetry refresh.
+Future Action: When changing agent runtime status handling, add a regression that emits terminal_status/window_state for a hidden tab and asserts the visible sibling tab state and Project Tab dot both stop pulsing.

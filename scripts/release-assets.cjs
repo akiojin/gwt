@@ -4,6 +4,34 @@ const os = require("os");
 const path = require("path");
 const { execFileSync } = require("child_process");
 
+const RELEASE_CONTRACT = JSON.parse(
+  fs.readFileSync(path.join(__dirname, "..", "assets", "release-assets.json"), "utf8")
+);
+
+function normalizePlatform(platform = os.platform()) {
+  if (platform === "darwin") {
+    return "macos";
+  }
+  if (platform === "win32") {
+    return "windows";
+  }
+  return platform;
+}
+
+function normalizeArch(arch = os.arch()) {
+  if (arch === "arm64") {
+    return "aarch64";
+  }
+  if (arch === "x64") {
+    return "x86_64";
+  }
+  return arch;
+}
+
+function contractKey(platform = os.platform(), arch = os.arch()) {
+  return `${normalizePlatform(platform)}-${normalizeArch(arch)}`;
+}
+
 function binaryNameForPlatform(platform = os.platform()) {
   return platform === "win32" ? "gwt.exe" : "gwt";
 }
@@ -17,31 +45,27 @@ function bundleBinaryNamesForPlatform(platform = os.platform()) {
 }
 
 function releaseAssetName(platform = os.platform(), arch = os.arch()) {
-  if (platform === "darwin" && arch === "arm64") {
-    return "gwt-macos-arm64.tar.gz";
-  }
-  if (platform === "darwin" && arch === "x64") {
-    return "gwt-macos-x86_64.tar.gz";
-  }
-  if (platform === "linux" && arch === "x64") {
-    return "gwt-linux-x86_64.tar.gz";
-  }
-  if (platform === "linux" && arch === "arm64") {
-    return "gwt-linux-aarch64.tar.gz";
-  }
-  if (platform === "win32" && arch === "x64") {
-    return "gwt-windows-x86_64.zip";
+  const asset = RELEASE_CONTRACT.portable_assets[contractKey(platform, arch)];
+  if (asset) {
+    return asset;
   }
 
   throw new Error(`Unsupported platform: ${platform}-${arch}`);
 }
 
+function installerAssetName(platform = os.platform(), arch = os.arch()) {
+  const normalizedPlatform = normalizePlatform(platform);
+  return (
+    RELEASE_CONTRACT.installer_assets[contractKey(platform, arch)] ||
+    RELEASE_CONTRACT.installer_assets[normalizedPlatform] ||
+    null
+  );
+}
+
 function primaryReleaseAssetName(platform = os.platform(), arch = os.arch()) {
-  if (platform === "darwin" && (arch === "arm64" || arch === "x64")) {
-    return "gwt-macos-universal.dmg";
-  }
-  if (platform === "win32" && arch === "x64") {
-    return "gwt-windows-x86_64.msi";
+  const installer = installerAssetName(platform, arch);
+  if (installer) {
+    return installer;
   }
   return releaseAssetName(platform, arch);
 }
@@ -207,6 +231,7 @@ module.exports = {
   installBinaryFromArchive: installBundleFromArchive,
   installBundleFromArchive,
   installReleaseBinary,
+  installerAssetName,
   primaryReleaseAssetName,
   releaseAssetName,
   releaseAssetUrl,

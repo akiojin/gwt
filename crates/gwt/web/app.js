@@ -2462,6 +2462,7 @@
             const element = windowMap.get(windowId);
             if (!element) {
               renderWindowList();
+              refreshWindowTabTelemetry(windowData);
               refreshProjectTabDots();
               return;
             }
