@@ -65,11 +65,11 @@ Field notes:
 - "success_criteria": rendered as `SC-001`, `SC-002`, ...
 
 Examples:
-gwtd <<'JSON'
+"$GWT_BIN" <<'JSON'
 {"schema_version":1,"operation":"issue.spec.create","params":{"title":"SPEC: Launch agents from GUI","spec":{"background":["..."],"user_stories":[],"functional_requirements":[],"success_criteria":[]}}}
 JSON
 
-gwtd <<'JSON'
+"$GWT_BIN" <<'JSON'
 {"schema_version":1,"operation":"issue.spec.edit","params":{"number":1942,"section":"spec","spec":{"background":["..."],"user_stories":[],"functional_requirements":[],"success_criteria":[]},"replace":true}}
 JSON
 "#;

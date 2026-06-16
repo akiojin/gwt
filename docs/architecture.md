@@ -15,7 +15,9 @@ gwt は二つの Rust バイナリ — `gwt` (GUI フロントドア) と `gwtd`
     (`issue.*` / `pr.*` / `board.*` /
     `actions.*` / `daemon.*` operations)。JSON operation `daemon.start` は
     Unix ドメインソケット経由でプロジェクト単位の runtime daemon を
-    bootstrap する (SPEC-2077 Phase H1)
+    bootstrap する (SPEC-2077 Phase H1)。Managed hook dispatch は例外で、
+    provider hooks は dedicated transport `gwtd hook event <Event>` /
+    `gwtd hook provider-event <provider> <native-event>` を使い続ける
 - `crates/gwt-core/`
   - Git / worktree / 設定 / ログ / coordination / index ランタイム、
     daemon 契約 (`DaemonEndpoint` / `ClientFrame` / `DaemonFrame` の

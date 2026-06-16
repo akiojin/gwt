@@ -12,11 +12,11 @@ Unified agent pane management: discover, read, and lifecycle operations.
 Use the Board for agent-to-agent communication:
 
 ```bash
-gwtd <<'JSON'
+"$GWT_BIN" <<'JSON'
 {"schema_version":1,"operation":"board.post","params":{"kind":"request","targets":["<session-id|branch|agent-id>"],"body":"<message>"}}
 JSON
 
-gwtd <<'JSON'
+"$GWT_BIN" <<'JSON'
 {"schema_version":1,"operation":"board.post","params":{"kind":"handoff","targets":["<session-id|branch|agent-id>"],"body":"<message>"}}
 JSON
 ```

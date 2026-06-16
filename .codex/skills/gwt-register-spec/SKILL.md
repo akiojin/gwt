@@ -92,14 +92,15 @@ digraph register_spec_flow {
 6. **Inject body**: JSON operation `issue.spec.edit` with
    `params.section:"spec"` and `params.body` from `body_path`. The edit
    operation auto-applies `<!-- artifact:spec BEGIN/END -->` markers.
-7. **Phase edit**: JSON operation `register.phase` with `params.label:"edit"`.
+7. **Phase edit**: JSON operation `register.phase` with `params.spec:<n>` and
+   `params.label:"edit"`.
 8. **Roundtrip verify**: JSON operation `issue.spec.section` with
    `params.section:"spec"`. The output
    must be non-empty and must contain the H1 line of the body file. On
    failure, follow `references/recovery.md` and abort.
-9. **Phase roundtrip**: JSON operation `register.phase` with
+9. **Phase roundtrip**: JSON operation `register.phase` with `params.spec:<n>` and
    `params.label:"roundtrip"`.
-10. **Complete**: JSON operation `register.complete`. Return `{ issue: <n>,
+10. **Complete**: JSON operation `register.complete` with `params.spec:<n>`. Return `{ issue: <n>,
     url: "https://github.com/akiojin/gwt/issues/<n>" }` to the caller.
 
 ## Validation rules

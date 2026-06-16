@@ -33,11 +33,11 @@ SPEC-1935 FR-014q routes Stop through `skill-plan-spec-stop-check`, which reads
 `.gwt/skill-state/plan-spec.json` and blocks Stop while the skill is active.
 Register the skill lifecycle explicitly with the exit CLI:
 
-- JSON operation `plan.start` with `params.spec:<n>` at the beginning of the skill invocation
-- JSON operation `plan.phase` with `params.spec:<n>` and
+- JSON operation `plan.start` with `params.spec:<n>` at the beginning of the skill invocation (`params.spec:0` for lightweight mode)
+- JSON operation `plan.phase` with `params.spec:<n>` (or `params.spec:0` for lightweight mode) and
   `params.label:"plan-draft"|"tasks-draft"|"quality-gate"` at each internal milestone (logging only; does not affect blocking)
-- JSON operation `plan.complete` with `params.spec:<n>` once the quality gate verdict is `CLEAR` and planning artifacts are written
-- JSON operation `plan.abort` with `params.spec:<n>` and `params.reason` when planning cannot proceed (e.g. spec gap discovered mid-planning)
+- JSON operation `plan.complete` with `params.spec:<n>` (or `params.spec:0` for lightweight mode) once the quality gate verdict is `CLEAR` and planning artifacts are written
+- JSON operation `plan.abort` with `params.spec:<n>` (or `params.spec:0` for lightweight mode) and `params.reason` when planning cannot proceed (e.g. spec gap discovered mid-planning)
 
 The Stop-block handler honours Claude Code / Codex's built-in
 `stop_hook_active` flag, so forced continuation is capped at one per Stop
@@ -233,22 +233,22 @@ Use gwtd JSON operations for artifact persistence:
 
 ```bash
 # Read spec section
-gwtd <<'JSON'
+"$GWT_BIN" <<'JSON'
 {"schema_version":1,"operation":"issue.spec.section","params":{"number":123,"section":"spec"}}
 JSON
 
 # Write plan section
-gwtd <<'JSON'
+"$GWT_BIN" <<'JSON'
 {"schema_version":1,"operation":"issue.spec.edit","params":{"number":123,"section":"plan","body":"<plan markdown>"}}
 JSON
 
 # Write tasks section
-gwtd <<'JSON'
+"$GWT_BIN" <<'JSON'
 {"schema_version":1,"operation":"issue.spec.edit","params":{"number":123,"section":"tasks","body":"<tasks markdown>"}}
 JSON
 
 # List all SPEC Issues
-gwtd <<'JSON'
+"$GWT_BIN" <<'JSON'
 {"schema_version":1,"operation":"issue.spec.list","params":{}}
 JSON
 ```

@@ -187,7 +187,7 @@ fn apply_goal_pending(
             out.push_str(&format!(
                 "discuss: {proposal} is not eligible for goal pending (no change)\n"
             ));
-            Ok(1)
+            Ok(0)
         }
         Err(err) => {
             out.push_str(&format!("discuss: goal pending failed: {err}\n"));

@@ -88,10 +88,15 @@ if [ -n "$(git status --porcelain)" ]; then dirty=1; fi
 git fetch origin
 
 commit_count="$(git rev-list --count "origin/$base..HEAD")"
-pr_summary="$("$GWT_BIN" <<'JSON' 2>/tmp/gwt-pr-current.err || true
+if ! pr_summary="$("$GWT_BIN" <<'JSON' 2>/tmp/gwt-pr-current.err
 {"schema_version":1,"operation":"pr.current","params":{}}
 JSON
-)"
+)"; then
+  status="CHECK_FAILED"; action="MANUAL_CHECK"
+  reason="$(cat /tmp/gwt-pr-current.err)"
+  printf '!! MANUAL CHECK -- Could not determine PR status.\n   Reason: %s\n' "$reason" >&2
+  exit 1
+fi
 merge_state="$(printf '%s\n' "$pr_summary" | sed -n 's/^mergeable: //p' | head -n1)"
 
 if printf '%s\n' "$pr_summary" | grep -qx 'no current pull request'; then

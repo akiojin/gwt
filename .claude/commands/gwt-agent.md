@@ -11,11 +11,11 @@ Unified agent pane management. Auto-detects mode from arguments: no args lists p
 Use Board for agent-to-agent communication:
 
 ```bash
-gwtd <<'JSON'
+"$GWT_BIN" <<'JSON'
 {"schema_version":1,"operation":"board.post","params":{"kind":"request","targets":["<session-id|branch|agent-id>"],"body":"<message>"}}
 JSON
 
-gwtd <<'JSON'
+"$GWT_BIN" <<'JSON'
 {"schema_version":1,"operation":"board.post","params":{"kind":"handoff","targets":["<session-id|branch|agent-id>"],"body":"<message>"}}
 JSON
 ```

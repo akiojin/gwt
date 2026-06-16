@@ -966,9 +966,9 @@ mod tests {
             );
             assert!(
                 discussion_command.contains("discuss.goal_pending")
-                    && discussion_command.contains("goal_started")
-                    && discussion_command.contains("goal_failed")
-                    && discussion_command.contains("goal_skipped"),
+                    && discussion_command.contains("discuss.goal_started")
+                    && discussion_command.contains("discuss.goal_failed")
+                    && discussion_command.contains("discuss.goal_skipped"),
                 "expected discussion command to mention pending Goal Start bookkeeping through JSON operations in {relative}"
             );
         }

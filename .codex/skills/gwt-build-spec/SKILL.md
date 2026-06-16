@@ -56,14 +56,14 @@ continuation; a genuinely stuck turn still terminates normally.
 Determine the mode at entry:
 
 - **SPEC mode** if a SPEC ID is provided or discoverable from the current branch/context, AND
-  JSON operation `issue.spec.section` で tasks セクションが取得できる
+  the tasks section can be read with JSON operation `issue.spec.section`
 - **Standalone mode** otherwise
 
 ## Phase 1: Context Load
 
 ### SPEC mode
 
-1. JSON operation `issue.spec.read` で SPEC の全セクション（spec, plan, tasks）を読み込む。
+1. Read all SPEC sections (`spec`, `plan`, `tasks`) with JSON operation `issue.spec.read`.
 2. Run the Board active-claim preflight for the target SPEC before choosing a
    task slice:
    - Read the current Board with JSON operation `board.show`.
@@ -84,7 +84,7 @@ Determine the mode at entry:
 3. Identify the next incomplete task slice in dependency order:
    - Setup before Foundational work
    - Foundational before story-specific work
-4. SPEC セクションの読み書きは JSON operations `issue.spec.section` / `issue.spec.edit` を使用する。
+4. Use JSON operations `issue.spec.section` / `issue.spec.edit` for SPEC section reads and writes.
 
 ### Standalone mode
 
@@ -144,7 +144,7 @@ detects the host project's actual test runners from manifests
 *.sln / etc.) per `.codex/skills/gwt-verify/references/runner-detection.md`,
 runs the appropriate unit / integration / E2E / visual tests, emits a
 **Test Inventory** that names which tests were executed, and hands off to
-the user via a 4-step 導線 + Check Items before finalizing
+the user via a 4-step verification path + Check Items before finalizing
 `## Verification Report`. The right matrix is determined by what actually
 changed and which runners the project ships; do not hard-code a static
 cargo / pnpm / Playwright command list here.
@@ -190,9 +190,9 @@ Reconcile implemented behavior against all SPEC artifacts. See `references/compl
 Required checks:
 
 - Every completed task in `tasks.md` matches the implementation
-- tasks セクションの受け入れチェックボックスが実際の受け入れ済み動作を反映している
-- tasks セクションの TDD チェックボックスが実際の検証エビデンスを反映している
-- tasks セクションの完了マーカーがコードで裏付けられていない完了を主張していない
+- Acceptance checkboxes in the tasks section reflect behavior that has actually been accepted
+- TDD checkboxes in the tasks section reflect real verification evidence
+- Completion markers in the tasks section do not claim completion that is not backed by code
 - If artifacts disagree, return to `gwt-discussion` — do not proceed to PR
 - Ready PR Gate passed for a releaseable slice. An incomplete Draft PR
   handoff must be reported separately and does not satisfy completion.
@@ -200,7 +200,7 @@ Required checks:
 Update execution tracking:
 
 - Mark completed tasks in `tasks.md`
-- tasks セクションのチェックボックスを JSON operation `issue.spec.edit` で更新する
+- Update tasks-section checkboxes with JSON operation `issue.spec.edit`
 
 ### Standalone mode
 

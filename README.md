@@ -199,16 +199,16 @@ running JSON operation `daemon.start` brings up a per-project runtime daemon
 — for example, with the daemon running, Board posts you make in one
 `gwt` window appear in another instance opened on the same repo
 without a polling delay. The daemon keeps running in the background
-until you stop it (Ctrl-C or SIGTERM). `gwtd daemon status` prints
-the live endpoint for diagnostics. Without `gwtd daemon start`,
+until you stop it (Ctrl-C or SIGTERM). JSON operation `daemon.status` prints
+the live endpoint for diagnostics. Without JSON operation `daemon.start`,
 multi-instance fan-out is inactive but local file-based state and
 the file watcher continue to work as before.
 
-Windows currently has no long-running daemon: `gwtd daemon start`
+Windows currently has no long-running daemon: JSON operation `daemon.start`
 exits with "not yet implemented", and managed hooks fall back to
 synchronous `gwt hook ...` dispatch. Multi-instance fan-out is
-therefore unavailable on Windows pending follow-up work; `gwtd
-daemon status` still works there but always reports `stopped` until
+therefore unavailable on Windows pending follow-up work; JSON operation
+`daemon.status` still works there but always reports `stopped` until
 the named-pipe path lands.
 
 ## Agent Workflow

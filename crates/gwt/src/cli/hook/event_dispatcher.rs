@@ -210,7 +210,7 @@ If the latest user prompt approves this Action Bundle and asks work to continue 
 - Codex: call `create_goal` with the Goal condition above as the objective.\n\
 - Claude Code: resolve `GWT_BIN`, then run JSON operation `pane.send` with `params.text:\"/goal <condition>\"` using the Goal condition above.\n\
 \n\
-After a successful start, run JSON operation `discuss.goal_started`. If the user rejects or revises the Action Bundle, run JSON operation `discuss.goal_skipped`. If goal start fails, run JSON operation `discuss.goal_failed` and show a manual `/goal <condition>` line to the user.",
+After a successful start, run JSON operation `discuss.goal_started` with `params.proposal:\"{label}\"`. If the user rejects or revises the Action Bundle, run JSON operation `discuss.goal_skipped` with `params.proposal:\"{label}\"` and `params.reason`. If goal start fails, run JSON operation `discuss.goal_failed` with `params.proposal:\"{label}\"` and `params.reason`, then show a manual `/goal <condition>` line to the user.",
         label = goal.proposal_label,
         title = goal.proposal_title,
         condition = goal.condition,

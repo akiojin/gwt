@@ -10,6 +10,7 @@
 //! - `tests.rs`: env integration tests (`#[cfg(test)]`).
 
 mod default;
+mod stdout_capture;
 mod test_env;
 #[cfg(test)]
 mod tests;
@@ -17,6 +18,7 @@ mod tests;
 pub use default::DefaultCliEnv;
 #[cfg(test)]
 pub use default::{IssueClientFactory, LazyIssueClient};
+pub(crate) use stdout_capture::StdoutCaptureEnv;
 pub use test_env::TestEnv;
 
 use std::{

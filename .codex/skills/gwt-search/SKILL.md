@@ -5,15 +5,18 @@ description: "Mandatory preflight before gwt-discussion, gwt-register-issue, and
 
 # Unified Search
 
-gwt maintains ChromaDB vector search indexes for four scopes (Phase 8 layout
-plus SPEC-2805 Memory):
+gwt maintains ChromaDB vector search indexes for the scopes below (Phase 8
+layout plus SPEC-2805 Memory):
 
 | Scope | Content | Lifecycle |
 |-------|---------|-----------|
 | SPECs | GitHub Issue cache (`~/.gwt/cache/issues/`) | Populated by JSON operation `issue.spec.pull` or gwt GUI startup sync |
 | Issues | GitHub Issues (all states) | gwt GUI startup async refresh (TTL 15 min) + auto-build on first search |
 | Files | Project implementation files (excludes skill assets, SPEC trees, snapshots) | Per-worktree watcher (gwt GUI) + auto-build on first search |
+| Project docs | Project documentation files | Per-worktree watcher (gwt GUI) + auto-build on first search |
 | Memory | Post-mortem entries in `.gwt/work/memory.md` | Pinpoint allowlist watcher on `.gwt/work/memory.md` + auto-build on first search |
+| Board | Coordination Board entries | Repo-local event log + auto-build on first search |
+| Discussions | Git-managed discussion notes | Repo-local discussion notes + auto-build on first search |
 
 All vector data is stored under `~/.gwt/index/<repo-hash>/...`. Issues,
 SPECs, and Memory are repo-scoped and shared across worktrees; Files

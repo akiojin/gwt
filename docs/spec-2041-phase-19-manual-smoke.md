@@ -122,7 +122,14 @@ Post a single Board entry summarising the outcome:
 
 ```bash
 gwtd <<'JSON'
-{"schema_version":1,"operation":"board.post","params":{"kind":"status","body":"SPEC-2041 Phase 19 Gate 3 manual smoke result:\n- 3.A Restart-now: PASS / FAIL\n- 3.B Later + next-launch swap: PASS / FAIL\n- 3.C Failure UX: PASS / FAIL\n- 3.D Cancel mid-download: PASS / FAIL\nNotes: <free-form observations, screenshots, log excerpts as needed>"}}
+{
+  "schema_version": 1,
+  "operation": "board.post",
+  "params": {
+    "kind": "status",
+    "body": "<paste the Message body block below>"
+  }
+}
 JSON
 ```
 

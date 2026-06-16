@@ -24,7 +24,7 @@ offset inside the body.
 | ID | Severity | Rule | Failure example |
 |---|---|---|---|
 | R1 | Structural | Title matches `^SPEC: .+$` | `"feat: foo"` → fail |
-| R2 | Structural | First non-blank line of body equals title | H1 says `# something else` |
+| R2 | Structural | H1 text (`# SPEC: ...`) matches the title | H1 says `# something else` |
 | R3 | Structural | Section `## 背景` exists | missing or misspelled |
 | R4 | Structural | Section `## ユビキタス言語` exists | — |
 | R5 | Structural | Section `## ユーザーシナリオと受け入れシナリオ` exists | — |

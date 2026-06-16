@@ -4,7 +4,20 @@ use std::{
     process::{Command, Stdio},
 };
 
+use gwt_agent::{AgentId, Session};
 use gwt_core::workspace_projection::load_or_default_workspace_projection;
+use tempfile::TempDir;
+
+fn prepared_hook_session() -> (TempDir, TempDir, String) {
+    let home = tempfile::tempdir().expect("home tempdir");
+    let worktree = tempfile::tempdir().expect("worktree tempdir");
+    let session = Session::new(worktree.path(), "work/hook-transport", AgentId::Codex);
+    let session_id = session.id.clone();
+    session
+        .save(&home.path().join(".gwt").join("sessions"))
+        .expect("save hook session");
+    (home, worktree, session_id)
+}
 
 #[test]
 fn gwtd_dispatches_internal_hook_cli_without_gui_output() {
@@ -80,10 +93,13 @@ fn gwtd_no_args_dispatches_stdin_json_envelope() {
         "gwtd JSON envelope should exit 0, stderr: {}",
         String::from_utf8_lossy(&output.stderr)
     );
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    assert!(
-        stdout.contains(r#""ok":true"#),
-        "stdout should be success JSON, got: {stdout}"
+    let response: serde_json::Value =
+        serde_json::from_slice(&output.stdout).expect("parse gwtd JSON response");
+    assert_eq!(
+        response.get("ok").and_then(|value| value.as_bool()),
+        Some(true),
+        "stdout should be success JSON with ok=true, got: {}",
+        String::from_utf8_lossy(&output.stdout)
     );
     let projection =
         load_or_default_workspace_projection(project.path()).expect("load workspace projection");
@@ -180,9 +196,14 @@ fn gwtd_hook_register_codex_managed_hook_trust_writes_requested_config() {
         "registration should exit 0, stderr: {}",
         String::from_utf8_lossy(&output.stderr)
     );
+    let response: serde_json::Value =
+        serde_json::from_slice(&output.stdout).expect("hook registration stdout must be JSON");
+    assert_eq!(response["ok"].as_bool(), Some(true));
     assert!(
-        String::from_utf8_lossy(&output.stdout).contains("trusted 5"),
-        "stdout should report trusted hook count, got: {}",
+        response["output"]
+            .as_str()
+            .is_some_and(|output| output.contains("trusted 5")),
+        "JSON output field should report trusted hook count, got: {}",
         String::from_utf8_lossy(&output.stdout)
     );
     let config = fs::read_to_string(&config_path).expect("read config");
@@ -199,8 +220,14 @@ fn gwtd_hook_register_codex_managed_hook_trust_writes_requested_config() {
 
 #[test]
 fn gwtd_managed_hook_event_remains_argv_transport_exception() {
+    let (home, worktree, session_id) = prepared_hook_session();
     let output = Command::new(env!("CARGO_BIN_EXE_gwtd"))
+        .current_dir(worktree.path())
         .args(["hook", "event", "SessionStart"])
+        .env("HOME", home.path())
+        .env("USERPROFILE", home.path())
+        .env("GWT_SESSION_ID", &session_id)
+        .env_remove("GWT_SESSION_RUNTIME_PATH")
         .stdin(Stdio::null())
         .output()
         .expect("run gwtd hook event");
@@ -213,6 +240,41 @@ fn gwtd_managed_hook_event_remains_argv_transport_exception() {
     assert!(
         String::from_utf8_lossy(&output.stdout).contains("hookSpecificOutput"),
         "SessionStart should keep the managed hook stdout contract, got: {}",
+        String::from_utf8_lossy(&output.stdout)
+    );
+}
+
+#[test]
+fn gwtd_provider_hook_event_remains_argv_transport_exception() {
+    let (home, worktree, session_id) = prepared_hook_session();
+    let mut child = Command::new(env!("CARGO_BIN_EXE_gwtd"))
+        .current_dir(worktree.path())
+        .args(["hook", "provider-event", "opencode", "session.created"])
+        .env("HOME", home.path())
+        .env("USERPROFILE", home.path())
+        .env("GWT_SESSION_ID", &session_id)
+        .env_remove("GWT_SESSION_RUNTIME_PATH")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("run gwtd provider hook event");
+    child
+        .stdin
+        .take()
+        .expect("stdin")
+        .write_all(br#"{"sessionId":"provider-session"}"#)
+        .expect("write provider event payload");
+    let output = child.wait_with_output().expect("wait provider hook event");
+
+    assert!(
+        output.status.success(),
+        "provider hook transport should exit 0, stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        String::from_utf8_lossy(&output.stdout).contains("hookSpecificOutput"),
+        "provider SessionStart should keep the hook stdout contract, got: {}",
         String::from_utf8_lossy(&output.stdout)
     );
 }

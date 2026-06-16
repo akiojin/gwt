@@ -310,7 +310,7 @@ impl std::fmt::Display for CliParseError {
             CliParseError::InvalidJson(message) => write!(f, "invalid JSON envelope: {message}"),
             CliParseError::Usage => write!(
                 f,
-                "usage: gwtd < stdin JSON envelope; e.g. {{\"schema_version\":1,\"operation\":\"workspace.update\",\"params\":{{\"purpose\":\"<work purpose>\",\"current_focus\":\"<focus>\"}}}}. Managed hook transport remains gwtd hook event <Event>."
+                "usage: gwtd < stdin JSON envelope; e.g. {{\"schema_version\":1,\"operation\":\"workspace.update\",\"params\":{{\"status\":\"active\",\"summary\":\"<summary>\"}}}}. Managed hook transport remains gwtd hook event <Event>."
             ),
             CliParseError::InvalidNumber(s) => write!(f, "invalid issue number: {s}"),
             CliParseError::MissingFlag(flag) => write!(f, "missing required flag: {flag}"),
@@ -645,10 +645,28 @@ pub(crate) fn run_collect<E: CliEnv>(
         CliCommand::Build(action) => build::run(env, action, &mut out)?,
         CliCommand::Register(action) => register::run(env, action, &mut out)?,
         CliCommand::Hook(HookCommand::Run { name, rest }) => {
-            return hook::run_hook(env, &name, &rest).map(|code| (code, String::new()));
+            let mut hook_stdout = Vec::new();
+            let code = {
+                let mut capture = env::StdoutCaptureEnv {
+                    inner: env,
+                    stdout: &mut hook_stdout,
+                };
+                hook::run_hook(&mut capture, &name, &rest)?
+            };
+            out.push_str(&String::from_utf8_lossy(&hook_stdout));
+            return Ok((code, out));
         }
         CliCommand::Hook(HookCommand::InternalDaemon { name, rest }) => {
-            return hook::run_daemon_hook(env, &name, &rest).map(|code| (code, String::new()));
+            let mut hook_stdout = Vec::new();
+            let code = {
+                let mut capture = env::StdoutCaptureEnv {
+                    inner: env,
+                    stdout: &mut hook_stdout,
+                };
+                hook::run_daemon_hook(&mut capture, &name, &rest)?
+            };
+            out.push_str(&String::from_utf8_lossy(&hook_stdout));
+            return Ok((code, out));
         }
         CliCommand::Diagnostics(inner) => diagnostics::run(env, inner, &mut out)?,
         CliCommand::Update(UpdateCommand::CheckOnly) => {
@@ -674,7 +692,9 @@ pub(crate) fn run_collect<E: CliEnv>(
 
 pub fn run<E: CliEnv>(env: &mut E, cmd: CliCommand) -> Result<i32, SpecOpsError> {
     let (code, out) = run_collect(env, cmd)?;
-    let _ = env.stdout().write_all(out.as_bytes());
+    env.stdout()
+        .write_all(out.as_bytes())
+        .map_err(io_as_api_error)?;
     Ok(code)
 }
 

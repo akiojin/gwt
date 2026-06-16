@@ -39,31 +39,31 @@ manual 経路では必ず以下の 2 段階で実行する:
 
 ```bash
 # SPEC 一覧
-gwtd <<'JSON'
+"$GWT_BIN" <<'JSON'
 {"schema_version":1,"operation":"issue.spec.list","params":{}}
 JSON
 
 # SPEC 作成（構造化 JSON 推奨）
-gwtd <<'JSON'
+"$GWT_BIN" <<'JSON'
 {"schema_version":1,"operation":"issue.spec.create","params":{"title":"SPEC: <説明> — <サブタイトル>","structured":true,"body":{"spec":"<structured spec body>"}}}
 JSON
 
 # SPEC 作成（既存 Markdown 断片から直接作る互換パス）
-gwtd <<'JSON'
+"$GWT_BIN" <<'JSON'
 {"schema_version":1,"operation":"issue.spec.create","params":{"title":"SPEC: <説明> — <サブタイトル>","body":"<spec markdown>"}}
 JSON
 
 # SPEC セクション読み取り
-gwtd <<'JSON'
+"$GWT_BIN" <<'JSON'
 {"schema_version":1,"operation":"issue.spec.read","params":{"number":123}}
 JSON
 
-gwtd <<'JSON'
+"$GWT_BIN" <<'JSON'
 {"schema_version":1,"operation":"issue.spec.section","params":{"number":123,"section":"spec"}}
 JSON
 
 # SPEC セクション更新
-gwtd <<'JSON'
+"$GWT_BIN" <<'JSON'
 {"schema_version":1,"operation":"issue.spec.edit","params":{"number":123,"section":"spec","body":"<full body>"}}
 JSON
 ```

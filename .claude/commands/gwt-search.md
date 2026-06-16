@@ -11,8 +11,12 @@ Unified semantic search over SPEC Issues, GitHub Issues, project source files, a
 ## Usage
 
 ```text
-/gwt:gwt-search {"query":"...","scopes":["specs"|"issues"|"files"|"memory"],"match_mode":"semantic|all_terms"}
+/gwt:gwt-search {"query":"...","scopes":["issues"],"match_mode":"semantic"}
 ```
+
+Allowed `scopes` values include `specs`, `issues`, `files`, `files_docs`,
+`memory`, `board`, and `discussions`. `match_mode` accepts `semantic` or
+`all_terms`.
 
 ## Steps
 

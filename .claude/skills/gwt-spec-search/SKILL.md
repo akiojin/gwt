@@ -5,7 +5,7 @@ description: "Semantic search over SPEC Issues (GitHub Issue cache at ~/.gwt/cac
 
 # SPEC Search
 
-gwt maintains a vector search index of SPEC Issues using ChromaDB embeddings (model: `intfloat/multilingual-e5-base`). SPECs are stored as `gwt-spec` labeled GitHub Issues and cached locally at `~/.gwt/cache/issues/`. The index is stored at `~/.gwt/index/<repo-hash>/worktrees/<worktree-hash>/specs/` and is rebuilt from the cache. Use JSON operation `issue.spec.pull` with `{"all":true}` to refresh the cache before searching.
+gwt maintains a repo-scoped vector search index of SPEC Issues using ChromaDB embeddings (model: `intfloat/multilingual-e5-base`). SPECs are stored as `gwt-spec` labeled GitHub Issues and cached locally at `~/.gwt/cache/issues/`. The index is stored under `~/.gwt/index/<repo-hash>/` and is rebuilt from the cache. Use JSON operation `issue.spec.pull` with `{"all":true}` to refresh the cache before searching.
 
 ## gwtd resolution
 
@@ -70,7 +70,7 @@ JSON
 
 ## Notes
 
-- The search refreshes the worktree-scoped SPEC index from the repo-scoped Issue cache when invoked outside the GUI
+- The search refreshes the repo-scoped SPEC index from the repo-scoped Issue cache when invoked outside the GUI
 - A missing index is auto-built on the first search
 - An `EMPTY_CORPUS` error means the Issue cache is unpopulated — refresh the cache with JSON operation `issue.spec.pull` and retry; do **not** conclude that no SPEC owner exists
 - Uses semantic similarity (not just keyword matching)

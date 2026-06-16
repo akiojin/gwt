@@ -407,10 +407,13 @@ fn dispatch_accepts_json_envelope_workspace_update_without_argv_flags() {
         "JSON envelope dispatch should succeed, stderr: {}",
         String::from_utf8_lossy(&env.stderr)
     );
-    let stdout = String::from_utf8(env.stdout.clone()).expect("stdout utf8");
-    assert!(
-        stdout.contains(r#""ok":true"#),
-        "JSON envelope output must be machine-readable success JSON, got: {stdout}"
+    let stdout: serde_json::Value =
+        serde_json::from_slice(&env.stdout).expect("parse JSON envelope response");
+    assert_eq!(
+        stdout.get("ok").and_then(|value| value.as_bool()),
+        Some(true),
+        "JSON envelope output must be machine-readable success JSON, got: {}",
+        String::from_utf8_lossy(&env.stdout)
     );
     let projection =
         load_or_default_workspace_projection(temp.path()).expect("load workspace projection");

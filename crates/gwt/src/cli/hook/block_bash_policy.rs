@@ -161,8 +161,8 @@ fn long_pr_ci_polling_sleep_block_decision(command: &str) -> HookOutput {
         "Long PR/CI polling sleeps are not allowed",
         format!(
             "Do not keep Claude Code idle while waiting for PR or CI state changes.\n\n\
-Run JSON operation `pr.checks` once. If checks are still pending or queued, post the wait state with \
-JSON operation `board.post` and `params.kind:\"blocked\"`, then hand off instead of sleeping indefinitely.\n\n\
+Run JSON operation `pr.checks` with `params.number:<pr>` once. If checks are still pending or queued, post the wait state with \
+JSON operation `board.post` and `params.kind:\"blocked\"` plus `params.body`, then hand off instead of sleeping indefinitely.\n\n\
 Blocked command: {command}"
         ),
     )

@@ -538,6 +538,16 @@ fn is_allowed_argv_exception(argv: &[String]) -> bool {
             ),
             (Some("hook"), Some("event"), Some(_), None)
         )
+        || matches!(
+            (
+                argv.get(1).map(String::as_str),
+                argv.get(2).map(String::as_str),
+                argv.get(3),
+                argv.get(4),
+                argv.get(5),
+            ),
+            (Some("hook"), Some("provider-event"), Some(_), Some(_), None)
+        )
 }
 
 fn json_only_argv_message(argv: &[String]) -> String {

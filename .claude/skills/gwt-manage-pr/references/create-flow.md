@@ -174,10 +174,14 @@ if [ "${behind_count:-0}" -gt 0 ]; then
 fi
 
 # Check existing PRs (canonical surface)
-pr_summary="$("$GWT_BIN" <<'JSON' 2>/tmp/gwt-pr-current.err || true
+if ! pr_summary="$("$GWT_BIN" <<'JSON' 2>/tmp/gwt-pr-current.err
 {"schema_version":1,"operation":"pr.current","params":{}}
 JSON
-)"
+)"; then
+  echo "Failed to resolve current PR:" >&2
+  cat /tmp/gwt-pr-current.err >&2
+  exit 1
+fi
 merge_state="$(printf '%s\n' "$pr_summary" | sed -n 's/^mergeable: //p' | head -n1)"
 
 if printf '%s\n' "$pr_summary" | grep -qx 'no current pull request'; then
@@ -197,13 +201,14 @@ fi
 case "$action" in
   create)
     git push -u origin "$head"
+    body_json="$(jq -Rs . < /tmp/pr-body.md)"
     if grep -q 'State: Draft' /tmp/pr-body.md; then
-      "$GWT_BIN" <<'JSON'
-{"schema_version":1,"operation":"pr.create","params":{"base":"develop","head":"<head>","title":"...","body":"<rendered PR body>","draft":true}}
+      "$GWT_BIN" <<JSON
+{"schema_version":1,"operation":"pr.create","params":{"base":"$base","head":"$head","title":"...","body":$body_json,"draft":true}}
 JSON
     else
-      "$GWT_BIN" <<'JSON'
-{"schema_version":1,"operation":"pr.create","params":{"base":"develop","head":"<head>","title":"...","body":"<rendered PR body>","draft":false}}
+      "$GWT_BIN" <<JSON
+{"schema_version":1,"operation":"pr.create","params":{"base":"$base","head":"$head","title":"...","body":$body_json,"draft":false}}
 JSON
     fi
     ;;
