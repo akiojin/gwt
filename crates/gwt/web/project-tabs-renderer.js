@@ -12,7 +12,12 @@ function ensureChild(parent, selector, create) {
   return child;
 }
 
-function createTabButton(document, send, requestCloseProjectTab) {
+function createTabButton(
+  document,
+  send,
+  requestCloseProjectTab,
+  onSelectProjectTab,
+) {
   const button = document.createElement("div");
   button.className = "project-tab";
   button.setAttribute("role", "button");
@@ -36,14 +41,18 @@ function createTabButton(document, send, requestCloseProjectTab) {
   button.appendChild(close);
 
   button.addEventListener("click", () => {
-    send({ kind: "select_project_tab", tab_id: button.dataset.projectTabId });
+    const tabId = button.dataset.projectTabId;
+    onSelectProjectTab?.(tabId);
+    send({ kind: "select_project_tab", tab_id: tabId });
   });
   button.addEventListener("keydown", (event) => {
     if (event.key !== "Enter" && event.key !== " ") {
       return;
     }
     event.preventDefault();
-    send({ kind: "select_project_tab", tab_id: button.dataset.projectTabId });
+    const tabId = button.dataset.projectTabId;
+    onSelectProjectTab?.(tabId);
+    send({ kind: "select_project_tab", tab_id: tabId });
   });
   close.addEventListener("click", (event) => {
     event.stopPropagation();
@@ -113,6 +122,7 @@ export function renderProjectTabs({
   runtimeStateForWindow,
   send,
   requestCloseProjectTab,
+  onSelectProjectTab,
 }) {
   if (!projectTabs) {
     return;
@@ -145,7 +155,12 @@ export function renderProjectTabs({
     const tab = nextTabs[index];
     let button = existingButtons.get(tab.id);
     if (!button) {
-      button = createTabButton(document, send, requestCloseProjectTab);
+      button = createTabButton(
+        document,
+        send,
+        requestCloseProjectTab,
+        onSelectProjectTab,
+      );
     }
 
     const dot = ensureChild(button, "[data-role='project-tab-dot']", (doc) => {

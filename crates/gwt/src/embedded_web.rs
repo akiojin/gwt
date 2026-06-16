@@ -71,6 +71,12 @@ root_js_modules! {
     "branch-list-state.js" => "applyBranchEntriesEvent",
     // SPEC-2013 FR-012: close project tab confirm modal renderer.
     "close-project-tab-confirm-modal.js" => "renderCloseProjectTabConfirmModal",
+    // SPEC-2013 2026-06-16 amendment: project switcher popover and
+    // Shift+Cmd+Up/Down project tab cycling helpers.
+    "project-switcher.js" => "createProjectSwitcherController",
+    // SPEC-2013 2026-06-16 amendment: quiet long-running Agent completion
+    // notification controller.
+    "agent-completion-notifications.js" => "createAgentCompletionNotifier",
     // SPEC-3038 US-3: Close Guard — window close confirm modal renderer.
     "window-close-confirm-modal.js" => "renderWindowCloseConfirmModal",
     "migration-modal.js" => "renderMigrationModal",
