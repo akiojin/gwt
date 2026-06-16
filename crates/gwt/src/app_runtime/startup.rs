@@ -84,13 +84,11 @@ fn startup_auto_resume_window_was_open(session: &gwt_agent::Session) -> bool {
 }
 
 pub(super) fn mark_auto_resume_source_completed(sessions_dir: &Path, session_id: &str) {
-    let path = sessions_dir.join(format!("{session_id}.toml"));
-    let Ok(mut session) = gwt_agent::Session::load_and_migrate(&path) else {
-        return;
-    };
-    session.update_status(gwt_agent::AgentStatus::Stopped);
-    session.restore_window_on_startup = false;
-    let _ = session.save(sessions_dir);
+    let _ = gwt_agent::update_session(sessions_dir, session_id, |session| {
+        session.update_status(gwt_agent::AgentStatus::Stopped);
+        session.restore_window_on_startup = false;
+        Ok(())
+    });
 }
 
 impl AppRuntime {
@@ -501,14 +499,16 @@ impl AppRuntime {
             .map(|entry| entry.path())
             .filter(|path| path.extension().and_then(|ext| ext.to_str()) == Some("toml"))
             .filter_map(|path| {
-                let mut session = gwt_agent::Session::load_and_migrate(&path).ok()?;
-                if session.worktree_path.exists()
-                    && session.should_mark_interrupted_from_lifecycle()
-                {
-                    session.update_status(gwt_agent::AgentStatus::Interrupted);
-                }
-                let _ = session.save(&self.sessions_dir);
-                Some(session)
+                let session_id = path.file_stem()?.to_str()?;
+                gwt_agent::update_session(&self.sessions_dir, session_id, |session| {
+                    if session.worktree_path.exists()
+                        && session.should_mark_interrupted_from_lifecycle()
+                    {
+                        session.update_status(gwt_agent::AgentStatus::Interrupted);
+                    }
+                    Ok(())
+                })
+                .ok()
             })
             .collect()
     }
