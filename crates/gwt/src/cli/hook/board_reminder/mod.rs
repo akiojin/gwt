@@ -66,7 +66,7 @@ pub fn handle_with_input(event: &str, input: &str) -> Result<HookOutput, HookErr
         return Ok(HookOutput::Silent);
     };
     let sessions_dir = gwt_core::paths::gwt_sessions_dir();
-    let Some(session) = current_session_from_env(&sessions_dir)? else {
+    let Some(session) = current_session_from_env(&sessions_dir) else {
         return Ok(HookOutput::Silent);
     };
     let session = session_scoped_to_hook_cwd(session, hook_event.as_ref());
@@ -82,15 +82,22 @@ pub fn is_intent_boundary(event: &str) -> bool {
     IntentBoundaryEvent::from_name(event).is_some()
 }
 
-fn current_session_from_env(sessions_dir: &Path) -> io::Result<Option<Session>> {
-    let Some(session_id) = std::env::var_os(GWT_SESSION_ID_ENV) else {
-        return Ok(None);
-    };
+fn current_session_from_env(sessions_dir: &Path) -> Option<Session> {
+    let session_id = std::env::var_os(GWT_SESSION_ID_ENV)?;
     let path = sessions_dir.join(format!("{}.toml", session_id.to_string_lossy()));
     if !path.exists() {
-        return Ok(None);
+        return None;
     }
-    Session::load(&path).map(Some)
+    match Session::load(&path) {
+        Ok(session) => Some(session),
+        Err(error) => {
+            eprintln!(
+                "gwtd hook board-reminder: failed to load session metadata {}: {error}",
+                path.display()
+            );
+            None
+        }
+    }
 }
 
 fn session_scoped_to_hook_cwd(mut session: Session, hook_event: Option<&HookEvent>) -> Session {

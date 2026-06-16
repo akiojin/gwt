@@ -1327,6 +1327,7 @@ version = "9.60.0"
 dependencies = [
  "chrono",
  "dunce",
+ "fs2",
  "gwt-config",
  "gwt-core",
  "gwt-docker",

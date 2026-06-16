@@ -183,6 +183,13 @@ fn log_missing_codex_hook_session_id(
     );
 }
 
+fn log_session_metadata_error(action: &str, gwt_session_id: &GwtSessionId, error: &io::Error) {
+    eprintln!(
+        "gwtd hook runtime-state: failed to {action} session metadata gwt_session_id={}: {error}",
+        gwt_session_id.as_str()
+    );
+}
+
 #[cfg(test)]
 fn sync_coordination_for_session(_session: &Session, _event: &str) {}
 
@@ -219,10 +226,17 @@ pub fn handle_with_input(event: &str, input: &str) -> Result<(), HookError> {
         hook_event.as_ref(),
     )?;
     if let Some(agent_session_id) = agent_session_id.as_ref() {
-        sync_agent_session_id(&sessions_dir, &gwt_session_id, agent_session_id)?;
+        if let Err(error) = sync_agent_session_id(&sessions_dir, &gwt_session_id, agent_session_id)
+        {
+            log_session_metadata_error("sync agent_session_id for", &gwt_session_id, &error);
+        }
     }
     if session.is_some() {
-        gwt_agent::persist_session_hook_event(&sessions_dir, gwt_session_id.as_str(), event)?;
+        if let Err(error) =
+            gwt_agent::persist_session_hook_event(&sessions_dir, gwt_session_id.as_str(), event)
+        {
+            log_session_metadata_error("record hook event for", &gwt_session_id, &error);
+        }
     }
 
     let pending_discussion = session.as_ref().and_then(|session| {
@@ -241,7 +255,11 @@ pub fn record_completed_stop_from_env() -> Result<(), HookError> {
         .map(PathBuf::from)
         .map(|path| sessions_dir_for_runtime_path(&path))
         .unwrap_or_else(gwt_core::paths::gwt_sessions_dir);
-    gwt_agent::persist_session_completed_stop(&sessions_dir, gwt_session_id.as_str())?;
+    if let Err(error) =
+        gwt_agent::persist_session_completed_stop(&sessions_dir, gwt_session_id.as_str())
+    {
+        log_session_metadata_error("record completed Stop for", &gwt_session_id, &error);
+    }
     Ok(())
 }
 
@@ -256,7 +274,11 @@ pub fn record_blocked_stop_from_env() -> Result<(), HookError> {
     let sessions_dir = sessions_dir_for_runtime_path(&runtime_path);
     let session = current_session_for_id(&sessions_dir, &gwt_session_id);
     if session.is_some() {
-        persist_session_status(&sessions_dir, gwt_session_id.as_str(), AgentStatus::Running)?;
+        if let Err(error) =
+            persist_session_status(&sessions_dir, gwt_session_id.as_str(), AgentStatus::Running)
+        {
+            log_session_metadata_error("restore blocked Stop status for", &gwt_session_id, &error);
+        }
     }
     let pending_discussion = session.as_ref().and_then(|session| {
         pending_discussion_for_session(&sessions_dir, &session.id)
@@ -459,6 +481,59 @@ mod tests {
         let state: RuntimeState = serde_json::from_str(&raw).unwrap();
         assert_eq!(state.status, "Running");
         assert_eq!(state.source_event, "PostToolUse");
+    }
+
+    #[test]
+    fn handle_with_input_fails_open_when_corrupt_metadata_has_hook_session_id() {
+        let _lock = env_lock();
+        let dir = tempfile::tempdir().unwrap();
+        let sessions_dir = dir.path().join("sessions");
+        std::fs::create_dir_all(&sessions_dir).unwrap();
+        std::fs::write(
+            sessions_dir.join("session-corrupt.toml"),
+            "started_at = \"2026-06-16T04:30:00.\n320310Z\"",
+        )
+        .unwrap();
+        let runtime_path = gwt_agent::runtime_state_path(&sessions_dir, "session-corrupt");
+        let mut env = EnvGuard::new();
+        env.set(GWT_SESSION_ID_ENV, "session-corrupt");
+        env.set(
+            gwt_agent::GWT_SESSION_RUNTIME_PATH_ENV,
+            runtime_path.as_os_str(),
+        );
+
+        handle_with_input("SessionStart", r#"{"session_id":"agent-123"}"#)
+            .expect("corrupt metadata with a hook session_id must fail open");
+
+        let raw = std::fs::read_to_string(&runtime_path).unwrap();
+        let state: RuntimeState = serde_json::from_str(&raw).unwrap();
+        assert_eq!(state.status, "Idle");
+        assert_eq!(state.source_event, "SessionStart");
+    }
+
+    #[test]
+    fn record_completed_stop_fails_open_when_session_metadata_is_corrupt() {
+        let _lock = env_lock();
+        let dir = tempfile::tempdir().unwrap();
+        let sessions_dir = dir.path().join("sessions");
+        std::fs::create_dir_all(&sessions_dir).unwrap();
+        std::fs::write(sessions_dir.join("session-corrupt.toml"), "169630Z\"").unwrap();
+        let runtime_path = gwt_agent::runtime_state_path(&sessions_dir, "session-corrupt");
+        let mut env = EnvGuard::new();
+        env.set(GWT_SESSION_ID_ENV, "session-corrupt");
+        env.set(
+            gwt_agent::GWT_SESSION_RUNTIME_PATH_ENV,
+            runtime_path.as_os_str(),
+        );
+
+        handle_with_input("Stop", "{}").expect("Stop sidecar write must succeed");
+        record_completed_stop_from_env()
+            .expect("completed-stop metadata update must fail open on corrupt TOML");
+
+        let raw = std::fs::read_to_string(&runtime_path).unwrap();
+        let state: RuntimeState = serde_json::from_str(&raw).unwrap();
+        assert_eq!(state.status, "Idle");
+        assert_eq!(state.source_event, "Stop");
     }
 
     #[test]
