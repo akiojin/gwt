@@ -189,6 +189,9 @@ export function createKnowledgeKanbanSurface({
             inFlightSearchRequestId: 0,
             searchInFlight: false,
             queuedSearchQuery: "",
+            queuedLoadRefresh: false,
+            loadRecoveryTimer: null,
+            loadRecoveryRetryCount: 0,
             error: "",
             emptyMessage: "",
             baseEmptyMessage: "",
@@ -200,6 +203,7 @@ export function createKnowledgeKanbanSurface({
             // pendingPhaseUpdates tracks in-flight requests so cards
             // render a spinner until the server confirms the move.
             hideDone: readKanbanHideDonePreference(),
+            issueStateFilter: "open",
             dndSnapshot: null,
             pendingPhaseUpdates: new Map(),
             autoRefreshTimer: null,
@@ -209,6 +213,9 @@ export function createKnowledgeKanbanSurface({
         state.kind = knowledgeKind || state.kind;
         if (state.hideDone === undefined) {
           state.hideDone = readKanbanHideDonePreference();
+        }
+        if (!["open", "closed", "all"].includes(state.issueStateFilter)) {
+          state.issueStateFilter = "open";
         }
         if (!state.pendingPhaseUpdates) {
           state.pendingPhaseUpdates = new Map();
@@ -239,7 +246,7 @@ export function createKnowledgeKanbanSurface({
           if (!state.refreshEnabled || knowledgeAutoRefreshIsBusy(state)) {
             return;
           }
-          requestKnowledgeBridge(windowId, knowledgeKind, true);
+          requestKnowledgeBridge(windowId, knowledgeKind, false);
         }, KNOWLEDGE_AUTO_REFRESH_INTERVAL_MS);
       }
 
@@ -276,16 +283,88 @@ export function createKnowledgeKanbanSurface({
           state.searchInFlight = false;
           state.inFlightSearchRequestId = 0;
           state.detailRequestId = 0;
+          state.queuedLoadRefresh = false;
+          state.loadRecoveryRetryCount = 0;
+          if (state.loadRecoveryTimer) {
+            clearTimeout(state.loadRecoveryTimer);
+            state.loadRecoveryTimer = null;
+          }
           state.pendingPhaseUpdates?.clear();
           state.dndSnapshot = null;
         }
         knowledgeBridgeStateMap.delete(windowId);
       }
 
+      function knowledgeEntriesAreEmpty(state) {
+        return (
+          (!Array.isArray(state.entries) || state.entries.length === 0) &&
+          (!Array.isArray(state.baseEntries) || state.baseEntries.length === 0)
+        );
+      }
+
+      function clearKnowledgeLoadRecoveryTimer(state) {
+        if (!state.loadRecoveryTimer) {
+          return;
+        }
+        clearTimeout(state.loadRecoveryTimer);
+        state.loadRecoveryTimer = null;
+      }
+
+      function scheduleKnowledgeLoadRecovery(windowId, knowledgeKind, requestId) {
+        const state = ensureKnowledgeBridgeState(windowId, knowledgeKind);
+        clearKnowledgeLoadRecoveryTimer(state);
+        state.loadRecoveryTimer = setTimeout(() => {
+          state.loadRecoveryTimer = null;
+          if (!workspaceWindowById(windowId)) {
+            return;
+          }
+          if (
+            !state.loading ||
+            state.loadRequestId !== requestId ||
+            !knowledgeEntriesAreEmpty(state)
+          ) {
+            return;
+          }
+          if (state.loadRecoveryRetryCount < 1) {
+            state.loadRecoveryRetryCount += 1;
+            state.loading = false;
+            state.refreshing = false;
+            requestKnowledgeBridge(windowId, knowledgeKind, true);
+            renderKnowledgeBridge(windowId);
+            return;
+          }
+          state.loading = false;
+          state.refreshing = false;
+          state.error = "Timed out loading cache-backed data";
+          renderKnowledgeBridge(windowId);
+        }, 5000);
+      }
+
+      function finishKnowledgeLoad(state, windowId, knowledgeKind) {
+        clearKnowledgeLoadRecoveryTimer(state);
+        state.loading = false;
+        state.refreshing = false;
+        state.loadRecoveryRetryCount = 0;
+        const queuedRefresh = state.queuedLoadRefresh;
+        state.queuedLoadRefresh = false;
+        if (queuedRefresh && workspaceWindowById(windowId)) {
+          requestKnowledgeBridge(windowId, knowledgeKind, true);
+          return true;
+        }
+        return false;
+      }
+
       function requestKnowledgeBridge(windowId, knowledgeKind, refresh = false) {
         const state = ensureKnowledgeBridgeState(windowId, knowledgeKind);
         if (state.loading) {
-          return;
+          if (refresh && knowledgeEntriesAreEmpty(state)) {
+            clearKnowledgeLoadRecoveryTimer(state);
+            state.loading = false;
+            state.refreshing = false;
+          } else {
+            state.queuedLoadRefresh = state.queuedLoadRefresh || Boolean(refresh);
+            return;
+          }
         }
         if (state.pendingSearchTimer) {
           clearTimeout(state.pendingSearchTimer);
@@ -300,6 +379,7 @@ export function createKnowledgeKanbanSurface({
         state.searchInFlight = false;
         state.inFlightSearchRequestId = 0;
         state.queuedSearchQuery = "";
+        state.queuedLoadRefresh = false;
         state.searchRequestId += 1;
         state.error = "";
         const effectiveKind = knowledgeKind || state.kind;
@@ -311,6 +391,7 @@ export function createKnowledgeKanbanSurface({
           selected_number: state.selectedNumber ?? null,
           refresh,
         });
+        scheduleKnowledgeLoadRecovery(windowId, effectiveKind, requestId);
       }
 
       function restoreKnowledgeBaseEntries(state) {
@@ -543,7 +624,14 @@ export function createKnowledgeKanbanSurface({
         return "";
       }
 
-      function knowledgeDetailChip(detail) {
+      function knowledgeDetailChip(detail, knowledgeKind = "spec") {
+        if (knowledgeKind === "issue") {
+          const rawState = String(detail?.state || "open").toLowerCase();
+          return {
+            className: rawState === "closed" ? "closed" : "open",
+            label: rawState === "closed" ? "Closed" : "Open",
+          };
+        }
         const effectivePhase = effectiveKnowledgePhase(detail);
         const rawState = String(detail?.state || "").toLowerCase();
         if (
@@ -563,6 +651,17 @@ export function createKnowledgeKanbanSurface({
         };
       }
 
+      function issueEntryState(entry) {
+        return String(entry?.state || "open").toLowerCase() === "closed"
+          ? "closed"
+          : "open";
+      }
+
+      function issueEntryMatchesStateFilter(entry, filter) {
+        if (filter === "all") return true;
+        return issueEntryState(entry) === filter;
+      }
+
       function filteredKnowledgeEntries(state) {
         const query = state.query.trim().toLowerCase();
         if (!query) {
@@ -578,6 +677,12 @@ export function createKnowledgeKanbanSurface({
             .join(" ")
             .toLowerCase()
             .includes(query),
+        );
+      }
+
+      function filteredIssueEntries(state) {
+        return filteredKnowledgeEntries(state).filter((entry) =>
+          issueEntryMatchesStateFilter(entry, state.issueStateFilter || "open"),
         );
       }
 
@@ -773,6 +878,208 @@ export function createKnowledgeKanbanSurface({
         return card;
       }
 
+      function renderKnowledgeDetailPane(windowId, state, detailPane) {
+        detailPane.innerHTML = "";
+        const detail = state.detail;
+        if (!detail) {
+          detailPane.appendChild(
+            createNode(
+              "div",
+              "knowledge-detail-empty",
+              state.detailLoading ? "Loading detail" : "Select a cached item",
+            ),
+          );
+          return;
+        }
+
+        const header = createNode("div", "knowledge-detail-header");
+        const head = createNode("div", "");
+        const headRow = createNode("div", "knowledge-detail-head");
+        headRow.appendChild(createNode("h3", "knowledge-detail-title", detail.title));
+        const detailChip = knowledgeDetailChip(detail, state.kind);
+        headRow.appendChild(
+          createNode(
+            "span",
+            `knowledge-state-chip ${detailChip.className}`,
+            detailChip.label,
+          ),
+        );
+        head.appendChild(headRow);
+        if (detail.subtitle) {
+          head.appendChild(
+            createNode("div", "knowledge-detail-subtitle", detail.subtitle),
+          );
+        }
+        const displayLabels = visibleKnowledgeLabels(detail.labels || []);
+        const stalePhase = state.kind === "issue" ? "" : staleKnowledgePhaseWarning(detail);
+        if (displayLabels.length > 0 || stalePhase) {
+          const labelRow = createNode("div", "knowledge-label-row");
+          for (const label of displayLabels) {
+            labelRow.appendChild(createNode("span", "knowledge-chip", label));
+          }
+          if (stalePhase) {
+            labelRow.appendChild(
+              createNode("span", "kanban-card-chip kanban-card-chip--warning", stalePhase),
+            );
+          }
+          head.appendChild(labelRow);
+        }
+        header.appendChild(head);
+
+        const actions = createNode("div", "knowledge-detail-actions");
+        if (detail.launch_issue_number !== null && detail.launch_issue_number !== undefined) {
+          const launchButton = createNode("button", "wizard-button primary", "Launch Agent");
+          launchButton.type = "button";
+          launchButton.addEventListener("click", () =>
+            openIssueLaunchWizard(windowId, detail.launch_issue_number),
+          );
+          actions.appendChild(launchButton);
+        }
+        if (actions.childElementCount > 0) {
+          header.appendChild(actions);
+        }
+        detailPane.appendChild(header);
+
+        const scroll = createNode("div", "knowledge-detail-scroll workspace-scroll");
+        if (state.detailLoading) {
+          scroll.appendChild(
+            createNode("div", "knowledge-detail-empty", "Loading detail"),
+          );
+        }
+        for (const section of detail.sections || []) {
+          const card = createNode("section", "knowledge-section");
+          card.appendChild(
+            createNode("div", "knowledge-section-title", section.title),
+          );
+          card.appendChild(createKnowledgeMarkdownBody(section));
+          scroll.appendChild(card);
+        }
+        if (scroll.childElementCount === 0) {
+          scroll.appendChild(
+            createNode("div", "knowledge-detail-empty", "No cached detail available"),
+          );
+        }
+        detailPane.appendChild(scroll);
+      }
+
+      function renderIssueRow(windowId, state, entry) {
+        const row = createNode("button", "knowledge-row");
+        row.type = "button";
+        row.dataset.issueNumber = String(entry.number);
+        row.setAttribute("role", "listitem");
+        if (state.selectedNumber === entry.number) {
+          row.classList.add("selected");
+          row.setAttribute("aria-current", "true");
+        }
+
+        const main = createNode("div", "knowledge-row-main");
+        const titleWrap = createNode("div", "");
+        titleWrap.appendChild(
+          createNode("div", "knowledge-row-title", entry.title || `Issue #${entry.number}`),
+        );
+        titleWrap.appendChild(
+          createNode("div", "knowledge-row-number", `#${entry.number}`),
+        );
+        main.appendChild(titleWrap);
+        const rawState = issueEntryState(entry);
+        main.appendChild(
+          createNode(
+            "span",
+            `knowledge-state-chip ${rawState}`,
+            rawState === "closed" ? "Closed" : "Open",
+          ),
+        );
+        row.appendChild(main);
+
+        const meta = createNode("div", "knowledge-row-meta");
+        for (const label of visibleKnowledgeLabels(entry.labels || [])) {
+          meta.appendChild(createNode("span", "knowledge-chip", label));
+        }
+        if ((entry.linked_branch_count || 0) > 0) {
+          meta.appendChild(
+            createNode(
+              "span",
+              "knowledge-meta-copy",
+              `${entry.linked_branch_count} branch${entry.linked_branch_count === 1 ? "" : "es"}`,
+            ),
+          );
+        }
+        if (Number.isFinite(entry.match_score)) {
+          meta.appendChild(
+            createNode("span", "knowledge-meta-copy", `${entry.match_score}% match`),
+          );
+        }
+        if (entry.meta) {
+          meta.appendChild(createNode("span", "knowledge-meta-copy", entry.meta));
+        }
+        if (meta.childElementCount > 0) {
+          row.appendChild(meta);
+        }
+
+        row.addEventListener("click", () => {
+          requestKnowledgeDetail(windowId, state.kind, entry.number);
+          renderKnowledgeBridge(windowId);
+        });
+        return row;
+      }
+
+      function renderIssueKnowledgeBridge(windowId, element, state) {
+        const list = element.querySelector(".knowledge-list");
+        const detailPane = element.querySelector(".knowledge-detail-pane");
+        const status = element.querySelector(".knowledge-status");
+        const refreshButton = element.querySelector("[data-action='refresh-knowledge']");
+        const searchInput = element.querySelector(".knowledge-search");
+        if (!list || !detailPane || !status || !refreshButton || !searchInput) {
+          return;
+        }
+
+        refreshButton.disabled =
+          !state.refreshEnabled || (state.loading && !knowledgeEntriesAreEmpty(state));
+        searchInput.placeholder = knowledgeSearchPlaceholder(state.kind);
+        for (const button of element.querySelectorAll("[data-issue-filter]")) {
+          const selected = button.dataset.issueFilter === state.issueStateFilter;
+          button.classList.toggle("is-active", selected);
+          button.setAttribute("aria-pressed", selected ? "true" : "false");
+        }
+
+        status.className = "knowledge-status";
+        status.textContent = "";
+        if (state.error) {
+          status.classList.add("visible", "error");
+          status.textContent = state.error;
+        } else if (state.searching) {
+          status.classList.add("visible", "info");
+          status.textContent = "Searching semantic index";
+        } else if (state.loading && state.entries.length > 0) {
+          status.classList.add("visible", "info");
+          status.textContent = state.refreshing
+            ? "Refreshing cached issues"
+            : "Loading cache-backed issues";
+        } else if (state.loading && state.entries.length === 0) {
+          status.classList.add("visible", "info");
+          status.textContent = "Loading cache-backed issues";
+        } else if (state.entries.length === 0 && !state.searching) {
+          status.classList.add("visible", "info");
+          status.textContent = state.emptyMessage || "No cached issues";
+        }
+
+        list.innerHTML = "";
+        const visibleEntries = filteredIssueEntries(state);
+        if (visibleEntries.length === 0) {
+          const filterLabel = state.issueStateFilter === "all"
+            ? ""
+            : `${state.issueStateFilter || "open"} `;
+          list.appendChild(
+            createNode("div", "knowledge-empty", `No ${filterLabel}issues`),
+          );
+        } else {
+          for (const entry of visibleEntries) {
+            list.appendChild(renderIssueRow(windowId, state, entry));
+          }
+        }
+        renderKnowledgeDetailPane(windowId, state, detailPane);
+      }
+
       function renderKnowledgeBridge(windowId) {
         const element = windowMap.get(windowId);
         if (!element) {
@@ -782,6 +1089,10 @@ export function createKnowledgeKanbanSurface({
           windowId,
           knowledgeKindForPreset(workspaceWindowById(windowId)?.preset),
         );
+        if (state.kind === "issue") {
+          renderIssueKnowledgeBridge(windowId, element, state);
+          return;
+        }
         const board = element.querySelector(".kanban-board");
         const detailPane = element.querySelector(".knowledge-detail-pane");
         const status = element.querySelector(".knowledge-status");
@@ -792,7 +1103,8 @@ export function createKnowledgeKanbanSurface({
           return;
         }
 
-        refreshButton.disabled = !state.refreshEnabled || state.loading;
+        refreshButton.disabled =
+          !state.refreshEnabled || (state.loading && !knowledgeEntriesAreEmpty(state));
         searchInput.placeholder = knowledgeSearchPlaceholder(state.kind);
         if (hideDoneToggle) {
           hideDoneToggle.checked = state.hideDone === true;
@@ -870,85 +1182,7 @@ export function createKnowledgeKanbanSurface({
           }
         }
 
-        detailPane.innerHTML = "";
-        const detail = state.detail;
-        if (!detail) {
-          detailPane.appendChild(
-            createNode("div", "knowledge-detail-empty", "Select a cached item"),
-          );
-          return;
-        }
-
-        const header = createNode("div", "knowledge-detail-header");
-        const head = createNode("div", "");
-        const headRow = createNode("div", "knowledge-detail-head");
-        headRow.appendChild(createNode("h3", "knowledge-detail-title", detail.title));
-        const detailChip = knowledgeDetailChip(detail);
-        headRow.appendChild(
-          createNode(
-            "span",
-            `knowledge-state-chip ${detailChip.className}`,
-            detailChip.label,
-          ),
-        );
-        head.appendChild(headRow);
-        if (detail.subtitle) {
-          head.appendChild(
-            createNode("div", "knowledge-detail-subtitle", detail.subtitle),
-          );
-        }
-        const displayLabels = visibleKnowledgeLabels(detail.labels || []);
-        const stalePhase = staleKnowledgePhaseWarning(detail);
-        if (displayLabels.length > 0 || stalePhase) {
-          const labelRow = createNode("div", "knowledge-label-row");
-          for (const label of displayLabels) {
-            labelRow.appendChild(createNode("span", "knowledge-chip", label));
-          }
-          if (stalePhase) {
-            labelRow.appendChild(
-              createNode("span", "kanban-card-chip kanban-card-chip--warning", stalePhase),
-            );
-          }
-          head.appendChild(labelRow);
-        }
-        header.appendChild(head);
-
-        const actions = createNode("div", "knowledge-detail-actions");
-        if (detail.launch_issue_number !== null && detail.launch_issue_number !== undefined) {
-          const launchButton = createNode("button", "wizard-button primary", "Launch Agent");
-          launchButton.type = "button";
-          launchButton.addEventListener("click", () =>
-            openIssueLaunchWizard(windowId, detail.launch_issue_number),
-          );
-          actions.appendChild(launchButton);
-        }
-        if (actions.childElementCount > 0) {
-          header.appendChild(actions);
-        }
-        detailPane.appendChild(header);
-
-        const scroll = createNode("div", "knowledge-detail-scroll workspace-scroll");
-        if (state.detailLoading) {
-          scroll.appendChild(
-            createNode("div", "knowledge-detail-empty", "Loading detail"),
-          );
-        }
-        for (const section of detail.sections || []) {
-          const card = createNode("section", "knowledge-section");
-          card.appendChild(
-            createNode("div", "knowledge-section-title", section.title),
-          );
-          card.appendChild(
-            createKnowledgeMarkdownBody(section),
-          );
-          scroll.appendChild(card);
-        }
-        if (scroll.childElementCount === 0) {
-          scroll.appendChild(
-            createNode("div", "knowledge-detail-empty", "No cached detail available"),
-          );
-        }
-        detailPane.appendChild(scroll);
+        renderKnowledgeDetailPane(windowId, state, detailPane);
       }
       // SPEC-3064 Phase 3 (E6d): Knowledge window mount moved verbatim from
       // app.js mountWindowBody (surface === "knowledge" branch).
@@ -1034,6 +1268,33 @@ export function createKnowledgeKanbanSurface({
               </div>
             </div>
           `;
+          if (knowledgeKind === "issue") {
+            body.innerHTML = `
+              <div class="knowledge-root issue-bridge-root">
+                <div class="workspace-toolbar kanban-toolbar is-stacked">
+                  <div class="workspace-toolbar-main">
+                    <div class="knowledge-heading">${knowledgeHeading(knowledgeKind)}</div>
+                    <input class="knowledge-search" type="search" placeholder="${knowledgeSearchPlaceholder(knowledgeKind)}" />
+                    <div class="knowledge-state-filter" role="group" aria-label="Issue state filter">
+                      <button type="button" data-issue-filter="open">Open</button>
+                      <button type="button" data-issue-filter="closed">Closed</button>
+                      <button type="button" data-issue-filter="all">All</button>
+                    </div>
+                  </div>
+                  <div class="workspace-toolbar-actions">
+                    <button class="icon-button" data-action="refresh-knowledge" aria-label="Refresh cached issues">↻</button>
+                  </div>
+                </div>
+                <div class="knowledge-status"></div>
+                <div class="knowledge-split workspace-split issue-list-shell">
+                  <div class="knowledge-list-pane">
+                    <div class="knowledge-list" role="list" aria-label="Cached issues"></div>
+                  </div>
+                  <div class="knowledge-detail-pane"></div>
+                </div>
+              </div>
+            `;
+          }
           body.addEventListener("mousedown", () => {
             focusWindowLocally(windowData.id);
             sendWindowFocus(windowData.id);
@@ -1072,6 +1333,15 @@ export function createKnowledgeKanbanSurface({
                 windowData.id,
               );
             });
+          for (const filterButton of body.querySelectorAll("[data-issue-filter]")) {
+            filterButton.addEventListener("click", (event) => {
+              event.stopPropagation();
+              state.issueStateFilter = filterButton.dataset.issueFilter || "open";
+              renderKnowledgeBridge(
+                windowData.id,
+              );
+            });
+          }
           // SPEC-2017 — Hide done toggle persists via localStorage so
           // reloads honour the user preference. The hidden state hides
           // the Done column entirely (CSS-driven via data-hide-done on
@@ -1090,7 +1360,7 @@ export function createKnowledgeKanbanSurface({
               );
             });
           }
-          if (!state.detail && !state.loading) {
+          if (!state.loading && (!state.detail || knowledgeEntriesAreEmpty(state))) {
             requestKnowledgeBridge(
               windowData.id,
               knowledgeKind,
@@ -1132,9 +1402,11 @@ export function createKnowledgeKanbanSurface({
               ? state.selectedNumber
               : event.selected_number ?? null;
             state.refreshEnabled = Boolean(event.refresh_enabled);
-            state.loading = false;
-            state.refreshing = false;
             state.error = "";
+            if (finishKnowledgeLoad(state, event.id, event.knowledge_kind)) {
+              renderKnowledgeBridge(event.id);
+              break;
+            }
             if (queuedQuery) {
               scheduleKnowledgeSearch(
                 event.id,
@@ -1211,8 +1483,7 @@ export function createKnowledgeKanbanSurface({
             state.detail = event.detail;
             state.selectedNumber = event.detail?.number ?? state.selectedNumber ?? null;
             if (matchesLoadRequest) {
-              state.loading = false;
-              state.refreshing = false;
+              finishKnowledgeLoad(state, event.id, event.knowledge_kind);
             }
             state.detailLoading = false;
             renderKnowledgeBridge(event.id);
@@ -1320,16 +1591,19 @@ export function createKnowledgeKanbanSurface({
             }
             const matchesLoadRequest =
               !event.request_id || event.request_id === state.loadRequestId;
+            const startedQueuedRefresh = matchesLoadRequest
+              ? finishKnowledgeLoad(state, event.id, event.knowledge_kind)
+              : false;
             if (matchesLoadRequest) {
-              state.loading = false;
-              state.refreshing = false;
+              state.error = startedQueuedRefresh ? "" : event.message;
+            } else {
+              state.error = event.message;
             }
             state.searching = false;
             state.searchInFlight = false;
             state.inFlightSearchRequestId = 0;
             state.queuedSearchQuery = "";
             state.detailLoading = false;
-            state.error = event.message;
             renderKnowledgeBridge(event.id);
             break;
           }

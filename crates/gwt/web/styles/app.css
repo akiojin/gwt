@@ -2011,6 +2011,42 @@ body {
   display: grid;
 }
 
+.knowledge-state-filter {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  padding: 2px;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-sm);
+  background: var(--color-surface-elevated);
+}
+
+.knowledge-state-filter button {
+  min-width: 64px;
+  min-height: 28px;
+  padding: 4px 10px;
+  border: 0;
+  border-radius: calc(var(--radius-sm) - 2px);
+  background: transparent;
+  color: var(--color-text-muted);
+  font-family: var(--font-mono);
+  font-size: var(--type-xs);
+  letter-spacing: var(--tracking-mono);
+  text-transform: uppercase;
+  cursor: pointer;
+}
+
+.knowledge-state-filter button:hover,
+.knowledge-state-filter button:focus-visible {
+  color: var(--color-text-strong);
+  background: color-mix(in oklab, var(--color-state-active) 8%, transparent);
+}
+
+.knowledge-state-filter button.is-active {
+  color: var(--color-state-active);
+  background: color-mix(in oklab, var(--color-state-active) 16%, transparent);
+}
+
 .knowledge-row {
   display: grid;
   gap: 6px;
