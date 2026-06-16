@@ -361,7 +361,15 @@ test("runTerminalActivationSequence syncs geometry when focus reflow changes the
     "focus reflow must sync backend geometry exactly when fit changes cols/rows",
   );
   assert.deepEqual(geometry, { id: "win-focus-grid-changed", cols: 112, rows: 28 });
-  assert.deepEqual(result, { ran: true, cols: 112, rows: 28 });
+  assert.deepEqual(result, {
+    ran: true,
+    cols: 112,
+    rows: 28,
+    fastPath: false,
+    gridChanged: true,
+    geometrySent: true,
+    reason: "activated",
+  });
 });
 
 test("runTerminalActivationSequence does not sync unchanged focus grids (T-266)", () => {
@@ -390,7 +398,146 @@ test("runTerminalActivationSequence does not sync unchanged focus grids (T-266)"
   });
 
   assert.deepEqual(callOrder, ["refresh", "fit"]);
-  assert.deepEqual(result, { ran: true, cols: 100, rows: 30 });
+  assert.deepEqual(result, {
+    ran: true,
+    cols: 100,
+    rows: 30,
+    fastPath: false,
+    gridChanged: false,
+    geometrySent: false,
+    reason: "activated",
+  });
+});
+
+test("runTerminalActivationSequence uses a focus-only fast path for same-grid ready activations (T-307)", () => {
+  const callOrder = [];
+  const parent = {
+    clientWidth: 960,
+    clientHeight: 540,
+  };
+  const runtime = {
+    isReady: true,
+    lastSuccessfulActivationSnapshot: {
+      width: 960,
+      height: 540,
+      cols: 132,
+      rows: 38,
+    },
+    terminal: {
+      cols: 132,
+      rows: 38,
+      element: { parentElement: parent },
+      refresh: () => callOrder.push("refresh"),
+      focus: () => callOrder.push("focus"),
+    },
+    fitAddon: {
+      fit: () => callOrder.push("fit"),
+      proposeDimensions: () => ({ cols: 132, rows: 38 }),
+    },
+  };
+
+  const result = runTerminalActivationSequence({
+    runtime,
+    windowId: "win-fast-path",
+    shouldPersistGeometry: false,
+    syncGeometryOnGridChange: true,
+    allowFastPath: true,
+    pendingOutputCount: 0,
+    hasPendingRefresh: false,
+    sendGeometry: () => callOrder.push("sendGeometry"),
+  });
+
+  assert.deepEqual(callOrder, ["focus"]);
+  assert.deepEqual(result, {
+    ran: true,
+    cols: 132,
+    rows: 38,
+    fastPath: true,
+    gridChanged: false,
+    geometrySent: false,
+    reason: "same-grid",
+  });
+});
+
+test("runTerminalActivationSequence keeps full activation for pending output, refresh, unready, and changed layout (T-308)", () => {
+  function makeRuntime(overrides = {}) {
+    const callOrder = [];
+    const parent = {
+      clientWidth: overrides.width ?? 960,
+      clientHeight: overrides.height ?? 540,
+    };
+    const runtime = {
+      isReady: overrides.isReady ?? true,
+      lastSuccessfulActivationSnapshot: {
+        width: 960,
+        height: 540,
+        cols: 132,
+        rows: 38,
+      },
+      terminal: {
+        cols: 132,
+        rows: 38,
+        element: { parentElement: parent },
+        refresh: () => callOrder.push("refresh"),
+        focus: () => callOrder.push("focus"),
+      },
+      fitAddon: {
+        fit: () => callOrder.push("fit"),
+        proposeDimensions: () => ({ cols: 132, rows: 38 }),
+      },
+    };
+    return { runtime, callOrder };
+  }
+
+  for (const [name, options] of [
+    ["pending output", { pendingOutputCount: 1 }],
+    ["pending viewport refresh", { hasPendingRefresh: true }],
+    ["unready runtime", { isReady: false }],
+    ["changed layout box", { width: 980 }],
+  ]) {
+    const { runtime, callOrder } = makeRuntime(options);
+    const result = runTerminalActivationSequence({
+      runtime,
+      windowId: `win-${name}`,
+      shouldFocus: false,
+      shouldPersistGeometry: false,
+      syncGeometryOnGridChange: true,
+      allowFastPath: true,
+      pendingOutputCount: options.pendingOutputCount ?? 0,
+      hasPendingRefresh: options.hasPendingRefresh ?? false,
+      sendGeometry: () => callOrder.push("sendGeometry"),
+    });
+
+    assert.deepEqual(callOrder, ["refresh", "fit"], `${name} must keep full activation`);
+    assert.equal(result.fastPath, false, `${name} must not use the fast path`);
+  }
+
+  const zeroLayoutCalls = [];
+  const zeroLayoutRuntime = {
+    isReady: true,
+    lastSuccessfulActivationSnapshot: { width: 960, height: 540, cols: 132, rows: 38 },
+    terminal: {
+      cols: 132,
+      rows: 38,
+      element: { parentElement: { clientWidth: 0, clientHeight: 540 } },
+      refresh: () => zeroLayoutCalls.push("refresh"),
+      focus: () => zeroLayoutCalls.push("focus"),
+    },
+    fitAddon: {
+      fit: () => zeroLayoutCalls.push("fit"),
+      proposeDimensions: () => ({ cols: 132, rows: 38 }),
+    },
+  };
+  const zeroLayoutResult = runTerminalActivationSequence({
+    runtime: zeroLayoutRuntime,
+    windowId: "win-zero-layout",
+    allowFastPath: true,
+    sendGeometry: () => zeroLayoutCalls.push("sendGeometry"),
+  });
+
+  assert.deepEqual(zeroLayoutCalls, []);
+  assert.equal(zeroLayoutResult.ran, false);
+  assert.equal(zeroLayoutResult.fastPath, false);
 });
 
 test("runTerminalActivationSequence keeps viewport-only fits off grid-change sync (T-266)", () => {
@@ -422,7 +569,15 @@ test("runTerminalActivationSequence keeps viewport-only fits off grid-change syn
   });
 
   assert.deepEqual(callOrder, ["refresh", "fit"]);
-  assert.deepEqual(result, { ran: true, cols: 120, rows: 32 });
+  assert.deepEqual(result, {
+    ran: true,
+    cols: 120,
+    rows: 32,
+    fastPath: false,
+    gridChanged: true,
+    geometrySent: false,
+    reason: "activated",
+  });
 });
 
 test("runTerminalActivationSequence waits for the terminal host layout box before fitting (#2839)", () => {
@@ -457,7 +612,15 @@ test("runTerminalActivationSequence waits for the terminal host layout box befor
   });
 
   assert.deepEqual(callOrder, [], "0-size terminal host must not fit, send geometry, or focus");
-  assert.deepEqual(result, { ran: false, cols: 80, rows: 24 });
+  assert.deepEqual(result, {
+    ran: false,
+    cols: 80,
+    rows: 24,
+    fastPath: false,
+    gridChanged: false,
+    geometrySent: false,
+    reason: "layout-pending",
+  });
 });
 
 test("runTerminalActivationSequence waits when xterm fit dimensions are unavailable (#2839)", () => {
@@ -496,27 +659,44 @@ test("runTerminalActivationSequence waits when xterm fit dimensions are unavaila
     ["refresh", "flush-layout"],
     "unresolved xterm cell metrics must not fit, send geometry, or focus",
   );
-  assert.deepEqual(result, { ran: false, cols: 80, rows: 24 });
+  assert.deepEqual(result, {
+    ran: false,
+    cols: 80,
+    rows: 24,
+    fastPath: false,
+    gridChanged: false,
+    geometrySent: false,
+    reason: "fit-dimensions-unavailable",
+  });
 });
 
 test("runTerminalActivationSequence is a no-op when runtime is missing pieces (T-199)", () => {
+  const missingResult = {
+    ran: false,
+    cols: 0,
+    rows: 0,
+    fastPath: false,
+    gridChanged: false,
+    geometrySent: false,
+    reason: "runtime-missing",
+  };
   assert.deepEqual(
     runTerminalActivationSequence({ runtime: null, windowId: "x" }),
-    { ran: false, cols: 0, rows: 0 },
+    missingResult,
   );
   assert.deepEqual(
     runTerminalActivationSequence({
       runtime: { terminal: null, fitAddon: { fit() {} } },
       windowId: "x",
     }),
-    { ran: false, cols: 0, rows: 0 },
+    missingResult,
   );
   assert.deepEqual(
     runTerminalActivationSequence({
       runtime: { terminal: { rows: 24, refresh() {}, focus() {} }, fitAddon: null },
       windowId: "x",
     }),
-    { ran: false, cols: 0, rows: 0 },
+    missingResult,
   );
 });
 
@@ -792,6 +972,9 @@ test("createTerminalViewportRefreshScheduler budgets multi-terminal refreshes ac
   }
 
   assert.equal(callbacks.length, 1, "refresh burst must schedule one shared frame");
+  assert.equal(scheduler.hasPending("terminal-1"), true);
+  assert.equal(scheduler.hasPending("terminal-12"), true);
+  assert.equal(scheduler.hasPending("terminal-missing"), false);
 
   callbacks.shift()();
   assert.deepEqual(
@@ -800,6 +983,8 @@ test("createTerminalViewportRefreshScheduler budgets multi-terminal refreshes ac
     "first frame must only run the configured refresh budget",
   );
   assert.equal(callbacks.length, 1, "remaining refreshes must share one follow-up frame");
+  assert.equal(scheduler.hasPending("terminal-1"), false);
+  assert.equal(scheduler.hasPending("terminal-12"), true);
 
   callbacks.shift()();
   assert.deepEqual(
@@ -826,6 +1011,7 @@ test("createTerminalViewportRefreshScheduler budgets multi-terminal refreshes ac
   );
   assert.equal(callbacks.length, 0, "no extra frames after completion");
   assert.equal(scheduler.pendingCount(), 0);
+  assert.equal(scheduler.hasPending("terminal-12"), false);
 });
 
 test("createTerminalViewportRefreshScheduler coalesces and marks ineligible windows pending", () => {
@@ -957,7 +1143,7 @@ test("app.js wires the reflow controller for resize, transition, and predicate",
   );
   assert.match(
     appSource,
-    /scheduleTerminalFocusActivation\(topmostId,\s*\{\s*shouldPersistGeometry:\s*false,?\s*\}\)/,
+    /scheduleTerminalFocusActivation\(topmostId,\s*\{[\s\S]*?shouldPersistGeometry:\s*false[\s\S]*?reason:\s*"topmost_focus"[\s\S]*?\}\)/,
     "topmost focus activation must not persist geometry unconditionally on every workspace render",
   );
   assert.match(

@@ -294,7 +294,11 @@ impl AppRuntime {
             return Vec::new();
         }
         let _ = self.set_active_tab(address.tab_id);
-        self.resize_runtime_to_window(id);
+        // Tab activation only changes the active marker/z-order. The revealed
+        // terminal's real grid is owned by the frontend xterm fit; resizing
+        // from backend geometry here clobbers that fit, especially for
+        // maximized tab groups where shared window geometry is only an
+        // approximation of the visible terminal body.
         let _ = self.persist();
         vec![self.workspace_state_broadcast()]
     }

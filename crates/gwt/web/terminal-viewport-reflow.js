@@ -148,6 +148,13 @@ export function createTerminalViewportRefreshScheduler({
     return pending.delete(String(windowId));
   }
 
+  function hasPending(windowId) {
+    if (windowId === null || windowId === undefined || windowId === "") {
+      return false;
+    }
+    return pending.has(String(windowId));
+  }
+
   function flushPending() {
     scheduled = false;
     let refreshed = 0;
@@ -179,6 +186,7 @@ export function createTerminalViewportRefreshScheduler({
   return {
     enqueue,
     clear,
+    hasPending,
     flushPending,
     pendingCount,
   };
@@ -468,6 +476,89 @@ function fitAddonCanResolveDimensions(fitAddon) {
   );
 }
 
+function activationResult({
+  ran,
+  cols,
+  rows,
+  fastPath = false,
+  gridChanged = false,
+  geometrySent = false,
+  reason,
+}) {
+  return {
+    ran,
+    cols,
+    rows,
+    fastPath,
+    gridChanged,
+    geometrySent,
+    reason: reason || (ran ? "activated" : "not-run"),
+  };
+}
+
+export function terminalActivationLayoutSnapshot(runtime) {
+  const terminal = runtime?.terminal;
+  const parent = terminal?.element?.parentElement;
+  if (!terminal || !parent || !elementHasLayoutBox(parent)) {
+    return null;
+  }
+  let width = typeof parent.clientWidth === "number" ? parent.clientWidth : 0;
+  let height = typeof parent.clientHeight === "number" ? parent.clientHeight : 0;
+  if ((width <= 0 || height <= 0) && typeof parent.getBoundingClientRect === "function") {
+    const rect = parent.getBoundingClientRect();
+    if (width <= 0 && Number.isFinite(rect?.width)) {
+      width = rect.width;
+    }
+    if (height <= 0 && Number.isFinite(rect?.height)) {
+      height = rect.height;
+    }
+  }
+  if (width <= 0 || height <= 0) {
+    return null;
+  }
+  const grid = currentTerminalGrid(terminal);
+  return {
+    width,
+    height,
+    cols: grid.cols,
+    rows: grid.rows,
+  };
+}
+
+function terminalActivationFastPathState({
+  runtime,
+  pendingOutputCount = 0,
+  hasPendingRefresh = false,
+}) {
+  if (!runtime || !runtime.terminal || !runtime.fitAddon) {
+    return { eligible: false, reason: "runtime-missing", snapshot: null };
+  }
+  if (runtime.isReady !== true) {
+    return { eligible: false, reason: "runtime-not-ready", snapshot: null };
+  }
+  if (Number(pendingOutputCount) > 0) {
+    return { eligible: false, reason: "pending-output", snapshot: null };
+  }
+  if (hasPendingRefresh === true) {
+    return { eligible: false, reason: "pending-refresh", snapshot: null };
+  }
+  const snapshot = terminalActivationLayoutSnapshot(runtime);
+  if (!snapshot) {
+    return { eligible: false, reason: "layout-pending", snapshot: null };
+  }
+  const previous = runtime.lastSuccessfulActivationSnapshot;
+  if (!previous) {
+    return { eligible: false, reason: "no-previous-snapshot", snapshot };
+  }
+  if (snapshot.width !== previous.width || snapshot.height !== previous.height) {
+    return { eligible: false, reason: "layout-changed", snapshot };
+  }
+  if (snapshot.cols !== previous.cols || snapshot.rows !== previous.rows) {
+    return { eligible: false, reason: "grid-changed", snapshot };
+  }
+  return { eligible: true, reason: "same-grid", snapshot };
+}
+
 /**
  * SPEC-2008 Phase 26.B / FR-056 — terminal activation must render BEFORE
  * fit. Phase 24 activation called fitAddon.fit() first, then scheduled a
@@ -495,7 +586,8 @@ function fitAddonCanResolveDimensions(fitAddon) {
  *   4. `sendGeometry(windowId, cols, rows)` — sync backend PTY size.
  *   5. `terminal.focus()` — restore keyboard focus.
  *
- * Returns `{ ran, cols, rows }` so tests can pin which path executed.
+ * Returns `{ ran, cols, rows, fastPath, gridChanged, geometrySent, reason }`
+ * so tests and UI trace can pin which path executed.
  */
 export function runTerminalActivationSequence({
   runtime,
@@ -503,16 +595,45 @@ export function runTerminalActivationSequence({
   shouldFocus = true,
   shouldPersistGeometry = true,
   syncGeometryOnGridChange = false,
+  allowFastPath = false,
+  pendingOutputCount = 0,
+  hasPendingRefresh = false,
   sendGeometry,
 }) {
   if (!runtime || !runtime.terminal || !runtime.fitAddon) {
-    return { ran: false, cols: 0, rows: 0 };
+    return activationResult({ ran: false, cols: 0, rows: 0, reason: "runtime-missing" });
   }
   const { terminal, fitAddon } = runtime;
   const currentGrid = currentTerminalGrid(terminal);
+  let fullActivationReason = "activated";
+  if (allowFastPath) {
+    const fastPath = terminalActivationFastPathState({
+      runtime,
+      pendingOutputCount,
+      hasPendingRefresh,
+    });
+    if (fastPath.eligible) {
+      if (shouldFocus && typeof terminal.focus === "function") {
+        terminal.focus();
+      }
+      return activationResult({
+        ran: true,
+        cols: fastPath.snapshot.cols,
+        rows: fastPath.snapshot.rows,
+        fastPath: true,
+        reason: "same-grid",
+      });
+    }
+    fullActivationReason = fastPath.reason;
+  }
   const parent = terminal.element && terminal.element.parentElement;
   if (parent && !elementHasLayoutBox(parent)) {
-    return { ran: false, cols: currentGrid.cols, rows: currentGrid.rows };
+    return activationResult({
+      ran: false,
+      cols: currentGrid.cols,
+      rows: currentGrid.rows,
+      reason: "layout-pending",
+    });
   }
   const rowsForRefresh = Math.max((terminal.rows || 1) - 1, 0);
   terminal.refresh(0, rowsForRefresh);
@@ -520,22 +641,40 @@ export function runTerminalActivationSequence({
     parent.getBoundingClientRect();
   }
   if (!fitAddonCanResolveDimensions(fitAddon)) {
-    return { ran: false, cols: currentGrid.cols, rows: currentGrid.rows };
+    return activationResult({
+      ran: false,
+      cols: currentGrid.cols,
+      rows: currentGrid.rows,
+      reason: "fit-dimensions-unavailable",
+    });
   }
   fitAddon.fit();
   const fittedGrid = currentTerminalGrid(terminal);
   const gridChanged =
     fittedGrid.cols !== currentGrid.cols || fittedGrid.rows !== currentGrid.rows;
+  let geometrySent = false;
   if (
     (shouldPersistGeometry || (syncGeometryOnGridChange && gridChanged)) &&
     typeof sendGeometry === "function"
   ) {
     sendGeometry(windowId, fittedGrid.cols, fittedGrid.rows);
+    geometrySent = true;
   }
   if (shouldFocus && typeof terminal.focus === "function") {
     terminal.focus();
   }
-  return { ran: true, cols: fittedGrid.cols, rows: fittedGrid.rows };
+  const snapshot = terminalActivationLayoutSnapshot(runtime);
+  if (snapshot) {
+    runtime.lastSuccessfulActivationSnapshot = snapshot;
+  }
+  return activationResult({
+    ran: true,
+    cols: fittedGrid.cols,
+    rows: fittedGrid.rows,
+    gridChanged,
+    geometrySent,
+    reason: fullActivationReason,
+  });
 }
 
 /**
