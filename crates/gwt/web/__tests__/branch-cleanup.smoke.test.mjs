@@ -6,8 +6,11 @@
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { fileURLToPath } from "node:url";
+import { pathToFileURL } from "node:url";
 import { dirname, resolve } from "node:path";
 import { parseHTML } from "linkedom";
 
@@ -16,6 +19,26 @@ import { renderBranchCleanupModal } from "../branch-cleanup-modal.js";
 const here = dirname(fileURLToPath(import.meta.url));
 const indexHtmlPath = resolve(here, "..", "index.html");
 const indexHtml = readFileSync(indexHtmlPath, "utf8");
+
+async function loadBranchesCleanupSurfaceForTest() {
+  const tempDir = mkdtempSync(join(tmpdir(), "gwt-branches-cleanup-test-"));
+  const modulePath = join(tempDir, "branches-cleanup-surface.mjs");
+  const source = readFileSync(resolve(here, "../branches-cleanup-surface.js"), "utf8")
+    .replace(
+      'from "/branch-cleanup-modal.js"',
+      `from ${JSON.stringify(pathToFileURL(resolve(here, "../branch-cleanup-modal.js")).href)}`,
+    )
+    .replace(
+      'from "/branch-list-state.js"',
+      `from ${JSON.stringify(pathToFileURL(resolve(here, "../branch-list-state.js")).href)}`,
+    );
+  writeFileSync(modulePath, source);
+  try {
+    return await import(pathToFileURL(modulePath).href);
+  } finally {
+    rmSync(tempDir, { recursive: true, force: true });
+  }
+}
 
 function mount() {
   const { document } = parseHTML(indexHtml);
@@ -399,4 +422,63 @@ test("result stage: renders summary, per-result rows and Close button", () => {
   assert.equal(buttons[0].textContent, "Close");
   buttons[0].click();
   assert.equal(closed, 1);
+});
+
+test("Workspace-owned cleanup result re-renders the modal even without a Branches list", async () => {
+  const { createBranchesCleanupSurface } = await loadBranchesCleanupSurfaceForTest();
+  const { document, modalEl, dialogEl, createNode } = mount();
+  const sent = [];
+  let workspaceRenderCount = 0;
+  const workspaceWindowId = "workspace-window";
+  const workspaceWindow = document.createElement("section");
+  workspaceWindow.className = "workspace-overview-root";
+  const surface = createBranchesCleanupSurface({
+    send: (message) => sent.push(message),
+    createNode,
+    windowMap: new Map([[workspaceWindowId, workspaceWindow]]),
+    focusWindowLocally() {},
+    sendWindowFocus() {},
+    branchCleanupModal: modalEl,
+    branchCleanupDialog: dialogEl,
+    launchPending: { settleWhere() {} },
+    visibleBounds: () => ({}),
+    getActiveWorkProjection: () => null,
+    renderWorkspaceWindows: () => {
+      workspaceRenderCount += 1;
+    },
+  });
+
+  surface.openWorkspaceCleanup(
+    {
+      branch: "work/20260615-0125",
+      remote_delete_available: false,
+    },
+    workspaceWindowId,
+  );
+  const submitButton = Array.from(dialogEl.querySelectorAll("button")).find(
+    (button) => button.textContent === "Run cleanup",
+  );
+  assert.ok(submitButton, "expected Workspace cleanup confirm action");
+  submitButton.click();
+
+  assert.equal(sent.length, 1);
+  assert.equal(sent[0].kind, "run_branch_cleanup");
+  assert.equal(dialogEl.querySelector("h2").textContent, "Cleaning up branches");
+
+  surface.applyBranchCleanupReceiveEvent({
+    kind: "branch_cleanup_result",
+    id: workspaceWindowId,
+    results: [
+      {
+        branch: "work/20260615-0125",
+        execution_branch: "work/20260615-0125",
+        status: "success",
+        message: "Deleted local branch",
+      },
+    ],
+  });
+
+  assert.equal(dialogEl.querySelector("h2").textContent, "Cleanup result");
+  assert.match(dialogEl.textContent, /Deleted local branch/);
+  assert.equal(workspaceRenderCount, 1);
 });

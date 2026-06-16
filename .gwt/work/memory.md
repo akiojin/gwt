@@ -6955,3 +6955,10 @@ Type: failure-pattern
 Context: SPEC-2359 user verification on 2026-06-16 showed work/20260616-0203 displayed as cleanup-safe in a fresh browser-check while Codex processes still had cwd inside that worktree. The session ledger was Idle/Stop and the isolated browser-check HOME had no real session ledger entry.
 Learning: Idle session status and isolated browser-check state are insufficient for destructive cleanup gates. A merged Workspace can still be unsafe when any live OS process is running from that worktree.
 Future Action: For workspace cleanup/delete changes, add tests with a live process whose cwd is the candidate worktree and verify both action availability and UI copy in a fresh browser-check before asking for user confirmation.
+
+## 2026-06-16 — Workspace cleanup result must repaint non-Branches owners
+
+Type: lesson
+Context: SPEC-2359 user verification on 2026-06-16 showed Workspace-origin cleanup stuck at PENDING for work/20260615-0125 even though logs proved git worktree remove --force and git branch -D had both exited 0. The cleanup modal state was owned by a Workspace window id, not the synthetic cleanup id or a Branches window.
+Learning: Backend completion is insufficient for destructive UI flows: event receive paths must repaint the modal owner. renderBranches(event.id) can return before modal repaint when the owner window does not contain .branch-list, leaving stale running UI after a successful cleanup.
+Future Action: For cleanup/progress/result/error changes, add a DOM test where the cleanup owner is a Workspace window without .branch-list, and verify fresh browser-check serves the fixed JS before asking for user confirmation.
