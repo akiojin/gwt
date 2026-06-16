@@ -7018,3 +7018,10 @@ Type: failure-pattern
 Context: SPEC-2017 Issue Bridge UX verification exposed a red gh issue list HTTP 401 banner while cached issues and details were already visible. The banner appeared after browsing for about a minute in a fresh HOME without GitHub auth.
 Learning: The Knowledge Bridge auto-refresh timer must not call requestKnowledgeBridge(..., true). refresh=true forces remote GitHub sync and can surface auth/network failures over a healthy cache-backed UI. Manual refresh can remain forceful; automatic refresh should be cache-first/non-force.
 Future Action: When changing Knowledge Bridge refresh behavior, test that auto refresh sends refresh=false and that cached Issue browsing remains error-free after the timer fires. Reserve refresh=true for explicit user actions such as the refresh button.
+
+## 2026-06-16 — Hidden agent window status can leave visible tab telemetry stale
+
+Type: failure-pattern
+Context: Stop/terminal_status for an inactive tabbed agent updated runtime state and Project Tab dots, but the target window DOM was not mounted, so the visible sibling window tab strip kept data-agent-state=active and continued pulsing.
+Learning: For tabbed windows, runtime status changes must refresh every mounted tab strip in the group, not only the target window element. Missing-element branches in status handlers still need tab telemetry refresh.
+Future Action: When changing agent runtime status handling, add a regression that emits terminal_status/window_state for a hidden tab and asserts the visible sibling tab state and Project Tab dot both stop pulsing.

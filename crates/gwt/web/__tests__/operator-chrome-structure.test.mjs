@@ -4549,6 +4549,31 @@ test("Runtime status updates skip unchanged DOM and dependent surface writes", (
   );
 });
 
+test("Runtime status updates repaint tab telemetry when the target window is hidden", () => {
+  const statusBody = extractFunctionBody(appSource, "applyStatus");
+  const branchMatch = statusBody.match(
+    /if\s*\(\s*!element\s*\)\s*\{([\s\S]*?)return\s*;\s*\}/,
+  );
+  assert.ok(branchMatch, "applyStatus must handle status events for unmounted windows");
+
+  const branchBody = branchMatch[1];
+  assert.match(
+    branchBody,
+    /renderWindowList\s*\(\s*\)\s*;/,
+    "hidden target status updates must still refresh the Window List",
+  );
+  assert.match(
+    branchBody,
+    /refreshWindowTabTelemetry\s*\(\s*windowData\s*\)\s*;/,
+    "hidden target status updates must repaint visible sibling tab telemetry",
+  );
+  assert.match(
+    branchBody,
+    /refreshProjectTabDots\s*\(\s*\)\s*;/,
+    "hidden target status updates must still refresh project tab dots",
+  );
+});
+
 test("Runtime status key covers state detail preset visibility and cleanup", () => {
   const keyBody = extractFunctionBody(appSource, "windowRuntimeStatusRenderKey");
   assert.match(
