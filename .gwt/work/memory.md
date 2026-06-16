@@ -7011,3 +7011,10 @@ Type: failure-pattern
 Context: Issue Bridge showed all Kanban columns as 0 even though issue cache contained plain open Issues and a direct WebSocket load_knowledge_bridge request returned entries for the same window.
 Learning: When Knowledge Bridge backend/cache are healthy but the UI stays empty, inspect frontend mount/load gating, stale detail state, loading flags, and refresh button disabled state before changing cache or backend code.
 Future Action: Add or run frontend regression tests that seed stale detail without entries and stuck initial load before implementing Knowledge Bridge recovery fixes.
+
+## 2026-06-16 — Knowledge Bridge auto refresh must stay cache-first
+
+Type: failure-pattern
+Context: SPEC-2017 Issue Bridge UX verification exposed a red gh issue list HTTP 401 banner while cached issues and details were already visible. The banner appeared after browsing for about a minute in a fresh HOME without GitHub auth.
+Learning: The Knowledge Bridge auto-refresh timer must not call requestKnowledgeBridge(..., true). refresh=true forces remote GitHub sync and can surface auth/network failures over a healthy cache-backed UI. Manual refresh can remain forceful; automatic refresh should be cache-first/non-force.
+Future Action: When changing Knowledge Bridge refresh behavior, test that auto refresh sends refresh=false and that cached Issue browsing remains error-free after the timer fires. Reserve refresh=true for explicit user actions such as the refresh button.
