@@ -444,6 +444,18 @@ mod tests {
             !rendered.contains("--title-summary"),
             "generated coordination guidance must not expose the legacy title-summary flag"
         );
+        let stale_commands = [
+            ["gwtd", "board post"].join(" "),
+            ["gwtd", "workspace update"].join(" "),
+            ["gwtd", "search --"].join(" "),
+            "--current-focus".to_string(),
+        ];
+        for stale in stale_commands {
+            assert!(
+                !rendered.contains(&stale),
+                "generated coordination guidance must not expose legacy argv guidance: {stale}"
+            );
+        }
     }
 
     #[test]
