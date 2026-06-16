@@ -7004,3 +7004,10 @@ Type: lesson
 Context: JSON-only gwtd migration initially had to cover hidden .claude/.codex managed assets as well as Rust sources and public docs.
 Learning: Repository-wide command-surface migrations must include hidden managed assets and generated guidance, not only normal rg-visible files.
 Future Action: Before declaring a command-surface migration complete, run rg -uu across .claude, .codex, docs, tests, and source comments, then add contract tests that reject stale guidance.
+
+## 2026-06-16 — Issue Bridge UI can stay empty while backend returns cached entries
+
+Type: failure-pattern
+Context: Issue Bridge showed all Kanban columns as 0 even though issue cache contained plain open Issues and a direct WebSocket load_knowledge_bridge request returned entries for the same window.
+Learning: When Knowledge Bridge backend/cache are healthy but the UI stays empty, inspect frontend mount/load gating, stale detail state, loading flags, and refresh button disabled state before changing cache or backend code.
+Future Action: Add or run frontend regression tests that seed stale detail without entries and stuck initial load before implementing Knowledge Bridge recovery fixes.

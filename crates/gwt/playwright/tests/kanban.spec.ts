@@ -41,6 +41,51 @@ test.describe("Knowledge Bridge Kanban visual snapshots", () => {
   }
 });
 
+test.describe("Issue Bridge load recovery", () => {
+  test.use({
+    deviceScaleFactor: 1,
+    viewport: { width: 1440, height: 900 },
+  });
+
+  test("requests cached issues when a stale detail exists but the board is empty", async ({
+    page,
+  }) => {
+    await installEmbeddedRoutes(page);
+    await installIssueBridgeBackend(page, { staleDetailBeforeWorkspace: true });
+
+    await page.goto(APP_URL);
+
+    const board = page.locator(".surface-knowledge .kanban-board");
+    await expect(board).toBeVisible();
+    await expect(
+      page.locator(
+        ".surface-knowledge .kanban-column[data-phase='backlog'] [data-role='count']",
+      ),
+    ).toHaveText("2");
+    await expect(page.locator(".surface-knowledge .kanban-card")).toHaveCount(2);
+  });
+
+  test("manual refresh recovers a stale empty loading state", async ({ page }) => {
+    await installEmbeddedRoutes(page);
+    await installIssueBridgeBackend(page, { ignoreFirstLoad: true });
+
+    await page.goto(APP_URL);
+
+    const refresh = page.locator(
+      ".surface-knowledge [data-action='refresh-knowledge']",
+    );
+    await expect(refresh).toBeEnabled();
+    await refresh.click();
+
+    await expect(
+      page.locator(
+        ".surface-knowledge .kanban-column[data-phase='backlog'] [data-role='count']",
+      ),
+    ).toHaveText("2");
+    await expect(page.locator(".surface-knowledge .kanban-card")).toHaveCount(2);
+  });
+});
+
 async function installKanbanBackend(page, { hideDone, theme }) {
   await page.addInitScript(
     ({ hideDone: shouldHideDone, theme: selectedTheme }) => {
@@ -246,5 +291,161 @@ async function installKanbanBackend(page, { hideDone, theme }) {
       });
     },
     { hideDone, theme },
+  );
+}
+
+async function installIssueBridgeBackend(
+  page,
+  { ignoreFirstLoad = false, staleDetailBeforeWorkspace = false } = {},
+) {
+  await page.addInitScript(
+    ({ ignoreFirstLoad: shouldIgnoreFirstLoad, staleDetailBeforeWorkspace: shouldSeedStaleDetail }) => {
+      const entries = [
+        {
+          number: 3096,
+          title: "Issue Bridge shows empty columns despite cached issues",
+          state: "open",
+          meta: "Regression fixture",
+          labels: ["bug"],
+          linked_branch_count: 0,
+          match_score: 100,
+          phase: null,
+          has_unknown_phase: false,
+          is_spec: false,
+        },
+        {
+          number: 3095,
+          title: "Session TOML corruption on new agent session",
+          state: "open",
+          meta: "Cached plain issue",
+          labels: ["bug"],
+          linked_branch_count: 0,
+          match_score: 96,
+          phase: null,
+          has_unknown_phase: false,
+          is_spec: false,
+        },
+      ];
+
+      const workspaceState = {
+        kind: "workspace_state",
+        workspace: {
+          app_version: "playwright",
+          tabs: [
+            {
+              id: "tab-issue",
+              title: "Fixture Project",
+              project_root: "/fixture",
+              kind: "git",
+              workspace: {
+                viewport: { x: 0, y: 0, zoom: 1 },
+                windows: [
+                  {
+                    id: "issue-kanban",
+                    title: "Issue",
+                    preset: "issue",
+                    geometry: { x: 40, y: 60, width: 1320, height: 760 },
+                    z_index: 1,
+                    status: "running",
+                    minimized: false,
+                    maximized: false,
+                    pre_maximize_geometry: null,
+                    persist: true,
+                    purpose_title: null,
+                    dynamic_title: null,
+                    dynamic_title_detail: null,
+                    agent_id: null,
+                    agent_color: null,
+                    tab_group_id: null,
+                    tab_group_active: false,
+                  },
+                ],
+              },
+            },
+          ],
+          active_tab_id: "tab-issue",
+          recent_projects: [],
+        },
+      };
+
+      class FixtureWebSocket extends EventTarget {
+        static CONNECTING = 0;
+        static OPEN = 1;
+        static CLOSING = 2;
+        static CLOSED = 3;
+
+        loadCount = 0;
+
+        constructor(url) {
+          super();
+          this.url = url;
+          this.readyState = FixtureWebSocket.CONNECTING;
+          setTimeout(() => {
+            this.readyState = FixtureWebSocket.OPEN;
+            this.dispatchEvent(new Event("open"));
+          }, 0);
+        }
+
+        send(raw) {
+          const message = JSON.parse(raw);
+          if (message.kind === "frontend_ready") {
+            if (shouldSeedStaleDetail) {
+              this.emit({
+                kind: "knowledge_detail",
+                id: "issue-kanban",
+                knowledge_kind: "issue",
+                request_id: 0,
+                detail: {
+                  number: 3095,
+                  title: "Stale cached detail",
+                  state: "open",
+                  subtitle: "Detail survived without entries",
+                  labels: ["bug"],
+                  launch_issue_number: 3095,
+                  sections: [],
+                },
+              });
+            }
+            this.emit(workspaceState);
+            return;
+          }
+          if (message.kind === "load_knowledge_bridge") {
+            this.loadCount += 1;
+            if (shouldIgnoreFirstLoad && this.loadCount === 1) {
+              return;
+            }
+            this.emit({
+              kind: "knowledge_entries",
+              id: message.id,
+              knowledge_kind: message.knowledge_kind,
+              request_id: message.request_id,
+              entries,
+              selected_number: 3096,
+              empty_message: null,
+              refresh_enabled: true,
+            });
+          }
+        }
+
+        close() {
+          this.readyState = FixtureWebSocket.CLOSED;
+          this.dispatchEvent(new CloseEvent("close"));
+        }
+
+        emit(payload) {
+          setTimeout(() => {
+            this.dispatchEvent(
+              new MessageEvent("message", { data: JSON.stringify(payload) }),
+            );
+          }, 0);
+        }
+      }
+
+      Object.defineProperty(window, "WebSocket", {
+        configurable: true,
+        value: FixtureWebSocket,
+      });
+    },
+    { ignoreFirstLoad, staleDetailBeforeWorkspace },
   );
 }

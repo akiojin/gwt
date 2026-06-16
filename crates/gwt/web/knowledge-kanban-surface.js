@@ -189,6 +189,9 @@ export function createKnowledgeKanbanSurface({
             inFlightSearchRequestId: 0,
             searchInFlight: false,
             queuedSearchQuery: "",
+            queuedLoadRefresh: false,
+            loadRecoveryTimer: null,
+            loadRecoveryRetryCount: 0,
             error: "",
             emptyMessage: "",
             baseEmptyMessage: "",
@@ -276,16 +279,88 @@ export function createKnowledgeKanbanSurface({
           state.searchInFlight = false;
           state.inFlightSearchRequestId = 0;
           state.detailRequestId = 0;
+          state.queuedLoadRefresh = false;
+          state.loadRecoveryRetryCount = 0;
+          if (state.loadRecoveryTimer) {
+            clearTimeout(state.loadRecoveryTimer);
+            state.loadRecoveryTimer = null;
+          }
           state.pendingPhaseUpdates?.clear();
           state.dndSnapshot = null;
         }
         knowledgeBridgeStateMap.delete(windowId);
       }
 
+      function knowledgeEntriesAreEmpty(state) {
+        return (
+          (!Array.isArray(state.entries) || state.entries.length === 0) &&
+          (!Array.isArray(state.baseEntries) || state.baseEntries.length === 0)
+        );
+      }
+
+      function clearKnowledgeLoadRecoveryTimer(state) {
+        if (!state.loadRecoveryTimer) {
+          return;
+        }
+        clearTimeout(state.loadRecoveryTimer);
+        state.loadRecoveryTimer = null;
+      }
+
+      function scheduleKnowledgeLoadRecovery(windowId, knowledgeKind, requestId) {
+        const state = ensureKnowledgeBridgeState(windowId, knowledgeKind);
+        clearKnowledgeLoadRecoveryTimer(state);
+        state.loadRecoveryTimer = setTimeout(() => {
+          state.loadRecoveryTimer = null;
+          if (!workspaceWindowById(windowId)) {
+            return;
+          }
+          if (
+            !state.loading ||
+            state.loadRequestId !== requestId ||
+            !knowledgeEntriesAreEmpty(state)
+          ) {
+            return;
+          }
+          if (state.loadRecoveryRetryCount < 1) {
+            state.loadRecoveryRetryCount += 1;
+            state.loading = false;
+            state.refreshing = false;
+            requestKnowledgeBridge(windowId, knowledgeKind, true);
+            renderKnowledgeBridge(windowId);
+            return;
+          }
+          state.loading = false;
+          state.refreshing = false;
+          state.error = "Timed out loading cache-backed data";
+          renderKnowledgeBridge(windowId);
+        }, 5000);
+      }
+
+      function finishKnowledgeLoad(state, windowId, knowledgeKind) {
+        clearKnowledgeLoadRecoveryTimer(state);
+        state.loading = false;
+        state.refreshing = false;
+        state.loadRecoveryRetryCount = 0;
+        const queuedRefresh = state.queuedLoadRefresh;
+        state.queuedLoadRefresh = false;
+        if (queuedRefresh && workspaceWindowById(windowId)) {
+          requestKnowledgeBridge(windowId, knowledgeKind, true);
+          return true;
+        }
+        return false;
+      }
+
       function requestKnowledgeBridge(windowId, knowledgeKind, refresh = false) {
         const state = ensureKnowledgeBridgeState(windowId, knowledgeKind);
         if (state.loading) {
-          return;
+          if (refresh && knowledgeEntriesAreEmpty(state)) {
+            clearKnowledgeLoadRecoveryTimer(state);
+            state.loading = false;
+            state.refreshing = false;
+          } else {
+            state.queuedLoadRefresh = state.queuedLoadRefresh || Boolean(refresh);
+            return;
+          }
         }
         if (state.pendingSearchTimer) {
           clearTimeout(state.pendingSearchTimer);
@@ -300,6 +375,7 @@ export function createKnowledgeKanbanSurface({
         state.searchInFlight = false;
         state.inFlightSearchRequestId = 0;
         state.queuedSearchQuery = "";
+        state.queuedLoadRefresh = false;
         state.searchRequestId += 1;
         state.error = "";
         const effectiveKind = knowledgeKind || state.kind;
@@ -311,6 +387,7 @@ export function createKnowledgeKanbanSurface({
           selected_number: state.selectedNumber ?? null,
           refresh,
         });
+        scheduleKnowledgeLoadRecovery(windowId, effectiveKind, requestId);
       }
 
       function restoreKnowledgeBaseEntries(state) {
@@ -792,7 +869,8 @@ export function createKnowledgeKanbanSurface({
           return;
         }
 
-        refreshButton.disabled = !state.refreshEnabled || state.loading;
+        refreshButton.disabled =
+          !state.refreshEnabled || (state.loading && !knowledgeEntriesAreEmpty(state));
         searchInput.placeholder = knowledgeSearchPlaceholder(state.kind);
         if (hideDoneToggle) {
           hideDoneToggle.checked = state.hideDone === true;
@@ -1090,7 +1168,7 @@ export function createKnowledgeKanbanSurface({
               );
             });
           }
-          if (!state.detail && !state.loading) {
+          if (!state.loading && (!state.detail || knowledgeEntriesAreEmpty(state))) {
             requestKnowledgeBridge(
               windowData.id,
               knowledgeKind,
@@ -1132,9 +1210,11 @@ export function createKnowledgeKanbanSurface({
               ? state.selectedNumber
               : event.selected_number ?? null;
             state.refreshEnabled = Boolean(event.refresh_enabled);
-            state.loading = false;
-            state.refreshing = false;
             state.error = "";
+            if (finishKnowledgeLoad(state, event.id, event.knowledge_kind)) {
+              renderKnowledgeBridge(event.id);
+              break;
+            }
             if (queuedQuery) {
               scheduleKnowledgeSearch(
                 event.id,
@@ -1211,8 +1291,7 @@ export function createKnowledgeKanbanSurface({
             state.detail = event.detail;
             state.selectedNumber = event.detail?.number ?? state.selectedNumber ?? null;
             if (matchesLoadRequest) {
-              state.loading = false;
-              state.refreshing = false;
+              finishKnowledgeLoad(state, event.id, event.knowledge_kind);
             }
             state.detailLoading = false;
             renderKnowledgeBridge(event.id);
@@ -1320,16 +1399,19 @@ export function createKnowledgeKanbanSurface({
             }
             const matchesLoadRequest =
               !event.request_id || event.request_id === state.loadRequestId;
+            const startedQueuedRefresh = matchesLoadRequest
+              ? finishKnowledgeLoad(state, event.id, event.knowledge_kind)
+              : false;
             if (matchesLoadRequest) {
-              state.loading = false;
-              state.refreshing = false;
+              state.error = startedQueuedRefresh ? "" : event.message;
+            } else {
+              state.error = event.message;
             }
             state.searching = false;
             state.searchInFlight = false;
             state.inFlightSearchRequestId = 0;
             state.queuedSearchQuery = "";
             state.detailLoading = false;
-            state.error = event.message;
             renderKnowledgeBridge(event.id);
             break;
           }
