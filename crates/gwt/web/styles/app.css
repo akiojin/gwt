@@ -304,6 +304,35 @@ body {
   border-color: var(--color-focus-ring);
 }
 
+/* SPEC-2013 Phase 8 — Open Folder / Clone actions that replace the retired
+   Open Project split button, divided from the switchable OPEN / RECENT rows. */
+.project-switcher-actions-separator {
+  height: 1px;
+  margin: 8px 4px;
+  background: var(--color-border);
+}
+
+.project-switcher-action {
+  width: 100%;
+  text-align: left;
+  padding: 8px 10px;
+  border: 1px solid transparent;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--color-text);
+  font-family: var(--font-body);
+  font-size: var(--type-sm);
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.project-switcher-action:hover,
+.project-switcher-action:focus-visible {
+  background: color-mix(in oklab, var(--color-state-active) 12%, var(--color-surface));
+  outline: none;
+  border-color: var(--color-border);
+}
+
 /* SPEC-2013 — running agent activity dot on project tabs. */
 .project-tab-dot {
   display: inline-block;
@@ -605,135 +634,6 @@ body {
 
 .arrange-button:hover {
   background: var(--color-button-bg-hover);
-}
-
-/* Issue #2684 — split-button group anchors the dropdown menu below the
-   primary Open Project button. */
-.split-button-group {
-  position: relative;
-  display: inline-flex;
-  align-items: stretch;
-}
-
-.split-button-group .split-button-primary {
-  border-top-right-radius: 0;
-  border-bottom-right-radius: 0;
-  border-right-width: 0;
-}
-
-.split-button-group .split-button-caret {
-  padding: 0 8px;
-  border-top-left-radius: 0;
-  border-bottom-left-radius: 0;
-  font-size: var(--type-sm);
-  min-width: 26px;
-}
-
-.split-button-group .split-button-caret[aria-expanded="true"] {
-  background: var(--color-button-bg-hover);
-}
-
-.split-button-menu {
-  position: absolute;
-  top: calc(100% + 6px);
-  right: 0;
-  min-width: 260px;
-  max-width: 360px;
-  padding: 8px;
-  display: none;
-  flex-direction: column;
-  gap: 4px;
-  border: 1px solid var(--color-border);
-  border-radius: var(--radius-md);
-  background: var(--color-surface);
-  box-shadow: var(--shadow-2);
-  z-index: 50;
-}
-
-.split-button-menu.open {
-  display: flex;
-}
-
-.split-button-menu-item {
-  width: 100%;
-  text-align: left;
-  padding: 8px 10px;
-  border: 1px solid transparent;
-  border-radius: var(--radius-sm);
-  background: transparent;
-  color: var(--color-text);
-  font-family: var(--font-body);
-  font-size: var(--type-sm);
-  font-weight: 600;
-  cursor: pointer;
-}
-
-.split-button-menu-item:hover,
-.split-button-menu-item:focus-visible {
-  background: color-mix(in oklab, var(--color-state-active) 12%, var(--color-surface));
-  outline: none;
-  border-color: var(--color-border);
-}
-
-.split-button-menu-section-label {
-  margin: 8px 4px 4px;
-  font-family: var(--font-display);
-  font-stretch: 75%;
-  font-weight: 700;
-  font-size: var(--type-xs);
-  letter-spacing: var(--tracking-display);
-  text-transform: uppercase;
-  color: var(--color-text-muted);
-}
-
-.split-button-menu-recent {
-  display: grid;
-  /* Issue #2746 follow-up — without minmax(0, 1fr) the implicit auto track
-     grows to fit the longest meta path, so the row outgrows the dropdown
-     and the hover background bleeds past the right edge. */
-  grid-template-columns: minmax(0, 1fr);
-  gap: 4px;
-}
-
-/* Empty-state copy is rendered as a real <div> by JS so assistive tech
-   finds it; this rule only styles that node. */
-.split-button-menu-empty {
-  padding: 8px 10px;
-  font-family: var(--font-body);
-  font-size: var(--type-sm);
-  color: var(--color-text-muted);
-}
-
-.split-button-menu-recent-row {
-  display: flex;
-  flex-direction: column;
-  gap: 2px;
-  /* Issue #2746 follow-up — flex columns default to `min-width: auto`,
-     which equals the meta span's min-content. Force 0 so the row honors
-     the menu width and meta's text-overflow: ellipsis actually engages. */
-  min-width: 0;
-  /* Issue #2746 — span children inside <button> would otherwise inherit
-     user-select: auto, so a sub-pixel pointer drift turns the click into a
-     text-selection drag and swallows it. Mirrors the #2744 fix on
-     .project-tab. */
-  user-select: none;
-}
-
-.split-button-menu-recent-title {
-  font-family: var(--font-body);
-  font-size: var(--type-sm);
-  font-weight: 600;
-  color: var(--color-text-strong);
-}
-
-.split-button-menu-recent-meta {
-  font-family: var(--font-mono);
-  font-size: var(--type-xs);
-  letter-spacing: var(--tracking-mono);
-  color: var(--color-text-muted);
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
 }
 
 /* SPEC-2356 — workspace window chrome.
@@ -5404,8 +5304,9 @@ body {
   background: var(--color-surface);
   color: var(--color-text);
   cursor: pointer;
-  /* Issue #2746 — see .split-button-menu-recent-row comment. Picker
-     overlay shares the same button + span-children pattern. */
+  /* Issue #2746 — span children inside a <button> inherit user-select: auto,
+     so a sub-pixel pointer drift turns the click into a text-selection drag
+     and swallows it. Mirrors the #2744 fix on .project-tab. */
   user-select: none;
 }
 

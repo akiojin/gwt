@@ -60,6 +60,29 @@ export function nextProjectTabId(tabs, activeTabId, direction = "next") {
   return ids[(currentIndex + delta + ids.length) % ids.length];
 }
 
+// Cmd+O (mac) / Ctrl+O (Windows/Linux) opens the native folder dialog. The
+// single `Projects ▾` control absorbed the standalone split-button, so this
+// keyboard path preserves the one-press Open Folder muscle memory the split
+// button's primary half used to provide (SPEC-2013 US-10 / FR-025). It mirrors
+// the project-switcher shortcut guard: never steals editable input, never
+// fires on key-repeat, and stays inert while a modal/dropdown owns focus.
+export function shouldTriggerOpenFolderHotkey(event, { modalOpen = false } = {}) {
+  if (!event || event.repeat) {
+    return false;
+  }
+  if (!(event.metaKey || event.ctrlKey) || event.shiftKey || event.altKey) {
+    return false;
+  }
+  if (modalOpen) {
+    return false;
+  }
+  if (isEditableTarget(event.target)) {
+    return false;
+  }
+  const key = String(event.key || "").toLowerCase();
+  return key === "o" || String(event.code || "") === "KeyO";
+}
+
 export function shouldHandleProjectSwitcherShortcut(
   event,
   {
@@ -153,6 +176,8 @@ export function createProjectSwitcherController({
   clearUnreadProject = () => {},
   getNotificationPermission = () => "unsupported",
   requestNotificationPermission = null,
+  onOpenFolder = () => {},
+  onCloneFromGithub = () => {},
 } = {}) {
   let open = false;
   let selectedIndex = 0;
@@ -240,6 +265,41 @@ export function createProjectSwitcherController({
     fragment.appendChild(item);
   }
 
+  function appendActions(fragment) {
+    // SPEC-2013 US-9: the consolidated `Projects ▾` menu owns project intake
+    // too. The separator divides the switchable OPEN / RECENT rows from the
+    // Open Folder / Clone actions that replace the retired split button.
+    const separator = createNode("div", "project-switcher-actions-separator");
+    separator.setAttribute("role", "presentation");
+    fragment.appendChild(separator);
+
+    const openFolder = createNode(
+      "button",
+      "project-switcher-action",
+      "Open Folder…",
+    );
+    openFolder.type = "button";
+    openFolder.dataset.action = "open-folder";
+    openFolder.addEventListener("click", () => {
+      close({ restoreFocus: true });
+      onOpenFolder?.();
+    });
+
+    const clone = createNode(
+      "button",
+      "project-switcher-action",
+      "Clone from GitHub…",
+    );
+    clone.type = "button";
+    clone.dataset.action = "clone-from-github";
+    clone.addEventListener("click", () => {
+      close({ restoreFocus: true });
+      onCloneFromGithub?.();
+    });
+
+    fragment.append(openFolder, clone);
+  }
+
   function appendNotificationPermissionAction(fragment) {
     if (
       getNotificationPermission() !== "default" ||
@@ -298,6 +358,7 @@ export function createProjectSwitcherController({
       });
     }
     appendNotificationPermissionAction(fragment);
+    appendActions(fragment);
     panelEl.replaceChildren(fragment);
   }
 
@@ -347,10 +408,22 @@ export function createProjectSwitcherController({
         event.preventDefault();
         moveSelection(-1);
         return true;
-      case "Enter":
+      case "Enter": {
+        // Enter selects only when focus is on an OPEN / RECENT row. Action
+        // buttons (Open Folder / Clone) and the notification-permission button
+        // must keep their native Enter -> click activation, so the panel-level
+        // handler must not preventDefault / selectRow for them.
+        const target = event.target;
+        const isRow =
+          typeof target?.classList?.contains === "function" &&
+          target.classList.contains("project-switcher-row");
+        if (!isRow) {
+          return false;
+        }
         event.preventDefault();
         selectRow(lastRows[selectedIndex]);
         return true;
+      }
       case "Escape":
         event.preventDefault();
         close({ restoreFocus: true });

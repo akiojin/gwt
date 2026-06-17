@@ -35,6 +35,32 @@ test("renderIndexSettingsPanel shows empty hint when no project root is selected
   assert.equal(ctx.panel.querySelector("table"), null);
 });
 
+test("renderIndexSettingsPanel distinguishes an empty status payload from unavailable status", () => {
+  const ctx = fixture();
+  renderIndexSettingsPanel({
+    panel: ctx.panel,
+    status: {
+      state: "skipped",
+      detail: "Project index bootstrap has not produced a full status yet.",
+      scopes: {},
+      worktrees: {},
+    },
+    projectRoot: "/abs/repo",
+    send: ctx.send,
+    document: ctx.document,
+  });
+
+  assert.equal(
+    ctx.panel.querySelector("[data-role='index-settings-empty']"),
+    null,
+    "a real status payload should not be rendered as unavailable bootstrap state",
+  );
+  const status = ctx.panel.querySelector("[data-role='index-settings-status']");
+  assert.ok(status, "expected a status-specific fallback message");
+  assert.match(status.textContent, /skipped/i);
+  assert.match(status.textContent, /Project index bootstrap/);
+});
+
 test("renderIndexSettingsPanel renders one row per scope and one column per worktree", () => {
   const ctx = fixture();
   renderIndexSettingsPanel({

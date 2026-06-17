@@ -60,8 +60,8 @@ import {
   createProjectSwitcherController,
   nextProjectTabId,
   shouldHandleProjectSwitcherShortcut,
+  shouldTriggerOpenFolderHotkey,
 } from "/project-switcher.js";
-import { createFocusTrap } from "/focus-trap.js";
 import { maximizedGeometry } from "/window-geometry-sync.js";
 import { windowRuntimeLabel } from "/window-runtime-state.js";
 
@@ -102,20 +102,6 @@ export function createProjectShellSurface({
       const projectSwitcherPanel = document.getElementById(
         "project-switcher-panel",
       );
-      const openProjectButton = document.getElementById("open-project-button");
-      const openProjectMenuButton = document.getElementById(
-        "open-project-menu-button",
-      );
-      const openProjectMenu = document.getElementById("open-project-menu");
-      const openProjectMenuOpenItem = document.getElementById(
-        "open-project-menu-open",
-      );
-      const openProjectMenuCloneItem = document.getElementById(
-        "open-project-menu-clone",
-      );
-      const openProjectMenuRecent = document.getElementById(
-        "open-project-menu-recent",
-      );
       const projectPicker = document.getElementById("project-picker");
       const projectPickerError = document.getElementById("project-picker-error");
       const pickerOpenProjectButton = document.getElementById("picker-open-project");
@@ -137,7 +123,6 @@ export function createProjectShellSurface({
       let windowListOpen = false;
       let windowListEntries = [];
       let renderedRecentProjectsKey = "";
-      let renderedRecentProjectsMenuKey = "";
       let renderedWindowListKey = "";
       let renderedProjectPickerKey = "";
       let renderedProjectOnboardingKey = "";
@@ -213,6 +198,8 @@ export function createProjectShellSurface({
         clearUnreadProject: clearProjectUnread,
         getNotificationPermission: desktopNotificationPermission,
         requestNotificationPermission: requestDesktopNotificationPermission,
+        onOpenFolder: sendOpenProjectDialog,
+        onCloneFromGithub: openCloneProjectModal,
       });
 
       function windowListRenderKey() {
@@ -831,151 +818,6 @@ export function createProjectShellSurface({
         }
       }
 
-      // Issue #2684 — mirror Recent projects inside the split-button dropdown
-      // so users can reach them without first closing every project tab.
-      function renderRecentProjectsIntoMenu({ force = false } = {}) {
-        if (!openProjectMenuRecent) {
-          return;
-        }
-        const appState = getAppState();
-        const nextKey = recentProjectsRenderKey(appState);
-        if (!force && renderedRecentProjectsMenuKey === nextKey) {
-          return;
-        }
-        renderedRecentProjectsMenuKey = nextKey;
-        openProjectMenuRecent.replaceChildren();
-        const recentProjects = appState?.recent_projects || [];
-        if (recentProjects.length === 0) {
-          openProjectMenuRecent.dataset.empty = "true";
-          // Real DOM node beats CSS pseudo-content so screen readers reach it.
-          const empty = document.createElement("div");
-          empty.className = "split-button-menu-empty";
-          empty.setAttribute("role", "presentation");
-          empty.textContent = "No recent projects";
-          openProjectMenuRecent.appendChild(empty);
-          return;
-        }
-        delete openProjectMenuRecent.dataset.empty;
-        for (const project of recentProjects) {
-          const row = document.createElement("button");
-          row.type = "button";
-          row.className =
-            "split-button-menu-item split-button-menu-recent-row";
-          row.setAttribute("role", "menuitem");
-          row.tabIndex = -1;
-          // Issue #2746 follow-up — meta truncates with ellipsis, so the
-          // full path lives in the native title tooltip on hover/focus.
-          row.title = `${project.kind} · ${project.path}`;
-          const titleEl = document.createElement("span");
-          titleEl.className = "split-button-menu-recent-title";
-          titleEl.textContent = project.title;
-          const metaEl = document.createElement("span");
-          metaEl.className = "split-button-menu-recent-meta";
-          metaEl.textContent = `${project.kind} · ${project.path}`;
-          row.append(titleEl, metaEl);
-          row.addEventListener("click", () => {
-            closeOpenProjectMenu();
-            send({ kind: "reopen_recent_project", path: project.path });
-          });
-          openProjectMenuRecent.appendChild(row);
-        }
-      }
-
-      // Issue #2684 — split-button dropdown that mirrors the picker so users
-      // can reach Clone from GitHub while a project tab is active.
-      let openProjectMenuFocusRelease = null;
-
-      function isOpenProjectMenuOpen() {
-        return openProjectMenu?.classList.contains("open") || false;
-      }
-
-      function openOpenProjectMenu() {
-        if (!openProjectMenu || isOpenProjectMenuOpen()) {
-          return;
-        }
-        renderRecentProjectsIntoMenu({ force: true });
-        openProjectMenu.classList.add("open");
-        openProjectMenu.setAttribute("aria-hidden", "false");
-        openProjectMenuButton.setAttribute("aria-expanded", "true");
-        try {
-          openProjectMenuOpenItem.focus({ preventScroll: true });
-        } catch {
-          openProjectMenuOpenItem.focus();
-        }
-        openProjectMenuFocusRelease = createFocusTrap(openProjectMenu, {
-          document,
-        });
-      }
-
-      function closeOpenProjectMenu({ restoreFocus = false } = {}) {
-        if (!openProjectMenu || !isOpenProjectMenuOpen()) {
-          return;
-        }
-        openProjectMenu.classList.remove("open");
-        openProjectMenu.setAttribute("aria-hidden", "true");
-        openProjectMenuButton.setAttribute("aria-expanded", "false");
-        if (typeof openProjectMenuFocusRelease === "function") {
-          openProjectMenuFocusRelease();
-        }
-        openProjectMenuFocusRelease = null;
-        if (restoreFocus) {
-          try {
-            openProjectMenuButton.focus({ preventScroll: true });
-          } catch {
-            openProjectMenuButton.focus();
-          }
-        }
-      }
-
-      function toggleOpenProjectMenu() {
-        if (isOpenProjectMenuOpen()) {
-          closeOpenProjectMenu({ restoreFocus: true });
-        } else {
-          openOpenProjectMenu();
-        }
-      }
-
-      // Issue #2684 — roving focus across menu items. Items carry
-      // tabindex="-1" by ARIA APG convention so Tab does not stop on each
-      // individual entry; arrow keys take over once the menu is open.
-      function openProjectMenuItems() {
-        if (!openProjectMenu) {
-          return [];
-        }
-        return Array.from(
-          openProjectMenu.querySelectorAll('[role="menuitem"]'),
-        ).filter((el) => !el.disabled);
-      }
-
-      function focusOpenProjectMenuItemAt(index) {
-        const items = openProjectMenuItems();
-        if (items.length === 0) {
-          return;
-        }
-        const wrapped = ((index % items.length) + items.length) % items.length;
-        try {
-          items[wrapped].focus({ preventScroll: true });
-        } catch {
-          items[wrapped].focus();
-        }
-      }
-
-      function moveOpenProjectMenuFocus(direction) {
-        const items = openProjectMenuItems();
-        if (items.length === 0) {
-          return;
-        }
-        const active = document.activeElement;
-        const currentIndex = items.indexOf(active);
-        const nextIndex =
-          currentIndex === -1
-            ? direction > 0
-              ? 0
-              : items.length - 1
-            : currentIndex + direction;
-        focusOpenProjectMenuItemAt(nextIndex);
-      }
-
       function renderProjectPicker(activeTab = activeProjectTab()) {
         const projectError = getProjectError();
         const nextProjectPickerKey = projectPickerRenderKey(activeTab);
@@ -1234,7 +1076,6 @@ export function createProjectShellSurface({
           closeProjectTabModalEl?.classList.contains("open") ||
           cloneProjectModal?.classList.contains("open") ||
           migrationModal?.classList.contains("open") ||
-          isOpenProjectMenuOpen() ||
           windowListOpen ||
           projectSwitcherController.isOpen()
         );
@@ -1275,88 +1116,45 @@ export function createProjectShellSurface({
         return true;
       }
 
-      // SPEC-3064 Phase 3 (E7): project-shell chrome listeners (Open Project
-      // button + picker/onboarding entry points, the Open Project
-      // split-button menu, the Windows dropdown trigger, and the dropdown
+      // SPEC-2013 US-10 / FR-025: Cmd+O (mac) / Ctrl+O (Windows/Linux) opens the
+      // native folder dialog directly, recovering the one-press Open Folder the
+      // retired split button's primary half used to give.
+      function handleOpenFolderHotkey(event) {
+        if (
+          !shouldTriggerOpenFolderHotkey(event, {
+            modalOpen: projectShellModalOrDropdownOpen(),
+          })
+        ) {
+          return false;
+        }
+        event.preventDefault();
+        sendOpenProjectDialog();
+        return true;
+      }
+
+      // SPEC-3064 Phase 3 (E7): project-shell chrome listeners (picker /
+      // onboarding entry points, the Windows dropdown trigger, and the dropdown
       // outside-click close) moved out of the app.js bootstrap. References
       // that previously went through frontendUnits.projectWorkspaceShell.*
       // are direct local calls here.
+      //
+      // SPEC-2013 Phase 8: the standalone Open Project split-button was retired.
+      // Open Folder / Clone now live inside the consolidated `Projects ▾`
+      // switcher (onOpenFolder / onCloneFromGithub above) and Open Folder is
+      // also reachable via the Cmd+O / Ctrl+O hotkey (handleOpenFolderHotkey).
       function installProjectShellChrome() {
-        openProjectButton.addEventListener("click", sendOpenProjectDialog);
         pickerOpenProjectButton.addEventListener("click", sendOpenProjectDialog);
         pickerCloneProjectButton.addEventListener("click", openCloneProjectModal);
         onboardingOpenProjectButton.addEventListener("click", sendOpenProjectDialog);
 
-        // Issue #2684 — split-button caret toggles the dropdown menu, and each
-        // menu item routes to the same handler the project picker uses. Outside
-        // clicks and Escape close the menu so it never strands keyboard users.
-        if (openProjectMenuButton && openProjectMenu) {
-          openProjectMenuButton.addEventListener("click", (event) => {
-            event.stopPropagation();
-            toggleOpenProjectMenu();
-          });
-          openProjectMenuButton.addEventListener("keydown", (event) => {
-            if (event.key === "ArrowDown" || event.key === "Down") {
-              event.preventDefault();
-              openOpenProjectMenu();
-            }
-          });
-          openProjectMenuOpenItem.addEventListener("click", () => {
-            closeOpenProjectMenu();
-            sendOpenProjectDialog();
-          });
-          openProjectMenuCloneItem.addEventListener("click", () => {
-            closeOpenProjectMenu();
-            openCloneProjectModal();
-          });
-          document.addEventListener("click", (event) => {
-            if (!isOpenProjectMenuOpen()) {
-              return;
-            }
-            if (
-              openProjectMenu.contains(event.target) ||
-              openProjectMenuButton.contains(event.target)
-            ) {
-              return;
-            }
-            closeOpenProjectMenu();
-          });
-          document.addEventListener("keydown", (event) => {
-            if (event.key === "Escape" && isOpenProjectMenuOpen()) {
-              event.preventDefault();
-              closeOpenProjectMenu({ restoreFocus: true });
-            }
-            if (event.key === "Escape" && projectSwitcherController.isOpen()) {
-              event.preventDefault();
-              closeProjectSwitcher({ restoreFocus: true });
-            }
-          });
-          openProjectMenu.addEventListener("keydown", (event) => {
-            if (!isOpenProjectMenuOpen()) {
-              return;
-            }
-            switch (event.key) {
-              case "ArrowDown":
-                event.preventDefault();
-                moveOpenProjectMenuFocus(1);
-                break;
-              case "ArrowUp":
-                event.preventDefault();
-                moveOpenProjectMenuFocus(-1);
-                break;
-              case "Home":
-                event.preventDefault();
-                focusOpenProjectMenuItemAt(0);
-                break;
-              case "End":
-                event.preventDefault();
-                focusOpenProjectMenuItemAt(-1);
-                break;
-              default:
-                break;
-            }
-          });
-        }
+        // Escape closes the Projects switcher even when focus has left its panel
+        // (e.g. returned to the trigger button or the document body).
+        document.addEventListener("keydown", (event) => {
+          if (event.key === "Escape" && projectSwitcherController.isOpen()) {
+            event.preventDefault();
+            closeProjectSwitcher({ restoreFocus: true });
+          }
+        });
 
         windowListButton.addEventListener("click", toggleWindowList);
 
@@ -1364,6 +1162,7 @@ export function createProjectShellSurface({
           "keydown",
           (event) => {
             handleProjectSwitcherShortcut(event);
+            handleOpenFolderHotkey(event);
           },
           true,
         );
