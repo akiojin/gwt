@@ -4966,6 +4966,19 @@ body {
   text-transform: uppercase;
 }
 
+.launch-advisory-loading {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.launch-advisory-loading-text {
+  font-family: var(--font-mono);
+  font-size: var(--type-xs);
+  letter-spacing: var(--tracking-mono);
+  color: var(--color-text-muted);
+}
+
 .launch-advisory-item {
   display: flex;
   align-items: baseline;

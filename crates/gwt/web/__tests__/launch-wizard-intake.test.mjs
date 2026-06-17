@@ -36,6 +36,17 @@ test("advisory ignores stale responses and stays quiet when empty", () => {
   assert.match(surface, /wizardAdvisoryResults\.length/);
 });
 
+test("advisory shows an in-flight loading indicator during the search", () => {
+  // The semantic search cold-loads the embedding model (several seconds), so a
+  // non-empty prompt must surface a loading indicator immediately rather than a
+  // blank/unresponsive panel.
+  assert.match(surface, /wizardAdvisoryLoading\s*=\s*true/);
+  assert.match(surface, /wizardAdvisoryLoading\s*=\s*false/);
+  assert.match(surface, /Searching related work/);
+  // Reuses the existing project-index loading-dots animation.
+  assert.match(surface, /index-search-loading-dot/);
+});
+
 test("app shell wires the advisory sender and routes the result event", () => {
   assert.match(appJs, /function requestWorkAdvisory\(/);
   assert.match(appJs, /kind:\s*"request_work_advisory"/);

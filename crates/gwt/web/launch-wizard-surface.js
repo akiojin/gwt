@@ -61,6 +61,10 @@ export function createLaunchWizardSurface({
       let wizardAdvisoryRequestSeq = 0;
       let wizardAdvisoryLatestRequestId = 0;
       let wizardAdvisoryTimer = 0;
+      // The semantic search behind the advisory cold-loads the embedding model
+      // (~several seconds), so show an in-flight indicator instead of an empty
+      // panel while a non-empty prompt is being searched.
+      let wizardAdvisoryLoading = false;
       // Issue #2698 PR 1 (B7) — defer destructive wizard re-renders
       // while the user has a native <select> dropdown open. The OS
       // dropdown overlay is anchored to the original DOM node; if
@@ -370,10 +374,15 @@ export function createLaunchWizardSurface({
         const query = wizardPromptDraft.trim();
         if (!query) {
           // Empty prompt → quiet advisory (skippable, no noise).
+          wizardAdvisoryLoading = false;
           wizardAdvisoryResults = [];
           renderWorkAdvisoryPanel();
           return;
         }
+        // Show the in-flight indicator immediately so the multi-second model
+        // load never looks like a frozen/unresponsive panel.
+        wizardAdvisoryLoading = true;
+        renderWorkAdvisoryPanel();
         wizardAdvisoryTimer = setTimeout(() => {
           wizardAdvisoryTimer = 0;
           wizardAdvisoryRequestSeq += 1;
@@ -399,6 +408,7 @@ export function createLaunchWizardSurface({
         ) {
           return;
         }
+        wizardAdvisoryLoading = false;
         wizardAdvisoryResults = Array.isArray(event.results) ? event.results : [];
         renderWorkAdvisoryPanel();
       }
@@ -409,6 +419,23 @@ export function createLaunchWizardSurface({
           return;
         }
         panel.innerHTML = "";
+        if (wizardAdvisoryLoading) {
+          // In-flight: keep the panel visible with an animated indicator so the
+          // multi-second semantic search never reads as an unresponsive UI.
+          // Reuses the project index search loading-dots animation.
+          panel.hidden = false;
+          const loading = createNode("div", "launch-advisory-loading");
+          const dots = createNode("span", "index-search-loading-dots");
+          for (let i = 0; i < 3; i += 1) {
+            dots.appendChild(createNode("span", "index-search-loading-dot"));
+          }
+          loading.appendChild(dots);
+          loading.appendChild(
+            createNode("span", "launch-advisory-loading-text", "Searching related work…"),
+          );
+          panel.appendChild(loading);
+          return;
+        }
         if (!wizardAdvisoryResults.length) {
           panel.hidden = true;
           return;
