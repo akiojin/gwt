@@ -1560,4 +1560,36 @@ Status: active
         assert!(updated.contains("- Goal State: started"));
         assert!(updated.contains("- Goal Condition: tests green and verification handoff ready"));
     }
+
+    #[test]
+    fn goal_pending_rearms_state_even_when_condition_is_unchanged() {
+        let dir = tempfile::tempdir().unwrap();
+        let discussion_path = dir.path().join(DISCUSSION_RELATIVE_PATH);
+        std::fs::create_dir_all(discussion_path.parent().unwrap()).unwrap();
+        std::fs::write(
+            &discussion_path,
+            "## Discussion TODO\n\n\
+             ### Proposal A - Goal handoff [chosen]\n\
+             - Summary: Action Bundle is approved.\n\
+             - Goal Condition: tests green and verification handoff ready\n\
+             - Goal State: failed(goal tool unavailable)\n",
+        )
+        .unwrap();
+
+        assert!(set_proposal_goal_pending_by_label(
+            dir.path(),
+            "Proposal A",
+            "tests green and verification handoff ready"
+        )
+        .unwrap());
+
+        let updated = read_canonical_discussion(dir.path());
+        assert!(updated.contains("- Goal State: pending"), "{updated}");
+        assert_eq!(
+            load_pending_goal(dir.path())
+                .unwrap()
+                .map(|goal| goal.condition),
+            Some("tests green and verification handoff ready".to_string())
+        );
+    }
 }
