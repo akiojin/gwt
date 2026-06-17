@@ -290,8 +290,15 @@ fn canonical_allows_legacy_fallback(content: &str) -> bool {
 fn read_mutable_discussion_document(worktree: &Path) -> io::Result<Option<DiscussionDocument>> {
     let canonical_path = canonical_discussions_path(worktree);
     if canonical_path.exists() {
+        let mut content = std::fs::read_to_string(&canonical_path)?;
+        let legacy_path = worktree.join(DISCUSSION_RELATIVE_PATH);
+        if canonical_allows_legacy_fallback(&content) && legacy_path.exists() {
+            let legacy_content = std::fs::read_to_string(&legacy_path)?;
+            content = append_legacy_discussion_to_canonical(&content, &legacy_content);
+            std::fs::write(&canonical_path, &content)?;
+        }
         return Ok(Some(DiscussionDocument {
-            content: std::fs::read_to_string(&canonical_path)?,
+            content,
             path: canonical_path,
             source: DiscussionSource::Canonical,
         }));
@@ -321,12 +328,30 @@ fn canonical_discussions_path(worktree: &Path) -> PathBuf {
 
 fn canonicalize_legacy_discussion_content(content: &str) -> String {
     format!(
-        "# Discussions\n\n\
-         ## Legacy gwt-discussion state\n\n\
+        "# Discussions\n\n{}\n",
+        canonicalize_legacy_discussion_entry(content)
+    )
+}
+
+fn append_legacy_discussion_to_canonical(canonical_content: &str, legacy_content: &str) -> String {
+    let canonical_content = canonical_content.trim_end();
+    if canonical_content.is_empty() {
+        return canonicalize_legacy_discussion_content(legacy_content);
+    }
+    format!(
+        "{}\n\n{}\n",
+        canonical_content,
+        canonicalize_legacy_discussion_entry(legacy_content)
+    )
+}
+
+fn canonicalize_legacy_discussion_entry(content: &str) -> String {
+    format!(
+        "## Legacy gwt-discussion state\n\n\
          Status: active\n\n\
          Summary:\n\
          Migrated from legacy .gwt/discussion.md.\n\n\
-         {}\n",
+         {}",
         content.trim_end()
     )
 }
@@ -933,6 +958,82 @@ Status: completed
                         .to_string()
                 ),
             })
+        );
+    }
+
+    #[test]
+    fn canonical_completed_state_canonicalizes_legacy_fallback_for_status_mutation() {
+        let dir = tempfile::tempdir().unwrap();
+        write_canonical_discussion(
+            dir.path(),
+            r#"# Discussions
+
+## 2026-06-16 — Old decision
+
+Status: completed
+
+### Proposal A - Historical proposal [chosen]
+- Goal State: started
+"#,
+        );
+        let legacy_path = dir.path().join(DISCUSSION_RELATIVE_PATH);
+        std::fs::create_dir_all(legacy_path.parent().unwrap()).unwrap();
+        std::fs::write(&legacy_path, sample_discussion()).unwrap();
+
+        let changed = set_proposal_status_by_label(dir.path(), "Proposal A", "chosen").unwrap();
+
+        assert!(changed);
+        let canonical = read_canonical_discussion(dir.path());
+        assert!(canonical.contains("## Legacy gwt-discussion state"));
+        assert!(canonical.contains("### Proposal A - Hook-driven resume [chosen]"));
+        assert_eq!(load_pending_resume(dir.path()).unwrap(), None);
+        assert_eq!(discussion_stop_blocker(dir.path()).unwrap(), None);
+    }
+
+    #[test]
+    fn canonical_completed_state_canonicalizes_legacy_fallback_for_goal_mutation() {
+        let dir = tempfile::tempdir().unwrap();
+        write_canonical_discussion(
+            dir.path(),
+            r#"# Discussions
+
+## 2026-06-16 — Old decision
+
+Status: completed
+
+### Proposal A - Historical proposal [chosen]
+- Goal State: started
+"#,
+        );
+        let legacy_path = dir.path().join(DISCUSSION_RELATIVE_PATH);
+        std::fs::create_dir_all(legacy_path.parent().unwrap()).unwrap();
+        std::fs::write(
+            &legacy_path,
+            r#"## Discussion TODO
+
+### Proposal A - Hook-driven resume [chosen]
+- Summary: Keep unfinished discussion state in the local artifact.
+- Promotable Changes: Add runtime-state handoff.
+"#,
+        )
+        .unwrap();
+
+        let changed = set_proposal_goal_pending_by_label(
+            dir.path(),
+            "Proposal A",
+            "complete the managed hook discussion handoff",
+        )
+        .unwrap();
+
+        assert!(changed);
+        let canonical = read_canonical_discussion(dir.path());
+        assert!(canonical.contains("## Legacy gwt-discussion state"));
+        assert!(canonical.contains("- Goal State: pending"));
+        assert_eq!(
+            load_pending_goal(dir.path())
+                .unwrap()
+                .map(|goal| goal.condition),
+            Some("complete the managed hook discussion handoff".to_string())
         );
     }
 
