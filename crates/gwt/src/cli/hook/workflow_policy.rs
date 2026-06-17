@@ -22,6 +22,8 @@ use gwt_core::{
 use gwt_github::{body::SpecBody, sections::SectionName, Cache, IssueNumber};
 use serde::Deserialize;
 
+use crate::discussion_resume::PendingDiscussionGoal;
+
 use super::{block_bash_policy, HookError, HookEvent, HookOutput};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -38,7 +40,7 @@ pub struct WorkflowContext {
     pub has_tasks: bool,
     pub bypass: Option<WorkflowBypass>,
     pub title_summary_missing: bool,
-    pub pending_discussion_goal: bool,
+    pub pending_discussion_goal: Option<PendingDiscussionGoal>,
 }
 
 impl WorkflowContext {
@@ -49,7 +51,7 @@ impl WorkflowContext {
             has_tasks: false,
             bypass: None,
             title_summary_missing: false,
-            pending_discussion_goal: false,
+            pending_discussion_goal: None,
         }
     }
 
@@ -60,7 +62,7 @@ impl WorkflowContext {
             has_tasks: false,
             bypass: None,
             title_summary_missing: false,
-            pending_discussion_goal: false,
+            pending_discussion_goal: None,
         }
     }
 
@@ -71,7 +73,7 @@ impl WorkflowContext {
             has_tasks,
             bypass: None,
             title_summary_missing: false,
-            pending_discussion_goal: false,
+            pending_discussion_goal: None,
         }
     }
 
@@ -82,7 +84,7 @@ impl WorkflowContext {
             has_tasks: false,
             bypass: Some(bypass),
             title_summary_missing: false,
-            pending_discussion_goal: false,
+            pending_discussion_goal: None,
         }
     }
 
@@ -91,7 +93,7 @@ impl WorkflowContext {
         self
     }
 
-    pub fn with_pending_discussion_goal(mut self, pending: bool) -> Self {
+    pub fn with_pending_discussion_goal(mut self, pending: Option<PendingDiscussionGoal>) -> Self {
         self.pending_discussion_goal = pending;
         self
     }
@@ -118,7 +120,7 @@ pub fn evaluate_with_context(
         return Ok(title_summary);
     }
     let pending_goal =
-        evaluate_pending_discussion_goal_guard(event, context.pending_discussion_goal)?;
+        evaluate_pending_discussion_goal_guard(event, context.pending_discussion_goal.as_ref())?;
     if pending_goal != HookOutput::Silent {
         return Ok(pending_goal);
     }
@@ -131,8 +133,7 @@ pub fn evaluate(event: &HookEvent, worktree_root: &Path) -> Result<HookOutput, H
         .with_pending_discussion_goal(
             crate::discussion_resume::load_pending_goal(worktree_root)
                 .ok()
-                .flatten()
-                .is_some(),
+                .flatten(),
         );
     evaluate_with_context(event, worktree_root, &context)
 }
@@ -270,19 +271,29 @@ Use the configured narrative language for the purpose. Keep progress, completion
 
 fn evaluate_pending_discussion_goal_guard(
     event: &HookEvent,
-    pending_discussion_goal: bool,
+    pending_discussion_goal: Option<&PendingDiscussionGoal>,
 ) -> Result<HookOutput, HookError> {
-    if !pending_discussion_goal || is_goal_start_or_bookkeeping_event(event) {
+    let Some(goal) = pending_discussion_goal else {
+        return Ok(HookOutput::Silent);
+    };
+    if is_goal_start_or_bookkeeping_event(event) {
         return Ok(HookOutput::Silent);
     }
     if is_mutating_work_event(event) {
         return Ok(HookOutput::pre_tool_use_permission(
             "pending gwt-discussion Goal Start must be handled first",
-            "A gwt-discussion Action Bundle has a pending gwt-discussion Goal Start. Start, skip, or record the goal failure before changing implementation state.\n\n\
-Codex path: call `create_goal` with the pending Goal condition, then run JSON operation `discuss.goal_started`.\n\
-Claude Code path: run JSON operation `pane.send` with the `/goal <condition>` text, then run JSON operation `discuss.goal_started`.\n\
-Skip path: if the user rejects or revises the Action Bundle, run JSON operation `discuss.goal_skipped` with a reason.\n\
-Failure path: run JSON operation `discuss.goal_failed` with a reason and show the manual `/goal <condition>` line to the user.",
+            format!(
+                "A gwt-discussion Action Bundle has a pending gwt-discussion Goal Start. Start, skip, or record the goal failure before changing implementation state.\n\n\
+Proposal: {label} - {title}\n\
+Goal condition: {condition}\n\n\
+Codex path: call `create_goal` with the Goal condition above as the objective, then run JSON operation `discuss.goal_started` with `params.proposal:\"{label}\"`.\n\
+Claude Code path: run JSON operation `pane.send` with the `/goal {condition}` text, then run JSON operation `discuss.goal_started` with `params.proposal:\"{label}\"`.\n\
+Skip path: if the user rejects or revises the Action Bundle, run JSON operation `discuss.goal_skipped` with `params.proposal:\"{label}\"` and a reason.\n\
+Failure path: run JSON operation `discuss.goal_failed` with `params.proposal:\"{label}\"` and a reason, then show the manual `/goal {condition}` line to the user.",
+                label = goal.proposal_label,
+                title = goal.proposal_title,
+                condition = goal.condition,
+            ),
         ));
     }
     Ok(HookOutput::Silent)
@@ -1233,6 +1244,15 @@ Coverage requirements.
 
     #[test]
     fn evaluate_with_context_blocks_mutating_tools_until_pending_discussion_goal_starts() {
+        fn pending_goal() -> PendingDiscussionGoal {
+            PendingDiscussionGoal {
+                proposal_label: "Proposal A".to_string(),
+                proposal_title: "Goal handoff".to_string(),
+                condition: "verification handoff ready with User Verification Result recorded"
+                    .to_string(),
+            }
+        }
+
         let event = HookEvent {
             tool_name: Some("Edit".to_string()),
             tool_input: Some(serde_json::json!({
@@ -1245,7 +1265,7 @@ Coverage requirements.
         let output = evaluate_with_context(
             &event,
             std::path::Path::new("."),
-            &WorkflowContext::unknown().with_pending_discussion_goal(true),
+            &WorkflowContext::unknown().with_pending_discussion_goal(Some(pending_goal())),
         )
         .expect("guard output");
 
@@ -1259,6 +1279,10 @@ Coverage requirements.
         assert!(detail.contains("create_goal"), "{detail}");
         assert!(detail.contains("discuss.goal_started"), "{detail}");
         assert!(detail.contains("discuss.goal_skipped"), "{detail}");
+        assert!(
+            detail.contains("verification handoff ready with User Verification Result recorded"),
+            "{detail}"
+        );
 
         let allowed = HookEvent {
             tool_name: Some("create_goal".to_string()),
@@ -1270,7 +1294,7 @@ Coverage requirements.
             evaluate_with_context(
                 &allowed,
                 std::path::Path::new("."),
-                &WorkflowContext::unknown().with_pending_discussion_goal(true),
+                &WorkflowContext::unknown().with_pending_discussion_goal(Some(pending_goal())),
             )
             .expect("allowed output"),
             HookOutput::Silent
@@ -1291,7 +1315,7 @@ Coverage requirements.
                 evaluate_with_context(
                     &allowed,
                     std::path::Path::new("."),
-                    &WorkflowContext::unknown().with_pending_discussion_goal(true),
+                    &WorkflowContext::unknown().with_pending_discussion_goal(Some(pending_goal())),
                 )
                 .expect("allowed JSON bookkeeping output"),
                 HookOutput::Silent,

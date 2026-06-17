@@ -21,8 +21,8 @@ pub fn handle_with_input(
     current_session: Option<&str>,
 ) -> Result<HookOutput, HookError> {
     match event {
-        "SessionStart" => handle_session_start(event, input),
-        "UserPromptSubmit" => handle_user_prompt_submit(event, input),
+        "SessionStart" => handle_session_start(event, input, worktree_root),
+        "UserPromptSubmit" => handle_user_prompt_submit(event, input, worktree_root),
         "PreToolUse" => handle_pre_tool_use(event, input),
         "PostToolUse" => handle_post_tool_use(event, input),
         "Stop" => handle_stop(event, input, worktree_root, current_session),
@@ -30,7 +30,11 @@ pub fn handle_with_input(
     }
 }
 
-fn handle_session_start(event: &str, input: &str) -> Result<HookOutput, HookError> {
+fn handle_session_start(
+    event: &str,
+    input: &str,
+    worktree_root: &Path,
+) -> Result<HookOutput, HookError> {
     run_step(event, "runtime-state", || {
         crate::daemon_runtime::handle_runtime_state(event, input)
     })?;
@@ -52,18 +56,21 @@ fn handle_session_start(event: &str, input: &str) -> Result<HookOutput, HookErro
     let output = run_step(event, "board-reminder", || {
         board_reminder::handle_with_input(event, input)
     })?;
-    let worktree_root = crate::cli::hook::worktree::detect_worktree_root();
     let pending_goal = run_value(event, "discussion-goal-start", || {
-        load_pending_goal(&worktree_root).ok().flatten()
+        load_pending_goal(worktree_root).ok().flatten()
     });
     Ok(append_pending_discussion_goal_context(
         output,
-        IntentBoundaryEvent::UserPromptSubmit,
+        IntentBoundaryEvent::SessionStart,
         pending_goal,
     ))
 }
 
-fn handle_user_prompt_submit(event: &str, input: &str) -> Result<HookOutput, HookError> {
+fn handle_user_prompt_submit(
+    event: &str,
+    input: &str,
+    worktree_root: &Path,
+) -> Result<HookOutput, HookError> {
     run_step(event, "runtime-state", || {
         crate::daemon_runtime::handle_runtime_state(event, input)
     })?;
@@ -79,9 +86,17 @@ fn handle_user_prompt_submit(event: &str, input: &str) -> Result<HookOutput, Hoo
             tracing::warn!(?error, "workspace-identity hook step failed");
         }
     });
-    run_step(event, "board-reminder", || {
+    let output = run_step(event, "board-reminder", || {
         board_reminder::handle_with_input(event, input)
-    })
+    })?;
+    let pending_goal = run_value(event, "discussion-goal-start", || {
+        load_pending_goal(worktree_root).ok().flatten()
+    });
+    Ok(append_pending_discussion_goal_context(
+        output,
+        IntentBoundaryEvent::UserPromptSubmit,
+        pending_goal,
+    ))
 }
 
 fn handle_pre_tool_use(event: &str, input: &str) -> Result<HookOutput, HookError> {
@@ -221,6 +236,21 @@ After a successful start, run JSON operation `discuss.goal_started` with `params
 mod tests {
     use super::*;
     use crate::discussion_resume::PendingDiscussionGoal;
+    use gwt_core::test_support::ScopedEnvVar;
+
+    fn write_pending_goal(worktree: &Path) {
+        let discussion_path = worktree.join(".gwt/discussion.md");
+        std::fs::create_dir_all(discussion_path.parent().unwrap()).unwrap();
+        std::fs::write(
+            discussion_path,
+            "## Discussion TODO\n\n\
+             ### Proposal A - Goal handoff [chosen]\n\
+             - Summary: Action Bundle is approved.\n\
+             - Goal Condition: verification handoff ready with User Verification Result recorded\n\
+             - Goal State: pending\n",
+        )
+        .unwrap();
+    }
 
     #[test]
     fn pending_discussion_goal_context_is_appended_to_user_prompt_submit_output() {
@@ -247,5 +277,56 @@ mod tests {
         assert!(text.contains("create_goal"), "{text}");
         assert!(text.contains("pane.send"), "{text}");
         assert!(text.contains("verification handoff ready"), "{text}");
+    }
+
+    #[test]
+    fn user_prompt_submit_appends_pending_goal_from_dispatch_worktree() {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let worktree = tempfile::tempdir().unwrap();
+        let _home = ScopedEnvVar::set("HOME", worktree.path());
+        let _userprofile = ScopedEnvVar::set("USERPROFILE", worktree.path());
+        let _session_id = ScopedEnvVar::unset(gwt_agent::GWT_SESSION_ID_ENV);
+        let _runtime_path = ScopedEnvVar::unset(gwt_agent::GWT_SESSION_RUNTIME_PATH_ENV);
+        let _forward_url = ScopedEnvVar::unset(gwt_agent::GWT_HOOK_FORWARD_URL_ENV);
+        let _forward_token = ScopedEnvVar::unset(gwt_agent::GWT_HOOK_FORWARD_TOKEN_ENV);
+        let _codex_thread_id = ScopedEnvVar::unset("CODEX_THREAD_ID");
+        write_pending_goal(worktree.path());
+
+        let output = handle_with_input("UserPromptSubmit", "{}", worktree.path(), None)
+            .expect("hook output");
+
+        let HookOutput::HookSpecificAdditionalContext { event, text } = output else {
+            panic!("expected pending goal context");
+        };
+        assert_eq!(event, IntentBoundaryEvent::UserPromptSubmit);
+        assert!(text.contains("pending gwt-discussion Goal Start"), "{text}");
+        assert!(text.contains("Proposal A - Goal handoff"), "{text}");
+        assert!(
+            text.contains("verification handoff ready with User Verification Result recorded"),
+            "{text}"
+        );
+        assert!(text.contains("create_goal"), "{text}");
+        assert!(text.contains("discuss.goal_started"), "{text}");
+    }
+
+    #[test]
+    fn session_start_pending_goal_context_uses_session_start_event_when_silent() {
+        let output = append_pending_discussion_goal_context(
+            HookOutput::Silent,
+            IntentBoundaryEvent::SessionStart,
+            Some(PendingDiscussionGoal {
+                proposal_label: "Proposal A".to_string(),
+                proposal_title: "Goal handoff".to_string(),
+                condition: "tests green".to_string(),
+            }),
+        );
+
+        let HookOutput::HookSpecificAdditionalContext { event, text } = output else {
+            panic!("expected pending goal context");
+        };
+        assert_eq!(event, IntentBoundaryEvent::SessionStart);
+        assert!(text.contains("pending gwt-discussion Goal Start"), "{text}");
     }
 }
