@@ -47,6 +47,7 @@ pub enum IndexSearchScope {
     Memory,
     Discussions,
     Board,
+    Works,
     Files,
     #[serde(rename = "files-docs")]
     FilesDocs,
@@ -77,6 +78,7 @@ impl IndexSearchScope {
             Self::Memory => "memory",
             Self::Discussions => "discussions",
             Self::Board => "board",
+            Self::Works => "works",
             Self::Files => "files",
             Self::FilesDocs => "files-docs",
         }
@@ -91,6 +93,7 @@ pub enum IndexSearchTarget {
     Memory { heading: String, date: String },
     Discussion { heading: String, date: String },
     Board { entry_id: String },
+    Work { work_id: String },
     File { path: String },
 }
 
@@ -3033,6 +3036,32 @@ mod tests {
                 ..
             }
         ));
+    }
+
+    #[test]
+    fn works_scope_serde_roundtrip() {
+        // SPEC-2359 US-80: the `works` semantic scope must round-trip as "works".
+        let scope: IndexSearchScope =
+            serde_json::from_value(serde_json::json!("works")).expect("deserialize works scope");
+        assert_eq!(scope, IndexSearchScope::Works);
+        assert_eq!(IndexSearchScope::Works.as_str(), "works");
+        assert_eq!(
+            serde_json::to_value(IndexSearchScope::Works).unwrap(),
+            serde_json::json!("works")
+        );
+    }
+
+    #[test]
+    fn work_search_target_serde_roundtrip() {
+        // SPEC-2359 US-80: advisory results locate a prior Work by work_id.
+        let target = IndexSearchTarget::Work {
+            work_id: "work-feature-auth-abc123".to_string(),
+        };
+        let value = serde_json::to_value(&target).unwrap();
+        assert_eq!(value["kind"], "work");
+        assert_eq!(value["work_id"], "work-feature-auth-abc123");
+        let parsed: IndexSearchTarget = serde_json::from_value(value).unwrap();
+        assert_eq!(parsed, target);
     }
 
     #[test]
