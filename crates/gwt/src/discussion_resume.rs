@@ -33,11 +33,13 @@ pub struct ResumePromptSessionState {
 }
 
 pub fn load_pending_resume(worktree: &Path) -> io::Result<Option<PendingDiscussionResume>> {
-    let Some(document) = read_discussion_document(worktree)? else {
-        return Ok(None);
-    };
-    let proposals = parse_document_proposals(&document);
-    Ok(select_pending_resume(&proposals))
+    for document in read_discussion_documents(worktree)? {
+        let proposals = parse_document_proposals(&document);
+        if let Some(pending) = select_pending_resume(&proposals) {
+            return Ok(Some(pending));
+        }
+    }
+    Ok(None)
 }
 
 pub fn park_pending_resume(worktree: &Path, pending: &PendingDiscussionResume) -> io::Result<bool> {
@@ -248,26 +250,41 @@ pub fn parse_proposals(content: &str) -> Vec<ParsedProposal> {
     proposals
 }
 
-fn read_discussion_document(worktree: &Path) -> io::Result<Option<DiscussionDocument>> {
+fn read_discussion_documents(worktree: &Path) -> io::Result<Vec<DiscussionDocument>> {
+    let mut documents = Vec::new();
     let canonical_path = canonical_discussions_path(worktree);
-    if canonical_path.exists() {
-        return Ok(Some(DiscussionDocument {
-            content: std::fs::read_to_string(&canonical_path)?,
+    let should_read_legacy = if canonical_path.exists() {
+        let content = std::fs::read_to_string(&canonical_path)?;
+        let should_read_legacy = canonical_allows_legacy_fallback(&content);
+        documents.push(DiscussionDocument {
+            content,
             path: canonical_path,
             source: DiscussionSource::Canonical,
-        }));
-    }
+        });
+        should_read_legacy
+    } else {
+        true
+    };
 
     let legacy_path = worktree.join(DISCUSSION_RELATIVE_PATH);
-    if legacy_path.exists() {
-        return Ok(Some(DiscussionDocument {
+    if should_read_legacy && legacy_path.exists() {
+        documents.push(DiscussionDocument {
             content: std::fs::read_to_string(&legacy_path)?,
             path: legacy_path,
             source: DiscussionSource::Legacy,
-        }));
+        });
     }
 
-    Ok(None)
+    Ok(documents)
+}
+
+fn canonical_allows_legacy_fallback(content: &str) -> bool {
+    let lines = content.lines().collect::<Vec<_>>();
+    let headings = discussion_entry_heading_indices(&lines);
+    if headings.is_empty() {
+        return parse_proposals(content).is_empty();
+    }
+    active_discussion_entry_ranges_from_headings(&lines, &headings).is_empty()
 }
 
 fn read_mutable_discussion_document(worktree: &Path) -> io::Result<Option<DiscussionDocument>> {
@@ -323,9 +340,14 @@ fn parse_document_proposals(document: &DiscussionDocument) -> Vec<ParsedProposal
 
 fn parse_active_canonical_proposals(content: &str) -> Vec<ParsedProposal> {
     let proposals = parse_proposals(content);
-    let active_ranges = active_discussion_entry_ranges(content);
-    if active_ranges.is_empty() {
+    let lines = content.lines().collect::<Vec<_>>();
+    let headings = discussion_entry_heading_indices(&lines);
+    if headings.is_empty() {
         return proposals;
+    }
+    let active_ranges = active_discussion_entry_ranges_from_headings(&lines, &headings);
+    if active_ranges.is_empty() {
+        return Vec::new();
     }
     proposals
         .into_iter()
@@ -340,10 +362,13 @@ fn parse_active_canonical_proposals(content: &str) -> Vec<ParsedProposal> {
 fn active_discussion_entry_ranges(content: &str) -> Vec<(usize, usize)> {
     let lines = content.lines().collect::<Vec<_>>();
     let headings = discussion_entry_heading_indices(&lines);
-    if headings.is_empty() {
-        return Vec::new();
-    }
+    active_discussion_entry_ranges_from_headings(&lines, &headings)
+}
 
+fn active_discussion_entry_ranges_from_headings(
+    lines: &[&str],
+    headings: &[usize],
+) -> Vec<(usize, usize)> {
     headings
         .iter()
         .enumerate()
@@ -439,30 +464,37 @@ pub fn proposal_evidence_blocker_by_label(
     worktree: &Path,
     label: &str,
 ) -> io::Result<Option<String>> {
-    let Some(document) = read_discussion_document(worktree)? else {
-        return Ok(None);
-    };
-    let proposals = parse_document_proposals(&document);
-    Ok(proposals
-        .iter()
-        .find(|p| p.status == ProposalStatus::Active && p.label.eq_ignore_ascii_case(label))
-        .and_then(evidence_gate_blocker))
+    for document in read_discussion_documents(worktree)? {
+        let proposals = parse_document_proposals(&document);
+        if let Some(blocker) = proposals
+            .iter()
+            .find(|p| p.status == ProposalStatus::Active && p.label.eq_ignore_ascii_case(label))
+            .and_then(evidence_gate_blocker)
+        {
+            return Ok(Some(blocker));
+        }
+    }
+    Ok(None)
 }
 
 pub fn discussion_stop_blocker(worktree: &Path) -> io::Result<Option<PendingDiscussionResume>> {
-    let Some(document) = read_discussion_document(worktree)? else {
-        return Ok(None);
-    };
-    let proposals = parse_document_proposals(&document);
-    Ok(select_pending_discussion_blocker(&proposals))
+    for document in read_discussion_documents(worktree)? {
+        let proposals = parse_document_proposals(&document);
+        if let Some(blocker) = select_pending_discussion_blocker(&proposals) {
+            return Ok(Some(blocker));
+        }
+    }
+    Ok(None)
 }
 
 pub fn load_pending_goal(worktree: &Path) -> io::Result<Option<PendingDiscussionGoal>> {
-    let Some(document) = read_discussion_document(worktree)? else {
-        return Ok(None);
-    };
-    let proposals = parse_document_proposals(&document);
-    Ok(select_pending_goal(&proposals))
+    for document in read_discussion_documents(worktree)? {
+        let proposals = parse_document_proposals(&document);
+        if let Some(goal) = select_pending_goal(&proposals) {
+            return Ok(Some(goal));
+        }
+    }
+    Ok(None)
 }
 
 pub fn set_proposal_goal_pending_by_label(
@@ -845,6 +877,84 @@ Status: active
 - Next Question: Chosen proposal should not block.
 "#,
         );
+
+        assert_eq!(load_pending_resume(dir.path()).unwrap(), None);
+        assert_eq!(discussion_stop_blocker(dir.path()).unwrap(), None);
+    }
+
+    #[test]
+    fn canonical_completed_entries_without_active_entry_do_not_block() {
+        let dir = tempfile::tempdir().unwrap();
+        write_canonical_discussion(
+            dir.path(),
+            r#"# Discussions
+
+## 2026-06-16 — Old decision
+
+Status: completed
+
+### Proposal A - Historical proposal [active]
+- Next Question: This old question should not resume.
+"#,
+        );
+
+        assert_eq!(load_pending_resume(dir.path()).unwrap(), None);
+        assert_eq!(discussion_stop_blocker(dir.path()).unwrap(), None);
+    }
+
+    #[test]
+    fn canonical_without_pending_discussion_state_falls_back_to_legacy() {
+        let dir = tempfile::tempdir().unwrap();
+        write_canonical_discussion(
+            dir.path(),
+            r#"# Discussions
+
+## 2026-06-16 — Old decision
+
+Status: completed
+
+### Proposal A - Historical proposal [chosen]
+- Goal State: started
+"#,
+        );
+        let legacy_path = dir.path().join(DISCUSSION_RELATIVE_PATH);
+        std::fs::create_dir_all(legacy_path.parent().unwrap()).unwrap();
+        std::fs::write(&legacy_path, sample_discussion()).unwrap();
+
+        let pending = load_pending_resume(dir.path()).unwrap();
+
+        assert_eq!(
+            pending,
+            Some(PendingDiscussionResume {
+                proposal_label: "Proposal A".to_string(),
+                proposal_title: "Hook-driven resume".to_string(),
+                next_question: Some(
+                    "Should SessionStart or UserPromptSubmit surface the resume proposal?"
+                        .to_string()
+                ),
+            })
+        );
+    }
+
+    #[test]
+    fn canonical_active_entry_without_pending_resume_does_not_fallback_to_legacy() {
+        let dir = tempfile::tempdir().unwrap();
+        write_canonical_discussion(
+            dir.path(),
+            r#"# Discussions
+
+## 2026-06-17 — Current discussion
+
+Status: active
+
+### Proposal A - Already chosen [chosen]
+- Goal State: started
+- Next Question: Legacy should not win.
+"#,
+        );
+        let legacy_path = dir.path().join(DISCUSSION_RELATIVE_PATH);
+        std::fs::create_dir_all(legacy_path.parent().unwrap()).unwrap();
+        std::fs::write(&legacy_path, sample_discussion()).unwrap();
 
         assert_eq!(load_pending_resume(dir.path()).unwrap(), None);
         assert_eq!(discussion_stop_blocker(dir.path()).unwrap(), None);
