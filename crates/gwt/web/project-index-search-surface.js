@@ -17,8 +17,8 @@ import { renderIndexSettingsPanel } from "/index-settings-panel.js";
 // - makeEl / clearChildren: DOM helpers owned by app.js.
 // - focusOrSpawnPreset / knowledgeKindForPreset / requestKnowledgeDetail /
 //   renderKnowledgeBridge: knowledge-window integration owned by app.js.
-// - renderIndexPanelInAllSettingsWindows / refreshProjectTabDots: status
-//   fan-out hooks owned by app.js (Settings panel + project tab dots).
+// - renderIndexPanelInAllSettingsWindows / refreshProjectTabStateCues: status
+//   fan-out hooks owned by app.js (Settings panel + project tab state cues).
 // - requestFullIndexStatusRefresh(): Health tab refresh request owned by
 //   app.js (also used by Settings).
 export function createProjectIndexSearchSurface({
@@ -33,7 +33,7 @@ export function createProjectIndexSearchSurface({
   requestKnowledgeDetail,
   renderKnowledgeBridge,
   renderIndexPanelInAllSettingsWindows,
-  refreshProjectTabDots,
+  refreshProjectTabStateCues,
   requestFullIndexStatusRefresh,
 }) {
       const indexSearchStateMap = new Map();
@@ -41,7 +41,7 @@ export function createProjectIndexSearchSurface({
       const indexStatusByProjectRoot = new Map();
 
       // SPEC-1939 Phase 13: project-bar Index badge withdrawn. The
-      // aggregated payload now feeds only the per-tab dot indicator and the
+      // aggregated payload now feeds only the Index Health tab and the
       // Settings.Index panel; the project-bar surface no longer renders an
       // Index summary because repo-shared (issues/specs) and per-worktree
       // (files/files-docs) scopes were being collapsed into a single state.
@@ -59,7 +59,7 @@ export function createProjectIndexSearchSurface({
         });
         renderIndexPanelInAllSettingsWindows();
         renderProjectIndexWindows();
-        refreshProjectTabDots();
+        refreshProjectTabStateCues();
       }
 
       const INDEX_SEARCH_SCOPES = Object.freeze([

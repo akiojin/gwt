@@ -38,31 +38,58 @@ test(".project-tab CSS rule disables user-select so label clicks register", () =
   );
 });
 
-test("project tab running-agent dot blinks and honors reduced motion", () => {
-  const block = findRuleBlock('.project-tab-dot[data-state="running"]');
+test("project tab agent state cue is static and visually quiet", () => {
+  const baseBlock = findRuleBlock(".project-tab-state-cue");
   assert.ok(
-    block !== null,
-    '`.project-tab-dot[data-state="running"]` rule not found in app.css',
+    baseBlock !== null,
+    "`.project-tab-state-cue` rule not found in app.css",
   );
   assert.match(
-    block,
-    /animation\s*:\s*project-tab-agent-running-pulse\s+var\(--motion-pulse\)\s+ease-in-out\s+infinite\s*;?/,
-    "running agent dot must blink with the shared pulse duration",
+    baseBlock,
+    /min-width\s*:\s*22px\s*;?/,
+    "state cue must stay compact so project tabs do not feel visually heavy",
+  );
+  assert.match(
+    baseBlock,
+    /background\s*:\s*transparent\s*;?/,
+    "state cue must not use a filled badge background",
+  );
+  assert.match(
+    baseBlock,
+    /border\s*:\s*0\s*;?/,
+    "state cue must not render as a boxed pill",
+  );
+  assert.match(
+    baseBlock,
+    /font-size\s*:\s*10px\s*;?/,
+    "state cue label must stay compact inside project tabs",
   );
   assert.match(
     css,
-    /@keyframes\s+project-tab-agent-running-pulse\s*\{/,
-    "running agent dot animation keyframes must exist",
+    /\.project-tab\[data-agent-state\]\s*\{[^}]*border-left:\s*3px\s+solid/,
+    "project tab state must be carried by a slim left rail on the tab itself",
+  );
+  for (const [state, token] of [
+    ["run", "--color-state-active"],
+    ["start", "--color-state-idle"],
+    ["block", "--color-state-blocked"],
+  ]) {
+    assert.match(
+      css,
+      new RegExp(
+        String.raw`\.project-tab-state-cue\[data-state="${state}"\]\s*\{[^}]*var\(${token}\)`,
+      ),
+      `${state} cue must use ${token}`,
+    );
+  }
+  assert.doesNotMatch(
+    css,
+    /@keyframes\s+project-tab-agent-running-pulse/,
+    "project tab state cues must not rely on a running-agent blink animation",
   );
   assert.match(
     css,
-    new RegExp(
-      [
-        String.raw`@media\s*\(\s*prefers-reduced-motion:\s*reduce\s*\)\s*\{`,
-        String.raw`[\s\S]*?\.project-tab-dot\[data-state="running"\]`,
-        String.raw`[\s\S]*?animation\s*:\s*none\s*;?[\s\S]*?\}`,
-      ].join(""),
-    ),
-    "running agent dot must become static when reduced motion is requested",
+    /\.project-tab-state-cue\[data-state="run"\]\s*\{[^}]*animation\s*:\s*none\s*;?/,
+    "RUN cue must explicitly stay static",
   );
 });

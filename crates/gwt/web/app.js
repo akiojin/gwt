@@ -51,7 +51,7 @@
       // /profile-window-surface.js.
       import { createProfileWindowSurface } from "/profile-window-surface.js";
       // SPEC-3064 Phase 3 (E7): the project & workspace shell chrome
-      // (project tabs + close-tab confirm modal + tab dots, recent projects,
+      // (project tabs + close-tab confirm modal + tab cues, recent projects,
       // open-project menu, picker/onboarding renderers, action availability,
       // window list dropdown, maximized-window viewport sync, open/clone
       // project modal glue, migration modal glue) moved to
@@ -633,10 +633,10 @@
         // instead of passing the (not yet initialized) consts directly.
         renderIndexPanelInAllSettingsWindows: () =>
           renderIndexPanelInAllSettingsWindows(),
-        // SPEC-3064 Phase 3 (E7): refreshProjectTabDots lives in the project
-        // shell surface, whose factory also runs after this one — close over
-        // the binding for the same reason.
-        refreshProjectTabDots: () => refreshProjectTabDots(),
+        // SPEC-3064 Phase 3 (E7): refreshProjectTabStateCues lives in the
+        // project shell surface, whose factory also runs after this one —
+        // close over the binding for the same reason.
+        refreshProjectTabStateCues: () => refreshProjectTabStateCues(),
         requestFullIndexStatusRefresh: () => requestFullIndexStatusRefresh(),
       });
 
@@ -1330,7 +1330,7 @@
 
       // SPEC-3064 Phase 3 (E7): renderProjectTabs, the close-project-tab
       // confirm modal (state + render + requestCloseProjectTab), the project
-      // tab dots, the Recent Projects renderers, the Open Project
+      // tab cues, the Recent Projects renderers, the Open Project
       // split-button menu, renderProjectPicker, and renderProjectOnboarding
       // moved to /project-shell-surface.js; renderAppState below calls the
       // imported renderers.
@@ -2463,7 +2463,7 @@
             if (!element) {
               renderWindowList();
               refreshWindowTabTelemetry(windowData);
-              refreshProjectTabDots();
+              refreshProjectTabStateCues();
               return;
             }
             const chip = element.querySelector(".status-chip");
@@ -2516,7 +2516,7 @@
               }
             }
             renderWindowList();
-            refreshProjectTabDots();
+            refreshProjectTabStateCues();
           },
         );
       }
@@ -2670,7 +2670,7 @@
         const runtimeState =
           windowRuntimeStateMap.get(tab.id) ||
           normalizeWindowRuntimeState(tab.status, tab.preset);
-        return mapAgentTelemetryState(runtimeState);
+        return runtimeState;
       }
 
       // AS-2.2: a runtime state change must repaint the tab strip of every
@@ -3551,7 +3551,7 @@
       });
 
       // SPEC-3064 Phase 3 (E7): the project & workspace shell chrome surface
-      // (project tabs + close-tab confirm modal + tab dots, Recent Projects,
+      // (project tabs + close-tab confirm modal + tab cues, Recent Projects,
       // Open Project split-button menu, picker/onboarding renderers, action
       // availability, Window List dropdown + render key, maximized-window
       // viewport sync, open/clone project modal glue, migration modal glue,
@@ -3571,7 +3571,7 @@
         scheduleMaximizedWindowsToViewportSync,
         workspaceHasVisibleMaximizedWindow,
         renderProjectTabs,
-        refreshProjectTabDots,
+        refreshProjectTabStateCues,
         markProjectUnread,
         clearProjectUnread,
         renderProjectSwitcher,

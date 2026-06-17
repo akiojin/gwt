@@ -333,44 +333,62 @@ body {
   border-color: var(--color-border);
 }
 
-/* SPEC-2013 — running agent activity dot on project tabs. */
-.project-tab-dot {
-  display: inline-block;
-  width: 8px;
-  height: 8px;
-  border-radius: 50%;
-  margin-right: 6px;
+/* SPEC-2013 — agent state cue on project tabs. */
+.project-tab[data-agent-state] {
+  border-left: 3px solid var(--color-border-strong);
+  padding-left: 8px;
+}
+
+.project-tab[data-agent-state="run"] {
+  border-left-color: var(--color-state-active);
+}
+
+.project-tab[data-agent-state="start"] {
+  border-left-color: var(--color-state-idle);
+}
+
+.project-tab[data-agent-state="block"] {
+  border-left-color: var(--color-state-blocked);
+  border-color: color-mix(in oklab, var(--color-state-blocked) 42%, var(--color-border));
+}
+
+.project-tab-state-cue {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex: 0 0 auto;
+  min-width: 22px;
+  height: 14px;
+  padding: 0;
+  border: 0;
   background: transparent;
-  border: 1px solid transparent;
+  color: var(--color-text-muted);
+  font-family: var(--font-mono);
+  font-size: 10px;
+  font-weight: 700;
+  line-height: 1;
+  letter-spacing: 0;
+  opacity: 0.9;
+  text-transform: uppercase;
 }
 
-@keyframes project-tab-agent-running-pulse {
-  0%,
-  100% {
-    opacity: 0.42;
-    box-shadow: 0 0 0 0
-      color-mix(in oklab, var(--color-state-active) 0%, transparent);
-  }
-  50% {
-    opacity: 1;
-    box-shadow: 0 0 0 3px
-      color-mix(in oklab, var(--color-state-active) 30%, transparent);
-  }
+.project-tab-state-cue[hidden] {
+  display: none;
 }
 
-.project-tab-dot[data-state="running"] {
-  background: var(--color-state-active);
-  border-color: color-mix(in oklab, var(--color-state-active) 80%, transparent);
-  animation: project-tab-agent-running-pulse var(--motion-pulse) ease-in-out
-    infinite;
+.project-tab-state-cue[data-state="run"] {
+  color: var(--color-state-active);
+  animation: none;
 }
 
-@media (prefers-reduced-motion: reduce) {
-  .project-tab-dot[data-state="running"] {
-    animation: none;
-    opacity: 1;
-    box-shadow: none;
-  }
+.project-tab-state-cue[data-state="start"] {
+  color: var(--color-state-idle);
+  animation: none;
+}
+
+.project-tab-state-cue[data-state="block"] {
+  color: var(--color-state-blocked);
+  animation: none;
 }
 
 /* SPEC-1939 T-IDX-106 — Settings.Index health table. */
@@ -977,7 +995,7 @@ body {
   cursor: grab;
 }
 
-/* SPEC-3038 US-2 — Telemetry tabs. The dot + label live inside the tab
+/* SPEC-3038 US-2 — Telemetry tabs. The cue + label live inside the tab
    button; the gap separates them without breaking the title ellipsis. */
 .window-tab .window-tab-label {
   min-width: 0;
@@ -987,12 +1005,22 @@ body {
 }
 
 .window-tab-state {
-  width: 8px;
-  height: 8px;
-  margin-right: 6px;
-  border-radius: var(--radius-pill);
-  flex-shrink: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex: 0 0 auto;
+  min-width: 24px;
+  height: 14px;
+  padding: 0;
+  border: 0;
   background: transparent;
+  color: var(--color-text-muted);
+  font-family: var(--font-mono);
+  font-size: 10px;
+  font-weight: 700;
+  line-height: 1;
+  letter-spacing: 0;
+  flex-shrink: 0;
 }
 
 .window-tab-state[hidden] {
@@ -1001,7 +1029,7 @@ body {
 
 /* The window-level [data-agent-state] rules paint a rim glow + pulse meant
    for full windows; tabs neutralize that and express telemetry through an
-   agent-colored left rim + a small state dot instead. */
+   agent-colored left rim + a compact state cue instead. */
 .window-tab[data-agent-state] {
   box-shadow: none;
   animation: none;
@@ -1009,46 +1037,41 @@ body {
   padding-left: 6px;
 }
 
-.window-tab[data-agent-state="active"] .window-tab-state {
-  background: var(--color-state-active);
-  animation: window-tab-state-pulse var(--motion-pulse) ease-in-out infinite;
+.window-tab[data-agent-state="running"] .window-tab-state {
+  color: var(--color-state-active);
+  animation: none;
 }
 
 .window-tab[data-agent-state="idle"] .window-tab-state {
-  background: var(--color-state-idle);
+  color: var(--color-state-idle);
+  animation: none;
 }
 
-.window-tab[data-agent-state="not_started"] .window-tab-state {
-  background: transparent;
-  border: 1px solid var(--color-border-strong);
+.window-tab[data-agent-state="starting"] .window-tab-state {
+  color: var(--color-state-idle);
+  animation: none;
 }
 
-/* AS-2.3: blocked stays loud even on an inactive tab — red dot pulse plus a
-   red-tinted tab border. */
-.window-tab[data-agent-state="blocked"] .window-tab-state {
-  background: var(--color-state-blocked);
-  animation: window-tab-state-pulse calc(var(--motion-pulse) * 0.5) ease-in-out infinite;
+.window-tab[data-agent-state="waiting"] .window-tab-state {
+  color: var(--color-state-idle);
+  animation: none;
 }
 
-.window-tab[data-agent-state="blocked"] {
+/* AS-2.3: blocked stays loud even on an inactive tab through red text,
+   border, and tab edge. */
+.window-tab[data-agent-state="error"] .window-tab-state {
+  color: var(--color-state-blocked);
+  animation: none;
+}
+
+.window-tab[data-agent-state="error"] {
   border-color: color-mix(in oklab, var(--color-state-blocked) 55%, var(--color-border));
 }
 
-.window-tab[data-agent-state="done"] .window-tab-state {
-  background: var(--color-state-done);
+.window-tab[data-agent-state="stopped"] .window-tab-state {
+  color: var(--color-state-done);
   opacity: 0.65;
-}
-
-@keyframes window-tab-state-pulse {
-  0%, 100% { opacity: 1; }
-  50% { opacity: 0.35; }
-}
-
-@media (prefers-reduced-motion: reduce) {
-  .window-tab[data-agent-state="active"] .window-tab-state,
-  .window-tab[data-agent-state="blocked"] .window-tab-state {
-    animation: none;
-  }
+  animation: none;
 }
 
 /* AS-2.4: the close button only appears on hover / keyboard focus so a tab

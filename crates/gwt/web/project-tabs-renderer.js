@@ -23,12 +23,12 @@ function createTabButton(
   button.setAttribute("role", "button");
   button.tabIndex = 0;
 
-  const dot = document.createElement("span");
-  dot.className = "project-tab-dot";
-  dot.dataset.role = "project-tab-dot";
-  dot.dataset.state = "";
-  dot.setAttribute("aria-hidden", "true");
-  button.appendChild(dot);
+  const cue = document.createElement("span");
+  cue.className = "project-tab-state-cue";
+  cue.dataset.role = "project-tab-state-cue";
+  cue.dataset.state = "";
+  cue.hidden = true;
+  button.appendChild(cue);
 
   const label = document.createElement("span");
   label.className = "project-tab-label";
@@ -87,7 +87,31 @@ function projectTabWindows(tab) {
   return Array.isArray(windows) ? windows : [];
 }
 
-export function projectTabAgentDotState(tab, { runtimeStateForWindow } = {}) {
+const PROJECT_TAB_STATE_PRIORITY = ["block", "start", "run"];
+const PROJECT_TAB_STATE_CONFIG = Object.freeze({
+  block: { label: "BLOCK", aria: "blocked" },
+  start: { label: "START", aria: "starting" },
+  run: { label: "RUN", aria: "running" },
+});
+
+function projectTabStateForRuntimeState(runtimeState) {
+  switch (normalizeProjectTabRuntimeState(runtimeState)) {
+    case "error":
+      return "block";
+    case "starting":
+      return "start";
+    case "running":
+      return "run";
+    default:
+      return "";
+  }
+}
+
+export function projectTabAgentCueState(
+  tab,
+  { runtimeStateForWindow } = {},
+) {
+  const counts = { block: 0, start: 0, run: 0 };
   for (const windowData of projectTabWindows(tab)) {
     if (!windowIsAgentPane(windowData)) {
       continue;
@@ -96,24 +120,62 @@ export function projectTabAgentDotState(tab, { runtimeStateForWindow } = {}) {
       typeof runtimeStateForWindow === "function"
         ? runtimeStateForWindow(windowData)
         : windowData.status;
-    if (normalizeProjectTabRuntimeState(runtimeState) === "running") {
-      return "running";
+    const state = projectTabStateForRuntimeState(runtimeState);
+    if (state) {
+      counts[state] += 1;
     }
   }
-  return "";
+  for (const state of PROJECT_TAB_STATE_PRIORITY) {
+    const count = counts[state];
+    if (count > 0) {
+      const config = PROJECT_TAB_STATE_CONFIG[state];
+      const noun = count === 1 ? "agent" : "agents";
+      return {
+        state,
+        count,
+        text: count === 1 ? config.label : `${config.label} ${count}`,
+        ariaLabel: `${count} ${config.aria} ${noun}`,
+      };
+    }
+  }
+  return { state: "", count: 0, text: "", ariaLabel: "" };
 }
 
-export function updateProjectTabDot(
+export function projectTabAgentDotState(tab, options = {}) {
+  return projectTabAgentCueState(tab, options).state;
+}
+
+export const projectTabAgentPillState = projectTabAgentCueState;
+
+export function updateProjectTabStateCue(
   buttonEl,
   tab,
   { runtimeStateForWindow } = {},
 ) {
-  const dot = buttonEl.querySelector("[data-role='project-tab-dot']");
-  if (!dot) {
+  const cue = buttonEl.querySelector("[data-role='project-tab-state-cue']");
+  if (!cue) {
     return;
   }
-  dot.dataset.state = projectTabAgentDotState(tab, { runtimeStateForWindow });
+  const state = projectTabAgentCueState(tab, { runtimeStateForWindow });
+  cue.dataset.state = state.state;
+  cue.textContent = state.text;
+  cue.hidden = !state.state;
+  if (state.state) {
+    buttonEl.dataset.agentState = state.state;
+  } else {
+    delete buttonEl.dataset.agentState;
+  }
+  if (state.ariaLabel) {
+    cue.setAttribute("aria-label", state.ariaLabel);
+    cue.title = state.ariaLabel;
+  } else {
+    cue.removeAttribute("aria-label");
+    cue.removeAttribute("title");
+  }
 }
+
+export const updateProjectTabStatePill = updateProjectTabStateCue;
+export const updateProjectTabDot = updateProjectTabStateCue;
 
 export function renderProjectTabs({
   projectTabs,
@@ -163,18 +225,28 @@ export function renderProjectTabs({
       );
     }
 
-    const dot = ensureChild(button, "[data-role='project-tab-dot']", (doc) => {
-      const element = doc.createElement("span");
-      element.className = "project-tab-dot";
-      element.dataset.role = "project-tab-dot";
-      element.setAttribute("aria-hidden", "true");
-      return element;
-    });
+    button.querySelector("[data-role='project-tab-dot']")?.remove();
+    button.querySelector("[data-role='project-tab-state-pill']")?.remove();
+    const cue = ensureChild(
+      button,
+      "[data-role='project-tab-state-cue']",
+      (doc) => {
+        const element = doc.createElement("span");
+        element.className = "project-tab-state-cue";
+        element.dataset.role = "project-tab-state-cue";
+        element.dataset.state = "";
+        element.hidden = true;
+        return element;
+      },
+    );
     const label = ensureChild(button, ".project-tab-label", (doc) => {
       const element = doc.createElement("span");
       element.className = "project-tab-label";
       return element;
     });
+    if (cue.nextElementSibling !== label) {
+      button.insertBefore(cue, label);
+    }
     const close = ensureChild(button, ".project-tab-close", (doc) => {
       const element = doc.createElement("button");
       element.className = "project-tab-close";
@@ -207,8 +279,8 @@ export function renderProjectTabs({
     label.textContent = tab.title || "";
     close.setAttribute("aria-label", `Close ${tab.title || "project"}`);
     close.title = `Close ${tab.title || "project"}`;
-    dot.dataset.state = dot.dataset.state || "";
-    updateProjectTabDot(button, tab, { runtimeStateForWindow });
+    cue.dataset.state = cue.dataset.state || "";
+    updateProjectTabStateCue(button, tab, { runtimeStateForWindow });
 
     const current = projectTabs.children[index] || null;
     if (current !== button) {
