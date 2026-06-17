@@ -6,7 +6,10 @@ use std::{
     sync::OnceLock,
 };
 
-use ignore::gitignore::{Gitignore, GitignoreBuilder};
+use ignore::{
+    gitignore::{Gitignore, GitignoreBuilder},
+    Match,
+};
 use serde::Deserialize;
 
 const INDEX_PATH_POLICY_SOURCE: &str = include_str!("../../runtime/index_path_policy.json");
@@ -26,23 +29,34 @@ pub struct IndexPathPolicy {
 
 #[derive(Debug, Clone)]
 pub struct ProjectIgnoreMatcher {
+    scopes: Vec<ScopedGitignore>,
+}
+
+#[derive(Debug, Clone)]
+struct ScopedGitignore {
+    base: PathBuf,
     gitignore: Gitignore,
 }
 
 impl ProjectIgnoreMatcher {
-    fn empty() -> Self {
-        Self {
-            gitignore: Gitignore::empty(),
-        }
-    }
-
-    fn is_ignored(&self, root: &Path, path: &Path) -> bool {
-        let rel = relative_path(root, path);
+    fn is_ignored(&self, _root: &Path, path: &Path) -> bool {
+        let canonical_path = dunce::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
         let is_dir = path.is_dir();
-        matches!(
-            self.gitignore.matched_path_or_any_parents(&rel, is_dir),
-            ignore::Match::Ignore(_)
-        )
+        let mut ignored = false;
+        for scope in &self.scopes {
+            if !canonical_path.starts_with(&scope.base) {
+                continue;
+            }
+            let rel = canonical_path
+                .strip_prefix(&scope.base)
+                .unwrap_or(&canonical_path);
+            match scope.gitignore.matched_path_or_any_parents(rel, is_dir) {
+                Match::Ignore(_) => ignored = true,
+                Match::Whitelist(_) => ignored = false,
+                Match::None => {}
+            }
+        }
+        ignored
     }
 }
 
@@ -58,19 +72,9 @@ pub fn default_index_path_policy() -> IndexPathPolicy {
 pub fn build_project_ignore_matcher(root: &Path) -> ProjectIgnoreMatcher {
     let policy = default_index_path_policy();
     let root = dunce::canonicalize(root).unwrap_or_else(|_| root.to_path_buf());
-    let mut builder = GitignoreBuilder::new(&root);
-
-    add_gitignore_files(&policy, &root, &root, &mut builder);
-    if let Some(info_exclude) = git_info_exclude_path(&root) {
-        if info_exclude.is_file() {
-            let _ = builder.add(info_exclude);
-        }
-    }
-
-    match builder.build() {
-        Ok(gitignore) => ProjectIgnoreMatcher { gitignore },
-        Err(_) => ProjectIgnoreMatcher::empty(),
-    }
+    let mut scopes = Vec::new();
+    add_gitignore_files(&policy, &root, &root, &mut scopes);
+    ProjectIgnoreMatcher { scopes }
 }
 
 impl IndexPathPolicy {
@@ -127,11 +131,22 @@ fn add_gitignore_files(
     policy: &IndexPathPolicy,
     root: &Path,
     dir: &Path,
-    builder: &mut GitignoreBuilder,
+    scopes: &mut Vec<ScopedGitignore>,
 ) {
+    let mut files = Vec::new();
     let ignore_file = dir.join(".gitignore");
     if ignore_file.is_file() {
-        let _ = builder.add(ignore_file);
+        files.push(ignore_file);
+    }
+    if dir == root {
+        if let Some(info_exclude) = git_info_exclude_path(root) {
+            if info_exclude.is_file() {
+                files.push(info_exclude);
+            }
+        }
+    }
+    if let Some(scope) = build_scoped_gitignore(dir, files) {
+        scopes.push(scope);
     }
 
     let Ok(entries) = fs::read_dir(dir) else {
@@ -149,8 +164,23 @@ fn add_gitignore_files(
         if policy.is_builtin_denied_path(root, &path) {
             continue;
         }
-        add_gitignore_files(policy, root, &path, builder);
+        add_gitignore_files(policy, root, &path, scopes);
     }
+}
+
+fn build_scoped_gitignore(base: &Path, files: Vec<PathBuf>) -> Option<ScopedGitignore> {
+    if files.is_empty() {
+        return None;
+    }
+    let base = dunce::canonicalize(base).unwrap_or_else(|_| base.to_path_buf());
+    let mut builder = GitignoreBuilder::new(&base);
+    for file in files {
+        let _ = builder.add(file);
+    }
+    builder
+        .build()
+        .ok()
+        .map(|gitignore| ScopedGitignore { base, gitignore })
 }
 
 fn git_info_exclude_path(root: &Path) -> Option<PathBuf> {
