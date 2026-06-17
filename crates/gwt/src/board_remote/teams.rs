@@ -929,6 +929,37 @@ mod tests {
     }
 
     #[test]
+    fn load_snapshot_matches_trimmed_teams_channel_mapping() {
+        let root = root();
+        append_teams_root(&root, "ws-a", "  team-2/chan-9  ", "m-root");
+        let calls = std::sync::Arc::new(Mutex::new(Vec::new()));
+        let mock = MockGraph {
+            messages_body: r#"{"value":[]}"#.to_string(),
+            replies_body: r#"{"value":[
+                {"id":"m-r1","replyToId":"m-root","createdDateTime":"2026-01-01T10:02:00Z","body":{"content":"trimmed channel progress"},"from":{"user":{"displayName":"Akio"}}}
+            ]}"#
+            .to_string(),
+            get_calls: calls.clone(),
+            ..Default::default()
+        };
+        let mut map = BTreeMap::new();
+        map.insert("ws-a".to_string(), "  team-2/chan-9  ".to_string());
+        let prov = TeamsProvider::new("tok", "team-1/chan-1", map, Box::new(mock), 60);
+
+        let snapshot = prov.load_snapshot(&root).unwrap();
+        assert_eq!(snapshot.board.entries.len(), 1);
+        assert_eq!(snapshot.board.entries[0].body, "trimmed channel progress");
+
+        let calls = calls.lock().unwrap().clone();
+        assert!(calls
+            .iter()
+            .any(|(url, _)| { url.ends_with("/teams/team-2/channels/chan-9/messages") }));
+        assert!(calls.iter().any(|(url, _)| {
+            url.ends_with("/teams/team-2/channels/chan-9/messages/m-root/replies")
+        }));
+    }
+
+    #[test]
     fn load_snapshot_ignores_root_mappings_for_unconfigured_channels() {
         let root = root();
         append_teams_root(
@@ -1035,6 +1066,28 @@ mod tests {
             .0
             .contains("/teams/team-1/channels/chan-1/messages/m-1/replies"));
         assert!(calls[1].1.contains("threaded"));
+    }
+
+    #[test]
+    fn post_entry_saves_trimmed_teams_channel_mapping() {
+        let mut map = BTreeMap::new();
+        map.insert("ws-a".to_string(), "  team-1/chan-1  ".to_string());
+        let mock = RecordingGraph::new();
+        let prov = TeamsProvider::new("tok", "team-default/chan-default", map, Box::new(mock), 60);
+        let root = root();
+
+        prov.post_entry(
+            &root,
+            entry("threaded").with_audience(vec!["ws-a".to_string()]),
+        )
+        .unwrap();
+
+        let mappings = gwt_core::board_remote_roots::load_root_mappings(&root);
+        let mapping = mappings
+            .values()
+            .find(|mapping| mapping.provider == "teams" && mapping.key == "ws-a")
+            .expect("workspace root mapping must be saved");
+        assert_eq!(mapping.channel, "team-1/chan-1");
     }
 
     // Share one MockGraph between the provider and the test assertions.
