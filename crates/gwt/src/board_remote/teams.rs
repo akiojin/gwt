@@ -7,7 +7,7 @@
 //! the same time-window cache as Slack to bound API calls; failures surface as
 //! errors rather than a silent local fallback (FR-010).
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 
 use chrono::{DateTime, Utc};
@@ -54,15 +54,48 @@ impl TeamsProvider {
         }
     }
 
-    fn workspace_for_channel(&self, channel: &str) -> String {
-        self.channel_map
+    fn fetch_thread_replies(
+        &self,
+        team: &str,
+        chan: &str,
+        root: &gwt_core::board_remote_roots::RootMapping,
+    ) -> Result<Vec<BoardEntry>> {
+        let top = MESSAGE_LIMIT.to_string();
+        let url = format!(
+            "{GRAPH_API}/teams/{team}/channels/{chan}/messages/{}/replies",
+            root.root_id
+        );
+        let response = self
+            .http
+            .get(&url, &self.token, &[("$top", &top)])
+            .map_err(GwtError::Other)?;
+        check_status(&response, "list replies")?;
+        let parsed: GraphMessages = serde_json::from_str(&response.body)
+            .map_err(|err| GwtError::Other(format!("graph replies parse: {err}")))?;
+        let workspace = if root.key == gwt_core::board_remote_roots::GENERAL_THREAD_KEY {
+            ""
+        } else {
+            root.key.trim()
+        };
+        let mut entries: Vec<BoardEntry> = parsed
+            .value
             .iter()
-            .find(|(_, ch)| ch.as_str() == channel)
-            .map(|(ws, _)| ws.clone())
-            .unwrap_or_default()
+            // Skip system events (join/leave, etc.) and deleted messages so the
+            // Board shows only real posts.
+            .filter(|message| message.is_renderable())
+            .map(|message| {
+                let mut entry = graph_message_to_entry(message, workspace);
+                if entry.parent_id.as_deref() == Some(root.root_id.as_str()) {
+                    entry.parent_id = None;
+                }
+                entry
+            })
+            .collect();
+        entries.sort_by_key(|entry| entry.created_at);
+        Ok(entries)
     }
 
-    fn fetch_history(&self, channel: &str) -> Result<Vec<BoardEntry>> {
+    fn fetch_history(&self, worktree_root: &Path, channel: &str) -> Result<Vec<BoardEntry>> {
         let (team, chan) = split_channel(channel)?;
         let top = MESSAGE_LIMIT.to_string();
         let url = format!("{GRAPH_API}/teams/{team}/channels/{chan}/messages");
@@ -71,27 +104,45 @@ impl TeamsProvider {
             .get(&url, &self.token, &[("$top", &top)])
             .map_err(GwtError::Other)?;
         check_status(&response, "list messages")?;
-        let parsed: GraphMessages = serde_json::from_str(&response.body)
+        let _parsed: GraphMessages = serde_json::from_str(&response.body)
             .map_err(|err| GwtError::Other(format!("graph messages parse: {err}")))?;
-        let workspace = self.workspace_for_channel(channel);
-        let mut entries: Vec<BoardEntry> = parsed
-            .value
-            .iter()
-            // Skip system events (join/leave, etc.) and deleted messages so the
-            // Board shows only real posts.
-            .filter(|message| message.is_renderable())
-            .map(|message| graph_message_to_entry(message, &workspace))
-            .collect();
+
+        let roots = gwt_core::board_remote_roots::load_root_mappings(worktree_root);
+        let mut entries = Vec::new();
+        for root in roots
+            .values()
+            .filter(|root| root.provider == "teams" && root.channel == channel)
+        {
+            entries.extend(self.fetch_thread_replies(&team, &chan, root)?);
+        }
         entries.sort_by_key(|entry| entry.created_at);
         Ok(entries)
     }
 
-    fn cached_history(&self) -> Result<Vec<BoardEntry>> {
+    fn history_channels(&self, worktree_root: &Path) -> Vec<String> {
+        let mut channels = BTreeSet::new();
+        let default_channel = self.default_channel.trim();
+        if !default_channel.is_empty() {
+            channels.insert(default_channel.to_string());
+        }
+        for root in gwt_core::board_remote_roots::load_root_mappings(worktree_root).values() {
+            if root.provider == "teams" && !root.channel.trim().is_empty() {
+                channels.insert(root.channel.clone());
+            }
+        }
+        channels.into_iter().collect()
+    }
+
+    fn cached_history(&self, worktree_root: &Path) -> Result<Vec<BoardEntry>> {
         let now = Utc::now();
         if let Some(cached) = self.cache.get(now) {
             return Ok(cached);
         }
-        let entries = self.fetch_history(&self.default_channel)?;
+        let mut entries = Vec::new();
+        for channel in self.history_channels(worktree_root) {
+            entries.extend(self.fetch_history(worktree_root, &channel)?);
+        }
+        entries.sort_by_key(|entry| entry.created_at);
         self.cache.put(now, entries.clone());
         Ok(entries)
     }
@@ -431,8 +482,8 @@ impl BoardProvider for TeamsProvider {
         self.load_snapshot(worktree_root)
     }
 
-    fn load_snapshot(&self, _worktree_root: &Path) -> Result<CoordinationSnapshot> {
-        Ok(Self::snapshot_from(self.cached_history()?))
+    fn load_snapshot(&self, worktree_root: &Path) -> Result<CoordinationSnapshot> {
+        Ok(Self::snapshot_from(self.cached_history(worktree_root)?))
     }
 
     fn load_snapshot_for_scope(
@@ -445,11 +496,11 @@ impl BoardProvider for TeamsProvider {
 
     fn load_entries_since(
         &self,
-        _worktree_root: &Path,
+        worktree_root: &Path,
         since: DateTime<Utc>,
     ) -> Result<Vec<BoardEntry>> {
         Ok(self
-            .cached_history()?
+            .cached_history(worktree_root)?
             .into_iter()
             .filter(|entry| entry.updated_at > since)
             .collect())
@@ -466,34 +517,34 @@ impl BoardProvider for TeamsProvider {
 
     fn has_recent_post_by(
         &self,
-        _worktree_root: &Path,
+        worktree_root: &Path,
         author: &str,
         kind: &BoardEntryKind,
         within: chrono::Duration,
     ) -> Result<bool> {
         let threshold = Utc::now() - within;
-        Ok(self.cached_history()?.iter().any(|entry| {
+        Ok(self.cached_history(worktree_root)?.iter().any(|entry| {
             entry.author == author && entry.kind == *kind && entry.updated_at > threshold
         }))
     }
 
-    fn board_entry_exists(&self, _worktree_root: &Path, entry_id: &str) -> Result<bool> {
+    fn board_entry_exists(&self, worktree_root: &Path, entry_id: &str) -> Result<bool> {
         Ok(self
-            .cached_history()?
+            .cached_history(worktree_root)?
             .iter()
             .any(|entry| entry.id == entry_id))
     }
 
     fn load_entries_before(
         &self,
-        _worktree_root: &Path,
+        worktree_root: &Path,
         before_entry_id: Option<&str>,
         limit: usize,
     ) -> Result<BoardHistoryPage> {
         if limit == 0 {
             return Ok(BoardHistoryPage::default());
         }
-        let entries = self.cached_history()?;
+        let entries = self.cached_history(worktree_root)?;
         let cutoff = before_entry_id
             .and_then(|id| entries.iter().position(|entry| entry.id == id))
             .unwrap_or(entries.len());
@@ -523,10 +574,16 @@ mod tests {
     use std::path::PathBuf;
     use std::sync::Mutex;
 
+    /// Captured GET calls: `(url, query)` per mock invocation.
+    type GetCallLog = std::sync::Arc<Mutex<Vec<(String, Vec<(String, String)>)>>>;
+
     struct MockGraph {
         messages_body: String,
         messages_status: u16,
+        replies_body: String,
+        replies_status: u16,
         post_status: u16,
+        get_calls: GetCallLog,
         last_post_url: Mutex<String>,
         last_post_body: Mutex<String>,
     }
@@ -536,7 +593,10 @@ mod tests {
             Self {
                 messages_body: r#"{"value":[]}"#.to_string(),
                 messages_status: 200,
+                replies_body: r#"{"value":[]}"#.to_string(),
+                replies_status: 200,
                 post_status: 201,
+                get_calls: std::sync::Arc::new(Mutex::new(Vec::new())),
                 last_post_url: Mutex::new(String::new()),
                 last_post_body: Mutex::new(String::new()),
             }
@@ -548,8 +608,26 @@ mod tests {
             &self,
             url: &str,
             _bearer: &str,
-            _query: &[(&str, &str)],
+            query: &[(&str, &str)],
         ) -> std::result::Result<HttpResponse, String> {
+            self.get_calls.lock().unwrap().push((
+                url.to_string(),
+                query
+                    .iter()
+                    .map(|(k, v)| (k.to_string(), v.to_string()))
+                    .collect(),
+            ));
+            if url.contains("/replies") {
+                return Ok(HttpResponse {
+                    status: self.replies_status,
+                    body: self.replies_body.clone(),
+                    retry_after: if self.replies_status == 429 {
+                        Some(30)
+                    } else {
+                        None
+                    },
+                });
+            }
             assert!(url.contains("/messages"));
             Ok(HttpResponse {
                 status: self.messages_status,
@@ -693,22 +771,131 @@ mod tests {
         )
     }
 
+    fn append_teams_root(root: &std::path::Path, key: &str, channel: &str, root_id: &str) {
+        gwt_core::board_remote_roots::append_root_mapping(
+            root,
+            &gwt_core::board_remote_roots::RootMapping {
+                key: key.to_string(),
+                provider: "teams".to_string(),
+                channel: channel.to_string(),
+                root_id: root_id.to_string(),
+                card_hash: "hash".to_string(),
+                updated_at: DateTime::<Utc>::from_timestamp(0, 0).unwrap(),
+            },
+        )
+        .unwrap();
+    }
+
     #[test]
     fn load_snapshot_maps_graph_messages() {
+        let root = root();
+        append_teams_root(
+            &root,
+            gwt_core::board_remote_roots::GENERAL_THREAD_KEY,
+            "team-1/chan-1",
+            "m-root",
+        );
         let mock = MockGraph {
             messages_body: r#"{"value":[
-                {"id":"m1","createdDateTime":"2026-01-01T10:00:00Z","body":{"content":"hi"},"from":{"user":{"displayName":"Akio"}}},
-                {"id":"m2","createdDateTime":"2026-01-01T10:05:00Z","replyToId":"m1","body":{"content":"re"}}
+                {"id":"m-root","createdDateTime":"2026-01-01T10:00:00Z","subject":"General","body":{"content":"root"}}
+            ]}"#
+            .to_string(),
+            replies_body: r#"{"value":[
+                {"id":"m1","replyToId":"m-root","createdDateTime":"2026-01-01T10:00:00Z","body":{"content":"hi"},"from":{"user":{"displayName":"Akio"}}},
+                {"id":"m2","replyToId":"m-root","createdDateTime":"2026-01-01T10:05:00Z","body":{"content":"re"}}
             ]}"#
             .to_string(),
             ..Default::default()
         };
         let prov = TeamsProvider::new("tok", "team-1/chan-1", BTreeMap::new(), Box::new(mock), 60);
-        let snapshot = prov.load_snapshot(&root()).unwrap();
+        let snapshot = prov.load_snapshot(&root).unwrap();
         assert_eq!(snapshot.board.entries.len(), 2);
         assert_eq!(snapshot.board.entries[0].id, "m1");
         assert_eq!(snapshot.board.entries[0].author, "Akio");
-        assert_eq!(snapshot.board.entries[1].parent_id.as_deref(), Some("m1"));
+        assert_eq!(snapshot.board.entries[1].parent_id.as_deref(), None);
+    }
+
+    #[test]
+    fn load_snapshot_reads_workspace_thread_replies_and_ignores_flat_messages() {
+        let root = root();
+        append_teams_root(&root, "ws-a", "team-1/chan-1", "m-root");
+        let calls = std::sync::Arc::new(Mutex::new(Vec::new()));
+        let mock = MockGraph {
+            messages_body: r#"{"value":[
+                {"id":"m-root","createdDateTime":"2026-01-01T10:00:00Z","subject":"Workspace root","body":{"content":"root"}},
+                {"id":"m-flat","createdDateTime":"2026-01-01T10:01:00Z","body":{"content":"flat channel noise"}}
+            ]}"#
+            .to_string(),
+            replies_body: r#"{"value":[
+                {"id":"m-r1","replyToId":"m-root","createdDateTime":"2026-01-01T10:02:00Z","body":{"content":"first progress"},"from":{"user":{"displayName":"Akio"}}},
+                {"id":"m-r2","replyToId":"m-root","createdDateTime":"2026-01-01T10:03:00Z","body":{"content":"second progress"}}
+            ]}"#
+            .to_string(),
+            get_calls: calls.clone(),
+            ..Default::default()
+        };
+        let mut map = BTreeMap::new();
+        map.insert("ws-a".to_string(), "team-1/chan-1".to_string());
+        let prov = TeamsProvider::new("tok", "team-1/chan-1", map, Box::new(mock), 60);
+
+        let snapshot = prov.load_snapshot(&root).unwrap();
+        let bodies: Vec<_> = snapshot
+            .board
+            .entries
+            .iter()
+            .map(|entry| entry.body.as_str())
+            .collect();
+        assert_eq!(bodies, vec!["first progress", "second progress"]);
+        assert!(snapshot
+            .board
+            .entries
+            .iter()
+            .all(|entry| entry.audience == vec!["ws-a".to_string()]));
+        assert!(snapshot
+            .board
+            .entries
+            .iter()
+            .all(|entry| entry.parent_id.is_none()));
+
+        let calls = calls.lock().unwrap().clone();
+        assert!(calls
+            .iter()
+            .any(|(url, _)| url.ends_with("/teams/team-1/channels/chan-1/messages")));
+        assert!(calls.iter().any(|(url, _)| {
+            url.ends_with("/teams/team-1/channels/chan-1/messages/m-root/replies")
+        }));
+    }
+
+    #[test]
+    fn load_snapshot_includes_workspace_thread_from_mapped_channel() {
+        let root = root();
+        append_teams_root(&root, "ws-a", "team-2/chan-9", "m-root");
+        let calls = std::sync::Arc::new(Mutex::new(Vec::new()));
+        let mock = MockGraph {
+            messages_body: r#"{"value":[]}"#.to_string(),
+            replies_body: r#"{"value":[
+                {"id":"m-r1","replyToId":"m-root","createdDateTime":"2026-01-01T10:02:00Z","body":{"content":"mapped channel progress"},"from":{"user":{"displayName":"Akio"}}}
+            ]}"#
+            .to_string(),
+            get_calls: calls.clone(),
+            ..Default::default()
+        };
+        let mut map = BTreeMap::new();
+        map.insert("ws-a".to_string(), "team-2/chan-9".to_string());
+        let prov = TeamsProvider::new("tok", "team-1/chan-1", map, Box::new(mock), 60);
+
+        let snapshot = prov.load_snapshot(&root).unwrap();
+        assert_eq!(snapshot.board.entries.len(), 1);
+        assert_eq!(snapshot.board.entries[0].body, "mapped channel progress");
+        assert_eq!(snapshot.board.entries[0].audience, vec!["ws-a".to_string()]);
+
+        let calls = calls.lock().unwrap().clone();
+        assert!(calls
+            .iter()
+            .any(|(url, _)| { url.ends_with("/teams/team-2/channels/chan-9/messages") }));
+        assert!(calls.iter().any(|(url, _)| {
+            url.ends_with("/teams/team-2/channels/chan-9/messages/m-root/replies")
+        }));
     }
 
     #[test]
@@ -792,9 +979,17 @@ mod tests {
 
     #[test]
     fn skips_system_and_deleted_messages() {
+        let root = root();
+        append_teams_root(
+            &root,
+            gwt_core::board_remote_roots::GENERAL_THREAD_KEY,
+            "team-1/chan-1",
+            "m-root",
+        );
         let mock = MockGraph {
-            messages_body: r#"{"value":[
-                {"id":"m1","createdDateTime":"2026-01-01T10:00:00Z","body":{"content":"hi"},"from":{"user":{"displayName":"Akio"}}},
+            messages_body: r#"{"value":[]}"#.to_string(),
+            replies_body: r#"{"value":[
+                {"id":"m1","replyToId":"m-root","createdDateTime":"2026-01-01T10:00:00Z","body":{"content":"hi"},"from":{"user":{"displayName":"Akio"}}},
                 {"id":"sys","messageType":"systemEventMessage","createdDateTime":"2026-01-01T10:01:00Z","body":{"content":"joined the channel"}},
                 {"id":"del","createdDateTime":"2026-01-01T10:02:00Z","deletedDateTime":"2026-01-01T10:03:00Z","body":{"content":""}}
             ]}"#
@@ -802,7 +997,7 @@ mod tests {
             ..Default::default()
         };
         let prov = TeamsProvider::new("tok", "team-1/chan-1", BTreeMap::new(), Box::new(mock), 60);
-        let snapshot = prov.load_snapshot(&root()).unwrap();
+        let snapshot = prov.load_snapshot(&root).unwrap();
         assert_eq!(
             snapshot.board.entries.len(),
             1,
@@ -1017,19 +1212,27 @@ mod tests {
     }
 
     #[test]
-    fn read_back_strips_html_and_maps_subject_to_title() {
+    fn read_back_strips_reply_html() {
+        let root = root();
+        append_teams_root(
+            &root,
+            gwt_core::board_remote_roots::GENERAL_THREAD_KEY,
+            "team-1/chan-1",
+            "m-root",
+        );
         let mock = MockGraph {
-            messages_body: r#"{"value":[
-                {"id":"m1","createdDateTime":"2026-01-01T10:00:00Z","subject":"Release notes","body":{"contentType":"html","content":"<strong>bold</strong> text"},"from":{"user":{"displayName":"Akio"}}}
+            messages_body: r#"{"value":[]}"#.to_string(),
+            replies_body: r#"{"value":[
+                {"id":"m1","replyToId":"m-root","createdDateTime":"2026-01-01T10:00:00Z","body":{"contentType":"html","content":"<strong>bold</strong> text"},"from":{"user":{"displayName":"Akio"}}}
             ]}"#
             .to_string(),
             ..Default::default()
         };
         let prov = TeamsProvider::new("tok", "team-1/chan-1", BTreeMap::new(), Box::new(mock), 60);
-        let snapshot = prov.load_snapshot(&root()).unwrap();
+        let snapshot = prov.load_snapshot(&root).unwrap();
         assert_eq!(snapshot.board.entries.len(), 1);
         let e = &snapshot.board.entries[0];
-        assert_eq!(e.title.as_deref(), Some("Release notes"));
+        assert_eq!(e.title.as_deref(), None);
         assert_eq!(
             e.body, "bold text",
             "html tags stripped for plaintext board"
@@ -1038,10 +1241,11 @@ mod tests {
 
     fn three_message_mock() -> MockGraph {
         MockGraph {
-            messages_body: r#"{"value":[
-                {"id":"m1","createdDateTime":"2026-01-01T10:00:00Z","body":{"content":"a"},"from":{"user":{"displayName":"U"}}},
-                {"id":"m2","createdDateTime":"2026-01-01T10:05:00Z","body":{"content":"b"},"from":{"user":{"displayName":"U"}}},
-                {"id":"m3","createdDateTime":"2026-01-01T10:10:00Z","body":{"content":"c"},"from":{"user":{"displayName":"U"}}}
+            messages_body: r#"{"value":[]}"#.to_string(),
+            replies_body: r#"{"value":[
+                {"id":"m1","replyToId":"m-root","createdDateTime":"2026-01-01T10:00:00Z","body":{"content":"a"},"from":{"user":{"displayName":"U"}}},
+                {"id":"m2","replyToId":"m-root","createdDateTime":"2026-01-01T10:05:00Z","body":{"content":"b"},"from":{"user":{"displayName":"U"}}},
+                {"id":"m3","replyToId":"m-root","createdDateTime":"2026-01-01T10:10:00Z","body":{"content":"c"},"from":{"user":{"displayName":"U"}}}
             ]}"#
             .to_string(),
             ..Default::default()
@@ -1050,6 +1254,13 @@ mod tests {
 
     #[test]
     fn second_read_is_served_from_cache() {
+        let root = root();
+        append_teams_root(
+            &root,
+            gwt_core::board_remote_roots::GENERAL_THREAD_KEY,
+            "team-1/chan-1",
+            "m-root",
+        );
         let prov = TeamsProvider::new(
             "tok",
             "team-1/chan-1",
@@ -1057,9 +1268,9 @@ mod tests {
             Box::new(three_message_mock()),
             60,
         );
-        assert_eq!(prov.load_snapshot(&root()).unwrap().board.entries.len(), 3);
+        assert_eq!(prov.load_snapshot(&root).unwrap().board.entries.len(), 3);
         // Within the TTL the second read hits the cache rather than the mock.
-        assert_eq!(prov.load_snapshot(&root()).unwrap().board.entries.len(), 3);
+        assert_eq!(prov.load_snapshot(&root).unwrap().board.entries.len(), 3);
     }
 
     #[test]
@@ -1087,6 +1298,8 @@ mod tests {
 
     #[test]
     fn mapped_channel_tags_entries_with_workspace_audience() {
+        let root = root();
+        append_teams_root(&root, "ws-x", "team-1/chan-1", "m-root");
         let mut map = BTreeMap::new();
         map.insert("ws-x".to_string(), "team-1/chan-1".to_string());
         let prov = TeamsProvider::new(
@@ -1096,7 +1309,8 @@ mod tests {
             Box::new(three_message_mock()),
             60,
         );
-        let snapshot = prov.load_snapshot(&root()).unwrap();
+        let snapshot = prov.load_snapshot(&root).unwrap();
+        assert_eq!(snapshot.board.entries.len(), 3);
         assert!(snapshot
             .board
             .entries
@@ -1118,6 +1332,13 @@ mod tests {
 
     #[test]
     fn trait_read_methods_cover_since_recent_exists_and_pagination() {
+        let root = root();
+        append_teams_root(
+            &root,
+            gwt_core::board_remote_roots::GENERAL_THREAD_KEY,
+            "team-1/chan-1",
+            "m-root",
+        );
         let prov = TeamsProvider::new(
             "tok",
             "team-1/chan-1",
@@ -1128,7 +1349,7 @@ mod tests {
         let scope = BoardAudienceScope::All;
 
         assert_eq!(
-            prov.load_snapshot_for_scope(&root(), &scope)
+            prov.load_snapshot_for_scope(&root, &scope)
                 .unwrap()
                 .board
                 .entries
@@ -1137,9 +1358,9 @@ mod tests {
         );
 
         let epoch = DateTime::<Utc>::from_timestamp(0, 0).unwrap();
-        assert_eq!(prov.load_entries_since(&root(), epoch).unwrap().len(), 3);
+        assert_eq!(prov.load_entries_since(&root, epoch).unwrap().len(), 3);
         assert_eq!(
-            prov.load_entries_since_for_scope(&root(), epoch, &scope)
+            prov.load_entries_since_for_scope(&root, epoch, &scope)
                 .unwrap()
                 .len(),
             3
@@ -1147,25 +1368,25 @@ mod tests {
 
         let wide = chrono::Duration::days(1_000_000);
         assert!(prov
-            .has_recent_post_by(&root(), "nobody", &BoardEntryKind::Status, wide)
+            .has_recent_post_by(&root, "nobody", &BoardEntryKind::Status, wide)
             .is_ok());
 
-        assert!(prov.board_entry_exists(&root(), "m2").unwrap());
-        assert!(!prov.board_entry_exists(&root(), "missing").unwrap());
+        assert!(prov.board_entry_exists(&root, "m2").unwrap());
+        assert!(!prov.board_entry_exists(&root, "missing").unwrap());
 
-        let zero = prov.load_entries_before(&root(), None, 0).unwrap();
+        let zero = prov.load_entries_before(&root, None, 0).unwrap();
         assert!(zero.entries.is_empty() && !zero.has_more_before);
 
-        let page = prov.load_entries_before(&root(), None, 2).unwrap();
+        let page = prov.load_entries_before(&root, None, 2).unwrap();
         assert_eq!(page.entries.len(), 2);
         assert!(page.has_more_before);
 
-        let before = prov.load_entries_before(&root(), Some("m2"), 5).unwrap();
+        let before = prov.load_entries_before(&root, Some("m2"), 5).unwrap();
         assert_eq!(before.entries.len(), 1);
         assert!(!before.has_more_before);
 
         assert_eq!(
-            prov.load_entries_before_for_scope(&root(), None, 2, &scope)
+            prov.load_entries_before_for_scope(&root, None, 2, &scope)
                 .unwrap()
                 .entries
                 .len(),

@@ -7,7 +7,7 @@
 //! Slack's `conversations.history` rate limit (FR-009). API/network failures
 //! surface as errors — never a silent fall back to local (FR-010).
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 
 use chrono::{DateTime, Utc};
@@ -102,16 +102,57 @@ impl SlackProvider {
         }
     }
 
-    /// Reverse-map a Slack channel id to the gwt Work it represents.
-    fn workspace_for_channel(&self, channel: &str) -> String {
-        self.channel_map
+    fn fetch_thread_replies(
+        &self,
+        channel: &str,
+        root: &gwt_core::board_remote_roots::RootMapping,
+    ) -> Result<Vec<BoardEntry>> {
+        let limit = HISTORY_LIMIT.to_string();
+        let response = self
+            .http
+            .get(
+                &format!("{SLACK_API}/conversations.replies"),
+                &self.token,
+                &[
+                    ("channel", channel),
+                    ("ts", &root.root_id),
+                    ("limit", &limit),
+                ],
+            )
+            .map_err(GwtError::Other)?;
+        check_status(&response, "conversations.replies")?;
+        let parsed: SlackHistory = serde_json::from_str(&response.body)
+            .map_err(|err| GwtError::Other(format!("slack replies parse: {err}")))?;
+        if !parsed.ok {
+            return Err(GwtError::Other(format!(
+                "slack conversations.replies error: {}",
+                parsed.error.unwrap_or_else(|| "unknown".to_string())
+            )));
+        }
+
+        let workspace = if root.key == gwt_core::board_remote_roots::GENERAL_THREAD_KEY {
+            ""
+        } else {
+            root.key.trim()
+        };
+        let mut entries: Vec<BoardEntry> = parsed
+            .messages
             .iter()
-            .find(|(_, ch)| ch.as_str() == channel)
-            .map(|(ws, _)| ws.clone())
-            .unwrap_or_default()
+            .filter(|message| message.ts != root.root_id)
+            .map(|message| {
+                let mut entry =
+                    mapping::slack_message_to_board_entry(&message.to_message(), workspace);
+                if entry.parent_id.as_deref() == Some(root.root_id.as_str()) {
+                    entry.parent_id = None;
+                }
+                entry
+            })
+            .collect();
+        entries.sort_by_key(|entry| entry.created_at);
+        Ok(entries)
     }
 
-    fn fetch_history(&self, channel: &str) -> Result<Vec<BoardEntry>> {
+    fn fetch_history(&self, worktree_root: &Path, channel: &str) -> Result<Vec<BoardEntry>> {
         let limit = HISTORY_LIMIT.to_string();
         let response = self
             .http
@@ -130,23 +171,44 @@ impl SlackProvider {
                 parsed.error.unwrap_or_else(|| "unknown".to_string())
             )));
         }
-        let workspace = self.workspace_for_channel(channel);
-        let mut entries: Vec<BoardEntry> = parsed
-            .messages
-            .iter()
-            .map(|message| mapping::slack_message_to_board_entry(&message.to_message(), &workspace))
-            .collect();
+
+        let roots = gwt_core::board_remote_roots::load_root_mappings(worktree_root);
+        let mut entries = Vec::new();
+        for root in roots
+            .values()
+            .filter(|root| root.provider == "slack" && root.channel == channel)
+        {
+            entries.extend(self.fetch_thread_replies(channel, root)?);
+        }
         entries.sort_by_key(|entry| entry.created_at);
         Ok(entries)
     }
 
+    fn history_channels(&self, worktree_root: &Path) -> Vec<String> {
+        let mut channels = BTreeSet::new();
+        let default_channel = self.default_channel.trim();
+        if !default_channel.is_empty() {
+            channels.insert(default_channel.to_string());
+        }
+        for root in gwt_core::board_remote_roots::load_root_mappings(worktree_root).values() {
+            if root.provider == "slack" && !root.channel.trim().is_empty() {
+                channels.insert(root.channel.clone());
+            }
+        }
+        channels.into_iter().collect()
+    }
+
     /// History for the default channel, served from cache within the TTL.
-    fn cached_history(&self) -> Result<Vec<BoardEntry>> {
+    fn cached_history(&self, worktree_root: &Path) -> Result<Vec<BoardEntry>> {
         let now = Utc::now();
         if let Some(cached) = self.cache.get(now) {
             return Ok(cached);
         }
-        let entries = self.fetch_history(&self.default_channel)?;
+        let mut entries = Vec::new();
+        for channel in self.history_channels(worktree_root) {
+            entries.extend(self.fetch_history(worktree_root, &channel)?);
+        }
+        entries.sort_by_key(|entry| entry.created_at);
         self.cache.put(now, entries.clone());
         Ok(entries)
     }
@@ -433,8 +495,8 @@ impl BoardProvider for SlackProvider {
         self.load_snapshot(worktree_root)
     }
 
-    fn load_snapshot(&self, _worktree_root: &Path) -> Result<CoordinationSnapshot> {
-        Ok(Self::snapshot_from(self.cached_history()?))
+    fn load_snapshot(&self, worktree_root: &Path) -> Result<CoordinationSnapshot> {
+        Ok(Self::snapshot_from(self.cached_history(worktree_root)?))
     }
 
     fn load_snapshot_for_scope(
@@ -448,11 +510,11 @@ impl BoardProvider for SlackProvider {
 
     fn load_entries_since(
         &self,
-        _worktree_root: &Path,
+        worktree_root: &Path,
         since: DateTime<Utc>,
     ) -> Result<Vec<BoardEntry>> {
         Ok(self
-            .cached_history()?
+            .cached_history(worktree_root)?
             .into_iter()
             .filter(|entry| entry.updated_at > since)
             .collect())
@@ -469,34 +531,34 @@ impl BoardProvider for SlackProvider {
 
     fn has_recent_post_by(
         &self,
-        _worktree_root: &Path,
+        worktree_root: &Path,
         author: &str,
         kind: &BoardEntryKind,
         within: chrono::Duration,
     ) -> Result<bool> {
         let threshold = Utc::now() - within;
-        Ok(self.cached_history()?.iter().any(|entry| {
+        Ok(self.cached_history(worktree_root)?.iter().any(|entry| {
             entry.author == author && entry.kind == *kind && entry.updated_at > threshold
         }))
     }
 
-    fn board_entry_exists(&self, _worktree_root: &Path, entry_id: &str) -> Result<bool> {
+    fn board_entry_exists(&self, worktree_root: &Path, entry_id: &str) -> Result<bool> {
         Ok(self
-            .cached_history()?
+            .cached_history(worktree_root)?
             .iter()
             .any(|entry| entry.id == entry_id))
     }
 
     fn load_entries_before(
         &self,
-        _worktree_root: &Path,
+        worktree_root: &Path,
         before_entry_id: Option<&str>,
         limit: usize,
     ) -> Result<BoardHistoryPage> {
         if limit == 0 {
             return Ok(BoardHistoryPage::default());
         }
-        let entries = self.cached_history()?;
+        let entries = self.cached_history(worktree_root)?;
         let cutoff = before_entry_id
             .and_then(|id| entries.iter().position(|entry| entry.id == id))
             .unwrap_or(entries.len());
@@ -527,13 +589,32 @@ mod tests {
     use std::path::PathBuf;
     use std::sync::Mutex;
 
+    /// Captured HTTP calls: `(url, params/query)` per mock invocation.
+    type CallLog = std::sync::Arc<Mutex<Vec<(String, Vec<(String, String)>)>>>;
+
     /// Mock HTTP client returning canned responses by endpoint.
-    #[derive(Default)]
     struct MockHttp {
         history_body: String,
         history_status: u16,
+        replies_body: String,
+        replies_status: u16,
         post_body: String,
         post_status: u16,
+        calls: CallLog,
+    }
+
+    impl Default for MockHttp {
+        fn default() -> Self {
+            Self {
+                history_body: String::new(),
+                history_status: 0,
+                replies_body: r#"{"ok":true,"messages":[]}"#.to_string(),
+                replies_status: 0,
+                post_body: String::new(),
+                post_status: 0,
+                calls: std::sync::Arc::new(Mutex::new(Vec::new())),
+            }
+        }
     }
 
     impl HttpClient for MockHttp {
@@ -541,8 +622,30 @@ mod tests {
             &self,
             url: &str,
             _bearer: &str,
-            _query: &[(&str, &str)],
+            query: &[(&str, &str)],
         ) -> std::result::Result<HttpResponse, String> {
+            self.calls.lock().unwrap().push((
+                url.to_string(),
+                query
+                    .iter()
+                    .map(|(k, v)| (k.to_string(), v.to_string()))
+                    .collect(),
+            ));
+            if url.contains("conversations.replies") {
+                return Ok(HttpResponse {
+                    status: if self.replies_status == 0 {
+                        200
+                    } else {
+                        self.replies_status
+                    },
+                    body: self.replies_body.clone(),
+                    retry_after: if self.replies_status == 429 {
+                        Some(30)
+                    } else {
+                        None
+                    },
+                });
+            }
             assert!(url.contains("conversations.history"));
             Ok(HttpResponse {
                 status: if self.history_status == 0 {
@@ -600,9 +703,6 @@ mod tests {
         let _ = std::fs::create_dir_all(&path);
         path
     }
-
-    /// Captured post calls: `(url, params)` per post_form invocation.
-    type CallLog = std::sync::Arc<Mutex<Vec<(String, Vec<(String, String)>)>>>;
 
     /// Recording mock that captures every post (url + params) and returns an
     /// incrementing `ts` so root-thread get-or-create works in tests.
@@ -694,25 +794,141 @@ mod tests {
         )
     }
 
+    fn append_slack_root(root: &std::path::Path, key: &str, channel: &str, root_id: &str) {
+        gwt_core::board_remote_roots::append_root_mapping(
+            root,
+            &gwt_core::board_remote_roots::RootMapping {
+                key: key.to_string(),
+                provider: "slack".to_string(),
+                channel: channel.to_string(),
+                root_id: root_id.to_string(),
+                card_hash: "hash".to_string(),
+                updated_at: DateTime::<Utc>::from_timestamp(0, 0).unwrap(),
+            },
+        )
+        .unwrap();
+    }
+
     #[test]
     fn load_snapshot_maps_slack_history() {
+        let root = root();
+        append_slack_root(
+            &root,
+            gwt_core::board_remote_roots::GENERAL_THREAD_KEY,
+            "CH-DEFAULT",
+            "1700000000.000100",
+        );
         let mock = MockHttp {
             history_body: r#"{"ok":true,"messages":[
-                {"ts":"1700000000.000100","text":"first","username":"Akio"},
+                {"ts":"1700000000.000100","text":"root","username":"gwt","thread_ts":"1700000000.000100"}
+            ]}"#
+            .to_string(),
+            replies_body: r#"{"ok":true,"messages":[
+                {"ts":"1700000000.000100","text":"root","username":"gwt","thread_ts":"1700000000.000100"},
                 {"ts":"1700000050.000200","text":"reply","bot_id":"B1","thread_ts":"1700000000.000100"}
             ]}"#
             .to_string(),
             ..Default::default()
         };
-        let snapshot = provider(mock).load_snapshot(&root()).unwrap();
-        assert_eq!(snapshot.board.entries.len(), 2);
-        assert_eq!(snapshot.board.entries[0].id, "1700000000.000100");
-        assert_eq!(snapshot.board.entries[0].body, "first");
+        let snapshot = provider(mock).load_snapshot(&root).unwrap();
+        assert_eq!(snapshot.board.entries.len(), 1);
+        assert_eq!(snapshot.board.entries[0].id, "1700000050.000200");
+        assert_eq!(snapshot.board.entries[0].body, "reply");
+        assert_eq!(snapshot.board.entries[0].author_kind, AuthorKind::Agent);
         assert_eq!(
-            snapshot.board.entries[1].parent_id.as_deref(),
-            Some("1700000000.000100")
+            snapshot.board.entries[0].parent_id.as_deref(),
+            None,
+            "the hidden Workspace/General root is not exposed as a parent entry"
         );
-        assert_eq!(snapshot.board.total_entries, 2);
+        assert_eq!(snapshot.board.total_entries, 1);
+    }
+
+    #[test]
+    fn load_snapshot_reads_workspace_thread_replies_and_ignores_flat_history() {
+        let root = root();
+        append_slack_root(&root, "ws-a", "CH-DEFAULT", "1700000000.000100");
+        let calls = std::sync::Arc::new(Mutex::new(Vec::new()));
+        let mock = MockHttp {
+            history_body: r#"{"ok":true,"messages":[
+                {"ts":"1700000000.000100","text":"Workspace root","username":"gwt","thread_ts":"1700000000.000100"},
+                {"ts":"9999999999.000999","text":"flat channel noise","username":"Noise"}
+            ]}"#
+            .to_string(),
+            replies_body: r#"{"ok":true,"messages":[
+                {"ts":"1700000000.000100","text":"Workspace root","username":"gwt","thread_ts":"1700000000.000100"},
+                {"ts":"1700000001.000200","text":"first progress","username":"Akio","thread_ts":"1700000000.000100"},
+                {"ts":"1700000002.000300","text":"second progress","bot_id":"B1","thread_ts":"1700000000.000100"}
+            ]}"#
+            .to_string(),
+            calls: calls.clone(),
+            ..Default::default()
+        };
+
+        let snapshot = provider(mock).load_snapshot(&root).unwrap();
+        let bodies: Vec<_> = snapshot
+            .board
+            .entries
+            .iter()
+            .map(|entry| entry.body.as_str())
+            .collect();
+        assert_eq!(bodies, vec!["first progress", "second progress"]);
+        assert!(snapshot
+            .board
+            .entries
+            .iter()
+            .all(|entry| entry.audience == vec!["ws-a".to_string()]));
+        assert!(snapshot
+            .board
+            .entries
+            .iter()
+            .all(|entry| entry.parent_id.is_none()));
+
+        let calls = calls.lock().unwrap().clone();
+        assert!(calls
+            .iter()
+            .any(|(url, _)| url.contains("conversations.history")));
+        assert!(calls.iter().any(|(url, query)| {
+            url.contains("conversations.replies")
+                && query
+                    .iter()
+                    .any(|(key, value)| key == "ts" && value == "1700000000.000100")
+        }));
+    }
+
+    #[test]
+    fn load_snapshot_includes_workspace_thread_from_mapped_channel() {
+        let root = root();
+        append_slack_root(&root, "ws-a", "CH-A", "1700000100.000100");
+        let calls = std::sync::Arc::new(Mutex::new(Vec::new()));
+        let mock = MockHttp {
+            history_body: r#"{"ok":true,"messages":[]}"#.to_string(),
+            replies_body: r#"{"ok":true,"messages":[
+                {"ts":"1700000100.000100","text":"Workspace root","username":"gwt","thread_ts":"1700000100.000100"},
+                {"ts":"1700000101.000200","text":"mapped channel progress","username":"Akio","thread_ts":"1700000100.000100"}
+            ]}"#
+            .to_string(),
+            calls: calls.clone(),
+            ..Default::default()
+        };
+
+        let snapshot = provider(mock).load_snapshot(&root).unwrap();
+        assert_eq!(snapshot.board.entries.len(), 1);
+        assert_eq!(snapshot.board.entries[0].body, "mapped channel progress");
+        assert_eq!(snapshot.board.entries[0].audience, vec!["ws-a".to_string()]);
+
+        let calls = calls.lock().unwrap().clone();
+        assert!(calls.iter().any(|(url, query)| {
+            url.contains("conversations.history")
+                && query
+                    .iter()
+                    .any(|(key, value)| key == "channel" && value == "CH-A")
+        }));
+        assert!(calls.iter().any(|(url, query)| {
+            url.contains("conversations.replies")
+                && query
+                    .iter()
+                    .any(|(key, value)| key == "ts" && value == "1700000100.000100")
+        }));
     }
 
     #[test]
@@ -898,24 +1114,35 @@ mod tests {
 
     #[test]
     fn board_entry_exists_scans_history() {
+        let root = root();
+        append_slack_root(
+            &root,
+            gwt_core::board_remote_roots::GENERAL_THREAD_KEY,
+            "CH-DEFAULT",
+            "root-ts",
+        );
         let mock = MockHttp {
-            history_body: r#"{"ok":true,"messages":[{"ts":"1700000000.000100","text":"x"}]}"#
-                .to_string(),
+            history_body: r#"{"ok":true,"messages":[]}"#.to_string(),
+            replies_body: r#"{"ok":true,"messages":[
+                {"ts":"root-ts","text":"root","thread_ts":"root-ts"},
+                {"ts":"1700000000.000100","text":"x","thread_ts":"root-ts"}
+            ]}"#
+            .to_string(),
             ..Default::default()
         };
         let prov = provider(mock);
-        assert!(prov
-            .board_entry_exists(&root(), "1700000000.000100")
-            .unwrap());
-        assert!(!prov.board_entry_exists(&root(), "missing").unwrap());
+        assert!(prov.board_entry_exists(&root, "1700000000.000100").unwrap());
+        assert!(!prov.board_entry_exists(&root, "missing").unwrap());
     }
 
     fn three_message_mock() -> MockHttp {
         MockHttp {
-            history_body: r#"{"ok":true,"messages":[
-                {"ts":"100.0001","text":"a","username":"U"},
-                {"ts":"200.0002","text":"b","username":"U"},
-                {"ts":"300.0003","text":"c","username":"U"}
+            history_body: r#"{"ok":true,"messages":[]}"#.to_string(),
+            replies_body: r#"{"ok":true,"messages":[
+                {"ts":"root-ts","text":"root","username":"gwt","thread_ts":"root-ts"},
+                {"ts":"100.0001","text":"a","username":"U","thread_ts":"root-ts"},
+                {"ts":"200.0002","text":"b","username":"U","thread_ts":"root-ts"},
+                {"ts":"300.0003","text":"c","username":"U","thread_ts":"root-ts"}
             ]}"#
             .to_string(),
             post_body: r#"{"ok":true,"ts":"root-ts"}"#.to_string(),
@@ -936,10 +1163,17 @@ mod tests {
     fn trait_read_methods_cover_since_recent_and_pagination() {
         let prov = provider(three_message_mock());
         let scope = BoardAudienceScope::All;
+        let root = root();
+        append_slack_root(
+            &root,
+            gwt_core::board_remote_roots::GENERAL_THREAD_KEY,
+            "CH-DEFAULT",
+            "root-ts",
+        );
 
         // load_snapshot_for_scope delegates to load_snapshot.
         assert_eq!(
-            prov.load_snapshot_for_scope(&root(), &scope)
+            prov.load_snapshot_for_scope(&root, &scope)
                 .unwrap()
                 .board
                 .entries
@@ -949,9 +1183,9 @@ mod tests {
 
         // load_entries_since: an epoch-0 `since` returns every cached entry.
         let epoch = DateTime::<Utc>::from_timestamp(0, 0).unwrap();
-        assert_eq!(prov.load_entries_since(&root(), epoch).unwrap().len(), 3);
+        assert_eq!(prov.load_entries_since(&root, epoch).unwrap().len(), 3);
         assert_eq!(
-            prov.load_entries_since_for_scope(&root(), epoch, &scope)
+            prov.load_entries_since_for_scope(&root, epoch, &scope)
                 .unwrap()
                 .len(),
             3
@@ -960,28 +1194,28 @@ mod tests {
         // has_recent_post_by executes the predicate over every entry.
         let wide = chrono::Duration::days(1_000_000);
         assert!(prov
-            .has_recent_post_by(&root(), "nobody", &BoardEntryKind::Status, wide)
+            .has_recent_post_by(&root, "nobody", &BoardEntryKind::Status, wide)
             .is_ok());
 
         // load_entries_before: empty for limit 0.
-        let zero = prov.load_entries_before(&root(), None, 0).unwrap();
+        let zero = prov.load_entries_before(&root, None, 0).unwrap();
         assert!(zero.entries.is_empty() && !zero.has_more_before);
 
         // Newest-2 with more available behind them.
-        let page = prov.load_entries_before(&root(), None, 2).unwrap();
+        let page = prov.load_entries_before(&root, None, 2).unwrap();
         assert_eq!(page.entries.len(), 2);
         assert!(page.has_more_before);
 
         // Everything strictly before a known id, no more behind.
         let before = prov
-            .load_entries_before(&root(), Some("200.0002"), 5)
+            .load_entries_before(&root, Some("200.0002"), 5)
             .unwrap();
         assert_eq!(before.entries.len(), 1);
         assert!(!before.has_more_before);
 
         // Scope variant delegates.
         assert_eq!(
-            prov.load_entries_before_for_scope(&root(), None, 2, &scope)
+            prov.load_entries_before_for_scope(&root, None, 2, &scope)
                 .unwrap()
                 .entries
                 .len(),

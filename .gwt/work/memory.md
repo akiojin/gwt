@@ -7032,3 +7032,10 @@ Type: lesson
 Context: v9.60.0 の chore(release) commit を push した際、husky pre-push が gwt-core/gwt のフィルタ済みカバレッジ89.72%を検出して reject。release commit 自体はソース無変更だが、Web マージされた既存 PR で develop のカバレッジが閾値割れしていた。
 Learning: バージョンbumpのみの release でも pre-push はリポジトリ全体のカバレッジを再計測する。不足時は --no-verify で逃げず、最も低カバレッジな新規ファイル(今回 cli/json_envelope.rs 46%)に pure 関数の直接ユニットテストを足すのが最短。parse() 等の pure dispatcher は全 operation 分岐を envelope JSON で網羅でき一気に上がる。
 Future Action: release 前に node scripts/check-coverage-threshold.mjs target/coverage-summary.json 90 を先回り実行し、割れていれば最新機能ファイルへユニットテストを足してから release commit を積む。
+
+## 2026-06-17 — Remote Board read-back must expand root thread replies
+
+Type: postmortem
+Context: SPEC #2963 Slack/Teams remote Board providers were posting entries as Workspace/General thread replies, but load_snapshot read only channel top-level history/messages. Existing tests placed reply-shaped fixtures directly in history/list responses, hiding the real API split.
+Learning: Slack conversations.history and Microsoft Graph channel messages do not provide the thread reply stream as Board entries. Root summary cards and arbitrary flat channel messages must not be mapped into BoardEntry; provider tests should seed root mappings and assert calls to conversations.replies or /messages/{root}/replies.
+Future Action: When changing remote Board providers, write RED tests against provider-specific reply endpoints with a seeded board_remote_roots mapping, include mapped-channel roots distinct from the default channel, and verify board.show reads replies back before claiming completion.
