@@ -28,6 +28,18 @@ function emptyMessage(doc) {
   return note;
 }
 
+function statusMessage(doc, status) {
+  const note = doc.createElement("p");
+  note.className = "settings-help";
+  note.dataset.role = "index-settings-status";
+  const state = String(status?.state || "unknown");
+  const detail = String(status?.detail || "").trim();
+  note.textContent = detail
+    ? `Project index status: ${state}. ${detail}`
+    : `Project index status: ${state}.`;
+  return note;
+}
+
 function buildHealthCell(doc, scope, worktreeHash, view, send, projectRoot) {
   const td = doc.createElement("td");
   td.className = "settings-index-cell";
@@ -102,8 +114,13 @@ export function renderIndexSettingsPanel(options) {
     return;
   }
 
-  const scopes = (status && status.scopes) || {};
-  const worktrees = (status && status.worktrees) || {};
+  if (!status) {
+    panel.appendChild(emptyMessage(ownerDoc));
+    return;
+  }
+
+  const scopes = status.scopes || {};
+  const worktrees = status.worktrees || {};
   const worktreeHashes = Object.keys(worktrees).sort();
 
   if (
@@ -116,7 +133,7 @@ export function renderIndexSettingsPanel(options) {
     && (!scopes.files || Object.keys(scopes.files).length === 0)
     && (!scopes["files-docs"] || Object.keys(scopes["files-docs"]).length === 0)
   ) {
-    panel.appendChild(emptyMessage(ownerDoc));
+    panel.appendChild(statusMessage(ownerDoc, status));
     return;
   }
 

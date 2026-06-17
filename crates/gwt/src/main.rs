@@ -3285,6 +3285,72 @@ mod tests {
     }
 
     #[test]
+    fn file_tree_load_uses_selected_linked_worktree_root() {
+        let temp = tempdir().expect("tempdir");
+        let repo = temp.path().join("repo");
+        init_git_repo(&repo);
+
+        let active_worktree = temp.path().join("work-current");
+        let develop_worktree = temp.path().join("develop");
+        for (branch, path) in [
+            ("work/current", &active_worktree),
+            ("develop", &develop_worktree),
+        ] {
+            let status = gwt_core::process::hidden_command("git")
+                .args(["worktree", "add", "-b", branch])
+                .arg(path)
+                .current_dir(&repo)
+                .status()
+                .expect("git worktree add");
+            assert!(status.success(), "git worktree add {branch} failed");
+        }
+        fs::write(active_worktree.join("ACTIVE_ONLY.txt"), "active").expect("write active file");
+        fs::write(develop_worktree.join("DEVELOP_ONLY.txt"), "develop")
+            .expect("write develop file");
+
+        let tab = sample_project_tab(
+            "tab-1",
+            "Repo",
+            active_worktree,
+            ProjectKind::Git,
+            &[WindowPreset::FileTree],
+        );
+        let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+        let file_tree_id = window_id_for_preset(&runtime, "tab-1", WindowPreset::FileTree, 0);
+
+        let worktree_id = match runtime.list_file_tree_worktrees_event(&file_tree_id) {
+            BackendEvent::FileTreeWorktrees { entries, .. } => {
+                entries
+                    .into_iter()
+                    .find(|entry| entry.branch.as_deref() == Some("develop"))
+                    .expect("develop worktree")
+                    .id
+            }
+            other => panic!("expected FileTreeWorktrees, got {other:?}"),
+        };
+
+        assert!(matches!(
+            runtime.select_file_tree_worktree_event(&file_tree_id, &worktree_id),
+            BackendEvent::FileTreeWorktreeSelected { .. }
+        ));
+
+        match runtime.load_file_tree_event(&file_tree_id, "") {
+            BackendEvent::FileTreeEntries { entries, .. } => {
+                let paths: Vec<&str> = entries.iter().map(|entry| entry.path.as_str()).collect();
+                assert!(
+                    paths.contains(&"DEVELOP_ONLY.txt"),
+                    "selected develop worktree file should be visible: {paths:?}",
+                );
+                assert!(
+                    !paths.contains(&"ACTIVE_ONLY.txt"),
+                    "active worktree file must not leak after selecting develop: {paths:?}",
+                );
+            }
+            other => panic!("expected FileTreeEntries, got {other:?}"),
+        }
+    }
+
+    #[test]
     fn runtime_status_helpers_cover_sessions_auto_close_and_launch_errors() {
         let _env_lock = crate::env_test_lock()
             .lock()

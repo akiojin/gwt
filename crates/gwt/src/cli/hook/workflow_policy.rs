@@ -3,11 +3,12 @@
 //! v1 keeps the policy deliberately narrow:
 //!
 //! - reuse the existing consolidated Bash safety policy first
-//! - apply only safety guardrails that are independent of Issue/SPEC ownership
 //! - block worktree escape, branch-switching, and direct GitHub workflow CLI
 //!   commands before they reach the tool runtime
-//! - allow transport operations such as `git push` and worktree-internal edits
-//!   without an owner gate
+//! - keep read-only exploration, transport operations, and unowned worktree-local
+//!   edits non-blocking
+//! - block implementation-state changes only when a linked SPEC owner is known
+//!   but its plan/tasks sections are not ready
 
 use std::{collections::HashMap, io::Read, path::Path};
 
@@ -109,8 +110,6 @@ pub fn evaluate_with_context(
     worktree_root: &Path,
     context: &WorkflowContext,
 ) -> Result<HookOutput, HookError> {
-    // Safety guardrails only: branch switching, worktree escape, direct gh CLI.
-    // No owner gate — git push/commit and worktree-internal edits are always allowed.
     let safety = block_bash_policy::evaluate(event, worktree_root)?;
     if safety != HookOutput::Silent {
         return Ok(safety);
@@ -123,6 +122,10 @@ pub fn evaluate_with_context(
         evaluate_pending_discussion_goal_guard(event, context.pending_discussion_goal.as_ref())?;
     if pending_goal != HookOutput::Silent {
         return Ok(pending_goal);
+    }
+    let owner = evaluate_owner_guard(event, context)?;
+    if owner != HookOutput::Silent {
+        return Ok(owner);
     }
     Ok(HookOutput::Silent)
 }
@@ -252,7 +255,7 @@ fn evaluate_title_summary_guard(
         return Ok(HookOutput::Silent);
     }
 
-    if is_title_sensitive_tool(event) || is_read_only_exploration_event(event) {
+    if is_title_sensitive_tool(event) && !is_read_only_exploration_event(event) {
         return Ok(HookOutput::pre_tool_use_permission(
             "Agent Workspace identity is required before work starts",
             "Set both a short work name and current focus before exploration, implementation, or verification commands. This is required so Workspace can show which window is doing what.\n\n\
@@ -297,6 +300,97 @@ Failure path: run JSON operation `discuss.goal_failed` with `params.proposal:\"{
         ));
     }
     Ok(HookOutput::Silent)
+}
+
+fn evaluate_owner_guard(
+    event: &HookEvent,
+    context: &WorkflowContext,
+) -> Result<HookOutput, HookError> {
+    if context.bypass.is_some() {
+        return Ok(HookOutput::Silent);
+    }
+
+    match context.owner {
+        WorkflowOwner::Unknown => Ok(HookOutput::Silent),
+        WorkflowOwner::Issue(_) => Ok(HookOutput::Silent),
+        WorkflowOwner::Spec(number) if context.has_plan && context.has_tasks => {
+            let _ = number;
+            Ok(HookOutput::Silent)
+        }
+        WorkflowOwner::Spec(number) => {
+            if !requires_spec_plan_tasks(event) {
+                return Ok(HookOutput::Silent);
+            }
+            let detail = format!(
+                "SPEC #{number} is linked, but its cached `plan` and `tasks` sections are not both non-empty. Refresh the SPEC plan/tasks through `gwt-plan-spec` before changing implementation state."
+            );
+            Ok(HookOutput::pre_tool_use_permission(
+                "Owner SPEC needs plan and tasks before implementation",
+                detail,
+            ))
+        }
+    }
+}
+
+fn requires_spec_plan_tasks(event: &HookEvent) -> bool {
+    match event.tool_name.as_deref() {
+        Some("Edit" | "MultiEdit" | "Write" | "NotebookEdit" | "apply_patch") => true,
+        Some("Bash") => event
+            .command()
+            .is_some_and(command_requires_spec_plan_tasks),
+        _ => false,
+    }
+}
+
+fn command_requires_spec_plan_tasks(command: &str) -> bool {
+    if is_read_only_exploration_event(&HookEvent {
+        tool_name: Some("Bash".to_string()),
+        tool_input: Some(serde_json::json!({ "command": command })),
+        transcript_path: None,
+        cwd: None,
+    }) || command_segments_are_goal_safe(command)
+        || command_segments_are_transport_only(command)
+        || command_segments_are_verification_only(command)
+    {
+        return false;
+    }
+
+    let segments = super::segments::split_command_segments(command);
+    !segments.is_empty()
+}
+
+fn command_segments_are_transport_only(command: &str) -> bool {
+    let segments = super::segments::split_command_segments(command);
+    !segments.is_empty() && segments.iter().all(|segment| is_transport_segment(segment))
+}
+
+fn is_transport_segment(segment: &str) -> bool {
+    let tokens = segment_tokens(segment);
+    matches!(tokens.as_slice(), ["git", "push", ..])
+}
+
+fn command_segments_are_verification_only(command: &str) -> bool {
+    let segments = super::segments::split_command_segments(command);
+    !segments.is_empty()
+        && segments
+            .iter()
+            .all(|segment| is_verification_segment(segment))
+}
+
+fn is_verification_segment(segment: &str) -> bool {
+    let tokens = segment_tokens(segment);
+    matches!(
+        tokens.as_slice(),
+        ["cargo", "test", ..]
+            | ["cargo", "clippy", ..]
+            | ["cargo", "build", ..]
+            | ["cargo", "check", ..]
+            | ["bun", "test", ..]
+            | ["bunx", "markdownlint-cli", ..]
+            | ["npm", "test", ..]
+            | ["pnpm", "test", ..]
+            | ["yarn", "test", ..]
+    )
 }
 
 fn is_mutating_work_event(event: &HookEvent) -> bool {
@@ -1023,7 +1117,7 @@ Coverage requirements.
     }
 
     #[test]
-    fn title_summary_guard_blocks_read_only_exploration_before_identity_is_set() {
+    fn title_summary_guard_allows_read_only_exploration_before_identity_is_set() {
         let event = HookEvent {
             tool_name: Some("Bash".to_string()),
             tool_input: Some(serde_json::json!({
@@ -1033,14 +1127,14 @@ Coverage requirements.
             cwd: None,
         };
 
-        assert!(matches!(
+        assert_eq!(
             evaluate_title_summary_guard(&event, true).expect("guard output"),
-            HookOutput::PreToolUsePermission { .. }
-        ));
+            HookOutput::Silent
+        );
     }
 
     #[test]
-    fn title_summary_guard_blocks_read_only_git_config_before_identity_is_set() {
+    fn title_summary_guard_allows_read_only_git_config_before_identity_is_set() {
         let event = HookEvent {
             tool_name: Some("Bash".to_string()),
             tool_input: Some(serde_json::json!({
@@ -1050,14 +1144,14 @@ Coverage requirements.
             cwd: None,
         };
 
-        assert!(matches!(
+        assert_eq!(
             evaluate_title_summary_guard(&event, true).expect("guard output"),
-            HookOutput::PreToolUsePermission { .. }
-        ));
+            HookOutput::Silent
+        );
     }
 
     #[test]
-    fn title_summary_guard_blocks_read_only_git_remote_before_identity_is_set() {
+    fn title_summary_guard_allows_read_only_git_remote_before_identity_is_set() {
         let event = HookEvent {
             tool_name: Some("Bash".to_string()),
             tool_input: Some(serde_json::json!({
@@ -1067,14 +1161,14 @@ Coverage requirements.
             cwd: None,
         };
 
-        assert!(matches!(
+        assert_eq!(
             evaluate_title_summary_guard(&event, true).expect("guard output"),
-            HookOutput::PreToolUsePermission { .. }
-        ));
+            HookOutput::Silent
+        );
     }
 
     #[test]
-    fn title_summary_guard_blocks_read_only_git_branch_queries_before_identity_is_set() {
+    fn title_summary_guard_allows_read_only_git_branch_queries_before_identity_is_set() {
         for command in [
             "git branch --contains HEAD",
             "git branch --points-at HEAD",
@@ -1102,10 +1196,8 @@ Coverage requirements.
             };
 
             assert!(
-                matches!(
-                    evaluate_title_summary_guard(&event, true).expect("guard output"),
-                    HookOutput::PreToolUsePermission { .. }
-                ),
+                evaluate_title_summary_guard(&event, true).expect("guard output")
+                    == HookOutput::Silent,
                 "{command}"
             );
         }
@@ -1322,6 +1414,120 @@ Coverage requirements.
                 "{command}"
             );
         }
+    }
+
+    #[test]
+    fn owner_guard_allows_read_only_exploration_without_owner() {
+        let repo = tempfile::tempdir().expect("repo");
+        let event = HookEvent {
+            tool_name: Some("Bash".to_string()),
+            tool_input: Some(serde_json::json!({
+                "command": "rg -n WorkflowContext crates/gwt/src"
+            })),
+            transcript_path: None,
+            cwd: None,
+        };
+
+        assert_eq!(
+            evaluate_with_context(&event, repo.path(), &WorkflowContext::unknown())
+                .expect("guard output"),
+            HookOutput::Silent
+        );
+    }
+
+    #[test]
+    fn owner_guard_allows_mutating_tools_without_owner() {
+        let repo = tempfile::tempdir().expect("repo");
+        let event = HookEvent {
+            tool_name: Some("Edit".to_string()),
+            tool_input: Some(serde_json::json!({
+                "file_path": "crates/gwt/src/lib.rs"
+            })),
+            transcript_path: None,
+            cwd: None,
+        };
+
+        assert_eq!(
+            evaluate_with_context(&event, repo.path(), &WorkflowContext::unknown())
+                .expect("guard output"),
+            HookOutput::Silent
+        );
+    }
+
+    #[test]
+    fn owner_guard_requires_plan_and_tasks_for_spec_owner() {
+        let repo = tempfile::tempdir().expect("repo");
+        let event = HookEvent {
+            tool_name: Some("Write".to_string()),
+            tool_input: Some(serde_json::json!({
+                "file_path": "crates/gwt/src/lib.rs"
+            })),
+            transcript_path: None,
+            cwd: None,
+        };
+
+        let output = evaluate_with_context(
+            &event,
+            repo.path(),
+            &WorkflowContext::spec_issue(1935, true, false),
+        )
+        .expect("guard output");
+        let HookOutput::PreToolUsePermission { detail, .. } = output else {
+            panic!("expected SPEC plan/tasks guard");
+        };
+        assert!(detail.contains("SPEC #1935"), "{detail}");
+        assert!(detail.contains("`plan` and `tasks`"), "{detail}");
+
+        assert_eq!(
+            evaluate_with_context(
+                &event,
+                repo.path(),
+                &WorkflowContext::spec_issue(1935, true, true),
+            )
+            .expect("guard output"),
+            HookOutput::Silent
+        );
+
+        let transport = HookEvent {
+            tool_name: Some("Bash".to_string()),
+            tool_input: Some(serde_json::json!({
+                "command": "git push origin develop"
+            })),
+            transcript_path: None,
+            cwd: None,
+        };
+        assert_eq!(
+            evaluate_with_context(
+                &transport,
+                repo.path(),
+                &WorkflowContext::spec_issue(1935, false, true),
+            )
+            .expect("transport output"),
+            HookOutput::Silent
+        );
+    }
+
+    #[test]
+    fn owner_guard_honors_workflow_bypass() {
+        let repo = tempfile::tempdir().expect("repo");
+        let event = HookEvent {
+            tool_name: Some("Write".to_string()),
+            tool_input: Some(serde_json::json!({
+                "file_path": "CHANGELOG.md"
+            })),
+            transcript_path: None,
+            cwd: None,
+        };
+
+        assert_eq!(
+            evaluate_with_context(
+                &event,
+                repo.path(),
+                &WorkflowContext::with_bypass(WorkflowBypass::Chore),
+            )
+            .expect("guard output"),
+            HookOutput::Silent
+        );
     }
 
     #[test]
