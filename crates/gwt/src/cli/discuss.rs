@@ -1,8 +1,10 @@
 //! `discuss.*` JSON exit operations.
 //!
 //! Exit CLI for the `gwt-discussion` skill (SPEC-1935 FR-014p). The LLM
-//! invokes these operations to mutate `.gwt/discussion.md` so the
-//! `skill-discussion-stop-check` handler stops blocking Stop events.
+//! invokes these operations to mutate `.gwt/work/discussions.md` so the
+//! `skill-discussion-stop-check` handler stops blocking Stop events. Legacy
+//! `.gwt/discussion.md` is read only as a fallback and canonicalized on
+//! mutation.
 //!
 //! All operations are idempotent: calling `resolve` on an already-resolved
 //! proposal, or targeting a missing label, exits successfully with a
