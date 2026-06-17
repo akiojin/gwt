@@ -1482,7 +1482,7 @@ Status: active
         )
         .unwrap());
 
-        let updated = std::fs::read_to_string(&discussion_path).unwrap();
+        let updated = read_canonical_discussion(dir.path());
         assert!(updated.contains("- Goal State: pending"), "{updated}");
         assert_eq!(
             load_pending_goal(dir.path())
