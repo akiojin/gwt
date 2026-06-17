@@ -1,11 +1,11 @@
 //! `gwtd hook skill-discussion-stop-check` — Stop-block handler for the
 //! `gwt-discussion` skill (SPEC-1935 Phase 10, FR-014p).
 //!
-//! Reads `.gwt/discussion.md` in the current worktree and, when an
-//! `[active]` proposal with a non-empty `Next Question:` line is found,
-//! returns `HookOutput::StopBlock` so Claude Code / Codex continue the
-//! agent instead of stopping. Claude Code's built-in `stop_hook_active`
-//! flag (FR-014o) short-circuits this handler to prevent infinite loops.
+//! Reads `.gwt/work/discussions.md` in the current worktree, falling back to
+//! legacy `.gwt/discussion.md`, and returns `HookOutput::StopBlock` when an
+//! active proposal still has a next question, evidence blocker, or depth
+//! blocker. Claude Code's built-in `stop_hook_active` flag (FR-014o)
+//! short-circuits this handler to prevent infinite loops.
 //!
 //! Fail-open policy (FR-014u): any I/O or parse failure resolves to
 //! `HookOutput::Silent` so a corrupted state file never accidentally
@@ -126,6 +126,12 @@ mod tests {
         fs::write(path, body).unwrap();
     }
 
+    fn write_canonical_discussion(dir: &Path, body: &str) {
+        let path = gwt_core::paths::gwt_repo_local_discussions_path(dir);
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(path, body).unwrap();
+    }
+
     fn assert_stop_block(output: HookOutput, contains: &[&str]) {
         match output {
             HookOutput::StopBlock { reason } => {
@@ -151,6 +157,27 @@ mod tests {
                 "Hook-driven resume",
                 "Should SessionStart or UserPromptSubmit surface the resume proposal?",
                 "discuss.resolve",
+                "Proposal A",
+            ],
+        );
+    }
+
+    #[test]
+    fn blocks_when_active_proposal_is_in_canonical_discussions_md() {
+        let dir = tempfile::tempdir().unwrap();
+        write_canonical_discussion(
+            dir.path(),
+            &format!(
+                "# Discussions\n\n## 2026-06-17 — Managed Hooks\n\nStatus: active\n\n{}",
+                ACTIVE_WITH_QUESTION
+            ),
+        );
+
+        assert_stop_block(
+            handle_with_input(dir.path(), "{}"),
+            &[
+                "Hook-driven resume",
+                "Should SessionStart or UserPromptSubmit surface the resume proposal?",
                 "Proposal A",
             ],
         );

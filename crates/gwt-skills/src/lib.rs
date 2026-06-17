@@ -821,8 +821,9 @@ mod tests {
             );
             assert!(
                 discussion_skill.contains("### Discussion TODO")
-                    && discussion_skill.contains(".gwt/discussion.md"),
-                "expected discussion skill to define Discussion TODO scratch state in {relative}"
+                    && discussion_skill.contains(".gwt/work/discussions.md")
+                    && discussion_skill.contains("legacy `.gwt/discussion.md`"),
+                "expected discussion skill to define canonical Discussion TODO state in {relative}"
             );
             assert!(
                 discussion_skill.contains("## Discussion Depth Gate")
@@ -958,7 +959,8 @@ mod tests {
                 "expected discussion command to describe the Plan Mode and depth-gate contract in {relative}"
             );
             assert!(
-                discussion_command.contains(".gwt/discussion.md")
+                discussion_command.contains(".gwt/work/discussions.md")
+                    && discussion_command.contains("legacy `.gwt/discussion.md`")
                     && discussion_command.contains("Resume discussion")
                     && discussion_command.contains("Park proposal")
                     && discussion_command.contains("Dismiss for now"),
