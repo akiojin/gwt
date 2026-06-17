@@ -108,26 +108,43 @@ impl SlackProvider {
         root: &gwt_core::board_remote_roots::RootMapping,
     ) -> Result<Vec<BoardEntry>> {
         let limit = HISTORY_LIMIT.to_string();
-        let response = self
-            .http
-            .get(
-                &format!("{SLACK_API}/conversations.replies"),
-                &self.token,
-                &[
-                    ("channel", channel),
-                    ("ts", &root.root_id),
-                    ("limit", &limit),
-                ],
-            )
-            .map_err(GwtError::Other)?;
-        check_status(&response, "conversations.replies")?;
-        let parsed: SlackHistory = serde_json::from_str(&response.body)
-            .map_err(|err| GwtError::Other(format!("slack replies parse: {err}")))?;
-        if !parsed.ok {
-            return Err(GwtError::Other(format!(
-                "slack conversations.replies error: {}",
-                parsed.error.unwrap_or_else(|| "unknown".to_string())
-            )));
+        let mut cursor: Option<String> = None;
+        let mut messages = Vec::new();
+        loop {
+            let mut query = vec![
+                ("channel", channel),
+                ("ts", root.root_id.as_str()),
+                ("limit", limit.as_str()),
+            ];
+            if let Some(cursor) = cursor.as_deref() {
+                query.push(("cursor", cursor));
+            }
+            let response = self
+                .http
+                .get(
+                    &format!("{SLACK_API}/conversations.replies"),
+                    &self.token,
+                    &query,
+                )
+                .map_err(GwtError::Other)?;
+            check_status(&response, "conversations.replies")?;
+            let parsed: SlackHistory = serde_json::from_str(&response.body)
+                .map_err(|err| GwtError::Other(format!("slack replies parse: {err}")))?;
+            if !parsed.ok {
+                return Err(GwtError::Other(format!(
+                    "slack conversations.replies error: {}",
+                    parsed.error.unwrap_or_else(|| "unknown".to_string())
+                )));
+            }
+            messages.extend(parsed.messages);
+            cursor = parsed
+                .response_metadata
+                .and_then(|metadata| metadata.next_cursor)
+                .map(|cursor| cursor.trim().to_string())
+                .filter(|cursor| !cursor.is_empty());
+            if cursor.is_none() {
+                break;
+            }
         }
 
         let workspace = if root.key == gwt_core::board_remote_roots::GENERAL_THREAD_KEY {
@@ -135,8 +152,7 @@ impl SlackProvider {
         } else {
             root.key.trim()
         };
-        let mut entries: Vec<BoardEntry> = parsed
-            .messages
+        let mut entries: Vec<BoardEntry> = messages
             .iter()
             .filter(|message| message.ts != root.root_id)
             .map(|message| {
@@ -184,15 +200,16 @@ impl SlackProvider {
         Ok(entries)
     }
 
-    fn history_channels(&self, worktree_root: &Path) -> Vec<String> {
+    fn history_channels(&self) -> Vec<String> {
         let mut channels = BTreeSet::new();
         let default_channel = self.default_channel.trim();
         if !default_channel.is_empty() {
             channels.insert(default_channel.to_string());
         }
-        for root in gwt_core::board_remote_roots::load_root_mappings(worktree_root).values() {
-            if root.provider == "slack" && !root.channel.trim().is_empty() {
-                channels.insert(root.channel.clone());
+        for channel in self.channel_map.values() {
+            let channel = channel.trim();
+            if !channel.is_empty() {
+                channels.insert(channel.to_string());
             }
         }
         channels.into_iter().collect()
@@ -205,7 +222,7 @@ impl SlackProvider {
             return Ok(cached);
         }
         let mut entries = Vec::new();
-        for channel in self.history_channels(worktree_root) {
+        for channel in self.history_channels() {
             entries.extend(self.fetch_history(worktree_root, &channel)?);
         }
         entries.sort_by_key(|entry| entry.created_at);
@@ -426,6 +443,14 @@ struct SlackHistory {
     error: Option<String>,
     #[serde(default)]
     messages: Vec<SlackHistoryMessage>,
+    #[serde(default)]
+    response_metadata: Option<SlackResponseMetadata>,
+}
+
+#[derive(Deserialize)]
+struct SlackResponseMetadata {
+    #[serde(default)]
+    next_cursor: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -597,6 +622,7 @@ mod tests {
         history_body: String,
         history_status: u16,
         replies_body: String,
+        replies_pages: Mutex<Vec<String>>,
         replies_status: u16,
         post_body: String,
         post_status: u16,
@@ -609,6 +635,7 @@ mod tests {
                 history_body: String::new(),
                 history_status: 0,
                 replies_body: r#"{"ok":true,"messages":[]}"#.to_string(),
+                replies_pages: Mutex::new(Vec::new()),
                 replies_status: 0,
                 post_body: String::new(),
                 post_status: 0,
@@ -632,13 +659,19 @@ mod tests {
                     .collect(),
             ));
             if url.contains("conversations.replies") {
+                let body = self
+                    .replies_pages
+                    .lock()
+                    .unwrap()
+                    .pop()
+                    .unwrap_or_else(|| self.replies_body.clone());
                 return Ok(HttpResponse {
                     status: if self.replies_status == 0 {
                         200
                     } else {
                         self.replies_status
                     },
-                    body: self.replies_body.clone(),
+                    body,
                     retry_after: if self.replies_status == 429 {
                         Some(30)
                     } else {
@@ -928,6 +961,96 @@ mod tests {
                 && query
                     .iter()
                     .any(|(key, value)| key == "ts" && value == "1700000100.000100")
+        }));
+    }
+
+    #[test]
+    fn load_snapshot_ignores_root_mappings_for_unconfigured_channels() {
+        let root = root();
+        append_slack_root(
+            &root,
+            gwt_core::board_remote_roots::GENERAL_THREAD_KEY,
+            "CH-DEFAULT",
+            "1700000000.000100",
+        );
+        append_slack_root(&root, "ws-stale", "CH-STALE", "9999999999.000100");
+        let calls = std::sync::Arc::new(Mutex::new(Vec::new()));
+        let mock = MockHttp {
+            history_body: r#"{"ok":true,"messages":[]}"#.to_string(),
+            replies_body: r#"{"ok":true,"messages":[
+                {"ts":"1700000000.000100","text":"General root","username":"gwt","thread_ts":"1700000000.000100"},
+                {"ts":"1700000001.000200","text":"current channel progress","username":"Akio","thread_ts":"1700000000.000100"}
+            ]}"#
+            .to_string(),
+            calls: calls.clone(),
+            ..Default::default()
+        };
+
+        let snapshot = provider(mock).load_snapshot(&root).unwrap();
+        assert_eq!(snapshot.board.entries.len(), 1);
+        assert_eq!(snapshot.board.entries[0].body, "current channel progress");
+
+        let calls = calls.lock().unwrap().clone();
+        assert!(
+            calls.iter().all(|(_, query)| {
+                query
+                    .iter()
+                    .all(|(key, value)| key != "channel" || value != "CH-STALE")
+            }),
+            "stale root channels must not be read: {calls:?}"
+        );
+        assert!(
+            calls.iter().all(|(_, query)| {
+                query
+                    .iter()
+                    .all(|(key, value)| key != "ts" || value != "9999999999.000100")
+            }),
+            "stale root replies must not be read: {calls:?}"
+        );
+    }
+
+    #[test]
+    fn load_snapshot_reads_all_slack_reply_pages() {
+        let root = root();
+        append_slack_root(
+            &root,
+            gwt_core::board_remote_roots::GENERAL_THREAD_KEY,
+            "CH-DEFAULT",
+            "root-ts",
+        );
+        let calls = std::sync::Arc::new(Mutex::new(Vec::new()));
+        let mock = MockHttp {
+            history_body: r#"{"ok":true,"messages":[]}"#.to_string(),
+            replies_pages: Mutex::new(vec![
+                r#"{"ok":true,"messages":[
+                    {"ts":"200.0002","text":"second","username":"U","thread_ts":"root-ts"}
+                ]}"#
+                .to_string(),
+                r#"{"ok":true,"messages":[
+                    {"ts":"root-ts","text":"root","username":"gwt","thread_ts":"root-ts"},
+                    {"ts":"100.0001","text":"first","username":"U","thread_ts":"root-ts"}
+                ],"response_metadata":{"next_cursor":"cursor-2"}}"#
+                    .to_string(),
+            ]),
+            calls: calls.clone(),
+            ..Default::default()
+        };
+
+        let snapshot = provider(mock).load_snapshot(&root).unwrap();
+        let bodies: Vec<_> = snapshot
+            .board
+            .entries
+            .iter()
+            .map(|entry| entry.body.as_str())
+            .collect();
+        assert_eq!(bodies, vec!["first", "second"]);
+
+        let calls = calls.lock().unwrap().clone();
+        assert!(calls.iter().any(|(url, query)| {
+            url.contains("conversations.replies")
+                && query
+                    .iter()
+                    .any(|(key, value)| key == "cursor" && value == "cursor-2")
         }));
     }
 
