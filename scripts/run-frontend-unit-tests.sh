@@ -8,6 +8,7 @@ bash scripts/run-node-tests-with-linkedom.sh \
   crates/gwt/web/__tests__/hotkey.test.mjs \
   crates/gwt/web/__tests__/index-settings-panel.test.mjs \
   crates/gwt/web/__tests__/index-status-controller.test.mjs \
+  crates/gwt/web/__tests__/index-works-scope.test.mjs \
   crates/gwt/web/__tests__/operator-chrome-structure.test.mjs \
   crates/gwt/web/__tests__/operator-shell-runtime.test.mjs \
   crates/gwt/web/__tests__/operator-rail.test.mjs \

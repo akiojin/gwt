@@ -451,10 +451,13 @@ impl AppRuntime {
         query: &str,
         request_id: u64,
     ) -> Vec<OutboundEvent> {
+        // The Launch Wizard is a modal bound to the client's active project
+        // tab (not a registered window), so resolve the project from the active
+        // tab the same way wizard actions do.
         let project_root = self
-            .window_lookup
-            .get(id)
-            .and_then(|address| self.tab(&address.tab_id))
+            .active_tab_id
+            .clone()
+            .and_then(|tab_id| self.tab(&tab_id))
             .map(|tab| tab.project_root.clone());
         let Some(project_root) = project_root else {
             return vec![OutboundEvent::reply(
