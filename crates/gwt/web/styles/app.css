@@ -963,6 +963,7 @@ body {
 .window-tab {
   display: inline-flex;
   align-items: center;
+  position: relative;
   max-width: 180px;
   height: 24px;
   padding: 0 9px;
@@ -1082,6 +1083,26 @@ body {
   border-color: var(--color-border-strong);
   background: var(--color-surface-elevated);
   color: var(--color-text);
+}
+
+/* Issue #3104 — the active tab carries a theme-aware --color-state-active
+   underline. A surface vs surface-elevated background delta alone collapses to
+   near-white in light mode (and elevated is the darker step, so the active tab
+   even reads as recessed), making the active tab in a tabbed agent-window group
+   indistinguishable. Rendered as an ::after bar — not box-shadow (which
+   .window-tab[data-agent-state] clears) and not a border (which would reflow
+   and collide with the blocked border-color) — so it coexists with the
+   agent-color left rim, the state dot, and the blocked border. */
+.window-tab.active::after {
+  content: "";
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  height: 2px;
+  border-radius: var(--radius-pill);
+  background: var(--color-state-active);
+  pointer-events: none;
 }
 
 .window-tab:active {
