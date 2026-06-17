@@ -54,6 +54,7 @@ pub fn parse(args: &[String]) -> Result<SearchCommand, CliParseError> {
             "--memory" => push_scope(&mut scopes, IndexSearchScope::Memory),
             "--board" => push_scope(&mut scopes, IndexSearchScope::Board),
             "--discussions" => push_scope(&mut scopes, IndexSearchScope::Discussions),
+            "--works" => push_scope(&mut scopes, IndexSearchScope::Works),
             "--json" => json = true,
             "--match-mode" => {
                 i += 1;

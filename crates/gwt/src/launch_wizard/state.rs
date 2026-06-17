@@ -70,6 +70,7 @@ impl LaunchWizardState {
             skip_permissions: false,
             codex_fast_mode: false,
             branch_name: String::new(),
+            initial_prompt: String::new(),
             completion: None,
             error: None,
             is_hydrating,
@@ -394,6 +395,9 @@ impl LaunchWizardState {
             }
             LaunchWizardAction::SetBranchName { value } => {
                 self.branch_name = value;
+            }
+            LaunchWizardAction::SetInitialPrompt { value } => {
+                self.initial_prompt = value;
             }
             LaunchWizardAction::SetLaunchTarget { target } => {
                 self.set_launch_target(target);
@@ -1820,6 +1824,38 @@ mod tests {
         assert_eq!(state.step, LaunchWizardStep::BranchAction);
         assert_eq!(state.branch_name, "feature/gui");
         assert!(!state.is_new_branch);
+    }
+
+    #[test]
+    fn set_initial_prompt_records_intake_text() {
+        // SPEC-2359 US-80: the optional Start Work intake prompt is captured on
+        // the wizard state so it can drive the duplicate-work advisory.
+        let mut state = LaunchWizardState::open_with(
+            context(branch("feature/gui"), "feature/gui"),
+            sample_agent_options(),
+            Vec::new(),
+        );
+        assert_eq!(state.initial_prompt, "");
+        state.apply(LaunchWizardAction::SetInitialPrompt {
+            value: "fix login auth bug".to_string(),
+        });
+        assert_eq!(state.initial_prompt, "fix login auth bug");
+    }
+
+    #[test]
+    fn initial_prompt_is_skippable_and_does_not_block_completion() {
+        // SPEC-2359 US-81: leaving the prompt blank must not affect the rest of
+        // the launch flow (backward compatible).
+        let mut state = LaunchWizardState::open_with(
+            context(branch("feature/gui"), "feature/gui"),
+            sample_agent_options(),
+            Vec::new(),
+        );
+        state.apply(LaunchWizardAction::SetInitialPrompt {
+            value: String::new(),
+        });
+        assert_eq!(state.initial_prompt, "");
+        assert_eq!(state.branch_name, "feature/gui");
     }
 
     #[test]

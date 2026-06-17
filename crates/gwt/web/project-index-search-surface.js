@@ -67,6 +67,9 @@ export function createProjectIndexSearchSurface({
         { id: "specs", label: "SPECs" },
         { id: "board", label: "Board" },
         { id: "discussions", label: "Discussions" },
+        // SPEC-2359 US-80: past Work (incl. completed/discarded) is searchable
+        // so similar prior work can be found before starting duplicate work.
+        { id: "works", label: "Work" },
         { id: "files", label: "Files" },
         { id: "files-docs", label: "Docs" },
         { id: "memory", label: "Memory" },
@@ -76,6 +79,7 @@ export function createProjectIndexSearchSurface({
         "specs",
         "board",
         "discussions",
+        "works",
         "memory",
       ]);
       function ensureIndexSearchState(windowId) {
