@@ -57,7 +57,7 @@ fn handle_session_start(
         board_reminder::handle_with_input(event, input)
     })?;
     let pending_goal = run_value(event, "discussion-goal-start", || {
-        load_pending_goal(worktree_root).ok().flatten()
+        load_pending_goal_for_hook_worktree(worktree_root)
     });
     Ok(append_pending_discussion_goal_context(
         output,
@@ -90,7 +90,7 @@ fn handle_user_prompt_submit(
         board_reminder::handle_with_input(event, input)
     })?;
     let pending_goal = run_value(event, "discussion-goal-start", || {
-        load_pending_goal(worktree_root).ok().flatten()
+        load_pending_goal_for_hook_worktree(worktree_root)
     });
     Ok(append_pending_discussion_goal_context(
         output,
@@ -192,6 +192,11 @@ fn run_value<T>(event: &str, handler: &str, operation: impl FnOnce() -> T) -> T 
     value
 }
 
+fn load_pending_goal_for_hook_worktree(worktree_root: &Path) -> Option<PendingDiscussionGoal> {
+    let resolved_worktree_root = gwt_core::paths::resolve_current_worktree_root(worktree_root);
+    load_pending_goal(&resolved_worktree_root).ok().flatten()
+}
+
 fn append_pending_discussion_goal_context(
     output: HookOutput,
     event: IntentBoundaryEvent,
@@ -252,6 +257,16 @@ mod tests {
         .unwrap();
     }
 
+    fn init_git_repo(worktree: &Path) {
+        let status = gwt_core::process::hidden_command("git")
+            .arg("init")
+            .arg("-q")
+            .current_dir(worktree)
+            .status()
+            .expect("git init");
+        assert!(status.success(), "git init failed");
+    }
+
     #[test]
     fn pending_discussion_goal_context_is_appended_to_user_prompt_submit_output() {
         let output = append_pending_discussion_goal_context(
@@ -309,6 +324,35 @@ mod tests {
         );
         assert!(text.contains("create_goal"), "{text}");
         assert!(text.contains("discuss.goal_started"), "{text}");
+    }
+
+    #[test]
+    fn user_prompt_submit_appends_legacy_pending_goal_when_started_from_subdirectory() {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let worktree = tempfile::tempdir().unwrap();
+        init_git_repo(worktree.path());
+        let subdir = worktree.path().join("nested/agent");
+        std::fs::create_dir_all(&subdir).unwrap();
+        let _home = ScopedEnvVar::set("HOME", worktree.path());
+        let _userprofile = ScopedEnvVar::set("USERPROFILE", worktree.path());
+        let _session_id = ScopedEnvVar::unset(gwt_agent::GWT_SESSION_ID_ENV);
+        let _runtime_path = ScopedEnvVar::unset(gwt_agent::GWT_SESSION_RUNTIME_PATH_ENV);
+        let _forward_url = ScopedEnvVar::unset(gwt_agent::GWT_HOOK_FORWARD_URL_ENV);
+        let _forward_token = ScopedEnvVar::unset(gwt_agent::GWT_HOOK_FORWARD_TOKEN_ENV);
+        let _codex_thread_id = ScopedEnvVar::unset("CODEX_THREAD_ID");
+        write_pending_goal(worktree.path());
+
+        let output =
+            handle_with_input("UserPromptSubmit", "{}", &subdir, None).expect("hook output");
+
+        let HookOutput::HookSpecificAdditionalContext { event, text } = output else {
+            panic!("expected pending goal context");
+        };
+        assert_eq!(event, IntentBoundaryEvent::UserPromptSubmit);
+        assert!(text.contains("pending gwt-discussion Goal Start"), "{text}");
+        assert!(text.contains("Proposal A - Goal handoff"), "{text}");
     }
 
     #[test]
