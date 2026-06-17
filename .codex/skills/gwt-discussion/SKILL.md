@@ -43,7 +43,7 @@ Keep these artifacts throughout the discussion:
 
 - `Intake Memo` in conversation context for background, scope, and constraints
 - `Discussion TODO` in conversation context and mirrored to
-  `.gwt/discussion.md`
+  `.gwt/work/discussions.md`; legacy `.gwt/discussion.md` is read fallback only
 - `Action Delta` for changes that are ready to land in `spec`, `plan`, `issue`,
   or build context
 - `Action Bundle` for the concrete follow-up actions that should happen next
@@ -56,7 +56,7 @@ Evidence is part of the discussion state, not a later implementation detail.
 Do not mark a proposal `[chosen]` until its evidence fields prove the outcome
 without relying on speculation, guesses, or vibes.
 
-Mirror structure for `.gwt/discussion.md`:
+Mirror structure inside an active entry in `.gwt/work/discussions.md`:
 
 ```markdown
 ## Discussion TODO
@@ -101,13 +101,15 @@ high-impact unknown behind it has been resolved.
 ## Exit CLI (Stop-block contract)
 
 SPEC-1935 FR-014p routes Stop events through `skill-discussion-stop-check`,
-which inspects `.gwt/discussion.md` and blocks Stop (with
-`{"decision":"block","reason":"..."}`) while any proposal is still `[active]`
-with a non-empty `Next Question:`, unresolved `Exit Blockers:`, incomplete
-proof fields, incomplete depth fields, or an `Evidence Gate:` that is not
-`complete`. Depth fields are incomplete when `Question Ledger:` is empty,
-`Depth Gate:` is missing/open, or `Depth Gate: deferred(<reason>)` has no
-reason. To let Stop succeed, mark each proposal explicitly using the exit CLI:
+which inspects `.gwt/work/discussions.md` and falls back to legacy
+`.gwt/discussion.md`, then blocks Stop (with
+`{"decision":"block","reason":"..."}`) while any proposal is still
+`[active]` with a non-empty `Next Question:`, unresolved `Exit Blockers:`,
+incomplete proof fields, incomplete depth fields, or an `Evidence Gate:` that
+is not `complete`. Depth fields are incomplete when `Question Ledger:` is
+empty, `Depth Gate:` is missing/open, or `Depth Gate: deferred(<reason>)` has
+no reason. To let Stop succeed, mark each proposal explicitly using the exit
+CLI:
 
 - `discuss.resolve` JSON operation — active → chosen only after
   `Evidence Gate: complete`
@@ -124,7 +126,8 @@ at most one forced continuation per Stop cycle.
 ## Resume hooks
 
 Managed hook settings in `.claude/settings.local.json` and `.codex/hooks.json`
-may surface unfinished discussion candidates from `.gwt/discussion.md`.
+may surface unfinished discussion candidates from `.gwt/work/discussions.md`
+with legacy `.gwt/discussion.md` fallback.
 
 Use this contract:
 
@@ -135,8 +138,8 @@ Use this contract:
   fallback from `UserPromptSubmit` and surface it after the next `Stop`.
 - Offer exactly `Resume discussion`, `Park proposal`, and `Dismiss for now`.
 - `Resume discussion` continues `gwt-discussion` before other work proceeds.
-- `Park proposal` changes the matching proposal in `.gwt/discussion.md` from
-  `[active]` to `[parked]`.
+- `Park proposal` changes the matching proposal in `.gwt/work/discussions.md`
+  from `[active]` to `[parked]`.
 - `Dismiss for now` suppresses the prompt only for the current agent session. A
   later session may surface it again.
 - `PreToolUse` may also dispatch `workflow-policy` before mutating tool calls.
@@ -172,7 +175,7 @@ exception path. Keep the same one-question-at-a-time discipline.
    in the `Intake Memo`.
 5. If a clear owner exists, present it before going further.
 6. If the clear owner is an existing SPEC, run the Board active-claim preflight
-   before changing `.gwt/discussion.md` or any SPEC/plan artifacts:
+   before changing `.gwt/work/discussions.md` or any SPEC/plan artifacts:
    - Read the current Board with JSON operation `board.show`.
    - Look for active `claim` entries from another session that mention the same
      owner (`#<N>` or `SPEC-<N>`) or the same phase/topic under discussion.
@@ -431,7 +434,7 @@ autonomously after user approval, arm a runtime goal from the bundle
 2. Before the final discussion response stops, write the condition to a temp
    file and run JSON operation `discuss.goal_pending`
    after resolving the chosen proposal. This records `Goal State: pending`
-   in `.gwt/discussion.md` so the next `UserPromptSubmit` hook can remind
+   in `.gwt/work/discussions.md` so the next `UserPromptSubmit` hook can remind
    the agent even though the approval arrives in a later turn.
 3. In the next turn, if the user approves the Action Bundle and asks the
    follow-up work to continue autonomously, start the goal per runtime:

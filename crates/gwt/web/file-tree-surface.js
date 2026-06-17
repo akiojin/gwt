@@ -248,6 +248,7 @@ export function createFileTreeSurface({
               state.selectedWorktreeLabel = entry.label;
               closeWorktreePicker(windowId);
               selectFileTreeWorktree(windowId, entry.id);
+              renderWorktreeTrigger(windowId);
               // Reset tree + viewer state when switching worktree.
               state.loaded.clear();
               state.expanded.clear();
@@ -263,7 +264,6 @@ export function createFileTreeSurface({
                 hexBytes: "",
                 error: { kind: "", message: "", size: null, limit: null },
               };
-              requestFileTree(windowId, "");
               renderFileTreeViewer(windowId);
               renderFileTree(windowId);
             });
@@ -955,6 +955,17 @@ export function createFileTreeSurface({
         split.dataset.leftRatio = String(clamped);
       }
 
+      function renderWorktreeTrigger(windowId) {
+        const element = windowMap.get(windowId);
+        if (!element) return;
+        const trigger = element.querySelector(".file-tree-worktree-trigger");
+        if (!trigger) return;
+        const state = ensureFileTreeState(windowId);
+        trigger.textContent = state.selectedWorktreeId
+          ? (state.selectedWorktreeLabel || "Worktree")
+          : "Select worktree…";
+      }
+
       function renderFileTree(windowId) {
         const element = windowMap.get(windowId);
         if (!element) {
@@ -1265,6 +1276,12 @@ export function createFileTreeSurface({
               event.id,
             );
             state.selectedWorktreeId = event.worktree_id || "";
+            const selectedEntry = state.picker.entries.find(
+              (entry) => entry.id === state.selectedWorktreeId,
+            );
+            state.selectedWorktreeLabel =
+              (selectedEntry && selectedEntry.label) || state.selectedWorktreeLabel;
+            renderWorktreeTrigger(event.id);
             // After selection, refresh tree contents.
             state.loaded.clear();
             state.expanded.clear();
@@ -1278,6 +1295,7 @@ export function createFileTreeSurface({
             const state = ensureFileTreeState(
               event.id,
             );
+            state.picker.open = true;
             state.picker.loading = false;
             state.picker.error = event.message || "Unable to enumerate worktrees";
             renderWorktreePicker(event.id);
