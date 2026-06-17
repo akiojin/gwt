@@ -7038,4 +7038,11 @@ Future Action: release 前に node scripts/check-coverage-threshold.mjs target/c
 Type: lesson
 Context: discussion: 「1ヶ月前の作業を知らずに似た Workspace を作る」懸念。調査で現状の重複検出は incomplete work と同一ブランチ（canonical_work_id）のみ。is_incomplete() フィルタで completed/discarded は照合から除外され、Work/Workspace/branch 自体は ChromaDB semantic 索引の対象外（V2_SCOPES に works が無い）。token 一致は日本語↔英語の言い換えを拾えない。設計制約 memory 2026-05-12『coordination must not become a global tool lock』により解は非ブロック advisory。
 Learning: 重複作業の事前検出は (1) Start Work に初回プロンプト記入ステップ（常に skippable）を追加し意図を branch 作成前に捕捉、(2) 過去 Work（completed/discarded 含む）を新 ChromaDB scope works として e5 索引化、(3) 既存索引（Issue 全状態/SPEC/PR/Board）+ works に意味検索して advisory 提示（distance 閾値で strong match のみ、非ブロック）、(4) skip 時は起動後の最初の workspace.update intent 設定で advisory 再走＋索引化、で解く。owner は SPEC-2359 US-80/US-81（UI/advisory）+ SPEC-1939 cross-ref（works scope の索引/watcher/query/寿命）。
-Future Action: workspace の重複検出・Start Work 起動 UX・semantic 索引 scope を触る前に SPEC-2359 US-80/US-81 と SPEC-1939 の 2026-06-17 works scope cross-ref を確認する。advisory は決して global tool lock にしない。索引寿命は worktree 寿命から切り離す。
+Future Action: workspace の重複検出・Start Work 起動 UX・semantic 索引 scope を触る前に SPEC-2359 US-80/US-81 と SPEC-1939 の 2026-06-17 works scope cross-ref を確認する。advisory は決して global tool lock にしない。索引寿命は worktree 寿命から切り離す。works scope は必ず index health/auto-repair（ProjectIndexScopes / collect_unhealthy_rebuild_targets）に配線し、watcher が自動ビルドするようにする（auto_build=false の advisory が空にならないため）。
+
+## 2026-06-17 — Remote Board read-back must expand root thread replies
+
+Type: postmortem
+Context: SPEC #2963 Slack/Teams remote Board providers were posting entries as Workspace/General thread replies, but load_snapshot read only channel top-level history/messages. Existing tests placed reply-shaped fixtures directly in history/list responses, hiding the real API split.
+Learning: Slack conversations.history and Microsoft Graph channel messages do not provide the thread reply stream as Board entries. Root summary cards and arbitrary flat channel messages must not be mapped into BoardEntry; provider tests should seed root mappings and assert calls to conversations.replies or /messages/{root}/replies.
+Future Action: When changing remote Board providers, write RED tests against provider-specific reply endpoints with a seeded board_remote_roots mapping, include mapped-channel roots distinct from the default channel, and verify board.show reads replies back before claiming completion.
