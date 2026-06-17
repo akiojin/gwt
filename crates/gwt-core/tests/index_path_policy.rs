@@ -21,6 +21,28 @@ fn index_path_policy_honors_nested_gitignore() {
 }
 
 #[test]
+fn index_path_policy_scopes_nested_gitignore_to_own_directory() {
+    let dir = tempdir().expect("tempdir");
+    let husky = dir.path().join(".husky/_");
+    fs::create_dir_all(&husky).expect("create husky dir");
+    fs::write(husky.join(".gitignore"), "*\n").expect("write nested wildcard ignore");
+    fs::write(husky.join("shim.sh"), "ignored").expect("write nested ignored file");
+    fs::write(dir.path().join("README.md"), "visible").expect("write root file");
+
+    let policy = default_index_path_policy();
+    let matcher = build_project_ignore_matcher(dir.path());
+
+    assert!(
+        policy.is_indexable_path(&matcher, dir.path(), &dir.path().join("README.md")),
+        "nested wildcard .gitignore must not hide root files"
+    );
+    assert!(
+        !policy.is_indexable_path(&matcher, dir.path(), &husky.join("shim.sh")),
+        "nested wildcard .gitignore should still hide files in its own directory"
+    );
+}
+
+#[test]
 fn index_path_policy_honors_git_info_exclude() {
     let dir = tempdir().expect("tempdir");
     Command::new("git")
