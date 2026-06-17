@@ -176,7 +176,10 @@ test.describe("Project tabs", () => {
       timeout: 10_000,
     });
     await expect(page.locator("#app-version")).toBeVisible();
-    await expect(page.locator("#open-project-button")).toBeVisible();
+    // SPEC-2013 Phase 8 (518f7a10b) — the Open Project split-button was retired
+    // and project intake/switching consolidated into the `Projects ▾` switcher.
+    // The project action that must stay reachable is now #project-switcher-button.
+    await expect(page.locator("#project-switcher-button")).toBeVisible();
 
     const layout = await page.evaluate(() => {
       const rectOf = (selector: string) => {
@@ -196,7 +199,7 @@ test.describe("Project tabs", () => {
         viewportWidth: window.innerWidth,
         tabs: rectOf("#project-tabs"),
         actions: rectOf(".project-actions"),
-        openProject: rectOf("#open-project-button"),
+        projectSwitcher: rectOf("#project-switcher-button"),
         version: rectOf("#app-version"),
         tabsClientWidth: tabs?.clientWidth ?? 0,
         tabsScrollWidth: tabs?.scrollWidth ?? 0,
@@ -204,7 +207,7 @@ test.describe("Project tabs", () => {
     });
 
     expect(layout.actions?.right).toBeLessThanOrEqual(layout.viewportWidth);
-    expect(layout.openProject?.right).toBeLessThanOrEqual(layout.viewportWidth);
+    expect(layout.projectSwitcher?.right).toBeLessThanOrEqual(layout.viewportWidth);
     expect(layout.version?.right).toBeLessThanOrEqual(layout.viewportWidth);
     expect(layout.tabs?.right).toBeLessThanOrEqual(layout.actions?.x ?? 0);
     expect(layout.tabsScrollWidth).toBeGreaterThan(layout.tabsClientWidth);

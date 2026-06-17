@@ -32,7 +32,11 @@ INDEX_PATH_POLICY_FILE = "index_path_policy.json"
 FALLBACK_INDEX_PATH_POLICY = {
     "schema_version": 1,
     "max_file_size": 1_048_576,
-    "allow_paths": [".gwt/work/memory.md", ".gwt/work/discussions.md"],
+    "allow_paths": [
+        ".gwt/work/memory.md",
+        ".gwt/work/discussions.md",
+        ".gwt/work/events.jsonl",
+    ],
     "deny_root_prefixes": [
         ".git",
         ".claude",
@@ -1174,7 +1178,7 @@ MANIFEST_FILENAME = "manifest.json"
 LOCK_FILENAME = ".lock"
 META_FILENAME = "meta.json"
 
-V2_SCOPES = ("issues", "specs", "memory", "discussions", "board", "files", "files-docs")
+V2_SCOPES = ("issues", "specs", "memory", "discussions", "board", "works", "files", "files-docs")
 WORKTREE_SCOPED = {"files", "files-docs"}
 
 V2_FILES_CODE_COLLECTION = "files_code"
@@ -1184,6 +1188,7 @@ V2_ISSUES_COLLECTION = "issues"
 V2_MEMORY_COLLECTION = "memory"
 V2_DISCUSSIONS_COLLECTION = "discussions"
 V2_BOARD_COLLECTION = "board"
+V2_WORKS_COLLECTION = "works"
 
 
 def gwt_index_root() -> Path:
@@ -1207,7 +1212,7 @@ def resolve_db_path(
     root = (db_root or gwt_index_root()).resolve()
     repo_dir = root / repo_hash
 
-    if scope in {"issues", "specs", "memory", "discussions", "board"}:
+    if scope in {"issues", "specs", "memory", "discussions", "board", "works"}:
         return repo_dir / scope
 
     return repo_dir / "worktrees" / worktree_hash / scope
@@ -1467,6 +1472,7 @@ def _manifest_path(worktree_dir: Path, scope: str) -> Path:
         "memory",
         "discussions",
         "board",
+        "works",
     ):
         return worktree_dir.parent / f"manifest-{scope}.json"
     return worktree_dir / f"manifest-{scope}.json"
@@ -2830,6 +2836,384 @@ def action_index_board_v2(
     return {"ok": True, "scope": "board", "indexed": indexed}
 
 
+# ---------------------------------------------------------------------
+# v2 actions: index-works (SPEC-2359 US-80)
+# ---------------------------------------------------------------------
+
+
+def _work_project_state_dir(repo_hash: str) -> Path:
+    return _gwt_home() / "projects" / repo_hash / "project-state"
+
+
+def _fold_work_events_into_items(
+    items_by_id: Dict[str, Dict[str, Any]],
+    order: List[str],
+    content: str,
+) -> None:
+    """Fold raw ``work-events.jsonl`` / ``events.jsonl`` lines into Work items.
+
+    Mirrors the minimal subset of the Rust ``WorkItemsProjection`` fold needed
+    for search documents: title/intent/summary/owner take the last non-empty
+    value, status follows the latest event, execution containers accumulate,
+    and board/related references are collected. The fold is order-tolerant —
+    events are sorted by ``updated_at`` before applying — so it can absorb
+    git union-merge artifacts and duplicate lines (dedup by event id).
+    """
+    events: List[Dict[str, Any]] = []
+    for line in content.splitlines():
+        raw = line.strip()
+        if not raw:
+            continue
+        try:
+            event = json.loads(raw)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(event, dict) and event.get("work_item_id"):
+            events.append(event)
+
+    seen_event_ids: set = set()
+    for item in items_by_id.values():
+        for ev in item.get("events", []):
+            ev_id = ev.get("id") if isinstance(ev, dict) else None
+            if ev_id:
+                seen_event_ids.add(ev_id)
+
+    events.sort(key=lambda ev: str(ev.get("updated_at") or ""))
+    for event in events:
+        event_id = event.get("id")
+        if event_id and event_id in seen_event_ids:
+            continue
+        if event_id:
+            seen_event_ids.add(event_id)
+        work_id = str(event.get("work_item_id") or "").strip()
+        if not work_id:
+            continue
+        item = items_by_id.get(work_id)
+        if item is None:
+            title = event.get("title") or event.get("intent") or work_id
+            item = {
+                "id": work_id,
+                "title": str(title or work_id),
+                "intent": event.get("intent") or "",
+                "summary": event.get("summary") or "",
+                "status_category": "",
+                "owner": event.get("owner") or "",
+                "execution_containers": [],
+                "board_refs": [],
+                "related_work_item_ids": [],
+                "discarded": False,
+                "events": [],
+            }
+            items_by_id[work_id] = item
+            order.append(work_id)
+
+        for field in ("title", "intent", "summary", "owner"):
+            value = event.get(field)
+            if isinstance(value, str) and value.strip():
+                item[field] = value
+        status = event.get("status_category")
+        if isinstance(status, str) and status.strip():
+            item["status_category"] = status
+        elif event.get("kind") == "done":
+            item["status_category"] = "done"
+        if event.get("kind") == "discard":
+            item["discarded"] = True
+        container = event.get("execution_container")
+        if isinstance(container, dict):
+            item.setdefault("execution_containers", []).append(container)
+        board_entry_id = event.get("board_entry_id")
+        if isinstance(board_entry_id, str) and board_entry_id.strip():
+            item.setdefault("board_refs", []).append(board_entry_id)
+        related = event.get("related_work_item_id")
+        if isinstance(related, str) and related.strip():
+            item.setdefault("related_work_item_ids", []).append(related)
+
+
+def _load_work_documents(
+    repo_hash: str,
+    project_root: Optional[str],
+) -> tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
+    """Load Work items from the home-scoped projection (primary) or event logs.
+
+    Primary path: the home projection JSON written by the Rust Work surface
+    (``~/.gwt/projects/<repo_hash>/project-state/works.json``; the legacy name
+    ``work_items.json`` is also accepted). When that file is absent, fall back
+    to folding ``project-state/work-events.jsonl`` and the repo-local
+    ``<project_root>/.gwt/work/events.jsonl`` into items, mirroring the Rust
+    projection build.
+
+    ALL works are returned, including completed and discarded ones — finding a
+    Work done a month ago is the whole point of the scope (SPEC-2359 US-80).
+
+    Returns ``(works, manifest_entries)`` where ``manifest_entries`` describes
+    each source file's mtime/size so incremental rebuilds can detect changes.
+    """
+    state_dir = _work_project_state_dir(repo_hash)
+    manifest_entries: List[Dict[str, Any]] = []
+
+    projection_path: Optional[Path] = None
+    for name in ("works.json", "work_items.json"):
+        candidate = state_dir / name
+        if candidate.is_file():
+            projection_path = candidate
+            break
+
+    if projection_path is not None:
+        try:
+            payload = json.loads(projection_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError, UnicodeDecodeError):
+            payload = None
+        if isinstance(payload, dict):
+            works = [
+                item
+                for item in payload.get("work_items", [])
+                if isinstance(item, dict) and str(item.get("id") or "").strip()
+            ]
+            try:
+                stat = projection_path.stat()
+                manifest_entries.append(
+                    {
+                        "path": f"project-state/{projection_path.name}",
+                        "mtime": int(stat.st_mtime),
+                        "size": int(stat.st_size),
+                    }
+                )
+            except OSError:
+                pass
+            return works, manifest_entries
+
+    # Fallback: fold the event logs into items.
+    items_by_id: Dict[str, Dict[str, Any]] = {}
+    order: List[str] = []
+    event_sources: List[Path] = [state_dir / "work-events.jsonl"]
+    if project_root:
+        event_sources.append(
+            Path(project_root) / ".gwt" / "work" / "events.jsonl"
+        )
+
+    for source in event_sources:
+        if not source.is_file():
+            continue
+        try:
+            content = source.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            continue
+        _fold_work_events_into_items(items_by_id, order, content)
+        try:
+            stat = source.stat()
+        except OSError:
+            continue
+        try:
+            rel = source.relative_to(_gwt_home() / "projects" / repo_hash)
+            path_label = rel.as_posix()
+        except ValueError:
+            path_label = ".gwt/work/events.jsonl"
+        manifest_entries.append(
+            {
+                "path": path_label,
+                "mtime": int(stat.st_mtime),
+                "size": int(stat.st_size),
+            }
+        )
+
+    works = [items_by_id[work_id] for work_id in order]
+    return works, manifest_entries
+
+
+def _work_entry_document(work: Dict[str, Any]) -> str:
+    """Join the non-empty searchable fields of a Work into one document string.
+
+    Includes title, intent, summary, owner, the branch name(s) of every
+    execution container, and the linked PR / Issue identifiers (PR numbers /
+    URLs from execution containers, plus board / related-work references).
+    """
+    parts: List[str] = [
+        str(work.get("title") or ""),
+        str(work.get("intent") or ""),
+        str(work.get("summary") or ""),
+        str(work.get("owner") or ""),
+    ]
+    for container in work.get("execution_containers") or []:
+        if not isinstance(container, dict):
+            continue
+        branch = container.get("branch")
+        if isinstance(branch, str) and branch.strip():
+            parts.append(branch)
+        pr_number = container.get("pr_number")
+        if pr_number is not None:
+            parts.append(f"#{pr_number}")
+        pr_url = container.get("pr_url")
+        if isinstance(pr_url, str) and pr_url.strip():
+            parts.append(pr_url)
+    for ref in work.get("board_refs") or []:
+        if isinstance(ref, str) and ref.strip():
+            parts.append(ref)
+    for ref in work.get("related_work_item_ids") or []:
+        if isinstance(ref, str) and ref.strip():
+            parts.append(ref)
+    return "\n".join(part for part in parts if part).strip()
+
+
+def _work_branches(work: Dict[str, Any]) -> List[str]:
+    branches: List[str] = []
+    for container in work.get("execution_containers") or []:
+        if not isinstance(container, dict):
+            continue
+        branch = container.get("branch")
+        if isinstance(branch, str) and branch.strip() and branch not in branches:
+            branches.append(branch)
+    return branches
+
+
+def _work_pr_numbers(work: Dict[str, Any]) -> List[str]:
+    prs: List[str] = []
+    for container in work.get("execution_containers") or []:
+        if not isinstance(container, dict):
+            continue
+        pr_number = container.get("pr_number")
+        if pr_number is not None:
+            value = str(pr_number)
+            if value not in prs:
+                prs.append(value)
+    return prs
+
+
+def _build_work_records(works: Sequence[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """Materialize Chroma upsert records for the works scope.
+
+    The metadata carries the contract fields the Rust ``work_result()`` reads:
+    ``work_id`` (required), ``title``, ``intent``, ``status``.
+    """
+    records: List[Dict[str, Any]] = []
+    for work in works:
+        work_id = str(work.get("id") or "").strip()
+        if not work_id:
+            continue
+        status = str(work.get("status_category") or "")
+        if work.get("discarded"):
+            status = "discarded"
+        records.append(
+            {
+                "id": f"work-{work_id}",
+                "document": _work_entry_document(work),
+                "metadata": {
+                    "work_id": work_id,
+                    "title": str(work.get("title") or ""),
+                    "intent": str(work.get("intent") or ""),
+                    "status": status,
+                    "owner": str(work.get("owner") or ""),
+                    "branches": ",".join(_work_branches(work)),
+                    "pr_numbers": ",".join(_work_pr_numbers(work)),
+                },
+            }
+        )
+    return records
+
+
+def action_index_works_v2(
+    project_root: Optional[str],
+    repo_hash: str,
+    worktree_hash: Optional[str],
+    mode: str = "full",
+    db_root: Optional[Path] = None,
+) -> dict:
+    """Index past Work items into the repo-scoped works Chroma store.
+
+    `worktree_hash` is accepted for symmetry with the other v2 actions but is
+    ignored — Work history is repo-scoped. On first build, every existing Work
+    item (including completed and discarded ones) is folded into a document so
+    work done weeks ago remains discoverable (SPEC-2359 US-80 backfill).
+    """
+    del worktree_hash  # repo-scoped scope does not consume the worktree hash
+    db_path = resolve_db_path(repo_hash, None, "works", db_root=db_root)
+    works, new_entries = _load_work_documents(repo_hash, project_root)
+    new_entries.sort(key=lambda entry: entry["path"])
+
+    emit_progress(
+        {
+            "phase": "indexing",
+            "scope": "works",
+            "mode": mode,
+            "done": 0,
+            "total": len(works),
+        }
+    )
+
+    indexed = 0
+    with acquire_lock(db_path, exclusive=True):
+        if mode != "incremental":
+            _reset_chroma_store(db_path)
+        make_collection = (
+            _make_chroma_collection
+            if mode == "incremental"
+            else _make_chroma_collection_repairing
+        )
+        client, collection = make_collection(db_path, V2_WORKS_COLLECTION)
+        try:
+            old_entries = read_manifest(db_path, scope="works")
+            diff = compute_manifest_diff(old_entries, new_entries)
+            source_changed = bool(diff["added"] or diff["changed"] or diff["removed"])
+
+            if mode != "incremental" or source_changed:
+                try:
+                    existing = collection.get()
+                    if existing.get("ids"):
+                        collection.delete(ids=existing["ids"])
+                except Exception:
+                    pass
+                records = _build_work_records(works)
+            else:
+                records = []
+
+            emit_progress(
+                {
+                    "phase": "diff",
+                    "scope": "works",
+                    "added": len(diff["added"]),
+                    "changed": len(diff["changed"]),
+                    "removed": len(diff["removed"]),
+                }
+            )
+
+            if records:
+                ids = [r["id"] for r in records]
+                documents = [r["document"] for r in records]
+                metadatas = [r["metadata"] for r in records]
+                batch = 100
+                for i in range(0, len(ids), batch):
+                    collection.upsert(
+                        ids=ids[i : i + batch],
+                        documents=documents[i : i + batch],
+                        metadatas=metadatas[i : i + batch],
+                    )
+                indexed = len(records)
+
+            write_manifest(db_path, scope="works", entries=new_entries)
+            _write_scope_meta(
+                repo_hash=repo_hash,
+                worktree_hash=None,
+                scope="works",
+                db_root=db_root,
+                updates={
+                    "last_repair_at": _now_utc().isoformat(),
+                    "document_count": indexed,
+                },
+            )
+        finally:
+            _close_chroma_client(client)
+
+    emit_progress(
+        {
+            "phase": "complete",
+            "scope": "works",
+            "mode": mode,
+            "indexed": indexed,
+            "total": indexed,
+        }
+    )
+    return {"ok": True, "scope": "works", "indexed": indexed}
+
+
 def _format_memory_results(
     items: List[Dict[str, Any]], n_results: int = 10
 ) -> List[Dict[str, Any]]:
@@ -2973,6 +3357,8 @@ def _scope_meta_path(
         return resolve_db_path(repo_hash, None, "discussions", db_root=db_root) / META_FILENAME
     if scope == "board":
         return resolve_db_path(repo_hash, None, "board", db_root=db_root) / META_FILENAME
+    if scope == "works":
+        return resolve_db_path(repo_hash, None, "works", db_root=db_root) / META_FILENAME
     if scope in WORKTREE_SCOPED:
         worktree_dir = resolve_db_path(repo_hash, worktree_hash, scope, db_root=db_root).parent
         return worktree_dir / META_FILENAME
@@ -3045,6 +3431,7 @@ def _scope_collection_name(scope: str) -> str:
         "memory": V2_MEMORY_COLLECTION,
         "discussions": V2_DISCUSSIONS_COLLECTION,
         "board": V2_BOARD_COLLECTION,
+        "works": V2_WORKS_COLLECTION,
     }[scope]
 
 
@@ -3116,11 +3503,11 @@ def _scope_status_v2(
         reason = "empty_collection"
         healthy = False
         repair_required = True
-    elif scope in ("specs", "memory", "discussions", "board") and document_count < manifest_count:
+    elif scope in ("specs", "memory", "discussions", "board", "works") and document_count < manifest_count:
         reason = "count_mismatch"
         healthy = False
         repair_required = True
-    elif scope not in ("specs", "memory", "discussions", "board") and document_count != manifest_count:
+    elif scope not in ("specs", "memory", "discussions", "board", "works") and document_count != manifest_count:
         reason = "empty_collection" if document_count == 0 and manifest_count > 0 else "count_mismatch"
         healthy = False
         repair_required = True
@@ -3529,6 +3916,39 @@ def _format_board_results(items: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     return formatted
 
 
+def _format_work_results(items: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """Format works-scope hits, carrying the Rust ``work_result()`` contract.
+
+    Each item exposes ``work_id`` (required — Rust drops items without it),
+    ``title``, ``intent``, ``status``, the standard ``distance``, and the
+    optional ``matched_terms`` / ``missing_terms`` arrays via
+    ``_attach_match_fields``. Items missing a ``work_id`` are dropped to honor
+    the contract on the Python side too.
+    """
+    formatted = []
+    for it in items:
+        meta = it["metadata"] or {}
+        work_id = meta.get("work_id", it["id"])
+        if not work_id:
+            continue
+        formatted.append(
+            _attach_match_fields(
+                {
+                    "work_id": work_id,
+                    "title": meta.get("title", ""),
+                    "intent": meta.get("intent", ""),
+                    "status": meta.get("status", ""),
+                    "owner": meta.get("owner", ""),
+                    "branches": _split_csv_meta(meta.get("branches", "")),
+                    "pr_numbers": _split_csv_meta(meta.get("pr_numbers", "")),
+                    "distance": it["distance"],
+                },
+                it,
+            )
+        )
+    return formatted
+
+
 def _scope_result_key(scope: str) -> str:
     return {
         "files": "results",
@@ -3538,6 +3958,7 @@ def _scope_result_key(scope: str) -> str:
         "memory": "memoryResults",
         "discussions": "discussionResults",
         "board": "boardResults",
+        "works": "workResults",
     }[scope]
 
 
@@ -3556,6 +3977,8 @@ def _format_scope_results(
         return _format_discussion_results(items, n_results)
     if scope == "board":
         return _format_board_results(items)[:n_results]
+    if scope == "works":
+        return _format_work_results(items)[:n_results]
     return _format_issue_results(items)[:n_results]
 
 
@@ -3609,6 +4032,7 @@ def action_search_v2(
         "search-memory": "memory",
         "search-discussions": "discussions",
         "search-board": "board",
+        "search-works": "works",
     }
     if action not in scope_for_action:
         return {"ok": False, "error_code": "BAD_ARGS", "error": f"unknown action {action}"}
@@ -3678,6 +4102,14 @@ def action_search_v2(
             build = action_index_board_v2(
                 repo_hash=repo_hash,
                 project_root=project_root,
+                mode="full",
+                db_root=db_root,
+            )
+        elif scope == "works":
+            build = action_index_works_v2(
+                project_root=project_root,
+                repo_hash=repo_hash,
+                worktree_hash=None,
                 mode="full",
                 db_root=db_root,
             )
@@ -3753,6 +4185,7 @@ def action_search_multi_v2(
         "memory": "search-memory",
         "discussions": "search-discussions",
         "board": "search-board",
+        "works": "search-works",
         "files": "search-files",
         "files-docs": "search-files-docs",
     }
@@ -3817,6 +4250,7 @@ def action_status_v2(
         "memory": _scope_status_v2(repo_hash, None, "memory", db_root=db_root),
         "discussions": _scope_status_v2(repo_hash, None, "discussions", db_root=db_root),
         "board": _scope_status_v2(repo_hash, None, "board", db_root=db_root),
+        "works": _scope_status_v2(repo_hash, None, "works", db_root=db_root),
     }
     if worktree_hash:
         for scope in ("files", "files-docs"):
@@ -3854,6 +4288,8 @@ def parse_args() -> argparse.Namespace:
             "search-discussions",
             "index-board",
             "search-board",
+            "index-works",
+            "search-works",
             "search-multi",
         ],
     )
@@ -3867,7 +4303,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--scope",
         default="",
-        choices=["", "issues", "specs", "files", "files-docs", "memory", "discussions", "board"],
+        choices=["", "issues", "specs", "files", "files-docs", "memory", "discussions", "board", "works"],
     )
     parser.add_argument("--scopes", default="")
     parser.add_argument("--match-mode", default="semantic", choices=["semantic", "all_terms"])
@@ -3968,6 +4404,17 @@ def _dispatch_v2(action: str, args: argparse.Namespace) -> int:
             )
             return 0
 
+        if action == "index-works":
+            emit(
+                action_index_works_v2(
+                    project_root=args.project_root or None,
+                    repo_hash=repo_hash,
+                    worktree_hash=None,
+                    mode=args.mode,
+                )
+            )
+            return 0
+
         if action == "search-multi":
             if not args.query:
                 emit({"ok": False, "error_code": "BAD_ARGS", "error": "--query is required"})
@@ -3994,6 +4441,7 @@ def _dispatch_v2(action: str, args: argparse.Namespace) -> int:
             "search-memory",
             "search-discussions",
             "search-board",
+            "search-works",
         ):
             if not args.query:
                 emit({"ok": False, "error_code": "BAD_ARGS", "error": "--query is required"})

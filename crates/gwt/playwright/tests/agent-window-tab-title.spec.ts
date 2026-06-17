@@ -38,6 +38,48 @@ test.describe("Agent window tab hover title", () => {
     await expect(fallbackTab).toHaveAttribute("title", "Claude");
   });
 
+  // Issue #3104 — in a tabbed agent-window group the active tab must stay
+  // distinguishable. Renders a --color-state-active ::after underline (works in
+  // both themes; chromium-light covers the reported light surface). Inactive
+  // tabs must not generate the accent.
+  test("active tab carries a state-active accent underline that inactive tabs lack", async ({
+    page,
+  }) => {
+    await installEmbeddedRoutes(page);
+    await installTabbedAgentsBackend(page);
+
+    await page.goto(APP_URL);
+
+    const activeWindow = page.locator(".workspace-window[data-id='agent-1']");
+    await expect(activeWindow).toBeVisible({ timeout: 10_000 });
+    await expect(activeWindow).toHaveClass(/tabbed/);
+
+    const accent = await page.evaluate(() => {
+      const read = (id: string) => {
+        const el = document.querySelector(
+          `.workspace-window[data-id='agent-1'] .window-tab[data-window-tab-id='${id}']`,
+        );
+        if (!el) {
+          return null;
+        }
+        const after = getComputedStyle(el, "::after");
+        return {
+          content: after.content,
+          height: after.height,
+          background: after.backgroundColor,
+        };
+      };
+      return { active: read("agent-1"), inactive: read("agent-2") };
+    });
+
+    // The active tab generates the ::after accent bar...
+    expect(accent?.active?.content).toBe('""');
+    expect(accent?.active?.height).toBe("2px");
+    expect(accent?.active?.background).not.toBe("rgba(0, 0, 0, 0)");
+    // ...and the inactive tab does not generate the accent at all.
+    expect(accent?.inactive?.content).toBe("none");
+  });
+
   test("inactive tab telemetry updates when runtime status changes", async ({
     page,
   }) => {

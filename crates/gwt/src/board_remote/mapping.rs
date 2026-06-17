@@ -36,7 +36,10 @@ pub fn resolve_channel(
 ) -> Option<String> {
     for workspace_id in &entry.audience {
         if let Some(channel) = channel_map.get(workspace_id) {
-            return Some(channel.clone());
+            let channel = channel.trim();
+            if !channel.is_empty() {
+                return Some(channel.to_string());
+            }
         }
     }
     default_channel
@@ -339,7 +342,7 @@ mod tests {
     #[test]
     fn channel_resolution_prefers_mapping_then_default() {
         let mut map = BTreeMap::new();
-        map.insert("ws-a".to_string(), "CH-A".to_string());
+        map.insert("ws-a".to_string(), "  CH-A  ".to_string());
         let mut mapped = BoardEntry::new(
             AuthorKind::User,
             "You",
