@@ -7032,3 +7032,10 @@ Type: lesson
 Context: v9.60.0 の chore(release) commit を push した際、husky pre-push が gwt-core/gwt のフィルタ済みカバレッジ89.72%を検出して reject。release commit 自体はソース無変更だが、Web マージされた既存 PR で develop のカバレッジが閾値割れしていた。
 Learning: バージョンbumpのみの release でも pre-push はリポジトリ全体のカバレッジを再計測する。不足時は --no-verify で逃げず、最も低カバレッジな新規ファイル(今回 cli/json_envelope.rs 46%)に pure 関数の直接ユニットテストを足すのが最短。parse() 等の pure dispatcher は全 operation 分岐を envelope JSON で網羅でき一気に上がる。
 Future Action: release 前に node scripts/check-coverage-threshold.mjs target/coverage-summary.json 90 を先回り実行し、割れていれば最新機能ファイルへユニットテストを足してから release commit を積む。
+
+## 2026-06-17 — Fresh Docker Codex E2E needs container-visible workspace-home hooks
+
+Type: failure-pattern
+Context: During real-use E2E for SPEC-3050 on 2026-06-17, browser-check fresh HOME could not verify Agent launch through Start Work because remote branch creation lacked GitHub credentials. Existing-branch Docker launch then started Codex 0.140, but pending Goal Start hooks did not inject until the linked-worktree workspace-home .codex/hooks.json path was visible inside the container and trusted with the same GWT_HOOK_BIN fallback as the generated hook file.
+Learning: For Codex >= 0.131 in linked worktrees, workspace-home hook discovery keys use the root checkout path from .git, not the /gwt worktree-local path. In Docker E2E, mounting only the worktree-local hooks or trusting with /usr/local/bin/gwtd fallback can register the wrong keys/hashes. Start Work is also the wrong fresh-check path unless GitHub branch creation credentials are proven in the isolated HOME.
+Future Action: For fresh browser-check E2E that needs an Agent but not Start Work, launch the current branch via Launch Agent/active-work. If Docker + latest Codex is used, ensure the container sees the linked workspace-home .codex/hooks.json path, register trust for workspace-home with GWT_HOOK_BIN matching the generated hook fallback, and then verify SessionStart/UserPromptSubmit hook injection in the Codex session log before testing the feature.
