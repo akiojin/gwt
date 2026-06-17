@@ -358,6 +358,11 @@ pub(super) fn frontend_user_action_log(event: &FrontendEvent) -> Option<Frontend
             ))
             .agent(worktree_hash.as_deref().unwrap_or_default())
             .count(query.len()),
+        FrontendEvent::RequestWorkAdvisory { id, query, .. } => {
+            FrontendUserActionLog::new("request_work_advisory", "launch")
+                .window(id)
+                .count(query.len())
+        }
         FrontendEvent::SelectKnowledgeBridgeEntry {
             id,
             knowledge_kind,
@@ -438,7 +443,8 @@ pub(super) fn frontend_user_action_log(event: &FrontendEvent) -> Option<Frontend
                 | LaunchWizardAction::SetDockerService { service: value } => {
                     log = log.target(value);
                 }
-                LaunchWizardAction::SubmitText { value } => {
+                LaunchWizardAction::SubmitText { value }
+                | LaunchWizardAction::SetInitialPrompt { value } => {
                     log = log.count(value.len());
                 }
                 LaunchWizardAction::SetSkipPermissions { enabled }

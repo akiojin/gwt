@@ -580,6 +580,11 @@ pub enum LaunchWizardAction {
     SetBranchName {
         value: String,
     },
+    /// SPEC-2359 US-80: the optional Start Work intake prompt describing the
+    /// work about to begin. Drives the duplicate-work advisory query.
+    SetInitialPrompt {
+        value: String,
+    },
     SetLaunchTarget {
         target: LaunchTargetKind,
     },
@@ -659,6 +664,9 @@ pub struct LaunchWizardState {
     pub skip_permissions: bool,
     pub codex_fast_mode: bool,
     pub branch_name: String,
+    /// SPEC-2359 US-80: optional Start Work intake prompt (always skippable).
+    /// Empty string means the step was skipped or left blank.
+    pub initial_prompt: String,
     pub completion: Option<LaunchWizardCompletion>,
     pub error: Option<String>,
     pub is_hydrating: bool,

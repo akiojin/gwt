@@ -56,6 +56,7 @@ impl AppRuntime {
             gwt::LaunchWizardAction::SetBranchMode { .. } => "set_branch_mode",
             gwt::LaunchWizardAction::SetBranchType { .. } => "set_branch_type",
             gwt::LaunchWizardAction::SetBranchName { .. } => "set_branch_name",
+            gwt::LaunchWizardAction::SetInitialPrompt { .. } => "set_initial_prompt",
             gwt::LaunchWizardAction::SetLaunchTarget { .. } => "set_launch_target",
             gwt::LaunchWizardAction::SetAgent { .. } => "set_agent",
             gwt::LaunchWizardAction::SetModel { .. } => "set_model",
