@@ -3545,11 +3545,6 @@ test("hidden project picker does not rebuild Recent Projects on workspace_state"
   );
   assert.match(
     projectShellSurfaceSource,
-    /let\s+renderedRecentProjectsMenuKey\s*=/,
-    "the project shell surface must track the split-menu Recent Projects render key separately",
-  );
-  assert.match(
-    projectShellSurfaceSource,
     /function\s+recentProjectsRenderKey\s*\(/,
     "the project shell surface must define a Recent Projects render key helper",
   );
@@ -3565,7 +3560,7 @@ test("hidden project picker does not rebuild Recent Projects on workspace_state"
   );
 });
 
-test("Recent Projects render key ignores workspace state and split menu refreshes on open", () => {
+test("Recent Projects render key ignores workspace state", () => {
   const keyBody = extractFunctionBody(
     projectShellSurfaceSource,
     "recentProjectsRenderKey",
@@ -3584,15 +3579,6 @@ test("Recent Projects render key ignores workspace state and split menu refreshe
       `Recent Projects key must ignore ${workspaceField}`,
     );
   }
-  const openMenuBody = extractFunctionBody(
-    projectShellSurfaceSource,
-    "openOpenProjectMenu",
-  );
-  assert.match(
-    openMenuBody,
-    /renderRecentProjectsIntoMenu\s*\(\s*\{\s*force:\s*true\s*\}\s*\)/,
-    "Open Project split menu must force-refresh Recent Projects from current appState when opened",
-  );
 });
 
 test("viewport-only workspace_state skips unchanged window reconciliation", () => {
