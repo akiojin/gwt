@@ -184,6 +184,10 @@ pub fn filter_strong_advisory_matches(
 /// Run the Start Work duplicate-work advisory (SPEC-2359 US-80): semantic search
 /// across past Work and the durable owners, keeping only strong matches. Never
 /// blocks Start Work; an error or empty corpus yields an empty advisory.
+///
+/// This is a GUI-interactive surface, so it uses `auto_build = false`: the index
+/// watcher owns (re)builds and the advisory never blocks on an inline rebuild —
+/// the same contract the project index search window uses.
 pub fn work_advisory(project_root: &Path, query: &str) -> Result<Vec<IndexSearchResult>, String> {
     let outcome = search_project_index(
         project_root,
@@ -191,7 +195,7 @@ pub fn work_advisory(project_root: &Path, query: &str) -> Result<Vec<IndexSearch
         WORK_ADVISORY_SCOPES,
         None,
         IndexSearchMatchMode::Semantic,
-        true,
+        false,
     )?;
     Ok(filter_strong_advisory_matches(
         outcome.results,

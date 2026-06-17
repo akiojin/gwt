@@ -3377,6 +3377,16 @@
         });
       }
 
+      // SPEC-2359 US-80: debounced Start Work duplicate-work advisory query.
+      function requestWorkAdvisory({ id, query, request_id }) {
+        send({
+          kind: "request_work_advisory",
+          id,
+          query,
+          request_id,
+        });
+      }
+
       function createNode(tagName, className, textContent) {
         const node = document.createElement(tagName);
         if (className) {
@@ -3542,12 +3552,14 @@
         openStartWorkPendingWizard,
         applyLaunchWizardStateEvent,
         applyLaunchWizardOpenErrorEvent,
+        applyWorkAdvisoryResultEvent,
         handleWizardEscapeKeydown,
         installWizardChrome,
       } = createLaunchWizardSurface({
         createNode,
         closeModal,
         sendWizardAction,
+        requestWorkAdvisory,
       });
 
       // SPEC-3064 Phase 3 (E7): the project & workspace shell chrome surface
@@ -4611,6 +4623,11 @@
             // SPEC-3064 Phase 3 (E5): guard defer + wizard state mutation
             // live in the launch wizard surface.
             applyLaunchWizardStateEvent(event);
+            break;
+          case "work_advisory_result":
+            // SPEC-2359 US-80: duplicate-work advisory results for the Start
+            // Work intake prompt.
+            applyWorkAdvisoryResultEvent(event);
             break;
           case "runtime_hook_event":
             frontendUnits.boardSurface.handleRuntimeHookEvent(event);

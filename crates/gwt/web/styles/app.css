@@ -4928,6 +4928,70 @@ body {
   color: var(--color-text-strong);
 }
 
+/* SPEC-2359 US-80 — Start Work intake prompt + duplicate-work advisory. */
+.launch-intake-input {
+  width: 100%;
+  box-sizing: border-box;
+  font-family: var(--font-mono);
+  font-size: var(--type-xs);
+  letter-spacing: var(--tracking-mono);
+  color: var(--color-text-strong);
+  background: var(--color-surface-raised, var(--color-surface));
+  border: 1px solid var(--color-border);
+  border-radius: 4px;
+  padding: 8px 10px;
+  resize: vertical;
+}
+
+.launch-advisory {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin-top: 10px;
+  padding: 10px;
+  border: 1px solid var(--color-border);
+  border-radius: 4px;
+  background: var(--color-surface);
+}
+
+.launch-advisory[hidden] {
+  display: none;
+}
+
+.launch-advisory-title {
+  font-family: var(--font-mono);
+  font-size: var(--type-xs);
+  letter-spacing: var(--tracking-mono);
+  color: var(--color-text-muted);
+  text-transform: uppercase;
+}
+
+.launch-advisory-item {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  font-size: var(--type-xs);
+}
+
+.launch-advisory-scope {
+  font-family: var(--font-mono);
+  letter-spacing: var(--tracking-mono);
+  color: var(--color-text-muted);
+  text-transform: uppercase;
+  flex: 0 0 auto;
+}
+
+.launch-advisory-item-title {
+  color: var(--color-text-strong);
+  flex: 1 1 auto;
+  overflow-wrap: anywhere;
+}
+
+.launch-advisory-item-sub {
+  color: var(--color-text-muted);
+  flex: 0 0 auto;
+}
+
 @media (max-width: 760px) {
   .wizard-main {
     grid-template-columns: 1fr;
