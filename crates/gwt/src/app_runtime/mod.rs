@@ -1304,6 +1304,11 @@ impl AppRuntime {
                     match_mode,
                 },
             ),
+            FrontendEvent::RequestWorkAdvisory {
+                id,
+                query,
+                request_id,
+            } => self.request_work_advisory_events(&client_id, &id, &query, request_id),
             FrontendEvent::SelectKnowledgeBridgeEntry {
                 id,
                 knowledge_kind,
