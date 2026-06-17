@@ -354,3 +354,64 @@ test("shouldTriggerOpenFolderHotkey honors the Cmd+O / Ctrl+O guards", () => {
     false,
   );
 });
+
+// SPEC-2013 US-9 (PR #3102 review) — the panel-level Enter handler must select
+// only when focus is on an OPEN / RECENT row. Action buttons (Open Folder /
+// Clone) must keep their native Enter -> click activation instead of being
+// hijacked into selectRow.
+test("handlePanelKeydown selects on Enter for rows only, never for action buttons", () => {
+  const { document } = parseHTML(`
+    <button id="project-switcher-button"></button>
+    <div id="project-switcher-panel"></div>
+  `);
+  const buttonEl = document.getElementById("project-switcher-button");
+  const panelEl = document.getElementById("project-switcher-panel");
+  const sends = [];
+  const createNode = (tagName, className, textContent) => {
+    const node = document.createElement(tagName);
+    if (className) node.className = className;
+    if (textContent !== undefined) node.textContent = textContent;
+    return node;
+  };
+  const controller = createProjectSwitcherController({
+    buttonEl,
+    panelEl,
+    getState: () => ({
+      tabs: makeTabs(),
+      active_tab_id: "tab-1",
+      recent_projects: [],
+    }),
+    send: (payload) => sends.push(payload),
+    createNode,
+    runtimeStateForWindow: (windowData) => windowData.status,
+  });
+  controller.open();
+
+  // Enter on an action button: not consumed, no preventDefault, no selection.
+  const action = panelEl.querySelector("[data-action='open-folder']");
+  let actionPrevented = false;
+  const actionHandled = controller.handlePanelKeydown({
+    key: "Enter",
+    target: action,
+    preventDefault() {
+      actionPrevented = true;
+    },
+  });
+  assert.equal(actionHandled, false, "panel must not consume Enter on an action button");
+  assert.equal(actionPrevented, false, "panel must not preventDefault the button's native activation");
+  assert.equal(sends.length, 0, "Enter on an action button must not select a project");
+
+  // Enter on an OPEN row: consumed + selects the highlighted row.
+  const row = panelEl.querySelector(".project-switcher-row");
+  let rowPrevented = false;
+  const rowHandled = controller.handlePanelKeydown({
+    key: "Enter",
+    target: row,
+    preventDefault() {
+      rowPrevented = true;
+    },
+  });
+  assert.equal(rowHandled, true);
+  assert.equal(rowPrevented, true);
+  assert.deepEqual(sends, [{ kind: "select_project_tab", tab_id: "tab-1" }]);
+});

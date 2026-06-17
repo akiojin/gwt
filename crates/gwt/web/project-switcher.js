@@ -408,10 +408,22 @@ export function createProjectSwitcherController({
         event.preventDefault();
         moveSelection(-1);
         return true;
-      case "Enter":
+      case "Enter": {
+        // Enter selects only when focus is on an OPEN / RECENT row. Action
+        // buttons (Open Folder / Clone) and the notification-permission button
+        // must keep their native Enter -> click activation, so the panel-level
+        // handler must not preventDefault / selectRow for them.
+        const target = event.target;
+        const isRow =
+          typeof target?.classList?.contains === "function" &&
+          target.classList.contains("project-switcher-row");
+        if (!isRow) {
+          return false;
+        }
         event.preventDefault();
         selectRow(lastRows[selectedIndex]);
         return true;
+      }
       case "Escape":
         event.preventDefault();
         close({ restoreFocus: true });
