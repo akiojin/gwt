@@ -61,24 +61,43 @@ impl TeamsProvider {
         root: &gwt_core::board_remote_roots::RootMapping,
     ) -> Result<Vec<BoardEntry>> {
         let top = MESSAGE_LIMIT.to_string();
-        let url = format!(
+        let mut url = format!(
             "{GRAPH_API}/teams/{team}/channels/{chan}/messages/{}/replies",
             root.root_id
         );
-        let response = self
-            .http
-            .get(&url, &self.token, &[("$top", &top)])
-            .map_err(GwtError::Other)?;
-        check_status(&response, "list replies")?;
-        let parsed: GraphMessages = serde_json::from_str(&response.body)
-            .map_err(|err| GwtError::Other(format!("graph replies parse: {err}")))?;
+        let mut include_top = true;
+        let mut messages = Vec::new();
+        loop {
+            let query: Vec<(&str, &str)> = if include_top {
+                vec![("$top", top.as_str())]
+            } else {
+                Vec::new()
+            };
+            let response = self
+                .http
+                .get(&url, &self.token, &query)
+                .map_err(GwtError::Other)?;
+            check_status(&response, "list replies")?;
+            let parsed: GraphMessages = serde_json::from_str(&response.body)
+                .map_err(|err| GwtError::Other(format!("graph replies parse: {err}")))?;
+            messages.extend(parsed.value);
+            if let Some(next_link) = parsed
+                .next_link
+                .map(|link| link.trim().to_string())
+                .filter(|link| !link.is_empty())
+            {
+                url = next_link;
+                include_top = false;
+            } else {
+                break;
+            }
+        }
         let workspace = if root.key == gwt_core::board_remote_roots::GENERAL_THREAD_KEY {
             ""
         } else {
             root.key.trim()
         };
-        let mut entries: Vec<BoardEntry> = parsed
-            .value
+        let mut entries: Vec<BoardEntry> = messages
             .iter()
             // Skip system events (join/leave, etc.) and deleted messages so the
             // Board shows only real posts.
@@ -119,15 +138,16 @@ impl TeamsProvider {
         Ok(entries)
     }
 
-    fn history_channels(&self, worktree_root: &Path) -> Vec<String> {
+    fn history_channels(&self) -> Vec<String> {
         let mut channels = BTreeSet::new();
         let default_channel = self.default_channel.trim();
         if !default_channel.is_empty() {
             channels.insert(default_channel.to_string());
         }
-        for root in gwt_core::board_remote_roots::load_root_mappings(worktree_root).values() {
-            if root.provider == "teams" && !root.channel.trim().is_empty() {
-                channels.insert(root.channel.clone());
+        for channel in self.channel_map.values() {
+            let channel = channel.trim();
+            if !channel.is_empty() {
+                channels.insert(channel.to_string());
             }
         }
         channels.into_iter().collect()
@@ -139,7 +159,7 @@ impl TeamsProvider {
             return Ok(cached);
         }
         let mut entries = Vec::new();
-        for channel in self.history_channels(worktree_root) {
+        for channel in self.history_channels() {
             entries.extend(self.fetch_history(worktree_root, &channel)?);
         }
         entries.sort_by_key(|entry| entry.created_at);
@@ -334,6 +354,8 @@ fn check_status(response: &HttpResponse, op: &str) -> Result<()> {
 struct GraphMessages {
     #[serde(default)]
     value: Vec<GraphMessage>,
+    #[serde(rename = "@odata.nextLink", default)]
+    next_link: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -581,6 +603,7 @@ mod tests {
         messages_body: String,
         messages_status: u16,
         replies_body: String,
+        replies_pages: Mutex<Vec<String>>,
         replies_status: u16,
         post_status: u16,
         get_calls: GetCallLog,
@@ -594,6 +617,7 @@ mod tests {
                 messages_body: r#"{"value":[]}"#.to_string(),
                 messages_status: 200,
                 replies_body: r#"{"value":[]}"#.to_string(),
+                replies_pages: Mutex::new(Vec::new()),
                 replies_status: 200,
                 post_status: 201,
                 get_calls: std::sync::Arc::new(Mutex::new(Vec::new())),
@@ -618,9 +642,15 @@ mod tests {
                     .collect(),
             ));
             if url.contains("/replies") {
+                let body = self
+                    .replies_pages
+                    .lock()
+                    .unwrap()
+                    .pop()
+                    .unwrap_or_else(|| self.replies_body.clone());
                 return Ok(HttpResponse {
                     status: self.replies_status,
-                    body: self.replies_body.clone(),
+                    body,
                     retry_after: if self.replies_status == 429 {
                         Some(30)
                     } else {
@@ -896,6 +926,88 @@ mod tests {
         assert!(calls.iter().any(|(url, _)| {
             url.ends_with("/teams/team-2/channels/chan-9/messages/m-root/replies")
         }));
+    }
+
+    #[test]
+    fn load_snapshot_ignores_root_mappings_for_unconfigured_channels() {
+        let root = root();
+        append_teams_root(
+            &root,
+            gwt_core::board_remote_roots::GENERAL_THREAD_KEY,
+            "team-1/chan-1",
+            "m-root",
+        );
+        append_teams_root(&root, "ws-stale", "team-old/chan-old", "m-stale");
+        let calls = std::sync::Arc::new(Mutex::new(Vec::new()));
+        let mock = MockGraph {
+            messages_body: r#"{"value":[]}"#.to_string(),
+            replies_body: r#"{"value":[
+                {"id":"m-r1","replyToId":"m-root","createdDateTime":"2026-01-01T10:02:00Z","body":{"content":"current channel progress"},"from":{"user":{"displayName":"Akio"}}}
+            ]}"#
+            .to_string(),
+            get_calls: calls.clone(),
+            ..Default::default()
+        };
+        let prov = TeamsProvider::new("tok", "team-1/chan-1", BTreeMap::new(), Box::new(mock), 60);
+
+        let snapshot = prov.load_snapshot(&root).unwrap();
+        assert_eq!(snapshot.board.entries.len(), 1);
+        assert_eq!(snapshot.board.entries[0].body, "current channel progress");
+
+        let calls = calls.lock().unwrap().clone();
+        assert!(
+            calls.iter().all(|(url, _)| !url.contains("team-old")),
+            "stale root channels must not be read: {calls:?}"
+        );
+        assert!(
+            calls.iter().all(|(url, _)| !url.contains("m-stale")),
+            "stale root replies must not be read: {calls:?}"
+        );
+    }
+
+    #[test]
+    fn load_snapshot_reads_all_teams_reply_pages() {
+        let root = root();
+        append_teams_root(
+            &root,
+            gwt_core::board_remote_roots::GENERAL_THREAD_KEY,
+            "team-1/chan-1",
+            "m-root",
+        );
+        let calls = std::sync::Arc::new(Mutex::new(Vec::new()));
+        let next = "https://graph.microsoft.com/v1.0/teams/team-1/channels/chan-1/messages/m-root/replies?$skiptoken=abc";
+        let mock = MockGraph {
+            messages_body: r#"{"value":[]}"#.to_string(),
+            replies_pages: Mutex::new(vec![
+                r#"{"value":[
+                    {"id":"m-r2","replyToId":"m-root","createdDateTime":"2026-01-01T10:03:00Z","body":{"content":"second"},"from":{"user":{"displayName":"Akio"}}}
+                ]}"#
+                .to_string(),
+                format!(
+                    r#"{{"value":[
+                    {{"id":"m-r1","replyToId":"m-root","createdDateTime":"2026-01-01T10:02:00Z","body":{{"content":"first"}},"from":{{"user":{{"displayName":"Akio"}}}}}}
+                ],"@odata.nextLink":"{next}"}}"#
+                ),
+            ]),
+            get_calls: calls.clone(),
+            ..Default::default()
+        };
+        let prov = TeamsProvider::new("tok", "team-1/chan-1", BTreeMap::new(), Box::new(mock), 60);
+
+        let snapshot = prov.load_snapshot(&root).unwrap();
+        let bodies: Vec<_> = snapshot
+            .board
+            .entries
+            .iter()
+            .map(|entry| entry.body.as_str())
+            .collect();
+        assert_eq!(bodies, vec!["first", "second"]);
+
+        let calls = calls.lock().unwrap().clone();
+        assert!(
+            calls.iter().any(|(url, _)| url == next),
+            "nextLink URL must be followed: {calls:?}"
+        );
     }
 
     #[test]
