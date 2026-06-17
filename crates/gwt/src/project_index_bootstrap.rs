@@ -210,7 +210,11 @@ impl ProjectIndexBootstrapService {
             );
             return ProjectIndexBootstrapRequest::AlreadyRunning;
         }
-        if self.full_status_cached_recently(&project_key, &project_root_label) {
+        if let Some(status) = self.fresh_full_status(&project_key, &project_root_label) {
+            proxy.send(UserEvent::ProjectIndexStatus {
+                project_root: project_root_label,
+                status,
+            });
             return ProjectIndexBootstrapRequest::AlreadyRunning;
         }
         let key = IndexInFlightKey::FullStatus {
@@ -419,29 +423,31 @@ impl ProjectIndexBootstrapService {
         true
     }
 
-    fn full_status_cached_recently(&self, project_key: &Path, project_root_label: &str) -> bool {
+    fn fresh_full_status(
+        &self,
+        project_key: &Path,
+        project_root_label: &str,
+    ) -> Option<gwt::ProjectIndexStatusView> {
         if self.full_status_cooldown.is_zero() {
-            return false;
+            return None;
         }
         let key = normalize_project_root(project_key);
         let Ok(last) = self.last_full_status.lock() else {
-            return false;
+            return None;
         };
-        let Some(entry) = last.get(&key) else {
-            return false;
-        };
+        let entry = last.get(&key)?;
         let elapsed = entry.refreshed_at.elapsed();
         if elapsed >= self.full_status_cooldown {
-            return false;
+            return None;
         }
         tracing::debug!(
             target: "gwt::index",
             worktree = %project_root_label,
             elapsed_ms = elapsed.as_millis() as u64,
             cooldown_ms = self.full_status_cooldown.as_millis() as u64,
-            "skipping fresh project index full status refresh"
+            "replaying fresh project index full status"
         );
-        true
+        Some(entry.status.clone())
     }
 
     fn invalidate_full_status(&self, project_root: &Path) {
@@ -1300,7 +1306,7 @@ mod tests {
     }
 
     #[test]
-    fn repeated_full_status_refresh_inside_cooldown_reuses_cached_status_probe() {
+    fn repeated_full_status_refresh_inside_cooldown_replays_cached_status_without_reprobing() {
         let service = super::ProjectIndexBootstrapService::new_for_test_with_full_status_cooldown(
             Duration::from_secs(60),
         );
@@ -1360,8 +1366,8 @@ mod tests {
             })
             .count();
         assert_eq!(
-            full_status_events, 1,
-            "unchanged full status payload should not be re-broadcast"
+            full_status_events, 2,
+            "explicit Settings.Index refreshes inside cooldown should replay the cached full status"
         );
     }
 
