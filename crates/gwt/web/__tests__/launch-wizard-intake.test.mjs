@@ -36,6 +36,18 @@ test("advisory ignores stale responses and stays quiet when empty", () => {
   assert.match(surface, /wizardAdvisoryResults\.length/);
 });
 
+test("clearing the prompt invalidates an in-flight advisory request", () => {
+  // SPEC-2359 US-80: clearing the intake prompt must advance the latest
+  // request id so a late response for deleted text cannot repopulate the
+  // cleared panel. The empty-query branch advances the seq before returning.
+  const emptyBranch = surface.slice(
+    surface.indexOf("Empty prompt"),
+    surface.indexOf("Empty prompt") + 400,
+  );
+  assert.match(emptyBranch, /wizardAdvisoryRequestSeq\s*\+=\s*1/);
+  assert.match(emptyBranch, /wizardAdvisoryLatestRequestId\s*=\s*wizardAdvisoryRequestSeq/);
+});
+
 test("advisory shows an in-flight loading indicator during the search", () => {
   // The semantic search cold-loads the embedding model (several seconds), so a
   // non-empty prompt must surface a loading indicator immediately rather than a

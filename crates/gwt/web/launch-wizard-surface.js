@@ -373,7 +373,11 @@ export function createLaunchWizardSurface({
         }
         const query = wizardPromptDraft.trim();
         if (!query) {
-          // Empty prompt → quiet advisory (skippable, no noise).
+          // Empty prompt → quiet advisory (skippable, no noise). Advance the
+          // request id so any response still in flight for previously typed
+          // text is treated as stale and cannot repopulate the cleared panel.
+          wizardAdvisoryRequestSeq += 1;
+          wizardAdvisoryLatestRequestId = wizardAdvisoryRequestSeq;
           wizardAdvisoryLoading = false;
           wizardAdvisoryResults = [];
           renderWorkAdvisoryPanel();

@@ -185,18 +185,39 @@ pub fn filter_strong_advisory_matches(
 /// across past Work and the durable owners, keeping only strong matches. Never
 /// blocks Start Work; an error or empty corpus yields an empty advisory.
 ///
-/// This is a GUI-interactive surface, so it uses `auto_build = false`: the index
-/// watcher owns (re)builds and the advisory never blocks on an inline rebuild —
-/// the same contract the project index search window uses.
+/// Uses `auto_build = true` so the advisory self-heals the `works` index on
+/// first use: unlike the long-lived `issues` / `specs` / `board` scopes, the
+/// `works` scope is not (yet) maintained by the index watcher, so in a freshly
+/// upgraded project it would not exist and the advisory would always come back
+/// empty until the user manually ran a works search. Self-healing backfills past
+/// Work from `work_items.json` on first advisory. This runs on a background
+/// task with a visible loading indicator, so a one-time inline build is
+/// acceptable here even though the interactive search window uses `false`.
 pub fn work_advisory(project_root: &Path, query: &str) -> Result<Vec<IndexSearchResult>, String> {
-    let outcome = search_project_index(
+    // Try the full curated set first. With auto_build the per-scope actions
+    // hard-fail on an empty corpus (e.g. an issue cache that was never synced
+    // for this repo), and a single peripheral failure would otherwise blank the
+    // whole advisory. Fall back to past Work alone — the scope that actually
+    // matters for duplicate-work detection — so a broken issues/specs/board
+    // source never hides similar prior Work.
+    let outcome = match search_project_index(
         project_root,
         query,
         WORK_ADVISORY_SCOPES,
         None,
         IndexSearchMatchMode::Semantic,
-        false,
-    )?;
+        true,
+    ) {
+        Ok(outcome) => outcome,
+        Err(_) => search_project_index(
+            project_root,
+            query,
+            &[IndexSearchScope::Works],
+            None,
+            IndexSearchMatchMode::Semantic,
+            true,
+        )?,
+    };
     Ok(filter_strong_advisory_matches(
         outcome.results,
         WORK_ADVISORY_DISTANCE_THRESHOLD,
