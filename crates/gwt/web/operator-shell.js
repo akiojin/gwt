@@ -291,6 +291,8 @@ export function applyProviderUsage(doc, snapshot = {}) {
 // Runtime health cell (SPEC-3107)
 // ------------------------------------------------------------
 
+const RUNTIME_HEALTH_VISIBLE_PROCESS_LIMIT = 10;
+
 export function applyRuntimeHealth(doc, snapshot = {}) {
   const cell = doc.getElementById("op-strip-runtime-health");
   const value = doc.getElementById("op-strip-runtime-health-value");
@@ -386,8 +388,16 @@ function showRuntimeHealthDetail(doc, cell) {
   const viewport = doc.defaultView || {};
   const width = Number(viewport.innerWidth) || 1024;
   const height = Number(viewport.innerHeight) || 768;
-  detail.style.left = `${Math.max(8, Math.min(rect.left, width - 420))}px`;
-  detail.style.bottom = `${Math.max(32, height - rect.top + 8)}px`;
+  const margin = 8;
+  const statusGap = 8;
+  const detailWidth = Math.min(420, Math.max(0, width - margin * 2));
+  const maxHeight = Math.max(220, Math.floor(rect.top - margin * 2));
+  detail.style.left = `${Math.max(
+    margin,
+    Math.min(rect.left, width - detailWidth - margin),
+  )}px`;
+  detail.style.bottom = `${Math.max(margin, height - rect.top + statusGap)}px`;
+  detail.style.maxHeight = `${maxHeight}px`;
 }
 
 function hideRuntimeHealthDetail(doc) {
@@ -435,8 +445,14 @@ function renderRuntimeHealthDetail(doc, snapshot, queue) {
     empty.textContent = "No process detail";
     processList.appendChild(empty);
   } else {
-    for (const process of processes) {
+    for (const process of processes.slice(0, RUNTIME_HEALTH_VISIBLE_PROCESS_LIMIT)) {
       processList.appendChild(renderRuntimeHealthProcess(doc, process));
+    }
+    if (processes.length > RUNTIME_HEALTH_VISIBLE_PROCESS_LIMIT) {
+      const more = doc.createElement("div");
+      more.className = "op-runtime-health-detail__process-more";
+      more.textContent = `Showing top ${RUNTIME_HEALTH_VISIBLE_PROCESS_LIMIT} of ${processes.length}`;
+      processList.appendChild(more);
     }
   }
   detail.appendChild(processList);

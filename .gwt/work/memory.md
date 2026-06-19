@@ -7032,3 +7032,10 @@ Type: lesson
 Context: v9.60.0 の chore(release) commit を push した際、husky pre-push が gwt-core/gwt のフィルタ済みカバレッジ89.72%を検出して reject。release commit 自体はソース無変更だが、Web マージされた既存 PR で develop のカバレッジが閾値割れしていた。
 Learning: バージョンbumpのみの release でも pre-push はリポジトリ全体のカバレッジを再計測する。不足時は --no-verify で逃げず、最も低カバレッジな新規ファイル(今回 cli/json_envelope.rs 46%)に pure 関数の直接ユニットテストを足すのが最短。parse() 等の pure dispatcher は全 operation 分岐を envelope JSON で網羅でき一気に上がる。
 Future Action: release 前に node scripts/check-coverage-threshold.mjs target/coverage-summary.json 90 を先回り実行し、割れていれば最新機能ファイルへユニットテストを足してから release commit を積む。
+
+## 2026-06-19 — Dynamic diagnostic popovers need visible row caps
+
+Type: failure_pattern
+Context: SPEC-3107 runtime health PERF detail originally rendered up to 16 process rows inside a hover popover. In a real browser at status-strip position, the bottom process row looked clipped and the user reported 見切れています.
+Learning: For status-strip or toolbar diagnostics with dynamic lists, viewport max-height alone is not enough. Cap visible rows, show an explicit top-N/total indicator, and set popover left/bottom/maxHeight from the trigger rect so the surface stays inside the viewport.
+Future Action: When adding hover/focus diagnostic popovers, add focused frontend tests that simulate a near-edge trigger and assert row count caps plus viewport-clamped style values before handing the UI to the user.

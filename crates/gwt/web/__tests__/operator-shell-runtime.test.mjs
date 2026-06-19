@@ -213,6 +213,65 @@ test("Runtime health renderer shows structured diagnostic hover detail", async (
   assert.equal(detail?.querySelector("button"), null, "detail must stay diagnostic-only");
 });
 
+test("Runtime health detail caps process rows and clamps to the viewport", async () => {
+  const { applyRuntimeHealth } = await importOperatorShell();
+  assert.equal(typeof applyRuntimeHealth, "function");
+  const { document, window } = parseHTML(html);
+  Object.defineProperty(document, "defaultView", {
+    configurable: true,
+    value: {
+      innerWidth: 760,
+      innerHeight: 520,
+    },
+  });
+
+  const processes = Array.from({ length: 16 }, (_, index) => ({
+    pid: 1000 + index,
+    parent_pid: index === 0 ? null : 1000,
+    role: index % 2 === 0 ? "codex" : "gwt",
+    name: index % 2 === 0 ? "codex" : "gwt",
+    cpu_percent: 16 - index,
+    memory_bytes: (256 + index) * 1024 * 1024,
+  }));
+
+  applyRuntimeHealth(document, {
+    state: "hot",
+    cpu_percent: 42,
+    memory_bytes: 3 * 1024 * 1024 * 1024,
+    process_count: 25,
+    runner_count: 0,
+    queue: {
+      client_count: 1,
+      queued_entries: 0,
+      dirty_panes: 0,
+      dropped_lossy_delta: 0,
+    },
+    processes,
+  });
+
+  const cell = document.getElementById("op-strip-runtime-health");
+  cell.getBoundingClientRect = () => ({
+    left: 680,
+    top: 488,
+    right: 744,
+    bottom: 520,
+    width: 64,
+    height: 32,
+  });
+  cell.dispatchEvent(new window.Event("mouseenter", { bubbles: true }));
+
+  const detail = document.getElementById("op-runtime-health-detail");
+  const processRows = detail?.querySelectorAll(".op-runtime-health-detail__process") ?? [];
+  assert.equal(processRows.length, 10);
+  assert.match(
+    detail?.querySelector(".op-runtime-health-detail__process-more")?.textContent ?? "",
+    /Showing top 10 of 16/,
+  );
+  assert.equal(detail?.style.maxHeight, "472px");
+  assert.equal(detail?.style.left, "332px");
+  assert.equal(detail?.style.bottom, "40px");
+});
+
 function throwingStorage() {
   return {
     getItem() {

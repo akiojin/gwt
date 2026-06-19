@@ -898,6 +898,7 @@ body::after {
   box-shadow: var(--shadow-xl, 0 12px 40px rgba(0, 0, 0, 0.5));
   font-family: var(--font-mono);
   font-size: var(--type-xs);
+  scrollbar-gutter: stable;
 }
 
 .op-runtime-health-detail[hidden] {
@@ -1000,6 +1001,12 @@ body::after {
 }
 
 .op-runtime-health-detail__empty {
+  color: var(--color-text-muted);
+  font-variant-numeric: tabular-nums;
+}
+
+.op-runtime-health-detail__process-more {
+  padding-top: var(--space-1);
   color: var(--color-text-muted);
   font-variant-numeric: tabular-nums;
 }
