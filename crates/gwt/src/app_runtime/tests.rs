@@ -6143,6 +6143,70 @@ fn app_runtime_runtime_status_stopped_auto_closes_active_agent_window() {
 }
 
 #[test]
+fn app_runtime_runtime_hook_running_recovers_active_agent_after_pty_error() {
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedEnvVar::set("HOME", temp.path());
+    let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+    let tab = sample_project_tab_with_window(
+        "tab-1",
+        "codex-1",
+        WindowPreset::Codex,
+        WindowProcessStatus::Running,
+    );
+    let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+    let window_id = combined_window_id("tab-1", "codex-1");
+    runtime.active_agent_sessions.insert(
+        window_id.clone(),
+        sample_active_agent_session("tab-1", &window_id),
+    );
+
+    let error_events = runtime.handle_runtime_status(
+        window_id.clone(),
+        WindowProcessStatus::Error,
+        Some("pty stream interrupted".to_string()),
+    );
+
+    assert!(runtime.active_agent_sessions.contains_key(&window_id));
+    assert_eq!(
+        runtime.window_details.get(&window_id).map(String::as_str),
+        Some("pty stream interrupted")
+    );
+    assert!(error_events.iter().any(|event| matches!(
+        event.event,
+        BackendEvent::WindowState {
+            state: WindowProcessStatus::Error,
+            ..
+        }
+    )));
+
+    let recovered_events = runtime.handle_runtime_hook_event(runtime_hook_state_for_event(
+        "Running",
+        "PreToolUse",
+        "session-1",
+    ));
+
+    assert!(runtime.active_agent_sessions.contains_key(&window_id));
+    assert_eq!(
+        runtime.window_status(&window_id),
+        Some(WindowProcessStatus::Running)
+    );
+    assert!(
+        !runtime.window_details.contains_key(&window_id),
+        "live hook recovery clears the stale PTY error detail"
+    );
+    assert!(recovered_events.iter().any(|event| matches!(
+        event.event,
+        BackendEvent::WindowState {
+            state: WindowProcessStatus::Running,
+            ..
+        }
+    )));
+}
+
+#[test]
 fn app_runtime_active_work_projection_filters_stale_saved_agents_when_no_agent_is_live() {
     let _env_lock = env_test_lock()
         .lock()
