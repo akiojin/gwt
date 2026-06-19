@@ -15645,6 +15645,128 @@ fn attach_registry_sessions_dedupes_agents_sharing_a_conversation() {
     );
 }
 
+/// User verification 2026-06-19: a legacy branchless Work record can carry
+/// agent refs from multiple branches. Once such refs reach a branch-backed row,
+/// the row must drop sessions whose ledger branch/worktree belongs to another
+/// Workspace so the same Codex conversation is not shown under two Workspaces.
+#[test]
+fn attach_registry_sessions_filters_agents_from_other_workspace_rows() {
+    fn agent_view(
+        session_id: &str,
+        display_name: &str,
+        conversation: &str,
+    ) -> gwt::ActiveWorkAgentView {
+        gwt::ActiveWorkAgentView {
+            session_id: session_id.to_string(),
+            window_id: None,
+            agent_id: display_name.to_ascii_lowercase().replace(' ', "-"),
+            display_name: display_name.to_string(),
+            affiliation_status: "assigned".to_string(),
+            workspace_id: None,
+            status_category: "idle".to_string(),
+            current_focus: None,
+            title_summary: None,
+            branch: None,
+            worktree_path: None,
+            last_board_entry_id: None,
+            last_board_entry_kind: None,
+            coordination_scope: None,
+            updated_at: "2026-06-19T13:49:00Z".to_string(),
+            sessions: vec![gwt::WorkspaceHistorySessionView {
+                agent_session_id: conversation.to_string(),
+                started_at: "2026-06-19T13:49:00Z".to_string(),
+                is_active: true,
+                resumable: true,
+            }],
+        }
+    }
+
+    let temp = tempdir().expect("tempdir");
+    let repo = temp.path().join("unity-cli");
+    let issue_worktree = temp.path().join("unity-cli/work/issue-206");
+    let other_worktree = temp.path().join("unity-cli/work/20260616-1102");
+    fs::create_dir_all(&issue_worktree).expect("issue worktree");
+    fs::create_dir_all(&other_worktree).expect("other worktree");
+
+    let mut issue_session = gwt_agent::Session::new(
+        &issue_worktree,
+        "work/issue-206",
+        gwt_agent::AgentId::ClaudeCode,
+    );
+    issue_session.id = "78992500-1502-4ab2-8e67-04f79803e013".to_string();
+    issue_session.agent_session_id = Some("33939943-240d-461f-bf90-e7b5497e4ee8".to_string());
+    issue_session.display_name = "Claude Code".to_string();
+    let mut other_session = gwt_agent::Session::new(
+        &other_worktree,
+        "work/20260616-1102",
+        gwt_agent::AgentId::Codex,
+    );
+    other_session.id = "5b907840-31ee-48d5-a7e3-277c93fda63b".to_string();
+    other_session.agent_session_id = Some("019ed018-c208-7183-bb6e-b08ba2ef4981".to_string());
+    other_session.display_name = "Codex".to_string();
+    let mut session_index = std::collections::HashMap::new();
+    session_index.insert(issue_session.id.as_str(), &issue_session);
+    session_index.insert(other_session.id.as_str(), &other_session);
+
+    let mut works = vec![gwt::ActiveWorkItemView {
+        id: "work-work-issue-206-a0668517".to_string(),
+        title: "contribution docs PR".to_string(),
+        status_category: "idle".to_string(),
+        status_text: "Paused".to_string(),
+        summary: None,
+        progress_summary: None,
+        work_summary: None,
+        owner: Some("Issue #206".to_string()),
+        next_action: None,
+        active_agents: 0,
+        blocked_agents: 0,
+        branch: Some("work/issue-206".to_string()),
+        worktree_path: Some(issue_worktree.display().to_string()),
+        pr_number: None,
+        pr_url: None,
+        pr_state: None,
+        board_refs: Vec::new(),
+        agents: vec![
+            agent_view(
+                &issue_session.id,
+                "Claude Code",
+                "33939943-240d-461f-bf90-e7b5497e4ee8",
+            ),
+            agent_view(
+                &other_session.id,
+                "Codex",
+                "019ed018-c208-7183-bb6e-b08ba2ef4981",
+            ),
+        ],
+        lifecycle_state: "paused".to_string(),
+        closed_at: None,
+        session_agent_total: 0,
+        merged_into_base: false,
+        workspace_key: None,
+        remote_only: false,
+        done_equivalent: false,
+        cleanup_candidate: None,
+        updated_at: "2026-06-19T13:49:00Z".to_string(),
+    }];
+
+    super::attach_registry_sessions_to_active_works(&mut works, &[], None, &session_index, &repo);
+
+    let agents = &works[0].agents;
+    assert_eq!(agents.len(), 1, "only sessions owned by this row stay");
+    assert_eq!(agents[0].display_name, "Claude Code");
+    assert_eq!(
+        agents[0].sessions[0].agent_session_id,
+        "33939943-240d-461f-bf90-e7b5497e4ee8"
+    );
+    assert!(
+        agents
+            .iter()
+            .flat_map(|agent| agent.sessions.iter())
+            .all(|session| session.agent_session_id != "019ed018-c208-7183-bb6e-b08ba2ef4981"),
+        "Codex conversation from work/20260616-1102 must not appear on work/issue-206"
+    );
+}
+
 /// SPEC-2359 Phase W-16 (FR-402 follow-up, user verification 2026-06-10): on
 /// this machine none of the ledger TOMLs carry `session_history` (the field
 /// is newer than the sessions), but almost all carry `agent_session_id` (the

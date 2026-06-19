@@ -1436,6 +1436,49 @@ fn compare_active_work_agents_newest_first(
         .then_with(|| right.agent_id.cmp(&left.agent_id))
 }
 
+fn active_work_agent_matches_workspace_row_identity(
+    row_branch: Option<&str>,
+    row_worktree: Option<&Path>,
+    agent: &gwt::ActiveWorkAgentView,
+    session_index: &std::collections::HashMap<&str, &gwt_agent::Session>,
+) -> bool {
+    let row_branch = row_branch
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(normalize_branch_name);
+    let row_has_git_identity = row_branch.is_some() || row_worktree.is_some();
+
+    let ledger = session_index.get(agent.session_id.as_str());
+    let agent_branch = ledger
+        .map(|session| session.branch.as_str())
+        .or(agent.branch.as_deref())
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(normalize_branch_name);
+    let agent_worktree = ledger
+        .map(|session| session.worktree_path.as_path())
+        .or_else(|| agent.worktree_path.as_deref().map(Path::new));
+
+    if !row_has_git_identity {
+        return true;
+    }
+
+    let branch_matches = row_branch
+        .as_deref()
+        .zip(agent_branch.as_deref())
+        .is_some_and(|(left, right)| left == right);
+    let worktree_matches = row_worktree
+        .zip(agent_worktree)
+        .is_some_and(|(left, right)| same_worktree_path(left, right) || left == right);
+    if branch_matches || worktree_matches {
+        return true;
+    }
+
+    let branch_conflicts = row_branch.is_some() && agent_branch.is_some();
+    let worktree_conflicts = row_worktree.is_some() && agent_worktree.is_some();
+    !(branch_conflicts || worktree_conflicts)
+}
+
 /// Convert a persisted Work's agent (a launch, carrying its Session history) to
 /// the active-surface agent view so Paused Workspaces render their Work →
 /// Session list instead of an empty agent list.
@@ -1458,6 +1501,16 @@ pub(super) fn attach_registry_sessions_to_active_works(
     );
     let cap = crate::workspace_session_registry::REGISTRY_SESSION_CAP;
     for work in active_works.iter_mut() {
+        let row_branch = work.branch.clone();
+        let row_worktree = work.worktree_path.as_deref().map(PathBuf::from);
+        work.agents.retain(|agent| {
+            active_work_agent_matches_workspace_row_identity(
+                row_branch.as_deref(),
+                row_worktree.as_deref(),
+                agent,
+                session_index,
+            )
+        });
         let existing: Vec<&str> = work
             .agents
             .iter()
