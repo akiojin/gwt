@@ -3409,6 +3409,18 @@ mod tests {
                 if id == &shell_id && data_base64 == "aGVsbG8="
         ));
 
+        let _ = runtime.handle_runtime_hook_event(RuntimeHookEvent {
+            kind: RuntimeHookEventKind::RuntimeState,
+            source_event: Some("PreToolUse".to_string()),
+            gwt_session_id: Some("session-1".to_string()),
+            agent_session_id: None,
+            project_root: Some("E:/gwt/test-repo".to_string()),
+            branch: Some("feature/test".to_string()),
+            status: Some("Running".to_string()),
+            tool_name: None,
+            message: None,
+            occurred_at: "2026-04-25T00:00:00Z".to_string(),
+        });
         let error_events = runtime.handle_runtime_status(
             claude_one_id.clone(),
             WindowProcessStatus::Error,
@@ -3417,7 +3429,7 @@ mod tests {
         assert_eq!(error_events.len(), 3);
         assert!(
             runtime.active_agent_sessions.contains_key(&claude_one_id),
-            "PTY Error keeps Agent session ownership so later runtime hooks can recover it"
+            "PTY Error with a live hook state keeps Agent session ownership for recovery"
         );
         assert_eq!(
             runtime

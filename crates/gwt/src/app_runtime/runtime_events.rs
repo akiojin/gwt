@@ -245,6 +245,10 @@ impl AppRuntime {
             && self
                 .window_preset(window_id)
                 .is_some_and(gwt::window_state::uses_agent_hook_state)
+            && self
+                .window_hook_states
+                .get(window_id)
+                .is_some_and(|state| gwt::window_state::is_live_agent_hook_state(*state))
     }
 
     fn should_broadcast_runtime_hook_event_to_frontend(event: &gwt::RuntimeHookEvent) -> bool {

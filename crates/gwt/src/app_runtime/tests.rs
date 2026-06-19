@@ -6216,6 +6216,11 @@ fn app_runtime_runtime_hook_running_recovers_active_agent_after_pty_error() {
         window_id.clone(),
         sample_active_agent_session("tab-1", &window_id),
     );
+    let _ = runtime.handle_runtime_hook_event(runtime_hook_state_for_event(
+        "Running",
+        "PreToolUse",
+        "session-1",
+    ));
 
     let error_events = runtime.handle_runtime_status(
         window_id.clone(),
@@ -6255,6 +6260,43 @@ fn app_runtime_runtime_hook_running_recovers_active_agent_after_pty_error() {
         event.event,
         BackendEvent::WindowState {
             state: WindowProcessStatus::Running,
+            ..
+        }
+    )));
+}
+
+#[test]
+fn app_runtime_runtime_status_error_without_live_hook_stops_active_agent() {
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedEnvVar::set("HOME", temp.path());
+    let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+    let tab = sample_project_tab_with_window(
+        "tab-1",
+        "codex-1",
+        WindowPreset::Codex,
+        WindowProcessStatus::Running,
+    );
+    let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+    let window_id = combined_window_id("tab-1", "codex-1");
+    runtime.active_agent_sessions.insert(
+        window_id.clone(),
+        sample_active_agent_session("tab-1", &window_id),
+    );
+
+    let error_events = runtime.handle_runtime_status(
+        window_id.clone(),
+        WindowProcessStatus::Error,
+        Some("process failed".to_string()),
+    );
+
+    assert!(!runtime.active_agent_sessions.contains_key(&window_id));
+    assert!(error_events.iter().any(|event| matches!(
+        event.event,
+        BackendEvent::WindowState {
+            state: WindowProcessStatus::Error,
             ..
         }
     )));
