@@ -280,22 +280,31 @@ pub fn update_workspace_projection_with_journal(
     repo_path: &Path,
     update: WorkspaceProjectionUpdate,
 ) -> Result<WorkspaceJournalEntry> {
-    let current_path = gwt_workspace_projection_path_for_repo_path(repo_path);
-    let journal_path = gwt_workspace_journal_path_for_repo_path(repo_path);
-    let _ = migrate_legacy_workspace_projection(repo_path, &current_path)?;
+    update_workspace_projection_with_journal_for_work_event_root(repo_path, repo_path, update)
+}
+
+pub fn update_workspace_projection_with_journal_for_work_event_root(
+    project_state_root: &Path,
+    work_event_root: &Path,
+    update: WorkspaceProjectionUpdate,
+) -> Result<WorkspaceJournalEntry> {
+    let current_path = gwt_workspace_projection_path_for_repo_path(project_state_root);
+    let journal_path = gwt_workspace_journal_path_for_repo_path(project_state_root);
+    let _ = migrate_legacy_workspace_projection(project_state_root, &current_path)?;
     copy_legacy_workspace_file_if_needed(
-        &legacy_workspace_journal_path_for_repo_path(repo_path),
+        &legacy_workspace_journal_path_for_repo_path(project_state_root),
         &journal_path,
     )?;
     let entry = update_workspace_projection_with_journal_paths(
         &current_path,
         &journal_path,
-        repo_path,
+        project_state_root,
         update,
     )?;
-    if let Some(projection) = load_workspace_projection(repo_path)? {
-        let event = workspace_work_event_from_journal_entry(&projection, &entry);
-        record_workspace_work_event(repo_path, event)?;
+    if let Some(projection) = load_workspace_projection(project_state_root)? {
+        let event =
+            workspace_work_event_from_journal_entry_for_root(&projection, &entry, work_event_root);
+        record_workspace_work_event(work_event_root, event)?;
     }
     Ok(entry)
 }
@@ -358,6 +367,7 @@ pub fn load_workspace_work_items_from_path(path: &Path) -> Result<Option<WorkIte
                     item.title = format!("{prefix} work");
                 }
             }
+            items.refresh_derived_progress_summaries();
             Ok(Some(items))
         }
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
@@ -1732,6 +1742,9 @@ fn synthesize_workspace_work_item_from_legacy(
         .and_then(|projection| projection.summary.clone())
         .or_else(|| last_entry.and_then(|entry| entry.summary.clone()))
         .or_else(|| last_entry.and_then(|entry| entry.status_text.clone()));
+    let progress_summary = projection
+        .and_then(|projection| projection.progress_summary.clone())
+        .or_else(|| last_entry.and_then(|entry| entry.progress_summary.clone()));
     let owner = projection
         .and_then(|projection| projection.owner.clone())
         .or_else(|| last_entry.and_then(|entry| entry.owner.clone()));
@@ -1749,6 +1762,7 @@ fn synthesize_workspace_work_item_from_legacy(
         title,
         intent: summary.clone(),
         summary,
+        progress_summary,
         status_category,
         owner,
         created_at,
@@ -1798,6 +1812,7 @@ fn synthesize_workspace_work_item_from_legacy(
             .clone()
             .or_else(|| entry.summary.clone());
         event.summary = entry.summary.clone().or_else(|| entry.status_text.clone());
+        event.progress_summary = entry.progress_summary.clone();
         event.status_category = entry.status_category;
         event.owner = entry.owner.clone();
         event.next_action = entry.next_action.clone();
@@ -1826,6 +1841,7 @@ fn synthesize_workspace_work_item_from_legacy(
         );
         event.title = Some(item.title.clone());
         event.summary = item.summary.clone();
+        event.progress_summary = item.progress_summary.clone();
         event.status_category = Some(status_category);
         event.owner = item.owner.clone();
         item.events.push(event);
@@ -1834,16 +1850,30 @@ fn synthesize_workspace_work_item_from_legacy(
     Some(item)
 }
 
+#[cfg(test)]
 fn workspace_work_event_from_journal_entry(
     projection: &WorkspaceProjection,
     entry: &WorkspaceJournalEntry,
 ) -> WorkEvent {
+    workspace_work_event_from_journal_entry_for_root(projection, entry, &projection.project_root)
+}
+
+fn workspace_work_event_from_journal_entry_for_root(
+    projection: &WorkspaceProjection,
+    entry: &WorkspaceJournalEntry,
+    work_event_root: &Path,
+) -> WorkEvent {
+    let (work_item_id, execution_container) = workspace_work_event_target_from_projection(
+        projection,
+        entry.agent_session_id.as_deref(),
+        work_event_root,
+    );
     let mut event = WorkEvent::new(
         workspace_work_event_kind_from_status(
             entry.status_category.unwrap_or(projection.status_category),
             1,
         ),
-        projection.id.clone(),
+        work_item_id,
         entry.updated_at,
     );
     event.title = entry
@@ -1857,6 +1887,10 @@ fn workspace_work_event_from_journal_entry(
         .or_else(|| entry.summary.clone())
         .or_else(|| projection.summary.clone());
     event.summary = entry.summary.clone().or_else(|| entry.status_text.clone());
+    event.progress_summary = entry
+        .progress_summary
+        .clone()
+        .or_else(|| projection.progress_summary.clone());
     event.status_category = Some(entry.status_category.unwrap_or(projection.status_category));
     event.owner = entry.owner.clone().or_else(|| projection.owner.clone());
     event.next_action = entry.next_action.clone();
@@ -1871,7 +1905,7 @@ fn workspace_work_event_from_journal_entry(
             event.display_name = Some(agent.display_name.clone());
         }
     }
-    event.execution_container = workspace_execution_container_from_projection(projection);
+    event.execution_container = execution_container;
     event
 }
 
@@ -1879,9 +1913,14 @@ pub fn workspace_work_event_from_board_entry(
     projection: &WorkspaceProjection,
     entry: &BoardEntry,
 ) -> WorkEvent {
+    let (work_item_id, execution_container) = workspace_work_event_target_from_projection(
+        projection,
+        entry.origin_session_id.as_deref(),
+        &projection.project_root,
+    );
     let mut event = WorkEvent::new(
         workspace_work_event_kind_from_board_entry(entry),
-        projection.id.clone(),
+        work_item_id,
         entry.updated_at,
     );
     // SPEC-3075 FR-003/FR-004: a Board post body is the Work *status*
@@ -1915,7 +1954,7 @@ pub fn workspace_work_event_from_board_entry(
     event.agent_session_id = entry.origin_session_id.clone();
     event.agent_id = entry.origin_agent_id.clone();
     event.board_entry_id = Some(entry.id.clone());
-    event.execution_container = workspace_execution_container_from_projection(projection);
+    event.execution_container = execution_container;
     event
 }
 
@@ -1970,6 +2009,52 @@ fn workspace_execution_container_from_projection(
             pr_url: details.pr_url.clone(),
             pr_state: details.pr_state.clone(),
         })
+}
+
+fn workspace_work_event_target_from_projection(
+    projection: &WorkspaceProjection,
+    agent_session_id: Option<&str>,
+    work_event_root: &Path,
+) -> (String, Option<WorkspaceExecutionContainerRef>) {
+    if let Some(container) = agent_session_id
+        .and_then(|session_id| {
+            projection
+                .agents
+                .iter()
+                .find(|agent| agent.session_id == session_id)
+        })
+        .and_then(workspace_execution_container_from_agent)
+    {
+        let work_item_id = canonical_work_id(
+            work_event_root,
+            container.branch.as_deref(),
+            container.worktree_path.as_deref(),
+        )
+        .unwrap_or_else(|| projection.id.clone());
+        return (work_item_id, Some(container));
+    }
+
+    (
+        projection.id.clone(),
+        workspace_execution_container_from_projection(projection),
+    )
+}
+
+fn workspace_execution_container_from_agent(
+    agent: &WorkspaceAgentSummary,
+) -> Option<WorkspaceExecutionContainerRef> {
+    let branch = non_empty_clone(agent.branch.as_deref());
+    let worktree_path = agent.worktree_path.clone();
+    if branch.is_none() && worktree_path.is_none() {
+        return None;
+    }
+    Some(WorkspaceExecutionContainerRef {
+        branch,
+        worktree_path,
+        pr_number: None,
+        pr_url: None,
+        pr_state: None,
+    })
 }
 
 pub(crate) fn write_atomic(path: &Path, bytes: &[u8]) -> Result<()> {

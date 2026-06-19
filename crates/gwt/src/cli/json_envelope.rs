@@ -280,6 +280,7 @@ fn workspace_update(params: &Map<String, Value>) -> Result<CliCommand, CliParseE
         status: optional_string(params, "status")?,
         status_text: optional_string(params, "status_text")?,
         summary: optional_string(params, "summary")?,
+        progress_summary: optional_string(params, "progress_summary")?,
         next_action: optional_string(params, "next_action")?,
         owner: optional_string(params, "owner")?,
         agent_session,

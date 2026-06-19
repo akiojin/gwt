@@ -119,6 +119,7 @@ fn session_start_hook_registers_agent_so_workspace_update_persists_title_summary
         owner: None,
         next_action: None,
         summary: None,
+        progress_summary: None,
         agent_session_id: Some(session_id.clone()),
         agent_current_focus: None,
         agent_title_summary: Some("verify session start fixes".to_string()),

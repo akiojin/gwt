@@ -124,6 +124,53 @@ test("Workspace Overview renders Active Works from active_works and keeps Unassi
   assert.match(queue.textContent, /No Workspace selected/);
 });
 
+test("Workspace Overview does not leak projection progress summary into other Active Works", () => {
+  const fixture = createFixture();
+  const surface = createSurface(fixture, {
+    id: "workspace-current",
+    title: "Current projection",
+    status_category: "active",
+    progress_summary: "Projection-only progress should stay on the current projection.",
+    active_work_count: 2,
+    active_works: [
+      {
+        id: "work-parser",
+        title: "Parser cleanup",
+        status_category: "active",
+        progress_summary: "Parser-specific progress summary.",
+        agents: [],
+      },
+      {
+        id: "work-ui",
+        title: "UI polish",
+        status_category: "paused",
+        agents: [],
+      },
+    ],
+    unassigned_agents: [],
+  });
+
+  surface.mount(fixture.body, fixture.windowData, {
+    focusWindowLocally() {},
+    sendFocus() {},
+  });
+
+  const detail = fixture.body.querySelector(".workspace-overview-detail-pane");
+  assert.ok(detail);
+  let detailText = detail.textContent.replace(/\s+/g, " ");
+  assert.match(detailText, /Parser-specific progress summary/);
+  assert.doesNotMatch(detailText, /Projection-only progress/);
+
+  fixture.body
+    .querySelector('.workspace-overview-row[data-workspace-id="work-ui"]')
+    .click();
+
+  detailText = detail.textContent.replace(/\s+/g, " ");
+  assert.match(detailText, /No progress summary yet/);
+  assert.doesNotMatch(detailText, /Projection-only progress/);
+  assert.doesNotMatch(detailText, /Parser-specific progress summary/);
+});
+
 test("Workspace detail renders structured body sections without preformatted dumps", () => {
   const fixture = createFixture();
   const surface = createSurface(fixture, sampleProjection());
@@ -142,15 +189,16 @@ test("Workspace detail renders structured body sections without preformatted dum
     (node) => node.textContent,
   );
   // SPEC-3075: the Work purpose is the detail heading (not a body section), so
-  // the body leads with Status (current focus / next), then a demoted Latest
-  // update (Board snapshot) — instead of one conflated "Summary".
+  // the body leads with the accumulated progress summary, then separates the
+  // current state, related sessions, linked work, lifecycle, and execution
+  // context instead of one conflated "Summary".
   assert.deepEqual(sectionTitles, [
-    "Status",
-    "Latest update",
-    "Work",
+    "Progress Summary",
+    "Current State",
+    "Agents & Sessions",
+    "Linked Work",
     "Lifecycle",
-    "Work Context",
-    "Coordination",
+    "Context",
   ]);
 
   // The heading carries the Work purpose ("what work was running"), not the
@@ -161,11 +209,32 @@ test("Workspace detail renders structured body sections without preformatted dum
   );
 
   const text = detail.textContent.replace(/\s+/g, " ").trim();
+  assert.match(text, /Reworked the Workspace list into a purpose-first surface/);
   assert.match(text, /Quiet Work UI redesign/);
   assert.match(text, /Mona Sans body copy/);
   assert.match(text, /work\/20260521-0234/);
   assert.match(text, /repo\/work\/20260521-0234/);
   assert.match(text, /board-claim-1/);
+});
+
+test("Workspace detail Board refs can focus the matching Board entry", () => {
+  const fixture = createFixture();
+  const focused = [];
+  const surface = createSurface(fixture, sampleProjection(), {
+    focusBoardEntry: (entryId) => focused.push(entryId),
+  });
+
+  surface.mount(fixture.body, fixture.windowData, {
+    focusWindowLocally() {},
+    sendFocus() {},
+  });
+
+  const boardRef = fixture.body.querySelector(
+    "[data-action='focus-board-entry'][data-board-entry-id='board-claim-1']",
+  );
+  assert.ok(boardRef, "Board ref chip should be clickable");
+  boardRef.click();
+  assert.deepEqual(focused, ["board-claim-1"]);
 });
 
 test("Workspace detail renders Sessions under a Work, highlighting the active one (SPEC-2359)", () => {
@@ -620,6 +689,8 @@ function sampleProjection() {
     status_category: "active",
     status_text: "Current work is active",
     summary: "Mona Sans body copy should carry the work summary.",
+    progress_summary:
+      "Reworked the Workspace list into a purpose-first surface and split current status from cumulative progress.",
     owner: "SPEC-2356",
     branch: "work/20260521-0234",
     worktree_path: "/repo/work/20260521-0234",
@@ -653,6 +724,8 @@ function sampleProjection() {
         title: "Release Notes cleanup",
         intent: "Quiet Work UI redesign",
         summary: "Mona Sans body copy should carry the work summary.",
+        progress_summary:
+          "Reworked the Workspace list into a purpose-first surface and split current status from cumulative progress.",
         owner: "SPEC-2356",
         status_category: "active",
         lifecycle_stage: "active",

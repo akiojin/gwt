@@ -3337,6 +3337,7 @@
         renderBoard,
         renderLogs,
         submitBoardEntry,
+        focusBoardEntry,
         handleBoardHookEvent,
         appendLiveLogEntry,
         jumpToUnreadLogs,
@@ -3529,6 +3530,7 @@
         windowMap,
         workspaceWindowById,
         openWorkspaceResumePicker: (workspaceId) => workspaceResumePicker.open(workspaceId),
+        focusBoardEntry,
         getResumeBounds: () => visibleBounds(),
         launchPending,
         branchesSurface: {
@@ -4340,6 +4342,7 @@
         requestOlderBoardEntries,
         renderBoard,
         submitBoardEntry,
+        focusBoardEntry,
         handleRuntimeHookEvent: handleBoardHookEvent,
       });
 

@@ -1807,6 +1807,20 @@ pub struct RemindersState {
     /// until the reminder fires for the first time.
     #[serde(default)]
     pub last_memory_reminded_at: Option<DateTime<Utc>>,
+    /// SPEC-3075 follow-up: last observed cumulative progress summary. Used by
+    /// the hook reminder to detect when the detail summary is missing or stale
+    /// while short status/focus fields continue to change.
+    #[serde(default)]
+    pub last_progress_summary_seen: Option<String>,
+    /// Consecutive UserPromptSubmit turns with the same progress summary.
+    #[serde(default)]
+    pub progress_summary_unchanged_turn_count: u32,
+    /// Last observed status/focus signal paired with the progress summary.
+    #[serde(default)]
+    pub last_progress_focus_seen: Option<String>,
+    /// Sticky drift flag for the current unchanged progress-summary window.
+    #[serde(default)]
+    pub progress_focus_changed_in_window: bool,
 }
 
 /// Directory that stores per-agent-session reminder sidecar files.

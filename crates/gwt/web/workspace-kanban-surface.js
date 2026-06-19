@@ -11,6 +11,7 @@ export function createWorkspaceKanbanSurface({
   workspaceWindowById,
   openWorkspaceResumePicker,
   getResumeBounds,
+  focusBoardEntry,
   branchesSurface,
   launchPending,
 }) {
@@ -159,6 +160,7 @@ export function createWorkspaceKanbanSurface({
       title: workspaceTitle(item),
       intent: compactText(item?.intent),
       summary: compactText(item?.summary || item?.status_text || item?.intent),
+      progress_summary: compactText(item?.progress_summary),
       // SPEC-3075: backend-derived "what work was running" purpose summary
       // (agent title-summary surfaced). Primary rail label; branch is the sub.
       work_summary: compactText(item?.work_summary),
@@ -458,6 +460,26 @@ export function createWorkspaceKanbanSurface({
     if (list.childNodes.length > 0) {
       container.appendChild(list);
     }
+  }
+
+  function appendBoardRefs(container, refs) {
+    const list = Array.isArray(refs) ? refs.filter(Boolean) : [];
+    if (list.length === 0) return false;
+    const wrap = createNode("div", "workspace-board-ref-list");
+    for (const ref of list) {
+      if (typeof focusBoardEntry === "function") {
+        const button = createNode("button", "workspace-board-ref", ref);
+        button.type = "button";
+        button.dataset.action = "focus-board-entry";
+        button.dataset.boardEntryId = ref;
+        button.addEventListener("click", () => focusBoardEntry(ref));
+        wrap.appendChild(button);
+      } else {
+        wrap.appendChild(createNode("span", "workspace-board-ref", ref));
+      }
+    }
+    container.appendChild(wrap);
+    return true;
   }
 
   // SPEC-2359 Workspace → Work → Session: the detail is Session-centric. Each
@@ -973,35 +995,54 @@ export function createWorkspaceKanbanSurface({
 
     // SPEC-3075: the Work *purpose* ("what work was running") is the detail
     // heading (see above), so it is not repeated as a body section. The body
-    // separates *status* (current focus / next) from the demoted Board-body
-    // snapshot, instead of the old conflated "Summary" that read as status.
+    // now separates the accumulated progress summary from current status and
+    // linked context so the Workspace detail answers both "why does this exist?"
+    // and "what has actually happened so far?".
     const purposeText = detailPurpose;
     const currentFocus = workspace.intent;
-    if (currentFocus || workspace.next_action || workspace.blocked_reason) {
-      container.appendChild(
-        detailSection("Status", (body) => {
-          appendDefinitionList(body, [
-            ["Now", currentFocus],
-            ["Next", workspace.next_action],
-          ]);
-          appendTextBlock(body, workspace.blocked_reason, "workspace-detail-text is-warning");
-        }),
-      );
-    }
-    // The Board-body status snapshot, demoted below purpose/status — it is the
-    // latest "what happened", not the Work's identity. Only shown when it adds
-    // something beyond the current focus / purpose.
     const latestUpdate = workspace.summary || workspace.status_text;
-    if (latestUpdate && latestUpdate !== currentFocus && latestUpdate !== purposeText) {
-      container.appendChild(
-        detailSection("Latest update", (body) => {
-          appendTextBlock(body, latestUpdate);
-        }),
-      );
-    }
     container.appendChild(
-      detailSection("Work", (body) => {
+      detailSection("Progress Summary", (body) => {
+        if (workspace.progress_summary) {
+          appendTextBlock(body, workspace.progress_summary);
+        } else {
+          body.appendChild(
+            createNode("div", "workspace-overview-empty", "No progress summary yet"),
+          );
+        }
+      }),
+    );
+    container.appendChild(
+      detailSection("Current State", (body) => {
+        appendDefinitionList(body, [
+          ["Now", currentFocus],
+          ["Next", workspace.next_action],
+        ]);
+        if (latestUpdate && latestUpdate !== currentFocus && latestUpdate !== purposeText) {
+          appendTextBlock(body, latestUpdate);
+        }
+        appendTextBlock(body, workspace.blocked_reason, "workspace-detail-text is-warning");
+        if (body.childNodes.length === 0) {
+          body.appendChild(createNode("div", "workspace-overview-empty", "No current state"));
+        }
+      }),
+    );
+    container.appendChild(
+      detailSection("Agents & Sessions", (body) => {
         appendWorks(body, workspace.agents, workspace);
+      }),
+    );
+    container.appendChild(
+      detailSection("Linked Work", (body) => {
+        appendDefinitionList(body, [
+          ["Owner", workspace.owner],
+          ["PR", workspace.pr_number ? `PR #${workspace.pr_number}` : ""],
+          ["PR state", workspace.pr_state],
+        ]);
+        const hadBoardRefs = appendBoardRefs(body, workspace.board_refs);
+        if (!workspace.owner && !workspace.pr_number && !workspace.pr_state && !hadBoardRefs) {
+          body.appendChild(createNode("div", "workspace-overview-empty", "No linked work"));
+        }
       }),
     );
     container.appendChild(
@@ -1015,30 +1056,12 @@ export function createWorkspaceKanbanSurface({
       }),
     );
     container.appendChild(
-      detailSection("Work Context", (body) => {
+      detailSection("Context", (body) => {
         appendDefinitionList(body, [
-          ["Owner", workspace.owner],
+          ["Purpose", purposeText],
           ["Branch", workspace.branch],
           ["Worktree", compactPath(workspace.worktree_path) || workspace.worktree_path],
-          ["PR", workspace.pr_number ? `PR #${workspace.pr_number}` : ""],
-          ["PR state", workspace.pr_state],
         ]);
-      }),
-    );
-    container.appendChild(
-      detailSection("Coordination", (body) => {
-        if (workspace.board_refs.length === 0 && workspace.events.length === 0) {
-          body.appendChild(createNode("div", "workspace-overview-empty", "No Board references"));
-          return;
-        }
-        if (workspace.board_refs.length > 0) {
-          const refs = createNode("div", "workspace-board-ref-list");
-          for (const ref of workspace.board_refs) {
-            refs.appendChild(createNode("span", "workspace-board-ref", ref));
-          }
-          body.appendChild(refs);
-        }
-        appendEvents(body, workspace.events.filter((event) => event.board_entry_id));
       }),
     );
   }
