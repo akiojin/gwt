@@ -12,7 +12,7 @@ Related Works:
 Promoted To: SPEC #2359 US-79B / T-651〜T-655
 
 Summary:
-セッション復元時に Codex pane が `CODEX Codex Error` や blank terminal になり、復元できないように見える場合がある。添付画像では複数の resumed Codex pane が Error 表示になっている一方、対応する session TOML / runtime sidecar / OS process では `codex resume <agent_session_id>` が生存している。現時点では「resume プロセスが起動できない」よりも、「live agent session があるのに stale な PTY Error/Stopped state が hook Running state より優先され、GUI 表示だけ Error 固定になる」可能性が高い。
+セッション復元時に Codex pane が `CODEX Codex Error` や blank terminal になり、復元できないように見える場合がある。添付画像では複数の resumed Codex pane が Error 表示になっている一方、対応する session TOML / runtime sidecar / OS process では `codex resume <agent_session_id>` が生存している。現時点では「resume プロセスが起動できない」よりも、「live agent session があるのに stale な PTY Error state が hook Running state より優先され、GUI 表示だけ Error 固定になる」可能性が高い。
 
 Evidence:
 - 添付画像では `work/20260617-0255` と `work/20260617-0425` 系の Codex pane が Error/blank 表示。
@@ -20,11 +20,11 @@ Evidence:
 - `ps` では `/Users/akiojin/.bun/bin/codex --no-alt-screen resume <agent_session_id>` が該当セッションで生存。
 - 対象 worktree / branch は存在しており、SPEC #2359 US-79 の「missing worktree/branch」ケースとは現在のスクリーンショット上では一致しない。
 - `gwtd pane.list` は pane websocket timeout になり、UI/pane 更新系の詰まりも併発している可能性がある。
-- `crates/gwt/src/window_state.rs` の `compose_window_state_with_active_session` は PTY state が `Stopped` / `Error` の場合、Agent hook state を見ずに PTY state を返す。
+- `crates/gwt/src/window_state.rs` の `compose_window_state_with_active_session` は PTY state が `Error` の場合、Agent hook state を見ずに PTY state を返す。
 - `crates/gwt/src/app_runtime/runtime_events.rs` は PTY status `Error` / `Stopped` で active agent session tracking と runtime tracking を落とすため、その後の hook event が live session を GUI 上で復旧しにくい。
 
 Approaches:
-- Approach 1: Agent window に active session または matching runtime hook がある場合、PTY terminal state より hook state を優先する。実際の process exit と stale UI state の境界を test で固定できるが、auto-close / stopped 表示の既存期待を見直す必要がある。
+- Approach 1: Agent window に active session と matching live runtime hook がある場合、PTY Error より hook state を優先する。実際の process exit と stale UI state の境界を test で固定できるが、auto-close / stopped 表示の既存期待を壊さないよう Stopped は対象外にする必要がある。
 - Approach 2: hook Running/Waiting/Idle を受けたタイミングで同じ window の PTY terminal state を clear する。局所的だが、status composition の意図が分散する。
 - Approach 3: pane websocket timeout / render blank の retry と status refresh を追加する。表示更新の堅牢性は上がるが、Error 固定の根本原因を直接直さない。
 

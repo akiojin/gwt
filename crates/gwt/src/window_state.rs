@@ -19,7 +19,8 @@ pub fn compose_window_state_with_active_session(
     hook_state: Option<WindowState>,
     has_active_agent_session: bool,
 ) -> WindowState {
-    if has_active_agent_session && uses_agent_hook_state(preset) {
+    if pty_state == WindowState::Error && has_active_agent_session && uses_agent_hook_state(preset)
+    {
         if let Some(hook_state) = hook_state.filter(|state| is_live_agent_hook_state(*state)) {
             return hook_state;
         }
@@ -219,7 +220,7 @@ mod tests {
     }
 
     #[test]
-    fn compose_window_state_recovers_active_agent_from_stale_pty_terminal_state() {
+    fn compose_window_state_recovers_active_agent_from_stale_pty_error_state() {
         assert_eq!(
             compose_window_state_with_active_session(
                 WindowState::Error,
@@ -229,6 +230,10 @@ mod tests {
             ),
             WindowState::Running
         );
+    }
+
+    #[test]
+    fn compose_window_state_keeps_pty_stopped_for_active_agent_recovery() {
         assert_eq!(
             compose_window_state_with_active_session(
                 WindowState::Stopped,
@@ -236,7 +241,7 @@ mod tests {
                 Some(WindowState::Waiting),
                 true,
             ),
-            WindowState::Waiting
+            WindowState::Stopped
         );
         assert_eq!(
             compose_window_state_with_active_session(
@@ -245,7 +250,7 @@ mod tests {
                 Some(WindowState::Idle),
                 true,
             ),
-            WindowState::Idle
+            WindowState::Stopped
         );
     }
 
