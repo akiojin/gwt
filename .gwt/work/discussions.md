@@ -86,3 +86,25 @@ Open Questions:
 
 Next:
 Action Bundle: run gwt-build-spec for #1935 Phase 22. Start with T-HUX2-001 through T-HUX2-006: RED tests and backend ManagedHookHealth read model before UI work.
+
+## 2026-06-19 — Tray Copy URL menu displays port-bearing URL
+
+Status: completed
+Topics: tray-menu, copy-url, server-url
+Related SPECs: #2785
+Related Works:
+Promoted To: SPEC #2785 tray menu Copy URL label amendment
+
+Summary:
+ユーザー要望は tray menu の `Copy URL` にポート番号を表示すること。現状は menu label が静的 `Copy URL` だが、clipboard へコピーされる値は `browser_url` の完全 URL で、`browser_url` は menu 作成前に確定している。既存 owner は SPEC #2785 Server URL Surface で、2026-06-09 Amendment が tray menu Copy URL surface を定義済み。
+
+Decisions:
+- `Copy URL` label は `Copy URL (http://127.0.0.1:<port>/)` 形式にする。表示値と clipboard へ入る root browser URL を一致させる。
+- 新規 SPEC は作らず、SPEC #2785 の tray menu amendment / tasks へ小さな follow-up として統合する。
+- 実装は label 生成 helper と focused contract test の追加を優先し、clipboard 処理・browser_url source は変更しない。
+
+Open Questions:
+
+
+Next:
+Action Bundle: Update Spec + Resume Build。実装時は focused RED test で `Copy URL (<browser_url>)` label を固定し、`main.rs` の tray menu item label を browser_url 付きに変更する。検証は focused tray contract test、cargo test -p gwt --test tray_module_present_test、必要に応じて browser-check による tray menu 視覚確認。

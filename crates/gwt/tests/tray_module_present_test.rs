@@ -75,8 +75,16 @@ fn tray_menu_contract_is_open_copy_url_about_quit() {
         "tray menu must expose Open in browser"
     );
     assert!(
-        MAIN_RS.contains(r#""Copy URL""#),
-        "tray menu must expose Copy URL"
+        TRAY_MENU.contains("pub fn copy_url_label_for_browser_url(browser_url: &str) -> String"),
+        "tray menu must expose a helper for the visible Copy URL label"
+    );
+    assert!(
+        TRAY_MENU.contains(r#"format!("Copy URL ({browser_url})")"#),
+        "Copy URL label must display the full browser URL, including the active port"
+    );
+    assert!(
+        MAIN_RS.contains("copy_url_label_for_browser_url(&browser_url)"),
+        "tray menu must build Copy URL label from the root browser URL"
     );
     assert!(
         MAIN_RS.contains(r#""About GWT""#),
