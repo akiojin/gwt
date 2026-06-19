@@ -10,6 +10,7 @@ import { readFile } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { parseHTML } from "linkedom";
+import { createFileTreeSurface } from "../file-tree-surface.js";
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const INDEX_HTML = path.resolve(here, "..", "index.html");
@@ -121,5 +122,100 @@ test("editor CSS contract ships dirty / Save / hex cell / modal styles", async (
       css.includes(cls),
       `components.css must declare ${cls} so the editor flow renders correctly`,
     );
+  }
+});
+
+function makeEl(tag, options = {}, children = []) {
+  const element = document.createElement(tag);
+  if (options.className) element.className = options.className;
+  if (Object.hasOwn(options, "text")) element.textContent = options.text;
+  for (const [key, value] of Object.entries(options.attrs || {})) {
+    element.setAttribute(key, value);
+  }
+  for (const [key, value] of Object.entries(options.dataset || {})) {
+    element.dataset[key] = value;
+  }
+  for (const child of children) {
+    if (child) element.appendChild(child);
+  }
+  return element;
+}
+
+function clearChildren(element) {
+  while (element.firstChild) element.removeChild(element.firstChild);
+}
+
+test("File Tree waits for worktree selection confirmation before loading the root", () => {
+  const { document: fixtureDocument, window } = parseHTML(`<!doctype html><body>
+    <div id="file-tree-worktree-picker-modal" class="modal-backdrop" aria-hidden="true">
+      <div class="modal-shell" role="dialog" aria-modal="true"></div>
+    </div>
+    <main id="file-tree-window"></main>
+  </body>`);
+  const previousDocument = globalThis.document;
+  const previousEvent = globalThis.Event;
+  const previousCss = globalThis.CSS;
+  globalThis.document = fixtureDocument;
+  globalThis.Event = window.Event;
+  globalThis.CSS = { escape: (value) => String(value) };
+  try {
+    const sent = [];
+    const windowMap = new Map();
+    const body = fixtureDocument.getElementById("file-tree-window");
+    windowMap.set("ft-1", body);
+    const surface = createFileTreeSurface({
+      send: (message) => sent.push(message),
+      makeEl,
+      clearChildren,
+      focusWindowLocally: () => {},
+      sendWindowFocus: () => {},
+      windowMap,
+    });
+
+    surface.mountFileTreeWindow({ id: "ft-1" }, body);
+    surface.applyFileTreeReceiveEvent({
+      kind: "file_tree_worktrees",
+      id: "ft-1",
+      entries: [
+        {
+          id: "wt-develop",
+          kind: "workspace",
+          path: "/repo/develop",
+          label: "develop",
+          branch: "develop",
+          is_active: false,
+        },
+      ],
+    });
+
+    fixtureDocument.querySelector("[data-worktree-id='wt-develop']").click();
+
+    assert.deepEqual(
+      sent.map((message) => message.kind),
+      ["list_file_tree_worktrees", "select_file_tree_worktree"],
+      "root load must wait until file_tree_worktree_selected confirms the backend root",
+    );
+
+    surface.applyFileTreeReceiveEvent({
+      kind: "file_tree_worktree_selected",
+      id: "ft-1",
+      worktree_id: "wt-develop",
+    });
+
+    assert.equal(
+      fixtureDocument.querySelector(".file-tree-worktree-trigger").textContent,
+      "develop",
+      "confirmed selection should update the toolbar worktree label",
+    );
+
+    assert.deepEqual(
+      sent.map((message) => message.kind),
+      ["list_file_tree_worktrees", "select_file_tree_worktree", "load_file_tree"],
+      "confirmed selection should trigger exactly one root load",
+    );
+  } finally {
+    globalThis.document = previousDocument;
+    globalThis.Event = previousEvent;
+    globalThis.CSS = previousCss;
   }
 });

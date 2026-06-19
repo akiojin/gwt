@@ -19,6 +19,12 @@ pub fn compose_window_state_with_active_session(
     hook_state: Option<WindowState>,
     has_active_agent_session: bool,
 ) -> WindowState {
+    if pty_state == WindowState::Error && has_active_agent_session && uses_agent_hook_state(preset)
+    {
+        if let Some(hook_state) = hook_state.filter(|state| is_live_agent_hook_state(*state)) {
+            return hook_state;
+        }
+    }
     if matches!(pty_state, WindowState::Stopped | WindowState::Error) {
         return pty_state;
     }
@@ -30,6 +36,13 @@ pub fn compose_window_state_with_active_session(
         });
     }
     pty_state
+}
+
+pub fn is_live_agent_hook_state(state: WindowState) -> bool {
+    matches!(
+        state,
+        WindowState::Running | WindowState::Waiting | WindowState::Idle
+    )
 }
 
 pub fn runtime_hook_window_state(event: &RuntimeHookEvent) -> Option<WindowState> {
@@ -204,6 +217,72 @@ mod tests {
 
         assert_eq!(composed, WindowState::Idle);
         assert_eq!(serde_json::to_string(&composed).unwrap(), "\"idle\"");
+    }
+
+    #[test]
+    fn compose_window_state_recovers_active_agent_from_stale_pty_error_state() {
+        assert_eq!(
+            compose_window_state_with_active_session(
+                WindowState::Error,
+                WindowPreset::Codex,
+                Some(WindowState::Running),
+                true,
+            ),
+            WindowState::Running
+        );
+    }
+
+    #[test]
+    fn compose_window_state_keeps_pty_stopped_for_active_agent_recovery() {
+        assert_eq!(
+            compose_window_state_with_active_session(
+                WindowState::Stopped,
+                WindowPreset::Claude,
+                Some(WindowState::Waiting),
+                true,
+            ),
+            WindowState::Stopped
+        );
+        assert_eq!(
+            compose_window_state_with_active_session(
+                WindowState::Stopped,
+                WindowPreset::Agent,
+                Some(WindowState::Idle),
+                true,
+            ),
+            WindowState::Stopped
+        );
+    }
+
+    #[test]
+    fn compose_window_state_keeps_pty_terminal_state_without_active_agent_recovery() {
+        assert_eq!(
+            compose_window_state_with_active_session(
+                WindowState::Error,
+                WindowPreset::Shell,
+                Some(WindowState::Running),
+                true,
+            ),
+            WindowState::Error
+        );
+        assert_eq!(
+            compose_window_state_with_active_session(
+                WindowState::Error,
+                WindowPreset::Codex,
+                Some(WindowState::Running),
+                false,
+            ),
+            WindowState::Error
+        );
+        assert_eq!(
+            compose_window_state_with_active_session(
+                WindowState::Error,
+                WindowPreset::Codex,
+                Some(WindowState::Error),
+                true,
+            ),
+            WindowState::Error
+        );
     }
 
     #[test]

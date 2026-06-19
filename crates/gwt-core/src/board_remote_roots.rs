@@ -56,6 +56,12 @@ pub struct RootMapping {
 }
 
 impl RootMapping {
+    fn normalized(&self) -> Self {
+        let mut mapping = self.clone();
+        mapping.channel = mapping.channel.trim().to_string();
+        mapping
+    }
+
     fn dedup_key(&self) -> (String, String, String) {
         (
             self.provider.clone(),
@@ -82,13 +88,14 @@ fn home_roots_path(repo_root: &Path) -> Option<PathBuf> {
 /// exists. Append-only: a later line for the same `(provider, channel, key)`
 /// supersedes earlier ones on load.
 pub fn append_root_mapping(repo_root: &Path, mapping: &RootMapping) -> Result<()> {
+    let mapping = mapping.normalized();
     let path = gwt_board_remote_roots_path(repo_root);
     ensure_gitattributes(repo_root);
-    append_mapping_line(&path, mapping)?;
+    append_mapping_line(&path, &mapping)?;
     // FR-023: the home store write is best-effort — an unresolvable repo hash
     // or a home I/O failure must never fail the post itself.
     if let Some(home_path) = home_roots_path(repo_root) {
-        let _ = append_mapping_line(&home_path, mapping);
+        let _ = append_mapping_line(&home_path, &mapping);
     }
     Ok(())
 }
@@ -145,6 +152,7 @@ fn merge_root_mappings_from_path(
         let Ok(mapping) = serde_json::from_str::<RootMapping>(line) else {
             continue;
         };
+        let mapping = mapping.normalized();
         let key = mapping.dedup_key();
         let supersedes = latest
             .get(&key)
@@ -165,7 +173,7 @@ pub fn find_root_mapping(
 ) -> Option<RootMapping> {
     load_root_mappings(repo_root).remove(&(
         provider.to_string(),
-        channel.to_string(),
+        channel.trim().to_string(),
         key.to_string(),
     ))
 }

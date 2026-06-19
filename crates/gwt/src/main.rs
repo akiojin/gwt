@@ -2278,6 +2278,7 @@ mod tests {
             local_worktree_branches: std::cell::RefCell::new(HashMap::new()),
             window_pty_statuses: HashMap::new(),
             window_hook_states: HashMap::new(),
+            recoverable_agent_error_windows: std::collections::HashSet::new(),
             hook_forward_target: None,
             issue_link_cache_dir: gwt_core::paths::gwt_cache_dir(),
             pending_update: None,
@@ -3286,6 +3287,72 @@ mod tests {
     }
 
     #[test]
+    fn file_tree_load_uses_selected_linked_worktree_root() {
+        let temp = tempdir().expect("tempdir");
+        let repo = temp.path().join("repo");
+        init_git_repo(&repo);
+
+        let active_worktree = temp.path().join("work-current");
+        let develop_worktree = temp.path().join("develop");
+        for (branch, path) in [
+            ("work/current", &active_worktree),
+            ("develop", &develop_worktree),
+        ] {
+            let status = gwt_core::process::hidden_command("git")
+                .args(["worktree", "add", "-b", branch])
+                .arg(path)
+                .current_dir(&repo)
+                .status()
+                .expect("git worktree add");
+            assert!(status.success(), "git worktree add {branch} failed");
+        }
+        fs::write(active_worktree.join("ACTIVE_ONLY.txt"), "active").expect("write active file");
+        fs::write(develop_worktree.join("DEVELOP_ONLY.txt"), "develop")
+            .expect("write develop file");
+
+        let tab = sample_project_tab(
+            "tab-1",
+            "Repo",
+            active_worktree,
+            ProjectKind::Git,
+            &[WindowPreset::FileTree],
+        );
+        let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+        let file_tree_id = window_id_for_preset(&runtime, "tab-1", WindowPreset::FileTree, 0);
+
+        let worktree_id = match runtime.list_file_tree_worktrees_event(&file_tree_id) {
+            BackendEvent::FileTreeWorktrees { entries, .. } => {
+                entries
+                    .into_iter()
+                    .find(|entry| entry.branch.as_deref() == Some("develop"))
+                    .expect("develop worktree")
+                    .id
+            }
+            other => panic!("expected FileTreeWorktrees, got {other:?}"),
+        };
+
+        assert!(matches!(
+            runtime.select_file_tree_worktree_event(&file_tree_id, &worktree_id),
+            BackendEvent::FileTreeWorktreeSelected { .. }
+        ));
+
+        match runtime.load_file_tree_event(&file_tree_id, "") {
+            BackendEvent::FileTreeEntries { entries, .. } => {
+                let paths: Vec<&str> = entries.iter().map(|entry| entry.path.as_str()).collect();
+                assert!(
+                    paths.contains(&"DEVELOP_ONLY.txt"),
+                    "selected develop worktree file should be visible: {paths:?}",
+                );
+                assert!(
+                    !paths.contains(&"ACTIVE_ONLY.txt"),
+                    "active worktree file must not leak after selecting develop: {paths:?}",
+                );
+            }
+            other => panic!("expected FileTreeEntries, got {other:?}"),
+        }
+    }
+
+    #[test]
     fn runtime_status_helpers_cover_sessions_auto_close_and_launch_errors() {
         let _env_lock = crate::env_test_lock()
             .lock()
@@ -3344,13 +3411,28 @@ mod tests {
                 if id == &shell_id && data_base64 == "aGVsbG8="
         ));
 
+        let _ = runtime.handle_runtime_hook_event(RuntimeHookEvent {
+            kind: RuntimeHookEventKind::RuntimeState,
+            source_event: Some("PreToolUse".to_string()),
+            gwt_session_id: Some("session-1".to_string()),
+            agent_session_id: None,
+            project_root: Some("E:/gwt/test-repo".to_string()),
+            branch: Some("feature/test".to_string()),
+            status: Some("Running".to_string()),
+            tool_name: None,
+            message: None,
+            occurred_at: "2026-04-25T00:00:00Z".to_string(),
+        });
         let error_events = runtime.handle_runtime_status(
             claude_one_id.clone(),
             WindowProcessStatus::Error,
             Some("boom".to_string()),
         );
         assert_eq!(error_events.len(), 3);
-        assert!(!runtime.active_agent_sessions.contains_key(&claude_one_id));
+        assert!(
+            runtime.active_agent_sessions.contains_key(&claude_one_id),
+            "PTY Error with a live hook state keeps Agent session ownership for recovery"
+        );
         assert_eq!(
             runtime
                 .window_details
@@ -3361,7 +3443,7 @@ mod tests {
         assert!(matches!(
             error_events[0].event,
             BackendEvent::ActiveWorkProjection { ref projection }
-                if projection.active_agents == 1 && projection.agents.len() == 1
+                if projection.active_agents == 2 && projection.agents.len() == 2
         ));
         assert!(matches!(
             error_events[1].event,

@@ -438,6 +438,93 @@ fn dispatch_accepts_json_envelope_workspace_update_without_argv_flags() {
 }
 
 #[test]
+fn dispatch_json_envelope_hook_health_returns_managed_health_json() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    gwt_skills::generate_settings_local(temp.path()).expect("claude hooks");
+    gwt_skills::generate_codex_hooks(temp.path()).expect("codex hooks");
+    let runtime_path = temp.path().join("runtime-state.json");
+    crate::cli::hook::runtime_state::write_for_event(&runtime_path, "PreToolUse")
+        .expect("runtime state");
+    let profile_path = temp.path().join("profile.jsonl");
+    fs::write(
+        &profile_path,
+        serde_json::to_string(&serde_json::json!({
+            "event": "PreToolUse",
+            "handler": "workflow-policy",
+            "status": "ok",
+            "duration_ms": 1400.0,
+            "occurred_at": "2026-06-17T00:00:00.000Z"
+        }))
+        .unwrap(),
+    )
+    .expect("profile");
+    let mut env = TestEnv::new(temp.path().to_path_buf());
+    env.stdin = serde_json::json!({
+        "schema_version": 1,
+        "operation": "hook.health",
+        "params": {
+            "runtime_state_path": runtime_path,
+            "profile_path": profile_path
+        }
+    })
+    .to_string();
+
+    let code = dispatch(&mut env, &["gwtd".to_string()]);
+
+    assert_eq!(
+        code,
+        0,
+        "hook.health JSON envelope should succeed, stderr: {}",
+        String::from_utf8_lossy(&env.stderr)
+    );
+    let stdout: serde_json::Value =
+        serde_json::from_slice(&env.stdout).expect("parse JSON envelope response");
+    assert_eq!(stdout["ok"].as_bool(), Some(true));
+    assert_eq!(stdout["operation"].as_str(), Some("hook.health"));
+    let health: serde_json::Value =
+        serde_json::from_str(stdout["output"].as_str().expect("output string"))
+            .expect("parse hook health output");
+    assert_eq!(health["status"].as_str(), Some("needs_attention"));
+    assert_eq!(health["last_event"].as_str(), Some("PreToolUse"));
+    assert_eq!(
+        health["slow_handlers"][0]["handler"].as_str(),
+        Some("workflow-policy")
+    );
+}
+
+#[test]
+fn dispatch_json_envelope_hook_doctor_can_repair_missing_managed_configs() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    fs::create_dir_all(temp.path().join(".codex")).expect("codex dir");
+    let mut env = TestEnv::new(temp.path().to_path_buf());
+    env.stdin = serde_json::json!({
+        "schema_version": 1,
+        "operation": "hook.doctor",
+        "params": {
+            "repair": true
+        }
+    })
+    .to_string();
+
+    let code = dispatch(&mut env, &["gwtd".to_string()]);
+
+    assert_eq!(
+        code,
+        0,
+        "hook.doctor JSON envelope should succeed, stderr: {}",
+        String::from_utf8_lossy(&env.stderr)
+    );
+    assert!(temp.path().join(".codex/hooks.json").exists());
+    let stdout: serde_json::Value =
+        serde_json::from_slice(&env.stdout).expect("parse JSON envelope response");
+    let doctor: serde_json::Value =
+        serde_json::from_str(stdout["output"].as_str().expect("output string"))
+            .expect("parse hook doctor output");
+    assert_eq!(doctor["repair"]["repaired"].as_bool(), Some(true));
+    assert_eq!(doctor["health"]["status"].as_str(), Some("inactive"));
+}
+
+#[test]
 fn dispatch_json_envelope_board_post_rejects_purpose_fields() {
     let temp = tempfile::tempdir().expect("tempdir");
     let mut env = TestEnv::new(temp.path().to_path_buf());

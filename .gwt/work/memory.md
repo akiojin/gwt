@@ -7046,3 +7046,45 @@ Type: lesson
 Context: SPEC-3107 PERF detail sort controls were initially verified with linkedom unit tests and a live DOM click script, but the live check did not assert that the tooltip remained visible after the user clicked Load/CPU/Mem. User verification caught that the window closed after clicking a sort button.
 Learning: For hover/focus popovers that re-render their own controls, DOM/order assertions are insufficient. The regression must drive a real browser click, wait beyond the hide debounce, and assert the popover is still visible. Re-rendering focused controls can fire focusout and leave a stale hide timer.
 Future Action: When changing popover controls in gwt, add or run a live Playwright test that clicks each control and waits at least one debounce interval before asserting visibility and content. Do not call this E2E-verified unless that hold-open behavior is covered.
+
+## 2026-06-17 — Fresh Docker Codex E2E needs container-visible workspace-home hooks
+
+Type: failure-pattern
+Context: During real-use E2E for SPEC-3050 on 2026-06-17, browser-check fresh HOME could not verify Agent launch through Start Work because remote branch creation lacked GitHub credentials. Existing-branch Docker launch then started Codex 0.140, but pending Goal Start hooks did not inject until the linked-worktree workspace-home .codex/hooks.json path was visible inside the container and trusted with the same GWT_HOOK_BIN fallback as the generated hook file.
+Learning: For Codex >= 0.131 in linked worktrees, workspace-home hook discovery keys use the root checkout path from .git, not the /gwt worktree-local path. In Docker E2E, mounting only the worktree-local hooks or trusting with /usr/local/bin/gwtd fallback can register the wrong keys/hashes. Start Work is also the wrong fresh-check path unless GitHub branch creation credentials are proven in the isolated HOME.
+Future Action: For fresh browser-check E2E that needs an Agent but not Start Work, launch the current branch via Launch Agent/active-work. If Docker + latest Codex is used, ensure the container sees the linked workspace-home .codex/hooks.json path, register trust for workspace-home with GWT_HOOK_BIN matching the generated hook fallback, and then verify SessionStart/UserPromptSubmit hook injection in the Codex session log before testing the feature.
+
+## 2026-06-17 — 重複 Workspace 検出の穴と採用方針（Start Work intake prompt + works scope）
+
+Type: lesson
+Context: discussion: 「1ヶ月前の作業を知らずに似た Workspace を作る」懸念。調査で現状の重複検出は incomplete work と同一ブランチ（canonical_work_id）のみ。is_incomplete() フィルタで completed/discarded は照合から除外され、Work/Workspace/branch 自体は ChromaDB semantic 索引の対象外（V2_SCOPES に works が無い）。token 一致は日本語↔英語の言い換えを拾えない。設計制約 memory 2026-05-12『coordination must not become a global tool lock』により解は非ブロック advisory。
+Learning: 重複作業の事前検出は (1) Start Work に初回プロンプト記入ステップ（常に skippable）を追加し意図を branch 作成前に捕捉、(2) 過去 Work（completed/discarded 含む）を新 ChromaDB scope works として e5 索引化、(3) 既存索引（Issue 全状態/SPEC/PR/Board）+ works に意味検索して advisory 提示（distance 閾値で strong match のみ、非ブロック）、(4) skip 時は起動後の最初の workspace.update intent 設定で advisory 再走＋索引化、で解く。owner は SPEC-2359 US-80/US-81（UI/advisory）+ SPEC-1939 cross-ref（works scope の索引/watcher/query/寿命）。
+Future Action: workspace の重複検出・Start Work 起動 UX・semantic 索引 scope を触る前に SPEC-2359 US-80/US-81 と SPEC-1939 の 2026-06-17 works scope cross-ref を確認する。advisory は決して global tool lock にしない。索引寿命は worktree 寿命から切り離す。works scope は必ず index health/auto-repair（ProjectIndexScopes / collect_unhealthy_rebuild_targets）に配線し、watcher が自動ビルドするようにする（auto_build=false の advisory が空にならないため）。
+
+## 2026-06-17 — Remote Board read-back must expand root thread replies
+
+Type: postmortem
+Context: SPEC #2963 Slack/Teams remote Board providers were posting entries as Workspace/General thread replies, but load_snapshot read only channel top-level history/messages. Existing tests placed reply-shaped fixtures directly in history/list responses, hiding the real API split.
+Learning: Slack conversations.history and Microsoft Graph channel messages do not provide the thread reply stream as Board entries. Root summary cards and arbitrary flat channel messages must not be mapped into BoardEntry; provider tests should seed root mappings and assert calls to conversations.replies or /messages/{root}/replies.
+Future Action: When changing remote Board providers, write RED tests against provider-specific reply endpoints with a seeded board_remote_roots mapping, include mapped-channel roots distinct from the default channel, and verify board.show reads replies back before claiming completion.
+
+## 2026-06-17 — issue.spec.edit body replaces section content
+
+Type: lesson
+Context: While updating SPEC #2359 tasks after implementing the Workspace session summary / Resume normalization follow-up, I used issue.spec.edit with section=tasks and a body containing only a completion note, expecting append semantics.
+Learning: issue.spec.edit with a plain body replaces the target section. It does not append. For large tasks sections this can erase existing task history unless the caller first reads/extracts the full existing artifact and writes back the complete replacement body.
+Future Action: Before updating SPEC sections, read the current section and either construct a full replacement body that preserves existing content, or use a documented append/comment workflow. Never send a partial completion note as section body unless replacing the section is intentional.
+
+## 2026-06-19 — Backfill Workspace progress_summary for legacy Work rows
+
+Type: failure-pattern
+Context: SPEC-3075 Workspace Progress Summary follow-up: UI fallback bug was fixed first, but most historical Work rows still displayed empty progress because persisted Work events lacked progress_summary. Hooks only reminded agents to write summaries and did not backfill old records.
+Learning: Adding a new display field plus hook reminders is insufficient for existing Work data. If a Workspace UI field is expected to be useful for historical rows, add a deterministic load/apply backfill from existing persisted event fields and tests that cover legacy records. Do not rely on display-time AI generation for this class of summary.
+Future Action: When extending Work/Workspace projection fields, add RED tests for legacy persisted files with missing new fields, explicit-value preservation tests, and a migration/backfill path before claiming the UI will be populated.
+
+## 2026-06-17 — Do not parallelize same skill-state JSON updates
+
+Type: agent workflow correction
+Context: During SPEC #1935 Phase 22 implementation, two build.phase JSON operations were sent in parallel against .gwt/skill-state/build-spec.json.
+Learning: skill-state JSON operations are not safe to parallelize for the same state file; concurrent writes can interleave or leave trailing characters, causing build.phase/load failures.
+Future Action: Run build.start/build.phase/build.complete/build.abort sequentially only. Do not place same skill-state JSON updates inside multi_tool_use.parallel.

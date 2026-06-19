@@ -71,7 +71,7 @@ pub use file_content::{
 };
 pub use file_tree::{list_directory_entries, FileTreeEntry, FileTreeEntryKind};
 pub use gwt_agent::{ClaudeCodeOpenaiCompatInput, PresetDefinition, PresetId};
-pub use index_search::search_project_index;
+pub use index_search::{search_project_index, work_advisory};
 pub use index_worker::{
     aggregate_current_worktree_index_status_for_path, aggregate_project_index_status_for_path,
     auto_repair_unhealthy_scopes, auto_repair_unhealthy_targets, build_aggregated_status_view,
@@ -127,10 +127,11 @@ pub use protocol::{
     BranchEntriesPhase, CustomAgentErrorCode, FileAttachment, FileContentErrorKind,
     FileContentMode, FileContentSaveErrorKind, FocusCycleDirection, FrontendEvent,
     GitHubRepositorySearchResultView, IndexSearchMatchMode, IndexSearchResult, IndexSearchScope,
-    IndexSearchTarget, ProfileEntryView, ProfileEnvEntryView, ProfileSnapshotView, ProjectTabView,
-    RecentProjectView, RunningAgentSummary, UiTraceEntry, UiTracePayload, WorkAgentView,
-    WorkEventView, WorkItemView, WorkspaceExecutionContainerView, WorkspaceHistoryAgentView,
-    WorkspaceHistoryEventView, WorkspaceHistorySessionView, WorkspaceHistoryView,
-    WorkspaceJournalEntryView, WorkspaceResumeSource, WorkspaceView,
+    IndexSearchTarget, ManagedHookHealthView, ManagedHookPendingDiscussionView,
+    ManagedHookPendingGoalView, ManagedHookSlowHandlerView, ProfileEntryView, ProfileEnvEntryView,
+    ProfileSnapshotView, ProjectTabView, RecentProjectView, RunningAgentSummary, UiTraceEntry,
+    UiTracePayload, WorkAgentView, WorkEventView, WorkItemView, WorkspaceExecutionContainerView,
+    WorkspaceHistoryAgentView, WorkspaceHistoryEventView, WorkspaceHistorySessionView,
+    WorkspaceHistoryView, WorkspaceJournalEntryView, WorkspaceResumeSource, WorkspaceView,
 };
 pub use window_canvas::WindowCanvasState;

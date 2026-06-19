@@ -122,6 +122,66 @@ fn work_items_cache_never_caches_synthesized_fallback() {
     assert_eq!(loaded.work_items.len(), 1);
 }
 
+#[test]
+fn load_workspace_work_items_backfills_progress_summary_from_legacy_events() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let work_items_path = tmp.path().join("works.json");
+    let t1 = chrono::Utc.with_ymd_and_hms(2026, 6, 16, 10, 0, 0).unwrap();
+    let t2 = chrono::Utc.with_ymd_and_hms(2026, 6, 16, 11, 0, 0).unwrap();
+
+    let mut projection = super::WorkItemsProjection::empty(t1);
+    let mut start = super::WorkEvent::new(super::WorkEventKind::Start, "legacy-work", t1);
+    start.title = Some("Project Tabs UX".to_string());
+    start.intent = Some("Compared browser-tab and built-in tab switching UX.".to_string());
+    projection.apply_event(start);
+    let mut update = super::WorkEvent::new(super::WorkEventKind::Update, "legacy-work", t2);
+    update.summary =
+        Some("Implemented project switcher and quiet Agent completion notifications.".to_string());
+    projection.apply_event(update);
+
+    projection.work_items[0].progress_summary = None;
+    super::save_workspace_work_items_projection_to_path(&work_items_path, &projection)
+        .expect("save legacy works.json");
+
+    let loaded = super::load_workspace_work_items_from_path(&work_items_path)
+        .expect("load works.json")
+        .expect("items");
+    let progress = loaded.work_items[0]
+        .progress_summary
+        .as_deref()
+        .expect("loader should backfill derived progress_summary");
+    assert!(progress.contains("Compared browser-tab"), "{progress}");
+    assert!(
+        progress.contains("Implemented project switcher"),
+        "{progress}"
+    );
+}
+
+#[test]
+fn load_workspace_work_items_preserves_saved_progress_summary() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let work_items_path = tmp.path().join("works.json");
+    let now = chrono::Utc.with_ymd_and_hms(2026, 6, 16, 10, 0, 0).unwrap();
+
+    let mut projection = super::WorkItemsProjection::empty(now);
+    let mut event = super::WorkEvent::new(super::WorkEventKind::Start, "saved-work", now);
+    event.title = Some("Saved progress".to_string());
+    event.intent = Some("Short latest focus".to_string());
+    projection.apply_event(event);
+    projection.work_items[0].progress_summary =
+        Some("Human-written cumulative progress must stay intact.".to_string());
+    super::save_workspace_work_items_projection_to_path(&work_items_path, &projection)
+        .expect("save works.json");
+
+    let loaded = super::load_workspace_work_items_from_path(&work_items_path)
+        .expect("load works.json")
+        .expect("items");
+    assert_eq!(
+        loaded.work_items[0].progress_summary.as_deref(),
+        Some("Human-written cumulative progress must stay intact.")
+    );
+}
+
 fn sample_work_event(work_id: &str, updated_at: chrono::DateTime<chrono::Utc>) -> super::WorkEvent {
     let mut event = super::WorkEvent::new(super::WorkEventKind::Start, work_id, updated_at);
     event.status_category = Some(super::WorkspaceStatusCategory::Active);
@@ -202,6 +262,7 @@ fn workspace_update_persists_current_summary_and_journal_entry() {
             owner: Some("SPEC-2359".to_string()),
             next_action: Some("Run focused regression tests".to_string()),
             summary: Some("Workspace state is now the source for Active Work.".to_string()),
+            progress_summary: None,
             agent_session_id: Some("session-1".to_string()),
             agent_current_focus: Some("Writing RED tests".to_string()),
             agent_title_summary: None,
@@ -242,6 +303,228 @@ fn workspace_update_persists_current_summary_and_journal_entry() {
 }
 
 #[test]
+fn workspace_journal_event_targets_agent_branch_work_item() {
+    let project_root = std::path::PathBuf::from("/repo/workspace-home");
+    let worktree = std::path::PathBuf::from("/repo/workspace-home/work/20260617-0255");
+    let updated_at = Utc.with_ymd_and_hms(2026, 6, 17, 5, 30, 0).unwrap();
+    let mut projection = WorkspaceProjection::default_for_project(&project_root);
+    projection.id = canonical_work_id(&project_root, Some("develop"), None).unwrap();
+    projection.title = "Canonical root work".to_string();
+    projection.git_details = Some(GitDetails {
+        branch: Some("develop".to_string()),
+        worktree_path: Some(project_root.join("develop")),
+        base_branch: Some("origin/develop".to_string()),
+        pr_number: None,
+        pr_url: None,
+        pr_state: None,
+        pr_created_at: None,
+        created_by_start_work: false,
+        created_at: updated_at,
+    });
+    projection.agents.push(WorkspaceAgentSummary {
+        session_id: "session-current".to_string(),
+        window_id: None,
+        agent_id: "codex".to_string(),
+        display_name: "Codex".to_string(),
+        status_category: WorkspaceStatusCategory::Active,
+        current_focus: None,
+        title_summary: None,
+        worktree_path: Some(worktree.clone()),
+        branch: Some("work/20260617-0255".to_string()),
+        last_board_entry_id: None,
+        last_board_entry_kind: None,
+        coordination_scope: None,
+        affiliation_status: WorkspaceAgentAffiliationStatus::Unassigned,
+        workspace_id: None,
+        updated_at,
+    });
+    let entry = WorkspaceJournalEntry {
+        id: "journal-current".to_string(),
+        project_root: project_root.clone(),
+        title: None,
+        status_category: Some(WorkspaceStatusCategory::Active),
+        status_text: None,
+        owner: Some("SPEC-2359".to_string()),
+        next_action: None,
+        summary: None,
+        progress_summary: None,
+        agent_session_id: Some("session-current".to_string()),
+        agent_current_focus: Some("修正中".to_string()),
+        agent_title_summary: Some("Workspace detail content".to_string()),
+        updated_at,
+    };
+
+    let event = super::workspace_work_event_from_journal_entry(&projection, &entry);
+
+    let expected_id = canonical_work_id(&project_root, Some("work/20260617-0255"), None).unwrap();
+    assert_eq!(
+        event.work_item_id, expected_id,
+        "session-authored workspace.update must land on the session branch Work"
+    );
+    let container = event.execution_container.expect("execution container");
+    assert_eq!(container.branch.as_deref(), Some("work/20260617-0255"));
+    assert_eq!(container.worktree_path.as_deref(), Some(worktree.as_path()));
+}
+
+#[test]
+fn workspace_journal_event_carries_progress_summary_separately_from_status_summary() {
+    let project_root = std::path::PathBuf::from("/repo/workspace-home");
+    let updated_at = Utc.with_ymd_and_hms(2026, 6, 17, 6, 0, 0).unwrap();
+    let mut projection = WorkspaceProjection::default_for_project(&project_root);
+    projection.id = canonical_work_id(&project_root, Some("develop"), None).unwrap();
+    projection.title = "Workspace detail context".to_string();
+    projection.summary = Some("Previous latest status".to_string());
+    projection.progress_summary = Some("Previous cumulative progress".to_string());
+
+    let entry = WorkspaceJournalEntry {
+        id: "journal-progress-summary".to_string(),
+        project_root: project_root.clone(),
+        title: None,
+        status_category: Some(WorkspaceStatusCategory::Active),
+        status_text: None,
+        owner: Some("SPEC-3075".to_string()),
+        next_action: None,
+        summary: Some("Latest status snapshot".to_string()),
+        progress_summary: Some(
+            "Investigated resume persistence, confirmed hook timing, and wired the field."
+                .to_string(),
+        ),
+        agent_session_id: None,
+        agent_current_focus: None,
+        agent_title_summary: None,
+        updated_at,
+    };
+
+    let event = super::workspace_work_event_from_journal_entry(&projection, &entry);
+
+    assert_eq!(event.summary.as_deref(), Some("Latest status snapshot"));
+    assert_eq!(
+        event.progress_summary.as_deref(),
+        Some("Investigated resume persistence, confirmed hook timing, and wired the field.")
+    );
+}
+
+#[test]
+fn board_status_event_updates_summary_without_overwriting_progress_summary() {
+    let started_at = Utc.with_ymd_and_hms(2026, 6, 17, 6, 5, 0).unwrap();
+    let updated_at = Utc.with_ymd_and_hms(2026, 6, 17, 6, 10, 0).unwrap();
+    let mut projection = WorkItemsProjection::empty(started_at);
+    let mut start = WorkEvent::new(WorkEventKind::Start, "work-progress", started_at);
+    start.title = Some("Workspace detail context".to_string());
+    start.summary = Some("Initial status".to_string());
+    start.progress_summary =
+        Some("Implemented resume normalization and isolated the WorkEvent root issue.".to_string());
+    projection.apply_event(start);
+
+    let mut board_update = WorkEvent::new(WorkEventKind::Update, "work-progress", updated_at);
+    board_update.summary = Some("Posted a short Board status update.".to_string());
+    projection.apply_event(board_update);
+
+    let item = projection
+        .work_items
+        .iter()
+        .find(|item| item.id == "work-progress")
+        .expect("work item");
+    assert_eq!(
+        item.summary.as_deref(),
+        Some("Posted a short Board status update.")
+    );
+    assert_eq!(
+        item.progress_summary.as_deref(),
+        Some("Implemented resume normalization and isolated the WorkEvent root issue.")
+    );
+}
+
+#[test]
+fn workspace_journal_event_records_to_agent_worktree_log() {
+    let _guard = crate::test_support::env_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let home = tempfile::tempdir().expect("home");
+    let _home = ScopedHome::set(home.path());
+    let temp = tempfile::tempdir().expect("tempdir");
+    let project_state_root = temp.path().join("workspace-home");
+    let worktree = temp.path().join("workspace-home/work/20260617-0255");
+    init_test_git_repo(&worktree);
+    let mut projection = WorkspaceProjection::default_for_project(&project_state_root);
+    projection.id = canonical_work_id(&project_state_root, Some("develop"), None).unwrap();
+    projection.git_details = Some(GitDetails {
+        branch: Some("develop".to_string()),
+        worktree_path: Some(project_state_root.clone()),
+        base_branch: None,
+        pr_number: None,
+        pr_state: None,
+        pr_url: None,
+        pr_created_at: None,
+        created_by_start_work: false,
+        created_at: Utc::now(),
+    });
+    projection.agents.push(WorkspaceAgentSummary {
+        session_id: "session-current".to_string(),
+        window_id: None,
+        agent_id: "codex".to_string(),
+        display_name: "Codex".to_string(),
+        status_category: WorkspaceStatusCategory::Active,
+        current_focus: None,
+        title_summary: None,
+        worktree_path: Some(worktree.clone()),
+        branch: Some("work/20260617-0255".to_string()),
+        last_board_entry_id: None,
+        last_board_entry_kind: None,
+        coordination_scope: None,
+        affiliation_status: WorkspaceAgentAffiliationStatus::Unassigned,
+        workspace_id: None,
+        updated_at: Utc::now(),
+    });
+    save_workspace_projection(&project_state_root, &projection).expect("seed canonical projection");
+
+    update_workspace_projection_with_journal_for_work_event_root(
+        &project_state_root,
+        &worktree,
+        WorkspaceProjectionUpdate {
+            title: Some("Workspace".to_string()),
+            status_category: Some(WorkspaceStatusCategory::Active),
+            status_text: None,
+            owner: Some("SPEC-2359".to_string()),
+            next_action: None,
+            summary: Some("Canonical journal update".to_string()),
+            progress_summary: None,
+            agent_session_id: Some("session-current".to_string()),
+            agent_current_focus: Some("修正中".to_string()),
+            agent_title_summary: Some("Workspace detail content".to_string()),
+        },
+    )
+    .expect("workspace update");
+
+    let canonical_journal = gwt_workspace_journal_path_for_repo_path(&project_state_root);
+    assert!(
+        canonical_journal.is_file(),
+        "summary journal stays in the project-state root"
+    );
+
+    let worktree_events = gwt_repo_local_work_events_path(&worktree);
+    let events_text = fs::read_to_string(&worktree_events).expect("worktree events log");
+    let lines: Vec<&str> = events_text.lines().collect();
+    assert_eq!(lines.len(), 1, "one event is recorded in the worktree log");
+    let event: WorkEvent = serde_json::from_str(lines[0]).expect("event json");
+    let expected_id = canonical_work_id(&worktree, Some("work/20260617-0255"), None).unwrap();
+    assert_eq!(event.work_item_id, expected_id);
+    assert_eq!(
+        event
+            .execution_container
+            .as_ref()
+            .and_then(|container| container.branch.as_deref()),
+        Some("work/20260617-0255")
+    );
+
+    let project_state_events = gwt_repo_local_work_events_path(&project_state_root);
+    assert!(
+        !project_state_events.exists(),
+        "session-authored Work event must not be written to the project-state root"
+    );
+}
+
+#[test]
 fn workspace_work_items_synthesize_from_legacy_current_and_journal_without_rewrite() {
     let temp = tempfile::tempdir().expect("tempdir");
     let project_root = temp.path().join("repo");
@@ -272,6 +555,7 @@ fn workspace_work_items_synthesize_from_legacy_current_and_journal_without_rewri
             owner: Some("SPEC-2359".to_string()),
             next_action: None,
             summary: Some("Started from legacy journal.".to_string()),
+            progress_summary: None,
             agent_session_id: Some("session-legacy".to_string()),
             agent_current_focus: Some("Implement lifecycle events".to_string()),
             agent_title_summary: Some("WorkItem history".to_string()),
@@ -290,6 +574,7 @@ fn workspace_work_items_synthesize_from_legacy_current_and_journal_without_rewri
             owner: Some("SPEC-2359".to_string()),
             next_action: Some("Post Board handoff".to_string()),
             summary: Some("Blocked state from legacy journal.".to_string()),
+            progress_summary: None,
             agent_session_id: Some("session-legacy".to_string()),
             agent_current_focus: None,
             agent_title_summary: Some("WorkItem history".to_string()),
@@ -355,6 +640,7 @@ fn workspace_update_persists_agent_title_summary_separately_from_focus() {
             owner: None,
             next_action: None,
             summary: None,
+            progress_summary: None,
             agent_session_id: Some("session-1".to_string()),
             agent_current_focus: Some(
                 "Implementing title-summary support across Board and Workspace".to_string(),
@@ -402,6 +688,7 @@ fn recent_workspace_journal_entries_load_newest_first_with_limit() {
             owner: Some("SPEC-2359".to_string()),
             next_action: None,
             summary: Some("First summary".to_string()),
+            progress_summary: None,
             agent_session_id: None,
             agent_current_focus: None,
             agent_title_summary: None,
@@ -420,6 +707,7 @@ fn recent_workspace_journal_entries_load_newest_first_with_limit() {
             owner: Some("SPEC-2359".to_string()),
             next_action: Some("Review Workspace Overview".to_string()),
             summary: Some("Second summary".to_string()),
+            progress_summary: None,
             agent_session_id: None,
             agent_current_focus: None,
             agent_title_summary: None,
@@ -1816,6 +2104,7 @@ fn seeded_work_item(
         title: id.to_string(),
         intent: None,
         summary: None,
+        progress_summary: None,
         status_category: status,
         owner: None,
         created_at: at,

@@ -53,10 +53,10 @@ test("project-bar Index badge has been withdrawn (SPEC-1939 Phase 13)", () => {
   );
 });
 
-test("project tab dots no longer wire Project Index health", () => {
+test("project tab state cues no longer wire Project Index health", () => {
   assert.ok(
     !projectTabsRendererSource.includes("aggregateProjectTabDotState"),
-    "project tab dots should be driven by agent runtime state, not Project Index health",
+    "project tab state cues should be driven by agent runtime state, not Project Index health",
   );
   assert.ok(
     !appSource.includes("aggregateProjectTabDotState"),

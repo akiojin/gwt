@@ -19,6 +19,14 @@ fn new_env() -> (TestEnv, TempDir) {
     (TestEnv::new(dir.path().to_path_buf()), dir)
 }
 
+fn legacy_discussion_path(dir: &TempDir) -> std::path::PathBuf {
+    dir.path().join(".gwt/discussion.md")
+}
+
+fn canonical_discussions_path(dir: &TempDir) -> std::path::PathBuf {
+    gwt_core::paths::gwt_repo_local_discussions_path(dir.path())
+}
+
 fn dispatch_json(env: &mut TestEnv, operation: &str, params: serde_json::Value) -> i32 {
     env.stdin = serde_json::json!({
         "schema_version": 1,
@@ -43,7 +51,7 @@ fn exit_operations_dispatch_through_json_envelopes() {
 #[test]
 fn discuss_resolve_flips_active_proposal_to_chosen() {
     let (mut env, dir) = new_env();
-    let discussion_path = dir.path().join(".gwt/discussion.md");
+    let discussion_path = legacy_discussion_path(&dir);
     std::fs::create_dir_all(discussion_path.parent().unwrap()).unwrap();
     std::fs::write(
         &discussion_path,
@@ -68,7 +76,7 @@ fn discuss_resolve_flips_active_proposal_to_chosen() {
         serde_json::json!({"proposal": "Proposal A"}),
     );
     assert_eq!(code, 0);
-    let updated = std::fs::read_to_string(&discussion_path).unwrap();
+    let updated = std::fs::read_to_string(canonical_discussions_path(&dir)).unwrap();
     assert!(updated.contains("[chosen]"));
     assert!(!updated.contains("[active]"));
 }
@@ -76,7 +84,7 @@ fn discuss_resolve_flips_active_proposal_to_chosen() {
 #[test]
 fn discuss_resolve_rejects_incomplete_evidence_gate() {
     let (mut env, dir) = new_env();
-    let discussion_path = dir.path().join(".gwt/discussion.md");
+    let discussion_path = legacy_discussion_path(&dir);
     std::fs::create_dir_all(discussion_path.parent().unwrap()).unwrap();
     std::fs::write(
         &discussion_path,
@@ -102,7 +110,7 @@ fn discuss_resolve_rejects_incomplete_evidence_gate() {
 #[test]
 fn discuss_resolve_rejects_incomplete_depth_gate() {
     let (mut env, dir) = new_env();
-    let discussion_path = dir.path().join(".gwt/discussion.md");
+    let discussion_path = legacy_discussion_path(&dir);
     std::fs::create_dir_all(discussion_path.parent().unwrap()).unwrap();
     std::fs::write(
         &discussion_path,
@@ -136,7 +144,7 @@ fn discuss_resolve_rejects_incomplete_depth_gate() {
 fn discuss_park_and_reject_follow_the_same_pattern() {
     for (action, expected) in &[("park", "[parked]"), ("reject", "[rejected]")] {
         let (mut env, dir) = new_env();
-        let path = dir.path().join(".gwt/discussion.md");
+        let path = legacy_discussion_path(&dir);
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
         std::fs::write(
             &path,
@@ -150,7 +158,7 @@ fn discuss_park_and_reject_follow_the_same_pattern() {
             serde_json::json!({"proposal": "Proposal B"}),
         );
         assert_eq!(code, 0, "action={action} should exit 0");
-        let body = std::fs::read_to_string(&path).unwrap();
+        let body = std::fs::read_to_string(canonical_discussions_path(&dir)).unwrap();
         assert!(body.contains(expected), "expected {expected} in {body}");
     }
 }
@@ -158,7 +166,7 @@ fn discuss_park_and_reject_follow_the_same_pattern() {
 #[test]
 fn discuss_clear_next_question_empties_the_field() {
     let (mut env, dir) = new_env();
-    let path = dir.path().join(".gwt/discussion.md");
+    let path = legacy_discussion_path(&dir);
     std::fs::create_dir_all(path.parent().unwrap()).unwrap();
     std::fs::write(
         &path,
@@ -173,7 +181,7 @@ fn discuss_clear_next_question_empties_the_field() {
         serde_json::json!({"proposal": "Proposal A"}),
     );
     assert_eq!(code, 0);
-    let body = std::fs::read_to_string(&path).unwrap();
+    let body = std::fs::read_to_string(canonical_discussions_path(&dir)).unwrap();
     assert!(body.contains("- Next Question:\n"));
     assert!(!body.contains("Should SessionStart surface it?"));
 }

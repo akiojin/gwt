@@ -45,6 +45,19 @@ const sampleAgent = {
   branch: "feature/x",
 };
 
+test("native picker entries are labelled separately from fresh starts", () => {
+  const fixture = createFixture();
+  const picker = createPicker(fixture, {});
+
+  picker.open("workspace-1");
+  picker.handleAgentsList({
+    agents: [{ ...sampleAgent, resume_kind: "native_picker" }],
+  });
+
+  const tag = fixture.dialogEl.querySelector(".workspace-resume-picker-row-tag");
+  assert.equal(tag?.textContent, "Resume picker");
+});
+
 test("pick keeps the modal open in a pending state instead of closing", () => {
   const fixture = createFixture();
   const sent = [];

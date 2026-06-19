@@ -29,6 +29,7 @@ fn projection(project_root: &Path) -> WorkspaceProjection {
         status_category: WorkspaceStatusCategory::Active,
         status_text: "Refining the backend change".to_string(),
         summary: Some("Payment cleanup is in progress.".to_string()),
+        progress_summary: None,
         owner: Some("SPEC-2359".to_string()),
         next_action: Some("Run focused tests".to_string()),
         agents: vec![WorkspaceAgentSummary {
@@ -354,6 +355,10 @@ fn workspace_projection_serde_round_trip_preserves_new_fields() {
         status_category: WorkspaceStatusCategory::Active,
         status_text: "Implementing Phase U-6".to_string(),
         summary: Some("Schema additions for Workspace Content Coherence".to_string()),
+        progress_summary: Some(
+            "Added Workspace schema fields and verified lossless projection persistence."
+                .to_string(),
+        ),
         owner: Some("SPEC-2359".to_string()),
         next_action: Some("Auto-populate".to_string()),
         agents: Vec::new(),

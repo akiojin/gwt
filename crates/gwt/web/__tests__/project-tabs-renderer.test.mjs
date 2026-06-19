@@ -28,6 +28,10 @@ function render(deps = {}) {
   return { projectTabs, sends };
 }
 
+function stateCue(button) {
+  return button.querySelector("[data-role='project-tab-state-cue']");
+}
+
 test("renderProjectTabs preserves existing tab buttons across workspace refreshes", () => {
   const { projectTabs } = setupDom();
 
@@ -78,7 +82,7 @@ test("renderProjectTabs keeps one click binding per stable tab node", () => {
   assert.deepEqual(sends, [{ kind: "select_project_tab", tab_id: "tab-1" }]);
 });
 
-test("renderProjectTabs updates running-agent dots without rebuilding tab buttons", () => {
+test("renderProjectTabs updates agent state cues without rebuilding tab buttons", () => {
   const { projectTabs } = setupDom();
   const runtimeStates = new Map([["agent-1", "running"]]);
   const tabs = [
@@ -100,10 +104,10 @@ test("renderProjectTabs updates running-agent dots without rebuilding tab button
       runtimeStates.get(windowData.id) || windowData.status,
   });
   const firstButton = projectTabs.querySelector('[data-project-tab-id="tab-1"]');
-  assert.equal(
-    firstButton.querySelector("[data-role='project-tab-dot']").dataset.state,
-    "running",
-  );
+  assert.equal(firstButton.dataset.agentState, "run");
+  assert.equal(stateCue(firstButton).dataset.state, "run");
+  assert.equal(stateCue(firstButton).textContent, "RUN");
+  assert.equal(stateCue(firstButton).hidden, false);
 
   runtimeStates.set("agent-1", "idle");
   render({
@@ -117,13 +121,13 @@ test("renderProjectTabs updates running-agent dots without rebuilding tab button
     projectTabs.querySelector('[data-project-tab-id="tab-1"]'),
     firstButton,
   );
-  assert.equal(
-    firstButton.querySelector("[data-role='project-tab-dot']").dataset.state,
-    "",
-  );
+  assert.equal(firstButton.dataset.agentState, undefined);
+  assert.equal(stateCue(firstButton).dataset.state, "");
+  assert.equal(stateCue(firstButton).textContent, "");
+  assert.equal(stateCue(firstButton).hidden, true);
 });
 
-test("renderProjectTabs marks dot running only for running agent windows", () => {
+test("renderProjectTabs shows project state cues only for active agent states", () => {
   const { projectTabs } = setupDom();
   const tabs = [
     {
@@ -154,6 +158,14 @@ test("renderProjectTabs marks dot running only for running agent windows", () =>
         ],
       },
     },
+    {
+      id: "tab-non-agent",
+      title: "Non Agent",
+      project_root: "/repo/non-agent",
+      workspace: {
+        windows: [{ id: "shell-running", preset: "shell", status: "running" }],
+      },
+    },
   ];
   const runtimeStates = new Map([
     ["agent-running", "running"],
@@ -161,6 +173,7 @@ test("renderProjectTabs marks dot running only for running agent windows", () =>
     ["agent-idle", "idle"],
     ["agent-waiting", "waiting"],
     ["custom-stopped", "stopped"],
+    ["shell-running", "running"],
   ]);
 
   render({
@@ -174,17 +187,111 @@ test("renderProjectTabs marks dot running only for running agent windows", () =>
   assert.equal(
     projectTabs
       .querySelector(
-        "[data-project-tab-id='tab-running'] [data-role='project-tab-dot']",
+        "[data-project-tab-id='tab-running'] [data-role='project-tab-state-cue']",
       )
       .dataset.state,
-    "running",
+    "run",
+  );
+  assert.equal(
+    projectTabs.querySelector("[data-project-tab-id='tab-running']").dataset
+      .agentState,
+    "run",
   );
   assert.equal(
     projectTabs
       .querySelector(
-        "[data-project-tab-id='tab-idle'] [data-role='project-tab-dot']",
+        "[data-project-tab-id='tab-running'] [data-role='project-tab-state-cue']",
+      )
+      .textContent,
+    "RUN",
+  );
+  assert.equal(
+    projectTabs
+      .querySelector(
+        "[data-project-tab-id='tab-idle'] [data-role='project-tab-state-cue']",
       )
       .dataset.state,
     "",
   );
+  assert.equal(
+    projectTabs
+      .querySelector(
+        "[data-project-tab-id='tab-non-agent'] [data-role='project-tab-state-cue']",
+      )
+      .hidden,
+    true,
+  );
+});
+
+test("renderProjectTabs prioritizes BLOCK over START over RUN and counts the selected state", () => {
+  const { projectTabs } = setupDom();
+  const tabs = [
+    {
+      id: "tab-block",
+      title: "Blocked Agents",
+      project_root: "/repo/block",
+      workspace: {
+        windows: [
+          { id: "agent-error-1", preset: "codex", status: "error" },
+          { id: "agent-error-2", preset: "claude", status: "error" },
+          { id: "agent-starting", preset: "agent", status: "starting" },
+          { id: "agent-running", preset: "codex", status: "running" },
+        ],
+      },
+    },
+    {
+      id: "tab-start",
+      title: "Starting Agents",
+      project_root: "/repo/start",
+      workspace: {
+        windows: [
+          { id: "agent-not-started", preset: "codex", status: "not_started" },
+          { id: "agent-running-2", preset: "claude", status: "running" },
+        ],
+      },
+    },
+    {
+      id: "tab-run",
+      title: "Running Agents",
+      project_root: "/repo/run",
+      workspace: {
+        windows: [
+          { id: "agent-running-3", preset: "codex", status: "running" },
+          { id: "agent-running-4", preset: "claude", status: "running" },
+        ],
+      },
+    },
+  ];
+
+  render({ projectTabs, tabs, activeTabId: "tab-block" });
+
+  const blocked = projectTabs.querySelector(
+    "[data-project-tab-id='tab-block'] [data-role='project-tab-state-cue']",
+  );
+  assert.equal(blocked.dataset.state, "block");
+  assert.equal(blocked.textContent, "BLOCK 2");
+  assert.equal(blocked.getAttribute("aria-label"), "2 blocked agents");
+  assert.equal(
+    projectTabs.querySelector("[data-project-tab-id='tab-block']").dataset
+      .agentState,
+    "block",
+  );
+
+  const starting = projectTabs.querySelector(
+    "[data-project-tab-id='tab-start'] [data-role='project-tab-state-cue']",
+  );
+  assert.equal(starting.dataset.state, "start");
+  assert.equal(starting.textContent, "START");
+  assert.equal(
+    starting.getAttribute("aria-label"),
+    "1 starting agent",
+    "legacy not_started must count as START and outrank RUN",
+  );
+
+  const running = projectTabs.querySelector(
+    "[data-project-tab-id='tab-run'] [data-role='project-tab-state-cue']",
+  );
+  assert.equal(running.dataset.state, "run");
+  assert.equal(running.textContent, "RUN 2");
+  assert.equal(running.getAttribute("aria-label"), "2 running agents");
 });

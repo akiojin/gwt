@@ -162,6 +162,7 @@ pub(super) fn active_work_projection_from_saved_with_journal(
         status_category,
         status_text: projection.status_text,
         summary: projection.summary,
+        progress_summary: projection.progress_summary,
         owner: projection.owner,
         next_action: projection.next_action,
         active_agents,
@@ -176,6 +177,7 @@ pub(super) fn active_work_projection_from_saved_with_journal(
         journal_entries,
         works,
         cleanup_candidate,
+        managed_hook_health: None,
         active_work_count,
         active_works,
         agents,
@@ -193,6 +195,7 @@ fn empty_active_work_projection_view(
         status_category: "idle".to_string(),
         status_text: String::new(),
         summary: None,
+        progress_summary: None,
         owner: None,
         next_action: None,
         active_agents: 0,
@@ -207,10 +210,83 @@ fn empty_active_work_projection_view(
         journal_entries: Vec::new(),
         works: Vec::new(),
         cleanup_candidate: None,
+        managed_hook_health: None,
         active_work_count: 0,
         active_works: Vec::new(),
         agents: Vec::new(),
         unassigned_agents: Vec::new(),
+    }
+}
+
+fn managed_hook_health_view_for_project(
+    project_root: &Path,
+    sessions_dir: &Path,
+    sessions: &[&ActiveAgentSession],
+) -> Option<gwt::ManagedHookHealthView> {
+    let mut input = gwt::cli::hook::health::ManagedHookHealthInput::new(project_root);
+    if let Some(session) = sessions.iter().min_by_key(|session| &session.session_id) {
+        input = input.with_runtime_state_path(gwt_agent::runtime_state_path(
+            sessions_dir,
+            &session.session_id,
+        ));
+    }
+    let health = gwt::cli::hook::health::read_managed_hook_health(&input);
+    let should_show = health.status != gwt::cli::hook::health::ManagedHookHealthStatus::Inactive
+        || health.pending_discussion.is_some()
+        || health.pending_goal.is_some()
+        || !health.slow_handlers.is_empty()
+        || !health.issues.is_empty();
+    should_show.then(|| managed_hook_health_view_from_health(health))
+}
+
+fn managed_hook_health_status_wire(
+    status: gwt::cli::hook::health::ManagedHookHealthStatus,
+) -> &'static str {
+    match status {
+        gwt::cli::hook::health::ManagedHookHealthStatus::Ready => "ready",
+        gwt::cli::hook::health::ManagedHookHealthStatus::NeedsAttention => "needs_attention",
+        gwt::cli::hook::health::ManagedHookHealthStatus::SelfHealed => "self_healed",
+        gwt::cli::hook::health::ManagedHookHealthStatus::Degraded => "degraded",
+        gwt::cli::hook::health::ManagedHookHealthStatus::Inactive => "inactive",
+        gwt::cli::hook::health::ManagedHookHealthStatus::WaitingForFirstHookEvent => {
+            "waiting_for_first_hook_event"
+        }
+    }
+}
+
+fn managed_hook_health_view_from_health(
+    health: gwt::cli::hook::health::ManagedHookHealth,
+) -> gwt::ManagedHookHealthView {
+    gwt::ManagedHookHealthView {
+        status: managed_hook_health_status_wire(health.status).to_string(),
+        last_event: health.last_event,
+        last_event_at: health.last_event_at,
+        pending_discussion: health.pending_discussion.map(|pending| {
+            gwt::ManagedHookPendingDiscussionView {
+                proposal_label: pending.proposal_label,
+                proposal_title: pending.proposal_title,
+                next_question: pending.next_question,
+            }
+        }),
+        pending_goal: health
+            .pending_goal
+            .map(|goal| gwt::ManagedHookPendingGoalView {
+                proposal_label: goal.proposal_label,
+                proposal_title: goal.proposal_title,
+                condition: goal.condition,
+            }),
+        slow_handlers: health
+            .slow_handlers
+            .into_iter()
+            .map(|handler| gwt::ManagedHookSlowHandlerView {
+                event: handler.event,
+                handler: handler.handler,
+                status: handler.status,
+                duration_ms: handler.duration_ms.max(0.0).round() as u64,
+                occurred_at: handler.occurred_at,
+            })
+            .collect(),
+        issues: health.issues,
     }
 }
 
@@ -456,6 +532,7 @@ pub(super) fn apply_work_summary_external_sources(
                 .or_else(|| map.get(&format!("origin/{branch}")))
         })
         .and_then(|value| purpose_candidate(Some(value.as_str()), Some(branch)))
+        .filter(|value| !super::is_summary_noise(value))
     };
     for work in active_works.iter_mut() {
         let Some(branch) = work
@@ -602,6 +679,13 @@ fn active_work_items_from_projection(
                             .then(|| projection.summary.clone())
                             .flatten()
                     }),
+                progress_summary: history
+                    .and_then(|item| item.progress_summary.clone())
+                    .or_else(|| {
+                        is_current_projection
+                            .then(|| projection.progress_summary.clone())
+                            .flatten()
+                    }),
                 work_summary,
                 owner: owner_value,
                 next_action: if is_current_projection {
@@ -742,6 +826,7 @@ fn append_paused_work_items(
             status_category: "idle".to_string(),
             status_text,
             summary: work.summary.clone().or_else(|| work.intent.clone()),
+            progress_summary: work.progress_summary.clone(),
             work_summary,
             owner: work.owner.clone(),
             next_action: None,
@@ -855,6 +940,7 @@ pub(super) fn workspace_journal_entry_view_from_entry(
             .map(str::to_string),
         status_text: entry.status_text.clone(),
         summary: entry.summary.clone(),
+        progress_summary: entry.progress_summary.clone(),
         owner: entry.owner.clone(),
         next_action: entry.next_action.clone(),
         agent_session_id: entry.agent_session_id.clone(),
@@ -884,6 +970,7 @@ pub(crate) fn workspace_work_item_view_from_item(
         title: item.title.clone(),
         intent: item.intent.clone(),
         summary: item.summary.clone(),
+        progress_summary: item.progress_summary.clone(),
         // SPEC-2359 Phase W-12 Slice 4 (FR-352): a discarded Work surfaces as the
         // dedicated `"discarded"` status so the Work surface and the Paused
         // exclusion treat it as a terminal close distinct from Done.
@@ -1033,6 +1120,7 @@ fn workspace_work_event_view_from_event(
         title: event.title.clone(),
         intent: event.intent.clone(),
         summary: event.summary.clone(),
+        progress_summary: event.progress_summary.clone(),
         status_category: event
             .status_category
             .map(workspace_status_category_wire)
@@ -1304,6 +1392,93 @@ fn active_work_agent_view_from_summary(
     }
 }
 
+fn active_work_agent_identity_key(agent: &gwt::ActiveWorkAgentView) -> Option<String> {
+    for raw in [&agent.agent_id, &agent.display_name] {
+        let value = raw.trim();
+        if value.is_empty() {
+            continue;
+        }
+        if let Some(agent_id) = gwt_agent::resolve_agent_id(value) {
+            return Some(format!("agent:{}", agent_id.command()));
+        }
+    }
+
+    [&agent.agent_id, &agent.display_name]
+        .into_iter()
+        .map(|value| value.trim())
+        .find(|value| !value.is_empty())
+        .map(|value| format!("label:{}", value.to_lowercase()))
+}
+
+fn recompute_active_work_agent_counters(work: &mut gwt::ActiveWorkItemView) {
+    work.active_agents = work
+        .agents
+        .iter()
+        .filter(|agent| matches!(agent.status_category.as_str(), "active" | "running"))
+        .count();
+    work.blocked_agents = work
+        .agents
+        .iter()
+        .filter(|agent| agent.status_category == "blocked")
+        .count();
+}
+
+fn compare_active_work_agents_newest_first(
+    left: &gwt::ActiveWorkAgentView,
+    right: &gwt::ActiveWorkAgentView,
+) -> std::cmp::Ordering {
+    right
+        .updated_at
+        .cmp(&left.updated_at)
+        .then_with(|| right.session_id.cmp(&left.session_id))
+        .then_with(|| right.window_id.cmp(&left.window_id))
+        .then_with(|| right.display_name.cmp(&left.display_name))
+        .then_with(|| right.agent_id.cmp(&left.agent_id))
+}
+
+fn active_work_agent_matches_workspace_row_identity(
+    row_branch: Option<&str>,
+    row_worktree: Option<&Path>,
+    agent: &gwt::ActiveWorkAgentView,
+    session_index: &std::collections::HashMap<&str, &gwt_agent::Session>,
+) -> bool {
+    let row_branch = row_branch
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(normalize_branch_name);
+    let row_has_git_identity = row_branch.is_some() || row_worktree.is_some();
+
+    let ledger = session_index.get(agent.session_id.as_str());
+    let agent_branch = ledger
+        .map(|session| session.branch.as_str())
+        .or(agent.branch.as_deref())
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(normalize_branch_name);
+    let agent_worktree = ledger
+        .map(|session| session.worktree_path.as_path())
+        .or_else(|| agent.worktree_path.as_deref().map(Path::new));
+
+    if !row_has_git_identity {
+        return true;
+    }
+
+    let branch_matches = row_branch
+        .as_deref()
+        .zip(agent_branch.as_deref())
+        .is_some_and(|(left, right)| left == right);
+    let worktree_matches = row_worktree
+        .zip(agent_worktree)
+        .is_some_and(|(left, right)| same_worktree_path(left, right) || left == right);
+    if branch_matches || worktree_matches {
+        return true;
+    }
+
+    let branch_conflicts = row_branch.is_some() && agent_branch.is_some();
+    let worktree_conflicts = row_worktree.is_some() && agent_worktree.is_some();
+    !(branch_conflicts || worktree_conflicts)
+}
+
 /// Convert a persisted Work's agent (a launch, carrying its Session history) to
 /// the active-surface agent view so Paused Workspaces render their Work →
 /// Session list instead of an empty agent list.
@@ -1326,6 +1501,16 @@ pub(super) fn attach_registry_sessions_to_active_works(
     );
     let cap = crate::workspace_session_registry::REGISTRY_SESSION_CAP;
     for work in active_works.iter_mut() {
+        let row_branch = work.branch.clone();
+        let row_worktree = work.worktree_path.as_deref().map(PathBuf::from);
+        work.agents.retain(|agent| {
+            active_work_agent_matches_workspace_row_identity(
+                row_branch.as_deref(),
+                row_worktree.as_deref(),
+                agent,
+                session_index,
+            )
+        });
         let existing: Vec<&str> = work
             .agents
             .iter()
@@ -1372,7 +1557,7 @@ pub(super) fn attach_registry_sessions_to_active_works(
         // and borrows the duplicate's display_name when its own is empty.
         {
             let mut sorted: Vec<gwt::ActiveWorkAgentView> = std::mem::take(&mut work.agents);
-            sorted.sort_by(|left, right| right.updated_at.cmp(&left.updated_at));
+            sorted.sort_by(compare_active_work_agents_newest_first);
             let mut seen_conversations: std::collections::HashMap<String, usize> =
                 std::collections::HashMap::new();
             let mut kept: Vec<gwt::ActiveWorkAgentView> = Vec::with_capacity(sorted.len());
@@ -1404,45 +1589,34 @@ pub(super) fn attach_registry_sessions_to_active_works(
             work.agents = kept;
             work.session_agent_total = work.session_agent_total.saturating_sub(dropped as u32);
         }
-        // User verification 2026-06-12 (screenshot): one group per historical
-        // gwt session rendered e.g. five identical "Claude Code" groups. Per
-        // agent identity only the latest history entry stays; live (active /
-        // running) agents are never collapsed away — two running panes are
-        // two real agents.
+        // User verification 2026-06-17 (follow-up): Workspace detail is a
+        // session summary, not a live process inventory. Per agent identity
+        // only the latest history entry stays; live duplicates collapse too.
         {
             let mut sorted: Vec<gwt::ActiveWorkAgentView> = std::mem::take(&mut work.agents);
-            sorted.sort_by(|left, right| right.updated_at.cmp(&left.updated_at));
+            sorted.sort_by(compare_active_work_agents_newest_first);
             let mut seen_identities: std::collections::HashSet<String> =
                 std::collections::HashSet::new();
             let mut kept: Vec<gwt::ActiveWorkAgentView> = Vec::with_capacity(sorted.len());
-            let mut dropped = 0usize;
             for agent in sorted {
-                let live = matches!(
-                    agent.status_category.as_str(),
-                    "active" | "running" | "blocked"
-                );
-                let identity = if !agent.display_name.trim().is_empty() {
-                    agent.display_name.trim().to_lowercase()
-                } else {
-                    agent.agent_id.trim().to_lowercase()
-                };
-                if live || identity.is_empty() || seen_identities.insert(identity) {
+                let Some(identity) = active_work_agent_identity_key(&agent) else {
                     kept.push(agent);
-                } else {
-                    dropped += 1;
+                    continue;
+                };
+                if seen_identities.insert(identity) {
+                    kept.push(agent);
                 }
             }
             work.agents = kept;
-            work.session_agent_total = work.session_agent_total.saturating_sub(dropped as u32);
         }
+        recompute_active_work_agent_counters(work);
         // The cap applies to the row's TOTAL agents: a decomposed legacy row
         // can carry hundreds of record agents, and the workspace payload feeds
         // every connected client (unbounded fan-out amplifies the WebSocket
         // eviction storm). Keep the newest agents; the uncapped count already
         // rides `session_agent_total`. RFC3339 UTC strings sort lexically.
         if work.agents.len() > cap {
-            work.agents
-                .sort_by(|left, right| right.updated_at.cmp(&left.updated_at));
+            work.agents.sort_by(compare_active_work_agents_newest_first);
             work.agents.truncate(cap);
         }
     }
@@ -2070,6 +2244,11 @@ impl AppRuntime {
                 workspaces,
                 cleanup_candidate,
             );
+            view.managed_hook_health = managed_hook_health_view_for_project(
+                &tab.project_root,
+                &self.sessions_dir,
+                &sessions,
+            );
             // SPEC-2359 W16-2 (FR-389): group Works sharing a canonical
             // branch into one Workspace row before the ledger attach, so the
             // attach / identity-collapse / cap run once per Workspace.
@@ -2148,6 +2327,7 @@ impl AppRuntime {
                 format!("{active_agents} active agents")
             },
             summary: None,
+            progress_summary: None,
             work_summary: None,
             owner: None,
             next_action: Some("Check Board for latest updates".to_string()),
@@ -2188,6 +2368,7 @@ impl AppRuntime {
                 format!("{active_agents} active agents")
             },
             summary: None,
+            progress_summary: None,
             owner: None,
             next_action: Some("Check Board for latest updates".to_string()),
             active_agents,
@@ -2202,6 +2383,11 @@ impl AppRuntime {
             journal_entries: Vec::new(),
             works: Vec::new(),
             cleanup_candidate: None,
+            managed_hook_health: managed_hook_health_view_for_project(
+                &tab.project_root,
+                &self.sessions_dir,
+                &sessions,
+            ),
             active_work_count: active_works.len(),
             active_works,
             agents,

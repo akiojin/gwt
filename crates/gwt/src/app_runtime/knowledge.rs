@@ -83,6 +83,15 @@ struct ProjectIndexSearchTask {
     match_mode: gwt::IndexSearchMatchMode,
 }
 
+/// SPEC-2359 US-80: a debounced Start Work duplicate-work advisory query.
+struct WorkAdvisoryTask {
+    client_id: String,
+    id: String,
+    project_root: PathBuf,
+    query: String,
+    request_id: u64,
+}
+
 pub(super) fn knowledge_error_event(
     id: impl Into<String>,
     kind: KnowledgeKind,
@@ -430,6 +439,70 @@ impl AppRuntime {
             match_mode: request.match_mode,
         });
         Vec::new()
+    }
+
+    /// SPEC-2359 US-80: run the Start Work duplicate-work advisory for the
+    /// wizard's project. Advisory is non-blocking — on any resolution failure we
+    /// reply with an empty advisory rather than an error (FR-415).
+    pub(crate) fn request_work_advisory_events(
+        &self,
+        client_id: &str,
+        id: &str,
+        query: &str,
+        request_id: u64,
+    ) -> Vec<OutboundEvent> {
+        // The Launch Wizard is a modal bound to the client's active project
+        // tab (not a registered window), so resolve the project from the active
+        // tab the same way wizard actions do.
+        let project_root = self
+            .active_tab_id
+            .clone()
+            .and_then(|tab_id| self.tab(&tab_id))
+            .map(|tab| tab.project_root.clone());
+        let Some(project_root) = project_root else {
+            return vec![OutboundEvent::reply(
+                client_id,
+                BackendEvent::WorkAdvisoryResult {
+                    id: id.to_string(),
+                    query: query.to_string(),
+                    request_id,
+                    results: Vec::new(),
+                },
+            )];
+        };
+        self.spawn_work_advisory(WorkAdvisoryTask {
+            client_id: client_id.to_string(),
+            id: id.to_string(),
+            project_root,
+            query: query.to_string(),
+            request_id,
+        });
+        Vec::new()
+    }
+
+    fn spawn_work_advisory(&self, task: WorkAdvisoryTask) {
+        let WorkAdvisoryTask {
+            client_id,
+            id,
+            project_root,
+            query,
+            request_id,
+        } = task;
+        let proxy = self.proxy.clone();
+        self.blocking_tasks.spawn(move || {
+            // Advisory never blocks the launch: an error yields an empty
+            // advisory (SPEC-2359 FR-415), never a surfaced failure.
+            let results = gwt::work_advisory(&project_root, &query).unwrap_or_default();
+            let event = BackendEvent::WorkAdvisoryResult {
+                id,
+                query,
+                request_id,
+                results,
+            };
+            proxy.send(UserEvent::Dispatch(vec![OutboundEvent::reply(
+                client_id, event,
+            )]));
+        });
     }
 
     fn spawn_project_index_search(&self, task: ProjectIndexSearchTask) {

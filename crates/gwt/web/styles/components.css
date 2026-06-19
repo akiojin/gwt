@@ -2402,6 +2402,30 @@ kbd.op-kbd {
   line-height: 1.5;
 }
 
+.workspace-overview-hook-health {
+  flex: 0 0 auto;
+  padding: 0 var(--space-2);
+  border: 1px solid var(--color-border-strong);
+  border-radius: var(--radius-sm);
+  color: var(--color-text-muted);
+  font-family: var(--font-mono);
+  font-size: 10px;
+  font-weight: 650;
+  letter-spacing: 0.06em;
+  line-height: 1.5;
+}
+
+.workspace-overview-hook-health[data-status="needs_attention"],
+.workspace-overview-hook-health[data-status="waiting_for_first_hook_event"] {
+  border-color: var(--color-state-idle);
+  color: var(--color-state-idle);
+}
+
+.workspace-overview-hook-health[data-status="degraded"] {
+  border-color: var(--color-state-blocked);
+  color: var(--color-state-blocked);
+}
+
 .workspace-overview-agent-name,
 .workspace-detail-agent-name,
 .workspace-detail-session-name,
@@ -2562,6 +2586,43 @@ kbd.op-kbd {
   font-size: var(--type-xs);
 }
 
+.workspace-hook-issue-list,
+.workspace-hook-slow-list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin-top: 10px;
+}
+
+.workspace-hook-issue,
+.workspace-hook-slow-row {
+  min-width: 0;
+  padding: 7px 9px;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-sm);
+  background: var(--color-surface-elevated);
+  color: var(--color-text);
+  font-family: var(--font-mono);
+  font-size: var(--type-xs);
+  overflow-wrap: anywhere;
+}
+
+.workspace-hook-issue {
+  border-color: color-mix(in oklab, var(--color-state-blocked) 44%, var(--color-border));
+}
+
+.workspace-hook-slow-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  color: var(--color-text-muted);
+}
+
+.workspace-hook-slow-name {
+  color: var(--color-text);
+  font-weight: 650;
+}
+
 .workspace-board-ref-list {
   display: flex;
   flex-wrap: wrap;
@@ -2572,9 +2633,20 @@ kbd.op-kbd {
   padding: 2px 6px;
   border: 1px solid var(--color-border);
   border-radius: var(--radius-sm);
+  background: transparent;
   font-family: var(--font-mono);
   font-size: var(--type-xs);
   color: var(--color-text-muted);
+}
+
+button.workspace-board-ref {
+  cursor: pointer;
+}
+
+button.workspace-board-ref:hover,
+button.workspace-board-ref:focus-visible {
+  border-color: var(--color-border-strong);
+  color: var(--color-text);
 }
 
 .workspace-overview-empty {
