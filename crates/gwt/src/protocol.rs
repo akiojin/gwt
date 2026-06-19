@@ -1248,6 +1248,40 @@ pub struct ActiveWorkProjectionView {
 }
 
 #[derive(Debug, Clone, Serialize)]
+pub struct RuntimeHealthSnapshotView {
+    pub generated_at: String,
+    pub state: String,
+    pub cpu_percent: Option<f32>,
+    pub memory_bytes: u64,
+    pub process_count: usize,
+    pub runner_count: usize,
+    pub queue: RuntimeHealthQueueView,
+    pub processes: Vec<RuntimeHealthProcessView>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct RuntimeHealthQueueView {
+    pub client_count: usize,
+    pub queued_entries: usize,
+    pub dirty_panes: usize,
+    pub dropped_lossy: u64,
+    pub dropped_lossy_delta: u64,
+    pub dead_clients: usize,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct RuntimeHealthProcessView {
+    pub pid: u32,
+    pub parent_pid: Option<u32>,
+    pub role: String,
+    pub name: String,
+    pub cpu_percent: Option<f32>,
+    pub memory_bytes: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub focus_window_id: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum BackendEvent {
     /// SPEC-2359 US-66 (T-527): canonical Rust name is Work-based; the wire
@@ -1270,6 +1304,9 @@ pub enum BackendEvent {
         accounts: Vec<gwt_core::usage::ProviderUsage>,
         sessions: Vec<gwt_core::usage::SessionUsage>,
         consumption: Vec<gwt_core::usage::ProviderConsumption>,
+    },
+    RuntimeHealth {
+        snapshot: RuntimeHealthSnapshotView,
     },
     TerminalOutput {
         id: String,
@@ -1916,6 +1953,11 @@ pub const BACKEND_EVENT_POLICIES: &[BackendEventPolicy] = &[
         BackendEventBackpressurePolicy::LatestWins,
     ),
     BackendEventPolicy::new(
+        "runtime_health",
+        BackendEventDeliveryClass::IdempotentLatest,
+        BackendEventBackpressurePolicy::LatestWins,
+    ),
+    BackendEventPolicy::new(
         "terminal_output",
         BackendEventDeliveryClass::Streamed,
         BackendEventBackpressurePolicy::PreserveOrder,
@@ -2333,6 +2375,7 @@ impl BackendEvent {
             BackendEvent::ActiveWorkProjection { .. } => "active_work_projection",
             BackendEvent::WindowList { .. } => "window_list",
             BackendEvent::ProviderUsage { .. } => "provider_usage",
+            BackendEvent::RuntimeHealth { .. } => "runtime_health",
             BackendEvent::TerminalOutput { .. } => "terminal_output",
             BackendEvent::TerminalSnapshot { .. } => "terminal_snapshot",
             BackendEvent::TerminalStatus { .. } => "terminal_status",
@@ -2803,6 +2846,17 @@ mod tests {
             active_work_projection.backpressure,
             BackendEventBackpressurePolicy::LatestWins
         );
+
+        let runtime_health = backend_event_policy("runtime_health").expect("runtime_health policy");
+        assert_eq!(
+            runtime_health.delivery,
+            BackendEventDeliveryClass::IdempotentLatest
+        );
+        assert_eq!(
+            runtime_health.backpressure,
+            BackendEventBackpressurePolicy::LatestWins
+        );
+        assert!(runtime_health.coalesces_on_frontend());
 
         let terminal_snapshot =
             backend_event_policy("terminal_snapshot").expect("terminal_snapshot policy");

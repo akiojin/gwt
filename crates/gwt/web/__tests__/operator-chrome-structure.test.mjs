@@ -1103,7 +1103,13 @@ test("Status Strip is exposed as a live region with semantic value labels", () =
   assert.ok(strip);
   assert.equal(strip.getAttribute("role"), "status");
   assert.equal(strip.getAttribute("aria-live"), "polite");
-  for (const id of ["op-strip-active", "op-strip-idle", "op-strip-blocked", "op-strip-branches"]) {
+  for (const id of [
+    "op-strip-active",
+    "op-strip-idle",
+    "op-strip-blocked",
+    "op-strip-branches",
+    "op-strip-runtime-health-value",
+  ]) {
     const el = document.getElementById(id);
     assert.ok(el, `expected element ${id}`);
     assert.ok(el.getAttribute("aria-label"), `${id} must have an aria-label`);
@@ -1112,6 +1118,56 @@ test("Status Strip is exposed as a live region with semantic value labels", () =
   const clockCell = document.getElementById("op-strip-clock")?.parentElement;
   assert.ok(clockCell, "clock cell exists");
   assert.equal(clockCell.getAttribute("aria-hidden"), "true");
+});
+
+test("Status Strip exposes a compact PERF cell for runtime health", () => {
+  const cell = document.getElementById("op-strip-runtime-health");
+  assert.ok(cell, "expected runtime health PERF cell");
+  assert.match(cell.textContent ?? "", /PERF/);
+  assert.equal(cell.getAttribute("aria-label"), "Runtime performance");
+  assert.match(operatorShellSource, /applyRuntimeHealth/);
+});
+
+test("Runtime health PERF detail uses structured diagnostic classes", () => {
+  const css = readFileSync(resolve(here, "../styles/components.css"), "utf8");
+  for (const token of [
+    "runtimeHealthStateLabel",
+    "op-runtime-health-detail__summary",
+    "op-runtime-health-detail__chip",
+    "op-runtime-health-detail__queue",
+    "op-runtime-health-detail__process-list",
+    "op-runtime-health-detail__process--focusable",
+    "op-runtime-health-detail__process-role",
+    "op-runtime-health-detail__process-name",
+    "op-runtime-health-detail__process-metric",
+  ]) {
+    assert.match(operatorShellSource, new RegExp(token), `expected renderer token: ${token}`);
+  }
+  assert.match(
+    operatorShellSource,
+    /value\.textContent\s*=\s*`\$\{runtimeHealthStateLabel\(state\)\}\s+\$\{formatRuntimeCpu/,
+    "compact PERF value must be severity-first",
+  );
+  assert.match(
+    css,
+    /\.op-status-strip__cell--runtime-health\s+\.op-status-strip__value\s*\{[\s\S]*min-width:/,
+    "compact PERF value must reserve stable width",
+  );
+  assert.match(
+    css,
+    /\.op-runtime-health-detail__process\s*\{[\s\S]*display:\s*grid;[\s\S]*grid-template-columns:/,
+    "process rows must use columns instead of a raw text line",
+  );
+  assert.match(
+    operatorShellSource,
+    /focusWindow/,
+    "focusable runtime rows must call the injected focus callback",
+  );
+  assert.doesNotMatch(
+    operatorShellSource,
+    /op-runtime-health-detail[\s\S]{0,8000}(kill|terminate|stop_process|close_window)/i,
+    "runtime health detail must not expose destructive process controls",
+  );
 });
 
 test("Status Strip omits the retired server URL cell", () => {
@@ -2973,6 +3029,8 @@ test("Status Strip ACTIVE / IDLE / BLOCKED cells all tint with their state color
   const indexHtml = readFileSync(resolve(here, "../index.html"), "utf8");
   assert.match(indexHtml, /op-status-strip__cell\s+op-status-strip__cell--active/);
   assert.match(indexHtml, /op-status-strip__cell\s+op-status-strip__cell--idle/);
+  assert.match(indexHtml, /op-status-strip__cell\s+op-status-strip__cell--runtime-health/);
+  assert.match(css, /\.op-status-strip__cell--runtime-health\[data-state="warn"\]/);
 });
 
 test("Work surface lifecycle badge styles every agent-session state (SPEC-2359 W-12 FR-351)", () => {

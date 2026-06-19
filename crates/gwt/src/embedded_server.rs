@@ -319,6 +319,20 @@ impl ClientQueue {
         self.notify.notify_one();
     }
 
+    fn health_stats(&self) -> ClientHubHealthStats {
+        let state = self
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        ClientHubHealthStats {
+            client_count: 0,
+            queued_entries: state.entries.len(),
+            dirty_panes: state.dirty_panes.len(),
+            dropped_lossy: state.dropped_lossy,
+            dead_clients: usize::from(state.dead),
+        }
+    }
+
     #[cfg(test)]
     fn len(&self) -> usize {
         self.state
@@ -355,6 +369,15 @@ impl ClientQueue {
     }
 }
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct ClientHubHealthStats {
+    pub client_count: usize,
+    pub queued_entries: usize,
+    pub dirty_panes: usize,
+    pub dropped_lossy: u64,
+    pub dead_clients: usize,
+}
+
 #[derive(Clone, Default)]
 pub struct ClientHub {
     clients: Arc<Mutex<HashMap<String, Arc<ClientQueue>>>>,
@@ -389,6 +412,32 @@ impl ClientHub {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .is_empty()
+    }
+
+    /// SPEC-3107: lightweight queue pressure snapshot for runtime health.
+    /// The registry lock is held only long enough to clone queue handles; each
+    /// queue is sampled under its own mutex.
+    pub fn health_stats(&self) -> ClientHubHealthStats {
+        let snapshot: Vec<Arc<ClientQueue>> = {
+            let clients = self
+                .clients
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            clients.values().cloned().collect()
+        };
+
+        let mut stats = ClientHubHealthStats {
+            client_count: snapshot.len(),
+            ..ClientHubHealthStats::default()
+        };
+        for queue in snapshot {
+            let queue_stats = queue.health_stats();
+            stats.queued_entries += queue_stats.queued_entries;
+            stats.dirty_panes += queue_stats.dirty_panes;
+            stats.dropped_lossy += queue_stats.dropped_lossy;
+            stats.dead_clients += queue_stats.dead_clients;
+        }
+        stats
     }
 
     pub(super) fn dispatch(&self, events: Vec<OutboundEvent>) {
@@ -1358,6 +1407,28 @@ mod tests {
         assert!(!queue.is_dead(), "lossy flood must not kill the client");
         assert_eq!(queue.len(), LOSSY_HIGH_WATER, "queue capped at high water");
         assert_eq!(queue.dropped_lossy(), 50, "overflow entries are dropped");
+    }
+
+    #[test]
+    fn client_hub_health_stats_summarizes_queue_pressure() {
+        let hub = ClientHub::default();
+        let queue_a = hub.register("client-a".to_string());
+        let queue_b = hub.register("client-b".to_string());
+
+        for index in 0..(LOSSY_HIGH_WATER + 3) {
+            queue_a.enqueue(&prepare_outbound(&terminal_output(
+                "tab-1::agent-1",
+                &format!("chunk-{index}"),
+            )));
+        }
+        queue_b.enqueue(&prepare_outbound(&lossless_error("must arrive")));
+
+        let stats = hub.health_stats();
+        assert_eq!(stats.client_count, 2);
+        assert_eq!(stats.queued_entries, LOSSY_HIGH_WATER + 1);
+        assert_eq!(stats.dirty_panes, 1);
+        assert_eq!(stats.dropped_lossy, 3);
+        assert_eq!(stats.dead_clients, 0);
     }
 
     // SPEC-2359 W-17 (FR-395): lossless events must survive any lossy flood.

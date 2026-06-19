@@ -3,7 +3,12 @@
       // SPEC-3064 Phase 3 (E7): the migration-modal / project-clone-modal /
       // project-tabs-renderer / close-project-tab-confirm-modal view imports
       // moved to /project-shell-surface.js with the project shell chrome.
-      import { initOperatorShell, applyTelemetryCounts, applyProviderUsage } from "/operator-shell.js";
+      import {
+        initOperatorShell,
+        applyTelemetryCounts,
+        applyProviderUsage,
+        applyRuntimeHealth,
+      } from "/operator-shell.js";
       import { createFocusTrap } from "/focus-trap.js";
       import {
         TITLEBAR_DOCK_HIT_HEIGHT,
@@ -127,6 +132,10 @@
         palette: __op.palette,
         applyTelemetryCounts: (counts) => applyTelemetryCounts(document, counts),
         applyProviderUsage: (snapshot) => applyProviderUsage(document, snapshot),
+        applyRuntimeHealth: (snapshot) =>
+          applyRuntimeHealth(document, snapshot, {
+            focusWindow: (windowId) => focusWindowRemotely(windowId, { center: true }),
+          }),
       };
 
       const uiTraceProfiler = createUiTraceProfiler();
@@ -4459,6 +4468,9 @@
               sessions: event.sessions || [],
               consumption: event.consumption || [],
             });
+            break;
+          case "runtime_health":
+            window.__operatorShell?.applyRuntimeHealth?.(event.snapshot || {});
             break;
           case "terminal_output":
             frontendUnits.terminalHost.writeOutput(event.id, event.data_base64);

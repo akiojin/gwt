@@ -45,6 +45,7 @@ mod embedded_web;
 mod launch_runtime;
 mod project_index_bootstrap;
 mod repo_browser;
+mod runtime_health_poller;
 mod runtime_support;
 mod session_ledger_cache;
 mod update_front_door;
@@ -2277,6 +2278,7 @@ mod tests {
             local_worktree_branches: std::cell::RefCell::new(HashMap::new()),
             window_pty_statuses: HashMap::new(),
             window_hook_states: HashMap::new(),
+            recoverable_agent_error_windows: std::collections::HashSet::new(),
             hook_forward_target: None,
             issue_link_cache_dir: gwt_core::paths::gwt_cache_dir(),
             pending_update: None,
@@ -3409,13 +3411,28 @@ mod tests {
                 if id == &shell_id && data_base64 == "aGVsbG8="
         ));
 
+        let _ = runtime.handle_runtime_hook_event(RuntimeHookEvent {
+            kind: RuntimeHookEventKind::RuntimeState,
+            source_event: Some("PreToolUse".to_string()),
+            gwt_session_id: Some("session-1".to_string()),
+            agent_session_id: None,
+            project_root: Some("E:/gwt/test-repo".to_string()),
+            branch: Some("feature/test".to_string()),
+            status: Some("Running".to_string()),
+            tool_name: None,
+            message: None,
+            occurred_at: "2026-04-25T00:00:00Z".to_string(),
+        });
         let error_events = runtime.handle_runtime_status(
             claude_one_id.clone(),
             WindowProcessStatus::Error,
             Some("boom".to_string()),
         );
         assert_eq!(error_events.len(), 3);
-        assert!(!runtime.active_agent_sessions.contains_key(&claude_one_id));
+        assert!(
+            runtime.active_agent_sessions.contains_key(&claude_one_id),
+            "PTY Error with a live hook state keeps Agent session ownership for recovery"
+        );
         assert_eq!(
             runtime
                 .window_details
@@ -3426,7 +3443,7 @@ mod tests {
         assert!(matches!(
             error_events[0].event,
             BackendEvent::ActiveWorkProjection { ref projection }
-                if projection.active_agents == 1 && projection.agents.len() == 1
+                if projection.active_agents == 2 && projection.agents.len() == 2
         ));
         assert!(matches!(
             error_events[1].event,
@@ -6636,7 +6653,7 @@ fn main() -> std::io::Result<()> {
         oauth_redirect_port,
         AppEventProxy::new(proxy.clone()),
         clients.clone(),
-        pty_writers,
+        pty_writers.clone(),
         attachment_uploads,
     )
     .expect("embedded server");
@@ -6654,6 +6671,7 @@ fn main() -> std::io::Result<()> {
     let usage_refresh = std::sync::Arc::new(tokio::sync::Notify::new());
     app.set_usage_refresh(usage_refresh.clone());
     usage_poller::spawn_usage_poller(&runtime, clients.clone(), usage_refresh);
+    runtime_health_poller::spawn_runtime_health_poller(&runtime, clients.clone(), pty_writers);
     eprintln!("gwt browser URL: {browser_url}");
     // SPEC-1939 T-IDX-109/110 / Issue #2584 — Playwright e2e seam.
     // When `GWT_BROWSER_URL_FILE` is set, the embedded server URL is also

@@ -1,5 +1,5 @@
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     ffi::OsString,
     fs,
     io::Write,
@@ -1862,6 +1862,7 @@ fn sample_runtime_with_events(
         local_worktree_branches: std::cell::RefCell::new(HashMap::new()),
         window_pty_statuses: HashMap::new(),
         window_hook_states: HashMap::new(),
+        recoverable_agent_error_windows: HashSet::new(),
         hook_forward_target: None,
         issue_link_cache_dir: gwt_cache_dir(),
         pending_update: None,
@@ -6279,6 +6280,219 @@ fn app_runtime_runtime_status_stopped_auto_closes_active_agent_window() {
     assert!(!runtime.active_agent_sessions.contains_key(&window_id));
     assert!(!runtime.window_lookup.contains_key(&window_id));
     assert!(runtime.tabs[0].workspace.window("codex-1").is_none());
+}
+
+#[test]
+fn app_runtime_runtime_hook_running_recovers_active_agent_after_pty_error() {
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedEnvVar::set("HOME", temp.path());
+    let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+    let tab = sample_project_tab_with_window(
+        "tab-1",
+        "codex-1",
+        WindowPreset::Codex,
+        WindowProcessStatus::Running,
+    );
+    let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+    let window_id = combined_window_id("tab-1", "codex-1");
+    runtime.active_agent_sessions.insert(
+        window_id.clone(),
+        sample_active_agent_session("tab-1", &window_id),
+    );
+    let _ = runtime.handle_runtime_hook_event(runtime_hook_state_for_event(
+        "Running",
+        "PreToolUse",
+        "session-1",
+    ));
+
+    let error_events = runtime.handle_runtime_status(
+        window_id.clone(),
+        WindowProcessStatus::Error,
+        Some("pty stream interrupted".to_string()),
+    );
+
+    assert!(runtime.active_agent_sessions.contains_key(&window_id));
+    assert_eq!(
+        runtime.window_details.get(&window_id).map(String::as_str),
+        Some("pty stream interrupted")
+    );
+    assert!(error_events.iter().any(|event| matches!(
+        event.event,
+        BackendEvent::WindowState {
+            state: WindowProcessStatus::Error,
+            ..
+        }
+    )));
+
+    let recovered_events = runtime.handle_runtime_hook_event(runtime_hook_state_for_event(
+        "Running",
+        "PreToolUse",
+        "session-1",
+    ));
+
+    assert!(runtime.active_agent_sessions.contains_key(&window_id));
+    assert_eq!(
+        runtime.window_status(&window_id),
+        Some(WindowProcessStatus::Running)
+    );
+    assert!(
+        !runtime.window_details.contains_key(&window_id),
+        "live hook recovery clears the stale PTY error detail"
+    );
+    assert!(recovered_events.iter().any(|event| matches!(
+        event.event,
+        BackendEvent::WindowState {
+            state: WindowProcessStatus::Running,
+            ..
+        }
+    )));
+}
+
+#[test]
+fn app_runtime_runtime_status_error_without_live_hook_stops_active_agent() {
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedEnvVar::set("HOME", temp.path());
+    let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+    let tab = sample_project_tab_with_window(
+        "tab-1",
+        "codex-1",
+        WindowPreset::Codex,
+        WindowProcessStatus::Running,
+    );
+    let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+    let window_id = combined_window_id("tab-1", "codex-1");
+    runtime.active_agent_sessions.insert(
+        window_id.clone(),
+        sample_active_agent_session("tab-1", &window_id),
+    );
+
+    let error_events = runtime.handle_runtime_status(
+        window_id.clone(),
+        WindowProcessStatus::Error,
+        Some("process failed".to_string()),
+    );
+
+    assert!(!runtime.active_agent_sessions.contains_key(&window_id));
+    assert!(error_events.iter().any(|event| matches!(
+        event.event,
+        BackendEvent::WindowState {
+            state: WindowProcessStatus::Error,
+            ..
+        }
+    )));
+}
+
+#[test]
+fn app_runtime_duplicate_pty_error_after_live_hook_keeps_active_agent_for_recovery() {
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedEnvVar::set("HOME", temp.path());
+    let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+    let tab = sample_project_tab_with_window(
+        "tab-1",
+        "codex-1",
+        WindowPreset::Codex,
+        WindowProcessStatus::Running,
+    );
+    let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+    let window_id = combined_window_id("tab-1", "codex-1");
+    runtime.active_agent_sessions.insert(
+        window_id.clone(),
+        sample_active_agent_session("tab-1", &window_id),
+    );
+    let _ = runtime.handle_runtime_hook_event(runtime_hook_state_for_event(
+        "Running",
+        "PreToolUse",
+        "session-1",
+    ));
+
+    let _ = runtime.handle_runtime_status(
+        window_id.clone(),
+        WindowProcessStatus::Error,
+        Some("transient pty error".to_string()),
+    );
+    assert!(runtime.active_agent_sessions.contains_key(&window_id));
+
+    let duplicate_error_events = runtime.handle_runtime_status(
+        window_id.clone(),
+        WindowProcessStatus::Error,
+        Some("transient pty error".to_string()),
+    );
+
+    assert!(runtime.active_agent_sessions.contains_key(&window_id));
+    assert!(duplicate_error_events.iter().any(|event| matches!(
+        event.event,
+        BackendEvent::WindowState {
+            state: WindowProcessStatus::Error,
+            ..
+        }
+    )));
+}
+
+#[test]
+fn app_runtime_live_hook_recovery_clears_recoverable_pty_error_marker() {
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedEnvVar::set("HOME", temp.path());
+    let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+    let tab = sample_project_tab_with_window(
+        "tab-1",
+        "codex-1",
+        WindowPreset::Codex,
+        WindowProcessStatus::Running,
+    );
+    let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+    let window_id = combined_window_id("tab-1", "codex-1");
+    runtime.active_agent_sessions.insert(
+        window_id.clone(),
+        sample_active_agent_session("tab-1", &window_id),
+    );
+    let _ = runtime.handle_runtime_hook_event(runtime_hook_state_for_event(
+        "Running",
+        "PreToolUse",
+        "session-1",
+    ));
+    let _ = runtime.handle_runtime_status(
+        window_id.clone(),
+        WindowProcessStatus::Error,
+        Some("transient pty error".to_string()),
+    );
+    let _ = runtime.handle_runtime_status(
+        window_id.clone(),
+        WindowProcessStatus::Error,
+        Some("transient pty error".to_string()),
+    );
+    assert!(runtime.recoverable_agent_error_windows.contains(&window_id));
+
+    let _ = runtime.handle_runtime_hook_event(runtime_hook_state_for_event(
+        "Running",
+        "PreToolUse",
+        "session-1",
+    ));
+
+    assert!(
+        !runtime.recoverable_agent_error_windows.contains(&window_id),
+        "live hook recovery must end the stale PTY Error duplicate window"
+    );
+    runtime.window_hook_states.remove(&window_id);
+
+    let _ = runtime.handle_runtime_status(
+        window_id.clone(),
+        WindowProcessStatus::Error,
+        Some("process exited".to_string()),
+    );
+
+    assert!(!runtime.active_agent_sessions.contains_key(&window_id));
 }
 
 #[test]
@@ -15513,6 +15727,128 @@ fn attach_registry_sessions_dedupes_agents_sharing_a_conversation() {
     assert_eq!(
         works[0].session_agent_total, 2,
         "the collapsed duplicate is not counted as a hidden extra session"
+    );
+}
+
+/// User verification 2026-06-19: a legacy branchless Work record can carry
+/// agent refs from multiple branches. Once such refs reach a branch-backed row,
+/// the row must drop sessions whose ledger branch/worktree belongs to another
+/// Workspace so the same Codex conversation is not shown under two Workspaces.
+#[test]
+fn attach_registry_sessions_filters_agents_from_other_workspace_rows() {
+    fn agent_view(
+        session_id: &str,
+        display_name: &str,
+        conversation: &str,
+    ) -> gwt::ActiveWorkAgentView {
+        gwt::ActiveWorkAgentView {
+            session_id: session_id.to_string(),
+            window_id: None,
+            agent_id: display_name.to_ascii_lowercase().replace(' ', "-"),
+            display_name: display_name.to_string(),
+            affiliation_status: "assigned".to_string(),
+            workspace_id: None,
+            status_category: "idle".to_string(),
+            current_focus: None,
+            title_summary: None,
+            branch: None,
+            worktree_path: None,
+            last_board_entry_id: None,
+            last_board_entry_kind: None,
+            coordination_scope: None,
+            updated_at: "2026-06-19T13:49:00Z".to_string(),
+            sessions: vec![gwt::WorkspaceHistorySessionView {
+                agent_session_id: conversation.to_string(),
+                started_at: "2026-06-19T13:49:00Z".to_string(),
+                is_active: true,
+                resumable: true,
+            }],
+        }
+    }
+
+    let temp = tempdir().expect("tempdir");
+    let repo = temp.path().join("unity-cli");
+    let issue_worktree = temp.path().join("unity-cli/work/issue-206");
+    let other_worktree = temp.path().join("unity-cli/work/20260616-1102");
+    fs::create_dir_all(&issue_worktree).expect("issue worktree");
+    fs::create_dir_all(&other_worktree).expect("other worktree");
+
+    let mut issue_session = gwt_agent::Session::new(
+        &issue_worktree,
+        "work/issue-206",
+        gwt_agent::AgentId::ClaudeCode,
+    );
+    issue_session.id = "78992500-1502-4ab2-8e67-04f79803e013".to_string();
+    issue_session.agent_session_id = Some("33939943-240d-461f-bf90-e7b5497e4ee8".to_string());
+    issue_session.display_name = "Claude Code".to_string();
+    let mut other_session = gwt_agent::Session::new(
+        &other_worktree,
+        "work/20260616-1102",
+        gwt_agent::AgentId::Codex,
+    );
+    other_session.id = "5b907840-31ee-48d5-a7e3-277c93fda63b".to_string();
+    other_session.agent_session_id = Some("019ed018-c208-7183-bb6e-b08ba2ef4981".to_string());
+    other_session.display_name = "Codex".to_string();
+    let mut session_index = std::collections::HashMap::new();
+    session_index.insert(issue_session.id.as_str(), &issue_session);
+    session_index.insert(other_session.id.as_str(), &other_session);
+
+    let mut works = vec![gwt::ActiveWorkItemView {
+        id: "work-work-issue-206-a0668517".to_string(),
+        title: "contribution docs PR".to_string(),
+        status_category: "idle".to_string(),
+        status_text: "Paused".to_string(),
+        summary: None,
+        progress_summary: None,
+        work_summary: None,
+        owner: Some("Issue #206".to_string()),
+        next_action: None,
+        active_agents: 0,
+        blocked_agents: 0,
+        branch: Some("work/issue-206".to_string()),
+        worktree_path: Some(issue_worktree.display().to_string()),
+        pr_number: None,
+        pr_url: None,
+        pr_state: None,
+        board_refs: Vec::new(),
+        agents: vec![
+            agent_view(
+                &issue_session.id,
+                "Claude Code",
+                "33939943-240d-461f-bf90-e7b5497e4ee8",
+            ),
+            agent_view(
+                &other_session.id,
+                "Codex",
+                "019ed018-c208-7183-bb6e-b08ba2ef4981",
+            ),
+        ],
+        lifecycle_state: "paused".to_string(),
+        closed_at: None,
+        session_agent_total: 0,
+        merged_into_base: false,
+        workspace_key: None,
+        remote_only: false,
+        done_equivalent: false,
+        cleanup_candidate: None,
+        updated_at: "2026-06-19T13:49:00Z".to_string(),
+    }];
+
+    super::attach_registry_sessions_to_active_works(&mut works, &[], None, &session_index, &repo);
+
+    let agents = &works[0].agents;
+    assert_eq!(agents.len(), 1, "only sessions owned by this row stay");
+    assert_eq!(agents[0].display_name, "Claude Code");
+    assert_eq!(
+        agents[0].sessions[0].agent_session_id,
+        "33939943-240d-461f-bf90-e7b5497e4ee8"
+    );
+    assert!(
+        agents
+            .iter()
+            .flat_map(|agent| agent.sessions.iter())
+            .all(|session| session.agent_session_id != "019ed018-c208-7183-bb6e-b08ba2ef4981"),
+        "Codex conversation from work/20260616-1102 must not appear on work/issue-206"
     );
 }
 
