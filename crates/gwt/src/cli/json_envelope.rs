@@ -199,6 +199,8 @@ fn parse(input: &str) -> Result<ParsedEnvelope, CliParseError> {
         "hook.register_codex_managed_hook_trust" | "hook.register-codex-managed-hook-trust" => {
             hook_register_codex_trust(params)?
         }
+        "hook.health" => hook_health(params)?,
+        "hook.doctor" => hook_doctor(params)?,
         "memory.add" => memory_add(params)?,
         "discussion.update" => discussion_update(params)?,
         "discuss.resolve" => discuss_proposal(params, DiscussEnvelopeAction::Resolve)?,
@@ -456,6 +458,23 @@ fn hook_register_codex_trust(params: &Map<String, Value>) -> Result<CliCommand, 
     }))
 }
 
+fn hook_health(params: &Map<String, Value>) -> Result<CliCommand, CliParseError> {
+    Ok(CliCommand::Hook(HookCommand::Health {
+        runtime_state_path: optional_path(params, "runtime_state_path")?,
+        profile_path: optional_path(params, "profile_path")?,
+        expected_hook_bin: optional_string(params, "expected_hook_bin")?,
+    }))
+}
+
+fn hook_doctor(params: &Map<String, Value>) -> Result<CliCommand, CliParseError> {
+    Ok(CliCommand::Hook(HookCommand::Doctor {
+        runtime_state_path: optional_path(params, "runtime_state_path")?,
+        profile_path: optional_path(params, "profile_path")?,
+        expected_hook_bin: optional_string(params, "expected_hook_bin")?,
+        repair: optional_bool(params, "repair")?.unwrap_or(false),
+    }))
+}
+
 fn discussion_update(params: &Map<String, Value>) -> Result<CliCommand, CliParseError> {
     Ok(CliCommand::Discussion(super::DiscussionCommand::Update(
         super::discussion::DiscussionUpdateCommand {
@@ -658,6 +677,13 @@ fn optional_string(
     }
 }
 
+fn optional_path(
+    params: &Map<String, Value>,
+    key: &'static str,
+) -> Result<Option<std::path::PathBuf>, CliParseError> {
+    Ok(optional_string(params, key)?.map(std::path::PathBuf::from))
+}
+
 fn required_u64(params: &Map<String, Value>, key: &'static str) -> Result<u64, CliParseError> {
     optional_u64(params, key)?.ok_or(CliParseError::MissingFlag(key))
 }
@@ -765,8 +791,8 @@ fn optional_string_vec(
 #[cfg(test)]
 mod tests {
     use super::{
-        parse, ActionsCommand, CliCommand, CliParseError, DaemonCommand, IndexCommand, IndexScope,
-        IssueCommand, PaneCommand, PrCommand, SkillStateAction, WorkspaceCommand,
+        parse, ActionsCommand, CliCommand, CliParseError, DaemonCommand, HookCommand, IndexCommand,
+        IndexScope, IssueCommand, PaneCommand, PrCommand, SkillStateAction, WorkspaceCommand,
     };
     use crate::protocol::{IndexSearchMatchMode, IndexSearchScope};
     use serde_json::{json, Value};
@@ -1214,6 +1240,35 @@ mod tests {
         assert!(matches!(
             ok("diagnostics.cpu", json!({})),
             CliCommand::Diagnostics(_)
+        ));
+        match ok(
+            "hook.health",
+            json!({
+                "runtime_state_path": "/tmp/runtime.json",
+                "profile_path": "/tmp/profile.jsonl",
+                "expected_hook_bin": "/tmp/gwtd"
+            }),
+        ) {
+            CliCommand::Hook(HookCommand::Health {
+                runtime_state_path,
+                profile_path,
+                expected_hook_bin,
+            }) => {
+                assert_eq!(
+                    runtime_state_path.as_deref(),
+                    Some(std::path::Path::new("/tmp/runtime.json"))
+                );
+                assert_eq!(
+                    profile_path.as_deref(),
+                    Some(std::path::Path::new("/tmp/profile.jsonl"))
+                );
+                assert_eq!(expected_hook_bin.as_deref(), Some("/tmp/gwtd"));
+            }
+            other => panic!("unexpected command: {other:?}"),
+        }
+        assert!(matches!(
+            ok("hook.doctor", json!({"repair": true})),
+            CliCommand::Hook(HookCommand::Doctor { repair: true, .. })
         ));
         assert!(matches!(
             ok("daemon.start", json!({})),

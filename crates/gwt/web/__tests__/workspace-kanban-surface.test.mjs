@@ -168,6 +168,54 @@ test("Workspace detail renders structured body sections without preformatted dum
   assert.match(text, /board-claim-1/);
 });
 
+test("Workspace detail surfaces Managed Hooks health without raw JSON dumps", () => {
+  const projection = sampleProjection();
+  projection.works[0].managed_hook_health = {
+    status: "needs_attention",
+    last_event: "PreToolUse",
+    last_event_at: "2026-06-17T00:00:00Z",
+    pending_discussion: {
+      proposal_label: "Proposal A",
+      proposal_title: "Managed Hooks UX",
+      next_question: "Choose the repair path",
+    },
+    pending_goal: {
+      proposal_label: "Proposal A",
+      proposal_title: "Managed Hooks UX",
+      condition: "Implement hook health first",
+    },
+    slow_handlers: [
+      {
+        event: "PreToolUse",
+        handler: "workflow-policy",
+        status: "ok",
+        duration_ms: 1250.25,
+        occurred_at: "2026-06-17T00:00:01Z",
+      },
+    ],
+    issues: ["managed hook event missing: Stop in .codex/hooks.json"],
+  };
+  const fixture = createFixture();
+  const surface = createSurface(fixture, projection);
+
+  surface.mount(fixture.body, fixture.windowData, {
+    focusWindowLocally() {},
+    sendFocus() {},
+  });
+
+  const detail = fixture.body.querySelector(".workspace-overview-detail-pane");
+  const hookSection = detail.querySelector('[data-section="managed-hooks"]');
+  assert.ok(hookSection, "managed hook health should render in Work detail");
+  assert.equal(detail.querySelector("pre"), null);
+  assert.match(hookSection.textContent, /Managed Hooks/);
+  assert.match(hookSection.textContent, /Needs attention/);
+  assert.match(hookSection.textContent, /PreToolUse/);
+  assert.match(hookSection.textContent, /Proposal A/);
+  assert.match(hookSection.textContent, /workflow-policy/);
+  assert.match(hookSection.textContent, /1250ms/);
+  assert.match(hookSection.textContent, /Stop/);
+});
+
 test("Workspace detail renders Sessions under a Work, highlighting the active one (SPEC-2359)", () => {
   const projection = sampleProjection();
   // A single Work (launch) whose conversation split into two Sessions; the

@@ -127,10 +127,11 @@ pub use protocol::{
     BranchEntriesPhase, CustomAgentErrorCode, FileAttachment, FileContentErrorKind,
     FileContentMode, FileContentSaveErrorKind, FocusCycleDirection, FrontendEvent,
     GitHubRepositorySearchResultView, IndexSearchMatchMode, IndexSearchResult, IndexSearchScope,
-    IndexSearchTarget, ProfileEntryView, ProfileEnvEntryView, ProfileSnapshotView, ProjectTabView,
-    RecentProjectView, RunningAgentSummary, UiTraceEntry, UiTracePayload, WorkAgentView,
-    WorkEventView, WorkItemView, WorkspaceExecutionContainerView, WorkspaceHistoryAgentView,
-    WorkspaceHistoryEventView, WorkspaceHistorySessionView, WorkspaceHistoryView,
-    WorkspaceJournalEntryView, WorkspaceResumeSource, WorkspaceView,
+    IndexSearchTarget, ManagedHookHealthView, ManagedHookPendingDiscussionView,
+    ManagedHookPendingGoalView, ManagedHookSlowHandlerView, ProfileEntryView, ProfileEnvEntryView,
+    ProfileSnapshotView, ProjectTabView, RecentProjectView, RunningAgentSummary, UiTraceEntry,
+    UiTracePayload, WorkAgentView, WorkEventView, WorkItemView, WorkspaceExecutionContainerView,
+    WorkspaceHistoryAgentView, WorkspaceHistoryEventView, WorkspaceHistorySessionView,
+    WorkspaceHistoryView, WorkspaceJournalEntryView, WorkspaceResumeSource, WorkspaceView,
 };
 pub use window_canvas::WindowCanvasState;

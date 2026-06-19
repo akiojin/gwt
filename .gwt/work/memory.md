@@ -7039,3 +7039,10 @@ Type: postmortem
 Context: SPEC #2963 Slack/Teams remote Board providers were posting entries as Workspace/General thread replies, but load_snapshot read only channel top-level history/messages. Existing tests placed reply-shaped fixtures directly in history/list responses, hiding the real API split.
 Learning: Slack conversations.history and Microsoft Graph channel messages do not provide the thread reply stream as Board entries. Root summary cards and arbitrary flat channel messages must not be mapped into BoardEntry; provider tests should seed root mappings and assert calls to conversations.replies or /messages/{root}/replies.
 Future Action: When changing remote Board providers, write RED tests against provider-specific reply endpoints with a seeded board_remote_roots mapping, include mapped-channel roots distinct from the default channel, and verify board.show reads replies back before claiming completion.
+
+## 2026-06-17 — Do not parallelize same skill-state JSON updates
+
+Type: agent workflow correction
+Context: During SPEC #1935 Phase 22 implementation, two build.phase JSON operations were sent in parallel against .gwt/skill-state/build-spec.json.
+Learning: skill-state JSON operations are not safe to parallelize for the same state file; concurrent writes can interleave or leave trailing characters, causing build.phase/load failures.
+Future Action: Run build.start/build.phase/build.complete/build.abort sequentially only. Do not place same skill-state JSON updates inside multi_tool_use.parallel.

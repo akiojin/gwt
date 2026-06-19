@@ -34,7 +34,10 @@ pub mod tray;
 pub mod update;
 mod workspace;
 
-use std::io::{self};
+use std::{
+    io::{self},
+    path::PathBuf,
+};
 
 pub use board::{BoardCommand, BoardPostCommand};
 pub use commands::{IssueCommand, PrCommand};
@@ -241,6 +244,19 @@ pub enum HookCommand {
     Run { name: String, rest: Vec<String> },
     /// `gwtd __internal daemon-hook <name> [args...]` — hidden helper.
     InternalDaemon { name: String, rest: Vec<String> },
+    /// `hook.health` — read-only managed hook health projection.
+    Health {
+        runtime_state_path: Option<PathBuf>,
+        profile_path: Option<PathBuf>,
+        expected_hook_bin: Option<String>,
+    },
+    /// `hook.doctor` — managed hook health projection with optional repair.
+    Doctor {
+        runtime_state_path: Option<PathBuf>,
+        profile_path: Option<PathBuf>,
+        expected_hook_bin: Option<String>,
+        repair: bool,
+    },
 }
 
 /// SPEC-1942 command model for update and internal updater operations.
@@ -668,6 +684,59 @@ pub(crate) fn run_collect<E: CliEnv>(
             out.push_str(&String::from_utf8_lossy(&hook_stdout));
             return Ok((code, out));
         }
+        CliCommand::Hook(HookCommand::Health {
+            runtime_state_path,
+            profile_path,
+            expected_hook_bin,
+        }) => {
+            let mut input = hook::health::ManagedHookHealthInput::new(env.repo_path());
+            if let Some(path) = runtime_state_path {
+                input = input.with_runtime_state_path(path);
+            }
+            if let Some(path) = profile_path {
+                input = input.with_profile_path(path);
+            }
+            if let Some(bin) = expected_hook_bin {
+                input = input.with_expected_hook_bin(bin);
+            }
+            let health = hook::health::read_managed_hook_health(&input);
+            out.push_str(&serde_json::to_string_pretty(&health).map_err(serde_as_api_error)?);
+            out.push('\n');
+            0
+        }
+        CliCommand::Hook(HookCommand::Doctor {
+            runtime_state_path,
+            profile_path,
+            expected_hook_bin,
+            repair,
+        }) => {
+            let repair = if repair {
+                Some(
+                    hook::health::repair_managed_hook_configs(env.repo_path())
+                        .map_err(io_as_api_error)?,
+                )
+            } else {
+                None
+            };
+            let mut input = hook::health::ManagedHookHealthInput::new(env.repo_path());
+            if let Some(path) = runtime_state_path {
+                input = input.with_runtime_state_path(path);
+            }
+            if let Some(path) = profile_path {
+                input = input.with_profile_path(path);
+            }
+            if let Some(bin) = expected_hook_bin {
+                input = input.with_expected_hook_bin(bin);
+            }
+            let health = hook::health::read_managed_hook_health(&input);
+            let payload = serde_json::json!({
+                "repair": repair,
+                "health": health,
+            });
+            out.push_str(&serde_json::to_string_pretty(&payload).map_err(serde_as_api_error)?);
+            out.push('\n');
+            0
+        }
         CliCommand::Diagnostics(inner) => diagnostics::run(env, inner, &mut out)?,
         CliCommand::Update(UpdateCommand::CheckOnly) => {
             std::process::exit(update::run(update::UpdateRunMode::CheckOnly));
@@ -699,6 +768,10 @@ pub fn run<E: CliEnv>(env: &mut E, cmd: CliCommand) -> Result<i32, SpecOpsError>
 }
 
 fn io_as_api_error(err: io::Error) -> SpecOpsError {
+    SpecOpsError::from(ApiError::Network(err.to_string()))
+}
+
+fn serde_as_api_error(err: serde_json::Error) -> SpecOpsError {
     SpecOpsError::from(ApiError::Network(err.to_string()))
 }
 
