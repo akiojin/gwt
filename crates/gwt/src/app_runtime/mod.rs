@@ -342,6 +342,13 @@ pub struct LaunchWizardSession {
     pub(crate) wizard_id: String,
     pub(crate) wizard: LaunchWizardState,
     pub(crate) workspace_resume_context: Option<WorkspaceResumeContext>,
+    pub(crate) agent_kanban_target: Option<AgentKanbanLaunchTarget>,
+}
+
+#[derive(Debug, Clone)]
+pub struct AgentKanbanLaunchTarget {
+    pub(crate) board_id: String,
+    pub(crate) lane_id: gwt::AgentKanbanLane,
 }
 
 #[derive(Debug, Clone)]
@@ -1115,6 +1122,27 @@ impl AppRuntime {
             FrontendEvent::DetachWindowTab { id, geometry } => {
                 self.detach_window_tab_events(&id, geometry)
             }
+            FrontendEvent::PlaceAgentWindowInKanban {
+                id,
+                board_id,
+                lane_id,
+                order,
+            } => self.place_agent_window_in_kanban_events(&id, &board_id, lane_id, order),
+            FrontendEvent::MoveAgentKanbanCard {
+                id,
+                board_id,
+                lane_id,
+                order,
+            } => self.move_agent_kanban_card_events(&id, &board_id, lane_id, order),
+            FrontendEvent::UndockAgentWindow { id, geometry } => {
+                self.undock_agent_window_events(&id, geometry)
+            }
+            FrontendEvent::SetAgentKanbanCardCollapsed { id, collapsed } => {
+                self.set_agent_kanban_card_collapsed_events(&id, collapsed)
+            }
+            FrontendEvent::UpdateTerminalGrid { id, cols, rows } => {
+                self.update_terminal_grid_events(&id, cols, rows)
+            }
             FrontendEvent::ListWindows => {
                 vec![OutboundEvent::reply(client_id, self.list_windows_event())]
             }
@@ -1428,6 +1456,12 @@ impl AppRuntime {
                 self.open_issue_launch_wizard_events(&client_id, &id, issue_number)
             }
             FrontendEvent::OpenStartWork => self.open_start_work(&client_id),
+            FrontendEvent::OpenStartWorkInAgentKanban { board_id, lane_id } => {
+                self.open_start_work_in_agent_kanban(&client_id, &board_id, lane_id)
+            }
+            FrontendEvent::OpenAgentKanbanLaunchWizard { board_id, lane_id } => {
+                self.open_agent_kanban_launch_wizard(&client_id, &board_id, lane_id)
+            }
             FrontendEvent::ResumeWorkspace { source, journal_id } => {
                 self.resume_workspace_events(&client_id, source, journal_id)
             }
@@ -1686,6 +1720,20 @@ impl AppRuntime {
                 .map(|mut window| {
                     let raw_id = window.id.clone();
                     window.id = combined_window_id(&tab.id, &raw_id);
+                    if let gwt::WindowPlacement::AgentKanban {
+                        board_id,
+                        lane_id,
+                        order,
+                        collapsed,
+                    } = window.placement
+                    {
+                        window.placement = gwt::WindowPlacement::AgentKanban {
+                            board_id: combined_window_id(&tab.id, &board_id),
+                            lane_id,
+                            order,
+                            collapsed,
+                        };
+                    }
                     if let Some(status) = self.window_status(&window.id) {
                         window.status = status;
                     }

@@ -76,7 +76,7 @@ test("Surface Deck — categories own the expected preset members", () => {
   assert.deepEqual(presetsIn("config").sort(), ["profile", "settings"]);
 });
 
-test("Surface Deck — all 11 legacy data-preset values are preserved", () => {
+test("Surface Deck — all 11 visible data-preset values are preserved", () => {
   const presets = [...modal.querySelectorAll(".preset-button[data-preset]")].map(
     (btn) => btn.dataset.preset,
   );
@@ -98,7 +98,7 @@ test("Surface Deck — all 11 legacy data-preset values are preserved", () => {
 });
 
 test("Surface Deck — no forbidden presets leak into the modal", () => {
-  for (const forbidden of ["shell", "claude", "codex", "branches"]) {
+  for (const forbidden of ["shell", "claude", "codex", "branches", "agent_kanban"]) {
     assert.equal(
       modal.querySelector(`.preset-button[data-preset="${forbidden}"]`),
       null,
@@ -360,8 +360,8 @@ test("Surface Deck JS — wires the roving keydown listener and clears state on 
 
 // Behavioral lock for the geometry direction-nearest roving math. linkedom does
 // no layout, so we replicate the exact scorer from app.js against synthetic rect
-// centers modeling the 案B weighted deck (SURFACES 2-col×3row, KNOWLEDGE 2-col×2row,
-// CONFIG 1-col×2row) and assert intuitive navigation. A future scorer change that
+// centers modeling the weighted deck (SURFACES 2-col x 3-row, KNOWLEDGE 2-col x 2-row,
+// CONFIG 1-col x 2-row) and assert intuitive navigation. A future scorer change that
 // breaks cross-column / clamp behavior trips this test.
 test("Surface Deck behavioral — geometry roving picks the nearest tile in the pressed direction", () => {
   const buttons = [...modal.querySelectorAll(".preset-button")];
@@ -419,6 +419,7 @@ test("Surface Deck behavioral — geometry roving picks the nearest tile in the 
   assert.equal(move(0, "ArrowDown"), 2, "File Tree → Console");
   assert.equal(move(2, "ArrowUp"), 0, "Console → File Tree");
   assert.equal(move(1, "ArrowDown"), 3, "Logs → Board (same inner column)");
+  assert.equal(move(3, "ArrowDown"), 4, "Board → Workspace");
   // Cross-column to the next category at the same row.
   assert.equal(move(1, "ArrowRight"), 5, "Logs → Issue (jump to KNOWLEDGE)");
   assert.equal(move(6, "ArrowRight"), 9, "SPEC → Settings (jump to CONFIG)");

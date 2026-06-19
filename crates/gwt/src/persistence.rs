@@ -33,6 +33,38 @@ pub fn default_canvas_viewport() -> CanvasViewport {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
+pub enum AgentKanbanLane {
+    Plan,
+    Active,
+    Blocked,
+    Done,
+}
+
+impl AgentKanbanLane {
+    pub const ALL: [Self; 4] = [Self::Plan, Self::Active, Self::Blocked, Self::Done];
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum WindowPlacement {
+    #[default]
+    Canvas,
+    AgentKanban {
+        board_id: String,
+        lane_id: AgentKanbanLane,
+        order: u32,
+        collapsed: bool,
+    },
+}
+
+impl WindowPlacement {
+    pub fn is_canvas(&self) -> bool {
+        matches!(self, Self::Canvas)
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum WindowState {
     #[serde(alias = "ready")]
     Running,
@@ -83,6 +115,8 @@ pub struct PersistedWindowState {
     pub maximized: bool,
     #[serde(default)]
     pub pre_maximize_geometry: Option<WindowGeometry>,
+    #[serde(default, skip_serializing_if = "WindowPlacement::is_canvas")]
+    pub placement: WindowPlacement,
     #[serde(default = "default_persist_window")]
     pub persist: bool,
     /// Identifier of the agent occupying this window. Persisted across
@@ -193,6 +227,7 @@ pub fn default_workspace_state() -> PersistedWindowCanvasState {
                 minimized: false,
                 maximized: false,
                 pre_maximize_geometry: None,
+                placement: WindowPlacement::Canvas,
                 persist: true,
                 purpose_title: None,
                 dynamic_title: None,
@@ -219,6 +254,7 @@ pub fn default_workspace_state() -> PersistedWindowCanvasState {
                 minimized: false,
                 maximized: false,
                 pre_maximize_geometry: None,
+                placement: WindowPlacement::Canvas,
                 persist: true,
                 purpose_title: None,
                 dynamic_title: None,
@@ -563,6 +599,7 @@ mod tests {
                         width: 720.0,
                         height: 480.0,
                     }),
+                    placement: WindowPlacement::Canvas,
                     persist: true,
                     purpose_title: None,
                     dynamic_title: None,
@@ -589,6 +626,7 @@ mod tests {
                     minimized: true,
                     maximized: false,
                     pre_maximize_geometry: None,
+                    placement: WindowPlacement::Canvas,
                     persist: true,
                     purpose_title: None,
                     dynamic_title: None,
@@ -643,6 +681,40 @@ mod tests {
         assert!(loaded.windows[0].agent_color.is_none());
         assert!(loaded.windows[0].tab_group_id.is_none());
         assert!(!loaded.windows[0].tab_group_active);
+        assert_eq!(loaded.windows[0].placement, WindowPlacement::Canvas);
+    }
+
+    #[test]
+    fn persisted_window_state_round_trips_agent_kanban_placement() {
+        let mut window = default_workspace_state().windows.remove(0);
+        window.preset = WindowPreset::Agent;
+        window.placement = WindowPlacement::AgentKanban {
+            board_id: "agent-kanban-1".to_string(),
+            lane_id: AgentKanbanLane::Active,
+            order: 3,
+            collapsed: true,
+        };
+
+        let json = serde_json::to_string(&window).expect("serialize");
+        assert!(
+            json.contains("\"placement\""),
+            "placement must be serialized for Kanban-contained agents: {json}"
+        );
+        assert!(
+            json.contains("\"agent_kanban\""),
+            "placement kind must be explicit: {json}"
+        );
+
+        let parsed: PersistedWindowState = serde_json::from_str(&json).expect("parse");
+        assert_eq!(
+            parsed.placement,
+            WindowPlacement::AgentKanban {
+                board_id: "agent-kanban-1".to_string(),
+                lane_id: AgentKanbanLane::Active,
+                order: 3,
+                collapsed: true,
+            }
+        );
     }
 
     #[test]
@@ -770,6 +842,7 @@ mod tests {
                 minimized: false,
                 maximized: false,
                 pre_maximize_geometry: None,
+                placement: WindowPlacement::Canvas,
                 persist: true,
                 purpose_title: None,
                 dynamic_title: None,
@@ -861,6 +934,7 @@ mod tests {
             minimized: false,
             maximized: false,
             pre_maximize_geometry: None,
+            placement: WindowPlacement::Canvas,
             persist: true,
             purpose_title: Some("Review launch flow".into()),
             dynamic_title: None,
@@ -933,6 +1007,7 @@ mod tests {
                     minimized: false,
                     maximized: false,
                     pre_maximize_geometry: None,
+                    placement: WindowPlacement::Canvas,
                     persist: true,
                     purpose_title: None,
                     dynamic_title: None,
@@ -959,6 +1034,7 @@ mod tests {
                     minimized: false,
                     maximized: false,
                     pre_maximize_geometry: None,
+                    placement: WindowPlacement::Canvas,
                     persist: true,
                     purpose_title: None,
                     dynamic_title: None,
@@ -1170,6 +1246,7 @@ mod tests {
                     minimized: false,
                     maximized: false,
                     pre_maximize_geometry: None,
+                    placement: WindowPlacement::Canvas,
                     persist: true,
                     purpose_title: None,
                     dynamic_title: None,
@@ -1196,6 +1273,7 @@ mod tests {
                     minimized: false,
                     maximized: false,
                     pre_maximize_geometry: None,
+                    placement: WindowPlacement::Canvas,
                     persist: true,
                     purpose_title: None,
                     dynamic_title: None,

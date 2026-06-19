@@ -436,16 +436,32 @@ export function createLaunchWizardSurface({
         launchWizardPendingAction = null;
       }
 
-      function openStartWorkPendingWizard() {
+      function openLaunchPendingWizard({ title, meta, message }) {
         clearLaunchWizardPendingAction();
         launchWizard = null;
         launchWizardOpenError = null;
         launchWizardOpening = {
+          title,
+          meta,
+          message,
+        };
+        renderLaunchWizard();
+      }
+
+      function openStartWorkPendingWizard() {
+        openLaunchPendingWizard({
           title: "Start Work",
           meta: "Work launch",
           message: "Preparing Start Work...",
-        };
-        renderLaunchWizard();
+        });
+      }
+
+      function openLaunchAgentPendingWizard() {
+        openLaunchPendingWizard({
+          title: "Launch Agent",
+          meta: "Agent launch",
+          message: "Preparing Launch Agent...",
+        });
       }
 
       function clearLaunchWizardOpening() {
@@ -1342,6 +1358,7 @@ export function createLaunchWizardSurface({
         flushWizardBranchDraft,
         renderLaunchWizard,
         openStartWorkPendingWizard,
+        openLaunchAgentPendingWizard,
         applyLaunchWizardStateEvent,
         applyLaunchWizardOpenErrorEvent,
         handleWizardEscapeKeydown,

@@ -1,7 +1,7 @@
 use crate::{
     persistence::{
-        CanvasViewport, PersistedWindowCanvasState, PersistedWindowState, WindowGeometry,
-        WindowProcessStatus,
+        AgentKanbanLane, CanvasViewport, PersistedWindowCanvasState, PersistedWindowState,
+        WindowGeometry, WindowPlacement, WindowProcessStatus,
     },
     preset::WindowPreset,
     protocol::{ArrangeMode, FocusCycleDirection},
@@ -163,7 +163,9 @@ impl WindowCanvasState {
             .iter()
             .enumerate()
             .filter_map(|(index, window)| {
-                (!window.minimized && (window.tab_group_id.is_none() || window.tab_group_active))
+                (!window.minimized
+                    && window.placement.is_canvas()
+                    && (window.tab_group_id.is_none() || window.tab_group_active))
                     .then_some(index)
             })
             .collect::<Vec<_>>();
@@ -183,6 +185,9 @@ impl WindowCanvasState {
         let Some(index) = self.window_index(id) else {
             return false;
         };
+        if !self.persisted.windows[index].placement.is_canvas() {
+            return false;
+        }
         self.bring_to_front(index);
         if let Some(b) = bounds {
             self.center_window(id, b);
@@ -201,7 +206,7 @@ impl WindowCanvasState {
             .windows
             .iter()
             .enumerate()
-            .filter(|(_, w)| !w.minimized)
+            .filter(|(_, w)| !w.minimized && w.placement.is_canvas())
             .map(|(i, _)| i)
             .collect();
         if eligible.is_empty() {
@@ -282,7 +287,7 @@ impl WindowCanvasState {
             .persisted
             .windows
             .iter()
-            .filter(|w| !w.minimized && !w.maximized)
+            .filter(|w| !w.minimized && !w.maximized && w.placement.is_canvas())
             .count();
         let mut step = 0usize;
         while step <= visible_window_count {
@@ -291,6 +296,7 @@ impl WindowCanvasState {
             let occupied = self.persisted.windows.iter().any(|w| {
                 !w.minimized
                     && !w.maximized
+                    && w.placement.is_canvas()
                     && (w.geometry.x - candidate_x).abs() < 1.0
                     && (w.geometry.y - candidate_y).abs() < 1.0
             });
@@ -342,6 +348,7 @@ impl WindowCanvasState {
             minimized: false,
             maximized: false,
             pre_maximize_geometry: None,
+            placement: WindowPlacement::Canvas,
             persist,
             purpose_title: None,
             dynamic_title: None,
@@ -373,6 +380,9 @@ impl WindowCanvasState {
         let Some(index) = self.window_index(id) else {
             return false;
         };
+        if !self.persisted.windows[index].placement.is_canvas() {
+            return false;
+        }
         let group_id = self.persisted.windows[index].tab_group_id.clone();
         let was_maximized = self.persisted.windows[index].maximized;
         let pre_geometry = self.persisted.windows[index].geometry.clone();
@@ -414,6 +424,9 @@ impl WindowCanvasState {
         let Some(index) = self.window_index(id) else {
             return false;
         };
+        if !self.persisted.windows[index].placement.is_canvas() {
+            return false;
+        }
         let group_id = self.persisted.windows[index].tab_group_id.clone();
         let was_minimized = self.persisted.windows[index].minimized;
         let was_maximized = self.persisted.windows[index].maximized;
@@ -447,6 +460,9 @@ impl WindowCanvasState {
         let Some(index) = self.window_index(id) else {
             return false;
         };
+        if !self.persisted.windows[index].placement.is_canvas() {
+            return false;
+        }
         let window = &self.persisted.windows[index];
         let was_maximized = window.maximized;
         let was_minimized = window.minimized;
@@ -482,6 +498,9 @@ impl WindowCanvasState {
         let Some(index) = self.window_index(id) else {
             return false;
         };
+        if !self.persisted.windows[index].placement.is_canvas() {
+            return false;
+        }
         let group_id = self.persisted.windows[index].tab_group_id.clone();
         let members = self.group_member_indices(group_id.as_deref(), index);
         self.set_geometry_for_indices(&members, &geometry);
@@ -493,6 +512,12 @@ impl WindowCanvasState {
         let group_id = self
             .window(id)
             .and_then(|window| window.tab_group_id.clone());
+        if self
+            .window(id)
+            .is_some_and(|window| window.preset == WindowPreset::AgentKanban)
+        {
+            self.undock_agent_windows_for_board(id);
+        }
         self.persisted.windows.retain(|window| window.id != id);
         let changed = self.persisted.windows.len() != initial_len;
         if changed {
@@ -513,6 +538,11 @@ impl WindowCanvasState {
         let Some(target_index) = self.window_index(target_id) else {
             return false;
         };
+        if !self.persisted.windows[source_index].placement.is_canvas()
+            || !self.persisted.windows[target_index].placement.is_canvas()
+        {
+            return false;
+        }
         let source_group_id = self.persisted.windows[source_index].tab_group_id.clone();
         let group_id = self.persisted.windows[target_index]
             .tab_group_id
@@ -558,6 +588,9 @@ impl WindowCanvasState {
         let Some(index) = self.window_index(id) else {
             return false;
         };
+        if !self.persisted.windows[index].placement.is_canvas() {
+            return false;
+        }
         let Some(group_id) = self.persisted.windows[index].tab_group_id.clone() else {
             return self.focus_window(id, None);
         };
@@ -579,6 +612,9 @@ impl WindowCanvasState {
         let Some(index) = self.window_index(id) else {
             return false;
         };
+        if !self.persisted.windows[index].placement.is_canvas() {
+            return false;
+        }
         let Some(group_id) = self.persisted.windows[index].tab_group_id.clone() else {
             self.set_geometry_for_indices(&[index], &geometry);
             self.bring_to_front(index);
@@ -592,6 +628,124 @@ impl WindowCanvasState {
         self.persisted.windows[index].pre_maximize_geometry = None;
         self.bring_to_front(index);
         self.normalize_group(&group_id);
+        true
+    }
+
+    pub fn place_agent_window_in_kanban(
+        &mut self,
+        id: &str,
+        board_id: &str,
+        lane_id: AgentKanbanLane,
+        order: Option<u32>,
+    ) -> bool {
+        let Some(source_index) = self.window_index(id) else {
+            return false;
+        };
+        let Some(board_index) = self.window_index(board_id) else {
+            return false;
+        };
+        if source_index == board_index
+            || !self.persisted.windows[source_index]
+                .preset
+                .is_agent_terminal()
+            || self.persisted.windows[board_index].preset != WindowPreset::AgentKanban
+            || self.persisted.windows[source_index].tab_group_id.is_some()
+        {
+            return false;
+        }
+
+        let order = order.unwrap_or_else(|| self.next_agent_kanban_order(board_id, lane_id));
+        let window = &mut self.persisted.windows[source_index];
+        window.placement = WindowPlacement::AgentKanban {
+            board_id: board_id.to_string(),
+            lane_id,
+            order,
+            collapsed: false,
+        };
+        window.minimized = false;
+        window.maximized = false;
+        window.pre_maximize_geometry = None;
+        self.normalize_agent_kanban_orders(board_id);
+        true
+    }
+
+    pub fn move_agent_kanban_card(
+        &mut self,
+        id: &str,
+        board_id: &str,
+        lane_id: AgentKanbanLane,
+        order: u32,
+    ) -> bool {
+        let Some(index) = self.window_index(id) else {
+            return false;
+        };
+        if !self
+            .window(board_id)
+            .is_some_and(|window| window.preset == WindowPreset::AgentKanban)
+        {
+            return false;
+        }
+        let WindowPlacement::AgentKanban {
+            board_id: previous_board_id,
+            collapsed,
+            ..
+        } = self.persisted.windows[index].placement.clone()
+        else {
+            return false;
+        };
+        self.persisted.windows[index].placement = WindowPlacement::AgentKanban {
+            board_id: board_id.to_string(),
+            lane_id,
+            order,
+            collapsed,
+        };
+        if previous_board_id != board_id {
+            self.normalize_agent_kanban_orders(&previous_board_id);
+        }
+        self.normalize_agent_kanban_orders(board_id);
+        true
+    }
+
+    pub fn set_agent_kanban_card_collapsed(&mut self, id: &str, collapsed: bool) -> bool {
+        let Some(index) = self.window_index(id) else {
+            return false;
+        };
+        let WindowPlacement::AgentKanban {
+            board_id,
+            lane_id,
+            order,
+            ..
+        } = self.persisted.windows[index].placement.clone()
+        else {
+            return false;
+        };
+        self.persisted.windows[index].placement = WindowPlacement::AgentKanban {
+            board_id,
+            lane_id,
+            order,
+            collapsed,
+        };
+        true
+    }
+
+    pub fn undock_agent_window(&mut self, id: &str, geometry: Option<WindowGeometry>) -> bool {
+        let Some(index) = self.window_index(id) else {
+            return false;
+        };
+        if !matches!(
+            self.persisted.windows[index].placement,
+            WindowPlacement::AgentKanban { .. }
+        ) {
+            return false;
+        }
+        self.persisted.windows[index].placement = WindowPlacement::Canvas;
+        if let Some(geometry) = geometry {
+            self.set_geometry_for_indices(&[index], &geometry);
+        }
+        self.persisted.windows[index].minimized = false;
+        self.persisted.windows[index].maximized = false;
+        self.persisted.windows[index].pre_maximize_geometry = None;
+        self.bring_to_front(index);
         true
     }
 
@@ -811,6 +965,73 @@ impl WindowCanvasState {
         }
     }
 
+    fn next_agent_kanban_order(&self, board_id: &str, lane_id: AgentKanbanLane) -> u32 {
+        self.persisted
+            .windows
+            .iter()
+            .filter_map(|window| match &window.placement {
+                WindowPlacement::AgentKanban {
+                    board_id: current_board_id,
+                    lane_id: current_lane_id,
+                    order,
+                    ..
+                } if current_board_id == board_id && *current_lane_id == lane_id => Some(*order),
+                _ => None,
+            })
+            .max()
+            .map(|order| order.saturating_add(1))
+            .unwrap_or(0)
+    }
+
+    fn normalize_agent_kanban_orders(&mut self, board_id: &str) {
+        for lane_id in AgentKanbanLane::ALL {
+            let mut indices = self
+                .persisted
+                .windows
+                .iter()
+                .enumerate()
+                .filter_map(|(index, window)| match &window.placement {
+                    WindowPlacement::AgentKanban {
+                        board_id: current_board_id,
+                        lane_id: current_lane_id,
+                        order,
+                        ..
+                    } if current_board_id == board_id && *current_lane_id == lane_id => {
+                        Some((index, *order))
+                    }
+                    _ => None,
+                })
+                .collect::<Vec<_>>();
+            indices.sort_by_key(|(_, order)| *order);
+            for (order, (index, _)) in indices.into_iter().enumerate() {
+                if let WindowPlacement::AgentKanban {
+                    order: stored_order,
+                    ..
+                } = &mut self.persisted.windows[index].placement
+                {
+                    *stored_order = order as u32;
+                }
+            }
+        }
+    }
+
+    fn undock_agent_windows_for_board(&mut self, board_id: &str) {
+        for window in &mut self.persisted.windows {
+            if matches!(
+                &window.placement,
+                WindowPlacement::AgentKanban {
+                    board_id: current_board_id,
+                    ..
+                } if current_board_id == board_id
+            ) {
+                window.placement = WindowPlacement::Canvas;
+                window.minimized = false;
+                window.maximized = false;
+                window.pre_maximize_geometry = None;
+            }
+        }
+    }
+
     fn bring_to_front(&mut self, index: usize) {
         if let Some(window) = self.persisted.windows.get_mut(index) {
             window.z_index = self.persisted.next_z_index;
@@ -930,6 +1151,138 @@ mod tests {
     }
 
     #[test]
+    fn placing_agent_window_in_kanban_sets_containment_placement() {
+        let mut workspace = WindowCanvasState::from_persisted(empty_workspace_state());
+        let board = workspace.add_window(WindowPreset::AgentKanban, arrange_bounds());
+        let agent = workspace.add_window(WindowPreset::Agent, arrange_bounds());
+
+        assert!(workspace.place_agent_window_in_kanban(
+            &agent.id,
+            &board.id,
+            AgentKanbanLane::Active,
+            None,
+        ));
+
+        let agent = workspace.window(&agent.id).expect("agent window");
+        assert_eq!(
+            agent.placement,
+            WindowPlacement::AgentKanban {
+                board_id: board.id.clone(),
+                lane_id: AgentKanbanLane::Active,
+                order: 0,
+                collapsed: false,
+            }
+        );
+        assert!(!agent.minimized);
+        assert!(!agent.maximized);
+    }
+
+    #[test]
+    fn agent_kanban_rejects_non_agent_or_grouped_sources() {
+        let mut workspace = WindowCanvasState::from_persisted(empty_workspace_state());
+        let board = workspace.add_window(WindowPreset::AgentKanban, arrange_bounds());
+        let shell = workspace.add_window(WindowPreset::Shell, arrange_bounds());
+        let claude = workspace.add_window(WindowPreset::Claude, arrange_bounds());
+        let codex = workspace.add_window(WindowPreset::Codex, arrange_bounds());
+        let agent = workspace.add_window(WindowPreset::Agent, arrange_bounds());
+        let target = workspace.add_window(WindowPreset::Agent, arrange_bounds());
+        assert!(workspace.dock_window_tab(&agent.id, &target.id));
+
+        assert!(workspace.place_agent_window_in_kanban(
+            &claude.id,
+            &board.id,
+            AgentKanbanLane::Plan,
+            None,
+        ));
+        assert!(workspace.place_agent_window_in_kanban(
+            &codex.id,
+            &board.id,
+            AgentKanbanLane::Active,
+            None,
+        ));
+        assert!(!workspace.place_agent_window_in_kanban(
+            &shell.id,
+            &board.id,
+            AgentKanbanLane::Plan,
+            None,
+        ));
+        assert!(!workspace.place_agent_window_in_kanban(
+            &agent.id,
+            &board.id,
+            AgentKanbanLane::Plan,
+            None,
+        ));
+    }
+
+    #[test]
+    fn focus_cycle_skips_agent_kanban_contained_agents() {
+        let mut workspace = WindowCanvasState::from_persisted(empty_workspace_state());
+        let board = workspace.add_window(WindowPreset::AgentKanban, arrange_bounds());
+        let agent = workspace.add_window(WindowPreset::Agent, arrange_bounds());
+        assert!(workspace.place_agent_window_in_kanban(
+            &agent.id,
+            &board.id,
+            AgentKanbanLane::Active,
+            None,
+        ));
+
+        let focused = workspace.cycle_focus(FocusCycleDirection::Forward, arrange_bounds());
+
+        assert_eq!(focused.as_deref(), Some(board.id.as_str()));
+    }
+
+    #[test]
+    fn closing_agent_kanban_window_undocks_contained_agents() {
+        let mut workspace = WindowCanvasState::from_persisted(empty_workspace_state());
+        let board = workspace.add_window(WindowPreset::AgentKanban, arrange_bounds());
+        let agent = workspace.add_window(WindowPreset::Agent, arrange_bounds());
+        assert!(workspace.place_agent_window_in_kanban(
+            &agent.id,
+            &board.id,
+            AgentKanbanLane::Done,
+            None,
+        ));
+
+        assert!(workspace.close_window(&board.id));
+
+        assert!(workspace.window(&board.id).is_none());
+        assert_eq!(
+            workspace.window(&agent.id).expect("agent").placement,
+            WindowPlacement::Canvas
+        );
+    }
+
+    #[test]
+    fn moving_agent_kanban_card_rejects_missing_board() {
+        let mut workspace = WindowCanvasState::from_persisted(empty_workspace_state());
+        let board = workspace.add_window(WindowPreset::AgentKanban, arrange_bounds());
+        let agent = workspace.add_window(WindowPreset::Agent, arrange_bounds());
+        assert!(workspace.place_agent_window_in_kanban(
+            &agent.id,
+            &board.id,
+            AgentKanbanLane::Plan,
+            None,
+        ));
+
+        assert!(!workspace.move_agent_kanban_card(
+            &agent.id,
+            "missing-board",
+            AgentKanbanLane::Done,
+            0,
+        ));
+
+        assert_eq!(
+            workspace.window(&agent.id).expect("agent").placement,
+            WindowPlacement::AgentKanban {
+                board_id: board.id,
+                lane_id: AgentKanbanLane::Plan,
+                order: 0,
+                collapsed: false,
+            }
+        );
+    }
+
+    #[test]
     fn adding_window_centers_in_bounds() {
         let mut workspace = WindowCanvasState::from_persisted(empty_workspace_state());
         let bounds = WindowGeometry {
@@ -1034,6 +1387,7 @@ mod tests {
                 minimized: false,
                 maximized: false,
                 pre_maximize_geometry: None,
+                placement: WindowPlacement::Canvas,
                 persist: false,
                 purpose_title: None,
                 dynamic_title: None,

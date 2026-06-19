@@ -11,14 +11,16 @@ const releaseNotesSource = readFileSync(resolve(here, "../release-notes-window.j
 const appCss = readFileSync(resolve(here, "../styles/app.css"), "utf8");
 const componentsCss = readFileSync(resolve(here, "../styles/components.css"), "utf8");
 
-test("Workspace Overview is governed by Quiet Work UI List + Detail, not Kanban columns", () => {
+test("Workspace Overview is governed by Quiet Work UI Attention Board + Detail", () => {
   assert.match(workspaceSource, /workspace-overview-root/);
   assert.match(workspaceSource, /workspace-overview-list-pane/);
+  assert.match(workspaceSource, /workspace-attention-board/);
+  assert.match(workspaceSource, /ATTENTION_LANES/);
   assert.match(workspaceSource, /workspace-overview-detail-pane/);
   assert.doesNotMatch(
     workspaceSource,
     /workspace-kanban-board|data-workspace-column|workspace-kanban-column/,
-    "Workspace Overview must not reintroduce Workspace-specific Kanban columns",
+    "Workspace Overview must not reintroduce retired Workspace-specific Kanban columns",
   );
   assert.doesNotMatch(
     workspaceSource,

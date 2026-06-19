@@ -203,6 +203,33 @@ pub(super) fn frontend_user_action_log(event: &FrontendEvent) -> Option<Frontend
         FrontendEvent::DetachWindowTab { id, .. } => {
             FrontendUserActionLog::new("detach_window_tab", "window").window(id)
         }
+        FrontendEvent::PlaceAgentWindowInKanban {
+            id,
+            board_id,
+            lane_id,
+            ..
+        } => FrontendUserActionLog::new("place_agent_window_in_kanban", "window")
+            .window(id)
+            .target(format!("{board_id}:{lane_id:?}")),
+        FrontendEvent::MoveAgentKanbanCard {
+            id,
+            board_id,
+            lane_id,
+            ..
+        } => FrontendUserActionLog::new("move_agent_kanban_card", "window")
+            .window(id)
+            .target(format!("{board_id}:{lane_id:?}")),
+        FrontendEvent::UndockAgentWindow { id, .. } => {
+            FrontendUserActionLog::new("undock_agent_window", "window").window(id)
+        }
+        FrontendEvent::SetAgentKanbanCardCollapsed { id, collapsed } => {
+            FrontendUserActionLog::new("set_agent_kanban_card_collapsed", "window")
+                .window(id)
+                .mode(collapsed.to_string())
+        }
+        FrontendEvent::UpdateTerminalGrid { id, .. } => {
+            FrontendUserActionLog::new("update_terminal_grid", "terminal").window(id)
+        }
         FrontendEvent::ListWindows => FrontendUserActionLog::new("list_windows", "window"),
         FrontendEvent::CloseWindow { id } => {
             FrontendUserActionLog::new("close_window", "window").window(id)
@@ -393,6 +420,16 @@ pub(super) fn frontend_user_action_log(event: &FrontendEvent) -> Option<Frontend
                 .target(issue_number.to_string())
         }
         FrontendEvent::OpenStartWork => FrontendUserActionLog::new("open_start_work", "launch"),
+        FrontendEvent::OpenStartWorkInAgentKanban { board_id, lane_id } => {
+            FrontendUserActionLog::new("open_start_work_in_agent_kanban", "launch")
+                .window(board_id)
+                .mode(format!("{lane_id:?}"))
+        }
+        FrontendEvent::OpenAgentKanbanLaunchWizard { board_id, lane_id } => {
+            FrontendUserActionLog::new("open_agent_kanban_launch_wizard", "launch")
+                .window(board_id)
+                .mode(format!("{lane_id:?}"))
+        }
         FrontendEvent::ResumeWorkspace { source, .. } => {
             FrontendUserActionLog::new("resume_workspace", "workspace").mode(format!("{source:?}"))
         }

@@ -74,6 +74,8 @@ fn frontend_bundle_source() -> &'static str {
         "\n",
         include_str!("../web/board-surface.js"),
         "\n",
+        include_str!("../web/agent-kanban-surface.js"),
+        "\n",
         include_str!("../web/workspace-kanban-surface.js"),
         "\n",
         include_str!("../web/update-cta.js"),
@@ -557,7 +559,7 @@ fn embedded_web_terminal_runtime_buffers_writes_until_initial_fit_handshake() {
     // `isReady` flip while the window is still hidden, defeating the
     // deferredWrites buffer (CodeRabbit PR #2693 concern).
     let create_runtime_handshake = regex::Regex::new(
-            r#"(?s)isReady: false,\s*deferredWrites: \[\],[\s\S]*?handshakeAttempts: 0,\s*\};\s*terminalMap\.set\(windowId, runtime\);\s*decoderMap\.set\(windowId, new TextDecoder\(\)\);[\s\S]*?requestAnimationFrame\(\(\) => completeInitialFitHandshake\(windowId\)\);"#,
+            r#"(?s)isReady: false,\s*deferredWrites: \[\],[\s\S]*?handshakeAttempts: 0,[\s\S]*?\};\s*terminalMap\.set\(windowId, runtime\);\s*decoderMap\.set\(windowId, new TextDecoder\(\)\);[\s\S]*?requestAnimationFrame\(\(\) => completeInitialFitHandshake\(windowId\)\);"#,
         )
         .expect("valid regex");
     // The helper itself must (a) bail when canRefreshTerminalViewport
@@ -3281,6 +3283,8 @@ fn embedded_web_window_surface_enum_aligns_with_js_preset_surface() {
         (WindowSurface::Knowledge, "knowledge"),
         (WindowSurface::Index, "index"),
         (WindowSurface::Work, "work"),
+        (WindowSurface::AgentKanban, "agent-kanban"),
+        (WindowSurface::Console, "console"),
         (WindowSurface::Mock, "mock"),
     ];
 

@@ -18,6 +18,7 @@ bash scripts/run-node-tests-with-linkedom.sh \
   crates/gwt/web/__tests__/quiet-work-ui-contract.test.mjs \
   crates/gwt/web/__tests__/kanban-dnd.test.mjs \
   crates/gwt/web/__tests__/kanban-drawer.test.mjs \
+  crates/gwt/web/__tests__/agent-kanban-surface.test.mjs \
   crates/gwt/web/__tests__/workspace-kanban-surface.test.mjs \
   crates/gwt/web/__tests__/launch-pending-controller.test.mjs \
   crates/gwt/web/__tests__/workspace-resume-picker-pending.test.mjs \

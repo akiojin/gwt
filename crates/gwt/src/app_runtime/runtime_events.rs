@@ -99,7 +99,8 @@ impl AppRuntime {
         self.window_pty_statuses.insert(id.clone(), status);
         let composed_status = self.recompute_window_state(&id).unwrap_or(status);
         let should_auto_close =
-            should_auto_close_agent_window(&self.active_agent_sessions, &id, &composed_status);
+            should_auto_close_agent_window(&self.active_agent_sessions, &id, &composed_status)
+                && self.window_hook_states.get(&id).copied() == Some(WindowProcessStatus::Stopped);
         match detail.as_ref() {
             Some(detail) if !detail.is_empty() => {
                 self.window_details.insert(id.clone(), detail.clone());
