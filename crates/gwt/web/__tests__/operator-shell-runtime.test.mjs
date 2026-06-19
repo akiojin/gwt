@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
+import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { dirname, resolve } from "node:path";
 import { parseHTML } from "linkedom";
@@ -110,6 +110,109 @@ test("Operator shell keeps the Command Rail always visible with no reveal state 
   }
 });
 
+test("Runtime health renderer updates severity-first compact PERF values", async () => {
+  const { applyRuntimeHealth } = await importOperatorShell();
+  assert.equal(typeof applyRuntimeHealth, "function");
+  const { document } = parseHTML(html);
+
+  applyRuntimeHealth(document, {
+    state: "warn",
+    cpu_percent: 42.4,
+    memory_bytes: 768 * 1024 * 1024,
+    process_count: 3,
+    runner_count: 1,
+    queue: {
+      client_count: 2,
+      queued_entries: 4,
+      dirty_panes: 1,
+      dropped_lossy_delta: 2,
+    },
+    processes: [],
+  });
+
+  const cell = document.getElementById("op-strip-runtime-health");
+  const value = document.getElementById("op-strip-runtime-health-value");
+  assert.equal(cell?.dataset.state, "warn");
+  assert.equal(value?.textContent, "WARN 42% 768M");
+  assert.match(cell?.getAttribute("title") ?? "", /processes: 3/);
+  assert.match(cell?.getAttribute("title") ?? "", /dropped: \+2/);
+});
+
+test("Runtime health renderer shows structured diagnostic hover detail", async () => {
+  const { applyRuntimeHealth } = await importOperatorShell();
+  assert.equal(typeof applyRuntimeHealth, "function");
+  const { document, window } = parseHTML(html);
+
+  applyRuntimeHealth(document, {
+    state: "hot",
+    cpu_percent: 101.2,
+    memory_bytes: 2 * 1024 * 1024 * 1024,
+    process_count: 2,
+    runner_count: 1,
+    queue: {
+      client_count: 1,
+      queued_entries: 7,
+      dirty_panes: 2,
+      dropped_lossy_delta: 3,
+    },
+    processes: [
+      {
+        pid: 101,
+        parent_pid: null,
+        role: "gwt",
+        name: "gwt",
+        cpu_percent: 82.8,
+        memory_bytes: 1536 * 1024 * 1024,
+      },
+      {
+        pid: 202,
+        parent_pid: 101,
+        role: "runner",
+        name: "chroma_index_runner",
+        cpu_percent: 18.4,
+        memory_bytes: 512 * 1024 * 1024,
+      },
+    ],
+  });
+
+  const cell = document.getElementById("op-strip-runtime-health");
+  cell?.dispatchEvent(new window.Event("mouseenter", { bubbles: true }));
+
+  const detail = document.getElementById("op-runtime-health-detail");
+  assert.ok(detail, "expected runtime health detail surface");
+  assert.equal(detail?.hidden, false);
+
+  const summary = detail?.querySelector(".op-runtime-health-detail__summary");
+  const queue = detail?.querySelector(".op-runtime-health-detail__queue");
+  const processRows = detail?.querySelectorAll(".op-runtime-health-detail__process") ?? [];
+  assert.ok(summary, "expected summary chips");
+  assert.ok(queue, "expected queue diagnostics");
+  assert.equal(processRows.length, 2);
+  assert.match(summary?.textContent ?? "", /HOT/);
+  assert.match(summary?.textContent ?? "", /101%/);
+  assert.match(summary?.textContent ?? "", /2.0G/);
+  assert.match(queue?.textContent ?? "", /queued/i);
+  assert.match(queue?.textContent ?? "", /7/);
+
+  const runnerRow = [...processRows].find((row) =>
+    row.textContent?.includes("chroma_index_runner"),
+  );
+  assert.ok(runnerRow, "expected runner process row");
+  assert.equal(
+    runnerRow?.querySelector(".op-runtime-health-detail__process-role")?.textContent,
+    "runner",
+  );
+  assert.match(
+    runnerRow?.querySelector(".op-runtime-health-detail__process-name")?.textContent ?? "",
+    /chroma_index_runner/,
+  );
+  assert.match(
+    runnerRow?.querySelector(".op-runtime-health-detail__process-metric")?.textContent ?? "",
+    /18%/,
+  );
+  assert.equal(detail?.querySelector("button"), null, "detail must stay diagnostic-only");
+});
+
 function throwingStorage() {
   return {
     getItem() {
@@ -145,5 +248,9 @@ async function importOperatorShell() {
     .replace('from "/theme-manager.js"', `from "${pathToFileURL(resolve(here, "../theme-manager.js")).href}"`)
     .replace('from "/hotkey.js"', `from "${pathToFileURL(resolve(here, "../hotkey.js")).href}"`)
     .replace('from "/theme-toggle.js"', `from "${pathToFileURL(resolve(here, "../theme-toggle.js")).href}"`);
-  return import(`data:text/javascript,${encodeURIComponent(source)}`);
+  const tmpDir = resolve(here, "../../../../.tmp-tests");
+  mkdirSync(tmpDir, { recursive: true });
+  const tmpModule = resolve(tmpDir, "operator-shell-runtime-import.mjs");
+  writeFileSync(tmpModule, source);
+  return import(pathToFileURL(tmpModule).href);
 }

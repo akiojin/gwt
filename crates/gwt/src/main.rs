@@ -45,6 +45,7 @@ mod embedded_web;
 mod launch_runtime;
 mod project_index_bootstrap;
 mod repo_browser;
+mod runtime_health_poller;
 mod runtime_support;
 mod session_ledger_cache;
 mod update_front_door;
@@ -6588,6 +6589,7 @@ fn main() -> std::io::Result<()> {
     let usage_refresh = std::sync::Arc::new(tokio::sync::Notify::new());
     app.set_usage_refresh(usage_refresh.clone());
     usage_poller::spawn_usage_poller(&runtime, clients.clone(), usage_refresh);
+    runtime_health_poller::spawn_runtime_health_poller(&runtime, clients.clone());
     eprintln!("gwt browser URL: {browser_url}");
     // SPEC-1939 T-IDX-109/110 / Issue #2584 — Playwright e2e seam.
     // When `GWT_BROWSER_URL_FILE` is set, the embedded server URL is also
