@@ -288,6 +288,533 @@ export function applyProviderUsage(doc, snapshot = {}) {
 }
 
 // ------------------------------------------------------------
+// Runtime health cell (SPEC-3107)
+// ------------------------------------------------------------
+
+const RUNTIME_HEALTH_SCROLL_PROCESS_THRESHOLD = 10;
+const RUNTIME_HEALTH_DEFAULT_SORT = "load";
+const RUNTIME_HEALTH_SORT_MODES = [
+  { mode: "load", label: "Load" },
+  { mode: "cpu", label: "CPU" },
+  { mode: "mem", label: "Mem" },
+];
+const RUNTIME_HEALTH_LOAD_CPU_UNIT = 20;
+const RUNTIME_HEALTH_LOAD_MEMORY_UNIT = 512 * 1024 * 1024;
+let runtimeHealthHideTimer = null;
+
+export function applyRuntimeHealth(doc, snapshot = {}, options = {}) {
+  const cell = doc.getElementById("op-strip-runtime-health");
+  const value = doc.getElementById("op-strip-runtime-health-value");
+  if (!cell || !value) return;
+
+  const queue = snapshot.queue || {};
+  const state = runtimeHealthState(snapshot.state);
+  cell.dataset.state = state;
+  cell.hidden = false;
+  value.textContent = `${runtimeHealthStateLabel(state)} ${formatRuntimeCpu(
+    snapshot.cpu_percent,
+  )} ${formatRuntimeMemory(
+    snapshot.memory_bytes,
+  )}`;
+  cell.setAttribute("title", runtimeHealthTitle(snapshot, queue));
+  cell.dataset.runtimeHealthSort = runtimeHealthSortMode(cell.dataset.runtimeHealthSort);
+  wireRuntimeHealthDetail(doc, cell);
+  renderRuntimeHealthDetail(doc, snapshot, queue, options);
+}
+
+function runtimeHealthState(state) {
+  return ["warming", "ok", "warn", "hot"].includes(state) ? state : "ok";
+}
+
+function runtimeHealthStateLabel(state) {
+  switch (runtimeHealthState(state)) {
+    case "hot":
+      return "HOT";
+    case "warn":
+      return "WARN";
+    case "warming":
+      return "WARM";
+    default:
+      return "OK";
+  }
+}
+
+function formatRuntimeCpu(cpu) {
+  if (typeof cpu !== "number" || !Number.isFinite(cpu)) return "--";
+  return `${Math.round(cpu)}%`;
+}
+
+function formatRuntimeMemory(bytes) {
+  const value = Number(bytes) || 0;
+  if (value <= 0) return "--";
+  const mib = value / (1024 * 1024);
+  if (mib < 1024) return `${Math.round(mib)}M`;
+  return `${(mib / 1024).toFixed(1)}G`;
+}
+
+function signedDelta(value) {
+  const delta = Number(value) || 0;
+  return delta > 0 ? `+${delta}` : String(delta);
+}
+
+function runtimeHealthTitle(snapshot, queue) {
+  return [
+    `state: ${runtimeHealthState(snapshot.state)}`,
+    `processes: ${Number(snapshot.process_count) || 0}`,
+    `runners: ${Number(snapshot.runner_count) || 0}`,
+    `queued: ${Number(queue.queued_entries) || 0}`,
+    `dropped: ${signedDelta(queue.dropped_lossy_delta)}`,
+  ].join(" | ");
+}
+
+function wireRuntimeHealthDetail(doc, cell) {
+  if (cell.dataset.runtimeHealthBound === "true") return;
+  cell.dataset.runtimeHealthBound = "true";
+  const win = doc.defaultView || globalThis;
+  const show = () => {
+    clearRuntimeHealthHideTimer(win);
+    showRuntimeHealthDetail(doc, cell);
+  };
+  const hide = () => {
+    scheduleRuntimeHealthHide(doc, win);
+  };
+  cell.addEventListener("mouseenter", show);
+  cell.addEventListener("focus", show);
+  cell.addEventListener("mouseleave", hide);
+  cell.addEventListener("blur", hide);
+  const detail = runtimeHealthDetail(doc);
+  detail.addEventListener("mouseenter", () => clearRuntimeHealthHideTimer(win));
+  detail.addEventListener("focusin", () => clearRuntimeHealthHideTimer(win));
+  detail.addEventListener("mouseleave", hide);
+  detail.addEventListener("focusout", hide);
+}
+
+function clearRuntimeHealthHideTimer(win = globalThis) {
+  if (!runtimeHealthHideTimer) return;
+  (win.clearTimeout || clearTimeout)(runtimeHealthHideTimer);
+  runtimeHealthHideTimer = null;
+}
+
+function scheduleRuntimeHealthHide(doc, win = globalThis) {
+  clearRuntimeHealthHideTimer(win);
+  runtimeHealthHideTimer = (win.setTimeout || setTimeout)(() => {
+    runtimeHealthHideTimer = null;
+    hideRuntimeHealthDetail(doc);
+  }, 120);
+}
+
+function runtimeHealthDetail(doc) {
+  let detail = doc.getElementById("op-runtime-health-detail");
+  if (detail) return detail;
+  detail = doc.createElement("div");
+  detail.className = "op-runtime-health-detail";
+  detail.id = "op-runtime-health-detail";
+  detail.hidden = true;
+  detail.setAttribute("role", "tooltip");
+  doc.body.appendChild(detail);
+  return detail;
+}
+
+function showRuntimeHealthDetail(doc, cell) {
+  const detail = runtimeHealthDetail(doc);
+  detail.hidden = false;
+  const rect = cell.getBoundingClientRect?.();
+  if (!rect) return;
+  const viewport = doc.defaultView || {};
+  const width = Number(viewport.innerWidth) || 1024;
+  const height = Number(viewport.innerHeight) || 768;
+  const margin = 8;
+  const statusGap = 8;
+  const detailWidth = Math.min(420, Math.max(0, width - margin * 2));
+  const maxHeight = Math.max(220, Math.floor(rect.top - margin * 2));
+  detail.style.left = `${Math.max(
+    margin,
+    Math.min(rect.left, width - detailWidth - margin),
+  )}px`;
+  detail.style.bottom = `${Math.max(margin, height - rect.top + statusGap)}px`;
+  detail.style.maxHeight = `${maxHeight}px`;
+}
+
+function hideRuntimeHealthDetail(doc) {
+  const detail = doc.getElementById("op-runtime-health-detail");
+  if (detail) detail.hidden = true;
+}
+
+function renderRuntimeHealthDetail(doc, snapshot, queue, options) {
+  const detail = runtimeHealthDetail(doc);
+  while (detail.firstChild) detail.removeChild(detail.firstChild);
+
+  const summary = doc.createElement("div");
+  summary.className = "op-runtime-health-detail__summary";
+  appendRuntimeHealthChip(doc, summary, "STATE", runtimeHealthStateLabel(snapshot.state));
+  appendRuntimeHealthChip(doc, summary, "CPU", formatRuntimeCpu(snapshot.cpu_percent));
+  appendRuntimeHealthChip(doc, summary, "MEM", formatRuntimeMemory(snapshot.memory_bytes));
+  appendRuntimeHealthChip(
+    doc,
+    summary,
+    "PROC",
+    `${Number(snapshot.process_count) || 0}/${Number(snapshot.runner_count) || 0}`,
+  );
+  detail.appendChild(summary);
+
+  const queueBlock = doc.createElement("div");
+  queueBlock.className = "op-runtime-health-detail__queue";
+  appendRuntimeHealthQueueItem(doc, queueBlock, "clients", Number(queue.client_count) || 0);
+  appendRuntimeHealthQueueItem(doc, queueBlock, "queued", Number(queue.queued_entries) || 0);
+  appendRuntimeHealthQueueItem(doc, queueBlock, "dirty", Number(queue.dirty_panes) || 0);
+  appendRuntimeHealthQueueItem(
+    doc,
+    queueBlock,
+    "dropped",
+    signedDelta(queue.dropped_lossy_delta),
+  );
+  detail.appendChild(queueBlock);
+
+  const sortMode = runtimeHealthCurrentSortMode(doc);
+  detail.appendChild(
+    renderRuntimeHealthSortControls(doc, sortMode, (nextMode) => {
+      const win = doc.defaultView || globalThis;
+      const cell = doc.getElementById("op-strip-runtime-health");
+      if (cell) cell.dataset.runtimeHealthSort = nextMode;
+      clearRuntimeHealthHideTimer(win);
+      renderRuntimeHealthDetail(doc, snapshot, queue, options);
+      clearRuntimeHealthHideTimer(win);
+      if (cell) showRuntimeHealthDetail(doc, cell);
+    }),
+  );
+
+  const processList = doc.createElement("div");
+  processList.className = "op-runtime-health-detail__process-list";
+  processList.setAttribute("aria-label", "Runtime processes");
+  const rawProcesses = Array.isArray(snapshot.processes) ? snapshot.processes : [];
+  const processes = runtimeHealthDisplayProcesses(rawProcesses, sortMode);
+  if (processes.length > RUNTIME_HEALTH_SCROLL_PROCESS_THRESHOLD) {
+    processList.dataset.scroll = "true";
+  }
+  if (processes.length === 0) {
+    const empty = doc.createElement("div");
+    empty.className = "op-runtime-health-detail__empty";
+    empty.textContent = "No process detail";
+    processList.appendChild(empty);
+  } else {
+    processList.appendChild(renderRuntimeHealthProcessHeader(doc));
+    for (const process of processes) {
+      processList.appendChild(renderRuntimeHealthProcess(doc, process, options));
+    }
+    const more = doc.createElement("div");
+    more.className = "op-runtime-health-detail__process-more";
+    more.textContent = runtimeHealthProcessSummary(processes, rawProcesses, sortMode);
+    processList.appendChild(more);
+  }
+  detail.appendChild(processList);
+}
+
+function runtimeHealthFocusWindowId(process) {
+  return typeof process?.focus_window_id === "string" && process.focus_window_id.trim()
+    ? process.focus_window_id
+    : null;
+}
+
+function appendRuntimeHealthChip(doc, parent, label, value) {
+  const chip = doc.createElement("span");
+  chip.className = "op-runtime-health-detail__chip";
+  const labelEl = doc.createElement("span");
+  labelEl.className = "op-runtime-health-detail__chip-label";
+  labelEl.textContent = label;
+  const valueEl = doc.createElement("span");
+  valueEl.className = "op-runtime-health-detail__chip-value";
+  valueEl.textContent = String(value);
+  chip.appendChild(labelEl);
+  chip.appendChild(valueEl);
+  parent.appendChild(chip);
+}
+
+function appendRuntimeHealthQueueItem(doc, parent, label, value) {
+  const item = doc.createElement("span");
+  item.className = "op-runtime-health-detail__queue-item";
+  const labelEl = doc.createElement("span");
+  labelEl.className = "op-runtime-health-detail__queue-label";
+  labelEl.textContent = label;
+  const valueEl = doc.createElement("span");
+  valueEl.className = "op-runtime-health-detail__queue-value";
+  valueEl.textContent = String(value);
+  item.appendChild(labelEl);
+  item.appendChild(valueEl);
+  parent.appendChild(item);
+}
+
+function renderRuntimeHealthSortControls(doc, activeMode, onChange) {
+  const group = doc.createElement("div");
+  group.className = "op-runtime-health-detail__sort";
+  group.setAttribute("aria-label", "Runtime process sort");
+  for (const { mode, label } of RUNTIME_HEALTH_SORT_MODES) {
+    const button = doc.createElement("button");
+    button.className = "op-runtime-health-detail__sort-button";
+    button.type = "button";
+    button.textContent = label;
+    button.dataset.sort = mode;
+    button.setAttribute("aria-pressed", mode === activeMode ? "true" : "false");
+    button.addEventListener("click", (event) => {
+      event.preventDefault();
+      event.stopPropagation();
+      if (mode !== activeMode) onChange(mode);
+    });
+    group.appendChild(button);
+  }
+  return group;
+}
+
+function renderRuntimeHealthProcessHeader(doc) {
+  const header = doc.createElement("div");
+  header.className = "op-runtime-health-detail__process-header";
+  for (const label of ["Role", "Process", "PID", "CPU", "Mem"]) {
+    const cell = doc.createElement("span");
+    cell.textContent = label;
+    header.appendChild(cell);
+  }
+  return header;
+}
+
+function renderRuntimeHealthProcess(doc, process, options = {}) {
+  const focusWindowId = runtimeHealthFocusWindowId(process);
+  const canFocus = focusWindowId && typeof options.focusWindow === "function";
+  const row = doc.createElement(canFocus ? "button" : "div");
+  row.className = "op-runtime-health-detail__process";
+  row.dataset.heat = runtimeHealthProcessHeat(process.cpu_percent);
+  if (runtimeHealthProcessLooksLikeAgent(process)) row.dataset.agent = "true";
+  const cpuPercent = Number(process.cpu_percent);
+  if (Number.isFinite(cpuPercent)) {
+    row.style.setProperty("--runtime-health-cpu", `${Math.max(0, Math.min(cpuPercent, 100))}%`);
+  }
+  if (canFocus) {
+    row.classList.add("op-runtime-health-detail__process--focusable");
+    row.type = "button";
+    const processLabel = runtimeHealthProcessNameLabel(process);
+    row.setAttribute(
+      "aria-label",
+      `Focus ${processLabel || "process"} process ${runtimeHealthProcessPidLabel(process)}`,
+    );
+    row.addEventListener("click", (event) => {
+      event.preventDefault();
+      event.stopPropagation();
+      options.focusWindow(focusWindowId);
+    });
+  }
+
+  const role = doc.createElement("span");
+  role.className = "op-runtime-health-detail__process-role";
+  role.textContent = process.role || "process";
+  row.appendChild(role);
+
+  const name = doc.createElement("span");
+  name.className = "op-runtime-health-detail__process-name";
+  name.textContent = runtimeHealthProcessNameLabel(process);
+  row.appendChild(name);
+
+  const pid = doc.createElement("span");
+  pid.className = "op-runtime-health-detail__process-pid";
+  pid.textContent = runtimeHealthProcessPidLabel(process);
+  row.appendChild(pid);
+
+  const cpu = doc.createElement("span");
+  cpu.className = "op-runtime-health-detail__process-metric";
+  cpu.textContent = formatRuntimeCpu(process.cpu_percent);
+  row.appendChild(cpu);
+
+  const memory = doc.createElement("span");
+  memory.className = "op-runtime-health-detail__process-metric";
+  memory.textContent = formatRuntimeMemory(process.memory_bytes);
+  row.appendChild(memory);
+
+  return row;
+}
+
+function runtimeHealthProcessHeat(cpu) {
+  const value = Number(cpu);
+  if (!Number.isFinite(value)) return "unknown";
+  if (value >= 20) return "hot";
+  if (value >= 5) return "warm";
+  return "idle";
+}
+
+function runtimeHealthProcessLooksLikeAgent(process) {
+  return ["agent", "codex", "claude", "docker"].includes(String(process?.role || ""));
+}
+
+function runtimeHealthDisplayProcesses(processes, sortMode = RUNTIME_HEALTH_DEFAULT_SORT) {
+  if (!Array.isArray(processes) || processes.length === 0) return [];
+
+  const byPid = new Map();
+  for (const process of processes) {
+    const pid = Number(process?.pid);
+    if (Number.isFinite(pid)) byPid.set(pid, process);
+  }
+
+  const groups = new Map();
+  const standalone = [];
+  for (const process of processes) {
+    if (!runtimeHealthProcessShouldGroup(process)) {
+      standalone.push(process);
+      continue;
+    }
+    const rootPid = runtimeHealthProcessGroupRootPid(process, byPid);
+    if (!groups.has(rootPid)) groups.set(rootPid, []);
+    groups.get(rootPid).push(process);
+  }
+
+  const display = [...standalone];
+  for (const group of groups.values()) {
+    display.push(runtimeHealthProcessGroupView(group));
+  }
+  display.sort((left, right) =>
+    compareRuntimeHealthProcesses(left, right, runtimeHealthSortMode(sortMode)),
+  );
+  return display;
+}
+
+function runtimeHealthProcessShouldGroup(process) {
+  return ["codex", "claude", "docker"].includes(String(process?.role || ""));
+}
+
+function runtimeHealthProcessGroupRootPid(process, byPid) {
+  const role = String(process?.role || "");
+  let current = process;
+  const seen = new Set();
+  while (current && !seen.has(Number(current.pid))) {
+    seen.add(Number(current.pid));
+    const parent = byPid.get(Number(current.parent_pid));
+    if (!parent || String(parent.role || "") !== role) break;
+    current = parent;
+  }
+  return Number(current?.pid ?? process?.pid);
+}
+
+function runtimeHealthProcessGroupView(group) {
+  if (group.length <= 1) return group[0];
+  const primary = [...group].sort(compareRuntimeHealthGroupPrimary)[0] || group[0];
+  const cpuValues = group
+    .map((process) => Number(process.cpu_percent))
+    .filter((value) => Number.isFinite(value));
+  const memoryValues = group
+    .map((process) => Number(process.memory_bytes))
+    .filter((value) => Number.isFinite(value));
+  const memoryBytes =
+    memoryValues.length > 0 ? memoryValues.reduce((sum, value) => sum + value, 0) : null;
+  const focusWindowId =
+    runtimeHealthFocusWindowId(primary) ||
+    group.map(runtimeHealthFocusWindowId).find((windowId) => windowId) ||
+    null;
+
+  return {
+    ...primary,
+    name: runtimeHealthProcessRoleLabel(primary),
+    cpu_percent:
+      cpuValues.length > 0 ? cpuValues.reduce((sum, value) => sum + value, 0) : null,
+    memory_bytes: memoryBytes,
+    focus_window_id: focusWindowId,
+    process_count: group.length,
+  };
+}
+
+function compareRuntimeHealthGroupPrimary(left, right) {
+  const cpuCompare =
+    runtimeHealthNumeric(right.cpu_percent) - runtimeHealthNumeric(left.cpu_percent);
+  if (cpuCompare !== 0) return cpuCompare;
+  const memoryCompare =
+    runtimeHealthNumeric(right.memory_bytes) - runtimeHealthNumeric(left.memory_bytes);
+  if (memoryCompare !== 0) return memoryCompare;
+  const wrapperCompare = runtimeHealthWrapperRank(left) - runtimeHealthWrapperRank(right);
+  if (wrapperCompare !== 0) return wrapperCompare;
+  return runtimeHealthNumeric(left.pid) - runtimeHealthNumeric(right.pid);
+}
+
+function compareRuntimeHealthProcesses(left, right, sortMode = RUNTIME_HEALTH_DEFAULT_SORT) {
+  if (sortMode === "load") {
+    const loadCompare = runtimeHealthProcessLoadScore(right) - runtimeHealthProcessLoadScore(left);
+    if (loadCompare !== 0) return loadCompare;
+  }
+  if (sortMode === "mem") {
+    const memoryCompare =
+      runtimeHealthNumeric(right.memory_bytes) - runtimeHealthNumeric(left.memory_bytes);
+    if (memoryCompare !== 0) return memoryCompare;
+  }
+  const cpuCompare =
+    runtimeHealthNumeric(right.cpu_percent) - runtimeHealthNumeric(left.cpu_percent);
+  if (cpuCompare !== 0) return cpuCompare;
+  const memoryCompare =
+    runtimeHealthNumeric(right.memory_bytes) - runtimeHealthNumeric(left.memory_bytes);
+  if (memoryCompare !== 0) return memoryCompare;
+  return runtimeHealthNumeric(left.pid) - runtimeHealthNumeric(right.pid);
+}
+
+function runtimeHealthWrapperRank(process) {
+  const name = String(process?.name || "").toLowerCase();
+  return name === "node" || name.startsWith("npm") || name.startsWith("npx") ? 1 : 0;
+}
+
+function runtimeHealthNumeric(value) {
+  const number = Number(value);
+  return Number.isFinite(number) ? number : 0;
+}
+
+function runtimeHealthProcessLoadScore(process) {
+  return Math.max(
+    runtimeHealthNumeric(process?.cpu_percent) / RUNTIME_HEALTH_LOAD_CPU_UNIT,
+    runtimeHealthNumeric(process?.memory_bytes) / RUNTIME_HEALTH_LOAD_MEMORY_UNIT,
+  );
+}
+
+function runtimeHealthCurrentSortMode(doc) {
+  const cell = doc.getElementById("op-strip-runtime-health");
+  return runtimeHealthSortMode(cell?.dataset.runtimeHealthSort);
+}
+
+function runtimeHealthSortMode(mode) {
+  return RUNTIME_HEALTH_SORT_MODES.some((candidate) => candidate.mode === mode)
+    ? mode
+    : RUNTIME_HEALTH_DEFAULT_SORT;
+}
+
+function runtimeHealthSortLabel(mode) {
+  const normalized = runtimeHealthSortMode(mode);
+  return (
+    RUNTIME_HEALTH_SORT_MODES.find((candidate) => candidate.mode === normalized)?.label || "Load"
+  );
+}
+
+function runtimeHealthProcessRoleLabel(process) {
+  const role = String(process?.role || "").trim();
+  return role || "process";
+}
+
+function runtimeHealthProcessNameLabel(process) {
+  const name = process?.name || "unknown";
+  const count = Number(process?.process_count);
+  return Number.isFinite(count) && count > 1 ? `${name} (${count} proc)` : name;
+}
+
+function runtimeHealthProcessPidLabel(process) {
+  const pid = process?.pid ?? "--";
+  const count = Number(process?.process_count);
+  return Number.isFinite(count) && count > 1 ? `${pid}+${count - 1}` : pid;
+}
+
+function runtimeHealthProcessSummary(
+  processes,
+  rawProcesses,
+  sortMode = RUNTIME_HEALTH_DEFAULT_SORT,
+) {
+  const sortLabel = runtimeHealthSortLabel(sortMode);
+  if (rawProcesses.length !== processes.length) {
+    return (
+      `Showing ${processes.length} groups / ${rawProcesses.length} ` +
+      `processes sorted by ${sortLabel}`
+    );
+  }
+  return `Showing ${processes.length} processes sorted by ${sortLabel}`;
+}
+
+// ------------------------------------------------------------
 // Mission Briefing intro
 // ------------------------------------------------------------
 
