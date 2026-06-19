@@ -96,6 +96,11 @@ impl AppRuntime {
             }
         }
 
+        let keep_active_agent_session_for_recovery =
+            self.should_keep_active_agent_session_for_recoverable_pty_error(&id, status);
+        if matches!(status, WindowProcessStatus::Error) {
+            self.window_hook_states.remove(&id);
+        }
         self.window_pty_statuses.insert(id.clone(), status);
         let composed_status = self.recompute_window_state(&id).unwrap_or(status);
         let should_auto_close =
@@ -128,7 +133,8 @@ impl AppRuntime {
         if matches!(
             status,
             WindowProcessStatus::Error | WindowProcessStatus::Stopped
-        ) {
+        ) && !keep_active_agent_session_for_recovery
+        {
             self.runtimes.remove(&id);
             self.remove_window_state_tracking(&id);
             self.mark_agent_session_stopped(&id);
@@ -197,7 +203,6 @@ impl AppRuntime {
             &window_id,
             &composed_state,
         );
-        let detail = self.window_details.get(&window_id).cloned();
         if should_auto_close {
             self.clear_agent_window_startup_restore(&window_id);
             self.stop_window_runtime(&window_id);
@@ -213,6 +218,10 @@ impl AppRuntime {
             }
             return events;
         }
+        if gwt::window_state::is_live_agent_hook_state(hook_state) {
+            self.window_details.remove(&window_id);
+        }
+        let detail = self.window_details.get(&window_id).cloned();
         let _ = self.persist();
         if matches!(
             composed_state,
@@ -224,6 +233,18 @@ impl AppRuntime {
         }
         events.extend(Self::status_events(window_id, composed_state, detail));
         events
+    }
+
+    fn should_keep_active_agent_session_for_recoverable_pty_error(
+        &self,
+        window_id: &str,
+        status: WindowProcessStatus,
+    ) -> bool {
+        status == WindowProcessStatus::Error
+            && self.active_agent_sessions.contains_key(window_id)
+            && self
+                .window_preset(window_id)
+                .is_some_and(gwt::window_state::uses_agent_hook_state)
     }
 
     fn should_broadcast_runtime_hook_event_to_frontend(event: &gwt::RuntimeHookEvent) -> bool {

@@ -3415,7 +3415,10 @@ mod tests {
             Some("boom".to_string()),
         );
         assert_eq!(error_events.len(), 3);
-        assert!(!runtime.active_agent_sessions.contains_key(&claude_one_id));
+        assert!(
+            runtime.active_agent_sessions.contains_key(&claude_one_id),
+            "PTY Error keeps Agent session ownership so later runtime hooks can recover it"
+        );
         assert_eq!(
             runtime
                 .window_details
@@ -3426,7 +3429,7 @@ mod tests {
         assert!(matches!(
             error_events[0].event,
             BackendEvent::ActiveWorkProjection { ref projection }
-                if projection.active_agents == 1 && projection.agents.len() == 1
+                if projection.active_agents == 2 && projection.agents.len() == 2
         ));
         assert!(matches!(
             error_events[1].event,
