@@ -48,6 +48,7 @@ pub enum IndexSearchScope {
     Memory,
     Discussions,
     Board,
+    Works,
     Files,
     #[serde(rename = "files-docs")]
     FilesDocs,
@@ -78,6 +79,7 @@ impl IndexSearchScope {
             Self::Memory => "memory",
             Self::Discussions => "discussions",
             Self::Board => "board",
+            Self::Works => "works",
             Self::Files => "files",
             Self::FilesDocs => "files-docs",
         }
@@ -92,6 +94,7 @@ pub enum IndexSearchTarget {
     Memory { heading: String, date: String },
     Discussion { heading: String, date: String },
     Board { entry_id: String },
+    Work { work_id: String },
     File { path: String },
 }
 
@@ -424,6 +427,15 @@ pub enum FrontendEvent {
         worktree_hash: Option<String>,
         #[serde(default)]
         match_mode: IndexSearchMatchMode,
+    },
+    /// SPEC-2359 US-80: Start Work duplicate-work advisory query. Sent
+    /// (debounced) as the user types the intake prompt. The backend runs the
+    /// curated, distance-thresholded `work_advisory` search and replies with
+    /// `WorkAdvisoryResult`. Never blocks the launch.
+    RequestWorkAdvisory {
+        id: String,
+        query: String,
+        request_id: u64,
     },
     SelectKnowledgeBridgeEntry {
         id: String,
@@ -1003,6 +1015,8 @@ pub struct WorkspaceJournalEntryView {
     pub status_category: Option<String>,
     pub status_text: Option<String>,
     pub summary: Option<String>,
+    #[serde(default)]
+    pub progress_summary: Option<String>,
     pub owner: Option<String>,
     pub next_action: Option<String>,
     pub agent_session_id: Option<String>,
@@ -1065,6 +1079,8 @@ pub struct WorkspaceHistoryEventView {
     pub title: Option<String>,
     pub intent: Option<String>,
     pub summary: Option<String>,
+    #[serde(default)]
+    pub progress_summary: Option<String>,
     pub status_category: Option<String>,
     pub owner: Option<String>,
     pub next_action: Option<String>,
@@ -1082,6 +1098,8 @@ pub struct WorkspaceHistoryView {
     pub title: String,
     pub intent: Option<String>,
     pub summary: Option<String>,
+    #[serde(default)]
+    pub progress_summary: Option<String>,
     pub status_category: String,
     pub owner: Option<String>,
     pub created_at: String,
@@ -1105,6 +1123,42 @@ pub struct ActiveWorkCleanupCandidateView {
     pub remote_delete_available: bool,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ManagedHookPendingDiscussionView {
+    pub proposal_label: String,
+    pub proposal_title: String,
+    pub next_question: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ManagedHookPendingGoalView {
+    pub proposal_label: String,
+    pub proposal_title: String,
+    pub condition: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ManagedHookSlowHandlerView {
+    pub event: String,
+    pub handler: String,
+    pub status: String,
+    pub duration_ms: u64,
+    pub occurred_at: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ManagedHookHealthView {
+    pub status: String,
+    pub last_event: Option<String>,
+    pub last_event_at: Option<String>,
+    pub pending_discussion: Option<ManagedHookPendingDiscussionView>,
+    pub pending_goal: Option<ManagedHookPendingGoalView>,
+    #[serde(default)]
+    pub slow_handlers: Vec<ManagedHookSlowHandlerView>,
+    #[serde(default)]
+    pub issues: Vec<String>,
+}
+
 /// SPEC-2359 Phase W-12 (FR-349): default wire value for
 /// [`ActiveWorkItemView::lifecycle_state`] when deserializing payloads that
 /// predate the field. Legacy active Work entries are always live (a group of
@@ -1120,6 +1174,8 @@ pub struct ActiveWorkItemView {
     pub status_category: String,
     pub status_text: String,
     pub summary: Option<String>,
+    #[serde(default)]
+    pub progress_summary: Option<String>,
     /// SPEC-3075: human-readable "what work was running" summary for the rail
     /// row's primary label (the branch becomes the sub-line). Surfaces the
     /// agent-declared `title-summary` purpose (live, then journal-recorded),
@@ -1197,6 +1253,8 @@ pub struct ActiveWorkProjectionView {
     pub status_category: String,
     pub status_text: String,
     pub summary: Option<String>,
+    #[serde(default)]
+    pub progress_summary: Option<String>,
     pub owner: Option<String>,
     pub next_action: Option<String>,
     pub active_agents: usize,
@@ -1212,6 +1270,8 @@ pub struct ActiveWorkProjectionView {
     #[serde(default, alias = "workspaces", alias = "work_items")]
     pub works: Vec<WorkspaceHistoryView>,
     pub cleanup_candidate: Option<ActiveWorkCleanupCandidateView>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub managed_hook_health: Option<ManagedHookHealthView>,
     #[serde(default)]
     pub active_work_count: usize,
     #[serde(default)]
@@ -1219,6 +1279,40 @@ pub struct ActiveWorkProjectionView {
     pub agents: Vec<ActiveWorkAgentView>,
     #[serde(default)]
     pub unassigned_agents: Vec<ActiveWorkAgentView>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct RuntimeHealthSnapshotView {
+    pub generated_at: String,
+    pub state: String,
+    pub cpu_percent: Option<f32>,
+    pub memory_bytes: u64,
+    pub process_count: usize,
+    pub runner_count: usize,
+    pub queue: RuntimeHealthQueueView,
+    pub processes: Vec<RuntimeHealthProcessView>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct RuntimeHealthQueueView {
+    pub client_count: usize,
+    pub queued_entries: usize,
+    pub dirty_panes: usize,
+    pub dropped_lossy: u64,
+    pub dropped_lossy_delta: u64,
+    pub dead_clients: usize,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct RuntimeHealthProcessView {
+    pub pid: u32,
+    pub parent_pid: Option<u32>,
+    pub role: String,
+    pub name: String,
+    pub cpu_percent: Option<f32>,
+    pub memory_bytes: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub focus_window_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -1244,6 +1338,9 @@ pub enum BackendEvent {
         accounts: Vec<gwt_core::usage::ProviderUsage>,
         sessions: Vec<gwt_core::usage::SessionUsage>,
         consumption: Vec<gwt_core::usage::ProviderConsumption>,
+    },
+    RuntimeHealth {
+        snapshot: RuntimeHealthSnapshotView,
     },
     TerminalOutput {
         id: String,
@@ -1442,6 +1539,16 @@ pub enum BackendEvent {
         query: String,
         request_id: u64,
         message: String,
+    },
+    /// SPEC-2359 US-80: result of a Start Work duplicate-work advisory query.
+    /// An empty `results` vector means "no strong match" — the advisory panel
+    /// stays quiet. This is advisory only and never blocks the launch.
+    WorkAdvisoryResult {
+        id: String,
+        query: String,
+        request_id: u64,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        results: Vec<IndexSearchResult>,
     },
     KnowledgeDetail {
         id: String,
@@ -1880,6 +1987,11 @@ pub const BACKEND_EVENT_POLICIES: &[BackendEventPolicy] = &[
         BackendEventBackpressurePolicy::LatestWins,
     ),
     BackendEventPolicy::new(
+        "runtime_health",
+        BackendEventDeliveryClass::IdempotentLatest,
+        BackendEventBackpressurePolicy::LatestWins,
+    ),
+    BackendEventPolicy::new(
         "terminal_output",
         BackendEventDeliveryClass::Streamed,
         BackendEventBackpressurePolicy::PreserveOrder,
@@ -2297,6 +2409,7 @@ impl BackendEvent {
             BackendEvent::ActiveWorkProjection { .. } => "active_work_projection",
             BackendEvent::WindowList { .. } => "window_list",
             BackendEvent::ProviderUsage { .. } => "provider_usage",
+            BackendEvent::RuntimeHealth { .. } => "runtime_health",
             BackendEvent::TerminalOutput { .. } => "terminal_output",
             BackendEvent::TerminalSnapshot { .. } => "terminal_snapshot",
             BackendEvent::TerminalStatus { .. } => "terminal_status",
@@ -2325,6 +2438,7 @@ impl BackendEvent {
             BackendEvent::KnowledgeSearchResults { .. } => "knowledge_search_results",
             BackendEvent::ProjectIndexSearchResults { .. } => "project_index_search_results",
             BackendEvent::ProjectIndexSearchError { .. } => "project_index_search_error",
+            BackendEvent::WorkAdvisoryResult { .. } => "work_advisory_result",
             BackendEvent::KnowledgeDetail { .. } => "knowledge_detail",
             BackendEvent::KnowledgeBridgePhaseUpdated { .. } => "knowledge_bridge_phase_updated",
             BackendEvent::BranchCleanupResult { .. } => "branch_cleanup_result",
@@ -2767,6 +2881,17 @@ mod tests {
             BackendEventBackpressurePolicy::LatestWins
         );
 
+        let runtime_health = backend_event_policy("runtime_health").expect("runtime_health policy");
+        assert_eq!(
+            runtime_health.delivery,
+            BackendEventDeliveryClass::IdempotentLatest
+        );
+        assert_eq!(
+            runtime_health.backpressure,
+            BackendEventBackpressurePolicy::LatestWins
+        );
+        assert!(runtime_health.coalesces_on_frontend());
+
         let terminal_snapshot =
             backend_event_policy("terminal_snapshot").expect("terminal_snapshot policy");
         assert_eq!(
@@ -2831,6 +2956,9 @@ mod tests {
                 status_category: "active".to_string(),
                 status_text: "Launching from Project Bar".to_string(),
                 summary: Some("Launching from Project Bar".to_string()),
+                progress_summary: Some(
+                    "Created the workspace and started launch validation.".to_string(),
+                ),
                 owner: Some("SPEC-2359".to_string()),
                 next_action: Some("Run launch tests".to_string()),
                 active_agents: 1,
@@ -2849,6 +2977,9 @@ mod tests {
                     status_category: Some("active".to_string()),
                     status_text: Some("Launching from Project Bar".to_string()),
                     summary: Some("Launching from Project Bar".to_string()),
+                    progress_summary: Some(
+                        "Created the workspace and started launch validation.".to_string(),
+                    ),
                     owner: Some("SPEC-2359".to_string()),
                     next_action: Some("Run launch tests".to_string()),
                     agent_session_id: Some("session-1".to_string()),
@@ -2863,6 +2994,7 @@ mod tests {
                     default_delete_remote: false,
                     remote_delete_available: true,
                 }),
+                managed_hook_health: None,
                 active_work_count: 1,
                 active_works: vec![super::ActiveWorkItemView {
                     id: "work-1".to_string(),
@@ -2870,6 +3002,9 @@ mod tests {
                     status_category: "active".to_string(),
                     status_text: "Launching from Project Bar".to_string(),
                     summary: Some("Launching from Project Bar".to_string()),
+                    progress_summary: Some(
+                        "Created the workspace and started launch validation.".to_string(),
+                    ),
                     work_summary: Some("Implement Start Work".to_string()),
                     owner: Some("SPEC-2359".to_string()),
                     next_action: Some("Run launch tests".to_string()),
@@ -3085,6 +3220,62 @@ mod tests {
                 ..
             }
         ));
+    }
+
+    #[test]
+    fn works_scope_serde_roundtrip() {
+        // SPEC-2359 US-80: the `works` semantic scope must round-trip as "works".
+        let scope: IndexSearchScope =
+            serde_json::from_value(serde_json::json!("works")).expect("deserialize works scope");
+        assert_eq!(scope, IndexSearchScope::Works);
+        assert_eq!(IndexSearchScope::Works.as_str(), "works");
+        assert_eq!(
+            serde_json::to_value(IndexSearchScope::Works).unwrap(),
+            serde_json::json!("works")
+        );
+    }
+
+    #[test]
+    fn request_work_advisory_deserializes_from_frontend() {
+        // SPEC-2359 US-80: the intake prompt sends a debounced advisory query.
+        let event: FrontendEvent = serde_json::from_value(serde_json::json!({
+            "kind": "request_work_advisory",
+            "id": "wizard-1",
+            "query": "fix login auth bug",
+            "request_id": 7
+        }))
+        .expect("deserialize request_work_advisory");
+        assert!(matches!(
+            event,
+            FrontendEvent::RequestWorkAdvisory { request_id: 7, .. }
+        ));
+    }
+
+    #[test]
+    fn work_advisory_result_omits_empty_results() {
+        // SPEC-2359 AS-2: "no strong match" => empty advisory, results omitted.
+        let event = BackendEvent::WorkAdvisoryResult {
+            id: "wizard-1".to_string(),
+            query: "novel work".to_string(),
+            request_id: 7,
+            results: Vec::new(),
+        };
+        let value = serde_json::to_value(&event).unwrap();
+        assert_eq!(value["kind"], "work_advisory_result");
+        assert!(value.get("results").is_none());
+    }
+
+    #[test]
+    fn work_search_target_serde_roundtrip() {
+        // SPEC-2359 US-80: advisory results locate a prior Work by work_id.
+        let target = IndexSearchTarget::Work {
+            work_id: "work-feature-auth-abc123".to_string(),
+        };
+        let value = serde_json::to_value(&target).unwrap();
+        assert_eq!(value["kind"], "work");
+        assert_eq!(value["work_id"], "work-feature-auth-abc123");
+        let parsed: IndexSearchTarget = serde_json::from_value(value).unwrap();
+        assert_eq!(parsed, target);
     }
 
     #[test]

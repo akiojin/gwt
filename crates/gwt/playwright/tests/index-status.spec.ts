@@ -154,6 +154,40 @@ test.describe("Project Index status surface", () => {
       .toContainText("develop");
   });
 
+  test("Index window Health tab and refresh button request full status refresh", async ({
+    page,
+  }) => {
+    await installEmbeddedRoutes(page);
+    await installIndexStatusBackend(page, {
+      state: "ready",
+      scopes: {
+        issues: {
+          healthy: true,
+          repair_required: false,
+          document_count: 12,
+          reason: "ready",
+        },
+      },
+    });
+
+    await page.goto(APP_URL);
+    const { root } = await openIndexHealthPanel(page);
+    const afterTabOpen = await readRefreshIndexStatusSends(page);
+    expect(afterTabOpen.length).toBeGreaterThanOrEqual(1);
+    expect(afterTabOpen.at(-1)).toMatchObject({
+      kind: "refresh_index_status",
+      project_root: "/fixture",
+    });
+
+    await root.locator("[data-action='refresh-index-status']").click();
+    const afterManualRefresh = await readRefreshIndexStatusSends(page);
+    expect(afterManualRefresh.length).toBeGreaterThan(afterTabOpen.length);
+    expect(afterManualRefresh.at(-1)).toMatchObject({
+      kind: "refresh_index_status",
+      project_root: "/fixture",
+    });
+  });
+
   test("Index window Health scope-row Rebuild all dispatches without worktree_hash", async ({ page }) => {
     await installEmbeddedRoutes(page);
     await installIndexStatusBackend(page, {
@@ -480,6 +514,22 @@ async function openIndexSearchPanel(page) {
   const panel = root.locator("[data-index-panel='search']");
   await expect(panel).toBeVisible({ timeout: 10_000 });
   return { root, panel };
+}
+
+async function readRefreshIndexStatusSends(page) {
+  return page.evaluate(() => {
+    const sends =
+      (window.__gwtFixtureWebSocket && window.__gwtFixtureWebSocket.recordedSends) || [];
+    return sends
+      .map((raw) => {
+        try {
+          return JSON.parse(raw);
+        } catch (e) {
+          return null;
+        }
+      })
+      .filter((message) => message && message.kind === "refresh_index_status");
+  });
 }
 
 async function installIndexStatusBackend(page, indexStatus) {

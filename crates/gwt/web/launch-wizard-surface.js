@@ -31,6 +31,7 @@ export function createLaunchWizardSurface({
   createNode,
   closeModal,
   sendWizardAction,
+  requestWorkAdvisory,
 }) {
       const wizardModal = document.getElementById("wizard-modal");
       const wizardDialog = wizardModal.querySelector(".modal-shell");
@@ -50,6 +51,20 @@ export function createLaunchWizardSurface({
       let wizardBranchDraft = "";
       let wizardBranchBackendValue = "";
       let launchWizardPendingAction = null;
+      // SPEC-2359 US-80 — Start Work duplicate-work advisory. The intake prompt
+      // is always skippable; these locals drive the debounced query and the
+      // non-blocking results panel. `wizardAdvisoryLatestRequestId` guards
+      // against stale responses arriving out of order.
+      let wizardPromptDraft = "";
+      let wizardPromptBackendValue = "";
+      let wizardAdvisoryResults = [];
+      let wizardAdvisoryRequestSeq = 0;
+      let wizardAdvisoryLatestRequestId = 0;
+      let wizardAdvisoryTimer = 0;
+      // The semantic search behind the advisory cold-loads the embedding model
+      // (~several seconds), so show an in-flight indicator instead of an empty
+      // panel while a non-empty prompt is being searched.
+      let wizardAdvisoryLoading = false;
       // Issue #2698 PR 1 (B7) — defer destructive wizard re-renders
       // while the user has a native <select> dropdown open. The OS
       // dropdown overlay is anchored to the original DOM node; if
@@ -328,6 +343,130 @@ export function createLaunchWizardSurface({
           kind: "set_branch_name",
           value: wizardBranchDraft,
         });
+      }
+
+      // SPEC-2359 US-80 — is this a Start Work launch (where the work branch is
+      // auto-created)? Start Work hides the branch controls; that is the signal
+      // for showing the optional intake prompt + duplicate-work advisory.
+      function isStartWorkLaunch() {
+        return Boolean(launchWizard) && launchWizard.show_branch_controls === false;
+      }
+
+      function flushWizardPromptDraft() {
+        if (!launchWizard || wizardPromptDraft === wizardPromptBackendValue) {
+          return;
+        }
+        wizardPromptBackendValue = wizardPromptDraft;
+        sendWizardAction({
+          kind: "set_initial_prompt",
+          value: wizardPromptDraft,
+        });
+      }
+
+      function scheduleWorkAdvisory() {
+        if (typeof requestWorkAdvisory !== "function") {
+          return;
+        }
+        if (wizardAdvisoryTimer) {
+          clearTimeout(wizardAdvisoryTimer);
+          wizardAdvisoryTimer = 0;
+        }
+        const query = wizardPromptDraft.trim();
+        if (!query) {
+          // Empty prompt → quiet advisory (skippable, no noise). Advance the
+          // request id so any response still in flight for previously typed
+          // text is treated as stale and cannot repopulate the cleared panel.
+          wizardAdvisoryRequestSeq += 1;
+          wizardAdvisoryLatestRequestId = wizardAdvisoryRequestSeq;
+          wizardAdvisoryLoading = false;
+          wizardAdvisoryResults = [];
+          renderWorkAdvisoryPanel();
+          return;
+        }
+        // Show the in-flight indicator immediately so the multi-second model
+        // load never looks like a frozen/unresponsive panel.
+        wizardAdvisoryLoading = true;
+        renderWorkAdvisoryPanel();
+        wizardAdvisoryTimer = setTimeout(() => {
+          wizardAdvisoryTimer = 0;
+          wizardAdvisoryRequestSeq += 1;
+          wizardAdvisoryLatestRequestId = wizardAdvisoryRequestSeq;
+          requestWorkAdvisory({
+            id: "launch-wizard",
+            query,
+            request_id: wizardAdvisoryRequestSeq,
+          });
+        }, 280);
+      }
+
+      // SPEC-2359 US-80 — apply a duplicate-work advisory result. Ignore stale
+      // responses (older than the latest in-flight request); empty results keep
+      // the panel quiet.
+      function applyWorkAdvisoryResultEvent(event) {
+        if (!event || typeof event !== "object") {
+          return;
+        }
+        if (
+          typeof event.request_id === "number"
+          && event.request_id < wizardAdvisoryLatestRequestId
+        ) {
+          return;
+        }
+        wizardAdvisoryLoading = false;
+        wizardAdvisoryResults = Array.isArray(event.results) ? event.results : [];
+        renderWorkAdvisoryPanel();
+      }
+
+      function renderWorkAdvisoryPanel() {
+        const panel = document.getElementById("wizard-work-advisory");
+        if (!panel) {
+          return;
+        }
+        panel.innerHTML = "";
+        if (wizardAdvisoryLoading) {
+          // In-flight: keep the panel visible with an animated indicator so the
+          // multi-second semantic search never reads as an unresponsive UI.
+          // Reuses the project index search loading-dots animation.
+          panel.hidden = false;
+          const loading = createNode("div", "launch-advisory-loading");
+          const dots = createNode("span", "index-search-loading-dots");
+          for (let i = 0; i < 3; i += 1) {
+            dots.appendChild(createNode("span", "index-search-loading-dot"));
+          }
+          loading.appendChild(dots);
+          loading.appendChild(
+            createNode("span", "launch-advisory-loading-text", "Searching related work…"),
+          );
+          panel.appendChild(loading);
+          return;
+        }
+        if (!wizardAdvisoryResults.length) {
+          panel.hidden = true;
+          return;
+        }
+        panel.hidden = false;
+        panel.appendChild(
+          createNode(
+            "div",
+            "launch-advisory-title",
+            "Related prior work — review before starting",
+          ),
+        );
+        for (const result of wizardAdvisoryResults.slice(0, 5)) {
+          const row = createNode("div", "launch-advisory-item");
+          row.appendChild(
+            createNode("span", "launch-advisory-scope", result.scope || "work"),
+          );
+          row.appendChild(
+            createNode("span", "launch-advisory-item-title", result.title || ""),
+          );
+          if (result.subtitle) {
+            row.appendChild(
+              createNode("span", "launch-advisory-item-sub", result.subtitle),
+            );
+          }
+          panel.appendChild(row);
+        }
       }
 
       function renderWizardSummary() {
@@ -725,6 +864,37 @@ export function createLaunchWizardSurface({
               "Creating agent window...",
             ),
           );
+        }
+
+        // SPEC-2359 US-80 — optional, always-skippable Start Work intake
+        // prompt. Typing it surfaces similar prior work (non-blocking advisory)
+        // before a duplicate work branch is created. Only shown for Start Work.
+        if (isStartWorkLaunch()) {
+          const section = createLaunchSection(
+            "What are you working on?",
+            "Optional — describe the work to surface similar prior work before you start. You can skip this.",
+          );
+          const textarea = createNode("textarea", "launch-intake-input");
+          textarea.placeholder = "e.g. fix the login auth bug";
+          textarea.rows = 2;
+          textarea.value = wizardPromptDraft;
+          textarea.addEventListener("input", () => {
+            wizardPromptDraft = textarea.value;
+            scheduleWorkAdvisory();
+          });
+          // Persist the prompt to wizard state on blur only (not per keystroke)
+          // so typing never triggers a disruptive full wizard re-render.
+          textarea.addEventListener("blur", () => {
+            flushWizardPromptDraft();
+          });
+          section.appendChild(textarea);
+          const advisory = createNode("div", "launch-advisory");
+          advisory.id = "wizard-work-advisory";
+          advisory.hidden = wizardAdvisoryResults.length === 0;
+          section.appendChild(advisory);
+          panel.appendChild(section);
+          // Repaint any results already received into the fresh panel node.
+          renderWorkAdvisoryPanel();
         }
 
         // SPEC-2014 FR-127 — Confirm step: a read-only review of the
@@ -1361,6 +1531,7 @@ export function createLaunchWizardSurface({
         openLaunchAgentPendingWizard,
         applyLaunchWizardStateEvent,
         applyLaunchWizardOpenErrorEvent,
+        applyWorkAdvisoryResultEvent,
         handleWizardEscapeKeydown,
         installWizardChrome,
       };

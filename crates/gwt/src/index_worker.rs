@@ -94,6 +94,7 @@ pub enum IndexRebuildScope {
     Memory,
     Discussions,
     Board,
+    Works,
     Files,
     #[serde(rename = "files-docs")]
     FilesDocs,
@@ -107,6 +108,7 @@ impl IndexRebuildScope {
             Self::Memory => "memory",
             Self::Discussions => "discussions",
             Self::Board => "board",
+            Self::Works => "works",
             Self::Files => "files",
             Self::FilesDocs => "files-docs",
         }
@@ -989,6 +991,12 @@ pub fn default_rebuild_runner(
         IndexRebuildScope::Board => RebuildAction {
             label: "board",
             action: "index-board",
+            scope: None,
+            needs_worktree_hash: false,
+        },
+        IndexRebuildScope::Works => RebuildAction {
+            label: "works",
+            action: "index-works",
             scope: None,
             needs_worktree_hash: false,
         },

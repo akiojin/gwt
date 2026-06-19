@@ -55,6 +55,7 @@ pub use persistence::{
     resolve_workspace_id_for_mention, resolve_workspace_id_for_session, retroactive_auto_done_scan,
     retroactive_auto_done_scan_paths, save_workspace_projection, save_workspace_projection_to_path,
     save_workspace_work_items_projection_to_path, update_workspace_projection_with_journal,
+    update_workspace_projection_with_journal_for_work_event_root,
     update_workspace_projection_with_journal_paths,
     update_workspace_projection_with_journal_paths_at, workspace_projection_stale_reason,
     workspace_work_event_from_board_entry, worktree_sources_needing_backfill, ClassifiedProjection,

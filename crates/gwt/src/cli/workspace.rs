@@ -5,10 +5,11 @@ use gwt_core::paths::gwt_projects_dir;
 use gwt_core::workspace_projection::{
     apply_prune_plan, classify_workspace_projections, load_or_default_workspace_projection,
     load_or_synthesize_workspace_work_items, record_workspace_work_event,
-    save_workspace_projection, update_workspace_projection_with_journal, ClassifiedProjection,
-    PruneAction, PruneSkipReason, WorkEvent, WorkEventKind, WorkItem, WorkspaceAgentSummary,
-    WorkspaceExecutionContainerRef, WorkspaceProjection, WorkspaceProjectionUpdate,
-    WorkspaceRetentionConfig, WorkspaceStartUpdate, WorkspaceStatusCategory,
+    save_workspace_projection, update_workspace_projection_with_journal_for_work_event_root,
+    ClassifiedProjection, PruneAction, PruneSkipReason, WorkEvent, WorkEventKind, WorkItem,
+    WorkspaceAgentSummary, WorkspaceExecutionContainerRef, WorkspaceProjection,
+    WorkspaceProjectionUpdate, WorkspaceRetentionConfig, WorkspaceStartUpdate,
+    WorkspaceStatusCategory,
 };
 use gwt_github::{ApiError, SpecOpsError};
 
@@ -77,6 +78,7 @@ fn parse_update(args: &[String]) -> Result<WorkspaceCommand, CliParseError> {
     let mut status = None;
     let mut status_text = None;
     let mut summary = None;
+    let mut progress_summary = None;
     let mut next_action = None;
     let mut owner = None;
     let mut agent_session = None;
@@ -90,6 +92,7 @@ fn parse_update(args: &[String]) -> Result<WorkspaceCommand, CliParseError> {
             "--status" => status = Some(value),
             "--status-text" => status_text = Some(value),
             "--summary" => summary = Some(value),
+            "--progress-summary" => progress_summary = Some(value),
             "--next-action" => next_action = Some(value),
             "--owner" => owner = Some(value),
             "--agent-session" => agent_session = Some(value),
@@ -110,6 +113,7 @@ fn parse_update(args: &[String]) -> Result<WorkspaceCommand, CliParseError> {
         status,
         status_text,
         summary,
+        progress_summary,
         next_action,
         owner,
         agent_session,
@@ -321,6 +325,7 @@ pub(super) fn run<E: CliEnv>(
             status,
             status_text,
             summary,
+            progress_summary,
             next_action,
             owner,
             agent_session,
@@ -331,6 +336,15 @@ pub(super) fn run<E: CliEnv>(
                 .as_deref()
                 .map(|session_id| {
                     crate::agent_project_state::project_state_root_for_agent_session_or_fallback(
+                        env.repo_path(),
+                        session_id,
+                    )
+                })
+                .unwrap_or_else(|| env.repo_path().to_path_buf());
+            let work_event_root = agent_session
+                .as_deref()
+                .map(|session_id| {
+                    crate::agent_project_state::work_event_root_for_agent_session_or_fallback(
                         env.repo_path(),
                         session_id,
                     )
@@ -355,12 +369,17 @@ pub(super) fn run<E: CliEnv>(
                 owner,
                 next_action,
                 summary,
+                progress_summary,
                 agent_session_id: agent_session,
                 agent_current_focus: current_focus,
                 agent_title_summary: title_summary,
             };
-            let entry = update_workspace_projection_with_journal(&project_state_root, update)
-                .map_err(|error| string_error(error.to_string()))?;
+            let entry = update_workspace_projection_with_journal_for_work_event_root(
+                &project_state_root,
+                &work_event_root,
+                update,
+            )
+            .map_err(|error| string_error(error.to_string()))?;
             publish_workspace_change(&project_state_root);
             out.push_str(&format!("workspace updated: {}\n", entry.id));
             Ok(0)
@@ -1234,6 +1253,7 @@ mod tests {
                 status: Some("active".to_string()),
                 status_text: None,
                 summary: Some("Workspace state is current".to_string()),
+                progress_summary: None,
                 next_action: None,
                 owner: None,
                 agent_session: None,
@@ -1263,6 +1283,7 @@ mod tests {
                 status: None,
                 status_text: None,
                 summary: None,
+                progress_summary: None,
                 next_action: None,
                 owner: None,
                 agent_session: Some("session-1".to_string()),
@@ -1426,6 +1447,7 @@ mod tests {
                 status: Some("blocked".to_string()),
                 status_text: Some("Waiting on Board alignment".to_string()),
                 summary: Some("Align Workspace ownership before edits".to_string()),
+                progress_summary: None,
                 next_action: Some("Post Board request".to_string()),
                 owner: Some("SPEC-2359".to_string()),
                 agent_session: None,
@@ -1444,6 +1466,53 @@ mod tests {
         assert_eq!(saved.title, "Work coordination");
         assert_eq!(saved.status_category, WorkspaceStatusCategory::Blocked);
         assert_eq!(saved.owner.as_deref(), Some("SPEC-2359"));
+    }
+
+    #[test]
+    fn workspace_update_json_envelope_persists_progress_summary() {
+        let _guard = env_guard();
+        let gwt_home = tempfile::tempdir().expect("gwt home");
+        let _home = ScopedHome::set(gwt_home.path());
+        let _session =
+            crate::cli::test_support::ScopedEnvVar::unset(gwt_agent::session::GWT_SESSION_ID_ENV);
+        let temp = tempfile::tempdir().expect("tempdir");
+        let repo = temp.path().join("repo");
+        std::fs::create_dir_all(&repo).expect("repo");
+        let mut env = TestEnv::new(repo.clone());
+        env.stdin = serde_json::json!({
+            "schema_version": 1,
+            "operation": "workspace.update",
+            "params": {
+                "agent_session": "session-progress",
+                "purpose": "Workspace detail progress summary",
+                "current_focus": "Adding progress summary persistence",
+                "summary": "Latest update should stay separate.",
+                "progress_summary": "Implemented resume normalization and identified the split WorkEvent root. Now adding a cumulative progress summary field."
+            }
+        })
+        .to_string();
+
+        let code = crate::cli::env::dispatch(&mut env, &["gwtd".to_string()]);
+
+        assert_eq!(
+            code,
+            0,
+            "workspace.update JSON envelope failed: {}",
+            String::from_utf8_lossy(&env.stderr)
+        );
+        let raw = std::fs::read_to_string(
+            gwt_core::paths::gwt_workspace_projection_path_for_repo_path(&repo),
+        )
+        .expect("workspace current json");
+        let current: serde_json::Value = serde_json::from_str(&raw).expect("current json");
+        assert_eq!(
+            current["progress_summary"],
+            "Implemented resume normalization and identified the split WorkEvent root. Now adding a cumulative progress summary field."
+        );
+        assert_eq!(
+            current["summary"], "Latest update should stay separate.",
+            "progress summary must not replace latest-update summary"
+        );
     }
 
     #[test]
@@ -1474,6 +1543,7 @@ mod tests {
                 status: None,
                 status_text: None,
                 summary: None,
+                progress_summary: None,
                 next_action: None,
                 owner: None,
                 agent_session: Some("session-1".to_string()),
@@ -1506,6 +1576,14 @@ mod tests {
                 .expect("load worktree projection")
                 .is_none(),
             "agent workspace update must not create a split Project State under the worktree root"
+        );
+        assert!(
+            gwt_core::paths::gwt_repo_local_work_events_path(&worktree).is_file(),
+            "agent workspace update must record the Work event in the session worktree"
+        );
+        assert!(
+            !gwt_core::paths::gwt_repo_local_work_events_path(&project_root).exists(),
+            "agent workspace update must not write the repo-local Work event to the Project State root"
         );
     }
 
@@ -1545,6 +1623,7 @@ mod tests {
                 status: None,
                 status_text: None,
                 summary: None,
+                progress_summary: None,
                 next_action: None,
                 owner: None,
                 agent_session: Some("session-1".to_string()),

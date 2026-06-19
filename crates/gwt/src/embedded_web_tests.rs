@@ -1266,10 +1266,11 @@ fn embedded_web_project_bar_omits_index_status_badge() {
             "SPEC-1939 Phase 15: Settings must drop Index while the Index window keeps the health panel",
         );
     assert!(
-        html.contains(".project-tab-dot")
-            && project_tabs_js.contains("projectTabAgentDotState(tab")
+        html.contains(".project-tab-state-cue")
+            && project_tabs_js.contains("projectTabAgentCueState")
+            && project_tabs_js.contains("projectTabStateForRuntimeState")
             && !project_tabs_js.contains("aggregateProjectTabDotState"),
-        "SPEC-2013 Phase 6: project tab dot must reflect running agent state, not Index health",
+        "SPEC-2013 Phase 6: project tab state cue must reflect agent runtime state, not Index health",
     );
 }
 

@@ -112,6 +112,8 @@ pub struct WorkEvent {
     #[serde(default)]
     pub summary: Option<String>,
     #[serde(default)]
+    pub progress_summary: Option<String>,
+    #[serde(default)]
     pub status_category: Option<WorkspaceStatusCategory>,
     #[serde(default)]
     pub owner: Option<String>,
@@ -145,6 +147,7 @@ impl WorkEvent {
             title: None,
             intent: None,
             summary: None,
+            progress_summary: None,
             status_category: None,
             owner: None,
             next_action: None,
@@ -170,6 +173,8 @@ pub struct WorkItem {
     pub intent: Option<String>,
     #[serde(default)]
     pub summary: Option<String>,
+    #[serde(default)]
+    pub progress_summary: Option<String>,
     pub status_category: WorkspaceStatusCategory,
     #[serde(default)]
     pub owner: Option<String>,
@@ -255,6 +260,7 @@ impl WorkItemsProjection {
                     .unwrap_or_else(|| event.work_item_id.clone()),
                 intent: event.intent.clone(),
                 summary: event.summary.clone(),
+                progress_summary: event.progress_summary.clone(),
                 status_category: workspace_work_event_status(&event),
                 owner: event.owner.clone(),
                 created_at: event.updated_at,
@@ -288,6 +294,7 @@ impl WorkItemsProjection {
                 }
             }
             item.events.push(event);
+            refresh_work_item_progress_summary(item);
             return;
         }
         if let Some(title) = non_empty_clone(event.title.as_deref()) {
@@ -298,6 +305,9 @@ impl WorkItemsProjection {
         }
         if let Some(summary) = non_empty_clone(event.summary.as_deref()) {
             item.summary = Some(summary);
+        }
+        if let Some(progress_summary) = non_empty_clone(event.progress_summary.as_deref()) {
+            item.progress_summary = Some(progress_summary);
         }
         if let Some(owner) = non_empty_clone(event.owner.as_deref()) {
             item.owner = Some(owner);
@@ -369,11 +379,18 @@ impl WorkItemsProjection {
         let event_updated_at = event.updated_at;
         item.events.push(event);
         item.events.sort_by_key(|event| event.updated_at);
+        refresh_work_item_progress_summary(item);
         if event_updated_at > self.updated_at {
             self.updated_at = event_updated_at;
         }
         self.work_items
             .sort_by_key(|item| std::cmp::Reverse(item.updated_at));
+    }
+
+    pub fn refresh_derived_progress_summaries(&mut self) {
+        for item in &mut self.work_items {
+            backfill_work_item_progress_summary(item);
+        }
     }
 }
 
@@ -416,6 +433,104 @@ fn push_unique(values: &mut Vec<String>, value: String) {
     if !values.iter().any(|existing| existing == &value) {
         values.push(value);
     }
+}
+
+const DERIVED_PROGRESS_SUMMARY_MAX_ITEMS: usize = 6;
+const DERIVED_PROGRESS_SUMMARY_EVENT_CHAR_LIMIT: usize = 600;
+
+fn refresh_work_item_progress_summary(item: &mut WorkItem) {
+    item.progress_summary = latest_event_progress_summary(item)
+        .or_else(|| synthesize_progress_summary_from_events(&item.events, &item.title));
+}
+
+fn backfill_work_item_progress_summary(item: &mut WorkItem) {
+    item.progress_summary = latest_event_progress_summary(item)
+        .or_else(|| non_empty_clone(item.progress_summary.as_deref()))
+        .or_else(|| synthesize_progress_summary_from_events(&item.events, &item.title));
+}
+
+fn latest_event_progress_summary(item: &WorkItem) -> Option<String> {
+    item.events
+        .iter()
+        .rev()
+        .find_map(|event| non_empty_clone(event.progress_summary.as_deref()))
+}
+
+fn synthesize_progress_summary_from_events(
+    events: &[WorkEvent],
+    item_title: &str,
+) -> Option<String> {
+    let mut candidates = Vec::new();
+    for event in events {
+        let Some(candidate) = legacy_progress_summary_candidate(event, item_title) else {
+            continue;
+        };
+        if candidates.last() != Some(&candidate) {
+            candidates.push(candidate);
+        }
+    }
+    if candidates.is_empty() {
+        return None;
+    }
+
+    let omitted = candidates
+        .len()
+        .saturating_sub(DERIVED_PROGRESS_SUMMARY_MAX_ITEMS);
+    let selected = candidates
+        .iter()
+        .skip(omitted)
+        .map(|value| format!("- {value}"));
+    let mut lines = Vec::new();
+    if omitted > 0 {
+        lines.push(format!("- ... {omitted} earlier updates omitted"));
+    }
+    lines.extend(selected);
+    Some(lines.join("\n"))
+}
+
+fn legacy_progress_summary_candidate(event: &WorkEvent, item_title: &str) -> Option<String> {
+    for value in [
+        event.summary.as_deref(),
+        event.intent.as_deref(),
+        event.next_action.as_deref(),
+        event.title.as_deref(),
+    ]
+    .into_iter()
+    .flatten()
+    {
+        let Some(normalized) = normalize_legacy_progress_summary_text(value) else {
+            continue;
+        };
+        if normalized == item_title {
+            continue;
+        }
+        return Some(normalized);
+    }
+    None
+}
+
+fn normalize_legacy_progress_summary_text(value: &str) -> Option<String> {
+    let collapsed = value.split_whitespace().collect::<Vec<_>>().join(" ");
+    let collapsed = collapsed.trim();
+    if collapsed.is_empty() {
+        return None;
+    }
+    Some(truncate_chars(
+        collapsed,
+        DERIVED_PROGRESS_SUMMARY_EVENT_CHAR_LIMIT,
+    ))
+}
+
+fn truncate_chars(value: &str, limit: usize) -> String {
+    let mut output = String::new();
+    for (index, ch) in value.chars().enumerate() {
+        if index == limit {
+            output.push_str("...");
+            return output;
+        }
+        output.push(ch);
+    }
+    output
 }
 
 pub(super) fn non_empty_clone(value: Option<&str>) -> Option<String> {
@@ -513,6 +628,52 @@ mod tests {
 
         let event_lines = std::fs::read_to_string(&events_path).expect("event log");
         assert_eq!(event_lines.lines().count(), 2);
+    }
+
+    #[test]
+    fn apply_event_synthesizes_progress_summary_from_legacy_events() {
+        let work_item_id = "test-item-legacy-progress";
+        let t1 = Utc.with_ymd_and_hms(2026, 6, 16, 10, 0, 0).unwrap();
+        let t2 = Utc.with_ymd_and_hms(2026, 6, 16, 11, 0, 0).unwrap();
+        let t3 = Utc.with_ymd_and_hms(2026, 6, 16, 12, 0, 0).unwrap();
+
+        let mut projection = WorkItemsProjection::empty(t1);
+
+        let mut start = WorkEvent::new(WorkEventKind::Start, work_item_id, t1);
+        start.title = Some("Project Tabs UX".to_string());
+        start.intent = Some("Compare browser-tab and built-in tab switching UX.".to_string());
+        projection.apply_event(start);
+
+        let mut implemented = WorkEvent::new(WorkEventKind::Update, work_item_id, t2);
+        implemented.intent = Some(
+            "Implemented project switcher, always-confirm close, and quiet Agent completion notifications."
+                .to_string(),
+        );
+        projection.apply_event(implemented);
+
+        let mut verified = WorkEvent::new(WorkEventKind::Update, work_item_id, t3);
+        verified.summary =
+            Some("User confirmed the Project Tabs UX. Committed and pushed 275930e5a.".to_string());
+        projection.apply_event(verified);
+
+        let item = projection
+            .work_items
+            .iter()
+            .find(|it| it.id == work_item_id)
+            .expect("work item");
+        let progress = item
+            .progress_summary
+            .as_deref()
+            .expect("legacy events should synthesize progress_summary");
+        assert!(progress.contains("Compare browser-tab"), "{progress}");
+        assert!(
+            progress.contains("Implemented project switcher"),
+            "{progress}"
+        );
+        assert!(
+            progress.contains("User confirmed the Project Tabs UX"),
+            "{progress}"
+        );
     }
 
     #[test]

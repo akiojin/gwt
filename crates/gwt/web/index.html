@@ -308,6 +308,21 @@
             <span class="op-status-strip__label">WORK</span>
             <span class="op-status-strip__value" id="op-strip-branches" aria-label="Work">—</span>
           </div>
+          <div
+            class="op-status-strip__cell op-status-strip__cell--runtime-health"
+            id="op-strip-runtime-health"
+            tabindex="0"
+            data-state="warming"
+            aria-label="Runtime performance"
+            title="Runtime performance warming"
+          >
+            <span class="op-status-strip__label">PERF</span>
+            <span
+              class="op-status-strip__value"
+              id="op-strip-runtime-health-value"
+              aria-label="Runtime performance"
+            >CPU -- MEM --</span>
+          </div>
           <!-- SPEC-2356 operator chrome cleanup: canvas Zoom (− / 100% / +)
                moves from the right-bottom floating toolbar into the Status Strip
                so it is always visible. IDs are unchanged so app.js handlers stay

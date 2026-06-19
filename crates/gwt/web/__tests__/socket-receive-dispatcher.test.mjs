@@ -72,6 +72,7 @@ test("default coalescing policy mirrors backend latest-wins event policy", () =>
     "workspace_state",
     "active_work_projection",
     "window_list",
+    "runtime_health",
     "project_index_status",
     "launch_wizard_state",
     "update_state",
@@ -94,6 +95,20 @@ test("default coalescing policy mirrors backend latest-wins event policy", () =>
       `${kind} must preserve delivery semantics`,
     );
   }
+});
+
+test("runtime_health collapses to the latest snapshot", () => {
+  const queue = [
+    { kind: "runtime_health", snapshot: { cpu_percent: 10 } },
+    { kind: "terminal_output", id: "shell", data: "echo" },
+    { kind: "runtime_health", snapshot: { cpu_percent: 42 } },
+  ];
+
+  const coalesced = coalesceEvents(queue, DEFAULT_COALESCE_KINDS);
+  assert.deepEqual(coalesced, [
+    { kind: "terminal_output", id: "shell", data: "echo" },
+    { kind: "runtime_health", snapshot: { cpu_percent: 42 } },
+  ]);
 });
 
 test("launch_wizard_state null tombstone wins during coalescing", () => {

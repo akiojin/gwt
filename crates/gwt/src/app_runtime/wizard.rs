@@ -763,11 +763,19 @@ impl AppRuntime {
             builder = builder
                 .session_mode(gwt_agent::SessionMode::Resume)
                 .resume_session_id(resume_id);
+        } else if agent_session_id
+            .as_deref()
+            .is_some_and(|id| !id.trim().is_empty())
+        {
+            return reply_error(
+                "The requested Session id is not resumable; use the Work Resume picker or start a new Work.".to_string(),
+            );
+        } else if session.agent_id.supports_resume_picker() {
+            builder = builder.session_mode(gwt_agent::SessionMode::Resume);
         } else {
-            // Resume picker selected an entry without an agent-side
-            // session id (e.g. Session toml exists but no `--resume`
-            // handle was captured). Fall back to fresh start so the user
-            // still gets a working agent in the Workspace.
+            // Legacy metadata-only rows for agents without a native resume
+            // picker remain a fresh start fallback. Claude Code / Codex use
+            // their provider-native picker instead of silently losing Resume.
             builder = builder.session_mode(gwt_agent::SessionMode::Normal);
         }
 
@@ -1007,19 +1015,48 @@ impl AppRuntime {
 
         let sessions_dir = self.sessions_dir.clone();
 
-        let work_item_session_ids: Option<std::collections::HashSet<String>> = workspace_id
-            .and_then(|wid| {
-                gwt_core::workspace_projection::load_workspace_work_items(&project_root)
-                    .ok()
-                    .flatten()
-                    .and_then(|items| {
-                        items
-                            .work_items
-                            .into_iter()
-                            .find(|item| item.id == wid)
-                            .map(|item| item.agents.into_iter().map(|a| a.session_id).collect())
-                    })
+        let workspace_work_item = workspace_id.and_then(|wid| {
+            gwt_core::workspace_projection::load_workspace_work_items(&project_root)
+                .ok()
+                .flatten()
+                .and_then(|items| items.work_items.into_iter().find(|item| item.id == wid))
+        });
+        let work_item_session_ids: Option<std::collections::HashSet<String>> =
+            workspace_work_item.as_ref().map(|item| {
+                item.agents
+                    .iter()
+                    .map(|agent| agent.session_id.clone())
+                    .collect()
             });
+        let work_item_branch = workspace_work_item.as_ref().and_then(|item| {
+            item.execution_containers
+                .iter()
+                .filter_map(|container| container.branch.as_deref())
+                .map(str::trim)
+                .find(|branch| !branch.is_empty())
+                .map(str::to_string)
+        });
+
+        let resume_kind_for_session = |session: &gwt_agent::Session| {
+            if session.exact_resume_session_id().is_some() {
+                gwt::ResumableAgentResumeKind::Session
+            } else if session.agent_id.supports_resume_picker() {
+                gwt::ResumableAgentResumeKind::NativePicker
+            } else {
+                gwt::ResumableAgentResumeKind::MetadataOnly
+            }
+        };
+        let lifecycle_status_for_session = |session: &gwt_agent::Session| {
+            if session.should_mark_interrupted_from_lifecycle()
+                || session.status == gwt_agent::AgentStatus::Interrupted
+            {
+                Some(gwt::ResumableAgentLifecycleStatus::Interrupted)
+            } else if session.exact_auto_resume_candidate() {
+                Some(gwt::ResumableAgentLifecycleStatus::Active)
+            } else {
+                None
+            }
+        };
 
         let mut entries: Vec<gwt::ResumableAgentView> = projection
             .agents
@@ -1043,22 +1080,10 @@ impl AppRuntime {
                             if !session_exact_resume_materializable(&project_root, &session) {
                                 return None;
                             }
-                            let resume_kind = if session.exact_resume_session_id().is_some() {
-                                gwt::ResumableAgentResumeKind::Session
-                            } else {
-                                gwt::ResumableAgentResumeKind::MetadataOnly
-                            };
-                            let lifecycle_status = if session
-                                .should_mark_interrupted_from_lifecycle()
-                                || session.status == gwt_agent::AgentStatus::Interrupted
-                            {
-                                Some(gwt::ResumableAgentLifecycleStatus::Interrupted)
-                            } else if session.exact_auto_resume_candidate() {
-                                Some(gwt::ResumableAgentLifecycleStatus::Active)
-                            } else {
-                                None
-                            };
-                            (resume_kind, lifecycle_status)
+                            (
+                                resume_kind_for_session(&session),
+                                lifecycle_status_for_session(&session),
+                            )
                         }
                         Err(_) => return None,
                     }
@@ -1078,6 +1103,51 @@ impl AppRuntime {
                 })
             })
             .collect();
+
+        if let Some(branch) = work_item_branch.as_deref() {
+            let agent_sessions = self
+                .session_ledger_cache
+                .borrow_mut()
+                .load(&self.sessions_dir);
+            let project_repo_hash = gwt_core::repo_hash::detect_repo_hash(&project_root);
+            let registry = crate::workspace_session_registry::branch_session_registry(
+                &agent_sessions,
+                project_repo_hash.as_ref().map(|hash| hash.as_str()),
+            );
+            let existing_session_ids: Vec<&str> = entries
+                .iter()
+                .map(|entry| entry.session_id.as_str())
+                .collect();
+            let (branch_sessions, _) =
+                crate::workspace_session_registry::registry_sessions_for_branch(
+                    &registry,
+                    Some(branch),
+                    &existing_session_ids,
+                    crate::workspace_session_registry::REGISTRY_SESSION_CAP,
+                );
+            for session in branch_sessions {
+                if !session_exact_resume_materializable(&project_root, session) {
+                    continue;
+                }
+                if entries.iter().any(|entry| entry.session_id == session.id) {
+                    continue;
+                }
+                entries.push(gwt::ResumableAgentView {
+                    session_id: session.id.clone(),
+                    agent_id: session.agent_id.command().to_string(),
+                    display_name: session.display_name.clone(),
+                    branch: (!session.branch.trim().is_empty()).then(|| session.branch.clone()),
+                    worktree_path: Some(session.worktree_path.display().to_string()),
+                    last_activity_at: Some(
+                        session
+                            .last_activity_at
+                            .to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
+                    ),
+                    resume_kind: resume_kind_for_session(session),
+                    lifecycle_status: lifecycle_status_for_session(session),
+                });
+            }
+        }
 
         entries.sort_by(|left, right| right.last_activity_at.cmp(&left.last_activity_at));
         entries

@@ -390,9 +390,10 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let sessions_dir = dir.path().join(".gwt").join("sessions");
         let worktree = dir.path().join("wt-feature");
-        std::fs::create_dir_all(worktree.join(".gwt")).unwrap();
+        let discussion_path = gwt_core::paths::gwt_repo_local_discussions_path(&worktree);
+        std::fs::create_dir_all(discussion_path.parent().unwrap()).unwrap();
         std::fs::write(
-            worktree.join(".gwt/discussion.md"),
+            discussion_path,
             r#"## Discussion TODO
 
 ### Proposal A - Hook-driven resume [active]
