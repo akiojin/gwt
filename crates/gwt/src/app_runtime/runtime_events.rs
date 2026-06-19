@@ -130,6 +130,11 @@ impl AppRuntime {
             self.push_workspace_and_active_work_projection_broadcasts(&mut events);
             return events;
         }
+        if keep_active_agent_session_for_recovery {
+            self.recoverable_agent_error_windows.insert(id.clone());
+        } else if status != WindowProcessStatus::Error {
+            self.recoverable_agent_error_windows.remove(&id);
+        }
         if matches!(
             status,
             WindowProcessStatus::Error | WindowProcessStatus::Stopped
@@ -245,10 +250,11 @@ impl AppRuntime {
             && self
                 .window_preset(window_id)
                 .is_some_and(gwt::window_state::uses_agent_hook_state)
-            && self
+            && (self
                 .window_hook_states
                 .get(window_id)
                 .is_some_and(|state| gwt::window_state::is_live_agent_hook_state(*state))
+                || self.recoverable_agent_error_windows.contains(window_id))
     }
 
     fn should_broadcast_runtime_hook_event_to_frontend(event: &gwt::RuntimeHookEvent) -> bool {

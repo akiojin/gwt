@@ -1,5 +1,5 @@
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     ffi::OsString,
     fs,
     io::Write,
@@ -1862,6 +1862,7 @@ fn sample_runtime_with_events(
         local_worktree_branches: std::cell::RefCell::new(HashMap::new()),
         window_pty_statuses: HashMap::new(),
         window_hook_states: HashMap::new(),
+        recoverable_agent_error_windows: HashSet::new(),
         hook_forward_target: None,
         issue_link_cache_dir: gwt_cache_dir(),
         pending_update: None,
@@ -6294,6 +6295,55 @@ fn app_runtime_runtime_status_error_without_live_hook_stops_active_agent() {
 
     assert!(!runtime.active_agent_sessions.contains_key(&window_id));
     assert!(error_events.iter().any(|event| matches!(
+        event.event,
+        BackendEvent::WindowState {
+            state: WindowProcessStatus::Error,
+            ..
+        }
+    )));
+}
+
+#[test]
+fn app_runtime_duplicate_pty_error_after_live_hook_keeps_active_agent_for_recovery() {
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedEnvVar::set("HOME", temp.path());
+    let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+    let tab = sample_project_tab_with_window(
+        "tab-1",
+        "codex-1",
+        WindowPreset::Codex,
+        WindowProcessStatus::Running,
+    );
+    let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+    let window_id = combined_window_id("tab-1", "codex-1");
+    runtime.active_agent_sessions.insert(
+        window_id.clone(),
+        sample_active_agent_session("tab-1", &window_id),
+    );
+    let _ = runtime.handle_runtime_hook_event(runtime_hook_state_for_event(
+        "Running",
+        "PreToolUse",
+        "session-1",
+    ));
+
+    let _ = runtime.handle_runtime_status(
+        window_id.clone(),
+        WindowProcessStatus::Error,
+        Some("transient pty error".to_string()),
+    );
+    assert!(runtime.active_agent_sessions.contains_key(&window_id));
+
+    let duplicate_error_events = runtime.handle_runtime_status(
+        window_id.clone(),
+        WindowProcessStatus::Error,
+        Some("transient pty error".to_string()),
+    );
+
+    assert!(runtime.active_agent_sessions.contains_key(&window_id));
+    assert!(duplicate_error_events.iter().any(|event| matches!(
         event.event,
         BackendEvent::WindowState {
             state: WindowProcessStatus::Error,
