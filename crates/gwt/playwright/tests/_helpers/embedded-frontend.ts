@@ -15,6 +15,8 @@ export const APP_URL = "http://gwt-playwright.local/";
 
 const ROOT_MODULES = new Set([
   "app.js",
+  // SPEC-2008 Phase 38 — Agent Kanban window surface.
+  "agent-kanban-surface.js",
   // SPEC-2013 2026-06-16 amendment — quiet Agent completion notices.
   "agent-completion-notifications.js",
   // SPEC-3064 Phase 3 (E6c) — Board & Logs window surface.

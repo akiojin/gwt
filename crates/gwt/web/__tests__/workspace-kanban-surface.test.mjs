@@ -4,7 +4,7 @@ import assert from "node:assert/strict";
 import { parseHTML } from "linkedom";
 import { createWorkspaceKanbanSurface } from "../workspace-kanban-surface.js";
 
-test("Workspace Overview renders a quiet List + Detail shell instead of status Kanban columns", () => {
+test("Workspace Overview renders a readable Workspace list with compact filters", () => {
   const fixture = createFixture();
   const surface = createSurface(fixture, sampleProjection());
 
@@ -15,19 +15,285 @@ test("Workspace Overview renders a quiet List + Detail shell instead of status K
 
   assert.ok(fixture.body.querySelector(".workspace-overview-root"));
   assert.ok(fixture.body.querySelector(".workspace-overview-list-pane"));
+  assert.ok(fixture.body.querySelector(".workspace-overview-filter-bar"));
+  assert.ok(fixture.body.querySelector(".workspace-overview-list"));
   assert.ok(fixture.body.querySelector(".workspace-overview-detail-pane"));
-  assert.equal(fixture.body.querySelector(".workspace-kanban-board"), null);
-  assert.equal(fixture.body.querySelector("[data-workspace-column]"), null);
+  assert.equal(
+    fixture.body.querySelectorAll(".workspace-attention-lane[data-attention-lane]").length,
+    0,
+    "Workspace overview must not render mini Kanban lanes in the persistent pane",
+  );
+  assert.deepEqual(
+    Array.from(fixture.body.querySelectorAll("[data-workspace-filter]"), (filter) => [
+      filter.dataset.workspaceFilter,
+      filter.querySelector(".workspace-overview-filter-label")?.textContent.trim(),
+      filter.querySelector(".workspace-overview-filter-count")?.textContent.trim(),
+    ]),
+    [
+      ["all", "All", "2"],
+      ["needs_attention", "Needs Attention", "1"],
+      ["running", "Running", "0"],
+      ["paused", "Paused", "0"],
+      ["closed", "Closed", "1"],
+    ],
+  );
 
   const rows = Array.from(
     fixture.body.querySelectorAll(".workspace-overview-row[data-workspace-id]"),
   );
   assert.equal(rows.length, 2);
   assert.equal(rows[0].dataset.workspaceId, "workspace-current");
+  assert.equal(rows[0].dataset.attention, "needs_attention");
   assert.equal(rows[0].getAttribute("aria-selected"), "true");
   assert.match(rows[0].textContent, /Release Notes cleanup/);
   assert.match(rows[0].textContent, /SPEC-2356/);
-  assert.match(rows[0].textContent, /PR #2847/);
+  assert.match(rows[0].textContent, /Resolve blocker/);
+  assert.equal(
+    rows[0].querySelectorAll(".workspace-attention-chip").length,
+    0,
+    "row state should not duplicate lifecycle badges with attention chips",
+  );
+});
+
+test("Workspace list filters explicit attention separately from PR metadata", () => {
+  const fixture = createFixture();
+  const surface = createSurface(fixture, {
+    id: "projection",
+    title: "projection",
+    status_category: "active",
+    active_works: [
+      {
+        id: "work-attention",
+        title: "Broken launch",
+        status_category: "active",
+        lifecycle_state: "active",
+        blocked_reason: "API token is missing",
+        next_action: "Resolve blocker",
+        active_agents: 1,
+        blocked_agents: 1,
+        agents: [],
+      },
+      {
+        id: "work-pr-only",
+        title: "PR metadata only",
+        status_category: "active",
+        lifecycle_state: "active",
+        active_agents: 1,
+        blocked_agents: 0,
+        pr_number: 2847,
+        pr_state: "OPEN",
+        agents: [],
+      },
+      {
+        id: "work-paused",
+        title: "Paused branch",
+        status_category: "idle",
+        lifecycle_state: "paused",
+        active_agents: 0,
+        blocked_agents: 0,
+        agents: [],
+      },
+      {
+        id: "work-closed",
+        title: "Merged branch",
+        status_category: "idle",
+        lifecycle_state: "active",
+        done_equivalent: true,
+        active_agents: 0,
+        blocked_agents: 0,
+        agents: [],
+      },
+    ],
+    unassigned_agents: [],
+  });
+
+  surface.mount(fixture.body, fixture.windowData, {
+    focusWindowLocally() {},
+    sendFocus() {},
+  });
+
+  assert.deepEqual(rowIdsInList(fixture), [
+    "work-attention",
+    "work-pr-only",
+    "work-paused",
+    "work-closed",
+  ]);
+
+  const attention = fixture.body.querySelector(
+    '.workspace-overview-row[data-workspace-id="work-attention"]',
+  );
+  assert.match(attention.textContent, /API token is missing/);
+  assert.match(attention.textContent, /Resolve blocker/);
+
+  const prOnly = fixture.body.querySelector(
+    '.workspace-overview-row[data-workspace-id="work-pr-only"]',
+  );
+  assert.match(prOnly.textContent, /PR #2847/);
+  assert.doesNotMatch(prOnly.textContent, /Needs Attention/);
+
+  fixture.body.querySelector('[data-workspace-filter="paused"]').click();
+  assert.deepEqual(rowIdsInList(fixture), ["work-paused"]);
+  assert.equal(
+    fixture.body
+      .querySelector('[data-workspace-filter="paused"]')
+      .getAttribute("aria-pressed"),
+    "true",
+  );
+});
+
+test("Workspace list does not expose Kanban D&D lifecycle affordances", () => {
+  const fixture = createFixture();
+  const sent = [];
+  const surface = createSurface(
+    fixture,
+    {
+      id: "projection",
+      title: "projection",
+      status_category: "active",
+      active_works: [
+        {
+          id: "work-running",
+          title: "Running work",
+          status_category: "active",
+          lifecycle_state: "active",
+          active_agents: 1,
+          blocked_agents: 0,
+          agents: [],
+        },
+        {
+          id: "work-paused",
+          title: "Paused work",
+          status_category: "idle",
+          lifecycle_state: "paused",
+          active_agents: 0,
+          blocked_agents: 0,
+          agents: [],
+        },
+      ],
+      unassigned_agents: [],
+    },
+    { send: (message) => sent.push(message) },
+  );
+
+  surface.mount(fixture.body, fixture.windowData, {
+    focusWindowLocally() {},
+    sendFocus() {},
+  });
+
+  const runningRow = fixture.body.querySelector(
+    '.workspace-overview-row[data-workspace-id="work-running"]',
+  );
+  assert.equal(runningRow.draggable, false);
+  assert.equal(
+    fixture.body.querySelectorAll(".workspace-attention-lane[data-attention-lane]").length,
+    0,
+  );
+
+  assert.deepEqual(sent, [], "D&D must not send lifecycle, Board, or runtime mutations");
+  assert.deepEqual(rowIdsInList(fixture), ["work-running", "work-paused"]);
+});
+
+test("Workspace list row Launch Agent opens the launch wizard without changing selection", () => {
+  const fixture = createFixture();
+  const sent = [];
+  const surface = createSurface(
+    fixture,
+    {
+      id: "projection",
+      title: "projection",
+      status_category: "active",
+      active_works: [
+        {
+          id: "work-launch",
+          title: "Launchable work",
+          status_category: "idle",
+          lifecycle_state: "paused",
+          branch: "work/launchable",
+          active_agents: 0,
+          blocked_agents: 0,
+          agents: [],
+        },
+      ],
+      unassigned_agents: [],
+    },
+    { send: (message) => sent.push(message) },
+  );
+
+  surface.mount(fixture.body, fixture.windowData, {
+    focusWindowLocally() {},
+    sendFocus() {},
+  });
+
+  const rowLaunch = fixture.body.querySelector(
+    '.workspace-overview-row[data-workspace-id="work-launch"] [data-action="launch-workspace-row"]',
+  );
+  assert.ok(rowLaunch, "row must expose a compact Launch Agent action");
+  rowLaunch.click();
+
+  assert.deepEqual(sent, [
+    {
+      kind: "open_launch_wizard",
+      id: fixture.windowData.id,
+      branch_name: "work/launchable",
+    },
+  ]);
+  assert.equal(
+    fixture.body
+      .querySelector('.workspace-overview-row[data-workspace-id="work-launch"]')
+      .getAttribute("aria-selected"),
+    "true",
+  );
+});
+
+test("Workspace list row keyboard handler does not steal Launch Agent button keys", () => {
+  const fixture = createFixture();
+  const surface = createSurface(fixture, {
+    id: "projection",
+    title: "projection",
+    status_category: "active",
+    active_works: [
+      {
+        id: "work-selected",
+        title: "Selected work",
+        status_category: "active",
+        lifecycle_state: "active",
+        branch: "work/selected",
+        active_agents: 1,
+        blocked_agents: 0,
+        agents: [],
+      },
+      {
+        id: "work-launch",
+        title: "Launchable work",
+        status_category: "idle",
+        lifecycle_state: "paused",
+        branch: "work/launchable",
+        active_agents: 0,
+        blocked_agents: 0,
+        agents: [],
+      },
+    ],
+    unassigned_agents: [],
+  });
+
+  surface.mount(fixture.body, fixture.windowData, {
+    focusWindowLocally() {},
+    sendFocus() {},
+  });
+
+  const selectedRow = fixture.body.querySelector(
+    '.workspace-overview-row[data-workspace-id="work-selected"]',
+  );
+  const launchRow = fixture.body.querySelector(
+    '.workspace-overview-row[data-workspace-id="work-launch"]',
+  );
+  const rowLaunch = launchRow.querySelector('[data-action="launch-workspace-row"]');
+  const event = new fixture.window.Event("keydown", { bubbles: true });
+  event.key = "Enter";
+  rowLaunch.dispatchEvent(event);
+
+  assert.equal(selectedRow.getAttribute("aria-selected"), "true");
+  assert.equal(launchRow.getAttribute("aria-selected"), "false");
 });
 
 test("Workspace Overview keeps unassigned agents in an explicit queue outside Workspace rows", () => {
@@ -107,17 +373,17 @@ test("Workspace Overview renders Active Works from active_works and keeps Unassi
   assert.match(fixture.body.textContent, /Unassigned Agents/);
   assert.match(
     fixture.body.querySelector(".workspace-overview-status-line").textContent,
-    /2 Workspaces · 1 Unassigned Agents/,
+    /2 Workspaces · 1 Needs Attention · 1 Unassigned Agents/,
   );
   const rows = Array.from(
     fixture.body.querySelectorAll(".workspace-overview-row[data-workspace-id]"),
   );
   assert.deepEqual(
     rows.map((row) => row.dataset.workspaceId),
-    ["work-parser", "work-ui"],
+    ["work-ui", "work-parser"],
   );
-  assert.match(rows[0].textContent, /Parser cleanup/);
-  assert.match(rows[1].textContent, /UI polish/);
+  assert.match(rows[0].textContent, /UI polish/);
+  assert.match(rows[1].textContent, /Parser cleanup/);
   const queue = fixture.body.querySelector(".workspace-agent-queue");
   assert.ok(queue);
   assert.equal(queue.querySelectorAll(".workspace-overview-agent-row").length, 1);
@@ -777,6 +1043,8 @@ function sampleProjection() {
         owner: "SPEC-2356",
         status_category: "active",
         lifecycle_stage: "active",
+        next_action: "Resolve blocker",
+        blocked_reason: "Resolve blocker",
         branch: "work/20260521-0234",
         worktree_path: "/repo/work/20260521-0234",
         pr_number: 2847,
@@ -827,7 +1095,7 @@ function sampleProjection() {
 }
 
 function createFixture() {
-  const { document } = parseHTML(`
+  const { document, window } = parseHTML(`
     <div id="workspace-window">
       <div class="window-body"></div>
     </div>
@@ -837,6 +1105,7 @@ function createFixture() {
   const windowData = { id: "workspace-1", preset: "workspace" };
   return {
     document,
+    window,
     body,
     windowData,
     windowMap: new Map([[windowData.id, windowElement]]),
@@ -878,6 +1147,13 @@ function createNode(document, tag, className, text) {
   if (className) node.className = className;
   if (text !== undefined) node.textContent = text;
   return node;
+}
+
+function rowIdsInList(fixture) {
+  return Array.from(
+    fixture.body.querySelectorAll(".workspace-overview-list .workspace-overview-row[data-workspace-id]"),
+    (row) => row.dataset.workspaceId,
+  );
 }
 
 // SPEC-2359 W-15 (FR-379 follow-up, user verification 2026-06-10): a

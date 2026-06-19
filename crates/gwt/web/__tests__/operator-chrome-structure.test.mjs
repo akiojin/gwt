@@ -731,7 +731,7 @@ test("Workspace Overview is separate from live-only Active Work", () => {
   );
 });
 
-test("Workspace Overview uses the Quiet Work full-window List + Detail layout", () => {
+test("Workspace Overview uses the Quiet Work list filter + Detail layout", () => {
   assert.ok(
     workspaceOverviewSource.length > 0,
     "expected Workspace Overview renderer to live in workspace-kanban-surface.js",
@@ -746,10 +746,23 @@ test("Workspace Overview uses the Quiet Work full-window List + Detail layout", 
     /presetSurface\(preset\)[\s\S]+preset\s*===\s*"work"[\s\S]+return\s+"work"/,
     "expected Work to be a first-class window surface",
   );
-  assert.match(
+  for (const token of [
+    "workspace-overview-root",
+    "workspace-overview-list-pane",
+    "workspace-overview-filter-bar",
+    "workspace-overview-list",
+    "workspace-overview-detail-pane",
+  ]) {
+    assert.match(
+      workspaceOverviewSource,
+      new RegExp(token),
+      `expected Workspace Overview source to include ${token}`,
+    );
+  }
+  assert.doesNotMatch(
     workspaceOverviewSource,
-    /workspace-overview-root[\s\S]+workspace-overview-list-pane[\s\S]+workspace-overview-detail-pane/,
-    "expected Workspace Overview to use a quiet List + Detail shell",
+    /ATTENTION_LANES|workspace-attention-lane/,
+    "Workspace Overview must not classify Work into visible Kanban lanes",
   );
   assert.match(
     workspaceOverviewSource,
@@ -773,7 +786,7 @@ test("Workspace Overview uses the Quiet Work full-window List + Detail layout", 
   assert.doesNotMatch(
     workspaceOverviewSource,
     /workspace-kanban-board|data-workspace-column|workspace-kanban-column/,
-    "Workspace Overview must not reintroduce Workspace-specific Kanban columns",
+    "Workspace Overview must not reintroduce retired Workspace-specific Kanban columns",
   );
   assert.doesNotMatch(
     appSource,
@@ -1575,8 +1588,13 @@ test("Window tab activation updates tab chrome in place without remounting termi
     ensureWindowBody.match(/mountWindowBody\(windowData,\s*element\)/g) || [];
   assert.equal(
     mountCalls.length,
-    1,
-    "terminal body mounting must remain limited to the preset-change path",
+    2,
+    "body remounting must stay limited to preset changes plus the Agent Kanban dynamic body",
+  );
+  assert.match(
+    ensureWindowBody,
+    /surface\s*===\s*"agent-kanban"[\s\S]*mountWindowBody\(windowData,\s*element\)/,
+    "Agent Kanban is the only dynamic body remount path",
   );
   const mountIndex = ensureWindowBody.indexOf("mountWindowBody(windowData, element);");
   const renderKeyIndex = ensureWindowBody.indexOf(
@@ -3197,11 +3215,11 @@ test("agent-state telemetry never makes readable workspace windows translucent (
 
 test("non-terminal surface bodies still follow the overall theme (FR-013 boundary)", () => {
   // The Dark fix is scoped to .surface-terminal.  Other surfaces (Board /
-  // Logs / File Tree / Branches / Knowledge / Workspace / Console / Mock / Profile) must
-  // keep tracking the active theme via --color-surface so tabbed windows
+  // Logs / File Tree / Branches / Knowledge / Workspace / Agent Kanban /
+  // Console / Mock / Profile) must keep tracking the active theme via --color-surface so tabbed windows
   // still flip body color when a non-terminal tab is selected.
   const otherSurfaceRule =
-    /(?:\.surface-(?:file-tree|branches|board|logs|knowledge|index|workspace|console|mock|profile)\s+\.window-body,?\s*)+\{[^}]*background:\s*var\(\s*--color-surface\s*\)/;
+    /(?:\.surface-(?:file-tree|agent-kanban|branches|board|logs|knowledge|index|work|console|mock|profile)\s+\.window-body,?\s*)+\{[^}]*background:\s*var\(\s*--color-surface\s*\)/;
   assert.match(
     inlineStyle,
     otherSurfaceRule,
@@ -3216,6 +3234,7 @@ test("mountWindowBody clears every known surface class before applying the activ
   assert.ok(mountBody, "expected mountWindowBody implementation");
   for (const surfaceClass of [
     "surface-terminal",
+    "surface-agent-kanban",
     "surface-file-tree",
     "surface-branches",
     "surface-board",
@@ -3361,6 +3380,46 @@ test("Start Work command opens a pending wizard before backend state arrives", (
     launchWizardSource,
     /if\s*\(!launchWizard\s*&&\s*!launchWizardOpenError\s*&&\s*!launchWizardOpening\)/,
     "renderLaunchWizard must keep the modal open for local pending Start Work state",
+  );
+});
+
+test("Agent Kanban Launch Agent action opens pending Launch Agent wizard with lane target", () => {
+  const factoryStart = appSource.indexOf(
+    "const agentKanbanSurface = createAgentKanbanSurface({",
+  );
+  assert.notEqual(factoryStart, -1, "expected Agent Kanban surface factory wiring");
+  const factoryEnd = appSource.indexOf("\n      // SPEC-3064", factoryStart);
+  assert.notEqual(factoryEnd, -1, "expected end marker after Agent Kanban factory wiring");
+  const factoryCall = appSource.slice(factoryStart, factoryEnd);
+  assert.match(
+    factoryCall,
+    /onLaunchAgent:\s*\(\{\s*boardId,\s*laneId\s*\}\)\s*=>/,
+    "lane action must be named as Launch Agent, not an add-existing-window path",
+  );
+  assert.doesNotMatch(
+    factoryCall,
+    /onAddAgent:/,
+    "Agent Kanban must not expose the old Add Agent callback name",
+  );
+  assert.match(
+    factoryCall,
+    /agentKanbanPendingPlacement\.begin\(\{\s*boardId,\s*laneId,\s*knownAgentWindowIds,/,
+    "Launch Agent must record the originating board and lane as pending placement target",
+  );
+  assert.match(
+    factoryCall,
+    /openLaunchAgentPendingWizard\(\)[\s\S]*send\(\{[\s\S]{0,180}?kind:\s*"open_agent_kanban_launch_wizard"[\s\S]{0,180}?board_id:\s*boardId[\s\S]{0,180}?lane_id:\s*laneId/,
+    "Launch Agent must open the pending wizard before requesting backend Launch Agent state with a lane target",
+  );
+  assert.match(
+    appSource,
+    /case\s+"launch_wizard_open_error":[\s\S]{0,220}?agentKanbanPendingPlacement\.clear\(\);[\s\S]{0,120}?applyLaunchWizardOpenErrorEvent\(event\);/,
+    "backend wizard open errors must clear stale Kanban placement targets",
+  );
+  assert.match(
+    appSource,
+    /case\s+"launch_wizard_state":[\s\S]{0,220}?agentKanbanPendingPlacement\.clear\(\);[\s\S]{0,120}?applyLaunchWizardStateEvent\(event\);/,
+    "backend wizard state must clear Kanban placement targets now owned by the launch session",
   );
 });
 

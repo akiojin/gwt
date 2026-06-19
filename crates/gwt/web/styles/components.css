@@ -2032,7 +2032,7 @@ kbd.op-kbd {
   flex: 1 1 auto;
   min-height: 0;
   display: grid;
-  grid-template-columns: minmax(280px, 360px) minmax(0, 1fr);
+  grid-template-columns: minmax(340px, 440px) minmax(0, 1fr);
   border-top: 1px solid var(--color-border);
 }
 
@@ -2081,9 +2081,67 @@ kbd.op-kbd {
   border-top: 1px solid var(--color-border);
 }
 
+.workspace-overview-filter-bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-2);
+  min-width: 0;
+  padding-bottom: var(--space-2);
+}
+
+.workspace-overview-filters {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  min-width: 0;
+}
+
+.workspace-overview-filter {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  min-height: 24px;
+  padding: 0 8px;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--color-text-muted);
+  font-family: var(--font-mono);
+  font-size: 10px;
+  font-weight: 650;
+  line-height: 1;
+}
+
+.workspace-overview-filter:hover,
+.workspace-overview-filter.is-active {
+  border-color: var(--color-border-strong);
+  background: var(--color-surface-elevated);
+  color: var(--color-text);
+}
+
+.workspace-overview-filter-count {
+  color: var(--color-text);
+  font-variant-numeric: tabular-nums;
+}
+
+.workspace-attention-reason,
+.workspace-attention-next {
+  overflow: hidden;
+  color: var(--color-text-muted);
+  font-family: var(--font-mono);
+  font-size: var(--type-xs);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.workspace-attention-reason {
+  color: var(--color-text);
+}
+
 .workspace-overview-row {
   display: grid;
-  grid-template-columns: auto minmax(0, 1fr);
+  grid-template-columns: auto minmax(0, 1fr) auto;
   gap: 10px;
   align-items: center;
   width: 100%;
@@ -2158,6 +2216,25 @@ kbd.op-kbd {
 .workspace-overview-row-copy {
   display: grid;
   gap: 4px;
+}
+
+.workspace-overview-row-actions {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  min-width: 32px;
+}
+
+.workspace-overview-row-action {
+  width: 28px;
+  height: 28px;
+  opacity: 0.64;
+}
+
+.workspace-overview-row:hover .workspace-overview-row-action,
+.workspace-overview-row:focus-within .workspace-overview-row-action,
+.workspace-overview-row[aria-selected="true"] .workspace-overview-row-action {
+  opacity: 1;
 }
 
 .workspace-overview-row-title {
