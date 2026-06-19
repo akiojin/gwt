@@ -1458,12 +1458,13 @@ test("window close always routes through the Close Guard confirm modal (SPEC-303
   );
 });
 
-test("window tabs receive agent telemetry from runtime state (SPEC-3038 US-2)", () => {
-  // SPEC-3038 AS-2.1: tabs carry the same telemetry the window chrome shows.
+test("window tabs receive agent runtime state from runtime status (SPEC-3038 US-2)", () => {
+  // SPEC-3038 AS-2.1: tabs carry compact runtime-state cues while the full
+  // window chrome keeps the semantic telemetry mapping.
   assert.match(
     appSource,
-    /function\s+windowTabTelemetryState\(tab\)[\s\S]{0,400}?shouldShowRuntimeStatus\(tab\)[\s\S]{0,400}?mapAgentTelemetryState/,
-    "expected a tab telemetry helper that gates on agent windows and reuses the telemetry mapping",
+    /function\s+windowTabTelemetryState\(tab\)[\s\S]{0,400}?shouldShowRuntimeStatus\(tab\)[\s\S]{0,400}?normalizeWindowRuntimeState\(tab\.status,\s*tab\.preset\)[\s\S]{0,120}?return\s+runtimeState/,
+    "expected a tab telemetry helper that gates on agent windows and returns raw runtime state for the tab cue",
   );
   const renderTabsBody = extractFunctionBody(appSource, "renderWindowTabs");
   assert.match(
@@ -4514,7 +4515,7 @@ test("Runtime status updates skip unchanged DOM and dependent surface writes", (
   const overlayIndex = statusBody.indexOf("const overlay = element.querySelector");
   const telemetryIndex = statusBody.indexOf("recomputeOperatorTelemetry");
   const windowListIndex = statusBody.lastIndexOf("renderWindowList()");
-  const dotsIndex = statusBody.indexOf("refreshProjectTabDots()");
+  const stateCuesIndex = statusBody.indexOf("refreshProjectTabStateCues()");
 
   assert.notEqual(keyIndex, -1, "applyStatus must compute a runtime status key");
   assert.notEqual(guardIndex, -1, "applyStatus must guard unchanged runtime status");
@@ -4523,7 +4524,7 @@ test("Runtime status updates skip unchanged DOM and dependent surface writes", (
     ["overlay lookup/writes", overlayIndex],
     ["telemetry recompute", telemetryIndex],
     ["Window List refresh", windowListIndex],
-    ["project tab dot refresh", dotsIndex],
+    ["project tab state cue refresh", stateCuesIndex],
   ]) {
     assert.notEqual(index, -1, `applyStatus must still contain ${label}`);
     assert.ok(guardIndex < index, `unchanged runtime status must return before ${label}`);
@@ -4555,8 +4556,8 @@ test("Runtime status updates repaint tab telemetry when the target window is hid
   );
   assert.match(
     branchBody,
-    /refreshProjectTabDots\s*\(\s*\)\s*;/,
-    "hidden target status updates must still refresh project tab dots",
+    /refreshProjectTabStateCues\s*\(\s*\)\s*;/,
+    "hidden target status updates must still refresh project tab state cues",
   );
 });
 

@@ -298,45 +298,56 @@ fn allows_read_only_tools_without_owner() {
 }
 
 #[test]
-fn allows_worktree_internal_edit_without_owner() {
+fn blocks_worktree_internal_edit_without_owner() {
     let wt = root();
     let event = event(
         "Edit",
         json!({ "file_path": format!("{}/src/lib.rs", wt.display()), "old_string": "x", "new_string": "y" }),
     );
     let decision = evaluate(&event, workflow_policy::WorkflowContext::unknown());
-    assert!(
-        decision.is_none(),
-        "worktree-internal edits must be allowed without owner"
-    );
+    let decision = decision.expect("worktree-internal implementation edit must be blocked");
+    assert!(decision
+        .permission_decision_reason()
+        .contains("Owner Issue/SPEC"));
 }
 
 #[test]
-fn allows_worktree_internal_edit_with_relative_path() {
+fn blocks_worktree_internal_edit_with_relative_path() {
     let event = event(
         "Edit",
         json!({ "file_path": "src/lib.rs", "old_string": "x", "new_string": "y" }),
     );
     let decision = evaluate(&event, workflow_policy::WorkflowContext::unknown());
-    assert!(
-        decision.is_none(),
-        "relative worktree-internal edits must be allowed without owner"
-    );
+    let decision = decision.expect("relative implementation edit must be blocked");
+    assert!(decision
+        .permission_decision_reason()
+        .contains("Owner Issue/SPEC"));
 }
 
 #[test]
-fn allows_edit_outside_worktree_without_owner() {
-    // Edit/Write path control is handled by Claude Code permissions, not by
-    // workflow-policy. The hook only enforces Bash safety guardrails.
+fn blocks_edit_outside_worktree_without_owner() {
     let event = event(
         "Edit",
         json!({ "file_path": "/outside/project/src/lib.rs", "old_string": "x", "new_string": "y" }),
     );
     let decision = evaluate(&event, workflow_policy::WorkflowContext::unknown());
-    assert!(
-        decision.is_none(),
-        "Edit outside worktree is not gated by workflow-policy"
+    let decision = decision.expect("owner guard should block mutating edit without owner");
+    assert!(decision
+        .permission_decision_reason()
+        .contains("Owner Issue/SPEC"));
+}
+
+#[test]
+fn blocks_docs_edit_outside_worktree_without_owner() {
+    let event = event(
+        "Edit",
+        json!({ "file_path": "/outside/project/README.md", "old_string": "x", "new_string": "y" }),
     );
+    let decision = evaluate(&event, workflow_policy::WorkflowContext::unknown());
+    let decision = decision.expect("owner guard should block outside-worktree docs edit");
+    assert!(decision
+        .permission_decision_reason()
+        .contains("Owner Issue/SPEC"));
 }
 
 #[test]
@@ -347,6 +358,54 @@ fn allows_docs_edits_without_owner_as_chore_exemption() {
     );
     let decision = evaluate(&event, workflow_policy::WorkflowContext::unknown());
     assert!(decision.is_none(), "docs-only changes should stay allowed");
+}
+
+#[test]
+fn allows_docs_only_apply_patch_without_owner_as_chore_exemption() {
+    let event = event(
+        "apply_patch",
+        json!({
+            "patch": "*** Begin Patch\n*** Update File: README.md\n@@\n-old\n+new\n*** End Patch\n"
+        }),
+    );
+    let decision = evaluate(&event, workflow_policy::WorkflowContext::unknown());
+    assert!(
+        decision.is_none(),
+        "docs-only apply_patch changes should stay allowed"
+    );
+}
+
+#[test]
+fn blocks_source_apply_patch_without_owner() {
+    let event = event(
+        "apply_patch",
+        json!({
+            "patch": "*** Begin Patch\n*** Update File: src/lib.rs\n@@\n-old\n+new\n*** End Patch\n"
+        }),
+    );
+    let decision = evaluate(&event, workflow_policy::WorkflowContext::unknown());
+    let decision = decision.expect("source apply_patch without owner must be blocked");
+    assert!(decision
+        .permission_decision_reason()
+        .contains("Owner Issue/SPEC"));
+}
+
+#[test]
+fn allows_docs_only_apply_patch_for_spec_owner_before_plan_refresh() {
+    let event = event(
+        "apply_patch",
+        json!({
+            "patch": "*** Begin Patch\n*** Update File: docs/hooks.md\n@@\n-old\n+new\n*** End Patch\n"
+        }),
+    );
+    let decision = evaluate(
+        &event,
+        workflow_policy::WorkflowContext::spec_issue(1935, false, false),
+    );
+    assert!(
+        decision.is_none(),
+        "docs-only patch should not require spec plan/tasks"
+    );
 }
 
 #[test]
@@ -448,16 +507,16 @@ fn allows_cargo_fmt_without_owner() {
 }
 
 #[test]
-fn allows_git_commit_without_owner() {
+fn blocks_git_commit_without_owner() {
     let event = event(
         "Bash",
         json!({ "command": "git add . && git commit -m 'chore: release'" }),
     );
     let decision = evaluate(&event, workflow_policy::WorkflowContext::unknown());
-    assert!(
-        decision.is_none(),
-        "git add/commit are worktree-internal and must be allowed"
-    );
+    let decision = decision.expect("git commit without owner must be blocked");
+    assert!(decision
+        .permission_decision_reason()
+        .contains("Owner Issue/SPEC"));
 }
 
 #[test]
@@ -491,26 +550,26 @@ fn allows_git_push_with_chore_bypass() {
 }
 
 #[test]
-fn allows_sed_in_place_without_owner() {
+fn blocks_sed_in_place_without_owner() {
     let event = event(
         "Bash",
         json!({ "command": "sed -i 's/old/new/' Cargo.toml" }),
     );
     let decision = evaluate(&event, workflow_policy::WorkflowContext::unknown());
-    assert!(
-        decision.is_none(),
-        "sed -i is worktree-internal and must be allowed"
-    );
+    let decision = decision.expect("sed -i without owner must be blocked");
+    assert!(decision
+        .permission_decision_reason()
+        .contains("Owner Issue/SPEC"));
 }
 
 #[test]
-fn allows_shell_redirect_without_owner() {
+fn blocks_shell_redirect_without_owner() {
     let event = event("Bash", json!({ "command": "echo '1.0.0' > version.txt" }));
     let decision = evaluate(&event, workflow_policy::WorkflowContext::unknown());
-    assert!(
-        decision.is_none(),
-        "shell redirects are worktree-internal and must be allowed"
-    );
+    let decision = decision.expect("shell redirect without owner must be blocked");
+    assert!(decision
+        .permission_decision_reason()
+        .contains("Owner Issue/SPEC"));
 }
 
 #[test]
@@ -598,7 +657,7 @@ fn evaluate_falls_back_to_issue_linkage_store_for_plain_issue_owner() {
 fn similar_active_workspace_does_not_hard_block_mutation() {
     with_temp_home(|home| {
         let repo_path = init_repo(home);
-        let session_id = save_session(&repo_path, "work/current", None);
+        let session_id = save_session(&repo_path, "work/current", Some(1942));
         std::env::set_var(GWT_SESSION_ID_ENV, &session_id);
         seed_workspace_agents(
             &repo_path,
@@ -620,7 +679,7 @@ fn similar_active_workspace_does_not_hard_block_mutation() {
         let decision = workflow_policy::evaluate_with_context(
             &event,
             &repo_path,
-            &workflow_policy::WorkflowContext::unknown(),
+            &workflow_policy::WorkflowContext::plain_issue(1942),
         )
         .expect("workflow evaluation succeeds");
 
@@ -635,7 +694,7 @@ fn similar_active_workspace_does_not_hard_block_mutation() {
 fn allows_mutation_after_split_claim_targets_matching_workspace_agent() {
     with_temp_home(|home| {
         let repo_path = init_repo(home);
-        let session_id = save_session(&repo_path, "work/current", None);
+        let session_id = save_session(&repo_path, "work/current", Some(1942));
         std::env::set_var(GWT_SESSION_ID_ENV, &session_id);
         seed_workspace_agents(
             &repo_path,
@@ -674,7 +733,7 @@ fn allows_mutation_after_split_claim_targets_matching_workspace_agent() {
         let decision = workflow_policy::evaluate_with_context(
             &event,
             &repo_path,
-            &workflow_policy::WorkflowContext::unknown(),
+            &workflow_policy::WorkflowContext::plain_issue(1942),
         )
         .expect("workflow evaluation succeeds");
 
@@ -689,7 +748,7 @@ fn allows_mutation_after_split_claim_targets_matching_workspace_agent() {
 fn active_board_claim_does_not_hard_block_mutation() {
     with_temp_home(|home| {
         let repo_path = init_repo(home);
-        let session_id = save_session(&repo_path, "work/current", None);
+        let session_id = save_session(&repo_path, "work/current", Some(1942));
         std::env::set_var(GWT_SESSION_ID_ENV, &session_id);
         let mut projection = WorkspaceProjection::default_for_project(&repo_path);
         projection.agents.push(workspace_agent(
@@ -720,7 +779,7 @@ fn active_board_claim_does_not_hard_block_mutation() {
         let decision = workflow_policy::evaluate_with_context(
             &event,
             &repo_path,
-            &workflow_policy::WorkflowContext::unknown(),
+            &workflow_policy::WorkflowContext::plain_issue(1942),
         )
         .expect("workflow evaluation succeeds");
 
@@ -735,7 +794,7 @@ fn active_board_claim_does_not_hard_block_mutation() {
 fn unassigned_agent_does_not_inherit_projection_title_for_duplicate_gate() {
     with_temp_home(|home| {
         let repo_path = init_repo(home);
-        let session_id = save_session(&repo_path, "work/unassigned", None);
+        let session_id = save_session(&repo_path, "work/unassigned", Some(1942));
         std::env::set_var(GWT_SESSION_ID_ENV, &session_id);
         let mut projection = WorkspaceProjection::default_for_project(&repo_path);
         projection.title = "Workspace affiliation fix".to_string();
@@ -767,7 +826,7 @@ fn unassigned_agent_does_not_inherit_projection_title_for_duplicate_gate() {
         let decision = workflow_policy::evaluate_with_context(
             &event,
             &repo_path,
-            &workflow_policy::WorkflowContext::unknown(),
+            &workflow_policy::WorkflowContext::plain_issue(1942),
         )
         .expect("workflow evaluation succeeds");
 
@@ -788,7 +847,7 @@ fn does_not_block_when_active_board_claim_is_audienced_to_other_workspace() {
     // must stay silent.
     with_temp_home(|home| {
         let repo_path = init_repo(home);
-        let session_id = save_session(&repo_path, "work/current", None);
+        let session_id = save_session(&repo_path, "work/current", Some(1942));
         std::env::set_var(GWT_SESSION_ID_ENV, &session_id);
         let mut projection = WorkspaceProjection::default_for_project(&repo_path);
         projection.agents.push(workspace_agent(
@@ -820,7 +879,7 @@ fn does_not_block_when_active_board_claim_is_audienced_to_other_workspace() {
         let decision = workflow_policy::evaluate_with_context(
             &event,
             &repo_path,
-            &workflow_policy::WorkflowContext::unknown(),
+            &workflow_policy::WorkflowContext::plain_issue(1942),
         )
         .expect("workflow evaluation succeeds");
 
@@ -840,7 +899,7 @@ fn does_not_block_when_active_board_claim_is_audienced_to_other_workspace() {
 fn unassigned_agent_without_title_summary_is_not_title_blocked() {
     with_temp_home(|home| {
         let repo_path = init_repo(home);
-        let session_id = save_session(&repo_path, "work/unassigned", None);
+        let session_id = save_session(&repo_path, "work/unassigned", Some(1942));
         std::env::set_var(GWT_SESSION_ID_ENV, &session_id);
         let mut projection = WorkspaceProjection::default_for_project(&repo_path);
         projection
@@ -871,7 +930,7 @@ fn unassigned_agent_without_title_summary_is_not_title_blocked() {
 fn actionable_unassigned_agent_can_mutate_without_forced_workspace_affiliation() {
     with_temp_home(|home| {
         let repo_path = init_repo(home);
-        let session_id = save_session(&repo_path, "work/unassigned", None);
+        let session_id = save_session(&repo_path, "work/unassigned", Some(1942));
         std::env::set_var(GWT_SESSION_ID_ENV, &session_id);
         let mut projection = WorkspaceProjection::default_for_project(&repo_path);
         let mut agent = unassigned_workspace_agent(&session_id);
@@ -903,7 +962,7 @@ fn actionable_unassigned_agent_can_mutate_without_forced_workspace_affiliation()
 fn actionable_unassigned_agent_can_run_workspace_ensure_command() {
     with_temp_home(|home| {
         let repo_path = init_repo(home);
-        let session_id = save_session(&repo_path, "work/unassigned", None);
+        let session_id = save_session(&repo_path, "work/unassigned", Some(1942));
         std::env::set_var(GWT_SESSION_ID_ENV, &session_id);
         let mut projection = WorkspaceProjection::default_for_project(&repo_path);
         let mut agent = unassigned_workspace_agent(&session_id);
@@ -964,7 +1023,7 @@ fn assigned_agent_without_title_summary_remains_title_blocked() {
 fn incomplete_work_item_history_does_not_hard_block_mutation() {
     with_temp_home(|home| {
         let repo_path = init_repo(home);
-        let session_id = save_session(&repo_path, "work/current", None);
+        let session_id = save_session(&repo_path, "work/current", Some(1942));
         std::env::set_var(GWT_SESSION_ID_ENV, &session_id);
         seed_workspace_current_agent(
             &repo_path,
@@ -992,7 +1051,7 @@ fn incomplete_work_item_history_does_not_hard_block_mutation() {
         let decision = workflow_policy::evaluate_with_context(
             &event,
             &repo_path,
-            &workflow_policy::WorkflowContext::unknown(),
+            &workflow_policy::WorkflowContext::plain_issue(1942),
         )
         .expect("workflow evaluation succeeds");
 
@@ -1007,7 +1066,7 @@ fn incomplete_work_item_history_does_not_hard_block_mutation() {
 fn completed_work_item_history_does_not_block_new_related_work() {
     with_temp_home(|home| {
         let repo_path = init_repo(home);
-        let session_id = save_session(&repo_path, "work/current", None);
+        let session_id = save_session(&repo_path, "work/current", Some(1942));
         std::env::set_var(GWT_SESSION_ID_ENV, &session_id);
         seed_workspace_current_agent(
             &repo_path,
@@ -1031,7 +1090,7 @@ fn completed_work_item_history_does_not_block_new_related_work() {
         let decision = workflow_policy::evaluate_with_context(
             &event,
             &repo_path,
-            &workflow_policy::WorkflowContext::unknown(),
+            &workflow_policy::WorkflowContext::plain_issue(1942),
         )
         .expect("workflow evaluation succeeds");
 

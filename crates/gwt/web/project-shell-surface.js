@@ -1,6 +1,6 @@
 // SPEC-3064 Phase 3 (E7) — Project & workspace shell chrome surface
 // extracted from app.js. Owns the project tab strip (close-tab confirm
-// modal + running-agent dots), the Recent Projects list (picker overlay +
+// modal + running-agent cues), the Recent Projects list (picker overlay +
 // Open Project split-button menu), the project picker / onboarding
 // renderers, the toolbar action availability, the Windows dropdown
 // (window list state + render key + renderer), the maximized-window
@@ -53,7 +53,7 @@ import { renderMigrationModal as renderMigrationModalView } from "/migration-mod
 import { renderProjectCloneModal as renderProjectCloneModalView } from "/project-clone-modal.js";
 import {
   renderProjectTabs as renderProjectTabsView,
-  updateProjectTabDot as updateProjectTabDotView,
+  updateProjectTabStateCue as updateProjectTabStateCueView,
 } from "/project-tabs-renderer.js";
 import { renderCloseProjectTabConfirmModal } from "/close-project-tab-confirm-modal.js";
 import {
@@ -761,17 +761,17 @@ export function createProjectShellSurface({
         renderCloseProjectTabModal();
       }
 
-      function updateProjectTabDot(buttonEl, tab) {
-        updateProjectTabDotView(buttonEl, tab, { runtimeStateForWindow });
+      function updateProjectTabStateCue(buttonEl, tab) {
+        updateProjectTabStateCueView(buttonEl, tab, { runtimeStateForWindow });
       }
 
-      function refreshProjectTabDots() {
+      function refreshProjectTabStateCues() {
         const appState = getAppState();
         const tabsById = new Map(
           (appState.tabs || []).map((tab) => [tab.id, tab]),
         );
         for (const buttonEl of projectTabs.querySelectorAll(".project-tab")) {
-          updateProjectTabDot(
+          updateProjectTabStateCue(
             buttonEl,
             tabsById.get(buttonEl.dataset.projectTabId),
           );
@@ -1201,7 +1201,7 @@ export function createProjectShellSurface({
         scheduleMaximizedWindowsToViewportSync,
         workspaceHasVisibleMaximizedWindow,
         renderProjectTabs,
-        refreshProjectTabDots,
+        refreshProjectTabStateCues,
         markProjectUnread,
         clearProjectUnread,
         renderProjectSwitcher,

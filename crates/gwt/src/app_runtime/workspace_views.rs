@@ -177,6 +177,7 @@ pub(super) fn active_work_projection_from_saved_with_journal(
         journal_entries,
         works,
         cleanup_candidate,
+        managed_hook_health: None,
         active_work_count,
         active_works,
         agents,
@@ -209,10 +210,83 @@ fn empty_active_work_projection_view(
         journal_entries: Vec::new(),
         works: Vec::new(),
         cleanup_candidate: None,
+        managed_hook_health: None,
         active_work_count: 0,
         active_works: Vec::new(),
         agents: Vec::new(),
         unassigned_agents: Vec::new(),
+    }
+}
+
+fn managed_hook_health_view_for_project(
+    project_root: &Path,
+    sessions_dir: &Path,
+    sessions: &[&ActiveAgentSession],
+) -> Option<gwt::ManagedHookHealthView> {
+    let mut input = gwt::cli::hook::health::ManagedHookHealthInput::new(project_root);
+    if let Some(session) = sessions.iter().min_by_key(|session| &session.session_id) {
+        input = input.with_runtime_state_path(gwt_agent::runtime_state_path(
+            sessions_dir,
+            &session.session_id,
+        ));
+    }
+    let health = gwt::cli::hook::health::read_managed_hook_health(&input);
+    let should_show = health.status != gwt::cli::hook::health::ManagedHookHealthStatus::Inactive
+        || health.pending_discussion.is_some()
+        || health.pending_goal.is_some()
+        || !health.slow_handlers.is_empty()
+        || !health.issues.is_empty();
+    should_show.then(|| managed_hook_health_view_from_health(health))
+}
+
+fn managed_hook_health_status_wire(
+    status: gwt::cli::hook::health::ManagedHookHealthStatus,
+) -> &'static str {
+    match status {
+        gwt::cli::hook::health::ManagedHookHealthStatus::Ready => "ready",
+        gwt::cli::hook::health::ManagedHookHealthStatus::NeedsAttention => "needs_attention",
+        gwt::cli::hook::health::ManagedHookHealthStatus::SelfHealed => "self_healed",
+        gwt::cli::hook::health::ManagedHookHealthStatus::Degraded => "degraded",
+        gwt::cli::hook::health::ManagedHookHealthStatus::Inactive => "inactive",
+        gwt::cli::hook::health::ManagedHookHealthStatus::WaitingForFirstHookEvent => {
+            "waiting_for_first_hook_event"
+        }
+    }
+}
+
+fn managed_hook_health_view_from_health(
+    health: gwt::cli::hook::health::ManagedHookHealth,
+) -> gwt::ManagedHookHealthView {
+    gwt::ManagedHookHealthView {
+        status: managed_hook_health_status_wire(health.status).to_string(),
+        last_event: health.last_event,
+        last_event_at: health.last_event_at,
+        pending_discussion: health.pending_discussion.map(|pending| {
+            gwt::ManagedHookPendingDiscussionView {
+                proposal_label: pending.proposal_label,
+                proposal_title: pending.proposal_title,
+                next_question: pending.next_question,
+            }
+        }),
+        pending_goal: health
+            .pending_goal
+            .map(|goal| gwt::ManagedHookPendingGoalView {
+                proposal_label: goal.proposal_label,
+                proposal_title: goal.proposal_title,
+                condition: goal.condition,
+            }),
+        slow_handlers: health
+            .slow_handlers
+            .into_iter()
+            .map(|handler| gwt::ManagedHookSlowHandlerView {
+                event: handler.event,
+                handler: handler.handler,
+                status: handler.status,
+                duration_ms: handler.duration_ms.max(0.0).round() as u64,
+                occurred_at: handler.occurred_at,
+            })
+            .collect(),
+        issues: health.issues,
     }
 }
 
@@ -2117,6 +2191,11 @@ impl AppRuntime {
                 workspaces,
                 cleanup_candidate,
             );
+            view.managed_hook_health = managed_hook_health_view_for_project(
+                &tab.project_root,
+                &self.sessions_dir,
+                &sessions,
+            );
             // SPEC-2359 W16-2 (FR-389): group Works sharing a canonical
             // branch into one Workspace row before the ledger attach, so the
             // attach / identity-collapse / cap run once per Workspace.
@@ -2251,6 +2330,11 @@ impl AppRuntime {
             journal_entries: Vec::new(),
             works: Vec::new(),
             cleanup_candidate: None,
+            managed_hook_health: managed_hook_health_view_for_project(
+                &tab.project_root,
+                &self.sessions_dir,
+                &sessions,
+            ),
             active_work_count: active_works.len(),
             active_works,
             agents,

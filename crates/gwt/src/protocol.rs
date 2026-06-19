@@ -1089,6 +1089,42 @@ pub struct ActiveWorkCleanupCandidateView {
     pub remote_delete_available: bool,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ManagedHookPendingDiscussionView {
+    pub proposal_label: String,
+    pub proposal_title: String,
+    pub next_question: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ManagedHookPendingGoalView {
+    pub proposal_label: String,
+    pub proposal_title: String,
+    pub condition: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ManagedHookSlowHandlerView {
+    pub event: String,
+    pub handler: String,
+    pub status: String,
+    pub duration_ms: u64,
+    pub occurred_at: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ManagedHookHealthView {
+    pub status: String,
+    pub last_event: Option<String>,
+    pub last_event_at: Option<String>,
+    pub pending_discussion: Option<ManagedHookPendingDiscussionView>,
+    pub pending_goal: Option<ManagedHookPendingGoalView>,
+    #[serde(default)]
+    pub slow_handlers: Vec<ManagedHookSlowHandlerView>,
+    #[serde(default)]
+    pub issues: Vec<String>,
+}
+
 /// SPEC-2359 Phase W-12 (FR-349): default wire value for
 /// [`ActiveWorkItemView::lifecycle_state`] when deserializing payloads that
 /// predate the field. Legacy active Work entries are always live (a group of
@@ -1200,6 +1236,8 @@ pub struct ActiveWorkProjectionView {
     #[serde(default, alias = "workspaces", alias = "work_items")]
     pub works: Vec<WorkspaceHistoryView>,
     pub cleanup_candidate: Option<ActiveWorkCleanupCandidateView>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub managed_hook_health: Option<ManagedHookHealthView>,
     #[serde(default)]
     pub active_work_count: usize,
     #[serde(default)]
@@ -2868,6 +2906,7 @@ mod tests {
                     default_delete_remote: false,
                     remote_delete_available: true,
                 }),
+                managed_hook_health: None,
                 active_work_count: 1,
                 active_works: vec![super::ActiveWorkItemView {
                     id: "work-1".to_string(),

@@ -189,6 +189,7 @@ export function createWorkspaceKanbanSurface({
         : Array.isArray(fallback.board_refs)
           ? fallback.board_refs
           : [],
+      managed_hook_health: item?.managed_hook_health || fallback.managed_hook_health || null,
       agents: Array.isArray(item?.agents)
         ? item.agents
         : Array.isArray(fallback.agents)
@@ -357,6 +358,14 @@ export function createWorkspaceKanbanSurface({
       // ref; Launch Agent creates the worktree on demand.
       titleRow.appendChild(createNode("span", "workspace-overview-remote", "Remote"));
     }
+    const hookHealth = item.managed_hook_health;
+    const hookStatus = hookHealthStatus(hookHealth);
+    if (hookStatus && hookStatus !== "ready" && hookStatus !== "inactive") {
+      const hookBadge = createNode("span", "workspace-overview-hook-health", "Hooks");
+      hookBadge.dataset.status = hookStatus;
+      hookBadge.title = `Managed Hooks: ${hookHealthStatusLabel(hookStatus)}`;
+      titleRow.appendChild(hookBadge);
+    }
     const rowRelative = formatRelativeTime(item.updated_at);
     if (rowRelative) {
       const time = createNode("span", "workspace-overview-row-time", rowRelative);
@@ -480,6 +489,99 @@ export function createWorkspaceKanbanSurface({
     }
     container.appendChild(wrap);
     return true;
+  }
+
+  function hookHealthStatus(health) {
+    return String(health?.status || "").trim().toLowerCase();
+  }
+
+  function hookHealthStatusLabel(value) {
+    switch (hookHealthStatus({ status: value })) {
+      case "ready":
+        return "Ready";
+      case "needs_attention":
+        return "Needs attention";
+      case "self_healed":
+        return "Self healed";
+      case "degraded":
+        return "Degraded";
+      case "inactive":
+        return "Inactive";
+      case "waiting_for_first_hook_event":
+        return "Waiting for first hook event";
+      default:
+        return value ? compactText(value).replace(/_/g, " ") : "Unknown";
+    }
+  }
+
+  function formatHookDurationMs(value) {
+    const number = Number(value);
+    if (!Number.isFinite(number)) {
+      return "";
+    }
+    return `${Math.round(number)}ms`;
+  }
+
+  function appendHookIssueList(container, issues) {
+    const list = Array.isArray(issues) ? issues.filter(Boolean) : [];
+    if (list.length === 0) return;
+    const wrap = createNode("div", "workspace-hook-issue-list");
+    for (const issue of list.slice(0, 4)) {
+      wrap.appendChild(createNode("div", "workspace-hook-issue", compactText(issue)));
+    }
+    if (list.length > 4) {
+      wrap.appendChild(createNode("div", "workspace-overview-empty", `+${list.length - 4} more issues`));
+    }
+    container.appendChild(wrap);
+  }
+
+  function appendHookSlowHandlers(container, handlers) {
+    const list = Array.isArray(handlers) ? handlers : [];
+    if (list.length === 0) return;
+    const wrap = createNode("div", "workspace-hook-slow-list");
+    for (const handler of list.slice(0, 3)) {
+      const row = createNode("div", "workspace-hook-slow-row");
+      row.appendChild(
+        createNode(
+          "span",
+          "workspace-hook-slow-name",
+          compactText(handler?.handler || "handler"),
+        ),
+      );
+      appendMetaText(row, handler?.event);
+      appendMetaText(row, formatHookDurationMs(handler?.duration_ms));
+      wrap.appendChild(row);
+    }
+    container.appendChild(wrap);
+  }
+
+  function renderManagedHooksHealthSection(health) {
+    if (!health || typeof health !== "object") {
+      return null;
+    }
+    const status = hookHealthStatus(health);
+    const section = detailSection("Managed Hooks", (body) => {
+      const pendingDiscussion = health.pending_discussion;
+      const pendingGoal = health.pending_goal;
+      appendDefinitionList(body, [
+        ["Status", hookHealthStatusLabel(status)],
+        ["Last event", health.last_event],
+        ["Last event at", health.last_event_at],
+        [
+          "Discussion",
+          pendingDiscussion?.proposal_label || pendingDiscussion?.proposal_title,
+        ],
+        ["Goal", pendingGoal?.condition || pendingGoal?.proposal_title],
+      ]);
+      if (pendingDiscussion?.next_question) {
+        appendTextBlock(body, pendingDiscussion.next_question);
+      }
+      appendHookSlowHandlers(body, health.slow_handlers);
+      appendHookIssueList(body, health.issues);
+    });
+    section.dataset.section = "managed-hooks";
+    section.dataset.status = status || "unknown";
+    return section;
   }
 
   // SPEC-2359 Workspace → Work → Session: the detail is Session-centric. Each
@@ -1012,6 +1114,10 @@ export function createWorkspaceKanbanSurface({
         }
       }),
     );
+    const hookHealth = renderManagedHooksHealthSection(workspace.managed_hook_health);
+    if (hookHealth) {
+      container.appendChild(hookHealth);
+    }
     container.appendChild(
       detailSection("Current State", (body) => {
         appendDefinitionList(body, [

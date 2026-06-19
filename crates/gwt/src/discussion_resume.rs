@@ -522,6 +522,48 @@ pub fn load_pending_goal(worktree: &Path) -> io::Result<Option<PendingDiscussion
     Ok(None)
 }
 
+pub fn load_pending_goal_from_worktree_files(
+    worktree: &Path,
+) -> io::Result<Option<PendingDiscussionGoal>> {
+    for document in read_discussion_documents_from_worktree_files(worktree)? {
+        let proposals = parse_document_proposals(&document);
+        if let Some(goal) = select_pending_goal(&proposals) {
+            return Ok(Some(goal));
+        }
+    }
+    Ok(None)
+}
+
+fn read_discussion_documents_from_worktree_files(
+    worktree: &Path,
+) -> io::Result<Vec<DiscussionDocument>> {
+    let mut documents = Vec::new();
+    let canonical_path = worktree.join(CANONICAL_DISCUSSIONS_DISPLAY_PATH);
+    let should_read_legacy = if canonical_path.exists() {
+        let content = std::fs::read_to_string(&canonical_path)?;
+        let should_read_legacy = canonical_allows_legacy_fallback(&content);
+        documents.push(DiscussionDocument {
+            content,
+            path: canonical_path,
+            source: DiscussionSource::Canonical,
+        });
+        should_read_legacy
+    } else {
+        true
+    };
+
+    let legacy_path = worktree.join(DISCUSSION_RELATIVE_PATH);
+    if should_read_legacy && legacy_path.exists() {
+        documents.push(DiscussionDocument {
+            content: std::fs::read_to_string(&legacy_path)?,
+            path: legacy_path,
+            source: DiscussionSource::Legacy,
+        });
+    }
+
+    Ok(documents)
+}
+
 pub fn set_proposal_goal_pending_by_label(
     worktree: &Path,
     label: &str,
@@ -1559,5 +1601,37 @@ Status: active
         let updated = read_canonical_discussion(dir.path());
         assert!(updated.contains("- Goal State: started"));
         assert!(updated.contains("- Goal Condition: tests green and verification handoff ready"));
+    }
+
+    #[test]
+    fn goal_pending_rearms_state_even_when_condition_is_unchanged() {
+        let dir = tempfile::tempdir().unwrap();
+        let discussion_path = dir.path().join(DISCUSSION_RELATIVE_PATH);
+        std::fs::create_dir_all(discussion_path.parent().unwrap()).unwrap();
+        std::fs::write(
+            &discussion_path,
+            "## Discussion TODO\n\n\
+             ### Proposal A - Goal handoff [chosen]\n\
+             - Summary: Action Bundle is approved.\n\
+             - Goal Condition: tests green and verification handoff ready\n\
+             - Goal State: failed(goal tool unavailable)\n",
+        )
+        .unwrap();
+
+        assert!(set_proposal_goal_pending_by_label(
+            dir.path(),
+            "Proposal A",
+            "tests green and verification handoff ready"
+        )
+        .unwrap());
+
+        let updated = read_canonical_discussion(dir.path());
+        assert!(updated.contains("- Goal State: pending"), "{updated}");
+        assert_eq!(
+            load_pending_goal(dir.path())
+                .unwrap()
+                .map(|goal| goal.condition),
+            Some("tests green and verification handoff ready".to_string())
+        );
     }
 }

@@ -5,10 +5,11 @@
 //! - reuse the existing consolidated Bash safety policy first
 //! - block worktree escape, branch-switching, and direct GitHub workflow CLI
 //!   commands before they reach the tool runtime
-//! - keep read-only exploration, transport operations, and unowned worktree-local
-//!   edits non-blocking
-//! - block implementation-state changes only when a linked SPEC owner is known
-//!   but its plan/tasks sections are not ready
+//! - keep read-only exploration, transport operations, verification, and
+//!   explicit low-risk bookkeeping non-blocking
+//! - block mutating implementation work until an owner Issue/SPEC is linked
+//! - block implementation-state changes when a linked SPEC owner is known but
+//!   its plan/tasks sections are not ready
 
 use std::{collections::HashMap, io::Read, path::Path};
 
@@ -22,6 +23,8 @@ use gwt_core::{
 };
 use gwt_github::{body::SpecBody, sections::SectionName, Cache, IssueNumber};
 use serde::Deserialize;
+
+use crate::discussion_resume::PendingDiscussionGoal;
 
 use super::{block_bash_policy, HookError, HookEvent, HookOutput};
 
@@ -39,7 +42,7 @@ pub struct WorkflowContext {
     pub has_tasks: bool,
     pub bypass: Option<WorkflowBypass>,
     pub title_summary_missing: bool,
-    pub pending_discussion_goal: bool,
+    pub pending_discussion_goal: Option<PendingDiscussionGoal>,
 }
 
 impl WorkflowContext {
@@ -50,7 +53,7 @@ impl WorkflowContext {
             has_tasks: false,
             bypass: None,
             title_summary_missing: false,
-            pending_discussion_goal: false,
+            pending_discussion_goal: None,
         }
     }
 
@@ -61,7 +64,7 @@ impl WorkflowContext {
             has_tasks: false,
             bypass: None,
             title_summary_missing: false,
-            pending_discussion_goal: false,
+            pending_discussion_goal: None,
         }
     }
 
@@ -72,7 +75,7 @@ impl WorkflowContext {
             has_tasks,
             bypass: None,
             title_summary_missing: false,
-            pending_discussion_goal: false,
+            pending_discussion_goal: None,
         }
     }
 
@@ -83,7 +86,7 @@ impl WorkflowContext {
             has_tasks: false,
             bypass: Some(bypass),
             title_summary_missing: false,
-            pending_discussion_goal: false,
+            pending_discussion_goal: None,
         }
     }
 
@@ -92,7 +95,7 @@ impl WorkflowContext {
         self
     }
 
-    pub fn with_pending_discussion_goal(mut self, pending: bool) -> Self {
+    pub fn with_pending_discussion_goal(mut self, pending: Option<PendingDiscussionGoal>) -> Self {
         self.pending_discussion_goal = pending;
         self
     }
@@ -117,11 +120,11 @@ pub fn evaluate_with_context(
         return Ok(title_summary);
     }
     let pending_goal =
-        evaluate_pending_discussion_goal_guard(event, context.pending_discussion_goal)?;
+        evaluate_pending_discussion_goal_guard(event, context.pending_discussion_goal.as_ref())?;
     if pending_goal != HookOutput::Silent {
         return Ok(pending_goal);
     }
-    let owner = evaluate_owner_guard(event, context)?;
+    let owner = evaluate_owner_guard(event, worktree_root, context)?;
     if owner != HookOutput::Silent {
         return Ok(owner);
     }
@@ -134,8 +137,7 @@ pub fn evaluate(event: &HookEvent, worktree_root: &Path) -> Result<HookOutput, H
         .with_pending_discussion_goal(
             crate::discussion_resume::load_pending_goal(worktree_root)
                 .ok()
-                .flatten()
-                .is_some(),
+                .flatten(),
         );
     evaluate_with_context(event, worktree_root, &context)
 }
@@ -273,19 +275,29 @@ Use the configured narrative language for the purpose. Keep progress, completion
 
 fn evaluate_pending_discussion_goal_guard(
     event: &HookEvent,
-    pending_discussion_goal: bool,
+    pending_discussion_goal: Option<&PendingDiscussionGoal>,
 ) -> Result<HookOutput, HookError> {
-    if !pending_discussion_goal || is_goal_start_or_bookkeeping_event(event) {
+    let Some(goal) = pending_discussion_goal else {
+        return Ok(HookOutput::Silent);
+    };
+    if is_goal_start_or_bookkeeping_event(event) {
         return Ok(HookOutput::Silent);
     }
     if is_mutating_work_event(event) {
         return Ok(HookOutput::pre_tool_use_permission(
             "pending gwt-discussion Goal Start must be handled first",
-            "A gwt-discussion Action Bundle has a pending gwt-discussion Goal Start. Start, skip, or record the goal failure before changing implementation state.\n\n\
-Codex path: call `create_goal` with the pending Goal condition, then run JSON operation `discuss.goal_started`.\n\
-Claude Code path: run JSON operation `pane.send` with the `/goal <condition>` text, then run JSON operation `discuss.goal_started`.\n\
-Skip path: if the user rejects or revises the Action Bundle, run JSON operation `discuss.goal_skipped` with a reason.\n\
-Failure path: run JSON operation `discuss.goal_failed` with a reason and show the manual `/goal <condition>` line to the user.",
+            format!(
+                "A gwt-discussion Action Bundle has a pending gwt-discussion Goal Start. Start, skip, or record the goal failure before changing implementation state.\n\n\
+Proposal: {label} - {title}\n\
+Goal condition: {condition}\n\n\
+Codex path: call `create_goal` with the Goal condition above as the objective, then run JSON operation `discuss.goal_started` with `params.proposal:\"{label}\"`.\n\
+Claude Code path: run JSON operation `pane.send` with the `/goal {condition}` text, then run JSON operation `discuss.goal_started` with `params.proposal:\"{label}\"`.\n\
+Skip path: if the user rejects or revises the Action Bundle, run JSON operation `discuss.goal_skipped` with `params.proposal:\"{label}\"` and a reason.\n\
+Failure path: run JSON operation `discuss.goal_failed` with `params.proposal:\"{label}\"` and a reason, then show the manual `/goal {condition}` line to the user.",
+                label = goal.proposal_label,
+                title = goal.proposal_title,
+                condition = goal.condition,
+            ),
         ));
     }
     Ok(HookOutput::Silent)
@@ -293,6 +305,7 @@ Failure path: run JSON operation `discuss.goal_failed` with a reason and show th
 
 fn evaluate_owner_guard(
     event: &HookEvent,
+    worktree_root: &Path,
     context: &WorkflowContext,
 ) -> Result<HookOutput, HookError> {
     if context.bypass.is_some() {
@@ -300,14 +313,23 @@ fn evaluate_owner_guard(
     }
 
     match context.owner {
-        WorkflowOwner::Unknown => Ok(HookOutput::Silent),
+        WorkflowOwner::Unknown => {
+            if !requires_owner_for_mutating_work(event, worktree_root) {
+                return Ok(HookOutput::Silent);
+            }
+            Ok(HookOutput::pre_tool_use_permission(
+                "Owner Issue/SPEC is required before implementation",
+                "This tool call changes mutating implementation work, but no owner Issue/SPEC is linked to the current agent session.\n\n\
+Start or link the work first through `gwt-register-issue`, `gwt-fix-issue`, or an approved SPEC plan. Read-only exploration, explicit goal/workspace/Board bookkeeping, verification commands, transport-only commands, docs/chore edits, and low-risk worktree-local `touch`/`rm` file operations remain allowed.",
+            ))
+        }
         WorkflowOwner::Issue(_) => Ok(HookOutput::Silent),
         WorkflowOwner::Spec(number) if context.has_plan && context.has_tasks => {
             let _ = number;
             Ok(HookOutput::Silent)
         }
         WorkflowOwner::Spec(number) => {
-            if !requires_spec_plan_tasks(event) {
+            if !requires_spec_plan_tasks(event, worktree_root) {
                 return Ok(HookOutput::Silent);
             }
             let detail = format!(
@@ -321,9 +343,160 @@ fn evaluate_owner_guard(
     }
 }
 
-fn requires_spec_plan_tasks(event: &HookEvent) -> bool {
+fn requires_owner_for_mutating_work(event: &HookEvent, worktree_root: &Path) -> bool {
     match event.tool_name.as_deref() {
-        Some("Edit" | "MultiEdit" | "Write" | "NotebookEdit" | "apply_patch") => true,
+        Some("Edit" | "MultiEdit" | "Write" | "NotebookEdit") => {
+            !event_targets_documentation_or_guidance(event, worktree_root)
+        }
+        Some("apply_patch") => !event_targets_documentation_or_guidance(event, worktree_root),
+        Some("Bash") => event
+            .command()
+            .is_some_and(|command| !command_segments_are_ownerless_safe(command, worktree_root)),
+        _ => false,
+    }
+}
+
+fn event_targets_documentation_or_guidance(event: &HookEvent, worktree_root: &Path) -> bool {
+    let paths = event_target_paths(event);
+    !paths.is_empty()
+        && paths
+            .iter()
+            .all(|path| is_documentation_or_guidance_path(path, worktree_root))
+}
+
+fn event_target_paths(event: &HookEvent) -> Vec<String> {
+    let mut paths = Vec::new();
+    if let Some(path) = event
+        .tool_input
+        .as_ref()
+        .and_then(|input| input.get("file_path"))
+        .and_then(serde_json::Value::as_str)
+    {
+        paths.push(path.to_string());
+    }
+    if event.tool_name.as_deref() == Some("apply_patch") {
+        if let Some(input) = event.tool_input.as_ref() {
+            if let Some(patch) = input.as_str() {
+                paths.extend(apply_patch_target_paths(patch));
+            }
+            for key in ["patch", "input", "content", "cmd", "command"] {
+                if let Some(patch) = input.get(key).and_then(serde_json::Value::as_str) {
+                    paths.extend(apply_patch_target_paths(patch));
+                }
+            }
+        }
+    }
+    paths
+}
+
+fn apply_patch_target_paths(patch: &str) -> Vec<String> {
+    const PREFIXES: &[&str] = &[
+        "*** Add File: ",
+        "*** Delete File: ",
+        "*** Update File: ",
+        "*** Move to: ",
+    ];
+
+    patch
+        .lines()
+        .filter_map(|line| {
+            PREFIXES
+                .iter()
+                .find_map(|prefix| line.strip_prefix(prefix))
+                .map(str::trim)
+                .filter(|path| !path.is_empty())
+                .map(ToOwned::to_owned)
+        })
+        .collect()
+}
+
+fn is_documentation_or_guidance_path(path: &str, worktree_root: &Path) -> bool {
+    let path = path.trim_matches(|ch| ch == '\'' || ch == '"');
+    let path = Path::new(path);
+    let relative = if path.is_absolute() {
+        let Ok(relative) = path.strip_prefix(worktree_root) else {
+            return false;
+        };
+        relative
+    } else {
+        path
+    };
+    let normalized = relative.to_string_lossy();
+    normalized == "README.md"
+        || normalized == "README.ja.md"
+        || normalized == "AGENTS.md"
+        || normalized == "CLAUDE.md"
+        || normalized.starts_with("docs/")
+        || normalized.starts_with("tasks/")
+        || normalized.ends_with(".md")
+}
+
+fn command_segments_are_ownerless_safe(command: &str, worktree_root: &Path) -> bool {
+    if command_segments_are_goal_safe(command) {
+        return true;
+    }
+    let segments = super::segments::split_command_segments(command);
+    !segments.is_empty()
+        && segments
+            .iter()
+            .all(|segment| is_ownerless_safe_segment(segment, worktree_root))
+}
+
+fn is_ownerless_safe_segment(segment: &str, worktree_root: &Path) -> bool {
+    is_read_only_segment(segment)
+        || is_transport_segment(segment)
+        || is_verification_segment(segment)
+        || is_goal_bookkeeping_segment(segment)
+        || is_workspace_identity_update_segment(segment)
+        || is_board_post_segment(segment)
+        || is_low_risk_worktree_file_op_segment(segment, worktree_root)
+}
+
+fn is_low_risk_worktree_file_op_segment(segment: &str, worktree_root: &Path) -> bool {
+    let tokens = segment_tokens(segment);
+    let Some(command_name) = tokens.first().map(|token| normalize_command_name(token)) else {
+        return false;
+    };
+    match command_name.as_str() {
+        "touch" => {
+            let paths = tokens.iter().skip(1).copied().collect::<Vec<_>>();
+            !paths.is_empty()
+                && paths
+                    .iter()
+                    .all(|path| path_is_worktree_local(path, worktree_root))
+        }
+        "rm" => {
+            let paths = tokens
+                .iter()
+                .skip(1)
+                .copied()
+                .filter(|token| !token.starts_with('-'))
+                .collect::<Vec<_>>();
+            !paths.is_empty()
+                && paths
+                    .iter()
+                    .all(|path| path_is_worktree_local(path, worktree_root))
+        }
+        _ => false,
+    }
+}
+
+fn path_is_worktree_local(path: &str, worktree_root: &Path) -> bool {
+    let path = path.trim_matches(|ch| ch == '\'' || ch == '"');
+    let path = Path::new(path);
+    if path.is_absolute() {
+        return path.starts_with(worktree_root);
+    }
+    !path
+        .components()
+        .any(|component| matches!(component, std::path::Component::ParentDir))
+}
+
+fn requires_spec_plan_tasks(event: &HookEvent, worktree_root: &Path) -> bool {
+    match event.tool_name.as_deref() {
+        Some("Edit" | "MultiEdit" | "Write" | "NotebookEdit" | "apply_patch") => {
+            !event_targets_documentation_or_guidance(event, worktree_root)
+        }
         Some("Bash") => event
             .command()
             .is_some_and(command_requires_spec_plan_tasks),
@@ -372,6 +545,7 @@ fn is_verification_segment(segment: &str) -> bool {
         tokens.as_slice(),
         ["cargo", "test", ..]
             | ["cargo", "clippy", ..]
+            | ["cargo", "fmt", ..]
             | ["cargo", "build", ..]
             | ["cargo", "check", ..]
             | ["bun", "test", ..]
@@ -1325,6 +1499,15 @@ Coverage requirements.
 
     #[test]
     fn evaluate_with_context_blocks_mutating_tools_until_pending_discussion_goal_starts() {
+        fn pending_goal() -> PendingDiscussionGoal {
+            PendingDiscussionGoal {
+                proposal_label: "Proposal A".to_string(),
+                proposal_title: "Goal handoff".to_string(),
+                condition: "verification handoff ready with User Verification Result recorded"
+                    .to_string(),
+            }
+        }
+
         let event = HookEvent {
             tool_name: Some("Edit".to_string()),
             tool_input: Some(serde_json::json!({
@@ -1337,7 +1520,7 @@ Coverage requirements.
         let output = evaluate_with_context(
             &event,
             std::path::Path::new("."),
-            &WorkflowContext::unknown().with_pending_discussion_goal(true),
+            &WorkflowContext::unknown().with_pending_discussion_goal(Some(pending_goal())),
         )
         .expect("guard output");
 
@@ -1351,6 +1534,10 @@ Coverage requirements.
         assert!(detail.contains("create_goal"), "{detail}");
         assert!(detail.contains("discuss.goal_started"), "{detail}");
         assert!(detail.contains("discuss.goal_skipped"), "{detail}");
+        assert!(
+            detail.contains("verification handoff ready with User Verification Result recorded"),
+            "{detail}"
+        );
 
         let allowed = HookEvent {
             tool_name: Some("create_goal".to_string()),
@@ -1362,7 +1549,7 @@ Coverage requirements.
             evaluate_with_context(
                 &allowed,
                 std::path::Path::new("."),
-                &WorkflowContext::unknown().with_pending_discussion_goal(true),
+                &WorkflowContext::unknown().with_pending_discussion_goal(Some(pending_goal())),
             )
             .expect("allowed output"),
             HookOutput::Silent
@@ -1383,7 +1570,7 @@ Coverage requirements.
                 evaluate_with_context(
                     &allowed,
                     std::path::Path::new("."),
-                    &WorkflowContext::unknown().with_pending_discussion_goal(true),
+                    &WorkflowContext::unknown().with_pending_discussion_goal(Some(pending_goal())),
                 )
                 .expect("allowed JSON bookkeeping output"),
                 HookOutput::Silent,
@@ -1412,7 +1599,7 @@ Coverage requirements.
     }
 
     #[test]
-    fn owner_guard_allows_mutating_tools_without_owner() {
+    fn owner_guard_blocks_mutating_tools_without_owner() {
         let repo = tempfile::tempdir().expect("repo");
         let event = HookEvent {
             tool_name: Some("Edit".to_string()),
@@ -1423,11 +1610,16 @@ Coverage requirements.
             cwd: None,
         };
 
-        assert_eq!(
-            evaluate_with_context(&event, repo.path(), &WorkflowContext::unknown())
-                .expect("guard output"),
-            HookOutput::Silent
-        );
+        let output = evaluate_with_context(&event, repo.path(), &WorkflowContext::unknown())
+            .expect("guard output");
+        let HookOutput::PreToolUsePermission {
+            summary, detail, ..
+        } = output
+        else {
+            panic!("expected owner guard");
+        };
+        assert!(summary.contains("Owner Issue/SPEC"), "{summary}");
+        assert!(detail.contains("mutating implementation work"), "{detail}");
     }
 
     #[test]

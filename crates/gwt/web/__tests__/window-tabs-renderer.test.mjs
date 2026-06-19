@@ -178,43 +178,51 @@ test("renderWindowTabs projects agent telemetry onto tabs (SPEC-3038 US-2)", () 
         id: "win-1",
         title: "Agent One",
         preset: "codex",
-        agent_state: "active",
+        agent_state: "running",
         agent_color: "cyan",
       },
       {
         id: "win-2",
         title: "Agent Two",
         preset: "claude",
-        agent_state: "blocked",
+        agent_state: "error",
         agent_color: "yellow",
       },
     ],
   });
 
   const first = strip.querySelector('[data-window-tab-id="win-1"] .window-tab');
-  assert.equal(first.dataset.agentState, "active");
+  assert.equal(first.dataset.agentState, "running");
   assert.equal(
     first.dataset.agentColor,
     "cyan",
     "tab must carry the agent color so --current-agent resolves on the rim",
   );
-  const dot = first.querySelector(".window-tab-state");
-  assert.ok(dot, "expected a state dot inside the tab");
-  assert.equal(dot.hidden, false);
+  const cue = first.querySelector(".window-tab-state");
+  assert.ok(cue, "expected a state cue inside the tab");
+  assert.equal(cue.hidden, false);
+  assert.equal(cue.textContent, "RUN");
   assert.equal(
-    dot.getAttribute("aria-hidden"),
+    cue.getAttribute("aria-hidden"),
     "true",
-    "state dot is decorative — state is announced via the window chrome",
+    "state cue is decorative because the tab button announces the state",
+  );
+  assert.equal(
+    first.getAttribute("aria-label"),
+    "Activate Agent One (RUN)",
+    "agent state must be announced from the tab button",
   );
   assert.equal(
     first.querySelector(".window-tab-label")?.textContent,
     "Agent One",
-    "title must live in a label span so the dot survives re-renders",
+    "title must live in a label span so the cue survives re-renders",
   );
 
   const second = strip.querySelector('[data-window-tab-id="win-2"] .window-tab');
-  assert.equal(second.dataset.agentState, "blocked");
+  assert.equal(second.dataset.agentState, "error");
   assert.equal(second.dataset.agentColor, "yellow");
+  assert.equal(second.querySelector(".window-tab-state")?.textContent, "BLOCK");
+  assert.equal(second.getAttribute("aria-label"), "Activate Agent Two (BLOCK)");
 });
 
 test("renderWindowTabs omits telemetry attributes for non-agent tabs (SPEC-3038 US-2)", () => {
@@ -228,9 +236,10 @@ test("renderWindowTabs omits telemetry attributes for non-agent tabs (SPEC-3038 
   const tab = strip.querySelector('[data-window-tab-id="win-1"] .window-tab');
   assert.equal(tab.dataset.agentState, undefined);
   assert.equal(tab.dataset.agentColor, undefined);
-  const dot = tab.querySelector(".window-tab-state");
-  assert.ok(dot, "the dot node stays keyed in place even without telemetry");
-  assert.equal(dot.hidden, true, "non-agent tabs must hide the state dot");
+  const cue = tab.querySelector(".window-tab-state");
+  assert.ok(cue, "the cue node stays keyed in place even without telemetry");
+  assert.equal(cue.hidden, true, "non-agent tabs must hide the state cue");
+  assert.equal(cue.textContent, "");
 });
 
 test("renderWindowTabs updates telemetry in place on state change (SPEC-3038 AS-2.2)", () => {
@@ -243,7 +252,7 @@ test("renderWindowTabs updates telemetry in place on state change (SPEC-3038 AS-
         id: "win-1",
         title: "Agent One",
         preset: "codex",
-        agent_state: "active",
+        agent_state: "running",
         agent_color: "cyan",
       },
     ],
@@ -257,7 +266,7 @@ test("renderWindowTabs updates telemetry in place on state change (SPEC-3038 AS-
         id: "win-1",
         title: "Agent One",
         preset: "codex",
-        agent_state: "blocked",
+        agent_state: "error",
         agent_color: "cyan",
       },
     ],
@@ -268,7 +277,8 @@ test("renderWindowTabs updates telemetry in place on state change (SPEC-3038 AS-
     button,
     "state changes must update the keyed tab node in place",
   );
-  assert.equal(button.dataset.agentState, "blocked");
+  assert.equal(button.dataset.agentState, "error");
+  assert.equal(button.querySelector(".window-tab-state")?.textContent, "BLOCK");
 
   render({
     strip,
@@ -279,9 +289,10 @@ test("renderWindowTabs updates telemetry in place on state change (SPEC-3038 AS-
     undefined,
     "clearing telemetry must remove the attribute",
   );
+  assert.equal(button.querySelector(".window-tab-state")?.textContent, "");
 });
 
-test("app.css styles telemetry tabs: agent rim, state dot, pulse, hover-only close (SPEC-3038)", () => {
+test("app.css styles telemetry tabs: agent rim, static state cue, hover-only close (SPEC-3038)", () => {
   const css = readFileSync(resolve(here, "../styles/app.css"), "utf8");
 
   // The window-level [data-agent-state] glow rules must not leak onto tabs.
@@ -295,26 +306,46 @@ test("app.css styles telemetry tabs: agent rim, state dot, pulse, hover-only clo
     /\.window-tab\[data-agent-state\]\s*\{[^}]*border-left[^}]*--current-agent/,
     "tabs must carry an agent-colored left rim",
   );
-  assert.match(css, /\.window-tab-state\s*\{/, "expected a state dot rule");
+  assert.match(css, /\.window-tab-state\s*\{/, "expected a state cue rule");
   assert.match(
     css,
-    /\.window-tab\[data-agent-state="active"\]\s+\.window-tab-state\s*\{[^}]*var\(--color-state-active\)/,
-    "active dot uses the active state token",
+    /\.window-tab-state\s*\{[^}]*background:\s*transparent/,
+    "state cue must not use a filled badge background",
   );
   assert.match(
     css,
-    /\.window-tab\[data-agent-state="blocked"\]\s+\.window-tab-state\s*\{[^}]*var\(--color-state-blocked\)/,
-    "blocked dot uses the blocked state token",
+    /\.window-tab-state\s*\{[^}]*border:\s*0/,
+    "state cue must not render as a boxed pill",
   );
   assert.match(
+    css,
+    /\.window-tab-state\s*\{[^}]*min-width:\s*24px/,
+    "state cue must remain compact inside narrow tabs",
+  );
+  assert.match(
+    css,
+    /\.window-tab\[data-agent-state="running"\]\s+\.window-tab-state\s*\{[^}]*var\(--color-state-active\)/,
+    "RUN cue uses the active state token",
+  );
+  assert.match(
+    css,
+    /\.window-tab\[data-agent-state="error"\]\s+\.window-tab-state\s*\{[^}]*var\(--color-state-blocked\)/,
+    "BLOCK cue uses the blocked state token",
+  );
+  assert.match(
+    css,
+    /\.window-tab\[data-agent-state="starting"\]\s+\.window-tab-state\s*\{[^}]*var\(--color-state-idle\)/,
+    "START cue uses the idle state token",
+  );
+  assert.doesNotMatch(
     css,
     /@keyframes\s+window-tab-state-pulse/,
-    "expected a named tab state pulse animation",
+    "window tab state cues must not rely on pulse animation",
   );
   assert.match(
     css,
-    /prefers-reduced-motion[\s\S]{0,2000}?\.window-tab\[data-agent-state="active"\]\s+\.window-tab-state[\s\S]{0,200}?animation:\s*none/,
-    "reduced-motion must stop tab dot pulses",
+    /\.window-tab\[data-agent-state="running"\]\s+\.window-tab-state\s*\{[^}]*animation\s*:\s*none\s*;?/,
+    "RUN cue must explicitly stay static",
   );
   // AS-2.4: the close button only appears on hover / keyboard focus.
   assert.match(

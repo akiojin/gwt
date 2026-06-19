@@ -5101,6 +5101,43 @@ fn app_runtime_active_work_projection_groups_live_assigned_agents_by_work_id() {
             .any(|agent| agent.session_id == "session-b")));
 }
 
+#[test]
+fn app_runtime_active_work_projection_includes_managed_hook_health() {
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedEnvVar::set("HOME", temp.path());
+    let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+    let repo = temp.path().join("repo");
+    fs::create_dir_all(&repo).expect("create repo");
+    gwt_skills::generate_codex_hooks(&repo).expect("generate codex hooks");
+    let tab = sample_project_tab("tab-1", "Repo", repo.clone(), ProjectKind::Git, &[]);
+    let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+    let mut session = sample_active_agent_session("tab-1", "tab-1::agent-a");
+    session.session_id = "session-a".to_string();
+    session.worktree_path = repo.clone();
+    session.agent_project_root = repo.display().to_string();
+    runtime
+        .active_agent_sessions
+        .insert("tab-1::agent-a".to_string(), session);
+    let runtime_path = gwt_agent::runtime_state_path(&runtime.sessions_dir, "session-a");
+    gwt::cli::hook::runtime_state::write_for_event(&runtime_path, "PreToolUse")
+        .expect("runtime state");
+
+    let view = runtime
+        .active_work_projection_for_tab("tab-1", &runtime.tabs[0])
+        .expect("projection view");
+
+    let health = view
+        .managed_hook_health
+        .as_ref()
+        .expect("managed hook health");
+    assert_eq!(health.status, "ready");
+    assert_eq!(health.last_event.as_deref(), Some("PreToolUse"));
+    assert!(health.issues.is_empty(), "{:?}", health.issues);
+}
+
 /// SPEC-2359 Phase W-12 Slice 2 (FR-348): "1 agent session : 1 Work". When
 /// the *same* `session_id` surfaces under multiple windows, the agents
 /// collapse into a single Work row keyed by that session. The Workspace detail
