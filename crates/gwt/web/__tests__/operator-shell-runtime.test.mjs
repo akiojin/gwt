@@ -276,6 +276,98 @@ test("Runtime health focusable process rows call the focus callback", async () =
   assert.deepEqual(focused, ["agent-window-1"]);
 });
 
+test("Runtime health groups Codex launcher and native child processes", async () => {
+  const { applyRuntimeHealth } = await importOperatorShell();
+  assert.equal(typeof applyRuntimeHealth, "function");
+  const { document, window } = parseHTML(html);
+  const focused = [];
+
+  applyRuntimeHealth(
+    document,
+    {
+      state: "hot",
+      cpu_percent: 84.2,
+      memory_bytes: 924 * 1024 * 1024,
+      process_count: 5,
+      runner_count: 0,
+      queue: {
+        client_count: 1,
+        queued_entries: 0,
+        dirty_panes: 0,
+        dropped_lossy_delta: 0,
+      },
+      processes: [
+        {
+          pid: 101,
+          parent_pid: null,
+          role: "codex",
+          name: "node",
+          cpu_percent: 2.4,
+          memory_bytes: 48 * 1024 * 1024,
+          focus_window_id: "codex-window-1",
+        },
+        {
+          pid: 102,
+          parent_pid: 101,
+          role: "codex",
+          name: "codex",
+          cpu_percent: 37.6,
+          memory_bytes: 260 * 1024 * 1024,
+          focus_window_id: "codex-window-1",
+        },
+        {
+          pid: 201,
+          parent_pid: null,
+          role: "codex",
+          name: "node",
+          cpu_percent: 0.1,
+          memory_bytes: 48 * 1024 * 1024,
+        },
+        {
+          pid: 202,
+          parent_pid: 201,
+          role: "codex",
+          name: "codex",
+          cpu_percent: 5.5,
+          memory_bytes: 220 * 1024 * 1024,
+        },
+        {
+          pid: 301,
+          parent_pid: null,
+          role: "gwtd",
+          name: "gwtd",
+          cpu_percent: 1.0,
+          memory_bytes: 12 * 1024 * 1024,
+        },
+      ],
+    },
+    {
+      focusWindow: (windowId) => focused.push(windowId),
+    },
+  );
+
+  const cell = document.getElementById("op-strip-runtime-health");
+  cell?.dispatchEvent(new window.Event("mouseenter", { bubbles: true }));
+  const detail = document.getElementById("op-runtime-health-detail");
+  const processRows = [...(detail?.querySelectorAll(".op-runtime-health-detail__process") ?? [])];
+  const codexRows = processRows.filter((row) =>
+    row.querySelector(".op-runtime-health-detail__process-role")?.textContent?.includes("codex"),
+  );
+  const focusableRows =
+    detail?.querySelectorAll(".op-runtime-health-detail__process--focusable") ?? [];
+
+  assert.equal(processRows.length, 3, "two Codex process pairs should render as two group rows");
+  assert.equal(codexRows.length, 2);
+  assert.match(codexRows[0]?.textContent ?? "", /codex \(2 proc\)/);
+  assert.match(codexRows[0]?.textContent ?? "", /102\+1/);
+  assert.match(codexRows[0]?.textContent ?? "", /40%/);
+  assert.match(codexRows[0]?.textContent ?? "", /308M/);
+  assert.equal(focusableRows.length, 1);
+
+  focusableRows[0]?.dispatchEvent(new window.Event("click", { bubbles: true }));
+  assert.deepEqual(focused, ["codex-window-1"]);
+});
+
 test("Runtime health detail scrolls all process rows and highlights heavy focusable rows", async () => {
   const { applyRuntimeHealth } = await importOperatorShell();
   assert.equal(typeof applyRuntimeHealth, "function");
@@ -367,8 +459,8 @@ test("Runtime health detail scroll area clamps to the viewport", async () => {
   const processes = Array.from({ length: 24 }, (_, index) => ({
     pid: 1000 + index,
     parent_pid: index === 0 ? null : 1000,
-    role: index % 2 === 0 ? "codex" : "gwt",
-    name: index % 2 === 0 ? "codex" : "gwt",
+    role: index % 2 === 0 ? "runner" : "gwt",
+    name: index % 2 === 0 ? "python3" : "gwt",
     cpu_percent: 16 - index,
     memory_bytes: (256 + index) * 1024 * 1024,
   }));

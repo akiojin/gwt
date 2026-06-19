@@ -459,7 +459,8 @@ function renderRuntimeHealthDetail(doc, snapshot, queue, options) {
   const processList = doc.createElement("div");
   processList.className = "op-runtime-health-detail__process-list";
   processList.setAttribute("aria-label", "Runtime processes");
-  const processes = Array.isArray(snapshot.processes) ? snapshot.processes : [];
+  const rawProcesses = Array.isArray(snapshot.processes) ? snapshot.processes : [];
+  const processes = runtimeHealthDisplayProcesses(rawProcesses);
   if (processes.length > RUNTIME_HEALTH_SCROLL_PROCESS_THRESHOLD) {
     processList.dataset.scroll = "true";
   }
@@ -476,7 +477,7 @@ function renderRuntimeHealthDetail(doc, snapshot, queue, options) {
     if (processes.length > RUNTIME_HEALTH_SCROLL_PROCESS_THRESHOLD) {
       const more = doc.createElement("div");
       more.className = "op-runtime-health-detail__process-more";
-      more.textContent = `Showing ${processes.length} processes sorted by CPU`;
+      more.textContent = runtimeHealthProcessSummary(processes, rawProcesses);
       processList.appendChild(more);
     }
   }
@@ -542,9 +543,10 @@ function renderRuntimeHealthProcess(doc, process, options = {}) {
   if (canFocus) {
     row.classList.add("op-runtime-health-detail__process--focusable");
     row.type = "button";
+    const processLabel = runtimeHealthProcessNameLabel(process);
     row.setAttribute(
       "aria-label",
-      `Focus ${process.name || "process"} process ${process.pid ?? "--"}`,
+      `Focus ${processLabel || "process"} process ${runtimeHealthProcessPidLabel(process)}`,
     );
     row.addEventListener("click", (event) => {
       event.preventDefault();
@@ -560,12 +562,12 @@ function renderRuntimeHealthProcess(doc, process, options = {}) {
 
   const name = doc.createElement("span");
   name.className = "op-runtime-health-detail__process-name";
-  name.textContent = process.name || "unknown";
+  name.textContent = runtimeHealthProcessNameLabel(process);
   row.appendChild(name);
 
   const pid = doc.createElement("span");
   pid.className = "op-runtime-health-detail__process-pid";
-  pid.textContent = process.pid ?? "--";
+  pid.textContent = runtimeHealthProcessPidLabel(process);
   row.appendChild(pid);
 
   const cpu = doc.createElement("span");
@@ -591,6 +593,135 @@ function runtimeHealthProcessHeat(cpu) {
 
 function runtimeHealthProcessLooksLikeAgent(process) {
   return ["agent", "codex", "claude", "docker"].includes(String(process?.role || ""));
+}
+
+function runtimeHealthDisplayProcesses(processes) {
+  if (!Array.isArray(processes) || processes.length === 0) return [];
+
+  const byPid = new Map();
+  for (const process of processes) {
+    const pid = Number(process?.pid);
+    if (Number.isFinite(pid)) byPid.set(pid, process);
+  }
+
+  const groups = new Map();
+  const standalone = [];
+  for (const process of processes) {
+    if (!runtimeHealthProcessShouldGroup(process)) {
+      standalone.push(process);
+      continue;
+    }
+    const rootPid = runtimeHealthProcessGroupRootPid(process, byPid);
+    if (!groups.has(rootPid)) groups.set(rootPid, []);
+    groups.get(rootPid).push(process);
+  }
+
+  const display = [...standalone];
+  for (const group of groups.values()) {
+    display.push(runtimeHealthProcessGroupView(group));
+  }
+  display.sort(compareRuntimeHealthProcesses);
+  return display;
+}
+
+function runtimeHealthProcessShouldGroup(process) {
+  return ["codex", "claude", "docker"].includes(String(process?.role || ""));
+}
+
+function runtimeHealthProcessGroupRootPid(process, byPid) {
+  const role = String(process?.role || "");
+  let current = process;
+  const seen = new Set();
+  while (current && !seen.has(Number(current.pid))) {
+    seen.add(Number(current.pid));
+    const parent = byPid.get(Number(current.parent_pid));
+    if (!parent || String(parent.role || "") !== role) break;
+    current = parent;
+  }
+  return Number(current?.pid ?? process?.pid);
+}
+
+function runtimeHealthProcessGroupView(group) {
+  if (group.length <= 1) return group[0];
+  const primary = [...group].sort(compareRuntimeHealthGroupPrimary)[0] || group[0];
+  const cpuValues = group
+    .map((process) => Number(process.cpu_percent))
+    .filter((value) => Number.isFinite(value));
+  const memoryValues = group
+    .map((process) => Number(process.memory_bytes))
+    .filter((value) => Number.isFinite(value));
+  const memoryBytes =
+    memoryValues.length > 0 ? memoryValues.reduce((sum, value) => sum + value, 0) : null;
+  const focusWindowId =
+    runtimeHealthFocusWindowId(primary) ||
+    group.map(runtimeHealthFocusWindowId).find((windowId) => windowId) ||
+    null;
+
+  return {
+    ...primary,
+    name: runtimeHealthProcessRoleLabel(primary),
+    cpu_percent:
+      cpuValues.length > 0 ? cpuValues.reduce((sum, value) => sum + value, 0) : null,
+    memory_bytes: memoryBytes,
+    focus_window_id: focusWindowId,
+    process_count: group.length,
+  };
+}
+
+function compareRuntimeHealthGroupPrimary(left, right) {
+  const cpuCompare =
+    runtimeHealthNumeric(right.cpu_percent) - runtimeHealthNumeric(left.cpu_percent);
+  if (cpuCompare !== 0) return cpuCompare;
+  const memoryCompare =
+    runtimeHealthNumeric(right.memory_bytes) - runtimeHealthNumeric(left.memory_bytes);
+  if (memoryCompare !== 0) return memoryCompare;
+  const wrapperCompare = runtimeHealthWrapperRank(left) - runtimeHealthWrapperRank(right);
+  if (wrapperCompare !== 0) return wrapperCompare;
+  return runtimeHealthNumeric(left.pid) - runtimeHealthNumeric(right.pid);
+}
+
+function compareRuntimeHealthProcesses(left, right) {
+  const cpuCompare =
+    runtimeHealthNumeric(right.cpu_percent) - runtimeHealthNumeric(left.cpu_percent);
+  if (cpuCompare !== 0) return cpuCompare;
+  const memoryCompare =
+    runtimeHealthNumeric(right.memory_bytes) - runtimeHealthNumeric(left.memory_bytes);
+  if (memoryCompare !== 0) return memoryCompare;
+  return runtimeHealthNumeric(left.pid) - runtimeHealthNumeric(right.pid);
+}
+
+function runtimeHealthWrapperRank(process) {
+  const name = String(process?.name || "").toLowerCase();
+  return name === "node" || name.startsWith("npm") || name.startsWith("npx") ? 1 : 0;
+}
+
+function runtimeHealthNumeric(value) {
+  const number = Number(value);
+  return Number.isFinite(number) ? number : 0;
+}
+
+function runtimeHealthProcessRoleLabel(process) {
+  const role = String(process?.role || "").trim();
+  return role || "process";
+}
+
+function runtimeHealthProcessNameLabel(process) {
+  const name = process?.name || "unknown";
+  const count = Number(process?.process_count);
+  return Number.isFinite(count) && count > 1 ? `${name} (${count} proc)` : name;
+}
+
+function runtimeHealthProcessPidLabel(process) {
+  const pid = process?.pid ?? "--";
+  const count = Number(process?.process_count);
+  return Number.isFinite(count) && count > 1 ? `${pid}+${count - 1}` : pid;
+}
+
+function runtimeHealthProcessSummary(processes, rawProcesses) {
+  if (rawProcesses.length !== processes.length) {
+    return `Showing ${processes.length} groups / ${rawProcesses.length} processes sorted by CPU`;
+  }
+  return `Showing ${processes.length} processes sorted by CPU`;
 }
 
 // ------------------------------------------------------------
