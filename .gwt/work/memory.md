@@ -7039,3 +7039,10 @@ Type: failure_pattern
 Context: SPEC-3107 runtime health PERF detail originally rendered up to 16 process rows inside a hover popover. In a real browser at status-strip position, the bottom process row looked clipped and the user reported 見切れています.
 Learning: For status-strip or toolbar diagnostics with dynamic lists, viewport max-height alone is not enough. Cap visible rows, show an explicit top-N/total indicator, and set popover left/bottom/maxHeight from the trigger rect so the surface stays inside the viewport.
 Future Action: When adding hover/focus diagnostic popovers, add focused frontend tests that simulate a near-edge trigger and assert row count caps plus viewport-clamped style values before handing the UI to the user.
+
+## 2026-06-20 — Runtime health popover interactions require live E2E hold-open checks
+
+Type: lesson
+Context: SPEC-3107 PERF detail sort controls were initially verified with linkedom unit tests and a live DOM click script, but the live check did not assert that the tooltip remained visible after the user clicked Load/CPU/Mem. User verification caught that the window closed after clicking a sort button.
+Learning: For hover/focus popovers that re-render their own controls, DOM/order assertions are insufficient. The regression must drive a real browser click, wait beyond the hide debounce, and assert the popover is still visible. Re-rendering focused controls can fire focusout and leave a stale hide timer.
+Future Action: When changing popover controls in gwt, add or run a live Playwright test that clicks each control and waits at least one debounce interval before asserting visibility and content. Do not call this E2E-verified unless that hold-open behavior is covered.
