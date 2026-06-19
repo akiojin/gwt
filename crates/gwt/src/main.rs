@@ -2277,6 +2277,7 @@ mod tests {
             local_worktree_branches: std::cell::RefCell::new(HashMap::new()),
             window_pty_statuses: HashMap::new(),
             window_hook_states: HashMap::new(),
+            recoverable_agent_error_windows: std::collections::HashSet::new(),
             hook_forward_target: None,
             issue_link_cache_dir: gwt_core::paths::gwt_cache_dir(),
             pending_update: None,
