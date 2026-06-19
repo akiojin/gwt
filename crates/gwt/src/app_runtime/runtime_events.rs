@@ -195,6 +195,7 @@ impl AppRuntime {
         let Some(hook_state) = gwt::window_state::runtime_hook_window_state(&event) else {
             return events;
         };
+        self.recoverable_agent_error_windows.remove(&window_id);
         if self.window_hook_states.get(&window_id).copied() == Some(hook_state) {
             return events;
         }
