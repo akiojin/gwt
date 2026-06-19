@@ -186,6 +186,7 @@ fn cli_command_family_split_round_trip_parses() {
             status: Some("active".to_string()),
             status_text: Some("Cleaning projection state".to_string()),
             summary: Some("Workspace state is updated by the Agent".to_string()),
+            progress_summary: None,
             next_action: Some("Run regression tests".to_string()),
             owner: Some("SPEC-2359".to_string()),
             agent_session: Some("session-1".to_string()),

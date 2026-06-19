@@ -7054,6 +7054,20 @@ Context: SPEC #2963 Slack/Teams remote Board providers were posting entries as W
 Learning: Slack conversations.history and Microsoft Graph channel messages do not provide the thread reply stream as Board entries. Root summary cards and arbitrary flat channel messages must not be mapped into BoardEntry; provider tests should seed root mappings and assert calls to conversations.replies or /messages/{root}/replies.
 Future Action: When changing remote Board providers, write RED tests against provider-specific reply endpoints with a seeded board_remote_roots mapping, include mapped-channel roots distinct from the default channel, and verify board.show reads replies back before claiming completion.
 
+## 2026-06-17 — issue.spec.edit body replaces section content
+
+Type: lesson
+Context: While updating SPEC #2359 tasks after implementing the Workspace session summary / Resume normalization follow-up, I used issue.spec.edit with section=tasks and a body containing only a completion note, expecting append semantics.
+Learning: issue.spec.edit with a plain body replaces the target section. It does not append. For large tasks sections this can erase existing task history unless the caller first reads/extracts the full existing artifact and writes back the complete replacement body.
+Future Action: Before updating SPEC sections, read the current section and either construct a full replacement body that preserves existing content, or use a documented append/comment workflow. Never send a partial completion note as section body unless replacing the section is intentional.
+
+## 2026-06-19 — Backfill Workspace progress_summary for legacy Work rows
+
+Type: failure-pattern
+Context: SPEC-3075 Workspace Progress Summary follow-up: UI fallback bug was fixed first, but most historical Work rows still displayed empty progress because persisted Work events lacked progress_summary. Hooks only reminded agents to write summaries and did not backfill old records.
+Learning: Adding a new display field plus hook reminders is insufficient for existing Work data. If a Workspace UI field is expected to be useful for historical rows, add a deterministic load/apply backfill from existing persisted event fields and tests that cover legacy records. Do not rely on display-time AI generation for this class of summary.
+Future Action: When extending Work/Workspace projection fields, add RED tests for legacy persisted files with missing new fields, explicit-value preservation tests, and a migration/backfill path before claiming the UI will be populated.
+
 ## 2026-06-17 — Do not parallelize same skill-state JSON updates
 
 Type: agent workflow correction

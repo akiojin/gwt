@@ -981,6 +981,8 @@ pub struct WorkspaceJournalEntryView {
     pub status_category: Option<String>,
     pub status_text: Option<String>,
     pub summary: Option<String>,
+    #[serde(default)]
+    pub progress_summary: Option<String>,
     pub owner: Option<String>,
     pub next_action: Option<String>,
     pub agent_session_id: Option<String>,
@@ -1043,6 +1045,8 @@ pub struct WorkspaceHistoryEventView {
     pub title: Option<String>,
     pub intent: Option<String>,
     pub summary: Option<String>,
+    #[serde(default)]
+    pub progress_summary: Option<String>,
     pub status_category: Option<String>,
     pub owner: Option<String>,
     pub next_action: Option<String>,
@@ -1060,6 +1064,8 @@ pub struct WorkspaceHistoryView {
     pub title: String,
     pub intent: Option<String>,
     pub summary: Option<String>,
+    #[serde(default)]
+    pub progress_summary: Option<String>,
     pub status_category: String,
     pub owner: Option<String>,
     pub created_at: String,
@@ -1134,6 +1140,8 @@ pub struct ActiveWorkItemView {
     pub status_category: String,
     pub status_text: String,
     pub summary: Option<String>,
+    #[serde(default)]
+    pub progress_summary: Option<String>,
     /// SPEC-3075: human-readable "what work was running" summary for the rail
     /// row's primary label (the branch becomes the sub-line). Surfaces the
     /// agent-declared `title-summary` purpose (live, then journal-recorded),
@@ -1211,6 +1219,8 @@ pub struct ActiveWorkProjectionView {
     pub status_category: String,
     pub status_text: String,
     pub summary: Option<String>,
+    #[serde(default)]
+    pub progress_summary: Option<String>,
     pub owner: Option<String>,
     pub next_action: Option<String>,
     pub active_agents: usize,
@@ -2858,6 +2868,9 @@ mod tests {
                 status_category: "active".to_string(),
                 status_text: "Launching from Project Bar".to_string(),
                 summary: Some("Launching from Project Bar".to_string()),
+                progress_summary: Some(
+                    "Created the workspace and started launch validation.".to_string(),
+                ),
                 owner: Some("SPEC-2359".to_string()),
                 next_action: Some("Run launch tests".to_string()),
                 active_agents: 1,
@@ -2876,6 +2889,9 @@ mod tests {
                     status_category: Some("active".to_string()),
                     status_text: Some("Launching from Project Bar".to_string()),
                     summary: Some("Launching from Project Bar".to_string()),
+                    progress_summary: Some(
+                        "Created the workspace and started launch validation.".to_string(),
+                    ),
                     owner: Some("SPEC-2359".to_string()),
                     next_action: Some("Run launch tests".to_string()),
                     agent_session_id: Some("session-1".to_string()),
@@ -2898,6 +2914,9 @@ mod tests {
                     status_category: "active".to_string(),
                     status_text: "Launching from Project Bar".to_string(),
                     summary: Some("Launching from Project Bar".to_string()),
+                    progress_summary: Some(
+                        "Created the workspace and started launch validation.".to_string(),
+                    ),
                     work_summary: Some("Implement Start Work".to_string()),
                     owner: Some("SPEC-2359".to_string()),
                     next_action: Some("Run launch tests".to_string()),

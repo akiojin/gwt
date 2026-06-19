@@ -321,6 +321,7 @@ mod tests {
             status_category: WorkspaceStatusCategory::Active,
             status_text: "Started".to_string(),
             summary: Some("Real summary".to_string()),
+            progress_summary: None,
             owner: None,
             next_action: None,
             agents: Vec::new(),

@@ -2354,9 +2354,20 @@ kbd.op-kbd {
   padding: 2px 6px;
   border: 1px solid var(--color-border);
   border-radius: var(--radius-sm);
+  background: transparent;
   font-family: var(--font-mono);
   font-size: var(--type-xs);
   color: var(--color-text-muted);
+}
+
+button.workspace-board-ref {
+  cursor: pointer;
+}
+
+button.workspace-board-ref:hover,
+button.workspace-board-ref:focus-visible {
+  border-color: var(--color-border-strong);
+  color: var(--color-text);
 }
 
 .workspace-overview-empty {

@@ -184,6 +184,7 @@ pub enum WorkspaceCommand {
         status: Option<String>,
         status_text: Option<String>,
         summary: Option<String>,
+        progress_summary: Option<String>,
         next_action: Option<String>,
         owner: Option<String>,
         agent_session: Option<String>,
