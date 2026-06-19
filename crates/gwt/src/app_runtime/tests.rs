@@ -6353,6 +6353,64 @@ fn app_runtime_duplicate_pty_error_after_live_hook_keeps_active_agent_for_recove
 }
 
 #[test]
+fn app_runtime_live_hook_recovery_clears_recoverable_pty_error_marker() {
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedEnvVar::set("HOME", temp.path());
+    let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+    let tab = sample_project_tab_with_window(
+        "tab-1",
+        "codex-1",
+        WindowPreset::Codex,
+        WindowProcessStatus::Running,
+    );
+    let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+    let window_id = combined_window_id("tab-1", "codex-1");
+    runtime.active_agent_sessions.insert(
+        window_id.clone(),
+        sample_active_agent_session("tab-1", &window_id),
+    );
+    let _ = runtime.handle_runtime_hook_event(runtime_hook_state_for_event(
+        "Running",
+        "PreToolUse",
+        "session-1",
+    ));
+    let _ = runtime.handle_runtime_status(
+        window_id.clone(),
+        WindowProcessStatus::Error,
+        Some("transient pty error".to_string()),
+    );
+    let _ = runtime.handle_runtime_status(
+        window_id.clone(),
+        WindowProcessStatus::Error,
+        Some("transient pty error".to_string()),
+    );
+    assert!(runtime.recoverable_agent_error_windows.contains(&window_id));
+
+    let _ = runtime.handle_runtime_hook_event(runtime_hook_state_for_event(
+        "Running",
+        "PreToolUse",
+        "session-1",
+    ));
+
+    assert!(
+        !runtime.recoverable_agent_error_windows.contains(&window_id),
+        "live hook recovery must end the stale PTY Error duplicate window"
+    );
+    runtime.window_hook_states.remove(&window_id);
+
+    let _ = runtime.handle_runtime_status(
+        window_id.clone(),
+        WindowProcessStatus::Error,
+        Some("process exited".to_string()),
+    );
+
+    assert!(!runtime.active_agent_sessions.contains_key(&window_id));
+}
+
+#[test]
 fn app_runtime_active_work_projection_filters_stale_saved_agents_when_no_agent_is_live() {
     let _env_lock = env_test_lock()
         .lock()

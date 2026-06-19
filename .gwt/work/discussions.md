@@ -23,6 +23,7 @@ Evidence:
 - `crates/gwt/src/window_state.rs` の `compose_window_state_with_active_session` は PTY state が `Error` の場合、Agent hook state を見ずに PTY state を返す。
 - `crates/gwt/src/app_runtime/runtime_events.rs` は PTY status `Error` / `Stopped` で active agent session tracking と runtime tracking を落とすため、その後の hook event が live session を GUI 上で復旧しにくい。
 - PR review で重複 PTY `Error` の境界も確認した。最初の recoverable `Error` で hook state を表示用に消しても、同じ window の duplicate `Error` では active session を保持し続ける必要がある。
+- PR review で marker lifetime の境界も確認した。live hook recovery 後も duplicate 用 marker が残ると、後続の本物の `Error` まで recoverable と誤判定し得るため、次の hook state 受信時点で marker を消す必要がある。
 
 Approaches:
 - Approach 1: Agent window に active session と matching live runtime hook がある場合、PTY Error より hook state を優先する。実際の process exit と stale UI state の境界を test で固定できるが、auto-close / stopped 表示の既存期待を壊さないよう Stopped は対象外にする必要がある。
@@ -30,13 +31,13 @@ Approaches:
 - Approach 3: pane websocket timeout / render blank の retry と status refresh を追加する。表示更新の堅牢性は上がるが、Error 固定の根本原因を直接直さない。
 
 Current Recommendation:
-最小の修正対象は Approach 1 を中心に、Agent resume pane の status composition と runtime tracking を SPEC #2359 の resume/restore follow-up として扱うこと。Recoverable `Error` は live hook evidence または同じ window で既に recoverable と判定済みの duplicate `Error` に限定する。Startup restore が missing worktree を skip する `crates/gwt/src/app_runtime/startup.rs` の US-79 ギャップは関連するが、今回の画像とは別症状として scope を分ける。
+最小の修正対象は Approach 1 を中心に、Agent resume pane の status composition と runtime tracking を SPEC #2359 の resume/restore follow-up として扱うこと。Recoverable `Error` は live hook evidence または同じ window で既に recoverable と判定済みの duplicate `Error` に限定し、duplicate 用 marker は次の hook state 受信で終了させる。Startup restore が missing worktree を skip する `crates/gwt/src/app_runtime/startup.rs` の US-79 ギャップは関連するが、今回の画像とは別症状として scope を分ける。
 
 Open Questions:
 - なし。
 
 Next:
-SPEC #2359 US-79B / T-651〜T-655 は完了。ユーザー視覚確認は 2026-06-19 に confirmed。PR #3118 merge 直前の review follow-up として duplicate PTY `Error` regression も追加済み。
+SPEC #2359 US-79B / T-651〜T-655 は完了。ユーザー視覚確認は 2026-06-19 に confirmed。PR #3118 / #3119 merge 直前の review follow-up として duplicate PTY `Error` regression と marker-clear regression も追加済み。
 
 ## 2026-05-23 — Workspace terminology and durable discussions
 
