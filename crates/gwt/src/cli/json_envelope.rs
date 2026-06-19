@@ -570,6 +570,7 @@ fn search(params: &Map<String, Value>) -> Result<CliCommand, CliParseError> {
             "memory" => Ok(IndexSearchScope::Memory),
             "board" => Ok(IndexSearchScope::Board),
             "discussions" => Ok(IndexSearchScope::Discussions),
+            "works" => Ok(IndexSearchScope::Works),
             _ => Err(CliParseError::InvalidJson(format!(
                 "unknown search scope: {scope}"
             ))),

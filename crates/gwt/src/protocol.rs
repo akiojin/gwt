@@ -47,6 +47,7 @@ pub enum IndexSearchScope {
     Memory,
     Discussions,
     Board,
+    Works,
     Files,
     #[serde(rename = "files-docs")]
     FilesDocs,
@@ -77,6 +78,7 @@ impl IndexSearchScope {
             Self::Memory => "memory",
             Self::Discussions => "discussions",
             Self::Board => "board",
+            Self::Works => "works",
             Self::Files => "files",
             Self::FilesDocs => "files-docs",
         }
@@ -91,6 +93,7 @@ pub enum IndexSearchTarget {
     Memory { heading: String, date: String },
     Discussion { heading: String, date: String },
     Board { entry_id: String },
+    Work { work_id: String },
     File { path: String },
 }
 
@@ -398,6 +401,15 @@ pub enum FrontendEvent {
         worktree_hash: Option<String>,
         #[serde(default)]
         match_mode: IndexSearchMatchMode,
+    },
+    /// SPEC-2359 US-80: Start Work duplicate-work advisory query. Sent
+    /// (debounced) as the user types the intake prompt. The backend runs the
+    /// curated, distance-thresholded `work_advisory` search and replies with
+    /// `WorkAdvisoryResult`. Never blocks the launch.
+    RequestWorkAdvisory {
+        id: String,
+        query: String,
+        request_id: u64,
     },
     SelectKnowledgeBridgeEntry {
         id: String,
@@ -1447,6 +1459,16 @@ pub enum BackendEvent {
         request_id: u64,
         message: String,
     },
+    /// SPEC-2359 US-80: result of a Start Work duplicate-work advisory query.
+    /// An empty `results` vector means "no strong match" — the advisory panel
+    /// stays quiet. This is advisory only and never blocks the launch.
+    WorkAdvisoryResult {
+        id: String,
+        query: String,
+        request_id: u64,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        results: Vec<IndexSearchResult>,
+    },
     KnowledgeDetail {
         id: String,
         knowledge_kind: KnowledgeKind,
@@ -2329,6 +2351,7 @@ impl BackendEvent {
             BackendEvent::KnowledgeSearchResults { .. } => "knowledge_search_results",
             BackendEvent::ProjectIndexSearchResults { .. } => "project_index_search_results",
             BackendEvent::ProjectIndexSearchError { .. } => "project_index_search_error",
+            BackendEvent::WorkAdvisoryResult { .. } => "work_advisory_result",
             BackendEvent::KnowledgeDetail { .. } => "knowledge_detail",
             BackendEvent::KnowledgeBridgePhaseUpdated { .. } => "knowledge_bridge_phase_updated",
             BackendEvent::BranchCleanupResult { .. } => "branch_cleanup_result",
@@ -3072,6 +3095,62 @@ mod tests {
                 ..
             }
         ));
+    }
+
+    #[test]
+    fn works_scope_serde_roundtrip() {
+        // SPEC-2359 US-80: the `works` semantic scope must round-trip as "works".
+        let scope: IndexSearchScope =
+            serde_json::from_value(serde_json::json!("works")).expect("deserialize works scope");
+        assert_eq!(scope, IndexSearchScope::Works);
+        assert_eq!(IndexSearchScope::Works.as_str(), "works");
+        assert_eq!(
+            serde_json::to_value(IndexSearchScope::Works).unwrap(),
+            serde_json::json!("works")
+        );
+    }
+
+    #[test]
+    fn request_work_advisory_deserializes_from_frontend() {
+        // SPEC-2359 US-80: the intake prompt sends a debounced advisory query.
+        let event: FrontendEvent = serde_json::from_value(serde_json::json!({
+            "kind": "request_work_advisory",
+            "id": "wizard-1",
+            "query": "fix login auth bug",
+            "request_id": 7
+        }))
+        .expect("deserialize request_work_advisory");
+        assert!(matches!(
+            event,
+            FrontendEvent::RequestWorkAdvisory { request_id: 7, .. }
+        ));
+    }
+
+    #[test]
+    fn work_advisory_result_omits_empty_results() {
+        // SPEC-2359 AS-2: "no strong match" => empty advisory, results omitted.
+        let event = BackendEvent::WorkAdvisoryResult {
+            id: "wizard-1".to_string(),
+            query: "novel work".to_string(),
+            request_id: 7,
+            results: Vec::new(),
+        };
+        let value = serde_json::to_value(&event).unwrap();
+        assert_eq!(value["kind"], "work_advisory_result");
+        assert!(value.get("results").is_none());
+    }
+
+    #[test]
+    fn work_search_target_serde_roundtrip() {
+        // SPEC-2359 US-80: advisory results locate a prior Work by work_id.
+        let target = IndexSearchTarget::Work {
+            work_id: "work-feature-auth-abc123".to_string(),
+        };
+        let value = serde_json::to_value(&target).unwrap();
+        assert_eq!(value["kind"], "work");
+        assert_eq!(value["work_id"], "work-feature-auth-abc123");
+        let parsed: IndexSearchTarget = serde_json::from_value(value).unwrap();
+        assert_eq!(parsed, target);
     }
 
     #[test]

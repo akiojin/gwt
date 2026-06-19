@@ -149,6 +149,82 @@ fn is_file_scope(scope: IndexSearchScope) -> bool {
     matches!(scope, IndexSearchScope::Files | IndexSearchScope::FilesDocs)
 }
 
+/// Curated scopes consulted by the Start Work duplicate-work advisory
+/// (SPEC-2359 US-80): past Work (`works`) plus the durable owners a prior
+/// effort would have been anchored to.
+const WORK_ADVISORY_SCOPES: &[IndexSearchScope] = &[
+    IndexSearchScope::Works,
+    IndexSearchScope::Issues,
+    IndexSearchScope::Specs,
+    IndexSearchScope::Board,
+];
+
+/// Maximum semantic distance for an advisory hit to count as a "strong match".
+/// Beyond this, hits are dropped so Start Work stays quiet instead of always
+/// claiming "related work" (alarm-fatigue guard, SPEC-2359 FR-414).
+pub const WORK_ADVISORY_DISTANCE_THRESHOLD: f64 = 0.25;
+
+/// Maximum advisory hits surfaced at Start Work.
+const WORK_ADVISORY_LIMIT: usize = 5;
+
+/// Keep only strong-match advisory hits: a present distance within `threshold`.
+/// Returns them nearest-first, capped at `limit`. An empty result means
+/// "no strong match" — the advisory panel stays empty (SPEC-2359 AS-2).
+pub fn filter_strong_advisory_matches(
+    mut results: Vec<IndexSearchResult>,
+    threshold: f64,
+    limit: usize,
+) -> Vec<IndexSearchResult> {
+    results.retain(|item| item.distance.is_some_and(|distance| distance <= threshold));
+    results.sort_by(|left, right| distance_key(left).total_cmp(&distance_key(right)));
+    results.truncate(limit);
+    results
+}
+
+/// Run the Start Work duplicate-work advisory (SPEC-2359 US-80): semantic search
+/// across past Work and the durable owners, keeping only strong matches. Never
+/// blocks Start Work; an error or empty corpus yields an empty advisory.
+///
+/// Uses `auto_build = true` so the advisory self-heals the `works` index on
+/// first use: unlike the long-lived `issues` / `specs` / `board` scopes, the
+/// `works` scope is not (yet) maintained by the index watcher, so in a freshly
+/// upgraded project it would not exist and the advisory would always come back
+/// empty until the user manually ran a works search. Self-healing backfills past
+/// Work from `work_items.json` on first advisory. This runs on a background
+/// task with a visible loading indicator, so a one-time inline build is
+/// acceptable here even though the interactive search window uses `false`.
+pub fn work_advisory(project_root: &Path, query: &str) -> Result<Vec<IndexSearchResult>, String> {
+    // Try the full curated set first. With auto_build the per-scope actions
+    // hard-fail on an empty corpus (e.g. an issue cache that was never synced
+    // for this repo), and a single peripheral failure would otherwise blank the
+    // whole advisory. Fall back to past Work alone — the scope that actually
+    // matters for duplicate-work detection — so a broken issues/specs/board
+    // source never hides similar prior Work.
+    let outcome = match search_project_index(
+        project_root,
+        query,
+        WORK_ADVISORY_SCOPES,
+        None,
+        IndexSearchMatchMode::Semantic,
+        true,
+    ) {
+        Ok(outcome) => outcome,
+        Err(_) => search_project_index(
+            project_root,
+            query,
+            &[IndexSearchScope::Works],
+            None,
+            IndexSearchMatchMode::Semantic,
+            true,
+        )?,
+    };
+    Ok(filter_strong_advisory_matches(
+        outcome.results,
+        WORK_ADVISORY_DISTANCE_THRESHOLD,
+        WORK_ADVISORY_LIMIT,
+    ))
+}
+
 fn per_scope_limit(scope_count: usize) -> usize {
     if scope_count <= 1 {
         INDEX_SEARCH_LIMIT
@@ -242,6 +318,7 @@ fn default_index_search_scopes() -> Vec<IndexSearchScope> {
         IndexSearchScope::Memory,
         IndexSearchScope::Discussions,
         IndexSearchScope::Board,
+        IndexSearchScope::Works,
         IndexSearchScope::Files,
         IndexSearchScope::FilesDocs,
     ]
@@ -456,6 +533,7 @@ fn search_action(scope: IndexSearchScope) -> &'static str {
         IndexSearchScope::Memory => "search-memory",
         IndexSearchScope::Discussions => "search-discussions",
         IndexSearchScope::Board => "search-board",
+        IndexSearchScope::Works => "search-works",
         IndexSearchScope::Files => "search-files",
         IndexSearchScope::FilesDocs => "search-files-docs",
     }
@@ -473,6 +551,7 @@ fn append_scope_results(
         IndexSearchScope::Memory => "memoryResults",
         IndexSearchScope::Discussions => "discussionResults",
         IndexSearchScope::Board => "boardResults",
+        IndexSearchScope::Works => "workResults",
         IndexSearchScope::Files | IndexSearchScope::FilesDocs => "results",
     };
     let Some(items) = payload.get(key).and_then(Value::as_array) else {
@@ -485,6 +564,7 @@ fn append_scope_results(
             IndexSearchScope::Memory => memory_result(item),
             IndexSearchScope::Discussions => discussion_result(item),
             IndexSearchScope::Board => board_result(item, board_scope),
+            IndexSearchScope::Works => work_result(item),
             IndexSearchScope::Files | IndexSearchScope::FilesDocs => file_result(scope, item),
         };
         if let Some(result) = result {
@@ -516,6 +596,7 @@ fn append_scope_suggestions(
             IndexSearchScope::Memory => memory_result(item),
             IndexSearchScope::Discussions => discussion_result(item),
             IndexSearchScope::Board => board_result(item, board_scope),
+            IndexSearchScope::Works => work_result(item),
             IndexSearchScope::Files | IndexSearchScope::FilesDocs => file_result(scope, item),
         };
         if let Some(result) = result {
@@ -576,6 +657,27 @@ fn memory_result(item: &Value) -> Option<IndexSearchResult> {
         matched_terms: value_string_array(item.get("matched_terms")),
         missing_terms: value_string_array(item.get("missing_terms")),
         target: IndexSearchTarget::Memory { heading, date },
+    })
+}
+
+fn work_result(item: &Value) -> Option<IndexSearchResult> {
+    let work_id = value_str(item.get("work_id"))?;
+    let title = value_str(item.get("title")).unwrap_or_else(|| work_id.clone());
+    let status = value_str(item.get("status")).unwrap_or_default();
+    Some(IndexSearchResult {
+        scope: IndexSearchScope::Works,
+        title,
+        subtitle: if status.is_empty() {
+            "work".to_string()
+        } else {
+            format!("work · {status}")
+        },
+        preview: value_str(item.get("intent")).unwrap_or_default(),
+        distance: item.get("distance").and_then(Value::as_f64),
+        match_mode: item_match_mode(item),
+        matched_terms: value_string_array(item.get("matched_terms")),
+        missing_terms: value_string_array(item.get("missing_terms")),
+        target: IndexSearchTarget::Work { work_id },
     })
 }
 
@@ -847,10 +949,114 @@ mod tests {
                 IndexSearchScope::Memory,
                 IndexSearchScope::Discussions,
                 IndexSearchScope::Board,
+                IndexSearchScope::Works,
                 IndexSearchScope::Files,
                 IndexSearchScope::FilesDocs,
             ]
         );
+    }
+
+    fn advisory_item(
+        scope: IndexSearchScope,
+        title: &str,
+        distance: Option<f64>,
+    ) -> IndexSearchResult {
+        IndexSearchResult {
+            scope,
+            title: title.to_string(),
+            subtitle: String::new(),
+            preview: String::new(),
+            distance,
+            match_mode: None,
+            matched_terms: Vec::new(),
+            missing_terms: Vec::new(),
+            target: IndexSearchTarget::Work {
+                work_id: title.to_string(),
+            },
+        }
+    }
+
+    #[test]
+    fn advisory_keeps_only_strong_matches_sorted_nearest_first() {
+        // SPEC-2359 FR-414 / AS-1: strong matches survive, weak ones drop, and
+        // hits arrive nearest-first.
+        let input = vec![
+            advisory_item(IndexSearchScope::Works, "far", Some(0.40)),
+            advisory_item(IndexSearchScope::Works, "near", Some(0.05)),
+            advisory_item(IndexSearchScope::Issues, "mid", Some(0.20)),
+            advisory_item(IndexSearchScope::Works, "no-distance", None),
+        ];
+        let out = filter_strong_advisory_matches(input, 0.25, 5);
+        let titles: Vec<_> = out.iter().map(|item| item.title.as_str()).collect();
+        assert_eq!(titles, vec!["near", "mid"]);
+    }
+
+    #[test]
+    fn advisory_is_empty_when_no_strong_match() {
+        // SPEC-2359 AS-2: nothing within threshold => quiet (empty) advisory.
+        let input = vec![
+            advisory_item(IndexSearchScope::Issues, "weak-a", Some(0.6)),
+            advisory_item(IndexSearchScope::Specs, "weak-b", Some(0.9)),
+        ];
+        assert!(filter_strong_advisory_matches(input, 0.25, 5).is_empty());
+    }
+
+    #[test]
+    fn advisory_caps_at_limit() {
+        let input: Vec<_> = (1..=10)
+            .map(|i| {
+                advisory_item(
+                    IndexSearchScope::Works,
+                    &i.to_string(),
+                    Some(0.01 * f64::from(i)),
+                )
+            })
+            .collect();
+        assert_eq!(filter_strong_advisory_matches(input, 1.0, 3).len(), 3);
+    }
+
+    #[test]
+    fn append_scope_results_formats_work_target() {
+        // SPEC-2359 US-80: a `works` scope result must locate a prior Work by
+        // work_id and surface its title/intent/status for the advisory panel.
+        let mut results = Vec::new();
+        let board_scope = BoardAudienceScope::All;
+        append_scope_results(
+            &mut results,
+            IndexSearchScope::Works,
+            &json!({
+                "workResults": [{
+                    "work_id": "work-feature-auth-abc123",
+                    "title": "ログイン認証のバグ修正",
+                    "intent": "login auth bug",
+                    "status": "done",
+                    "distance": 0.07,
+                }]
+            }),
+            &board_scope,
+        );
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].scope, IndexSearchScope::Works);
+        assert_eq!(results[0].title, "ログイン認証のバグ修正");
+        assert_eq!(results[0].subtitle, "work · done");
+        assert_eq!(results[0].preview, "login auth bug");
+        assert!(matches!(
+            results[0].target,
+            IndexSearchTarget::Work { ref work_id } if work_id == "work-feature-auth-abc123"
+        ));
+    }
+
+    #[test]
+    fn work_result_without_work_id_is_dropped() {
+        let mut results = Vec::new();
+        let board_scope = BoardAudienceScope::All;
+        append_scope_results(
+            &mut results,
+            IndexSearchScope::Works,
+            &json!({ "workResults": [{ "title": "no id" }] }),
+            &board_scope,
+        );
+        assert!(results.is_empty());
     }
 
     #[test]
@@ -1259,6 +1465,7 @@ mod tests {
                     IndexSearchScope::Board => "boardResults",
                     IndexSearchScope::Discussions => "discussionResults",
                     IndexSearchScope::Memory => "memoryResults",
+                    IndexSearchScope::Works => "workResults",
                     IndexSearchScope::Files | IndexSearchScope::FilesDocs => "results",
                 };
                 let mut payload = serde_json::Map::new();

@@ -19,6 +19,19 @@ function tabAgentState(tab) {
   return state;
 }
 
+const AGENT_STATE_CUE_LABELS = Object.freeze({
+  running: "RUN",
+  starting: "START",
+  idle: "IDLE",
+  waiting: "WAIT",
+  error: "BLOCK",
+  stopped: "DONE",
+});
+
+function tabAgentStateLabel(agentState) {
+  return AGENT_STATE_CUE_LABELS[agentState] || "";
+}
+
 function tabAgentColor(tab) {
   const color = typeof tab?.agent_color === "string" ? tab.agent_color.trim() : "";
   return color;
@@ -38,14 +51,14 @@ function createTabButton(document, item) {
   button.className = "window-tab";
   button.draggable = true;
 
-  // SPEC-3038 US-2: state dot + label span. The dot must precede the label so
+  // SPEC-3038 US-2: state cue + label span. The cue must precede the label so
   // keyed in-place updates never reorder children; the title lives in its own
-  // span so updating it cannot wipe the dot.
-  const dot = document.createElement("span");
-  dot.className = "window-tab-state";
-  dot.setAttribute("aria-hidden", "true");
-  dot.hidden = true;
-  button.appendChild(dot);
+  // span so updating it cannot wipe the cue.
+  const cue = document.createElement("span");
+  cue.className = "window-tab-state";
+  cue.setAttribute("aria-hidden", "true");
+  cue.hidden = true;
+  button.appendChild(cue);
   const label = document.createElement("span");
   label.className = "window-tab-label";
   button.appendChild(label);
@@ -105,7 +118,6 @@ function updateTabItem(item, tab, { activeWindowId, tooltipForWindow, actions })
   tabButton.className = "window-tab";
   tabButton.draggable = true;
   tabButton.dataset.windowTabId = tab.id;
-  tabButton.setAttribute("aria-label", `Activate ${title}`);
   tabButton.classList.toggle("active", active);
   if (active) {
     tabButton.setAttribute("aria-current", "page");
@@ -116,11 +128,18 @@ function updateTabItem(item, tab, { activeWindowId, tooltipForWindow, actions })
   // SPEC-3038 US-2: project agent telemetry onto the tab. The dataset
   // attributes drive the agent-color rim + state styling in app.css.
   const agentState = tabAgentState(tab);
+  const agentStateLabel = tabAgentStateLabel(agentState);
   if (agentState) {
     tabButton.dataset.agentState = agentState;
   } else {
     delete tabButton.dataset.agentState;
   }
+  tabButton.setAttribute(
+    "aria-label",
+    agentStateLabel
+      ? `Activate ${title} (${agentStateLabel})`
+      : `Activate ${title}`,
+  );
   const agentColor = tabAgentColor(tab);
   if (agentColor) {
     tabButton.dataset.agentColor = agentColor;
@@ -128,19 +147,23 @@ function updateTabItem(item, tab, { activeWindowId, tooltipForWindow, actions })
     delete tabButton.dataset.agentColor;
   }
 
-  const stateDot = ensureChild(tabButton, ".window-tab-state", (document) => {
-    const dot = document.createElement("span");
-    dot.className = "window-tab-state";
-    dot.setAttribute("aria-hidden", "true");
-    return dot;
+  const stateCue = ensureChild(tabButton, ".window-tab-state", (document) => {
+    const cue = document.createElement("span");
+    cue.className = "window-tab-state";
+    cue.setAttribute("aria-hidden", "true");
+    return cue;
   });
-  stateDot.hidden = !agentState;
+  stateCue.hidden = !agentStateLabel;
+  stateCue.textContent = agentStateLabel;
 
   const label = ensureChild(tabButton, ".window-tab-label", (document) => {
     const span = document.createElement("span");
     span.className = "window-tab-label";
     return span;
   });
+  if (stateCue.nextElementSibling !== label) {
+    tabButton.insertBefore(stateCue, label);
+  }
   label.textContent = title;
 
   tabButton.title =
