@@ -300,6 +300,7 @@ const RUNTIME_HEALTH_SORT_MODES = [
 ];
 const RUNTIME_HEALTH_LOAD_CPU_UNIT = 20;
 const RUNTIME_HEALTH_LOAD_MEMORY_UNIT = 512 * 1024 * 1024;
+let runtimeHealthHideTimer = null;
 
 export function applyRuntimeHealth(doc, snapshot = {}, options = {}) {
   const cell = doc.getElementById("op-strip-runtime-health");
@@ -370,32 +371,36 @@ function wireRuntimeHealthDetail(doc, cell) {
   if (cell.dataset.runtimeHealthBound === "true") return;
   cell.dataset.runtimeHealthBound = "true";
   const win = doc.defaultView || globalThis;
-  let hideTimer = null;
-  const clearHide = () => {
-    if (!hideTimer) return;
-    (win.clearTimeout || clearTimeout)(hideTimer);
-    hideTimer = null;
-  };
   const show = () => {
-    clearHide();
+    clearRuntimeHealthHideTimer(win);
     showRuntimeHealthDetail(doc, cell);
   };
   const hide = () => {
-    clearHide();
-    hideTimer = (win.setTimeout || setTimeout)(() => {
-      hideTimer = null;
-      hideRuntimeHealthDetail(doc);
-    }, 120);
+    scheduleRuntimeHealthHide(doc, win);
   };
   cell.addEventListener("mouseenter", show);
   cell.addEventListener("focus", show);
   cell.addEventListener("mouseleave", hide);
   cell.addEventListener("blur", hide);
   const detail = runtimeHealthDetail(doc);
-  detail.addEventListener("mouseenter", clearHide);
-  detail.addEventListener("focusin", clearHide);
+  detail.addEventListener("mouseenter", () => clearRuntimeHealthHideTimer(win));
+  detail.addEventListener("focusin", () => clearRuntimeHealthHideTimer(win));
   detail.addEventListener("mouseleave", hide);
   detail.addEventListener("focusout", hide);
+}
+
+function clearRuntimeHealthHideTimer(win = globalThis) {
+  if (!runtimeHealthHideTimer) return;
+  (win.clearTimeout || clearTimeout)(runtimeHealthHideTimer);
+  runtimeHealthHideTimer = null;
+}
+
+function scheduleRuntimeHealthHide(doc, win = globalThis) {
+  clearRuntimeHealthHideTimer(win);
+  runtimeHealthHideTimer = (win.setTimeout || setTimeout)(() => {
+    runtimeHealthHideTimer = null;
+    hideRuntimeHealthDetail(doc);
+  }, 120);
 }
 
 function runtimeHealthDetail(doc) {
@@ -468,9 +473,13 @@ function renderRuntimeHealthDetail(doc, snapshot, queue, options) {
   const sortMode = runtimeHealthCurrentSortMode(doc);
   detail.appendChild(
     renderRuntimeHealthSortControls(doc, sortMode, (nextMode) => {
+      const win = doc.defaultView || globalThis;
       const cell = doc.getElementById("op-strip-runtime-health");
       if (cell) cell.dataset.runtimeHealthSort = nextMode;
+      clearRuntimeHealthHideTimer(win);
       renderRuntimeHealthDetail(doc, snapshot, queue, options);
+      clearRuntimeHealthHideTimer(win);
+      if (cell) showRuntimeHealthDetail(doc, cell);
     }),
   );
 
