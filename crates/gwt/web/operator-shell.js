@@ -292,6 +292,14 @@ export function applyProviderUsage(doc, snapshot = {}) {
 // ------------------------------------------------------------
 
 const RUNTIME_HEALTH_SCROLL_PROCESS_THRESHOLD = 10;
+const RUNTIME_HEALTH_DEFAULT_SORT = "load";
+const RUNTIME_HEALTH_SORT_MODES = [
+  { mode: "load", label: "Load" },
+  { mode: "cpu", label: "CPU" },
+  { mode: "mem", label: "Mem" },
+];
+const RUNTIME_HEALTH_LOAD_CPU_UNIT = 20;
+const RUNTIME_HEALTH_LOAD_MEMORY_UNIT = 512 * 1024 * 1024;
 
 export function applyRuntimeHealth(doc, snapshot = {}, options = {}) {
   const cell = doc.getElementById("op-strip-runtime-health");
@@ -308,6 +316,7 @@ export function applyRuntimeHealth(doc, snapshot = {}, options = {}) {
     snapshot.memory_bytes,
   )}`;
   cell.setAttribute("title", runtimeHealthTitle(snapshot, queue));
+  cell.dataset.runtimeHealthSort = runtimeHealthSortMode(cell.dataset.runtimeHealthSort);
   wireRuntimeHealthDetail(doc, cell);
   renderRuntimeHealthDetail(doc, snapshot, queue, options);
 }
@@ -456,11 +465,20 @@ function renderRuntimeHealthDetail(doc, snapshot, queue, options) {
   );
   detail.appendChild(queueBlock);
 
+  const sortMode = runtimeHealthCurrentSortMode(doc);
+  detail.appendChild(
+    renderRuntimeHealthSortControls(doc, sortMode, (nextMode) => {
+      const cell = doc.getElementById("op-strip-runtime-health");
+      if (cell) cell.dataset.runtimeHealthSort = nextMode;
+      renderRuntimeHealthDetail(doc, snapshot, queue, options);
+    }),
+  );
+
   const processList = doc.createElement("div");
   processList.className = "op-runtime-health-detail__process-list";
   processList.setAttribute("aria-label", "Runtime processes");
   const rawProcesses = Array.isArray(snapshot.processes) ? snapshot.processes : [];
-  const processes = runtimeHealthDisplayProcesses(rawProcesses);
+  const processes = runtimeHealthDisplayProcesses(rawProcesses, sortMode);
   if (processes.length > RUNTIME_HEALTH_SCROLL_PROCESS_THRESHOLD) {
     processList.dataset.scroll = "true";
   }
@@ -474,12 +492,10 @@ function renderRuntimeHealthDetail(doc, snapshot, queue, options) {
     for (const process of processes) {
       processList.appendChild(renderRuntimeHealthProcess(doc, process, options));
     }
-    if (processes.length > RUNTIME_HEALTH_SCROLL_PROCESS_THRESHOLD) {
-      const more = doc.createElement("div");
-      more.className = "op-runtime-health-detail__process-more";
-      more.textContent = runtimeHealthProcessSummary(processes, rawProcesses);
-      processList.appendChild(more);
-    }
+    const more = doc.createElement("div");
+    more.className = "op-runtime-health-detail__process-more";
+    more.textContent = runtimeHealthProcessSummary(processes, rawProcesses, sortMode);
+    processList.appendChild(more);
   }
   detail.appendChild(processList);
 }
@@ -516,6 +532,27 @@ function appendRuntimeHealthQueueItem(doc, parent, label, value) {
   item.appendChild(labelEl);
   item.appendChild(valueEl);
   parent.appendChild(item);
+}
+
+function renderRuntimeHealthSortControls(doc, activeMode, onChange) {
+  const group = doc.createElement("div");
+  group.className = "op-runtime-health-detail__sort";
+  group.setAttribute("aria-label", "Runtime process sort");
+  for (const { mode, label } of RUNTIME_HEALTH_SORT_MODES) {
+    const button = doc.createElement("button");
+    button.className = "op-runtime-health-detail__sort-button";
+    button.type = "button";
+    button.textContent = label;
+    button.dataset.sort = mode;
+    button.setAttribute("aria-pressed", mode === activeMode ? "true" : "false");
+    button.addEventListener("click", (event) => {
+      event.preventDefault();
+      event.stopPropagation();
+      if (mode !== activeMode) onChange(mode);
+    });
+    group.appendChild(button);
+  }
+  return group;
 }
 
 function renderRuntimeHealthProcessHeader(doc) {
@@ -595,7 +632,7 @@ function runtimeHealthProcessLooksLikeAgent(process) {
   return ["agent", "codex", "claude", "docker"].includes(String(process?.role || ""));
 }
 
-function runtimeHealthDisplayProcesses(processes) {
+function runtimeHealthDisplayProcesses(processes, sortMode = RUNTIME_HEALTH_DEFAULT_SORT) {
   if (!Array.isArray(processes) || processes.length === 0) return [];
 
   const byPid = new Map();
@@ -620,7 +657,9 @@ function runtimeHealthDisplayProcesses(processes) {
   for (const group of groups.values()) {
     display.push(runtimeHealthProcessGroupView(group));
   }
-  display.sort(compareRuntimeHealthProcesses);
+  display.sort((left, right) =>
+    compareRuntimeHealthProcesses(left, right, runtimeHealthSortMode(sortMode)),
+  );
   return display;
 }
 
@@ -680,7 +719,16 @@ function compareRuntimeHealthGroupPrimary(left, right) {
   return runtimeHealthNumeric(left.pid) - runtimeHealthNumeric(right.pid);
 }
 
-function compareRuntimeHealthProcesses(left, right) {
+function compareRuntimeHealthProcesses(left, right, sortMode = RUNTIME_HEALTH_DEFAULT_SORT) {
+  if (sortMode === "load") {
+    const loadCompare = runtimeHealthProcessLoadScore(right) - runtimeHealthProcessLoadScore(left);
+    if (loadCompare !== 0) return loadCompare;
+  }
+  if (sortMode === "mem") {
+    const memoryCompare =
+      runtimeHealthNumeric(right.memory_bytes) - runtimeHealthNumeric(left.memory_bytes);
+    if (memoryCompare !== 0) return memoryCompare;
+  }
   const cpuCompare =
     runtimeHealthNumeric(right.cpu_percent) - runtimeHealthNumeric(left.cpu_percent);
   if (cpuCompare !== 0) return cpuCompare;
@@ -700,6 +748,31 @@ function runtimeHealthNumeric(value) {
   return Number.isFinite(number) ? number : 0;
 }
 
+function runtimeHealthProcessLoadScore(process) {
+  return Math.max(
+    runtimeHealthNumeric(process?.cpu_percent) / RUNTIME_HEALTH_LOAD_CPU_UNIT,
+    runtimeHealthNumeric(process?.memory_bytes) / RUNTIME_HEALTH_LOAD_MEMORY_UNIT,
+  );
+}
+
+function runtimeHealthCurrentSortMode(doc) {
+  const cell = doc.getElementById("op-strip-runtime-health");
+  return runtimeHealthSortMode(cell?.dataset.runtimeHealthSort);
+}
+
+function runtimeHealthSortMode(mode) {
+  return RUNTIME_HEALTH_SORT_MODES.some((candidate) => candidate.mode === mode)
+    ? mode
+    : RUNTIME_HEALTH_DEFAULT_SORT;
+}
+
+function runtimeHealthSortLabel(mode) {
+  const normalized = runtimeHealthSortMode(mode);
+  return (
+    RUNTIME_HEALTH_SORT_MODES.find((candidate) => candidate.mode === normalized)?.label || "Load"
+  );
+}
+
 function runtimeHealthProcessRoleLabel(process) {
   const role = String(process?.role || "").trim();
   return role || "process";
@@ -717,11 +790,19 @@ function runtimeHealthProcessPidLabel(process) {
   return Number.isFinite(count) && count > 1 ? `${pid}+${count - 1}` : pid;
 }
 
-function runtimeHealthProcessSummary(processes, rawProcesses) {
+function runtimeHealthProcessSummary(
+  processes,
+  rawProcesses,
+  sortMode = RUNTIME_HEALTH_DEFAULT_SORT,
+) {
+  const sortLabel = runtimeHealthSortLabel(sortMode);
   if (rawProcesses.length !== processes.length) {
-    return `Showing ${processes.length} groups / ${rawProcesses.length} processes sorted by CPU`;
+    return (
+      `Showing ${processes.length} groups / ${rawProcesses.length} ` +
+      `processes sorted by ${sortLabel}`
+    );
   }
-  return `Showing ${processes.length} processes sorted by CPU`;
+  return `Showing ${processes.length} processes sorted by ${sortLabel}`;
 }
 
 // ------------------------------------------------------------

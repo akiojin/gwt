@@ -957,6 +957,42 @@ body::after {
   font-variant-numeric: tabular-nums;
 }
 
+.op-runtime-health-detail__sort {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: var(--space-1);
+  margin-top: var(--space-3);
+}
+
+.op-runtime-health-detail__sort-button {
+  appearance: none;
+  min-width: 0;
+  padding: 3px 6px;
+  border: 1px solid color-mix(in oklab, var(--color-border) 74%, transparent);
+  border-radius: var(--radius-sm);
+  background: color-mix(in oklab, var(--color-surface) 80%, transparent);
+  color: var(--color-text-muted);
+  font: inherit;
+  font-size: 0.68rem;
+  font-weight: 700;
+  letter-spacing: 0;
+  text-align: center;
+  text-transform: uppercase;
+}
+
+.op-runtime-health-detail__sort-button[aria-pressed="true"] {
+  border-color: color-mix(in oklab, var(--color-accent) 58%, var(--color-border));
+  background: color-mix(in oklab, var(--color-accent) 15%, transparent);
+  color: var(--color-text-strong);
+}
+
+.op-runtime-health-detail__sort-button:hover,
+.op-runtime-health-detail__sort-button:focus-visible {
+  color: var(--color-text);
+  outline: 1px solid color-mix(in oklab, var(--color-accent) 52%, transparent);
+  outline-offset: 1px;
+}
+
 .op-runtime-health-detail__process-list {
   display: grid;
   gap: 4px;
