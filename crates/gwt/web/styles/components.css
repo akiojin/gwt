@@ -887,9 +887,11 @@ body::after {
 .op-runtime-health-detail {
   position: fixed;
   z-index: 1100;
+  display: flex;
+  flex-direction: column;
   width: min(420px, calc(100vw - 16px));
   max-height: 62vh;
-  overflow: auto;
+  overflow: hidden;
   padding: var(--space-3);
   background: var(--color-surface-elevated);
   color: var(--color-text);
@@ -959,6 +961,33 @@ body::after {
   display: grid;
   gap: 4px;
   margin-top: var(--space-3);
+  min-height: 0;
+}
+
+.op-runtime-health-detail__process-list[data-scroll="true"] {
+  max-height: min(360px, calc(62vh - 132px));
+  overflow-y: auto;
+  padding-right: var(--space-1);
+  scrollbar-gutter: stable;
+}
+
+.op-runtime-health-detail__process-header {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  display: grid;
+  grid-template-columns: 4.8rem minmax(0, 1fr) 4rem 4.5rem 5rem;
+  gap: var(--space-2);
+  padding: 2px 0 5px;
+  background: var(--color-surface-elevated);
+  color: var(--color-text-muted);
+  font-size: 0.66rem;
+  text-transform: uppercase;
+  border-bottom: 1px solid color-mix(in oklab, var(--color-border) 70%, transparent);
+}
+
+.op-runtime-health-detail__process-header span:nth-child(n + 3) {
+  text-align: right;
 }
 
 .op-runtime-health-detail__process {
@@ -966,10 +995,70 @@ body::after {
   grid-template-columns: 4.8rem minmax(0, 1fr) 4rem 4.5rem 5rem;
   align-items: center;
   gap: var(--space-2);
+  width: 100%;
   min-width: 0;
-  padding: 3px 0;
+  padding: 4px 5px 4px 4px;
   color: var(--color-text-muted);
   font-variant-numeric: tabular-nums;
+  border-left: 2px solid transparent;
+  border-radius: var(--radius-sm);
+  background:
+    linear-gradient(
+      90deg,
+      color-mix(in oklab, var(--color-accent) 10%, transparent) 0 var(--runtime-health-cpu, 0%),
+      transparent var(--runtime-health-cpu, 0%) 100%
+    );
+}
+
+button.op-runtime-health-detail__process {
+  appearance: none;
+  border: 0;
+  background: transparent;
+  font: inherit;
+  text-align: inherit;
+}
+
+.op-runtime-health-detail__process--focusable {
+  cursor: pointer;
+}
+
+.op-runtime-health-detail__process--focusable:hover,
+.op-runtime-health-detail__process--focusable:focus-visible {
+  background: color-mix(in oklab, var(--color-accent) 14%, transparent);
+  color: var(--color-text);
+  outline: 1px solid color-mix(in oklab, var(--color-accent) 52%, transparent);
+  outline-offset: 1px;
+}
+
+.op-runtime-health-detail__process[data-agent="true"] .op-runtime-health-detail__process-role {
+  border-color: color-mix(in oklab, var(--color-accent) 52%, var(--color-border));
+  color: var(--color-text-strong);
+}
+
+.op-runtime-health-detail__process[data-heat="warm"] {
+  color: var(--color-text);
+  border-left-color: color-mix(in oklab, var(--color-state-active) 56%, transparent);
+  background:
+    linear-gradient(
+      90deg,
+      color-mix(in oklab, var(--color-state-active) 12%, transparent) 0 var(--runtime-health-cpu, 0%),
+      transparent var(--runtime-health-cpu, 0%) 100%
+    );
+}
+
+.op-runtime-health-detail__process[data-heat="hot"] {
+  color: var(--color-text);
+  border-left-color: color-mix(in oklab, var(--color-state-blocked) 68%, transparent);
+  background:
+    linear-gradient(
+      90deg,
+      color-mix(in oklab, var(--color-state-blocked) 16%, transparent) 0 var(--runtime-health-cpu, 0%),
+      transparent var(--runtime-health-cpu, 0%) 100%
+    );
+}
+
+.op-runtime-health-detail__process[data-heat="hot"] .op-runtime-health-detail__process-metric:nth-last-child(2) {
+  color: var(--color-text-strong);
 }
 
 .op-runtime-health-detail__process-role {

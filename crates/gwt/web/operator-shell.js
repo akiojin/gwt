@@ -291,9 +291,9 @@ export function applyProviderUsage(doc, snapshot = {}) {
 // Runtime health cell (SPEC-3107)
 // ------------------------------------------------------------
 
-const RUNTIME_HEALTH_VISIBLE_PROCESS_LIMIT = 10;
+const RUNTIME_HEALTH_SCROLL_PROCESS_THRESHOLD = 10;
 
-export function applyRuntimeHealth(doc, snapshot = {}) {
+export function applyRuntimeHealth(doc, snapshot = {}, options = {}) {
   const cell = doc.getElementById("op-strip-runtime-health");
   const value = doc.getElementById("op-strip-runtime-health-value");
   if (!cell || !value) return;
@@ -309,7 +309,7 @@ export function applyRuntimeHealth(doc, snapshot = {}) {
   )}`;
   cell.setAttribute("title", runtimeHealthTitle(snapshot, queue));
   wireRuntimeHealthDetail(doc, cell);
-  renderRuntimeHealthDetail(doc, snapshot, queue);
+  renderRuntimeHealthDetail(doc, snapshot, queue, options);
 }
 
 function runtimeHealthState(state) {
@@ -360,12 +360,33 @@ function runtimeHealthTitle(snapshot, queue) {
 function wireRuntimeHealthDetail(doc, cell) {
   if (cell.dataset.runtimeHealthBound === "true") return;
   cell.dataset.runtimeHealthBound = "true";
-  const show = () => showRuntimeHealthDetail(doc, cell);
-  const hide = () => hideRuntimeHealthDetail(doc);
+  const win = doc.defaultView || globalThis;
+  let hideTimer = null;
+  const clearHide = () => {
+    if (!hideTimer) return;
+    (win.clearTimeout || clearTimeout)(hideTimer);
+    hideTimer = null;
+  };
+  const show = () => {
+    clearHide();
+    showRuntimeHealthDetail(doc, cell);
+  };
+  const hide = () => {
+    clearHide();
+    hideTimer = (win.setTimeout || setTimeout)(() => {
+      hideTimer = null;
+      hideRuntimeHealthDetail(doc);
+    }, 120);
+  };
   cell.addEventListener("mouseenter", show);
   cell.addEventListener("focus", show);
   cell.addEventListener("mouseleave", hide);
   cell.addEventListener("blur", hide);
+  const detail = runtimeHealthDetail(doc);
+  detail.addEventListener("mouseenter", clearHide);
+  detail.addEventListener("focusin", clearHide);
+  detail.addEventListener("mouseleave", hide);
+  detail.addEventListener("focusout", hide);
 }
 
 function runtimeHealthDetail(doc) {
@@ -405,7 +426,7 @@ function hideRuntimeHealthDetail(doc) {
   if (detail) detail.hidden = true;
 }
 
-function renderRuntimeHealthDetail(doc, snapshot, queue) {
+function renderRuntimeHealthDetail(doc, snapshot, queue, options) {
   const detail = runtimeHealthDetail(doc);
   while (detail.firstChild) detail.removeChild(detail.firstChild);
 
@@ -439,23 +460,33 @@ function renderRuntimeHealthDetail(doc, snapshot, queue) {
   processList.className = "op-runtime-health-detail__process-list";
   processList.setAttribute("aria-label", "Runtime processes");
   const processes = Array.isArray(snapshot.processes) ? snapshot.processes : [];
+  if (processes.length > RUNTIME_HEALTH_SCROLL_PROCESS_THRESHOLD) {
+    processList.dataset.scroll = "true";
+  }
   if (processes.length === 0) {
     const empty = doc.createElement("div");
     empty.className = "op-runtime-health-detail__empty";
     empty.textContent = "No process detail";
     processList.appendChild(empty);
   } else {
-    for (const process of processes.slice(0, RUNTIME_HEALTH_VISIBLE_PROCESS_LIMIT)) {
-      processList.appendChild(renderRuntimeHealthProcess(doc, process));
+    processList.appendChild(renderRuntimeHealthProcessHeader(doc));
+    for (const process of processes) {
+      processList.appendChild(renderRuntimeHealthProcess(doc, process, options));
     }
-    if (processes.length > RUNTIME_HEALTH_VISIBLE_PROCESS_LIMIT) {
+    if (processes.length > RUNTIME_HEALTH_SCROLL_PROCESS_THRESHOLD) {
       const more = doc.createElement("div");
       more.className = "op-runtime-health-detail__process-more";
-      more.textContent = `Showing top ${RUNTIME_HEALTH_VISIBLE_PROCESS_LIMIT} of ${processes.length}`;
+      more.textContent = `Showing ${processes.length} processes sorted by CPU`;
       processList.appendChild(more);
     }
   }
   detail.appendChild(processList);
+}
+
+function runtimeHealthFocusWindowId(process) {
+  return typeof process?.focus_window_id === "string" && process.focus_window_id.trim()
+    ? process.focus_window_id
+    : null;
 }
 
 function appendRuntimeHealthChip(doc, parent, label, value) {
@@ -486,9 +517,41 @@ function appendRuntimeHealthQueueItem(doc, parent, label, value) {
   parent.appendChild(item);
 }
 
-function renderRuntimeHealthProcess(doc, process) {
-  const row = doc.createElement("div");
+function renderRuntimeHealthProcessHeader(doc) {
+  const header = doc.createElement("div");
+  header.className = "op-runtime-health-detail__process-header";
+  for (const label of ["Role", "Process", "PID", "CPU", "Mem"]) {
+    const cell = doc.createElement("span");
+    cell.textContent = label;
+    header.appendChild(cell);
+  }
+  return header;
+}
+
+function renderRuntimeHealthProcess(doc, process, options = {}) {
+  const focusWindowId = runtimeHealthFocusWindowId(process);
+  const canFocus = focusWindowId && typeof options.focusWindow === "function";
+  const row = doc.createElement(canFocus ? "button" : "div");
   row.className = "op-runtime-health-detail__process";
+  row.dataset.heat = runtimeHealthProcessHeat(process.cpu_percent);
+  if (runtimeHealthProcessLooksLikeAgent(process)) row.dataset.agent = "true";
+  const cpuPercent = Number(process.cpu_percent);
+  if (Number.isFinite(cpuPercent)) {
+    row.style.setProperty("--runtime-health-cpu", `${Math.max(0, Math.min(cpuPercent, 100))}%`);
+  }
+  if (canFocus) {
+    row.classList.add("op-runtime-health-detail__process--focusable");
+    row.type = "button";
+    row.setAttribute(
+      "aria-label",
+      `Focus ${process.name || "process"} process ${process.pid ?? "--"}`,
+    );
+    row.addEventListener("click", (event) => {
+      event.preventDefault();
+      event.stopPropagation();
+      options.focusWindow(focusWindowId);
+    });
+  }
 
   const role = doc.createElement("span");
   role.className = "op-runtime-health-detail__process-role";
@@ -516,6 +579,18 @@ function renderRuntimeHealthProcess(doc, process) {
   row.appendChild(memory);
 
   return row;
+}
+
+function runtimeHealthProcessHeat(cpu) {
+  const value = Number(cpu);
+  if (!Number.isFinite(value)) return "unknown";
+  if (value >= 20) return "hot";
+  if (value >= 5) return "warm";
+  return "idle";
+}
+
+function runtimeHealthProcessLooksLikeAgent(process) {
+  return ["agent", "codex", "claude", "docker"].includes(String(process?.role || ""));
 }
 
 // ------------------------------------------------------------

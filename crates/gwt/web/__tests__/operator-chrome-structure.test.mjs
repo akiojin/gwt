@@ -1136,6 +1136,7 @@ test("Runtime health PERF detail uses structured diagnostic classes", () => {
     "op-runtime-health-detail__chip",
     "op-runtime-health-detail__queue",
     "op-runtime-health-detail__process-list",
+    "op-runtime-health-detail__process--focusable",
     "op-runtime-health-detail__process-role",
     "op-runtime-health-detail__process-name",
     "op-runtime-health-detail__process-metric",
@@ -1157,10 +1158,15 @@ test("Runtime health PERF detail uses structured diagnostic classes", () => {
     /\.op-runtime-health-detail__process\s*\{[\s\S]*display:\s*grid;[\s\S]*grid-template-columns:/,
     "process rows must use columns instead of a raw text line",
   );
+  assert.match(
+    operatorShellSource,
+    /focusWindow/,
+    "focusable runtime rows must call the injected focus callback",
+  );
   assert.doesNotMatch(
     operatorShellSource,
-    /op-runtime-health-detail[\s\S]{0,6000}createElement\("button"\)/,
-    "runtime health detail must stay diagnostic-only",
+    /op-runtime-health-detail[\s\S]{0,8000}(kill|terminate|stop_process|close_window)/i,
+    "runtime health detail must not expose destructive process controls",
   );
 });
 

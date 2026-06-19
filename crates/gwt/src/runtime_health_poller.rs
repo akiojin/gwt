@@ -11,6 +11,7 @@ use tokio::time::{interval, MissedTickBehavior};
 
 use crate::embedded_server::{ClientHub, ClientHubHealthStats};
 use crate::OutboundEvent;
+use crate::PtyWriterRegistry;
 
 const TICK_SECS: u64 = 5;
 const WARMING_SAMPLES: u64 = 2;
@@ -18,15 +19,18 @@ const WARN_CPU_PERCENT: f32 = 50.0;
 const HOT_CPU_PERCENT: f32 = 100.0;
 const WARN_MEMORY_BYTES: u64 = 1024 * 1024 * 1024;
 const HOT_MEMORY_BYTES: u64 = 2 * 1024 * 1024 * 1024;
-const DETAIL_PROCESS_LIMIT: usize = 16;
 
 /// Spawn the runtime health poller onto the shared tokio runtime.
-pub fn spawn_runtime_health_poller(runtime: &tokio::runtime::Runtime, clients: ClientHub) {
-    drop(runtime.handle().spawn(run(clients)));
+pub fn spawn_runtime_health_poller(
+    runtime: &tokio::runtime::Runtime,
+    clients: ClientHub,
+    pty_writers: PtyWriterRegistry,
+) {
+    drop(runtime.handle().spawn(run(clients, pty_writers)));
 }
 
-async fn run(clients: ClientHub) {
-    let mut poller = Poller::default();
+async fn run(clients: ClientHub, pty_writers: PtyWriterRegistry) {
+    let mut poller = Poller::new(pty_writers);
     let mut ticker = interval(Duration::from_secs(TICK_SECS));
     ticker.set_missed_tick_behavior(MissedTickBehavior::Delay);
     loop {
@@ -47,21 +51,21 @@ struct Poller {
     sample_count: u64,
     last_dropped_lossy: u64,
     severity: SeverityTracker,
+    pty_writers: PtyWriterRegistry,
 }
 
-impl Default for Poller {
-    fn default() -> Self {
+impl Poller {
+    fn new(pty_writers: PtyWriterRegistry) -> Self {
         Self {
             system: System::new(),
             root_pid: std::process::id(),
             sample_count: 0,
             last_dropped_lossy: 0,
             severity: SeverityTracker::default(),
+            pty_writers,
         }
     }
-}
 
-impl Poller {
     fn poll_once(
         &mut self,
         generated_at: DateTime<Utc>,
@@ -79,6 +83,8 @@ impl Poller {
                 .without_tasks(),
         );
         let observed = observe_processes(&self.system);
+        let parent_by_pid = parent_by_pid(&observed);
+        let direct_focus_windows = focus_window_ids_by_pty_pid(&self.pty_writers);
         let mut selected = select_runtime_processes(self.root_pid, &observed);
         let cpu_percent = selected
             .iter()
@@ -110,11 +116,12 @@ impl Poller {
             process_count: selected.len(),
             runner_count,
             queue,
-            processes: selected
-                .into_iter()
-                .take(DETAIL_PROCESS_LIMIT)
-                .map(|process| process.into_view(self.root_pid))
-                .collect(),
+            processes: detail_process_views(
+                self.root_pid,
+                selected,
+                &parent_by_pid,
+                &direct_focus_windows,
+            ),
         }
     }
 
@@ -204,6 +211,8 @@ impl ObservedProcess {
             "gwtd"
         } else if self.looks_like_runner() {
             "runner"
+        } else if self.looks_like_docker() {
+            "docker"
         } else if self.looks_like_codex() {
             "codex"
         } else if self.looks_like_claude() {
@@ -231,6 +240,13 @@ impl ObservedProcess {
     fn looks_like_runner(&self) -> bool {
         self.matches_basename("chroma_index_runner")
             || self.command_fingerprint_contains("chroma_index_runner")
+    }
+
+    fn looks_like_docker(&self) -> bool {
+        self.matches_basename("docker")
+            || self.matches_basename("docker-compose")
+            || self.matches_basename("com.docker.cli")
+            || self.command_fingerprint_contains("docker compose exec")
     }
 
     fn looks_like_codex(&self) -> bool {
@@ -280,7 +296,7 @@ impl ObservedProcess {
         .to_ascii_lowercase()
     }
 
-    fn into_view(self, root_pid: u32) -> RuntimeHealthProcessView {
+    fn into_view(self, root_pid: u32, focus_window_id: Option<String>) -> RuntimeHealthProcessView {
         RuntimeHealthProcessView {
             pid: self.pid,
             parent_pid: self.parent_pid,
@@ -288,6 +304,7 @@ impl ObservedProcess {
             name: self.name,
             cpu_percent: Some(self.cpu_percent),
             memory_bytes: self.memory_bytes,
+            focus_window_id,
         }
     }
 }
@@ -320,10 +337,7 @@ fn observe_processes(system: &System) -> Vec<ObservedProcess> {
 }
 
 fn select_runtime_processes(root_pid: u32, processes: &[ObservedProcess]) -> Vec<ObservedProcess> {
-    let parent_by_pid: HashMap<u32, Option<u32>> = processes
-        .iter()
-        .map(|process| (process.pid, process.parent_pid))
-        .collect();
+    let parent_by_pid = parent_by_pid(processes);
     let seed_pids: HashSet<u32> = processes
         .iter()
         .filter(|process| process.is_runtime_seed(root_pid))
@@ -336,6 +350,13 @@ fn select_runtime_processes(root_pid: u32, processes: &[ObservedProcess]) -> Vec
                 || has_any_seed_ancestor(process.pid, &seed_pids, &parent_by_pid)
         })
         .cloned()
+        .collect()
+}
+
+fn parent_by_pid(processes: &[ObservedProcess]) -> HashMap<u32, Option<u32>> {
+    processes
+        .iter()
+        .map(|process| (process.pid, process.parent_pid))
         .collect()
 }
 
@@ -356,6 +377,54 @@ fn has_any_seed_ancestor(
         current = parent;
     }
     false
+}
+
+fn focus_window_ids_by_pty_pid(pty_writers: &PtyWriterRegistry) -> HashMap<u32, String> {
+    let Ok(guard) = pty_writers.read() else {
+        tracing::warn!(
+            target: "gwt_runtime_health",
+            "failed to read PTY writer registry for runtime health focus targets"
+        );
+        return HashMap::new();
+    };
+    guard
+        .iter()
+        .filter_map(|(window_id, pty)| pty.process_id().map(|pid| (pid, window_id.clone())))
+        .collect()
+}
+
+fn focus_window_id_for_process(
+    pid: u32,
+    parent_by_pid: &HashMap<u32, Option<u32>>,
+    direct_focus_windows: &HashMap<u32, String>,
+) -> Option<String> {
+    let mut seen = HashSet::new();
+    let mut current = pid;
+    loop {
+        if let Some(window_id) = direct_focus_windows.get(&current) {
+            return Some(window_id.clone());
+        }
+        if !seen.insert(current) {
+            return None;
+        }
+        current = parent_by_pid.get(&current).copied().flatten()?;
+    }
+}
+
+fn detail_process_views(
+    root_pid: u32,
+    processes: Vec<ObservedProcess>,
+    parent_by_pid: &HashMap<u32, Option<u32>>,
+    direct_focus_windows: &HashMap<u32, String>,
+) -> Vec<RuntimeHealthProcessView> {
+    processes
+        .into_iter()
+        .map(|process| {
+            let focus_window_id =
+                focus_window_id_for_process(process.pid, parent_by_pid, direct_focus_windows);
+            process.into_view(root_pid, focus_window_id)
+        })
+        .collect()
 }
 
 fn lowercase_basename(value: &str) -> String {
@@ -565,6 +634,99 @@ mod tests {
                 (61, "claude"),
                 (70, "runner"),
             ]
+        );
+    }
+
+    #[test]
+    fn assigns_focus_window_id_to_pty_process_and_descendants() {
+        let processes = vec![
+            ObservedProcess::new(10, None, "gwt", 1.0, 100),
+            ObservedProcess::new(20, Some(10), "zsh", 2.0, 120),
+            ObservedProcess::new(21, Some(20), "node", 40.0, 300).with_command_line(
+                "/usr/local/bin/node /opt/homebrew/lib/node_modules/@openai/codex/bin/codex.js",
+            ),
+            ObservedProcess::new(22, Some(21), "codex-aarch64-apple-darwin", 51.0, 400)
+                .with_executable_path(
+                    "/opt/homebrew/lib/node_modules/@openai/codex/bin/codex-aarch64-apple-darwin",
+                ),
+            ObservedProcess::new(30, None, "gwtd", 3.0, 140),
+            ObservedProcess::new(31, Some(30), "worker", 4.0, 160),
+        ];
+        let parent_by_pid = parent_by_pid(&processes);
+        let direct_focus_windows = HashMap::from([(20, "agent-window-1".to_string())]);
+        let selected = select_runtime_processes(10, &processes);
+        let focus_by_pid: HashMap<u32, Option<String>> = selected
+            .iter()
+            .map(|process| {
+                (
+                    process.pid,
+                    focus_window_id_for_process(process.pid, &parent_by_pid, &direct_focus_windows),
+                )
+            })
+            .collect();
+
+        assert_eq!(
+            focus_by_pid.get(&20).and_then(Option::as_deref),
+            Some("agent-window-1")
+        );
+        assert_eq!(
+            focus_by_pid.get(&21).and_then(Option::as_deref),
+            Some("agent-window-1")
+        );
+        assert_eq!(
+            focus_by_pid.get(&22).and_then(Option::as_deref),
+            Some("agent-window-1")
+        );
+        assert_eq!(focus_by_pid.get(&10).and_then(Option::as_deref), None);
+        assert_eq!(focus_by_pid.get(&31).and_then(Option::as_deref), None);
+
+        let view = processes[2]
+            .clone()
+            .into_view(10, Some("agent-window-1".to_string()));
+        assert_eq!(view.focus_window_id.as_deref(), Some("agent-window-1"));
+    }
+
+    #[test]
+    fn detail_includes_all_selected_processes_and_focus_rows() {
+        let mut processes = vec![ObservedProcess::new(10, None, "gwt", 1.0, 100)];
+        processes.extend((0..24).map(|index| {
+            ObservedProcess::new(
+                200 + index as u32,
+                Some(10),
+                "worker",
+                100.0 - index as f32,
+                900 + index as u64,
+            )
+        }));
+        processes.push(ObservedProcess::new(20, Some(10), "zsh", 0.1, 120));
+        processes.push(
+            ObservedProcess::new(21, Some(20), "docker", 0.2, 180)
+                .with_command_line("docker compose exec gwt codex --no-alt-screen"),
+        );
+
+        let parent_by_pid = parent_by_pid(&processes);
+        let direct_focus_windows = HashMap::from([(20, "docker-agent-window".to_string())]);
+        let mut selected = select_runtime_processes(10, &processes);
+        selected.sort_by(|left, right| {
+            right
+                .cpu_percent
+                .total_cmp(&left.cpu_percent)
+                .then_with(|| right.memory_bytes.cmp(&left.memory_bytes))
+                .then_with(|| left.pid.cmp(&right.pid))
+        });
+        let selected_len = selected.len();
+
+        let detail = detail_process_views(10, selected, &parent_by_pid, &direct_focus_windows);
+
+        assert_eq!(detail.len(), selected_len);
+        let docker = detail
+            .iter()
+            .find(|process| process.name == "docker")
+            .expect("expected low-CPU docker row to remain visible");
+        assert_eq!(docker.role, "docker");
+        assert_eq!(
+            docker.focus_window_id.as_deref(),
+            Some("docker-agent-window")
         );
     }
 

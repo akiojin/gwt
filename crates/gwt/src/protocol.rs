@@ -1217,6 +1217,8 @@ pub struct RuntimeHealthProcessView {
     pub name: String,
     pub cpu_percent: Option<f32>,
     pub memory_bytes: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub focus_window_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]

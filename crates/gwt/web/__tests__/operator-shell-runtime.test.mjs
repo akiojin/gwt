@@ -213,7 +213,146 @@ test("Runtime health renderer shows structured diagnostic hover detail", async (
   assert.equal(detail?.querySelector("button"), null, "detail must stay diagnostic-only");
 });
 
-test("Runtime health detail caps process rows and clamps to the viewport", async () => {
+test("Runtime health focusable process rows call the focus callback", async () => {
+  const { applyRuntimeHealth } = await importOperatorShell();
+  assert.equal(typeof applyRuntimeHealth, "function");
+  const { document, window } = parseHTML(html);
+  const focused = [];
+
+  applyRuntimeHealth(
+    document,
+    {
+      state: "warn",
+      cpu_percent: 64.2,
+      memory_bytes: 768 * 1024 * 1024,
+      process_count: 2,
+      runner_count: 0,
+      queue: {
+        client_count: 1,
+        queued_entries: 0,
+        dirty_panes: 0,
+        dropped_lossy_delta: 0,
+      },
+      processes: [
+        {
+          pid: 301,
+          parent_pid: 300,
+          role: "codex",
+          name: "codex",
+          cpu_percent: 52.4,
+          memory_bytes: 512 * 1024 * 1024,
+          focus_window_id: "agent-window-1",
+        },
+        {
+          pid: 401,
+          parent_pid: null,
+          role: "gwtd",
+          name: "gwtd",
+          cpu_percent: 2.1,
+          memory_bytes: 128 * 1024 * 1024,
+        },
+      ],
+    },
+    {
+      focusWindow: (windowId) => focused.push(windowId),
+    },
+  );
+
+  const cell = document.getElementById("op-strip-runtime-health");
+  cell?.dispatchEvent(new window.Event("mouseenter", { bubbles: true }));
+  const detail = document.getElementById("op-runtime-health-detail");
+  const focusableRows =
+    detail?.querySelectorAll(".op-runtime-health-detail__process--focusable") ?? [];
+  assert.equal(focusableRows.length, 1);
+  assert.equal(focusableRows[0]?.tagName, "BUTTON");
+  assert.equal(focusableRows[0]?.getAttribute("type"), "button");
+  assert.match(focusableRows[0]?.getAttribute("aria-label") ?? "", /Focus codex process 301/);
+
+  const staticRows =
+    detail?.querySelectorAll(".op-runtime-health-detail__process:not(button)") ?? [];
+  assert.equal(staticRows.length, 1, "process rows without a focus target stay plain diagnostics");
+
+  focusableRows[0]?.dispatchEvent(new window.Event("click", { bubbles: true }));
+  assert.deepEqual(focused, ["agent-window-1"]);
+});
+
+test("Runtime health detail scrolls all process rows and highlights heavy focusable rows", async () => {
+  const { applyRuntimeHealth } = await importOperatorShell();
+  assert.equal(typeof applyRuntimeHealth, "function");
+  const { document, window } = parseHTML(html);
+  const focused = [];
+  const processes = Array.from({ length: 24 }, (_, index) => ({
+    pid: 1000 + index,
+    parent_pid: index === 0 ? null : 1000,
+    role: index % 2 === 0 ? "runner" : "gwt",
+    name: index % 2 === 0 ? "python3" : "gwt",
+    cpu_percent: 60 - index,
+    memory_bytes: (256 + index) * 1024 * 1024,
+  }));
+  processes[0] = {
+    pid: 1000,
+    parent_pid: null,
+    role: "codex",
+    name: "codex",
+    cpu_percent: 72.4,
+    memory_bytes: 768 * 1024 * 1024,
+    focus_window_id: "heavy-agent-window",
+  };
+  processes[23] = {
+    pid: 2023,
+    parent_pid: 1000,
+    role: "docker",
+    name: "docker",
+    cpu_percent: 0.2,
+    memory_bytes: 128 * 1024 * 1024,
+    focus_window_id: "docker-agent-window",
+  };
+
+  applyRuntimeHealth(
+    document,
+    {
+      state: "hot",
+      cpu_percent: 120,
+      memory_bytes: 4 * 1024 * 1024 * 1024,
+      process_count: 24,
+      runner_count: 0,
+      queue: {
+        client_count: 1,
+        queued_entries: 0,
+        dirty_panes: 0,
+        dropped_lossy_delta: 0,
+      },
+      processes,
+    },
+    {
+      focusWindow: (windowId) => focused.push(windowId),
+    },
+  );
+
+  const cell = document.getElementById("op-strip-runtime-health");
+  cell?.dispatchEvent(new window.Event("mouseenter", { bubbles: true }));
+  const detail = document.getElementById("op-runtime-health-detail");
+  const processList = detail?.querySelector(".op-runtime-health-detail__process-list");
+  const processRows = detail?.querySelectorAll(".op-runtime-health-detail__process") ?? [];
+  const focusableRows =
+    detail?.querySelectorAll(".op-runtime-health-detail__process--focusable") ?? [];
+  assert.equal(processList?.dataset.scroll, "true");
+  assert.equal(processRows.length, 24);
+  assert.equal(focusableRows.length, 2);
+  assert.equal(processRows[0]?.dataset.heat, "hot");
+  assert.equal(processRows[0]?.dataset.agent, "true");
+  assert.match(processRows[0]?.textContent ?? "", /codex/);
+  assert.match(focusableRows[1]?.textContent ?? "", /docker/);
+  assert.match(
+    detail?.querySelector(".op-runtime-health-detail__process-more")?.textContent ?? "",
+    /Showing 24 processes sorted by CPU/,
+  );
+
+  focusableRows[1]?.dispatchEvent(new window.Event("click", { bubbles: true }));
+  assert.deepEqual(focused, ["docker-agent-window"]);
+});
+
+test("Runtime health detail scroll area clamps to the viewport", async () => {
   const { applyRuntimeHealth } = await importOperatorShell();
   assert.equal(typeof applyRuntimeHealth, "function");
   const { document, window } = parseHTML(html);
@@ -225,7 +364,7 @@ test("Runtime health detail caps process rows and clamps to the viewport", async
     },
   });
 
-  const processes = Array.from({ length: 16 }, (_, index) => ({
+  const processes = Array.from({ length: 24 }, (_, index) => ({
     pid: 1000 + index,
     parent_pid: index === 0 ? null : 1000,
     role: index % 2 === 0 ? "codex" : "gwt",
@@ -262,10 +401,12 @@ test("Runtime health detail caps process rows and clamps to the viewport", async
 
   const detail = document.getElementById("op-runtime-health-detail");
   const processRows = detail?.querySelectorAll(".op-runtime-health-detail__process") ?? [];
-  assert.equal(processRows.length, 10);
+  const processList = detail?.querySelector(".op-runtime-health-detail__process-list");
+  assert.equal(processRows.length, 24);
+  assert.equal(processList?.dataset.scroll, "true");
   assert.match(
     detail?.querySelector(".op-runtime-health-detail__process-more")?.textContent ?? "",
-    /Showing top 10 of 16/,
+    /Showing 24 processes sorted by CPU/,
   );
   assert.equal(detail?.style.maxHeight, "472px");
   assert.equal(detail?.style.left, "332px");

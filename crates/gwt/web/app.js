@@ -132,7 +132,10 @@
         palette: __op.palette,
         applyTelemetryCounts: (counts) => applyTelemetryCounts(document, counts),
         applyProviderUsage: (snapshot) => applyProviderUsage(document, snapshot),
-        applyRuntimeHealth: (snapshot) => applyRuntimeHealth(document, snapshot),
+        applyRuntimeHealth: (snapshot) =>
+          applyRuntimeHealth(document, snapshot, {
+            focusWindow: (windowId) => focusWindowRemotely(windowId, { center: true }),
+          }),
       };
 
       const uiTraceProfiler = createUiTraceProfiler();
