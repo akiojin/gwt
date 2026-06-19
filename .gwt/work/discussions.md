@@ -49,3 +49,23 @@ Open Questions:
 
 Next:
 Action Bundle: run gwt-build-spec for #1935 Phase 22. Start with T-HUX2-001 through T-HUX2-006: RED tests and backend ManagedHookHealth read model before UI work.
+
+## 2026-06-20 — Antigravity CLI visual verification route
+
+Status: active
+Topics: SPEC-1921, antigravity-cli, visual-verification
+Related SPECs: #1921
+Related Works:
+Promoted To:
+
+Summary:
+ユーザー報告では fresh check で何も変わっていないように見える。調査の結果、スクリーンショットの失敗は Antigravity CLI 起動ではなく Start Work が remote branch を作る段階で GitHub 認証プロンプト不可により失敗していた。open_launch_wizard 経路の live Playwright check では Agent picker に Antigravity CLI と Gemini CLI (legacy) が期待順で表示されることを確認した。
+
+Decisions:
+- 実装差分は fresh binary に反映済み。Start Work branch 作成失敗は SPEC #1921 Antigravity descriptor/label slice とは別の確認導線または Start Work 認証 scope として扱う。
+
+Open Questions:
+- PR gate の視覚確認として既存 branch Launch Wizard の表示確認で進めるか、Start Work 認証失敗をこの流れで追加 scope として扱うか。
+
+Next:
+ユーザーに確認する: A) 既存 branch Launch Wizard の表示確認を採用して PR gate に進む、B) Start Work 認証失敗を別 Issue/SPEC scope として扱う、C) Antigravity 実起動まで current branch で追加確認する。

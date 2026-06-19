@@ -22,6 +22,13 @@ use super::{
     WindowProcessStatus,
 };
 
+const ANTIGRAVITY_MISSING_BINARY_DETAIL: &str = concat!(
+    "Antigravity CLI (`agy`) was not found in PATH. ",
+    "Install it with: curl -fsSL https://antigravity.google/cli/install.sh | bash. ",
+    "If it is already installed, ensure ~/.local/bin or the install directory is on PATH and ",
+    "restart gwt."
+);
+
 impl AppRuntime {
     pub(super) fn launch_wizard_action_error_stage(
         action: &gwt::LaunchWizardAction,
@@ -207,28 +214,50 @@ impl AppRuntime {
         launch_feedback_context: Option<LaunchFeedbackContext>,
     ) -> Vec<OutboundEvent> {
         self.log_window_launch_error("launch_complete", &window_id, &detail);
-        let terminal_output = Self::launch_error_terminal_output_event(window_id.clone(), &detail);
+        let user_detail = Self::user_facing_launch_error_detail(&detail);
+        let terminal_output =
+            Self::launch_error_terminal_output_event(window_id.clone(), &user_detail);
         if self.tracked_window_exists(&window_id) {
             self.launch_error_terminal_details
-                .insert(window_id.clone(), detail.clone());
-            let mut events =
-                self.handle_runtime_status(window_id, WindowProcessStatus::Error, Some(detail));
+                .insert(window_id.clone(), user_detail.clone());
+            let mut events = self.handle_runtime_status(
+                window_id,
+                WindowProcessStatus::Error,
+                Some(user_detail),
+            );
             events.push(terminal_output);
             return events;
         }
-        let mut events =
-            Self::status_events(window_id, WindowProcessStatus::Error, Some(detail.clone()));
+        let mut events = Self::status_events(
+            window_id,
+            WindowProcessStatus::Error,
+            Some(user_detail.clone()),
+        );
         events.push(terminal_output);
         if let Some(context) = launch_feedback_context {
             events.push(OutboundEvent::reply(
                 context.client_id,
                 BackendEvent::LaunchWizardOpenError {
                     title: context.title,
-                    message: detail,
+                    message: user_detail,
                 },
             ));
         }
         events
+    }
+
+    fn user_facing_launch_error_detail(detail: &str) -> String {
+        if Self::is_antigravity_missing_binary_error(detail) {
+            return ANTIGRAVITY_MISSING_BINARY_DETAIL.to_string();
+        }
+        detail.to_string()
+    }
+
+    fn is_antigravity_missing_binary_error(detail: &str) -> bool {
+        detail.contains("Unable to spawn agy")
+            && (detail.contains("No viable candidates found in PATH")
+                || detail.contains("command not found")
+                || detail.contains("No such file or directory"))
     }
 
     pub(super) fn launch_error_terminal_bytes(detail: &str) -> Vec<u8> {
