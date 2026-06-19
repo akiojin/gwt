@@ -151,6 +151,7 @@ pub fn canonical_launch_args(agent: &AgentId) -> Vec<String> {
         // CLI's documented inline mode for preserving terminal history.
         AgentId::Codex => vec!["--no-alt-screen".to_string()],
         AgentId::ClaudeCode
+        | AgentId::Antigravity
         | AgentId::Gemini
         | AgentId::OpenCode
         | AgentId::OpenClaw
@@ -654,6 +655,9 @@ impl AgentLaunchBuilder {
             AgentId::Codex => {
                 self.build_codex_args(&mut args, &mut env_vars);
             }
+            AgentId::Antigravity => {
+                self.build_antigravity_args(&mut args);
+            }
             AgentId::Gemini => {
                 self.build_gemini_args(&mut args);
             }
@@ -1012,6 +1016,28 @@ impl AgentLaunchBuilder {
         }
     }
 
+    fn build_antigravity_args(&self, args: &mut Vec<String>) {
+        match self.session_mode {
+            SessionMode::Continue => args.push("--continue".to_string()),
+            SessionMode::Resume => {
+                if let Some(ref id) = self.resume_session_id {
+                    args.push("--conversation".to_string());
+                    args.push(id.clone());
+                }
+            }
+            SessionMode::Normal => {}
+        }
+
+        if let Some(ref model) = self.model {
+            args.push("--model".to_string());
+            args.push(model.clone());
+        }
+
+        if self.skip_permissions {
+            args.push("--dangerously-skip-permissions".to_string());
+        }
+    }
+
     fn build_opencode_args(&self, args: &mut Vec<String>, env_vars: &mut HashMap<String, String>) {
         if let Some(ref dir) = self.working_dir {
             env_vars.insert(
@@ -1144,6 +1170,7 @@ mod tests {
         // defaults today. Agent-specific env vars and conditional args belong in
         // the agent-specific builder, not the canonical default list.
         assert!(canonical_launch_args(&AgentId::ClaudeCode).is_empty());
+        assert!(canonical_launch_args(&AgentId::Antigravity).is_empty());
         assert!(canonical_launch_args(&AgentId::Gemini).is_empty());
         assert!(canonical_launch_args(&AgentId::OpenCode).is_empty());
         assert!(canonical_launch_args(&AgentId::OpenClaw).is_empty());
@@ -1571,6 +1598,43 @@ mod tests {
 
         assert!(config.args.contains(&"--yolo".to_string()));
         assert!(config.skip_permissions);
+    }
+
+    #[test]
+    fn build_antigravity_maps_model_skip_permissions_and_resume_id() {
+        let agent_id = crate::types::resolve_agent_id("agy").expect("Antigravity must resolve");
+        let config = AgentLaunchBuilder::new(agent_id)
+            .model("gemini-3.5-pro")
+            .skip_permissions(true)
+            .session_mode(SessionMode::Resume)
+            .resume_session_id("conversation-123")
+            .build();
+
+        assert_eq!(config.command, "agy");
+        assert!(config
+            .args
+            .windows(2)
+            .any(|pair| pair[0] == "--model" && pair[1] == "gemini-3.5-pro"));
+        assert!(config
+            .args
+            .contains(&"--dangerously-skip-permissions".to_string()));
+        assert!(!config.args.contains(&"--yolo".to_string()));
+        assert!(config
+            .args
+            .windows(2)
+            .any(|pair| pair[0] == "--conversation" && pair[1] == "conversation-123"));
+    }
+
+    #[test]
+    fn build_antigravity_continue_uses_continue_flag() {
+        let agent_id = crate::types::resolve_agent_id("antigravity-cli")
+            .expect("Antigravity alias must resolve");
+        let config = AgentLaunchBuilder::new(agent_id)
+            .session_mode(SessionMode::Continue)
+            .build();
+
+        assert_eq!(config.command, "agy");
+        assert!(config.args.contains(&"--continue".to_string()));
     }
 
     #[test]

@@ -133,7 +133,7 @@ fn managed_targets_for_agent(agent_id: &AgentId) -> Option<ManagedAssetTarget> {
         AgentId::OpenCode => Some(ManagedAssetTarget::OpenCode),
         AgentId::OpenClaw => Some(ManagedAssetTarget::OpenClaw),
         AgentId::Hermes => Some(ManagedAssetTarget::Hermes),
-        AgentId::Gemini | AgentId::Copilot | AgentId::Custom(_) => None,
+        AgentId::Antigravity | AgentId::Gemini | AgentId::Copilot | AgentId::Custom(_) => None,
     }
 }
 

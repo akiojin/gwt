@@ -393,6 +393,10 @@ mod tests {
     fn agent_key_mapping() {
         assert_eq!(VersionCache::agent_key(&AgentId::ClaudeCode), "claude-code");
         assert_eq!(VersionCache::agent_key(&AgentId::Codex), "codex");
+        assert_eq!(
+            VersionCache::agent_key(&AgentId::Antigravity),
+            "antigravity"
+        );
         assert_eq!(VersionCache::agent_key(&AgentId::Gemini), "gemini");
         assert_eq!(VersionCache::agent_key(&AgentId::OpenCode), "opencode");
         assert_eq!(VersionCache::agent_key(&AgentId::OpenClaw), "openclaw");

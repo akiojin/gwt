@@ -8,6 +8,7 @@ use serde::{Deserialize, Serialize};
 pub enum AgentId {
     ClaudeCode,
     Codex,
+    Antigravity,
     Gemini,
     OpenCode,
     OpenClaw,
@@ -71,7 +72,7 @@ impl AgentId {
     pub fn supports_continue_latest(&self) -> bool {
         matches!(
             self,
-            Self::ClaudeCode | Self::Codex | Self::OpenCode | Self::Hermes
+            Self::ClaudeCode | Self::Codex | Self::Antigravity | Self::OpenCode | Self::Hermes
         )
     }
 
@@ -79,7 +80,12 @@ impl AgentId {
     pub fn supports_resume_session_id(&self) -> bool {
         matches!(
             self,
-            Self::ClaudeCode | Self::Codex | Self::OpenCode | Self::OpenClaw | Self::Hermes
+            Self::ClaudeCode
+                | Self::Codex
+                | Self::Antigravity
+                | Self::OpenCode
+                | Self::OpenClaw
+                | Self::Hermes
         )
     }
 
@@ -142,12 +148,23 @@ const BUILTIN_AGENT_DESCRIPTORS: &[BuiltinAgentDescriptor] = &[
         version_prefix_args: &[],
     },
     BuiltinAgentDescriptor {
+        id: AgentId::Antigravity,
+        command: "agy",
+        display_name: "Antigravity CLI",
+        package_name: None,
+        color: AgentColor::Green,
+        aliases: &["agy", "antigravity", "antigravity cli", "antigravity-cli"],
+        cache_key: "antigravity",
+        version_flag: "--version",
+        version_prefix_args: &[],
+    },
+    BuiltinAgentDescriptor {
         id: AgentId::Gemini,
         command: "gemini",
-        display_name: "Gemini CLI",
+        display_name: "Gemini CLI (legacy)",
         package_name: Some("@google/gemini-cli"),
         color: AgentColor::Magenta,
-        aliases: &["gemini", "gemini cli", "gemini-cli"],
+        aliases: &["gemini", "gemini cli", "gemini-cli", "gemini cli legacy"],
         cache_key: "gemini",
         version_flag: "--version",
         version_prefix_args: &[],
@@ -352,6 +369,7 @@ mod tests {
     fn agent_id_command_returns_expected() {
         assert_eq!(AgentId::ClaudeCode.command(), "claude");
         assert_eq!(AgentId::Codex.command(), "codex");
+        assert_eq!(AgentId::Antigravity.command(), "agy");
         assert_eq!(AgentId::Gemini.command(), "gemini");
         assert_eq!(AgentId::OpenCode.command(), "opencode");
         assert_eq!(AgentId::OpenClaw.command(), "openclaw");
@@ -363,6 +381,8 @@ mod tests {
     #[test]
     fn agent_id_display_name_returns_expected() {
         assert_eq!(AgentId::ClaudeCode.display_name(), "Claude Code");
+        assert_eq!(AgentId::Antigravity.display_name(), "Antigravity CLI");
+        assert_eq!(AgentId::Gemini.display_name(), "Gemini CLI (legacy)");
         assert_eq!(AgentId::OpenCode.display_name(), "OpenCode");
         assert_eq!(AgentId::OpenClaw.display_name(), "OpenClaw");
         assert_eq!(AgentId::Hermes.display_name(), "Hermes Agent");
@@ -376,6 +396,7 @@ mod tests {
             AgentId::ClaudeCode.package_name(),
             Some("@anthropic-ai/claude-code")
         );
+        assert_eq!(AgentId::Antigravity.package_name(), None);
         assert_eq!(AgentId::Gemini.package_name(), Some("@google/gemini-cli"));
         assert_eq!(AgentId::OpenCode.package_name(), None);
         assert_eq!(AgentId::OpenClaw.package_name(), None);
@@ -387,6 +408,7 @@ mod tests {
     fn agent_id_default_color() {
         assert_eq!(AgentId::ClaudeCode.default_color(), AgentColor::Yellow);
         assert_eq!(AgentId::Codex.default_color(), AgentColor::Cyan);
+        assert_eq!(AgentId::Antigravity.default_color(), AgentColor::Green);
         assert_eq!(AgentId::Gemini.default_color(), AgentColor::Magenta);
         assert_eq!(AgentId::OpenCode.default_color(), AgentColor::Green);
         assert_eq!(AgentId::OpenClaw.default_color(), AgentColor::Blue);
@@ -409,7 +431,7 @@ mod tests {
     #[test]
     fn builtin_agent_descriptors_drive_agent_info_contract() {
         let descriptors = builtin_agent_descriptors();
-        assert_eq!(descriptors.len(), 7);
+        assert_eq!(descriptors.len(), 8);
 
         for descriptor in descriptors {
             let info = AgentInfo::from_id(descriptor.id.clone());
@@ -428,6 +450,20 @@ mod tests {
                 descriptor.command
             );
         }
+    }
+
+    #[test]
+    fn antigravity_descriptor_uses_native_agy_without_npm_package() {
+        let descriptor =
+            builtin_agent_descriptor_for_command("agy").expect("Antigravity must be built in");
+
+        assert_eq!(descriptor.command, "agy");
+        assert_eq!(descriptor.display_name, "Antigravity CLI");
+        assert_eq!(descriptor.package_name, None);
+        assert_eq!(descriptor.cache_key, "antigravity");
+        assert_eq!(descriptor.version_flag, "--version");
+        assert!(descriptor.aliases.contains(&"antigravity"));
+        assert!(descriptor.aliases.contains(&"antigravity-cli"));
     }
 
     #[test]
@@ -474,6 +510,7 @@ mod tests {
         assert!(AgentId::ClaudeCode.supports_resume_picker());
         assert!(AgentId::Codex.supports_resume_picker());
         for non_picker in [
+            AgentId::Antigravity,
             AgentId::Gemini,
             AgentId::OpenCode,
             AgentId::OpenClaw,
@@ -493,6 +530,7 @@ mod tests {
         for supported in [
             AgentId::ClaudeCode,
             AgentId::Codex,
+            resolve_agent_id("agy").expect("Antigravity must resolve"),
             AgentId::OpenCode,
             AgentId::Hermes,
         ] {
@@ -519,6 +557,7 @@ mod tests {
         for supported in [
             AgentId::ClaudeCode,
             AgentId::Codex,
+            resolve_agent_id("agy").expect("Antigravity must resolve"),
             AgentId::OpenCode,
             AgentId::OpenClaw,
             AgentId::Hermes,
@@ -545,6 +584,7 @@ mod tests {
         assert!(AgentId::ClaudeCode.supports_fast_mode());
         assert!(AgentId::Codex.supports_fast_mode());
         for unsupported in [
+            AgentId::Antigravity,
             AgentId::Gemini,
             AgentId::OpenCode,
             AgentId::OpenClaw,
@@ -574,7 +614,18 @@ mod tests {
         assert_eq!(resolve_agent_id("codex"), Some(AgentId::Codex));
         assert_eq!(resolve_agent_id("Codex"), Some(AgentId::Codex));
         assert_eq!(resolve_agent_id("gemini"), Some(AgentId::Gemini));
-        assert_eq!(resolve_agent_id("Gemini CLI"), Some(AgentId::Gemini));
+        assert_eq!(
+            resolve_agent_id("Gemini CLI (legacy)"),
+            Some(AgentId::Gemini)
+        );
+        assert_eq!(
+            resolve_agent_id("agy").map(|id| id.command().to_string()),
+            Some("agy".into())
+        );
+        assert_eq!(
+            resolve_agent_id("Antigravity CLI").map(|id| id.display_name().to_string()),
+            Some("Antigravity CLI".into())
+        );
         assert_eq!(resolve_agent_id("opencode"), Some(AgentId::OpenCode));
         assert_eq!(resolve_agent_id("OpenCode"), Some(AgentId::OpenCode));
         assert_eq!(resolve_agent_id("open-code"), Some(AgentId::OpenCode));
@@ -619,6 +670,7 @@ mod tests {
             "my-claude-wrapper",
             "codex-wrapper",
             "gemini-helper",
+            "antigravity-helper",
             "opencode-mentor",
             "openclaw-mentor",
             "hermes-helper",
@@ -640,6 +692,8 @@ mod tests {
         let cases = [
             ("claude", AgentColor::Yellow),
             ("codex", AgentColor::Cyan),
+            ("agy", AgentColor::Green),
+            ("antigravity", AgentColor::Green),
             ("gemini", AgentColor::Magenta),
             ("opencode", AgentColor::Green),
             ("openclaw", AgentColor::Blue),
@@ -660,6 +714,7 @@ mod tests {
         let ids = vec![
             AgentId::ClaudeCode,
             AgentId::Codex,
+            AgentId::Antigravity,
             AgentId::Gemini,
             AgentId::OpenCode,
             AgentId::OpenClaw,

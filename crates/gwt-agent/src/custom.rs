@@ -238,7 +238,7 @@ mod tests {
                     builtin_display_name,
                     ..
                 } => {
-                    assert_eq!(builtin_display_name, "Gemini CLI");
+                    assert_eq!(builtin_display_name, "Gemini CLI (legacy)");
                 }
                 other => panic!("unexpected variant: {other:?}"),
             }

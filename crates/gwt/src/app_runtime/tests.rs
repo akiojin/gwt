@@ -42,8 +42,8 @@ use super::{
     save_start_work_workspace_projection, save_workspace_launch_projection, ActiveAgentSession,
     AgentLaunchCompletion, AppEventProxy, AppRuntime, AttachmentProgressPhase, BlockingTaskSpawner,
     DispatchTarget, KnowledgeLoadRequest, KnowledgeRefreshTask, KnowledgeSearchRequest,
-    LaunchWizardMemoryCache, LaunchWizardSession, OutboundEvent, ProcessLaunch, ProjectTabRuntime,
-    UserEvent, WindowRuntime, WorkspaceResumeContext,
+    LaunchFeedbackContext, LaunchWizardMemoryCache, LaunchWizardSession, OutboundEvent,
+    ProcessLaunch, ProjectTabRuntime, UserEvent, WindowRuntime, WorkspaceResumeContext,
 };
 use crate::{
     combined_window_id, geometry_to_pty_size, same_worktree_path, AttachmentUploadStore,
@@ -4506,6 +4506,91 @@ fn app_runtime_agent_launch_completion_failure_writes_diagnostic_to_terminal() {
         diagnostic.contains("launch failed before process spawn"),
         "diagnostic must include the launch error detail: {diagnostic:?}"
     );
+}
+
+#[test]
+fn app_runtime_antigravity_missing_binary_launch_error_is_actionable() {
+    let temp = tempdir().expect("tempdir");
+    let tab = sample_project_tab_with_window(
+        "tab-1",
+        "agent-1",
+        WindowPreset::Agent,
+        WindowProcessStatus::Running,
+    );
+    let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+    let window_id = combined_window_id("tab-1", "agent-1");
+    let raw_error = "PTY creation failed: Unable to spawn agy because: \
+No viable candidates found in PATH \
+\"/private/var/folders/tmp/node_modules/.bin:/opt/homebrew/bin:/Users/example/.local/bin\"";
+
+    let events = runtime.handle_launch_complete(window_id.clone(), Err(raw_error.to_string()));
+
+    let detail = events
+        .iter()
+        .find_map(|event| match &event.event {
+            BackendEvent::TerminalStatus { id, status, detail }
+                if id == &window_id && *status == WindowProcessStatus::Error =>
+            {
+                detail.as_deref()
+            }
+            _ => None,
+        })
+        .expect("terminal status detail");
+    assert!(detail.contains("Antigravity CLI (`agy`) was not found"));
+    assert!(detail.contains("https://antigravity.google/cli/install.sh"));
+    assert!(detail.contains("~/.local/bin"));
+    assert!(!detail.contains("No viable candidates found in PATH"));
+    assert!(!detail.contains("/private/var/folders"));
+
+    let diagnostic = events
+        .iter()
+        .find_map(|event| match &event.event {
+            BackendEvent::TerminalOutput { id, data_base64 } if id == &window_id => {
+                let decoded = base64::engine::general_purpose::STANDARD
+                    .decode(data_base64)
+                    .expect("decode terminal diagnostic");
+                Some(String::from_utf8_lossy(&decoded).to_string())
+            }
+            _ => None,
+        })
+        .expect("launch failure diagnostic terminal output");
+    assert!(diagnostic.contains("Antigravity CLI (`agy`) was not found"));
+    assert!(diagnostic.contains("https://antigravity.google/cli/install.sh"));
+    assert!(!diagnostic.contains("No viable candidates found in PATH"));
+    assert!(!diagnostic.contains("node_modules/.bin"));
+}
+
+#[test]
+fn app_runtime_antigravity_missing_binary_launch_wizard_error_is_actionable() {
+    let temp = tempdir().expect("tempdir");
+    let mut runtime = sample_runtime(temp.path(), Vec::new(), None);
+    let raw_error = "PTY creation failed: Unable to spawn agy because: \
+No viable candidates found in PATH \
+\"/private/var/folders/tmp/node_modules/.bin:/opt/homebrew/bin:/Users/example/.local/bin\"";
+
+    let events = runtime.launch_error_events(
+        "tab-1::agent-1".to_string(),
+        raw_error.to_string(),
+        Some(LaunchFeedbackContext {
+            client_id: "client-1".to_string(),
+            title: "Launch failed".to_string(),
+        }),
+    );
+
+    let message = events
+        .iter()
+        .find_map(|event| match &event.event {
+            BackendEvent::LaunchWizardOpenError { title, message } if title == "Launch failed" => {
+                Some(message.as_str())
+            }
+            _ => None,
+        })
+        .expect("launch wizard open error");
+    assert!(message.contains("Antigravity CLI (`agy`) was not found"));
+    assert!(message.contains("https://antigravity.google/cli/install.sh"));
+    assert!(message.contains("~/.local/bin"));
+    assert!(!message.contains("No viable candidates found in PATH"));
+    assert!(!message.contains("/private/var/folders"));
 }
 
 #[test]
