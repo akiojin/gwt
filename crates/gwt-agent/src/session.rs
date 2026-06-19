@@ -1000,7 +1000,7 @@ display_name = "Claude Code"
             ]
         );
         assert_eq!(loaded.workflow_bypass, Some(WorkflowBypass::Release));
-        assert_eq!(loaded.display_name, "Gemini CLI");
+        assert_eq!(loaded.display_name, "Gemini CLI (legacy)");
     }
 
     #[test]
