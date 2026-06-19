@@ -2201,6 +2201,7 @@ fn append_workspace_resume_journal(
         owner: Some(owner.to_string()),
         next_action: Some("Resume the review".to_string()),
         summary: Some(summary.to_string()),
+        progress_summary: None,
         agent_session_id: None,
         agent_current_focus: None,
         agent_title_summary: Some("Suspended review".to_string()),
@@ -5100,11 +5101,47 @@ fn app_runtime_active_work_projection_groups_live_assigned_agents_by_work_id() {
             .any(|agent| agent.session_id == "session-b")));
 }
 
+#[test]
+fn app_runtime_active_work_projection_includes_managed_hook_health() {
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedEnvVar::set("HOME", temp.path());
+    let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+    let repo = temp.path().join("repo");
+    fs::create_dir_all(&repo).expect("create repo");
+    gwt_skills::generate_codex_hooks(&repo).expect("generate codex hooks");
+    let tab = sample_project_tab("tab-1", "Repo", repo.clone(), ProjectKind::Git, &[]);
+    let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+    let mut session = sample_active_agent_session("tab-1", "tab-1::agent-a");
+    session.session_id = "session-a".to_string();
+    session.worktree_path = repo.clone();
+    session.agent_project_root = repo.display().to_string();
+    runtime
+        .active_agent_sessions
+        .insert("tab-1::agent-a".to_string(), session);
+    let runtime_path = gwt_agent::runtime_state_path(&runtime.sessions_dir, "session-a");
+    gwt::cli::hook::runtime_state::write_for_event(&runtime_path, "PreToolUse")
+        .expect("runtime state");
+
+    let view = runtime
+        .active_work_projection_for_tab("tab-1", &runtime.tabs[0])
+        .expect("projection view");
+
+    let health = view
+        .managed_hook_health
+        .as_ref()
+        .expect("managed hook health");
+    assert_eq!(health.status, "ready");
+    assert_eq!(health.last_event.as_deref(), Some("PreToolUse"));
+    assert!(health.issues.is_empty(), "{:?}", health.issues);
+}
+
 /// SPEC-2359 Phase W-12 Slice 2 (FR-348): "1 agent session : 1 Work". When
 /// the *same* `session_id` surfaces under multiple windows, the agents
-/// collapse into a single Work row keyed by that session. Distinct sessions
-/// are covered by
-/// `app_runtime_active_work_projection_separates_sessions_on_same_branch`.
+/// collapse into a single Work row keyed by that session. The Workspace detail
+/// is then normalized to the latest visible entry per agent identity.
 #[test]
 fn app_runtime_active_work_projection_groups_same_session_windows_in_one_work_row() {
     let _env_lock = env_test_lock()
@@ -5144,17 +5181,20 @@ fn app_runtime_active_work_projection_groups_same_session_windows_in_one_work_ro
     assert_eq!(view.active_work_count, 1);
     assert_eq!(view.active_works.len(), 1);
     assert_eq!(view.active_works[0].id, "work-session-session-shared");
-    assert_eq!(view.active_works[0].agents.len(), 2);
+    assert_eq!(view.active_works[0].agents.len(), 1);
     assert!(view.active_works[0]
         .agents
         .iter()
         .all(|agent| agent.session_id == "session-shared"));
+    assert_eq!(
+        view.active_works[0].session_agent_total, 2,
+        "hidden same-agent candidates stay counted for the session summary"
+    );
 }
 
-/// SPEC-2359 Phase W-12 Slice 2 (FR-348): `agent_session_id` is the primary
-/// Work identity. Two live agents that share the *same* branch but report
-/// *different* `session_id`s must materialize as two separate Work rows,
-/// proving "1 agent session : 1 Work".
+/// SPEC-2359 Phase W-12 Slice 2 (FR-348): `agent_session_id` is the storage
+/// identity, but the Workspace detail shows only the latest visible entry per
+/// agent identity after same-branch Works are grouped into one row.
 #[test]
 fn app_runtime_active_work_projection_separates_sessions_on_same_branch() {
     let _env_lock = env_test_lock()
@@ -5174,6 +5214,11 @@ fn app_runtime_active_work_projection_separates_sessions_on_same_branch() {
         let mut agent = workspace_agent_summary_for_test(session_id, Some("work-shared"));
         agent.window_id = Some(window_id.to_string());
         agent.branch = Some("work/shared".to_string());
+        agent.updated_at = if session_id == "session-a" {
+            Utc.with_ymd_and_hms(2026, 6, 17, 9, 0, 0).unwrap()
+        } else {
+            Utc.with_ymd_and_hms(2026, 6, 17, 10, 0, 0).unwrap()
+        };
         projection.agents.push(agent);
     }
     gwt_core::workspace_projection::save_workspace_projection(&repo, &projection)
@@ -5207,14 +5252,23 @@ fn app_runtime_active_work_projection_separates_sessions_on_same_branch() {
         "same branch groups into one row"
     );
     let row = &view.active_works[0];
-    assert!(row
-        .agents
-        .iter()
-        .any(|agent| agent.session_id == "session-a"));
+    assert_eq!(
+        row.agents.len(),
+        1,
+        "same agent identity collapses to the newest visible session"
+    );
     assert!(row
         .agents
         .iter()
         .any(|agent| agent.session_id == "session-b"));
+    assert!(!row
+        .agents
+        .iter()
+        .any(|agent| agent.session_id == "session-a"));
+    assert_eq!(
+        row.session_agent_total, 2,
+        "hidden same-agent candidates stay counted for the session summary"
+    );
     assert!(row.workspace_key.is_some());
 }
 
@@ -6415,6 +6469,7 @@ fn app_runtime_active_work_projection_includes_recent_workspace_journal_entries(
             owner: Some("SPEC-2359".to_string()),
             next_action: Some("Review summary".to_string()),
             summary: Some("Overview summary is persisted.".to_string()),
+            progress_summary: None,
             agent_session_id: None,
             agent_current_focus: None,
             agent_title_summary: None,
@@ -6688,6 +6743,149 @@ fn app_runtime_list_resumable_agents_includes_live_session_as_running() {
                 agents[0].lifecycle_status,
                 Some(gwt::ResumableAgentLifecycleStatus::Running),
             );
+            assert_eq!(
+                agents[0].resume_kind,
+                gwt::ResumableAgentResumeKind::Session
+            );
+        }
+        other => panic!("unexpected backend event: {other:?}"),
+    }
+}
+
+#[test]
+fn app_runtime_list_resumable_agents_marks_idless_codex_as_native_picker() {
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedEnvVar::set("HOME", temp.path());
+    let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+    let repo = temp.path().join("repo");
+    fs::create_dir_all(&repo).expect("create repo");
+    let session_id = "session-native-picker-1";
+    let projection = projection_with_assigned_agent(&repo, session_id);
+    gwt_core::workspace_projection::save_workspace_projection(&repo, &projection)
+        .expect("save projection");
+    let sessions_dir = temp.path().join("sessions");
+    write_resumable_session_for_test(
+        &sessions_dir,
+        session_id,
+        &repo,
+        "work/test",
+        gwt_agent::AgentId::Codex,
+        None,
+    );
+
+    let tab = sample_project_tab("tab-1", "Repo", repo, ProjectKind::Git, &[]);
+    let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+
+    let events = runtime.handle_frontend_event(
+        "client-1".to_string(),
+        FrontendEvent::ListResumableAgents { workspace_id: None },
+    );
+
+    match events.first().map(|outbound| &outbound.event) {
+        Some(BackendEvent::WorkspaceResumableAgents { agents, .. }) => {
+            assert_eq!(agents.len(), 1);
+            assert_eq!(
+                agents[0].resume_kind,
+                gwt::ResumableAgentResumeKind::NativePicker,
+                "Codex without an exact id should open the provider-native resume picker"
+            );
+        }
+        other => panic!("unexpected backend event: {other:?}"),
+    }
+}
+
+#[test]
+fn app_runtime_list_resumable_agents_uses_workspace_branch_ledger_candidates() {
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedEnvVar::set("HOME", temp.path());
+    let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+    let repo = temp.path().join("repo");
+    init_git_clone_with_origin(&repo);
+    let branch = "work/ledger-resume";
+    run_git(&repo, &["branch", branch]);
+
+    let projection =
+        gwt_core::workspace_projection::WorkspaceProjection::default_for_project(&repo);
+    gwt_core::workspace_projection::save_workspace_projection(&repo, &projection)
+        .expect("save projection without raw agents");
+
+    let work_id = gwt_core::workspace_projection::canonical_work_id(&repo, Some(branch), None)
+        .expect("canonical work id");
+    let updated_at = Utc.with_ymd_and_hms(2026, 6, 17, 9, 0, 0).unwrap();
+    let work_item = gwt_core::workspace_projection::WorkItem {
+        id: work_id.clone(),
+        title: branch.to_string(),
+        intent: None,
+        summary: None,
+        progress_summary: None,
+        status_category: gwt_core::workspace_projection::WorkspaceStatusCategory::Idle,
+        owner: None,
+        created_at: updated_at,
+        updated_at,
+        completed_at: None,
+        agents: Vec::new(),
+        execution_containers: vec![
+            gwt_core::workspace_projection::WorkspaceExecutionContainerRef {
+                branch: Some(branch.to_string()),
+                worktree_path: None,
+                pr_number: None,
+                pr_url: None,
+                pr_state: None,
+            },
+        ],
+        board_refs: Vec::new(),
+        related_work_item_ids: Vec::new(),
+        events: Vec::new(),
+        discarded: false,
+    };
+    let work_items = gwt_core::workspace_projection::WorkItemsProjection {
+        updated_at,
+        work_items: vec![work_item],
+    };
+    let work_items_path = gwt_core::paths::gwt_workspace_work_items_path_for_repo_path(&repo);
+    fs::create_dir_all(work_items_path.parent().expect("work items parent"))
+        .expect("create work items parent");
+    gwt_core::workspace_projection::save_workspace_work_items_projection_to_path(
+        &work_items_path,
+        &work_items,
+    )
+    .expect("save work items projection");
+
+    let sessions_dir = temp.path().join("sessions");
+    write_resumable_session_for_test(
+        &sessions_dir,
+        "session-ledger-codex",
+        &repo,
+        branch,
+        gwt_agent::AgentId::Codex,
+        Some("codex-thread-ledger"),
+    );
+
+    let tab = sample_project_tab("tab-1", "Repo", repo, ProjectKind::Git, &[]);
+    let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+
+    let events = runtime.handle_frontend_event(
+        "client-1".to_string(),
+        FrontendEvent::ListResumableAgents {
+            workspace_id: Some(work_id),
+        },
+    );
+
+    match events.first().map(|outbound| &outbound.event) {
+        Some(BackendEvent::WorkspaceResumableAgents { agents, .. }) => {
+            assert_eq!(
+                agents.len(),
+                1,
+                "Resume picker must use the same branch ledger candidates as Workspace detail",
+            );
+            assert_eq!(agents[0].session_id, "session-ledger-codex");
+            assert_eq!(agents[0].display_name, "Codex");
             assert_eq!(
                 agents[0].resume_kind,
                 gwt::ResumableAgentResumeKind::Session
@@ -14408,6 +14606,7 @@ fn workspace_view_for_tab_omits_work_item_history_from_workspace_state() {
         title: "Test Done Item".to_string(),
         intent: None,
         summary: None,
+        progress_summary: None,
         status_category: gwt_core::workspace_projection::WorkspaceStatusCategory::Done,
         owner: None,
         created_at: completed_at,
@@ -14783,7 +14982,7 @@ fn attach_registry_sessions_caps_total_agents_on_the_wire() {
         .map(|index| gwt::ActiveWorkAgentView {
             session_id: format!("rec-{index:02}"),
             window_id: None,
-            agent_id: "claude".to_string(),
+            agent_id: format!("custom-agent-{index:02}"),
             display_name: format!("Claude {index:02}"),
             affiliation_status: "assigned".to_string(),
             workspace_id: None,
@@ -14805,6 +15004,7 @@ fn attach_registry_sessions_caps_total_agents_on_the_wire() {
         status_category: "idle".to_string(),
         status_text: "Paused".to_string(),
         summary: None,
+        progress_summary: None,
         work_summary: None,
         owner: None,
         next_action: None,
@@ -14848,10 +15048,9 @@ fn attach_registry_sessions_caps_total_agents_on_the_wire() {
     );
 }
 
-/// User verification 2026-06-12 (screenshot): five identical "Claude Code"
-/// groups, one per historical gwt session, read as noise. Per agent identity
-/// only the latest entry stays; live (active) agents are never collapsed
-/// away.
+/// User verification 2026-06-17 (follow-up): Workspace detail is a session
+/// summary, not a live process inventory. Per agent identity only the latest
+/// entry stays; live (active/running/blocked) duplicates are collapsed too.
 #[test]
 fn attach_registry_sessions_keeps_latest_entry_per_agent_identity() {
     fn agent_with_conv(
@@ -14892,6 +15091,7 @@ fn attach_registry_sessions_keeps_latest_entry_per_agent_identity() {
         status_category: "idle".to_string(),
         status_text: "Paused".to_string(),
         summary: None,
+        progress_summary: None,
         work_summary: None,
         owner: None,
         next_action: None,
@@ -14926,7 +15126,8 @@ fn attach_registry_sessions_keeps_latest_entry_per_agent_identity() {
                 "conv-c3",
             ),
             agent_with_conv("x1", "Codex", "idle", "2026-06-09T00:00:00Z", "conv-x1"),
-            // A live agent of the same identity is never collapsed away.
+            // A live agent of the same identity is still a duplicate in the
+            // Workspace session summary.
             agent_with_conv(
                 "c-live",
                 "Claude Code",
@@ -14965,12 +15166,115 @@ fn attach_registry_sessions_keeps_latest_entry_per_agent_identity() {
     );
     assert!(ids.contains(&"x1"), "the other agent identity stays");
     assert!(
-        ids.contains(&"c-live"),
-        "live agents are never collapsed away"
+        !ids.contains(&"c-live"),
+        "older live duplicate collapses under the latest Claude Code row"
     );
     assert!(!ids.contains(&"c1"), "older duplicates collapse");
     assert!(!ids.contains(&"c3"), "older duplicates collapse");
-    assert_eq!(agents.len(), 3);
+    assert_eq!(agents.len(), 2);
+    assert_eq!(
+        works[0].session_agent_total, 5,
+        "hidden same-agent candidates stay counted for the '+N more sessions' summary"
+    );
+}
+
+#[test]
+fn attach_registry_sessions_recomputes_agent_counters_after_identity_collapse() {
+    fn agent_view(
+        session_id: &str,
+        display_name: &str,
+        status_category: &str,
+        updated_at: &str,
+    ) -> gwt::ActiveWorkAgentView {
+        gwt::ActiveWorkAgentView {
+            session_id: session_id.to_string(),
+            window_id: None,
+            agent_id: String::new(),
+            display_name: display_name.to_string(),
+            affiliation_status: "assigned".to_string(),
+            workspace_id: None,
+            status_category: status_category.to_string(),
+            current_focus: None,
+            title_summary: None,
+            branch: None,
+            worktree_path: None,
+            last_board_entry_id: None,
+            last_board_entry_kind: None,
+            coordination_scope: None,
+            updated_at: updated_at.to_string(),
+            sessions: vec![gwt::WorkspaceHistorySessionView {
+                agent_session_id: format!("conv-{session_id}"),
+                started_at: updated_at.to_string(),
+                is_active: true,
+                resumable: true,
+            }],
+        }
+    }
+
+    let mut works = vec![gwt::ActiveWorkItemView {
+        id: "work-develop-7ea5aa57".to_string(),
+        title: "develop".to_string(),
+        status_category: "active".to_string(),
+        status_text: "Active".to_string(),
+        summary: None,
+        progress_summary: None,
+        work_summary: None,
+        owner: None,
+        next_action: None,
+        active_agents: 99,
+        blocked_agents: 99,
+        branch: Some("develop".to_string()),
+        worktree_path: None,
+        pr_number: None,
+        pr_url: None,
+        pr_state: None,
+        board_refs: Vec::new(),
+        agents: vec![
+            agent_view(
+                "claude-old",
+                "Claude Code",
+                "active",
+                "2026-06-10T00:00:00Z",
+            ),
+            agent_view(
+                "claude-new",
+                "Claude Code",
+                "running",
+                "2026-06-11T00:00:00Z",
+            ),
+            agent_view("codex-blocked", "Codex", "blocked", "2026-06-09T00:00:00Z"),
+        ],
+        lifecycle_state: "active".to_string(),
+        closed_at: None,
+        session_agent_total: 0,
+        merged_into_base: false,
+        workspace_key: None,
+        remote_only: false,
+        done_equivalent: false,
+        cleanup_candidate: None,
+        updated_at: String::new(),
+    }];
+
+    super::attach_registry_sessions_to_active_works(
+        &mut works,
+        &[],
+        None,
+        &std::collections::HashMap::new(),
+        Path::new("/"),
+    );
+
+    let ids: Vec<&str> = works[0]
+        .agents
+        .iter()
+        .map(|agent| agent.session_id.as_str())
+        .collect();
+    assert_eq!(
+        ids,
+        vec!["claude-new", "codex-blocked"],
+        "latest visible agent per identity determines counters"
+    );
+    assert_eq!(works[0].active_agents, 1);
+    assert_eq!(works[0].blocked_agents, 1);
 }
 
 /// User verification 2026-06-12 (follow-up): a record agent whose ledger TOML
@@ -15006,6 +15310,7 @@ fn attach_registry_sessions_drops_ghost_agents_without_identity_or_sessions() {
         status_category: "idle".to_string(),
         status_text: "Paused".to_string(),
         summary: None,
+        progress_summary: None,
         work_summary: None,
         owner: None,
         next_action: None,
@@ -15090,10 +15395,15 @@ fn attach_registry_sessions_dedupes_agents_sharing_a_conversation() {
         updated_at: &str,
         conversation: &str,
     ) -> gwt::ActiveWorkAgentView {
+        let agent_id = if display_name == "Codex" {
+            "codex"
+        } else {
+            "claude"
+        };
         gwt::ActiveWorkAgentView {
             session_id: session_id.to_string(),
             window_id: None,
-            agent_id: "claude".to_string(),
+            agent_id: agent_id.to_string(),
             display_name: display_name.to_string(),
             affiliation_status: "assigned".to_string(),
             workspace_id: None,
@@ -15121,6 +15431,7 @@ fn attach_registry_sessions_dedupes_agents_sharing_a_conversation() {
         status_category: "idle".to_string(),
         status_text: "Paused".to_string(),
         summary: None,
+        progress_summary: None,
         work_summary: None,
         owner: None,
         next_action: None,
@@ -15302,6 +15613,7 @@ fn active_works_are_sorted_by_latest_update_descending() {
         status_category: "idle".to_string(),
         status_text: "Paused".to_string(),
         summary: None,
+        progress_summary: None,
         work_summary: None,
         owner: None,
         next_action: None,
@@ -15376,6 +15688,7 @@ fn mark_merged_active_works_flags_cache_and_pr_state() {
         status_category: "idle".to_string(),
         status_text: "Paused".to_string(),
         summary: None,
+        progress_summary: None,
         work_summary: None,
         owner: None,
         next_action: None,
@@ -15777,6 +16090,7 @@ fn assign_and_merge_workspace_groups_unifies_same_branch_rows() {
             status_category: "idle".to_string(),
             status_text: "Paused".to_string(),
             summary: None,
+            progress_summary: None,
             work_summary: None,
             owner: None,
             next_action: None,
@@ -15863,6 +16177,7 @@ fn mark_remote_only_flags_fetched_branches_without_local_worktree() {
             status_category: "idle".to_string(),
             status_text: "Paused".to_string(),
             summary: None,
+            progress_summary: None,
             work_summary: None,
             owner: None,
             next_action: None,
@@ -15923,6 +16238,7 @@ fn mark_merged_classifies_done_equivalent_for_stale_merged_rows() {
             status_category: "idle".to_string(),
             status_text: "Paused".to_string(),
             summary: None,
+            progress_summary: None,
             work_summary: None,
             owner: None,
             next_action: None,
@@ -16070,6 +16386,14 @@ fn apply_work_summary_external_sources_prefers_pr_then_ai_then_commit_subject() 
         "work/20260609-1130".to_string(),
         "Merge pull request #42 from x".to_string(), // noisy raw subject
     );
+    tip_subjects.insert(
+        "work/20260617-0417".to_string(),
+        "Merge pull request #3102 from akiojin/work/20260616-1443".to_string(),
+    );
+    tip_subjects.insert(
+        "work/20260617-0250".to_string(),
+        "chore(release): v9.61.0".to_string(),
+    );
     let mut ai_summaries: HashMap<String, String> = HashMap::new();
     ai_summaries.insert(
         "work/20260609-1130".to_string(),
@@ -16081,6 +16405,10 @@ fn apply_work_summary_external_sources_prefers_pr_then_ai_then_commit_subject() 
         "work/20260612-1405".to_string(),
         "Surface work purpose in the Workspace rail".to_string(),
     );
+    pr_titles.insert(
+        "work/20260617-0422".to_string(),
+        "Merge pull request #3102 from akiojin/work/20260616-1443".to_string(),
+    );
 
     let base = |branch: &str, work_summary: Option<&str>| gwt::ActiveWorkItemView {
         id: branch.to_string(),
@@ -16088,6 +16416,7 @@ fn apply_work_summary_external_sources_prefers_pr_then_ai_then_commit_subject() 
         status_category: "idle".to_string(),
         status_text: "Paused".to_string(),
         summary: None,
+        progress_summary: None,
         work_summary: work_summary.map(str::to_string),
         owner: None,
         next_action: None,
@@ -16115,6 +16444,9 @@ fn apply_work_summary_external_sources_prefers_pr_then_ai_then_commit_subject() 
         base("work/20260612-1405", Some("Keep my purpose")), // PR title overrides title-summary
         base("work/20260610-0907", None), // no PR, subject == branch -> stays None
         base("work/20260609-1130", None), // no PR, AI summary beats noisy commit subject
+        base("work/20260617-0417", None), // no AI, noisy merge subject -> no purpose
+        base("work/20260617-0250", None), // no AI, release bump subject -> no purpose
+        base("work/20260617-0422", Some("Declared purpose")), // noisy PR title must not override
     ];
     super::apply_work_summary_external_sources(
         &mut works,
@@ -16136,6 +16468,19 @@ fn apply_work_summary_external_sources_prefers_pr_then_ai_then_commit_subject() 
         works[3].work_summary.as_deref(),
         Some("tray の Copy URL のちらつきを修正"),
         "AI-polished summary wins over the raw commit subject",
+    );
+    assert_eq!(
+        works[4].work_summary, None,
+        "raw merge commit subjects are git mechanics, not Work purpose",
+    );
+    assert_eq!(
+        works[5].work_summary, None,
+        "raw release bump subjects are git mechanics, not Work purpose",
+    );
+    assert_eq!(
+        works[6].work_summary.as_deref(),
+        Some("Declared purpose"),
+        "noisy external titles must not override a declared purpose",
     );
 }
 

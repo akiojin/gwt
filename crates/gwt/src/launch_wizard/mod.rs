@@ -220,6 +220,7 @@ pub struct ResumableAgentView {
 #[serde(rename_all = "snake_case")]
 pub enum ResumableAgentResumeKind {
     Session,
+    NativePicker,
     MetadataOnly,
 }
 

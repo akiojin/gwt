@@ -19,6 +19,15 @@ pub(crate) fn project_state_root_for_agent_session_or_fallback(
         .unwrap_or_else(|| normalize_project_state_root(fallback_repo_path))
 }
 
+pub(crate) fn work_event_root_for_agent_session_or_fallback(
+    fallback_repo_path: &Path,
+    session_id: &str,
+) -> PathBuf {
+    load_session(session_id)
+        .map(|session| normalize_project_state_root(&session.worktree_path))
+        .unwrap_or_else(|| normalize_project_state_root(fallback_repo_path))
+}
+
 pub(crate) fn canonical_project_state_root_for_session(
     session: &Session,
     fallback_repo_path: &Path,

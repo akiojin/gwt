@@ -22,6 +22,7 @@ pub mod diagnostics;
 pub mod envelope;
 pub mod event_dispatcher;
 pub mod forward;
+pub mod health;
 mod identity;
 pub mod provider_event;
 pub mod runtime_state;

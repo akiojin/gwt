@@ -1419,6 +1419,7 @@ export function createBoardLogsSurface({
         renderBoard,
         renderLogs,
         submitBoardEntry,
+        focusBoardEntry,
         handleBoardHookEvent,
         appendLiveLogEntry,
         jumpToUnreadLogs,

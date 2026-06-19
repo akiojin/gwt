@@ -192,6 +192,7 @@ mod tests {
             status_category: WorkspaceStatusCategory::Unknown,
             status_text: String::new(),
             summary: None,
+            progress_summary: None,
             owner: None,
             next_action: None,
             agents: Vec::new(),
