@@ -4,7 +4,7 @@ import assert from "node:assert/strict";
 import { parseHTML } from "linkedom";
 import { createWorkspaceKanbanSurface } from "../workspace-kanban-surface.js";
 
-test("Workspace Overview renders an Attention Board shell with four derived lanes", () => {
+test("Workspace Overview renders a readable Workspace list with compact filters", () => {
   const fixture = createFixture();
   const surface = createSurface(fixture, sampleProjection());
 
@@ -14,35 +14,48 @@ test("Workspace Overview renders an Attention Board shell with four derived lane
   });
 
   assert.ok(fixture.body.querySelector(".workspace-overview-root"));
-  assert.ok(fixture.body.querySelector(".workspace-attention-board"));
+  assert.ok(fixture.body.querySelector(".workspace-overview-list-pane"));
+  assert.ok(fixture.body.querySelector(".workspace-overview-filter-bar"));
+  assert.ok(fixture.body.querySelector(".workspace-overview-list"));
   assert.ok(fixture.body.querySelector(".workspace-overview-detail-pane"));
-  const lanes = Array.from(
-    fixture.body.querySelectorAll(".workspace-attention-lane[data-attention-lane]"),
+  assert.equal(
+    fixture.body.querySelectorAll(".workspace-attention-lane[data-attention-lane]").length,
+    0,
+    "Workspace overview must not render mini Kanban lanes in the persistent pane",
   );
   assert.deepEqual(
-    lanes.map((lane) => lane.dataset.attentionLane),
-    ["needs_attention", "running", "paused", "closed"],
-  );
-  assert.deepEqual(
-    lanes.map((lane) =>
-      lane.querySelector(".workspace-attention-lane-title").textContent.trim(),
-    ),
-    ["Needs Attention", "Running", "Paused", "Closed"],
+    Array.from(fixture.body.querySelectorAll("[data-workspace-filter]"), (filter) => [
+      filter.dataset.workspaceFilter,
+      filter.querySelector(".workspace-overview-filter-label")?.textContent.trim(),
+      filter.querySelector(".workspace-overview-filter-count")?.textContent.trim(),
+    ]),
+    [
+      ["all", "All", "2"],
+      ["needs_attention", "Needs Attention", "1"],
+      ["running", "Running", "0"],
+      ["paused", "Paused", "0"],
+      ["closed", "Closed", "1"],
+    ],
   );
 
   const rows = Array.from(
-    fixture.body.querySelectorAll(".workspace-attention-card[data-workspace-id]"),
+    fixture.body.querySelectorAll(".workspace-overview-row[data-workspace-id]"),
   );
   assert.equal(rows.length, 2);
   assert.equal(rows[0].dataset.workspaceId, "workspace-current");
-  assert.equal(rows[0].dataset.attentionLane, "needs_attention");
+  assert.equal(rows[0].dataset.attention, "needs_attention");
   assert.equal(rows[0].getAttribute("aria-selected"), "true");
   assert.match(rows[0].textContent, /Release Notes cleanup/);
   assert.match(rows[0].textContent, /SPEC-2356/);
   assert.match(rows[0].textContent, /Resolve blocker/);
+  assert.equal(
+    rows[0].querySelectorAll(".workspace-attention-chip").length,
+    0,
+    "row state should not duplicate lifecycle badges with attention chips",
+  );
 });
 
-test("Workspace Attention Board classifies explicit attention separately from PR metadata", () => {
+test("Workspace list filters explicit attention separately from PR metadata", () => {
   const fixture = createFixture();
   const surface = createSurface(fixture, {
     id: "projection",
@@ -99,25 +112,36 @@ test("Workspace Attention Board classifies explicit attention separately from PR
     sendFocus() {},
   });
 
-  assert.deepEqual(cardIdsInLane(fixture, "needs_attention"), ["work-attention"]);
-  assert.deepEqual(cardIdsInLane(fixture, "running"), ["work-pr-only"]);
-  assert.deepEqual(cardIdsInLane(fixture, "paused"), ["work-paused"]);
-  assert.deepEqual(cardIdsInLane(fixture, "closed"), ["work-closed"]);
+  assert.deepEqual(rowIdsInList(fixture), [
+    "work-attention",
+    "work-pr-only",
+    "work-paused",
+    "work-closed",
+  ]);
 
   const attention = fixture.body.querySelector(
-    '.workspace-attention-card[data-workspace-id="work-attention"]',
+    '.workspace-overview-row[data-workspace-id="work-attention"]',
   );
   assert.match(attention.textContent, /API token is missing/);
   assert.match(attention.textContent, /Resolve blocker/);
 
   const prOnly = fixture.body.querySelector(
-    '.workspace-attention-card[data-workspace-id="work-pr-only"]',
+    '.workspace-overview-row[data-workspace-id="work-pr-only"]',
   );
   assert.match(prOnly.textContent, /PR #2847/);
   assert.doesNotMatch(prOnly.textContent, /Needs Attention/);
+
+  fixture.body.querySelector('[data-workspace-filter="paused"]').click();
+  assert.deepEqual(rowIdsInList(fixture), ["work-paused"]);
+  assert.equal(
+    fixture.body
+      .querySelector('[data-workspace-filter="paused"]')
+      .getAttribute("aria-pressed"),
+    "true",
+  );
 });
 
-test("Workspace Attention Board drag/drop is reorder-only and never mutates Work state", () => {
+test("Workspace list does not expose Kanban D&D lifecycle affordances", () => {
   const fixture = createFixture();
   const sent = [];
   const surface = createSurface(
@@ -156,18 +180,120 @@ test("Workspace Attention Board drag/drop is reorder-only and never mutates Work
     sendFocus() {},
   });
 
-  const card = fixture.body.querySelector(
-    '.workspace-attention-card[data-workspace-id="work-running"]',
+  const runningRow = fixture.body.querySelector(
+    '.workspace-overview-row[data-workspace-id="work-running"]',
   );
-  const pausedLane = fixture.body.querySelector(
-    '.workspace-attention-lane[data-attention-lane="paused"]',
+  assert.equal(runningRow.draggable, false);
+  assert.equal(
+    fixture.body.querySelectorAll(".workspace-attention-lane[data-attention-lane]").length,
+    0,
   );
-  card.dispatchEvent(new fixture.window.Event("dragstart", { bubbles: true }));
-  pausedLane.dispatchEvent(new fixture.window.Event("drop", { bubbles: true }));
 
   assert.deepEqual(sent, [], "D&D must not send lifecycle, Board, or runtime mutations");
-  assert.deepEqual(cardIdsInLane(fixture, "running"), ["work-running"]);
-  assert.deepEqual(cardIdsInLane(fixture, "paused"), ["work-paused"]);
+  assert.deepEqual(rowIdsInList(fixture), ["work-running", "work-paused"]);
+});
+
+test("Workspace list row Launch Agent opens the launch wizard without changing selection", () => {
+  const fixture = createFixture();
+  const sent = [];
+  const surface = createSurface(
+    fixture,
+    {
+      id: "projection",
+      title: "projection",
+      status_category: "active",
+      active_works: [
+        {
+          id: "work-launch",
+          title: "Launchable work",
+          status_category: "idle",
+          lifecycle_state: "paused",
+          branch: "work/launchable",
+          active_agents: 0,
+          blocked_agents: 0,
+          agents: [],
+        },
+      ],
+      unassigned_agents: [],
+    },
+    { send: (message) => sent.push(message) },
+  );
+
+  surface.mount(fixture.body, fixture.windowData, {
+    focusWindowLocally() {},
+    sendFocus() {},
+  });
+
+  const rowLaunch = fixture.body.querySelector(
+    '.workspace-overview-row[data-workspace-id="work-launch"] [data-action="launch-workspace-row"]',
+  );
+  assert.ok(rowLaunch, "row must expose a compact Launch Agent action");
+  rowLaunch.click();
+
+  assert.deepEqual(sent, [
+    {
+      kind: "open_launch_wizard",
+      id: fixture.windowData.id,
+      branch_name: "work/launchable",
+    },
+  ]);
+  assert.equal(
+    fixture.body
+      .querySelector('.workspace-overview-row[data-workspace-id="work-launch"]')
+      .getAttribute("aria-selected"),
+    "true",
+  );
+});
+
+test("Workspace list row keyboard handler does not steal Launch Agent button keys", () => {
+  const fixture = createFixture();
+  const surface = createSurface(fixture, {
+    id: "projection",
+    title: "projection",
+    status_category: "active",
+    active_works: [
+      {
+        id: "work-selected",
+        title: "Selected work",
+        status_category: "active",
+        lifecycle_state: "active",
+        branch: "work/selected",
+        active_agents: 1,
+        blocked_agents: 0,
+        agents: [],
+      },
+      {
+        id: "work-launch",
+        title: "Launchable work",
+        status_category: "idle",
+        lifecycle_state: "paused",
+        branch: "work/launchable",
+        active_agents: 0,
+        blocked_agents: 0,
+        agents: [],
+      },
+    ],
+    unassigned_agents: [],
+  });
+
+  surface.mount(fixture.body, fixture.windowData, {
+    focusWindowLocally() {},
+    sendFocus() {},
+  });
+
+  const selectedRow = fixture.body.querySelector(
+    '.workspace-overview-row[data-workspace-id="work-selected"]',
+  );
+  const launchRow = fixture.body.querySelector(
+    '.workspace-overview-row[data-workspace-id="work-launch"]',
+  );
+  const rowLaunch = launchRow.querySelector('[data-action="launch-workspace-row"]');
+  const event = new fixture.window.Event("keydown", { bubbles: true });
+  event.key = "Enter";
+  rowLaunch.dispatchEvent(event);
+
+  assert.equal(selectedRow.getAttribute("aria-selected"), "true");
+  assert.equal(launchRow.getAttribute("aria-selected"), "false");
 });
 
 test("Workspace Overview keeps unassigned agents in an explicit queue outside Workspace rows", () => {
@@ -902,12 +1028,10 @@ function createNode(document, tag, className, text) {
   return node;
 }
 
-function cardIdsInLane(fixture, laneId) {
+function rowIdsInList(fixture) {
   return Array.from(
-    fixture.body.querySelectorAll(
-      `.workspace-attention-lane[data-attention-lane="${laneId}"] .workspace-attention-card[data-workspace-id]`,
-    ),
-    (card) => card.dataset.workspaceId,
+    fixture.body.querySelectorAll(".workspace-overview-list .workspace-overview-row[data-workspace-id]"),
+    (row) => row.dataset.workspaceId,
   );
 }
 
@@ -1884,7 +2008,7 @@ test("ArrowDown / ArrowUp move the Workspace list selection", () => {
   });
 
   const pressOnList = (key) => {
-    const list = fixture.body.querySelector(".workspace-attention-board");
+    const list = fixture.body.querySelector(".workspace-overview-list");
     const event = new fixture.document.defaultView.Event("keydown", { bubbles: true });
     event.key = key;
     list.dispatchEvent(event);

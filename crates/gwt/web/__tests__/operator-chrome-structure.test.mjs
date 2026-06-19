@@ -731,7 +731,7 @@ test("Workspace Overview is separate from live-only Active Work", () => {
   );
 });
 
-test("Workspace Overview uses the Quiet Work Attention Board + Detail layout", () => {
+test("Workspace Overview uses the Quiet Work list filter + Detail layout", () => {
   assert.ok(
     workspaceOverviewSource.length > 0,
     "expected Workspace Overview renderer to live in workspace-kanban-surface.js",
@@ -746,15 +746,23 @@ test("Workspace Overview uses the Quiet Work Attention Board + Detail layout", (
     /presetSurface\(preset\)[\s\S]+preset\s*===\s*"work"[\s\S]+return\s+"work"/,
     "expected Work to be a first-class window surface",
   );
-  assert.match(
+  for (const token of [
+    "workspace-overview-root",
+    "workspace-overview-list-pane",
+    "workspace-overview-filter-bar",
+    "workspace-overview-list",
+    "workspace-overview-detail-pane",
+  ]) {
+    assert.match(
+      workspaceOverviewSource,
+      new RegExp(token),
+      `expected Workspace Overview source to include ${token}`,
+    );
+  }
+  assert.doesNotMatch(
     workspaceOverviewSource,
-    /workspace-overview-root[\s\S]+workspace-overview-list-pane[\s\S]+workspace-attention-board[\s\S]+workspace-overview-detail-pane/,
-    "expected Workspace Overview to use a quiet Attention Board + Detail shell",
-  );
-  assert.match(
-    workspaceOverviewSource,
-    /ATTENTION_LANES[\s\S]+needs_attention[\s\S]+running[\s\S]+paused[\s\S]+closed/,
-    "expected Workspace Overview to classify Work into attention lanes",
+    /ATTENTION_LANES|workspace-attention-lane/,
+    "Workspace Overview must not classify Work into visible Kanban lanes",
   );
   assert.match(
     workspaceOverviewSource,
