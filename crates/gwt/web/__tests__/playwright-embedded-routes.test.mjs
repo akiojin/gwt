@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
+import { dirname as posixDirname, normalize as posixNormalize } from "node:path/posix";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
 
@@ -12,10 +13,33 @@ const embeddedRoutesSource = readFileSync(
   "utf8",
 );
 
-function rootModuleImports(source) {
-  return [...source.matchAll(/from\s+["']\/([^"']+\.js)["']/g)]
-    .map((match) => match[1])
-    .sort();
+function webModuleImports(source, importerModuleName) {
+  const specifiers = [
+    ...source.matchAll(/\bfrom\s+["']([^"']+\.js)["']/g),
+    ...source.matchAll(/\bimport\s+["']([^"']+\.js)["']/g),
+  ];
+  return [
+    ...new Set(
+      specifiers
+        .map((match) => resolveWebModuleSpecifier(importerModuleName, match[1]))
+        .filter(Boolean),
+    ),
+  ].sort();
+}
+
+function resolveWebModuleSpecifier(importerModuleName, specifier) {
+  if (specifier.startsWith("/")) {
+    return specifier.slice(1);
+  }
+  if (!specifier.startsWith("./") && !specifier.startsWith("../")) {
+    return null;
+  }
+  const importerDir = posixDirname(importerModuleName);
+  const resolved = posixNormalize(importerDir === "." ? specifier : `${importerDir}/${specifier}`);
+  if (resolved === ".." || resolved.startsWith("../") || resolved.startsWith("/")) {
+    return null;
+  }
+  return resolved;
 }
 
 function reachableRootModuleImports(entryModuleName) {
@@ -26,7 +50,7 @@ function reachableRootModuleImports(entryModuleName) {
     if (seen.has(moduleName)) continue;
     seen.add(moduleName);
     const source = readFileSync(resolve(webRoot, moduleName), "utf8");
-    for (const importedModule of rootModuleImports(source)) {
+    for (const importedModule of webModuleImports(source, moduleName)) {
       if (!seen.has(importedModule)) {
         pending.push(importedModule);
       }
@@ -51,4 +75,10 @@ test("Playwright embedded routes serve every app.js transitive root module impor
     !orphaned.includes("index-status-controller.js"),
     `removed project-tab Index route must not remain in Playwright helper: ${orphaned.join(", ")}`,
   );
+});
+
+test("Playwright embedded route import graph follows relative web module imports", () => {
+  const imports = reachableRootModuleImports("project-tabs-renderer.js");
+  assert.ok(imports.includes("window-runtime-state.js"));
+  assert.ok(imports.includes("protocol-enums.js"));
 });
