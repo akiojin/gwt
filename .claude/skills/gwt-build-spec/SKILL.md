@@ -64,10 +64,27 @@ Determine the mode at entry:
 ### SPEC mode
 
 1. Read all SPEC sections (`spec`, `plan`, `tasks`) with JSON operation `issue.spec.read`.
-2. Identify the next incomplete task slice in dependency order:
+2. Run the Board active-claim preflight for the target SPEC before choosing a
+   task slice:
+   - Read the current Board with JSON operation `board.show`.
+   - Look for active `claim` entries from another session that mention the same
+     owner (`#<N>` or `SPEC-<N>`) or the same phase label (`Phase <N>`,
+     `Phase <label>`) as the task slice under consideration.
+   - If a matching claim exists, pause before Phase 2 and present the conflict:
+     propose joining that session with a Board handoff request, splitting the
+     work through `gwt-discussion`, or continuing only after the user explicitly
+     accepts duplicate risk.
+   - Intentional parallel work is allowed only when write scopes are disjoint.
+     Post a fresh Board `claim` that includes a `Boundary:` line naming the
+     files/modules owned by this session before continuing.
+   - Acceptance scenario: Given another session has an active Board claim for
+     `SPEC-2008 Phase 24`, when `gwt-build-spec` starts for SPEC-2008, then the
+     preflight reports the claim and requires user confirmation before any RED
+     test or production edit is made.
+3. Identify the next incomplete task slice in dependency order:
    - Setup before Foundational work
    - Foundational before story-specific work
-3. Use JSON operations `issue.spec.section` / `issue.spec.edit` for SPEC section reads and writes.
+4. Use JSON operations `issue.spec.section` / `issue.spec.edit` for SPEC section reads and writes.
 
 ### Standalone mode
 
@@ -121,10 +138,11 @@ All other changes require the TDD loop.
 
 Delegate environment-aware verification to `gwt-verify --mode full`. The
 sub-skill is a project-agnostic Generic Verification Contract: it classifies
-the changed surfaces against `.claude/skills/gwt-verify/references/surface-taxonomy.md`,
+the changed surfaces against the active runtime's `gwt-verify` skill
+(`references/surface-taxonomy.md`),
 detects the host project's actual test runners from manifests
 (Cargo.toml / package.json / pyproject.toml / go.mod / ProjectSettings /
-*.sln / etc.) per `.claude/skills/gwt-verify/references/runner-detection.md`,
+*.sln / etc.) per `references/runner-detection.md`,
 runs the appropriate unit / integration / E2E / visual tests, emits a
 **Test Inventory** that names which tests were executed, and hands off to
 the user via a 4-step verification path + Check Items before finalizing
@@ -209,7 +227,7 @@ Stop only when:
 - a merge conflict or review request is ambiguous enough to risk wrong behavior
 - required repo/auth/tooling access is unavailable
 - `gwt-verify` returns `failed: tooling-missing` and the auto-install path
-  cannot recover (see `.claude/skills/gwt-verify/references/tooling-bootstrap.md`)
+  cannot recover (see `gwt-verify`'s `references/tooling-bootstrap.md`)
 - implementation reveals a gap between spec.md and the actual behavior
   (acceptance scenario inaccuracy, missing data-model section, undocumented
   registration table, dependency chain not captured in tasks.md, etc.) that
