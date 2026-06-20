@@ -577,10 +577,11 @@ falls back to system colors so accessibility is preserved.
 | `⌘?` | Toggle the Hotkey Overlay (cheat sheet) |
 | `Esc` | Close any open palette / overlay / drawer / dropdown |
 
-The Command Rail on the left edge is always visible: Start Work / Work /
-Board / Logs at the top, window operations (Tile / Stack / Align / window
-list / Add) in the middle, and the Command Palette at the bottom. Hovering a
-rail item reveals its label and real shortcut. Closing a
+The Command Rail on the left edge is always visible: Start Work and Workspace
+at the top, window operations (Tile / Stack / Align / window list / Add) in the
+middle, and the Command Palette at the bottom. Board and Logs are not rail
+items; reach them via the Add Window preset menu, the command palette, or the
+`⌘B` / `⌘L` hotkeys. Hovering a rail item reveals its label and real shortcut. Closing a
 window (titlebar × or tab ×) always asks for confirmation so a stray click
 can never kill a running agent.
 
