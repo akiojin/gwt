@@ -3,7 +3,11 @@
 After automated tests pass, `gwt-verify` hands off to the user for manual
 confirmation when `--mode full` or `--mode pre-pr` is active and the
 changed surfaces include any `Required` or `Recommended` user-check
-entries (per `surface-taxonomy.md`).
+entries (per `surface-taxonomy.md`). This includes a backend-only diff that
+`surface-taxonomy.md`'s acceptance-aware escalation promotes to a
+user-facing surface because its acceptance manifests in the UI / CLI: the
+handoff fires for the escalated surface even though no UI / CLI file
+changed.
 
 The handoff has two halves:
 

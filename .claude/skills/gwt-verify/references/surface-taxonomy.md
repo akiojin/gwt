@@ -38,6 +38,30 @@ different classification, that wins.
    matched surfaces.** Required > Recommended > Skipped.
 6. **No changed files** → `Changed surfaces: (none)` and User Verification
    is `skipped(no-change)`.
+7. **Acceptance-aware escalation (acceptance over diff path).**
+   Classification is not limited to the diff's file paths. When a change's
+   acceptance — the behavior the Issue / reproduction says must hold —
+   manifests in a **user-facing surface** (UI surface, or Interactive CLI /
+   TUI surface), classify it as that user-facing surface even if every
+   changed file is backend / business logic. This catches backend changes
+   that drive a user-facing surface (e.g. a server / protocol layer that
+   renders into a WebView, or a service whose output a CLI prints).
+   - **Default to user-facing.** If the Issue or reproduction references
+     visible / rendered / screen behavior, CLI output, or an interaction,
+     or the diff touches a seam that drives a user-facing surface, the
+     acceptance surface defaults to that user-facing surface.
+   - **Rebuttal burden.** Declaring the acceptance as non-user-facing
+     requires an explicit justification recorded in the evidence bundle's
+     `Acceptance Surface` field. Do not silently downgrade to skip the
+     user-facing runner.
+   - **Runner-agnostic.** This rule sets only the abstract surface. The
+     concrete E2E / integration / visual runner is chosen by
+     `runner-detection.md` per project (Playwright / Cypress / Selenium /
+     WinAppDriver / Unity Editor for a graphical UI surface; the project's
+     CLI integration / E2E runner for an Interactive CLI / TUI surface —
+     never a browser / GUI runner for a CLI surface).
+   - **Scope.** Escalation applies in `--mode full` and `--mode pre-pr`
+     only; `--mode quick` keeps the diff-path classification.
 
 ## Per-project specialization hints
 

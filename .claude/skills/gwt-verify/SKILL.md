@@ -27,7 +27,7 @@ Playwright recipe. Instead it executes the following four-part contract:
    `references/surface-taxonomy.md`.
 2. **Appropriate Test Selection** — detect the project's actual test runners
    from its manifests (Cargo.toml, package.json, pyproject.toml, go.mod,
-   ProjectSettings/ProjectVersion.txt, *.sln / *.csproj, Gemfile, pom.xml,
+   ProjectSettings/ProjectVersion.txt, `*.sln` / `*.csproj`, Gemfile, pom.xml,
    build.gradle, Makefile) and choose the right unit / integration / E2E /
    visual commands for each changed surface. See
    `references/runner-detection.md`.
@@ -50,8 +50,8 @@ the generic matrix in this skill. The matrix here is the fallback frame.
 | Mode | When to use | Scope |
 |---|---|---|
 | `--mode quick` (default) | TDD loop, narrow check during implementation | Only surfaces touched by uncommitted / working-tree changes; the narrowest representative command per runner (e.g. single-package test invocation). Skip heavy integration / E2E / visual unless the diff explicitly touches them. |
-| `--mode full` | gwt-build-spec Phase 3, standalone completion gate | Full matched matrix per changed surface, including integration / E2E / visual when a UI surface changed. User Verification Handoff is required (see below). |
-| `--mode pre-pr` | gwt-manage-pr before PR create / update | `full` matrix + release-flow tests when a release surface changed; visual / UI regression always included if any UI surface changed. User Verification Handoff is required. |
+| `--mode full` | gwt-build-spec Phase 3, standalone completion gate | Full matched matrix per changed surface, including integration / E2E / visual when a UI surface is in scope — by the diff, or by acceptance-aware escalation (`references/surface-taxonomy.md`). User Verification Handoff is required (see below). |
+| `--mode pre-pr` | gwt-manage-pr before PR create / update | `full` matrix + release-flow tests when a release surface changed; visual / UI regression always included if any UI surface is in scope by diff or by acceptance-aware escalation. User Verification Handoff is required. |
 | `--headed` (flag) | Manual UI / design verification | When supplied alongside any mode that runs a browser-based test runner (Playwright / Cypress / Selenium / WinAppDriver / Unity Editor headed), launch the runner in headed mode so the user can watch. Default is headless to match CI. |
 
 Additional flag:
@@ -104,10 +104,15 @@ gwt-verify
      finalize Overall once the user response is recorded.
 ```
 
-The skill does not invoke Playwright when no WebView / browser UI surface
-changed. This is a hard contract from SPEC-1935 FR-124. The same restraint
-applies to other UI runners (Cypress / Selenium / WinAppDriver / Unity Editor
-headed): they are only invoked when a UI surface is in scope.
+The skill does not invoke Playwright — or any other UI runner (Cypress /
+Selenium / WinAppDriver / Unity Editor headed) — when no user-facing surface
+is in scope. A UI surface is in scope either by the diff touching WebView /
+browser UI files, or by `references/surface-taxonomy.md`'s acceptance-aware
+escalation promoting a backend-only diff whose acceptance manifests in a
+user-facing surface. A change with no user-facing surface in scope by diff or
+acceptance does not invoke Playwright. This restraint is part of the
+gwt-verify verification contract that prevents over-eager UI-runner
+invocation; it is not an external SPEC requirement.
 
 ## Evidence Bundle
 
@@ -119,6 +124,7 @@ Output to stdout in the following shape (Markdown):
 Mode: <quick|full|pre-pr>
 Baseline: merge-base HEAD..origin/develop (<N> commits, <M> files)
 Changed surfaces: <abstract surface list>
+Acceptance Surface: <user-facing surface the change is escalated to, or `non-user-facing(<justification>)`>
 
 ### Plan
 Detected runners: <e.g. Cargo, pnpm, Playwright | Unity Test Framework | dotnet test | pytest | go test>
@@ -243,8 +249,8 @@ Stop and surface a blocker to the caller when:
   snapshots.
 - The agent attempts to invoke Playwright (or any other browser UI runner)
   for a surface not classified as a UI surface under
-  `references/surface-taxonomy.md`. This is a contract violation, not a
-  runtime error.
+  `references/surface-taxonomy.md` (including its acceptance-aware
+  escalation). This is a contract violation, not a runtime error.
 - The User Verification phase is required but no platform question tool
   and no plain-text channel are available to ask the user.
 
