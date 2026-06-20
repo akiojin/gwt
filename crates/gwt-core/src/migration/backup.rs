@@ -44,7 +44,7 @@ pub struct BackupSnapshot {
     /// (SPEC-1934 US-7 / FR-033). `None` when the origin already used the
     /// wildcard form, had no `fetch` entry, or no `origin` remote exists, so
     /// rollback knows there is nothing to restore. The executor populates this
-    /// right before [`gwt_git::migration::normalize_fetch_refspec`] runs;
+    /// right before `gwt_git::migration::normalize_fetch_refspec` runs;
     /// [`super::rollback::rollback_migration`] writes it back on failure.
     pub pre_normalize_fetch_refspec: Option<String>,
 }
