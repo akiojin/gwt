@@ -2387,14 +2387,17 @@
       function recomputeOperatorTelemetry() {
         updateCanvasEmptyState();
         if (!window.__operatorShell?.applyTelemetryCounts) return;
-        // SPEC-3038 AS-1.4: the rail Windows item badges the open-window count.
+        // SPEC-3038 AS-1.4 (2026-06-20): the rail Windows item badges the
+        // open-window count across all project tabs, matching the cross-tab
+        // Windows popover. windowMap only holds windows mounted in visited
+        // tabs, so it undercounts; allProjectWindowIds() is the true total.
         const counts = {
           active: 0,
           idle: 0,
           blocked: 0,
           done: 0,
           agents: 0,
-          windows: windowMap.size,
+          windows: allProjectWindowIds().length,
         };
         for (const [windowId, el] of windowMap.entries()) {
           const state = el?.dataset?.agentState;
