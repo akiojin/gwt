@@ -83,6 +83,7 @@ root_js_modules! {
     "project-clone-modal.js" => "renderProjectCloneModal",
     "window-docking.js" => "findTitlebarDockTarget",
     "board-surface.js" => "boardEntryMentionsSelf",
+    "agent-kanban-surface.js" => "createAgentKanbanSurface",
     "workspace-kanban-surface.js" => "createWorkspaceKanbanSurface",
     "workspace-resume-picker-modal.js" => "createWorkspaceResumePickerController",
     "update-cta.js" => "createUpdateCtaController",

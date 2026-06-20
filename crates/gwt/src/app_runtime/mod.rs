@@ -342,6 +342,13 @@ pub struct LaunchWizardSession {
     pub(crate) wizard_id: String,
     pub(crate) wizard: LaunchWizardState,
     pub(crate) workspace_resume_context: Option<WorkspaceResumeContext>,
+    pub(crate) agent_kanban_target: Option<AgentKanbanLaunchTarget>,
+}
+
+#[derive(Debug, Clone)]
+pub struct AgentKanbanLaunchTarget {
+    pub(crate) board_id: String,
+    pub(crate) lane_id: gwt::AgentKanbanLane,
 }
 
 #[derive(Debug, Clone)]
@@ -528,6 +535,7 @@ pub struct AppRuntime {
         std::cell::RefCell<HashMap<PathBuf, std::collections::HashSet<String>>>,
     pub(crate) window_pty_statuses: HashMap<String, WindowProcessStatus>,
     pub(crate) window_hook_states: HashMap<String, WindowProcessStatus>,
+    pub(crate) recoverable_agent_error_windows: HashSet<String>,
     pub(crate) hook_forward_target: Option<HookForwardTarget>,
     pub(crate) issue_link_cache_dir: PathBuf,
     /// Cached update state so late-connecting WebView clients get the toast.
@@ -657,6 +665,7 @@ impl AppRuntime {
             local_worktree_branches: std::cell::RefCell::new(HashMap::new()),
             window_pty_statuses: HashMap::new(),
             window_hook_states: HashMap::new(),
+            recoverable_agent_error_windows: HashSet::new(),
             hook_forward_target: None,
             issue_link_cache_dir: gwt_core::paths::gwt_cache_dir(),
             pending_update: None,
@@ -1115,6 +1124,27 @@ impl AppRuntime {
             FrontendEvent::DetachWindowTab { id, geometry } => {
                 self.detach_window_tab_events(&id, geometry)
             }
+            FrontendEvent::PlaceAgentWindowInKanban {
+                id,
+                board_id,
+                lane_id,
+                order,
+            } => self.place_agent_window_in_kanban_events(&id, &board_id, lane_id, order),
+            FrontendEvent::MoveAgentKanbanCard {
+                id,
+                board_id,
+                lane_id,
+                order,
+            } => self.move_agent_kanban_card_events(&id, &board_id, lane_id, order),
+            FrontendEvent::UndockAgentWindow { id, geometry } => {
+                self.undock_agent_window_events(&id, geometry)
+            }
+            FrontendEvent::SetAgentKanbanCardCollapsed { id, collapsed } => {
+                self.set_agent_kanban_card_collapsed_events(&id, collapsed)
+            }
+            FrontendEvent::UpdateTerminalGrid { id, cols, rows } => {
+                self.update_terminal_grid_events(&id, cols, rows)
+            }
             FrontendEvent::ListWindows => {
                 vec![OutboundEvent::reply(client_id, self.list_windows_event())]
             }
@@ -1304,6 +1334,11 @@ impl AppRuntime {
                     match_mode,
                 },
             ),
+            FrontendEvent::RequestWorkAdvisory {
+                id,
+                query,
+                request_id,
+            } => self.request_work_advisory_events(&client_id, &id, &query, request_id),
             FrontendEvent::SelectKnowledgeBridgeEntry {
                 id,
                 knowledge_kind,
@@ -1428,6 +1463,12 @@ impl AppRuntime {
                 self.open_issue_launch_wizard_events(&client_id, &id, issue_number)
             }
             FrontendEvent::OpenStartWork => self.open_start_work(&client_id),
+            FrontendEvent::OpenStartWorkInAgentKanban { board_id, lane_id } => {
+                self.open_start_work_in_agent_kanban(&client_id, &board_id, lane_id)
+            }
+            FrontendEvent::OpenAgentKanbanLaunchWizard { board_id, lane_id } => {
+                self.open_agent_kanban_launch_wizard(&client_id, &board_id, lane_id)
+            }
             FrontendEvent::ResumeWorkspace { source, journal_id } => {
                 self.resume_workspace_events(&client_id, source, journal_id)
             }
@@ -1686,6 +1727,20 @@ impl AppRuntime {
                 .map(|mut window| {
                     let raw_id = window.id.clone();
                     window.id = combined_window_id(&tab.id, &raw_id);
+                    if let gwt::WindowPlacement::AgentKanban {
+                        board_id,
+                        lane_id,
+                        order,
+                        collapsed,
+                    } = window.placement
+                    {
+                        window.placement = gwt::WindowPlacement::AgentKanban {
+                            board_id: combined_window_id(&tab.id, &board_id),
+                            lane_id,
+                            order,
+                            collapsed,
+                        };
+                    }
                     if let Some(status) = self.window_status(&window.id) {
                         window.status = status;
                     }
@@ -1851,6 +1906,7 @@ impl AppRuntime {
             }
         }
         self.window_hook_states.clear();
+        self.recoverable_agent_error_windows.clear();
     }
 
     fn active_window_for_runtime_event(&self, event: &gwt::RuntimeHookEvent) -> Option<String> {
@@ -1892,6 +1948,7 @@ impl AppRuntime {
     fn remove_window_state_tracking(&mut self, window_id: &str) {
         self.window_pty_statuses.remove(window_id);
         self.window_hook_states.remove(window_id);
+        self.recoverable_agent_error_windows.remove(window_id);
         self.board_all_view_windows.remove(window_id);
     }
 

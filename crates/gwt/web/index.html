@@ -62,54 +62,10 @@
               ></div>
             </div>
             <span class="app-version" id="app-version" role="button" tabindex="0" hidden></span>
-            <!-- Issue #2684 — split-button surfaces Clone from GitHub while a
-                 project tab keeps the project-picker overlay hidden. The
-                 primary half preserves the historical native-dialog behavior
-                 so existing muscle memory continues to work. -->
-            <div class="split-button-group" id="open-project-group">
-              <button class="arrange-button split-button-primary" id="open-project-button" aria-label="Open project">
-                Open Project
-              </button>
-              <button
-                class="arrange-button split-button-caret"
-                id="open-project-menu-button"
-                type="button"
-                aria-label="More project actions"
-                aria-haspopup="menu"
-                aria-expanded="false"
-                aria-controls="open-project-menu"
-              >▾</button>
-              <div
-                class="split-button-menu"
-                id="open-project-menu"
-                role="menu"
-                aria-hidden="true"
-                aria-labelledby="open-project-menu-button"
-                tabindex="-1"
-              >
-                <button
-                  class="split-button-menu-item"
-                  id="open-project-menu-open"
-                  role="menuitem"
-                  type="button"
-                  tabindex="-1"
-                >Open Project...</button>
-                <button
-                  class="split-button-menu-item"
-                  id="open-project-menu-clone"
-                  role="menuitem"
-                  type="button"
-                  tabindex="-1"
-                >Clone from GitHub...</button>
-                <div class="split-button-menu-section-label" role="presentation">Recent</div>
-                <div
-                  class="split-button-menu-recent"
-                  id="open-project-menu-recent"
-                  role="group"
-                  aria-label="Recent projects"
-                ></div>
-              </div>
-            </div>
+            <!-- SPEC-2013 Phase 8: the standalone Open Project split-button was
+                 retired. Open Folder / Clone from GitHub now live inside the
+                 consolidated `Projects ▾` switcher (and Cmd+O opens a folder),
+                 so the top bar carries a single project control. -->
             <div
               class="op-theme-toggle"
               id="op-theme-toggle"
@@ -284,10 +240,10 @@
               </p>
               <div class="project-picker-error" id="project-picker-error" role="alert" hidden></div>
               <button class="wizard-button primary" id="picker-open-project">
-                Open Project...
+                Open Folder…
               </button>
               <button class="wizard-button" id="picker-clone-project">
-                Clone from GitHub...
+                Clone from GitHub…
               </button>
               <div class="picker-section-label">Recent</div>
               <div class="project-recent-list" id="recent-project-list"></div>
@@ -351,6 +307,21 @@
           <div class="op-status-strip__cell">
             <span class="op-status-strip__label">WORK</span>
             <span class="op-status-strip__value" id="op-strip-branches" aria-label="Work">—</span>
+          </div>
+          <div
+            class="op-status-strip__cell op-status-strip__cell--runtime-health"
+            id="op-strip-runtime-health"
+            tabindex="0"
+            data-state="warming"
+            aria-label="Runtime performance"
+            title="Runtime performance warming"
+          >
+            <span class="op-status-strip__label">PERF</span>
+            <span
+              class="op-status-strip__value"
+              id="op-strip-runtime-health-value"
+              aria-label="Runtime performance"
+            >CPU -- MEM --</span>
           </div>
           <!-- SPEC-2356 operator chrome cleanup: canvas Zoom (− / 100% / +)
                moves from the right-bottom floating toolbar into the Status Strip

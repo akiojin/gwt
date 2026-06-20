@@ -731,7 +731,7 @@ test("Workspace Overview is separate from live-only Active Work", () => {
   );
 });
 
-test("Workspace Overview uses the Quiet Work full-window List + Detail layout", () => {
+test("Workspace Overview uses the Quiet Work list filter + Detail layout", () => {
   assert.ok(
     workspaceOverviewSource.length > 0,
     "expected Workspace Overview renderer to live in workspace-kanban-surface.js",
@@ -746,10 +746,23 @@ test("Workspace Overview uses the Quiet Work full-window List + Detail layout", 
     /presetSurface\(preset\)[\s\S]+preset\s*===\s*"work"[\s\S]+return\s+"work"/,
     "expected Work to be a first-class window surface",
   );
-  assert.match(
+  for (const token of [
+    "workspace-overview-root",
+    "workspace-overview-list-pane",
+    "workspace-overview-filter-bar",
+    "workspace-overview-list",
+    "workspace-overview-detail-pane",
+  ]) {
+    assert.match(
+      workspaceOverviewSource,
+      new RegExp(token),
+      `expected Workspace Overview source to include ${token}`,
+    );
+  }
+  assert.doesNotMatch(
     workspaceOverviewSource,
-    /workspace-overview-root[\s\S]+workspace-overview-list-pane[\s\S]+workspace-overview-detail-pane/,
-    "expected Workspace Overview to use a quiet List + Detail shell",
+    /ATTENTION_LANES|workspace-attention-lane/,
+    "Workspace Overview must not classify Work into visible Kanban lanes",
   );
   assert.match(
     workspaceOverviewSource,
@@ -773,7 +786,7 @@ test("Workspace Overview uses the Quiet Work full-window List + Detail layout", 
   assert.doesNotMatch(
     workspaceOverviewSource,
     /workspace-kanban-board|data-workspace-column|workspace-kanban-column/,
-    "Workspace Overview must not reintroduce Workspace-specific Kanban columns",
+    "Workspace Overview must not reintroduce retired Workspace-specific Kanban columns",
   );
   assert.doesNotMatch(
     appSource,
@@ -1103,7 +1116,13 @@ test("Status Strip is exposed as a live region with semantic value labels", () =
   assert.ok(strip);
   assert.equal(strip.getAttribute("role"), "status");
   assert.equal(strip.getAttribute("aria-live"), "polite");
-  for (const id of ["op-strip-active", "op-strip-idle", "op-strip-blocked", "op-strip-branches"]) {
+  for (const id of [
+    "op-strip-active",
+    "op-strip-idle",
+    "op-strip-blocked",
+    "op-strip-branches",
+    "op-strip-runtime-health-value",
+  ]) {
     const el = document.getElementById(id);
     assert.ok(el, `expected element ${id}`);
     assert.ok(el.getAttribute("aria-label"), `${id} must have an aria-label`);
@@ -1112,6 +1131,56 @@ test("Status Strip is exposed as a live region with semantic value labels", () =
   const clockCell = document.getElementById("op-strip-clock")?.parentElement;
   assert.ok(clockCell, "clock cell exists");
   assert.equal(clockCell.getAttribute("aria-hidden"), "true");
+});
+
+test("Status Strip exposes a compact PERF cell for runtime health", () => {
+  const cell = document.getElementById("op-strip-runtime-health");
+  assert.ok(cell, "expected runtime health PERF cell");
+  assert.match(cell.textContent ?? "", /PERF/);
+  assert.equal(cell.getAttribute("aria-label"), "Runtime performance");
+  assert.match(operatorShellSource, /applyRuntimeHealth/);
+});
+
+test("Runtime health PERF detail uses structured diagnostic classes", () => {
+  const css = readFileSync(resolve(here, "../styles/components.css"), "utf8");
+  for (const token of [
+    "runtimeHealthStateLabel",
+    "op-runtime-health-detail__summary",
+    "op-runtime-health-detail__chip",
+    "op-runtime-health-detail__queue",
+    "op-runtime-health-detail__process-list",
+    "op-runtime-health-detail__process--focusable",
+    "op-runtime-health-detail__process-role",
+    "op-runtime-health-detail__process-name",
+    "op-runtime-health-detail__process-metric",
+  ]) {
+    assert.match(operatorShellSource, new RegExp(token), `expected renderer token: ${token}`);
+  }
+  assert.match(
+    operatorShellSource,
+    /value\.textContent\s*=\s*`\$\{runtimeHealthStateLabel\(state\)\}\s+\$\{formatRuntimeCpu/,
+    "compact PERF value must be severity-first",
+  );
+  assert.match(
+    css,
+    /\.op-status-strip__cell--runtime-health\s+\.op-status-strip__value\s*\{[\s\S]*min-width:/,
+    "compact PERF value must reserve stable width",
+  );
+  assert.match(
+    css,
+    /\.op-runtime-health-detail__process\s*\{[\s\S]*display:\s*grid;[\s\S]*grid-template-columns:/,
+    "process rows must use columns instead of a raw text line",
+  );
+  assert.match(
+    operatorShellSource,
+    /focusWindow/,
+    "focusable runtime rows must call the injected focus callback",
+  );
+  assert.doesNotMatch(
+    operatorShellSource,
+    /op-runtime-health-detail[\s\S]{0,8000}(kill|terminate|stop_process|close_window)/i,
+    "runtime health detail must not expose destructive process controls",
+  );
 });
 
 test("Status Strip omits the retired server URL cell", () => {
@@ -1458,12 +1527,13 @@ test("window close always routes through the Close Guard confirm modal (SPEC-303
   );
 });
 
-test("window tabs receive agent telemetry from runtime state (SPEC-3038 US-2)", () => {
-  // SPEC-3038 AS-2.1: tabs carry the same telemetry the window chrome shows.
+test("window tabs receive agent runtime state from runtime status (SPEC-3038 US-2)", () => {
+  // SPEC-3038 AS-2.1: tabs carry compact runtime-state cues while the full
+  // window chrome keeps the semantic telemetry mapping.
   assert.match(
     appSource,
-    /function\s+windowTabTelemetryState\(tab\)[\s\S]{0,400}?shouldShowRuntimeStatus\(tab\)[\s\S]{0,400}?mapAgentTelemetryState/,
-    "expected a tab telemetry helper that gates on agent windows and reuses the telemetry mapping",
+    /function\s+windowTabTelemetryState\(tab\)[\s\S]{0,400}?shouldShowRuntimeStatus\(tab\)[\s\S]{0,400}?normalizeWindowRuntimeState\(tab\.status,\s*tab\.preset\)[\s\S]{0,120}?return\s+runtimeState/,
+    "expected a tab telemetry helper that gates on agent windows and returns raw runtime state for the tab cue",
   );
   const renderTabsBody = extractFunctionBody(appSource, "renderWindowTabs");
   assert.match(
@@ -1518,8 +1588,13 @@ test("Window tab activation updates tab chrome in place without remounting termi
     ensureWindowBody.match(/mountWindowBody\(windowData,\s*element\)/g) || [];
   assert.equal(
     mountCalls.length,
-    1,
-    "terminal body mounting must remain limited to the preset-change path",
+    2,
+    "body remounting must stay limited to preset changes plus the Agent Kanban dynamic body",
+  );
+  assert.match(
+    ensureWindowBody,
+    /surface\s*===\s*"agent-kanban"[\s\S]*mountWindowBody\(windowData,\s*element\)/,
+    "Agent Kanban is the only dynamic body remount path",
   );
   const mountIndex = ensureWindowBody.indexOf("mountWindowBody(windowData, element);");
   const renderKeyIndex = ensureWindowBody.indexOf(
@@ -2972,6 +3047,8 @@ test("Status Strip ACTIVE / IDLE / BLOCKED cells all tint with their state color
   const indexHtml = readFileSync(resolve(here, "../index.html"), "utf8");
   assert.match(indexHtml, /op-status-strip__cell\s+op-status-strip__cell--active/);
   assert.match(indexHtml, /op-status-strip__cell\s+op-status-strip__cell--idle/);
+  assert.match(indexHtml, /op-status-strip__cell\s+op-status-strip__cell--runtime-health/);
+  assert.match(css, /\.op-status-strip__cell--runtime-health\[data-state="warn"\]/);
 });
 
 test("Work surface lifecycle badge styles every agent-session state (SPEC-2359 W-12 FR-351)", () => {
@@ -3138,11 +3215,11 @@ test("agent-state telemetry never makes readable workspace windows translucent (
 
 test("non-terminal surface bodies still follow the overall theme (FR-013 boundary)", () => {
   // The Dark fix is scoped to .surface-terminal.  Other surfaces (Board /
-  // Logs / File Tree / Branches / Knowledge / Workspace / Console / Mock / Profile) must
-  // keep tracking the active theme via --color-surface so tabbed windows
+  // Logs / File Tree / Branches / Knowledge / Workspace / Agent Kanban /
+  // Console / Mock / Profile) must keep tracking the active theme via --color-surface so tabbed windows
   // still flip body color when a non-terminal tab is selected.
   const otherSurfaceRule =
-    /(?:\.surface-(?:file-tree|branches|board|logs|knowledge|index|workspace|console|mock|profile)\s+\.window-body,?\s*)+\{[^}]*background:\s*var\(\s*--color-surface\s*\)/;
+    /(?:\.surface-(?:file-tree|agent-kanban|branches|board|logs|knowledge|index|work|console|mock|profile)\s+\.window-body,?\s*)+\{[^}]*background:\s*var\(\s*--color-surface\s*\)/;
   assert.match(
     inlineStyle,
     otherSurfaceRule,
@@ -3157,6 +3234,7 @@ test("mountWindowBody clears every known surface class before applying the activ
   assert.ok(mountBody, "expected mountWindowBody implementation");
   for (const surfaceClass of [
     "surface-terminal",
+    "surface-agent-kanban",
     "surface-file-tree",
     "surface-branches",
     "surface-board",
@@ -3302,6 +3380,46 @@ test("Start Work command opens a pending wizard before backend state arrives", (
     launchWizardSource,
     /if\s*\(!launchWizard\s*&&\s*!launchWizardOpenError\s*&&\s*!launchWizardOpening\)/,
     "renderLaunchWizard must keep the modal open for local pending Start Work state",
+  );
+});
+
+test("Agent Kanban Launch Agent action opens pending Launch Agent wizard with lane target", () => {
+  const factoryStart = appSource.indexOf(
+    "const agentKanbanSurface = createAgentKanbanSurface({",
+  );
+  assert.notEqual(factoryStart, -1, "expected Agent Kanban surface factory wiring");
+  const factoryEnd = appSource.indexOf("\n      // SPEC-3064", factoryStart);
+  assert.notEqual(factoryEnd, -1, "expected end marker after Agent Kanban factory wiring");
+  const factoryCall = appSource.slice(factoryStart, factoryEnd);
+  assert.match(
+    factoryCall,
+    /onLaunchAgent:\s*\(\{\s*boardId,\s*laneId\s*\}\)\s*=>/,
+    "lane action must be named as Launch Agent, not an add-existing-window path",
+  );
+  assert.doesNotMatch(
+    factoryCall,
+    /onAddAgent:/,
+    "Agent Kanban must not expose the old Add Agent callback name",
+  );
+  assert.match(
+    factoryCall,
+    /agentKanbanPendingPlacement\.begin\(\{\s*boardId,\s*laneId,\s*knownAgentWindowIds,/,
+    "Launch Agent must record the originating board and lane as pending placement target",
+  );
+  assert.match(
+    factoryCall,
+    /openLaunchAgentPendingWizard\(\)[\s\S]*send\(\{[\s\S]{0,180}?kind:\s*"open_agent_kanban_launch_wizard"[\s\S]{0,180}?board_id:\s*boardId[\s\S]{0,180}?lane_id:\s*laneId/,
+    "Launch Agent must open the pending wizard before requesting backend Launch Agent state with a lane target",
+  );
+  assert.match(
+    appSource,
+    /case\s+"launch_wizard_open_error":[\s\S]{0,220}?agentKanbanPendingPlacement\.clear\(\);[\s\S]{0,120}?applyLaunchWizardOpenErrorEvent\(event\);/,
+    "backend wizard open errors must clear stale Kanban placement targets",
+  );
+  assert.match(
+    appSource,
+    /case\s+"launch_wizard_state":[\s\S]{0,220}?agentKanbanPendingPlacement\.clear\(\);[\s\S]{0,120}?applyLaunchWizardStateEvent\(event\);/,
+    "backend wizard state must clear Kanban placement targets now owned by the launch session",
   );
 });
 
@@ -3545,11 +3663,6 @@ test("hidden project picker does not rebuild Recent Projects on workspace_state"
   );
   assert.match(
     projectShellSurfaceSource,
-    /let\s+renderedRecentProjectsMenuKey\s*=/,
-    "the project shell surface must track the split-menu Recent Projects render key separately",
-  );
-  assert.match(
-    projectShellSurfaceSource,
     /function\s+recentProjectsRenderKey\s*\(/,
     "the project shell surface must define a Recent Projects render key helper",
   );
@@ -3565,7 +3678,7 @@ test("hidden project picker does not rebuild Recent Projects on workspace_state"
   );
 });
 
-test("Recent Projects render key ignores workspace state and split menu refreshes on open", () => {
+test("Recent Projects render key ignores workspace state", () => {
   const keyBody = extractFunctionBody(
     projectShellSurfaceSource,
     "recentProjectsRenderKey",
@@ -3584,15 +3697,6 @@ test("Recent Projects render key ignores workspace state and split menu refreshe
       `Recent Projects key must ignore ${workspaceField}`,
     );
   }
-  const openMenuBody = extractFunctionBody(
-    projectShellSurfaceSource,
-    "openOpenProjectMenu",
-  );
-  assert.match(
-    openMenuBody,
-    /renderRecentProjectsIntoMenu\s*\(\s*\{\s*force:\s*true\s*\}\s*\)/,
-    "Open Project split menu must force-refresh Recent Projects from current appState when opened",
-  );
 });
 
 test("viewport-only workspace_state skips unchanged window reconciliation", () => {
@@ -4528,7 +4632,7 @@ test("Runtime status updates skip unchanged DOM and dependent surface writes", (
   const overlayIndex = statusBody.indexOf("const overlay = element.querySelector");
   const telemetryIndex = statusBody.indexOf("recomputeOperatorTelemetry");
   const windowListIndex = statusBody.lastIndexOf("renderWindowList()");
-  const dotsIndex = statusBody.indexOf("refreshProjectTabDots()");
+  const stateCuesIndex = statusBody.indexOf("refreshProjectTabStateCues()");
 
   assert.notEqual(keyIndex, -1, "applyStatus must compute a runtime status key");
   assert.notEqual(guardIndex, -1, "applyStatus must guard unchanged runtime status");
@@ -4537,7 +4641,7 @@ test("Runtime status updates skip unchanged DOM and dependent surface writes", (
     ["overlay lookup/writes", overlayIndex],
     ["telemetry recompute", telemetryIndex],
     ["Window List refresh", windowListIndex],
-    ["project tab dot refresh", dotsIndex],
+    ["project tab state cue refresh", stateCuesIndex],
   ]) {
     assert.notEqual(index, -1, `applyStatus must still contain ${label}`);
     assert.ok(guardIndex < index, `unchanged runtime status must return before ${label}`);
@@ -4569,8 +4673,8 @@ test("Runtime status updates repaint tab telemetry when the target window is hid
   );
   assert.match(
     branchBody,
-    /refreshProjectTabDots\s*\(\s*\)\s*;/,
-    "hidden target status updates must still refresh project tab dots",
+    /refreshProjectTabStateCues\s*\(\s*\)\s*;/,
+    "hidden target status updates must still refresh project tab state cues",
   );
 });
 

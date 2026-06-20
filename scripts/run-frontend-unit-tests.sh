@@ -8,6 +8,8 @@ bash scripts/run-node-tests-with-linkedom.sh \
   crates/gwt/web/__tests__/hotkey.test.mjs \
   crates/gwt/web/__tests__/index-settings-panel.test.mjs \
   crates/gwt/web/__tests__/index-status-controller.test.mjs \
+  crates/gwt/web/__tests__/index-works-scope.test.mjs \
+  crates/gwt/web/__tests__/launch-wizard-intake.test.mjs \
   crates/gwt/web/__tests__/operator-chrome-structure.test.mjs \
   crates/gwt/web/__tests__/operator-shell-runtime.test.mjs \
   crates/gwt/web/__tests__/operator-rail.test.mjs \
@@ -18,6 +20,7 @@ bash scripts/run-node-tests-with-linkedom.sh \
   crates/gwt/web/__tests__/quiet-work-ui-contract.test.mjs \
   crates/gwt/web/__tests__/kanban-dnd.test.mjs \
   crates/gwt/web/__tests__/kanban-drawer.test.mjs \
+  crates/gwt/web/__tests__/agent-kanban-surface.test.mjs \
   crates/gwt/web/__tests__/workspace-kanban-surface.test.mjs \
   crates/gwt/web/__tests__/launch-pending-controller.test.mjs \
   crates/gwt/web/__tests__/workspace-resume-picker-pending.test.mjs \

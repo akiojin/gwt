@@ -14,6 +14,9 @@ use crate::{
     preset::WindowPreset,
 };
 
+#[cfg(test)]
+use crate::persistence::WindowPlacement;
+
 use super::{CliEnv, CliParseError, PaneCommand};
 
 const DEFAULT_READ_LINES: usize = 50;
@@ -577,6 +580,7 @@ mod tests {
             minimized: false,
             maximized: false,
             pre_maximize_geometry: None,
+            placement: WindowPlacement::Canvas,
             persist: true,
             agent_id: agent_id.map(str::to_string),
             agent_color: None,

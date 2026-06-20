@@ -47,13 +47,15 @@ const TARGET_OPTIONS = [
 const AGENT_OPTIONS_FEW = [
   { value: "claude", label: "Claude Code" },
   { value: "codex", label: "Codex" },
-  { value: "gemini", label: "Gemini CLI" },
+  { value: "agy", label: "Antigravity CLI" },
+  { value: "gemini", label: "Gemini CLI (legacy)" },
 ];
 
 const AGENT_OPTIONS_MANY = [
   { value: "claude", label: "Claude Code" },
   { value: "codex", label: "Codex" },
-  { value: "gemini", label: "Gemini CLI" },
+  { value: "agy", label: "Antigravity CLI" },
+  { value: "gemini", label: "Gemini CLI (legacy)" },
   { value: "copilot", label: "GitHub Copilot" },
   { value: "custom-a", label: "My Custom Agent" },
 ];
@@ -114,11 +116,14 @@ function changeChecked(doc, input, checked) {
 
 test("chooseLaunchControlKind picks segmented for few short options", () => {
   assert.equal(chooseLaunchControlKind(TARGET_OPTIONS), "segmented");
-  assert.equal(chooseLaunchControlKind(AGENT_OPTIONS_FEW), "segmented");
+});
+
+test("chooseLaunchControlKind falls back to select for current built-in agent labels", () => {
+  assert.equal(chooseLaunchControlKind(AGENT_OPTIONS_FEW), "select");
 });
 
 test("chooseLaunchControlKind falls back to select past the count threshold", () => {
-  // 5 options exceeds the default 4-option segmented budget (Agent w/ custom).
+  // 6 options exceeds the default 4-option segmented budget (Agent w/ custom).
   assert.equal(chooseLaunchControlKind(AGENT_OPTIONS_MANY), "select");
 });
 
@@ -312,15 +317,15 @@ test("buildToggleField keeps a real checkbox under the switch styling", () => {
 
 // --- buildChoiceOrSelectField (adaptive dispatch) --------------------------
 
-test("buildChoiceOrSelectField dispatches few options to a segmented control", () => {
+test("buildChoiceOrSelectField dispatches few short options to a segmented control", () => {
   const doc = bootDom();
   const field = buildChoiceOrSelectField(doc, {
-    label: "Agent",
-    options: AGENT_OPTIONS_FEW,
-    selectedValue: "claude",
+    label: "Target",
+    options: TARGET_OPTIONS,
+    selectedValue: "agent",
     onChange: () => {},
   });
-  assert.ok(field.querySelector('[role="radiogroup"]'), "few agents render as segmented");
+  assert.ok(field.querySelector('[role="radiogroup"]'), "few short options render as segmented");
   assert.equal(field.querySelector("select"), null);
 });
 

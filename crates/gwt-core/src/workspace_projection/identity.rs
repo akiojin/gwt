@@ -127,6 +127,7 @@ mod tests {
             title: "a".to_string(),
             intent: None,
             summary: None,
+            progress_summary: None,
             status_category: WorkspaceStatusCategory::Active,
             owner: None,
             created_at: now,

@@ -3,7 +3,12 @@
       // SPEC-3064 Phase 3 (E7): the migration-modal / project-clone-modal /
       // project-tabs-renderer / close-project-tab-confirm-modal view imports
       // moved to /project-shell-surface.js with the project shell chrome.
-      import { initOperatorShell, applyTelemetryCounts, applyProviderUsage } from "/operator-shell.js";
+      import {
+        initOperatorShell,
+        applyTelemetryCounts,
+        applyProviderUsage,
+        applyRuntimeHealth,
+      } from "/operator-shell.js";
       import { createFocusTrap } from "/focus-trap.js";
       import {
         TITLEBAR_DOCK_HIT_HEIGHT,
@@ -13,6 +18,15 @@
         resolveDragReleasePoint,
       } from "/window-docking.js";
       import { createWorkspaceKanbanSurface as createWorkspaceOverviewSurface } from "/workspace-kanban-surface.js";
+      import {
+        createAgentKanbanPendingPlacementController,
+        createAgentKanbanSurface,
+        findAgentKanbanDropTargetAtPoint,
+        isAgentKanbanEligible,
+        isAgentKanbanPlacement,
+        placeAgentWindowMessage,
+        updateTerminalGridMessage,
+      } from "/agent-kanban-surface.js";
       import { createProviderUsageSurface } from "/provider-usage-surface.js";
       import { createTerminalAttachments } from "/terminal-attachments.js";
       import { createProjectIndexSearchSurface } from "/project-index-search-surface.js";
@@ -51,7 +65,7 @@
       // /profile-window-surface.js.
       import { createProfileWindowSurface } from "/profile-window-surface.js";
       // SPEC-3064 Phase 3 (E7): the project & workspace shell chrome
-      // (project tabs + close-tab confirm modal + tab dots, recent projects,
+      // (project tabs + close-tab confirm modal + tab cues, recent projects,
       // open-project menu, picker/onboarding renderers, action availability,
       // window list dropdown, maximized-window viewport sync, open/clone
       // project modal glue, migration modal glue) moved to
@@ -127,6 +141,10 @@
         palette: __op.palette,
         applyTelemetryCounts: (counts) => applyTelemetryCounts(document, counts),
         applyProviderUsage: (snapshot) => applyProviderUsage(document, snapshot),
+        applyRuntimeHealth: (snapshot) =>
+          applyRuntimeHealth(document, snapshot, {
+            focusWindow: (windowId) => focusWindowRemotely(windowId, { center: true }),
+          }),
       };
 
       const uiTraceProfiler = createUiTraceProfiler();
@@ -199,6 +217,7 @@
       const windowMap = new Map();
       const renderedWindowElementKeys = new Map();
       const renderedRuntimeStatusKeys = new Map();
+      const renderedAgentKanbanBodyKeys = new Map();
       // SPEC-3064 Phase 3 (E6a): fileTreeStateMap moved into
       // /file-tree-surface.js (exported and destructured below so the
       // window-cleanup call site keeps its text).
@@ -367,6 +386,8 @@
       // pending action) and wizardInteractionGuard moved to
       // /launch-wizard-surface.js.
       let activeWorkProjection = null;
+      const agentKanbanPendingPlacement =
+        createAgentKanbanPendingPlacementController();
       // SPEC-3064 Phase 3 (E6b): branchCleanupWindowId and the synthetic
       // workspace-cleanup window id moved to /branches-cleanup-surface.js.
       // SPEC-3064 Phase 3 (E7): windowListOpen / windowListEntries moved to
@@ -410,6 +431,20 @@
       function appendRenderKeyPart(parts, value) {
         const text = String(value ?? "");
         parts.push(String(text.length), ":", text, "\u001f");
+      }
+
+      function appendWindowPlacementRenderKey(parts, windowData) {
+        const placement = windowData?.placement || {};
+        appendRenderKeyPart(parts, "placement_kind");
+        appendRenderKeyPart(parts, placement.kind || "canvas");
+        appendRenderKeyPart(parts, "placement_board");
+        appendRenderKeyPart(parts, placement.board_id || "");
+        appendRenderKeyPart(parts, "placement_lane");
+        appendRenderKeyPart(parts, placement.lane_id || "");
+        appendRenderKeyPart(parts, "placement_order");
+        appendRenderKeyPart(parts, placement.order ?? "");
+        appendRenderKeyPart(parts, "placement_collapsed");
+        appendRenderKeyPart(parts, Boolean(placement.collapsed));
       }
 
       function workspaceWindowsRenderKey(workspace) {
@@ -467,6 +502,7 @@
           appendRenderKeyPart(parts, windowData?.tab_group_id || "");
           appendRenderKeyPart(parts, "tab_group_active");
           appendRenderKeyPart(parts, Boolean(windowData?.tab_group_active));
+          appendWindowPlacementRenderKey(parts, windowData);
         }
         return parts.join("");
       }
@@ -549,6 +585,7 @@
         appendRenderKeyPart(parts, windowData.tab_group_id || "");
         appendRenderKeyPart(parts, "tab_group_active");
         appendRenderKeyPart(parts, Boolean(windowData.tab_group_active));
+        appendWindowPlacementRenderKey(parts, windowData);
         appendRenderKeyPart(parts, "maximized_fill");
         appendRenderKeyPart(parts, Boolean(maximizedFill));
         if (maximizedFill) {
@@ -588,6 +625,34 @@
           appendRenderKeyPart(parts, tab.tab_group_id || "");
           appendRenderKeyPart(parts, "tab_group_active");
           appendRenderKeyPart(parts, Boolean(tab.tab_group_active));
+          appendWindowPlacementRenderKey(parts, tab);
+        }
+        return parts.join("");
+      }
+
+      function agentKanbanBodyRenderKey(boardWindow) {
+        const parts = [];
+        appendRenderKeyPart(parts, "board_id");
+        appendRenderKeyPart(parts, boardWindow?.id || "");
+        for (const windowData of activeWorkspace().windows || []) {
+          if (!isAgentKanbanPlacement(windowData)) {
+            continue;
+          }
+          const placement = windowData.placement || {};
+          if (placement.board_id !== boardWindow?.id) {
+            continue;
+          }
+          appendRenderKeyPart(parts, "id");
+          appendRenderKeyPart(parts, windowData.id || "");
+          appendRenderKeyPart(parts, "preset");
+          appendRenderKeyPart(parts, windowData.preset || "");
+          appendRenderKeyPart(parts, "title");
+          appendRenderKeyPart(parts, windowDisplayTitle(windowData));
+          appendRenderKeyPart(parts, "role");
+          appendRenderKeyPart(parts, windowRoleBadgeLabel(windowData));
+          appendRenderKeyPart(parts, "status");
+          appendRenderKeyPart(parts, runtimeStateForWindow(windowData));
+          appendWindowPlacementRenderKey(parts, windowData);
         }
         return parts.join("");
       }
@@ -633,10 +698,10 @@
         // instead of passing the (not yet initialized) consts directly.
         renderIndexPanelInAllSettingsWindows: () =>
           renderIndexPanelInAllSettingsWindows(),
-        // SPEC-3064 Phase 3 (E7): refreshProjectTabDots lives in the project
-        // shell surface, whose factory also runs after this one — close over
-        // the binding for the same reason.
-        refreshProjectTabDots: () => refreshProjectTabDots(),
+        // SPEC-3064 Phase 3 (E7): refreshProjectTabStateCues lives in the
+        // project shell surface, whose factory also runs after this one —
+        // close over the binding for the same reason.
+        refreshProjectTabStateCues: () => refreshProjectTabStateCues(),
         requestFullIndexStatusRefresh: () => requestFullIndexStatusRefresh(),
       });
 
@@ -690,6 +755,9 @@
         }
         if (preset === "file_tree") {
           return "file-tree";
+        }
+        if (preset === "agent_kanban") {
+          return "agent-kanban";
         }
         if (preset === "branches") {
           return "work";
@@ -1095,6 +1163,9 @@
       }
 
       function visibleWindowData(windowData) {
+        if (isAgentKanbanPlacement(windowData)) {
+          return false;
+        }
         if (!windowData?.tab_group_id) {
           return true;
         }
@@ -1140,6 +1211,18 @@
           point,
           sourceId,
           TITLEBAR_DOCK_HIT_HEIGHT,
+        );
+      }
+
+      function agentKanbanDropTargetAt(event, sourceId) {
+        const sourceWindow = workspaceWindowById(sourceId);
+        if (!isAgentKanbanEligible(sourceWindow)) {
+          return null;
+        }
+        return findAgentKanbanDropTargetAtPoint(
+          document,
+          event.clientX,
+          event.clientY,
         );
       }
 
@@ -1193,6 +1276,7 @@
           settings: "Settings",
           profile: "Profile",
           logs: "Logs",
+          agent_kanban: "Agent Kanban",
           issue: "Issue",
           spec: "SPEC",
           workspace: "Work",
@@ -1209,10 +1293,17 @@
         "claude code": "Claude Code",
         claude_code: "Claude Code",
         codex: "Codex",
-        gemini: "Gemini CLI",
-        "gemini-cli": "Gemini CLI",
-        "gemini cli": "Gemini CLI",
-        gemini_cli: "Gemini CLI",
+        agy: "Antigravity CLI",
+        antigravity: "Antigravity CLI",
+        "antigravity-cli": "Antigravity CLI",
+        "antigravity cli": "Antigravity CLI",
+        antigravity_cli: "Antigravity CLI",
+        gemini: "Gemini CLI (legacy)",
+        "gemini-cli": "Gemini CLI (legacy)",
+        "gemini cli": "Gemini CLI (legacy)",
+        "gemini cli legacy": "Gemini CLI (legacy)",
+        "gemini-cli-legacy": "Gemini CLI (legacy)",
+        gemini_cli: "Gemini CLI (legacy)",
         opencode: "OpenCode",
         "open-code": "OpenCode",
         open_code: "OpenCode",
@@ -1330,7 +1421,7 @@
 
       // SPEC-3064 Phase 3 (E7): renderProjectTabs, the close-project-tab
       // confirm modal (state + render + requestCloseProjectTab), the project
-      // tab dots, the Recent Projects renderers, the Open Project
+      // tab cues, the Recent Projects renderers, the Open Project
       // split-button menu, renderProjectPicker, and renderProjectOnboarding
       // moved to /project-shell-surface.js; renderAppState below calls the
       // imported renderers.
@@ -1717,9 +1808,14 @@
       // `terminal-viewport-reflow.js` so the host resize controller and
       // unit tests can reuse it.
       function canRefreshTerminalViewport(windowId) {
+        const workspaceWindow = workspaceWindowById(windowId);
+        if (isAgentKanbanPlacement(workspaceWindow)) {
+          const terminalHost = terminalMap.get(windowId)?.terminal?.element?.parentElement;
+          return elementHasLayoutBox(terminalHost);
+        }
         return viewportEligibleForRefresh({
           element: windowMap.get(windowId),
-          workspaceWindow: workspaceWindowById(windowId),
+          workspaceWindow,
         });
       }
 
@@ -2210,11 +2306,15 @@
           workspaceWindowById(windowId),
         ),
       ) {
+        const windowData = workspaceWindowById(windowId);
+        if (isAgentKanbanPlacement(windowData)) {
+          send(updateTerminalGridMessage(windowId, cols, rows));
+          return;
+        }
         const element = windowMap.get(windowId);
         if (!element) {
           return;
         }
-        const windowData = workspaceWindowById(windowId);
         send({
           kind: "update_window_geometry",
           id: windowId,
@@ -2463,7 +2563,7 @@
             if (!element) {
               renderWindowList();
               refreshWindowTabTelemetry(windowData);
-              refreshProjectTabDots();
+              refreshProjectTabStateCues();
               return;
             }
             const chip = element.querySelector(".status-chip");
@@ -2516,7 +2616,7 @@
               }
             }
             renderWindowList();
-            refreshProjectTabDots();
+            refreshProjectTabStateCues();
           },
         );
       }
@@ -2670,7 +2770,7 @@
         const runtimeState =
           windowRuntimeStateMap.get(tab.id) ||
           normalizeWindowRuntimeState(tab.status, tab.preset);
-        return mapAgentTelemetryState(runtimeState);
+        return runtimeState;
       }
 
       // AS-2.2: a runtime state change must repaint the tab strip of every
@@ -2832,22 +2932,7 @@
         );
       }
 
-      function createTerminalRuntime(windowId, terminalContainer) {
-        if (terminalMap.has(windowId)) {
-          return terminalMap.get(windowId);
-        }
-        const terminal = new Terminal({
-          cursorBlink: true,
-          convertEol: true,
-          theme: XTERM_THEME_DARK,
-          fontFamily: resolveTerminalFontFamily(),
-          fontSize: 14,
-          lineHeight: isBlinkBrowser() ? 1.35 : 1.3,
-          scrollback: 5000,
-        });
-        const fitAddon = new FitAddon();
-        terminal.loadAddon(fitAddon);
-        terminal.open(terminalContainer);
+      function attachTerminalContainerBindings(windowId, terminalContainer, terminal) {
         const copyCleanup = installTerminalCopyHandlers(windowId, terminalContainer, terminal);
         const imagePasteCleanup = installTerminalImagePasteHandlers(
           windowId,
@@ -2878,28 +2963,72 @@
             send({ kind: "terminal_input", id: windowId, data });
           },
         });
-        const viewportRefreshCleanup = installTerminalViewportRefreshHandlers(windowId, terminal);
-        // Re-fit whenever the terminal container actually changes size. Covers
-        // size changes that bypass the per-event reflow wiring (maximize /
-        // restore via server geometry, restore-from-minimize, tile/stack, or a
-        // fit that no-opped against an unsettled layout box) which otherwise
-        // leave the grown container showing a black band below the grid. The
-        // manual drag-resize handler already owns reflow + final geometry, so
-        // skip while it is active to avoid a redundant per-frame PTY resync.
         const containerResizeCleanup = attachContainerResizeReflow({
           element: terminalContainer,
           windowId,
           fitTerminal,
           shouldSkip: () => !!resizeState && resizeState.id === windowId,
         });
-        const cleanup = () => {
+        return () => {
           copyCleanup();
           imagePasteCleanup();
           fileDropCleanup();
           contextMenuCleanup();
           wheelScrollCleanup.dispose();
-          viewportRefreshCleanup();
           containerResizeCleanup();
+        };
+      }
+
+      function reparentTerminalRuntime(windowId, runtime, terminalContainer) {
+        if (!runtime || runtime.terminalContainer === terminalContainer) {
+          return runtime;
+        }
+        const terminalElement = runtime.terminal?.element;
+        if (terminalElement && terminalElement.parentElement !== terminalContainer) {
+          terminalContainer.appendChild(terminalElement);
+        }
+        runtime.containerBindingsCleanup?.();
+        runtime.terminalContainer = terminalContainer;
+        runtime.containerBindingsCleanup = attachTerminalContainerBindings(
+          windowId,
+          terminalContainer,
+          runtime.terminal,
+        );
+        requestAnimationFrame(() => {
+          scheduleTerminalFit(windowId, true);
+        });
+        return runtime;
+      }
+
+      function createTerminalRuntime(windowId, terminalContainer) {
+        if (terminalMap.has(windowId)) {
+          return reparentTerminalRuntime(
+            windowId,
+            terminalMap.get(windowId),
+            terminalContainer,
+          );
+        }
+        const terminal = new Terminal({
+          cursorBlink: true,
+          convertEol: true,
+          theme: XTERM_THEME_DARK,
+          fontFamily: resolveTerminalFontFamily(),
+          fontSize: 14,
+          lineHeight: isBlinkBrowser() ? 1.35 : 1.3,
+          scrollback: 5000,
+        });
+        const fitAddon = new FitAddon();
+        terminal.loadAddon(fitAddon);
+        terminal.open(terminalContainer);
+        const viewportRefreshCleanup = installTerminalViewportRefreshHandlers(windowId, terminal);
+        const containerBindingsCleanup = attachTerminalContainerBindings(
+          windowId,
+          terminalContainer,
+          terminal,
+        );
+        const cleanup = () => {
+          terminalMap.get(windowId)?.containerBindingsCleanup?.();
+          viewportRefreshCleanup();
         };
         terminal.onData((data) => {
           inputTraceSeq += 1;
@@ -2956,6 +3085,8 @@
           activationAttempts: 0,
           // Issue #2832: see completeInitialFitHandshake.
           handshakeAttempts: 0,
+          terminalContainer,
+          containerBindingsCleanup,
         };
         terminalMap.set(windowId, runtime);
         decoderMap.set(windowId, new TextDecoder());
@@ -3337,6 +3468,7 @@
         renderBoard,
         renderLogs,
         submitBoardEntry,
+        focusBoardEntry,
         handleBoardHookEvent,
         appendLiveLogEntry,
         jumpToUnreadLogs,
@@ -3374,6 +3506,16 @@
           kind: "launch_wizard_action",
           action,
           bounds: visibleBounds(),
+        });
+      }
+
+      // SPEC-2359 US-80: debounced Start Work duplicate-work advisory query.
+      function requestWorkAdvisory({ id, query, request_id }) {
+        send({
+          kind: "request_work_advisory",
+          id,
+          query,
+          request_id,
         });
       }
 
@@ -3519,6 +3661,7 @@
         windowMap,
         workspaceWindowById,
         openWorkspaceResumePicker: (workspaceId) => workspaceResumePicker.open(workspaceId),
+        focusBoardEntry,
         getResumeBounds: () => visibleBounds(),
         launchPending,
         branchesSurface: {
@@ -3540,18 +3683,49 @@
         flushWizardBranchDraft,
         renderLaunchWizard,
         openStartWorkPendingWizard,
+        openLaunchAgentPendingWizard,
         applyLaunchWizardStateEvent,
         applyLaunchWizardOpenErrorEvent,
+        applyWorkAdvisoryResultEvent,
         handleWizardEscapeKeydown,
         installWizardChrome,
       } = createLaunchWizardSurface({
         createNode,
         closeModal,
         sendWizardAction,
+        requestWorkAdvisory,
+      });
+
+      const agentKanbanSurface = createAgentKanbanSurface({
+        activeWorkspace,
+        createTerminalRuntime: (id, terminalRoot) =>
+          createTerminalRuntime(id, terminalRoot),
+        send,
+        visibleBounds,
+        windowDisplayTitle,
+        windowRoleBadgeLabel,
+        onLaunchAgent: ({ boardId, laneId }) => {
+          const knownAgentWindowIds = new Set(
+            (activeWorkspace().windows || [])
+              .filter((windowData) => isAgentWindowPreset(windowData.preset))
+              .map((windowData) => windowData.id),
+          );
+          agentKanbanPendingPlacement.begin({
+            boardId,
+            laneId,
+            knownAgentWindowIds,
+          });
+          openLaunchAgentPendingWizard();
+          send({
+            kind: "open_agent_kanban_launch_wizard",
+            board_id: boardId,
+            lane_id: laneId,
+          });
+        },
       });
 
       // SPEC-3064 Phase 3 (E7): the project & workspace shell chrome surface
-      // (project tabs + close-tab confirm modal + tab dots, Recent Projects,
+      // (project tabs + close-tab confirm modal + tab cues, Recent Projects,
       // Open Project split-button menu, picker/onboarding renderers, action
       // availability, Window List dropdown + render key, maximized-window
       // viewport sync, open/clone project modal glue, migration modal glue,
@@ -3571,7 +3745,7 @@
         scheduleMaximizedWindowsToViewportSync,
         workspaceHasVisibleMaximizedWindow,
         renderProjectTabs,
-        refreshProjectTabDots,
+        refreshProjectTabStateCues,
         markProjectUnread,
         clearProjectUnread,
         renderProjectSwitcher,
@@ -3626,6 +3800,7 @@
         const surface = presetSurface(windowData.preset);
         element.classList.remove(
           "surface-terminal",
+          "surface-agent-kanban",
           "surface-file-tree",
           "surface-branches",
           "surface-board",
@@ -3638,6 +3813,11 @@
           "surface-mock",
         );
         element.classList.add(`surface-${surface}`);
+
+        if (surface === "agent-kanban") {
+          agentKanbanSurface.mount(body, windowData);
+          return;
+        }
 
         if (surface === "terminal") {
           body.innerHTML = `
@@ -3997,9 +4177,22 @@
           });
         }
 
+        const surface = presetSurface(windowData.preset);
         if (!element.dataset.preset || element.dataset.preset !== windowData.preset) {
           element.dataset.preset = windowData.preset;
           mountWindowBody(windowData, element);
+          if (surface === "agent-kanban") {
+            renderedAgentKanbanBodyKeys.set(
+              windowData.id,
+              agentKanbanBodyRenderKey(windowData),
+            );
+          }
+        } else if (surface === "agent-kanban") {
+          const nextAgentKanbanBodyKey = agentKanbanBodyRenderKey(windowData);
+          if (renderedAgentKanbanBodyKeys.get(windowData.id) !== nextAgentKanbanBodyKey) {
+            mountWindowBody(windowData, element);
+            renderedAgentKanbanBodyKeys.set(windowData.id, nextAgentKanbanBodyKey);
+          }
         }
 
         const nextWindowElementKey = windowElementRenderKey(windowData);
@@ -4075,6 +4268,14 @@
           UI_TRACE_EVENT.renderWorkspace,
           { windows: Array.isArray(workspace?.windows) ? workspace.windows.length : 0 },
           () => {
+            const pendingAgentKanbanPlacement =
+              agentKanbanPendingPlacement.consumePlacementMessage(
+                workspace?.windows || [],
+              );
+            if (pendingAgentKanbanPlacement) {
+              send(pendingAgentKanbanPlacement);
+            }
+
             const nextViewport = viewportSyncState.applyServerViewport(workspace.viewport, {
               scopeKey: activeViewportScopeKey(),
             });
@@ -4141,6 +4342,7 @@
               agentCompletionNotifier.forgetWindow(windowId);
               renderedWindowElementKeys.delete(windowId);
               renderedRuntimeStatusKeys.delete(windowId);
+              renderedAgentKanbanBodyKeys.delete(windowId);
               pendingOutputMap.delete(windowId);
               pendingSnapshotMap.delete(windowId);
               terminalOutputBatcher.clear(windowId);
@@ -4328,6 +4530,7 @@
         requestOlderBoardEntries,
         renderBoard,
         submitBoardEntry,
+        focusBoardEntry,
         handleRuntimeHookEvent: handleBoardHookEvent,
       });
 
@@ -4365,6 +4568,7 @@
         profileSurface,
         boardSurface,
         logsSurface,
+        agentKanbanSurface,
         knowledgeSettingsSurface,
       });
 
@@ -4437,6 +4641,9 @@
               sessions: event.sessions || [],
               consumption: event.consumption || [],
             });
+            break;
+          case "runtime_health":
+            window.__operatorShell?.applyRuntimeHealth?.(event.snapshot || {});
             break;
           case "terminal_output":
             frontendUnits.terminalHost.writeOutput(event.id, event.data_base64);
@@ -4591,6 +4798,7 @@
           case "launch_wizard_open_error":
             // SPEC-3064 Phase 3 (E5): guard defer + wizard state mutation
             // live in the launch wizard surface.
+            agentKanbanPendingPlacement.clear();
             applyLaunchWizardOpenErrorEvent(event);
             break;
           // SPEC-2359 US-42 — Resume Picker dispatcher slots.
@@ -4610,7 +4818,13 @@
           case "launch_wizard_state":
             // SPEC-3064 Phase 3 (E5): guard defer + wizard state mutation
             // live in the launch wizard surface.
+            agentKanbanPendingPlacement.clear();
             applyLaunchWizardStateEvent(event);
+            break;
+          case "work_advisory_result":
+            // SPEC-2359 US-80: duplicate-work advisory results for the Start
+            // Work intake prompt.
+            applyWorkAdvisoryResultEvent(event);
             break;
           case "runtime_hook_event":
             frontendUnits.boardSurface.handleRuntimeHookEvent(event);
@@ -4975,11 +5189,23 @@
             window_id: dragState.id,
           });
           if (dragState.moved) {
+            const agentKanbanTarget = dragState.allowMove
+              ? agentKanbanDropTargetAt(event, dragState.id)
+              : null;
             dragState.dockTargetId = dragState.allowMove
               ? titlebarDockTargetAt(event, dragState.id)
               : null;
             clearTitlebarDockPreview();
-            if (dragState.dockTargetId) {
+            if (agentKanbanTarget) {
+              send(
+                placeAgentWindowMessage(
+                  dragState.id,
+                  agentKanbanTarget.boardId,
+                  agentKanbanTarget.laneId,
+                  agentKanbanTarget.order,
+                ),
+              );
+            } else if (dragState.dockTargetId) {
               send({
                 kind: "dock_window_tab",
                 id: dragState.id,

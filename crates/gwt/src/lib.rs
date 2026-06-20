@@ -71,7 +71,7 @@ pub use file_content::{
 };
 pub use file_tree::{list_directory_entries, FileTreeEntry, FileTreeEntryKind};
 pub use gwt_agent::{ClaudeCodeOpenaiCompatInput, PresetDefinition, PresetId};
-pub use index_search::search_project_index;
+pub use index_search::{search_project_index, work_advisory};
 pub use index_worker::{
     aggregate_current_worktree_index_status_for_path, aggregate_project_index_status_for_path,
     auto_repair_unhealthy_scopes, auto_repair_unhealthy_targets, build_aggregated_status_view,
@@ -113,9 +113,9 @@ pub use persistence::{
     legacy_workspace_state_path, load_restored_workspace_state, load_session_state,
     load_workspace_state, migrate_legacy_workspace_state, pause_process_windows_for_restore,
     project_title_from_path, save_session_state, save_workspace_state, workspace_state_path,
-    CanvasViewport, PersistedSessionState, PersistedSessionTabState, PersistedWindowCanvasState,
-    PersistedWindowState, ProjectKind, RecentProjectEntry, WindowGeometry, WindowProcessStatus,
-    WindowState,
+    AgentKanbanLane, CanvasViewport, PersistedSessionState, PersistedSessionTabState,
+    PersistedWindowCanvasState, PersistedWindowState, ProjectKind, RecentProjectEntry,
+    WindowGeometry, WindowPlacement, WindowProcessStatus, WindowState,
 };
 pub use preset::{
     detect_shell_program, resolve_launch_spec, LaunchSpec, PresetResolveError, ShellProgram,
@@ -127,10 +127,11 @@ pub use protocol::{
     BranchEntriesPhase, CustomAgentErrorCode, FileAttachment, FileContentErrorKind,
     FileContentMode, FileContentSaveErrorKind, FocusCycleDirection, FrontendEvent,
     GitHubRepositorySearchResultView, IndexSearchMatchMode, IndexSearchResult, IndexSearchScope,
-    IndexSearchTarget, ProfileEntryView, ProfileEnvEntryView, ProfileSnapshotView, ProjectTabView,
-    RecentProjectView, RunningAgentSummary, UiTraceEntry, UiTracePayload, WorkAgentView,
-    WorkEventView, WorkItemView, WorkspaceExecutionContainerView, WorkspaceHistoryAgentView,
-    WorkspaceHistoryEventView, WorkspaceHistorySessionView, WorkspaceHistoryView,
-    WorkspaceJournalEntryView, WorkspaceResumeSource, WorkspaceView,
+    IndexSearchTarget, ManagedHookHealthView, ManagedHookPendingDiscussionView,
+    ManagedHookPendingGoalView, ManagedHookSlowHandlerView, ProfileEntryView, ProfileEnvEntryView,
+    ProfileSnapshotView, ProjectTabView, RecentProjectView, RunningAgentSummary, UiTraceEntry,
+    UiTracePayload, WorkAgentView, WorkEventView, WorkItemView, WorkspaceExecutionContainerView,
+    WorkspaceHistoryAgentView, WorkspaceHistoryEventView, WorkspaceHistorySessionView,
+    WorkspaceHistoryView, WorkspaceJournalEntryView, WorkspaceResumeSource, WorkspaceView,
 };
 pub use window_canvas::WindowCanvasState;

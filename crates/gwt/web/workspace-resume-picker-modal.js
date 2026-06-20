@@ -140,13 +140,19 @@ export function renderWorkspaceResumePicker({
         ? `workspace-resume-picker-row-tag ${lifecycleTag.className}`
         : agent.resume_kind === "metadata_only"
           ? "workspace-resume-picker-row-tag is-fresh"
+          : agent.resume_kind === "native_picker"
+            ? "workspace-resume-picker-row-tag is-conversation"
           : "workspace-resume-picker-row-tag is-conversation";
       heading.appendChild(
         createNode(
           "span",
           tagClass,
           lifecycleTag?.label
-            || (agent.resume_kind === "metadata_only" ? "Fresh start" : "Conversation"),
+            || (agent.resume_kind === "metadata_only"
+              ? "Fresh start"
+              : agent.resume_kind === "native_picker"
+                ? "Resume picker"
+                : "Conversation"),
         ),
       );
       row.appendChild(heading);

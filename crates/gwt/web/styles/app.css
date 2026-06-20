@@ -304,44 +304,91 @@ body {
   border-color: var(--color-focus-ring);
 }
 
-/* SPEC-2013 — running agent activity dot on project tabs. */
-.project-tab-dot {
-  display: inline-block;
-  width: 8px;
-  height: 8px;
-  border-radius: 50%;
-  margin-right: 6px;
-  background: transparent;
+/* SPEC-2013 Phase 8 — Open Folder / Clone actions that replace the retired
+   Open Project split button, divided from the switchable OPEN / RECENT rows. */
+.project-switcher-actions-separator {
+  height: 1px;
+  margin: 8px 4px;
+  background: var(--color-border);
+}
+
+.project-switcher-action {
+  width: 100%;
+  text-align: left;
+  padding: 8px 10px;
   border: 1px solid transparent;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--color-text);
+  font-family: var(--font-body);
+  font-size: var(--type-sm);
+  font-weight: 600;
+  cursor: pointer;
 }
 
-@keyframes project-tab-agent-running-pulse {
-  0%,
-  100% {
-    opacity: 0.42;
-    box-shadow: 0 0 0 0
-      color-mix(in oklab, var(--color-state-active) 0%, transparent);
-  }
-  50% {
-    opacity: 1;
-    box-shadow: 0 0 0 3px
-      color-mix(in oklab, var(--color-state-active) 30%, transparent);
-  }
+.project-switcher-action:hover,
+.project-switcher-action:focus-visible {
+  background: color-mix(in oklab, var(--color-state-active) 12%, var(--color-surface));
+  outline: none;
+  border-color: var(--color-border);
 }
 
-.project-tab-dot[data-state="running"] {
-  background: var(--color-state-active);
-  border-color: color-mix(in oklab, var(--color-state-active) 80%, transparent);
-  animation: project-tab-agent-running-pulse var(--motion-pulse) ease-in-out
-    infinite;
+/* SPEC-2013 — agent state cue on project tabs. */
+.project-tab[data-agent-state] {
+  border-left: 3px solid var(--color-border-strong);
+  padding-left: 8px;
 }
 
-@media (prefers-reduced-motion: reduce) {
-  .project-tab-dot[data-state="running"] {
-    animation: none;
-    opacity: 1;
-    box-shadow: none;
-  }
+.project-tab[data-agent-state="run"] {
+  border-left-color: var(--color-state-active);
+}
+
+.project-tab[data-agent-state="start"] {
+  border-left-color: var(--color-state-idle);
+}
+
+.project-tab[data-agent-state="block"] {
+  border-left-color: var(--color-state-blocked);
+  border-color: color-mix(in oklab, var(--color-state-blocked) 42%, var(--color-border));
+}
+
+.project-tab-state-cue {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex: 0 0 auto;
+  min-width: 22px;
+  height: 14px;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: var(--color-text-muted);
+  font-family: var(--font-mono);
+  font-size: 10px;
+  font-weight: 700;
+  line-height: 1;
+  letter-spacing: 0;
+  opacity: 0.9;
+  text-transform: uppercase;
+}
+
+.project-tab-state-cue[hidden] {
+  display: none;
+}
+
+.project-tab-state-cue[data-state="run"] {
+  color: var(--color-state-active);
+  animation: none;
+}
+
+.project-tab-state-cue[data-state="start"] {
+  color: var(--color-state-idle);
+  animation: none;
+}
+
+.project-tab-state-cue[data-state="block"] {
+  color: var(--color-state-blocked);
+  animation: none;
 }
 
 /* SPEC-1939 T-IDX-106 — Settings.Index health table. */
@@ -607,135 +654,6 @@ body {
   background: var(--color-button-bg-hover);
 }
 
-/* Issue #2684 — split-button group anchors the dropdown menu below the
-   primary Open Project button. */
-.split-button-group {
-  position: relative;
-  display: inline-flex;
-  align-items: stretch;
-}
-
-.split-button-group .split-button-primary {
-  border-top-right-radius: 0;
-  border-bottom-right-radius: 0;
-  border-right-width: 0;
-}
-
-.split-button-group .split-button-caret {
-  padding: 0 8px;
-  border-top-left-radius: 0;
-  border-bottom-left-radius: 0;
-  font-size: var(--type-sm);
-  min-width: 26px;
-}
-
-.split-button-group .split-button-caret[aria-expanded="true"] {
-  background: var(--color-button-bg-hover);
-}
-
-.split-button-menu {
-  position: absolute;
-  top: calc(100% + 6px);
-  right: 0;
-  min-width: 260px;
-  max-width: 360px;
-  padding: 8px;
-  display: none;
-  flex-direction: column;
-  gap: 4px;
-  border: 1px solid var(--color-border);
-  border-radius: var(--radius-md);
-  background: var(--color-surface);
-  box-shadow: var(--shadow-2);
-  z-index: 50;
-}
-
-.split-button-menu.open {
-  display: flex;
-}
-
-.split-button-menu-item {
-  width: 100%;
-  text-align: left;
-  padding: 8px 10px;
-  border: 1px solid transparent;
-  border-radius: var(--radius-sm);
-  background: transparent;
-  color: var(--color-text);
-  font-family: var(--font-body);
-  font-size: var(--type-sm);
-  font-weight: 600;
-  cursor: pointer;
-}
-
-.split-button-menu-item:hover,
-.split-button-menu-item:focus-visible {
-  background: color-mix(in oklab, var(--color-state-active) 12%, var(--color-surface));
-  outline: none;
-  border-color: var(--color-border);
-}
-
-.split-button-menu-section-label {
-  margin: 8px 4px 4px;
-  font-family: var(--font-display);
-  font-stretch: 75%;
-  font-weight: 700;
-  font-size: var(--type-xs);
-  letter-spacing: var(--tracking-display);
-  text-transform: uppercase;
-  color: var(--color-text-muted);
-}
-
-.split-button-menu-recent {
-  display: grid;
-  /* Issue #2746 follow-up — without minmax(0, 1fr) the implicit auto track
-     grows to fit the longest meta path, so the row outgrows the dropdown
-     and the hover background bleeds past the right edge. */
-  grid-template-columns: minmax(0, 1fr);
-  gap: 4px;
-}
-
-/* Empty-state copy is rendered as a real <div> by JS so assistive tech
-   finds it; this rule only styles that node. */
-.split-button-menu-empty {
-  padding: 8px 10px;
-  font-family: var(--font-body);
-  font-size: var(--type-sm);
-  color: var(--color-text-muted);
-}
-
-.split-button-menu-recent-row {
-  display: flex;
-  flex-direction: column;
-  gap: 2px;
-  /* Issue #2746 follow-up — flex columns default to `min-width: auto`,
-     which equals the meta span's min-content. Force 0 so the row honors
-     the menu width and meta's text-overflow: ellipsis actually engages. */
-  min-width: 0;
-  /* Issue #2746 — span children inside <button> would otherwise inherit
-     user-select: auto, so a sub-pixel pointer drift turns the click into a
-     text-selection drag and swallows it. Mirrors the #2744 fix on
-     .project-tab. */
-  user-select: none;
-}
-
-.split-button-menu-recent-title {
-  font-family: var(--font-body);
-  font-size: var(--type-sm);
-  font-weight: 600;
-  color: var(--color-text-strong);
-}
-
-.split-button-menu-recent-meta {
-  font-family: var(--font-mono);
-  font-size: var(--type-xs);
-  letter-spacing: var(--tracking-mono);
-  color: var(--color-text-muted);
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
 /* SPEC-2356 — workspace window chrome.
    Box-shadows are heuristic depth values that look right on either
    theme; the surface backgrounds and titlebar fills come from tokens
@@ -781,6 +699,7 @@ body {
 }
 
 .workspace-window.surface-file-tree,
+.workspace-window.surface-agent-kanban,
 .workspace-window.surface-branches,
 .workspace-window.surface-board,
 .workspace-window.surface-logs,
@@ -812,6 +731,7 @@ body {
 }
 
 .surface-file-tree .titlebar,
+.surface-agent-kanban .titlebar,
 .surface-branches .titlebar,
 .surface-board .titlebar,
 .surface-logs .titlebar,
@@ -901,6 +821,7 @@ body {
 }
 
 .surface-file-tree .status-chip,
+.surface-agent-kanban .status-chip,
 .surface-branches .status-chip,
 .surface-board .status-chip,
 .surface-logs .status-chip,
@@ -966,6 +887,7 @@ body {
 }
 
 .surface-file-tree .icon-button,
+.surface-agent-kanban .icon-button,
 .surface-branches .icon-button,
 .surface-board .icon-button,
 .surface-logs .icon-button,
@@ -1063,6 +985,7 @@ body {
 .window-tab {
   display: inline-flex;
   align-items: center;
+  position: relative;
   max-width: 180px;
   height: 24px;
   padding: 0 9px;
@@ -1077,7 +1000,7 @@ body {
   cursor: grab;
 }
 
-/* SPEC-3038 US-2 — Telemetry tabs. The dot + label live inside the tab
+/* SPEC-3038 US-2 — Telemetry tabs. The cue + label live inside the tab
    button; the gap separates them without breaking the title ellipsis. */
 .window-tab .window-tab-label {
   min-width: 0;
@@ -1087,12 +1010,22 @@ body {
 }
 
 .window-tab-state {
-  width: 8px;
-  height: 8px;
-  margin-right: 6px;
-  border-radius: var(--radius-pill);
-  flex-shrink: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex: 0 0 auto;
+  min-width: 24px;
+  height: 14px;
+  padding: 0;
+  border: 0;
   background: transparent;
+  color: var(--color-text-muted);
+  font-family: var(--font-mono);
+  font-size: 10px;
+  font-weight: 700;
+  line-height: 1;
+  letter-spacing: 0;
+  flex-shrink: 0;
 }
 
 .window-tab-state[hidden] {
@@ -1101,7 +1034,7 @@ body {
 
 /* The window-level [data-agent-state] rules paint a rim glow + pulse meant
    for full windows; tabs neutralize that and express telemetry through an
-   agent-colored left rim + a small state dot instead. */
+   agent-colored left rim + a compact state cue instead. */
 .window-tab[data-agent-state] {
   box-shadow: none;
   animation: none;
@@ -1109,46 +1042,41 @@ body {
   padding-left: 6px;
 }
 
-.window-tab[data-agent-state="active"] .window-tab-state {
-  background: var(--color-state-active);
-  animation: window-tab-state-pulse var(--motion-pulse) ease-in-out infinite;
+.window-tab[data-agent-state="running"] .window-tab-state {
+  color: var(--color-state-active);
+  animation: none;
 }
 
 .window-tab[data-agent-state="idle"] .window-tab-state {
-  background: var(--color-state-idle);
+  color: var(--color-state-idle);
+  animation: none;
 }
 
-.window-tab[data-agent-state="not_started"] .window-tab-state {
-  background: transparent;
-  border: 1px solid var(--color-border-strong);
+.window-tab[data-agent-state="starting"] .window-tab-state {
+  color: var(--color-state-idle);
+  animation: none;
 }
 
-/* AS-2.3: blocked stays loud even on an inactive tab — red dot pulse plus a
-   red-tinted tab border. */
-.window-tab[data-agent-state="blocked"] .window-tab-state {
-  background: var(--color-state-blocked);
-  animation: window-tab-state-pulse calc(var(--motion-pulse) * 0.5) ease-in-out infinite;
+.window-tab[data-agent-state="waiting"] .window-tab-state {
+  color: var(--color-state-idle);
+  animation: none;
 }
 
-.window-tab[data-agent-state="blocked"] {
+/* AS-2.3: blocked stays loud even on an inactive tab through red text,
+   border, and tab edge. */
+.window-tab[data-agent-state="error"] .window-tab-state {
+  color: var(--color-state-blocked);
+  animation: none;
+}
+
+.window-tab[data-agent-state="error"] {
   border-color: color-mix(in oklab, var(--color-state-blocked) 55%, var(--color-border));
 }
 
-.window-tab[data-agent-state="done"] .window-tab-state {
-  background: var(--color-state-done);
+.window-tab[data-agent-state="stopped"] .window-tab-state {
+  color: var(--color-state-done);
   opacity: 0.65;
-}
-
-@keyframes window-tab-state-pulse {
-  0%, 100% { opacity: 1; }
-  50% { opacity: 0.35; }
-}
-
-@media (prefers-reduced-motion: reduce) {
-  .window-tab[data-agent-state="active"] .window-tab-state,
-  .window-tab[data-agent-state="blocked"] .window-tab-state {
-    animation: none;
-  }
+  animation: none;
 }
 
 /* AS-2.4: the close button only appears on hover / keyboard focus so a tab
@@ -1184,6 +1112,26 @@ body {
   color: var(--color-text);
 }
 
+/* Issue #3104 — the active tab carries a theme-aware --color-state-active
+   underline. A surface vs surface-elevated background delta alone collapses to
+   near-white in light mode (and elevated is the darker step, so the active tab
+   even reads as recessed), making the active tab in a tabbed agent-window group
+   indistinguishable. Rendered as an ::after bar — not box-shadow (which
+   .window-tab[data-agent-state] clears) and not a border (which would reflow
+   and collide with the blocked border-color) — so it coexists with the
+   agent-color left rim, the state dot, and the blocked border. */
+.window-tab.active::after {
+  content: "";
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  height: 2px;
+  border-radius: var(--radius-pill);
+  background: var(--color-state-active);
+  pointer-events: none;
+}
+
 .window-tab:active {
   cursor: grabbing;
 }
@@ -1211,6 +1159,7 @@ body {
 }
 
 .surface-file-tree .window-body,
+.surface-agent-kanban .window-body,
 .surface-branches .window-body,
 .surface-board .window-body,
 .surface-logs .window-body,
@@ -1256,6 +1205,256 @@ body {
  * at the gwt-default 720×420 window size. */
 .surface-terminal .terminal-root .xterm-viewport {
   overflow-y: auto;
+}
+
+.agent-kanban-root {
+  position: absolute;
+  inset: 0;
+  display: grid;
+  grid-template-rows: auto 1fr;
+  min-width: 0;
+  min-height: 0;
+  background: var(--color-surface);
+  color: var(--color-text);
+}
+
+.agent-kanban-toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 10px 12px;
+  border-bottom: 1px solid var(--color-border);
+  background: var(--color-surface-elevated);
+}
+
+.agent-kanban-heading {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-family: var(--font-display);
+  font-stretch: 75%;
+  font-size: var(--type-sm);
+  font-weight: 700;
+  letter-spacing: 0;
+  text-transform: uppercase;
+  color: var(--color-display-fg);
+}
+
+.agent-kanban-status {
+  flex-shrink: 0;
+  font-family: var(--font-mono);
+  font-size: var(--type-xs);
+  letter-spacing: 0;
+  color: var(--color-text-muted);
+}
+
+.agent-kanban-lanes {
+  min-height: 0;
+  display: grid;
+  grid-template-columns: repeat(4, minmax(220px, 1fr));
+  gap: 10px;
+  padding: 10px;
+  overflow: auto;
+}
+
+.agent-kanban-lane {
+  min-width: 0;
+  min-height: 0;
+  display: grid;
+  grid-template-rows: auto 1fr;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  background: color-mix(in oklab, var(--color-surface-elevated) 82%, var(--color-canvas));
+}
+
+.agent-kanban-lane-header {
+  display: grid;
+  grid-template-columns: 1fr auto auto;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  padding: 8px;
+  border-bottom: 1px solid var(--color-border);
+}
+
+.agent-kanban-lane-title {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-family: var(--font-display);
+  font-stretch: 75%;
+  font-size: var(--type-xs);
+  font-weight: 700;
+  letter-spacing: 0;
+  text-transform: uppercase;
+  color: var(--color-text);
+}
+
+.agent-kanban-lane-count {
+  display: grid;
+  place-items: center;
+  min-width: 22px;
+  height: 22px;
+  padding: 0 6px;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-pill);
+  font-family: var(--font-mono);
+  font-size: var(--type-xs);
+  letter-spacing: 0;
+  color: var(--color-text-muted);
+  background: var(--color-surface);
+}
+
+.agent-kanban-lane-add {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: auto;
+  min-width: max-content;
+  height: 24px;
+  padding: 0 8px;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-sm);
+  font-family: var(--font-display);
+  font-stretch: 75%;
+  font-size: var(--type-xs);
+  font-weight: 700;
+  letter-spacing: 0;
+  line-height: 1;
+  white-space: nowrap;
+  background: var(--color-surface);
+  color: var(--color-text);
+  cursor: pointer;
+}
+
+.agent-kanban-lane-add:hover,
+.agent-kanban-card-action:hover {
+  border-color: var(--color-border-strong);
+  background: var(--color-surface-elevated);
+}
+
+.agent-kanban-card-stack {
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 8px;
+  overflow: auto;
+}
+
+.agent-kanban-empty {
+  display: grid;
+  place-items: center;
+  min-height: 92px;
+  border: 1px dashed var(--color-border-strong);
+  border-radius: var(--radius-md);
+  font-family: var(--font-mono);
+  font-size: var(--type-xs);
+  letter-spacing: 0;
+  color: var(--color-text-muted);
+  background: color-mix(in oklab, var(--color-surface) 70%, transparent);
+}
+
+.agent-kanban-card {
+  min-width: 0;
+  display: grid;
+  grid-template-rows: auto minmax(180px, 1fr);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  background: var(--color-surface);
+  box-shadow: var(--shadow-1);
+}
+
+.agent-kanban-card.dragging {
+  opacity: 0.58;
+}
+
+.agent-kanban-card-header {
+  display: grid;
+  grid-template-columns: 1fr auto;
+  align-items: start;
+  gap: 8px;
+  min-width: 0;
+  padding: 8px;
+  border-bottom: 1px solid var(--color-border);
+}
+
+.agent-kanban-card-title-wrap {
+  min-width: 0;
+  display: grid;
+  gap: 3px;
+}
+
+.agent-kanban-card-title {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: var(--type-sm);
+  font-weight: 600;
+  color: var(--color-text);
+}
+
+.agent-kanban-card-meta {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-family: var(--font-mono);
+  font-size: var(--type-xs);
+  letter-spacing: 0;
+  color: var(--color-text-muted);
+}
+
+.agent-kanban-card-actions {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.agent-kanban-card-action {
+  display: grid;
+  place-items: center;
+  width: 24px;
+  height: 24px;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-sm);
+  background: var(--color-surface-elevated);
+  color: var(--color-text);
+  line-height: 1;
+  cursor: pointer;
+}
+
+.agent-kanban-card-terminal {
+  position: relative;
+  min-height: 180px;
+  height: clamp(180px, 34vh, 360px);
+  background: #0a0d12;
+  overflow: hidden;
+}
+
+.agent-kanban-card-terminal .terminal-root {
+  position: absolute;
+  inset: 0;
+}
+
+.agent-kanban-card[data-collapsed="true"] {
+  grid-template-rows: auto;
+}
+
+@media (max-width: 920px) {
+  .agent-kanban-lanes {
+    grid-template-columns: repeat(2, minmax(220px, 1fr));
+  }
+}
+
+@media (max-width: 560px) {
+  .agent-kanban-lanes {
+    grid-template-columns: minmax(220px, 1fr);
+  }
 }
 
 .terminal-overlay {
@@ -4182,7 +4381,7 @@ body {
 
 /* SPEC-2356 landscape Surface Deck (Plan B, "weighted deck") — the three category
    sections become side-by-side weighted columns so the deck stays low and never
-   overflows short viewports. Width maps to content volume: SURFACES (5 buttons)
+   overflows short viewports. Width maps to content volume: SURFACES (6 buttons)
    widest, CONFIGURATION (2) narrowest. */
 .modal-shell.is-surface-deck {
   width: min(940px, calc(100vw - 32px));
@@ -4928,6 +5127,83 @@ body {
   color: var(--color-text-strong);
 }
 
+/* SPEC-2359 US-80 — Start Work intake prompt + duplicate-work advisory. */
+.launch-intake-input {
+  width: 100%;
+  box-sizing: border-box;
+  font-family: var(--font-mono);
+  font-size: var(--type-xs);
+  letter-spacing: var(--tracking-mono);
+  color: var(--color-text-strong);
+  background: var(--color-surface-raised, var(--color-surface));
+  border: 1px solid var(--color-border);
+  border-radius: 4px;
+  padding: 8px 10px;
+  resize: vertical;
+}
+
+.launch-advisory {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin-top: 10px;
+  padding: 10px;
+  border: 1px solid var(--color-border);
+  border-radius: 4px;
+  background: var(--color-surface);
+}
+
+.launch-advisory[hidden] {
+  display: none;
+}
+
+.launch-advisory-title {
+  font-family: var(--font-mono);
+  font-size: var(--type-xs);
+  letter-spacing: var(--tracking-mono);
+  color: var(--color-text-muted);
+  text-transform: uppercase;
+}
+
+.launch-advisory-loading {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.launch-advisory-loading-text {
+  font-family: var(--font-mono);
+  font-size: var(--type-xs);
+  letter-spacing: var(--tracking-mono);
+  color: var(--color-text-muted);
+}
+
+.launch-advisory-item {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  font-size: var(--type-xs);
+}
+
+.launch-advisory-scope {
+  font-family: var(--font-mono);
+  letter-spacing: var(--tracking-mono);
+  color: var(--color-text-muted);
+  text-transform: uppercase;
+  flex: 0 0 auto;
+}
+
+.launch-advisory-item-title {
+  color: var(--color-text-strong);
+  flex: 1 1 auto;
+  overflow-wrap: anywhere;
+}
+
+.launch-advisory-item-sub {
+  color: var(--color-text-muted);
+  flex: 0 0 auto;
+}
+
 @media (max-width: 760px) {
   .wizard-main {
     grid-template-columns: 1fr;
@@ -5327,8 +5603,9 @@ body {
   background: var(--color-surface);
   color: var(--color-text);
   cursor: pointer;
-  /* Issue #2746 — see .split-button-menu-recent-row comment. Picker
-     overlay shares the same button + span-children pattern. */
+  /* Issue #2746 — span children inside a <button> inherit user-select: auto,
+     so a sub-pixel pointer drift turns the click into a text-selection drag
+     and swallows it. Mirrors the #2744 fix on .project-tab. */
   user-select: none;
 }
 

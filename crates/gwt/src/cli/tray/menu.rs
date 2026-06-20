@@ -1,6 +1,6 @@
 //! SPEC #2920 FR-004 — Tray menu skeleton.
 //!
-//! The minimal tray menu is `[Open in browser] / [Copy URL] / [About GWT] / [Quit]`.
+//! The minimal tray menu is `[Open in browser] / [Copy URL (<url>)] / [About GWT] / [Quit]`.
 //! Settings, autostart toggle, Logs, and Update controls live in the browser UI
 //! Settings page (Phase 8 / FR-007).
 //!
@@ -50,6 +50,14 @@ pub fn about_url_for_browser_url(browser_url: &str) -> String {
     format!("{base}#about")
 }
 
+/// Visible tray label for the Copy URL action.
+///
+/// The label includes the exact root browser URL copied by the handler so
+/// the active ephemeral port is visible before the user clicks.
+pub fn copy_url_label_for_browser_url(browser_url: &str) -> String {
+    format!("Copy URL ({browser_url})")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -86,6 +94,14 @@ mod tests {
         assert_eq!(
             about_url_for_browser_url("http://127.0.0.1:54321/#old"),
             "http://127.0.0.1:54321/#about"
+        );
+    }
+
+    #[test]
+    fn copy_url_label_includes_browser_url() {
+        assert_eq!(
+            copy_url_label_for_browser_url("http://127.0.0.1:54321/"),
+            "Copy URL (http://127.0.0.1:54321/)"
         );
     }
 }

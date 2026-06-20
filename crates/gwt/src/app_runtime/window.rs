@@ -21,7 +21,7 @@
 //! while preserving the broadcast/persist contract through the existing
 //! `workspace_state_broadcast` and `persist` helpers on `AppRuntime`.
 
-use gwt::{ArrangeMode, CanvasViewport, FocusCycleDirection};
+use gwt::{AgentKanbanLane, ArrangeMode, CanvasViewport, FocusCycleDirection};
 
 use super::{
     close_window_from_workspace, combined_window_id, AppRuntime, BackendEvent, OutboundEvent,
@@ -324,6 +324,136 @@ impl AppRuntime {
         self.resize_runtime_to_window(id);
         let _ = self.persist();
         vec![self.workspace_state_broadcast()]
+    }
+
+    pub(crate) fn place_agent_window_in_kanban_events(
+        &mut self,
+        id: &str,
+        board_id: &str,
+        lane_id: AgentKanbanLane,
+        order: Option<u32>,
+    ) -> Vec<OutboundEvent> {
+        let Some(address) = self.window_lookup.get(id).cloned() else {
+            return Vec::new();
+        };
+        let Some(board_address) = self.window_lookup.get(board_id).cloned() else {
+            return Vec::new();
+        };
+        if address.tab_id != board_address.tab_id {
+            return Vec::new();
+        }
+        let updated = {
+            let Some(tab) = self.tab_mut(&address.tab_id) else {
+                return Vec::new();
+            };
+            tab.workspace.place_agent_window_in_kanban(
+                &address.raw_id,
+                &board_address.raw_id,
+                lane_id,
+                order,
+            )
+        };
+        if !updated {
+            return Vec::new();
+        }
+        let _ = self.set_active_tab(address.tab_id);
+        let _ = self.persist();
+        vec![self.workspace_state_broadcast()]
+    }
+
+    pub(crate) fn move_agent_kanban_card_events(
+        &mut self,
+        id: &str,
+        board_id: &str,
+        lane_id: AgentKanbanLane,
+        order: u32,
+    ) -> Vec<OutboundEvent> {
+        let Some(address) = self.window_lookup.get(id).cloned() else {
+            return Vec::new();
+        };
+        let Some(board_address) = self.window_lookup.get(board_id).cloned() else {
+            return Vec::new();
+        };
+        if address.tab_id != board_address.tab_id {
+            return Vec::new();
+        }
+        let updated = {
+            let Some(tab) = self.tab_mut(&address.tab_id) else {
+                return Vec::new();
+            };
+            tab.workspace.move_agent_kanban_card(
+                &address.raw_id,
+                &board_address.raw_id,
+                lane_id,
+                order,
+            )
+        };
+        if !updated {
+            return Vec::new();
+        }
+        let _ = self.set_active_tab(address.tab_id);
+        let _ = self.persist();
+        vec![self.workspace_state_broadcast()]
+    }
+
+    pub(crate) fn undock_agent_window_events(
+        &mut self,
+        id: &str,
+        geometry: Option<WindowGeometry>,
+    ) -> Vec<OutboundEvent> {
+        let Some(address) = self.window_lookup.get(id).cloned() else {
+            return Vec::new();
+        };
+        let updated = {
+            let Some(tab) = self.tab_mut(&address.tab_id) else {
+                return Vec::new();
+            };
+            tab.workspace.undock_agent_window(&address.raw_id, geometry)
+        };
+        if !updated {
+            return Vec::new();
+        }
+        let _ = self.set_active_tab(address.tab_id);
+        let _ = self.persist();
+        vec![self.workspace_state_broadcast()]
+    }
+
+    pub(crate) fn set_agent_kanban_card_collapsed_events(
+        &mut self,
+        id: &str,
+        collapsed: bool,
+    ) -> Vec<OutboundEvent> {
+        let Some(address) = self.window_lookup.get(id).cloned() else {
+            return Vec::new();
+        };
+        let updated = {
+            let Some(tab) = self.tab_mut(&address.tab_id) else {
+                return Vec::new();
+            };
+            tab.workspace
+                .set_agent_kanban_card_collapsed(&address.raw_id, collapsed)
+        };
+        if !updated {
+            return Vec::new();
+        }
+        let _ = self.set_active_tab(address.tab_id);
+        let _ = self.persist();
+        vec![self.workspace_state_broadcast()]
+    }
+
+    pub(crate) fn update_terminal_grid_events(
+        &mut self,
+        id: &str,
+        cols: u16,
+        rows: u16,
+    ) -> Vec<OutboundEvent> {
+        let Some(runtime) = self.runtimes.get(id) else {
+            return Vec::new();
+        };
+        if let Ok(mut pane) = runtime.pane.lock() {
+            let _ = pane.resize(cols.max(20), rows.max(6));
+        }
+        Vec::new()
     }
 
     pub(crate) fn update_window_geometry_events(

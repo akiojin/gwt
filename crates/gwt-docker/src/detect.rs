@@ -43,6 +43,17 @@ fn docker_probe_diagnostics(args: &[&str], label: &str) -> std::result::Result<(
     // override; pass it as the program directly.
     let binary = docker_binary();
     let attempted_binary = binary.to_string_lossy().into_owned();
+    // Emit before spawning so the event is captured by tracing subscribers that
+    // wrap this call (e.g. `with_default` in tests). On Linux the tokio
+    // current-thread runtime's block_on can displace the thread-local dispatcher
+    // between the spawn and the match arm, causing post-spawn events to be missed.
+    info!(
+        target: "gwt::launch::probe",
+        category = "docker",
+        label = label,
+        attempted_binary = %attempted_binary,
+        "docker probe"
+    );
     let hub = gwt_core::process_console::global();
     let options =
         gwt_core::process_console::SpawnOptions::new(format!("docker {}", args.join(" ")));
@@ -55,16 +66,7 @@ fn docker_probe_diagnostics(args: &[&str], label: &str) -> std::result::Result<(
     );
     match result {
         Ok(output) => {
-            let ok = output.success();
-            info!(
-                target: "gwt::launch::probe",
-                category = "docker",
-                label = label,
-                attempted_binary = %attempted_binary,
-                ok = ok,
-                "docker probe"
-            );
-            if ok {
+            if output.success() {
                 return Ok(());
             }
             let stderr = output.stderr.trim();
@@ -86,18 +88,7 @@ fn docker_probe_diagnostics(args: &[&str], label: &str) -> std::result::Result<(
                 Err(stderr.to_string())
             }
         }
-        Err(e) => {
-            info!(
-                target: "gwt::launch::probe",
-                category = "docker",
-                label = label,
-                attempted_binary = %attempted_binary,
-                ok = false,
-                error = %e,
-                "docker probe failed"
-            );
-            Err(e.to_string())
-        }
+        Err(e) => Err(e.to_string()),
     }
 }
 

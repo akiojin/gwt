@@ -1103,8 +1103,14 @@ mod tests {
 
         assert_eq!(
             ids,
-            vec!["claude", "codex", "gemini", "opencode", "openclaw", "hermes", "gh"]
+            vec!["claude", "codex", "agy", "gemini", "opencode", "openclaw", "hermes", "gh"]
         );
+        assert!(options
+            .iter()
+            .any(|option| option.name == "Antigravity CLI"));
+        assert!(options
+            .iter()
+            .any(|option| option.name == "Gemini CLI (legacy)"));
         assert!(options.iter().any(|option| option.name == "OpenCode"));
         assert!(options.iter().any(|option| option.name == "OpenClaw"));
         assert!(options.iter().any(|option| option.name == "Hermes Agent"));
@@ -1337,6 +1343,8 @@ mod tests {
                 "gemma-4-26b-a4b-it",
             ]
         );
+        assert!(current_model_options("agy").is_empty());
+        assert!(model_display_options("agy").is_empty());
         assert!(current_model_options("custom").is_empty());
         assert!(model_display_options("custom").is_empty());
         assert!(!model_display_options("codex").is_empty());

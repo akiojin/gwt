@@ -139,10 +139,11 @@ mod tests {
     #[test]
     fn builtin_probes_cover_all_variants() {
         let probes = builtin_probes();
-        assert_eq!(probes.len(), 7);
+        assert_eq!(probes.len(), 8);
         let ids: Vec<_> = probes.iter().map(|p| &p.id).collect();
         assert!(ids.contains(&&AgentId::ClaudeCode));
         assert!(ids.contains(&&AgentId::Codex));
+        assert!(ids.contains(&&AgentId::Antigravity));
         assert!(ids.contains(&&AgentId::Gemini));
         assert!(ids.contains(&&AgentId::OpenCode));
         assert!(ids.contains(&&AgentId::OpenClaw));

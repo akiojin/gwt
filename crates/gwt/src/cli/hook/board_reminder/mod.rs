@@ -40,6 +40,12 @@ use gwt_core::workspace_projection::WorkspaceProjection;
 /// stale reminder fires. Tuned conservatively to avoid reminder fatigue.
 const TITLE_SUMMARY_STALE_TURN_THRESHOLD: u32 = 8;
 
+/// Minimum unchanged-progress turns before the cumulative progress summary is
+/// considered stale. Lower than title-summary because progress summary is
+/// expected to evolve during implementation/verification, not only on scope
+/// changes.
+const PROGRESS_SUMMARY_STALE_TURN_THRESHOLD: u32 = 4;
+
 /// Issue #2987: throttle window for the memory-update reminder. After the
 /// reminder fires it stays silent for this many hours, then fires again, so a
 /// long session does not pay the reminder on every UserPromptSubmit turn.
@@ -307,6 +313,119 @@ fn append_title_summary_stale_context(
     }
 }
 
+fn progress_summary_focus_signal(
+    projection: &WorkspaceProjection,
+    session_id: &str,
+) -> Option<String> {
+    let agent_focus = projection
+        .agents
+        .iter()
+        .find(|agent| agent.session_id == session_id)
+        .and_then(|agent| agent.current_focus.as_deref());
+    let parts = [
+        agent_focus,
+        projection.summary.as_deref(),
+        projection.next_action.as_deref(),
+        Some(projection.status_text.as_str()),
+    ];
+    let joined = parts
+        .into_iter()
+        .flatten()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .collect::<Vec<_>>()
+        .join("\n");
+    (!joined.is_empty()).then_some(joined)
+}
+
+fn compute_progress_summary_state(
+    event: IntentBoundaryEvent,
+    projection: Option<&WorkspaceProjection>,
+    session_id: &str,
+    current_state: &RemindersState,
+) -> (bool, bool, RemindersState) {
+    let mut new_state = current_state.clone();
+    let Some(projection) = projection else {
+        return (false, false, new_state);
+    };
+    let current_progress = projection
+        .progress_summary
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string);
+    let current_signal = progress_summary_focus_signal(projection, session_id);
+
+    if current_progress.is_none() {
+        new_state.last_progress_summary_seen = None;
+        new_state.progress_summary_unchanged_turn_count = 0;
+        new_state.progress_focus_changed_in_window = false;
+        new_state.last_progress_focus_seen = current_signal;
+        return (
+            matches!(
+                event,
+                IntentBoundaryEvent::UserPromptSubmit | IntentBoundaryEvent::Stop
+            ),
+            false,
+            new_state,
+        );
+    }
+
+    if event != IntentBoundaryEvent::UserPromptSubmit {
+        new_state.last_progress_summary_seen = current_progress;
+        new_state.last_progress_focus_seen = current_signal;
+        return (false, false, new_state);
+    }
+
+    let progress = current_progress.expect("checked above");
+    if new_state.last_progress_summary_seen.as_ref() == Some(&progress) {
+        new_state.progress_summary_unchanged_turn_count = new_state
+            .progress_summary_unchanged_turn_count
+            .saturating_add(1);
+        if new_state.last_progress_focus_seen != current_signal {
+            new_state.progress_focus_changed_in_window = true;
+        }
+    } else {
+        new_state.last_progress_summary_seen = Some(progress);
+        new_state.progress_summary_unchanged_turn_count = 0;
+        new_state.progress_focus_changed_in_window = false;
+    }
+    new_state.last_progress_focus_seen = current_signal;
+    let stale = new_state.progress_summary_unchanged_turn_count
+        >= PROGRESS_SUMMARY_STALE_TURN_THRESHOLD
+        && new_state.progress_focus_changed_in_window;
+    (false, stale, new_state)
+}
+
+fn append_progress_summary_context(
+    output: HookOutput,
+    event: IntentBoundaryEvent,
+    missing: bool,
+    stale: bool,
+    language: &str,
+) -> HookOutput {
+    if !missing && !stale {
+        return output;
+    }
+    let reminder =
+        texts::progress_summary_reminder(language, stale, event == IntentBoundaryEvent::Stop);
+    match output {
+        HookOutput::HookSpecificAdditionalContext { event, text } => {
+            HookOutput::hook_specific_additional_context(event, format!("{text}\n\n{reminder}"))
+        }
+        HookOutput::SystemMessage(text) => {
+            HookOutput::system_message(format!("{text}\n\n{reminder}"))
+        }
+        HookOutput::Silent if event == IntentBoundaryEvent::Stop => {
+            HookOutput::system_message(reminder.to_string())
+        }
+        HookOutput::Silent => {
+            HookOutput::hook_specific_additional_context(event, reminder.to_string())
+        }
+        other => other,
+    }
+}
+
 fn memory_source_present(worktree_path: &Path) -> bool {
     worktree_path.join(".gwt/work/memory.md").is_file()
         || worktree_path.join("tasks/memory.md").is_file()
@@ -448,6 +567,20 @@ pub fn compute_plan(
     );
     plan.next_reminders = updated_state;
     plan.output = append_title_summary_stale_context(plan.output, intent_event, stale, &language);
+    let (progress_missing, progress_stale, progress_state) = compute_progress_summary_state(
+        intent_event,
+        projection_for_stale.as_ref(),
+        &session.id,
+        &plan.next_reminders,
+    );
+    plan.next_reminders = progress_state;
+    plan.output = append_progress_summary_context(
+        plan.output,
+        intent_event,
+        progress_missing,
+        progress_stale,
+        &language,
+    );
     let memory_present = memory_source_present(&session.worktree_path);
     let (memory_suppress, memory_state) =
         compute_memory_reminder_state(intent_event, memory_present, &plan.next_reminders, now);
@@ -1708,6 +1841,114 @@ mod tests {
     }
 
     #[test]
+    fn compute_progress_summary_state_marks_missing_on_user_prompt_and_stop() {
+        let session_id = "session-progress-missing";
+        let projection = projection_with_agent_identity(
+            Path::new("/repo"),
+            session_id,
+            Some("Workspace detail"),
+            Some("implementing detail summary"),
+        );
+
+        let (missing, stale, _) = compute_progress_summary_state(
+            IntentBoundaryEvent::UserPromptSubmit,
+            Some(&projection),
+            session_id,
+            &RemindersState::default(),
+        );
+        assert!(
+            missing,
+            "UserPromptSubmit should remind when progress_summary is missing"
+        );
+        assert!(!stale);
+
+        let (missing, stale, _) = compute_progress_summary_state(
+            IntentBoundaryEvent::Stop,
+            Some(&projection),
+            session_id,
+            &RemindersState::default(),
+        );
+        assert!(
+            missing,
+            "Stop should remind when progress_summary is missing"
+        );
+        assert!(!stale);
+    }
+
+    #[test]
+    fn compute_progress_summary_state_stales_when_focus_changes_but_summary_does_not() {
+        let session_id = "session-progress-stale";
+        let mut state = RemindersState::default();
+        let mut projection = projection_with_agent_identity(
+            Path::new("/repo"),
+            session_id,
+            Some("Workspace detail"),
+            Some("phase 1"),
+        );
+        projection.progress_summary = Some("Initial cumulative summary".to_string());
+
+        let (missing, stale, next) = compute_progress_summary_state(
+            IntentBoundaryEvent::UserPromptSubmit,
+            Some(&projection),
+            session_id,
+            &state,
+        );
+        assert!(!missing);
+        assert!(!stale);
+        state = next;
+
+        let mut drifted = projection_with_agent_identity(
+            Path::new("/repo"),
+            session_id,
+            Some("Workspace detail"),
+            Some("phase 2"),
+        );
+        drifted.progress_summary = Some("Initial cumulative summary".to_string());
+        for _ in 0..PROGRESS_SUMMARY_STALE_TURN_THRESHOLD {
+            let (_, stale, next) = compute_progress_summary_state(
+                IntentBoundaryEvent::UserPromptSubmit,
+                Some(&drifted),
+                session_id,
+                &state,
+            );
+            state = next;
+            if state.progress_summary_unchanged_turn_count < PROGRESS_SUMMARY_STALE_TURN_THRESHOLD {
+                assert!(!stale);
+            }
+        }
+
+        assert!(
+            state.progress_focus_changed_in_window,
+            "focus drift must be sticky while progress_summary is unchanged"
+        );
+        let (_, stale, _) = compute_progress_summary_state(
+            IntentBoundaryEvent::UserPromptSubmit,
+            Some(&drifted),
+            session_id,
+            &state,
+        );
+        assert!(
+            stale,
+            "stale should fire once threshold and focus drift hold"
+        );
+    }
+
+    #[test]
+    fn append_progress_summary_context_uses_system_message_on_stop() {
+        let output = append_progress_summary_context(
+            HookOutput::Silent,
+            IntentBoundaryEvent::Stop,
+            true,
+            false,
+            "en",
+        );
+        let text = system_message(&output);
+        assert!(text.contains("Progress Summary Reminder"));
+        assert!(text.contains("progress_summary"));
+        assert!(!text.contains("StopBlock"));
+    }
+
+    #[test]
     fn reminders_state_round_trips_phase_u9_fields() {
         let original = RemindersState {
             last_injected_at: None,
@@ -1717,6 +1958,10 @@ mod tests {
             last_current_focus_seen: Some("focus".to_string()),
             phase_changed_in_window: true,
             last_memory_reminded_at: Some("2026-06-04T12:00:00Z".parse::<DateTime<Utc>>().unwrap()),
+            last_progress_summary_seen: Some("Progress".to_string()),
+            progress_summary_unchanged_turn_count: 4,
+            last_progress_focus_seen: Some("focus".to_string()),
+            progress_focus_changed_in_window: true,
         };
         let json = serde_json::to_string(&original).unwrap();
         let restored: RemindersState = serde_json::from_str(&json).unwrap();
@@ -1729,5 +1974,9 @@ mod tests {
         assert_eq!(restored_legacy.unchanged_turn_count, 0);
         assert_eq!(restored_legacy.last_current_focus_seen, None);
         assert!(!restored_legacy.phase_changed_in_window);
+        assert_eq!(restored_legacy.last_progress_summary_seen, None);
+        assert_eq!(restored_legacy.progress_summary_unchanged_turn_count, 0);
+        assert_eq!(restored_legacy.last_progress_focus_seen, None);
+        assert!(!restored_legacy.progress_focus_changed_in_window);
     }
 }

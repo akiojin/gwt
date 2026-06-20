@@ -52,6 +52,11 @@ pub enum Scope {
     /// Repo-scoped: discussion knowledge sourced from
     /// `.gwt/work/discussions.md`.
     Discussions,
+    /// Repo-scoped: Work history sourced from the Work projection
+    /// (`work_items.json` / `.gwt/work/events.jsonl`). Indexes past Work
+    /// (including completed/discarded) so similar prior work can be found
+    /// at Start Work time (SPEC-2359 US-80).
+    Works,
     /// Worktree-scoped: project source code files.
     FilesCode,
     /// Worktree-scoped: project documentation files.
@@ -70,6 +75,7 @@ impl Scope {
             Scope::Specs => "specs",
             Scope::Memory => "memory",
             Scope::Discussions => "discussions",
+            Scope::Works => "works",
             Scope::FilesCode => "files",
             Scope::FilesDocs => "files-docs",
         }
@@ -105,7 +111,7 @@ pub fn gwt_index_db_path(
 ) -> Result<PathBuf> {
     if matches!(
         scope,
-        Scope::Issues | Scope::Specs | Scope::Memory | Scope::Discussions
+        Scope::Issues | Scope::Specs | Scope::Memory | Scope::Discussions | Scope::Works
     ) {
         return Ok(gwt_index_repo_dir(repo).join(scope.subdir()));
     }
@@ -178,6 +184,36 @@ mod tests {
         let wt = compute_worktree_hash(tmp.path()).unwrap();
         let with_wt = gwt_index_db_path(&repo, Some(&wt), Scope::Memory).unwrap();
         let without_wt = gwt_index_db_path(&repo, None, Scope::Memory).unwrap();
+        assert_eq!(with_wt, without_wt);
+        assert!(!with_wt
+            .components()
+            .any(|component| component.as_os_str() == "worktrees"));
+    }
+
+    #[test]
+    fn works_scope_resolution() {
+        let repo = compute_repo_hash("https://github.com/akiojin/gwt.git");
+        let path = gwt_index_db_path(&repo, None, Scope::Works).unwrap();
+        assert!(path.ends_with(format!("{}/works", repo.as_str())));
+    }
+
+    #[test]
+    fn works_requires_worktree_false() {
+        assert!(!Scope::Works.requires_worktree());
+    }
+
+    #[test]
+    fn works_subdir_is_works() {
+        assert_eq!(Scope::Works.subdir(), "works");
+    }
+
+    #[test]
+    fn works_scope_ignores_worktree_hash() {
+        let repo = compute_repo_hash("https://github.com/akiojin/gwt.git");
+        let tmp = tempfile::tempdir().unwrap();
+        let wt = compute_worktree_hash(tmp.path()).unwrap();
+        let with_wt = gwt_index_db_path(&repo, Some(&wt), Scope::Works).unwrap();
+        let without_wt = gwt_index_db_path(&repo, None, Scope::Works).unwrap();
         assert_eq!(with_wt, without_wt);
         assert!(!with_wt
             .components()

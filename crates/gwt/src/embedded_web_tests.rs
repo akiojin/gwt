@@ -74,6 +74,8 @@ fn frontend_bundle_source() -> &'static str {
         "\n",
         include_str!("../web/board-surface.js"),
         "\n",
+        include_str!("../web/agent-kanban-surface.js"),
+        "\n",
         include_str!("../web/workspace-kanban-surface.js"),
         "\n",
         include_str!("../web/update-cta.js"),
@@ -557,7 +559,7 @@ fn embedded_web_terminal_runtime_buffers_writes_until_initial_fit_handshake() {
     // `isReady` flip while the window is still hidden, defeating the
     // deferredWrites buffer (CodeRabbit PR #2693 concern).
     let create_runtime_handshake = regex::Regex::new(
-            r#"(?s)isReady: false,\s*deferredWrites: \[\],[\s\S]*?handshakeAttempts: 0,\s*\};\s*terminalMap\.set\(windowId, runtime\);\s*decoderMap\.set\(windowId, new TextDecoder\(\)\);[\s\S]*?requestAnimationFrame\(\(\) => completeInitialFitHandshake\(windowId\)\);"#,
+            r#"(?s)isReady: false,\s*deferredWrites: \[\],[\s\S]*?handshakeAttempts: 0,[\s\S]*?\};\s*terminalMap\.set\(windowId, runtime\);\s*decoderMap\.set\(windowId, new TextDecoder\(\)\);[\s\S]*?requestAnimationFrame\(\(\) => completeInitialFitHandshake\(windowId\)\);"#,
         )
         .expect("valid regex");
     // The helper itself must (a) bail when canRefreshTerminalViewport
@@ -1264,10 +1266,11 @@ fn embedded_web_project_bar_omits_index_status_badge() {
             "SPEC-1939 Phase 15: Settings must drop Index while the Index window keeps the health panel",
         );
     assert!(
-        html.contains(".project-tab-dot")
-            && project_tabs_js.contains("projectTabAgentDotState(tab")
+        html.contains(".project-tab-state-cue")
+            && project_tabs_js.contains("projectTabAgentCueState")
+            && project_tabs_js.contains("projectTabStateForRuntimeState")
             && !project_tabs_js.contains("aggregateProjectTabDotState"),
-        "SPEC-2013 Phase 6: project tab dot must reflect running agent state, not Index health",
+        "SPEC-2013 Phase 6: project tab state cue must reflect agent runtime state, not Index health",
     );
 }
 
@@ -3281,6 +3284,8 @@ fn embedded_web_window_surface_enum_aligns_with_js_preset_surface() {
         (WindowSurface::Knowledge, "knowledge"),
         (WindowSurface::Index, "index"),
         (WindowSurface::Work, "work"),
+        (WindowSurface::AgentKanban, "agent-kanban"),
+        (WindowSurface::Console, "console"),
         (WindowSurface::Mock, "mock"),
     ];
 
@@ -3333,8 +3338,12 @@ fn embedded_web_project_picker_exposes_github_clone_action_and_modal() {
     let html = index_html();
 
     assert!(
-        html.contains("id=\"picker-clone-project\"") && html.contains("Clone from GitHub..."),
-        "Project Picker must expose the GitHub clone action next to Open Project"
+        html.contains("id=\"picker-open-project\"") && html.contains("Open Folder…"),
+        "Project Picker must expose the Open Folder action"
+    );
+    assert!(
+        html.contains("id=\"picker-clone-project\"") && html.contains("Clone from GitHub…"),
+        "Project Picker must expose the GitHub clone action next to Open Folder"
     );
     assert!(
         html.contains("id=\"clone-project-modal\"")
@@ -3348,34 +3357,28 @@ fn embedded_web_project_picker_exposes_github_clone_action_and_modal() {
     );
 }
 
-// Issue #2684 — top-toolbar Open Project must surface the GitHub clone path
-// even while an active project tab hides the project picker overlay.
+// SPEC-2013 Phase 8 — the Open Project split-button (Issue #2684) was retired.
+// The consolidated `Projects ▾` switcher owns switching plus the Open Folder /
+// Clone from GitHub intake actions, so the top toolbar carries a single
+// project control and no split-button group remains.
 #[test]
-fn embedded_web_top_toolbar_open_project_is_split_button() {
+fn embedded_web_top_toolbar_is_single_projects_switcher() {
     let html = index_html();
 
     assert!(
-        html.contains("id=\"open-project-group\"") && html.contains("class=\"split-button-group\""),
-        "top toolbar must mount an Open Project split-button group"
+        !html.contains("id=\"open-project-group\"")
+            && !html.contains("class=\"split-button-group\"")
+            && !html.contains("id=\"open-project-menu\""),
+        "the Open Project split-button group must be removed from the top toolbar"
     );
     assert!(
-        html.contains("id=\"open-project-menu-button\"")
-            && html.contains("aria-haspopup=\"menu\"")
-            && html.contains("aria-controls=\"open-project-menu\""),
-        "caret button must declare popup/controls semantics for the menu"
+        html.contains("id=\"project-switcher-button\"")
+            && html.contains("aria-controls=\"project-switcher-panel\""),
+        "top toolbar must mount the single Projects switcher button"
     );
     assert!(
-        html.contains("id=\"open-project-menu\"") && html.contains("role=\"menu\""),
-        "dropdown #open-project-menu must mount with role=menu"
-    );
-    assert!(
-        html.contains("id=\"open-project-menu-open\"")
-            && html.contains("id=\"open-project-menu-clone\""),
-        "dropdown must expose Open Project and Clone from GitHub menu items"
-    );
-    assert!(
-        html.contains("id=\"open-project-menu-recent\""),
-        "dropdown must expose a Recent projects container"
+        html.contains("id=\"project-switcher-panel\"") && html.contains("role=\"listbox\""),
+        "Projects switcher panel must mount as a listbox"
     );
 }
 

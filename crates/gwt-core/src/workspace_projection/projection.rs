@@ -85,6 +85,8 @@ pub struct WorkspaceProjection {
     pub status_text: String,
     #[serde(default)]
     pub summary: Option<String>,
+    #[serde(default)]
+    pub progress_summary: Option<String>,
     pub owner: Option<String>,
     pub next_action: Option<String>,
     pub agents: Vec<WorkspaceAgentSummary>,
@@ -149,6 +151,7 @@ impl WorkspaceProjection {
             status_category: WorkspaceStatusCategory::Unknown,
             status_text: "No active work".to_string(),
             summary: None,
+            progress_summary: None,
             owner: None,
             next_action: None,
             agents: Vec::new(),
@@ -333,6 +336,13 @@ impl WorkspaceProjection {
                 self.status_text = summary.clone();
             }
         }
+        if let Some(progress_summary) = update
+            .progress_summary
+            .as_ref()
+            .filter(|value| !value.trim().is_empty())
+        {
+            self.progress_summary = Some(progress_summary.clone());
+        }
         if let Some(owner) = update
             .owner
             .as_ref()
@@ -403,6 +413,7 @@ impl WorkspaceProjection {
             owner: update.owner,
             next_action: update.next_action,
             summary: update.summary,
+            progress_summary: update.progress_summary,
             agent_session_id: update.agent_session_id,
             agent_current_focus: update.agent_current_focus,
             agent_title_summary: update.agent_title_summary,
@@ -723,6 +734,7 @@ pub struct WorkspaceProjectionUpdate {
     pub owner: Option<String>,
     pub next_action: Option<String>,
     pub summary: Option<String>,
+    pub progress_summary: Option<String>,
     pub agent_session_id: Option<String>,
     pub agent_current_focus: Option<String>,
     pub agent_title_summary: Option<String>,
@@ -774,6 +786,8 @@ pub struct WorkspaceJournalEntry {
     pub owner: Option<String>,
     pub next_action: Option<String>,
     pub summary: Option<String>,
+    #[serde(default)]
+    pub progress_summary: Option<String>,
     pub agent_session_id: Option<String>,
     pub agent_current_focus: Option<String>,
     pub agent_title_summary: Option<String>,
@@ -1259,6 +1273,7 @@ mod tests {
                 owner: None,
                 next_action: None,
                 summary: None,
+                progress_summary: None,
                 agent_session_id: Some("session-new".to_string()),
                 agent_current_focus: Some("focus".to_string()),
                 agent_title_summary: Some("title from upsert".to_string()),
@@ -1316,6 +1331,7 @@ mod tests {
                 owner: None,
                 next_action: None,
                 summary: None,
+                progress_summary: None,
                 agent_session_id: Some("session-launched".to_string()),
                 agent_current_focus: None,
                 agent_title_summary: Some("new title".to_string()),
@@ -1357,6 +1373,7 @@ mod tests {
                 owner: None,
                 next_action: None,
                 summary: None,
+                progress_summary: None,
                 agent_session_id: Some("session-stub".to_string()),
                 agent_current_focus: None,
                 agent_title_summary: Some("stub title".to_string()),
@@ -1747,6 +1764,7 @@ mod tests {
             title: "Item Title".to_string(),
             intent: Some("intent text".to_string()),
             summary: None,
+            progress_summary: None,
             status_category: WorkspaceStatusCategory::Blocked,
             owner: Some("Issue #7".to_string()),
             created_at: now,
