@@ -1200,19 +1200,49 @@ test("Status Strip labels the WebSocket connection state as ONLINE/OFFLINE", () 
   assert.match(appSource, /connectionStatusLabel\.textContent\s*=\s*connected\s*\?\s*"ONLINE"\s*:\s*"OFFLINE"/);
 });
 
-test("Command Rail items expose aria-keyshortcuts and flyout kbd hints (SPEC-3038 AS-1.2)", () => {
-  for (const [cmd, key] of [
-    ["open-board", "B"],
-    ["open-logs", "L"],
-  ]) {
-    const button = document.querySelector(`.op-rail__item[data-cmd="${cmd}"]`);
-    assert.ok(button, `expected rail item for ${cmd}`);
-    const shortcut = button.getAttribute("aria-keyshortcuts");
-    assert.ok(shortcut, `${cmd} must declare aria-keyshortcuts`);
-    assert.match(shortcut, new RegExp(`Meta\\+${key}`));
-    const kbd = button.querySelector(".op-rail__flyout kbd.op-rail__kbd");
-    assert.ok(kbd, `${cmd} must show a kbd hint inside its flyout`);
-  }
+test("Command Rail keeps real shortcuts on its keyshortcut items (SPEC-3038 AS-1.2)", () => {
+  // After the 2026-06-20 Update the Navigate group is Start Work + Workspace
+  // only, so the Workspace rail item is the keyshortcut-bearing Navigate entry.
+  const workspace = document.getElementById("op-workspace-overview-entry");
+  assert.ok(workspace, "expected the Workspace rail item");
+  assert.ok(
+    workspace.classList.contains("op-rail__item"),
+    "Workspace entry must be a rail item",
+  );
+  const shortcut = workspace.getAttribute("aria-keyshortcuts") ?? "";
+  assert.match(shortcut, /Meta\+G/, "Workspace must declare its Meta+G shortcut");
+  const kbd = workspace.querySelector(".op-rail__flyout kbd.op-rail__kbd");
+  assert.ok(kbd, "Workspace must show a kbd hint inside its flyout");
+});
+
+test("Command Rail Navigate group drops Board / Logs but keeps their access paths (SPEC-3038 2026-06-20 Update)", () => {
+  // User feedback (2026-06-20): Board / Logs are noise in the rail. They are
+  // demoted out of the rail but stay reachable via the Add Window presets, the
+  // command palette, and the ⌘B / ⌘L hotkeys — no capability is removed.
+  assert.equal(
+    document.querySelector('.op-rail .op-rail__item[data-cmd="open-board"]'),
+    null,
+    "Board must not appear as a Command Rail item",
+  );
+  assert.equal(
+    document.querySelector('.op-rail .op-rail__item[data-cmd="open-logs"]'),
+    null,
+    "Logs must not appear as a Command Rail item",
+  );
+  // Access path 1: the Add Window preset deck still offers both surfaces.
+  assert.ok(
+    document.querySelector('[data-preset="board"]'),
+    "Add Window must keep the Board preset",
+  );
+  assert.ok(
+    document.querySelector('[data-preset="logs"]'),
+    "Add Window must keep the Logs preset",
+  );
+  // Access paths 2 + 3: command palette seeds and ⌘B / ⌘L hotkeys stay wired.
+  assert.match(operatorShellSource, /id:\s*"open-board"/, "palette must keep the Board entry");
+  assert.match(operatorShellSource, /id:\s*"open-logs"/, "palette must keep the Logs entry");
+  assert.match(operatorShellSource, /hotkey\.register\("cmd\+b"/, "⌘B hotkey must stay wired");
+  assert.match(operatorShellSource, /hotkey\.register\("cmd\+l"/, "⌘L hotkey must stay wired");
 });
 
 test("Command Rail retires the pseudo kbd badges (SPEC-3038 FR-012)", () => {
@@ -1228,7 +1258,9 @@ test("Command Rail retires the pseudo kbd badges (SPEC-3038 FR-012)", () => {
 
 test("Command Rail items are icon buttons with accessible names and flyout labels (SPEC-3038 AS-1.2/AS-1.3)", () => {
   const items = Array.from(document.querySelectorAll(".op-rail .op-rail__item"));
-  assert.ok(items.length >= 10, `expected >=10 rail items, got ${items.length}`);
+  // Navigate 2 (Start Work + Workspace) + Windows 5 + System 1 = 8 after the
+  // 2026-06-20 Update removed Board / Logs from the rail.
+  assert.ok(items.length >= 8, `expected >=8 rail items, got ${items.length}`);
   for (const item of items) {
     assert.ok(
       item.getAttribute("aria-label"),
