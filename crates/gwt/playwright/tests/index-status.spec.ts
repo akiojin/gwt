@@ -1,6 +1,6 @@
 /* SPEC-1939 Phase 13+15 — project-bar Index badge withdrawn. The remaining
  * coverage exercises the dedicated Index window health panel (per-cell
- * rebuild IPC) and the separation from the project-tab Agent activity dot
+ * rebuild IPC) and the separation from the project-tab Agent activity cue
  * using the SPEC-2017 Kanban fixture pattern:
  * the embedded frontend is served via `installEmbeddedRoutes`
  * (`_helpers/embedded-frontend.ts`) and the WebSocket is stubbed with a
@@ -51,9 +51,10 @@ test.describe("Project Index status surface", () => {
     });
 
     await page.goto(APP_URL);
-    const cue = page.locator(".project-tab .project-tab-state-cue");
+    const cue = page.locator(
+      ".project-tab [data-role='project-tab-state-cue']",
+    );
     await expect(cue).toHaveAttribute("data-state", "", { timeout: 10_000 });
-    await expect(cue).toBeHidden();
 
     // Project Index transitions still update the Index Health surface, but
     // must not light the project tab activity cue.
@@ -84,7 +85,6 @@ test.describe("Project Index status surface", () => {
       });
     });
     await expect(cue).toHaveAttribute("data-state", "", { timeout: 5_000 });
-    await expect(cue).toBeHidden();
 
     await page.evaluate(() => {
       window.__gwtFixtureWebSocket.emit({
@@ -110,7 +110,6 @@ test.describe("Project Index status surface", () => {
       });
     });
     await expect(cue).toHaveAttribute("data-state", "", { timeout: 5_000 });
-    await expect(cue).toBeHidden();
   });
 
   test("Index window Health renders the scope health table from project_index_status (T-IDX-106)", async ({

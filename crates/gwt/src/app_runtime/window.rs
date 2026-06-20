@@ -14,7 +14,8 @@
 //!   [`AppRuntime::restore_window_events`] /
 //!   [`AppRuntime::update_window_geometry_events`] — per-window geometry
 //!   adjustments (delegates terminal resize to the live runtime)
-//! - [`AppRuntime::list_windows_event`] — workspace snapshot for the active tab
+//! - [`AppRuntime::list_windows_event`] — workspace snapshot across all
+//!   project tabs (the Command Rail Windows popover is a cross-tab list)
 //!
 //! GUI-side window contracts (canvas viewport pan/zoom, arrange/stack
 //! semantics) remain owned by SPEC-2008. This split keeps `mod.rs` lean
@@ -518,12 +519,15 @@ impl AppRuntime {
     }
 
     pub(crate) fn list_windows_event(&self) -> BackendEvent {
+        // SPEC-3038 (2026-06-20): the Windows popover lists windows from every
+        // project tab so it matches the cross-tab open-window badge. Windows
+        // carry combined ids, so focusing a non-active-tab entry switches tabs
+        // via `focus_window_events`.
         let windows = self
-            .active_tab_id
-            .as_ref()
-            .and_then(|tab_id| self.tab(tab_id))
-            .map(|tab| self.workspace_view_for_tab(tab).windows)
-            .unwrap_or_default();
+            .tabs
+            .iter()
+            .flat_map(|tab| self.workspace_view_for_tab(tab).windows)
+            .collect();
         BackendEvent::WindowList { windows }
     }
 }

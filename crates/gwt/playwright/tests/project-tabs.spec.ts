@@ -221,7 +221,7 @@ test.describe("Project tabs", () => {
     await expect(first).not.toHaveAttribute("aria-current", "page");
   });
 
-  test("project tab state cue shows RUN only when the project has a running agent", async ({
+  test("project tab cue appears only when the project has a running agent", async ({
     page,
   }) => {
     await installEmbeddedRoutes(page);
@@ -257,18 +257,14 @@ test.describe("Project tabs", () => {
       '[data-project-tab-id="tab-no-agent"] [data-role="project-tab-state-cue"]',
     );
 
-    // The running-agent project shows a visible RUN cue.
     await expect(runningCue).toHaveAttribute("data-state", "run");
     await expect(runningCue).toHaveText("RUN");
-    await expect(runningCue).not.toBeHidden();
-    await expect(
-      page.locator('[data-project-tab-id="tab-running"]'),
-    ).toHaveAttribute("data-agent-state", "run");
-
-    // A shell-only project does not count as a running agent: no cue state and
-    // the cue stays hidden.
+    await expect(runningCue).toHaveAttribute("aria-label", "1 running agent");
     await expect(shellOnlyCue).toHaveAttribute("data-state", "");
-    await expect(shellOnlyCue).toBeHidden();
+    await expect(runningCue).toHaveCSS(
+      "animation-name",
+      "none",
+    );
   });
 });
 

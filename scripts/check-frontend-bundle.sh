@@ -62,3 +62,4 @@ node_check crates/gwt/web/board-logs-surface.js
 node_check crates/gwt/web/knowledge-kanban-surface.js
 node_check crates/gwt/web/profile-window-surface.js
 node_check crates/gwt/web/project-shell-surface.js
+node_check crates/gwt/web/window-list-model.js

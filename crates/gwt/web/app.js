@@ -2350,6 +2350,12 @@
         appendRenderKeyPart(parts, counts?.done ?? null);
         appendRenderKeyPart(parts, "agents");
         appendRenderKeyPart(parts, counts?.agents ?? null);
+        // SPEC-3038 (2026-06-20): include the window count so the rail Windows
+        // badge refreshes when only surface (non-agent) windows are added or
+        // removed. Agent-count fields alone do not change for surfaces, which
+        // otherwise short-circuits the badge update via the shared cache key.
+        appendRenderKeyPart(parts, "windows");
+        appendRenderKeyPart(parts, counts?.windows ?? null);
         appendRenderKeyPart(parts, "branches");
         appendRenderKeyPart(parts, counts?.branches ?? null);
         appendRenderKeyPart(parts, "git");
@@ -2387,14 +2393,17 @@
       function recomputeOperatorTelemetry() {
         updateCanvasEmptyState();
         if (!window.__operatorShell?.applyTelemetryCounts) return;
-        // SPEC-3038 AS-1.4: the rail Windows item badges the open-window count.
+        // SPEC-3038 AS-1.4 (2026-06-20): the rail Windows item badges the
+        // open-window count across all project tabs, matching the cross-tab
+        // Windows popover. windowMap only holds windows mounted in visited
+        // tabs, so it undercounts; allProjectWindowIds() is the true total.
         const counts = {
           active: 0,
           idle: 0,
           blocked: 0,
           done: 0,
           agents: 0,
-          windows: windowMap.size,
+          windows: allProjectWindowIds().length,
         };
         for (const [windowId, el] of windowMap.entries()) {
           const state = el?.dataset?.agentState;

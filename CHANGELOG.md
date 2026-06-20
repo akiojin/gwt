@@ -1,6 +1,94 @@
 # Changelog
 
 All notable changes to this project will be documented in this file.
+## [9.62.0] - 2026-06-20
+
+### Bug Fixes
+
+- Restore file tree worktree browsing
+- **gui:** Keep Enter activation on consolidated Projects menu actions
+- Improve tab status indicators
+- Read remote board thread replies
+- **gui:** Light モードでタブ化エージェントウィンドウのアクティブタブを視認可能にする
+- Harden remote board thread reads
+- Preserve discussion fallback semantics
+- Normalize remote board channel mappings
+- Canonicalize legacy fallback mutations
+- **launch:** Make Start Work advisory self-heal and degrade gracefully
+- **discussion:** 承認ターンの pending goal 開始を復旧
+- **discussion:** Legacy goal root解決を復旧
+- Recover agent resume status from stale pty errors
+- Persist workspace progress summaries
+- Limit agent resume recovery to live hook errors
+- Keep agent resume recovery across duplicate pty errors
+- Clear agent resume recovery marker after hook recovery
+- Show port in tray copy url label
+- Isolate workspace row sessions
+- Prevent runtime health detail clipping
+- Make runtime health process detail scrollable
+- Group runtime health agent process rows
+- Add runtime health load sort controls
+- Keep runtime health sort popover open
+- **gui:** Replace workspace mini kanban with list filters
+- Clarify Antigravity missing binary launch error
+
+### Features
+
+- **gui:** Consolidate top-bar project chrome into a single Projects menu
+- Managed Hooks の discussion UX を改善
+- **search:** Add works semantic scope wiring and Start Work advisory query
+- **search:** Index past Work as the works ChromaDB scope
+- **launch:** Wire Start Work intake prompt and advisory backend
+- **gui:** Surface the works scope in project index search
+- **launch:** Add Start Work intake prompt with duplicate-work advisory UI
+- **launch:** Show a loading indicator while the Start Work advisory searches
+- **hooks:** Surface managed hook health
+- Add runtime health status strip
+- **gui:** Add workspace attention board
+- Add Antigravity CLI built-in agent
+
+### Miscellaneous Tasks
+
+- Record board workspace thread root
+- Merge origin/develop into board thread fix
+- Merge origin/develop
+- Merge latest origin/develop into board thread fix
+- Merge current origin/develop into board thread fix
+- Merge latest origin/develop into board thread fix
+- Merge origin/develop for follow-up
+- Merge latest origin/develop for follow-up
+- Merge latest origin/develop into board thread hardening
+- Merge origin/develop after PR 3110
+- Merge latest origin/develop into board thread hardening
+- **work:** Record SPEC-2359 design decision and work events
+- Merge latest origin/develop into board thread hardening
+- Merge origin develop
+- 実利用e2e検証ログを記録
+- Docker codex e2e知見を記録
+- Developを同期
+- Developを再同期
+- Develop同期を更新
+- Developを再同期
+- Merge origin develop
+- Merge origin develop
+- Merge origin/develop into workspace progress summaries
+- Merge origin develop
+- Merge origin develop
+- Merge origin develop
+- Merge origin develop
+- Record runtime health e2e lesson
+- Merge origin develop into work branch
+- Merge origin develop into workspace overview branch
+- Record Antigravity verification handoff
+- Record Antigravity visual confirmation
+- Merge origin develop after pr creation
+- Merge origin develop into copy url branch
+
+### Testing
+
+- **gui:** Project-tabs の多タブ操作テストを Projects ▾ 統合に追従させる
+- **discussion:** Goal rearm検証をcanonicalに合わせる
+
 ## [9.61.0] - 2026-06-16
 
 ### Bug Fixes

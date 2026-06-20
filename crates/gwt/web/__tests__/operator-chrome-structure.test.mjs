@@ -1200,19 +1200,49 @@ test("Status Strip labels the WebSocket connection state as ONLINE/OFFLINE", () 
   assert.match(appSource, /connectionStatusLabel\.textContent\s*=\s*connected\s*\?\s*"ONLINE"\s*:\s*"OFFLINE"/);
 });
 
-test("Command Rail items expose aria-keyshortcuts and flyout kbd hints (SPEC-3038 AS-1.2)", () => {
-  for (const [cmd, key] of [
-    ["open-board", "B"],
-    ["open-logs", "L"],
-  ]) {
-    const button = document.querySelector(`.op-rail__item[data-cmd="${cmd}"]`);
-    assert.ok(button, `expected rail item for ${cmd}`);
-    const shortcut = button.getAttribute("aria-keyshortcuts");
-    assert.ok(shortcut, `${cmd} must declare aria-keyshortcuts`);
-    assert.match(shortcut, new RegExp(`Meta\\+${key}`));
-    const kbd = button.querySelector(".op-rail__flyout kbd.op-rail__kbd");
-    assert.ok(kbd, `${cmd} must show a kbd hint inside its flyout`);
-  }
+test("Command Rail keeps real shortcuts on its keyshortcut items (SPEC-3038 AS-1.2)", () => {
+  // After the 2026-06-20 Update the Navigate group is Start Work + Workspace
+  // only, so the Workspace rail item is the keyshortcut-bearing Navigate entry.
+  const workspace = document.getElementById("op-workspace-overview-entry");
+  assert.ok(workspace, "expected the Workspace rail item");
+  assert.ok(
+    workspace.classList.contains("op-rail__item"),
+    "Workspace entry must be a rail item",
+  );
+  const shortcut = workspace.getAttribute("aria-keyshortcuts") ?? "";
+  assert.match(shortcut, /Meta\+G/, "Workspace must declare its Meta+G shortcut");
+  const kbd = workspace.querySelector(".op-rail__flyout kbd.op-rail__kbd");
+  assert.ok(kbd, "Workspace must show a kbd hint inside its flyout");
+});
+
+test("Command Rail Navigate group drops Board / Logs but keeps their access paths (SPEC-3038 2026-06-20 Update)", () => {
+  // User feedback (2026-06-20): Board / Logs are noise in the rail. They are
+  // demoted out of the rail but stay reachable via the Add Window presets, the
+  // command palette, and the ⌘B / ⌘L hotkeys — no capability is removed.
+  assert.equal(
+    document.querySelector('.op-rail .op-rail__item[data-cmd="open-board"]'),
+    null,
+    "Board must not appear as a Command Rail item",
+  );
+  assert.equal(
+    document.querySelector('.op-rail .op-rail__item[data-cmd="open-logs"]'),
+    null,
+    "Logs must not appear as a Command Rail item",
+  );
+  // Access path 1: the Add Window preset deck still offers both surfaces.
+  assert.ok(
+    document.querySelector('[data-preset="board"]'),
+    "Add Window must keep the Board preset",
+  );
+  assert.ok(
+    document.querySelector('[data-preset="logs"]'),
+    "Add Window must keep the Logs preset",
+  );
+  // Access paths 2 + 3: command palette seeds and ⌘B / ⌘L hotkeys stay wired.
+  assert.match(operatorShellSource, /id:\s*"open-board"/, "palette must keep the Board entry");
+  assert.match(operatorShellSource, /id:\s*"open-logs"/, "palette must keep the Logs entry");
+  assert.match(operatorShellSource, /hotkey\.register\("cmd\+b"/, "⌘B hotkey must stay wired");
+  assert.match(operatorShellSource, /hotkey\.register\("cmd\+l"/, "⌘L hotkey must stay wired");
 });
 
 test("Command Rail retires the pseudo kbd badges (SPEC-3038 FR-012)", () => {
@@ -1228,7 +1258,9 @@ test("Command Rail retires the pseudo kbd badges (SPEC-3038 FR-012)", () => {
 
 test("Command Rail items are icon buttons with accessible names and flyout labels (SPEC-3038 AS-1.2/AS-1.3)", () => {
   const items = Array.from(document.querySelectorAll(".op-rail .op-rail__item"));
-  assert.ok(items.length >= 10, `expected >=10 rail items, got ${items.length}`);
+  // Navigate 2 (Start Work + Workspace) + Windows 5 + System 1 = 8 after the
+  // 2026-06-20 Update removed Board / Logs from the rail.
+  assert.ok(items.length >= 8, `expected >=8 rail items, got ${items.length}`);
   for (const item of items) {
     assert.ok(
       item.getAttribute("aria-label"),
@@ -1476,6 +1508,39 @@ test("renderWorkspace refreshes operator telemetry when windows mount/unmount (S
     body,
     /recomputeOperatorTelemetry\(\)/,
     "window-count badge + empty state must update when windows mount/unmount",
+  );
+});
+
+test("SPEC-3038 (2026-06-20): Windows badge counts windows across all project tabs", () => {
+  const body = extractFunctionBody(appSource, "recomputeOperatorTelemetry");
+  assert.match(
+    body,
+    /windows:\s*allProjectWindowIds\(\)\.length/,
+    "the rail Windows badge must count the cross-tab open-window total",
+  );
+  assert.doesNotMatch(
+    body,
+    /windows:\s*windowMap\.size/,
+    "windowMap.size only counts windows mounted in visited tabs and undercounts the badge",
+  );
+});
+
+test("SPEC-3038 (2026-06-20): Windows popover renders the cross-tab window-list model", () => {
+  assert.match(
+    projectShellSurfaceSource,
+    /import\s*\{\s*groupProjectWindowList\s*\}\s*from\s*"\/window-list-model\.js"/,
+    "project-shell-surface must import the cross-tab window-list model",
+  );
+  const body = extractFunctionBody(projectShellSurfaceSource, "renderWindowList");
+  assert.match(
+    body,
+    /groupProjectWindowList\(getAppState\(\),\s*windowListEntries\)/,
+    "renderWindowList must source rows from the cross-tab model, not activeWorkspace() alone",
+  );
+  assert.match(
+    body,
+    /window-list-group/,
+    "renderWindowList must render per-project group headers for multi-project shells",
   );
 });
 
@@ -4040,15 +4105,17 @@ test("Window List row source rebuild avoids mapped intermediate arrays", () => {
     /\.filter\s*\(/,
     "Window List row rebuild must avoid chained filter allocation",
   );
+  // SPEC-3038 (2026-06-20): rows now come from the cross-tab window-list
+  // model grouped by project tab, rendered with direct loops (no inline alloc).
   assert.match(
     renderWindowListBody,
-    /for\s*\(\s*const\s+windowData\s+of\s+workspaceWindows\s*\)/,
-    "Window List row rebuild must build workspace lookups with a direct loop",
+    /for\s*\(\s*const\s+group\s+of\s+model\.groups\s*\)/,
+    "Window List row rebuild must iterate the cross-tab model groups with a direct loop",
   );
   assert.match(
     renderWindowListBody,
-    /for\s*\(\s*const\s+entry\s+of\s+windowListEntries\s*\)/,
-    "Window List row rebuild must derive server-backed entries with a direct loop",
+    /for\s*\(\s*const\s+entry\s+of\s+group\.entries\s*\)/,
+    "Window List row rebuild must derive per-group entries with a direct loop",
   );
 });
 
@@ -4091,8 +4158,8 @@ test("Window List render key ignores viewport and includes row shell fields", ()
   );
   assert.match(
     keyBody,
-    /activeWorkspace\s*\(\s*\)/,
-    "Window List key must include active workspace window identity/order",
+    /groupProjectWindowList\s*\(/,
+    "Window List key must include the cross-tab window-list model identity/order",
   );
   assert.match(
     keyBody,
@@ -4852,6 +4919,18 @@ test("Operator telemetry key avoids JSON stringify allocation", () => {
     keyBody,
     /JSON\.stringify\s*\(/,
     "telemetry key must not serialize a counts object graph",
+  );
+});
+
+test("SPEC-3038 (2026-06-20): telemetry key includes windows so the badge updates on non-agent window changes", () => {
+  // Without `windows` in the cache key, adding/removing a surface (non-agent)
+  // window leaves the agent counts unchanged, so applyOperatorTelemetryCounts
+  // short-circuits and the rail Windows badge never refreshes.
+  const keyBody = extractFunctionBody(appSource, "operatorTelemetryRenderKey");
+  assert.match(
+    keyBody,
+    /appendRenderKeyPart\(parts,\s*"windows"\)/,
+    "telemetry render key must include the windows count",
   );
 });
 

@@ -135,34 +135,11 @@
                 <kbd class="op-rail__kbd">⌘ G</kbd>
               </span>
             </button>
-            <button
-              class="op-rail__item"
-              type="button"
-              data-cmd="open-board"
-              aria-label="Open Board (Cmd+B)"
-              aria-keyshortcuts="Meta+B"
-              title="Board"
-            >
-              <span class="op-rail__icon" aria-hidden="true">▦</span>
-              <span class="op-rail__flyout" aria-hidden="true">
-                <span class="op-rail__flyout-label">Board</span>
-                <kbd class="op-rail__kbd">⌘ B</kbd>
-              </span>
-            </button>
-            <button
-              class="op-rail__item"
-              type="button"
-              data-cmd="open-logs"
-              aria-label="Open Logs (Cmd+L)"
-              aria-keyshortcuts="Meta+L"
-              title="Logs"
-            >
-              <span class="op-rail__icon" aria-hidden="true">≣</span>
-              <span class="op-rail__flyout" aria-hidden="true">
-                <span class="op-rail__flyout-label">Logs</span>
-                <kbd class="op-rail__kbd">⌘ L</kbd>
-              </span>
-            </button>
+            <!-- 2026-06-20 Update: Board (⌘B) and Logs (⌘L) were demoted out of
+                 the Navigate rail group per user feedback. They stay reachable
+                 via the Add Window presets, the command palette, and the ⌘B /
+                 ⌘L hotkeys; the op:command handlers (open-board / open-logs)
+                 and operator-shell.js wiring are unchanged. -->
           </div>
           <div class="op-rail__divider" aria-hidden="true"></div>
           <div class="op-rail__group" role="group" aria-label="Windows">

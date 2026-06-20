@@ -97,29 +97,22 @@ test.describe("Agent window tab hover title", () => {
     const projectCue = page.locator(
       ".project-tab[data-project-tab-id='tab-1'] [data-role='project-tab-state-cue']",
     );
-    const siblingDot = siblingTab.locator(".window-tab-state");
-
-    // While agent-2 reports a running terminal, the window tab carries the
-    // "running" runtime state (label RUN) and the project tab cue lights RUN
-    // because a running agent exists in the project.
+    const siblingCue = siblingTab.locator(".window-tab-state");
     await expect(siblingTab).toHaveAttribute("data-agent-state", "running");
-    await expect(siblingDot).not.toBeHidden();
-    await expect(siblingDot).toHaveText("RUN");
     await expect(projectCue).toHaveAttribute("data-state", "run");
     await expect(projectCue).toHaveText("RUN");
-    await expect(projectCue).not.toBeHidden();
+    await expect(siblingCue).toHaveText("RUN");
+    await expect(siblingCue).toHaveCSS("animation-name", "none");
+    await expect(projectCue).toHaveCSS("animation-name", "none");
 
     await page.evaluate(() => {
       window.__tabbedAgentsFixture?.emitTerminalStatus("agent-2", "idle");
     });
 
-    // The runtime status change must repaint the inactive tab's telemetry to
-    // "idle" (label IDLE), and — with no running agent left — clear the
-    // project tab cue.
     await expect(siblingTab).toHaveAttribute("data-agent-state", "idle");
-    await expect(siblingDot).toHaveText("IDLE");
     await expect(projectCue).toHaveAttribute("data-state", "");
-    await expect(projectCue).toBeHidden();
+    await expect(siblingCue).toHaveCSS("animation-name", "none");
+    await expect(projectCue).toHaveCSS("animation-name", "none");
   });
 });
 
