@@ -478,9 +478,14 @@ pub fn project_title_from_path(path: &Path) -> String {
 
 #[cfg(test)]
 mod tests {
+    use gwt_core::test_support::ScopedGwtHome;
     use tempfile::tempdir;
 
     use super::*;
+
+    fn scoped_home(path: &std::path::Path) -> ScopedGwtHome {
+        ScopedGwtHome::set(path)
+    }
 
     #[test]
     fn empty_workspace_contains_no_windows() {
@@ -975,6 +980,7 @@ mod tests {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         let dir = tempdir().expect("tempdir");
+        let _home = scoped_home(dir.path());
         let path = workspace_state_path(dir.path());
         let hash = gwt_core::paths::project_scope_hash(dir.path());
         assert!(path.ends_with(format!("projects/{}/workspace.json", hash.as_str())));
@@ -986,6 +992,7 @@ mod tests {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         let dir = tempdir().expect("tempdir");
+        let _home = scoped_home(dir.path());
         let project_root = dir.path().join("project");
         std::fs::create_dir_all(&project_root).expect("project dir");
         let state = PersistedWindowCanvasState {
@@ -1061,6 +1068,7 @@ mod tests {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         let dir = tempdir().expect("tempdir");
+        let _home = scoped_home(dir.path());
         let legacy_path = dir.path().join("legacy-workspace.json");
         let session_path = dir.path().join("session.json");
         let project_one = dir.path().join("project-one");
@@ -1131,6 +1139,7 @@ mod tests {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         let dir = tempdir().expect("tempdir");
+        let _home = scoped_home(dir.path());
         let legacy_path = dir.path().join("legacy-workspace.json");
         let session_path = dir.path().join("session.json");
         let project_root = dir.path().join("workspace");
@@ -1169,6 +1178,7 @@ mod tests {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         let dir = tempdir().expect("tempdir");
+        let _home = scoped_home(dir.path());
         let legacy_path = dir.path().join("legacy-workspace.json");
         let session_path = dir.path().join("session.json");
         let project_root = dir.path().join("project");

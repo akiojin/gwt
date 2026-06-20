@@ -1,8 +1,9 @@
 //! Utility functions for gwt filesystem paths.
 
 use std::{
-    ffi::OsString,
+    ffi::{OsStr, OsString},
     path::{Path, PathBuf},
+    sync::OnceLock,
 };
 
 use crate::{
@@ -12,12 +13,81 @@ use crate::{
 
 /// Return the gwt home directory (`~/.gwt/`).
 pub fn gwt_home() -> PathBuf {
-    resolve_home_dir(
-        std::env::var_os("HOME"),
-        std::env::var_os("USERPROFILE"),
-        dirs::home_dir(),
+    #[cfg(any(test, feature = "test-support"))]
+    if let Some(home) = crate::test_support::gwt_home_override() {
+        return home.join(".gwt");
+    }
+
+    let home = std::env::var_os("HOME");
+    let userprofile = std::env::var_os("USERPROFILE");
+    if let Some(test_home) = cargo_test_home_override(home.as_deref(), userprofile.as_deref()) {
+        return test_home.join(".gwt");
+    }
+    resolve_home_dir(home, userprofile, dirs::home_dir()).join(".gwt")
+}
+
+static CARGO_TEST_HOME_OVERRIDE: OnceLock<Option<PathBuf>> = OnceLock::new();
+
+fn cargo_test_home_override(home: Option<&OsStr>, userprofile: Option<&OsStr>) -> Option<PathBuf> {
+    if is_explicit_isolated_home(home) || is_explicit_isolated_home(userprofile) {
+        return None;
+    }
+    CARGO_TEST_HOME_OVERRIDE
+        .get_or_init(detect_cargo_test_home)
+        .clone()
+}
+
+fn detect_cargo_test_home() -> Option<PathBuf> {
+    cargo_test_home_for_exe(
+        &std::env::current_exe().ok()?,
+        &std::env::temp_dir(),
+        std::process::id(),
     )
-    .join(".gwt")
+}
+
+fn cargo_test_home_for_exe(exe: &Path, temp_dir: &Path, process_id: u32) -> Option<PathBuf> {
+    if !is_cargo_test_binary(exe) {
+        return None;
+    }
+    let binary_name = exe.file_name()?.to_string_lossy();
+    Some(
+        temp_dir
+            .join("gwt-cargo-test-home")
+            .join(sanitize_test_binary_name(&binary_name))
+            .join(process_id.to_string()),
+    )
+}
+
+fn is_cargo_test_binary(exe: &Path) -> bool {
+    exe.parent()
+        .and_then(Path::file_name)
+        .is_some_and(|name| name == "deps")
+        && exe
+            .file_name()
+            .and_then(OsStr::to_str)
+            .is_some_and(|name| name.contains('-'))
+}
+
+fn sanitize_test_binary_name(name: &str) -> String {
+    name.chars()
+        .map(|ch| {
+            if ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_') {
+                ch
+            } else {
+                '_'
+            }
+        })
+        .collect()
+}
+
+fn is_explicit_isolated_home(path: Option<&OsStr>) -> bool {
+    let Some(path) = path
+        .map(PathBuf::from)
+        .filter(|path| !path.as_os_str().is_empty())
+    else {
+        return false;
+    };
+    path.starts_with(std::env::temp_dir())
 }
 
 fn resolve_home_dir(
@@ -553,6 +623,33 @@ mod tests {
 
         assert_eq!(userprofile_home, override_profile);
         assert_eq!(fallback_home, fallback);
+    }
+
+    #[test]
+    fn cargo_test_home_for_exe_redirects_test_binaries_to_temp_home() {
+        let temp = tempfile::tempdir().unwrap();
+        let exe = Path::new("/repo/target/debug/deps/gwt-abc123");
+
+        let home = cargo_test_home_for_exe(exe, temp.path(), 42).expect("test home");
+
+        assert_eq!(home, temp.path().join("gwt-cargo-test-home/gwt-abc123/42"));
+    }
+
+    #[test]
+    fn cargo_test_home_for_exe_ignores_non_test_binaries() {
+        let temp = tempfile::tempdir().unwrap();
+
+        assert!(
+            cargo_test_home_for_exe(Path::new("/repo/target/debug/gwtd"), temp.path(), 42)
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn cargo_test_home_override_preserves_explicit_temp_home() {
+        let temp = tempfile::tempdir().unwrap();
+
+        assert!(cargo_test_home_override(Some(temp.path().as_os_str()), None).is_none());
     }
 
     #[test]
