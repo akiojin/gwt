@@ -23,14 +23,16 @@ command as `"$GWT_BIN" ...`; if none exists, stop with an actionable
 
 Do not use this for new work intake. Use `gwt-register-issue` instead.
 
-## Domain model: an Issue is a bug against an existing owner
+## Domain model: an Issue is a bug against a specification
 
-A GitHub Issue handled here is a bug — a deviation from behavior that some owner
-already defines. Treat the owner SPEC as already existing: identify it, prove
-the deviation (root cause), and restore conformance. Do **not** create a new
-SPEC by default. A SPEC is a specification, authored only when one is genuinely
-missing (a `SPEC-GAP`), and that authoring happens through `gwt-discussion`,
-never as a reflex from this skill.
+A GitHub Issue handled here is a bug — a deviation from intended behavior. Most
+bugs deviate from an owner SPEC that already exists: identify it, prove the
+deviation (root cause), and restore conformance. Some bugs fall in a gap that no
+SPEC covers; resolving those means settling ownership first — either associating
+the behavior with an existing SPEC whose bounded context it belongs to (extend
+that SPEC), or authoring a new SPEC when it is a genuinely new context with no
+fitting owner. Creating a new SPEC is the last resort, decided through
+`gwt-discussion`, never a reflex from this skill.
 
 ## Ownership
 
@@ -57,14 +59,19 @@ never as a reflex from this skill.
      investigation needs user input). Do not guess-fix.
    - For FEATURE / ENHANCEMENT issues, extract requirements and acceptance
      criteria; the full report is optional.
-3. **Route with a structured `Spec Status`.** Classify the issue against its
-   owner SPEC before touching code:
-   - `ALIGNED` / `IMPLEMENTATION-GAP` → direct fix. The owner already defines
-     the intended behavior; implementation is missing, broken, or incomplete.
-   - `SPEC-GAP` / `SPEC-AMBIGUOUS` → stop direct work and route to
-     `gwt-discussion` to settle the owner SPEC first. The existing Issue stays
-     the owner; do not auto-create a SPEC. Prefer `gwt-discussion` whenever
-     behavior design or broader scope definition is required.
+3. **Route with a structured `Spec Status`.** Classify the issue against the
+   SPEC space before touching code:
+   - `ALIGNED` / `IMPLEMENTATION-GAP` → direct fix. An owner SPEC already
+     defines the intended behavior; implementation is missing, broken, or
+     incomplete.
+   - `SPEC-GAP` (no SPEC covers the behavior) → stop direct work and route to
+     `gwt-discussion` to settle ownership first. There, decide by domain fit:
+     associate the behavior with an existing SPEC whose bounded context it
+     belongs to (extend that SPEC's requirements / acceptance), or author a new
+     SPEC only when it is a genuinely new context with no fitting owner. Do not
+     create a SPEC as a reflex; the Issue stays the work item either way.
+   - `SPEC-AMBIGUOUS` (existing SPECs overlap or conflict) → route to
+     `gwt-discussion` to resolve which owner applies before fixing.
 4. **Implement through the build/verify loop.** Prefer delegating execution to
    `gwt-build-spec` (Standalone mode) so TDD (Red-Green-Refactor) and
    `gwt-verify` run as designed; its `When to skip tests` rule already exempts
