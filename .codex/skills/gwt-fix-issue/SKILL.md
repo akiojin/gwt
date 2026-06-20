@@ -33,12 +33,21 @@ Do not use this for new work intake. Use `gwt-register-issue` instead.
 ## Workflow
 
 1. Verify that JSON operations `issue.view` and `issue.comments` can access the target issue.
-2. Gather facts with JSON operations `issue.view`, `issue.comments`, `issue.linked_prs`, and `python3 ".codex/skills/gwt-fix-issue/scripts/inspect_issue.py" --repo "." --issue "<number or URL>"`.
+2. Gather facts with JSON operations `issue.view`, `issue.comments`,
+   `issue.linked_prs`, and the bundled `scripts/inspect_issue.py` helper from
+   the current runtime's `gwt-fix-issue` skill directory, for example:
+   `python3 <this-skill-dir>/scripts/inspect_issue.py --repo "." --issue "<number or URL>"`.
 3. Decide direct-fix vs spec-needed. Prefer direct fix for clear corrective work; prefer `gwt-discussion` when behavior design or broader scope definition is required.
 4. If the change is a clear direct fix, implement it. Verification is mandatory and must run in the correct environment via `gwt-verify --mode full`:
    - When routing through `gwt-build-spec`, its Phase 3 already runs `gwt-verify --mode full`.
    - When fixing inline without `gwt-build-spec`, run `gwt-verify --mode full` yourself and require `Overall: PASS` before posting the closure comment or handing off. Do not skip verification because the fix looks small; `gwt-verify` self-selects the matrix (cargo / frontend / Playwright / docs) for the changed surfaces.
-5. Post progress and closure comments through JSON operation `issue.comment`. On direct-fix completion the closure comment is mandatory and must follow `.codex/skills/gwt-fix-issue/references/closure-comment.md` (root cause, changed files, commit/PR link, `gwt-verify` result, remaining work). When the work is handed off to the SPEC flow instead of completed, `gwt-build-spec` owns closure; post a short handoff comment only.
+5. Post progress and closure comments through JSON operation `issue.comment`.
+   On direct-fix completion the closure comment is mandatory and must follow
+   the bundled `references/closure-comment.md` in the current runtime's
+   `gwt-fix-issue` skill directory (root cause, changed files, commit/PR link,
+   `gwt-verify` result, remaining work). When the work is handed off to the
+   SPEC flow instead of completed, `gwt-build-spec` owns closure; post a short
+   handoff comment only.
 6. Return the result in the current user's language.
 
 ## Guardrails
