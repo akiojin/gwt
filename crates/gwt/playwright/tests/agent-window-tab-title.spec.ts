@@ -94,26 +94,25 @@ test.describe("Agent window tab hover title", () => {
     const siblingTab = activeWindow.locator(
       ".window-tab[data-window-tab-id='agent-2']",
     );
-    const projectDot = page.locator(
-      ".project-tab[data-project-tab-id='tab-1'] [data-role='project-tab-dot']",
+    const projectCue = page.locator(
+      ".project-tab[data-project-tab-id='tab-1'] [data-role='project-tab-state-cue']",
     );
-    const siblingDot = siblingTab.locator(".window-tab-state");
-    await expect(siblingTab).toHaveAttribute("data-agent-state", "active");
-    await expect(projectDot).toHaveAttribute("data-state", "running");
-    await expect(siblingDot).toHaveCSS("animation-name", /window-tab-state-pulse/);
-    await expect(projectDot).toHaveCSS(
-      "animation-name",
-      /project-tab-agent-running-pulse/,
-    );
+    const siblingCue = siblingTab.locator(".window-tab-state");
+    await expect(siblingTab).toHaveAttribute("data-agent-state", "running");
+    await expect(projectCue).toHaveAttribute("data-state", "run");
+    await expect(projectCue).toHaveText("RUN");
+    await expect(siblingCue).toHaveText("RUN");
+    await expect(siblingCue).toHaveCSS("animation-name", "none");
+    await expect(projectCue).toHaveCSS("animation-name", "none");
 
     await page.evaluate(() => {
       window.__tabbedAgentsFixture?.emitTerminalStatus("agent-2", "idle");
     });
 
     await expect(siblingTab).toHaveAttribute("data-agent-state", "idle");
-    await expect(projectDot).toHaveAttribute("data-state", "");
-    await expect(siblingDot).toHaveCSS("animation-name", "none");
-    await expect(projectDot).toHaveCSS("animation-name", "none");
+    await expect(projectCue).toHaveAttribute("data-state", "");
+    await expect(siblingCue).toHaveCSS("animation-name", "none");
+    await expect(projectCue).toHaveCSS("animation-name", "none");
   });
 });
 
