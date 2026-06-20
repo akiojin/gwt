@@ -7095,3 +7095,10 @@ Type: lesson
 Context: Command Rail から Board/Logs を外す作業で frontend unit を回す際、scripts/run-node-tests-with-linkedom.sh / 直接 node --preserve-symlinks --test ともに出力ゼロのまま長時間ハングした。linkedom 直接ロードの素のスクリプトは即終了するのに --test だけが固まった。
 Learning: このランタイムでは node --test がデフォルトで stdin を待ち続けてハングする。`node ... --test <files> < /dev/null` のように stdin を閉じると即実行・完了する。加えて zsh では未クォートの $VAR が単語分割されない(bash と異なる)ため、ファイルリストを node に渡すときは zsh 配列 `${(f)...}` で展開する必要がある。linkedom は bun/npm install が走るため scripts 経由は重い→ /tmp に linkedom を一度入れ crates を symlink し `--preserve-symlinks` で回すと速い。
 Future Action: このリポジトリで frontend unit (web/__tests__/*.mjs) を個別/一括実行するときは必ず `< /dev/null` を付ける。複数ファイルを変数で渡す場合は zsh 配列展開を使う。
+
+## 2026-06-20 — Playwright embedded routes must cover transitive module imports
+
+Type: failure pattern
+Context: Issue #3037: embedded Playwright specs failed before workspace_state rendered because project-shell-surface.js imported /window-list-model.js, but installEmbeddedRoutes only served a hard-coded ROOT_MODULES list and the guard test only checked direct app.js imports.
+Learning: Direct import coverage is insufficient for browser module fixtures. A missing transitive module manifests as unrelated UI timeouts (0 project tabs / windows) because app.js evaluation aborts before the WebSocket fixture can render state.
+Future Action: When adding or moving frontend modules imported by routed Playwright fixtures, ensure the embedded route helper allowlist includes transitive imports and keep the recursive playwright-embedded-routes test green before triaging downstream visual failures.
