@@ -7095,3 +7095,10 @@ Type: lesson
 Context: Command Rail から Board/Logs を外す作業で frontend unit を回す際、scripts/run-node-tests-with-linkedom.sh / 直接 node --preserve-symlinks --test ともに出力ゼロのまま長時間ハングした。linkedom 直接ロードの素のスクリプトは即終了するのに --test だけが固まった。
 Learning: このランタイムでは node --test がデフォルトで stdin を待ち続けてハングする。`node ... --test <files> < /dev/null` のように stdin を閉じると即実行・完了する。加えて zsh では未クォートの $VAR が単語分割されない(bash と異なる)ため、ファイルリストを node に渡すときは zsh 配列 `${(f)...}` で展開する必要がある。linkedom は bun/npm install が走るため scripts 経由は重い→ /tmp に linkedom を一度入れ crates を symlink し `--preserve-symlinks` で回すと速い。
 Future Action: このリポジトリで frontend unit (web/__tests__/*.mjs) を個別/一括実行するときは必ず `< /dev/null` を付ける。複数ファイルを変数で渡す場合は zsh 配列展開を使う。
+
+## 2026-06-20 — Project-scope GC must include no-op projections and no-window canvas state
+
+Type: lesson
+Context: Issue #3066 investigation found tens of thousands of ~/.gwt/projects/<hash> directories created from fallback path-hash storage for temp/non-repo project roots. Existing workspace.projection_prune only handled workspace/current.json and project-state/current.json stale projections, and it left root legacy workspace.json canvas-only directories plus initial/no-op WorkspaceProjection records behind.
+Learning: Project-scoped cleanup must classify default/no-op WorkspaceProjection records as delete candidates when they have no active session, no work identity, no Board/Git/linked references, and only empty agent stubs. It must also prune root legacy workspace.json files that have no windows, even if viewport/next_z_index changed, while preserving any canvas file with windows because that may contain user layout.
+Future Action: When changing ~/.gwt/projects retention or projection storage, add dry-run/apply tests for workspace/current.json, project-state/current.json, and root workspace.json. Verify dry-run against a real populated ~/.gwt/projects tree and ensure deleting a child projection also attempts to remove the now-empty project directory.
