@@ -432,6 +432,7 @@ fn t035_backup_discard_removes_existing_snapshot_and_ignores_missing_snapshot() 
         project_root: tmp.path().to_path_buf(),
         backup_dir,
         external_roots: Vec::new(),
+        pre_normalize_fetch_refspec: None,
     };
     backup::discard(missing_snapshot).expect("discard missing backup is a no-op");
 }
@@ -466,11 +467,166 @@ fn t036_rollback_surfaces_backup_restore_errors() {
         project_root: tmp.path().join("missing-project-root"),
         backup_dir: tmp.path().join("missing-backup"),
         external_roots: Vec::new(),
+        pre_normalize_fetch_refspec: None,
     };
 
     let err = rollback::rollback_migration(&snapshot).expect_err("rollback must fail");
     let message = err.to_string();
     assert!(message.contains("rollback failed: backup io error:"));
+}
+
+/// Helper: initialize a Normal Git repo with an `origin` remote whose
+/// `remote.origin.fetch` is the single-branch shape a GitHub-UI clone leaves.
+fn init_repo_with_single_branch_origin(repo: &std::path::Path) {
+    gwt_core::process::hidden_command("git")
+        .args(["init", repo.to_str().unwrap()])
+        .output()
+        .unwrap();
+    gwt_core::process::hidden_command("git")
+        .args([
+            "remote",
+            "add",
+            "origin",
+            "https://example.invalid/repo.git",
+        ])
+        .current_dir(repo)
+        .output()
+        .unwrap();
+    gwt_core::process::hidden_command("git")
+        .args([
+            "config",
+            "remote.origin.fetch",
+            "+refs/heads/develop:refs/remotes/origin/develop",
+        ])
+        .current_dir(repo)
+        .output()
+        .unwrap();
+}
+
+fn read_origin_fetch_refspec(repo: &std::path::Path) -> Option<String> {
+    let output = gwt_core::process::hidden_command("git")
+        .args(["config", "--get", "remote.origin.fetch"])
+        .current_dir(repo)
+        .output()
+        .unwrap();
+    if !output.status.success() {
+        return None;
+    }
+    let value = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    if value.is_empty() {
+        None
+    } else {
+        Some(value)
+    }
+}
+
+#[test]
+fn t154_backup_snapshot_records_pre_normalize_fetch_refspec() {
+    // RED: the migration backup snapshot must be able to carry the project's
+    // pre-normalize `remote.origin.fetch` value so rollback can restore it
+    // (SPEC-1934 US-7 / FR-033). A fresh `backup::create` defaults to `None`;
+    // the executor populates it before the refspec is normalized.
+    let tmp = tempfile::tempdir().unwrap();
+    std::fs::write(tmp.path().join("seed.txt"), "x").unwrap();
+
+    let mut snapshot = backup::create(tmp.path()).expect("backup::create");
+    assert_eq!(
+        snapshot.pre_normalize_fetch_refspec, None,
+        "a fresh backup snapshot must default the pre-normalize refspec to None"
+    );
+
+    snapshot.pre_normalize_fetch_refspec =
+        Some("+refs/heads/develop:refs/remotes/origin/develop".to_string());
+    assert_eq!(
+        snapshot.pre_normalize_fetch_refspec.as_deref(),
+        Some("+refs/heads/develop:refs/remotes/origin/develop"),
+        "the snapshot must record the single-branch refspec captured before normalize"
+    );
+}
+
+#[test]
+fn t155_rollback_restores_pre_normalize_fetch_refspec() {
+    // RED: when the snapshot carries a pre-normalize refspec, rollback must
+    // write it back to `remote.origin.fetch` in the restored project so a
+    // partially-migrated repo returns to its original single-branch fetch
+    // configuration (SPEC-1934 US-7, T-155 / T-158).
+    let tmp = tempfile::tempdir().unwrap();
+    init_repo_with_single_branch_origin(tmp.path());
+
+    let mut snapshot = backup::create(tmp.path()).expect("backup::create");
+    snapshot.pre_normalize_fetch_refspec = read_origin_fetch_refspec(tmp.path());
+    assert_eq!(
+        snapshot.pre_normalize_fetch_refspec.as_deref(),
+        Some("+refs/heads/develop:refs/remotes/origin/develop"),
+        "fixture must capture the single-branch refspec before normalize"
+    );
+
+    // Simulate a normalize step that already rewrote the live config to the
+    // wildcard form before a later phase failed.
+    gwt_core::process::hidden_command("git")
+        .args([
+            "config",
+            "remote.origin.fetch",
+            "+refs/heads/*:refs/remotes/origin/*",
+        ])
+        .current_dir(tmp.path())
+        .output()
+        .unwrap();
+    assert_eq!(
+        read_origin_fetch_refspec(tmp.path()).as_deref(),
+        Some("+refs/heads/*:refs/remotes/origin/*"),
+        "precondition: live config is normalized to the wildcard form"
+    );
+
+    rollback::rollback_migration(&snapshot).expect("rollback");
+
+    assert_eq!(
+        read_origin_fetch_refspec(tmp.path()).as_deref(),
+        Some("+refs/heads/develop:refs/remotes/origin/develop"),
+        "rollback must restore the pre-normalize single-branch refspec to .git/config"
+    );
+}
+
+#[test]
+fn t155_rollback_without_recorded_refspec_leaves_restored_config_untouched() {
+    // When no pre-normalize refspec was recorded (idempotent / wildcard
+    // origin), rollback must not invent or strip a refspec beyond what the
+    // file-tree restore brings back.
+    let tmp = tempfile::tempdir().unwrap();
+    gwt_core::process::hidden_command("git")
+        .args(["init", tmp.path().to_str().unwrap()])
+        .output()
+        .unwrap();
+    gwt_core::process::hidden_command("git")
+        .args([
+            "remote",
+            "add",
+            "origin",
+            "https://example.invalid/repo.git",
+        ])
+        .current_dir(tmp.path())
+        .output()
+        .unwrap();
+    gwt_core::process::hidden_command("git")
+        .args([
+            "config",
+            "remote.origin.fetch",
+            "+refs/heads/*:refs/remotes/origin/*",
+        ])
+        .current_dir(tmp.path())
+        .output()
+        .unwrap();
+
+    let mut snapshot = backup::create(tmp.path()).expect("backup::create");
+    snapshot.pre_normalize_fetch_refspec = None;
+
+    rollback::rollback_migration(&snapshot).expect("rollback");
+
+    assert_eq!(
+        read_origin_fetch_refspec(tmp.path()).as_deref(),
+        Some("+refs/heads/*:refs/remotes/origin/*"),
+        "rollback with no recorded refspec must leave the restored config as-is"
+    );
 }
 
 #[test]

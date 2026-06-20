@@ -38,7 +38,7 @@ pub fn execute_migration(
     progress(MigrationPhase::Backup, 0);
     let planned_worktrees = git_migration::list_worktrees(project_root).unwrap_or_default();
     let external_roots = external_worktree_roots(project_root, &planned_worktrees);
-    let snapshot =
+    let mut snapshot =
         backup::create_with_external_roots(project_root, &external_roots).map_err(|e| {
             MigrationError {
                 phase: MigrationPhase::Backup,
@@ -46,6 +46,12 @@ pub fn execute_migration(
                 recovery: RecoveryState::Untouched,
             }
         })?;
+
+    // Capture the project's pre-normalize `remote.origin.fetch` before the
+    // Bareify phase normalizes a `--single-branch` refspec to the wildcard form
+    // (SPEC-1934 US-7 / FR-033, T-156). Recorded on the backup snapshot so a
+    // later-phase failure can restore the original refspec on rollback.
+    snapshot.pre_normalize_fetch_refspec = read_origin_fetch_refspec(&project_root.join(".git"));
 
     let outcome = run_post_backup(
         project_root,
@@ -438,6 +444,27 @@ fn read_origin_url(dot_git: &Path) -> Option<String> {
         None
     } else {
         Some(url)
+    }
+}
+
+/// Read the project's `remote.origin.fetch` refspec from its original `.git`
+/// directory before migration mutates anything. Returns `None` when there is
+/// no `origin`, no `fetch` entry, or the value already matches the canonical
+/// wildcard form so rollback has nothing to restore (SPEC-1934 FR-033, T-156).
+fn read_origin_fetch_refspec(dot_git: &Path) -> Option<String> {
+    let output = gwt_core::process::hidden_command("git")
+        .args(["config", "--get", "remote.origin.fetch"])
+        .env("GIT_DIR", dot_git.to_str().unwrap_or_default())
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let refspec = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    if refspec.is_empty() || refspec == git_migration::ORIGIN_WILDCARD_FETCH_REFSPEC {
+        None
+    } else {
+        Some(refspec)
     }
 }
 
