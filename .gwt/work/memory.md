@@ -7095,3 +7095,10 @@ Type: lesson
 Context: Command Rail から Board/Logs を外す作業で frontend unit を回す際、scripts/run-node-tests-with-linkedom.sh / 直接 node --preserve-symlinks --test ともに出力ゼロのまま長時間ハングした。linkedom 直接ロードの素のスクリプトは即終了するのに --test だけが固まった。
 Learning: このランタイムでは node --test がデフォルトで stdin を待ち続けてハングする。`node ... --test <files> < /dev/null` のように stdin を閉じると即実行・完了する。加えて zsh では未クォートの $VAR が単語分割されない(bash と異なる)ため、ファイルリストを node に渡すときは zsh 配列 `${(f)...}` で展開する必要がある。linkedom は bun/npm install が走るため scripts 経由は重い→ /tmp に linkedom を一度入れ crates を symlink し `--preserve-symlinks` で回すと速い。
 Future Action: このリポジトリで frontend unit (web/__tests__/*.mjs) を個別/一括実行するときは必ず `< /dev/null` を付ける。複数ファイルを変数で渡す場合は zsh 配列展開を使う。
+
+## 2026-06-20 — issue.spec.edit structured merge は日本語 SPEC を破損する
+
+Type: lesson
+Context: SPEC-2008（日本語見出し + 多数の日付付き amendment サブセクション）に新しい US/FR を追記しようとして issue.spec.edit の structured body を検討した。merge_structured_spec は CANONICAL_SECTION_HEADINGS（英語: Background/User Stories/Edge Cases/Functional Requirements/Non-Functional Requirements/Success Criteria のみ）に一致する canonical セクションを丸ごと置換し、それ以外は unknown として温存する。
+Learning: 日本語見出し SPEC では『ユーザーストーリー/機能要件/成功基準』が unknown 扱いになり、structured merge は英語の重複 canonical セクション（US-1.../FR-001... を再採番）を並走追加してしまう。既存番号と参照を壊し、二言語の重複構造を生む。replace=true は全置換でさらに危険。
+Future Action: 日本語 / amendment 中心の SPEC（例 SPEC-2008）へ追記する時は issue.spec.edit の structured body を使わない。既存パターン（『## YYYY-MM-DD Amendment: ...』『### YYYY-MM-DD 追記: ...』の raw markdown ブロック）に倣い、spec セクション全文を read → 末尾に amendment を append → raw section write で書き戻す。または gwt-plan-spec / gwt-register-spec の安全な edit 経路を使う。
