@@ -221,7 +221,7 @@ test.describe("Project tabs", () => {
     await expect(first).not.toHaveAttribute("aria-current", "page");
   });
 
-  test("project tab dot blinks only when the project has a running agent", async ({
+  test("project tab state cue shows RUN only when the project has a running agent", async ({
     page,
   }) => {
     await installEmbeddedRoutes(page);
@@ -250,19 +250,25 @@ test.describe("Project tabs", () => {
 
     await page.goto(APP_URL);
 
-    const runningDot = page.locator(
-      '[data-project-tab-id="tab-running"] [data-role="project-tab-dot"]',
+    const runningCue = page.locator(
+      '[data-project-tab-id="tab-running"] [data-role="project-tab-state-cue"]',
     );
-    const shellOnlyDot = page.locator(
-      '[data-project-tab-id="tab-no-agent"] [data-role="project-tab-dot"]',
+    const shellOnlyCue = page.locator(
+      '[data-project-tab-id="tab-no-agent"] [data-role="project-tab-state-cue"]',
     );
 
-    await expect(runningDot).toHaveAttribute("data-state", "running");
-    await expect(shellOnlyDot).toHaveAttribute("data-state", "");
-    await expect(runningDot).toHaveCSS(
-      "animation-name",
-      "project-tab-agent-running-pulse",
-    );
+    // The running-agent project shows a visible RUN cue.
+    await expect(runningCue).toHaveAttribute("data-state", "run");
+    await expect(runningCue).toHaveText("RUN");
+    await expect(runningCue).not.toBeHidden();
+    await expect(
+      page.locator('[data-project-tab-id="tab-running"]'),
+    ).toHaveAttribute("data-agent-state", "run");
+
+    // A shell-only project does not count as a running agent: no cue state and
+    // the cue stays hidden.
+    await expect(shellOnlyCue).toHaveAttribute("data-state", "");
+    await expect(shellOnlyCue).toBeHidden();
   });
 });
 

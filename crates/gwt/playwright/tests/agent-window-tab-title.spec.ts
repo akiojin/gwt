@@ -94,26 +94,32 @@ test.describe("Agent window tab hover title", () => {
     const siblingTab = activeWindow.locator(
       ".window-tab[data-window-tab-id='agent-2']",
     );
-    const projectDot = page.locator(
-      ".project-tab[data-project-tab-id='tab-1'] [data-role='project-tab-dot']",
+    const projectCue = page.locator(
+      ".project-tab[data-project-tab-id='tab-1'] [data-role='project-tab-state-cue']",
     );
     const siblingDot = siblingTab.locator(".window-tab-state");
-    await expect(siblingTab).toHaveAttribute("data-agent-state", "active");
-    await expect(projectDot).toHaveAttribute("data-state", "running");
-    await expect(siblingDot).toHaveCSS("animation-name", /window-tab-state-pulse/);
-    await expect(projectDot).toHaveCSS(
-      "animation-name",
-      /project-tab-agent-running-pulse/,
-    );
+
+    // While agent-2 reports a running terminal, the window tab carries the
+    // "running" runtime state (label RUN) and the project tab cue lights RUN
+    // because a running agent exists in the project.
+    await expect(siblingTab).toHaveAttribute("data-agent-state", "running");
+    await expect(siblingDot).not.toBeHidden();
+    await expect(siblingDot).toHaveText("RUN");
+    await expect(projectCue).toHaveAttribute("data-state", "run");
+    await expect(projectCue).toHaveText("RUN");
+    await expect(projectCue).not.toBeHidden();
 
     await page.evaluate(() => {
       window.__tabbedAgentsFixture?.emitTerminalStatus("agent-2", "idle");
     });
 
+    // The runtime status change must repaint the inactive tab's telemetry to
+    // "idle" (label IDLE), and — with no running agent left — clear the
+    // project tab cue.
     await expect(siblingTab).toHaveAttribute("data-agent-state", "idle");
-    await expect(projectDot).toHaveAttribute("data-state", "");
-    await expect(siblingDot).toHaveCSS("animation-name", "none");
-    await expect(projectDot).toHaveCSS("animation-name", "none");
+    await expect(siblingDot).toHaveText("IDLE");
+    await expect(projectCue).toHaveAttribute("data-state", "");
+    await expect(projectCue).toBeHidden();
   });
 });
 
