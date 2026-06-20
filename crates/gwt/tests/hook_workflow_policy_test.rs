@@ -14,6 +14,7 @@ use gwt_core::{
     },
     paths::gwt_sessions_dir,
     repo_hash::compute_repo_hash,
+    test_support::{ScopedEnvVar, ScopedGwtHome},
     workspace_projection::{
         record_workspace_work_event, save_workspace_projection, WorkEvent, WorkEventKind,
         WorkspaceAgentAffiliationStatus, WorkspaceAgentSummary, WorkspaceProjection,
@@ -65,25 +66,10 @@ fn with_temp_home<T>(f: impl FnOnce(&TempDir) -> T) -> T {
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
     let home = tempfile::tempdir().expect("temp home");
-    let previous_home = std::env::var_os("HOME");
-    let previous_session_id = std::env::var_os(GWT_SESSION_ID_ENV);
-    std::env::set_var("HOME", home.path());
-    std::env::remove_var(GWT_SESSION_ID_ENV);
+    let _home = ScopedGwtHome::set(home.path());
+    let _session_id = ScopedEnvVar::unset(GWT_SESSION_ID_ENV);
 
-    let result = f(&home);
-
-    if let Some(value) = previous_home {
-        std::env::set_var("HOME", value);
-    } else {
-        std::env::remove_var("HOME");
-    }
-    if let Some(value) = previous_session_id {
-        std::env::set_var(GWT_SESSION_ID_ENV, value);
-    } else {
-        std::env::remove_var(GWT_SESSION_ID_ENV);
-    }
-
-    result
+    f(&home)
 }
 
 fn init_repo(home: &TempDir) -> PathBuf {

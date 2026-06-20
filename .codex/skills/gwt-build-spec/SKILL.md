@@ -138,10 +138,11 @@ All other changes require the TDD loop.
 
 Delegate environment-aware verification to `gwt-verify --mode full`. The
 sub-skill is a project-agnostic Generic Verification Contract: it classifies
-the changed surfaces against `.codex/skills/gwt-verify/references/surface-taxonomy.md`,
+the changed surfaces against the active runtime's `gwt-verify` skill
+(`references/surface-taxonomy.md`),
 detects the host project's actual test runners from manifests
 (Cargo.toml / package.json / pyproject.toml / go.mod / ProjectSettings /
-*.sln / etc.) per `.codex/skills/gwt-verify/references/runner-detection.md`,
+*.sln / etc.) per `references/runner-detection.md`,
 runs the appropriate unit / integration / E2E / visual tests, emits a
 **Test Inventory** that names which tests were executed, and hands off to
 the user via a 4-step verification path + Check Items before finalizing
@@ -226,7 +227,7 @@ Stop only when:
 - a merge conflict or review request is ambiguous enough to risk wrong behavior
 - required repo/auth/tooling access is unavailable
 - `gwt-verify` returns `failed: tooling-missing` and the auto-install path
-  cannot recover (see `.codex/skills/gwt-verify/references/tooling-bootstrap.md`)
+  cannot recover (see `gwt-verify`'s `references/tooling-bootstrap.md`)
 - implementation reveals a gap between spec.md and the actual behavior
   (acceptance scenario inaccuracy, missing data-model section, undocumented
   registration table, dependency chain not captured in tasks.md, etc.) that

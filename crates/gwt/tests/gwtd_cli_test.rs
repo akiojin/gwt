@@ -5,7 +5,9 @@ use std::{
 };
 
 use gwt_agent::{AgentId, Session};
-use gwt_core::workspace_projection::load_or_default_workspace_projection;
+use gwt_core::{
+    paths::project_scope_hash, workspace_projection::load_workspace_projection_from_path,
+};
 use tempfile::TempDir;
 
 fn prepared_hook_session() -> (TempDir, TempDir, String) {
@@ -61,9 +63,12 @@ fn gwtd_help_describes_the_headless_cli_surface() {
 
 #[test]
 fn gwtd_no_args_dispatches_stdin_json_envelope() {
+    let home = tempfile::tempdir().expect("home tempdir");
     let project = tempfile::tempdir().expect("project tempdir");
     let mut child = Command::new(env!("CARGO_BIN_EXE_gwtd"))
         .current_dir(project.path())
+        .env("HOME", home.path())
+        .env("USERPROFILE", home.path())
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -101,8 +106,14 @@ fn gwtd_no_args_dispatches_stdin_json_envelope() {
         "stdout should be success JSON with ok=true, got: {}",
         String::from_utf8_lossy(&output.stdout)
     );
-    let projection =
-        load_or_default_workspace_projection(project.path()).expect("load workspace projection");
+    let projection_path = home
+        .path()
+        .join(".gwt/projects")
+        .join(project_scope_hash(project.path()).as_str())
+        .join("project-state/current.json");
+    let projection = load_workspace_projection_from_path(&projection_path)
+        .expect("load workspace projection")
+        .expect("workspace projection should be written under isolated home");
     let agent = projection
         .agents
         .iter()

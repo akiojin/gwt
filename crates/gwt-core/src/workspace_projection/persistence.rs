@@ -45,6 +45,7 @@ pub enum StaleReason {
     PrClosed,
     TimeThreshold,
     Compound,
+    EmptyProjection,
 }
 
 impl StaleReason {
@@ -54,6 +55,7 @@ impl StaleReason {
             Self::PrClosed => "pr_closed",
             Self::TimeThreshold => "time_threshold",
             Self::Compound => "compound",
+            Self::EmptyProjection => "empty_projection",
         }
     }
 }
@@ -2238,6 +2240,8 @@ where
             PruneAction::Skip {
                 reason: PruneSkipReason::ActiveAgent,
             }
+        } else if workspace_projection_is_empty_default(&projection) {
+            PruneAction::Delete
         } else {
             match projection.lifecycle_stage {
                 WorkspaceLifecycleStage::Archived => {
@@ -2266,12 +2270,52 @@ where
             workspace_dir,
             lifecycle_stage: projection.lifecycle_stage,
             updated_at: projection.updated_at,
-            stale_reason,
+            stale_reason: if workspace_projection_is_empty_default(&projection) {
+                Some(StaleReason::EmptyProjection)
+            } else {
+                stale_reason
+            },
             action,
         });
     }
 
     results
+}
+
+fn workspace_projection_is_empty_default(projection: &WorkspaceProjection) -> bool {
+    matches!(projection.title.as_str(), "Work" | "Workspace")
+        && projection.status_category == WorkspaceStatusCategory::Unknown
+        && matches!(projection.status_text.as_str(), "" | "No active work")
+        && projection.summary.as_deref().is_none_or(str::is_empty)
+        && projection
+            .progress_summary
+            .as_deref()
+            .is_none_or(str::is_empty)
+        && projection.owner.as_deref().is_none_or(str::is_empty)
+        && projection.next_action.as_deref().is_none_or(str::is_empty)
+        && projection.agents.iter().all(workspace_agent_is_empty_stub)
+        && projection.git_details.is_none()
+        && projection.board_refs.is_empty()
+        && projection.lifecycle_stage == WorkspaceLifecycleStage::Planning
+        && projection
+            .blocked_reason
+            .as_deref()
+            .is_none_or(str::is_empty)
+        && projection.linked_issues.is_empty()
+        && projection.linked_prs.is_empty()
+        && projection.tags.is_empty()
+        && projection.progress_pct.is_none()
+}
+
+fn workspace_agent_is_empty_stub(agent: &WorkspaceAgentSummary) -> bool {
+    agent.window_id.is_none()
+        && agent.current_focus.as_deref().is_none_or(str::is_empty)
+        && agent.title_summary.as_deref().is_none_or(str::is_empty)
+        && agent.worktree_path.is_none()
+        && agent.branch.as_deref().is_none_or(str::is_empty)
+        && agent.last_board_entry_id.is_none()
+        && agent.last_board_entry_kind.is_none()
+        && agent.coordination_scope.is_none()
 }
 
 /// SPEC-2359 US-41 (FR-153, FR-154): apply a previously-classified plan.
@@ -2303,19 +2347,27 @@ pub fn apply_prune_plan(plan: &[ClassifiedProjection], dry_run: bool) -> Result<
             }
             PruneAction::Delete => {
                 if !dry_run {
-                    fs::remove_dir_all(&item.workspace_dir).map_err(|err| {
-                        GwtError::Other(format!(
-                            "failed to remove workspace dir {}: {}",
-                            item.workspace_dir.display(),
-                            err
-                        ))
-                    })?;
+                    remove_workspace_dir_and_empty_project_dir(&item.workspace_dir)?;
                 }
                 summary.deleted += 1;
             }
         }
     }
     Ok(summary)
+}
+
+fn remove_workspace_dir_and_empty_project_dir(workspace_dir: &Path) -> Result<()> {
+    fs::remove_dir_all(workspace_dir).map_err(|err| {
+        GwtError::Other(format!(
+            "failed to remove workspace dir {}: {}",
+            workspace_dir.display(),
+            err
+        ))
+    })?;
+    if let Some(project_dir) = workspace_dir.parent() {
+        let _ = fs::remove_dir(project_dir);
+    }
+    Ok(())
 }
 
 #[cfg(test)]
