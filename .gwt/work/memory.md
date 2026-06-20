@@ -7102,3 +7102,10 @@ Type: lesson
 Context: Issue #3056 fixed a drift where runtime-independent additions existed only under .codex/skills while materialization writes managed Codex skill assets from the .claude bundle byte-for-byte.
 Learning: Checking only SKILL.md or only the currently reported divergent files is too narrow. Managed gwt-* parity must cover the whole skill directory tree, including references/ and scripts/, and runtime-specific path references should be expressed in runtime-neutral terms unless per-target generation is explicitly designed.
 Future Action: When changing managed gwt-* skill assets, update the canonical .claude tree first, sync .codex from it, run a recursive .claude/.codex parity check, and add/extend contract tests if a drift class is not already guarded.
+
+## 2026-06-20 — Playwright embedded routes must cover transitive module imports
+
+Type: failure pattern
+Context: Issue #3037: embedded Playwright specs failed before workspace_state rendered because project-shell-surface.js imported /window-list-model.js, but installEmbeddedRoutes only served a hard-coded ROOT_MODULES list and the guard test only checked direct app.js imports.
+Learning: Direct import coverage is insufficient for browser module fixtures. A missing transitive module manifests as unrelated UI timeouts (0 project tabs / windows) because app.js evaluation aborts before the WebSocket fixture can render state.
+Future Action: When adding or moving frontend modules imported by routed Playwright fixtures, ensure the embedded route helper allowlist includes transitive imports and keep the recursive playwright-embedded-routes test green before triaging downstream visual failures.
