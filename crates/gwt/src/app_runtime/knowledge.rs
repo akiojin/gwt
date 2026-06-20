@@ -403,6 +403,7 @@ fn knowledge_related_work_from_session(
     let updated_at = session
         .updated_at
         .to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+    let is_active = session_status_is_active(session.status);
     let sessions = session
         .agent_session_id
         .as_ref()
@@ -410,7 +411,7 @@ fn knowledge_related_work_from_session(
             vec![gwt::KnowledgeRelatedSessionView {
                 agent_session_id: agent_session_id.clone(),
                 started_at: updated_at.clone(),
-                is_active: true,
+                is_active,
                 resumable: session.is_resumable_conversation(agent_session_id),
             }]
         })
@@ -439,6 +440,13 @@ fn session_status_category(status: gwt_agent::AgentStatus) -> &'static str {
         gwt_agent::AgentStatus::Interrupted => "blocked",
         gwt_agent::AgentStatus::Unknown => "unknown",
     }
+}
+
+fn session_status_is_active(status: gwt_agent::AgentStatus) -> bool {
+    matches!(
+        status,
+        gwt_agent::AgentStatus::Running | gwt_agent::AgentStatus::WaitingInput
+    )
 }
 
 fn related_session_count(works: &[gwt::KnowledgeRelatedWorkView]) -> usize {
@@ -596,12 +604,7 @@ fn related_session_rank(
 ) -> RelatedSessionRank {
     let runtime_live = session_index
         .get(agent.session_id.as_str())
-        .is_some_and(|ledger| {
-            matches!(
-                ledger.status,
-                gwt_agent::AgentStatus::Running | gwt_agent::AgentStatus::WaitingInput
-            )
-        });
+        .is_some_and(|ledger| session_status_is_active(ledger.status));
     let recency_millis = [
         parse_related_time_millis(&session.started_at),
         parse_related_time_millis(&agent.updated_at),
