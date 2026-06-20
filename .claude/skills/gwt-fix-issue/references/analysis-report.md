@@ -1,5 +1,10 @@
 # Issue Analysis Report Template
 
+For BUG / regression issues this report is the mandatory investigation gate in
+`gwt-fix-issue`: the root cause must be **verified** here before any
+implementation. An unproven root cause means the fix is not ready — investigate
+further (or route to `gwt-discussion`) instead of guess-fixing.
+
 ## Full Report Structure
 
 Output must use this structure for non-SPEC issues before execution:
