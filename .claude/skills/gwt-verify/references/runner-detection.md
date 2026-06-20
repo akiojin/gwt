@@ -44,9 +44,17 @@ approach explicitly.
    names as they appear instead of guessing. Same for `Makefile` targets.
 
 3. **Visual / UI runners.** Playwright / Cypress / Selenium /
-   WinAppDriver / Unity Editor headed are only invoked when a UI surface
-   is in scope. Even if the manifest is present, do not invoke a UI
-   runner for non-UI changes.
+   WinAppDriver / Unity Editor headed are invoked when a UI surface is in
+   scope — either because the diff touches UI files, or because
+   `surface-taxonomy.md`'s acceptance-aware escalation promoted a
+   backend-only diff whose acceptance manifests in a user-facing surface.
+   Even if the manifest is present, do not invoke a UI runner for a change
+   with no user-facing surface in scope by diff or acceptance. When the
+   user-facing surface is an Interactive CLI / TUI surface (not a graphical
+   UI), select the project's CLI integration / E2E runner for that surface
+   (e.g. a `cargo test` integration suite that drives the binary, a pexpect
+   / expect-style TUI test, a `go test` CLI harness) instead of a browser /
+   GUI runner.
 
 4. **Long-running runners and `--mode quick`.** Some runners (Unity Editor
    batch, large `mvn verify`, full `dotnet test` solution) take many
