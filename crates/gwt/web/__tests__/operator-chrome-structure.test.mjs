@@ -4890,6 +4890,18 @@ test("Operator telemetry key avoids JSON stringify allocation", () => {
   );
 });
 
+test("SPEC-3038 (2026-06-20): telemetry key includes windows so the badge updates on non-agent window changes", () => {
+  // Without `windows` in the cache key, adding/removing a surface (non-agent)
+  // window leaves the agent counts unchanged, so applyOperatorTelemetryCounts
+  // short-circuits and the rail Windows badge never refreshes.
+  const keyBody = extractFunctionBody(appSource, "operatorTelemetryRenderKey");
+  assert.match(
+    keyBody,
+    /appendRenderKeyPart\(parts,\s*"windows"\)/,
+    "telemetry render key must include the windows count",
+  );
+});
+
 // SPEC-2356 — branch telemetry forwards only `branches` through the guarded
 // applyOperatorTelemetryCounts helper; the dead Sidebar Layers `git` counter is
 // retired (replaces develop's git-coupled branch telemetry assertion).

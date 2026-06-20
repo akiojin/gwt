@@ -2350,6 +2350,12 @@
         appendRenderKeyPart(parts, counts?.done ?? null);
         appendRenderKeyPart(parts, "agents");
         appendRenderKeyPart(parts, counts?.agents ?? null);
+        // SPEC-3038 (2026-06-20): include the window count so the rail Windows
+        // badge refreshes when only surface (non-agent) windows are added or
+        // removed. Agent-count fields alone do not change for surfaces, which
+        // otherwise short-circuits the badge update via the shared cache key.
+        appendRenderKeyPart(parts, "windows");
+        appendRenderKeyPart(parts, counts?.windows ?? null);
         appendRenderKeyPart(parts, "branches");
         appendRenderKeyPart(parts, counts?.branches ?? null);
         appendRenderKeyPart(parts, "git");
