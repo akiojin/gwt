@@ -17,8 +17,8 @@ use gwt::{
     empty_workspace_state, load_restored_workspace_state, load_session_state, ArrangeMode,
     BackendEvent, BranchCleanupInfo, BranchListEntry, BranchScope, ContentLimits,
     FocusCycleDirection, FrontendEvent, LaunchWizardAction, LaunchWizardContext, LaunchWizardState,
-    ProfileEnvEntryView, ProjectKind, UiTracePayload, WindowCanvasState, WindowGeometry,
-    WindowPlacement, WindowPreset, WindowProcessStatus,
+    LinkedIssueKind, ProfileEnvEntryView, ProjectKind, UiTracePayload, WindowCanvasState,
+    WindowGeometry, WindowPlacement, WindowPreset, WindowProcessStatus,
 };
 use gwt_config::{Profile, Settings};
 use gwt_core::{
@@ -44,7 +44,7 @@ use super::{
     AttachmentProgressPhase, BlockingTaskSpawner, DispatchTarget, KnowledgeLoadRequest,
     KnowledgeRefreshTask, KnowledgeSearchRequest, LaunchFeedbackContext, LaunchWizardMemoryCache,
     LaunchWizardSession, OutboundEvent, ProcessLaunch, ProjectTabRuntime, UserEvent, WindowRuntime,
-    WorkspaceResumeContext,
+    WorkspaceLaunchProjectionKind, WorkspaceResumeContext,
 };
 use crate::{
     combined_window_id, geometry_to_pty_size, same_worktree_path, AttachmentUploadStore,
@@ -619,7 +619,7 @@ fn save_assigned_workspace_projection_for_test(
         Some("develop"),
         None,
         Some(&context),
-        true,
+        WorkspaceLaunchProjectionKind::StartWork,
         &live,
     )
 }
@@ -754,7 +754,7 @@ fn save_workspace_launch_projection_retains_only_live_agents() {
         Some("develop"),
         None,
         Some(&context),
-        true,
+        WorkspaceLaunchProjectionKind::StartWork,
         &live,
     )
     .expect("save launch projection");
@@ -5319,6 +5319,135 @@ fn app_runtime_workspace_resume_launch_completion_carries_context_to_projection(
     assert_eq!(
         work_items.work_items[0].events[0].kind,
         gwt_core::workspace_projection::WorkEventKind::Resume
+    );
+}
+
+#[test]
+fn app_runtime_issue_launch_wizard_seeds_issue_workspace_context() {
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedEnvVar::set("HOME", temp.path());
+    let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+    let repo = temp.path().join("repo");
+    fs::create_dir_all(&repo).expect("create repo");
+    init_repo(&repo);
+    Cache::new(issue_cache_root(&repo))
+        .write_snapshot(&sample_issue_snapshot(
+            3096,
+            "Fix Launch Agent trace",
+            &["bug"],
+            "Launch trace missing",
+            "2026-06-20T00:00:00Z",
+        ))
+        .expect("write issue cache");
+    let tab = sample_project_tab("tab-1", "Repo", repo.clone(), ProjectKind::Git, &[]);
+    let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+
+    runtime
+        .open_knowledge_launch_wizard_for_base_branch(
+            "tab-1",
+            &repo,
+            "develop",
+            3096,
+            LinkedIssueKind::Issue,
+        )
+        .expect("open issue launch wizard");
+
+    let context = runtime
+        .launch_wizard
+        .as_ref()
+        .and_then(|session| session.workspace_resume_context.as_ref())
+        .expect("issue launch wizard should carry workspace context");
+    assert_eq!(context.owner.as_deref(), Some("Issue #3096"));
+    assert_eq!(context.title.as_deref(), Some("Fix Launch Agent trace"));
+}
+
+#[test]
+fn app_runtime_issue_launch_completion_records_issue_owned_start_work_event() {
+    let _env_guard = env_test_lock().lock().expect("env lock");
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedEnvVar::set("HOME", temp.path());
+    let repo = temp.path().join("repo");
+    let worktree = temp.path().join("repo-work-issue-3096");
+    fs::create_dir_all(&repo).expect("create repo");
+    fs::create_dir_all(&worktree).expect("create worktree");
+    init_repo(&repo);
+    let tab = sample_project_tab_with_window_at(
+        "tab-1",
+        "agent-1",
+        repo.clone(),
+        WindowPreset::Agent,
+        WindowProcessStatus::Running,
+    );
+    let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+    let window_id = combined_window_id("tab-1", "agent-1");
+    runtime.pending_workspace_resume_contexts.insert(
+        window_id.clone(),
+        WorkspaceResumeContext {
+            title: Some("Fix Launch Agent trace".to_string()),
+            owner: Some("Issue #3096".to_string()),
+            summary: None,
+            next_action: None,
+        },
+    );
+    let (command, args) = if cfg!(windows) {
+        (
+            "cmd".to_string(),
+            vec![
+                "/d".to_string(),
+                "/s".to_string(),
+                "/c".to_string(),
+                "exit /b 0".to_string(),
+            ],
+        )
+    } else {
+        (
+            "/bin/sh".to_string(),
+            vec!["-lc".to_string(), "exit 0".to_string()],
+        )
+    };
+
+    let _events = runtime.handle_launch_complete(
+        window_id,
+        Ok((
+            ProcessLaunch {
+                command,
+                args,
+                env: HashMap::new(),
+                remove_env: Vec::new(),
+                cwd: Some(worktree.clone()),
+            },
+            "session-issue-3096".to_string(),
+            "work/issue-3096".to_string(),
+            "Codex".to_string(),
+            worktree.clone(),
+            gwt_agent::AgentId::Codex,
+            Some(3096),
+            Some("develop".to_string()),
+            gwt_agent::LaunchRuntimeTarget::Host,
+            worktree.display().to_string(),
+        )),
+    );
+
+    let work_items = gwt_core::workspace_projection::load_workspace_work_items(&repo)
+        .expect("load work items")
+        .expect("work items");
+    let item = work_items
+        .work_items
+        .iter()
+        .find(|item| item.owner.as_deref() == Some("Issue #3096"))
+        .expect("issue-owned work item");
+    assert_eq!(item.title, "Fix Launch Agent trace");
+    assert_eq!(item.agents[0].session_id, "session-issue-3096");
+    assert_eq!(
+        item.events[0].kind,
+        gwt_core::workspace_projection::WorkEventKind::Start
+    );
+    assert_eq!(
+        item.execution_containers[0].branch.as_deref(),
+        Some("work/issue-3096")
     );
 }
 
@@ -10896,6 +11025,546 @@ fn app_runtime_load_knowledge_bridge_replies_with_cache_backed_issue_and_spec_vi
 }
 
 #[test]
+fn app_runtime_load_knowledge_bridge_projects_related_issue_work_sessions() {
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedEnvVar::set("HOME", temp.path());
+    let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+    let repo = temp.path().join("repo");
+    let worktree = temp.path().join("repo-work-issue-3096");
+    fs::create_dir_all(&repo).expect("create repo");
+    fs::create_dir_all(&worktree).expect("create worktree");
+    init_repo(&repo);
+    Cache::new(issue_cache_root(&repo))
+        .write_snapshot(&sample_issue_snapshot(
+            3096,
+            "Fix Launch Agent trace",
+            &["bug"],
+            "Issue body",
+            "2026-06-20T09:00:00Z",
+        ))
+        .expect("write issue snapshot");
+
+    let tab = sample_project_tab_with_window_at(
+        "tab-1",
+        "issue-1",
+        repo.clone(),
+        WindowPreset::Issue,
+        WindowProcessStatus::Ready,
+    );
+    let runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+
+    let mut session =
+        gwt_agent::Session::new(&worktree, "work/issue-3096", gwt_agent::AgentId::Codex);
+    session.id = "session-issue-3096".to_string();
+    session.agent_session_id = Some("conv-issue-3096".to_string());
+    session.display_name = "Codex".to_string();
+    session.linked_issue_number = Some(3096);
+    session.save(&runtime.sessions_dir).expect("save session");
+
+    let now = Utc.with_ymd_and_hms(2026, 6, 20, 9, 5, 0).unwrap();
+    let work_id = gwt_core::workspace_projection::canonical_work_id(
+        &repo,
+        Some("work/issue-3096"),
+        Some(&worktree),
+    )
+    .expect("work id");
+    let mut event = gwt_core::workspace_projection::WorkEvent::new(
+        gwt_core::workspace_projection::WorkEventKind::Start,
+        work_id,
+        now,
+    );
+    event.title = Some("Fix Launch Agent trace".to_string());
+    event.owner = Some("Issue #3096".to_string());
+    event.agent_session_id = Some("session-issue-3096".to_string());
+    event.agent_id = Some("codex".to_string());
+    event.display_name = Some("Codex".to_string());
+    event.execution_container = Some(
+        gwt_core::workspace_projection::WorkspaceExecutionContainerRef {
+            branch: Some("work/issue-3096".to_string()),
+            worktree_path: Some(worktree.clone()),
+            pr_number: None,
+            pr_url: None,
+            pr_state: None,
+        },
+    );
+    gwt_core::workspace_projection::record_workspace_work_event(&repo, event)
+        .expect("record work event");
+
+    let events = runtime.load_knowledge_bridge_events(
+        "client-1",
+        KnowledgeLoadRequest {
+            id: &combined_window_id("tab-1", "issue-1"),
+            kind: gwt::KnowledgeKind::Issue,
+            request_id: None,
+            selected_number: Some(3096),
+            refresh: false,
+        },
+    );
+
+    let entries = match &events[0].event {
+        BackendEvent::KnowledgeEntries { entries, .. } => entries,
+        other => panic!("unexpected entries event: {other:?}"),
+    };
+    assert_eq!(entries[0].number, 3096);
+    assert_eq!(entries[0].related_work_count, 1);
+    assert_eq!(entries[0].related_session_count, 1);
+
+    let detail = match &events[1].event {
+        BackendEvent::KnowledgeDetail { detail, .. } => detail,
+        other => panic!("unexpected detail event: {other:?}"),
+    };
+    assert_eq!(detail.related_works.len(), 1);
+    let work = &detail.related_works[0];
+    assert_eq!(work.title, "Fix Launch Agent trace");
+    assert_eq!(work.branch.as_deref(), Some("work/issue-3096"));
+    assert_eq!(work.agents[0].session_id, "session-issue-3096");
+    assert_eq!(
+        work.agents[0].sessions[0].agent_session_id,
+        "conv-issue-3096"
+    );
+}
+
+#[test]
+fn app_runtime_load_knowledge_bridge_dedupes_related_issue_sessions_by_conversation() {
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedEnvVar::set("HOME", temp.path());
+    let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+    let repo = temp.path().join("repo");
+    let worktree = temp.path().join("repo-work-issue-3133");
+    fs::create_dir_all(&repo).expect("create repo");
+    fs::create_dir_all(&worktree).expect("create worktree");
+    init_repo(&repo);
+    Cache::new(issue_cache_root(&repo))
+        .write_snapshot(&sample_issue_snapshot(
+            3133,
+            "Resume Launch Agent session",
+            &["bug"],
+            "Issue body",
+            "2026-06-20T09:00:00Z",
+        ))
+        .expect("write issue snapshot");
+
+    let tab = sample_project_tab_with_window_at(
+        "tab-1",
+        "issue-1",
+        repo.clone(),
+        WindowPreset::Issue,
+        WindowProcessStatus::Ready,
+    );
+    let runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+
+    let conversation_id = "conv-issue-3133";
+    let old_at = Utc.with_ymd_and_hms(2026, 6, 20, 9, 0, 0).unwrap();
+    let new_at = Utc.with_ymd_and_hms(2026, 6, 20, 9, 5, 0).unwrap();
+
+    let mut stale_session =
+        gwt_agent::Session::new(&worktree, "work/issue-3133", gwt_agent::AgentId::Codex);
+    stale_session.id = "session-issue-3133-stale".to_string();
+    stale_session.agent_session_id = Some(conversation_id.to_string());
+    stale_session.status = gwt_agent::AgentStatus::Stopped;
+    stale_session.linked_issue_number = Some(3133);
+    stale_session.created_at = old_at;
+    stale_session.updated_at = old_at;
+    stale_session.last_activity_at = old_at;
+    stale_session
+        .save(&runtime.sessions_dir)
+        .expect("save stale session");
+
+    let mut current_session =
+        gwt_agent::Session::new(&worktree, "work/issue-3133", gwt_agent::AgentId::Codex);
+    current_session.id = "session-issue-3133-current".to_string();
+    current_session.agent_session_id = Some(conversation_id.to_string());
+    current_session.status = gwt_agent::AgentStatus::Running;
+    current_session.linked_issue_number = Some(3133);
+    current_session.created_at = new_at;
+    current_session.updated_at = new_at;
+    current_session.last_activity_at = new_at;
+    current_session
+        .save(&runtime.sessions_dir)
+        .expect("save current session");
+
+    let work_id = gwt_core::workspace_projection::canonical_work_id(
+        &repo,
+        Some("work/issue-3133"),
+        Some(&worktree),
+    )
+    .expect("work id");
+    let mut event = gwt_core::workspace_projection::WorkEvent::new(
+        gwt_core::workspace_projection::WorkEventKind::Start,
+        work_id,
+        new_at,
+    );
+    event.title = Some("Resume Launch Agent session".to_string());
+    event.owner = Some("Issue #3133".to_string());
+    event.agent_session_id = Some("session-issue-3133-current".to_string());
+    event.agent_id = Some("codex".to_string());
+    event.display_name = Some("Codex".to_string());
+    event.execution_container = Some(
+        gwt_core::workspace_projection::WorkspaceExecutionContainerRef {
+            branch: Some("work/issue-3133".to_string()),
+            worktree_path: Some(worktree.clone()),
+            pr_number: None,
+            pr_url: None,
+            pr_state: None,
+        },
+    );
+    gwt_core::workspace_projection::record_workspace_work_event(&repo, event)
+        .expect("record work event");
+
+    let events = runtime.load_knowledge_bridge_events(
+        "client-1",
+        KnowledgeLoadRequest {
+            id: &combined_window_id("tab-1", "issue-1"),
+            kind: gwt::KnowledgeKind::Issue,
+            request_id: None,
+            selected_number: Some(3133),
+            refresh: false,
+        },
+    );
+
+    let entries = match &events[0].event {
+        BackendEvent::KnowledgeEntries { entries, .. } => entries,
+        other => panic!("unexpected entries event: {other:?}"),
+    };
+    assert_eq!(entries[0].number, 3133);
+    assert_eq!(entries[0].related_session_count, 1);
+
+    let detail = match &events[1].event {
+        BackendEvent::KnowledgeDetail { detail, .. } => detail,
+        other => panic!("unexpected detail event: {other:?}"),
+    };
+    assert_eq!(detail.related_works.len(), 1);
+    assert_eq!(detail.related_works[0].agents.len(), 1);
+    assert_eq!(detail.related_works[0].agents[0].sessions.len(), 1);
+    assert_eq!(
+        detail.related_works[0].agents[0].session_id,
+        "session-issue-3133-current"
+    );
+    assert_eq!(
+        detail.related_works[0].agents[0].sessions[0].agent_session_id,
+        conversation_id
+    );
+}
+
+#[test]
+fn app_runtime_load_knowledge_bridge_collapses_related_issue_session_actions_to_live_latest() {
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedEnvVar::set("HOME", temp.path());
+    let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+    let repo = temp.path().join("repo");
+    let worktree = temp.path().join("repo-work-issue-3133");
+    fs::create_dir_all(&repo).expect("create repo");
+    fs::create_dir_all(&worktree).expect("create worktree");
+    init_repo(&repo);
+    Cache::new(issue_cache_root(&repo))
+        .write_snapshot(&sample_issue_snapshot(
+            3133,
+            "Resume Launch Agent session",
+            &["bug"],
+            "Issue body",
+            "2026-06-20T09:00:00Z",
+        ))
+        .expect("write issue snapshot");
+
+    let tab = sample_project_tab_with_window_at(
+        "tab-1",
+        "issue-1",
+        repo.clone(),
+        WindowPreset::Issue,
+        WindowProcessStatus::Ready,
+    );
+    let runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+
+    let stale_at = Utc.with_ymd_and_hms(2026, 6, 20, 9, 0, 0).unwrap();
+    let past_at = Utc.with_ymd_and_hms(2026, 6, 20, 9, 1, 0).unwrap();
+    let live_at = Utc.with_ymd_and_hms(2026, 6, 20, 9, 5, 0).unwrap();
+    let empty_agent_at = Utc.with_ymd_and_hms(2026, 6, 20, 9, 6, 0).unwrap();
+
+    for (id, conversation_id, status, timestamp) in [
+        (
+            "session-issue-3133-stale-live",
+            "conv-issue-3133-live",
+            gwt_agent::AgentStatus::Stopped,
+            stale_at,
+        ),
+        (
+            "session-issue-3133-past",
+            "conv-issue-3133-past",
+            gwt_agent::AgentStatus::Stopped,
+            past_at,
+        ),
+        (
+            "session-issue-3133-current-live",
+            "conv-issue-3133-live",
+            gwt_agent::AgentStatus::Running,
+            live_at,
+        ),
+    ] {
+        let mut session =
+            gwt_agent::Session::new(&worktree, "work/issue-3133", gwt_agent::AgentId::Codex);
+        session.id = id.to_string();
+        session.agent_session_id = Some(conversation_id.to_string());
+        session.status = status;
+        session.linked_issue_number = Some(3133);
+        session.created_at = timestamp;
+        session.updated_at = timestamp;
+        session.last_activity_at = timestamp;
+        session.save(&runtime.sessions_dir).expect("save session");
+    }
+
+    let work_id = gwt_core::workspace_projection::canonical_work_id(
+        &repo,
+        Some("work/issue-3133"),
+        Some(&worktree),
+    )
+    .expect("work id");
+    for (session_id, timestamp) in [
+        ("session-issue-3133-stale-live", stale_at),
+        ("session-issue-3133-past", past_at),
+        ("session-issue-3133-current-live", live_at),
+    ] {
+        let mut event = gwt_core::workspace_projection::WorkEvent::new(
+            gwt_core::workspace_projection::WorkEventKind::Start,
+            work_id.clone(),
+            timestamp,
+        );
+        event.title = Some("Resume Launch Agent session".to_string());
+        event.owner = Some("Issue #3133".to_string());
+        event.agent_session_id = Some(session_id.to_string());
+        event.agent_id = Some("codex".to_string());
+        event.display_name = Some("Codex".to_string());
+        event.execution_container = Some(
+            gwt_core::workspace_projection::WorkspaceExecutionContainerRef {
+                branch: Some("work/issue-3133".to_string()),
+                worktree_path: Some(worktree.clone()),
+                pr_number: None,
+                pr_url: None,
+                pr_state: None,
+            },
+        );
+        gwt_core::workspace_projection::record_workspace_work_event(&repo, event)
+            .expect("record work event");
+    }
+    let mut empty_agent_event = gwt_core::workspace_projection::WorkEvent::new(
+        gwt_core::workspace_projection::WorkEventKind::Start,
+        work_id.clone(),
+        empty_agent_at,
+    );
+    empty_agent_event.title = Some("Resume Launch Agent session".to_string());
+    empty_agent_event.owner = Some("Issue #3133".to_string());
+    empty_agent_event.agent_session_id = Some("session-issue-3133-empty".to_string());
+    empty_agent_event.agent_id = Some("codex".to_string());
+    empty_agent_event.display_name = Some("Codex".to_string());
+    empty_agent_event.execution_container = Some(
+        gwt_core::workspace_projection::WorkspaceExecutionContainerRef {
+            branch: Some("work/issue-3133".to_string()),
+            worktree_path: Some(worktree.clone()),
+            pr_number: None,
+            pr_url: None,
+            pr_state: None,
+        },
+    );
+    gwt_core::workspace_projection::record_workspace_work_event(&repo, empty_agent_event)
+        .expect("record empty agent work event");
+
+    let events = runtime.load_knowledge_bridge_events(
+        "client-1",
+        KnowledgeLoadRequest {
+            id: &combined_window_id("tab-1", "issue-1"),
+            kind: gwt::KnowledgeKind::Issue,
+            request_id: None,
+            selected_number: Some(3133),
+            refresh: false,
+        },
+    );
+
+    let entries = match &events[0].event {
+        BackendEvent::KnowledgeEntries { entries, .. } => entries,
+        other => panic!("unexpected entries event: {other:?}"),
+    };
+    assert_eq!(entries[0].number, 3133);
+    assert_eq!(entries[0].related_session_count, 1);
+
+    let detail = match &events[1].event {
+        BackendEvent::KnowledgeDetail { detail, .. } => detail,
+        other => panic!("unexpected detail event: {other:?}"),
+    };
+    assert_eq!(detail.related_works.len(), 1);
+    assert_eq!(detail.related_works[0].agents.len(), 1);
+    assert_eq!(
+        detail.related_works[0].agents[0].session_id,
+        "session-issue-3133-current-live"
+    );
+    assert_eq!(detail.related_works[0].agents[0].sessions.len(), 1);
+    assert_eq!(
+        detail.related_works[0].agents[0].sessions[0].agent_session_id,
+        "conv-issue-3133-live"
+    );
+}
+
+#[test]
+fn app_runtime_load_knowledge_bridge_ignores_ambiguous_branch_only_related_work() {
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedEnvVar::set("HOME", temp.path());
+    let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+    let repo = temp.path().join("repo");
+    let develop_worktree = temp.path().join("repo-develop");
+    let issue_worktree = temp.path().join("repo-work-issue-3133");
+    fs::create_dir_all(&repo).expect("create repo");
+    fs::create_dir_all(&develop_worktree).expect("create develop worktree");
+    fs::create_dir_all(&issue_worktree).expect("create issue worktree");
+    init_repo(&repo);
+    Cache::new(issue_cache_root(&repo))
+        .write_snapshot(&sample_issue_snapshot(
+            3133,
+            "Resume Launch Agent session",
+            &["bug"],
+            "Issue body",
+            "2026-06-20T09:00:00Z",
+        ))
+        .expect("write issue snapshot");
+    write_issue_link_store(
+        &repo,
+        HashMap::from([("work/issue-3133".to_string(), 3133)]),
+    );
+
+    let tab = sample_project_tab_with_window_at(
+        "tab-1",
+        "issue-1",
+        repo.clone(),
+        WindowPreset::Issue,
+        WindowProcessStatus::Ready,
+    );
+    let runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+
+    let live_at = Utc.with_ymd_and_hms(2026, 6, 20, 9, 5, 0).unwrap();
+    let mut session = gwt_agent::Session::new(
+        &issue_worktree,
+        "work/issue-3133",
+        gwt_agent::AgentId::Codex,
+    );
+    session.id = "session-issue-3133-current".to_string();
+    session.agent_session_id = Some("conv-issue-3133-current".to_string());
+    session.status = gwt_agent::AgentStatus::Running;
+    session.linked_issue_number = Some(3133);
+    session.created_at = live_at;
+    session.updated_at = live_at;
+    session.last_activity_at = live_at;
+    session.save(&runtime.sessions_dir).expect("save session");
+
+    let issue_work_id = gwt_core::workspace_projection::canonical_work_id(
+        &repo,
+        Some("work/issue-3133"),
+        Some(&issue_worktree),
+    )
+    .expect("issue work id");
+    let mut issue_event = gwt_core::workspace_projection::WorkEvent::new(
+        gwt_core::workspace_projection::WorkEventKind::Start,
+        issue_work_id,
+        live_at,
+    );
+    issue_event.title = Some("Issue #3133 visual verification".to_string());
+    issue_event.owner = Some("Issue #3133".to_string());
+    issue_event.agent_session_id = Some("session-issue-3133-current".to_string());
+    issue_event.agent_id = Some("codex".to_string());
+    issue_event.display_name = Some("Codex".to_string());
+    issue_event.execution_container = Some(
+        gwt_core::workspace_projection::WorkspaceExecutionContainerRef {
+            branch: Some("work/issue-3133".to_string()),
+            worktree_path: Some(issue_worktree.clone()),
+            pr_number: None,
+            pr_url: None,
+            pr_state: None,
+        },
+    );
+    gwt_core::workspace_projection::record_workspace_work_event(&repo, issue_event)
+        .expect("record issue work event");
+
+    let ambiguous_id = "legacy-ambiguous-branch-only";
+    for (branch, worktree, at) in [
+        (
+            "develop",
+            develop_worktree.as_path(),
+            Utc.with_ymd_and_hms(2026, 6, 20, 9, 6, 0).unwrap(),
+        ),
+        (
+            "work/issue-3133",
+            issue_worktree.as_path(),
+            Utc.with_ymd_and_hms(2026, 6, 20, 9, 7, 0).unwrap(),
+        ),
+    ] {
+        let mut event = gwt_core::workspace_projection::WorkEvent::new(
+            gwt_core::workspace_projection::WorkEventKind::Update,
+            ambiguous_id,
+            at,
+        );
+        event.title = Some("Work progress summary detail".to_string());
+        event.status_category =
+            Some(gwt_core::workspace_projection::WorkspaceStatusCategory::Unknown);
+        event.agent_session_id = Some("missing-legacy-session".to_string());
+        event.execution_container = Some(
+            gwt_core::workspace_projection::WorkspaceExecutionContainerRef {
+                branch: Some(branch.to_string()),
+                worktree_path: Some(worktree.to_path_buf()),
+                pr_number: None,
+                pr_url: None,
+                pr_state: None,
+            },
+        );
+        gwt_core::workspace_projection::record_workspace_work_event(&repo, event)
+            .expect("record ambiguous work event");
+    }
+
+    let events = runtime.load_knowledge_bridge_events(
+        "client-1",
+        KnowledgeLoadRequest {
+            id: &combined_window_id("tab-1", "issue-1"),
+            kind: gwt::KnowledgeKind::Issue,
+            request_id: None,
+            selected_number: Some(3133),
+            refresh: false,
+        },
+    );
+
+    let entries = match &events[0].event {
+        BackendEvent::KnowledgeEntries { entries, .. } => entries,
+        other => panic!("unexpected entries event: {other:?}"),
+    };
+    assert_eq!(entries[0].number, 3133);
+    assert_eq!(entries[0].related_work_count, 1);
+    assert_eq!(entries[0].related_session_count, 1);
+
+    let detail = match &events[1].event {
+        BackendEvent::KnowledgeDetail { detail, .. } => detail,
+        other => panic!("unexpected detail event: {other:?}"),
+    };
+    assert_eq!(detail.related_works.len(), 1);
+    assert_eq!(
+        detail.related_works[0].title,
+        "Issue #3133 visual verification"
+    );
+    assert!(
+        detail
+            .related_works
+            .iter()
+            .all(|work| work.title != "Work progress summary detail"),
+        "ambiguous branch-only Work must not appear in Issue related work"
+    );
+}
+
+#[test]
 fn app_runtime_knowledge_search_errors_for_wrong_surface() {
     let temp = tempdir().expect("tempdir");
     let repo = temp.path().join("repo");
@@ -11292,6 +11961,8 @@ fn app_runtime_background_knowledge_refresh_silent_paths_do_not_dispatch() {
         request_id: Some(33),
         selected_number: None,
         force: false,
+        sessions_dir: runtime.sessions_dir.clone(),
+        issue_link_cache_dir: runtime.issue_link_cache_dir.clone(),
     });
     wait_for_path("stale knowledge refresh gh invocation", &marker);
     assert!(
@@ -11311,6 +11982,8 @@ fn app_runtime_background_knowledge_refresh_silent_paths_do_not_dispatch() {
         request_id: Some(34),
         selected_number: Some(43),
         force: false,
+        sessions_dir: runtime.sessions_dir.clone(),
+        issue_link_cache_dir: runtime.issue_link_cache_dir.clone(),
     });
     thread::sleep(Duration::from_millis(250));
     assert!(

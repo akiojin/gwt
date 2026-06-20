@@ -16,12 +16,14 @@
 // - send(message): forward a frontend event over the WebSocket bridge.
 // - createNode / createKnowledgeMarkdownBody: shared DOM helpers owned by
 //   app.js (the markdown body renderer is shared with the Board surface).
-// - windowMap / workspaceWindowById: workspace window lookups.
+// - windowMap / workspaceWindowById / getWorkspaceWindows: workspace window lookups.
 // - pendingIndexOpenTargetsByPreset: index-open handoff targets by preset.
 // - knowledgeKindForPreset(preset): issue/spec/pr kind mapping.
 // - focusWindowLocally(windowId) / sendWindowFocus(windowId): focus paths.
 // - focusOrSpawnPreset(preset): focus-or-spawn used by drawer actions.
 // - openIssueLaunchWizard(windowId, issueNumber): launch wizard entry.
+// - visibleBounds(): current canvas bounds for resume placement.
+// - launchPending: shared Resume/Launch pending controller.
 import { createFocusTrap } from "/focus-trap.js";
 
 export function createKnowledgeKanbanSurface({
@@ -30,17 +32,21 @@ export function createKnowledgeKanbanSurface({
   createKnowledgeMarkdownBody,
   windowMap,
   workspaceWindowById,
+  getWorkspaceWindows,
   pendingIndexOpenTargetsByPreset,
   knowledgeKindForPreset,
   focusWindowLocally,
   sendWindowFocus,
   focusOrSpawnPreset,
   openIssueLaunchWizard,
+  visibleBounds,
+  launchPending,
 }) {
       const knowledgeBridgeStateMap = new Map();
       const KNOWLEDGE_AUTO_REFRESH_INTERVAL_MS = 60000;
       let nextKnowledgeLoadRequestId = 1;
       let nextKnowledgeSearchRequestId = 1;
+      let relatedWorkRefreshTimer = null;
 
 
       // SPEC-2017 US-9 — Kanban Drawer (slide-over detail). Reuses the
@@ -394,6 +400,26 @@ export function createKnowledgeKanbanSurface({
         scheduleKnowledgeLoadRecovery(windowId, effectiveKind, requestId);
       }
 
+      function scheduleKnowledgeRelatedWorkRefresh() {
+        if (relatedWorkRefreshTimer) {
+          clearTimeout(relatedWorkRefreshTimer);
+        }
+        relatedWorkRefreshTimer = setTimeout(() => {
+          relatedWorkRefreshTimer = null;
+          for (const [windowId, state] of knowledgeBridgeStateMap.entries()) {
+            const windowData = workspaceWindowById(windowId);
+            if (!windowData) {
+              continue;
+            }
+            const knowledgeKind = state.kind || knowledgeKindForPreset(windowData.preset);
+            if (!knowledgeKind) {
+              continue;
+            }
+            requestKnowledgeBridge(windowId, knowledgeKind, false);
+          }
+        }, 150);
+      }
+
       function restoreKnowledgeBaseEntries(state) {
         state.entries = Array.isArray(state.baseEntries)
           ? state.baseEntries.slice()
@@ -651,6 +677,341 @@ export function createKnowledgeKanbanSurface({
         };
       }
 
+      function appendKnowledgeRelatedCountChips(container, entry, className) {
+        const relatedWorkCount = entry.related_work_count || 0;
+        const relatedSessionCount = entry.related_session_count || 0;
+        if (relatedWorkCount > 0) {
+          container.appendChild(
+            createNode(
+              "span",
+              className,
+              `${relatedWorkCount} work${relatedWorkCount === 1 ? "" : "s"}`,
+            ),
+          );
+        }
+        if (relatedSessionCount > 0) {
+          container.appendChild(
+            createNode(
+              "span",
+              className,
+              `${relatedSessionCount} session${relatedSessionCount === 1 ? "" : "s"}`,
+            ),
+          );
+        }
+      }
+
+      function shortRelatedSessionId(value) {
+        const text = String(value || "").trim();
+        if (text.length <= 12) {
+          return text || "unknown";
+        }
+        return `${text.slice(0, 8)}...${text.slice(-4)}`;
+      }
+
+      function knowledgeRelatedWorkPendingKey(sessionId) {
+        return `session:${sessionId}`;
+      }
+
+      function isKnowledgeRelatedResumePending(sessionId) {
+        return Boolean(
+          sessionId
+            && launchPending
+            && launchPending.isPending(knowledgeRelatedWorkPendingKey(sessionId)),
+        );
+      }
+
+      function addKnowledgeRelatedSessionId(target, value) {
+        const text = String(value || "").trim();
+        if (text) {
+          target.add(text);
+        }
+      }
+
+      function knowledgeRelatedLiveSessionIds(agent, session) {
+        const ids = new Set();
+        addKnowledgeRelatedSessionId(ids, session?.agent_session_id);
+        addKnowledgeRelatedSessionId(ids, session?.session_id);
+        if (session?.is_active !== false) {
+          addKnowledgeRelatedSessionId(ids, agent?.session_id);
+        }
+        return ids;
+      }
+
+      function knowledgeRelatedLiveWindowCandidates() {
+        const windows = [];
+        const seen = new Set();
+        const append = (windowData) => {
+          if (!windowData) {
+            return;
+          }
+          const key = windowData.id || windowData.session_id || windows.length;
+          if (seen.has(key)) {
+            return;
+          }
+          seen.add(key);
+          windows.push(windowData);
+        };
+        if (windowMap) {
+          for (const windowData of windowMap.values()) {
+            append(windowData);
+          }
+        }
+        if (typeof getWorkspaceWindows === "function") {
+          for (const windowData of getWorkspaceWindows() || []) {
+            append(windowData);
+          }
+        }
+        return windows;
+      }
+
+      function isKnowledgeRelatedLiveWindow(windowData) {
+        const status = String(windowData?.status || "").toLowerCase();
+        return status !== "stopped" && status !== "error";
+      }
+
+      function buildKnowledgeRelatedLiveSessionWindowsByConversation(works) {
+        const windowsBySessionId = new Map();
+        for (const windowData of knowledgeRelatedLiveWindowCandidates()) {
+          if (!isKnowledgeRelatedLiveWindow(windowData)) {
+            continue;
+          }
+          const sessionId = String(windowData?.session_id || "").trim();
+          if (sessionId) {
+            windowsBySessionId.set(sessionId, windowData);
+          }
+        }
+        const liveSessionWindowsByConversation = new Map();
+        for (const work of works || []) {
+          for (const agent of work?.agents || []) {
+            const liveWindow = windowsBySessionId.get(
+              String(agent?.session_id || "").trim(),
+            );
+            if (!liveWindow) {
+              continue;
+            }
+            for (const session of agent?.sessions || []) {
+              const conversation = String(session?.agent_session_id || "").trim();
+              if (conversation && !liveSessionWindowsByConversation.has(conversation)) {
+                liveSessionWindowsByConversation.set(conversation, liveWindow);
+              }
+            }
+          }
+        }
+        return liveSessionWindowsByConversation;
+      }
+
+      function findKnowledgeRelatedLiveWindow(agent, session, liveSessionWindowsByConversation) {
+        const conversationWindow = session?.agent_session_id
+          ? liveSessionWindowsByConversation?.get(String(session.agent_session_id).trim())
+          : null;
+        if (conversationWindow && isKnowledgeRelatedLiveWindow(conversationWindow)) {
+          return conversationWindow;
+        }
+        const sessionIds = knowledgeRelatedLiveSessionIds(agent, session);
+        if (sessionIds.size === 0) {
+          return null;
+        }
+        for (const windowData of knowledgeRelatedLiveWindowCandidates()) {
+          const liveIds = [
+            windowData?.session_id,
+            windowData?.agent_session_id,
+          ]
+            .map((value) => String(value || "").trim())
+            .filter(Boolean);
+          if (!liveIds.some((value) => sessionIds.has(value))) {
+            continue;
+          }
+          if (!isKnowledgeRelatedLiveWindow(windowData)) {
+            continue;
+          }
+          return windowData;
+        }
+        return null;
+      }
+
+      function focusKnowledgeRelatedSession(agent, session, liveSessionWindowsByConversation) {
+        const liveWindow = findKnowledgeRelatedLiveWindow(
+          agent,
+          session,
+          liveSessionWindowsByConversation,
+        );
+        if (!liveWindow?.id) {
+          return false;
+        }
+        focusWindowLocally(liveWindow.id);
+        sendWindowFocus(liveWindow.id);
+        return true;
+      }
+
+      function resumeKnowledgeRelatedSession(agent, session) {
+        const sessionId = String(agent?.session_id || "").trim();
+        if (!sessionId) {
+          return false;
+        }
+        const bounds = typeof visibleBounds === "function" ? visibleBounds() : null;
+        if (!bounds) {
+          return false;
+        }
+        if (
+          launchPending
+          && !launchPending.begin(knowledgeRelatedWorkPendingKey(sessionId), "Resume")
+        ) {
+          return false;
+        }
+        send({
+          kind: "resume_workspace_agent",
+          session_id: sessionId,
+          agent_session_id: session?.agent_session_id || null,
+          bounds,
+        });
+        return true;
+      }
+
+      function renderKnowledgeRelatedSessionAction(agent, session, liveSessionWindowsByConversation) {
+        const liveWindow = findKnowledgeRelatedLiveWindow(
+          agent,
+          session,
+          liveSessionWindowsByConversation,
+        );
+        if (liveWindow) {
+          const button = createNode("button", "wizard-button is-compact", "Focus");
+          button.type = "button";
+          button.dataset.action = "focus-related-session";
+          button.dataset.sessionId = agent.session_id || "";
+          if (session?.agent_session_id) {
+            button.dataset.agentSessionId = session.agent_session_id;
+            button.setAttribute("aria-label", `Focus conversation ${session.agent_session_id}`);
+          } else {
+            button.setAttribute("aria-label", "Focus related session");
+          }
+          button.addEventListener("click", () => {
+            focusKnowledgeRelatedSession(agent, session, liveSessionWindowsByConversation);
+          });
+          return button;
+        }
+        if (!agent?.session_id || session?.resumable === false) {
+          return null;
+        }
+        const button = createNode("button", "wizard-button is-compact", "Resume");
+        button.type = "button";
+        button.dataset.action = "resume-related-session";
+        button.dataset.sessionId = agent.session_id;
+        if (session?.agent_session_id) {
+          button.dataset.agentSessionId = session.agent_session_id;
+          button.setAttribute("aria-label", `Resume conversation ${session.agent_session_id}`);
+        } else {
+          button.setAttribute("aria-label", "Resume related session");
+        }
+        if (isKnowledgeRelatedResumePending(agent.session_id)) {
+          button.disabled = true;
+          button.textContent = "Resuming...";
+          button.classList.add("is-pending");
+        }
+        button.addEventListener("click", () => {
+          if (resumeKnowledgeRelatedSession(agent, session)) {
+            button.disabled = true;
+            button.textContent = "Resuming...";
+            button.classList.add("is-pending");
+          }
+        });
+        return button;
+      }
+
+      function renderKnowledgeRelatedWorks(detail) {
+        const works = Array.isArray(detail?.related_works)
+          ? detail.related_works
+          : [];
+        if (works.length === 0) {
+          return null;
+        }
+
+        const section = createNode("section", "knowledge-section knowledge-related-works");
+        section.appendChild(createNode("div", "knowledge-section-title", "Related Work"));
+        const list = createNode("div", "knowledge-related-work-list");
+        const liveSessionWindowsByConversation =
+          buildKnowledgeRelatedLiveSessionWindowsByConversation(works);
+        for (const work of works) {
+          const card = createNode("article", "knowledge-related-work");
+          const head = createNode("div", "knowledge-related-work-head");
+          head.appendChild(
+            createNode("div", "knowledge-related-work-title", work.title || "Untitled work"),
+          );
+          if (work.status_category) {
+            head.appendChild(
+              createNode(
+                "span",
+                `knowledge-related-status knowledge-related-status--${work.status_category}`,
+                work.status_category,
+              ),
+            );
+          }
+          card.appendChild(head);
+
+          const meta = createNode("div", "knowledge-related-work-meta");
+          if (work.branch) {
+            meta.appendChild(createNode("span", "knowledge-meta-copy", work.branch));
+          }
+          if (work.worktree_path) {
+            meta.appendChild(createNode("span", "knowledge-meta-copy", work.worktree_path));
+          }
+          if (meta.childElementCount > 0) {
+            card.appendChild(meta);
+          }
+
+          const agents = Array.isArray(work.agents) ? work.agents : [];
+          for (const agent of agents) {
+            const agentNode = createNode("div", "knowledge-related-agent");
+            agentNode.appendChild(
+              createNode(
+                "div",
+                "knowledge-related-agent-name",
+                agent.display_name || agent.agent_id || "Agent",
+              ),
+            );
+            const sessions = Array.isArray(agent.sessions) ? agent.sessions : [];
+            for (const session of sessions) {
+              const sessionNode = createNode(
+                "div",
+                `knowledge-related-session${session.is_active ? " is-active" : ""}`,
+              );
+              sessionNode.appendChild(
+                createNode(
+                  "span",
+                  "knowledge-related-session-label",
+                  `Session ${shortRelatedSessionId(session.agent_session_id)}`,
+                ),
+              );
+              sessionNode.appendChild(
+                createNode(
+                  "span",
+                  "knowledge-related-session-state",
+                  session.is_active ? "Current" : "Past",
+                ),
+              );
+              const action = renderKnowledgeRelatedSessionAction(
+                agent,
+                session,
+                liveSessionWindowsByConversation,
+              );
+              if (action) {
+                sessionNode.appendChild(action);
+              }
+              agentNode.appendChild(sessionNode);
+            }
+            if (sessions.length === 0) {
+              agentNode.appendChild(
+                createNode("div", "knowledge-related-session-empty", "No session yet"),
+              );
+            }
+            card.appendChild(agentNode);
+          }
+
+          list.appendChild(card);
+        }
+        section.appendChild(list);
+        return section;
+      }
+
       function issueEntryState(entry) {
         return String(entry?.state || "open").toLowerCase() === "closed"
           ? "closed"
@@ -840,6 +1201,7 @@ export function createKnowledgeKanbanSurface({
             ),
           );
         }
+        appendKnowledgeRelatedCountChips(meta, entry, "kanban-card-chip");
         if (meta.childElementCount > 0) {
           card.appendChild(meta);
         }
@@ -954,6 +1316,10 @@ export function createKnowledgeKanbanSurface({
           card.appendChild(createKnowledgeMarkdownBody(section));
           scroll.appendChild(card);
         }
+        const relatedWorks = renderKnowledgeRelatedWorks(detail);
+        if (relatedWorks) {
+          scroll.appendChild(relatedWorks);
+        }
         if (scroll.childElementCount === 0) {
           scroll.appendChild(
             createNode("div", "knowledge-detail-empty", "No cached detail available"),
@@ -1009,6 +1375,7 @@ export function createKnowledgeKanbanSurface({
             createNode("span", "knowledge-meta-copy", `${entry.match_score}% match`),
           );
         }
+        appendKnowledgeRelatedCountChips(meta, entry, "knowledge-meta-copy");
         if (entry.meta) {
           meta.appendChild(createNode("span", "knowledge-meta-copy", entry.meta));
         }
@@ -1617,6 +1984,7 @@ export function createKnowledgeKanbanSurface({
         ensureKnowledgeBridgeState,
         clearKnowledgeBridgeState,
         requestKnowledgeBridge,
+        scheduleKnowledgeRelatedWorkRefresh,
         scheduleKnowledgeSearch,
         requestKnowledgeDetail,
         knowledgeDetailRequestMatches,

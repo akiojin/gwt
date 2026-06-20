@@ -148,13 +148,37 @@ pub(super) fn workspace_cleanup_candidate_for_projection(
     Some(active_work_cleanup_candidate_view_from_candidate(candidate))
 }
 
+#[derive(Debug, Clone, Copy)]
+pub(super) enum WorkspaceLaunchProjectionKind {
+    StartWork,
+    Resume { created_by_start_work: bool },
+}
+
+impl WorkspaceLaunchProjectionKind {
+    fn work_event_kind(self) -> gwt_core::workspace_projection::WorkEventKind {
+        match self {
+            Self::StartWork => gwt_core::workspace_projection::WorkEventKind::Start,
+            Self::Resume { .. } => gwt_core::workspace_projection::WorkEventKind::Resume,
+        }
+    }
+
+    fn created_by_start_work(self) -> bool {
+        match self {
+            Self::StartWork => true,
+            Self::Resume {
+                created_by_start_work,
+            } => created_by_start_work,
+        }
+    }
+}
+
 pub(super) fn save_workspace_launch_projection(
     project_root: &Path,
     session: &ActiveAgentSession,
     base_branch: Option<&str>,
     linked_issue_number: Option<u64>,
     workspace_resume_context: Option<&WorkspaceResumeContext>,
-    created_by_start_work: bool,
+    launch_kind: WorkspaceLaunchProjectionKind,
     live_session_ids: &std::collections::HashSet<String>,
 ) -> Result<(), String> {
     let now = chrono::Utc::now();
@@ -188,7 +212,7 @@ pub(super) fn save_workspace_launch_projection(
             branch: session.branch_name.clone(),
             worktree_path: session.worktree_path.clone(),
             base_branch: base_branch.map(str::to_string),
-            created_by_start_work,
+            created_by_start_work: launch_kind.created_by_start_work(),
         },
         agent,
         now,
@@ -196,13 +220,12 @@ pub(super) fn save_workspace_launch_projection(
 
     gwt_core::workspace_projection::save_workspace_projection(project_root, &projection)
         .map_err(|error| error.to_string())?;
-    let work_event_kind = if workspace_resume_context.is_some() {
-        gwt_core::workspace_projection::WorkEventKind::Resume
-    } else {
-        gwt_core::workspace_projection::WorkEventKind::Start
-    };
-    let work_event =
-        workspace_work_event_from_launch_projection(&projection, session, work_event_kind, now);
+    let work_event = workspace_work_event_from_launch_projection(
+        &projection,
+        session,
+        launch_kind.work_event_kind(),
+        now,
+    );
     gwt_core::workspace_projection::record_workspace_work_event(project_root, work_event)
         .map_err(|error| error.to_string())
 }
