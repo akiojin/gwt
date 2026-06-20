@@ -14,7 +14,8 @@ use crate::{
     knowledge_bridge::{KnowledgeDetailView, KnowledgeKind, KnowledgeListItem},
     launch_wizard::{LaunchWizardAction, LaunchWizardView},
     persistence::{
-        CanvasViewport, PersistedWindowState, ProjectKind, WindowGeometry, WindowProcessStatus,
+        AgentKanbanLane, CanvasViewport, PersistedWindowState, ProjectKind, WindowGeometry,
+        WindowProcessStatus,
     },
     preset::WindowPreset,
     worktree_inventory::WorktreeEntry,
@@ -261,6 +262,31 @@ pub enum FrontendEvent {
     DetachWindowTab {
         id: String,
         geometry: WindowGeometry,
+    },
+    PlaceAgentWindowInKanban {
+        id: String,
+        board_id: String,
+        lane_id: AgentKanbanLane,
+        order: Option<u32>,
+    },
+    MoveAgentKanbanCard {
+        id: String,
+        board_id: String,
+        lane_id: AgentKanbanLane,
+        order: u32,
+    },
+    UndockAgentWindow {
+        id: String,
+        geometry: Option<WindowGeometry>,
+    },
+    SetAgentKanbanCardCollapsed {
+        id: String,
+        collapsed: bool,
+    },
+    UpdateTerminalGrid {
+        id: String,
+        cols: u16,
+        rows: u16,
     },
     ListWindows,
     UpdateWindowGeometry {
@@ -518,6 +544,14 @@ pub enum FrontendEvent {
         issue_number: u64,
     },
     OpenStartWork,
+    OpenStartWorkInAgentKanban {
+        board_id: String,
+        lane_id: AgentKanbanLane,
+    },
+    OpenAgentKanbanLaunchWizard {
+        board_id: String,
+        lane_id: AgentKanbanLane,
+    },
     ResumeWorkspace {
         source: WorkspaceResumeSource,
         #[serde(default)]
@@ -3085,6 +3119,24 @@ mod tests {
             matches!(event, FrontendEvent::OpenStartWork),
             "Start Work must be a global command, not a Branches window event"
         );
+    }
+
+    #[test]
+    fn frontend_event_accepts_agent_kanban_launch_wizard_command() {
+        let event: FrontendEvent = serde_json::from_value(serde_json::json!({
+            "kind": "open_agent_kanban_launch_wizard",
+            "board_id": "tab-1::agent-kanban-1",
+            "lane_id": "active",
+        }))
+        .expect("deserialize open_agent_kanban_launch_wizard");
+
+        assert!(matches!(
+            event,
+            FrontendEvent::OpenAgentKanbanLaunchWizard {
+                ref board_id,
+                lane_id: crate::AgentKanbanLane::Active,
+            } if board_id == "tab-1::agent-kanban-1"
+        ));
     }
 
     // SPEC-2785 US-1 AS-1 / FR-C: frontend → backend WS payload contract for

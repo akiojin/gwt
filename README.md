@@ -14,7 +14,8 @@ Issues, SPECs, search, and Board context rather than from branch management.
 ## Why gwt
 
 - **Agent workspace** — launch, resume, and monitor `Claude Code`, `Codex`,
-  `Gemini`, `OpenCode`, `Copilot`, and custom agents from a shared canvas.
+  `Antigravity CLI`, `Gemini CLI (legacy)`, `OpenCode`, `Copilot`, and custom
+  agents from a shared canvas.
 - **Shared Board** — keep user and agent communication in one repo-scoped
   timeline with `status`, `claim`, `next`, `blocked`, `handoff`, `decision`,
   and `question` posts.
@@ -93,6 +94,15 @@ curl -fsSL https://raw.githubusercontent.com/akiojin/gwt/main/installers/macos/u
 
 - `git` available in `PATH`
 - `gh auth login` completed for GitHub-backed features
+- Agent CLIs installed in `PATH` when you launch them from gwt. Antigravity CLI
+  is provided by Google's native `agy` command:
+
+  ```bash
+  curl -fsSL https://antigravity.google/cli/install.sh | bash
+  ```
+
+  Gemini CLI remains available in gwt as a legacy option for eligible
+  Standard/Enterprise or API-key workflows.
 - AI provider credentials when you use agents:
   - `ANTHROPIC_API_KEY` or `ANTHROPIC_AUTH_TOKEN`
   - `OPENAI_API_KEY`

@@ -19,10 +19,28 @@ export function createWorkspaceKanbanSurface({
 
   function ensureState(windowId) {
     if (!workspaceStateMap.has(windowId)) {
-      workspaceStateMap.set(windowId, { selectedId: null });
+      workspaceStateMap.set(windowId, {
+        selectedId: null,
+        filter: "all",
+      });
     }
     return workspaceStateMap.get(windowId);
   }
+
+  const WORKSPACE_FILTERS = Object.freeze([
+    { id: "all", label: "All" },
+    { id: "needs_attention", label: "Needs Attention" },
+    { id: "running", label: "Running" },
+    { id: "paused", label: "Paused" },
+    { id: "closed", label: "Closed" },
+  ]);
+
+  const ATTENTION_PRIORITY = Object.freeze({
+    needs_attention: 0,
+    running: 1,
+    paused: 2,
+    closed: 3,
+  });
 
   function compactText(value, fallback = "") {
     const text = String(value || "").replace(/\s+/g, " ").trim();
@@ -79,6 +97,67 @@ export function createWorkspaceKanbanSurface({
       default:
         return "Active";
     }
+  }
+
+  function attentionText(value) {
+    return compactText(value).toLowerCase();
+  }
+
+  function explicitAttentionReason(item) {
+    const blocked = compactText(item?.blocked_reason);
+    if (blocked) return blocked;
+    if (String(item?.status_category || "").toLowerCase() === "blocked") {
+      return compactText(item?.next_action || item?.status_text, "Resolve blocker");
+    }
+    if (Number(item?.blocked_agents) > 0) {
+      return compactText(item?.next_action || item?.status_text, "Resolve blocker");
+    }
+    const candidate = compactText(item?.next_action || item?.status_text || item?.summary);
+    if (!candidate) return "";
+    if (
+      /\b(question|request|requested|needs attention|verification pending|error|failed|failure|resolve blocker|blocked)\b/i
+        .test(candidate)
+    ) {
+      return candidate;
+    }
+    return "";
+  }
+
+  function attentionForWorkspace(item) {
+    const lifecycle = attentionText(item?.lifecycle_state || "");
+    const status = attentionText(item?.status_category || "");
+    if (
+      item?.done_equivalent ||
+      lifecycle === "done" ||
+      lifecycle === "discarded" ||
+      status === "done" ||
+      status === "discarded" ||
+      status === "closed" ||
+      status === "completed"
+    ) {
+      return {
+        lane: "closed",
+        label: "Closed",
+        reason: item?.done_equivalent ? "Merged with no updates" : formatLifecycleStateLabel(lifecycle),
+      };
+    }
+    const reason = explicitAttentionReason(item);
+    if (reason) {
+      return { lane: "needs_attention", label: "Needs Attention", reason };
+    }
+    if (
+      Number(item?.active_agents) > 0 ||
+      status === "active" ||
+      status === "running" ||
+      lifecycle === "active"
+    ) {
+      return { lane: "running", label: "Running", reason: compactText(item?.status_text) };
+    }
+    return {
+      lane: "paused",
+      label: "Paused",
+      reason: compactText(item?.next_action),
+    };
   }
 
   function compactPath(value) {
@@ -268,6 +347,55 @@ export function createWorkspaceKanbanSurface({
     return workspaces[0];
   }
 
+  function workspaceAttentionRank(item) {
+    const key = attentionForWorkspace(item).lane;
+    return ATTENTION_PRIORITY[key] ?? Number.MAX_SAFE_INTEGER;
+  }
+
+  function workspaceUpdatedAtMillis(item) {
+    const raw = item?.updated_at || item?.closed_at || "";
+    if (!raw) return 0;
+    const parsed = Date.parse(raw);
+    return Number.isFinite(parsed) ? parsed : 0;
+  }
+
+  function workspacesInListOrder(workspaces) {
+    return workspaces
+      .map((workspace, index) => ({ workspace, index }))
+      .sort((left, right) => {
+        const leftRank = workspaceAttentionRank(left.workspace);
+        const rightRank = workspaceAttentionRank(right.workspace);
+        if (leftRank !== rightRank) return leftRank - rightRank;
+        const leftUpdated = workspaceUpdatedAtMillis(left.workspace);
+        const rightUpdated = workspaceUpdatedAtMillis(right.workspace);
+        if (leftUpdated !== rightUpdated) return rightUpdated - leftUpdated;
+        return left.index - right.index;
+      })
+      .map((entry) => entry.workspace);
+  }
+
+  function filteredWorkspaces(workspaces, filter) {
+    if (!filter || filter === "all") return workspaces;
+    return workspaces.filter((workspace) => attentionForWorkspace(workspace).lane === filter);
+  }
+
+  function workspaceFilterCounts(workspaces) {
+    const counts = {
+      all: workspaces.length,
+      needs_attention: 0,
+      running: 0,
+      paused: 0,
+      closed: 0,
+    };
+    for (const workspace of workspaces) {
+      const key = attentionForWorkspace(workspace).lane;
+      if (Object.prototype.hasOwnProperty.call(counts, key)) {
+        counts[key] += 1;
+      }
+    }
+    return counts;
+  }
+
   function appendMetaText(container, value) {
     if (!value) return;
     appendMeta(container, value);
@@ -306,10 +434,13 @@ export function createWorkspaceKanbanSurface({
   }
 
   function renderWorkspaceRow(windowId, state, item) {
-    const row = createNode("button", "workspace-overview-row");
-    row.type = "button";
+    const row = createNode("div", "workspace-overview-row");
     row.dataset.workspaceId = item.id;
+    const attention = attentionForWorkspace(item);
+    row.dataset.attention = attention.lane;
     row.dataset.status = String(item.status_category || "idle").toLowerCase();
+    row.tabIndex = 0;
+    row.setAttribute("role", "option");
     row.setAttribute("aria-selected", state.selectedId === item.id ? "true" : "false");
 
     const status = createNode("span", "workspace-overview-status", statusLabel(item.status_category));
@@ -389,9 +520,38 @@ export function createWorkspaceKanbanSurface({
       meta.appendChild(prMeta);
     }
     copy.appendChild(meta);
+    if (attention.lane === "needs_attention" && attention.reason) {
+      copy.appendChild(createNode("span", "workspace-attention-reason", attention.reason));
+    }
+    if (
+      item.next_action &&
+      item.next_action !== attention.reason &&
+      attention.lane !== "paused"
+    ) {
+      copy.appendChild(createNode("span", "workspace-attention-next", item.next_action));
+    }
 
     row.appendChild(status);
     row.appendChild(copy);
+    const actions = createNode("span", "workspace-overview-row-actions");
+    const branch = item && item.branch ? String(item.branch) : "";
+    if (branch) {
+      const launch = createNode("button", "icon-button workspace-overview-row-action", "▶");
+      launch.type = "button";
+      launch.dataset.action = "launch-workspace-row";
+      launch.title = "Launch Agent";
+      launch.setAttribute("aria-label", `Launch Agent on ${branch}`);
+      launch.addEventListener("click", (event) => {
+        event.stopPropagation();
+        send({
+          kind: "open_launch_wizard",
+          id: windowId,
+          branch_name: branch,
+        });
+      });
+      actions.appendChild(launch);
+    }
+    row.appendChild(actions);
     row.addEventListener("click", () => {
       state.selectedId = item.id;
       renderWorkspaceOverviewWindow(windowId, true);
@@ -400,7 +560,63 @@ export function createWorkspaceKanbanSurface({
       // keyboard navigation keeps working after a mouse selection.
       focusSelectedWorkspaceRow(windowId);
     });
+    row.addEventListener("keydown", (event) => {
+      if (event.target?.closest?.("button")) return;
+      if (event.key !== "Enter" && event.key !== " ") return;
+      event.preventDefault?.();
+      row.click();
+    });
     return row;
+  }
+
+  function renderWorkspaceFilterBar(windowId, state, workspaces) {
+    const counts = workspaceFilterCounts(workspaces);
+    const bar = createNode("div", "workspace-overview-filter-bar");
+    const filters = createNode("div", "workspace-overview-filters");
+    for (const filter of WORKSPACE_FILTERS) {
+      const button = createNode("button", "workspace-overview-filter");
+      button.type = "button";
+      button.dataset.workspaceFilter = filter.id;
+      button.setAttribute("aria-pressed", state.filter === filter.id ? "true" : "false");
+      if (state.filter === filter.id) {
+        button.classList.add("is-active");
+      }
+      button.appendChild(createNode("span", "workspace-overview-filter-label", filter.label));
+      button.appendChild(
+        createNode(
+          "span",
+          "workspace-overview-filter-count",
+          String(counts[filter.id] || 0),
+        ),
+      );
+      button.addEventListener("click", () => {
+        state.filter = filter.id;
+        renderWorkspaceOverviewWindow(windowId, true);
+        const root = windowMap.get(windowId);
+        root
+          ?.querySelector?.(`[data-workspace-filter="${filter.id}"]`)
+          ?.focus?.();
+      });
+      filters.appendChild(button);
+    }
+    bar.appendChild(filters);
+    return bar;
+  }
+
+  function renderWorkspaceList(windowId, state, items) {
+    const list = createNode("div", "workspace-overview-list");
+    list.setAttribute("role", "listbox");
+    list.setAttribute("aria-label", "Workspaces");
+    if (items.length === 0) {
+      list.appendChild(
+        createNode("div", "workspace-overview-empty", "No Workspaces in this filter"),
+      );
+      return list;
+    }
+    for (const workspace of items) {
+      list.appendChild(renderWorkspaceRow(windowId, state, workspace));
+    }
+    return list;
   }
 
   function focusSelectedWorkspaceRow(windowId) {
@@ -1186,20 +1402,29 @@ export function createWorkspaceKanbanSurface({
 
     const workspaces = workspacesFromProjection(projection);
     const unassignedAgents = unassignedAgentsFromProjection(projection);
-    const selected = selectedWorkspace(state, workspaces);
+    const listOrder = workspacesInListOrder(workspaces);
+    if (!WORKSPACE_FILTERS.some((filter) => filter.id === state.filter)) {
+      state.filter = "all";
+    }
+    const visibleWorkspaces = filteredWorkspaces(listOrder, state.filter);
+    const selected = selectedWorkspace(state, visibleWorkspaces);
+    const needsAttentionCount = workspaces.filter(
+      (workspace) => attentionForWorkspace(workspace).lane === "needs_attention",
+    ).length;
 
     const status = root.querySelector(".workspace-overview-status-line");
     if (status) {
       status.textContent = projection
-        ? `${workspaces.length} Workspaces · ${unassignedAgents.length} Unassigned Agents`
+        ? `${workspaces.length} Workspaces · ${needsAttentionCount} Needs Attention · ${unassignedAgents.length} Unassigned Agents`
         : "No Workspace projection";
     }
 
-    const list = root.querySelector(".workspace-overview-list");
-    list.innerHTML = "";
+    const listPane = root.querySelector(".workspace-overview-list-pane");
+    listPane.innerHTML = "";
     if (workspaces.length === 0) {
-      list.appendChild(createNode("div", "workspace-overview-empty", "No Workspaces"));
+      listPane.appendChild(createNode("div", "workspace-overview-empty", "No Workspaces"));
     } else {
+      listPane.appendChild(renderWorkspaceFilterBar(windowId, state, listOrder));
       // User verification 2026-06-12 + SPEC-2359 US-78: completed local
       // branches need a BULK cleanup path, but only for backend-vetted row
       // candidates.
@@ -1220,16 +1445,12 @@ export function createWorkspaceKanbanSurface({
           ),
         );
         bulkRow.appendChild(bulk);
-        list.appendChild(bulkRow);
+        listPane.appendChild(bulkRow);
       }
-      for (const workspace of workspaces) {
-        list.appendChild(renderWorkspaceRow(windowId, state, workspace));
-      }
+      listPane.appendChild(renderWorkspaceList(windowId, state, visibleWorkspaces));
     }
 
-    const queue = root.querySelector("[data-role='workspace-agent-queue-slot']");
-    queue.innerHTML = "";
-    renderUnassignedQueue(queue, unassignedAgents);
+    renderUnassignedQueue(listPane, unassignedAgents);
 
     renderWorkspaceDetail(root.querySelector(".workspace-overview-detail-pane"), selected, windowId);
   }
@@ -1255,15 +1476,8 @@ export function createWorkspaceKanbanSurface({
     root.appendChild(toolbar);
 
     const workShell = createNode("div", "workspace-overview-shell");
-    const listPane = createNode("aside", "workspace-overview-list-pane");
+    const listPane = createNode("section", "workspace-overview-list-pane");
     listPane.setAttribute("aria-label", "Workspace list");
-    listPane.appendChild(createNode("div", "workspace-overview-section-label", "Workspaces"));
-    const listBox = createNode("div", "workspace-overview-list");
-    listBox.setAttribute("role", "listbox");
-    listPane.appendChild(listBox);
-    const queueSlot = createNode("div");
-    queueSlot.dataset.role = "workspace-agent-queue-slot";
-    listPane.appendChild(queueSlot);
     workShell.appendChild(listPane);
     const detailPane = createNode("main", "workspace-overview-detail-pane");
     detailPane.setAttribute("aria-label", "Work detail");

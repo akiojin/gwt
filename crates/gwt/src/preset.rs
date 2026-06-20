@@ -9,6 +9,7 @@ pub enum WindowPreset {
     Claude,
     Codex,
     Agent,
+    AgentKanban,
     FileTree,
     Branches,
     Settings,
@@ -42,6 +43,7 @@ pub enum WindowSurface {
     Knowledge,
     Index,
     Work,
+    AgentKanban,
     Console,
     Mock,
 }
@@ -62,6 +64,7 @@ impl WindowSurface {
             Self::Knowledge => "knowledge",
             Self::Index => "index",
             Self::Work => "work",
+            Self::AgentKanban => "agent-kanban",
             Self::Console => "console",
             Self::Mock => "mock",
         }
@@ -69,10 +72,11 @@ impl WindowSurface {
 }
 
 impl WindowPreset {
-    pub const ALL: [WindowPreset; 15] = [
+    pub const ALL: [WindowPreset; 16] = [
         WindowPreset::Shell,
         WindowPreset::Claude,
         WindowPreset::Codex,
+        WindowPreset::AgentKanban,
         WindowPreset::FileTree,
         WindowPreset::Branches,
         WindowPreset::Settings,
@@ -93,6 +97,7 @@ impl WindowPreset {
             Self::Claude => "Claude",
             Self::Codex => "Codex",
             Self::Agent => "Agent",
+            Self::AgentKanban => "Agent Kanban",
             Self::FileTree => "File Tree",
             Self::Branches => "Branches",
             Self::Settings => "Settings",
@@ -115,6 +120,7 @@ impl WindowPreset {
             Self::Claude => "Start the Claude CLI when available",
             Self::Codex => "Start the Codex CLI when available",
             Self::Agent => "Start a wizard-launched agent terminal",
+            Self::AgentKanban => "Organize live agent windows by lane",
             Self::FileTree => "Browse repository files in a read-only tree",
             Self::Branches => "Browse repository branches and launch agents",
             Self::Settings => "Manage custom agents and launch presets",
@@ -137,6 +143,7 @@ impl WindowPreset {
             Self::Claude => "claude",
             Self::Codex => "codex",
             Self::Agent => "agent",
+            Self::AgentKanban => "agent-kanban",
             Self::FileTree => "file-tree",
             Self::Branches => "branches",
             Self::Settings => "settings",
@@ -156,6 +163,7 @@ impl WindowPreset {
     pub fn surface(self) -> WindowSurface {
         match self {
             Self::Shell | Self::Claude | Self::Codex | Self::Agent => WindowSurface::Terminal,
+            Self::AgentKanban => WindowSurface::AgentKanban,
             Self::FileTree => WindowSurface::FileTree,
             Self::Branches => WindowSurface::Branches,
             Self::Memo => WindowSurface::Mock,
@@ -174,6 +182,10 @@ impl WindowPreset {
         matches!(self.surface(), WindowSurface::Terminal)
     }
 
+    pub fn is_agent_terminal(self) -> bool {
+        matches!(self, Self::Agent | Self::Claude | Self::Codex)
+    }
+
     pub fn default_size(self) -> (f64, f64) {
         let _ = self;
         (720.0, 420.0)
@@ -190,6 +202,7 @@ impl WindowPreset {
             Self::Claude => Some("claude"),
             Self::Codex => Some("codex"),
             Self::Agent => None,
+            Self::AgentKanban => None,
             Self::FileTree
             | Self::Branches
             | Self::Settings
@@ -336,6 +349,7 @@ where
             })
         }
         WindowPreset::Agent
+        | WindowPreset::AgentKanban
         | WindowPreset::FileTree
         | WindowPreset::Branches
         | WindowPreset::Settings
@@ -467,16 +481,22 @@ mod tests {
 
     #[test]
     fn preset_metadata_exposes_titles_prefixes_and_defaults() {
-        assert_eq!(WindowPreset::ALL.len(), 15);
+        assert_eq!(WindowPreset::ALL.len(), 16);
         assert_eq!(WindowPreset::Issue.title(), "Issue");
         assert_eq!(WindowPreset::Spec.title(), "SPEC");
+        assert_eq!(WindowPreset::AgentKanban.title(), "Agent Kanban");
         assert_eq!(WindowPreset::Work.title(), "Workspace");
         assert_eq!(WindowPreset::Index.title(), "Index");
         assert_eq!(WindowPreset::Pr.title(), "PR");
+        assert_eq!(WindowPreset::AgentKanban.id_prefix(), "agent-kanban");
         assert_eq!(WindowPreset::Board.id_prefix(), "board");
         assert_eq!(WindowPreset::Work.id_prefix(), "work");
         assert_eq!(WindowPreset::Index.id_prefix(), "index");
         assert_eq!(WindowPreset::Agent.id_prefix(), "agent");
+        assert_eq!(
+            WindowPreset::AgentKanban.surface(),
+            WindowSurface::AgentKanban
+        );
         assert_eq!(WindowPreset::Profile.surface(), WindowSurface::Profile);
         assert_eq!(WindowPreset::Board.surface(), WindowSurface::Board);
         assert_eq!(WindowPreset::Logs.surface(), WindowSurface::Logs);
@@ -579,6 +599,11 @@ mod tests {
                     assert!(preset.requires_process());
                     assert_eq!(preset.command_name(), Some("codex"));
                 }
+                WindowPreset::AgentKanban => {
+                    assert_eq!(preset.surface(), WindowSurface::AgentKanban);
+                    assert!(!preset.requires_process());
+                    assert_eq!(preset.command_name(), None);
+                }
                 WindowPreset::FileTree => {
                     assert_eq!(preset.surface(), WindowSurface::FileTree);
                     assert!(!preset.requires_process());
@@ -637,6 +662,10 @@ mod tests {
 
         assert_eq!(WindowPreset::Agent.surface(), WindowSurface::Terminal);
         assert!(WindowPreset::Agent.requires_process());
+        assert!(WindowPreset::Agent.is_agent_terminal());
+        assert!(WindowPreset::Claude.is_agent_terminal());
+        assert!(WindowPreset::Codex.is_agent_terminal());
+        assert!(!WindowPreset::Shell.is_agent_terminal());
         assert_eq!(WindowPreset::Agent.command_name(), None);
         assert_eq!(WindowPreset::Agent.default_size(), (720.0, 420.0));
     }

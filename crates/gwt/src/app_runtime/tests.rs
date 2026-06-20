@@ -18,7 +18,7 @@ use gwt::{
     BackendEvent, BranchCleanupInfo, BranchListEntry, BranchScope, ContentLimits,
     FocusCycleDirection, FrontendEvent, LaunchWizardAction, LaunchWizardContext, LaunchWizardState,
     ProfileEnvEntryView, ProjectKind, UiTracePayload, WindowCanvasState, WindowGeometry,
-    WindowPreset, WindowProcessStatus,
+    WindowPlacement, WindowPreset, WindowProcessStatus,
 };
 use gwt_config::{Profile, Settings};
 use gwt_core::{
@@ -40,10 +40,11 @@ use tracing_subscriber::{layer::Context, prelude::*, Layer};
 use super::{
     active_work_projection_from_saved, dispatch_agent_launch_success,
     save_start_work_workspace_projection, save_workspace_launch_projection, ActiveAgentSession,
-    AgentLaunchCompletion, AppEventProxy, AppRuntime, AttachmentProgressPhase, BlockingTaskSpawner,
-    DispatchTarget, KnowledgeLoadRequest, KnowledgeRefreshTask, KnowledgeSearchRequest,
-    LaunchWizardMemoryCache, LaunchWizardSession, OutboundEvent, ProcessLaunch, ProjectTabRuntime,
-    UserEvent, WindowRuntime, WorkspaceResumeContext,
+    AgentKanbanLaunchTarget, AgentLaunchCompletion, AppEventProxy, AppRuntime,
+    AttachmentProgressPhase, BlockingTaskSpawner, DispatchTarget, KnowledgeLoadRequest,
+    KnowledgeRefreshTask, KnowledgeSearchRequest, LaunchFeedbackContext, LaunchWizardMemoryCache,
+    LaunchWizardSession, OutboundEvent, ProcessLaunch, ProjectTabRuntime, UserEvent, WindowRuntime,
+    WorkspaceResumeContext,
 };
 use crate::{
     combined_window_id, geometry_to_pty_size, same_worktree_path, AttachmentUploadStore,
@@ -447,6 +448,7 @@ fn sample_window(
         minimized: false,
         maximized: false,
         pre_maximize_geometry: None,
+        placement: WindowPlacement::Canvas,
         persist: true,
         purpose_title: None,
         dynamic_title: None,
@@ -2095,6 +2097,7 @@ fn sample_launch_wizard_session(tab_id: &str, project_root: &Path) -> LaunchWiza
             Vec::new(),
         ),
         workspace_resume_context: None,
+        agent_kanban_target: None,
     }
 }
 
@@ -2245,6 +2248,7 @@ fn sample_no_agent_launch_wizard_session(tab_id: &str, project_root: &Path) -> L
             Vec::new(),
         ),
         workspace_resume_context: None,
+        agent_kanban_target: None,
     }
 }
 
@@ -2284,6 +2288,7 @@ fn sample_ready_agent_launch_wizard_session(
             Vec::new(),
         ),
         workspace_resume_context: None,
+        agent_kanban_target: None,
     }
 }
 
@@ -2719,6 +2724,249 @@ fn app_runtime_dock_window_tab_resizes_group_runtimes() {
             .expect("pane");
         assert_eq!(pane.screen().size(), (expected_rows, expected_cols));
     }
+}
+
+#[test]
+fn app_runtime_places_agent_window_in_kanban_from_frontend_event() {
+    let temp = tempdir().expect("tempdir");
+    let tab = sample_project_tab(
+        "tab-1",
+        "Repo",
+        temp.path().to_path_buf(),
+        ProjectKind::Git,
+        &[WindowPreset::AgentKanban, WindowPreset::Agent],
+    );
+    let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+    let agent_id = combined_window_id("tab-1", "agent-1");
+    let board_id = combined_window_id("tab-1", "agent-kanban-1");
+
+    let events = runtime.handle_frontend_event(
+        "client-1".to_string(),
+        FrontendEvent::PlaceAgentWindowInKanban {
+            id: agent_id,
+            board_id,
+            lane_id: gwt::AgentKanbanLane::Active,
+            order: None,
+        },
+    );
+
+    assert!(
+        events
+            .iter()
+            .any(|event| matches!(event.event, BackendEvent::WindowCanvasState { .. })),
+        "Kanban placement must broadcast workspace state"
+    );
+    let agent = runtime
+        .tab("tab-1")
+        .expect("tab")
+        .workspace
+        .window("agent-1")
+        .expect("agent");
+    assert_eq!(
+        agent.placement,
+        WindowPlacement::AgentKanban {
+            board_id: "agent-kanban-1".to_string(),
+            lane_id: gwt::AgentKanbanLane::Active,
+            order: 0,
+            collapsed: false,
+        }
+    );
+}
+
+#[test]
+fn app_runtime_open_agent_kanban_launch_wizard_records_launch_target() {
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedEnvVar::set("HOME", temp.path());
+    let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+    let repo = temp.path().join("repo");
+    fs::create_dir_all(&repo).expect("create repo");
+    init_repo(&repo);
+    let tab = sample_project_tab(
+        "tab-1",
+        "Repo",
+        repo,
+        ProjectKind::Git,
+        &[WindowPreset::AgentKanban],
+    );
+    let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+    let board_id = combined_window_id("tab-1", "agent-kanban-1");
+
+    let events = runtime.handle_frontend_event(
+        "client-1".to_string(),
+        FrontendEvent::OpenAgentKanbanLaunchWizard {
+            board_id,
+            lane_id: gwt::AgentKanbanLane::Blocked,
+        },
+    );
+
+    assert!(
+        events
+            .iter()
+            .any(|event| matches!(event.event, BackendEvent::LaunchWizardState { .. })),
+        "Kanban Launch Agent must open the normal Launch Agent wizard"
+    );
+    let session = runtime.launch_wizard.as_ref().expect("launch wizard");
+    let view = session.wizard.view();
+    assert_eq!(view.title, "Launch Agent");
+    assert_ne!(
+        view.mode,
+        gwt::LaunchWizardMode::StartWork,
+        "Kanban Launch Agent must not require Start Work branch materialization"
+    );
+    let target = session
+        .agent_kanban_target
+        .as_ref()
+        .expect("agent kanban launch target");
+    assert_eq!(target.board_id, "agent-kanban-1");
+    assert_eq!(target.lane_id, gwt::AgentKanbanLane::Blocked);
+}
+
+#[test]
+fn app_runtime_spawn_agent_window_in_agent_kanban_places_new_window() {
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedEnvVar::set("HOME", temp.path());
+    let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+    let repo = temp.path().join("repo");
+    fs::create_dir_all(&repo).expect("create repo");
+    init_repo(&repo);
+    let tab = sample_project_tab(
+        "tab-1",
+        "Repo",
+        repo,
+        ProjectKind::Git,
+        &[WindowPreset::AgentKanban],
+    );
+    let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+    let config = gwt_agent::AgentLaunchBuilder::new(gwt_agent::AgentId::Codex)
+        .branch("work/20260619-kanban")
+        .build();
+
+    runtime
+        .spawn_agent_window_in_agent_kanban(
+            "tab-1",
+            config,
+            canvas_bounds(),
+            None,
+            None,
+            AgentKanbanLaunchTarget {
+                board_id: "agent-kanban-1".to_string(),
+                lane_id: gwt::AgentKanbanLane::Active,
+            },
+        )
+        .expect("spawn agent in kanban");
+
+    let agent = runtime
+        .tab("tab-1")
+        .expect("tab")
+        .workspace
+        .persisted()
+        .windows
+        .iter()
+        .find(|window| window.preset == WindowPreset::Agent)
+        .expect("agent window");
+    assert_eq!(
+        agent.placement,
+        WindowPlacement::AgentKanban {
+            board_id: "agent-kanban-1".to_string(),
+            lane_id: gwt::AgentKanbanLane::Active,
+            order: 0,
+            collapsed: false,
+        }
+    );
+}
+
+#[test]
+fn app_runtime_spawn_agent_window_in_agent_kanban_falls_back_to_canvas_when_board_missing() {
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedEnvVar::set("HOME", temp.path());
+    let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+    let repo = temp.path().join("repo");
+    fs::create_dir_all(&repo).expect("create repo");
+    init_repo(&repo);
+    let tab = sample_project_tab(
+        "tab-1",
+        "Repo",
+        repo,
+        ProjectKind::Git,
+        &[WindowPreset::AgentKanban],
+    );
+    let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+    let config = gwt_agent::AgentLaunchBuilder::new(gwt_agent::AgentId::Codex)
+        .branch("work/20260619-kanban-fallback")
+        .build();
+
+    runtime
+        .spawn_agent_window_in_agent_kanban(
+            "tab-1",
+            config,
+            canvas_bounds(),
+            None,
+            None,
+            AgentKanbanLaunchTarget {
+                board_id: "missing-board".to_string(),
+                lane_id: gwt::AgentKanbanLane::Active,
+            },
+        )
+        .expect("spawn agent even when kanban placement is unavailable");
+
+    let agent = runtime
+        .tab("tab-1")
+        .expect("tab")
+        .workspace
+        .persisted()
+        .windows
+        .iter()
+        .find(|window| window.preset == WindowPreset::Agent)
+        .expect("agent window");
+    assert_eq!(agent.placement, WindowPlacement::Canvas);
+}
+
+#[test]
+fn app_runtime_update_terminal_grid_resizes_runtime_without_workspace_broadcast() {
+    let temp = tempdir().expect("tempdir");
+    let tab = sample_project_tab(
+        "tab-1",
+        "Repo",
+        temp.path().to_path_buf(),
+        ProjectKind::Git,
+        &[WindowPreset::Agent],
+    );
+    let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+    let agent_id = combined_window_id("tab-1", "agent-1");
+    insert_test_pane_runtime(&mut runtime, &agent_id);
+
+    let events = runtime.handle_frontend_event(
+        "client-1".to_string(),
+        FrontendEvent::UpdateTerminalGrid {
+            id: agent_id.clone(),
+            cols: 112,
+            rows: 34,
+        },
+    );
+
+    assert!(
+        events
+            .iter()
+            .all(|event| !matches!(event.event, BackendEvent::WindowCanvasState { .. })),
+        "embedded terminal grid resize must not mutate canvas geometry"
+    );
+    let pane = runtime
+        .runtimes
+        .get(&agent_id)
+        .expect("runtime")
+        .pane
+        .lock()
+        .expect("pane");
+    assert_eq!(pane.screen().size(), (34, 112));
 }
 
 #[test]
@@ -3942,6 +4190,45 @@ fn app_runtime_workspace_state_normalizes_pre_lifecycle_agent_windows() {
 }
 
 #[test]
+fn app_runtime_workspace_state_normalizes_agent_kanban_board_ids() {
+    let temp = tempdir().expect("tempdir");
+    let mut tab = sample_project_tab(
+        "tab-1",
+        "Repo",
+        PathBuf::from("E:/gwt/test-repo"),
+        ProjectKind::Git,
+        &[WindowPreset::AgentKanban, WindowPreset::Agent],
+    );
+    assert!(tab.workspace.place_agent_window_in_kanban(
+        "agent-1",
+        "agent-kanban-1",
+        gwt::AgentKanbanLane::Active,
+        None,
+    ));
+    let runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+
+    let view = runtime.app_state_view();
+    let tab = view.tabs.iter().find(|tab| tab.id == "tab-1").unwrap();
+    let agent = tab
+        .workspace
+        .windows
+        .iter()
+        .find(|window| window.id == "tab-1::agent-1")
+        .expect("agent window");
+
+    assert_eq!(
+        agent.placement,
+        WindowPlacement::AgentKanban {
+            board_id: "tab-1::agent-kanban-1".to_string(),
+            lane_id: gwt::AgentKanbanLane::Active,
+            order: 0,
+            collapsed: false,
+        },
+        "workspace wire state must use the same combined IDs for windows and Kanban board references"
+    );
+}
+
+#[test]
 fn app_runtime_window_list_normalizes_pre_lifecycle_agent_windows() {
     let temp = tempdir().expect("tempdir");
     let tab = sample_project_tab_with_window(
@@ -4506,6 +4793,91 @@ fn app_runtime_agent_launch_completion_failure_writes_diagnostic_to_terminal() {
         diagnostic.contains("launch failed before process spawn"),
         "diagnostic must include the launch error detail: {diagnostic:?}"
     );
+}
+
+#[test]
+fn app_runtime_antigravity_missing_binary_launch_error_is_actionable() {
+    let temp = tempdir().expect("tempdir");
+    let tab = sample_project_tab_with_window(
+        "tab-1",
+        "agent-1",
+        WindowPreset::Agent,
+        WindowProcessStatus::Running,
+    );
+    let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+    let window_id = combined_window_id("tab-1", "agent-1");
+    let raw_error = "PTY creation failed: Unable to spawn agy because: \
+No viable candidates found in PATH \
+\"/private/var/folders/tmp/node_modules/.bin:/opt/homebrew/bin:/Users/example/.local/bin\"";
+
+    let events = runtime.handle_launch_complete(window_id.clone(), Err(raw_error.to_string()));
+
+    let detail = events
+        .iter()
+        .find_map(|event| match &event.event {
+            BackendEvent::TerminalStatus { id, status, detail }
+                if id == &window_id && *status == WindowProcessStatus::Error =>
+            {
+                detail.as_deref()
+            }
+            _ => None,
+        })
+        .expect("terminal status detail");
+    assert!(detail.contains("Antigravity CLI (`agy`) was not found"));
+    assert!(detail.contains("https://antigravity.google/cli/install.sh"));
+    assert!(detail.contains("~/.local/bin"));
+    assert!(!detail.contains("No viable candidates found in PATH"));
+    assert!(!detail.contains("/private/var/folders"));
+
+    let diagnostic = events
+        .iter()
+        .find_map(|event| match &event.event {
+            BackendEvent::TerminalOutput { id, data_base64 } if id == &window_id => {
+                let decoded = base64::engine::general_purpose::STANDARD
+                    .decode(data_base64)
+                    .expect("decode terminal diagnostic");
+                Some(String::from_utf8_lossy(&decoded).to_string())
+            }
+            _ => None,
+        })
+        .expect("launch failure diagnostic terminal output");
+    assert!(diagnostic.contains("Antigravity CLI (`agy`) was not found"));
+    assert!(diagnostic.contains("https://antigravity.google/cli/install.sh"));
+    assert!(!diagnostic.contains("No viable candidates found in PATH"));
+    assert!(!diagnostic.contains("node_modules/.bin"));
+}
+
+#[test]
+fn app_runtime_antigravity_missing_binary_launch_wizard_error_is_actionable() {
+    let temp = tempdir().expect("tempdir");
+    let mut runtime = sample_runtime(temp.path(), Vec::new(), None);
+    let raw_error = "PTY creation failed: Unable to spawn agy because: \
+No viable candidates found in PATH \
+\"/private/var/folders/tmp/node_modules/.bin:/opt/homebrew/bin:/Users/example/.local/bin\"";
+
+    let events = runtime.launch_error_events(
+        "tab-1::agent-1".to_string(),
+        raw_error.to_string(),
+        Some(LaunchFeedbackContext {
+            client_id: "client-1".to_string(),
+            title: "Launch failed".to_string(),
+        }),
+    );
+
+    let message = events
+        .iter()
+        .find_map(|event| match &event.event {
+            BackendEvent::LaunchWizardOpenError { title, message } if title == "Launch failed" => {
+                Some(message.as_str())
+            }
+            _ => None,
+        })
+        .expect("launch wizard open error");
+    assert!(message.contains("Antigravity CLI (`agy`) was not found"));
+    assert!(message.contains("https://antigravity.google/cli/install.sh"));
+    assert!(message.contains("~/.local/bin"));
+    assert!(!message.contains("No viable candidates found in PATH"));
+    assert!(!message.contains("/private/var/folders"));
 }
 
 #[test]
@@ -6154,7 +6526,7 @@ fn app_runtime_launch_failure_log_redacts_sensitive_error_values() {
 }
 
 #[test]
-fn app_runtime_runtime_status_stopped_auto_closes_active_agent_window() {
+fn app_runtime_runtime_status_stopped_keeps_active_agent_window_for_diagnostics() {
     let _env_lock = env_test_lock()
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -6180,21 +6552,21 @@ fn app_runtime_runtime_status_stopped_auto_closes_active_agent_window() {
         Some("Process exited".to_string()),
     );
 
-    // SPEC-2359 Phase W-15 (FR-382): the stop records a Pause work item, and
-    // the surface must update without a saved current.json or live agents —
-    // so the projection broadcast accompanies the WindowCanvasState event.
-    assert_eq!(events.len(), 2);
-    assert!(matches!(
-        events[0].event,
-        BackendEvent::WindowCanvasState { .. }
-    ));
-    assert!(matches!(
-        events[1].event,
-        BackendEvent::ActiveWorkProjection { .. }
-    ));
+    assert!(
+        events
+            .iter()
+            .any(|event| matches!(event.event, BackendEvent::TerminalStatus { .. })),
+        "PTY stop must still update the terminal status"
+    );
+    assert!(
+        runtime.window_lookup.contains_key(&window_id),
+        "PTY stop alone must keep the agent window open so diagnostics remain visible"
+    );
+    assert!(
+        runtime.tabs[0].workspace.window("codex-1").is_some(),
+        "workspace must retain the stopped agent window"
+    );
     assert!(!runtime.active_agent_sessions.contains_key(&window_id));
-    assert!(!runtime.window_lookup.contains_key(&window_id));
-    assert!(runtime.tabs[0].workspace.window("codex-1").is_none());
 }
 
 #[test]

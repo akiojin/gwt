@@ -68,9 +68,9 @@ use super::{
     workspace_projection_for_current_resume, workspace_resume_branch_exists,
     workspace_resume_branch_from_journal_project_root, workspace_resume_context_for_work_item,
     workspace_resume_context_from_journal, workspace_resume_context_from_projection,
-    workspace_resume_owner_issue_number, AppEventProxy, AppRuntime, BackendEvent,
-    IssueLaunchWizardPrepared, LaunchFeedbackContext, LaunchWizardMemoryCache, LaunchWizardSession,
-    OutboundEvent, WindowPreset, WindowProcessStatus, WorkspaceResumeContext,
+    workspace_resume_owner_issue_number, AgentKanbanLaunchTarget, AppEventProxy, AppRuntime,
+    BackendEvent, IssueLaunchWizardPrepared, LaunchFeedbackContext, LaunchWizardMemoryCache,
+    LaunchWizardSession, OutboundEvent, WindowPreset, WindowProcessStatus, WorkspaceResumeContext,
     WORKSPACE_OVERVIEW_JOURNAL_LIMIT,
 };
 use crate::usable_worktree_path_for_branch;
@@ -218,6 +218,7 @@ impl AppRuntime {
             wizard_id,
             wizard,
             workspace_resume_context,
+            agent_kanban_target: None,
         });
 
         Ok(())
@@ -267,6 +268,7 @@ impl AppRuntime {
             wizard_id,
             wizard,
             workspace_resume_context: None,
+            agent_kanban_target: None,
         });
 
         Ok(())
@@ -342,6 +344,113 @@ impl AppRuntime {
         match self.open_start_work_for_project(&tab_id, &project_root) {
             Ok(()) => vec![self.launch_wizard_state_outbound()],
             Err(error) => start_work_open_error(client_id, error),
+        }
+    }
+
+    pub(crate) fn open_start_work_in_agent_kanban(
+        &mut self,
+        client_id: &str,
+        board_id: &str,
+        lane_id: gwt::AgentKanbanLane,
+    ) -> Vec<OutboundEvent> {
+        let Some(address) = self.window_lookup.get(board_id).cloned() else {
+            return start_work_open_error(client_id, "Window not found");
+        };
+        let Some(tab) = self.tab(&address.tab_id) else {
+            return start_work_open_error(client_id, "Project tab not found");
+        };
+        if tab.kind != gwt::ProjectKind::Git {
+            return start_work_open_error(client_id, "Start Work requires a Git project");
+        }
+        if tab.migration_pending {
+            return start_work_open_error(
+                client_id,
+                "Complete the project migration before starting work",
+            );
+        }
+        let Some(board_window) = tab.workspace.window(&address.raw_id) else {
+            return start_work_open_error(client_id, "Window not found");
+        };
+        if board_window.preset != gwt::WindowPreset::AgentKanban {
+            return start_work_open_error(
+                client_id,
+                format!(
+                    "Window preset {:?} is not an Agent Kanban surface",
+                    board_window.preset
+                ),
+            );
+        }
+
+        let tab_id = address.tab_id.clone();
+        let project_root = tab.project_root.clone();
+        match self.open_start_work_for_project(&tab_id, &project_root) {
+            Ok(()) => {
+                if let Some(session) = self.launch_wizard.as_mut() {
+                    session.agent_kanban_target = Some(AgentKanbanLaunchTarget {
+                        board_id: address.raw_id,
+                        lane_id,
+                    });
+                }
+                self.active_tab_id = Some(tab_id);
+                vec![self.launch_wizard_state_outbound()]
+            }
+            Err(error) => start_work_open_error(client_id, error),
+        }
+    }
+
+    pub(crate) fn open_agent_kanban_launch_wizard(
+        &mut self,
+        client_id: &str,
+        board_id: &str,
+        lane_id: gwt::AgentKanbanLane,
+    ) -> Vec<OutboundEvent> {
+        let Some(address) = self.window_lookup.get(board_id).cloned() else {
+            return launch_agent_open_error(client_id, "Window not found");
+        };
+        let Some(tab) = self.tab(&address.tab_id) else {
+            return launch_agent_open_error(client_id, "Project tab not found");
+        };
+        if tab.kind != gwt::ProjectKind::Git {
+            return launch_agent_open_error(client_id, "Launch Agent requires a Git project");
+        }
+        if tab.migration_pending {
+            return launch_agent_open_error(
+                client_id,
+                "Complete the project migration before launching an agent",
+            );
+        }
+        let Some(board_window) = tab.workspace.window(&address.raw_id) else {
+            return launch_agent_open_error(client_id, "Window not found");
+        };
+        if board_window.preset != gwt::WindowPreset::AgentKanban {
+            return launch_agent_open_error(
+                client_id,
+                format!(
+                    "Window preset {:?} is not an Agent Kanban surface",
+                    board_window.preset
+                ),
+            );
+        }
+
+        let tab_id = address.tab_id.clone();
+        let project_root = tab.project_root.clone();
+        let branch_name = match current_branch_name_for_launch_agent(&project_root) {
+            Ok(branch_name) => branch_name,
+            Err(error) => return launch_agent_open_error(client_id, error),
+        };
+        match self.open_launch_wizard_for_branch(&tab_id, &project_root, &branch_name, None, None) {
+            Ok(()) => {
+                if let Some(session) = self.launch_wizard.as_mut() {
+                    session.agent_kanban_target = Some(AgentKanbanLaunchTarget {
+                        board_id: address.raw_id,
+                        lane_id,
+                    });
+                    session.wizard.launch_path = LaunchWizardLaunchPath::ManualSetup;
+                }
+                self.active_tab_id = Some(tab_id);
+                vec![self.launch_wizard_state_outbound()]
+            }
+            Err(error) => launch_agent_open_error(client_id, error),
         }
     }
 
@@ -1096,6 +1205,7 @@ impl AppRuntime {
             wizard_id,
             wizard,
             workspace_resume_context,
+            agent_kanban_target: None,
         });
 
         Ok(())
@@ -1395,23 +1505,32 @@ impl AppRuntime {
                                     "Launch Agent".to_string()
                                 },
                             });
-                        let spawn_result =
-                            if let Some(launch_feedback_context) = launch_feedback_context {
-                                self.spawn_agent_window_with_feedback(
-                                    &session.tab_id,
-                                    *config,
-                                    bounds,
-                                    workspace_resume_context,
-                                    launch_feedback_context,
-                                )
-                            } else {
-                                self.spawn_agent_window(
-                                    &session.tab_id,
-                                    *config,
-                                    bounds,
-                                    workspace_resume_context,
-                                )
-                            };
+                        let spawn_result = if let Some(target) = session.agent_kanban_target.clone()
+                        {
+                            self.spawn_agent_window_in_agent_kanban(
+                                &session.tab_id,
+                                *config,
+                                bounds,
+                                workspace_resume_context,
+                                launch_feedback_context,
+                                target,
+                            )
+                        } else if let Some(launch_feedback_context) = launch_feedback_context {
+                            self.spawn_agent_window_with_feedback(
+                                &session.tab_id,
+                                *config,
+                                bounds,
+                                workspace_resume_context,
+                                launch_feedback_context,
+                            )
+                        } else {
+                            self.spawn_agent_window(
+                                &session.tab_id,
+                                *config,
+                                bounds,
+                                workspace_resume_context,
+                            )
+                        };
                         match spawn_result {
                             Ok(mut events) => {
                                 events.insert(0, self.launch_wizard_state_broadcast(None));
@@ -1539,6 +1658,21 @@ fn launch_runtime_context_paths(
         return (default_worktree_path, None);
     }
     (project_root.to_path_buf(), None)
+}
+
+fn current_branch_name_for_launch_agent(project_root: &Path) -> Result<String, String> {
+    let repository = gwt_git::Repository::open(project_root)
+        .map_err(|error| format!("Current branch is unavailable: {error}"))?;
+    let branch = repository
+        .current_branch()
+        .map_err(|error| format!("Current branch is unavailable: {error}"))?
+        .ok_or_else(|| "Launch Agent requires a checked-out branch".to_string())?;
+    let branch = normalize_branch_name(&branch);
+    if branch.is_empty() {
+        Err("Launch Agent requires a checked-out branch".to_string())
+    } else {
+        Ok(branch)
+    }
 }
 
 fn launch_runtime_worktrees(project_root: &Path) -> Option<Vec<gwt_git::WorktreeInfo>> {

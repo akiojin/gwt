@@ -1496,6 +1496,7 @@ mod tests {
             minimized: false,
             maximized: false,
             pre_maximize_geometry: None,
+            placement: gwt::WindowPlacement::Canvas,
             persist: true,
             purpose_title: None,
             dynamic_title: None,
@@ -2328,6 +2329,7 @@ mod tests {
                 Vec::new(),
             ),
             workspace_resume_context: None,
+            agent_kanban_target: None,
         }
     }
 
@@ -2440,6 +2442,7 @@ mod tests {
                 vec![sample_wizard_quick_start_entry(live_window_id)],
             ),
             workspace_resume_context: None,
+            agent_kanban_target: None,
         }
     }
 
@@ -3462,16 +3465,26 @@ mod tests {
             WindowProcessStatus::Exited,
             Some("Process exited".to_string()),
         );
-        // SPEC-2359 Phase W-15 (FR-382): the stop records a Pause work item,
-        // so the structural close now also broadcasts the work projection
-        // (the surface must update without a saved current.json).
-        assert_eq!(close_events.len(), 2);
+        // PTY exit alone keeps the window open so launch diagnostics remain
+        // visible; explicit hook stop owns structural auto-close.
+        assert_eq!(close_events.len(), 3);
         assert!(matches!(
-            close_events[1].event,
+            close_events[0].event,
             BackendEvent::ActiveWorkProjection { .. }
         ));
+        assert!(matches!(
+            close_events[1].event,
+            BackendEvent::WindowState { ref window_id, state }
+                if window_id == &claude_two_id && state == WindowProcessStatus::Stopped
+        ));
+        assert!(matches!(
+            close_events[2].event,
+            BackendEvent::TerminalStatus { ref status, ref detail, .. }
+                if *status == WindowProcessStatus::Stopped
+                    && detail.as_deref() == Some("Process exited")
+        ));
         assert!(!runtime.active_agent_sessions.contains_key(&claude_two_id));
-        assert!(!runtime.window_lookup.contains_key(&claude_two_id));
+        assert!(runtime.window_lookup.contains_key(&claude_two_id));
 
         let failed_launch = runtime.handle_launch_complete(
             "tab-1::missing".to_string(),
@@ -4289,6 +4302,7 @@ mod tests {
                 Vec::new(),
             ),
             workspace_resume_context: None,
+            agent_kanban_target: None,
         });
         {
             let wizard = &mut runtime.launch_wizard.as_mut().unwrap().wizard;

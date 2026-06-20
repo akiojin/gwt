@@ -37,9 +37,9 @@ use super::{
     refresh_managed_gwt_assets_for_agent_with_codex_hook_discovery_mode,
     resolve_docker_launch_plan, resolve_launch_spec_with_fallback, resolve_launch_worktree,
     save_resumed_workspace_projection, save_start_work_workspace_projection, ActiveAgentSession,
-    AppEventProxy, AppRuntime, BackendEvent, HookForwardTarget, LaunchFeedbackContext,
-    LiveSessionEntry, OutboundEvent, Pane, UserEvent, WindowGeometry, WindowPreset,
-    WindowProcessStatus, WindowRuntime, WorkspaceResumeContext,
+    AgentKanbanLaunchTarget, AppEventProxy, AppRuntime, BackendEvent, HookForwardTarget,
+    LaunchFeedbackContext, LiveSessionEntry, OutboundEvent, Pane, UserEvent, WindowGeometry,
+    WindowPreset, WindowProcessStatus, WindowRuntime, WorkspaceResumeContext,
 };
 
 #[derive(Debug, Clone)]
@@ -1128,6 +1128,7 @@ impl AppRuntime {
             AgentWindowPlacement::Centered(bounds),
             workspace_resume_context,
             None,
+            None,
         )
     }
 
@@ -1145,6 +1146,26 @@ impl AppRuntime {
             AgentWindowPlacement::Centered(bounds),
             workspace_resume_context,
             Some(launch_feedback_context),
+            None,
+        )
+    }
+
+    pub(crate) fn spawn_agent_window_in_agent_kanban(
+        &mut self,
+        tab_id: &str,
+        config: gwt_agent::LaunchConfig,
+        bounds: WindowGeometry,
+        workspace_resume_context: Option<WorkspaceResumeContext>,
+        launch_feedback_context: Option<LaunchFeedbackContext>,
+        target: AgentKanbanLaunchTarget,
+    ) -> Result<Vec<OutboundEvent>, String> {
+        self.spawn_agent_window_with_placement(
+            tab_id,
+            config,
+            AgentWindowPlacement::Centered(bounds),
+            workspace_resume_context,
+            launch_feedback_context,
+            Some(target),
         )
     }
 
@@ -1160,6 +1181,7 @@ impl AppRuntime {
             config,
             AgentWindowPlacement::Exact(geometry),
             workspace_resume_context,
+            None,
             None,
         )
     }
@@ -1217,6 +1239,7 @@ impl AppRuntime {
         placement: AgentWindowPlacement,
         workspace_resume_context: Option<WorkspaceResumeContext>,
         launch_feedback_context: Option<LaunchFeedbackContext>,
+        agent_kanban_target: Option<AgentKanbanLaunchTarget>,
     ) -> Result<Vec<OutboundEvent>, String> {
         if let Some(window_id) = self.live_agent_window_for_work(
             tab_id,
@@ -1281,6 +1304,14 @@ impl AppRuntime {
         let _ = tab
             .workspace
             .set_agent_id(&window.id, config.agent_id.command().to_string());
+        if let Some(target) = agent_kanban_target.as_ref() {
+            let _ = tab.workspace.place_agent_window_in_kanban(
+                &window.id,
+                &target.board_id,
+                target.lane_id,
+                None,
+            );
+        }
         self.register_window(tab_id, &window.id);
         let window_id = combined_window_id(tab_id, &window.id);
 
