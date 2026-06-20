@@ -5698,3 +5698,111 @@ button.workspace-board-ref:focus-visible {
     animation: none;
   }
 }
+
+/* SPEC-2008 camera-focus / FR-094 — Fleet Minimap.
+   The signature carrier: a permanent, always-visible map of every canvas
+   window in world position, with the live camera viewport overlaid. Docked
+   in the canvas corner, OUTSIDE the stage transform. This is the one bold
+   element — window chrome and telemetry stay restrained. */
+.fleet-minimap {
+  position: absolute;
+  right: var(--space-4, 16px);
+  bottom: var(--space-4, 16px);
+  width: 160px;
+  height: 120px;
+  z-index: 60;
+  pointer-events: auto;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md, 8px);
+  background: color-mix(in oklab, var(--color-surface-elevated) 92%, transparent);
+  box-shadow: var(--shadow-2, 0 8px 24px rgba(0, 0, 0, 0.35));
+  overflow: hidden;
+  backdrop-filter: blur(4px);
+}
+
+/* No windows yet — fade the carrier so it never looks broken on an empty
+   canvas, but keep it present (it is permanent). */
+.fleet-minimap[data-empty="true"] {
+  opacity: 0.45;
+}
+
+/* Each window, scaled to its world position. A plain rounded chip whose
+   accent follows the agent color via the shared data-agent-color map
+   (--current-agent). */
+.fleet-minimap__cell {
+  position: absolute;
+  margin: 0;
+  padding: 0;
+  border: 1px solid color-mix(in oklab, var(--current-agent, var(--color-text-muted)) 60%, var(--color-border));
+  border-radius: 2px;
+  background: color-mix(in oklab, var(--current-agent, var(--color-text-muted)) 26%, var(--color-surface));
+  cursor: pointer;
+  transition: background var(--motion-fast, 120ms) ease, border-color var(--motion-fast, 120ms) ease;
+}
+
+.fleet-minimap__cell:hover {
+  background: color-mix(in oklab, var(--current-agent, var(--color-text-muted)) 42%, var(--color-surface));
+  border-color: var(--current-agent, var(--color-focus-ring));
+}
+
+.fleet-minimap__cell:focus-visible {
+  outline: 1px solid var(--color-focus-ring);
+  outline-offset: 1px;
+}
+
+/* The framed window is emphasized with the focus ring so the minimap echoes
+   which window the camera is on. */
+.fleet-minimap__cell.is-focused {
+  border-color: var(--color-focus-ring);
+  box-shadow: 0 0 0 1px var(--color-focus-ring);
+}
+
+/* Living Telemetry dot — agent panes only. Color from the semantic state
+   tokens; active / blocked pulse via --motion-pulse (0ms under
+   reduced-motion, so the dot simply holds steady). */
+.fleet-minimap__cell[data-telemetry]::after {
+  content: "";
+  position: absolute;
+  top: 2px;
+  right: 2px;
+  width: 4px;
+  height: 4px;
+  border-radius: 50%;
+  background: var(--color-state-idle);
+}
+
+.fleet-minimap__cell[data-telemetry="active"]::after {
+  background: var(--color-state-active);
+  animation: op-live-pulse var(--motion-pulse) ease-in-out infinite;
+}
+
+.fleet-minimap__cell[data-telemetry="idle"]::after {
+  background: var(--color-state-idle);
+}
+
+.fleet-minimap__cell[data-telemetry="blocked"]::after {
+  background: var(--color-state-blocked);
+  animation: op-live-pulse var(--motion-pulse) ease-in-out infinite;
+}
+
+.fleet-minimap__cell[data-telemetry="done"]::after {
+  background: var(--color-state-done);
+}
+
+/* The live camera viewport. A 1px cyan frame + faint cyan fill so the
+   operator always sees where the camera is pointed within the fleet. */
+.fleet-minimap__camera {
+  position: absolute;
+  pointer-events: none;
+  border: 1px solid var(--color-focus-ring);
+  border-radius: 2px;
+  background: color-mix(in oklab, var(--color-focus-ring) 12%, transparent);
+  box-shadow: 0 0 6px 0 color-mix(in oklab, var(--color-focus-ring) 40%, transparent);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .fleet-minimap__cell[data-telemetry="active"]::after,
+  .fleet-minimap__cell[data-telemetry="blocked"]::after {
+    animation: none;
+  }
+}

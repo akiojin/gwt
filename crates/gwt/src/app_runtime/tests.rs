@@ -445,9 +445,6 @@ fn sample_window(
         geometry_revision: 0,
         z_index: 1,
         status,
-        minimized: false,
-        maximized: false,
-        pre_maximize_geometry: None,
         placement: WindowPlacement::Canvas,
         persist: true,
         purpose_title: None,
@@ -2970,56 +2967,6 @@ fn app_runtime_update_terminal_grid_resizes_runtime_without_workspace_broadcast(
 }
 
 #[test]
-fn app_runtime_cycle_focus_restores_maximized_source_geometry() {
-    // Switching focus away from a maximized window restores its
-    // pre-maximize geometry (workspace.cycle_focus behavior, surfaced
-    // at the app_runtime integration level). The PTY is intentionally
-    // NOT resized here anymore — the frontend real fit owns PTY size.
-    let temp = tempdir().expect("tempdir");
-    let bounds = canvas_bounds();
-    let tab = sample_project_tab(
-        "tab-1",
-        "Repo",
-        temp.path().to_path_buf(),
-        ProjectKind::Git,
-        &[WindowPreset::Shell, WindowPreset::Claude],
-    );
-    let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
-    let claude_id = combined_window_id("tab-1", "claude-1");
-
-    let original_claude_geometry = runtime
-        .tab("tab-1")
-        .expect("tab")
-        .workspace
-        .window("claude-1")
-        .expect("claude")
-        .geometry
-        .clone();
-
-    assert_eq!(
-        runtime
-            .maximize_window_events(&claude_id, bounds.clone())
-            .len(),
-        1
-    );
-    assert_eq!(
-        runtime
-            .cycle_focus_events(FocusCycleDirection::Forward, bounds)
-            .len(),
-        1
-    );
-
-    let claude_window = runtime
-        .tab("tab-1")
-        .expect("tab")
-        .workspace
-        .window("claude-1")
-        .expect("claude");
-    assert_eq!(claude_window.geometry, original_claude_geometry);
-    assert!(!claude_window.maximized);
-}
-
-#[test]
 fn app_runtime_cycle_focus_preserves_real_fit_pty_size() {
     // Issue #2937: cycle_focus must NOT clobber the PTY size that the
     // frontend established via its real xterm fit. The backend's
@@ -3099,13 +3046,12 @@ fn app_runtime_cycle_focus_preserves_real_fit_pty_size() {
 }
 
 #[test]
-fn app_runtime_activate_maximized_window_tab_preserves_real_fit_pty_size() {
-    // SPEC-2008 Phase 34 / Issue #2937 companion: maximized tab activation
-    // changes only the active marker. The backend must not resize the PTY
-    // from shared maximized geometry, because the frontend's visible xterm
-    // fit owns the real cols/rows for the revealed tab.
+fn app_runtime_activate_window_tab_preserves_real_fit_pty_size() {
+    // SPEC-2008 Phase 34 / Issue #2937 companion: tab activation changes only
+    // the active marker. The backend must not resize the PTY from the shared
+    // group geometry, because the frontend's visible xterm fit owns the real
+    // cols/rows for the revealed tab.
     let temp = tempdir().expect("tempdir");
-    let bounds = canvas_bounds();
     let tab = sample_project_tab(
         "tab-1",
         "Repo",
@@ -3119,12 +3065,6 @@ fn app_runtime_activate_maximized_window_tab_preserves_real_fit_pty_size() {
 
     assert_eq!(
         runtime.dock_window_tab_events(&shell_id, &claude_id).len(),
-        1
-    );
-    assert_eq!(
-        runtime
-            .maximize_window_events(&shell_id, bounds.clone())
-            .len(),
         1
     );
     let _ = runtime.activate_window_tab_events(&shell_id);
@@ -3146,7 +3086,7 @@ fn app_runtime_activate_maximized_window_tab_preserves_real_fit_pty_size() {
         assert_ne!(
             geometry_to_pty_size(&geometry),
             (REAL_COLS, REAL_ROWS),
-            "sentinel must differ from the maximized-geometry approximation",
+            "sentinel must differ from the shared-geometry approximation",
         );
     }
 
@@ -3173,8 +3113,6 @@ fn app_runtime_activate_maximized_window_tab_preserves_real_fit_pty_size() {
             .tab_group_active
     );
     assert!(!workspace.window("shell-1").expect("shell").tab_group_active);
-    assert!(workspace.window("claude-1").expect("claude").maximized);
-    assert!(workspace.window("shell-1").expect("shell").maximized);
     for window_id in [&shell_id, &claude_id] {
         let pane = runtime
             .runtimes
@@ -8341,9 +8279,9 @@ fn app_runtime_startup_auto_resume_uses_centered_stack_bounds() {
             .map(|geometry| (geometry.x, geometry.y, geometry.width, geometry.height))
             .collect::<Vec<_>>(),
         vec![
-            (312.0, 216.0, 720.0, 420.0),
-            (340.0, 240.0, 720.0, 420.0),
-            (368.0, 264.0, 720.0, 420.0),
+            (32.0, 26.0, 1280.0, 800.0),
+            (60.0, 50.0, 1280.0, 800.0),
+            (88.0, 74.0, 1280.0, 800.0),
         ],
         "restored agent windows should form a stack centered in the startup canvas"
     );

@@ -242,16 +242,6 @@ pub enum FrontendEvent {
         mode: ArrangeMode,
         bounds: WindowGeometry,
     },
-    MaximizeWindow {
-        id: String,
-        bounds: WindowGeometry,
-    },
-    MinimizeWindow {
-        id: String,
-    },
-    RestoreWindow {
-        id: String,
-    },
     DockWindowTab {
         id: String,
         target_id: String,

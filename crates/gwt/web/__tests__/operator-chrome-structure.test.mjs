@@ -2946,9 +2946,12 @@ test("Drawer modals close on Escape — keyboard parity with backdrop click", ()
     /if\s*\(windowListOpen\)\s*\{[\s\S]*windowListOpen\s*=\s*false[\s\S]*windowListButton\.focus/,
     "expected Esc to close window list dropdown and restore focus to trigger",
   );
+  // SPEC-2008 camera-focus: the Windows dropdown Esc branch is now guarded so
+  // a bare Esc that the dropdown did NOT consume can fall through to the
+  // camera overview (enterOverview) below it.
   assert.match(
     appSource,
-    /handleWindowListEscape\(event\);/,
+    /if\s*\(handleWindowListEscape\(event\)\)\s*\{\s*return;\s*\}/,
     "expected the global Esc handler to delegate the Windows dropdown branch into the surface",
   );
   // SPEC-2356 — preset modal Esc-close: closes via closeModal() which
@@ -2957,6 +2960,14 @@ test("Drawer modals close on Escape — keyboard parity with backdrop click", ()
     appSource,
     /if\s*\(modal\.classList\.contains\("open"\)\)\s*\{[\s\S]*closeModal\(\)/,
     "expected Esc to call closeModal when preset modal is open",
+  );
+  // SPEC-2008 camera-focus: a bare Esc that nothing else consumed zooms the
+  // camera out to frame all windows (overview), but only when no text entry /
+  // focused terminal owns the keystroke (vim, TUI apps rely on Esc).
+  assert.match(
+    appSource,
+    /if\s*\(event\.defaultPrevented\s*\|\|\s*isTextEntryFocused\(\)\)\s*\{\s*return;\s*\}\s*enterOverview\(\)/,
+    "expected an unconsumed Esc to enter camera overview, guarded by isTextEntryFocused",
   );
 });
 
@@ -3810,40 +3821,43 @@ test("viewport-only workspace_state skips unchanged window reconciliation", () =
   );
 });
 
-test("maximized viewport sync is coalesced across unchanged workspace_state events", () => {
+// SPEC-2008 2026-06-20 Camera Focus Rework: manual maximize-to-fill was
+// replaced by the per-viewer camera (frameWindow / enterOverview). The whole
+// shared-maximized-geometry sync machinery — the coalesced scheduler, its
+// pending-frame slot, and the sync body itself — was removed, so
+// renderWorkspace no longer schedules any maximized viewport sync.
+test("maximized viewport sync machinery is removed in favor of the per-viewer camera", () => {
   const renderWorkspaceBody = extractFunctionBody(appSource, "renderWorkspace");
-  // SPEC-3064 Phase 3 (E7): the coalesced scheduler and its pending-frame
-  // slot live in the project shell surface; renderWorkspace (app.js) keeps
-  // the call sites.
-  const schedulerBody = extractFunctionBody(
-    projectShellSurfaceSource,
-    "scheduleMaximizedWindowsToViewportSync",
-  );
 
-  assert.match(
-    projectShellSurfaceSource,
-    /let\s+maximizedViewportSyncFrame\s*=\s*null\s*;/,
-    "the project shell surface must track a pending maximized viewport sync frame",
-  );
-  assert.match(
-    schedulerBody,
-    /if\s*\(\s*maximizedViewportSyncFrame\s*!==\s*null\s*\)[\s\S]*?return\s*;/,
-    "maximized viewport sync scheduler must coalesce duplicate pending requests",
-  );
-  assert.match(
-    schedulerBody,
-    /maximizedViewportSyncFrame\s*=\s*requestAnimationFrame\s*\(\s*\(\s*\)\s*=>\s*\{/,
-    "maximized viewport sync scheduler must own the animation-frame reservation",
-  );
-  assert.match(
-    schedulerBody,
-    /maximizedViewportSyncFrame\s*=\s*null\s*;[\s\S]*?syncMaximizedWindowsToViewport\s*\(\s*\)/,
-    "maximized viewport sync scheduler must clear the pending handle before running the existing sync body",
-  );
-  assert.match(
+  // The removed scheduler / sync functions must not be referenced as code in
+  // either surface (only the removal-comment lines may mention the names).
+  for (const symbol of [
+    "scheduleMaximizedWindowsToViewportSync",
+    "syncMaximizedWindowsToViewport",
+    "maximizedViewportSyncFrame",
+    "workspaceHasVisibleMaximizedWindow",
+  ]) {
+    // Allow the name to appear only on comment lines documenting the removal.
+    const codeLines = (source) =>
+      source
+        .split("\n")
+        .filter((line) => line.includes(symbol) && !line.trimStart().startsWith("//"));
+    assert.deepEqual(
+      codeLines(appSource),
+      [],
+      `app.js must not reference removed maximized-sync symbol ${symbol} in code`,
+    );
+    assert.deepEqual(
+      codeLines(projectShellSurfaceSource),
+      [],
+      `project-shell-surface.js must not reference removed maximized-sync symbol ${symbol} in code`,
+    );
+  }
+
+  assert.doesNotMatch(
     renderWorkspaceBody,
-    /scheduleMaximizedWindowsToViewportSync\s*\(\s*\)/,
-    "renderWorkspace must route maximized sync through the coalesced scheduler",
+    /MaximizedWindowsToViewport/,
+    "renderWorkspace must not schedule any maximized viewport sync",
   );
   assert.doesNotMatch(
     renderWorkspaceBody,
@@ -4393,7 +4407,9 @@ test("Per-window renderer guards unchanged DOM writes after mount and preset syn
   const roleBadgeIndex = ensureWindowBody.indexOf("setWindowRoleBadge");
   const tabsIndex = ensureWindowBody.indexOf("renderWindowTabs");
   const agentColorIndex = ensureWindowBody.indexOf("agentColor");
-  const classIndex = ensureWindowBody.indexOf('classList.toggle("minimized"');
+  // SPEC-2008 camera-focus: the minimized/maximized class toggles were removed;
+  // the surviving guarded class write is the tab-group "tabbed" toggle.
+  const classIndex = ensureWindowBody.indexOf('classList.toggle("tabbed"');
   const styleIndex = ensureWindowBody.indexOf("element.style.zIndex");
   const statusIndex = ensureWindowBody.indexOf("applyStatus");
   const fitIndex = ensureWindowBody.indexOf("scheduleTerminalFit");
@@ -4465,10 +4481,18 @@ test("Per-window render key covers DOM shell fields and removal cleanup", () => 
     /detailMap\.get\s*\(\s*windowData\.id\s*\)/,
     "per-window key must include status detail text",
   );
-  assert.match(
+  // SPEC-2008 camera-focus: the viewport-relative `maximized_fill` /
+  // maximizedGeometry render-key input was removed (windows always render at
+  // their own world geometry now, so per-client fill never enters the key).
+  assert.doesNotMatch(
     keyBody,
-    /maximizedGeometry\s*\(\s*visibleBounds\s*\(\s*\)\s*,\s*viewport\.zoom\s*\)/,
-    "per-window key must include viewport-relative maximized fill",
+    /maximizedGeometry/,
+    "per-window key must not depend on the removed maximized fill geometry",
+  );
+  assert.doesNotMatch(
+    keyBody,
+    /\bmaximized_fill\b/,
+    "per-window key must not carry the removed maximized_fill marker",
   );
   for (const field of [
     "id",
@@ -4485,12 +4509,9 @@ test("Per-window render key covers DOM shell fields and removal cleanup", () => 
     "y",
     "width",
     "height",
-    "minimized",
-    "maximized",
     "z_index",
     "tab_group_id",
     "tab_group_active",
-    "maximized_fill",
     "tabs",
   ]) {
     assert.match(
@@ -4544,7 +4565,6 @@ test("Per-window render key avoids JSON stringify and mapped tab allocation", ()
     "title_tooltip",
     "role_badge",
     "geometry_revision",
-    "maximized_fill",
     "tabs",
     "tab_group_id",
     "tab_group_active",
@@ -4555,6 +4575,131 @@ test("Per-window render key avoids JSON stringify and mapped tab allocation", ()
       `per-window primitive key must keep ${field}`,
     );
   }
+  // SPEC-2008 camera-focus: maximized_fill was removed from the primitive key.
+  assert.doesNotMatch(
+    keyBody,
+    /\bmaximized_fill\b/,
+    "per-window primitive key must not carry the removed maximized_fill marker",
+  );
+});
+
+// SPEC-2008 camera-focus (UX amendment 2026-06-20): single click focuses
+// WITHOUT moving the camera; only a deliberate double click frames it; the
+// manual resize handle is restored.
+test("window template restores the manual resize handle as a window-body sibling", () => {
+  const ensureWindowBody = extractFunctionBody(appSource, "ensureWindow");
+  // The resize handle is a sibling div of the window body, NOT a window-action
+  // button (window-actions stays close-only).
+  assert.match(
+    ensureWindowBody,
+    /<div class="window-body"><\/div>\s*<div class="resize-handle"><\/div>/,
+    "the resize handle must be a sibling div after the window body",
+  );
+  assert.match(
+    ensureWindowBody,
+    /<div class="window-actions">\s*<button class="icon-button" data-action="close"[\s\S]*?<\/div>/,
+    "window-actions must stay close-only (no maximize/minimize buttons)",
+  );
+  // The handle is wired to begin a local geometry edit and arm the resize state
+  // (camera is untouched; only the window geometry changes).
+  const handleWiringIndex = ensureWindowBody.indexOf(
+    'resizeHandle.addEventListener("pointerdown"',
+  );
+  assert.notEqual(handleWiringIndex, -1, "resize handle must wire pointerdown");
+  const handleWiring = ensureWindowBody.slice(handleWiringIndex);
+  assert.match(
+    handleWiring,
+    /beginLocalGeometryEdit\(/,
+    "resize pointerdown must begin a local geometry edit",
+  );
+  assert.match(
+    handleWiring,
+    /resizeState\s*=\s*\{/,
+    "resize pointerdown must arm the resize state",
+  );
+  // The resize handle must NOT fly the camera — no frameWindow on resize.
+  assert.doesNotMatch(
+    handleWiring.slice(0, handleWiring.indexOf("});")),
+    /frameWindow\(/,
+    "resizing a window must never move the camera",
+  );
+});
+
+test("resize geometry enforces the 420x260 floor and writes inline window size", () => {
+  const applyBody = extractFunctionBody(appSource, "applyResizePointermove");
+  // The pointer-state → geometry helper owns the min floor (default 420x260);
+  // applyResizePointermove writes the result to the element's inline size.
+  assert.match(
+    applyBody,
+    /resizeGeometryFromPointerState\(/,
+    "resize apply must derive geometry from the shared pointer-state helper",
+  );
+  assert.match(
+    applyBody,
+    /element\.style\.width\s*=\s*`\$\{width\}px`/,
+    "resize apply must write the inline window width",
+  );
+  assert.match(
+    applyBody,
+    /element\.style\.height\s*=\s*`\$\{height\}px`/,
+    "resize apply must write the inline window height",
+  );
+});
+
+test("titlebar click focuses on single click and only frames on double click", () => {
+  const clickBody = extractFunctionBody(appSource, "handleTitlebarClick");
+  // A double-click window + threshold gate the framing gesture.
+  assert.match(
+    appSource,
+    /const\s+TITLEBAR_DOUBLE_CLICK_MS\s*=\s*\d+\s*;/,
+    "a double-click threshold must gate the framing gesture",
+  );
+  assert.match(
+    clickBody,
+    /lastTitlebarClick[\s\S]*now\s*-\s*lastTitlebarClick\.at\s*<=\s*TITLEBAR_DOUBLE_CLICK_MS/,
+    "handleTitlebarClick must detect a double click within the threshold",
+  );
+  // Double click → frame (camera moves). Single click → focus only (no camera).
+  const doubleIndex = clickBody.indexOf("isDoubleClick");
+  const frameIndex = clickBody.indexOf("frameWindow(windowId)");
+  const focusIndex = clickBody.indexOf("focusWindowRemotely(windowId)");
+  assert.ok(doubleIndex !== -1 && frameIndex !== -1 && focusIndex !== -1,
+    "handleTitlebarClick must branch double→frame, single→focus");
+  assert.ok(
+    frameIndex < focusIndex,
+    "the double-click frame branch must precede the single-click focus fallback",
+  );
+  // The single-click path uses focusWindowRemotely WITHOUT center, so no bounds
+  // and no camera move.
+  assert.doesNotMatch(
+    clickBody,
+    /focusWindowRemotely\(\s*windowId\s*,\s*\{\s*center/,
+    "a single titlebar click must not center (move) the camera",
+  );
+});
+
+test("body and terminal single click focus the window without moving the camera", () => {
+  // focusWindowRemotely without {center:true} sends focus_window WITHOUT bounds
+  // (camera unchanged); the body/terminal mousedown handlers use that path.
+  const focusRemoteBody = extractFunctionBody(appSource, "focusWindowRemotely");
+  assert.match(
+    focusRemoteBody,
+    /if\s*\(\s*center\s*\)\s*payload\.bounds\s*=\s*visibleBounds\(\)/,
+    "focusWindowRemotely must only attach bounds when explicitly centering",
+  );
+  // The non-terminal body click and terminal-root / overlay click all focus
+  // only (no center → no camera move). Pinned as source patterns since these
+  // listeners live inside the window mount closures.
+  assert.match(
+    appSource,
+    /terminalRoot\.addEventListener\("mousedown",\s*\(\)\s*=>\s*\{\s*focusWindowRemotely\(windowData\.id\);\s*\}\)/,
+    "terminal click must focus only (no camera move)",
+  );
+  assert.match(
+    appSource,
+    /body\.addEventListener\("mousedown",\s*\(\)\s*=>\s*\{\s*focusWindowRemotely\(windowData\.id\);\s*\}\)/,
+    "non-terminal body click must focus only (no camera move)",
+  );
 });
 
 test("Focus class updates skip unchanged focus and avoid all-window scans", () => {

@@ -62,7 +62,12 @@ test("surface preset reopen focuses and reveals existing windows instead of crea
   );
 });
 
-test("existing surface helper restores minimized windows and centers focus with visible bounds", () => {
+// SPEC-2008 2026-06-20 Camera Focus Rework: manual maximize/minimize/restore
+// were removed. Reopening an existing surface now flies the LOCAL camera to
+// frame the window (frameWindow) instead of asking the backend to
+// restore/center it. `frameWindow` sends a bounds-less `focus_window` purely
+// for z-order/highlight; the camera move is per-viewer (FR-095).
+test("existing surface helper frames the window via the local camera (no restore, no centered bounds)", () => {
   const helperBody = extractFunctionBody(appSource, "openExistingSurfaceWindow");
 
   assert.match(
@@ -72,27 +77,58 @@ test("existing surface helper restores minimized windows and centers focus with 
   );
   assert.match(
     helperBody,
-    /kind:\s*"focus_window"[\s\S]*id:\s*windowData\.id[\s\S]*bounds:\s*visibleBounds\(\)/,
-    "backend focus must include visibleBounds so offscreen windows are centered",
+    /frameWindow\(\s*windowData\.id\s*\)/,
+    "reopening an existing surface must fly the local camera to frame it",
   );
-  assert.match(
+  // The restore/minimize protocol is gone — the helper must not resurrect it.
+  assert.doesNotMatch(
     helperBody,
-    /windowData\.minimized[\s\S]*kind:\s*"restore_window"[\s\S]*id:\s*windowData\.id/,
-    "minimized existing surface windows must be restored",
+    /kind:\s*"restore_window"/,
+    "restore_window no longer exists; reopen must not send it",
+  );
+  assert.doesNotMatch(
+    helperBody,
+    /windowData\.minimized/,
+    "minimized state was removed from PersistedWindowState; reopen must not branch on it",
   );
 });
 
-test("existing grouped surface tabs are activated before focus", () => {
+test("frameWindow sends a bounds-less focus_window for highlight only (per-viewer camera)", () => {
+  const frameBody = extractFunctionBody(appSource, "frameWindow");
+
+  assert.match(
+    frameBody,
+    /send\(\s*\{\s*kind:\s*"focus_window",\s*id:\s*windowId\s*\}\s*\)/,
+    "frameWindow must notify the backend of focus for z-order/highlight only",
+  );
+  // The camera is local; the backend focus must NOT carry viewport bounds, or
+  // it would drag every other viewer's camera (the bug FR-095 fixes).
+  assert.doesNotMatch(
+    frameBody,
+    /kind:\s*"focus_window"[\s\S]*bounds:/,
+    "frameWindow's focus_window must not include bounds (camera centers locally)",
+  );
+  assert.match(
+    frameBody,
+    /animateViewportTo\(\s*target/,
+    "frameWindow must move the local viewport to frame the window",
+  );
+});
+
+test("existing grouped surface tabs are activated before the camera frames the window", () => {
   const helperBody = extractFunctionBody(appSource, "openExistingSurfaceWindow");
 
   assert.match(
     helperBody,
     /windowData\.tab_group_id[\s\S]*kind:\s*"activate_window_tab"[\s\S]*id:\s*windowData\.id/,
-    "inactive grouped surface tabs must be activated before focus",
+    "inactive grouped surface tabs must be activated before framing",
   );
+  // activate_window_tab is still sent BEFORE the frameWindow call so the
+  // requested tab is the one revealed when the camera lands on it.
   assert.ok(
-    helperBody.indexOf('kind: "activate_window_tab"') < helperBody.indexOf('kind: "focus_window"'),
-    "tab activation must be sent before focus_window so the requested tab is revealed",
+    helperBody.indexOf('kind: "activate_window_tab"') <
+      helperBody.indexOf("frameWindow("),
+    "tab activation must be sent before frameWindow so the requested tab is revealed",
   );
 });
 

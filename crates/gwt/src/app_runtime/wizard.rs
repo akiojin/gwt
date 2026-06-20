@@ -933,8 +933,7 @@ impl AppRuntime {
             if !self.window_lookup.contains_key(&window_id) {
                 return branch_error(format!("Agent window not found for session {}", session.id));
             }
-            let mut events = self.restore_window_events(&window_id);
-            events.extend(self.focus_window_events(&window_id, Some(bounds)));
+            let mut events = self.focus_window_events(&window_id, Some(bounds));
             if events.is_empty() {
                 events.push(self.workspace_state_broadcast());
             }

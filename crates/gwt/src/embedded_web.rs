@@ -194,6 +194,11 @@ root_js_modules! {
     // menu, picker/onboarding, window list dropdown, maximized viewport
     // sync, clone/migration modal glue) extracted from app.js.
     "project-shell-surface.js" => "createProjectShellSurface",
+    // SPEC-2008 camera-focus rework — Fleet Minimap overview. Lives in
+    // `#fleet-minimap` (canvas-area, outside the stage) and renders the window
+    // cell map + camera frame. app.js imports this at module top level, so the
+    // asset MUST be registered or the ES module load 404s and the splash hangs.
+    "fleet-minimap.js" => "createFleetMinimap",
 }
 
 /// Embedded payload of a [`StaticAsset`].

@@ -1112,11 +1112,6 @@ impl AppRuntime {
             FrontendEvent::ArrangeWindows { mode, bounds } => {
                 self.arrange_windows_events(mode, bounds)
             }
-            FrontendEvent::MaximizeWindow { id, bounds } => {
-                self.maximize_window_events(&id, bounds)
-            }
-            FrontendEvent::MinimizeWindow { id } => self.minimize_window_events(&id),
-            FrontendEvent::RestoreWindow { id } => self.restore_window_events(&id),
             FrontendEvent::DockWindowTab { id, target_id } => {
                 self.dock_window_tab_events(&id, &target_id)
             }

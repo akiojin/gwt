@@ -1086,10 +1086,14 @@ test("app.js wires the reflow controller for resize, transition, and predicate",
     /attachHostResizeReflow\(\{[\s\S]*?fitTerminal:\s*scheduleTerminalFit[\s\S]*?\}\)/,
     "host resize fan-out must route fit requests through the shared scheduler",
   );
-  assert.match(
+  // SPEC-2008 2026-06-20 Camera Focus Rework: syncMaximizedWindowsToViewport
+  // was removed (maximize-to-fill is superseded by the per-viewer camera), so
+  // the only surviving visual terminal-fit routing is the workspace render
+  // geometry-change path below.
+  assert.doesNotMatch(
     projectShellSurfaceSource,
-    /syncMaximizedWindowsToViewport[\s\S]*?scheduleTerminalFit\(windowData\.id,\s*false\)/,
-    "maximized viewport sync must route visual terminal fits through the shared scheduler",
+    /syncMaximizedWindowsToViewport\s*\(/,
+    "the removed maximized viewport sync must not be called",
   );
   assert.match(
     appSource,

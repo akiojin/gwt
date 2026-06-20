@@ -1493,9 +1493,6 @@ mod tests {
             geometry_revision: 0,
             z_index: 1,
             status,
-            minimized: false,
-            maximized: false,
-            pre_maximize_geometry: None,
             placement: gwt::WindowPlacement::Canvas,
             persist: true,
             purpose_title: None,
@@ -2747,16 +2744,6 @@ mod tests {
             .expect("file tree lookup")
             .raw_id
             .clone();
-        assert!(
-            !runtime
-                .tab("tab-1")
-                .expect("tab")
-                .workspace
-                .window(&file_tree_raw_id)
-                .expect("window")
-                .maximized,
-            "windows should not be auto-maximized on create"
-        );
 
         assert_eq!(
             runtime.window_status(&branches_id),
@@ -2790,26 +2777,6 @@ mod tests {
                 .len(),
             1
         );
-        assert_eq!(runtime.minimize_window_events(&file_tree_id).len(), 1);
-        assert!(
-            runtime
-                .tab("tab-1")
-                .expect("tab")
-                .workspace
-                .window(&file_tree_raw_id)
-                .expect("window")
-                .minimized
-        );
-        assert_eq!(runtime.restore_window_events(&file_tree_id).len(), 1);
-        assert!(
-            !runtime
-                .tab("tab-1")
-                .expect("tab")
-                .workspace
-                .window(&file_tree_raw_id)
-                .expect("window")
-                .minimized
-        );
 
         let geometry = WindowGeometry {
             x: 30.0,
@@ -2840,8 +2807,11 @@ mod tests {
         assert!(!runtime.window_lookup.contains_key(&file_tree_id));
     }
 
+    // SPEC-2008 FR-096/FR-097: the Camera-focus model replaced manual maximize.
+    // Windows now open and focus at their normal floating size; nothing
+    // auto-maximizes. Framing is the frontend camera's responsibility.
     #[test]
-    fn non_agent_window_presets_open_and_focus_maximized() {
+    fn non_agent_window_presets_open_and_focus_at_normal_floating_size() {
         let temp = tempdir().expect("tempdir");
         let repo = temp.path().join("repo");
         fs::create_dir_all(&repo).expect("create repo");
@@ -2862,15 +2832,18 @@ mod tests {
             .expect("board lookup")
             .raw_id
             .clone();
-        assert!(
-            !runtime
-                .tab("tab-1")
-                .expect("tab")
-                .workspace
-                .window(&board_raw_id)
-                .expect("board window")
-                .maximized,
-            "Board windows should not auto-maximize",
+        let board_geometry = runtime
+            .tab("tab-1")
+            .expect("tab")
+            .workspace
+            .window(&board_raw_id)
+            .expect("board window")
+            .geometry
+            .clone();
+        assert_eq!(
+            (board_geometry.width, board_geometry.height),
+            (720.0, 420.0),
+            "Board windows open at their normal floating size",
         );
         assert_eq!(
             runtime
@@ -2878,15 +2851,18 @@ mod tests {
                 .len(),
             1
         );
-        assert!(
-            !runtime
-                .tab("tab-1")
-                .expect("tab")
-                .workspace
-                .window(&board_raw_id)
-                .expect("board window")
-                .maximized,
-            "focusing a window should not auto-maximize it",
+        let board_after_focus = runtime
+            .tab("tab-1")
+            .expect("tab")
+            .workspace
+            .window(&board_raw_id)
+            .expect("board window")
+            .geometry
+            .clone();
+        assert_eq!(
+            (board_after_focus.width, board_after_focus.height),
+            (720.0, 420.0),
+            "focusing a window must not resize it",
         );
 
         let shell_id = window_id_for_preset(&runtime, "tab-1", WindowPreset::Shell, 0);
@@ -2902,15 +2878,18 @@ mod tests {
             .expect("shell lookup")
             .raw_id
             .clone();
-        assert!(
-            !runtime
-                .tab("tab-1")
-                .expect("tab")
-                .workspace
-                .window(&shell_raw_id)
-                .expect("shell window")
-                .maximized,
-            "shell windows should keep their normal floating size",
+        let shell_geometry = runtime
+            .tab("tab-1")
+            .expect("tab")
+            .workspace
+            .window(&shell_raw_id)
+            .expect("shell window")
+            .geometry
+            .clone();
+        assert_eq!(
+            (shell_geometry.width, shell_geometry.height),
+            (1280.0, 800.0),
+            "shell is a terminal preset, so it opens work-area large for camera framing",
         );
 
         for preset in [
@@ -2942,9 +2921,8 @@ mod tests {
                 .workspace
                 .window(&raw_id)
                 .expect("window");
-            assert!(!window.maximized, "{id} should not be auto-maximized");
-            assert_eq!(window.geometry.width, 720.0);
-            assert_eq!(window.geometry.height, 420.0);
+            assert_eq!(window.geometry.width, 720.0, "{id} opens at normal width");
+            assert_eq!(window.geometry.height, 420.0, "{id} opens at normal height");
         }
     }
 
@@ -3849,40 +3827,6 @@ mod tests {
                     gwt::FrontendEvent::ArrangeWindows {
                         mode: ArrangeMode::Tile,
                         bounds: bounds.clone(),
-                    },
-                )
-                .len(),
-            1
-        );
-        assert_eq!(
-            runtime
-                .handle_frontend_event(
-                    "client-1".to_string(),
-                    gwt::FrontendEvent::MaximizeWindow {
-                        id: file_tree_id.clone(),
-                        bounds,
-                    },
-                )
-                .len(),
-            1
-        );
-        assert_eq!(
-            runtime
-                .handle_frontend_event(
-                    "client-1".to_string(),
-                    gwt::FrontendEvent::MinimizeWindow {
-                        id: file_tree_id.clone(),
-                    },
-                )
-                .len(),
-            1
-        );
-        assert_eq!(
-            runtime
-                .handle_frontend_event(
-                    "client-1".to_string(),
-                    gwt::FrontendEvent::RestoreWindow {
-                        id: file_tree_id.clone(),
                     },
                 )
                 .len(),
