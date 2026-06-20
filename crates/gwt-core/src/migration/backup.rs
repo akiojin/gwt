@@ -39,6 +39,14 @@ pub struct BackupSnapshot {
     pub project_root: PathBuf,
     pub backup_dir: PathBuf,
     pub external_roots: Vec<ExternalBackupSnapshot>,
+    /// The project's `remote.origin.fetch` value captured *before* the
+    /// migration normalizes a `--single-branch` refspec to the wildcard form
+    /// (SPEC-1934 US-7 / FR-033). `None` when the origin already used the
+    /// wildcard form, had no `fetch` entry, or no `origin` remote exists, so
+    /// rollback knows there is nothing to restore. The executor populates this
+    /// right before `gwt_git::migration::normalize_fetch_refspec` runs;
+    /// [`super::rollback::rollback_migration`] writes it back on failure.
+    pub pre_normalize_fetch_refspec: Option<String>,
 }
 
 /// Backup copy for a linked worktree that lives outside `project_root`.
@@ -94,6 +102,7 @@ pub fn create_with_external_roots(
         project_root: project_root.to_path_buf(),
         backup_dir,
         external_roots: external_snapshots,
+        pre_normalize_fetch_refspec: None,
     })
 }
 
