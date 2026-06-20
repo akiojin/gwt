@@ -13,6 +13,11 @@ use crate::{
 
 /// Return the gwt home directory (`~/.gwt/`).
 pub fn gwt_home() -> PathBuf {
+    #[cfg(any(test, feature = "test-support"))]
+    if let Some(home) = crate::test_support::gwt_home_override() {
+        return home.join(".gwt");
+    }
+
     let home = std::env::var_os("HOME");
     let userprofile = std::env::var_os("USERPROFILE");
     if let Some(test_home) = cargo_test_home_override(home.as_deref(), userprofile.as_deref()) {

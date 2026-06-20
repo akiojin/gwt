@@ -478,39 +478,13 @@ pub fn project_title_from_path(path: &Path) -> String {
 
 #[cfg(test)]
 mod tests {
-    use std::ffi::OsString;
-
+    use gwt_core::test_support::ScopedGwtHome;
     use tempfile::tempdir;
 
     use super::*;
 
-    struct ScopedEnvVar {
-        key: &'static str,
-        previous: Option<OsString>,
-    }
-
-    impl ScopedEnvVar {
-        fn set(key: &'static str, value: impl AsRef<std::ffi::OsStr>) -> Self {
-            let previous = std::env::var_os(key);
-            std::env::set_var(key, value);
-            Self { key, previous }
-        }
-    }
-
-    impl Drop for ScopedEnvVar {
-        fn drop(&mut self) {
-            match self.previous.as_ref() {
-                Some(previous) => std::env::set_var(self.key, previous),
-                None => std::env::remove_var(self.key),
-            }
-        }
-    }
-
-    fn scoped_home(path: &std::path::Path) -> (ScopedEnvVar, ScopedEnvVar) {
-        (
-            ScopedEnvVar::set("HOME", path),
-            ScopedEnvVar::set("USERPROFILE", path),
-        )
+    fn scoped_home(path: &std::path::Path) -> ScopedGwtHome {
+        ScopedGwtHome::set(path)
     }
 
     #[test]
@@ -1006,7 +980,7 @@ mod tests {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         let dir = tempdir().expect("tempdir");
-        let (_home, _userprofile) = scoped_home(dir.path());
+        let _home = scoped_home(dir.path());
         let path = workspace_state_path(dir.path());
         let hash = gwt_core::paths::project_scope_hash(dir.path());
         assert!(path.ends_with(format!("projects/{}/workspace.json", hash.as_str())));
@@ -1018,7 +992,7 @@ mod tests {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         let dir = tempdir().expect("tempdir");
-        let (_home, _userprofile) = scoped_home(dir.path());
+        let _home = scoped_home(dir.path());
         let project_root = dir.path().join("project");
         std::fs::create_dir_all(&project_root).expect("project dir");
         let state = PersistedWindowCanvasState {
@@ -1094,7 +1068,7 @@ mod tests {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         let dir = tempdir().expect("tempdir");
-        let (_home, _userprofile) = scoped_home(dir.path());
+        let _home = scoped_home(dir.path());
         let legacy_path = dir.path().join("legacy-workspace.json");
         let session_path = dir.path().join("session.json");
         let project_one = dir.path().join("project-one");
@@ -1165,7 +1139,7 @@ mod tests {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         let dir = tempdir().expect("tempdir");
-        let (_home, _userprofile) = scoped_home(dir.path());
+        let _home = scoped_home(dir.path());
         let legacy_path = dir.path().join("legacy-workspace.json");
         let session_path = dir.path().join("session.json");
         let project_root = dir.path().join("workspace");
@@ -1204,7 +1178,7 @@ mod tests {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         let dir = tempdir().expect("tempdir");
-        let (_home, _userprofile) = scoped_home(dir.path());
+        let _home = scoped_home(dir.path());
         let legacy_path = dir.path().join("legacy-workspace.json");
         let session_path = dir.path().join("session.json");
         let project_root = dir.path().join("project");

@@ -7130,3 +7130,10 @@ Type: review-learning
 Context: Codex review on PR #3130 found that playwright-embedded-routes.test.mjs only followed absolute /module.js imports, so relative chains such as project-tabs-renderer.js -> ./window-runtime-state.js -> ./protocol-enums.js could be missed by the recurrence guard.
 Learning: A frontend route-coverage test that validates browser-served modules must resolve import specifiers the same way the browser module graph does, including relative ./ and ../ imports, not just absolute root imports.
 Future Action: When adding or updating embedded frontend route guards, include a focused test for a relative import chain and normalize web module specifiers with POSIX path semantics before comparing against ROOT_MODULES.
+
+## 2026-06-20 — Test home override for project storage
+
+Type: lesson
+Context: Issue #3066 PR verification found that some in-process tests used ScopedHome/std::env::set_var("HOME") while cargo ran tests in parallel, causing unrelated workspace projection tests to write temp project state into the real ~/.gwt/projects.
+Learning: For in-process tests, prefer a thread-local gwt_home override over process-wide HOME mutation. Reserve HOME/USERPROFILE env changes for spawned child processes that must receive an isolated environment.
+Future Action: When adding tests around gwt_core::paths::gwt_home or project storage, use gwt_core::test_support::ScopedGwtHome and only hold env_lock for real environment variables such as GWT_SESSION_ID.

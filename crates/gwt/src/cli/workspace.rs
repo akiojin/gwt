@@ -1200,8 +1200,6 @@ mod tests {
         save_workspace_projection, WorkspaceAgentAffiliationStatus, WorkspaceAgentSummary,
         WorkspaceProjection,
     };
-    use std::ffi::OsString;
-
     fn s(value: &str) -> String {
         value.to_string()
     }
@@ -1213,23 +1211,13 @@ mod tests {
     }
 
     struct ScopedHome {
-        previous_home: Option<OsString>,
+        _home: gwt_core::test_support::ScopedGwtHome,
     }
 
     impl ScopedHome {
         fn set(path: &std::path::Path) -> Self {
-            let previous_home = std::env::var_os("HOME");
-            std::env::set_var("HOME", path);
-            Self { previous_home }
-        }
-    }
-
-    impl Drop for ScopedHome {
-        fn drop(&mut self) {
-            if let Some(previous_home) = self.previous_home.as_ref() {
-                std::env::set_var("HOME", previous_home);
-            } else {
-                std::env::remove_var("HOME");
+            Self {
+                _home: gwt_core::test_support::ScopedGwtHome::set(path),
             }
         }
     }

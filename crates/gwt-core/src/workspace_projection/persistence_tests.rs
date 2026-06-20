@@ -1962,27 +1962,17 @@ fn record_workspace_work_paused_event_does_not_reopen_done_work() {
 // event log persistent core is repo-local and git-tracked.
 // ---------------------------------------------------------------------
 
-/// Override `HOME` for the duration of a test so the home-side projection
+/// Override `gwt_home()` for the duration of a test so the home-side projection
 /// writes (works.json, project-state) and the legacy migration sources
-/// resolve under an isolated temp directory. Restores the previous value
-/// on drop.
+/// resolve under an isolated temp directory.
 struct ScopedHome {
-    previous_home: Option<std::ffi::OsString>,
+    _home: crate::test_support::ScopedGwtHome,
 }
 
 impl ScopedHome {
     fn set(path: &Path) -> Self {
-        let previous_home = std::env::var_os("HOME");
-        std::env::set_var("HOME", path);
-        Self { previous_home }
-    }
-}
-
-impl Drop for ScopedHome {
-    fn drop(&mut self) {
-        match self.previous_home.as_ref() {
-            Some(previous) => std::env::set_var("HOME", previous),
-            None => std::env::remove_var("HOME"),
+        Self {
+            _home: crate::test_support::ScopedGwtHome::set(path),
         }
     }
 }
