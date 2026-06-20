@@ -6719,8 +6719,13 @@ fn main() -> std::io::Result<()> {
         true,
         None,
     );
-    let tray_copy_url =
-        MenuItem::with_id(gwt::cli::tray::menu::ids::COPY_URL, "Copy URL", true, None);
+    let tray_copy_url_label = gwt::cli::tray::menu::copy_url_label_for_browser_url(&browser_url);
+    let tray_copy_url = MenuItem::with_id(
+        gwt::cli::tray::menu::ids::COPY_URL,
+        tray_copy_url_label,
+        true,
+        None,
+    );
     let tray_about = MenuItem::with_id(gwt::cli::tray::menu::ids::ABOUT, "About GWT", true, None);
     let tray_quit = MenuItem::with_id(gwt::cli::tray::menu::ids::QUIT, "Quit", true, None);
     tray_menu
