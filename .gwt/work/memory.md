@@ -7109,3 +7109,10 @@ Type: failure pattern
 Context: Issue #3037: embedded Playwright specs failed before workspace_state rendered because project-shell-surface.js imported /window-list-model.js, but installEmbeddedRoutes only served a hard-coded ROOT_MODULES list and the guard test only checked direct app.js imports.
 Learning: Direct import coverage is insufficient for browser module fixtures. A missing transitive module manifests as unrelated UI timeouts (0 project tabs / windows) because app.js evaluation aborts before the WebSocket fixture can render state.
 Future Action: When adding or moving frontend modules imported by routed Playwright fixtures, ensure the embedded route helper allowlist includes transitive imports and keep the recursive playwright-embedded-routes test green before triaging downstream visual failures.
+
+## 2026-06-20 — Embedded route graph tests must resolve relative web imports
+
+Type: review-learning
+Context: Codex review on PR #3130 found that playwright-embedded-routes.test.mjs only followed absolute /module.js imports, so relative chains such as project-tabs-renderer.js -> ./window-runtime-state.js -> ./protocol-enums.js could be missed by the recurrence guard.
+Learning: A frontend route-coverage test that validates browser-served modules must resolve import specifiers the same way the browser module graph does, including relative ./ and ../ imports, not just absolute root imports.
+Future Action: When adding or updating embedded frontend route guards, include a focused test for a relative import chain and normalize web module specifiers with POSIX path semantics before comparing against ROOT_MODULES.
