@@ -1511,6 +1511,39 @@ test("renderWorkspace refreshes operator telemetry when windows mount/unmount (S
   );
 });
 
+test("SPEC-3038 (2026-06-20): Windows badge counts windows across all project tabs", () => {
+  const body = extractFunctionBody(appSource, "recomputeOperatorTelemetry");
+  assert.match(
+    body,
+    /windows:\s*allProjectWindowIds\(\)\.length/,
+    "the rail Windows badge must count the cross-tab open-window total",
+  );
+  assert.doesNotMatch(
+    body,
+    /windows:\s*windowMap\.size/,
+    "windowMap.size only counts windows mounted in visited tabs and undercounts the badge",
+  );
+});
+
+test("SPEC-3038 (2026-06-20): Windows popover renders the cross-tab window-list model", () => {
+  assert.match(
+    projectShellSurfaceSource,
+    /import\s*\{\s*groupProjectWindowList\s*\}\s*from\s*"\/window-list-model\.js"/,
+    "project-shell-surface must import the cross-tab window-list model",
+  );
+  const body = extractFunctionBody(projectShellSurfaceSource, "renderWindowList");
+  assert.match(
+    body,
+    /groupProjectWindowList\(getAppState\(\),\s*windowListEntries\)/,
+    "renderWindowList must source rows from the cross-tab model, not activeWorkspace() alone",
+  );
+  assert.match(
+    body,
+    /window-list-group/,
+    "renderWindowList must render per-project group headers for multi-project shells",
+  );
+});
+
 test("window close always routes through the Close Guard confirm modal (SPEC-3038 US-3)", () => {
   // index.html ships the modal scaffold.
   const modal = document.getElementById("window-close-confirm-modal");
@@ -4072,15 +4105,17 @@ test("Window List row source rebuild avoids mapped intermediate arrays", () => {
     /\.filter\s*\(/,
     "Window List row rebuild must avoid chained filter allocation",
   );
+  // SPEC-3038 (2026-06-20): rows now come from the cross-tab window-list
+  // model grouped by project tab, rendered with direct loops (no inline alloc).
   assert.match(
     renderWindowListBody,
-    /for\s*\(\s*const\s+windowData\s+of\s+workspaceWindows\s*\)/,
-    "Window List row rebuild must build workspace lookups with a direct loop",
+    /for\s*\(\s*const\s+group\s+of\s+model\.groups\s*\)/,
+    "Window List row rebuild must iterate the cross-tab model groups with a direct loop",
   );
   assert.match(
     renderWindowListBody,
-    /for\s*\(\s*const\s+entry\s+of\s+windowListEntries\s*\)/,
-    "Window List row rebuild must derive server-backed entries with a direct loop",
+    /for\s*\(\s*const\s+entry\s+of\s+group\.entries\s*\)/,
+    "Window List row rebuild must derive per-group entries with a direct loop",
   );
 });
 
@@ -4123,8 +4158,8 @@ test("Window List render key ignores viewport and includes row shell fields", ()
   );
   assert.match(
     keyBody,
-    /activeWorkspace\s*\(\s*\)/,
-    "Window List key must include active workspace window identity/order",
+    /groupProjectWindowList\s*\(/,
+    "Window List key must include the cross-tab window-list model identity/order",
   );
   assert.match(
     keyBody,
@@ -4884,6 +4919,18 @@ test("Operator telemetry key avoids JSON stringify allocation", () => {
     keyBody,
     /JSON\.stringify\s*\(/,
     "telemetry key must not serialize a counts object graph",
+  );
+});
+
+test("SPEC-3038 (2026-06-20): telemetry key includes windows so the badge updates on non-agent window changes", () => {
+  // Without `windows` in the cache key, adding/removing a surface (non-agent)
+  // window leaves the agent counts unchanged, so applyOperatorTelemetryCounts
+  // short-circuits and the rail Windows badge never refreshes.
+  const keyBody = extractFunctionBody(appSource, "operatorTelemetryRenderKey");
+  assert.match(
+    keyBody,
+    /appendRenderKeyPart\(parts,\s*"windows"\)/,
+    "telemetry render key must include the windows count",
   );
 });
 

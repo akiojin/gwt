@@ -194,6 +194,10 @@ root_js_modules! {
     // menu, picker/onboarding, window list dropdown, maximized viewport
     // sync, clone/migration modal glue) extracted from app.js.
     "project-shell-surface.js" => "createProjectShellSurface",
+    // SPEC-3038 (2026-06-20) — Command Rail Windows popover model: groups the
+    // cross-tab open-window set by owning project tab so the list matches the
+    // badge and supports cross-tab focus.
+    "window-list-model.js" => "groupProjectWindowList",
 }
 
 /// Embedded payload of a [`StaticAsset`].

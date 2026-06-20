@@ -4251,6 +4251,41 @@ fn app_runtime_window_list_normalizes_pre_lifecycle_agent_windows() {
 }
 
 #[test]
+fn app_runtime_window_list_enumerates_all_project_tabs() {
+    // SPEC-3038 (2026-06-20): the Command Rail Windows popover lists windows
+    // from every project tab, not just the active one, so the list matches the
+    // cross-tab open-window badge.
+    let temp = tempdir().expect("tempdir");
+    let tab_a = sample_project_tab_with_window(
+        "tab-a",
+        "win-a1",
+        WindowPreset::Codex,
+        WindowProcessStatus::Running,
+    );
+    let tab_b = sample_project_tab_with_window(
+        "tab-b",
+        "win-b1",
+        WindowPreset::Codex,
+        WindowProcessStatus::Running,
+    );
+    let runtime = sample_runtime(temp.path(), vec![tab_a, tab_b], Some("tab-a"));
+
+    let BackendEvent::WindowList { windows } = runtime.list_windows_event() else {
+        panic!("expected window list");
+    };
+    let ids: Vec<String> = windows.iter().map(|window| window.id.clone()).collect();
+    assert!(
+        ids.contains(&"tab-a::win-a1".to_string()),
+        "active tab window must be listed: {ids:?}"
+    );
+    assert!(
+        ids.contains(&"tab-b::win-b1".to_string()),
+        "non-active tab window must also be listed: {ids:?}"
+    );
+    assert_eq!(windows.len(), 2, "all project-tab windows must be listed");
+}
+
+#[test]
 fn app_runtime_open_start_work_defers_remote_develop_preparation_until_launch() {
     let _env_guard = env_test_lock().lock().expect("env lock");
     let temp = tempdir().expect("tempdir");
