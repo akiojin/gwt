@@ -7088,3 +7088,10 @@ Type: agent workflow correction
 Context: During SPEC #1935 Phase 22 implementation, two build.phase JSON operations were sent in parallel against .gwt/skill-state/build-spec.json.
 Learning: skill-state JSON operations are not safe to parallelize for the same state file; concurrent writes can interleave or leave trailing characters, causing build.phase/load failures.
 Future Action: Run build.start/build.phase/build.complete/build.abort sequentially only. Do not place same skill-state JSON updates inside multi_tool_use.parallel.
+
+## 2026-06-20 — node --test はこの環境で stdin 待ちハングするため < /dev/null 必須
+
+Type: lesson
+Context: Command Rail から Board/Logs を外す作業で frontend unit を回す際、scripts/run-node-tests-with-linkedom.sh / 直接 node --preserve-symlinks --test ともに出力ゼロのまま長時間ハングした。linkedom 直接ロードの素のスクリプトは即終了するのに --test だけが固まった。
+Learning: このランタイムでは node --test がデフォルトで stdin を待ち続けてハングする。`node ... --test <files> < /dev/null` のように stdin を閉じると即実行・完了する。加えて zsh では未クォートの $VAR が単語分割されない(bash と異なる)ため、ファイルリストを node に渡すときは zsh 配列 `${(f)...}` で展開する必要がある。linkedom は bun/npm install が走るため scripts 経由は重い→ /tmp に linkedom を一度入れ crates を symlink し `--preserve-symlinks` で回すと速い。
+Future Action: このリポジトリで frontend unit (web/__tests__/*.mjs) を個別/一括実行するときは必ず `< /dev/null` を付ける。複数ファイルを変数で渡す場合は zsh 配列展開を使う。

@@ -45,10 +45,10 @@ test("rail commands: [data-cmd] item click が op:command を dispatch する", 
     fixture.document.addEventListener("op:command", (event) => {
       received.push(event.detail?.id);
     });
-    const board = fixture.document.querySelector('.op-rail__item[data-cmd="open-board"]');
-    assert.ok(board, "expected Board rail item");
-    board.dispatchEvent(new fixture.window.Event("click", { bubbles: true }));
-    assert.deepEqual(received, ["open-board"]);
+    const startWork = fixture.document.querySelector('.op-rail__item[data-cmd="start-work"]');
+    assert.ok(startWork, "expected Start Work rail item");
+    startWork.dispatchEvent(new fixture.window.Event("click", { bubbles: true }));
+    assert.deepEqual(received, ["start-work"]);
   } finally {
     fixture.dispose();
   }

@@ -558,10 +558,12 @@ Contrast) では system colors にフォールバックします。
 | `⌘?` | Hotkey Overlay (cheat sheet) を toggle |
 | `Esc` | 開いている Palette / Overlay / Drawer / Dropdown を閉じる |
 
-画面左端の Command Rail は常時表示です。上段に Start Work / Work / Board /
-Logs、中段にウィンドウ操作 (Tile / Stack / Align / ウィンドウ一覧 / Add)、
-下段に Command Palette が並びます。レール項目にホバーすると
-ラベルと実際のショートカットが表示されます。ウィンドウを閉じる操作
+画面左端の Command Rail は常時表示です。上段に Start Work と Workspace、
+中段にウィンドウ操作 (Tile / Stack / Align / ウィンドウ一覧 / Add)、
+下段に Command Palette が並びます。Board と Logs はレール項目ではなく、
+Add Window のプリセットメニュー・Command Palette・`⌘B` / `⌘L` のホットキー
+から開けます。レール項目にホバーするとラベルと実際のショートカットが
+表示されます。ウィンドウを閉じる操作
 (タイトルバーの × / タブの ×) は常に確認ダイアログを経由するため、誤クリック
 で実行中のエージェントが失われることはありません。
 
