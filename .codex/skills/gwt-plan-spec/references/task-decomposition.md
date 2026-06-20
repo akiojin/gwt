@@ -48,6 +48,26 @@ Within each user story phase, tasks follow this order:
 
 Test tasks reference the acceptance scenario they verify.
 
+### Surface-aware test selection
+
+Test tasks should match the test execution system that `gwt-verify` will
+pick at Phase 3 of `gwt-build-spec` for the surface being changed. See
+`gwt-verify`'s `references/test-matrix.md` for the canonical mapping.
+Practical guidance:
+
+- Rust crate change → Rust test task (`#[cfg(test)] mod tests` or
+  `crates/*/tests/`).
+- Frontend JS logic change → `node --test` task under
+  `crates/gwt/web/__tests__/` (run by `pnpm test:frontend-unit`).
+- WebView/browser UI change → Playwright test task under
+  `crates/gwt/playwright/tests/` (run by `pnpm test:visual`). **Only**
+  WebView/browser UI surfaces get a Playwright task — never propose
+  Playwright for Rust crates, gwtd CLI, or release scripts.
+- Release script change → bash/node test task that `pnpm test:release-flow`
+  or `pnpm test:release-assets` will execute.
+- Skill asset change → `cargo test -p gwt-skills` and `pnpm lint:skills`
+  task to assert frontmatter / cross-skill consistency.
+
 ## `[P]` Parallel Markers
 
 A task may be marked `[P]` only when:

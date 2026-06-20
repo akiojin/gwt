@@ -52,8 +52,8 @@ Test tasks reference the acceptance scenario they verify.
 
 Test tasks should match the test execution system that `gwt-verify` will
 pick at Phase 3 of `gwt-build-spec` for the surface being changed. See
-`.claude/skills/gwt-verify/references/test-matrix.md` for the canonical
-mapping. Practical guidance:
+`gwt-verify`'s `references/test-matrix.md` for the canonical mapping.
+Practical guidance:
 
 - Rust crate change → Rust test task (`#[cfg(test)] mod tests` or
   `crates/*/tests/`).
