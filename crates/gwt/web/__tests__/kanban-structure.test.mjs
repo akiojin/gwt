@@ -87,6 +87,27 @@ test("Knowledge windows install periodic cache-first refresh for external phase 
   );
 });
 
+test("app initializes Launch Pending before Knowledge surface construction", () => {
+  const launchPendingDeclaration = appSource.indexOf(
+    "const launchPending = createLaunchPendingController({",
+  );
+  const knowledgeSurfaceConstruction = appSource.indexOf("createKnowledgeKanbanSurface({");
+  assert.notEqual(
+    launchPendingDeclaration,
+    -1,
+    "expected app.js to declare the shared Launch Pending controller",
+  );
+  assert.notEqual(
+    knowledgeSurfaceConstruction,
+    -1,
+    "expected app.js to construct the Knowledge surface",
+  );
+  assert.ok(
+    launchPendingDeclaration < knowledgeSurfaceConstruction,
+    "Knowledge surface wiring must not read launchPending before it is initialized",
+  );
+});
+
 test("Kanban removes legacy open and closed list scope controls", () => {
   assert.doesNotMatch(
     appSource,
@@ -424,5 +445,131 @@ test("Knowledge detail pane renders section bodies through sanitized Markdown he
     appSource,
     /\.innerHTML\s*=\s*section\.body\b/,
     "raw section.body must never be assigned to innerHTML",
+  );
+});
+
+test("Knowledge detail surfaces related Work and Session traces with Focus or Resume actions", () => {
+  assert.match(
+    appSource,
+    /related_works/,
+    "expected Knowledge detail renderer to consume related_works",
+  );
+  assert.match(
+    appSource,
+    /related_work_count[\s\S]{0,300}?related_session_count|related_session_count[\s\S]{0,300}?related_work_count/,
+    "expected Knowledge list rows/cards to surface related Work and Session counts",
+  );
+  assert.match(
+    appSource,
+    /knowledge-related-works/,
+    "expected a dedicated related Work section in Knowledge detail",
+  );
+  assert.match(
+    appSource,
+    /Session/,
+    "expected related agent conversations to be labelled as Sessions",
+  );
+  const relatedStart = appSource.indexOf("function knowledgeRelatedLiveSessionIds");
+  assert.ok(relatedStart >= 0, "expected related session focus/resume helpers");
+  const relatedEnd = appSource.indexOf(
+    "function renderKnowledgeDetailPane",
+    relatedStart,
+  );
+  assert.ok(relatedEnd > relatedStart, "expected related helper before detail pane");
+  const relatedBody = appSource.slice(relatedStart, relatedEnd);
+  assert.match(
+    relatedBody,
+    /function findKnowledgeRelatedLiveWindow\(agent,\s*session(?:,\s*liveSessionWindowsByConversation)?\)/,
+    "running related session detection must see both the Work agent and Session row",
+  );
+  assert.match(
+    relatedBody,
+    /session\?\.agent_session_id/,
+    "running related session detection should compare the agent-tool conversation id",
+  );
+  assert.match(
+    relatedBody,
+    /session\?\.is_active !== false[\s\S]{0,240}?agent\?\.session_id|agent\?\.session_id[\s\S]{0,240}?session\?\.is_active !== false/,
+    "Work-level session ids should only focus the current Session row",
+  );
+  assert.match(
+    relatedBody,
+    /windowData\?\.session_id/,
+    "running related session detection should compare the live window session id",
+  );
+  assert.match(
+    appSource,
+    /getWorkspaceWindows:\s*\(\)\s*=>[\s\S]{0,240}?allProjectWindowIds\(\)[\s\S]{0,240}?workspaceWindowById/,
+    "Knowledge surface must scan project workspace windows, not only mounted terminal maps",
+  );
+  assert.match(
+    relatedBody,
+    /getWorkspaceWindows/,
+    "running related session detection should include project workspace windows",
+  );
+  assert.match(
+    relatedBody,
+    /findKnowledgeRelatedLiveWindow\(\s*agent,\s*session/,
+    "per-session actions must pass the specific Session row to live-window detection",
+  );
+  assert.match(
+    relatedBody,
+    /liveSessionWindowsByConversation/,
+    "related sessions should build a conversation-id live window index across related gwt sessions",
+  );
+  assert.match(
+    relatedBody,
+    /const conversationWindow[\s\S]{0,220}?liveSessionWindowsByConversation\?\.get/,
+    "past rows for a conversation that is currently live in another gwt session should render Focus, not Resume",
+  );
+  assert.match(
+    appSource,
+    /scheduleKnowledgeRelatedWorkRefresh/,
+    "Knowledge windows should expose a cache-first refresh hook for Work/Session changes",
+  );
+  assert.match(
+    appSource,
+    /case "active_work_projection":[\s\S]{0,1200}?scheduleKnowledgeRelatedWorkRefresh\(\)/,
+    "active Work projection changes should refresh Knowledge related Work traces",
+  );
+  assert.match(
+    appSource,
+    /case "workspace_resume_agent_started":[\s\S]{0,500}?scheduleKnowledgeRelatedWorkRefresh\(\)/,
+    "Resume/Launch acks should refresh Knowledge related Session traces",
+  );
+  assert.match(
+    relatedBody,
+    /renderKnowledgeRelatedSessionAction/,
+    "expected related sessions to render a per-session action",
+  );
+  assert.match(
+    relatedBody,
+    /Focus/,
+    "running related sessions should expose Focus",
+  );
+  assert.match(
+    relatedBody,
+    /Resume/,
+    "historical related sessions should expose Resume",
+  );
+  assert.match(
+    relatedBody,
+    /resume_workspace_agent/,
+    "historical related sessions should reuse the Workspace resume event",
+  );
+  assert.match(
+    relatedBody,
+    /focusWindowLocally[\s\S]{0,240}?sendWindowFocus|sendWindowFocus[\s\S]{0,240}?focusWindowLocally/,
+    "running related sessions should reuse the normal window focus path",
+  );
+  assert.doesNotMatch(
+    relatedBody,
+    /Launch Agent/,
+    "related sessions should not open a new Launch Agent flow",
+  );
+  assert.match(
+    componentsCss,
+    /\.knowledge-related-works\b/,
+    "expected CSS hook for related Work detail rows",
   );
 });

@@ -7095,3 +7095,17 @@ Type: lesson
 Context: Command Rail から Board/Logs を外す作業で frontend unit を回す際、scripts/run-node-tests-with-linkedom.sh / 直接 node --preserve-symlinks --test ともに出力ゼロのまま長時間ハングした。linkedom 直接ロードの素のスクリプトは即終了するのに --test だけが固まった。
 Learning: このランタイムでは node --test がデフォルトで stdin を待ち続けてハングする。`node ... --test <files> < /dev/null` のように stdin を閉じると即実行・完了する。加えて zsh では未クォートの $VAR が単語分割されない(bash と異なる)ため、ファイルリストを node に渡すときは zsh 配列 `${(f)...}` で展開する必要がある。linkedom は bun/npm install が走るため scripts 経由は重い→ /tmp に linkedom を一度入れ crates を symlink し `--preserve-symlinks` で回すと速い。
 Future Action: このリポジトリで frontend unit (web/__tests__/*.mjs) を個別/一括実行するときは必ず `< /dev/null` を付ける。複数ファイルを変数で渡す場合は zsh 配列展開を使う。
+
+## 2026-06-20 — Verify related session dedupe with rendered action/card counts
+
+Type: failure_pattern
+Context: SPEC-1938 Issue Knowledge Bridge related sessions: a first fix deduped by conversation id, but user screenshots still showed duplicate Issue #3133 related Resume-looking rows because a stale same-target no-session agent remained in the rendered Related Work section.
+Learning: Counting unique agent_session_id values is insufficient for Related Work/Session UX. Distinct conversations and empty historical agent rows can still render duplicate Resume/Focus-looking cards for the same issue/worktree/branch/agent target.
+Future Action: For fixes touching Related Work/Session aggregation or Resume/Focus rendering, verify backend KnowledgeDetail rows and Playwright DOM counts: target related work cards, agent rows, session rows, empty No session yet rows, and Resume/Focus action count for the reported issue.
+
+## 2026-06-20 — Verify related Work absence, not only target presence
+
+Type: lesson
+Context: SPEC-1938 Issue detail Related Work showed extra Unknown cards even after duplicate Resume/Focus fixes. The earlier Playwright check only counted the expected target card and did not assert that unrelated Unknown/no-session cards were absent.
+Learning: Branch-only Issue inference is weak when a legacy WorkItem has multiple execution containers. Owner/session links are authoritative, but branch-only links must be unambiguous. Visual checks for Related Work must assert the entire rendered section: card count, Unknown status count, No session rows, and action count.
+Future Action: When fixing related Work/Session UI, add a backend regression test for ambiguous legacy Work items and a live DOM assertion that no unexpected Unknown/no-session related cards remain.

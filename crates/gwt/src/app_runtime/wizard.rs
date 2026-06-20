@@ -62,9 +62,9 @@ fn start_work_open_error(client_id: &str, message: impl Into<String>) -> Vec<Out
 
 use super::{
     build_shell_process_launch, combined_window_id, detect_wizard_docker_context_and_status,
-    knowledge_error_event, knowledge_kind_for_preset, list_branch_entries_with_active_sessions,
-    normalize_branch_name, preferred_issue_launch_branch, resolve_shell_launch_worktree,
-    session_exact_resume_materializable, synthetic_branch_entry,
+    knowledge_error_event, knowledge_kind_for_preset, linked_issue_workspace_context,
+    list_branch_entries_with_active_sessions, normalize_branch_name, preferred_issue_launch_branch,
+    resolve_shell_launch_worktree, session_exact_resume_materializable, synthetic_branch_entry,
     workspace_projection_for_current_resume, workspace_resume_branch_exists,
     workspace_resume_branch_from_journal_project_root, workspace_resume_context_for_work_item,
     workspace_resume_context_from_journal, workspace_resume_context_from_projection,
@@ -243,6 +243,15 @@ impl AppRuntime {
         let docker_context = None;
         let docker_service_status = gwt_docker::ComposeServiceStatus::NotFound;
         let wizard_id = Uuid::new_v4().to_string();
+        let owner_label = match linked_issue_kind {
+            LinkedIssueKind::Issue => format!("Issue #{issue_number}"),
+            LinkedIssueKind::Spec => format!("SPEC #{issue_number}"),
+        };
+        let workspace_resume_context = Some(linked_issue_workspace_context(
+            project_root,
+            issue_number,
+            owner_label,
+        ));
         let mut wizard = LaunchWizardState::open_knowledge_launch_with_previous_profiles(
             LaunchWizardContext {
                 selected_branch: synthetic_branch_entry(&base_branch_name),
@@ -267,7 +276,7 @@ impl AppRuntime {
             tab_id: tab_id.to_string(),
             wizard_id,
             wizard,
-            workspace_resume_context: None,
+            workspace_resume_context,
             agent_kanban_target: None,
         });
 

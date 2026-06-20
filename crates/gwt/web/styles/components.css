@@ -4050,6 +4050,98 @@ button.workspace-board-ref:focus-visible {
   white-space: normal;
 }
 
+.knowledge-related-works {
+  display: grid;
+  gap: var(--space-3);
+}
+
+.knowledge-related-work-list {
+  display: grid;
+  gap: var(--space-2);
+}
+
+.knowledge-related-work {
+  display: grid;
+  gap: var(--space-2);
+  padding: var(--space-3);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-sm);
+  background: color-mix(in oklab, var(--color-surface-elevated) 86%, transparent);
+}
+
+.knowledge-related-work-head,
+.knowledge-related-work-meta,
+.knowledge-related-session {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  min-width: 0;
+}
+
+.knowledge-related-work-head,
+.knowledge-related-work-meta {
+  flex-wrap: wrap;
+}
+
+.knowledge-related-work-title,
+.knowledge-related-agent-name,
+.knowledge-related-session-label {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.knowledge-related-work-title {
+  font-weight: 700;
+  color: var(--color-text-strong);
+}
+
+.knowledge-related-status,
+.knowledge-related-session-state {
+  flex: 0 0 auto;
+  padding: 1px var(--space-2);
+  border-radius: var(--radius-pill);
+  font-size: var(--type-xs);
+  color: var(--color-text-muted);
+  background: color-mix(in oklab, var(--color-text-muted) 12%, transparent);
+  text-transform: capitalize;
+}
+
+.knowledge-related-agent {
+  display: grid;
+  gap: var(--space-1);
+  min-width: 0;
+}
+
+.knowledge-related-agent-name {
+  font-size: var(--type-xs);
+  color: var(--color-text-muted);
+}
+
+.knowledge-related-session {
+  justify-content: space-between;
+  padding: var(--space-1) var(--space-2);
+  border-radius: var(--radius-sm);
+  background: color-mix(in oklab, var(--color-text-muted) 8%, transparent);
+}
+
+.knowledge-related-session.is-active .knowledge-related-session-state {
+  color: var(--color-state-active);
+  background: color-mix(in oklab, var(--color-state-active) 16%, transparent);
+}
+
+.knowledge-related-session-label {
+  font-family: var(--font-mono);
+  font-size: var(--type-xs);
+  color: var(--color-text);
+}
+
+.knowledge-related-session-empty {
+  font-size: var(--type-xs);
+  color: var(--color-text-muted);
+}
+
 .knowledge-markdown-body {
   min-width: 0;
   font-family: var(--font-body);

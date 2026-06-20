@@ -3426,6 +3426,28 @@
         sendWindowFocus: (id) => socketTransport.send({ kind: "focus_window", id }),
       });
 
+      // SPEC-2359 W-17 (FR-398): shared pending state for Resume/Launch
+      // requests. Settled by the dispatcher on workspace_resume_agent_started
+      // / *_error; the timeout re-enables the UI when no reply ever arrives.
+      const launchPending = createLaunchPendingController({
+        onChange: () => {
+          try {
+            workspaceOverviewSurface.renderWindows();
+          } catch {
+            // Surface may not be mounted yet during bootstrap.
+          }
+          try {
+            workspaceResumePicker.render();
+          } catch {
+            // Picker may not be mounted yet during bootstrap.
+          }
+          const notice = launchPending.consumeTimeoutNotice();
+          if (notice) {
+            console.warn("[launch-pending]", notice);
+          }
+        },
+      });
+
       // SPEC-3064 Phase 3 (E6d): the Knowledge Bridge (Kanban) window
       // surface (knowledge bridge state map, semantic search coalescing,
       // Kanban rendering, Kanban Drawer, Knowledge window mount, and the
@@ -3437,6 +3459,7 @@
         ensureKnowledgeBridgeState,
         clearKnowledgeBridgeState,
         requestKnowledgeBridge,
+        scheduleKnowledgeRelatedWorkRefresh,
         scheduleKnowledgeSearch,
         requestKnowledgeDetail,
         knowledgeDetailRequestMatches,
@@ -3451,12 +3474,18 @@
         createKnowledgeMarkdownBody,
         windowMap,
         workspaceWindowById,
+        getWorkspaceWindows: () =>
+          allProjectWindowIds()
+            .map((windowId) => workspaceWindowById(windowId))
+            .filter(Boolean),
         pendingIndexOpenTargetsByPreset,
         knowledgeKindForPreset,
         focusWindowLocally,
         sendWindowFocus: (id) => socketTransport.send({ kind: "focus_window", id }),
         focusOrSpawnPreset,
         openIssueLaunchWizard,
+        visibleBounds,
+        launchPending,
       });
 
       // SPEC-3064 Phase 3 (E6c): the Board & Logs window surface (board/log
@@ -3590,28 +3619,6 @@
       // resumable agents; the response opens this modal so the user can
       // pick which previously-assigned agent to restart in-place
       // (without going through the Launch Wizard).
-      // SPEC-2359 W-17 (FR-398): shared pending state for Resume/Launch
-      // requests. Settled by the dispatcher on workspace_resume_agent_started
-      // / *_error; the timeout re-enables the UI when no reply ever arrives.
-      const launchPending = createLaunchPendingController({
-        onChange: () => {
-          try {
-            workspaceOverviewSurface.renderWindows();
-          } catch {
-            // Surface may not be mounted yet during bootstrap.
-          }
-          try {
-            workspaceResumePicker.render();
-          } catch {
-            // Picker may not be mounted yet during bootstrap.
-          }
-          const notice = launchPending.consumeTimeoutNotice();
-          if (notice) {
-            console.warn("[launch-pending]", notice);
-          }
-        },
-      });
-
       const workspaceResumePicker = createWorkspaceResumePickerController({
         modalEl: document.getElementById("workspace-resume-picker-modal"),
         dialogEl: document.querySelector("#workspace-resume-picker-modal .modal-shell"),
@@ -4637,6 +4644,7 @@
             // Overview (Kanban). Keep the projection global + telemetry update
             // so the Kanban surface and Status Strip stay in sync.
             workspaceOverviewSurface.renderWindows();
+            scheduleKnowledgeRelatedWorkRefresh();
             recomputeOperatorTelemetry();
             break;
           // SPEC-3064 Phase 3 (E7): window list entries and rendering live
@@ -4823,6 +4831,7 @@
           case "workspace_resume_agent_started":
             launchPending.settleAck(event);
             workspaceResumePicker.handleStarted(event);
+            scheduleKnowledgeRelatedWorkRefresh();
             break;
           case "launch_wizard_state":
             // SPEC-3064 Phase 3 (E5): guard defer + wizard state mutation
