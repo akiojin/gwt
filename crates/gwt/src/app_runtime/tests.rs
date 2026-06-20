@@ -11128,6 +11128,74 @@ fn app_runtime_load_knowledge_bridge_projects_related_issue_work_sessions() {
 }
 
 #[test]
+fn app_runtime_load_knowledge_bridge_marks_session_only_stopped_related_session_past() {
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedEnvVar::set("HOME", temp.path());
+    let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+    let repo = temp.path().join("repo");
+    let worktree = temp.path().join("repo-work-issue-3133");
+    fs::create_dir_all(&repo).expect("create repo");
+    fs::create_dir_all(&worktree).expect("create worktree");
+    init_repo(&repo);
+    Cache::new(issue_cache_root(&repo))
+        .write_snapshot(&sample_issue_snapshot(
+            3133,
+            "Resume historical Launch Agent session",
+            &["bug"],
+            "Issue body",
+            "2026-06-20T09:00:00Z",
+        ))
+        .expect("write issue snapshot");
+
+    let tab = sample_project_tab_with_window_at(
+        "tab-1",
+        "issue-1",
+        repo.clone(),
+        WindowPreset::Issue,
+        WindowProcessStatus::Ready,
+    );
+    let runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+
+    let stopped_at = Utc.with_ymd_and_hms(2026, 6, 20, 9, 5, 0).unwrap();
+    let mut session =
+        gwt_agent::Session::new(&worktree, "work/issue-3133", gwt_agent::AgentId::Codex);
+    session.id = "session-issue-3133-stopped".to_string();
+    session.agent_session_id = Some("conv-issue-3133-stopped".to_string());
+    session.status = gwt_agent::AgentStatus::Stopped;
+    session.linked_issue_number = Some(3133);
+    session.created_at = stopped_at;
+    session.updated_at = stopped_at;
+    session.last_activity_at = stopped_at;
+    session.save(&runtime.sessions_dir).expect("save session");
+
+    let events = runtime.load_knowledge_bridge_events(
+        "client-1",
+        KnowledgeLoadRequest {
+            id: &combined_window_id("tab-1", "issue-1"),
+            kind: gwt::KnowledgeKind::Issue,
+            request_id: None,
+            selected_number: Some(3133),
+            refresh: false,
+        },
+    );
+
+    let detail = match &events[1].event {
+        BackendEvent::KnowledgeDetail { detail, .. } => detail,
+        other => panic!("unexpected detail event: {other:?}"),
+    };
+    assert_eq!(detail.related_works.len(), 1);
+    assert_eq!(detail.related_works[0].status_category, "idle");
+    assert_eq!(detail.related_works[0].agents[0].sessions.len(), 1);
+    assert!(
+        !detail.related_works[0].agents[0].sessions[0].is_active,
+        "session-only stopped related sessions must render as Past, not Current"
+    );
+}
+
+#[test]
 fn app_runtime_load_knowledge_bridge_dedupes_related_issue_sessions_by_conversation() {
     let _env_lock = env_test_lock()
         .lock()
