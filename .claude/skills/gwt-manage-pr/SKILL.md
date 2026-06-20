@@ -18,6 +18,48 @@ implementation may still use GitHub REST / `gh` internally as transport, while
 GraphQL remains the transport for unresolved review threads and thread
 reply/resolve.
 
+## Final Report Contract
+
+Every final user-facing report from this workflow MUST state whether a PR was
+created, updated, fixed, or left unchanged. When a PR was created, pushed to,
+or fixed, include a `PR Update Summary` derived from the actual diff, commit
+range, and PR body. Do not invent changes from intent alone.
+
+`PR Update Summary` must include:
+
+- PR number and URL
+- base/head branches
+- commit count or updated commit range
+- 2-5 bullets describing what the PR updates
+- related Issue/SPEC numbers, or `None`
+- verification and CI/review status
+
+For **check** and **NO ACTION** results, explicitly say no PR update was made.
+If an existing PR is only inspected, summarize the current PR status separately
+from `PR Update Summary` so the report does not imply new changes were pushed.
+
+Final report shape:
+
+```text
+## PR Result
+- Action: Created | Updated | Fixed | Checked | No Action
+- PR: #<number> <url> | None
+- Branches: <base> <- <head>
+
+### PR Update Summary
+- Commits: <count or range>
+- Updates:
+  - <what changed>
+- Related: #<issue/spec> | None
+- Verification: <commands/checks and status>
+
+### Next
+- <remaining blocker or "None">
+```
+
+Omit `PR Update Summary` only when no PR was created, updated, or fixed; in
+that case include `PR Update: none` in the result.
+
 ## gwtd resolution
 
 Before executing any `gwtd ...` command from this skill or its references,
@@ -166,7 +208,7 @@ Create mode is entered from the Preflight 2×2 matrix when `N > 0`.
 
 ### PR Body Rules
 
-- Template: `.claude/skills/gwt-manage-pr/references/pr-body-template.md`
+- Template: the current runtime's `gwt-manage-pr/references/pr-body-template.md`
 - Required sections: Summary, Changes, Testing, PR Readiness, Closing Issues, Related Issues, Checklist
 - Conditional sections (remove if N/A): Context, Risk/Impact, Screenshots, Deployment
 - Remove all `<!-- GUIDE: ... -->` comments from final output

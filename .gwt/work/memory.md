@@ -7109,3 +7109,24 @@ Type: lesson
 Context: Issue #3066 follow-up: cleanup-only fix passed tests, but full cargo test still created new ~/.gwt/projects entries. Remaining writers were gwt test binaries and gwtd child integration tests touching workspace_state_path/project-state without isolated HOME.
 Learning: For project-scoped storage changes, verification must compare the real ~/.gwt/projects count before and after focused and full tests. gwt-core used as a normal dependency will not see #[cfg(test)], so test-harness HOME fallback must be runtime-detected or tests must explicitly pass HOME/USERPROFILE to spawned binaries.
 Future Action: When adding tests that call workspace_state_path/save_workspace_projection or spawn gwtd/gwt with workspace JSON envelopes, hold env_test_lock where needed and set HOME/USERPROFILE to a tempdir; include a before/after real HOME project-dir count in verification for Issue #3066-class bugs.
+
+## 2026-06-20 — Managed gwt skill parity must cover full skill directories
+
+Type: lesson
+Context: Issue #3056 fixed a drift where runtime-independent additions existed only under .codex/skills while materialization writes managed Codex skill assets from the .claude bundle byte-for-byte.
+Learning: Checking only SKILL.md or only the currently reported divergent files is too narrow. Managed gwt-* parity must cover the whole skill directory tree, including references/ and scripts/, and runtime-specific path references should be expressed in runtime-neutral terms unless per-target generation is explicitly designed.
+Future Action: When changing managed gwt-* skill assets, update the canonical .claude tree first, sync .codex from it, run a recursive .claude/.codex parity check, and add/extend contract tests if a drift class is not already guarded.
+
+## 2026-06-20 — Playwright embedded routes must cover transitive module imports
+
+Type: failure pattern
+Context: Issue #3037: embedded Playwright specs failed before workspace_state rendered because project-shell-surface.js imported /window-list-model.js, but installEmbeddedRoutes only served a hard-coded ROOT_MODULES list and the guard test only checked direct app.js imports.
+Learning: Direct import coverage is insufficient for browser module fixtures. A missing transitive module manifests as unrelated UI timeouts (0 project tabs / windows) because app.js evaluation aborts before the WebSocket fixture can render state.
+Future Action: When adding or moving frontend modules imported by routed Playwright fixtures, ensure the embedded route helper allowlist includes transitive imports and keep the recursive playwright-embedded-routes test green before triaging downstream visual failures.
+
+## 2026-06-20 — Embedded route graph tests must resolve relative web imports
+
+Type: review-learning
+Context: Codex review on PR #3130 found that playwright-embedded-routes.test.mjs only followed absolute /module.js imports, so relative chains such as project-tabs-renderer.js -> ./window-runtime-state.js -> ./protocol-enums.js could be missed by the recurrence guard.
+Learning: A frontend route-coverage test that validates browser-served modules must resolve import specifiers the same way the browser module graph does, including relative ./ and ../ imports, not just absolute root imports.
+Future Action: When adding or updating embedded frontend route guards, include a focused test for a relative import chain and normalize web module specifiers with POSIX path semantics before comparing against ROOT_MODULES.
