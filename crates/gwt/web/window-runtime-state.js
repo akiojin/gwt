@@ -56,18 +56,25 @@ export function windowRuntimeLabel(status) {
 }
 
 // SPEC-2356 — translate legacy runtime state vocabulary to Living
-// Telemetry semantic states (`active|idle|blocked|done`). The mapping is
-// intentionally narrow so future runtime states surface as
+// Telemetry semantic states (`active|idle|blocked|done|needs_input`). The
+// mapping is intentionally narrow so future runtime states surface as
 // `idle` until the design language explicitly handles them.
+//
+// FR-039 (anshin): `waiting` (the agent is blocked on the operator's input)
+// is its own LOUD state `needs_input` — an attention / "your turn" cue —
+// instead of collapsing into quiet `idle`. The wire `"waiting"` value is
+// only emitted for agent/claude/codex presets (gated in
+// normalizeWindowRuntimeState), so non-agent windows never reach here.
 export function mapAgentTelemetryState(runtimeState) {
   switch (runtimeState) {
     case "running":
       return "active";
     case "starting":
       return "not_started";
+    case "waiting":
+      return "needs_input";
     case "ready":
     case "idle":
-    case "waiting":
       return "idle";
     case "stopped":
     case "exited":

@@ -805,6 +805,8 @@ body::after {
   --color-state-active: #22d3ee;
   --color-state-idle: #94a3b8;
   --color-state-blocked: #f87171;
+  /* FR-039 (anshin) — WAITING cell amber, bright enough for the dark strip. */
+  --color-state-needs-input: #fbbf24;
 }
 
 .op-status-strip__cell {
@@ -851,6 +853,12 @@ body::after {
 
 .op-status-strip__cell--idle .op-status-strip__value {
   color: var(--color-state-idle);
+}
+
+/* FR-039 (anshin) — WAITING count tints amber so "agents waiting for input"
+   reads as your-turn attention, not error. */
+.op-status-strip__cell--waiting .op-status-strip__value {
+  color: var(--color-state-needs-input);
 }
 
 .op-status-strip__cell--blocked .op-status-strip__value {
@@ -1247,6 +1255,17 @@ button.op-runtime-health-detail__process {
   animation: op-rim-blocked calc(var(--motion-pulse) * 0.5) ease-in-out infinite;
 }
 
+/* FR-039 (anshin) — "needs input" is a LOUD your-turn rim: it pulses like
+   blocked (so the operator notices it) but uses the warm amber state colour
+   instead of error red. Reuses the op-rim-blocked keyframe, which is driven
+   by --agent-color, so the glow tracks the needs-input token. */
+[data-agent-state="needs_input"] {
+  --agent-color: var(--color-state-needs-input);
+  box-shadow: 0 0 0 1px var(--agent-color),
+              0 0 14px 0 color-mix(in oklab, var(--agent-color) 50%, transparent);
+  animation: op-rim-blocked calc(var(--motion-pulse) * 0.5) ease-in-out infinite;
+}
+
 [data-agent-state="done"] {
   --agent-color: var(--color-state-done);
   box-shadow: 0 0 0 1px var(--agent-color);
@@ -1269,7 +1288,8 @@ button.op-runtime-health-detail__process {
 
 @media (prefers-reduced-motion: reduce) {
   [data-agent-state="active"],
-  [data-agent-state="blocked"] {
+  [data-agent-state="blocked"],
+  [data-agent-state="needs_input"] {
     animation: none;
   }
   /* SPEC-2356 — Status Strip live dot pulses to signal "system is alive".
@@ -3441,26 +3461,30 @@ button.workspace-board-ref:focus-visible {
 }
 
 /* SPEC-2356 — when blocked count > 0 the BLOCKED cell pulses subtly so
-   the user notices something needs attention. The animation is keyframed
-   on opacity (no shadow / repaint cost) and disabled by reduced-motion
-   and forced-colors. */
+   the user notices something needs attention. FR-039 (anshin) extends the same
+   alert pulse to the WAITING cell so "agents waiting for input" is just as
+   loud as blocked. The animation is keyframed on opacity (no shadow / repaint
+   cost) and disabled by reduced-motion and forced-colors. */
 @keyframes op-status-strip-blocked-pulse {
   0%, 100% { opacity: 1; }
   50%      { opacity: 0.55; }
 }
 
-:root[data-theme] .op-status-strip__cell--blocked.op-status-strip__cell--alert .op-status-strip__value {
+:root[data-theme] .op-status-strip__cell--blocked.op-status-strip__cell--alert .op-status-strip__value,
+:root[data-theme] .op-status-strip__cell--waiting.op-status-strip__cell--alert .op-status-strip__value {
   animation: op-status-strip-blocked-pulse var(--motion-pulse) ease-in-out infinite;
 }
 
 @media (prefers-reduced-motion: reduce) {
-  :root[data-theme] .op-status-strip__cell--blocked.op-status-strip__cell--alert .op-status-strip__value {
+  :root[data-theme] .op-status-strip__cell--blocked.op-status-strip__cell--alert .op-status-strip__value,
+  :root[data-theme] .op-status-strip__cell--waiting.op-status-strip__cell--alert .op-status-strip__value {
     animation: none;
   }
 }
 
 @media (forced-colors: active) {
-  :root[data-theme] .op-status-strip__cell--blocked.op-status-strip__cell--alert .op-status-strip__value {
+  :root[data-theme] .op-status-strip__cell--blocked.op-status-strip__cell--alert .op-status-strip__value,
+  :root[data-theme] .op-status-strip__cell--waiting.op-status-strip__cell--alert .op-status-strip__value {
     animation: none;
   }
 }
@@ -5877,6 +5901,13 @@ button.workspace-board-ref:focus-visible {
   animation: op-live-pulse var(--motion-pulse) ease-in-out infinite;
 }
 
+/* FR-039 (anshin) — needs-input dot pulses (loud) in amber so the minimap
+   surfaces "this pane is waiting for you" the same way it surfaces blocked. */
+.fleet-minimap__cell[data-telemetry="needs_input"]::after {
+  background: var(--color-state-needs-input);
+  animation: op-live-pulse var(--motion-pulse) ease-in-out infinite;
+}
+
 .fleet-minimap__cell[data-telemetry="done"]::after {
   background: var(--color-state-done);
 }
@@ -5894,7 +5925,8 @@ button.workspace-board-ref:focus-visible {
 
 @media (prefers-reduced-motion: reduce) {
   .fleet-minimap__cell[data-telemetry="active"]::after,
-  .fleet-minimap__cell[data-telemetry="blocked"]::after {
+  .fleet-minimap__cell[data-telemetry="blocked"]::after,
+  .fleet-minimap__cell[data-telemetry="needs_input"]::after {
     animation: none;
   }
 }

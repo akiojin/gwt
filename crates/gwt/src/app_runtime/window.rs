@@ -23,7 +23,7 @@ use gwt::{AgentKanbanLane, ArrangeMode, CanvasViewport, FocusCycleDirection};
 
 use super::{
     close_window_from_workspace, combined_window_id, AppRuntime, BackendEvent, OutboundEvent,
-    WindowGeometry, WindowPreset,
+    WindowGeometry, WindowPreset, WindowProcessStatus,
 };
 
 impl AppRuntime {
@@ -422,6 +422,107 @@ impl AppRuntime {
             events.push(event);
         }
         events
+    }
+
+    /// SPEC-2356 安心 Addendum (FR-041): stop a single window's agent runtime
+    /// (kill the PTY through the existing stop path) but keep the window and its
+    /// terminal output on the canvas, rendered as `Stopped`. Unlike
+    /// [`Self::close_window_events`], the window record is never removed, so the
+    /// operator keeps the prior output and can later relaunch it through
+    /// [`Self::restart_window_events`]. Idempotent: stopping an already-stopped
+    /// window simply re-broadcasts the authoritative `Stopped` status.
+    pub(crate) fn stop_window_events(&mut self, id: &str) -> Vec<OutboundEvent> {
+        let Some(address) = self.window_lookup.get(id).cloned() else {
+            return Vec::new();
+        };
+        // Tear down the live runtime (kills the PTY + joins reader/status
+        // threads + deregisters the writer). This reuses the exact same stop
+        // primitive that `close_window_events` uses, so no PTY management is
+        // reimplemented. `stop_window_runtime` also persists the Paused Work
+        // marker for an agent session via `mark_agent_session_stopped`.
+        self.stop_window_runtime(id);
+        // Render the surviving window as Stopped. `stop_window_runtime` already
+        // removed the pty/hook tracking, so the workspace record is the source
+        // of truth for the post-stop status.
+        self.set_window_status(
+            &address.tab_id,
+            &address.raw_id,
+            WindowProcessStatus::Stopped,
+        );
+        let _ = self.persist();
+        let mut events = vec![self.workspace_state_broadcast()];
+        events.extend(Self::status_events(
+            id.to_string(),
+            WindowProcessStatus::Stopped,
+            None,
+        ));
+        if let Some(event) = self.active_work_projection_broadcast_for_active_tab() {
+            events.push(event);
+        }
+        events
+    }
+
+    /// SPEC-2356 安心 Addendum (FR-042): stop every running agent window's
+    /// runtime, keeping all windows on the canvas. Iterates the open windows
+    /// and applies the per-window [`Self::stop_window_events`] stop to each
+    /// window that currently has a live runtime, so the confirm-on-frontend
+    /// "stop all" button resolves to the same kept-but-stopped state as the
+    /// single-window kill switch.
+    pub(crate) fn stop_all_windows_events(&mut self) -> Vec<OutboundEvent> {
+        let running_ids: Vec<String> = self.runtimes.keys().cloned().collect();
+        let mut events = Vec::new();
+        for window_id in running_ids {
+            events.extend(self.stop_window_events(&window_id));
+        }
+        events
+    }
+
+    /// SPEC-2356 安心 Addendum (FR-044): relaunch a window's agent in place. The
+    /// window id, geometry, and placement are preserved; the prior terminal
+    /// output is appended to (never wiped) because the window record — and the
+    /// frontend's xterm buffer bound to its id — survive the restart. Only acts
+    /// on a window that is currently `Stopped` or `Error`; restarting a running
+    /// window is a no-op so a live agent is never double-spawned.
+    ///
+    /// Process-spec presets (`Shell` / `Claude` / `Codex`) re-spawn through the
+    /// existing [`Self::start_window`] primitive. `Agent` windows re-spawn
+    /// through the persisted Session (the same resume path the Workspace /
+    /// Board resume buttons use) bound to the existing window id.
+    pub(crate) fn restart_window_events(&mut self, id: &str) -> Vec<OutboundEvent> {
+        let Some(address) = self.window_lookup.get(id).cloned() else {
+            return Vec::new();
+        };
+        let Some(tab) = self.tab(&address.tab_id) else {
+            return Vec::new();
+        };
+        let Some(window) = tab.workspace.window(&address.raw_id) else {
+            return Vec::new();
+        };
+        if !window.preset.requires_process() {
+            return Vec::new();
+        }
+        // Idempotency / safety guard: only relaunch a window that is actually
+        // stopped or errored. A running agent must never be double-spawned.
+        match self.window_status(id) {
+            Some(WindowProcessStatus::Stopped) | Some(WindowProcessStatus::Error) => {}
+            _ => return Vec::new(),
+        }
+
+        let preset = window.preset;
+        let geometry = window.geometry.clone();
+
+        if preset == WindowPreset::Agent {
+            return self.restart_agent_window_in_place(&address.tab_id, &address.raw_id, geometry);
+        }
+
+        // Clear any stale "restored window is paused" detail before relaunching
+        // so the new PTY's status is the authoritative one.
+        self.window_details.remove(id);
+        let events = self.start_window(&address.tab_id, &address.raw_id, preset, geometry);
+        let _ = self.persist();
+        let mut all = vec![self.workspace_state_broadcast()];
+        all.extend(events);
+        all
     }
 
     pub(crate) fn list_windows_event(&self) -> BackendEvent {

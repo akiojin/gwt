@@ -10167,6 +10167,259 @@ fn app_runtime_start_window_registers_running_process_runtime_and_pty_writer() {
     runtime.stop_window_runtime(&window_id);
 }
 
+// SPEC-2356 安心 Addendum (FR-041): StopWindow tears down the runtime but KEEPS
+// the window on the canvas, rendered as Stopped, unlike CloseWindow.
+#[test]
+fn stop_window_events_keeps_window_and_marks_stopped() {
+    let temp = tempdir().expect("tempdir");
+    let repo = temp.path().join("repo");
+    fs::create_dir_all(&repo).expect("create repo");
+    let tab = sample_project_tab(
+        "tab-1",
+        "Repo",
+        repo,
+        ProjectKind::NonRepo,
+        &[WindowPreset::Shell],
+    );
+    let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+    let window = runtime.tabs[0].workspace.persisted().windows[0].clone();
+    let window_id = combined_window_id("tab-1", &window.id);
+    runtime.register_window("tab-1", &window.id);
+    insert_test_pane_runtime(&mut runtime, &window_id);
+    runtime
+        .window_pty_statuses
+        .insert(window_id.clone(), WindowProcessStatus::Running);
+
+    let events = runtime.stop_window_events(&window_id);
+
+    // The runtime is gone (PTY killed) but the window record survives.
+    assert!(!runtime.runtimes.contains_key(&window_id));
+    assert!(runtime.window_lookup.contains_key(&window_id));
+    assert!(
+        runtime.tabs[0].workspace.window(&window.id).is_some(),
+        "StopWindow must keep the window on the canvas, unlike CloseWindow"
+    );
+    assert_eq!(
+        runtime.window_status(&window_id),
+        Some(WindowProcessStatus::Stopped),
+        "stopped window must render as Stopped"
+    );
+    assert!(events.iter().any(|event| matches!(
+        &event.event,
+        BackendEvent::WindowState { window_id: id, state }
+            if id == &window_id && *state == WindowProcessStatus::Stopped
+    )));
+}
+
+// SPEC-2356 安心 Addendum (FR-041): StopWindow is idempotent — stopping an
+// already-stopped window keeps it on the canvas and stays Stopped.
+#[test]
+fn stop_window_events_is_idempotent_when_already_stopped() {
+    let temp = tempdir().expect("tempdir");
+    let repo = temp.path().join("repo");
+    fs::create_dir_all(&repo).expect("create repo");
+    let tab = sample_project_tab_with_window_at(
+        "tab-1",
+        "shell-1",
+        repo,
+        WindowPreset::Shell,
+        WindowProcessStatus::Stopped,
+    );
+    let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+    let window_id = combined_window_id("tab-1", "shell-1");
+    runtime.register_window("tab-1", "shell-1");
+
+    let events = runtime.stop_window_events(&window_id);
+
+    assert!(runtime.tabs[0].workspace.window("shell-1").is_some());
+    assert_eq!(
+        runtime.window_status(&window_id),
+        Some(WindowProcessStatus::Stopped)
+    );
+    // Idempotent: it still emits the authoritative Stopped status, never an error.
+    assert!(events.iter().all(|event| !matches!(
+        &event.event,
+        BackendEvent::WindowState { state, .. } if *state == WindowProcessStatus::Error
+    )));
+}
+
+// SPEC-2356 安心 Addendum (FR-041): CloseWindow vs StopWindow contract — Close
+// removes the window, Stop keeps it. This guards the distinction directly.
+#[test]
+fn close_window_removes_while_stop_window_keeps() {
+    let temp = tempdir().expect("tempdir");
+    let repo = temp.path().join("repo");
+    fs::create_dir_all(&repo).expect("create repo");
+    let tab = sample_project_tab(
+        "tab-1",
+        "Repo",
+        repo,
+        ProjectKind::NonRepo,
+        &[WindowPreset::Shell, WindowPreset::Shell],
+    );
+    let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+    let windows: Vec<_> = runtime.tabs[0]
+        .workspace
+        .persisted()
+        .windows
+        .iter()
+        .map(|window| window.id.clone())
+        .collect();
+    let stop_raw = windows[0].clone();
+    let close_raw = windows[1].clone();
+    let stop_id = combined_window_id("tab-1", &stop_raw);
+    let close_id = combined_window_id("tab-1", &close_raw);
+    runtime.register_window("tab-1", &stop_raw);
+    runtime.register_window("tab-1", &close_raw);
+
+    runtime.stop_window_events(&stop_id);
+    runtime.close_window_events(&close_id);
+
+    assert!(
+        runtime.tabs[0].workspace.window(&stop_raw).is_some(),
+        "StopWindow keeps the window"
+    );
+    assert!(
+        runtime.tabs[0].workspace.window(&close_raw).is_none(),
+        "CloseWindow removes the window"
+    );
+}
+
+// SPEC-2356 安心 Addendum (FR-042): StopAllWindows stops every running agent
+// window's runtime while keeping all windows on the canvas.
+#[test]
+fn stop_all_windows_events_stops_every_runtime_keeping_windows() {
+    let temp = tempdir().expect("tempdir");
+    let repo = temp.path().join("repo");
+    fs::create_dir_all(&repo).expect("create repo");
+    let tab = sample_project_tab(
+        "tab-1",
+        "Repo",
+        repo,
+        ProjectKind::NonRepo,
+        &[WindowPreset::Claude, WindowPreset::Codex],
+    );
+    let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+    let raw_ids: Vec<_> = runtime.tabs[0]
+        .workspace
+        .persisted()
+        .windows
+        .iter()
+        .map(|window| window.id.clone())
+        .collect();
+    for raw in &raw_ids {
+        let window_id = combined_window_id("tab-1", raw);
+        runtime.register_window("tab-1", raw);
+        insert_test_pane_runtime(&mut runtime, &window_id);
+        runtime
+            .window_pty_statuses
+            .insert(window_id.clone(), WindowProcessStatus::Running);
+    }
+
+    runtime.stop_all_windows_events();
+
+    for raw in &raw_ids {
+        let window_id = combined_window_id("tab-1", raw);
+        assert!(
+            !runtime.runtimes.contains_key(&window_id),
+            "every agent runtime must be torn down"
+        );
+        assert!(
+            runtime.tabs[0].workspace.window(raw).is_some(),
+            "StopAllWindows must keep all windows on the canvas"
+        );
+        assert_eq!(
+            runtime.window_status(&window_id),
+            Some(WindowProcessStatus::Stopped)
+        );
+    }
+}
+
+// SPEC-2356 安心 Addendum (FR-044): RestartWindow relaunches a stopped process
+// preset in place, preserving the window id and re-registering its runtime.
+#[test]
+fn restart_window_events_relaunches_stopped_process_window_in_place() {
+    let temp = tempdir().expect("tempdir");
+    let repo = temp.path().join("repo");
+    fs::create_dir_all(&repo).expect("create repo");
+    let tab = sample_project_tab_with_window_at(
+        "tab-1",
+        "shell-1",
+        repo,
+        WindowPreset::Shell,
+        WindowProcessStatus::Stopped,
+    );
+    let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+    let window_id = combined_window_id("tab-1", "shell-1");
+    runtime.register_window("tab-1", "shell-1");
+    assert!(!runtime.runtimes.contains_key(&window_id));
+
+    let events = runtime.restart_window_events(&window_id);
+
+    // Same window id, freshly-running runtime + PTY writer registered.
+    assert!(
+        runtime.tabs[0].workspace.window("shell-1").is_some(),
+        "RestartWindow must preserve the window id"
+    );
+    assert!(runtime.runtimes.contains_key(&window_id));
+    assert_eq!(
+        runtime.window_status(&window_id),
+        Some(WindowProcessStatus::Running)
+    );
+    assert!(events.iter().any(|event| matches!(
+        &event.event,
+        BackendEvent::WindowState { window_id: id, state }
+            if id == &window_id && *state == WindowProcessStatus::Running
+    )));
+
+    runtime.stop_window_runtime(&window_id);
+}
+
+// SPEC-2356 安心 Addendum (FR-044): RestartWindow only acts on stopped/errored
+// windows — restarting a window that is already running is a no-op so a live
+// agent is never double-spawned.
+#[test]
+fn restart_window_events_is_noop_when_window_already_running() {
+    let temp = tempdir().expect("tempdir");
+    let repo = temp.path().join("repo");
+    fs::create_dir_all(&repo).expect("create repo");
+    let tab = sample_project_tab(
+        "tab-1",
+        "Repo",
+        repo,
+        ProjectKind::NonRepo,
+        &[WindowPreset::Shell],
+    );
+    let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+    let window = runtime.tabs[0].workspace.persisted().windows[0].clone();
+    let window_id = combined_window_id("tab-1", &window.id);
+    runtime.register_window("tab-1", &window.id);
+    insert_test_pane_runtime(&mut runtime, &window_id);
+    runtime
+        .window_pty_statuses
+        .insert(window_id.clone(), WindowProcessStatus::Running);
+    let original_pane = runtime
+        .runtimes
+        .get(&window_id)
+        .map(|runtime| Arc::as_ptr(&runtime.pane) as usize)
+        .expect("runtime present");
+
+    let events = runtime.restart_window_events(&window_id);
+
+    assert!(events.is_empty(), "restarting a running window is a no-op");
+    let after_pane = runtime
+        .runtimes
+        .get(&window_id)
+        .map(|runtime| Arc::as_ptr(&runtime.pane) as usize)
+        .expect("runtime still present");
+    assert_eq!(
+        original_pane, after_pane,
+        "running window's runtime must not be replaced"
+    );
+
+    runtime.stop_window_runtime(&window_id);
+}
+
 #[test]
 fn app_runtime_stop_all_runtimes_kills_every_pane_before_join_waits() {
     let temp = tempdir().expect("tempdir");

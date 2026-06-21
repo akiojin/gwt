@@ -1157,6 +1157,9 @@ impl AppRuntime {
                 base_geometry_revision,
             ),
             FrontendEvent::CloseWindow { id } => self.close_window_events(&id),
+            FrontendEvent::StopWindow { id } => self.stop_window_events(&id),
+            FrontendEvent::StopAllWindows {} => self.stop_all_windows_events(),
+            FrontendEvent::RestartWindow { id } => self.restart_window_events(&id),
             FrontendEvent::TerminalInput { id, data } => self.terminal_input_events(&id, &data),
             FrontendEvent::PaneSendInput { session_id, text } => {
                 self.pane_send_input_events(client_id, &session_id, &text)

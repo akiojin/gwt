@@ -331,6 +331,46 @@ impl AppRuntime {
         }
     }
 
+    /// SPEC-2356 安心 Addendum (FR-044): relaunch a stopped/errored `Agent`
+    /// window in place. Reuses the same persisted-Session resume primitive the
+    /// startup window restore uses ([`Self::spawn_restored_agent_session`]),
+    /// which removes the paused placeholder and re-spawns the agent into the
+    /// reused window id, preserving the window and appending to its prior
+    /// output. Returns an empty event list when the window has no resumable
+    /// Session (e.g. a never-launched placeholder) so the kill-switch UI can
+    /// surface "nothing to restart" instead of spawning a blank agent.
+    pub(crate) fn restart_agent_window_in_place(
+        &mut self,
+        tab_id: &str,
+        raw_id: &str,
+        fallback_geometry: WindowGeometry,
+    ) -> Vec<OutboundEvent> {
+        let Some(session_id) = self
+            .tab(tab_id)
+            .and_then(|tab| tab.workspace.window(raw_id))
+            .and_then(|window| window.session_id.clone())
+        else {
+            return Vec::new();
+        };
+        let path = self.sessions_dir.join(format!("{session_id}.toml"));
+        let Ok(session) = gwt_agent::Session::load_and_migrate(&path) else {
+            return Vec::new();
+        };
+        let workspace_resume_context = Some(workspace_resume_context_for_work_item(
+            &session.worktree_path,
+            Some(session.branch.as_str()),
+            &session.worktree_path,
+        ));
+        let mut events = vec![self.workspace_state_broadcast()];
+        events.append(&mut self.spawn_restored_agent_session(
+            tab_id,
+            session,
+            workspace_resume_context,
+            fallback_geometry,
+        ));
+        events
+    }
+
     /// Restore every process window the user did not explicitly close in a
     /// freshly opened/restored project tab (Issue #2942). Closing a window
     /// removes it from the persisted workspace, so the persisted process

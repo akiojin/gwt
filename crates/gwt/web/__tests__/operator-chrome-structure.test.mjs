@@ -197,6 +197,7 @@ test("index.html declares Operator chrome scaffold", () => {
     "#op-strip-clock",
     "#op-strip-active",
     "#op-strip-idle",
+    "#op-strip-waiting",
     "#op-strip-blocked",
     "#op-briefing",
     "#op-palette-backdrop",
@@ -327,11 +328,12 @@ test("Sidebar retires the Active Works overview in favor of the Work surface (SP
   );
 });
 
-test("Command Rail groups items into Navigate / Windows / System (SPEC-3038 US-1)", () => {
+test("Command Rail groups items into Navigate / Windows / Agents / System (SPEC-3038 US-1)", () => {
   // SPEC-3038 US-1: the rail is the single always-visible home for navigation
   // (Start Work / Work / Board / Logs), window operations (Tile / Stack /
   // Align / Windows / Add), and system actions (Palette / Update) — in that
-  // order. Groups carry aria-labels instead of visual headings.
+  // order. Groups carry aria-labels instead of visual headings. SPEC-2356
+  // Anshin (FR-042) inserts an Agents group (STOP ALL) before System.
   const groups = Array.from(document.querySelectorAll(".op-rail > .op-rail__group")).map(
     (group) => group.getAttribute("aria-label"),
   );
@@ -339,8 +341,8 @@ test("Command Rail groups items into Navigate / Windows / System (SPEC-3038 US-1
   // bottom-right home, so the sidebar no longer carries an Update section.
   assert.deepEqual(
     groups,
-    ["Navigate", "Windows", "System"],
-    "Rail order must be Navigate → Windows → System",
+    ["Navigate", "Windows", "Agents", "System"],
+    "Rail order must be Navigate → Windows → Agents → System",
   );
 });
 
@@ -1119,6 +1121,7 @@ test("Status Strip is exposed as a live region with semantic value labels", () =
   for (const id of [
     "op-strip-active",
     "op-strip-idle",
+    "op-strip-waiting",
     "op-strip-blocked",
     "op-strip-branches",
     "op-strip-runtime-health-value",
@@ -3101,30 +3104,100 @@ test("mapAgentTelemetryState emits only Living Telemetry states CSS handles", ()
   for (const m of mapperBlock[0].matchAll(/return\s+"([^"]+)"/g)) {
     returnedStates.add(m[1]);
   }
-  const allowed = new Set(["active", "not_started", "idle", "blocked", "done"]);
+  // FR-039 (安心): needs_input joins the Living Telemetry vocabulary as the
+  // LOUD "your turn" state CSS renders via [data-agent-state="needs_input"].
+  const allowed = new Set(["active", "not_started", "idle", "blocked", "done", "needs_input"]);
   for (const state of returnedStates) {
     assert.ok(allowed.has(state), `mapAgentTelemetryState returned undeclared state: ${state}`);
   }
-  // And the four design states must all be reachable, not just allowed.
+  // And every design state must be reachable, not just allowed.
   for (const required of allowed) {
     assert.ok(returnedStates.has(required), `Living Telemetry state never emitted: ${required}`);
   }
 });
 
-test("Status Strip ACTIVE / IDLE / BLOCKED cells all tint with their state color", () => {
+test("Status Strip ACTIVE / IDLE / WAITING / BLOCKED cells all tint with their state color", () => {
   const css = readFileSync(resolve(here, "../styles/components.css"), "utf8");
   // The ACTIVE / IDLE cells previously had no tonal hint — only BLOCKED did.
-  // Add parallel symmetry so the three count cells render with matching state
-  // colors (cyan / gray / red) for at-a-glance scanning.
+  // Add parallel symmetry so the count cells render with matching state colors
+  // (cyan / gray / amber / red) for at-a-glance scanning. FR-039 (安心) adds the
+  // WAITING cell tinted with the needs-input amber.
   assert.match(css, /\.op-status-strip__cell--active\s+\.op-status-strip__value\s*\{[^}]*--color-state-active/);
   assert.match(css, /\.op-status-strip__cell--idle\s+\.op-status-strip__value\s*\{[^}]*--color-state-idle/);
+  assert.match(css, /\.op-status-strip__cell--waiting\s+\.op-status-strip__value\s*\{[^}]*--color-state-needs-input/);
   assert.match(css, /\.op-status-strip__cell--blocked\s+\.op-status-strip__value\s*\{[^}]*--color-state-blocked/);
   // Markup also needs the modifiers wired so the CSS selectors actually match.
   const indexHtml = readFileSync(resolve(here, "../index.html"), "utf8");
   assert.match(indexHtml, /op-status-strip__cell\s+op-status-strip__cell--active/);
   assert.match(indexHtml, /op-status-strip__cell\s+op-status-strip__cell--idle/);
+  assert.match(indexHtml, /op-status-strip__cell\s+op-status-strip__cell--waiting/);
   assert.match(indexHtml, /op-status-strip__cell\s+op-status-strip__cell--runtime-health/);
   assert.match(css, /\.op-status-strip__cell--runtime-health\[data-state="warn"\]/);
+});
+
+test("FR-039 (安心): WAITING cell drives a LOUD needs_input alert pulse like BLOCKED", () => {
+  const css = readFileSync(resolve(here, "../styles/components.css"), "utf8");
+  // The WAITING cell must pulse via the same op-status-strip alert mechanism the
+  // BLOCKED cell uses, so "agents waiting for input" reads just as loud.
+  assert.match(
+    css,
+    /\.op-status-strip__cell--waiting\.op-status-strip__cell--alert\s+\.op-status-strip__value/,
+    "WAITING cell needs an --alert pulse rule mirroring BLOCKED",
+  );
+  // The window rim + minimap dot must render the needs_input telemetry state.
+  assert.match(css, /\[data-agent-state="needs_input"\]\s*\{/);
+  assert.match(css, /\.fleet-minimap__cell\[data-telemetry="needs_input"\]::after/);
+  // applyTelemetryCounts must route the needs_input count into the WAITING cell.
+  assert.match(operatorShellSource, /op-strip-waiting/);
+  assert.match(operatorShellSource, /needs_input/);
+});
+
+test("FR-041/044 (安心): window chrome carries STOP + RESTART kill-switch controls", () => {
+  // The window titlebar actions must expose STOP and RESTART alongside close,
+  // both starting hidden (visibility is driven per render from runtime state).
+  assert.match(appSource, /data-action="stop"[^>]*aria-label="Stop agent"/);
+  assert.match(appSource, /data-action="restart"[^>]*aria-label="Restart agent"/);
+  // STOP click sends stop_window (PTY halts, window stays); RESTART sends
+  // restart_window (relaunch in place).
+  assert.match(appSource, /kind:\s*"stop_window",\s*id:\s*windowData\.id/);
+  assert.match(appSource, /kind:\s*"restart_window",\s*id:\s*windowData\.id/);
+  // The render path toggles the controls based on runtime state.
+  assert.match(appSource, /updateWindowKillSwitchControls/);
+});
+
+test("FR-042 (安心): STOP ALL is reachable from the rail and the palette with a confirm", () => {
+  const railItem = document.querySelector('.op-rail__item[data-cmd="stop-all-windows"]');
+  assert.ok(railItem, "expected a Stop all agents rail item");
+  assert.equal(railItem.getAttribute("aria-label"), "Stop all agents");
+  // op:command + palette both route to requestStopAllWindows, which confirms
+  // and emits stop_all_windows.
+  assert.match(appSource, /case "stop-all-windows":/);
+  assert.match(appSource, /id:\s*"stop-all-agents"/);
+  assert.match(appSource, /kind:\s*"stop_all_windows"/);
+  assert.match(appSource, /function requestStopAllWindows\(\)/);
+});
+
+test("FR-043 (安心): send-input routes to the focused agent pane via session_id", () => {
+  // The palette entry + helper inject one line into the focused agent pane
+  // using pane_send_input scoped to the window's session_id.
+  assert.match(appSource, /id:\s*"send-input-focused-agent"/);
+  assert.match(appSource, /kind:\s*"pane_send_input",\s*session_id:/);
+  assert.match(appSource, /function sendFocusedPaneInput\(/);
+});
+
+test("FR-040 (安心): in-app attention toasts are wired with click-to-jump", () => {
+  // The attention toaster fires in-app toasts (no away gate); the renderer
+  // frames the window on click and respects reduced-motion via the CSS layer.
+  assert.match(appSource, /createAgentAttentionToaster/);
+  assert.match(appSource, /agentAttentionToaster\.handleRuntimeState/);
+  assert.match(appSource, /function showAttentionToast/);
+  assert.match(appSource, /frameWindow\(notice\.windowId\)/);
+  assert.match(inlineStyle, /\.attention-toast\s*\{/);
+  assert.match(
+    inlineStyle,
+    /@media \(prefers-reduced-motion: reduce\)[\s\S]*?\.attention-toast\s*\{[\s\S]*?animation:\s*none/,
+    "attention toast must drop its entrance animation under reduced motion",
+  );
 });
 
 test("Work surface lifecycle badge styles every agent-session state (SPEC-2359 W-12 FR-351)", () => {
@@ -4630,10 +4703,20 @@ test("window template restores the manual resize handle as a window-body sibling
     /<div class="window-body"><\/div>\s*<div class="resize-handle"><\/div>/,
     "the resize handle must be a sibling div after the window body",
   );
-  assert.match(
-    ensureWindowBody,
-    /<div class="window-actions">\s*<button class="icon-button" data-action="close"[\s\S]*?<\/div>/,
-    "window-actions must stay close-only (no maximize/minimize buttons)",
+  // SPEC-2008 retired maximize/minimize; SPEC-2356 Anshin (FR-041/044) added
+  // the STOP + RESTART kill-switch alongside close. Window-actions may carry
+  // those, but never maximize/minimize.
+  const windowActions = ensureWindowBody.match(
+    /<div class="window-actions">[\s\S]*?<\/div>/,
+  );
+  assert.ok(windowActions, "window-actions block must exist");
+  assert.match(windowActions[0], /data-action="close"/, "close must remain");
+  assert.match(windowActions[0], /data-action="stop"/, "STOP kill-switch must be present");
+  assert.match(windowActions[0], /data-action="restart"/, "RESTART must be present");
+  assert.doesNotMatch(
+    windowActions[0],
+    /data-action="(maximize|minimize)"/,
+    "window-actions must never reintroduce maximize/minimize buttons",
   );
   // The handle is wired to begin a local geometry edit and arm the resize state
   // (camera is untouched; only the window geometry changes).
