@@ -7102,3 +7102,58 @@ Type: lesson
 Context: SPEC-2008（日本語見出し + 多数の日付付き amendment サブセクション）に新しい US/FR を追記しようとして issue.spec.edit の structured body を検討した。merge_structured_spec は CANONICAL_SECTION_HEADINGS（英語: Background/User Stories/Edge Cases/Functional Requirements/Non-Functional Requirements/Success Criteria のみ）に一致する canonical セクションを丸ごと置換し、それ以外は unknown として温存する。
 Learning: 日本語見出し SPEC では『ユーザーストーリー/機能要件/成功基準』が unknown 扱いになり、structured merge は英語の重複 canonical セクション（US-1.../FR-001... を再採番）を並走追加してしまう。既存番号と参照を壊し、二言語の重複構造を生む。replace=true は全置換でさらに危険。
 Future Action: 日本語 / amendment 中心の SPEC（例 SPEC-2008）へ追記する時は issue.spec.edit の structured body を使わない。既存パターン（『## YYYY-MM-DD Amendment: ...』『### YYYY-MM-DD 追記: ...』の raw markdown ブロック）に倣い、spec セクション全文を read → 末尾に amendment を append → raw section write で書き戻す。または gwt-plan-spec / gwt-register-spec の安全な edit 経路を使う。
+## 2026-06-20 — Verify related session dedupe with rendered action/card counts
+
+Type: failure_pattern
+Context: SPEC-1938 Issue Knowledge Bridge related sessions: a first fix deduped by conversation id, but user screenshots still showed duplicate Issue #3133 related Resume-looking rows because a stale same-target no-session agent remained in the rendered Related Work section.
+Learning: Counting unique agent_session_id values is insufficient for Related Work/Session UX. Distinct conversations and empty historical agent rows can still render duplicate Resume/Focus-looking cards for the same issue/worktree/branch/agent target.
+Future Action: For fixes touching Related Work/Session aggregation or Resume/Focus rendering, verify backend KnowledgeDetail rows and Playwright DOM counts: target related work cards, agent rows, session rows, empty No session yet rows, and Resume/Focus action count for the reported issue.
+
+## 2026-06-20 — Verify related Work absence, not only target presence
+
+Type: lesson
+Context: SPEC-1938 Issue detail Related Work showed extra Unknown cards even after duplicate Resume/Focus fixes. The earlier Playwright check only counted the expected target card and did not assert that unrelated Unknown/no-session cards were absent.
+Learning: Branch-only Issue inference is weak when a legacy WorkItem has multiple execution containers. Owner/session links are authoritative, but branch-only links must be unambiguous. Visual checks for Related Work must assert the entire rendered section: card count, Unknown status count, No session rows, and action count.
+Future Action: When fixing related Work/Session UI, add a backend regression test for ambiguous legacy Work items and a live DOM assertion that no unexpected Unknown/no-session related cards remain.
+
+## 2026-06-20 — Project-scope GC must include no-op projections and no-window canvas state
+
+Type: lesson
+Context: Issue #3066 investigation found tens of thousands of ~/.gwt/projects/<hash> directories created from fallback path-hash storage for temp/non-repo project roots. Existing workspace.projection_prune only handled workspace/current.json and project-state/current.json stale projections, and it left root legacy workspace.json canvas-only directories plus initial/no-op WorkspaceProjection records behind.
+Learning: Project-scoped cleanup must classify default/no-op WorkspaceProjection records as delete candidates when they have no active session, no work identity, no Board/Git/linked references, and only empty agent stubs. It must also prune root legacy workspace.json files that have no windows, even if viewport/next_z_index changed, while preserving any canvas file with windows because that may contain user layout.
+Future Action: When changing ~/.gwt/projects retention or projection storage, add dry-run/apply tests for workspace/current.json, project-state/current.json, and root workspace.json. Verify dry-run against a real populated ~/.gwt/projects tree and ensure deleting a child projection also attempts to remove the now-empty project directory.
+
+## 2026-06-20 — Project storage tests must prove real HOME does not grow
+
+Type: lesson
+Context: Issue #3066 follow-up: cleanup-only fix passed tests, but full cargo test still created new ~/.gwt/projects entries. Remaining writers were gwt test binaries and gwtd child integration tests touching workspace_state_path/project-state without isolated HOME.
+Learning: For project-scoped storage changes, verification must compare the real ~/.gwt/projects count before and after focused and full tests. gwt-core used as a normal dependency will not see #[cfg(test)], so test-harness HOME fallback must be runtime-detected or tests must explicitly pass HOME/USERPROFILE to spawned binaries.
+Future Action: When adding tests that call workspace_state_path/save_workspace_projection or spawn gwtd/gwt with workspace JSON envelopes, hold env_test_lock where needed and set HOME/USERPROFILE to a tempdir; include a before/after real HOME project-dir count in verification for Issue #3066-class bugs.
+
+## 2026-06-20 — Managed gwt skill parity must cover full skill directories
+
+Type: lesson
+Context: Issue #3056 fixed a drift where runtime-independent additions existed only under .codex/skills while materialization writes managed Codex skill assets from the .claude bundle byte-for-byte.
+Learning: Checking only SKILL.md or only the currently reported divergent files is too narrow. Managed gwt-* parity must cover the whole skill directory tree, including references/ and scripts/, and runtime-specific path references should be expressed in runtime-neutral terms unless per-target generation is explicitly designed.
+Future Action: When changing managed gwt-* skill assets, update the canonical .claude tree first, sync .codex from it, run a recursive .claude/.codex parity check, and add/extend contract tests if a drift class is not already guarded.
+
+## 2026-06-20 — Playwright embedded routes must cover transitive module imports
+
+Type: failure pattern
+Context: Issue #3037: embedded Playwright specs failed before workspace_state rendered because project-shell-surface.js imported /window-list-model.js, but installEmbeddedRoutes only served a hard-coded ROOT_MODULES list and the guard test only checked direct app.js imports.
+Learning: Direct import coverage is insufficient for browser module fixtures. A missing transitive module manifests as unrelated UI timeouts (0 project tabs / windows) because app.js evaluation aborts before the WebSocket fixture can render state.
+Future Action: When adding or moving frontend modules imported by routed Playwright fixtures, ensure the embedded route helper allowlist includes transitive imports and keep the recursive playwright-embedded-routes test green before triaging downstream visual failures.
+
+## 2026-06-20 — Embedded route graph tests must resolve relative web imports
+
+Type: review-learning
+Context: Codex review on PR #3130 found that playwright-embedded-routes.test.mjs only followed absolute /module.js imports, so relative chains such as project-tabs-renderer.js -> ./window-runtime-state.js -> ./protocol-enums.js could be missed by the recurrence guard.
+Learning: A frontend route-coverage test that validates browser-served modules must resolve import specifiers the same way the browser module graph does, including relative ./ and ../ imports, not just absolute root imports.
+Future Action: When adding or updating embedded frontend route guards, include a focused test for a relative import chain and normalize web module specifiers with POSIX path semantics before comparing against ROOT_MODULES.
+
+## 2026-06-20 — Test home override for project storage
+
+Type: lesson
+Context: Issue #3066 PR verification found that some in-process tests used ScopedHome/std::env::set_var("HOME") while cargo ran tests in parallel, causing unrelated workspace projection tests to write temp project state into the real ~/.gwt/projects.
+Learning: For in-process tests, prefer a thread-local gwt_home override over process-wide HOME mutation. Reserve HOME/USERPROFILE env changes for spawned child processes that must receive an isolated environment.
+Future Action: When adding tests around gwt_core::paths::gwt_home or project storage, use gwt_core::test_support::ScopedGwtHome and only hold env_lock for real environment variables such as GWT_SESSION_ID.

@@ -199,6 +199,10 @@ root_js_modules! {
     // cell map + camera frame. app.js imports this at module top level, so the
     // asset MUST be registered or the ES module load 404s and the splash hangs.
     "fleet-minimap.js" => "createFleetMinimap",
+    // SPEC-3038 (2026-06-20) — Command Rail Windows popover model: groups the
+    // cross-tab open-window set by owning project tab so the list matches the
+    // badge and supports cross-tab focus.
+    "window-list-model.js" => "groupProjectWindowList",
 }
 
 /// Embedded payload of a [`StaticAsset`].

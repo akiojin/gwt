@@ -790,11 +790,32 @@ impl AppRuntime {
                             .map(|session| session.session_id.clone())
                             .collect();
                         let active_session = &self.active_agent_sessions[&window_id];
-                        if let Some(context) = workspace_resume_context.as_ref() {
+                        if let Some(base_branch) = base_branch.as_deref() {
+                            match save_start_work_workspace_projection(
+                                &project_root,
+                                active_session,
+                                base_branch,
+                                linked_issue_number,
+                                workspace_resume_context.as_ref(),
+                                &live_session_ids,
+                            ) {
+                                Ok(()) => {
+                                    workspace_projection_updated = true;
+                                }
+                                Err(error) => {
+                                    tracing::warn!(
+                                        project_root = %project_root.display(),
+                                        branch = %active_session.branch_name,
+                                        error = %error,
+                                        "workspace projection update skipped after Start Work launch"
+                                    );
+                                }
+                            }
+                        } else if let Some(context) = workspace_resume_context.as_ref() {
                             match save_resumed_workspace_projection(
                                 &project_root,
                                 active_session,
-                                base_branch.as_deref(),
+                                None,
                                 linked_issue_number,
                                 context,
                                 &live_session_ids,
@@ -808,27 +829,6 @@ impl AppRuntime {
                                         branch = %active_session.branch_name,
                                         error = %error,
                                         "workspace projection update skipped after Workspace Resume launch"
-                                    );
-                                }
-                            }
-                        } else if let Some(base_branch) = base_branch.as_deref() {
-                            match save_start_work_workspace_projection(
-                                &project_root,
-                                active_session,
-                                base_branch,
-                                linked_issue_number,
-                                None,
-                                &live_session_ids,
-                            ) {
-                                Ok(()) => {
-                                    workspace_projection_updated = true;
-                                }
-                                Err(error) => {
-                                    tracing::warn!(
-                                        project_root = %project_root.display(),
-                                        branch = %active_session.branch_name,
-                                        error = %error,
-                                        "workspace projection update skipped after Start Work launch"
                                     );
                                 }
                             }

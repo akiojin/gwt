@@ -95,6 +95,10 @@ pub struct KnowledgeListItem {
     pub meta: String,
     pub labels: Vec<String>,
     pub linked_branch_count: usize,
+    #[serde(default)]
+    pub related_work_count: usize,
+    #[serde(default)]
+    pub related_session_count: usize,
     pub match_score: Option<u8>,
     /// Canonical phase value (`"draft"`, `"planning"`, `"implementation"`,
     /// `"review"`, `"done"`) when a `phase/*` label is present, otherwise
@@ -110,6 +114,37 @@ pub struct KnowledgeListItem {
     /// always grouped into the Backlog column and are not draggable.
     #[serde(default)]
     pub is_spec: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct KnowledgeRelatedSessionView {
+    pub agent_session_id: String,
+    pub started_at: String,
+    pub is_active: bool,
+    #[serde(default)]
+    pub resumable: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct KnowledgeRelatedAgentView {
+    pub session_id: String,
+    pub agent_id: Option<String>,
+    pub display_name: Option<String>,
+    pub updated_at: String,
+    #[serde(default)]
+    pub sessions: Vec<KnowledgeRelatedSessionView>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct KnowledgeRelatedWorkView {
+    pub id: String,
+    pub title: String,
+    pub status_category: String,
+    pub branch: Option<String>,
+    pub worktree_path: Option<String>,
+    pub updated_at: String,
+    #[serde(default)]
+    pub agents: Vec<KnowledgeRelatedAgentView>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -129,6 +164,8 @@ pub struct KnowledgeDetailView {
     pub labels: Vec<String>,
     pub sections: Vec<KnowledgeDetailSection>,
     pub launch_issue_number: Option<u64>,
+    #[serde(default)]
+    pub related_works: Vec<KnowledgeRelatedWorkView>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -636,6 +673,7 @@ fn disabled_pr_view() -> KnowledgeBridgeView {
                 "PR Bridge is waiting for cache-backed PR list support before it can render data.",
             )],
             launch_issue_number: None,
+            related_works: Vec::new(),
         },
     }
 }
@@ -668,6 +706,7 @@ fn empty_detail(title: &str, body: &str) -> KnowledgeDetailView {
         labels: Vec::new(),
         sections: vec![knowledge_detail_section("Status", body)],
         launch_issue_number: None,
+        related_works: Vec::new(),
     }
 }
 
@@ -741,6 +780,8 @@ fn issue_list_item(
             .get(&entry.snapshot.number.0)
             .map(Vec::len)
             .unwrap_or_default(),
+        related_work_count: 0,
+        related_session_count: 0,
         match_score,
         phase: phase_info.phase,
         has_unknown_phase: phase_info.has_unknown_phase,
@@ -764,6 +805,8 @@ fn spec_list_item(
             .get(&entry.snapshot.number.0)
             .map(Vec::len)
             .unwrap_or_default(),
+        related_work_count: 0,
+        related_session_count: 0,
         match_score,
         phase: phase_info.phase,
         has_unknown_phase: phase_info.has_unknown_phase,
@@ -862,6 +905,7 @@ fn issue_detail_view(
         labels: entry.snapshot.labels.clone(),
         sections,
         launch_issue_number: Some(entry.snapshot.number.0),
+        related_works: Vec::new(),
     }
 }
 
@@ -909,6 +953,7 @@ fn spec_detail_view(entry: &CacheEntry) -> KnowledgeDetailView {
         labels: entry.snapshot.labels.clone(),
         sections,
         launch_issue_number: Some(entry.snapshot.number.0),
+        related_works: Vec::new(),
     }
 }
 

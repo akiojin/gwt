@@ -234,23 +234,12 @@ mod tests {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         let tmp = tempfile::tempdir().expect("tempdir");
-        let previous_home = std::env::var_os("HOME");
-        let previous_profile = std::env::var_os("USERPROFILE");
-        std::env::set_var("HOME", tmp.path());
-        std::env::set_var("USERPROFILE", tmp.path());
+        let _home = gwt_core::test_support::ScopedGwtHome::set(tmp.path());
 
         let mut env = TestEnv::new(std::path::PathBuf::from("cache-root"));
         let mut out = String::new();
         let exit = run(&mut env, OpenArgs, &mut out).unwrap();
 
-        match previous_home {
-            Some(value) => std::env::set_var("HOME", value),
-            None => std::env::remove_var("HOME"),
-        }
-        match previous_profile {
-            Some(value) => std::env::set_var("USERPROFILE", value),
-            None => std::env::remove_var("USERPROFILE"),
-        }
         assert_eq!(exit, 1, "isolated home has no tray lock");
     }
 }

@@ -635,6 +635,24 @@ body {
   font-size: var(--type-sm);
 }
 
+/* SPEC-3038 (2026-06-20) — per-project group header in the cross-tab Windows
+ * popover (shown only when more than one project tab contributes windows). */
+.window-list-group {
+  padding: 4px 6px 2px;
+  font-family: var(--font-mono);
+  font-size: var(--type-xs);
+  font-weight: 600;
+  letter-spacing: var(--tracking-mono);
+  text-transform: uppercase;
+  color: var(--color-text-muted);
+}
+
+.window-list-group:not(:first-child) {
+  margin-top: 6px;
+  border-top: 1px solid var(--color-border);
+  padding-top: 8px;
+}
+
 .arrange-button {
   height: 38px;
   padding: 0 12px;

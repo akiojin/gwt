@@ -148,12 +148,12 @@ use workspace::{
     active_agent_summary_from_session, merge_active_sessions_into_projection,
     retain_live_workspace_agents, save_workspace_launch_projection,
     workspace_cleanup_candidate_for_projection, workspace_projection_for_current_resume,
-    workspace_projection_owner_title,
+    workspace_projection_owner_title, WorkspaceLaunchProjectionKind,
 };
 use workspace_views::{
     active_agent_session_matches_work, active_work_cleanup_candidate_view_from_candidate,
     active_work_projection_from_saved_with_journal, agent_launch_purpose_title,
-    non_empty_workspace_text, save_resumed_workspace_projection,
+    linked_issue_workspace_context, non_empty_workspace_text, save_resumed_workspace_projection,
     save_start_work_workspace_projection, session_exact_resume_materializable, work_session_index,
     workspace_journal_entry_view_from_entry, workspace_resume_branch_exists,
     workspace_resume_branch_from_journal_project_root, workspace_resume_context_for_work_item,

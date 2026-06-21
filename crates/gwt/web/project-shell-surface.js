@@ -63,6 +63,7 @@ import {
   shouldTriggerOpenFolderHotkey,
 } from "/project-switcher.js";
 import { windowRuntimeLabel } from "/window-runtime-state.js";
+import { groupProjectWindowList } from "/window-list-model.js";
 
 export function createProjectShellSurface({
   send,
@@ -204,12 +205,10 @@ export function createProjectShellSurface({
 
       function windowListRenderKey() {
         const appState = getAppState();
-        const workspace = activeWorkspace();
-        const workspaceWindows = workspace.windows || [];
-        const workspaceWindowMap = new Map();
-        for (const windowData of workspaceWindows) {
-          workspaceWindowMap.set(windowData.id, windowData);
-        }
+        // SPEC-3038 (2026-06-20): the popover is a cross-tab list; the render
+        // key must change when any project tab's windows change, not only the
+        // active tab's.
+        const model = groupProjectWindowList(appState, windowListEntries);
         const appendEntryKey = (parts, entry) => {
           const geometry = entry?.geometry || {};
           const runtimeState = runtimeStateForWindow(entry);
@@ -270,31 +269,17 @@ export function createProjectShellSurface({
         appendRenderKeyPart(parts, appState?.active_tab_id || null);
         appendRenderKeyPart(parts, "window_list_entries");
         appendRenderKeyPart(parts, windowListEntries.length);
-        for (const entry of windowListEntries) {
-          appendEntryKey(parts, entry);
-        }
-        appendRenderKeyPart(parts, "active_window_ids");
-        appendRenderKeyPart(parts, workspaceWindows.length);
-        for (const windowData of workspaceWindows) {
-          appendRenderKeyPart(parts, windowData?.id || "");
-        }
+        appendRenderKeyPart(parts, "multi_project");
+        appendRenderKeyPart(parts, Boolean(model.multiProject));
         appendRenderKeyPart(parts, "rows");
-        if (windowListEntries.length > 0) {
-          let rowCount = 0;
-          for (const entry of windowListEntries) {
-            if (workspaceWindowMap.size === 0 || workspaceWindowMap.has(entry.id)) {
-              rowCount += 1;
-            }
-          }
-          appendRenderKeyPart(parts, rowCount);
-          for (const entry of windowListEntries) {
-            if (workspaceWindowMap.size === 0 || workspaceWindowMap.has(entry.id)) {
-              appendEntryKey(parts, workspaceWindowMap.get(entry.id) || entry);
-            }
-          }
-        } else {
-          appendRenderKeyPart(parts, workspaceWindows.length);
-          for (const entry of workspaceWindows) {
+        appendRenderKeyPart(parts, model.count);
+        for (const group of model.groups) {
+          appendRenderKeyPart(parts, "group");
+          appendRenderKeyPart(parts, group.tabId);
+          appendRenderKeyPart(parts, group.tabTitle);
+          appendRenderKeyPart(parts, Boolean(group.isActiveTab));
+          appendRenderKeyPart(parts, group.entries.length);
+          for (const entry of group.entries) {
             appendEntryKey(parts, entry);
           }
         }
@@ -524,72 +509,74 @@ export function createProjectShellSurface({
           return;
         }
         renderedWindowListKey = nextWindowListKey;
-        const workspaceWindows = activeWorkspace().windows || [];
-        let entries = workspaceWindows;
-        if (windowListEntries.length > 0) {
-          const workspaceWindowMap = new Map();
-          for (const windowData of workspaceWindows) {
-            workspaceWindowMap.set(windowData.id, windowData);
-          }
-          entries = [];
-          for (const entry of windowListEntries) {
-            const workspaceEntry = workspaceWindowMap.get(entry.id);
-            if (workspaceWindowMap.size === 0 || workspaceEntry) {
-              entries.push(workspaceEntry || entry);
-            }
-          }
-        }
+        // SPEC-3038 (2026-06-20): list windows from every project tab so the
+        // popover matches the cross-tab open-window badge. Multi-project
+        // shells get per-project group headers; single-project shells stay
+        // flat. The window set and order come from groupProjectWindowList.
+        const model = groupProjectWindowList(getAppState(), windowListEntries);
         windowListPanel.innerHTML = "";
-        if (entries.length === 0) {
+        if (model.count === 0) {
           const empty = document.createElement("div");
           empty.className = "window-list-empty";
           empty.textContent = "No windows";
           windowListPanel.appendChild(empty);
           return;
         }
-        for (const entry of entries) {
-          const row = document.createElement("button");
-          row.type = "button";
-          row.className = "window-list-row";
-          if (entry.agent_color) {
-            row.dataset.agentColor = entry.agent_color;
+        for (const group of model.groups) {
+          if (model.multiProject) {
+            const header = document.createElement("div");
+            header.className = "window-list-group";
+            header.textContent = group.tabTitle || "Project";
+            windowListPanel.appendChild(header);
           }
-          const geometryLabel = windowGeometryLabel(entry);
-          const runtimeState = runtimeStateForWindow(entry);
-          const runtimeLabel = windowRuntimeLabel(runtimeState);
-          const runtimeChip = shouldShowRuntimeStatus(entry)
-            ? `<span class="status-chip ${runtimeState}">
-                <span class="status-dot"></span>
-                <span class="status-label">${runtimeLabel}</span>
-              </span>`
-            : "";
-          const roleBadgeLabel = windowRoleBadgeLabel(entry);
-          const roleBadge = roleBadgeLabel
-            ? `<span class="window-role-badge window-list-role">${escapeHtml(roleBadgeLabel)}</span>`
-            : "";
-          row.innerHTML = `
-            <div class="window-list-copy">
-              <div class="window-list-title">${escapeHtml(windowDisplayTitle(entry))}</div>
-              <div class="window-list-meta">
-                ${roleBadge}
-                <span class="window-list-geometry">${geometryLabel}</span>
-              </div>
-            </div>
-            ${runtimeChip}
-          `;
-          const windowListTitle = row.querySelector(".window-list-title");
-          if (windowListTitle) windowListTitle.title = windowTitleTooltip(entry);
-          // SPEC-2008 camera-focus / FR-094: the persistent switcher row flies
-          // the local camera to frame the chosen window (teleport). frameWindow
-          // applies local focus + sends focus_window for highlight; there is no
-          // maximize/restore anymore.
-          row.addEventListener("click", () => {
-            windowListOpen = false;
-            renderWindowList();
-            frameWindow(entry.id);
-          });
-          windowListPanel.appendChild(row);
+          for (const entry of group.entries) {
+            windowListPanel.appendChild(createWindowListRow(entry));
+          }
         }
+      }
+
+      function createWindowListRow(entry) {
+        const row = document.createElement("button");
+        row.type = "button";
+        row.className = "window-list-row";
+        if (entry.agent_color) {
+          row.dataset.agentColor = entry.agent_color;
+        }
+        const geometryLabel = windowGeometryLabel(entry);
+        const runtimeState = runtimeStateForWindow(entry);
+        const runtimeLabel = windowRuntimeLabel(runtimeState);
+        const runtimeChip = shouldShowRuntimeStatus(entry)
+          ? `<span class="status-chip ${runtimeState}">
+              <span class="status-dot"></span>
+              <span class="status-label">${runtimeLabel}</span>
+            </span>`
+          : "";
+        const roleBadgeLabel = windowRoleBadgeLabel(entry);
+        const roleBadge = roleBadgeLabel
+          ? `<span class="window-role-badge window-list-role">${escapeHtml(roleBadgeLabel)}</span>`
+          : "";
+        row.innerHTML = `
+          <div class="window-list-copy">
+            <div class="window-list-title">${escapeHtml(windowDisplayTitle(entry))}</div>
+            <div class="window-list-meta">
+              ${roleBadge}
+              <span class="window-list-geometry">${geometryLabel}</span>
+            </div>
+          </div>
+          ${runtimeChip}
+        `;
+        const windowListTitle = row.querySelector(".window-list-title");
+        if (windowListTitle) windowListTitle.title = windowTitleTooltip(entry);
+        // SPEC-2008 camera-focus / FR-094: the persistent switcher row flies
+        // the local camera to frame the chosen window (teleport). There is no
+        // maximize/restore anymore; frameWindow applies local focus + sends
+        // focus_window for highlight.
+        row.addEventListener("click", () => {
+          windowListOpen = false;
+          renderWindowList();
+          frameWindow(entry.id);
+        });
+        return row;
       }
 
       function toggleWindowList() {

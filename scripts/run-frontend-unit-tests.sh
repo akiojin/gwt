@@ -64,4 +64,5 @@ bash scripts/run-node-tests-with-linkedom.sh \
   crates/gwt/web/__tests__/preset-modal-surface-deck.test.mjs \
   crates/gwt/web/__tests__/logs-process-facet.test.mjs \
   crates/gwt/web/__tests__/window-runtime-state.test.mjs \
+  crates/gwt/web/__tests__/window-list-model.test.mjs \
   crates/gwt/web/__tests__/window-close-confirm-modal.test.mjs

@@ -2558,6 +2558,12 @@
         appendRenderKeyPart(parts, counts?.done ?? null);
         appendRenderKeyPart(parts, "agents");
         appendRenderKeyPart(parts, counts?.agents ?? null);
+        // SPEC-3038 (2026-06-20): include the window count so the rail Windows
+        // badge refreshes when only surface (non-agent) windows are added or
+        // removed. Agent-count fields alone do not change for surfaces, which
+        // otherwise short-circuits the badge update via the shared cache key.
+        appendRenderKeyPart(parts, "windows");
+        appendRenderKeyPart(parts, counts?.windows ?? null);
         appendRenderKeyPart(parts, "branches");
         appendRenderKeyPart(parts, counts?.branches ?? null);
         appendRenderKeyPart(parts, "git");
@@ -2600,14 +2606,17 @@
         // operator-shell-degraded early return so the minimap stays live.
         fleetMinimap?.renderCells();
         if (!window.__operatorShell?.applyTelemetryCounts) return;
-        // SPEC-3038 AS-1.4: the rail Windows item badges the open-window count.
+        // SPEC-3038 AS-1.4 (2026-06-20): the rail Windows item badges the
+        // open-window count across all project tabs, matching the cross-tab
+        // Windows popover. windowMap only holds windows mounted in visited
+        // tabs, so it undercounts; allProjectWindowIds() is the true total.
         const counts = {
           active: 0,
           idle: 0,
           blocked: 0,
           done: 0,
           agents: 0,
-          windows: windowMap.size,
+          windows: allProjectWindowIds().length,
         };
         for (const [windowId, el] of windowMap.entries()) {
           const state = el?.dataset?.agentState;
@@ -3602,6 +3611,28 @@
         sendWindowFocus: (id) => socketTransport.send({ kind: "focus_window", id }),
       });
 
+      // SPEC-2359 W-17 (FR-398): shared pending state for Resume/Launch
+      // requests. Settled by the dispatcher on workspace_resume_agent_started
+      // / *_error; the timeout re-enables the UI when no reply ever arrives.
+      const launchPending = createLaunchPendingController({
+        onChange: () => {
+          try {
+            workspaceOverviewSurface.renderWindows();
+          } catch {
+            // Surface may not be mounted yet during bootstrap.
+          }
+          try {
+            workspaceResumePicker.render();
+          } catch {
+            // Picker may not be mounted yet during bootstrap.
+          }
+          const notice = launchPending.consumeTimeoutNotice();
+          if (notice) {
+            console.warn("[launch-pending]", notice);
+          }
+        },
+      });
+
       // SPEC-3064 Phase 3 (E6d): the Knowledge Bridge (Kanban) window
       // surface (knowledge bridge state map, semantic search coalescing,
       // Kanban rendering, Kanban Drawer, Knowledge window mount, and the
@@ -3613,6 +3644,7 @@
         ensureKnowledgeBridgeState,
         clearKnowledgeBridgeState,
         requestKnowledgeBridge,
+        scheduleKnowledgeRelatedWorkRefresh,
         scheduleKnowledgeSearch,
         requestKnowledgeDetail,
         knowledgeDetailRequestMatches,
@@ -3627,12 +3659,18 @@
         createKnowledgeMarkdownBody,
         windowMap,
         workspaceWindowById,
+        getWorkspaceWindows: () =>
+          allProjectWindowIds()
+            .map((windowId) => workspaceWindowById(windowId))
+            .filter(Boolean),
         pendingIndexOpenTargetsByPreset,
         knowledgeKindForPreset,
         focusWindowLocally,
         sendWindowFocus: (id) => socketTransport.send({ kind: "focus_window", id }),
         focusOrSpawnPreset,
         openIssueLaunchWizard,
+        visibleBounds,
+        launchPending,
       });
 
       // SPEC-3064 Phase 3 (E6c): the Board & Logs window surface (board/log
@@ -3766,28 +3804,6 @@
       // resumable agents; the response opens this modal so the user can
       // pick which previously-assigned agent to restart in-place
       // (without going through the Launch Wizard).
-      // SPEC-2359 W-17 (FR-398): shared pending state for Resume/Launch
-      // requests. Settled by the dispatcher on workspace_resume_agent_started
-      // / *_error; the timeout re-enables the UI when no reply ever arrives.
-      const launchPending = createLaunchPendingController({
-        onChange: () => {
-          try {
-            workspaceOverviewSurface.renderWindows();
-          } catch {
-            // Surface may not be mounted yet during bootstrap.
-          }
-          try {
-            workspaceResumePicker.render();
-          } catch {
-            // Picker may not be mounted yet during bootstrap.
-          }
-          const notice = launchPending.consumeTimeoutNotice();
-          if (notice) {
-            console.warn("[launch-pending]", notice);
-          }
-        },
-      });
-
       const workspaceResumePicker = createWorkspaceResumePickerController({
         modalEl: document.getElementById("workspace-resume-picker-modal"),
         dialogEl: document.querySelector("#workspace-resume-picker-modal .modal-shell"),
@@ -4788,6 +4804,7 @@
             // Overview (Kanban). Keep the projection global + telemetry update
             // so the Kanban surface and Status Strip stay in sync.
             workspaceOverviewSurface.renderWindows();
+            scheduleKnowledgeRelatedWorkRefresh();
             recomputeOperatorTelemetry();
             break;
           // SPEC-3064 Phase 3 (E7): window list entries and rendering live
@@ -4974,6 +4991,7 @@
           case "workspace_resume_agent_started":
             launchPending.settleAck(event);
             workspaceResumePicker.handleStarted(event);
+            scheduleKnowledgeRelatedWorkRefresh();
             break;
           case "launch_wizard_state":
             // SPEC-3064 Phase 3 (E5): guard defer + wizard state mutation

@@ -96,6 +96,7 @@ const ROOT_MODULES = new Set([
   // Issue #2698 PR 2 (B1) — throttle update_viewport WS sends.
   "viewport-persist-throttle.js",
   "viewport-sync.js",
+  "window-list-model.js",
   "window-geometry-sync.js",
   "window-docking.js",
   "workspace-kanban-surface.js",

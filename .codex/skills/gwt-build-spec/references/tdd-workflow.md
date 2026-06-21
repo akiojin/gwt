@@ -81,8 +81,8 @@ When in doubt, write the test. A skipped test is a potential regression.
 ## Per-environment guidance
 
 Execution systems are environment-specific. Defer the broad verification
-matrix to `gwt-verify` (see `.codex/skills/gwt-verify/SKILL.md` and
-`references/test-matrix.md`). The TDD inner loop below still belongs to
+matrix to `gwt-verify` (see the active runtime's `gwt-verify/SKILL.md` and
+its `references/test-matrix.md`). The TDD inner loop below still belongs to
 `gwt-build-spec` — it owns *writing* the RED test, getting it GREEN, and
 refactoring — while `gwt-verify` owns *which* tests run for the broader
 matrix at Phase 3.
@@ -119,7 +119,7 @@ matrix at Phase 3.
   for WebView/browser UI surfaces — never for Rust crates, gwtd CLI, or
   release scripts.
 - The full per-surface matrix is canonical in
-  `.codex/skills/gwt-verify/references/test-matrix.md`.
+  `gwt-verify`'s `references/test-matrix.md`.
 
 ### Release-system guidance
 
