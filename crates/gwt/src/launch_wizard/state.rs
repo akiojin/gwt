@@ -69,6 +69,12 @@ impl LaunchWizardState {
             docker_lifecycle_intent,
             skip_permissions: false,
             codex_fast_mode: false,
+            hermes_provider: String::new(),
+            hermes_profile: String::new(),
+            hermes_toolsets: String::new(),
+            hermes_skills: String::new(),
+            hermes_max_turns: String::new(),
+            hermes_safe_mode: false,
             branch_name: String::new(),
             initial_prompt: String::new(),
             completion: None,
@@ -443,6 +449,12 @@ impl LaunchWizardState {
             }
             LaunchWizardAction::SetCodexFastMode { enabled } => {
                 self.codex_fast_mode = enabled && self.agent_is_codex();
+            }
+            LaunchWizardAction::SetHermesOption { field, value } => {
+                self.set_hermes_option(&field, value);
+            }
+            LaunchWizardAction::SetHermesSafeMode { enabled } => {
+                self.hermes_safe_mode = enabled;
             }
             LaunchWizardAction::Back => {
                 if self.show_confirm() {
@@ -1171,6 +1183,10 @@ impl LaunchWizardState {
         {
             self.model = model.to_string();
             self.sync_reasoning_state();
+        } else if self.current_agent_supports_freetext_model() {
+            // SPEC-3152: Hermes models are provider-dependent free text, so any
+            // value (including empty to clear) is accepted without a fixed list.
+            self.model = model.to_string();
         } else if model.is_empty() && !self.agent_has_models() {
             self.model.clear();
         } else {
@@ -1400,6 +1416,33 @@ impl LaunchWizardState {
     pub(super) fn current_agent_supports_fast_mode(&self) -> bool {
         self.launch_target_is_agent()
             && agent_id_from_key(self.effective_agent_id()).supports_fast_mode()
+    }
+
+    /// SPEC-3152: whether the current agent exposes Hermes-style launch
+    /// options (provider / profile / free-text model / advanced) in the
+    /// Settings form.
+    pub(super) fn current_agent_supports_hermes_options(&self) -> bool {
+        self.launch_target_is_agent()
+            && agent_id_from_key(self.effective_agent_id()).supports_provider_selection()
+    }
+
+    /// SPEC-3152: whether the current agent takes a free-text model string
+    /// rather than a fixed gwt model list (Hermes).
+    pub(super) fn current_agent_supports_freetext_model(&self) -> bool {
+        self.launch_target_is_agent()
+            && agent_id_from_key(self.effective_agent_id()).supports_freetext_model()
+    }
+
+    /// SPEC-3152: persist a Hermes free-text launch option by field key.
+    pub(super) fn set_hermes_option(&mut self, field: &str, value: String) {
+        match field {
+            "provider" => self.hermes_provider = value,
+            "profile" => self.hermes_profile = value,
+            "toolsets" => self.hermes_toolsets = value,
+            "skills" => self.hermes_skills = value,
+            "max_turns" => self.hermes_max_turns = value,
+            _ => self.error = Some(format!("Unknown Hermes option: {field}")),
+        }
     }
 
     pub(super) fn fast_mode_enabled_for_current_agent(&self) -> bool {

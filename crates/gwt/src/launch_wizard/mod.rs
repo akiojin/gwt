@@ -307,6 +307,15 @@ pub struct LaunchWizardView {
     pub show_fast_mode: bool,
     /// Legacy Codex-only compatibility field for older frontend payloads.
     pub show_codex_fast_mode: bool,
+    /// SPEC-3152: render the Hermes launch-options section (provider / model /
+    /// profile / advanced) in the Settings form.
+    pub show_hermes_options: bool,
+    pub hermes_provider: String,
+    pub hermes_profile: String,
+    pub hermes_toolsets: String,
+    pub hermes_skills: String,
+    pub hermes_max_turns: String,
+    pub hermes_safe_mode: bool,
     pub show_branch_controls: bool,
     pub show_start_methods: bool,
     pub show_back_button: bool,
@@ -629,6 +638,16 @@ pub enum LaunchWizardAction {
     SetCodexFastMode {
         enabled: bool,
     },
+    /// SPEC-3152: set a Hermes free-text launch option by field key
+    /// (`provider` | `profile` | `toolsets` | `skills` | `max_turns`).
+    SetHermesOption {
+        field: String,
+        value: String,
+    },
+    /// SPEC-3152: toggle Hermes `--safe-mode`.
+    SetHermesSafeMode {
+        enabled: bool,
+    },
     Submit,
     /// SPEC-2014 FR-128: progress rail クリックで指定フェーズへ直接移動する。
     GotoStep {
@@ -664,6 +683,16 @@ pub struct LaunchWizardState {
     pub docker_lifecycle_intent: gwt_agent::DockerLifecycleIntent,
     pub skip_permissions: bool,
     pub codex_fast_mode: bool,
+    /// SPEC-3152: Hermes-specific launch options. Free-text fields map to
+    /// `--provider` / `--profile` / `--toolsets` / `--skills` / `--max-turns`;
+    /// `hermes_safe_mode` maps to `--safe-mode`. Only consumed for the Hermes
+    /// agent; ignored otherwise.
+    pub hermes_provider: String,
+    pub hermes_profile: String,
+    pub hermes_toolsets: String,
+    pub hermes_skills: String,
+    pub hermes_max_turns: String,
+    pub hermes_safe_mode: bool,
     pub branch_name: String,
     /// SPEC-2359 US-80: optional Start Work intake prompt (always skippable).
     /// Empty string means the step was skipped or left blank.

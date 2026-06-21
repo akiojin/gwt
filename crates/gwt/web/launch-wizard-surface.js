@@ -222,6 +222,31 @@ export function createLaunchWizardSurface({
         return field;
       }
 
+      // SPEC-3152: free-text launch option (Hermes provider/model/profile/etc.).
+      // Dispatches on change (blur/enter) so typing does not re-render mid-edit.
+      function appendTextField(
+        parent,
+        label,
+        value,
+        placeholder,
+        onChange,
+        wide = false,
+      ) {
+        const field = createLaunchField(label, wide);
+        const input = document.createElement("input");
+        input.type = "text";
+        input.className = "launch-select";
+        input.setAttribute("aria-label", label);
+        if (placeholder) {
+          input.placeholder = placeholder;
+        }
+        input.value = value || "";
+        input.addEventListener("change", () => onChange(input.value));
+        field.appendChild(input);
+        parent.appendChild(field);
+        return field;
+      }
+
       function appendCheckboxField(
         parent,
         label,
@@ -1268,6 +1293,100 @@ export function createLaunchWizardSurface({
                 }),
             );
           }
+          section.appendChild(grid);
+          panel.appendChild(section);
+        }
+
+        // SPEC-3152: Hermes-specific launch options (provider / free-text model
+        // / profile / advanced). Rendered only for the Hermes agent.
+        if (showSetupForms && launchWizard.show_hermes_options) {
+          const section = createLaunchSection(
+            "Hermes options",
+            "Provider, model, profile, and advanced flags for the Hermes agent.",
+          );
+          const grid = createNode("div", "launch-form-grid");
+          appendTextField(
+            grid,
+            "Provider",
+            launchWizard.hermes_provider,
+            "e.g. openrouter, nous, anthropic",
+            (value) =>
+              sendWizardAction({
+                kind: "set_hermes_option",
+                field: "provider",
+                value,
+              }),
+          );
+          appendTextField(
+            grid,
+            "Model",
+            launchWizard.selected_model,
+            "e.g. anthropic/claude-sonnet-4 (blank uses config.yaml)",
+            (value) =>
+              sendWizardAction({
+                kind: "set_model",
+                model: value,
+              }),
+          );
+          appendTextField(
+            grid,
+            "Profile",
+            launchWizard.hermes_profile,
+            "Hermes profile name (optional)",
+            (value) =>
+              sendWizardAction({
+                kind: "set_hermes_option",
+                field: "profile",
+                value,
+              }),
+          );
+          appendTextField(
+            grid,
+            "Toolsets",
+            launchWizard.hermes_toolsets,
+            "comma-separated, e.g. fs,web (optional)",
+            (value) =>
+              sendWizardAction({
+                kind: "set_hermes_option",
+                field: "toolsets",
+                value,
+              }),
+          );
+          appendTextField(
+            grid,
+            "Skills",
+            launchWizard.hermes_skills,
+            "preloaded skills (optional)",
+            (value) =>
+              sendWizardAction({
+                kind: "set_hermes_option",
+                field: "skills",
+                value,
+              }),
+          );
+          appendTextField(
+            grid,
+            "Max turns",
+            launchWizard.hermes_max_turns,
+            "max tool-calls per turn (optional)",
+            (value) =>
+              sendWizardAction({
+                kind: "set_hermes_option",
+                field: "max_turns",
+                value,
+              }),
+          );
+          appendToggleField(
+            grid,
+            "Safe mode",
+            "Disable user config/plugins (also disables gwt hooks)",
+            Boolean(launchWizard.hermes_safe_mode),
+            (enabled) =>
+              sendWizardAction({
+                kind: "set_hermes_safe_mode",
+                enabled,
+              }),
+          );
           section.appendChild(grid);
           panel.appendChild(section);
         }
