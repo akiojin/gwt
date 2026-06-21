@@ -110,6 +110,52 @@ test("Operator shell keeps the Command Rail always visible with no reveal state 
   }
 });
 
+test("FR-047 (anshin): MISSION cell shows done/total and converges to complete", async () => {
+  const { applyTelemetryCounts } = await importOperatorShell();
+  assert.equal(typeof applyTelemetryCounts, "function");
+  const { document } = parseHTML(html);
+
+  const missionCell = () =>
+    document.querySelector(".op-status-strip__cell--mission");
+  const missionValue = () => document.getElementById("op-strip-mission");
+
+  // In-progress mission: 2 of 5 agents done.
+  applyTelemetryCounts(document, { done: 2, agents: 5 });
+  assert.equal(missionValue()?.textContent, "2/5");
+  assert.equal(
+    missionCell()?.classList.contains("op-status-strip__cell--complete"),
+    false,
+    "in-progress mission must not be marked complete",
+  );
+
+  // No agents: the cell collapses to the em dash placeholder.
+  applyTelemetryCounts(document, { agents: 0 });
+  assert.equal(missionValue()?.textContent, "—");
+  assert.equal(
+    missionCell()?.classList.contains("op-status-strip__cell--complete"),
+    false,
+    "an empty fleet is not a converged mission",
+  );
+
+  // Full convergence: every agent done flips the positive complete state.
+  applyTelemetryCounts(document, { done: 4, agents: 4 });
+  assert.equal(missionValue()?.textContent, "4/4");
+  assert.equal(
+    missionCell()?.classList.contains("op-status-strip__cell--complete"),
+    true,
+    "all agents done marks the mission complete",
+  );
+
+  // Regressing away from convergence clears the complete state again.
+  applyTelemetryCounts(document, { done: 1, agents: 4 });
+  assert.equal(missionValue()?.textContent, "1/4");
+  assert.equal(
+    missionCell()?.classList.contains("op-status-strip__cell--complete"),
+    false,
+    "dropping below full convergence removes the complete state",
+  );
+});
+
 test("Runtime health renderer updates severity-first compact PERF values", async () => {
   const { applyRuntimeHealth } = await importOperatorShell();
   assert.equal(typeof applyRuntimeHealth, "function");

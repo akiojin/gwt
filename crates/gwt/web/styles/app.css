@@ -609,6 +609,18 @@ body {
   white-space: nowrap;
 }
 
+/* FR-045 (anshin) — the agent's live activity detail under the title. Muted
+   single line that ellipsis-truncates so long activity text never wraps. */
+.window-list-activity {
+  margin-top: 3px;
+  font-family: var(--font-body);
+  font-size: var(--type-xs);
+  color: var(--color-text-muted);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .window-list-meta {
   margin-top: 4px;
   display: flex;

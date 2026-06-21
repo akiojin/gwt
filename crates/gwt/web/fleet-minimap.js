@@ -34,6 +34,10 @@ export function createFleetMinimap({
   getFocusedId,
   frameWindow,
   windowDisplayTitle,
+  // FR-045 (anshin): optional factory for the per-cell tooltip / aria-label so
+  // the minimap can surface each agent's live activity (title · detail) at a
+  // glance. Falls back to windowDisplayTitle for back-compat.
+  cellTooltip,
   cellAgentColor,
   cellTelemetryState,
 }) {
@@ -52,6 +56,12 @@ export function createFleetMinimap({
   cameraFrame.className = "fleet-minimap__camera";
   cameraFrame.setAttribute("aria-hidden", "true");
   container.appendChild(cameraFrame);
+
+  // FR-045 (anshin): resolve a cell's tooltip / aria-label. Prefer the
+  // app-provided activity label (title · detail); fall back to the plain
+  // display title when no factory was wired.
+  const resolveCellTooltip =
+    typeof cellTooltip === "function" ? cellTooltip : windowDisplayTitle;
 
   // Cells are keyed by window id so unchanged windows keep their node across
   // renders (avoids losing hover/tooltip mid-interaction).
@@ -184,9 +194,9 @@ export function createFleetMinimap({
       }
 
       cell.classList.toggle("is-focused", windowData.id === focusedId);
-      const title = windowDisplayTitle(windowData);
-      cell.setAttribute("aria-label", title);
-      cell.title = title;
+      const tooltip = resolveCellTooltip(windowData);
+      cell.setAttribute("aria-label", tooltip);
+      cell.title = tooltip;
     }
 
     // Drop cells for windows that left the workspace.

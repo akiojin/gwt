@@ -7171,3 +7171,10 @@ Type: project
 Context: SPEC-2359 US-80 の視覚検証で、browser-check 隔離起動(GIT_TERMINAL_PROMPT=0)の Start Work 新規ブランチが remote push に失敗し『fatal: could not read Username for https://github.com: terminal prompts disabled』で Shell が PTY 起動前に落ちた。feature ではなく検証環境のブロッカー。
 Learning: 原因: 隔離 HOME の osxkeychain には git 用 github トークンが無く(ユーザーは gh keyring で認証)、push が prompt fallback→GIT_TERMINAL_PROMPT=0 で失敗。回避手段の比較: (1) GIT_CONFIG_COUNT/KEY/VALUE env で credential.https://github.com.helper を注入 → URL subsection を含む key の解析に失敗し効かない(GIT_CONFIG_VALUE が途中で切れる)。(2) 堅牢策: CHECK_HOME に real .gitconfig([include]実config + [credential] helper= リセット後 helper=store)と .git-credentials(gh auth token 埋め込み, chmod 600)を置く。gwt は git CLI を hidden_command で呼び env_clear しないため HOME=CHECK_HOME を継承し store helper で解決する。git push --dry-run origin HEAD:refs/heads/__tmp__ で副作用なく認証を実証してから検証依頼するとユーザー往復を減らせる。
 Future Action: Start Work 新規ブランチを含む GUI 視覚検証では、browser-check の隔離 HOME に real .gitconfig(store helper)+ .git-credentials(gh token)を用意し、git push --dry-run で push 認証を事前実証してからユーザーに依頼する。GIT_CONFIG_* env での credential.<url>.helper 注入は使わない。検証後は token 入り CHECK_HOME を rm -rf する。
+
+## 2026-06-21 — stop_all_runtimes join-wait test is flaky under parallel full run
+
+Type: project
+Context: Phase 2 検証中、cargo test -p gwt のフルランで app_runtime::tests::app_runtime_stop_all_runtimes_kills_every_pane_before_join_waits が 1 回だけ FAILED したが、tests.rs は HEAD と byte 同一かつ単独実行で 3/3 passed だった
+Learning: app_runtime_stop_all_runtimes_kills_every_pane_before_join_waits は PTY teardown/join-wait の timing に依存する flaky test。並列フルラン下の resource contention で稀に落ちる。単独再実行で緑なら回帰ではない。
+Future Action: このテストがフルランで 1 件落ちたら、まず git diff HEAD で当該ファイルが無変更か確認し、単独 -p gwt で 2-3 回再実行して flaky か判定する。緑なら blocker 扱いしない。

@@ -192,6 +192,21 @@ export function applyTelemetryCounts(doc, counts = {}) {
   };
   if ("blocked" in counts) toggleAlert("blocked", counts.blocked);
   if ("needs_input" in counts) toggleAlert("waiting", counts.needs_input);
+  // FR-047 (anshin): MISSION convergence indicator. Shows done/total agents so
+  // the operator can see the fleet trending toward completion at a glance, and
+  // flips a positive "complete" state (not an alert pulse) when every agent has
+  // converged (done === agents > 0).
+  const agents = Number(counts.agents ?? 0);
+  const done = Number(counts.done ?? 0);
+  setText("op-strip-mission", agents > 0 ? `${done}/${agents}` : "—");
+  const missionCell = doc.querySelector(".op-status-strip__cell--mission");
+  if (missionCell) {
+    if (agents > 0 && done === agents) {
+      missionCell.classList.add("op-status-strip__cell--complete");
+    } else {
+      missionCell.classList.remove("op-status-strip__cell--complete");
+    }
+  }
   // SPEC-2356 operator chrome cleanup: the dead Sidebar Layers rows and their
   // per-layer counters are removed; telemetry now lives solely in the Status
   // Strip cells below.
