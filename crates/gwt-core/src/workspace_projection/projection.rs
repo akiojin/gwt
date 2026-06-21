@@ -575,6 +575,34 @@ impl WorkspaceProjection {
         );
     }
 
+    /// SPEC-2359 US-80 (FR-428): reconcile every Shell Work's runtime status
+    /// from live PTY presence at view time. A Shell Work has no agent hook
+    /// telemetry, so its status is derived from whether its window's PTY is
+    /// still running: live → `Active`; otherwise (PTY exited in-session, or no
+    /// window after a restart) → `Idle`, so it leaves the Active lane and reads
+    /// as paused / done. Applied to a loaded projection at broadcast time, never
+    /// persisted, so the displayed status always tracks the real PTY state.
+    pub fn reconcile_shell_status(
+        &mut self,
+        is_live_shell: impl Fn(&str) -> bool,
+        updated_at: DateTime<Utc>,
+    ) {
+        for agent in self.agents.iter_mut() {
+            if !agent.is_shell_work() {
+                continue;
+            }
+            let desired = if is_live_shell(agent.session_id.as_str()) {
+                WorkspaceStatusCategory::Active
+            } else {
+                WorkspaceStatusCategory::Idle
+            };
+            if agent.status_category != desired {
+                agent.status_category = desired;
+                agent.updated_at = updated_at;
+            }
+        }
+    }
+
     /// SPEC-2359 Phase W-14 (US-70 / FR-375): reset the projection to the
     /// idle "no current work" identity for a project tab, clearing the
     /// work-specific identity fields alongside the Idle transition.
@@ -1672,6 +1700,46 @@ mod tests {
             .agents
             .iter()
             .any(|a| a.session_id == "dead-agent"));
+    }
+
+    #[test]
+    fn reconcile_shell_status_active_when_live_idle_when_not() {
+        // SPEC-2359 US-80 / FR-428: a live shell window stays Active; a shell
+        // whose PTY is gone (restart or exit) drops out of the Active lane.
+        let mut projection = WorkspaceProjection::default_for_project("/repo");
+        projection.agents.push(shell_work("tab-1:shell-live"));
+        projection.agents.push(shell_work("tab-1:shell-dead"));
+        projection.agents.push(us70_agent(
+            "agent-1",
+            WorkspaceStatusCategory::Active,
+            WorkspaceAgentAffiliationStatus::Assigned,
+        ));
+
+        let now = Utc.timestamp_opt(6_000, 0).unwrap();
+        projection.reconcile_shell_status(|id| id == "tab-1:shell-live", now);
+
+        let live = projection
+            .agents
+            .iter()
+            .find(|a| a.session_id == "tab-1:shell-live")
+            .unwrap();
+        let dead = projection
+            .agents
+            .iter()
+            .find(|a| a.session_id == "tab-1:shell-dead")
+            .unwrap();
+        let agent = projection
+            .agents
+            .iter()
+            .find(|a| a.session_id == "agent-1")
+            .unwrap();
+        assert_eq!(live.status_category, WorkspaceStatusCategory::Active);
+        assert_eq!(dead.status_category, WorkspaceStatusCategory::Idle);
+        assert_eq!(
+            agent.status_category,
+            WorkspaceStatusCategory::Active,
+            "agent rows are untouched by shell reconciliation"
+        );
     }
 
     #[test]

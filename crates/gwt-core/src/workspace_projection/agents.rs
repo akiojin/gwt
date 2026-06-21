@@ -108,7 +108,9 @@ impl WorkspaceAgentSummary {
             display_name: "Shell".to_string(),
             status_category,
             current_focus: None,
-            title_summary: None,
+            // Display-only purpose so the Active Work row reads "Shell" instead
+            // of the bare work-id slug when no agent shares the Work.
+            title_summary: Some("Shell".to_string()),
             worktree_path,
             branch,
             last_board_entry_id: None,
