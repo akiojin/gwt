@@ -82,6 +82,37 @@ test("renderCells creates one cell per window keyed by window id", () => {
   }
 });
 
+test("FR-045 (anshin): cellTooltip overrides the cell title/aria-label", () => {
+  // The minimap cell tooltip surfaces the agent's live activity (title ·
+  // detail) when an app-provided cellTooltip factory is wired, instead of
+  // the plain display title.
+  const { container } = setupDom();
+  const windows = [windowAt("w-1", 0, 0), windowAt("w-2", 300, 0)];
+  const { minimap } = makeMinimap(container, windows, {
+    cellTooltip: (w) => `Title ${w.id} · doing thing ${w.id}`,
+  });
+
+  minimap.renderCells();
+
+  const cell = container.querySelector('[data-window-id="w-1"]');
+  assert.equal(cell.title, "Title w-1 · doing thing w-1");
+  assert.equal(cell.getAttribute("aria-label"), "Title w-1 · doing thing w-1");
+});
+
+test("FR-045 (anshin): cellTooltip falls back to windowDisplayTitle when absent", () => {
+  // Back-compat: callers that do not pass cellTooltip keep the display title
+  // on both the tooltip and aria-label.
+  const { container } = setupDom();
+  const windows = [windowAt("w-1", 0, 0)];
+  const { minimap } = makeMinimap(container, windows);
+
+  minimap.renderCells();
+
+  const cell = container.querySelector('[data-window-id="w-1"]');
+  assert.equal(cell.title, "Title w-1");
+  assert.equal(cell.getAttribute("aria-label"), "Title w-1");
+});
+
 test("data-empty flips with the window count", () => {
   const { container } = setupDom();
   const windows = [windowAt("w-1", 0, 0)];

@@ -7157,3 +7157,10 @@ Type: lesson
 Context: Issue #3066 PR verification found that some in-process tests used ScopedHome/std::env::set_var("HOME") while cargo ran tests in parallel, causing unrelated workspace projection tests to write temp project state into the real ~/.gwt/projects.
 Learning: For in-process tests, prefer a thread-local gwt_home override over process-wide HOME mutation. Reserve HOME/USERPROFILE env changes for spawned child processes that must receive an isolated environment.
 Future Action: When adding tests around gwt_core::paths::gwt_home or project storage, use gwt_core::test_support::ScopedGwtHome and only hold env_lock for real environment variables such as GWT_SESSION_ID.
+
+## 2026-06-21 — stop_all_runtimes join-wait test is flaky under parallel full run
+
+Type: project
+Context: Phase 2 検証中、cargo test -p gwt のフルランで app_runtime::tests::app_runtime_stop_all_runtimes_kills_every_pane_before_join_waits が 1 回だけ FAILED したが、tests.rs は HEAD と byte 同一かつ単独実行で 3/3 passed だった
+Learning: app_runtime_stop_all_runtimes_kills_every_pane_before_join_waits は PTY teardown/join-wait の timing に依存する flaky test。並列フルラン下の resource contention で稀に落ちる。単独再実行で緑なら回帰ではない。
+Future Action: このテストがフルランで 1 件落ちたら、まず git diff HEAD で当該ファイルが無変更か確認し、単独 -p gwt で 2-3 回再実行して flaky か判定する。緑なら blocker 扱いしない。

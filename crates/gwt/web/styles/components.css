@@ -865,6 +865,18 @@ body::after {
   color: var(--color-state-blocked);
 }
 
+/* FR-047 (anshin) — MISSION convergence (done/total agents). Reads neutral
+   while in progress; when every agent has converged the value tints to the
+   positive done colour as a calm, glanceable "mission complete" cue (no loud
+   pulse, so it never competes with the BLOCKED/WAITING alerts). */
+.op-status-strip__cell--mission .op-status-strip__value {
+  color: var(--color-status-strip-fg);
+}
+
+.op-status-strip__cell--mission.op-status-strip__cell--complete .op-status-strip__value {
+  color: var(--color-state-done);
+}
+
 .op-status-strip__cell--runtime-health {
   cursor: default;
   position: relative;

@@ -1464,6 +1464,17 @@
         return windowDisplayTitle(windowData);
       }
 
+      // FR-045 (anshin): a glanceable "what is this agent doing now" label.
+      // Pairs the display title with the live activity detail
+      // (dynamic_title_detail) so glanceable surfaces (Fleet Minimap cells,
+      // switcher rows) read like "title · detail". Collapses to just the
+      // title when there is no distinct detail.
+      function windowActivityLabel(windowData) {
+        const title = windowDisplayTitle(windowData);
+        const detail = String(windowData?.dynamic_title_detail || "").trim();
+        return detail && detail !== title ? `${title} · ${detail}` : title;
+      }
+
       // SPEC-3064 Phase 3 (E7): escapeHtml moved to
       // /project-shell-surface.js with the Window List renderer (its only
       // remaining caller).
@@ -5912,6 +5923,10 @@
         getFocusedId: () => focusedId,
         frameWindow,
         windowDisplayTitle,
+        // FR-045 (anshin): the cell tooltip/aria-label surfaces each agent's
+        // live activity (title · detail) so the operator can read what every
+        // pane is doing now without focusing it.
+        cellTooltip: windowActivityLabel,
         // windowData.agent_color already IS the data-agent-color value.
         cellAgentColor: (windowData) => windowData?.agent_color || "",
         // Only agent panes carry a Living Telemetry state; other surfaces
