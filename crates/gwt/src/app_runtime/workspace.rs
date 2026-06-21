@@ -124,6 +124,40 @@ pub(super) fn retain_live_workspace_agents(
     );
 }
 
+/// SPEC-2359 US-80 (FR-427): register a Start-Work Shell as a first-class Work
+/// in the persisted projection so it appears in the Active Work / Workspace
+/// overview like an agent. Shell Works carry the window id as their identity
+/// (no agent session) and reuse the agent canonical Work id derivation via the
+/// shell's branch / worktree, so a shell groups into the same Work row as an
+/// agent on the same branch. `retain_live_agents_keep_shells` drops only dead
+/// agents (FR-429): launching the shell never prunes other live or paused
+/// shells.
+pub(super) fn save_shell_work_projection(
+    project_root: &Path,
+    window_id: &str,
+    worktree_path: Option<PathBuf>,
+    branch: Option<String>,
+    live_session_ids: &std::collections::HashSet<String>,
+) -> Result<(), String> {
+    let now = chrono::Utc::now();
+    let mut projection =
+        gwt_core::workspace_projection::load_or_default_workspace_projection(project_root)
+            .map_err(|error| error.to_string())?;
+    projection.project_root = project_root.to_path_buf();
+    projection.retain_live_agents_keep_shells(live_session_ids.iter().map(String::as_str), now);
+    let summary = gwt_core::workspace_projection::WorkspaceAgentSummary::shell_work(
+        window_id.to_string(),
+        worktree_path,
+        branch,
+        gwt_core::workspace_projection::WorkspaceStatusCategory::Active,
+        now,
+    );
+    projection.upsert_agent_summary(summary);
+    projection.updated_at = now;
+    gwt_core::workspace_projection::save_workspace_projection(project_root, &projection)
+        .map_err(|error| error.to_string())
+}
+
 pub(super) fn workspace_projection_for_current_resume(
     mut projection: gwt_core::workspace_projection::WorkspaceProjection,
     sessions: &[&ActiveAgentSession],
@@ -189,7 +223,10 @@ pub(super) fn save_workspace_launch_projection(
     // #3065: drop dead agent entries before computing the running-agents
     // status text — the shared projection otherwise accumulates one entry
     // per historical session ("765 active agents").
-    projection.retain_live_agents(live_session_ids.iter().map(String::as_str), now);
+    // SPEC-2359 US-80 (FR-429): an agent launch has no authority over shell
+    // liveness, so keep every Shell Work — they are pruned only by their own
+    // PTY / window lifecycle, never by an unrelated agent launch.
+    projection.retain_live_agents_keep_shells(live_session_ids.iter().map(String::as_str), now);
     let work_id = gwt_core::workspace_projection::canonical_work_id(
         project_root,
         Some(session.branch_name.as_str()),

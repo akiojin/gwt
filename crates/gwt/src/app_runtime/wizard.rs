@@ -64,14 +64,14 @@ use super::{
     build_shell_process_launch, combined_window_id, detect_wizard_docker_context_and_status,
     knowledge_error_event, knowledge_kind_for_preset, linked_issue_workspace_context,
     list_branch_entries_with_active_sessions, normalize_branch_name, preferred_issue_launch_branch,
-    resolve_shell_launch_worktree, session_exact_resume_materializable, synthetic_branch_entry,
-    workspace_projection_for_current_resume, workspace_resume_branch_exists,
-    workspace_resume_branch_from_journal_project_root, workspace_resume_context_for_work_item,
-    workspace_resume_context_from_journal, workspace_resume_context_from_projection,
-    workspace_resume_owner_issue_number, AgentKanbanLaunchTarget, AppEventProxy, AppRuntime,
-    BackendEvent, IssueLaunchWizardPrepared, LaunchFeedbackContext, LaunchWizardMemoryCache,
-    LaunchWizardSession, OutboundEvent, WindowPreset, WindowProcessStatus, WorkspaceResumeContext,
-    WORKSPACE_OVERVIEW_JOURNAL_LIMIT,
+    resolve_shell_launch_worktree, save_shell_work_projection, session_exact_resume_materializable,
+    synthetic_branch_entry, workspace_projection_for_current_resume,
+    workspace_resume_branch_exists, workspace_resume_branch_from_journal_project_root,
+    workspace_resume_context_for_work_item, workspace_resume_context_from_journal,
+    workspace_resume_context_from_projection, workspace_resume_owner_issue_number,
+    AgentKanbanLaunchTarget, AppEventProxy, AppRuntime, BackendEvent, IssueLaunchWizardPrepared,
+    LaunchFeedbackContext, LaunchWizardMemoryCache, LaunchWizardSession, OutboundEvent,
+    WindowPreset, WindowProcessStatus, WorkspaceResumeContext, WORKSPACE_OVERVIEW_JOURNAL_LIMIT,
 };
 use crate::usable_worktree_path_for_branch;
 
@@ -1715,6 +1715,7 @@ impl AppRuntime {
             .tab_mut(tab_id)
             .ok_or_else(|| "Project tab not found".to_string())?;
         let project_root = tab.project_root.display().to_string();
+        let project_root_path = tab.project_root.clone();
         let title = format!(
             "{} · {}",
             config.display_name,
@@ -1730,7 +1731,48 @@ impl AppRuntime {
             .insert(window_id.clone(), WindowProcessStatus::Running);
         self.window_hook_states.remove(&window_id);
 
+        // SPEC-2359 US-80 (FR-427): register the Start-Work Shell as a
+        // first-class Work so it appears in the Active Work / Workspace
+        // projection like an agent. `config.branch` is set even for new
+        // branches, so the branch-derived Work id is stable before the worktree
+        // exists; `config.working_dir` is `None` until the async launch creates
+        // a new-branch worktree.
+        let live_session_ids: std::collections::HashSet<String> = self
+            .active_agent_sessions
+            .values()
+            .map(|session| session.session_id.clone())
+            .collect();
+        let shell_work_registered = match save_shell_work_projection(
+            &project_root_path,
+            &window_id,
+            config.working_dir.clone(),
+            config.branch.clone(),
+            &live_session_ids,
+        ) {
+            Ok(()) => true,
+            Err(error) => {
+                tracing::warn!(
+                    project_root = %project_root_path.display(),
+                    window_id = %window_id,
+                    error = %error,
+                    "shell Work projection registration skipped"
+                );
+                false
+            }
+        };
+
         let mut events = vec![self.workspace_state_broadcast()];
+        if shell_work_registered && self.active_tab_id.as_deref() == Some(tab_id) {
+            if let Some(tab) = self.tab(tab_id) {
+                if let Some(projection) = self.active_work_projection_for_tab(tab_id, tab) {
+                    events.push(OutboundEvent::broadcast(
+                        BackendEvent::ActiveWorkProjection {
+                            projection: Box::new(projection),
+                        },
+                    ));
+                }
+            }
+        }
         events.extend(Self::status_events(
             window_id.clone(),
             WindowProcessStatus::Running,

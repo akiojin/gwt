@@ -522,12 +522,57 @@ impl WorkspaceProjection {
         live_session_ids: impl IntoIterator<Item = &'a str>,
         updated_at: DateTime<Utc>,
     ) {
-        let live: std::collections::HashSet<&str> = live_session_ids.into_iter().collect();
-        self.agents
-            .retain(|agent| live.contains(agent.session_id.as_str()));
+        self.retain_live_works(live_session_ids, std::iter::empty(), updated_at);
+    }
+
+    /// SPEC-2359 US-80 (FR-429): kind-aware liveness retain. Agent-backed Works
+    /// are judged by the live agent-session set; Shell Works (which carry a
+    /// window id in `session_id`, not an agent session) are judged by the live
+    /// shell-window set. This prevents an agent launch in another worktree —
+    /// whose save only knows live agent sessions — from silently pruning a
+    /// still-running Shell Work.
+    pub fn retain_live_works<'a, 'b>(
+        &mut self,
+        live_agent_sessions: impl IntoIterator<Item = &'a str>,
+        live_shell_windows: impl IntoIterator<Item = &'b str>,
+        updated_at: DateTime<Utc>,
+    ) {
+        let live_agents: std::collections::HashSet<&str> =
+            live_agent_sessions.into_iter().collect();
+        let live_shells: std::collections::HashSet<&str> = live_shell_windows.into_iter().collect();
+        self.agents.retain(|agent| {
+            if agent.is_shell_work() {
+                live_shells.contains(agent.session_id.as_str())
+            } else {
+                live_agents.contains(agent.session_id.as_str())
+            }
+        });
         if !self.has_current_agents() {
             self.transition_to_idle(updated_at);
         }
+    }
+
+    /// SPEC-2359 US-80 (FR-429): the retain an agent-launch save uses. It knows
+    /// the live agent-session set but has no authority over shell liveness, so
+    /// it prunes dead agents while keeping every Shell Work intact. Shell Works
+    /// are pruned only by their own PTY / window lifecycle, never by an
+    /// unrelated agent launch in another worktree.
+    pub fn retain_live_agents_keep_shells<'a>(
+        &mut self,
+        live_agent_sessions: impl IntoIterator<Item = &'a str>,
+        updated_at: DateTime<Utc>,
+    ) {
+        let shell_ids: Vec<String> = self
+            .agents
+            .iter()
+            .filter(|agent| agent.is_shell_work())
+            .map(|agent| agent.session_id.clone())
+            .collect();
+        self.retain_live_works(
+            live_agent_sessions,
+            shell_ids.iter().map(String::as_str),
+            updated_at,
+        );
     }
 
     /// SPEC-2359 Phase W-14 (US-70 / FR-375): reset the projection to the
@@ -1561,6 +1606,85 @@ mod tests {
         assert_eq!(projection.status_text, "No active work");
         assert_eq!(projection.next_action, None);
         assert_eq!(projection.updated_at, now);
+    }
+
+    fn shell_work(session_id: &str) -> WorkspaceAgentSummary {
+        let mut shell = us70_agent(
+            session_id,
+            WorkspaceStatusCategory::Active,
+            WorkspaceAgentAffiliationStatus::Assigned,
+        );
+        shell.agent_id = SHELL_WORK_AGENT_ID.to_string();
+        shell.display_name = "Shell".to_string();
+        shell
+    }
+
+    #[test]
+    fn retain_live_works_keeps_shell_by_live_window_and_drops_dead_agent() {
+        // SPEC-2359 US-80 / FR-429: launching an agent saves the projection with
+        // the live agent-session set, which never contains Shell window ids. A
+        // Shell Work must survive that retain while its window is still live,
+        // even though a since-stopped agent in another worktree is pruned.
+        let mut projection = WorkspaceProjection::default_for_project("/repo");
+        projection.agents.push(shell_work("tab-1:shell-3"));
+        projection.agents.push(us70_agent(
+            "dead-agent",
+            WorkspaceStatusCategory::Active,
+            WorkspaceAgentAffiliationStatus::Assigned,
+        ));
+
+        let now = Utc.timestamp_opt(4_000, 0).unwrap();
+        projection.retain_live_works(["live-other"], ["tab-1:shell-3"], now);
+
+        assert_eq!(projection.agents.len(), 1);
+        assert!(projection.agents[0].is_shell_work());
+        assert_eq!(projection.agents[0].session_id, "tab-1:shell-3");
+    }
+
+    #[test]
+    fn retain_live_agents_keep_shells_prunes_dead_agent_but_keeps_shell() {
+        // SPEC-2359 US-80 / FR-429: an agent launch in another worktree saves
+        // the projection knowing only live agent sessions. It must drop the
+        // since-stopped agent yet keep the running Shell Work untouched.
+        let mut projection = WorkspaceProjection::default_for_project("/repo");
+        projection.agents.push(shell_work("tab-1:shell-3"));
+        projection.agents.push(us70_agent(
+            "dead-agent",
+            WorkspaceStatusCategory::Active,
+            WorkspaceAgentAffiliationStatus::Assigned,
+        ));
+        projection.agents.push(us70_agent(
+            "live-agent",
+            WorkspaceStatusCategory::Active,
+            WorkspaceAgentAffiliationStatus::Assigned,
+        ));
+
+        let now = Utc.timestamp_opt(5_000, 0).unwrap();
+        projection.retain_live_agents_keep_shells(["live-agent"], now);
+
+        assert_eq!(projection.agents.len(), 2);
+        assert!(projection.agents.iter().any(|a| a.is_shell_work()));
+        assert!(projection
+            .agents
+            .iter()
+            .any(|a| a.session_id == "live-agent"));
+        assert!(!projection
+            .agents
+            .iter()
+            .any(|a| a.session_id == "dead-agent"));
+    }
+
+    #[test]
+    fn retain_live_works_drops_shell_when_window_not_live() {
+        // A Shell Work whose window is gone (e.g. after the PTY exited) is
+        // pruned just like a dead agent.
+        let mut projection = WorkspaceProjection::default_for_project("/repo");
+        projection.agents.push(shell_work("tab-1:shell-9"));
+
+        let now = Utc.timestamp_opt(4_000, 0).unwrap();
+        projection.retain_live_works(["some-agent"], std::iter::empty(), now);
+
+        assert!(projection.agents.is_empty());
     }
 
     #[test]

@@ -776,6 +776,102 @@ fn save_workspace_launch_projection_retains_only_live_agents() {
     assert_eq!(stored.status_text, "Codex is running");
 }
 
+// SPEC-2359 US-80 (FR-427/FR-429): a Start-Work Shell registers as a
+// first-class Work and is not pruned when an agent later launches on another
+// branch.
+#[test]
+fn save_shell_work_projection_registers_shell_and_survives_agent_launch() {
+    let _env_guard = env_test_lock().lock().expect("env lock");
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedEnvVar::set("HOME", temp.path());
+    let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+    let repo = temp.path().join("repo");
+    std::fs::create_dir_all(&repo).expect("repo dir");
+
+    // シナリオ1: registering a Start-Work Shell makes it a Work in the projection.
+    let empty: std::collections::HashSet<String> = std::collections::HashSet::new();
+    super::save_shell_work_projection(
+        &repo,
+        "tab-1:shell-3",
+        Some(repo.join("wt-shell")),
+        Some("work/shell-x".to_string()),
+        &empty,
+    )
+    .expect("register shell work");
+
+    let stored = gwt_core::workspace_projection::load_workspace_projection(&repo)
+        .expect("load")
+        .expect("projection exists");
+    let shell = stored
+        .agents
+        .iter()
+        .find(|agent| agent.is_shell_work())
+        .expect("shell work present");
+    assert_eq!(shell.session_id, "tab-1:shell-3");
+    assert_eq!(shell.display_name, "Shell");
+    assert_eq!(shell.branch.as_deref(), Some("work/shell-x"));
+
+    // シナリオ3 / FR-429: launching an agent on a different branch keeps the
+    // running Shell Work.
+    let session = sample_active_agent_session("tab-2", "win-2");
+    save_assigned_workspace_projection_for_test(&repo, &session).expect("agent launch save");
+
+    let after = gwt_core::workspace_projection::load_workspace_projection(&repo)
+        .expect("load")
+        .expect("projection exists");
+    assert!(
+        after
+            .agents
+            .iter()
+            .any(|agent| agent.is_shell_work() && agent.session_id == "tab-1:shell-3"),
+        "agent launch on another branch must keep the Shell Work"
+    );
+    assert!(
+        after
+            .agents
+            .iter()
+            .any(|agent| !agent.is_shell_work() && agent.session_id == session.session_id),
+        "the launched agent is present"
+    );
+}
+
+// SPEC-2359 US-80 (FR-430, シナリオ1/2): a Shell Work summary surfaces as a
+// Work row in the Active Work projection view, and an agent on the same branch
+// groups into the same Work.
+#[test]
+fn active_work_view_surfaces_shell_work_and_groups_with_same_branch_agent() {
+    let repo = std::path::Path::new("/repo");
+    let now = chrono::Utc::now();
+    let mut projection =
+        gwt_core::workspace_projection::WorkspaceProjection::default_for_project(repo);
+    projection.agents.push(
+        gwt_core::workspace_projection::WorkspaceAgentSummary::shell_work(
+            "tab-1:shell-3",
+            Some(repo.join("wt-x")),
+            Some("work/x".to_string()),
+            gwt_core::workspace_projection::WorkspaceStatusCategory::Active,
+            now,
+        ),
+    );
+
+    let view = super::active_work_projection_from_saved(projection.clone());
+    assert_eq!(
+        view.active_agents, 1,
+        "the shell work surfaces as one active work row"
+    );
+
+    // Same-branch agent groups into one Work (FR-430 / シナリオ2).
+    let mut agent = workspace_agent_summary_for_test("agent-1", None);
+    agent.branch = Some("work/x".to_string());
+    agent.worktree_path = Some(repo.join("wt-x"));
+    projection.agents.push(agent);
+    let grouped = super::active_work_projection_from_saved(projection);
+    assert_eq!(
+        grouped.active_agents, 2,
+        "shell + agent on the same branch both appear as active rows"
+    );
+}
+
 #[test]
 fn image_paste_prepare_uses_drop_files_relative_path_reference() {
     let temp = tempdir().expect("tempdir");
