@@ -87,7 +87,8 @@ test("telemetry mapping projects runtime states to semantic states", () => {
   assert.equal(mapAgentTelemetryState("starting"), "not_started");
   assert.equal(mapAgentTelemetryState("ready"), "idle");
   assert.equal(mapAgentTelemetryState("idle"), "idle");
-  assert.equal(mapAgentTelemetryState("waiting"), "idle");
+  // FR-039 (安心): waiting is its own LOUD telemetry state, not quiet idle.
+  assert.equal(mapAgentTelemetryState("waiting"), "needs_input");
   assert.equal(mapAgentTelemetryState("stopped"), "done");
   assert.equal(mapAgentTelemetryState("exited"), "done");
   assert.equal(mapAgentTelemetryState("error"), "blocked");

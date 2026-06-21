@@ -197,6 +197,7 @@ test("index.html declares Operator chrome scaffold", () => {
     "#op-strip-clock",
     "#op-strip-active",
     "#op-strip-idle",
+    "#op-strip-waiting",
     "#op-strip-blocked",
     "#op-briefing",
     "#op-palette-backdrop",
@@ -1119,6 +1120,7 @@ test("Status Strip is exposed as a live region with semantic value labels", () =
   for (const id of [
     "op-strip-active",
     "op-strip-idle",
+    "op-strip-waiting",
     "op-strip-blocked",
     "op-strip-branches",
     "op-strip-runtime-health-value",
@@ -3101,30 +3103,52 @@ test("mapAgentTelemetryState emits only Living Telemetry states CSS handles", ()
   for (const m of mapperBlock[0].matchAll(/return\s+"([^"]+)"/g)) {
     returnedStates.add(m[1]);
   }
-  const allowed = new Set(["active", "not_started", "idle", "blocked", "done"]);
+  // FR-039 (安心): needs_input joins the Living Telemetry vocabulary as the
+  // LOUD "your turn" state CSS renders via [data-agent-state="needs_input"].
+  const allowed = new Set(["active", "not_started", "idle", "blocked", "done", "needs_input"]);
   for (const state of returnedStates) {
     assert.ok(allowed.has(state), `mapAgentTelemetryState returned undeclared state: ${state}`);
   }
-  // And the four design states must all be reachable, not just allowed.
+  // And every design state must be reachable, not just allowed.
   for (const required of allowed) {
     assert.ok(returnedStates.has(required), `Living Telemetry state never emitted: ${required}`);
   }
 });
 
-test("Status Strip ACTIVE / IDLE / BLOCKED cells all tint with their state color", () => {
+test("Status Strip ACTIVE / IDLE / WAITING / BLOCKED cells all tint with their state color", () => {
   const css = readFileSync(resolve(here, "../styles/components.css"), "utf8");
   // The ACTIVE / IDLE cells previously had no tonal hint — only BLOCKED did.
-  // Add parallel symmetry so the three count cells render with matching state
-  // colors (cyan / gray / red) for at-a-glance scanning.
+  // Add parallel symmetry so the count cells render with matching state colors
+  // (cyan / gray / amber / red) for at-a-glance scanning. FR-039 (安心) adds the
+  // WAITING cell tinted with the needs-input amber.
   assert.match(css, /\.op-status-strip__cell--active\s+\.op-status-strip__value\s*\{[^}]*--color-state-active/);
   assert.match(css, /\.op-status-strip__cell--idle\s+\.op-status-strip__value\s*\{[^}]*--color-state-idle/);
+  assert.match(css, /\.op-status-strip__cell--waiting\s+\.op-status-strip__value\s*\{[^}]*--color-state-needs-input/);
   assert.match(css, /\.op-status-strip__cell--blocked\s+\.op-status-strip__value\s*\{[^}]*--color-state-blocked/);
   // Markup also needs the modifiers wired so the CSS selectors actually match.
   const indexHtml = readFileSync(resolve(here, "../index.html"), "utf8");
   assert.match(indexHtml, /op-status-strip__cell\s+op-status-strip__cell--active/);
   assert.match(indexHtml, /op-status-strip__cell\s+op-status-strip__cell--idle/);
+  assert.match(indexHtml, /op-status-strip__cell\s+op-status-strip__cell--waiting/);
   assert.match(indexHtml, /op-status-strip__cell\s+op-status-strip__cell--runtime-health/);
   assert.match(css, /\.op-status-strip__cell--runtime-health\[data-state="warn"\]/);
+});
+
+test("FR-039 (安心): WAITING cell drives a LOUD needs_input alert pulse like BLOCKED", () => {
+  const css = readFileSync(resolve(here, "../styles/components.css"), "utf8");
+  // The WAITING cell must pulse via the same op-status-strip alert mechanism the
+  // BLOCKED cell uses, so "agents waiting for input" reads just as loud.
+  assert.match(
+    css,
+    /\.op-status-strip__cell--waiting\.op-status-strip__cell--alert\s+\.op-status-strip__value/,
+    "WAITING cell needs an --alert pulse rule mirroring BLOCKED",
+  );
+  // The window rim + minimap dot must render the needs_input telemetry state.
+  assert.match(css, /\[data-agent-state="needs_input"\]\s*\{/);
+  assert.match(css, /\.fleet-minimap__cell\[data-telemetry="needs_input"\]::after/);
+  // applyTelemetryCounts must route the needs_input count into the WAITING cell.
+  assert.match(operatorShellSource, /op-strip-waiting/);
+  assert.match(operatorShellSource, /needs_input/);
 });
 
 test("Work surface lifecycle badge styles every agent-session state (SPEC-2359 W-12 FR-351)", () => {

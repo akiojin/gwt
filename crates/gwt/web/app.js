@@ -2552,6 +2552,10 @@
         appendRenderKeyPart(parts, counts?.active ?? null);
         appendRenderKeyPart(parts, "idle");
         appendRenderKeyPart(parts, counts?.idle ?? null);
+        // FR-039 (anshin): the WAITING cell refreshes when the needs_input count
+        // changes; include it in the render key so the strip is not skipped.
+        appendRenderKeyPart(parts, "needs_input");
+        appendRenderKeyPart(parts, counts?.needs_input ?? null);
         appendRenderKeyPart(parts, "blocked");
         appendRenderKeyPart(parts, counts?.blocked ?? null);
         appendRenderKeyPart(parts, "done");
@@ -2613,6 +2617,10 @@
         const counts = {
           active: 0,
           idle: 0,
+          // FR-039 (anshin): needs_input is its own LOUD telemetry state for
+          // agents waiting on the operator. It used to collapse into idle;
+          // now it drives the WAITING strip cell instead.
+          needs_input: 0,
           blocked: 0,
           done: 0,
           agents: 0,

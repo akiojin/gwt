@@ -181,19 +181,24 @@ export function applyTelemetryCounts(doc, counts = {}) {
     if (el) el.textContent = String(v);
   };
   // SPEC-2356 — toggle the blocked alert state so the BLOCKED cell pulses when
-  // anything actually needs attention, and stays still otherwise.
-  if ("blocked" in counts) {
-    const blockedCell = doc.querySelector(".op-status-strip__cell--blocked");
-    if (blockedCell) {
-      if ((counts.blocked ?? 0) > 0) blockedCell.classList.add("op-status-strip__cell--alert");
-      else blockedCell.classList.remove("op-status-strip__cell--alert");
-    }
-  }
+  // anything actually needs attention, and stays still otherwise. FR-039 (anshin)
+  // applies the same alert toggle to the WAITING cell so "agents waiting for
+  // input" is just as loud as blocked.
+  const toggleAlert = (modifier, count) => {
+    const cell = doc.querySelector(`.op-status-strip__cell--${modifier}`);
+    if (!cell) return;
+    if ((count ?? 0) > 0) cell.classList.add("op-status-strip__cell--alert");
+    else cell.classList.remove("op-status-strip__cell--alert");
+  };
+  if ("blocked" in counts) toggleAlert("blocked", counts.blocked);
+  if ("needs_input" in counts) toggleAlert("waiting", counts.needs_input);
   // SPEC-2356 operator chrome cleanup: the dead Sidebar Layers rows and their
   // per-layer counters are removed; telemetry now lives solely in the Status
   // Strip cells below.
   setText("op-strip-active", counts.active ?? 0);
   setText("op-strip-idle", counts.idle ?? 0);
+  // FR-039 (anshin): WAITING cell counts agents waiting on the operator.
+  setText("op-strip-waiting", counts.needs_input ?? 0);
   setText("op-strip-blocked", counts.blocked ?? 0);
   if ("branches" in counts) setText("op-strip-branches", counts.branches ?? "—");
   // SPEC-3038 AS-1.4: the rail Windows item badges the open-window count.

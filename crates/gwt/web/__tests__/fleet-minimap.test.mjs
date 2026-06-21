@@ -132,6 +132,19 @@ test("cells carry agent color and telemetry datasets only when present", () => {
   assert.equal(plainCell.dataset.telemetry, undefined, "non-agent cell omits telemetry");
 });
 
+test("FR-039 (安心): a needs_input telemetry surfaces as its own minimap dataset", () => {
+  // The minimap dot color/pulse keys off data-telemetry, so the loud
+  // needs_input state must round-trip onto the cell rather than collapse.
+  const { container } = setupDom();
+  const windows = [windowAt("w-wait", 0, 0, 100, 80, { agent_color: "amber", telemetry: "needs_input" })];
+  const { minimap } = makeMinimap(container, windows);
+
+  minimap.renderCells();
+
+  const cell = container.querySelector('[data-window-id="w-wait"]');
+  assert.equal(cell.dataset.telemetry, "needs_input");
+});
+
 test("the focused window's cell gets the is-focused class", () => {
   const { container } = setupDom();
   const windows = [windowAt("w-1", 0, 0), windowAt("w-2", 300, 0)];

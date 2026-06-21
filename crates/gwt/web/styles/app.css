@@ -1097,9 +1097,17 @@ body {
   animation: none;
 }
 
+/* FR-039 (anshin): waiting maps to the LOUD needs-input state, so the WAIT cue
+   stays prominent on an inactive tab through amber text + an amber tab edge —
+   the same loud-but-static treatment blocked gets, so "your turn" is never
+   lost in the quiet idle palette. */
 .window-tab[data-agent-state="waiting"] .window-tab-state {
-  color: var(--color-state-idle);
+  color: var(--color-state-needs-input);
   animation: none;
+}
+
+.window-tab[data-agent-state="waiting"] {
+  border-color: color-mix(in oklab, var(--color-state-needs-input) 55%, var(--color-border));
 }
 
 /* AS-2.3: blocked stays loud even on an inactive tab through red text,
