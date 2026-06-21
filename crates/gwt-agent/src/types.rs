@@ -98,6 +98,25 @@ impl AgentId {
     pub fn supports_fast_mode(&self) -> bool {
         matches!(self, Self::ClaudeCode | Self::Codex)
     }
+
+    /// Whether this agent supports selecting an upstream provider at launch
+    /// (Hermes `--provider`). SPEC-3152.
+    pub fn supports_provider_selection(&self) -> bool {
+        matches!(self, Self::Hermes)
+    }
+
+    /// Whether this agent supports selecting a named config profile at launch
+    /// (Hermes `--profile`). SPEC-3152.
+    pub fn supports_profile_selection(&self) -> bool {
+        matches!(self, Self::Hermes)
+    }
+
+    /// Whether this agent takes a free-text model string rather than a fixed
+    /// gwt model list, because the available models depend on the chosen
+    /// provider (Hermes). SPEC-3152.
+    pub fn supports_freetext_model(&self) -> bool {
+        matches!(self, Self::Hermes)
+    }
 }
 
 impl std::fmt::Display for AgentId {
@@ -596,6 +615,23 @@ mod tests {
                 !unsupported.supports_fast_mode(),
                 "{unsupported:?} should not advertise Fast mode support"
             );
+        }
+    }
+
+    #[test]
+    fn hermes_advertises_provider_profile_and_freetext_model() {
+        assert!(AgentId::Hermes.supports_provider_selection());
+        assert!(AgentId::Hermes.supports_profile_selection());
+        assert!(AgentId::Hermes.supports_freetext_model());
+        for other in [
+            AgentId::ClaudeCode,
+            AgentId::Codex,
+            AgentId::Gemini,
+            AgentId::OpenCode,
+        ] {
+            assert!(!other.supports_provider_selection());
+            assert!(!other.supports_profile_selection());
+            assert!(!other.supports_freetext_model());
         }
     }
 
