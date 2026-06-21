@@ -185,6 +185,18 @@
             </button>
           </div>
           <div class="op-rail__spacer" aria-hidden="true"></div>
+          <div class="op-rail__group" role="group" aria-label="Agents">
+            <!-- SPEC-2356 Anshin Addendum (FR-042): STOP ALL kill-switch. Halts
+                 every running agent runtime (windows stay on canvas) after a
+                 confirm. The op:command handler in app.js owns the prompt. -->
+            <button class="op-rail__item op-rail__item--stop-all" type="button" data-cmd="stop-all-windows" aria-label="Stop all agents" title="Stop all agents">
+              <span class="op-rail__icon" aria-hidden="true">⏹</span>
+              <span class="op-rail__flyout" aria-hidden="true">
+                <span class="op-rail__flyout-label">Stop all agents</span>
+              </span>
+            </button>
+          </div>
+          <div class="op-rail__divider" aria-hidden="true"></div>
           <div class="op-rail__group op-rail__group--system" role="group" aria-label="System">
             <button
               class="op-rail__item"

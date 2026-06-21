@@ -3391,6 +3391,95 @@ body {
   color: var(--color-text-muted);
 }
 
+/* SPEC-2356 Anshin Addendum (FR-040): in-app attention toasts. They stack in a
+   fixed bottom-right column above the completion toast slot, each carrying a
+   left accent rim keyed to its flavor (needs_input amber / error red / done
+   muted). */
+.attention-toast-stack {
+  position: fixed;
+  right: 18px;
+  bottom: 122px;
+  z-index: 1001;
+  display: grid;
+  gap: 8px;
+  justify-items: end;
+  pointer-events: none;
+}
+
+.attention-toast {
+  display: grid;
+  grid-template-columns: 1fr auto;
+  align-items: stretch;
+  gap: 4px;
+  max-width: min(420px, calc(100vw - 36px));
+  border: 1px solid var(--color-border-strong);
+  border-left: 3px solid var(--color-state-needs-input);
+  border-radius: var(--radius-md);
+  background: var(--color-surface-elevated);
+  box-shadow: var(--shadow-3);
+  pointer-events: auto;
+  animation: attention-toast-in var(--motion-medium) var(--motion-curve);
+}
+
+.attention-toast[data-flavor="error"] {
+  border-left-color: var(--color-state-blocked);
+}
+
+.attention-toast[data-flavor="done"] {
+  border-left-color: var(--color-state-done);
+}
+
+.attention-toast__jump {
+  display: grid;
+  gap: 2px;
+  min-height: 44px;
+  padding: 10px 12px;
+  border: 0;
+  background: transparent;
+  color: var(--color-text);
+  font-family: var(--font-body);
+  font-size: var(--type-sm);
+  text-align: left;
+  cursor: pointer;
+}
+
+.attention-toast__title {
+  font-weight: 700;
+  color: var(--color-text-strong);
+}
+
+.attention-toast__body {
+  color: var(--color-text-muted);
+}
+
+.attention-toast__dismiss {
+  align-self: stretch;
+  width: 32px;
+  border: 0;
+  border-left: 1px solid var(--color-border);
+  background: transparent;
+  color: var(--color-text-muted);
+  font-size: 16px;
+  line-height: 1;
+  cursor: pointer;
+}
+
+.attention-toast__dismiss:hover {
+  color: var(--color-text-strong);
+  background: color-mix(in oklab, var(--color-text-strong) 8%, transparent);
+}
+
+@keyframes attention-toast-in {
+  from { opacity: 0; transform: translateY(6px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .attention-toast {
+    animation: none;
+  }
+}
+
 .attachment-progress {
   position: absolute;
   right: 12px;

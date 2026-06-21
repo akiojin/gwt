@@ -328,11 +328,12 @@ test("Sidebar retires the Active Works overview in favor of the Work surface (SP
   );
 });
 
-test("Command Rail groups items into Navigate / Windows / System (SPEC-3038 US-1)", () => {
+test("Command Rail groups items into Navigate / Windows / Agents / System (SPEC-3038 US-1)", () => {
   // SPEC-3038 US-1: the rail is the single always-visible home for navigation
   // (Start Work / Work / Board / Logs), window operations (Tile / Stack /
   // Align / Windows / Add), and system actions (Palette / Update) — in that
-  // order. Groups carry aria-labels instead of visual headings.
+  // order. Groups carry aria-labels instead of visual headings. SPEC-2356
+  // Anshin (FR-042) inserts an Agents group (STOP ALL) before System.
   const groups = Array.from(document.querySelectorAll(".op-rail > .op-rail__group")).map(
     (group) => group.getAttribute("aria-label"),
   );
@@ -340,8 +341,8 @@ test("Command Rail groups items into Navigate / Windows / System (SPEC-3038 US-1
   // bottom-right home, so the sidebar no longer carries an Update section.
   assert.deepEqual(
     groups,
-    ["Navigate", "Windows", "System"],
-    "Rail order must be Navigate → Windows → System",
+    ["Navigate", "Windows", "Agents", "System"],
+    "Rail order must be Navigate → Windows → Agents → System",
   );
 });
 
@@ -3151,6 +3152,54 @@ test("FR-039 (安心): WAITING cell drives a LOUD needs_input alert pulse like B
   assert.match(operatorShellSource, /needs_input/);
 });
 
+test("FR-041/044 (安心): window chrome carries STOP + RESTART kill-switch controls", () => {
+  // The window titlebar actions must expose STOP and RESTART alongside close,
+  // both starting hidden (visibility is driven per render from runtime state).
+  assert.match(appSource, /data-action="stop"[^>]*aria-label="Stop agent"/);
+  assert.match(appSource, /data-action="restart"[^>]*aria-label="Restart agent"/);
+  // STOP click sends stop_window (PTY halts, window stays); RESTART sends
+  // restart_window (relaunch in place).
+  assert.match(appSource, /kind:\s*"stop_window",\s*id:\s*windowData\.id/);
+  assert.match(appSource, /kind:\s*"restart_window",\s*id:\s*windowData\.id/);
+  // The render path toggles the controls based on runtime state.
+  assert.match(appSource, /updateWindowKillSwitchControls/);
+});
+
+test("FR-042 (安心): STOP ALL is reachable from the rail and the palette with a confirm", () => {
+  const railItem = document.querySelector('.op-rail__item[data-cmd="stop-all-windows"]');
+  assert.ok(railItem, "expected a Stop all agents rail item");
+  assert.equal(railItem.getAttribute("aria-label"), "Stop all agents");
+  // op:command + palette both route to requestStopAllWindows, which confirms
+  // and emits stop_all_windows.
+  assert.match(appSource, /case "stop-all-windows":/);
+  assert.match(appSource, /id:\s*"stop-all-agents"/);
+  assert.match(appSource, /kind:\s*"stop_all_windows"/);
+  assert.match(appSource, /function requestStopAllWindows\(\)/);
+});
+
+test("FR-043 (安心): send-input routes to the focused agent pane via session_id", () => {
+  // The palette entry + helper inject one line into the focused agent pane
+  // using pane_send_input scoped to the window's session_id.
+  assert.match(appSource, /id:\s*"send-input-focused-agent"/);
+  assert.match(appSource, /kind:\s*"pane_send_input",\s*session_id:/);
+  assert.match(appSource, /function sendFocusedPaneInput\(/);
+});
+
+test("FR-040 (安心): in-app attention toasts are wired with click-to-jump", () => {
+  // The attention toaster fires in-app toasts (no away gate); the renderer
+  // frames the window on click and respects reduced-motion via the CSS layer.
+  assert.match(appSource, /createAgentAttentionToaster/);
+  assert.match(appSource, /agentAttentionToaster\.handleRuntimeState/);
+  assert.match(appSource, /function showAttentionToast/);
+  assert.match(appSource, /frameWindow\(notice\.windowId\)/);
+  assert.match(inlineStyle, /\.attention-toast\s*\{/);
+  assert.match(
+    inlineStyle,
+    /@media \(prefers-reduced-motion: reduce\)[\s\S]*?\.attention-toast\s*\{[\s\S]*?animation:\s*none/,
+    "attention toast must drop its entrance animation under reduced motion",
+  );
+});
+
 test("Work surface lifecycle badge styles every agent-session state (SPEC-2359 W-12 FR-351)", () => {
   const css = readFileSync(resolve(here, "../styles/components.css"), "utf8");
   // Slice 3 retires the sidebar `op-agent-card` states; the Work surface now
@@ -4654,10 +4703,20 @@ test("window template restores the manual resize handle as a window-body sibling
     /<div class="window-body"><\/div>\s*<div class="resize-handle"><\/div>/,
     "the resize handle must be a sibling div after the window body",
   );
-  assert.match(
-    ensureWindowBody,
-    /<div class="window-actions">\s*<button class="icon-button" data-action="close"[\s\S]*?<\/div>/,
-    "window-actions must stay close-only (no maximize/minimize buttons)",
+  // SPEC-2008 retired maximize/minimize; SPEC-2356 Anshin (FR-041/044) added
+  // the STOP + RESTART kill-switch alongside close. Window-actions may carry
+  // those, but never maximize/minimize.
+  const windowActions = ensureWindowBody.match(
+    /<div class="window-actions">[\s\S]*?<\/div>/,
+  );
+  assert.ok(windowActions, "window-actions block must exist");
+  assert.match(windowActions[0], /data-action="close"/, "close must remain");
+  assert.match(windowActions[0], /data-action="stop"/, "STOP kill-switch must be present");
+  assert.match(windowActions[0], /data-action="restart"/, "RESTART must be present");
+  assert.doesNotMatch(
+    windowActions[0],
+    /data-action="(maximize|minimize)"/,
+    "window-actions must never reintroduce maximize/minimize buttons",
   );
   // The handle is wired to begin a local geometry edit and arm the resize state
   // (camera is untouched; only the window geometry changes).

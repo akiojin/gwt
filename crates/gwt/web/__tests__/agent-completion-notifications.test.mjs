@@ -3,7 +3,10 @@ import test from "node:test";
 
 import { parseHTML } from "linkedom";
 
-import { createAgentCompletionNotifier } from "../agent-completion-notifications.js";
+import {
+  createAgentCompletionNotifier,
+  createAgentAttentionToaster,
+} from "../agent-completion-notifications.js";
 
 function setupDocument({ hidden = true, focused = false } = {}) {
   const { document } = parseHTML("<main></main>");
@@ -182,4 +185,85 @@ test("notifier reports stopped and error transitions as separate categories", ()
     notices.map((notice) => notice.kind),
     ["agent_stopped", "agent_error"],
   );
+});
+
+// SPEC-2356 Anshin Addendum (FR-040) — in-app attention toaster.
+function collectAttentionToaster() {
+  const toasts = [];
+  const toaster = createAgentAttentionToaster({
+    showToast: (notice) => toasts.push(notice),
+    now: () => 1000,
+  });
+  return { toaster, toasts };
+}
+
+test("FR-040: needs_input (waiting) fires an in-app toast even while present", () => {
+  const { toaster, toasts } = collectAttentionToaster();
+  const notice = toaster.handleRuntimeState({
+    windowId: "w-1",
+    runtimeState: "waiting",
+    windowData: { title: "codex-1" },
+  });
+  assert.ok(notice, "waiting must produce a toast");
+  assert.equal(notice.flavor, "needs_input");
+  assert.equal(notice.windowId, "w-1");
+  assert.match(notice.body, /codex-1/);
+  assert.equal(toasts.length, 1);
+});
+
+test("FR-040: blocked/error and done states also toast", () => {
+  const { toaster, toasts } = collectAttentionToaster();
+  toaster.handleRuntimeState({ windowId: "w-err", runtimeState: "error", windowData: { title: "a" } });
+  toaster.handleRuntimeState({ windowId: "w-done", runtimeState: "stopped", windowData: { title: "b" } });
+  toaster.handleRuntimeState({ windowId: "w-exit", runtimeState: "exited", windowData: { title: "c" } });
+  assert.deepEqual(
+    toasts.map((t) => t.flavor),
+    ["error", "done", "done"],
+  );
+});
+
+test("FR-040: running / starting / idle never toast", () => {
+  const { toaster, toasts } = collectAttentionToaster();
+  for (const state of ["running", "starting", "idle", "ready"]) {
+    toaster.handleRuntimeState({ windowId: "w-1", runtimeState: state, windowData: {} });
+  }
+  assert.equal(toasts.length, 0);
+});
+
+test("FR-040: the same flavor does not re-toast across repeated frames", () => {
+  const { toaster, toasts } = collectAttentionToaster();
+  toaster.handleRuntimeState({ windowId: "w-1", runtimeState: "waiting", windowData: {} });
+  toaster.handleRuntimeState({ windowId: "w-1", runtimeState: "waiting", windowData: {} });
+  toaster.handleRuntimeState({ windowId: "w-1", runtimeState: "waiting", windowData: {} });
+  assert.equal(toasts.length, 1, "repeated waiting frames must not spam");
+});
+
+test("FR-040: leaving and re-entering an attention state toasts again", () => {
+  const { toaster, toasts } = collectAttentionToaster();
+  toaster.handleRuntimeState({ windowId: "w-1", runtimeState: "waiting", windowData: {} });
+  toaster.handleRuntimeState({ windowId: "w-1", runtimeState: "running", windowData: {} });
+  toaster.handleRuntimeState({ windowId: "w-1", runtimeState: "waiting", windowData: {} });
+  assert.equal(toasts.length, 2, "re-entry into waiting after running must toast again");
+});
+
+test("FR-040: error -> done transition toasts each distinct flavor", () => {
+  const { toaster, toasts } = collectAttentionToaster();
+  toaster.handleRuntimeState({ windowId: "w-1", runtimeState: "error", windowData: {} });
+  toaster.handleRuntimeState({ windowId: "w-1", runtimeState: "stopped", windowData: {} });
+  assert.deepEqual(toasts.map((t) => t.flavor), ["error", "done"]);
+});
+
+test("FR-040: forgetWindow clears dedupe so a fresh window toasts", () => {
+  const { toaster, toasts } = collectAttentionToaster();
+  toaster.handleRuntimeState({ windowId: "w-1", runtimeState: "waiting", windowData: {} });
+  toaster.forgetWindow("w-1");
+  toaster.handleRuntimeState({ windowId: "w-1", runtimeState: "waiting", windowData: {} });
+  assert.equal(toasts.length, 2);
+});
+
+test("FR-040: missing windowId yields no toast", () => {
+  const { toaster, toasts } = collectAttentionToaster();
+  const notice = toaster.handleRuntimeState({ windowId: "", runtimeState: "waiting" });
+  assert.equal(notice, null);
+  assert.equal(toasts.length, 0);
 });

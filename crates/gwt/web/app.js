@@ -34,7 +34,12 @@
       import { createLaunchPendingController } from "/launch-pending-controller.js";
       import { createConnectionOverlay } from "/connection-overlay.js";
       import { createUpdateCtaController } from "/update-cta.js";
-      import { createAgentCompletionNotifier } from "/agent-completion-notifications.js";
+      // SPEC-2356 Anshin Addendum (FR-040): the in-app attention toaster ships
+      // alongside the away-only desktop notifier in the same module.
+      import {
+        createAgentCompletionNotifier,
+        createAgentAttentionToaster,
+      } from "/agent-completion-notifications.js";
       import { createReleaseNotesWindow } from "/release-notes-window.js";
       import { createConsoleWindow } from "/console-window.js";
       import { createTerminalWheelScrollController } from "/terminal-wheel-scroll.js";
@@ -837,6 +842,75 @@
             }
           },
         });
+        // SPEC-2356 Anshin Addendum (FR-042): STOP ALL is reachable from the
+        // palette as well as the rail.
+        window.__operatorShell.palette.register({
+          id: "stop-all-agents",
+          label: "Agents: Stop All Running Agents",
+          group: "Agents",
+          handler: () => {
+            requestStopAllWindows();
+          },
+        });
+        // SPEC-2356 Anshin Addendum (FR-043): send a line of input to the focused
+        // agent pane from the palette.
+        window.__operatorShell.palette.register({
+          id: "send-input-focused-agent",
+          label: "Agent: Send Input to Focused Agent",
+          group: "Agents",
+          handler: () => {
+            promptSendFocusedPaneInput();
+          },
+        });
+      }
+
+      // SPEC-2356 Anshin Addendum (FR-043): inject one line of input into the
+      // focused agent pane. Targets the window's session_id (not its window id)
+      // so the backend can scope the injection to the caller's own pane. Returns
+      // true when a line was actually dispatched.
+      function focusedAgentWindowData() {
+        if (!focusedId) return null;
+        const windowData = workspaceWindowById(focusedId);
+        if (!windowData || !presetSupportsWaitingStatus(windowData.preset)) {
+          return null;
+        }
+        return windowData;
+      }
+
+      function sendPaneInput(sessionId, text) {
+        const session = String(sessionId || "").trim();
+        const line = String(text ?? "");
+        if (!session || line.length === 0) {
+          return false;
+        }
+        send({ kind: "pane_send_input", session_id: session, text: line });
+        return true;
+      }
+
+      function sendFocusedPaneInput(text) {
+        const windowData = focusedAgentWindowData();
+        const sessionId = windowData?.session_id;
+        return sendPaneInput(sessionId, text);
+      }
+
+      // SPEC-2356 Anshin Addendum (FR-043): the Command Palette entry prompts for
+      // a single line and routes it to the focused agent pane.
+      function promptSendFocusedPaneInput() {
+        const windowData = focusedAgentWindowData();
+        if (!windowData) {
+          window.alert("Focus an agent window first to send it input.");
+          return;
+        }
+        if (!String(windowData.session_id || "").trim()) {
+          window.alert("This agent has no active session to send input to.");
+          return;
+        }
+        const label = windowDisplayTitle(windowData);
+        const text = window.prompt(`Send a line of input to ${label}:`);
+        if (text === null) {
+          return;
+        }
+        sendFocusedPaneInput(text);
       }
 
       // SPEC-2809 — registry of Console window controllers keyed by windowId.
@@ -2768,6 +2842,15 @@
               windowData,
               projectTab: windowContext?.tab || activeProjectTab(),
             });
+            // SPEC-2356 Anshin Addendum (FR-040): only agent panes (the presets
+            // that carry a waiting state) raise in-app attention toasts.
+            if (windowData && presetSupportsWaitingStatus(windowData.preset)) {
+              agentAttentionToaster.handleRuntimeState({
+                windowId,
+                runtimeState,
+                windowData,
+              });
+            }
             if (detail) {
               detailMap.set(windowId, detail);
             } else if (
@@ -2816,6 +2899,11 @@
             // SPEC-2356 — Living Telemetry: project the runtime state onto a stable
             // `data-agent-state` attribute the components.css layer animates.
             element.dataset.agentState = mapAgentTelemetryState(runtimeState);
+            // SPEC-2356 Anshin Addendum (FR-041/FR-044): toggle the kill-switch
+            // chrome. STOP shows for a live agent runtime; RESTART replaces it
+            // once the runtime is stopped or errored. Non-agent windows never
+            // expose either control.
+            updateWindowKillSwitchControls(element, windowData, runtimeState);
             recomputeOperatorTelemetry();
             refreshWindowTabTelemetry(windowData);
             label.textContent = windowRuntimeLabel(runtimeState);
@@ -2849,6 +2937,27 @@
             refreshProjectTabStateCues();
           },
         );
+      }
+
+      // SPEC-2356 Anshin Addendum (FR-041/FR-044): a stopped/errored agent runtime
+      // shows RESTART; a live one shows STOP. Non-agent windows hide both.
+      const STOPPED_RUNTIME_STATES = new Set(["stopped", "exited", "error"]);
+
+      function updateWindowKillSwitchControls(element, windowData, runtimeState) {
+        const stopButton = element.querySelector("[data-action='stop']");
+        const restartButton = element.querySelector("[data-action='restart']");
+        if (!stopButton || !restartButton) {
+          return;
+        }
+        const isAgentWindow = shouldShowRuntimeStatus(windowData);
+        if (!isAgentWindow) {
+          stopButton.hidden = true;
+          restartButton.hidden = true;
+          return;
+        }
+        const isStopped = STOPPED_RUNTIME_STATES.has(runtimeState);
+        stopButton.hidden = isStopped;
+        restartButton.hidden = !isStopped;
       }
 
       function stopSpinnerAnimation(overlay) {
@@ -2960,6 +3069,40 @@
           running: isAgentWindow && runtimeState === "running",
         };
         renderWindowCloseConfirm();
+      }
+
+      // SPEC-2356 Anshin Addendum (FR-042): STOP ALL halts every live agent
+      // runtime, leaving windows on the canvas. Count the live agent windows so
+      // the confirm is specific, and no-op when nothing is running.
+      function countRunningAgentWindows() {
+        let count = 0;
+        for (const [windowId, element] of windowMap.entries()) {
+          if (!element) continue;
+          const windowData = workspaceWindowById(windowId);
+          if (!windowData || !presetSupportsWaitingStatus(windowData.preset)) continue;
+          const runtimeState =
+            windowRuntimeStateMap.get(windowId) ||
+            normalizeWindowRuntimeState(windowData.status, windowData.preset);
+          if (!STOPPED_RUNTIME_STATES.has(runtimeState)) {
+            count += 1;
+          }
+        }
+        return count;
+      }
+
+      function requestStopAllWindows() {
+        const running = countRunningAgentWindows();
+        if (running === 0) {
+          return;
+        }
+        const plural = running === 1 ? "agent" : "agents";
+        if (
+          window.confirm(
+            `Stop all ${running} running ${plural}? Their windows and output stay on the canvas; you can restart each one in place.`,
+          )
+        ) {
+          send({ kind: "stop_all_windows" });
+        }
       }
 
       // SPEC-3038 US-2: tabs carry the same Living Telemetry the window chrome
@@ -3795,6 +3938,63 @@
         }, 12_000);
       }
 
+      // SPEC-2356 Anshin Addendum (FR-040): in-app attention toast. Distinct from
+      // the away-only desktop notification above — this surfaces even while the
+      // operator is present. Click flies the camera to the window (frameWindow);
+      // a dismiss control and an auto-hide keep it from lingering. needs_input /
+      // error toasts hold longer than the quiet "done" toast.
+      function showAttentionToast(notice) {
+        const flavor = notice.flavor || "needs_input";
+        const existing = document.getElementById(`attention-toast-${notice.windowId}`);
+        existing?.remove();
+        const toast = createNode("div", "attention-toast");
+        toast.id = `attention-toast-${notice.windowId}`;
+        toast.dataset.flavor = flavor;
+        toast.setAttribute("role", "status");
+        toast.setAttribute("aria-live", "polite");
+
+        const jump = createNode("button", "attention-toast__jump");
+        jump.type = "button";
+        jump.title = notice.title || "Agent attention";
+        jump.setAttribute("aria-label", `${notice.title}: ${notice.body} (jump to window)`);
+        const title = createNode("span", "attention-toast__title", notice.title || "Agent attention");
+        const body = createNode("span", "attention-toast__body", notice.body || "");
+        jump.append(title, body);
+        jump.addEventListener("click", () => {
+          frameWindow(notice.windowId);
+          toast.remove();
+        });
+
+        const dismiss = createNode("button", "attention-toast__dismiss", "×");
+        dismiss.type = "button";
+        dismiss.setAttribute("aria-label", "Dismiss notification");
+        dismiss.addEventListener("click", (event) => {
+          event.stopPropagation();
+          toast.remove();
+        });
+
+        toast.append(jump, dismiss);
+        attentionToastStack().appendChild(toast);
+        const holdMs = flavor === "done" ? 8_000 : 14_000;
+        window.setTimeout(() => {
+          if (toast.isConnected) {
+            toast.remove();
+          }
+        }, holdMs);
+      }
+
+      // The attention toasts stack in a fixed column so multiple windows can
+      // ask for attention at once without overlapping.
+      function attentionToastStack() {
+        let stackEl = document.getElementById("attention-toast-stack");
+        if (!stackEl) {
+          stackEl = createNode("div", "attention-toast-stack");
+          stackEl.id = "attention-toast-stack";
+          document.body.appendChild(stackEl);
+        }
+        return stackEl;
+      }
+
       function createKnowledgeMarkdownBody(section, className = "knowledge-section-body") {
         const node = createNode("div", `${className} knowledge-markdown-body`);
         const html = typeof section?.body_html === "string" ? section.body_html.trim() : "";
@@ -4232,6 +4432,8 @@
                 </span>
               </div>
               <div class="window-actions">
+                <button class="icon-button" data-action="restart" aria-label="Restart agent" title="Restart agent" hidden>↻</button>
+                <button class="icon-button" data-action="stop" aria-label="Stop agent" title="Stop agent" hidden>■</button>
                 <button class="icon-button" data-action="close" aria-label="Close window">×</button>
               </div>
             </div>
@@ -4244,7 +4446,23 @@
 
           const titlebar = element.querySelector(".titlebar");
           const closeButton = element.querySelector("[data-action='close']");
+          const stopButton = element.querySelector("[data-action='stop']");
+          const restartButton = element.querySelector("[data-action='restart']");
           const resizeHandle = element.querySelector(".resize-handle");
+
+          // SPEC-2356 Anshin Addendum (FR-041/FR-044): the kill-switch lives in
+          // the window chrome next to close. STOP halts the agent runtime but
+          // keeps the window + its output; RESTART relaunches the same preset
+          // in place. Both target the window id; visibility is driven per
+          // render from the runtime state by the status-apply path.
+          stopButton.addEventListener("click", (event) => {
+            event.stopPropagation();
+            send({ kind: "stop_window", id: windowData.id });
+          });
+          restartButton.addEventListener("click", (event) => {
+            event.stopPropagation();
+            send({ kind: "restart_window", id: windowData.id });
+          });
 
           // SPEC-2008 camera-focus: minimize/maximize buttons were removed
           // (focusing a window flies the camera to frame it). The close (×)
@@ -4526,6 +4744,8 @@
               detailMap.delete(windowId);
               windowRuntimeStateMap.delete(windowId);
               agentCompletionNotifier.forgetWindow(windowId);
+              agentAttentionToaster.forgetWindow(windowId);
+              document.getElementById(`attention-toast-${windowId}`)?.remove();
               renderedWindowElementKeys.delete(windowId);
               renderedRuntimeStatusKeys.delete(windowId);
               renderedAgentKanbanBodyKeys.delete(windowId);
@@ -4643,6 +4863,11 @@
         onProjectUnread: (projectId) => {
           projectWorkspaceShell.markProjectUnread(projectId);
         },
+      });
+
+      // SPEC-2356 Anshin Addendum (FR-040): the always-on, in-app counterpart.
+      const agentAttentionToaster = createAgentAttentionToaster({
+        showToast: showAttentionToast,
       });
 
       const workspaceWindowManager = Object.freeze({
@@ -6014,6 +6239,9 @@
             frontendUnits.socketTransport.send({
               kind: "open_start_work",
             });
+            return;
+          case "stop-all-windows":
+            requestStopAllWindows();
             return;
           case "theme-cycle": {
             const tm = window.__operatorShell?.themeManager;
