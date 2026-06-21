@@ -705,7 +705,7 @@ mod tests {
     use std::process::Command;
 
     use crate::provider_hooks::{
-        generate_hermes_hooks, generate_openclaw_hooks, generate_opencode_hooks,
+        generate_hermes_hooks_with_source, generate_openclaw_hooks, generate_opencode_hooks,
     };
 
     use super::*;
@@ -799,7 +799,7 @@ mod tests {
     fn generate_hermes_hooks_creates_isolated_home_config_and_script() {
         let dir = tempfile::tempdir().unwrap();
 
-        generate_hermes_hooks(dir.path()).unwrap();
+        generate_hermes_hooks_with_source(dir.path(), None).unwrap();
 
         let config_path = dir.path().join(".gwt/hermes/config.yaml");
         let script_path = dir.path().join(".gwt/hermes/agent-hooks/gwt-hook.sh");

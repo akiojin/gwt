@@ -1,6 +1,9 @@
 //! Worktree-local hook bridge assets for providers without Claude/Codex-style hooks.
 
-use std::{io, path::Path};
+use std::{
+    env, fs, io,
+    path::{Path, PathBuf},
+};
 
 use serde_json::{json, Value};
 
@@ -23,8 +26,21 @@ pub fn generate_opencode_hooks(worktree: &Path) -> io::Result<()> {
     write_settings_atomically(&config_path, &config)
 }
 
-/// Generate Hermes Agent project-local hook config under `.gwt/hermes`.
+/// Generate Hermes Agent project-local hook config under `.gwt/hermes` and
+/// bridge the user's real Hermes setup (credentials + provider config) into
+/// the worktree-local HERMES_HOME so the isolated home stays authenticated.
 pub fn generate_hermes_hooks(worktree: &Path) -> io::Result<()> {
+    let source_home = hermes_source_home(worktree);
+    generate_hermes_hooks_with_source(worktree, source_home.as_deref())
+}
+
+/// Testable core for [`generate_hermes_hooks`]. `source_home` is the user's
+/// real HERMES_HOME to bridge credentials and provider config from; `None`
+/// when it cannot be resolved or the user has no global Hermes setup.
+pub(crate) fn generate_hermes_hooks_with_source(
+    worktree: &Path,
+    source_home: Option<&Path>,
+) -> io::Result<()> {
     let home = worktree.join(".gwt/hermes");
     let config_path = home.join("config.yaml");
     let script_path = home.join("agent-hooks/gwt-hook.sh");
@@ -34,7 +50,108 @@ pub fn generate_hermes_hooks(worktree: &Path) -> io::Result<()> {
         &hermes_hook_script_content(&gwt_hook_bin_path()),
     )?;
     set_executable(&script_path)?;
-    write_text_atomically(&config_path, &hermes_config_content(&script_path))
+
+    if let Some(src) = source_home {
+        bridge_hermes_credentials(src, &home)?;
+    }
+
+    let merged = merge_hermes_config(source_home, &script_path)?;
+    write_text_atomically(&config_path, &merged)
+}
+
+/// `true` when the user's real Hermes home has resolvable credentials
+/// (a non-empty `.env` or an `auth.json`). Used by the launch wizard to
+/// surface a non-blocking "Hermes is not set up" hint.
+pub fn hermes_is_configured(source_home: &Path) -> bool {
+    let env_ok = fs::read_to_string(source_home.join(".env"))
+        .map(|content| !content.trim().is_empty())
+        .unwrap_or(false);
+    env_ok || source_home.join("auth.json").exists()
+}
+
+/// Resolve the user's real HERMES_HOME to bridge from. Honors an explicit
+/// `HERMES_HOME` env var, else falls back to `~/.hermes`. Returns `None`
+/// when it cannot be resolved or would point inside the worktree's managed
+/// `.gwt/` tree (self-reference guard against a leaked redirect).
+pub fn hermes_source_home(worktree: &Path) -> Option<PathBuf> {
+    let candidate = match env::var_os("HERMES_HOME") {
+        Some(value) if !value.is_empty() => PathBuf::from(value),
+        _ => home_dir()?.join(".hermes"),
+    };
+    if candidate.starts_with(worktree.join(".gwt")) {
+        return None;
+    }
+    Some(candidate)
+}
+
+fn home_dir() -> Option<PathBuf> {
+    env::var_os("HOME")
+        .or_else(|| env::var_os("USERPROFILE"))
+        .filter(|value| !value.is_empty())
+        .map(PathBuf::from)
+}
+
+/// Symlink the user's Hermes credentials (`.env`, `auth.json`) into the
+/// worktree-local HERMES_HOME. Symlinks let OAuth token refreshes flow back
+/// to the real home; on platforms/filesystems where symlinks fail we fall
+/// back to a copy. Existing entries are replaced so refresh stays idempotent.
+fn bridge_hermes_credentials(source_home: &Path, dest_home: &Path) -> io::Result<()> {
+    fs::create_dir_all(dest_home)?;
+    for name in [".env", "auth.json"] {
+        let src = source_home.join(name);
+        if !src.exists() {
+            continue;
+        }
+        let dst = dest_home.join(name);
+        if fs::symlink_metadata(&dst).is_ok() {
+            let _ = fs::remove_file(&dst);
+        }
+        if symlink_file(&src, &dst).is_err() {
+            fs::copy(&src, &dst)?;
+        }
+    }
+    Ok(())
+}
+
+#[cfg(unix)]
+fn symlink_file(src: &Path, dst: &Path) -> io::Result<()> {
+    std::os::unix::fs::symlink(src, dst)
+}
+
+#[cfg(windows)]
+fn symlink_file(src: &Path, dst: &Path) -> io::Result<()> {
+    std::os::windows::fs::symlink_file(src, dst)
+}
+
+#[cfg(not(any(unix, windows)))]
+fn symlink_file(_src: &Path, _dst: &Path) -> io::Result<()> {
+    Err(io::Error::other("symlinks unsupported on this platform"))
+}
+
+/// Build the worktree-local `config.yaml` by merging the user's existing
+/// Hermes config (model / provider / terminal / etc.) with gwt's managed
+/// hook block. The user's source config is parsed but never modified; the
+/// verbatim gwt hook block is appended so its exact shape is preserved.
+fn merge_hermes_config(source_home: Option<&Path>, script_path: &Path) -> io::Result<String> {
+    let hooks_block = hermes_config_content(script_path);
+    let Some(source_home) = source_home else {
+        return Ok(hooks_block);
+    };
+    let Ok(text) = fs::read_to_string(source_home.join("config.yaml")) else {
+        return Ok(hooks_block);
+    };
+    let mut mapping = match serde_yaml::from_str::<serde_yaml::Value>(&text) {
+        Ok(serde_yaml::Value::Mapping(mapping)) => mapping,
+        _ => return Ok(hooks_block),
+    };
+    mapping.remove(serde_yaml::Value::from("hooks"));
+    mapping.remove(serde_yaml::Value::from("hooks_auto_accept"));
+    if mapping.is_empty() {
+        return Ok(hooks_block);
+    }
+    let user_part =
+        serde_yaml::to_string(&serde_yaml::Value::Mapping(mapping)).map_err(io::Error::other)?;
+    Ok(format!("{user_part}{hooks_block}"))
 }
 
 /// Generate OpenClaw project-local hook bridge assets under `.gwt/openclaw`.
@@ -291,4 +408,116 @@ export default definePluginEntry({{
 }});
 "#
     )
+}
+
+#[cfg(test)]
+mod hermes_tests {
+    use super::*;
+    use std::fs;
+
+    fn write_file(path: &Path, content: &str) {
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(path, content).unwrap();
+    }
+
+    #[test]
+    fn bridges_env_and_auth_via_symlink_when_present() {
+        let wt = tempfile::tempdir().unwrap();
+        let src = tempfile::tempdir().unwrap();
+        write_file(&src.path().join(".env"), "HERMES_API_KEY=secret\n");
+        write_file(&src.path().join("auth.json"), "{\"nous\":\"tok\"}\n");
+
+        generate_hermes_hooks_with_source(wt.path(), Some(src.path())).unwrap();
+
+        let dest = wt.path().join(".gwt/hermes");
+        let env_link = dest.join(".env");
+        let auth_link = dest.join("auth.json");
+        assert!(env_link.exists(), ".env must be bridged");
+        assert!(auth_link.exists(), "auth.json must be bridged");
+        assert_eq!(
+            fs::read_to_string(&env_link).unwrap(),
+            "HERMES_API_KEY=secret\n"
+        );
+        #[cfg(unix)]
+        {
+            assert!(fs::symlink_metadata(&env_link)
+                .unwrap()
+                .file_type()
+                .is_symlink());
+            assert!(fs::symlink_metadata(&auth_link)
+                .unwrap()
+                .file_type()
+                .is_symlink());
+        }
+    }
+
+    #[test]
+    fn skips_missing_credentials_when_source_unconfigured() {
+        let wt = tempfile::tempdir().unwrap();
+        let src = tempfile::tempdir().unwrap();
+
+        generate_hermes_hooks_with_source(wt.path(), Some(src.path())).unwrap();
+
+        let dest = wt.path().join(".gwt/hermes");
+        assert!(!dest.join(".env").exists());
+        assert!(!dest.join("auth.json").exists());
+        assert!(dest.join("config.yaml").exists());
+    }
+
+    #[test]
+    fn merges_user_model_with_gwt_hooks_without_touching_source() {
+        let wt = tempfile::tempdir().unwrap();
+        let src = tempfile::tempdir().unwrap();
+        let src_config = src.path().join("config.yaml");
+        let original = "model: openrouter/anthropic/claude-sonnet-4\nterminal:\n  backend: pty\n";
+        write_file(&src_config, original);
+
+        generate_hermes_hooks_with_source(wt.path(), Some(src.path())).unwrap();
+
+        let dest_config = fs::read_to_string(wt.path().join(".gwt/hermes/config.yaml")).unwrap();
+        assert!(dest_config.contains("model:"));
+        assert!(dest_config.contains("openrouter/anthropic/claude-sonnet-4"));
+        assert!(dest_config.contains("hooks_auto_accept: true"));
+        assert!(dest_config.contains("on_session_start"));
+        // The user's global config must never be mutated by the merge.
+        assert_eq!(fs::read_to_string(&src_config).unwrap(), original);
+    }
+
+    #[test]
+    fn merge_is_idempotent_and_migrates_old_hooks_only_config() {
+        let wt = tempfile::tempdir().unwrap();
+        let src = tempfile::tempdir().unwrap();
+        write_file(&src.path().join(".env"), "K=v\n");
+        write_file(&src.path().join("config.yaml"), "model: nous/hermes-4\n");
+
+        // Simulate a pre-existing hooks-only dest config (older gwt output).
+        let dest_config = wt.path().join(".gwt/hermes/config.yaml");
+        write_file(
+            &dest_config,
+            "hooks:\n  on_session_start: []\nhooks_auto_accept: true\n",
+        );
+
+        generate_hermes_hooks_with_source(wt.path(), Some(src.path())).unwrap();
+        let first = fs::read_to_string(&dest_config).unwrap();
+        assert!(first.contains("model: nous/hermes-4"));
+        assert!(first.contains("on_session_start"));
+
+        generate_hermes_hooks_with_source(wt.path(), Some(src.path())).unwrap();
+        let second = fs::read_to_string(&dest_config).unwrap();
+        assert_eq!(first, second, "merge must be byte-identical on refresh");
+        assert!(wt.path().join(".gwt/hermes/.env").exists());
+    }
+
+    #[test]
+    fn none_source_writes_hooks_only_config() {
+        let wt = tempfile::tempdir().unwrap();
+
+        generate_hermes_hooks_with_source(wt.path(), None).unwrap();
+
+        let dest = wt.path().join(".gwt/hermes");
+        assert!(dest.join("config.yaml").exists());
+        assert!(!dest.join(".env").exists());
+        let config = fs::read_to_string(dest.join("config.yaml")).unwrap();
+        assert!(config.contains("hooks_auto_accept: true"));
+    }
 }
