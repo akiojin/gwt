@@ -887,9 +887,17 @@ test("Agent window chrome resolves dynamic purpose titles before legacy titles",
     /function\s+windowDisplayTitle\(windowData\)[\s\S]+dynamic_title[\s\S]+purpose_title[\s\S]+title/,
     "expected a shared display-title helper with dynamic > purpose > legacy title precedence",
   );
+  // FR-045 (anshin): the row now derives `displayTitle` from the shared helper
+  // (so the activity line can compare against it) and escapes that value into
+  // the title node. Assert both the helper binding and the escaped render.
   assert.match(
     projectShellSurfaceSource,
-    /window-list-title">\$\{escapeHtml\(windowDisplayTitle\(entry\)\)\}/,
+    /const\s+displayTitle\s*=\s*windowDisplayTitle\(entry\)/,
+    "expected the Windows dropdown to bind the shared display-title helper",
+  );
+  assert.match(
+    projectShellSurfaceSource,
+    /window-list-title">\$\{escapeHtml\(displayTitle\)\}/,
     "expected the Windows dropdown to escape the shared display-title helper output",
   );
   assert.match(
