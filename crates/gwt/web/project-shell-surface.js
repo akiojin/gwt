@@ -13,8 +13,6 @@
 //   `const appState = getAppState();` prologue), because app.js reassigns
 //   `appState` on every workspace_state,
 // - `projectError` reads go through `getProjectError()` the same way,
-// - `viewport.zoom` reads go through `getViewport().zoom` (viewport is
-//   reassigned on pan/zoom in app.js),
 // - in-module references that previously went through
 //   `frontendUnits.projectWorkspaceShell.*` became direct local calls
 //   (sendOpenProjectDialog, toggleWindowList, renderWindowList),
@@ -31,8 +29,8 @@
 // - send(message): forward a frontend event over the WebSocket bridge.
 // - createNode(tag, className, textContent): shared DOM helper owned by
 //   app.js (also used by Board / settings / wizard surfaces).
-// - getAppState() / getProjectError() / getViewport(): accessors for
-//   app.js-owned mutable shell state.
+// - getAppState() / getProjectError(): accessors for app.js-owned mutable
+//   shell state.
 // - activeProjectTab() / activeWorkspace(): app.js workspace selectors.
 // - windowMap: workspace window element map owned by app.js.
 // - appendRenderKeyPart(parts, value): shared render-key primitive (also
@@ -42,6 +40,8 @@
 //   visibleWindowData / presetSurface: window presentation helpers owned
 //   by app.js (still used by the core window renderers there).
 // - focusWindowRemotely(windowId, opts): focus path owned by app.js.
+// - frameWindow(windowId, opts): SPEC-2008 camera-focus path owned by app.js;
+//   flies the local camera to frame a window (used by the switcher rows).
 // - scheduleTerminalFit(windowId, persist): terminal core scheduler.
 // - visibleBounds(): current visible canvas bounds in world space.
 // - addButton / tileButton / stackButton: toolbar buttons owned by app.js
@@ -62,7 +62,6 @@ import {
   shouldHandleProjectSwitcherShortcut,
   shouldTriggerOpenFolderHotkey,
 } from "/project-switcher.js";
-import { maximizedGeometry } from "/window-geometry-sync.js";
 import { windowRuntimeLabel } from "/window-runtime-state.js";
 import { groupProjectWindowList } from "/window-list-model.js";
 
@@ -71,7 +70,6 @@ export function createProjectShellSurface({
   createNode,
   getAppState,
   getProjectError,
-  getViewport,
   activeProjectTab,
   activeWorkspace,
   windowMap,
@@ -85,6 +83,9 @@ export function createProjectShellSurface({
   visibleWindowData,
   presetSurface,
   focusWindowRemotely,
+  // SPEC-2008 camera-focus: window-list rows teleport the camera to a window
+  // (frameWindow) instead of maximizing/restoring it.
+  frameWindow,
   scheduleTerminalFit,
   visibleBounds,
   addButton,
@@ -128,7 +129,6 @@ export function createProjectShellSurface({
       let renderedProjectPickerKey = "";
       let renderedProjectOnboardingKey = "";
       let renderedActionAvailabilityKey = "";
-      let maximizedViewportSyncFrame = null;
       const unreadProjectIds = new Set();
 
       function recentProjectsRenderKey(state) {
@@ -567,13 +567,14 @@ export function createProjectShellSurface({
         `;
         const windowListTitle = row.querySelector(".window-list-title");
         if (windowListTitle) windowListTitle.title = windowTitleTooltip(entry);
+        // SPEC-2008 camera-focus / FR-094: the persistent switcher row flies
+        // the local camera to frame the chosen window (teleport). There is no
+        // maximize/restore anymore; frameWindow applies local focus + sends
+        // focus_window for highlight.
         row.addEventListener("click", () => {
           windowListOpen = false;
           renderWindowList();
-          focusWindowRemotely(entry.id, { center: true });
-          if (entry.minimized) {
-            send({ kind: "restore_window", id: entry.id });
-          }
+          frameWindow(entry.id);
         });
         return row;
       }
@@ -591,70 +592,13 @@ export function createProjectShellSurface({
         }
       }
 
-      function geometryMatches(left, right) {
-        return (
-          Math.abs(left.x - right.x) < 0.5 &&
-          Math.abs(left.y - right.y) < 0.5 &&
-          Math.abs(left.width - right.width) < 0.5 &&
-          Math.abs(left.height - right.height) < 0.5
-        );
-      }
-
-      function syncMaximizedWindowsToViewport() {
-        // A maximized window fills THIS client's viewport locally. Re-apply the
-        // fill directly to the element and NEVER send a maximize_window
-        // correction: broadcasting one let two clients with different viewport
-        // sizes ping-pong the shared maximized geometry forever (the flicker
-        // bug). The shared `maximized` flag is enough; the pixel fill is a
-        // per-client view concern computed from each client's visibleBounds.
-        const fill = maximizedGeometry(visibleBounds(), getViewport().zoom);
-        for (const windowData of activeWorkspace().windows || []) {
-          if (!windowData.maximized || windowData.minimized) {
-            continue;
-          }
-          const element = windowMap.get(windowData.id);
-          if (!element) {
-            continue;
-          }
-          const current = {
-            x: parseFloat(element.style.left || "0"),
-            y: parseFloat(element.style.top || "0"),
-            width: parseFloat(element.style.width || "0"),
-            height: parseFloat(element.style.height || "0"),
-          };
-          if (geometryMatches(current, fill)) {
-            continue;
-          }
-          element.style.left = `${fill.x}px`;
-          element.style.top = `${fill.y}px`;
-          element.style.width = `${fill.width}px`;
-          element.style.height = `${fill.height}px`;
-          if (presetSurface(windowData.preset) === "terminal") {
-            // Visual re-fit only (persist=false): never round-trip geometry from
-            // the sync path, so this client cannot churn the shared state.
-            scheduleTerminalFit(windowData.id, false);
-          }
-        }
-      }
-
-      function scheduleMaximizedWindowsToViewportSync() {
-        if (maximizedViewportSyncFrame !== null) {
-          return;
-        }
-        maximizedViewportSyncFrame = requestAnimationFrame(() => {
-          maximizedViewportSyncFrame = null;
-          syncMaximizedWindowsToViewport();
-        });
-      }
-
-      function workspaceHasVisibleMaximizedWindow(workspace) {
-        return (workspace?.windows || []).some(
-          (windowData) =>
-            Boolean(windowData?.maximized) &&
-            !windowData?.minimized &&
-            visibleWindowData(windowData),
-        );
-      }
+      // SPEC-2008 camera-focus: the maximized-window viewport sync
+      // (geometryMatches / syncMaximizedWindowsToViewport /
+      // scheduleMaximizedWindowsToViewportSync /
+      // workspaceHasVisibleMaximizedWindow) was removed. Windows render at
+      // their own geometry and the camera is driven locally by app.js
+      // (frameWindow / enterOverview), so there is no shared maximized fill to
+      // reconcile per client.
 
       function renderProjectTabs() {
         const appState = getAppState();
@@ -1184,9 +1128,6 @@ export function createProjectShellSurface({
         requestWindowList,
         renderWindowList,
         toggleWindowList,
-        syncMaximizedWindowsToViewport,
-        scheduleMaximizedWindowsToViewportSync,
-        workspaceHasVisibleMaximizedWindow,
         renderProjectTabs,
         refreshProjectTabStateCues,
         markProjectUnread,

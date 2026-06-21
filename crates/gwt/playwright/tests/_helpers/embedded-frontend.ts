@@ -39,6 +39,8 @@ const ROOT_MODULES = new Set([
   "custom-agent-env-editor.js",
   // SPEC-3064 Phase 3 (E6a) — File Tree window surface.
   "file-tree-surface.js",
+  // SPEC-2008 camera-focus / FR-094 — always-on Fleet Minimap carrier.
+  "fleet-minimap.js",
   "focus-trap.js",
   "hotkey.js",
   "index-settings-panel.js",

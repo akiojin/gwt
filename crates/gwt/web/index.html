@@ -209,6 +209,11 @@
             <div class="canvas-world-grid" id="canvas-world-grid" aria-hidden="true"></div>
             <div class="canvas-stage" id="canvas-stage"></div>
           </div>
+          <!-- SPEC-2008 camera-focus / FR-094: the always-on Fleet Minimap.
+               Lives in canvas-area, OUTSIDE #canvas-stage, so the camera
+               transform never scales it. Cells + camera frame are built by
+               fleet-minimap.js. -->
+          <div class="fleet-minimap" id="fleet-minimap" data-empty="true" aria-label="Fleet minimap"></div>
           <div class="project-picker" id="project-picker">
             <div class="project-picker-card">
               <h2 class="project-picker-title">Open a project</h2>

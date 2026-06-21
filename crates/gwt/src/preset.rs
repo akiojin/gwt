@@ -186,9 +186,19 @@ impl WindowPreset {
         matches!(self, Self::Agent | Self::Claude | Self::Codex)
     }
 
+    /// Default open size for a fresh window of this preset.
+    ///
+    /// SPEC-2008 camera-focus: terminal-surface presets (Shell / Claude /
+    /// Codex / Agent) open work-area large (1280×800) so that flying the camera
+    /// to frame a single terminal at zoom 1.0 fills the viewport crisply — the
+    /// camera no longer maximizes, it frames the window's own world geometry.
+    /// Non-terminal panels keep the compact 720×420 footprint.
     pub fn default_size(self) -> (f64, f64) {
-        let _ = self;
-        (720.0, 420.0)
+        if self.surface() == WindowSurface::Terminal {
+            (1280.0, 800.0)
+        } else {
+            (720.0, 420.0)
+        }
     }
 
     pub fn opens_maximized_by_default(self) -> bool {
@@ -506,11 +516,19 @@ mod tests {
         assert_eq!(WindowPreset::Index.surface(), WindowSurface::Index);
         assert_eq!(WindowPreset::Pr.surface(), WindowSurface::Knowledge);
         assert_eq!(WindowPreset::Settings.surface(), WindowSurface::Mock);
+        // SPEC-2008 camera-focus: terminal-surface presets open work-area large
+        // (1280×800) so that flying the camera to frame one at zoom 1.0 fills
+        // the viewport crisply; non-terminal panels keep the compact 720×420.
         for preset in WindowPreset::ALL {
+            let expected = if preset.surface() == WindowSurface::Terminal {
+                (1280.0, 800.0)
+            } else {
+                (720.0, 420.0)
+            };
             assert_eq!(
                 preset.default_size(),
-                (720.0, 420.0),
-                "{preset:?} should have uniform 720×420 default size",
+                expected,
+                "{preset:?} default size must match its surface class",
             );
             assert!(
                 !preset.opens_maximized_by_default(),
@@ -579,9 +597,14 @@ mod tests {
             assert!(!preset.title().is_empty());
             assert!(!preset.subtitle().is_empty());
 
+            // SPEC-2008 camera-focus: terminal-surface presets open work-area
+            // large (1280×800) for crisp zoom-1.0 framing; panels stay 720×420.
             let (width, height) = preset.default_size();
-            assert_eq!(width, 720.0);
-            assert_eq!(height, 420.0);
+            if preset.surface() == WindowSurface::Terminal {
+                assert_eq!((width, height), (1280.0, 800.0));
+            } else {
+                assert_eq!((width, height), (720.0, 420.0));
+            }
 
             match preset {
                 WindowPreset::Shell => {
@@ -667,7 +690,9 @@ mod tests {
         assert!(WindowPreset::Codex.is_agent_terminal());
         assert!(!WindowPreset::Shell.is_agent_terminal());
         assert_eq!(WindowPreset::Agent.command_name(), None);
-        assert_eq!(WindowPreset::Agent.default_size(), (720.0, 420.0));
+        // SPEC-2008 camera-focus: Agent is a terminal-surface preset, so it
+        // opens work-area large for crisp zoom-1.0 camera framing.
+        assert_eq!(WindowPreset::Agent.default_size(), (1280.0, 800.0));
     }
 
     #[test]

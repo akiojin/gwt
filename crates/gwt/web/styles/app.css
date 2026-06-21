@@ -706,10 +706,6 @@ body {
     0 0 0 1px var(--color-focus-ring);
 }
 
-.workspace-window.minimized {
-  min-height: 38px;
-}
-
 .workspace-window.surface-terminal {
   /* Terminal chrome follows the app theme; xterm content stays on the
      Dark Operator palette for terminal readability. */
@@ -766,10 +762,6 @@ body {
 
 .titlebar:active {
   cursor: grabbing;
-}
-
-.workspace-window.maximized .titlebar {
-  cursor: default;
 }
 
 .title {
@@ -932,6 +924,36 @@ body {
 
 .workspace-window.tabbed .window-body {
   top: 70px;
+}
+
+/* SPEC-2008 camera-focus: manual window resize handle. Framing fits the
+   CAMERA to a window; this grip still lets the user resize the WINDOW itself
+   (e.g. grow a tiled window back up). There is no maximized/minimized state,
+   so only the base + hover affordance exist. */
+.resize-handle {
+  position: absolute;
+  right: 0;
+  bottom: 0;
+  width: 18px;
+  height: 18px;
+  cursor: nwse-resize;
+  background:
+    linear-gradient(135deg,
+      transparent 0 50%,
+      color-mix(in oklab, var(--color-text-muted) 50%, transparent) 50% 60%,
+      transparent 60% 70%,
+      color-mix(in oklab, var(--color-text-muted) 50%, transparent) 70% 80%,
+      transparent 80%);
+}
+
+.resize-handle:hover {
+  background:
+    linear-gradient(135deg,
+      transparent 0 50%,
+      color-mix(in oklab, var(--color-state-active) 70%, transparent) 50% 60%,
+      transparent 60% 70%,
+      color-mix(in oklab, var(--color-state-active) 70%, transparent) 70% 80%,
+      transparent 80%);
 }
 
 .workspace-window.dock-target .titlebar {
@@ -1157,12 +1179,6 @@ body {
 .window-tab-close:hover {
   background: color-mix(in oklab, var(--color-text-muted) 18%, var(--color-surface-elevated));
   color: var(--color-text);
-}
-
-.workspace-window.minimized .window-body,
-.workspace-window.minimized .resize-handle,
-.workspace-window.maximized .resize-handle {
-  display: none;
 }
 
 /* SPEC-2356 FR-013 (revised): the terminal surface body must stay
@@ -4247,22 +4263,6 @@ body {
   font-family: var(--font-mono);
   font-size: var(--type-xs);
   letter-spacing: var(--tracking-mono);
-}
-
-.resize-handle {
-  position: absolute;
-  right: 0;
-  bottom: 0;
-  width: 18px;
-  height: 18px;
-  cursor: nwse-resize;
-  background:
-    linear-gradient(135deg,
-      transparent 0 50%,
-      color-mix(in oklab, var(--color-text-muted) 50%, transparent) 50% 60%,
-      transparent 60% 70%,
-      color-mix(in oklab, var(--color-text-muted) 50%, transparent) 70% 80%,
-      transparent 80%);
 }
 
 /* SPEC-2008 FR-035: shared modal frame primitives. Surface modals

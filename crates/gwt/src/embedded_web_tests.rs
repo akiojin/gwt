@@ -532,15 +532,24 @@ fn embedded_web_terminal_writes_refresh_viewport_after_xterm_parse() {
             ),
             "expected terminal output refresh to avoid geometry refits on every PTY chunk",
         );
+    // SPEC-2008 camera-focus: maximize/minimize were removed. Windows always
+    // render at their own world geometry, so geometry-persist is gated purely
+    // on a real dimension change (Tile/Stack/Align). The old
+    // restore-from-minimized branch (wasMinimized / windowData.minimized) no
+    // longer exists.
     assert!(
-        html.contains("const wasMinimized = element.classList.contains(\"minimized\")")
-            && html.contains("const previousWidth = parseFloat(element.style.width")
+        html.contains("const previousWidth = parseFloat(element.style.width")
             && html.contains("const previousHeight = parseFloat(element.style.height")
             && html.contains("const dimensionsChanged =")
-            && html.contains("(wasMinimized && !windowData.minimized) || dimensionsChanged",)
+            && html.contains("const shouldPersistTerminalGeometry =")
             && html.contains("scheduleTerminalFit(windowData.id, shouldPersistTerminalGeometry)"),
-        "expected terminals to persist fitted geometry to backend on \
-             restore-from-minimized OR window resize (Tile/Stack/Align)",
+        "expected terminals to persist fitted geometry to backend on window \
+             resize (Tile/Stack/Align)",
+    );
+    assert!(
+        !html.contains("element.classList.contains(\"minimized\")")
+            && !html.contains("const wasMinimized ="),
+        "expected the restore-from-minimized resize branch to be removed under camera-focus",
     );
 }
 
@@ -758,6 +767,8 @@ fn embedded_web_window_resize_cancellation_uses_shared_finalizer() {
             && html.contains("finishWindowResize(event.pointerId, event);"),
         "expected pointercancel to finalize resize state with release coordinates",
     );
+    // SPEC-2008 camera-focus follow-up: the per-window resize handle is back, so
+    // its `lostpointercapture` listener funnels into the shared finalizer too.
     assert!(
         html.contains("resizeHandle.addEventListener(\"lostpointercapture\", (event) => {")
             && html.contains("finishWindowResize(event.pointerId, event);"),
@@ -805,7 +816,9 @@ fn embedded_web_resize_pointermove_is_coalesced_via_request_animation_frame() {
             "expected pointermove to schedule the coalesced apply rather than write to the DOM directly"
         );
     assert!(
-        html.contains("applyFrame: null,"),
+        html.contains("resizeState.applyFrame = requestAnimationFrame(")
+            && html.contains("cancelAnimationFrame(resizeState.applyFrame);")
+            && html.contains("resizeState.applyFrame = null;"),
         "expected resizeState to carry an applyFrame slot so the rAF handle can be cancelled"
     );
 }
@@ -814,6 +827,11 @@ fn embedded_web_resize_pointermove_is_coalesced_via_request_animation_frame() {
 /// lostpointercapture のいずれも届かないケースで Wizard / Terminal が永久に
 /// 固まらないよう、resizeState には auto-clear する staleness guard と
 /// 二重 resize 検知時の forceReset が組み込まれていなければならない。
+///
+/// SPEC-2008 camera-focus follow-up: per-window manual resize (resize handle +
+/// resize-START session 構築) はユーザー要望で復活した。framing は camera で
+/// 行うが、端を掴んでの手動リサイズも残す。したがって staleness guard / force
+/// reset の安全網と resize-START 経路の両方が bundle に存在しなければならない。
 #[test]
 fn embedded_web_resize_state_guards_against_lost_pointer_end_events() {
     let html = frontend_bundle_source();
@@ -1490,20 +1508,26 @@ fn embedded_web_apply_status_keeps_window_list_and_badges_in_sync() {
 }
 
 #[test]
-fn embedded_web_window_list_selection_keeps_focus_center_and_restore_contract() {
+fn embedded_web_window_list_selection_frames_window_via_camera() {
     // SPEC-3064 Phase 3 (E7): the Window List dropdown renderer moved from
     // app.js to the project shell surface; the selection contract is pinned
     // against the extracted module.
+    //
+    // SPEC-2008 camera-focus / FR-094: maximize/minimize/restore were removed.
+    // Selecting a window from the switcher flies the local camera to frame the
+    // chosen window (frameWindow), which applies local focus + sends
+    // focus_window for highlight — there is no center/restore handshake.
     let js = project_shell_surface_js();
 
     assert!(
-        js.contains("focusWindowRemotely(entry.id, { center: true });"),
-        "expected window list selection to keep centering the chosen window",
+        js.contains("frameWindow(entry.id);"),
+        "expected window list selection to frame the chosen window via the camera",
     );
     assert!(
-        js.contains("if (entry.minimized) {")
-            && js.contains("send({ kind: \"restore_window\", id: entry.id });"),
-        "expected window list selection to keep restoring minimized windows after focus",
+        !js.contains("send({ kind: \"restore_window\", id: entry.id });")
+            && !js.contains("focusWindowRemotely(entry.id, { center: true });"),
+        "expected window list selection to drop the maximize/restore + center handshake \
+             under camera-focus",
     );
 }
 
@@ -3472,9 +3496,12 @@ fn embedded_web_host_window_resize_fans_out_terminal_fit() {
         "expected attachHostResizeReflow to route fit requests through the shared \
              terminal fit scheduler while preserving fitTerminal semantics; body: {body}",
     );
+    // SPEC-2008 camera-focus: maximize was removed, so the host-resize
+    // beforeFan no longer re-syncs maximized windows. It now refreshes the
+    // window list (rail/overview) so the new viewport size is reflected.
     assert!(
-        body.contains("syncMaximizedWindowsToViewport()"),
-        "expected attachHostResizeReflow.beforeFan to keep maximized window sync, body: {body}",
+        body.contains("renderWindowList()"),
+        "expected attachHostResizeReflow.beforeFan to refresh the window list, body: {body}",
     );
 }
 
@@ -3521,13 +3548,17 @@ fn embedded_web_can_refresh_terminal_viewport_skips_hidden_tabs() {
 #[test]
 fn embedded_web_tab_visibility_transition_triggers_terminal_focus_activation() {
     let js = app_js();
+    // SPEC-2008 camera-focus: maximize was removed, so the visibility loop no
+    // longer ends with a maximized-viewport sync. It now recomputes operator
+    // telemetry (rail window-count badge / empty-canvas state) after mounting
+    // every window and applying its visibility transition.
     let visibility_block = regex::Regex::new(
-            r"(?s)for \(const windowData of workspace\.windows\) \{(?P<body>.*?)\}\s*\n\s*scheduleMaximizedWindowsToViewportSync\(\);",
+            r"(?s)for \(const windowData of workspace\.windows\) \{(?P<body>.*?)\}\s*\n\s*//[^\n]*\n(?:\s*//[^\n]*\n)*\s*recomputeOperatorTelemetry\(\);",
         )
         .expect("valid regex");
-    let captures = visibility_block
-        .captures(js)
-        .expect("expected the workspace.windows visibility loop that sets element.hidden");
+    let captures = visibility_block.captures(js).expect(
+        "expected the workspace.windows visibility loop that applies the visibility transition",
+    );
     let body = captures.name("body").map(|m| m.as_str()).unwrap_or("");
     // After SPEC-2008 Phase 24 follow-up, the loop delegates to
     // `applyVisibilityTransition` from `terminal-viewport-reflow.js`.
@@ -3548,19 +3579,13 @@ fn embedded_web_tab_visibility_transition_triggers_terminal_focus_activation() {
              (fit + viewport refresh + focus) so scrollback responds without a manual \
              resize (SPEC-2008 FR-051); body: {body}",
     );
-    // SPEC-3064 Phase 3 (E7): the coalesced scheduler and its pending-frame
-    // slot moved to the project shell surface; renderWorkspace (app.js)
-    // keeps the call sites.
+    // SPEC-2008 camera-focus: the coalesced maximized-viewport sync scheduler
+    // was removed entirely; no rAF fan-out for maximized windows remains.
     let shell_js = project_shell_surface_js();
     assert!(
-        shell_js.contains("function scheduleMaximizedWindowsToViewportSync()")
-            && shell_js.contains("let maximizedViewportSyncFrame = null;"),
-        "expected maximized viewport sync to be routed through the coalesced \
-             frame scheduler (SPEC-1939 Phase 52)",
-    );
-    assert!(
         !js.contains("requestAnimationFrame(syncMaximizedWindowsToViewport)")
-            && !shell_js.contains("requestAnimationFrame(syncMaximizedWindowsToViewport)"),
-        "expected renderWorkspace to avoid raw maximized viewport sync rAF fan-out",
+            && !shell_js.contains("requestAnimationFrame(syncMaximizedWindowsToViewport)")
+            && !js.contains("scheduleMaximizedWindowsToViewportSync()"),
+        "expected maximized viewport sync machinery to be removed under camera-focus",
     );
 }

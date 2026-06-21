@@ -34,6 +34,7 @@ bash scripts/run-node-tests-with-linkedom.sh \
   crates/gwt/web/__tests__/canvas-wheel-gesture.test.mjs \
   crates/gwt/web/__tests__/terminal-viewport-reflow.test.mjs \
   crates/gwt/web/__tests__/window-geometry-sync.test.mjs \
+  crates/gwt/web/__tests__/fleet-minimap.test.mjs \
   crates/gwt/web/__tests__/custom-agent-env-editor.test.mjs \
   crates/gwt/web/__tests__/settings-system-tab.test.mjs \
   crates/gwt/web/__tests__/settings-agent-backends-tab.test.mjs \

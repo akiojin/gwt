@@ -1223,8 +1223,7 @@ impl AppRuntime {
         window_id: &str,
         bounds: Option<WindowGeometry>,
     ) -> Vec<OutboundEvent> {
-        let mut events = self.restore_window_events(window_id);
-        events.extend(self.focus_window_events(window_id, bounds));
+        let events = self.focus_window_events(window_id, bounds);
         if events.is_empty() {
             vec![self.workspace_state_broadcast()]
         } else {

@@ -1,8 +1,13 @@
 use gwt::{AgentKanbanLane, FrontendEvent, WindowPreset, WindowSurface};
 use serde_json::json;
 
+// SPEC-2008 FR-096/FR-097: the canvas window model dropped manual
+// maximize/minimize/restore in favor of frontend-driven Camera focus. The
+// legacy `maximize_window` / `minimize_window` / `restore_window` commands are
+// no longer part of the [`FrontendEvent`] contract, so payloads carrying those
+// `kind` values must be rejected as unknown variants.
 #[test]
-fn frontend_event_deserializes_window_state_commands() {
+fn frontend_event_rejects_removed_maximize_minimize_restore_commands() {
     let maximize = serde_json::from_value::<FrontendEvent>(json!({
         "kind": "maximize_window",
         "id": "project-1::claude-1",
@@ -12,43 +17,33 @@ fn frontend_event_deserializes_window_state_commands() {
             "width": 1280.0,
             "height": 720.0
         }
-    }))
-    .expect("maximize_window should deserialize");
-    match maximize {
-        FrontendEvent::MaximizeWindow { id, bounds } => {
-            assert_eq!(id, "project-1::claude-1");
-            assert_eq!(bounds.x, 12.0);
-            assert_eq!(bounds.y, 24.0);
-            assert_eq!(bounds.width, 1280.0);
-            assert_eq!(bounds.height, 720.0);
-        }
-        other => panic!("unexpected event: {other:?}"),
-    }
+    }));
+    assert!(
+        maximize.is_err(),
+        "maximize_window must no longer deserialize into a FrontendEvent: {maximize:?}"
+    );
 
     let minimize = serde_json::from_value::<FrontendEvent>(json!({
         "kind": "minimize_window",
         "id": "project-1::claude-1"
-    }))
-    .expect("minimize_window should deserialize");
-    match minimize {
-        FrontendEvent::MinimizeWindow { id } => {
-            assert_eq!(id, "project-1::claude-1");
-        }
-        other => panic!("unexpected event: {other:?}"),
-    }
+    }));
+    assert!(
+        minimize.is_err(),
+        "minimize_window must no longer deserialize into a FrontendEvent: {minimize:?}"
+    );
 
     let restore = serde_json::from_value::<FrontendEvent>(json!({
         "kind": "restore_window",
         "id": "project-1::claude-1"
-    }))
-    .expect("restore_window should deserialize");
-    match restore {
-        FrontendEvent::RestoreWindow { id } => {
-            assert_eq!(id, "project-1::claude-1");
-        }
-        other => panic!("unexpected event: {other:?}"),
-    }
+    }));
+    assert!(
+        restore.is_err(),
+        "restore_window must no longer deserialize into a FrontendEvent: {restore:?}"
+    );
+}
 
+#[test]
+fn frontend_event_deserializes_window_state_commands() {
     let list = serde_json::from_value::<FrontendEvent>(json!({
         "kind": "list_windows"
     }))

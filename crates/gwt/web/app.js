@@ -90,7 +90,6 @@
         commitLocalGeometryEdit,
         createGeometrySyncState,
         localGeometryBaseRevision,
-        maximizedGeometry,
         resizeGeometryFromPointerState,
         shouldApplyWorkspaceGeometry,
         syncResizeStatePointerEvent,
@@ -107,6 +106,8 @@
       import { createCanvasWheelGestureClassifier } from "/canvas-wheel-gesture.js";
       import { createViewportPersistThrottle } from "/viewport-persist-throttle.js";
       import { createViewportSyncState } from "/viewport-sync.js";
+      // SPEC-2008 camera-focus / FR-094: the always-on Fleet Minimap carrier.
+      import { createFleetMinimap } from "/fleet-minimap.js";
       import { shouldSkipTerminalFocusActivation } from "/clone-modal-focus-guard.js";
       import { createUiTraceProfiler } from "/ui-trace-profiler.js";
       import { UI_TRACE_EVENT, createUiTraceWiring } from "/ui-trace-wiring.js";
@@ -381,6 +382,11 @@
       });
       let viewportRasterTimer = null;
       let viewportDomApplied = false;
+      // SPEC-2008 camera-focus / FR-094: the Fleet Minimap is instantiated once
+      // the DOM container resolves (see the boot block). applyViewport /
+      // recomputeOperatorTelemetry call it through the optional chain so the
+      // early `applyViewport()` paths run safely before it exists.
+      let fleetMinimap = null;
       // SPEC-3064 Phase 3 (E5): the wizard state (launchWizard /
       // launchWizardOpenError / launchWizardOpening / branch draft /
       // pending action) and wizardInteractionGuard moved to
@@ -392,7 +398,8 @@
       // workspace-cleanup window id moved to /branches-cleanup-surface.js.
       // SPEC-3064 Phase 3 (E7): windowListOpen / windowListEntries moved to
       // /project-shell-surface.js.
-      let titlebarClickState = null;
+      // SPEC-2008 camera-focus: titlebarClickState (the double-click maximize
+      // detector) was removed; a titlebar click now always frames the window.
       let appState = {
         app_version: "",
         tabs: [],
@@ -530,10 +537,6 @@
 
       function windowElementRenderKey(windowData) {
         const geometry = windowData.geometry || {};
-        const maximizedFill =
-          windowData.maximized && !windowData.minimized
-            ? maximizedGeometry(visibleBounds(), viewport.zoom)
-            : null;
         const tabGroupId = windowGroupId(windowData);
         const parts = [];
         appendRenderKeyPart(parts, "id");
@@ -586,18 +589,6 @@
         appendRenderKeyPart(parts, "tab_group_active");
         appendRenderKeyPart(parts, Boolean(windowData.tab_group_active));
         appendWindowPlacementRenderKey(parts, windowData);
-        appendRenderKeyPart(parts, "maximized_fill");
-        appendRenderKeyPart(parts, Boolean(maximizedFill));
-        if (maximizedFill) {
-          appendRenderKeyPart(parts, "x");
-          appendRenderKeyPart(parts, maximizedFill.x);
-          appendRenderKeyPart(parts, "y");
-          appendRenderKeyPart(parts, maximizedFill.y);
-          appendRenderKeyPart(parts, "width");
-          appendRenderKeyPart(parts, maximizedFill.width);
-          appendRenderKeyPart(parts, "height");
-          appendRenderKeyPart(parts, maximizedFill.height);
-        }
         appendRenderKeyPart(parts, "tabs");
         for (const tab of activeWorkspace().windows || []) {
           if (windowGroupId(tab) !== tabGroupId) {
@@ -1642,6 +1633,9 @@
           zoom: viewport.zoom,
         });
         viewportDomApplied = true;
+        // SPEC-2008 camera-focus / FR-094: every viewport change repositions
+        // the Fleet Minimap camera frame so it tracks pan / zoom / framing.
+        fleetMinimap?.updateCameraFrame();
       }
 
       // Issue #2698 PR 2 (B1) — throttle the `update_viewport` WS
@@ -1702,7 +1696,7 @@
       }
 
       function zoomCanvasAt(anchorX, anchorY, nextZoom) {
-        const clampedZoom = clampRange(nextZoom, 0.6, 2.4);
+        const clampedZoom = clampRange(nextZoom, VIEWPORT_ZOOM_MIN, VIEWPORT_ZOOM_MAX);
         const worldX = (anchorX - viewport.x) / viewport.zoom;
         const worldY = (anchorY - viewport.y) / viewport.zoom;
         const nextViewport = {
@@ -1738,6 +1732,211 @@
         };
       }
 
+      // SPEC-2008 camera-focus: manual Ctrl+wheel / button zoom keeps the
+      // [VIEWPORT_ZOOM_MIN, VIEWPORT_ZOOM_MAX] envelope (zoomCanvasAt). The low
+      // end matches the overview floor so the user can manually pull the canvas
+      // far out and see a crowded fleet small (zoom in / double-click to read).
+      // Single-window framing is clamped TIGHTER on the high end (see
+      // FRAME_ZOOM_MAX) so the stage scale never exceeds 1 and xterm is never
+      // CSS-upscaled (which has no de-blur path).
+      const VIEWPORT_ZOOM_MIN = 0.15;
+      const VIEWPORT_ZOOM_MAX = 2.4;
+      // Single-window framing must never magnify past 1:1. At zoom ≤ 1 the
+      // terminal canvas renders at (or below) its native pixel grid, so framed
+      // agent terminals stay crisp. A window smaller than the work area is
+      // centered at 1:1 rather than blown up to fill (crisp > edge-fill).
+      const FRAME_ZOOM_MAX = 1.0;
+      // Overview (fitAll / enterOverview) must be able to pull the camera much
+      // further out so a widely-scattered fleet still fits — the single-window
+      // floor of 0.6 would clip it. Cells stay legible in the always-on Fleet
+      // Minimap, and the soft canvas at low zoom is acceptable for overview.
+      const OVERVIEW_ZOOM_MIN = 0.15;
+      // Fraction of the work area a framed rect should occupy along its tighter
+      // axis, leaving a small margin so the window is not flush to the edges.
+      // A terminal that roughly fills the work area lands near zoom ≈ 1, which
+      // keeps xterm crisp (no CSS scaling beyond the stage transform).
+      const FRAME_FILL_RATIO = 0.92;
+
+      // Commit a target viewport through the same local-edit + persist-throttle
+      // path that pan/zoom use, so the framed camera is saved per viewer and
+      // never broadcast to other clients (FR-095).
+      function commitFramedViewport(target) {
+        if (sameViewportValues(viewport, target)) {
+          applyViewport();
+          return;
+        }
+        viewport = target;
+        recordLocalViewportEdit();
+        applyViewport();
+        persistViewport();
+      }
+
+      // Compute the viewport that fits a WORLD-space rect into the canvas work
+      // area, centered, with a small margin. screen = world*zoom + offset, so
+      // to center the rect's center on the canvas center we solve
+      // offset = canvasCenter - worldCenter*zoom.
+      function viewportForWorldRect(
+        rect,
+        { minZoom = VIEWPORT_ZOOM_MIN, maxZoom = VIEWPORT_ZOOM_MAX } = {},
+      ) {
+        const width = Math.max(Number(rect?.width) || 0, 1);
+        const height = Math.max(Number(rect?.height) || 0, 1);
+        const canvasWidth = Math.max(canvas.clientWidth, 1);
+        const canvasHeight = Math.max(canvas.clientHeight, 1);
+        const zoom = clampRange(
+          Math.min(
+            (canvasWidth * FRAME_FILL_RATIO) / width,
+            (canvasHeight * FRAME_FILL_RATIO) / height,
+          ),
+          minZoom,
+          maxZoom,
+        );
+        const worldCenterX = (Number(rect?.x) || 0) + width / 2;
+        const worldCenterY = (Number(rect?.y) || 0) + height / 2;
+        return {
+          x: canvasWidth / 2 - worldCenterX * zoom,
+          y: canvasHeight / 2 - worldCenterY * zoom,
+          zoom,
+        };
+      }
+
+      // Fly the camera so `windowId`'s world geometry fills the work area. The
+      // window stays fixed in world space; only the viewport moves (camera
+      // model). Also applies local focus + z-order highlight (focus_window
+      // stays for highlight; maximize_window is gone).
+      function frameWindow(windowId, { animate = true } = {}) {
+        const windowData = workspaceWindowById(windowId);
+        if (!windowData) {
+          return;
+        }
+        const geometry = windowData.geometry || {};
+        // Cap framing at 1:1 so the focused terminal never CSS-upscales (blur).
+        const target = viewportForWorldRect(geometry, { maxZoom: FRAME_ZOOM_MAX });
+        focusWindowLocally(windowId);
+        send({ kind: "focus_window", id: windowId });
+        animateViewportTo(target, { animate });
+      }
+
+      // Frame the bounding box of every canvas window so all windows are in
+      // view (overview / fit-all). Falls back to a gentle zoom-to-fit-nothing
+      // when there are no framable windows.
+      function fitAll({ animate = true } = {}) {
+        const windows = (activeWorkspace().windows || []).filter(
+          (windowData) =>
+            visibleWindowData(windowData) && windowData.geometry,
+        );
+        if (windows.length === 0) {
+          return;
+        }
+        let minX = Infinity;
+        let minY = Infinity;
+        let maxX = -Infinity;
+        let maxY = -Infinity;
+        for (const windowData of windows) {
+          const g = windowData.geometry;
+          const x = Number(g.x) || 0;
+          const y = Number(g.y) || 0;
+          const w = Math.max(Number(g.width) || 0, 0);
+          const h = Math.max(Number(g.height) || 0, 0);
+          minX = Math.min(minX, x);
+          minY = Math.min(minY, y);
+          maxX = Math.max(maxX, x + w);
+          maxY = Math.max(maxY, y + h);
+        }
+        const target = viewportForWorldRect(
+          {
+            x: minX,
+            y: minY,
+            width: maxX - minX,
+            height: maxY - minY,
+          },
+          // Overview is allowed to zoom out far below the single-window floor so
+          // a scattered fleet still fits, and is capped at 1:1 on the high end
+          // (a lone small window in overview is centered crisp, never blown up).
+          { minZoom: OVERVIEW_ZOOM_MIN, maxZoom: FRAME_ZOOM_MAX },
+        );
+        animateViewportTo(target, { animate });
+      }
+
+      // Esc when framed zooms the camera out to frame all windows.
+      function enterOverview({ animate = true } = {}) {
+        fitAll({ animate });
+      }
+
+      // SPEC-2008 camera-focus: Esc-to-overview must not steal a bare Esc from
+      // a focused terminal (vim / TUI apps) or any text entry. xterm's input
+      // sink is the `.xterm-helper-textarea`; inputs / textareas /
+      // contenteditable are treated the same.
+      function isTextEntryFocused() {
+        const active = document.activeElement;
+        if (!active) {
+          return false;
+        }
+        if (active.classList && active.classList.contains("xterm-helper-textarea")) {
+          return true;
+        }
+        if (active.closest && active.closest(".terminal-root")) {
+          return true;
+        }
+        const tag = active.tagName;
+        if (tag === "INPUT" || tag === "TEXTAREA") {
+          return true;
+        }
+        return Boolean(active.isContentEditable);
+      }
+
+      let viewportTweenFrame = null;
+
+      // Short rAF tween of the viewport {x,y,zoom}. Correctness over animation:
+      // an unavailable rAF (or animate=false) commits the target instantly.
+      function animateViewportTo(target, { animate = true } = {}) {
+        if (viewportTweenFrame !== null) {
+          cancelAnimationFrame(viewportTweenFrame);
+          viewportTweenFrame = null;
+        }
+        if (
+          !animate ||
+          typeof requestAnimationFrame !== "function" ||
+          sameViewportValues(viewport, target)
+        ) {
+          commitFramedViewport(target);
+          return;
+        }
+        const start = { x: viewport.x, y: viewport.y, zoom: viewport.zoom };
+        const durationMs = 180;
+        const startedAt =
+          typeof performance !== "undefined" && performance.now
+            ? performance.now()
+            : Date.now();
+        const easeOut = (t) => 1 - Math.pow(1 - t, 3);
+        const step = () => {
+          const nowMs =
+            typeof performance !== "undefined" && performance.now
+              ? performance.now()
+              : Date.now();
+          const progress = Math.min(1, (nowMs - startedAt) / durationMs);
+          const eased = easeOut(progress);
+          viewport = {
+            x: start.x + (target.x - start.x) * eased,
+            y: start.y + (target.y - start.y) * eased,
+            zoom: start.zoom + (target.zoom - start.zoom) * eased,
+          };
+          recordLocalViewportEdit();
+          applyViewport();
+          if (progress < 1) {
+            viewportTweenFrame = requestAnimationFrame(step);
+            return;
+          }
+          viewportTweenFrame = null;
+          // Land exactly on target and persist the final framed camera once.
+          viewport = { x: target.x, y: target.y, zoom: target.zoom };
+          recordLocalViewportEdit();
+          applyViewport();
+          persistViewport();
+        };
+        viewportTweenFrame = requestAnimationFrame(step);
+      }
+
       function sendStartupAutoResumeReady() {
         if (startupAutoResumeReadySent) {
           return;
@@ -1768,11 +1967,22 @@
         if (windowMap.size === 0) {
           return;
         }
-        send({
-          kind: "cycle_focus",
-          direction,
-          bounds: visibleBounds(),
-        });
+        // SPEC-2008 camera-focus: cycling flies the local camera between
+        // windows in creation order (per viewer) instead of asking the backend
+        // to move a shared focus. Keep notifying the backend of the new focus
+        // for z-order/highlight, but the camera move is local.
+        const windows = (activeWorkspace().windows || []).filter(visibleWindowData);
+        if (windows.length === 0) {
+          return;
+        }
+        const currentIndex = windows.findIndex(
+          (windowData) => windowData.id === focusedId,
+        );
+        const delta = direction === "backward" ? -1 : 1;
+        const baseIndex = currentIndex === -1 ? 0 : currentIndex;
+        const nextIndex =
+          (baseIndex + delta + windows.length) % windows.length;
+        frameWindow(windows[nextIndex].id);
       }
 
       function shouldHandleFocusShortcut(event) {
@@ -2321,12 +2531,10 @@
           geometry: {
             x: parseNumber(element.style.left),
             y: parseNumber(element.style.top),
-            width: windowData?.minimized
-              ? windowData.geometry.width
-              : parseNumber(element.style.width),
-            height: windowData?.minimized
-              ? windowData.geometry.height
-              : parseNumber(element.style.height),
+            // SPEC-2008 camera-focus: windows are never minimized, so the
+            // element size is always the live geometry.
+            width: parseNumber(element.style.width),
+            height: parseNumber(element.style.height),
           },
           cols,
           rows,
@@ -2392,6 +2600,11 @@
 
       function recomputeOperatorTelemetry() {
         updateCanvasEmptyState();
+        // SPEC-2008 camera-focus / FR-094: rebuild the Fleet Minimap cells from
+        // the live window set (geometry / agent color / telemetry). Runs on the
+        // same cadence as the canvas empty-state + rail badges, before the
+        // operator-shell-degraded early return so the minimap stays live.
+        fleetMinimap?.renderCells();
         if (!window.__operatorShell?.applyTelemetryCounts) return;
         // SPEC-3038 AS-1.4 (2026-06-20): the rail Windows item badges the
         // open-window count across all project tabs, matching the cross-tab
@@ -2684,39 +2897,9 @@
         send(payload);
       }
 
-      function toggleMinimizeWindow(windowId) {
-        const windowData = workspaceWindowById(windowId);
-        if (!windowData) {
-          return;
-        }
-        focusWindowRemotely(windowId);
-        send({
-          kind: windowData.minimized ? "restore_window" : "minimize_window",
-          id: windowId,
-        });
-      }
-
-      function toggleMaximizeWindow(windowId) {
-        const windowData = workspaceWindowById(windowId);
-        if (!windowData) {
-          return;
-        }
-        focusWindowRemotely(windowId);
-        if (windowData.maximized) {
-          send({ kind: "restore_window", id: windowId });
-          return;
-        }
-        if (windowData.minimized) {
-          send({ kind: "restore_window", id: windowId });
-        }
-        send({
-          kind: "maximize_window",
-          id: windowId,
-          // Final maximized geometry (zoom-corrected screen inset). The backend
-          // stores it as-is; see maximizedGeometry in window-geometry-sync.js.
-          bounds: maximizedGeometry(visibleBounds(), viewport.zoom),
-        });
-      }
+      // SPEC-2008 camera-focus: toggleMinimizeWindow / toggleMaximizeWindow
+      // were removed. Maximize/minimize/restore no longer exist; focusing a
+      // window flies the camera to frame it in place (see frameWindow).
 
       // SPEC-3038 US-3: Close Guard — every window close (titlebar x and
       // tab x) confirms through one modal regardless of agent state
@@ -2839,27 +3022,29 @@
         });
       }
 
+      // SPEC-2008 camera-focus (UX fix): focus and camera move are SEPARATE.
+      // A single titlebar click only focuses the window (front + highlight +
+      // input routing) and never moves the camera/zoom. A DOUBLE click is the
+      // deliberate "fly the camera to frame this window" gesture. Focus fires
+      // immediately on the first click (no delay); a second click on the same
+      // window within the threshold upgrades to framing.
+      let lastTitlebarClick = null;
+      const TITLEBAR_DOUBLE_CLICK_MS = 300;
       function handleTitlebarClick(windowId) {
         const now = Date.now();
-        if (
-          titlebarClickState &&
-          titlebarClickState.id === windowId &&
-          now - titlebarClickState.timestamp <= 300
-        ) {
-          titlebarClickState = null;
-          const windowData = workspaceWindowById(windowId);
-          if (windowData?.minimized) {
-            focusWindowRemotely(windowId);
-            send({ kind: "restore_window", id: windowId });
-            return;
-          }
-          toggleMaximizeWindow(windowId);
+        const isDoubleClick =
+          lastTitlebarClick &&
+          lastTitlebarClick.id === windowId &&
+          now - lastTitlebarClick.at <= TITLEBAR_DOUBLE_CLICK_MS;
+        if (isDoubleClick) {
+          lastTitlebarClick = null;
+          // Deliberate framing: fly the camera to the window.
+          frameWindow(windowId);
           return;
         }
-        titlebarClickState = {
-          id: windowId,
-          timestamp: now,
-        };
+        lastTitlebarClick = { id: windowId, at: now };
+        // Single click = focus only, camera unchanged (no center → no bounds).
+        focusWindowRemotely(windowId);
       }
 
       function decodeBase64(base64) {
@@ -3757,9 +3942,6 @@
         requestWindowList,
         renderWindowList,
         toggleWindowList,
-        syncMaximizedWindowsToViewport,
-        scheduleMaximizedWindowsToViewportSync,
-        workspaceHasVisibleMaximizedWindow,
         renderProjectTabs,
         refreshProjectTabStateCues,
         markProjectUnread,
@@ -3777,11 +3959,10 @@
       } = createProjectShellSurface({
         send,
         createNode,
-        // appState / projectError / viewport are reassigned in app.js, so
-        // the surface reads them through accessors.
+        // appState / projectError are reassigned in app.js, so the surface
+        // reads them through accessors.
         getAppState: () => appState,
         getProjectError: () => projectError,
-        getViewport: () => viewport,
         activeProjectTab,
         activeWorkspace,
         windowMap,
@@ -3795,6 +3976,9 @@
         visibleWindowData,
         presetSurface,
         focusWindowRemotely,
+        // SPEC-2008 camera-focus: window-list rows fly the camera to a window
+        // via frameWindow (teleport) instead of maximizing/restoring it.
+        frameWindow,
         scheduleTerminalFit,
         visibleBounds,
         addButton,
@@ -3857,17 +4041,20 @@
             event.stopPropagation();
             void copyTerminalOverlayMessage(windowData.id);
           });
+          // SPEC-2008 camera-focus (UX fix): clicking a terminal focuses only —
+          // front + highlight + input routing — and never moves the camera
+          // (focusWindowRemotely omits center, so no bounds/zoom change). The
+          // camera only moves on the deliberate double-click / minimap / cycle
+          // framing gestures.
           overlay.addEventListener("mousedown", () => {
-            focusWindowLocally(windowData.id);
-            socketTransport.send({ kind: "focus_window", id: windowData.id });
+            focusWindowRemotely(windowData.id);
           });
           overlay.appendChild(spinner);
           overlay.appendChild(message);
           overlay.appendChild(copyButton);
           updateTerminalOverlayCopyState(overlay);
           terminalRoot.addEventListener("mousedown", () => {
-            focusWindowLocally(windowData.id);
-            socketTransport.send({ kind: "focus_window", id: windowData.id });
+            focusWindowRemotely(windowData.id);
           });
           terminalRoot.addEventListener("click", () => {
             const runtime = terminalMap.get(windowData.id);
@@ -3965,9 +4152,10 @@
           </div>
         `;
         const scroll = body.querySelector(".mock-scroll");
+        // SPEC-2008 camera-focus (UX fix): body click focuses only, no camera
+        // move (focusWindowRemotely without center).
         body.addEventListener("mousedown", () => {
-          focusWindowLocally(windowData.id);
-          socketTransport.send({ kind: "focus_window", id: windowData.id });
+          focusWindowRemotely(windowData.id);
         });
         for (const [label, value] of mock.rows) {
           const section = document.createElement("div");
@@ -4036,8 +4224,6 @@
                 </span>
               </div>
               <div class="window-actions">
-                <button class="icon-button" data-action="minimize" aria-label="Minimize window">▁</button>
-                <button class="icon-button" data-action="maximize" aria-label="Maximize window">◻</button>
                 <button class="icon-button" data-action="close" aria-label="Close window">×</button>
               </div>
             </div>
@@ -4049,21 +4235,14 @@
           windowMap.set(windowData.id, element);
 
           const titlebar = element.querySelector(".titlebar");
-          const minimizeButton = element.querySelector("[data-action='minimize']");
-          const maximizeButton = element.querySelector("[data-action='maximize']");
           const closeButton = element.querySelector("[data-action='close']");
           const resizeHandle = element.querySelector(".resize-handle");
 
-          minimizeButton.addEventListener("click", (event) => {
-            event.stopPropagation();
-            toggleMinimizeWindow(windowData.id);
-          });
-
-          maximizeButton.addEventListener("click", (event) => {
-            event.stopPropagation();
-            toggleMaximizeWindow(windowData.id);
-          });
-
+          // SPEC-2008 camera-focus: minimize/maximize buttons were removed
+          // (focusing a window flies the camera to frame it). The close (×)
+          // button and the manual resize handle remain — framing fits the
+          // CAMERA to the window, but the user can still resize the WINDOW
+          // itself (e.g. to grow a tiled window back up).
           closeButton.addEventListener("click", (event) => {
             event.stopPropagation();
             requestCloseWindow(windowData.id);
@@ -4073,7 +4252,6 @@
             if (event.target.closest("button")) {
               return;
             }
-            const currentWindow = workspaceWindowById(windowData.id);
             focusWindowRemotely(windowData.id);
             dragState = {
               id: windowData.id,
@@ -4083,7 +4261,9 @@
               left: parseNumber(element.style.left),
               top: parseNumber(element.style.top),
               moved: false,
-              allowMove: !currentWindow?.maximized,
+              // SPEC-2008 camera-focus: windows are no longer maximized, so
+              // drag-to-move is always allowed.
+              allowMove: true,
               dockTargetId: null,
             };
             titlebar.setPointerCapture(event.pointerId);
@@ -4113,6 +4293,7 @@
           });
 
           resizeHandle.addEventListener("pointerdown", (event) => {
+            event.stopPropagation();
             focusWindowRemotely(windowData.id);
             // SPEC-2014 Phase C1: Windows WebView2 occasionally fails to
             // deliver pointerup / pointercancel / lostpointercapture, leaving
@@ -4226,54 +4407,35 @@
         } else {
           delete element.dataset.agentColor;
         }
-        const wasMinimized = element.classList.contains("minimized");
         const previousWidth = parseFloat(element.style.width || "0");
         const previousHeight = parseFloat(element.style.height || "0");
         const applyWorkspaceGeometry = shouldApplyWorkspaceGeometry(geometrySyncState, {
           id: windowData.id,
           geometryRevision: workspaceGeometryRevision(windowData),
         });
-        // SPEC-2008: a maximized window fills THIS client's viewport locally.
-        // Each client computes its own fill and never renders/persists the
-        // shared geometry while maximized, so two clients with different
-        // viewport sizes cannot ping-pong the shared maximized geometry (the
-        // flicker bug). See syncMaximizedWindowsToViewport — it re-fills locally
-        // and never broadcasts a maximize_window correction.
-        const maximizedFill =
-          windowData.maximized && !windowData.minimized
-            ? maximizedGeometry(visibleBounds(), viewport.zoom)
-            : null;
-        const targetGeometry = maximizedFill || windowData.geometry;
+        // SPEC-2008 camera-focus: maximize/minimize were removed. Windows always
+        // render at their own world `geometry`; "focusing" a window flies the
+        // camera to frame it (frameWindow), so there is no per-client fill
+        // branch and no ping-pong of a shared maximized geometry anymore.
         const dimensionsChanged =
-          (applyWorkspaceGeometry || Boolean(maximizedFill)) &&
-          (previousWidth !== targetGeometry.width ||
-            previousHeight !== targetGeometry.height);
+          applyWorkspaceGeometry &&
+          (previousWidth !== windowData.geometry.width ||
+            previousHeight !== windowData.geometry.height);
         const shouldPersistTerminalGeometry =
-          (applyWorkspaceGeometry || Boolean(maximizedFill)) &&
-          ((wasMinimized && !windowData.minimized) || dimensionsChanged);
-        element.classList.toggle("minimized", Boolean(windowData.minimized));
-        element.classList.toggle("maximized", Boolean(windowData.maximized));
+          applyWorkspaceGeometry && dimensionsChanged;
         element.classList.toggle("tabbed", windowTabsFor(windowData).length > 1);
-        if (maximizedFill) {
-          element.style.left = `${maximizedFill.x}px`;
-          element.style.top = `${maximizedFill.y}px`;
-          element.style.width = `${maximizedFill.width}px`;
-          element.style.height = `${maximizedFill.height}px`;
-        } else if (applyWorkspaceGeometry) {
+        if (applyWorkspaceGeometry) {
           element.style.left = `${windowData.geometry.x}px`;
           element.style.top = `${windowData.geometry.y}px`;
           element.style.width = `${windowData.geometry.width}px`;
-          element.style.height = `${windowData.minimized ? 38 : windowData.geometry.height}px`;
+          element.style.height = `${windowData.geometry.height}px`;
         }
         element.style.zIndex = String(windowData.z_index);
-        element.querySelector(".resize-handle").hidden =
-          Boolean(windowData.minimized) || Boolean(windowData.maximized);
         applyStatus(windowData.id, windowData.status, detailMap.get(windowData.id));
         renderedWindowElementKeys.set(windowData.id, nextWindowElementKey);
         if (
-          (applyWorkspaceGeometry || Boolean(maximizedFill)) &&
-          presetSurface(windowData.preset) === "terminal" &&
-          !windowData.minimized
+          applyWorkspaceGeometry &&
+          presetSurface(windowData.preset) === "terminal"
         ) {
           scheduleTerminalFit(windowData.id, shouldPersistTerminalGeometry);
         }
@@ -4303,9 +4465,9 @@
 
             const nextWorkspaceWindowsKey = workspaceWindowsRenderKey(workspace);
             if (renderedWorkspaceWindowsKey === nextWorkspaceWindowsKey) {
-              if (workspaceHasVisibleMaximizedWindow(workspace)) {
-                scheduleMaximizedWindowsToViewportSync();
-              }
+              // SPEC-2008 camera-focus: nothing to re-sync when the window set is
+              // unchanged — windows render at their own geometry and the camera
+              // is driven locally (frameWindow), not per-render.
               return;
             }
             renderedWorkspaceWindowsKey = nextWorkspaceWindowsKey;
@@ -4416,11 +4578,9 @@
               });
             }
 
-            scheduleMaximizedWindowsToViewportSync();
-
-            // SPEC-3038: keep the rail window-count badge and the empty-canvas
-            // state in sync with window mounts/unmounts, not only with agent
-            // status events.
+            // SPEC-2008 camera-focus: keep the rail window-count badge and the
+            // empty-canvas state in sync with window mounts/unmounts, not only
+            // with agent status events.
             recomputeOperatorTelemetry();
 
             const topmostId = topmostWindowId(workspace);
@@ -5507,6 +5667,30 @@
       installBrowserFileDropBridge();
       installNativeFileDropBridge();
 
+      // SPEC-2008 camera-focus / FR-094: instantiate the always-on Fleet
+      // Minimap. It lives in `#fleet-minimap` (canvas-area, OUTSIDE the stage)
+      // so it is unaffected by the camera transform. Cells reuse the shared
+      // data-agent-color → --current-agent map and the Living Telemetry
+      // semantic state. Cell click flies the camera (frameWindow).
+      fleetMinimap = createFleetMinimap({
+        container: document.getElementById("fleet-minimap"),
+        getWindows: () => activeWorkspace().windows || [],
+        getVisibleBounds: visibleBounds,
+        getFocusedId: () => focusedId,
+        frameWindow,
+        windowDisplayTitle,
+        // windowData.agent_color already IS the data-agent-color value.
+        cellAgentColor: (windowData) => windowData?.agent_color || "",
+        // Only agent panes carry a Living Telemetry state; other surfaces
+        // render a neutral cell with no telemetry dot.
+        cellTelemetryState: (windowData) =>
+          shouldShowRuntimeStatus(windowData)
+            ? mapAgentTelemetryState(runtimeStateForWindow(windowData))
+            : "",
+      });
+      // First paint from whatever windows already exist at boot.
+      fleetMinimap.renderCells();
+
       window.addEventListener(
         "keydown",
         (event) => {
@@ -5691,8 +5875,19 @@
         }
         // SPEC-3064 Phase 3 (E7): the Windows dropdown Esc path (close +
         // focus restore to the trigger button) lives in the project shell
-        // surface.
-        handleWindowListEscape(event);
+        // surface. Returns true when it consumed the event.
+        if (handleWindowListEscape(event)) {
+          return;
+        }
+        // SPEC-2008 camera-focus: Esc, when nothing else consumed it, zooms the
+        // camera out to frame all windows (overview). Guard on
+        // defaultPrevented so a modal/dropdown that already handled Esc above
+        // does not also trigger overview, and never steal a bare Esc from a
+        // focused terminal / text input (vim, TUI apps rely on it).
+        if (event.defaultPrevented || isTextEntryFocused()) {
+          return;
+        }
+        enterOverview();
       });
       // SPEC-2008 Phase 24 / T-187: host resize must fan out `fitTerminal
       // (persist=true)` to every visible terminal so xterm cols/rows stay
@@ -5707,7 +5902,6 @@
         fitTerminal: scheduleTerminalFit,
         beforeFan: () => {
           frontendUnits.projectWorkspaceShell.renderWindowList();
-          syncMaximizedWindowsToViewport();
         },
       });
       document.addEventListener("visibilitychange", () => {
@@ -5750,23 +5944,16 @@
 
       function openExistingSurfaceWindow(windowData) {
         focusWindowLocally(windowData.id);
-        if (windowData.minimized) {
-          frontendUnits.socketTransport.send({
-            kind: "restore_window",
-            id: windowData.id,
-          });
-        }
         if (windowData.tab_group_id) {
           frontendUnits.socketTransport.send({
             kind: "activate_window_tab",
             id: windowData.id,
           });
         }
-        frontendUnits.socketTransport.send({
-          kind: "focus_window",
-          id: windowData.id,
-          bounds: visibleBounds(),
-        });
+        // SPEC-2008 camera-focus: reopening an existing surface flies the local
+        // camera to frame it (frameWindow sends focus_window for highlight);
+        // restore_window/minimize no longer exist.
+        frameWindow(windowData.id);
       }
 
       function focusOrSpawnPreset(preset) {

@@ -183,15 +183,6 @@ pub(super) fn frontend_user_action_log(event: &FrontendEvent) -> Option<Frontend
         FrontendEvent::ArrangeWindows { mode, .. } => {
             FrontendUserActionLog::new("arrange_windows", "window").mode(format!("{mode:?}"))
         }
-        FrontendEvent::MaximizeWindow { id, .. } => {
-            FrontendUserActionLog::new("maximize_window", "window").window(id)
-        }
-        FrontendEvent::MinimizeWindow { id } => {
-            FrontendUserActionLog::new("minimize_window", "window").window(id)
-        }
-        FrontendEvent::RestoreWindow { id } => {
-            FrontendUserActionLog::new("restore_window", "window").window(id)
-        }
         FrontendEvent::DockWindowTab { id, target_id } => {
             FrontendUserActionLog::new("dock_window_tab", "window")
                 .window(id)

@@ -9,10 +9,7 @@
 //! - [`AppRuntime::update_viewport_events`] /
 //!   [`AppRuntime::arrange_windows_events`] — viewport pan/zoom and arrange
 //!   tile / stack
-//! - [`AppRuntime::maximize_window_events`] /
-//!   [`AppRuntime::minimize_window_events`] /
-//!   [`AppRuntime::restore_window_events`] /
-//!   [`AppRuntime::update_window_geometry_events`] — per-window geometry
+//! - [`AppRuntime::update_window_geometry_events`] — per-window geometry
 //!   adjustments (delegates terminal resize to the live runtime)
 //! - [`AppRuntime::list_windows_event`] — workspace snapshot across all
 //!   project tabs (the Command Rail Windows popover is a cross-tab list)
@@ -45,13 +42,7 @@ impl AppRuntime {
             let Some(tab) = self.tab_mut(&tab_id) else {
                 return Vec::new();
             };
-            let window = tab.workspace.add_window(preset, bounds.clone());
-            if preset.opens_maximized_by_default() {
-                let _ = tab.workspace.maximize_window(&window.id, bounds.clone());
-                tab.workspace.window(&window.id).cloned().unwrap_or(window)
-            } else {
-                window
-            }
+            tab.workspace.add_window(preset, bounds.clone())
         };
         self.register_window(&tab_id, &window.id);
         let runtime_events = self.start_window(&tab_id, &window.id, window.preset, window.geometry);
@@ -72,32 +63,8 @@ impl AppRuntime {
         let Some(tab) = self.tab_mut(&address.tab_id) else {
             return Vec::new();
         };
-        let opens_maximized = tab
-            .workspace
-            .window(&address.raw_id)
-            .map(|window| window.preset.opens_maximized_by_default())
-            .unwrap_or(false);
-        if !tab.workspace.focus_window(
-            &address.raw_id,
-            if opens_maximized {
-                None
-            } else {
-                bounds.clone()
-            },
-        ) {
+        if !tab.workspace.focus_window(&address.raw_id, bounds) {
             return Vec::new();
-        }
-        if opens_maximized {
-            if let Some(bounds) = bounds {
-                let already_maximized = tab
-                    .workspace
-                    .window(&address.raw_id)
-                    .map(|window| window.maximized)
-                    .unwrap_or(false);
-                if !already_maximized {
-                    let _ = tab.workspace.maximize_window(&address.raw_id, bounds);
-                }
-            }
         }
         self.active_tab_id = Some(address.tab_id);
         let _ = self.persist();
@@ -170,67 +137,6 @@ impl AppRuntime {
         // terminal (applyWorkspaceGeometry → fitTerminal → sendGeometry) on
         // the resulting workspace_state render. The backend approximation
         // must not clobber those frontend-fitted cols/rows.
-        let _ = self.persist();
-        vec![self.workspace_state_broadcast()]
-    }
-
-    pub(crate) fn maximize_window_events(
-        &mut self,
-        id: &str,
-        bounds: WindowGeometry,
-    ) -> Vec<OutboundEvent> {
-        let Some(address) = self.window_lookup.get(id).cloned() else {
-            return Vec::new();
-        };
-        let updated = {
-            let Some(tab) = self.tab_mut(&address.tab_id) else {
-                return Vec::new();
-            };
-            tab.workspace.maximize_window(&address.raw_id, bounds)
-        };
-        if !updated {
-            return Vec::new();
-        }
-        let _ = self.set_active_tab(address.tab_id);
-        self.resize_runtime_to_window(id);
-        let _ = self.persist();
-        vec![self.workspace_state_broadcast()]
-    }
-
-    pub(crate) fn minimize_window_events(&mut self, id: &str) -> Vec<OutboundEvent> {
-        let Some(address) = self.window_lookup.get(id).cloned() else {
-            return Vec::new();
-        };
-        let updated = {
-            let Some(tab) = self.tab_mut(&address.tab_id) else {
-                return Vec::new();
-            };
-            tab.workspace.minimize_window(&address.raw_id)
-        };
-        if !updated {
-            return Vec::new();
-        }
-        let _ = self.set_active_tab(address.tab_id);
-        self.resize_runtime_to_window(id);
-        let _ = self.persist();
-        vec![self.workspace_state_broadcast()]
-    }
-
-    pub(crate) fn restore_window_events(&mut self, id: &str) -> Vec<OutboundEvent> {
-        let Some(address) = self.window_lookup.get(id).cloned() else {
-            return Vec::new();
-        };
-        let updated = {
-            let Some(tab) = self.tab_mut(&address.tab_id) else {
-                return Vec::new();
-            };
-            tab.workspace.restore_window(&address.raw_id)
-        };
-        if !updated {
-            return Vec::new();
-        }
-        let _ = self.set_active_tab(address.tab_id);
-        self.resize_runtime_to_window(id);
         let _ = self.persist();
         vec![self.workspace_state_broadcast()]
     }
