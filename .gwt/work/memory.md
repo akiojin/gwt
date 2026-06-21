@@ -7157,3 +7157,10 @@ Type: lesson
 Context: Issue #3066 PR verification found that some in-process tests used ScopedHome/std::env::set_var("HOME") while cargo ran tests in parallel, causing unrelated workspace projection tests to write temp project state into the real ~/.gwt/projects.
 Learning: For in-process tests, prefer a thread-local gwt_home override over process-wide HOME mutation. Reserve HOME/USERPROFILE env changes for spawned child processes that must receive an isolated environment.
 Future Action: When adding tests around gwt_core::paths::gwt_home or project storage, use gwt_core::test_support::ScopedGwtHome and only hold env_lock for real environment variables such as GWT_SESSION_ID.
+
+## 2026-06-21 — WorkspaceAgentSummary に新 discriminator を足す時は sentinel+派生メソッドを優先
+
+Type: project
+Context: SPEC-2359 US-80: 非 agent Shell Work を Active Work projection の一級 Work にする実装。WorkspaceAgentSummary に work_kind フィールドを足そうとしたら struct literal コンストラクタが gwt-core/gwt 全体に ~50 箇所あり全破壊だった。
+Learning: WorkspaceAgentSummary は struct literal で ~50 箇所構築されるため bare フィールド追加は全箇所コンパイル破壊する。Work 種別の識別は新フィールドではなく予約 agent_id sentinel(SHELL_WORK_AGENT_ID=shell) + 派生メソッド work_kind()/is_shell_work() にすると churn ゼロ・後方互換も構造的に自明。Active Work projection は projection.agents のみから構築され Work=agent session(FR-348)が設計境界。agent 起動 save の retain は agent session でしか生存判定できないので shell を間引かない retain_live_agents_keep_shells を使う。
+Future Action: projection の WorkspaceAgentSummary に新しい discriminator を足す時は、まず構築箇所数を grep し、フィールド追加より sentinel+派生メソッドを優先。retain 系を触る時は agent/shell の liveness 判定が別ソース(agent session vs PTY window)である点に注意。

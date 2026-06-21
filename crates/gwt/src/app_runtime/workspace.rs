@@ -118,7 +118,11 @@ pub(super) fn retain_live_workspace_agents(
     sessions: &[&ActiveAgentSession],
     updated_at: chrono::DateTime<chrono::Utc>,
 ) {
-    projection.retain_live_agents(
+    // SPEC-2359 US-80 (FR-429): live agent sessions have no authority over
+    // shell liveness, so keep every Shell Work here — otherwise the broadcast
+    // rebuild would prune a just-registered Shell Work that has no agent
+    // session. Shell Works are pruned only by their own PTY / window lifecycle.
+    projection.retain_live_agents_keep_shells(
         sessions.iter().map(|session| session.session_id.as_str()),
         updated_at,
     );

@@ -835,6 +835,47 @@ fn save_shell_work_projection_registers_shell_and_survives_agent_launch() {
     );
 }
 
+// SPEC-2359 US-80 (FR-429): the Active Work broadcast rebuild prunes dead
+// agents but must keep Shell Works (no agent session), otherwise a
+// just-registered shell would vanish from the broadcast.
+#[test]
+fn retain_live_workspace_agents_keeps_shell_work_with_no_live_sessions() {
+    let repo = std::path::Path::new("/repo");
+    let now = chrono::Utc::now();
+    let mut projection =
+        gwt_core::workspace_projection::WorkspaceProjection::default_for_project(repo);
+    projection.agents.push(
+        gwt_core::workspace_projection::WorkspaceAgentSummary::shell_work(
+            "tab-1:shell-3",
+            Some(repo.join("wt-x")),
+            Some("work/x".to_string()),
+            gwt_core::workspace_projection::WorkspaceStatusCategory::Active,
+            now,
+        ),
+    );
+    projection
+        .agents
+        .push(workspace_agent_summary_for_test("dead-agent", None));
+
+    super::retain_live_workspace_agents(&mut projection, &[], now);
+
+    assert!(
+        projection.agents.iter().any(|agent| agent.is_shell_work()),
+        "shell work survives the broadcast retain with no live sessions"
+    );
+    assert!(
+        !projection
+            .agents
+            .iter()
+            .any(|agent| agent.session_id == "dead-agent"),
+        "dead agent is pruned"
+    );
+    assert!(
+        projection.has_current_agents(),
+        "a lone shell keeps the projection out of the idle reset"
+    );
+}
+
 // SPEC-2359 US-80 (FR-430, シナリオ1/2): a Shell Work summary surfaces as a
 // Work row in the Active Work projection view, and an agent on the same branch
 // groups into the same Work.
