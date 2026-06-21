@@ -290,6 +290,27 @@ pub enum FrontendEvent {
     CloseWindow {
         id: String,
     },
+    /// SPEC-2356 安心 Addendum (FR-041): stop the window's agent runtime (kill
+    /// the PTY through the existing stop path) but KEEP the window and its
+    /// terminal output on the canvas, rendered as `Stopped`. Distinct from
+    /// [`Self::CloseWindow`], which removes the window. Idempotent if the
+    /// window is already stopped. The stopped window stays restartable through
+    /// [`Self::RestartWindow`].
+    StopWindow {
+        id: String,
+    },
+    /// SPEC-2356 安心 Addendum (FR-042): stop every running agent window's
+    /// runtime, keeping all windows on the canvas. The confirm-before-stop
+    /// prompt is the frontend's responsibility; the backend just executes the
+    /// per-window stop for each currently-running agent window.
+    StopAllWindows {},
+    /// SPEC-2356 安心 Addendum (FR-044): relaunch the window's agent in place
+    /// using its existing preset / persisted Session, preserving the window id
+    /// and appending to (never wiping) the prior terminal output. Works for a
+    /// window that is currently `Stopped` or `Error`.
+    RestartWindow {
+        id: String,
+    },
     TerminalInput {
         id: String,
         data: String,
@@ -4274,5 +4295,49 @@ mod tests {
         let value = serde_json::to_value(&event).expect("serialize");
         assert_eq!(value["kind"], "ui_trace_error");
         assert_eq!(value["message"], "trace payload missing entries");
+    }
+
+    // SPEC-2356 安心 Addendum (FR-041): StopWindow is a distinct kill-switch
+    // event that carries the window id only — it never removes the window.
+    #[test]
+    fn stop_window_deserializes_kill_switch_contract() {
+        let event = serde_json::from_value::<FrontendEvent>(serde_json::json!({
+            "kind": "stop_window",
+            "id": "tab-1::agent-1"
+        }))
+        .expect("deserialize stop_window");
+
+        assert!(matches!(
+            event,
+            FrontendEvent::StopWindow { id } if id == "tab-1::agent-1"
+        ));
+    }
+
+    // SPEC-2356 安心 Addendum (FR-042): StopAllWindows carries no payload; the
+    // backend decides which windows are running agents.
+    #[test]
+    fn stop_all_windows_deserializes_empty_payload_contract() {
+        let event = serde_json::from_value::<FrontendEvent>(serde_json::json!({
+            "kind": "stop_all_windows"
+        }))
+        .expect("deserialize stop_all_windows");
+
+        assert!(matches!(event, FrontendEvent::StopAllWindows {}));
+    }
+
+    // SPEC-2356 安心 Addendum (FR-044): RestartWindow carries the window id of a
+    // stopped/errored window to relaunch in place.
+    #[test]
+    fn restart_window_deserializes_relaunch_contract() {
+        let event = serde_json::from_value::<FrontendEvent>(serde_json::json!({
+            "kind": "restart_window",
+            "id": "tab-1::agent-1"
+        }))
+        .expect("deserialize restart_window");
+
+        assert!(matches!(
+            event,
+            FrontendEvent::RestartWindow { id } if id == "tab-1::agent-1"
+        ));
     }
 }

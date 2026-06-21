@@ -225,6 +225,15 @@ pub(super) fn frontend_user_action_log(event: &FrontendEvent) -> Option<Frontend
         FrontendEvent::CloseWindow { id } => {
             FrontendUserActionLog::new("close_window", "window").window(id)
         }
+        FrontendEvent::StopWindow { id } => {
+            FrontendUserActionLog::new("stop_window", "window").window(id)
+        }
+        FrontendEvent::StopAllWindows {} => {
+            FrontendUserActionLog::new("stop_all_windows", "window")
+        }
+        FrontendEvent::RestartWindow { id } => {
+            FrontendUserActionLog::new("restart_window", "window").window(id)
+        }
         FrontendEvent::LoadFileTree { id, path } => {
             FrontendUserActionLog::new("load_file_tree", "file")
                 .window(id)
