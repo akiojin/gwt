@@ -24,7 +24,7 @@ jobs:
       tag_name: ${{ steps.tag.outputs.tag_name }}
       version: ${{ steps.tag.outputs.version }}
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
 
       - name: Get version from Cargo.toml
         id: tag
@@ -113,7 +113,7 @@ jobs:
             release_name: gwt-windows-x86_64
             archive_name: gwt-windows-x86_64.zip
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
       - name: Reset broken pre-installed Rust on macOS runners
         if: runner.os == 'macOS'
         shell: bash
@@ -238,7 +238,7 @@ jobs:
     env:
       RELEASE_VERSION: ${{ needs.create-tag.outputs.version }}
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: x86_64-pc-windows-msvc
@@ -278,7 +278,7 @@ jobs:
             expected_arch: x86_64
             dmg_name: gwt-macos-x86_64.dmg
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
       - name: Reset broken pre-installed Rust on macOS runners
         shell: bash
         run: |
@@ -467,7 +467,7 @@ jobs:
     needs: [create-tag, build-gwt, build-msi, build-dmg]
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
       - uses: actions/download-artifact@v8
         with:
           path: artifacts
