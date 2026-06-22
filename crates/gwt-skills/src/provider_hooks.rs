@@ -10,17 +10,32 @@ use crate::settings_local::{
 };
 
 /// Generate OpenCode project-local hook bridge assets under `.gwt/opencode`.
+///
+/// Writes three artifacts:
+/// - `plugins/gwt-hooks.js` — the hook bridge plugin (auto-loaded from
+///   `OPENCODE_CONFIG_DIR/plugins/`).
+/// - `opencode.json` — the project config that also references the plugin.
+/// - `skip-permissions.json` — a permissive `permission` overlay layered in at
+///   launch time via `OPENCODE_CONFIG` when a launch opts into skip_permissions
+///   (SPEC-3151 FR-005). OpenCode has no skip-permissions CLI flag, so this
+///   config overlay is the parity mechanism for `--yolo` /
+///   `--dangerously-skip-permissions`.
 pub fn generate_opencode_hooks(worktree: &Path) -> io::Result<()> {
     let config_dir = worktree.join(".gwt/opencode");
     let plugin_path = config_dir.join("plugins/gwt-hooks.js");
     let config_path = config_dir.join("opencode.json");
+    let skip_permissions_path = config_dir.join("skip-permissions.json");
     let plugin_content = opencode_plugin_content(&gwt_hook_bin_path());
     let config = json!({
         "plugin": ["./plugins/gwt-hooks.js"],
     });
+    let skip_permissions_config = json!({
+        "permission": "allow",
+    });
 
     write_text_atomically(&plugin_path, &plugin_content)?;
-    write_settings_atomically(&config_path, &config)
+    write_settings_atomically(&config_path, &config)?;
+    write_settings_atomically(&skip_permissions_path, &skip_permissions_config)
 }
 
 /// Generate Hermes Agent project-local hook config under `.gwt/hermes`.
