@@ -22,12 +22,36 @@ use super::{
     WindowProcessStatus,
 };
 
-const ANTIGRAVITY_MISSING_BINARY_DETAIL: &str = concat!(
-    "Antigravity CLI (`agy`) was not found in PATH. ",
-    "Install it with: curl -fsSL https://antigravity.google/cli/install.sh | bash. ",
-    "If it is already installed, ensure ~/.local/bin or the install directory is on PATH and ",
-    "restart gwt."
-);
+/// Agents whose missing-binary launch failure should be rewritten into an
+/// actionable install hint instead of leaking the raw PTY/PATH error. Each
+/// entry maps the spawn command token that appears in the raw error
+/// (`Unable to spawn <command>`) to the user-facing guidance.
+///
+/// SPEC-3151 FR-003: OpenCode joined the table so a missing `opencode` binary
+/// with no available package runner surfaces install guidance rather than
+/// `No viable candidates found in PATH`.
+const MISSING_BINARY_INSTALL_HINTS: &[(&str, &str)] = &[
+    (
+        "agy",
+        concat!(
+            "Antigravity CLI (`agy`) was not found in PATH. ",
+            "Install it with: curl -fsSL https://antigravity.google/cli/install.sh | bash. ",
+            "If it is already installed, ensure ~/.local/bin or the install directory is on PATH and ",
+            "restart gwt."
+        ),
+    ),
+    (
+        "opencode",
+        concat!(
+            "OpenCode (`opencode`) was not found and no npm package runner (bunx/npx) is available. ",
+            "Select a non-`Installed` version in the Launch wizard to run it via bunx/npx, ",
+            "or install it with: npm i -g opencode-ai ",
+            "(or: curl -fsSL https://opencode.ai/install | bash, ",
+            "or: brew install anomalyco/tap/opencode). ",
+            "If it is already installed, ensure the install directory is on PATH and restart gwt."
+        ),
+    ),
+];
 
 impl AppRuntime {
     pub(super) fn launch_wizard_action_error_stage(
@@ -247,14 +271,21 @@ impl AppRuntime {
     }
 
     fn user_facing_launch_error_detail(detail: &str) -> String {
-        if Self::is_antigravity_missing_binary_error(detail) {
-            return ANTIGRAVITY_MISSING_BINARY_DETAIL.to_string();
+        if let Some(hint) = Self::missing_binary_install_hint(detail) {
+            return hint.to_string();
         }
         detail.to_string()
     }
 
-    fn is_antigravity_missing_binary_error(detail: &str) -> bool {
-        detail.contains("Unable to spawn agy")
+    fn missing_binary_install_hint(detail: &str) -> Option<&'static str> {
+        MISSING_BINARY_INSTALL_HINTS
+            .iter()
+            .find(|(command, _)| Self::is_missing_binary_error(detail, command))
+            .map(|(_, hint)| *hint)
+    }
+
+    fn is_missing_binary_error(detail: &str, command: &str) -> bool {
+        detail.contains(&format!("Unable to spawn {command}"))
             && (detail.contains("No viable candidates found in PATH")
                 || detail.contains("command not found")
                 || detail.contains("No such file or directory"))

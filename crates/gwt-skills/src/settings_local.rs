@@ -796,6 +796,21 @@ mod tests {
     }
 
     #[test]
+    fn generate_opencode_hooks_writes_skip_permissions_config_overlay() {
+        let dir = tempfile::tempdir().unwrap();
+
+        generate_opencode_hooks(dir.path()).unwrap();
+
+        // SPEC-3151 FR-005: a permissive permission overlay used at launch time
+        // (via OPENCODE_CONFIG) when skip_permissions is requested.
+        let overlay_path = dir.path().join(".gwt/opencode/skip-permissions.json");
+        assert!(overlay_path.exists());
+        let value: Value =
+            serde_json::from_str(&fs::read_to_string(overlay_path).unwrap()).unwrap();
+        assert_eq!(value["permission"], Value::from("allow"));
+    }
+
+    #[test]
     fn generate_hermes_hooks_creates_isolated_home_config_and_script() {
         let dir = tempfile::tempdir().unwrap();
 
