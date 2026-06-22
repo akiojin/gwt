@@ -2224,6 +2224,18 @@ impl AppRuntime {
             );
             let updated_at = chrono::Utc::now();
             retain_live_workspace_agents(&mut projection, &sessions, updated_at);
+            // SPEC-2359 US-80 (FR-428): derive each Shell Work's status from its
+            // live PTY — running → Active, otherwise (exited or post-restart) →
+            // Idle — so the rail never shows a dead shell as Active.
+            projection.reconcile_shell_status(
+                |window_id| {
+                    matches!(
+                        self.window_pty_statuses.get(window_id),
+                        Some(crate::WindowProcessStatus::Running)
+                    )
+                },
+                updated_at,
+            );
             if had_saved_agents && !projection.has_current_agents() {
                 projection.reset_idle_identity(&tab.title, updated_at);
             }
