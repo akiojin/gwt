@@ -7192,3 +7192,38 @@ Type: project
 Context: minimap centered-radar で .fleet-minimap__world に静的な transform layer hint を CSS に追加したら embedded_web_canvas_stage_keeps_transform_layer_hint_opt_in が失敗。CSS 宣言を消してもコメント内のリテラル文字列でまた失敗した。
 Learning: このテストは frontend_styles_bundle() 全体を substring 検索するため、CSS 宣言だけでなくコメント内の同リテラル文字列も失敗させる。transform の layer hint は applyViewport が motion 中だけ JS で opt-in し 300ms で解除する設計ポリシー（恒久 pin 禁止）。
 Future Action: CSS で transform の layer hint を恒久 pin しない。コメントでも当該リテラル文字列を書かず言い換える。GPU レイヤが要る要素は JS の motion-scoped opt-in に倣う。
+
+## 2026-06-23 — OpenCode auth は global＝wizard 整合に credential bridge 不要、serde rename は実機 E2E で捕捉
+
+Type: lesson
+Context: SPEC-3151 第2弾で OpenCode に Hermes 同等の wizard 整合（model free-text・未設定バナー・in-pane setup launcher）を実装。Hermes は HERMES_HOME を丸ごと .gwt/hermes へ差し替えるため credential bridge(symlink) が必要だが、OpenCode は OPENCODE_CONFIG_DIR(config) のみ差し替えで auth(data dir=$XDG_DATA_HOME/opencode or ~/.local/share/opencode) は差し替えない＝auth は global。よって bridge 不要（OPENCODE_CONFIG_DIR を変えても auth path 不変、XDG_DATA_HOME のみが auth を移動、を bunx opencode-ai auth list で実機確認）。in-pane launcher は ShellLaunchConfig に command_override を足して任意コマンドを pane 起動。enum variant RunOpenCodeSetup は serde rename_all=snake_case で run_open_code_setup になり JS の run_opencode_setup を拒否したが unit テストでは漏れ、Playwright 目視 E2E（ボタン click 後に pane が出ない＋server log の invalid frontend message）で捕捉。
+Learning: 外部 CLI の wizard 整合では、その CLI の auth/config がどの env で隔離されるかを実機(auth list 等)で確認してから bridge 要否を決める。serde rename_all=snake_case は CamelCase の連続大文字(OpenCode→open_code)を JS の慣用(opencode)と乖離させるので、frontend が dispatch する action は wire-tag の deser テストで contract を固定する。
+Future Action: agent wizard 整合では (1) auth 隔離の実機確認 → bridge 要否判断、(2) frontend→backend の action は {kind:...} の deser テストを必ず追加、(3) GUI 配線は unit だけでなく Playwright 目視 E2E で wire path を通す。
+
+## 2026-06-23 — gwt-register-spec lifecycle は start の spec 値で固定（real id rebind 不可）
+
+Type: lesson
+Context: gwt-register-spec で issue.spec.create 後に register.phase create を real issue 番号(#3151)で呼ぶと 'phase refused: state owns SPEC-Some(0)' で exit 2。crates/gwt/src/cli/skill_state_runtime.rs は register.start で owner_spec を固定し、owner_spec != spec の phase/complete を拒否する（rebind 経路なし）。SKILL.md の『phase create が real spec id を bind する』記述は実装と不一致。
+Learning: register.start を spec:0 で開始したら、以降の register.phase / register.complete も spec:0 のまま呼ぶ。real Issue 番号は GitHub Issue 側で追跡され、skill-state は Stop-block guard としての lifecycle 同一性のみを保持する。
+Future Action: gwt-register-spec 実行時は start で使った spec 値を全 lifecycle 呼び出しで一貫させる。doc と実装の乖離は gwt-register-spec skill 側の別 Issue で是正検討。
+
+## 2026-06-23 — OpenCode hook 配線は実機検証で正当・package は opencode-ai
+
+Type: lesson
+Context: SPEC-3151 で OpenCode 起動不可（types.rs descriptor が package_name:None で npx/bunx 経路に未接続）を修正。npm パッケージは opencode-ai（bin opencode）。当初 docs から『opencode.json の plugin キーは npm パッケージ名のみで相対パスは無効』と疑ったが、実 opencode 1.17.9 で実測すると相対 plugin パスも有効・OPENCODE_CONFIG_DIR/plugins/ も自動ロード・両方指しても 1 回だけ load（dedup）だった。permission は CLI フラグでなく opencode.json の permission（shorthand permission:allow）で制御し、OPENCODE_CONFIG overlay は OPENCODE_CONFIG_DIR と共存して merge する。
+Learning: OpenCode 連携は docs だけで判断せず実機（bunx opencode-ai@latest run ... --print-logs --log-level DEBUG + plugin の load-time side effect marker）で確認する。generator(provider_hooks.rs) の出力を実挙動で検証してから『変更要否』を決める。
+Future Action: OpenCode 関連の hook/config/permission を変更する前に、bunx opencode-ai で隔離 OPENCODE_CONFIG_DIR/OPENCODE_CONFIG を立てて load/merge/dedup を実測する。skip_permissions は per-launch で OPENCODE_CONFIG=skip-permissions.json を指す方式。
+
+## 2026-06-23 — browser-check は push 不可、Start Work 系は local mirror insteadOf で検証
+
+Type: lesson
+Context: SPEC-3151 の OpenCode 起動を GUI 目視検証する際、browser-check 隔離 HOME(GIT_TERMINAL_PROMPT=0)では Start Work の create_remote_branch(git push origin develop:refs/heads/work/<ts>) が 'could not read Username' で失敗し、OpenCode spawn に到達できなかった。ls-remote は public 匿名 read で成功するが push は credential 解決不可。wizard_mode!=Branch のため『現在ブランチ使用(push 無し)』も選べない。
+Learning: 隔離 HOME の .gitconfig（symlink を実ファイル化して [include] real + [url "<bare-mirror>"] insteadOf=https://github.com/<owner>/<repo>）で origin をローカル bare ミラー(git clone --mirror)へ差し替えると、Start Work の push が認証不要でローカルに通り、実リモートに触れずに launch を完走できる。gwt の子 git は config を都度読むのでサーバ再起動不要。
+Future Action: push を伴う gwt フロー(Start Work / branch 作成)を browser-check で目視検証する時は、最初から local bare mirror + url.insteadOf を隔離 gitconfig に仕込む。bodyText でのエラー検知は旧失敗ウィンドウの残骸で誤検知するため、新規ウィンドウの状態/スクリーンショットで判定する。
+
+## 2026-06-23 — .gwt/work/memory.md は git 管理対象＝merge unblock で checkout 破棄するな
+
+Type: lesson
+Context: SPEC-3151 作業中、PR の develop merge が .gwt/work/{events.jsonl,memory.md} のローカル変更で阻まれ、git checkout -- .gwt/work/memory.md で破棄して merge を通した。結果、その時点で未コミットだった memory.add 3 件（register-spec lifecycle / OpenCode hook 実機検証 / browser-check mirror）が消失。memory.md を『ランタイム/スクラッチ』と誤認し PR 対象外と報告したが、実際は git-tracked の正本ログでコミット必須。
+Learning: memory.md は管理対象。merge を阻むのは events.jsonl(ランタイム)だけ。memory.md の追記は checkout で捨てず、stash か別コミットで保全する。failure/lesson 系の作業成果は最後に必ず memory.md を commit して PR に含める。
+Future Action: merge unblock では git checkout の対象を events.jsonl 等の純ランタイムに限定し memory.md は除外する。作業完了時に memory.md の差分を確認し、未コミットなら chore(memory) で commit+PR する。
