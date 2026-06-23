@@ -445,6 +445,16 @@ pub struct AgentLaunchBuilder {
     /// (no env override). Set only for built-in agents that support
     /// Backend Override (Claude Code, Codex).
     backend_profile: Option<crate::backend::AgentBackendProfile>,
+    /// Hermes-specific launch options (SPEC-3152). `provider` maps to
+    /// `--provider`, `profile` to `--profile`, `toolsets`/`skills` to the
+    /// CSV/`--skills` flags, `max_turns` to `--max-turns`, and `safe_mode`
+    /// to `--safe-mode`. Ignored by agents that do not consume them.
+    provider: Option<String>,
+    profile: Option<String>,
+    toolsets: Option<String>,
+    skills: Option<String>,
+    max_turns: Option<u32>,
+    safe_mode: bool,
     extra_args: Vec<String>,
     runtime_target: LaunchRuntimeTarget,
     docker_service: Option<String>,
@@ -472,6 +482,12 @@ impl AgentLaunchBuilder {
             env_overrides: HashMap::new(),
             custom_agent_env: HashMap::new(),
             backend_profile: None,
+            provider: None,
+            profile: None,
+            toolsets: None,
+            skills: None,
+            max_turns: None,
+            safe_mode: false,
             extra_args: Vec::new(),
             runtime_target: LaunchRuntimeTarget::Host,
             docker_service: None,
@@ -565,6 +581,44 @@ impl AgentLaunchBuilder {
 
     pub fn permission_mode(mut self, mode: PermissionMode) -> Self {
         self.permission_mode = Some(mode);
+        self
+    }
+
+    /// SPEC-3152: Hermes provider selection (`--provider`), e.g. `openrouter`,
+    /// `nous`, `anthropic`. Ignored by agents that do not consume it.
+    pub fn provider(mut self, provider: impl Into<String>) -> Self {
+        self.provider = Some(provider.into());
+        self
+    }
+
+    /// SPEC-3152: Hermes profile selection (`--profile`).
+    pub fn profile(mut self, profile: impl Into<String>) -> Self {
+        self.profile = Some(profile.into());
+        self
+    }
+
+    /// SPEC-3152: Hermes toolsets CSV (`--toolsets`).
+    pub fn toolsets(mut self, toolsets: impl Into<String>) -> Self {
+        self.toolsets = Some(toolsets.into());
+        self
+    }
+
+    /// SPEC-3152: Hermes preloaded skills (`--skills`).
+    pub fn skills(mut self, skills: impl Into<String>) -> Self {
+        self.skills = Some(skills.into());
+        self
+    }
+
+    /// SPEC-3152: Hermes per-turn tool-call cap (`--max-turns`).
+    pub fn max_turns(mut self, turns: u32) -> Self {
+        self.max_turns = Some(turns);
+        self
+    }
+
+    /// SPEC-3152: Hermes safe-mode (`--safe-mode`). Note: safe-mode disables
+    /// user config / rules / plugins, which also disables gwt hooks.
+    pub fn safe_mode(mut self, enabled: bool) -> Self {
+        self.safe_mode = enabled;
         self
     }
 
@@ -1130,9 +1184,32 @@ impl AgentLaunchBuilder {
             }
             SessionMode::Normal => {}
         }
+        if let Some(ref provider) = self.provider {
+            args.push("--provider".to_string());
+            args.push(provider.clone());
+        }
         if let Some(ref model) = self.model {
             args.push("--model".to_string());
             args.push(model.clone());
+        }
+        if let Some(ref profile) = self.profile {
+            args.push("--profile".to_string());
+            args.push(profile.clone());
+        }
+        if let Some(ref toolsets) = self.toolsets {
+            args.push("--toolsets".to_string());
+            args.push(toolsets.clone());
+        }
+        if let Some(ref skills) = self.skills {
+            args.push("--skills".to_string());
+            args.push(skills.clone());
+        }
+        if let Some(max_turns) = self.max_turns {
+            args.push("--max-turns".to_string());
+            args.push(max_turns.to_string());
+        }
+        if self.safe_mode {
+            args.push("--safe-mode".to_string());
         }
         if self.skip_permissions {
             args.push("--yolo".to_string());
@@ -2143,6 +2220,51 @@ mod tests {
             config.env_vars.get("HERMES_ACCEPT_HOOKS"),
             Some(&"1".to_string())
         );
+    }
+
+    #[test]
+    fn build_hermes_maps_provider_profile_and_advanced_options() {
+        let config = AgentLaunchBuilder::new(AgentId::Hermes)
+            .working_dir("/tmp/project")
+            .provider("openrouter")
+            .model("anthropic/claude-sonnet-4")
+            .profile("work")
+            .toolsets("fs,web")
+            .skills("gwt-build-spec")
+            .max_turns(40)
+            .safe_mode(true)
+            .build();
+
+        let has_pair =
+            |flag: &str, val: &str| config.args.windows(2).any(|p| p[0] == flag && p[1] == val);
+        assert!(has_pair("--provider", "openrouter"));
+        assert!(has_pair("--model", "anthropic/claude-sonnet-4"));
+        assert!(has_pair("--profile", "work"));
+        assert!(has_pair("--toolsets", "fs,web"));
+        assert!(has_pair("--skills", "gwt-build-spec"));
+        assert!(has_pair("--max-turns", "40"));
+        assert!(config.args.contains(&"--safe-mode".to_string()));
+    }
+
+    #[test]
+    fn build_hermes_omits_unset_optional_flags() {
+        let config = AgentLaunchBuilder::new(AgentId::Hermes)
+            .working_dir("/tmp/project")
+            .build();
+
+        for flag in [
+            "--provider",
+            "--profile",
+            "--toolsets",
+            "--skills",
+            "--max-turns",
+            "--safe-mode",
+        ] {
+            assert!(
+                !config.args.iter().any(|a| a == flag),
+                "unset option must not emit {flag}"
+            );
+        }
     }
 
     #[cfg(windows)]

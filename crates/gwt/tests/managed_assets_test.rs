@@ -169,6 +169,10 @@ fn refresh_managed_assets_for_hermes_materializes_hermes_home_skills_only() {
     std::fs::create_dir_all(cli_bin.parent().expect("bin parent")).expect("create bin dir");
     std::fs::write(&cli_bin, "#!/bin/sh\n").expect("write cli bin");
     let _cli_bin_guard = ScopedEnvVar::set("GWT_HOOK_BIN", &cli_bin);
+    // Pin HERMES_HOME to an isolated empty dir so the credential bridge never
+    // reads the developer's real ~/.hermes during this test.
+    let hermes_home = tempdir().expect("hermes home tempdir");
+    let _hermes_home_guard = ScopedEnvVar::set("HERMES_HOME", hermes_home.path());
 
     refresh_managed_gwt_assets_for_agent(dir.path(), &AgentId::Hermes)
         .expect("refresh Hermes assets");
