@@ -41,6 +41,44 @@ pub fn generate_opencode_hooks(worktree: &Path) -> io::Result<()> {
     write_settings_atomically(&skip_permissions_path, &skip_permissions_config)
 }
 
+/// `true` when the user's OpenCode data home has at least one configured AI
+/// provider credential. OpenCode stores global auth in
+/// `$XDG_DATA_HOME/opencode/auth.json` (default `~/.local/share/opencode`) as a
+/// JSON object keyed by provider id; an empty object means "no provider signed
+/// in yet". gwt only redirects `OPENCODE_CONFIG_DIR` (config), never the data
+/// dir, so OpenCode auth is host-global and no credential bridge is required
+/// (unlike Hermes). Used by the launch wizard to surface a non-blocking
+/// "OpenCode has no AI provider configured" hint. SPEC-3151 FR-009.
+pub fn opencode_is_configured(data_home: &Path) -> bool {
+    let Ok(text) = fs::read_to_string(data_home.join("auth.json")) else {
+        return false;
+    };
+    matches!(
+        serde_json::from_str::<Value>(&text),
+        Ok(Value::Object(map)) if !map.is_empty()
+    )
+}
+
+/// `true` when the user's global OpenCode data home has at least one configured
+/// provider credential. Resolves the data home as `$XDG_DATA_HOME/opencode`
+/// else `~/.local/share/opencode`. Convenience wrapper over
+/// [`opencode_is_configured`] for the launch wizard's "OpenCode is not set up"
+/// hint. SPEC-3151 FR-009.
+pub fn opencode_is_configured_global() -> bool {
+    opencode_global_data_home()
+        .map(|home| opencode_is_configured(&home))
+        .unwrap_or(false)
+}
+
+/// The user's global OpenCode data home (`$XDG_DATA_HOME/opencode` else
+/// `~/.local/share/opencode`), where `auth.json` holds provider credentials.
+fn opencode_global_data_home() -> Option<PathBuf> {
+    match env::var_os("XDG_DATA_HOME") {
+        Some(value) if !value.is_empty() => Some(PathBuf::from(value).join("opencode")),
+        _ => home_dir().map(|home| home.join(".local/share/opencode")),
+    }
+}
+
 /// Generate Hermes Agent project-local hook config under `.gwt/hermes` and
 /// bridge the user's real Hermes setup (credentials + provider config) into
 /// the worktree-local HERMES_HOME so the isolated home stays authenticated.
@@ -623,5 +661,35 @@ mod hermes_tests {
         assert!(!dest.join(".env").exists());
         let config = fs::read_to_string(dest.join("config.yaml")).unwrap();
         assert!(config.contains("hooks_auto_accept: true"));
+    }
+}
+
+#[cfg(test)]
+mod opencode_tests {
+    use super::*;
+    use std::fs;
+
+    #[test]
+    fn is_configured_false_when_auth_absent() {
+        let data_home = tempfile::tempdir().unwrap();
+        assert!(!opencode_is_configured(data_home.path()));
+    }
+
+    #[test]
+    fn is_configured_false_when_auth_is_empty_object() {
+        let data_home = tempfile::tempdir().unwrap();
+        fs::write(data_home.path().join("auth.json"), "{}").unwrap();
+        assert!(!opencode_is_configured(data_home.path()));
+    }
+
+    #[test]
+    fn is_configured_true_with_at_least_one_credential() {
+        let data_home = tempfile::tempdir().unwrap();
+        fs::write(
+            data_home.path().join("auth.json"),
+            "{\"anthropic\":{\"type\":\"api\",\"key\":\"sk-x\"}}",
+        )
+        .unwrap();
+        assert!(opencode_is_configured(data_home.path()));
     }
 }
