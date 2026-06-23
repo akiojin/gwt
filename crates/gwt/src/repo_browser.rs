@@ -165,6 +165,7 @@ mod tests {
             cleanup_ready: true,
             cleanup: BranchCleanupInfo::default(),
             resume: BranchResumeInfo::unavailable(),
+            start_work_eligibility: None,
         }
     }
 
@@ -180,6 +181,7 @@ mod tests {
             cleanup_ready: true,
             cleanup: BranchCleanupInfo::default(),
             resume: BranchResumeInfo::unavailable(),
+            start_work_eligibility: None,
         }
     }
 

@@ -2741,6 +2741,7 @@ mod tests {
                     available: true,
                     reason: None,
                 },
+                start_work_eligibility: None,
             }],
             load_id: 0,
         };
@@ -2807,6 +2808,7 @@ mod tests {
                     available: true,
                     reason: None,
                 },
+                start_work_eligibility: None,
             }],
             load_id: 0,
         };

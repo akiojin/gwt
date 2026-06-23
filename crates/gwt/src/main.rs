@@ -2311,6 +2311,7 @@ mod tests {
                         cleanup_ready: true,
                         cleanup: BranchCleanupInfo::default(),
                         resume: gwt::BranchResumeInfo::unavailable(),
+                        start_work_eligibility: None,
                     },
                     normalized_branch_name: "feature/demo".to_string(),
                     worktree_path: None,
@@ -2342,6 +2343,7 @@ mod tests {
             cleanup_ready: true,
             cleanup: BranchCleanupInfo::default(),
             resume: gwt::BranchResumeInfo::unavailable(),
+            start_work_eligibility: None,
         }
     }
 
@@ -4998,6 +5000,7 @@ mod tests {
                 cleanup_ready: true,
                 cleanup: BranchCleanupInfo::default(),
                 resume: gwt::BranchResumeInfo::unavailable(),
+                start_work_eligibility: None,
             },
             BranchListEntry {
                 name: "develop".to_string(),
@@ -5010,6 +5013,7 @@ mod tests {
                 cleanup_ready: true,
                 cleanup: BranchCleanupInfo::default(),
                 resume: gwt::BranchResumeInfo::unavailable(),
+                start_work_eligibility: None,
             },
         ];
         assert_eq!(
@@ -5028,6 +5032,7 @@ mod tests {
             cleanup_ready: true,
             cleanup: BranchCleanupInfo::default(),
             resume: gwt::BranchResumeInfo::unavailable(),
+            start_work_eligibility: None,
         }];
         assert_eq!(
             super::preferred_issue_launch_branch(&head_only),

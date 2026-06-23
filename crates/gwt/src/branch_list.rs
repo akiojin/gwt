@@ -123,6 +123,12 @@ pub struct BranchListEntry {
     pub cleanup: BranchCleanupInfo,
     #[serde(default)]
     pub resume: BranchResumeInfo,
+    /// SPEC-2359 US-83 / FR-443: whether this row is an eligible "Start Work /
+    /// Open" source for an existing remote branch. Populated for remote-tracking
+    /// rows during hydration; `None` on local rows and on payloads from older
+    /// backends (serde default).
+    #[serde(default)]
+    pub start_work_eligibility: Option<RemoteStartWorkEligibility>,
 }
 
 pub fn list_branch_entries(repo_path: &Path) -> std::io::Result<Vec<BranchListEntry>> {
@@ -219,6 +225,7 @@ fn adapt_branch_inventory(branches: Vec<gwt_git::Branch>) -> Vec<BranchListEntry
             cleanup_ready: false,
             cleanup: BranchCleanupInfo::default(),
             resume: BranchResumeInfo::unavailable(),
+            start_work_eligibility: None,
         })
         .collect();
 
@@ -253,6 +260,12 @@ fn hydrate_branch_entries(
         .filter(|branch| branch.scope == BranchScope::Local)
         .map(|branch| (branch.name.clone(), (branch.ahead, branch.behind)))
         .collect();
+    // SPEC-2359 US-83 / FR-443: classify remote rows for the "Start Work / Open"
+    // entry points before consuming the entries. Pure — no git spawn.
+    let start_work_eligibility: HashMap<String, RemoteStartWorkEligibility> =
+        remote_start_work_eligibility(&entries, active_session_branches)
+            .into_iter()
+            .collect();
     let entries: Vec<BranchListEntry> = entries
         .into_iter()
         .map(|mut branch| {
@@ -265,6 +278,7 @@ fn hydrate_branch_entries(
                 cleanup_targets,
             );
             branch.cleanup_ready = true;
+            branch.start_work_eligibility = start_work_eligibility.get(&branch.name).copied();
             branch
         })
         .collect();
@@ -619,6 +633,36 @@ mod tests {
     }
 
     #[test]
+    fn hydrate_attaches_start_work_eligibility_to_remote_rows() {
+        // SPEC-2359 US-83 / FR-443: hydration carries per-remote-row eligibility
+        // to the Branches payload so the frontend can render "Start Work / Open".
+        let entries = adapt_branch_inventory(vec![
+            make_branch("origin/feature/fresh", false, false, None),
+            make_branch("feature/local", true, false, None),
+        ]);
+        let hydrated = hydrate_branch_entries(entries, &HashSet::new(), &HashMap::new(), true);
+
+        let fresh = hydrated
+            .iter()
+            .find(|entry| entry.name == "origin/feature/fresh")
+            .expect("remote row present");
+        assert_eq!(
+            fresh.start_work_eligibility,
+            Some(RemoteStartWorkEligibility::StartWork),
+            "a fresh origin row carries StartWork eligibility for the frontend"
+        );
+
+        let local = hydrated
+            .iter()
+            .find(|entry| entry.name == "feature/local")
+            .expect("local row present");
+        assert!(
+            local.start_work_eligibility.is_none(),
+            "local rows carry no start-work eligibility"
+        );
+    }
+
+    #[test]
     fn remote_start_work_eligibility_classifies_origin_protected_and_existing() {
         // SPEC-2359 US-83 / FR-443 / SC-302: only fresh origin branches are
         // "Start Work / Open" sources. Protected base and non-origin remotes are
@@ -839,6 +883,7 @@ mod tests {
             cleanup_ready: false,
             cleanup: BranchCleanupInfo::default(),
             resume: BranchResumeInfo::unavailable(),
+            start_work_eligibility: None,
         }];
         let cleanup_targets = HashMap::from([(
             String::from("feature/demo"),
@@ -877,6 +922,7 @@ mod tests {
             cleanup_ready: false,
             cleanup: BranchCleanupInfo::default(),
             resume: BranchResumeInfo::unavailable(),
+            start_work_eligibility: None,
         }
     }
 
