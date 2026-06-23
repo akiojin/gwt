@@ -1207,6 +1207,20 @@ impl AppRuntime {
             quick_start_entries,
             previous_profiles,
         );
+        // SPEC-2359 US-83 / FR-444: offer eligible existing remote branches in
+        // the Start Work "open existing branch" picker. Derived from the current
+        // branch listing (Branches refresh fetches origin; this open uses the
+        // refs already present to avoid blocking the UI thread on a network call).
+        let active_session_branches = self.active_session_branches_for_tab(tab_id);
+        wizard.open_branch_candidates =
+            list_branch_entries_with_active_sessions(project_root, &active_session_branches)
+                .map(|entries| {
+                    gwt::branch_list::eligible_remote_start_work_branch_names(
+                        &entries,
+                        &active_session_branches,
+                    )
+                })
+                .unwrap_or_default();
         wizard.mark_runtime_context_unresolved();
         self.launch_wizard = Some(LaunchWizardSession {
             tab_id: tab_id.to_string(),
@@ -1642,6 +1656,8 @@ fn resolve_launch_wizard_runtime_context_hydration(
         agent_options,
         quick_start_entries,
         previous_profiles: Some(previous_profiles),
+        // Runtime re-resolution preserves picker candidates set at first hydration.
+        open_branch_candidates: Vec::new(),
     })
 }
 
@@ -1850,6 +1866,8 @@ impl AppRuntime {
             agent_options,
             quick_start_entries,
             previous_profiles: None,
+            // Cache refresh preserves picker candidates set at first hydration.
+            open_branch_candidates: Vec::new(),
         });
     }
 }

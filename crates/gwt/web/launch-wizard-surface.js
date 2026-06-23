@@ -1039,6 +1039,50 @@ export function createLaunchWizardSurface({
           panel.appendChild(section);
         }
 
+        // SPEC-2359 US-83 / FR-444: "open an existing branch" picker. Lets the
+        // user continue on an eligible remote branch (no new work/* branch)
+        // instead of starting a fresh work branch. Each candidate dispatches
+        // SelectExistingBranch, which flips the wizard to continue-on-branch.
+        const openBranchCandidates = Array.isArray(launchWizard.open_branch_candidates)
+          ? launchWizard.open_branch_candidates
+          : [];
+        if (showStartMethods && openBranchCandidates.length > 0) {
+          const branchPickerSection = createLaunchSection(
+            "Open an existing branch",
+            "Continue on a remote branch instead of creating a new work branch.",
+          );
+          const candidateList = createNode("div", "start-method-list");
+          for (const candidate of openBranchCandidates) {
+            const button = createNode("button", "start-method-button");
+            button.type = "button";
+            button.setAttribute("data-existing-branch", candidate);
+            button.appendChild(createNode("div", "start-method-title", candidate));
+            button.appendChild(
+              createNode(
+                "div",
+                "start-method-summary",
+                "Continue on this branch (tracks the remote)",
+              ),
+            );
+            const openExistingBranch = () => {
+              if (
+                !releaseWizardInteractionGuardForChromeAction()
+                || launchWizardPendingAction
+              ) {
+                return;
+              }
+              sendWizardAction({
+                kind: "select_existing_branch",
+                branch_name: candidate,
+              });
+            };
+            button.addEventListener("click", openExistingBranch);
+            candidateList.appendChild(button);
+          }
+          branchPickerSection.appendChild(candidateList);
+          panel.appendChild(branchPickerSection);
+        }
+
         if (showSetupForms && launchWizard.show_branch_controls !== false) {
           const section = createLaunchSection(
             "Branch",

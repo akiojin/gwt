@@ -461,6 +461,20 @@ pub fn remote_start_work_eligibility(
         .collect()
 }
 
+/// SPEC-2359 US-83 / FR-444: names of remote branches that are eligible
+/// "Start Work / Open" sources, used to populate the Launch Wizard's existing
+/// branch picker. Derived purely from [`remote_start_work_eligibility`].
+pub fn eligible_remote_start_work_branch_names(
+    entries: &[BranchListEntry],
+    active_session_branches: &HashSet<String>,
+) -> Vec<String> {
+    remote_start_work_eligibility(entries, active_session_branches)
+        .into_iter()
+        .filter(|(_, eligibility)| *eligibility == RemoteStartWorkEligibility::StartWork)
+        .map(|(name, _)| name)
+        .collect()
+}
+
 fn classify_remote_start_work_eligibility(
     remote_entry_name: &str,
     local_branch_names: &HashSet<&str>,
@@ -630,6 +644,20 @@ mod tests {
             remote_branch_name: Some(remote_branch_name.to_string()),
             ..make_branch(name, false, false, last_commit_date)
         }
+    }
+
+    #[test]
+    fn eligible_remote_start_work_branch_names_lists_only_fresh_origin_branches() {
+        // SPEC-2359 US-83 / FR-444: the wizard picker offers only fresh origin
+        // branches — protected base, local rows, and non-origin remotes drop out.
+        let entries = adapt_branch_inventory(vec![
+            make_branch("origin/feature/fresh", false, false, None),
+            make_branch("origin/develop", false, false, None),
+            make_branch("upstream/feature/fork", false, false, None),
+            make_branch("feature/local", true, false, None),
+        ]);
+        let names = eligible_remote_start_work_branch_names(&entries, &HashSet::new());
+        assert_eq!(names, vec!["origin/feature/fresh".to_string()]);
     }
 
     #[test]

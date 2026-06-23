@@ -572,6 +572,32 @@ mod tests {
     }
 
     #[test]
+    fn open_branch_candidates_are_exposed_in_view_and_selectable() {
+        // SPEC-2359 US-83 / FR-444: the wizard view carries the existing-branch
+        // picker candidates, and selecting one continues on that branch.
+        let mut state = LaunchWizardState::open_with(
+            context(branch("develop"), "develop"),
+            sample_agent_options(),
+            Vec::new(),
+        );
+        state.open_branch_candidates = vec!["origin/feature-foo".to_string()];
+
+        let view = state.view();
+        assert_eq!(
+            view.open_branch_candidates,
+            vec!["origin/feature-foo".to_string()],
+            "the view exposes picker candidates for the frontend"
+        );
+
+        state.apply(LaunchWizardAction::SelectExistingBranch {
+            branch_name: "origin/feature-foo".to_string(),
+        });
+        let config = state.build_launch_config().expect("launch config");
+        assert_eq!(config.branch.as_deref(), Some("feature-foo"));
+        assert!(config.base_branch.is_none());
+    }
+
+    #[test]
     fn select_existing_branch_rejects_protected_base() {
         // SPEC-2359 US-83 / FR-446: the new-path backend guard refuses a
         // protected base branch even if the UI eligibility filter were bypassed.

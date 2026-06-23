@@ -34,6 +34,7 @@ impl LaunchWizardState {
             mode: self.wizard_mode,
             branch_name: self.branch_name.clone(),
             selected_branch_name: self.context.selected_branch.name.clone(),
+            open_branch_candidates: self.open_branch_candidates.clone(),
             linked_issue_number: self.linked_issue_number,
             is_hydrating: self.is_hydrating,
             runtime_context_resolved: self.runtime_context_resolved,
@@ -1380,6 +1381,7 @@ mod tests {
             agent_options: sample_agent_options(),
             quick_start_entries: Vec::new(),
             previous_profiles: Some(LaunchWizardPreviousProfiles::from_profile(Some(previous))),
+            open_branch_candidates: Vec::new(),
         });
 
         let confirmation = state.view();
@@ -2085,6 +2087,7 @@ mod tests {
             agent_options: sample_agent_options(),
             quick_start_entries: Vec::new(),
             previous_profiles: Some(Default::default()),
+            open_branch_candidates: Vec::new(),
         });
 
         let view = state.view();
@@ -2143,6 +2146,7 @@ mod tests {
             agent_options: sample_agent_options(),
             quick_start_entries: Vec::new(),
             previous_profiles: Some(Default::default()),
+            open_branch_candidates: Vec::new(),
         });
 
         let view = state.view();
@@ -2213,6 +2217,7 @@ mod tests {
             agent_options: sample_agent_options(),
             quick_start_entries: Vec::new(),
             previous_profiles: Some(Default::default()),
+            open_branch_candidates: Vec::new(),
         });
 
         // Runtime ステップ: 編集 UI が見え、primary は Confirm へ進む "Continue"。
@@ -2291,6 +2296,7 @@ mod tests {
             agent_options: sample_agent_options(),
             quick_start_entries: Vec::new(),
             previous_profiles: Some(Default::default()),
+            open_branch_candidates: Vec::new(),
         });
         state
     }
@@ -2421,6 +2427,7 @@ mod tests {
             agent_options: sample_agent_options(),
             quick_start_entries: Vec::new(),
             previous_profiles: Some(Default::default()),
+            open_branch_candidates: Vec::new(),
         });
 
         let view = state.view();
@@ -2476,6 +2483,7 @@ mod tests {
             agent_options: sample_agent_options(),
             quick_start_entries: vec![entry],
             previous_profiles: Some(Default::default()),
+            open_branch_candidates: Vec::new(),
         });
         state.apply(LaunchWizardAction::SetRuntimeTarget {
             target: gwt_agent::LaunchRuntimeTarget::Host,

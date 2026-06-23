@@ -84,6 +84,7 @@ impl LaunchWizardState {
             runtime_confirmed: false,
             settings_revisited: false,
             resolved_branch_name: None,
+            open_branch_candidates: Vec::new(),
         };
         state.branch_name = state.context.normalized_branch_name.clone();
         state.sync_selected_agent_options();
@@ -242,7 +243,13 @@ impl LaunchWizardState {
             agent_options,
             mut quick_start_entries,
             previous_profiles,
+            open_branch_candidates,
         } = hydration;
+        // FR-444: preserve picker candidates from the initial hydration across
+        // runtime re-resolution (which carries an empty list).
+        if !open_branch_candidates.is_empty() {
+            self.open_branch_candidates = open_branch_candidates;
+        }
         if let Some(selected_branch) = selected_branch {
             self.context.selected_branch = selected_branch;
         }
@@ -2136,6 +2143,7 @@ mod tests {
             agent_options: sample_agent_options(),
             quick_start_entries: Vec::new(),
             previous_profiles: None,
+            open_branch_candidates: Vec::new(),
         });
         let view = state.view();
         assert_eq!(view.selected_runtime_target, "host");
@@ -2321,6 +2329,7 @@ mod tests {
             agent_options: sample_agent_options(),
             quick_start_entries: Vec::new(),
             previous_profiles: Some(Default::default()),
+            open_branch_candidates: Vec::new(),
         });
 
         state.apply(LaunchWizardAction::Submit);
@@ -2578,6 +2587,7 @@ mod tests {
                     windows_shell: None,
                 },
             ))),
+            open_branch_candidates: Vec::new(),
         });
 
         assert_eq!(
@@ -2623,6 +2633,7 @@ mod tests {
             agent_options: sample_agent_options(),
             quick_start_entries: Vec::new(),
             previous_profiles: None,
+            open_branch_candidates: Vec::new(),
         });
 
         let view = state.view();
@@ -2673,6 +2684,7 @@ mod tests {
             agent_options: sample_agent_options(),
             quick_start_entries: Vec::new(),
             previous_profiles: Some(previous_profiles),
+            open_branch_candidates: Vec::new(),
         });
 
         let view = state.view();
@@ -2717,6 +2729,7 @@ mod tests {
                 agent_options: sample_agent_options(),
                 quick_start_entries: Vec::new(),
                 previous_profiles: Some(previous_profiles),
+                open_branch_candidates: Vec::new(),
             });
 
             assert_eq!(state.view().selected_execution_mode, mode);
@@ -2923,6 +2936,7 @@ mod tests {
             agent_options: sample_agent_options(),
             quick_start_entries: Vec::new(),
             previous_profiles: Some(previous_profiles),
+            open_branch_candidates: Vec::new(),
         });
 
         let view = state.view();
@@ -2976,6 +2990,7 @@ mod tests {
             agent_options: sample_agent_options(),
             quick_start_entries: Vec::new(),
             previous_profiles: Some(Default::default()),
+            open_branch_candidates: Vec::new(),
         });
 
         assert!(state.view().fast_mode);
@@ -3153,6 +3168,7 @@ mod tests {
                 docker_lifecycle_intent: gwt_agent::DockerLifecycleIntent::Connect,
             }],
             previous_profiles: Some(LaunchWizardPreviousProfiles::default()),
+            open_branch_candidates: Vec::new(),
         });
 
         let view = state.view();
