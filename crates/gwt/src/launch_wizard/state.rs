@@ -77,6 +77,7 @@ impl LaunchWizardState {
             hermes_safe_mode: false,
             hermes_provider_choices: Vec::new(),
             hermes_needs_setup: false,
+            opencode_needs_setup: false,
             branch_name: String::new(),
             initial_prompt: String::new(),
             completion: None,
@@ -457,6 +458,9 @@ impl LaunchWizardState {
             }
             LaunchWizardAction::SetHermesSafeMode { enabled } => {
                 self.hermes_safe_mode = enabled;
+            }
+            LaunchWizardAction::RunOpenCodeSetup => {
+                self.run_opencode_setup();
             }
             LaunchWizardAction::Back => {
                 if self.show_confirm() {
@@ -1429,10 +1433,18 @@ impl LaunchWizardState {
     }
 
     /// SPEC-3152: whether the current agent takes a free-text model string
-    /// rather than a fixed gwt model list (Hermes).
+    /// rather than a fixed gwt model list (Hermes / OpenCode).
     pub(super) fn current_agent_supports_freetext_model(&self) -> bool {
         self.launch_target_is_agent()
             && agent_id_from_key(self.effective_agent_id()).supports_freetext_model()
+    }
+
+    /// SPEC-3151 FR-008: whether the current agent is OpenCode, which exposes a
+    /// free-text `provider/model` field and the in-pane setup launcher in the
+    /// Settings form.
+    pub(super) fn current_agent_is_opencode(&self) -> bool {
+        self.launch_target_is_agent()
+            && agent_id_from_key(self.effective_agent_id()) == gwt_agent::AgentId::OpenCode
     }
 
     /// SPEC-3152: provider choices enumerated from the user's Hermes config,
@@ -1445,6 +1457,48 @@ impl LaunchWizardState {
     /// populated by the app runtime at wizard open.
     pub fn set_hermes_needs_setup(&mut self, needs_setup: bool) {
         self.hermes_needs_setup = needs_setup;
+    }
+
+    /// SPEC-3151 FR-009: whether OpenCode's global data home has no configured
+    /// AI provider, populated by the app runtime at wizard open.
+    pub fn set_opencode_needs_setup(&mut self, needs_setup: bool) {
+        self.opencode_needs_setup = needs_setup;
+    }
+
+    /// SPEC-3151 FR-010: resolve the OpenCode runner for the wizard's selected
+    /// version and produce a Shell launch that runs `<runner> auth login` on the
+    /// host. OpenCode auth is host-global (`$XDG_DATA_HOME/opencode/auth.json`),
+    /// so the setup launcher is forced to the Host runtime regardless of the
+    /// wizard's Docker selection.
+    fn run_opencode_setup(&mut self) {
+        let version = if self.version.is_empty() {
+            "latest"
+        } else {
+            self.version.as_str()
+        };
+        let runner = gwt_agent::launch::resolve_runner(&gwt_agent::AgentId::OpenCode, version);
+        let mut args = runner.base_args.clone();
+        args.push("auth".to_string());
+        args.push("login".to_string());
+
+        self.launch_target = LaunchTargetKind::Shell;
+        let config = ShellLaunchConfig {
+            working_dir: self.context.worktree_path.clone(),
+            branch: (!self.branch_name.is_empty()).then(|| self.branch_name.clone()),
+            base_branch: None,
+            display_name: "OpenCode Setup".to_string(),
+            runtime_target: gwt_agent::LaunchRuntimeTarget::Host,
+            docker_service: None,
+            docker_lifecycle_intent: gwt_agent::DockerLifecycleIntent::default(),
+            windows_shell: self.windows_shell_for_launch(),
+            env_vars: HashMap::new(),
+            remove_env: Vec::new(),
+            command_override: Some(runner.executable),
+            command_args_override: Some(args),
+        };
+        self.completion = Some(LaunchWizardCompletion::Launch(Box::new(
+            LaunchWizardLaunchRequest::Shell(Box::new(config)),
+        )));
     }
 
     /// SPEC-3152: persist a Hermes free-text launch option by field key.
