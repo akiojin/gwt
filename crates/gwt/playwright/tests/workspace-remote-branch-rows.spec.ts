@@ -1,9 +1,8 @@
-// SPEC-2359 US-83 — the "Open a branch…" action lives on the REACHABLE
-// Workspace surface (preset "work" → mountWorkSurface), opens the remote-branch
-// picker, shows bare branch names, and picking one launches via the existing
-// open_launch_wizard message. This E2E exists specifically because an earlier
-// attempt put the affordance on the unreachable Branches window; here we assert
-// the button renders on the surface a user actually opens.
+// SPEC-2359 US-83 — eligible existing remote branches render as "Start work on
+// a branch" rows IN the Workspace list (the surface the user actually sees),
+// not as a separate toolbar action / modal. Picking ▶ continues on the branch
+// via the existing open_launch_wizard path. This E2E renders the real UI so the
+// rows are proven to appear on the reachable Workspace surface.
 
 import { expect, test } from "@playwright/test";
 import { APP_URL, installEmbeddedRoutes } from "./_helpers/embedded-frontend";
@@ -13,7 +12,7 @@ test.beforeEach(async ({ page }) => {
   await installBackend(page);
 });
 
-test("Open a branch… renders on the Workspace surface and opens the picker", async ({
+test("remote branches render as Start work on a branch rows in the Workspace list", async ({
   page,
 }) => {
   await page.goto(APP_URL);
@@ -21,41 +20,29 @@ test("Open a branch… renders on the Workspace surface and opens the picker", a
   // The Workspace surface (the reachable one) mounts.
   await expect(page.locator(".workspace-overview-root")).toBeVisible();
 
-  // The "Open a branch…" toolbar action is present and visible on it.
-  const openBranch = page.locator(
-    "[data-action='open-workspace-branch-picker']",
-  );
-  await expect(openBranch).toBeVisible();
-  await expect(openBranch).toHaveText(/Open a branch/);
+  // The eligible remote branches appear as a section in the list.
+  const section = page.locator(".workspace-overview-remote-branches");
+  await expect(section).toBeVisible();
+  await expect(
+    section.locator(".workspace-overview-remote-branches-heading"),
+  ).toHaveText("Start work on a branch");
 
-  // Clicking it opens the picker modal.
-  await openBranch.click();
-  const modal = page.locator("#workspace-branch-picker-modal");
-  await expect(modal).toHaveClass(/open/);
-
-  // The backend response renders rows with BARE names (origin/ stripped) and a
-  // remote hint — the launch-facing "abstract remote/local" display.
-  const rows = modal.locator(".workspace-branch-picker-row");
+  const rows = section.locator(".workspace-overview-remote-branch-row");
   await expect(rows).toHaveCount(2);
+  // Bare names (origin/ stripped) + a Remote chip.
   await expect(
-    modal.locator(".workspace-branch-picker-row-name").first(),
+    rows.first().locator(".workspace-overview-remote-branch-name"),
   ).toHaveText("feature-foo");
-  await expect(
-    modal.locator(".workspace-branch-picker-row-tag").first(),
-  ).toHaveText("remote");
+  await expect(rows.first().locator(".workspace-overview-remote")).toHaveText("Remote");
 
-  // Picking a branch hands off to the launch wizard via open_launch_wizard with
-  // the raw ref (the backend normalizes origin/ for continue-on-branch).
-  await rows.first().click();
+  // ▶ starts work on the branch via open_launch_wizard with the raw ref.
+  await rows.first().locator("[data-action='start-work-remote-branch']").click();
   const sent = await page.evaluate(
     () => (window as unknown as { __sent: Array<{ kind: string; branch_name?: string }> }).__sent,
   );
   const launch = sent.find((m) => m.kind === "open_launch_wizard");
   expect(launch).toBeTruthy();
   expect(launch?.branch_name).toBe("origin/feature-foo");
-
-  // The picker closes after handing off.
-  await expect(modal).not.toHaveClass(/open/);
 });
 
 async function installBackend(page: any) {

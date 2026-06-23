@@ -102,8 +102,6 @@ const ROOT_MODULES = new Set([
   "workspace-kanban-surface.js",
   // SPEC-2359 US-42 — Workspace Resume Picker modal renderer.
   "workspace-resume-picker-modal.js",
-  // SPEC-2359 US-83 — Workspace "Open a branch…" picker modal renderer.
-  "workspace-branch-picker-modal.js",
 ]);
 
 export async function installEmbeddedRoutes(page: any): Promise<void> {

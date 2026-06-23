@@ -31,7 +31,6 @@
       import { createTerminalAttachments } from "/terminal-attachments.js";
       import { createProjectIndexSearchSurface } from "/project-index-search-surface.js";
       import { createWorkspaceResumePickerController } from "/workspace-resume-picker-modal.js";
-      import { createWorkspaceBranchPickerController } from "/workspace-branch-picker-modal.js";
       import { createLaunchPendingController } from "/launch-pending-controller.js";
       import { createConnectionOverlay } from "/connection-overlay.js";
       import { createUpdateCtaController } from "/update-cta.js";
@@ -3787,7 +3786,6 @@
           }
           try {
             workspaceResumePicker.render();
-            workspaceBranchPicker.render();
           } catch {
             // Picker may not be mounted yet during bootstrap.
           }
@@ -4062,14 +4060,6 @@
         launchPending,
       });
 
-      // SPEC-2359 US-83 — Workspace "Open a branch…" picker controller.
-      const workspaceBranchPicker = createWorkspaceBranchPickerController({
-        modalEl: document.getElementById("workspace-branch-picker-modal"),
-        dialogEl: document.querySelector("#workspace-branch-picker-modal .modal-shell"),
-        createNode,
-        send,
-      });
-
       // SPEC-3064 Phase 3 (E6b): the Branches window & cleanup surface
       // (branch list state map, branch rows/list rendering, cleanup modal
       // flow, Workspace Overview cleanup entry, Branches window mount, and
@@ -4119,9 +4109,6 @@
         windowMap,
         workspaceWindowById,
         openWorkspaceResumePicker: (workspaceId) => workspaceResumePicker.open(workspaceId),
-        // SPEC-2359 US-83: open the "Open a branch…" picker for a Workspace
-        // window; the caller also sends request_remote_start_work_branches.
-        openWorkspaceBranchPicker: (windowId) => workspaceBranchPicker.open(windowId),
         focusBoardEntry,
         getResumeBounds: () => visibleBounds(),
         launchPending,
@@ -4364,6 +4351,11 @@
             focusWindowLocally,
             sendFocus: (id) => socketTransport.send({ kind: "focus_window", id }),
           });
+          // SPEC-2359 US-83: fetch the eligible remote branches for this
+          // Workspace window so they render as "Start work on a branch" rows.
+          // Sent from app.js (not the surface's mount) so the surface stays a
+          // pure renderer and its unit tests keep their exact-message contracts.
+          send({ kind: "request_remote_start_work_branches", id: windowData.id });
           return;
         }
 
@@ -5267,9 +5259,10 @@
           case "workspace_resumable_agents":
             workspaceResumePicker.handleAgentsList(event);
             break;
-          // SPEC-2359 US-83 — Workspace "Open a branch…" picker.
+          // SPEC-2359 US-83 — eligible remote branches render as "Start work on
+          // a branch" rows in the Workspace list.
           case "remote_start_work_branches":
-            workspaceBranchPicker.handleBranchList(event);
+            workspaceOverviewSurface.applyRemoteStartWorkBranches(event);
             break;
           case "workspace_resume_agent_error":
             launchPending.settleAck(event);

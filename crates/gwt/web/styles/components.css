@@ -4958,103 +4958,58 @@ button.workspace-board-ref:focus-visible {
   padding-top: var(--space-2);
 }
 
-/* SPEC-2359 US-83 — Workspace "Open a branch…" picker. Mirrors the Resume
-   Picker modal styling so the two pickers read consistently. The remote chip
-   uses a neutral muted tone (not a status badge), matching the launch-facing
-   "abstract remote/local" intent. */
-:root[data-theme] .workspace-branch-picker-shell {
-  width: min(560px, calc(100vw - 32px));
-  gap: var(--space-3);
-}
-
-:root[data-theme] .workspace-branch-picker-title {
-  margin: 0;
-  font-family: var(--font-display);
-  font-size: var(--type-lg);
-  letter-spacing: 0.04em;
-  color: var(--color-text);
-}
-
-:root[data-theme] .workspace-branch-picker-subtitle {
-  margin: 0;
-  color: var(--color-text-subtle);
-  font-size: var(--type-sm);
-}
-
-:root[data-theme] .workspace-branch-picker-list {
+/* SPEC-2359 US-83 — "Start work on a branch" section in the Workspace list.
+   Eligible existing remote branches render as rows below the Works. The remote
+   chip reuses .workspace-overview-remote; the launch ▶ reuses
+   .workspace-overview-row-action. */
+:root[data-theme] .workspace-overview-remote-branches {
   display: flex;
   flex-direction: column;
-  gap: var(--space-2);
-  max-height: 60vh;
-  overflow: auto;
+  gap: var(--space-1);
+  padding: var(--space-2) 0;
+  border-top: 1px solid var(--color-border);
+  margin-top: var(--space-2);
 }
 
-:root[data-theme] .workspace-branch-picker-row {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: var(--space-2);
-  padding: var(--space-3);
-  border-radius: var(--radius-md);
-  background: var(--color-surface);
-  border: 1px solid var(--color-border);
-  color: var(--color-text);
-  text-align: left;
-  font: inherit;
-  text-transform: none;
-  cursor: pointer;
-  transition: border-color 120ms ease, background 120ms ease;
-}
-
-:root[data-theme] .workspace-branch-picker-row:hover,
-:root[data-theme] .workspace-branch-picker-row:focus-visible {
-  border-color: var(--color-accent, var(--color-border-strong));
-  background: var(--color-surface-elevated);
-  outline: none;
-}
-
-:root[data-theme] .workspace-branch-picker-row.is-pending {
-  opacity: 0.6;
-}
-
-:root[data-theme] .workspace-branch-picker-row-name {
-  font-weight: 600;
-  font-family: var(--font-mono);
-  text-transform: none;
-  letter-spacing: 0;
-}
-
-:root[data-theme] .workspace-branch-picker-row-tag {
-  display: inline-flex;
-  align-items: center;
-  padding: 2px var(--space-2);
-  border-radius: var(--radius-pill, 999px);
+:root[data-theme] .workspace-overview-remote-branches-heading {
+  padding: 0 var(--space-2);
   font-size: var(--type-2xs);
-  text-transform: uppercase;
-  letter-spacing: 0.08em;
-  background: color-mix(in oklab, var(--color-text-muted) 14%, transparent);
-  color: var(--color-text-muted);
-}
-
-:root[data-theme] .workspace-branch-picker-empty {
-  padding: var(--space-3);
-  text-align: center;
+  letter-spacing: 0.04em;
   color: var(--color-text-subtle);
 }
 
-:root[data-theme] .workspace-branch-picker-error {
-  padding: var(--space-2) var(--space-3);
-  border-radius: var(--radius-md);
-  background: rgba(248, 113, 113, 0.12);
-  color: rgb(252, 165, 165);
-  font-size: var(--type-sm);
+:root[data-theme] .workspace-overview-remote-branches-list {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
 }
 
-:root[data-theme] .workspace-branch-picker-actions {
+:root[data-theme] .workspace-overview-remote-branch-row {
   display: flex;
-  justify-content: flex-end;
+  align-items: center;
   gap: var(--space-2);
-  padding-top: var(--space-2);
+  padding: var(--space-2);
+  border-radius: var(--radius-md);
+}
+
+:root[data-theme] .workspace-overview-remote-branch-row:hover {
+  background: var(--color-surface-elevated);
+}
+
+:root[data-theme] .workspace-overview-remote-branch-copy {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  flex: 1;
+  min-width: 0;
+}
+
+:root[data-theme] .workspace-overview-remote-branch-name {
+  font-family: var(--font-mono);
+  color: var(--color-text);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 /* SPEC-2009 amendment Phase 2: File Tree editor affordance.

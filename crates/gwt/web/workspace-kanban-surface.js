@@ -10,7 +10,6 @@ export function createWorkspaceKanbanSurface({
   windowMap,
   workspaceWindowById,
   openWorkspaceResumePicker,
-  openWorkspaceBranchPicker,
   getResumeBounds,
   focusBoardEntry,
   branchesSurface,
@@ -432,6 +431,57 @@ export function createWorkspaceKanbanSurface({
     if (name.includes("opencode")) return "green";
     if (name.includes("copilot")) return "blue";
     return "gray";
+  }
+
+  // SPEC-2359 US-83: launch-facing display abstracts remote/local — show plain
+  // branch names ("feature-foo"). The launch payload keeps the raw ref; the
+  // backend normalizes origin/ for continue-on-branch.
+  function displayBranchName(name) {
+    return typeof name === "string" ? name.replace(/^origin\//, "") : name;
+  }
+
+  // SPEC-2359 US-83: render the eligible existing remote branches as a "Start
+  // work on a branch" section in the Workspace list. Each row continues on the
+  // branch itself via the existing open_launch_wizard path (no new work/*).
+  function renderRemoteBranchSection(windowId, state) {
+    const branches = Array.isArray(state.remoteBranches) ? state.remoteBranches : [];
+    if (branches.length === 0) return null;
+    const section = createNode("div", "workspace-overview-remote-branches");
+    section.appendChild(
+      createNode(
+        "div",
+        "workspace-overview-remote-branches-heading",
+        "Start work on a branch",
+      ),
+    );
+    const list = createNode("div", "workspace-overview-remote-branches-list");
+    for (const branch of branches) {
+      const row = createNode("div", "workspace-overview-remote-branch-row");
+      row.dataset.branchName = branch;
+      const copy = createNode("span", "workspace-overview-remote-branch-copy");
+      copy.appendChild(
+        createNode("span", "workspace-overview-remote-branch-name", displayBranchName(branch)),
+      );
+      copy.appendChild(createNode("span", "workspace-overview-remote", "Remote"));
+      row.appendChild(copy);
+      const start = createNode(
+        "button",
+        "icon-button workspace-overview-row-action",
+        "▶",
+      );
+      start.type = "button";
+      start.dataset.action = "start-work-remote-branch";
+      start.title = "Start work on this branch";
+      start.setAttribute("aria-label", `Start work on ${displayBranchName(branch)}`);
+      start.addEventListener("click", (event) => {
+        event.stopPropagation();
+        send({ kind: "open_launch_wizard", id: windowId, branch_name: branch });
+      });
+      row.appendChild(start);
+      list.appendChild(row);
+    }
+    section.appendChild(list);
+    return section;
   }
 
   function renderWorkspaceRow(windowId, state, item) {
@@ -1451,6 +1501,11 @@ export function createWorkspaceKanbanSurface({
       listPane.appendChild(renderWorkspaceList(windowId, state, visibleWorkspaces));
     }
 
+    // SPEC-2359 US-83: eligible existing remote branches the user can start
+    // work on, rendered as rows in the Workspace list (below the Works).
+    const remoteSection = renderRemoteBranchSection(windowId, state);
+    if (remoteSection) listPane.appendChild(remoteSection);
+
     renderUnassignedQueue(listPane, unassignedAgents);
 
     renderWorkspaceDetail(root.querySelector(".workspace-overview-detail-pane"), selected, windowId);
@@ -1469,18 +1524,6 @@ export function createWorkspaceKanbanSurface({
     // toggle is removed. The spine lists persistent Workspaces (Active+Paused);
     // the detail pane shows the selected Workspace's sessions / branch / PR.
     const toolbarActions = createNode("div", "workspace-toolbar-actions");
-    // SPEC-2359 US-83: start work on an existing remote branch from the
-    // Workspace surface. Opens the "Open a branch…" picker (eligible remote
-    // branches), and picking one continues on that branch.
-    const openBranchBtn = createNode(
-      "button",
-      "wizard-button workspace-open-branch-button",
-      "Open a branch…",
-    );
-    openBranchBtn.type = "button";
-    openBranchBtn.dataset.action = "open-workspace-branch-picker";
-    openBranchBtn.setAttribute("aria-label", "Open an existing branch");
-    toolbarActions.appendChild(openBranchBtn);
     const refreshBtn = createNode("button", "icon-button", "↻");
     refreshBtn.dataset.action = "refresh-workspace-overview";
     refreshBtn.setAttribute("aria-label", "Refresh Workspaces");
@@ -1514,17 +1557,6 @@ export function createWorkspaceKanbanSurface({
     refresh?.addEventListener("click", (event) => {
       event.stopPropagation();
       renderWorkspaceOverviewWindow(windowData.id, true);
-    });
-
-    // SPEC-2359 US-83: "Open a branch…" opens the remote-branch picker and asks
-    // the backend for the eligible branches (fetched off the UI thread).
-    const openBranch = parent.querySelector(
-      "[data-action='open-workspace-branch-picker']",
-    );
-    openBranch?.addEventListener("click", (event) => {
-      event.stopPropagation();
-      openWorkspaceBranchPicker?.(windowData.id);
-      send({ kind: "request_remote_start_work_branches", id: windowData.id });
     });
 
     // Keyboard navigation: ArrowUp / ArrowDown move the Workspace selection
@@ -1572,10 +1604,23 @@ export function createWorkspaceKanbanSurface({
     workspaceStateMap.delete(windowId);
   }
 
+  // SPEC-2359 US-83: store the backend-supplied eligible remote branches for a
+  // Workspace window and re-render so they appear as "Start work on a branch"
+  // rows. Scoped by window id so a stale response can't clobber another window.
+  function applyRemoteStartWorkBranches(event) {
+    const windowId = event?.id;
+    if (!windowId) return;
+    const state = workspaceStateMap.get(windowId);
+    if (!state) return;
+    state.remoteBranches = Array.isArray(event.branches) ? event.branches : [];
+    renderWorkspaceOverviewWindow(windowId, true);
+  }
+
   return {
     mount,
     renderWindows,
     deleteState,
+    applyRemoteStartWorkBranches,
     _workspacesFromProjection: workspacesFromProjection,
   };
 }
