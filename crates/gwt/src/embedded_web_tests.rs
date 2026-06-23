@@ -202,6 +202,23 @@ fn embedded_web_issue_monitor_surface_is_registered_and_wired() {
         "issue monitor surface must be reachable through frontendUnits"
     );
     assert!(
+        html.contains("surface === \"issue-monitor\""),
+        "Issue Monitor must mount through the canvas window body surface path"
+    );
+    assert!(
+        index_html().contains("data-preset=\"issue_monitor\""),
+        "Issue Monitor must be available through the same Add Window preset flow as other canvas windows"
+    );
+    let surface_js = root_js_module_source("/issue-monitor-surface.js");
+    assert!(
+        surface_js.contains("mount(body"),
+        "issue monitor surface must expose a window-body mount API"
+    );
+    assert!(
+        !surface_js.contains("position: fixed"),
+        "Issue Monitor must not render as a fixed overlay card"
+    );
+    assert!(
         html.contains("case \"issue_monitor_status\""),
         "app.js must handle issue monitor status events"
     );
@@ -3347,6 +3364,7 @@ fn embedded_web_window_surface_enum_aligns_with_js_preset_surface() {
         (WindowSurface::Work, "work"),
         (WindowSurface::AgentKanban, "agent-kanban"),
         (WindowSurface::Console, "console"),
+        (WindowSurface::IssueMonitor, "issue-monitor"),
         (WindowSurface::Mock, "mock"),
     ];
 

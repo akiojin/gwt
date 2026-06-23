@@ -771,6 +771,9 @@
         if (preset === "issue" || preset === "spec" || preset === "pr") {
           return "knowledge";
         }
+        if (preset === "issue_monitor") {
+          return "issue-monitor";
+        }
         if (preset === "index") {
           return "index";
         }
@@ -1344,6 +1347,7 @@
           logs: "Logs",
           agent_kanban: "Agent Kanban",
           issue: "Issue",
+          issue_monitor: "Issue Monitor",
           spec: "SPEC",
           workspace: "Work",
           board: "Board",
@@ -4259,6 +4263,7 @@
           "surface-board",
           "surface-logs",
           "surface-knowledge",
+          "surface-issue-monitor",
           "surface-index",
           "surface-work",
           "surface-profile",
@@ -4383,6 +4388,11 @@
           // SPEC-3064 Phase 3 (E6d): the Knowledge window mount moved to
           // the knowledge kanban surface.
           mountKnowledgeWindow(windowData, body);
+          return;
+        }
+
+        if (surface === "issue-monitor") {
+          issueMonitorSurface.mount(body, windowData);
           return;
         }
 

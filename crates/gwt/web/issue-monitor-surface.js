@@ -1,5 +1,5 @@
-// SPEC-3165 — Issue auto-improve monitor surface.
-// Owns the visible monitor card, inbox rows, and transient monitor toasts.
+// SPEC-3165 — Issue auto-improve monitor window surface.
+// Owns the monitor window body, inbox rows, and transient monitor toasts.
 export function createIssueMonitorSurface({ document, send }) {
   let status = {
     enabled: false,
@@ -10,13 +10,7 @@ export function createIssueMonitorSurface({ document, send }) {
     last_error: null,
   };
   let inboxItems = [];
-  let root = null;
-  let stateText = null;
-  let detailText = null;
-  let toggleButton = null;
-  let errorText = null;
-  let inboxRoot = null;
-  let toastRoot = null;
+  let mounted = null;
   let toastTimer = 0;
 
   function element(tagName, className, textContent) {
@@ -46,21 +40,14 @@ export function createIssueMonitorSurface({ document, send }) {
     style.id = "issue-monitor-surface-style";
     style.textContent = `
       .issue-monitor-card {
-        position: fixed;
-        right: 18px;
-        bottom: 18px;
-        z-index: 140;
         display: flex;
-        width: min(360px, calc(100vw - 36px));
-        max-height: min(520px, calc(100vh - 36px));
+        height: 100%;
+        min-height: 0;
         flex-direction: column;
         gap: 10px;
         overflow: hidden;
-        border: 1px solid rgba(148, 163, 184, 0.32);
-        border-radius: 8px;
-        background: rgba(15, 23, 42, 0.94);
+        background: #0f172a;
         color: #f8fafc;
-        box-shadow: 0 18px 52px rgba(2, 6, 23, 0.36);
         font: 12px/1.45 system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
       }
       .issue-monitor-card__header {
@@ -125,6 +112,7 @@ export function createIssueMonitorSurface({ document, send }) {
       .issue-monitor-card__inbox {
         display: flex;
         min-height: 42px;
+        flex: 1;
         flex-direction: column;
         overflow: auto;
         border-top: 1px solid rgba(148, 163, 184, 0.2);
@@ -185,21 +173,15 @@ export function createIssueMonitorSurface({ document, send }) {
     document.head.appendChild(style);
   }
 
-  function ensureRoot() {
-    if (root) {
-      return root;
-    }
-    if (!document.body) {
-      return null;
-    }
+  function buildRoot() {
     ensureStyles();
-    root = element("section", "issue-monitor-card");
+    const root = element("section", "issue-monitor-card");
     root.setAttribute("aria-label", "Issue Monitor");
 
     const header = element("div", "issue-monitor-card__header");
     header.appendChild(element("span", "issue-monitor-card__icon", "◆"));
     header.appendChild(element("div", "issue-monitor-card__title", "Issue Monitor"));
-    toggleButton = element("button", "issue-monitor-card__toggle", "Off");
+    const toggleButton = element("button", "issue-monitor-card__toggle", "Off");
     toggleButton.type = "button";
     toggleButton.addEventListener("click", () => {
       sendMonitorEvent({
@@ -210,22 +192,30 @@ export function createIssueMonitorSurface({ document, send }) {
     header.appendChild(toggleButton);
 
     const statusBlock = element("div", "issue-monitor-card__status");
-    stateText = element("div", "issue-monitor-card__state", "Disabled");
-    detailText = element("div", "issue-monitor-card__detail", "Queue 0");
+    const stateText = element("div", "issue-monitor-card__state", "Disabled");
+    const detailText = element("div", "issue-monitor-card__detail", "Queue 0");
     statusBlock.appendChild(stateText);
     statusBlock.appendChild(detailText);
 
-    errorText = element("div", "issue-monitor-card__error");
-    inboxRoot = element("div", "issue-monitor-card__inbox");
-    toastRoot = element("div", "issue-monitor-card__toast");
+    const errorText = element("div", "issue-monitor-card__error");
+    const inboxRoot = element("div", "issue-monitor-card__inbox");
+    const toastRoot = element("div", "issue-monitor-card__toast");
 
     root.appendChild(header);
     root.appendChild(statusBlock);
     root.appendChild(errorText);
     root.appendChild(inboxRoot);
     root.appendChild(toastRoot);
-    document.body.appendChild(root);
-    return root;
+
+    return {
+      root,
+      stateText,
+      detailText,
+      toggleButton,
+      errorText,
+      inboxRoot,
+      toastRoot,
+    };
   }
 
   function issueNumber(item) {
@@ -248,9 +238,10 @@ export function createIssueMonitorSurface({ document, send }) {
   }
 
   function renderInbox() {
-    if (!ensureRoot()) {
+    if (!mounted) {
       return;
     }
+    const { inboxRoot } = mounted;
     inboxRoot.replaceChildren();
     if (!inboxItems.length) {
       inboxRoot.appendChild(element("div", "issue-monitor-card__empty", "No watched issues"));
@@ -293,9 +284,10 @@ export function createIssueMonitorSurface({ document, send }) {
   }
 
   function renderStatus() {
-    if (!ensureRoot()) {
+    if (!mounted) {
       return;
     }
+    const { toggleButton, stateText, detailText, errorText } = mounted;
     const enabled = Boolean(status.enabled);
     toggleButton.dataset.enabled = enabled ? "true" : "false";
     toggleButton.textContent = enabled ? "On" : "Off";
@@ -314,6 +306,14 @@ export function createIssueMonitorSurface({ document, send }) {
     errorText.dataset.visible = lastError ? "true" : "false";
   }
 
+  function mount(body) {
+    mounted = buildRoot();
+    body.replaceChildren(mounted.root);
+    renderStatus();
+    renderInbox();
+    sendMonitorEvent({ kind: "list_issue_monitor" });
+  }
+
   function applyStatus(nextStatus) {
     status = { ...status, ...(nextStatus || {}) };
     renderStatus();
@@ -325,28 +325,24 @@ export function createIssueMonitorSurface({ document, send }) {
   }
 
   function showToast(event) {
-    if (!ensureRoot()) {
+    if (!mounted) {
       return;
     }
     const level = event?.level || "info";
     const issue = event?.issue_number ? ` #${event.issue_number}` : "";
+    const { toastRoot } = mounted;
     toastRoot.dataset.level = level;
     toastRoot.dataset.visible = "true";
     toastRoot.textContent = `${level.toUpperCase()}${issue}: ${event?.message || ""}`;
-    window.clearTimeout(toastTimer);
-    toastTimer = window.setTimeout(() => {
+    const hostWindow = document.defaultView || globalThis;
+    hostWindow.clearTimeout(toastTimer);
+    toastTimer = hostWindow.setTimeout(() => {
       toastRoot.dataset.visible = "false";
     }, 5000);
   }
 
-  ensureRoot();
-  renderStatus();
-  renderInbox();
-  window.setTimeout(() => {
-    sendMonitorEvent({ kind: "list_issue_monitor" });
-  }, 0);
-
   return Object.freeze({
+    mount,
     applyStatus,
     applyInbox,
     showToast,
