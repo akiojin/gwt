@@ -1358,6 +1358,14 @@ export function createLaunchWizardSurface({
             "Hermes options",
             "Provider override and advanced flags for the Hermes agent. Model and profile default to your hermes setup (config.yaml).",
           );
+          if (launchWizard.hermes_needs_setup) {
+            const note = createNode(
+              "div",
+              "launch-note",
+              "Hermes is not set up yet (no credentials in ~/.hermes). Run `hermes setup` (or `hermes model`) in a terminal to choose a provider and sign in; gwt will then bridge it into every worktree. You can still launch — Hermes will prompt for setup.",
+            );
+            section.appendChild(note);
+          }
           const grid = createNode("div", "launch-form-grid");
           appendHermesProviderField(
             grid,

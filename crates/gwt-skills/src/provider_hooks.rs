@@ -112,14 +112,28 @@ pub fn hermes_provider_choices(source_home: &Path) -> Vec<String> {
 /// [`hermes_provider_choices`] for callers (e.g. the launch wizard) that only
 /// have the global home, not a worktree.
 pub fn hermes_provider_choices_global() -> Vec<String> {
-    let home = match env::var_os("HERMES_HOME") {
-        Some(value) if !value.is_empty() => PathBuf::from(value),
-        _ => match home_dir() {
-            Some(home) => home.join(".hermes"),
-            None => return Vec::new(),
-        },
-    };
-    hermes_provider_choices(&home)
+    match hermes_global_home() {
+        Some(home) => hermes_provider_choices(&home),
+        None => Vec::new(),
+    }
+}
+
+/// `true` when the user's global Hermes home has resolvable credentials.
+/// Convenience wrapper over [`hermes_is_configured`] for the launch wizard's
+/// "Hermes is not set up" hint.
+pub fn hermes_is_configured_global() -> bool {
+    hermes_global_home()
+        .map(|home| hermes_is_configured(&home))
+        .unwrap_or(false)
+}
+
+/// The user's global HERMES_HOME (`$HERMES_HOME` or `~/.hermes`), without a
+/// worktree self-reference guard (the wizard reads global config only).
+fn hermes_global_home() -> Option<PathBuf> {
+    match env::var_os("HERMES_HOME") {
+        Some(value) if !value.is_empty() => Some(PathBuf::from(value)),
+        _ => home_dir().map(|home| home.join(".hermes")),
+    }
 }
 
 /// Resolve the user's real HERMES_HOME to bridge from. Honors an explicit

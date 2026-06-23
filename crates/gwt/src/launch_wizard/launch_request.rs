@@ -593,6 +593,40 @@ mod tests {
     }
 
     #[test]
+    fn hermes_needs_setup_flag_is_exposed_only_for_hermes() {
+        let mut options = sample_agent_options();
+        options.push(AgentOption {
+            id: "hermes".to_string(),
+            name: "Hermes Agent".to_string(),
+            available: true,
+            installed_version: Some("1.0.0".to_string()),
+            versions: Vec::new(),
+            custom_agent: None,
+        });
+        let mut state = LaunchWizardState::open_with(
+            context(branch("feature/gui"), "feature/gui"),
+            options,
+            Vec::new(),
+        );
+        state.mark_runtime_context_unresolved();
+        state.apply(LaunchWizardAction::UseStartMethod {
+            method: LaunchWizardStartMethodKind::ConfigureAndStart,
+        });
+        state.set_hermes_needs_setup(true);
+
+        state.apply(LaunchWizardAction::SetAgent {
+            agent_id: "hermes".to_string(),
+        });
+        assert!(state.view().hermes_needs_setup);
+
+        // Non-Hermes agents never surface the needs-setup hint.
+        state.apply(LaunchWizardAction::SetAgent {
+            agent_id: "claude".to_string(),
+        });
+        assert!(!state.view().hermes_needs_setup);
+    }
+
+    #[test]
     fn build_launch_config_preserves_linked_issue_number() {
         let mut ctx = context(branch("feature/gui"), "feature/gui");
         ctx.linked_issue_number = Some(1234);

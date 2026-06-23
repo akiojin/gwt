@@ -310,6 +310,7 @@ pub struct LaunchWizardView {
     /// SPEC-3152: render the Hermes launch-options section (provider / model /
     /// profile / advanced) in the Settings form.
     pub show_hermes_options: bool,
+    pub hermes_needs_setup: bool,
     pub hermes_provider: String,
     pub hermes_provider_options: Vec<String>,
     pub hermes_profile: String,
@@ -699,6 +700,10 @@ pub struct LaunchWizardState {
     /// in tests / when no config exists; the wizard then offers only the
     /// "use config default" and free-text "Other" provider entries.
     pub hermes_provider_choices: Vec<String>,
+    /// SPEC-3152 FR-005: `true` when the user's global Hermes home has no
+    /// resolvable credentials, so the wizard shows a non-blocking "Hermes is
+    /// not set up" hint. Populated at wizard open; never blocks launch.
+    pub hermes_needs_setup: bool,
     pub branch_name: String,
     /// SPEC-2359 US-80: optional Start Work intake prompt (always skippable).
     /// Empty string means the step was skipped or left blank.

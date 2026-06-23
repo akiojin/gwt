@@ -76,6 +76,7 @@ impl LaunchWizardState {
             hermes_max_turns: String::new(),
             hermes_safe_mode: false,
             hermes_provider_choices: Vec::new(),
+            hermes_needs_setup: false,
             branch_name: String::new(),
             initial_prompt: String::new(),
             completion: None,
@@ -1438,6 +1439,12 @@ impl LaunchWizardState {
     /// populated by the app runtime at wizard open.
     pub fn set_hermes_provider_choices(&mut self, choices: Vec<String>) {
         self.hermes_provider_choices = choices;
+    }
+
+    /// SPEC-3152 FR-005: whether the user's global Hermes home is unconfigured,
+    /// populated by the app runtime at wizard open.
+    pub fn set_hermes_needs_setup(&mut self, needs_setup: bool) {
+        self.hermes_needs_setup = needs_setup;
     }
 
     /// SPEC-3152: persist a Hermes free-text launch option by field key.
