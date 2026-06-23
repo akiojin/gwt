@@ -1718,9 +1718,10 @@
           zoom: viewport.zoom,
         });
         viewportDomApplied = true;
-        // SPEC-2008 camera-focus / FR-094: every viewport change repositions
-        // the Fleet Minimap camera frame so it tracks pan / zoom / framing.
-        fleetMinimap?.updateCameraFrame();
+        // SPEC-2008 camera-focus / FR-094: every viewport change re-centres the
+        // Fleet Minimap radar — the camera stays fixed at the minimap centre and
+        // the world (cells) slides under it, mirroring the canvas stage.
+        fleetMinimap?.update();
       }
 
       // Issue #2698 PR 2 (B1) — throttle the `update_viewport` WS

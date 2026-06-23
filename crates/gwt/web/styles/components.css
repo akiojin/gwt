@@ -5854,6 +5854,17 @@ button.workspace-board-ref:focus-visible {
   opacity: 0.45;
 }
 
+/* Centered-radar world layer: holds the window cells at absolute world*scale
+   positions. Panning translates ONLY this layer (one transform), mirroring the
+   canvas `#canvas-stage`, while the camera frame stays fixed at the centre. */
+.fleet-minimap__world {
+  position: absolute;
+  top: 0;
+  left: 0;
+  transform-origin: 0 0;
+  will-change: transform;
+}
+
 /* Each window, scaled to its world position. A plain rounded chip whose
    accent follows the agent color via the shared data-agent-color map
    (--current-agent). */
@@ -5933,6 +5944,44 @@ button.workspace-board-ref:focus-visible {
   border-radius: 2px;
   background: color-mix(in oklab, var(--color-focus-ring) 12%, transparent);
   box-shadow: 0 0 6px 0 color-mix(in oklab, var(--color-focus-ring) 40%, transparent);
+}
+
+/* Radar zoom controls (+ / −). Tiny stacked buttons in the top-right corner so
+   the operator can widen the radar to the whole fleet or tighten it. Kept
+   minimal so the glance widget stays uncluttered. */
+.fleet-minimap__zoom {
+  position: absolute;
+  top: 4px;
+  right: 4px;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  z-index: 1;
+}
+
+.fleet-minimap__zoom-button {
+  width: 16px;
+  height: 16px;
+  padding: 0;
+  display: grid;
+  place-items: center;
+  border: 1px solid var(--color-border);
+  border-radius: 3px;
+  background: color-mix(in oklab, var(--color-surface-elevated) 86%, transparent);
+  color: var(--color-text-muted);
+  font-size: 12px;
+  line-height: 1;
+  cursor: pointer;
+}
+
+.fleet-minimap__zoom-button:hover {
+  color: var(--color-text-strong);
+  border-color: var(--color-focus-ring);
+}
+
+.fleet-minimap__zoom-button:focus-visible {
+  outline: 1px solid var(--color-focus-ring);
+  outline-offset: 1px;
 }
 
 @media (prefers-reduced-motion: reduce) {
