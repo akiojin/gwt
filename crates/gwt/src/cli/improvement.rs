@@ -117,7 +117,7 @@ pub fn run<E: CliEnv>(
     out: &mut String,
 ) -> Result<i32, SpecOpsError> {
     let code = match command {
-        ImprovementCommand::Capture(command) => capture(env.repo_path(), command, out)?,
+        ImprovementCommand::Capture(command) => capture(env, command, out)?,
         ImprovementCommand::List(command) => list(env.repo_path(), command, out)?,
         ImprovementCommand::Dismiss(command) => dismiss(env.repo_path(), command, out)?,
         ImprovementCommand::LinkIssue(command) => link_issue(env.repo_path(), command, out)?,
@@ -182,8 +182,8 @@ fn is_contract_artifact(target_artifact: &str) -> bool {
     )
 }
 
-fn capture(
-    repo_root: &Path,
+fn capture<E: CliEnv>(
+    env: &mut E,
     command: ImprovementCaptureCommand,
     out: &mut String,
 ) -> Result<i32, SpecOpsError> {
@@ -230,13 +230,14 @@ fn capture(
 
     let now = Utc::now().to_rfc3339();
     let sanitized_summary = sanitize_text(&command.summary);
+    let repo_root = env.repo_path().to_path_buf();
     let dedupe_key = command
         .dedupe_key
         .as_ref()
         .filter(|value| !value.trim().is_empty())
         .cloned()
         .unwrap_or_else(|| default_dedupe_key(&command, &sanitized_summary));
-    let mut store = load_store(repo_root)?;
+    let mut store = load_store(&repo_root)?;
     let mut updated_existing = false;
     let candidate = if let Some(candidate) = store
         .candidates
@@ -273,7 +274,10 @@ fn capture(
         store.candidates.push(candidate.clone());
         candidate
     };
-    save_store(repo_root, &store)?;
+    save_store(&repo_root, &store)?;
+    if should_publish_capture_status(&candidate) {
+        post_candidate_captured_status(env, &candidate, updated_existing)?;
+    }
     write_json(
         out,
         json!({
@@ -439,6 +443,7 @@ fn promote_issue<E: CliEnv>(
     store.candidates[index].updated_at = now;
     store.candidates[index].linked_issue = Some(linked);
     save_store(&repo_root, &store)?;
+    post_candidate_promoted_status(&mut *env, &candidate, snapshot.number.0, &issue_url)?;
     write_json(
         out,
         json!({
@@ -450,6 +455,65 @@ fn promote_issue<E: CliEnv>(
         }),
     )?;
     Ok(0)
+}
+
+fn should_publish_capture_status(candidate: &ImprovementCandidate) -> bool {
+    candidate.confidence == "high" && candidate.classification == "gwt-caused"
+}
+
+fn post_candidate_captured_status<E: CliEnv>(
+    env: &mut E,
+    candidate: &ImprovementCandidate,
+    updated_existing: bool,
+) -> Result<(), SpecOpsError> {
+    let status = if updated_existing {
+        "updated"
+    } else {
+        "captured"
+    };
+    let body = format!(
+        "Current state: Improvement Candidate {id} was {status} with high confidence for `{target}`.\n\nReason: {summary}\n\nNext: Review it in Improvement Inbox, promote it to an upstream gwt Issue, or dismiss it with a reason.",
+        id = candidate.id,
+        target = candidate.target_artifact,
+        summary = candidate.sanitized_summary,
+    );
+    post_improvement_board_status(env, body)
+}
+
+fn post_candidate_promoted_status<E: CliEnv>(
+    env: &mut E,
+    candidate: &ImprovementCandidate,
+    issue_number: u64,
+    issue_url: &str,
+) -> Result<(), SpecOpsError> {
+    let body = format!(
+        "Current state: Improvement Candidate {id} was promoted to akiojin/gwt Issue #{issue_number}.\n\nReason: {summary}\n\nNext: Track the follow-up in {issue_url}.",
+        id = candidate.id,
+        summary = candidate.sanitized_summary,
+    );
+    post_improvement_board_status(env, body)
+}
+
+fn post_improvement_board_status<E: CliEnv>(env: &mut E, body: String) -> Result<(), SpecOpsError> {
+    let mut board_out = String::new();
+    super::board::run(
+        env,
+        super::BoardCommand::Post(Box::new(super::BoardPostCommand {
+            kind: "status".to_string(),
+            body: Some(body),
+            file: None,
+            title: Some("Improvement Candidate".to_string()),
+            title_summary: Some("Improvement Candidate".to_string()),
+            parent: None,
+            topics: vec!["improvement".to_string()],
+            owners: vec!["SPEC-3164".to_string()],
+            targets: Vec::new(),
+            mentions: Vec::new(),
+            broadcast: true,
+        })),
+        &mut board_out,
+    )?;
+    Ok(())
 }
 
 fn issue_title(candidate: &ImprovementCandidate) -> String {
@@ -644,10 +708,174 @@ mod tests {
     use serde_json::Value;
 
     use super::*;
-    use crate::cli::{run_collect, CliCommand, TestEnv};
+    use crate::cli::{run_collect, BoardCommand, CliCommand, TestEnv};
 
     fn parse_output(output: &str) -> Value {
         serde_json::from_str(output.trim()).expect("JSON output")
+    }
+
+    fn board_entries_json(env: &mut TestEnv) -> Value {
+        let (_, board_out) = run_collect(
+            env,
+            CliCommand::Board(BoardCommand::Show {
+                json: true,
+                workspace: None,
+                all: true,
+            }),
+        )
+        .expect("board show");
+        serde_json::from_str(&board_out).expect("board JSON")
+    }
+
+    fn board_bodies(env: &mut TestEnv) -> Vec<String> {
+        board_entries_json(env)["board"]["entries"]
+            .as_array()
+            .expect("board entries")
+            .iter()
+            .map(|entry| {
+                entry["body"]
+                    .as_str()
+                    .expect("board entry body")
+                    .to_string()
+            })
+            .collect()
+    }
+
+    #[test]
+    fn high_confidence_capture_posts_board_status() {
+        let project = tempfile::tempdir().expect("project");
+        let mut env = TestEnv::new(project.path().join("cache"));
+        env.repo_path = project.path().join("target-project");
+        std::fs::create_dir_all(&env.repo_path).expect("repo path");
+
+        let (capture_code, capture_out) = run_collect(
+            &mut env,
+            CliCommand::Improvement(ImprovementCommand::Capture(ImprovementCaptureCommand {
+                source: "agent-failure".to_string(),
+                target_artifact: "skill".to_string(),
+                classification: "gwt-caused".to_string(),
+                confidence: "high".to_string(),
+                summary: "Skill loop missed a required update".to_string(),
+                details: None,
+                evidence_digest: Some("Stop hook caught the missing skill update.".to_string()),
+                dedupe_key: Some("skill:missed-required-update".to_string()),
+                local_evidence: Vec::new(),
+            })),
+        )
+        .expect("capture");
+
+        assert_eq!(capture_code, 0);
+        let id = parse_output(&capture_out)["id"]
+            .as_str()
+            .expect("candidate id")
+            .to_string();
+        let bodies = board_bodies(&mut env);
+        assert_eq!(
+            bodies.len(),
+            1,
+            "capture should post exactly one board entry"
+        );
+        assert!(
+            bodies[0].contains(&id),
+            "board entry should mention candidate id"
+        );
+        assert!(
+            bodies[0].contains("Skill loop missed a required update"),
+            "board entry should include sanitized summary: {}",
+            bodies[0]
+        );
+        assert!(
+            bodies[0].contains("Improvement Candidate"),
+            "board entry should identify the improvement candidate: {}",
+            bodies[0]
+        );
+    }
+
+    #[test]
+    fn low_confidence_capture_does_not_post_board_status() {
+        let project = tempfile::tempdir().expect("project");
+        let mut env = TestEnv::new(project.path().join("cache"));
+        env.repo_path = project.path().join("target-project");
+        std::fs::create_dir_all(&env.repo_path).expect("repo path");
+
+        run_collect(
+            &mut env,
+            CliCommand::Improvement(ImprovementCommand::Capture(ImprovementCaptureCommand {
+                source: "verification".to_string(),
+                target_artifact: "verification".to_string(),
+                classification: "gwt-caused".to_string(),
+                confidence: "low".to_string(),
+                summary: "Weak verification signal".to_string(),
+                details: None,
+                evidence_digest: None,
+                dedupe_key: Some("verification:weak-signal-board".to_string()),
+                local_evidence: Vec::new(),
+            })),
+        )
+        .expect("capture");
+
+        let bodies = board_bodies(&mut env);
+        assert!(
+            bodies.is_empty(),
+            "low-confidence capture should stay local without a board post: {bodies:?}"
+        );
+    }
+
+    #[test]
+    fn promote_issue_posts_board_status_with_upstream_issue() {
+        let project = tempfile::tempdir().expect("project");
+        let mut env = TestEnv::new(project.path().join("cache"));
+        env.repo_path = project.path().join("target-project");
+        std::fs::create_dir_all(&env.repo_path).expect("repo path");
+
+        let (_, capture_out) = run_collect(
+            &mut env,
+            CliCommand::Improvement(ImprovementCommand::Capture(ImprovementCaptureCommand {
+                source: "agent-failure".to_string(),
+                target_artifact: "coordination".to_string(),
+                classification: "gwt-caused".to_string(),
+                confidence: "high".to_string(),
+                summary: "Board guidance drift".to_string(),
+                details: None,
+                evidence_digest: Some("Agent missed required Board update.".to_string()),
+                dedupe_key: Some("coordination:board-guidance-drift-post".to_string()),
+                local_evidence: Vec::new(),
+            })),
+        )
+        .expect("capture");
+        let id = parse_output(&capture_out)["id"]
+            .as_str()
+            .expect("candidate id")
+            .to_string();
+
+        run_collect(
+            &mut env,
+            CliCommand::Improvement(ImprovementCommand::PromoteIssue(
+                ImprovementPromoteIssueCommand {
+                    id: id.clone(),
+                    force: false,
+                    labels: Vec::new(),
+                },
+            )),
+        )
+        .expect("promote");
+
+        let bodies = board_bodies(&mut env);
+        assert_eq!(
+            bodies.len(),
+            2,
+            "capture and promote should each post a board status"
+        );
+        let promoted = bodies.last().expect("promoted board body");
+        assert!(promoted.contains(&id), "promoted body should include id");
+        assert!(
+            promoted.contains("akiojin/gwt Issue #1"),
+            "promoted body should include upstream Issue: {promoted}"
+        );
+        assert!(
+            promoted.contains("Board guidance drift"),
+            "promoted body should include sanitized summary: {promoted}"
+        );
     }
 
     #[test]
