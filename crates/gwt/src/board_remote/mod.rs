@@ -15,3 +15,6 @@ pub mod signin;
 pub mod slack;
 pub mod teams;
 pub mod token_store;
+
+#[cfg(test)]
+mod e2e_separation_tests;

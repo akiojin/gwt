@@ -7193,6 +7193,19 @@ Context: minimap centered-radar で .fleet-minimap__world に静的な transform
 Learning: このテストは frontend_styles_bundle() 全体を substring 検索するため、CSS 宣言だけでなくコメント内の同リテラル文字列も失敗させる。transform の layer hint は applyViewport が motion 中だけ JS で opt-in し 300ms で解除する設計ポリシー（恒久 pin 禁止）。
 Future Action: CSS で transform の layer hint を恒久 pin しない。コメントでも当該リテラル文字列を書かず言い換える。GPU レイヤが要る要素は JS の motion-scoped opt-in に倣う。
 
+## 2026-06-23 — Board settings are global-only; per-project config belongs in committed .gwt/work
+
+Type: project
+Context: Board remote(Slack/Teams)が複数プロジェクトを同一チャンネルに混在させる問題(SPEC-2963)の改善設計。
+Learning: gwt の Settings は ~/.gwt/config.toml のグローバルのみで per-project config realm が無い(settings.rs:96)。per-project の committed データ層は <repo>/.gwt/work/(paths.rs:387, merge=union)に既存(board-remote-roots.jsonl 等)。remote provider は provider()/current_kind() がグローバル設定を repo 引数なしで読み、書き込みも読み戻し(history_channels の channel 和集合)も repo 次元が無いため全プロジェクトが混在。
+Future Action: Board の per-project 設定は <repo>/.gwt/work/board.toml(committed)、provider() を provider_for(worktree_root) に repo-aware 化。グローバル config は OAuth client_id/tenant_id とフォールバック既定のみ、token は tenant 単位 machine-local。SPEC-2963 を再オープンし per-project isolation フェーズで実装。
+
+## 2026-06-24 — per-project Board config UI belongs in the Board window, not Settings
+
+Type: feedback
+Context: SPEC-2963 per-project Board 分離の GUI(T11-6)。最初 Settings に専用 Board タブを作ったがユーザーが却下。
+Learning: per-project(プロジェクト単位)の設定は、グローバルな Settings ウィンドウではなく、その対象を表示する場所(Board ウィンドウ)に置くべき。Board ウィンドウヘッダの宛先チップ(provider 色ドット+宛先+⚙ギア)にすると、各プロジェクトの宛先が常時可視化され分離の確認も兼ねる。グローバルな OAuth アプリ設定/既定だけ Settings に残す。設定ボタンはフィルタボタンと視覚的に明確に差別化する(ピル+ギア+色ドット)。
+Future Action: per-project の GUI 設定は対象の文脈(その window)に配置する。global=Settings / per-project=対象 window、というスコープ分離を既定にする。Board: board-logs-surface.js の destination chip + popover、backend は board_provider::routing_for/update_project_board_config を再利用。
 ## 2026-06-23 — OpenCode auth は global＝wizard 整合に credential bridge 不要、serde rename は実機 E2E で捕捉
 
 Type: lesson
