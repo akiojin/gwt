@@ -44,6 +44,13 @@ export function createLaunchWizardSurface({
       const wizardCancelButton = document.getElementById("wizard-cancel-button");
       const wizardSubmitButton = document.getElementById("wizard-submit-button");
 
+      // SPEC-2359 US-83: the launch-facing wizard abstracts the remote/local
+      // distinction — show plain branch names ("feature-foo") by stripping the
+      // `origin/` prefix. Display-only: the action payload keeps the raw name
+      // (the backend `select_existing_branch` normalizes either form).
+      const displayBranchName = (name) =>
+        typeof name === "string" ? name.replace(/^origin\//, "") : name;
+
       let launchWizard = null;
       let launchWizardOpenError = null;
       let launchWizardOpening = null;
@@ -770,7 +777,9 @@ export function createLaunchWizardSurface({
         wizardMeta.textContent = launchWizard.show_branch_controls === false
           ? "Work launch"
           : `Selected branch · ${
-            launchWizard.selected_branch_name || launchWizard.branch_name || "Work"
+            displayBranchName(
+              launchWizard.selected_branch_name || launchWizard.branch_name || "Work",
+            )
           }`;
         wizardSubmitButton.textContent = isLaunchSubmitPending
           ? "Launching..."
@@ -1056,7 +1065,9 @@ export function createLaunchWizardSurface({
             const button = createNode("button", "start-method-button");
             button.type = "button";
             button.setAttribute("data-existing-branch", candidate);
-            button.appendChild(createNode("div", "start-method-title", candidate));
+            button.appendChild(
+              createNode("div", "start-method-title", displayBranchName(candidate)),
+            );
             button.appendChild(
               createNode(
                 "div",

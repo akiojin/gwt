@@ -4032,6 +4032,18 @@ body {
   letter-spacing: var(--tracking-mono);
 }
 
+/* SPEC-2359 US-83: the "remote" chip on a remote-only branch is a subtle hint,
+   not a status badge — neutral muted tone, distinct from the codex accent so it
+   reads as "this branch is only on the remote" without re-introducing noise. */
+.branch-scope.remote-only {
+  background: color-mix(in oklab, var(--color-text-muted) 14%, transparent);
+  color: var(--color-text-muted);
+}
+
+.branch-scope[hidden] {
+  display: none;
+}
+
 .branch-cleanup-badge {
   padding: 4px 8px;
   border-radius: var(--radius-pill);
