@@ -5856,13 +5856,15 @@ button.workspace-board-ref:focus-visible {
 
 /* Centered-radar world layer: holds the window cells at absolute world*scale
    positions. Panning translates ONLY this layer (one transform), mirroring the
-   canvas `#canvas-stage`, while the camera frame stays fixed at the centre. */
+   canvas `#canvas-stage`, while the camera frame stays fixed at the centre.
+   The transform layer hint is intentionally NOT pinned here (project policy
+   keeps that hint opt-in during motion only); the world layer is a tiny element
+   with a handful of cells, so a permanent GPU layer is not worth the memory. */
 .fleet-minimap__world {
   position: absolute;
   top: 0;
   left: 0;
   transform-origin: 0 0;
-  will-change: transform;
 }
 
 /* Each window, scaled to its world position. A plain rounded chip whose
