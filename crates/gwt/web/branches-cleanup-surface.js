@@ -358,6 +358,30 @@ export function createBranchesCleanupSurface({
         );
         fields.launchButton.title = `Launch Agent on ${entry.name}`;
         fields.launchButton.setAttribute("aria-label", `Launch Agent on ${entry.name}`);
+
+        // SPEC-2359 US-83 / FR-443 / FR-444: refine the remote-row launch
+        // affordance from the backend-supplied eligibility. A fresh origin
+        // branch becomes a "Start Work / Open" source (continue on the branch
+        // itself); a protected base or non-origin remote is not offered. The
+        // action reuses the existing open_launch_wizard message; the wizard
+        // opens in continue-on-branch mode so launching materializes a worktree
+        // tracking origin/<branch> without minting a new work/* branch.
+        const startWorkEligibility = entry.start_work_eligibility;
+        if (entry.scope === "remote" && startWorkEligibility === "start_work") {
+          fields.launchButton.hidden = false;
+          fields.launchButton.textContent = "Start Work";
+          fields.launchButton.title =
+            `Start work on ${entry.name} (creates a worktree tracking it)`;
+          fields.launchButton.setAttribute(
+            "aria-label",
+            `Start work on ${entry.name}`,
+          );
+        } else if (entry.scope === "remote" && startWorkEligibility === "hidden") {
+          fields.launchButton.hidden = true;
+        } else {
+          fields.launchButton.hidden = false;
+          fields.launchButton.textContent = "Launch";
+        }
       }
 
       function setBranchListPlaceholder(list, text) {
