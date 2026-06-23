@@ -5696,6 +5696,112 @@ mod tests {
     }
 
     #[test]
+    fn resolve_launch_worktree_continues_existing_remote_branch_without_new_work_branch() {
+        // SPEC-2359 US-83 / FR-440 / FR-441 / SC-300: starting work from an
+        // existing origin branch must materialize a worktree on a local branch
+        // that tracks origin/<X> ("continue on the branch itself"), and must NOT
+        // mint a new work/* branch. This locks the routing contract that both
+        // entry points (Branches row + Launch Wizard picker) reuse.
+        let temp = tempdir().expect("tempdir");
+        let repo = temp.path().join("repo");
+        init_git_clone_with_origin(&repo);
+
+        // Publish an existing remote branch, then drop the local copy so only
+        // origin/feature-foo remains (the "colleague pushed a branch" case).
+        for args in [
+            vec!["checkout", "-q", "-b", "feature-foo"],
+            vec!["commit", "-q", "--allow-empty", "-m", "remote work"],
+            vec!["push", "-q", "origin", "feature-foo"],
+            vec!["checkout", "-q", "develop"],
+            vec!["branch", "-D", "feature-foo"],
+            vec!["fetch", "-q", "origin", "--prune"],
+        ] {
+            let status = gwt_core::process::hidden_command("git")
+                .args(&args)
+                .current_dir(&repo)
+                .status()
+                .expect("git fixture step");
+            assert!(status.success(), "git {:?} failed", args);
+        }
+
+        // Pre-conditions: no local feature-foo, origin/feature-foo present.
+        let local = gwt_core::process::hidden_command("git")
+            .args(["show-ref", "--verify", "--quiet", "refs/heads/feature-foo"])
+            .current_dir(&repo)
+            .status()
+            .expect("probe local branch");
+        assert_eq!(local.code(), Some(1), "local feature-foo must be absent");
+        let remote = gwt_core::process::hidden_command("git")
+            .args([
+                "show-ref",
+                "--verify",
+                "--quiet",
+                "refs/remotes/origin/feature-foo",
+            ])
+            .current_dir(&repo)
+            .status()
+            .expect("probe remote branch");
+        assert!(remote.success(), "origin/feature-foo must exist");
+
+        let mut working_dir = None;
+        let mut env_vars = HashMap::new();
+        let mut base_branch = None;
+        super::resolve_launch_worktree_request(
+            &repo,
+            Some("feature-foo"),
+            &mut base_branch,
+            &mut working_dir,
+            &mut env_vars,
+        )
+        .expect("continue existing remote branch");
+        let worktree_dir = working_dir.expect("worktree dir for existing remote branch");
+        assert!(worktree_dir.exists(), "worktree must be materialized");
+
+        // The worktree HEAD is the remote branch itself, not a new work/* branch.
+        let current = gwt_core::process::hidden_command("git")
+            .args(["branch", "--show-current"])
+            .current_dir(&worktree_dir)
+            .output()
+            .expect("current branch in worktree");
+        assert!(current.status.success(), "git branch --show-current failed");
+        assert_eq!(
+            String::from_utf8_lossy(&current.stdout).trim(),
+            "feature-foo"
+        );
+
+        // Local feature-foo tracks origin/feature-foo.
+        let upstream = gwt_core::process::hidden_command("git")
+            .args([
+                "rev-parse",
+                "--abbrev-ref",
+                "--symbolic-full-name",
+                "feature-foo@{upstream}",
+            ])
+            .current_dir(&worktree_dir)
+            .output()
+            .expect("upstream of feature-foo");
+        assert!(upstream.status.success(), "no upstream configured");
+        assert_eq!(
+            String::from_utf8_lossy(&upstream.stdout).trim(),
+            "origin/feature-foo"
+        );
+
+        // No work/* branch was created anywhere.
+        let work_branches = gwt_core::process::hidden_command("git")
+            .args(["branch", "--list", "work/*"])
+            .current_dir(&repo)
+            .output()
+            .expect("list work branches");
+        assert!(work_branches.status.success(), "git branch --list failed");
+        assert!(
+            String::from_utf8_lossy(&work_branches.stdout)
+                .trim()
+                .is_empty(),
+            "Start Work from an existing remote branch must not mint a work/* branch"
+        );
+    }
+
+    #[test]
     fn resolve_launch_worktree_uses_worktree_list_when_branch_probe_would_fail() {
         let temp = tempdir().expect("tempdir");
         let repo = temp.path().join("repo");

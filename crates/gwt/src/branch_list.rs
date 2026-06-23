@@ -398,6 +398,78 @@ fn local_branch_for_remote_ref(name: &str) -> Option<&str> {
     name.split_once('/').map(|(_, branch_name)| branch_name)
 }
 
+/// SPEC-2359 US-83 / FR-443: per-remote-row eligibility for "Start Work / Open"
+/// from an existing branch. Pure classification over already-assembled branch
+/// entries — performs no git spawn, so it is safe to call during view assembly.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RemoteStartWorkEligibility {
+    /// Offer "Start Work / Open": an origin branch with no local counterpart and
+    /// no live session — launching materializes a worktree on the branch itself.
+    StartWork,
+    /// The branch already exists locally or has a live Work; surface focus /
+    /// Resume instead of minting a second Work (FR-332 / US-79).
+    ResumeExisting,
+    /// Not offered as a Start Work source: a non-origin remote (FR-447), a
+    /// protected base branch (main/master/develop), or a non-branch ref such as
+    /// `origin/HEAD`.
+    Hidden,
+}
+
+/// Classify each remote-tracking entry in `entries` for the "Start Work from an
+/// existing remote branch" entry points (SPEC-2359 US-83 / FR-443).
+///
+/// Only `origin` remote branches are eligible. Protected base branches and refs
+/// without a branch name are `Hidden`. A branch that already has a local
+/// counterpart or a live session is `ResumeExisting`, so the UI surfaces
+/// focus/Resume rather than a duplicate Work. The result is keyed by the remote
+/// entry name (e.g. `"origin/feature-foo"`).
+pub fn remote_start_work_eligibility(
+    entries: &[BranchListEntry],
+    active_session_branches: &HashSet<String>,
+) -> Vec<(String, RemoteStartWorkEligibility)> {
+    let local_branch_names: HashSet<&str> = entries
+        .iter()
+        .filter(|entry| entry.scope == BranchScope::Local)
+        .map(|entry| entry.name.as_str())
+        .collect();
+    entries
+        .iter()
+        .filter(|entry| entry.scope == BranchScope::Remote)
+        .map(|entry| {
+            let eligibility = classify_remote_start_work_eligibility(
+                &entry.name,
+                &local_branch_names,
+                active_session_branches,
+            );
+            (entry.name.clone(), eligibility)
+        })
+        .collect()
+}
+
+fn classify_remote_start_work_eligibility(
+    remote_entry_name: &str,
+    local_branch_names: &HashSet<&str>,
+    active_session_branches: &HashSet<String>,
+) -> RemoteStartWorkEligibility {
+    let Some((remote, branch_name)) = remote_entry_name.split_once('/') else {
+        return RemoteStartWorkEligibility::Hidden;
+    };
+    // origin only — fork/upstream remotes are Out of Scope (FR-447).
+    if remote != "origin" || branch_name.is_empty() || branch_name == "HEAD" {
+        return RemoteStartWorkEligibility::Hidden;
+    }
+    // Never start work directly on a protected base branch (FR-443).
+    if gwt_git::is_protected_branch(remote_entry_name) {
+        return RemoteStartWorkEligibility::Hidden;
+    }
+    // Already materialized locally or running → focus/Resume, not a 2nd Work.
+    if local_branch_names.contains(branch_name) || active_session_branches.contains(branch_name) {
+        return RemoteStartWorkEligibility::ResumeExisting;
+    }
+    RemoteStartWorkEligibility::StartWork
+}
+
 fn remote_base_branch_ranks(branches: &[gwt_git::Branch]) -> RemoteBaseBranchRanks {
     branches
         .iter()
@@ -544,6 +616,59 @@ mod tests {
             remote_branch_name: Some(remote_branch_name.to_string()),
             ..make_branch(name, false, false, last_commit_date)
         }
+    }
+
+    #[test]
+    fn remote_start_work_eligibility_classifies_origin_protected_and_existing() {
+        // SPEC-2359 US-83 / FR-443 / SC-302: only fresh origin branches are
+        // "Start Work / Open" sources. Protected base and non-origin remotes are
+        // Hidden; a branch with a local counterpart or a live session resumes.
+        let entries = adapt_branch_inventory(vec![
+            make_branch("feature/alpha", true, false, None),
+            gwt_git::Branch {
+                upstream: Some("origin/feature/alpha".to_string()),
+                ..make_branch("origin/feature/alpha", false, false, None)
+            },
+            make_branch("origin/feature/fresh", false, false, None),
+            make_branch("origin/develop", false, false, None),
+            make_branch("origin/feature/busy", false, false, None),
+            make_branch("upstream/feature/fork", false, false, None),
+        ]);
+        let mut active = HashSet::new();
+        active.insert("feature/busy".to_string());
+
+        let eligibility: HashMap<String, RemoteStartWorkEligibility> =
+            remote_start_work_eligibility(&entries, &active)
+                .into_iter()
+                .collect();
+
+        assert_eq!(
+            eligibility.get("origin/feature/fresh"),
+            Some(&RemoteStartWorkEligibility::StartWork),
+            "a fresh origin branch with no local copy is a Start Work source"
+        );
+        assert_eq!(
+            eligibility.get("origin/feature/alpha"),
+            Some(&RemoteStartWorkEligibility::ResumeExisting),
+            "an origin branch with a local counterpart resumes instead"
+        );
+        assert_eq!(
+            eligibility.get("origin/feature/busy"),
+            Some(&RemoteStartWorkEligibility::ResumeExisting),
+            "an origin branch with a live session resumes instead"
+        );
+        assert_eq!(
+            eligibility.get("origin/develop"),
+            Some(&RemoteStartWorkEligibility::Hidden),
+            "a protected base branch is never a Start Work source"
+        );
+        assert_eq!(
+            eligibility.get("upstream/feature/fork"),
+            Some(&RemoteStartWorkEligibility::Hidden),
+            "non-origin remotes are out of scope"
+        );
+        // Local-only rows are never offered as remote Start Work sources.
+        assert!(!eligibility.contains_key("feature/alpha"));
     }
 
     #[test]
