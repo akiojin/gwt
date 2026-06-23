@@ -3404,10 +3404,10 @@ test("agent-state telemetry never makes readable workspace windows translucent (
 test("non-terminal surface bodies still follow the overall theme (FR-013 boundary)", () => {
   // The Dark fix is scoped to .surface-terminal.  Other surfaces (Board /
   // Logs / File Tree / Branches / Knowledge / Workspace / Agent Kanban /
-  // Console / Mock / Profile) must keep tracking the active theme via --color-surface so tabbed windows
+  // Console / Mock / Profile / Improvement) must keep tracking the active theme via --color-surface so tabbed windows
   // still flip body color when a non-terminal tab is selected.
   const otherSurfaceRule =
-    /(?:\.surface-(?:file-tree|agent-kanban|branches|board|logs|knowledge|index|work|console|mock|profile)\s+\.window-body,?\s*)+\{[^}]*background:\s*var\(\s*--color-surface\s*\)/;
+    /(?:\.surface-(?:file-tree|agent-kanban|branches|board|logs|knowledge|index|work|console|mock|profile|improvement)\s+\.window-body,?\s*)+\{[^}]*background:\s*var\(\s*--color-surface\s*\)/;
   assert.match(
     inlineStyle,
     otherSurfaceRule,
@@ -3431,6 +3431,7 @@ test("mountWindowBody clears every known surface class before applying the activ
     "surface-index",
     "surface-work",
     "surface-profile",
+    "surface-improvement",
     "surface-console",
     "surface-mock",
   ]) {
@@ -3452,6 +3453,7 @@ test("every readable non-terminal surface participates in the opaque window chro
     "index",
     "work",
     "profile",
+    "improvement",
     "console",
     "mock",
   ]) {

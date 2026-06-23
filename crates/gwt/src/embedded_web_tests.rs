@@ -3028,6 +3028,7 @@ fn embedded_web_panel_surfaces_share_opaque_window_chrome_and_body() {
         ".surface-knowledge",
         ".surface-mock",
         ".surface-profile",
+        ".surface-improvement",
     ];
 
     for (anchor, role) in [

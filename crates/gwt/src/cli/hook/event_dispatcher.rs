@@ -161,6 +161,18 @@ fn handle_stop(
             return Ok(output);
         }
     }
+    let improvement_stop = run_value(event, "improvement-stop-check", || {
+        workflow_policy::evaluate_improvement_stop_guard(
+            worktree_root,
+            super::envelope::stop_hook_active_from(input),
+        )
+    });
+    if matches!(improvement_stop, HookOutput::StopBlock { .. }) {
+        run_step(event, "blocked-stop-runtime-state", || {
+            crate::daemon_runtime::handle_blocked_stop_runtime_state(input)
+        })?;
+        return Ok(improvement_stop);
+    }
 
     run_step(event, "completed-stop", || {
         super::runtime_state::record_completed_stop_from_env()

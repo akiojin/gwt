@@ -18,6 +18,7 @@
         resolveDragReleasePoint,
       } from "/window-docking.js";
       import { createWorkspaceKanbanSurface as createWorkspaceOverviewSurface } from "/workspace-kanban-surface.js";
+      import { createImprovementInboxSurface } from "/improvement-inbox-surface.js";
       import {
         createAgentKanbanPendingPlacementController,
         createAgentKanbanSurface,
@@ -411,6 +412,8 @@
         active_tab_id: null,
         recent_projects: [],
       };
+      let improvementCandidates = [];
+      let improvementCandidatesRevision = 0;
       let renderedProjectTabsKey = "";
       let renderedWorkspaceWindowsKey = "";
       let renderedAppVersionLabel = null;
@@ -475,6 +478,10 @@
         }
         appendRenderKeyPart(parts, "windows");
         appendRenderKeyPart(parts, windows.length);
+        if (windows.some((windowData) => presetSurface(windowData?.preset) === "improvement")) {
+          appendRenderKeyPart(parts, "improvement_candidates_revision");
+          appendRenderKeyPart(parts, improvementCandidatesRevision);
+        }
         for (const windowData of windows) {
           const geometry = windowData?.geometry || {};
           appendRenderKeyPart(parts, "id");
@@ -775,6 +782,9 @@
         }
         if (preset === "work" || preset === "workspace") {
           return "work";
+        }
+        if (preset === "improvement" || preset === "improvements") {
+          return "improvement";
         }
         if (preset === "console") {
           return "console";
@@ -4119,6 +4129,10 @@
           openBranchCleanupModal: (...a) => openBranchCleanupModal(...a),
         },
       });
+      const improvementInboxSurface = createImprovementInboxSurface({
+        createNode,
+        send,
+      });
 
       // SPEC-3064 Phase 3 (E5): the Launch Wizard surface (wizard state,
       // interaction guard, field builders, state transitions,
@@ -4255,6 +4269,7 @@
           "surface-knowledge",
           "surface-index",
           "surface-work",
+          "surface-improvement",
           "surface-profile",
           "surface-console",
           "surface-mock",
@@ -4350,6 +4365,14 @@
           workspaceOverviewSurface.mount(body, windowData, {
             focusWindowLocally,
             sendFocus: (id) => socketTransport.send({ kind: "focus_window", id }),
+          });
+          return;
+        }
+
+        if (surface === "improvement") {
+          improvementInboxSurface.mount(body, {
+            ...windowData,
+            improvement_candidates: improvementCandidates,
           });
           return;
         }
@@ -5083,6 +5106,18 @@
           // in the project shell surface.
           case "window_list":
             applyWindowListEvent(event);
+            break;
+          case "improvement_candidates":
+            improvementCandidates = Array.isArray(event.candidates) ? event.candidates : [];
+            improvementCandidatesRevision += 1;
+            renderWorkspace(activeWorkspace() || emptyWorkspace());
+            break;
+          case "improvement_action_result":
+            // Candidate list refresh is delivered as a separate
+            // improvement_candidates snapshot; no extra UI state is needed here.
+            break;
+          case "improvement_action_error":
+            window.alert(`Improvement action error: ${event.message}`);
             break;
           case "provider_usage":
             applyProviderUsageUi({

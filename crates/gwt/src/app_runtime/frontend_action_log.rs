@@ -628,6 +628,12 @@ pub(super) fn frontend_user_action_log(event: &FrontendEvent) -> Option<Frontend
             close_kind,
         } => FrontendUserActionLog::new("close_work", "workspace")
             .target(format!("{work_id} ({close_kind})")),
+        FrontendEvent::ImprovementPromoteIssue { id } => {
+            FrontendUserActionLog::new("improvement_promote_issue", "improvement").target(id)
+        }
+        FrontendEvent::ImprovementDismiss { id, .. } => {
+            FrontendUserActionLog::new("improvement_dismiss", "improvement").target(id)
+        }
         // SPEC-3050: log the injection request without its text payload —
         // the injected line lands in the PTY transcript anyway.
         FrontendEvent::PaneSendInput { session_id, .. } => {

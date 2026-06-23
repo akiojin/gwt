@@ -1,7 +1,7 @@
 use std::io;
 
 use gwt_git::PrStatus;
-use gwt_github::IssueNumber;
+use gwt_github::{IssueNumber, IssueSnapshot};
 
 use super::{CliEnv, InternalCommandOutput};
 use crate::cli::{LinkedPrSummary, PrChecksSummary, PrReview, PrReviewThread};
@@ -40,6 +40,18 @@ impl<E: CliEnv> CliEnv for StdoutCaptureEnv<'_, E> {
 
     fn read_file(&self, path: &str) -> io::Result<String> {
         self.inner.read_file(path)
+    }
+
+    fn create_issue_in_repo(
+        &mut self,
+        owner: &str,
+        repo: &str,
+        title: &str,
+        body: &str,
+        labels: &[String],
+    ) -> io::Result<IssueSnapshot> {
+        self.inner
+            .create_issue_in_repo(owner, repo, title, body, labels)
     }
 
     fn fetch_linked_prs(&mut self, number: IssueNumber) -> io::Result<Vec<LinkedPrSummary>> {

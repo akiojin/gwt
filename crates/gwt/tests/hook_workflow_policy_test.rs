@@ -72,6 +72,104 @@ fn with_temp_home<T>(f: impl FnOnce(&TempDir) -> T) -> T {
     f(&home)
 }
 
+fn write_improvement_store(repo_path: &Path, candidates: serde_json::Value) {
+    let path = repo_path
+        .join(".gwt")
+        .join("improvements")
+        .join("candidates.json");
+    std::fs::create_dir_all(path.parent().expect("parent")).expect("create improvements dir");
+    std::fs::write(path, candidates.to_string()).expect("write candidates");
+}
+
+#[test]
+fn improvement_stop_guard_blocks_high_confidence_gwt_contract_violation() {
+    let repo = tempfile::tempdir().expect("repo");
+    write_improvement_store(
+        repo.path(),
+        json!({
+            "candidates": [{
+                "id": "impr-high",
+                "created_at": "2026-06-23T00:00:00Z",
+                "updated_at": "2026-06-23T00:00:00Z",
+                "source": "agent-failure",
+                "target_artifact": "skill",
+                "classification": "gwt-caused",
+                "confidence": "high",
+                "state": "pending",
+                "dedupe_key": "skill:gwt-discussion:self-improvement",
+                "occurrences": 1,
+                "sanitized_summary": "Skill failed to update after agent failure",
+                "sanitized_details": "Public-safe detail",
+                "evidence_digest": "Public-safe digest",
+                "local_evidence": [],
+                "linked_issue": null,
+                "dismissed_reason": null
+            }]
+        }),
+    );
+
+    let output = workflow_policy::evaluate_improvement_stop_guard(repo.path(), false);
+    let HookOutput::StopBlock { reason } = output else {
+        panic!("expected StopBlock, got {output:?}");
+    };
+    assert!(reason.contains("impr-high"));
+    assert!(reason.contains("improvement.promote_issue"));
+    assert!(reason.contains("improvement.dismiss"));
+}
+
+#[test]
+fn improvement_stop_guard_ignores_low_confidence_or_handled_candidates() {
+    let repo = tempfile::tempdir().expect("repo");
+    write_improvement_store(
+        repo.path(),
+        json!({
+            "candidates": [
+                {
+                    "id": "impr-low",
+                    "created_at": "2026-06-23T00:00:00Z",
+                    "updated_at": "2026-06-23T00:00:00Z",
+                    "source": "agent-failure",
+                    "target_artifact": "skill",
+                    "classification": "gwt-caused",
+                    "confidence": "low",
+                    "state": "pending",
+                    "dedupe_key": "skill:low",
+                    "occurrences": 1,
+                    "sanitized_summary": "Low confidence",
+                    "sanitized_details": null,
+                    "evidence_digest": null,
+                    "local_evidence": [],
+                    "linked_issue": null,
+                    "dismissed_reason": null
+                },
+                {
+                    "id": "impr-promoted",
+                    "created_at": "2026-06-23T00:00:00Z",
+                    "updated_at": "2026-06-23T00:00:00Z",
+                    "source": "agent-failure",
+                    "target_artifact": "skill",
+                    "classification": "gwt-caused",
+                    "confidence": "high",
+                    "state": "promoted",
+                    "dedupe_key": "skill:promoted",
+                    "occurrences": 1,
+                    "sanitized_summary": "Already promoted",
+                    "sanitized_details": null,
+                    "evidence_digest": null,
+                    "local_evidence": [],
+                    "linked_issue": {"number": 1, "url": "https://github.com/akiojin/gwt/issues/1", "repository": "akiojin/gwt"},
+                    "dismissed_reason": null
+                }
+            ]
+        }),
+    );
+
+    assert_eq!(
+        workflow_policy::evaluate_improvement_stop_guard(repo.path(), false),
+        HookOutput::Silent
+    );
+}
+
 fn init_repo(home: &TempDir) -> PathBuf {
     let repo_path = home.path().join("repo");
     std::fs::create_dir_all(&repo_path).expect("create repo dir");

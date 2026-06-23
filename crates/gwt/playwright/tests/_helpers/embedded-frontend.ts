@@ -43,6 +43,7 @@ const ROOT_MODULES = new Set([
   "fleet-minimap.js",
   "focus-trap.js",
   "hotkey.js",
+  "improvement-inbox-surface.js",
   "index-settings-panel.js",
   // SPEC-2014 2026-05-29 — Launch Agent setting controls (reasoning slider +
   // Auto toggle, count-adaptive segmented/select, boolean toggle).

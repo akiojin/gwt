@@ -14,7 +14,7 @@ use std::{
 use gwt_git::PrStatus;
 use gwt_github::{
     client::{http::HttpIssueClient, IssueClient},
-    IssueNumber, SpecListFilter,
+    IssueNumber, IssueSnapshot, SpecListFilter,
 };
 
 use super::{CliEnv, InternalCommandOutput};
@@ -137,6 +137,7 @@ impl IssueClient for LazyIssueClient {
 /// Default production [`CliEnv`] that defers GitHub auth until a command
 pub struct DefaultCliEnv {
     client: LazyIssueClient,
+    client_factory: Arc<IssueClientFactory>,
     cache_root: PathBuf,
     repo_path: PathBuf,
     owner: String,
@@ -174,7 +175,8 @@ impl DefaultCliEnv {
         factory: Arc<IssueClientFactory>,
     ) -> Self {
         DefaultCliEnv {
-            client: LazyIssueClient::new_with_factory(owner, repo, factory),
+            client: LazyIssueClient::new_with_factory(owner, repo, factory.clone()),
+            client_factory: factory,
             cache_root,
             repo_path,
             owner: owner.to_string(),
@@ -238,6 +240,17 @@ impl CliEnv for DefaultCliEnv {
     }
     fn read_file(&self, path: &str) -> io::Result<String> {
         fs::read_to_string(path)
+    }
+    fn create_issue_in_repo(
+        &mut self,
+        owner: &str,
+        repo: &str,
+        title: &str,
+        body: &str,
+        labels: &[String],
+    ) -> io::Result<IssueSnapshot> {
+        let client = (self.client_factory)(owner, repo).map_err(api_to_io)?;
+        client.create_issue(title, body, labels).map_err(api_to_io)
     }
     fn fetch_linked_prs(&mut self, number: IssueNumber) -> io::Result<Vec<LinkedPrSummary>> {
         crate::cli::issue::fetch_linked_prs_via_gh(&self.owner, &self.repo, number)
@@ -355,4 +368,8 @@ impl CliEnv for DefaultCliEnv {
             stderr: output.stderr,
         })
     }
+}
+
+fn api_to_io(err: gwt_github::client::ApiError) -> io::Error {
+    io::Error::other(err.to_string())
 }
