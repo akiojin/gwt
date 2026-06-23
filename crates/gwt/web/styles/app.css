@@ -3412,9 +3412,10 @@ body {
   right: 18px;
   bottom: 122px;
   z-index: 1001;
-  display: grid;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
   gap: 8px;
-  justify-items: end;
   pointer-events: none;
 }
 
@@ -3423,7 +3424,11 @@ body {
   grid-template-columns: 1fr auto;
   align-items: stretch;
   gap: 4px;
-  max-width: min(420px, calc(100vw - 36px));
+  /* FR-040 refinement: a fixed width so every toast lines up regardless of how
+     long its copy is (no more ragged, content-sized toasts). */
+  width: min(360px, calc(100vw - 36px));
+  max-height: 200px;
+  overflow: hidden;
   border: 1px solid var(--color-border-strong);
   border-left: 3px solid var(--color-state-needs-input);
   border-radius: var(--radius-md);
@@ -3431,6 +3436,19 @@ body {
   box-shadow: var(--shadow-3);
   pointer-events: auto;
   animation: attention-toast-in var(--motion-medium) var(--motion-curve);
+  /* FR-040 refinement: collapse + fade on close so the rest of the stack
+     settles down smoothly instead of snapping. */
+  transition:
+    max-height var(--motion-medium) var(--motion-curve),
+    opacity var(--motion-medium) var(--motion-curve),
+    margin-top var(--motion-medium) var(--motion-curve);
+}
+
+.attention-toast[data-leaving="true"] {
+  max-height: 0;
+  opacity: 0;
+  margin-top: -8px;
+  pointer-events: none;
 }
 
 .attention-toast[data-flavor="error"] {
@@ -3489,6 +3507,7 @@ body {
 @media (prefers-reduced-motion: reduce) {
   .attention-toast {
     animation: none;
+    transition: none;
   }
 }
 
