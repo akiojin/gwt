@@ -54,6 +54,7 @@
       // launch-controls / interaction-guard imports) moved to
       // /launch-wizard-surface.js.
       import { createLaunchWizardSurface } from "/launch-wizard-surface.js";
+      import { createIssueMonitorSurface } from "/issue-monitor-surface.js";
       // SPEC-3064 Phase 3 (E6a): the File Tree window surface moved to
       // /file-tree-surface.js.
       import { createFileTreeSurface } from "/file-tree-surface.js";
@@ -4144,6 +4145,11 @@
         requestWorkAdvisory,
       });
 
+      const issueMonitorSurface = createIssueMonitorSurface({
+        document,
+        send,
+      });
+
       const agentKanbanSurface = createAgentKanbanSurface({
         activeWorkspace,
         createTerminalRuntime: (id, terminalRoot) =>
@@ -5017,6 +5023,7 @@
         boardSurface,
         logsSurface,
         agentKanbanSurface,
+        issueMonitorSurface,
         knowledgeSettingsSurface,
       });
 
@@ -5093,6 +5100,15 @@
             break;
           case "runtime_health":
             window.__operatorShell?.applyRuntimeHealth?.(event.snapshot || {});
+            break;
+          case "issue_monitor_status":
+            frontendUnits.issueMonitorSurface.applyStatus(event.status || {});
+            break;
+          case "issue_monitor_inbox":
+            frontendUnits.issueMonitorSurface.applyInbox(event.items || []);
+            break;
+          case "issue_monitor_toast":
+            frontendUnits.issueMonitorSurface.showToast(event);
             break;
           case "terminal_output":
             frontendUnits.terminalHost.writeOutput(event.id, event.data_base64);

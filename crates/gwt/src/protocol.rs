@@ -11,6 +11,7 @@ use crate::{
     daemon_runtime::RuntimeHookEvent,
     file_content::{Encoding, Newline},
     file_tree::FileTreeEntry,
+    issue_monitor::{IssueMonitorInboxItem, IssueMonitorStatusView},
     knowledge_bridge::{KnowledgeDetailView, KnowledgeKind, KnowledgeListItem},
     launch_wizard::{LaunchWizardAction, LaunchWizardView},
     persistence::{
@@ -610,6 +611,13 @@ pub enum FrontendEvent {
     LaunchWizardAction {
         action: LaunchWizardAction,
         bounds: Option<WindowGeometry>,
+    },
+    SetIssueMonitorEnabled {
+        enabled: bool,
+    },
+    ListIssueMonitor,
+    IssueMonitorLaunchNow {
+        issue_number: u64,
     },
     /// Legacy Phase 14 entry point. Frontend now sends
     /// [`FrontendEvent::ApplyUpdateStart`] / [`FrontendEvent::ApplyUpdateRestartNow`]
@@ -1373,6 +1381,17 @@ pub enum BackendEvent {
         window_id: Option<String>,
         error: Option<String>,
     },
+    IssueMonitorStatus {
+        status: IssueMonitorStatusView,
+    },
+    IssueMonitorInbox {
+        items: Vec<IssueMonitorInboxItem>,
+    },
+    IssueMonitorToast {
+        level: String,
+        message: String,
+        issue_number: Option<u64>,
+    },
     AttachmentProgress {
         id: String,
         operation_id: String,
@@ -2023,6 +2042,21 @@ pub const BACKEND_EVENT_POLICIES: &[BackendEventPolicy] = &[
         BackendEventBackpressurePolicy::ClientScopedSnapshot,
     ),
     BackendEventPolicy::new(
+        "issue_monitor_status",
+        BackendEventDeliveryClass::IdempotentLatest,
+        BackendEventBackpressurePolicy::LatestWins,
+    ),
+    BackendEventPolicy::new(
+        "issue_monitor_inbox",
+        BackendEventDeliveryClass::Snapshot,
+        BackendEventBackpressurePolicy::ClientScopedSnapshot,
+    ),
+    BackendEventPolicy::new(
+        "issue_monitor_toast",
+        BackendEventDeliveryClass::EphemeralStatus,
+        BackendEventBackpressurePolicy::BestEffort,
+    ),
+    BackendEventPolicy::new(
         "attachment_progress",
         BackendEventDeliveryClass::EphemeralStatus,
         BackendEventBackpressurePolicy::BestEffort,
@@ -2425,6 +2459,9 @@ impl BackendEvent {
             BackendEvent::TerminalSnapshot { .. } => "terminal_snapshot",
             BackendEvent::TerminalStatus { .. } => "terminal_status",
             BackendEvent::PaneSendResult { .. } => "pane_send_result",
+            BackendEvent::IssueMonitorStatus { .. } => "issue_monitor_status",
+            BackendEvent::IssueMonitorInbox { .. } => "issue_monitor_inbox",
+            BackendEvent::IssueMonitorToast { .. } => "issue_monitor_toast",
             BackendEvent::AttachmentProgress { .. } => "attachment_progress",
             BackendEvent::WindowState { .. } => "window_state",
             BackendEvent::FileTreeEntries { .. } => "file_tree_entries",

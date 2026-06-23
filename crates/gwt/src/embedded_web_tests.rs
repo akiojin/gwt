@@ -99,6 +99,9 @@ fn frontend_bundle_source() -> &'static str {
         // app.js.
         include_str!("../web/launch-wizard-surface.js"),
         "\n",
+        // SPEC-3165 — Issue auto-improve monitor card/inbox/toast surface.
+        include_str!("../web/issue-monitor-surface.js"),
+        "\n",
         // SPEC-3064 Phase 3 (E6a) — File Tree window surface moved out of
         // app.js.
         include_str!("../web/file-tree-surface.js"),
@@ -175,6 +178,40 @@ fn embedded_web_terminal_copy_shortcut_module_is_registered() {
     assert!(
         paths.contains(&"/terminal-copy-shortcut.js"),
         "expected terminal copy shortcut helper to be served as a root JS module",
+    );
+}
+
+#[test]
+fn embedded_web_issue_monitor_surface_is_registered_and_wired() {
+    let paths: Vec<&str> = root_js_module_assets()
+        .iter()
+        .map(|asset| asset.path)
+        .collect();
+    assert!(
+        paths.contains(&"/issue-monitor-surface.js"),
+        "issue monitor surface must be served as a root JS module"
+    );
+
+    let html = app_js();
+    assert!(
+        html.contains("createIssueMonitorSurface"),
+        "app.js must import and instantiate the issue monitor surface"
+    );
+    assert!(
+        html.contains("issueMonitorSurface"),
+        "issue monitor surface must be reachable through frontendUnits"
+    );
+    assert!(
+        html.contains("case \"issue_monitor_status\""),
+        "app.js must handle issue monitor status events"
+    );
+    assert!(
+        html.contains("case \"issue_monitor_inbox\""),
+        "app.js must handle issue monitor inbox events"
+    );
+    assert!(
+        html.contains("case \"issue_monitor_toast\""),
+        "app.js must handle issue monitor toast events"
     );
 }
 

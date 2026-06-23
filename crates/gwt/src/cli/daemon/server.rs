@@ -38,7 +38,7 @@ use gwt_core::daemon::{
     persist_endpoint, validate_handshake, ClientFrame, DaemonEndpoint, DaemonFrame, DaemonStatus,
     IpcHandshakeRequest, IpcHandshakeResponse, RuntimeScope, DAEMON_PROTOCOL_VERSION,
 };
-use gwt_github::{client::ApiError, SpecOpsError};
+use gwt_github::{client::http::HttpIssueClient, client::ApiError, SpecOpsError};
 use tokio::{
     io::{AsyncBufReadExt, AsyncWriteExt, BufReader},
     net::{UnixListener, UnixStream},
@@ -128,6 +128,7 @@ pub async fn run_server(
 
     let shutdown = Arc::new(Notify::new());
     spawn_signal_watcher(Arc::clone(&shutdown));
+    spawn_issue_monitor_worker(endpoint.scope.clone(), hub.clone(), Arc::clone(&shutdown));
 
     let endpoint = Arc::new(endpoint);
     let started_at = Instant::now();
@@ -214,6 +215,130 @@ fn spawn_signal_watcher(shutdown: Arc<Notify>) {
         }
         term.notify_waiters();
     });
+}
+
+fn spawn_issue_monitor_worker(scope: RuntimeScope, hub: BroadcastHub, shutdown: Arc<Notify>) {
+    tokio::spawn(async move {
+        let mut control_rx =
+            hub.subscribe(crate::runtime_daemon_events::ISSUE_MONITOR_CONTROL_CHANNEL);
+        let mut monitor = crate::IssueMonitorState::new(crate::IssueMonitorConfig::default());
+        publish_issue_monitor_payloads(&hub, &mut monitor);
+        let mut interval =
+            tokio::time::interval(Duration::from_secs(monitor.config.poll_interval_secs));
+
+        loop {
+            tokio::select! {
+                biased;
+                _ = shutdown.notified() => break,
+                control = control_rx.recv() => {
+                    match control {
+                        Ok(DaemonFrame::Event { payload, .. }) => {
+                            if let Some(enabled) = decode_issue_monitor_control_enabled(payload) {
+                                monitor.set_enabled(enabled);
+                                publish_issue_monitor_payloads(&hub, &mut monitor);
+                                if enabled {
+                                    monitor = scan_issue_monitor_once(scope.clone(), monitor).await;
+                                    publish_issue_monitor_payloads(&hub, &mut monitor);
+                                }
+                            }
+                        }
+                        Ok(_) => {}
+                        Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {}
+                        Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+                    }
+                }
+                _ = interval.tick() => {
+                    if monitor.config.enabled {
+                        monitor = scan_issue_monitor_once(scope.clone(), monitor).await;
+                        publish_issue_monitor_payloads(&hub, &mut monitor);
+                    }
+                }
+            }
+        }
+    });
+}
+
+fn decode_issue_monitor_control_enabled(payload: serde_json::Value) -> Option<bool> {
+    match crate::runtime_daemon_events::decode_runtime_daemon_event(
+        crate::runtime_daemon_events::ISSUE_MONITOR_CHANNEL,
+        payload,
+        std::process::id(),
+    )? {
+        crate::runtime_daemon_events::RuntimeDaemonEvent::IssueMonitor { event } => {
+            if event.get("event")?.as_str()? != "control" {
+                return None;
+            }
+            event.get("payload")?.get("enabled")?.as_bool()
+        }
+        _ => None,
+    }
+}
+
+async fn scan_issue_monitor_once(
+    scope: RuntimeScope,
+    monitor: crate::IssueMonitorState,
+) -> crate::IssueMonitorState {
+    tokio::task::spawn_blocking(move || scan_issue_monitor_once_blocking(scope, monitor))
+        .await
+        .unwrap_or_else(|error| {
+            let mut monitor = crate::IssueMonitorState::new(crate::IssueMonitorConfig::default());
+            monitor.record_scan_error(
+                chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
+                format!("issue monitor worker join failed: {error}"),
+            );
+            monitor
+        })
+}
+
+fn scan_issue_monitor_once_blocking(
+    scope: RuntimeScope,
+    mut monitor: crate::IssueMonitorState,
+) -> crate::IssueMonitorState {
+    let now = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+    let Some((owner, repo)) =
+        crate::issue_monitor_worker::github_remote_owner_and_repo(&scope.project_root)
+    else {
+        monitor.record_scan_error(now, "GitHub origin remote is unavailable");
+        return monitor;
+    };
+    let issues =
+        match crate::issue_monitor_worker::load_open_issue_monitor_candidates(&owner, &repo) {
+            Ok(issues) => issues,
+            Err(error) => {
+                monitor.record_scan_error(now, format!("issue list failed: {error}"));
+                return monitor;
+            }
+        };
+    let client = match HttpIssueClient::from_gh_auth(&owner, &repo) {
+        Ok(client) => client,
+        Err(error) => {
+            monitor.record_scan_error(now, format!("GitHub auth failed: {error}"));
+            return monitor;
+        }
+    };
+    let monitor_owner = format!("{}:{}", whoami::username(), std::process::id());
+    crate::scan_issue_monitor_candidates(&mut monitor, &client, &issues, &monitor_owner, &now);
+    monitor
+}
+
+fn publish_issue_monitor_payloads(hub: &BroadcastHub, monitor: &mut crate::IssueMonitorState) {
+    let gui_connected = hub.receiver_count(crate::runtime_daemon_events::ISSUE_MONITOR_CHANNEL) > 0;
+    for payload in
+        crate::issue_monitor_worker::issue_monitor_daemon_payloads(monitor, gui_connected)
+    {
+        let payload = crate::runtime_daemon_events::issue_monitor_payload(
+            &payload.event,
+            payload.payload,
+            std::process::id(),
+        );
+        let _ = hub.publish(
+            crate::runtime_daemon_events::ISSUE_MONITOR_CHANNEL,
+            DaemonFrame::Event {
+                channel: crate::runtime_daemon_events::ISSUE_MONITOR_CHANNEL.to_string(),
+                payload,
+            },
+        );
+    }
 }
 
 async fn handle_connection(

@@ -1313,6 +1313,96 @@ impl AppRuntime {
         Vec::new()
     }
 
+    pub(crate) fn open_issue_monitor_launch_wizard_events(
+        &mut self,
+        client_id: &str,
+        issue_number: u64,
+    ) -> Vec<OutboundEvent> {
+        let Some(tab_id) = self.active_tab_id.clone() else {
+            return vec![OutboundEvent::reply(
+                client_id,
+                BackendEvent::IssueMonitorToast {
+                    level: "error".to_string(),
+                    message: "Open a project before launching monitored Issue work".to_string(),
+                    issue_number: Some(issue_number),
+                },
+            )];
+        };
+        let Some(tab) = self.tab(&tab_id) else {
+            return vec![OutboundEvent::reply(
+                client_id,
+                BackendEvent::IssueMonitorToast {
+                    level: "error".to_string(),
+                    message: "Project tab not found".to_string(),
+                    issue_number: Some(issue_number),
+                },
+            )];
+        };
+        if tab.kind != gwt::ProjectKind::Git {
+            return vec![OutboundEvent::reply(
+                client_id,
+                BackendEvent::IssueMonitorToast {
+                    level: "error".to_string(),
+                    message: "Issue Monitor launch requires a Git project".to_string(),
+                    issue_number: Some(issue_number),
+                },
+            )];
+        }
+        if tab.migration_pending {
+            return vec![OutboundEvent::reply(
+                client_id,
+                BackendEvent::IssueMonitorToast {
+                    level: "error".to_string(),
+                    message: "Complete the project migration before launching monitored Issue work"
+                        .to_string(),
+                    issue_number: Some(issue_number),
+                },
+            )];
+        }
+
+        let project_root = tab.project_root.clone();
+        let base_branch_name = match current_branch_name_for_launch_agent(&project_root) {
+            Ok(branch) => branch,
+            Err(error) => {
+                return vec![OutboundEvent::reply(
+                    client_id,
+                    BackendEvent::IssueMonitorToast {
+                        level: "error".to_string(),
+                        message: error,
+                        issue_number: Some(issue_number),
+                    },
+                )];
+            }
+        };
+        match self.open_knowledge_launch_wizard_for_base_branch(
+            &tab_id,
+            &project_root,
+            &base_branch_name,
+            issue_number,
+            gwt::LinkedIssueKind::Issue,
+        ) {
+            Ok(()) => vec![
+                OutboundEvent::reply(
+                    client_id,
+                    BackendEvent::IssueMonitorToast {
+                        level: "info".to_string(),
+                        message: "Issue Monitor launch prepared".to_string(),
+                        issue_number: Some(issue_number),
+                    },
+                ),
+                self.launch_wizard_state_outbound(),
+            ],
+            Err(error) => vec![OutboundEvent::reply(
+                client_id,
+                BackendEvent::IssueMonitorToast {
+                    level: "error".to_string(),
+                    message: error,
+                    issue_number: Some(issue_number),
+                },
+            )],
+        }
+    }
+
     pub(crate) fn handle_issue_launch_wizard_prepared(
         &mut self,
         prepared: IssueLaunchWizardPrepared,
