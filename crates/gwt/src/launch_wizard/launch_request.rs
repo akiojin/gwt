@@ -94,6 +94,38 @@ impl LaunchWizardState {
             builder = builder.fast_mode(true);
         }
 
+        // SPEC-3152: Hermes-specific launch options. Free-text/CSV fields map
+        // to their CLI flags; safe-mode is a boolean toggle. Only applied for
+        // the Hermes agent.
+        if agent_id == gwt_agent::AgentId::Hermes {
+            let trimmed = |value: &str| {
+                let value = value.trim();
+                (!value.is_empty()).then(|| value.to_string())
+            };
+            if let Some(provider) = trimmed(&self.hermes_provider) {
+                builder = builder.provider(provider);
+            }
+            if let Some(profile) = trimmed(&self.hermes_profile) {
+                builder = builder.profile(profile);
+            }
+            if let Some(toolsets) = trimmed(&self.hermes_toolsets) {
+                builder = builder.toolsets(toolsets);
+            }
+            if let Some(skills) = trimmed(&self.hermes_skills) {
+                builder = builder.skills(skills);
+            }
+            if let Some(max_turns) =
+                trimmed(&self.hermes_max_turns).and_then(|value| value.parse::<u32>().ok())
+            {
+                if max_turns > 0 {
+                    builder = builder.max_turns(max_turns);
+                }
+            }
+            if self.hermes_safe_mode {
+                builder = builder.safe_mode(true);
+            }
+        }
+
         builder = builder.runtime_target(self.runtime_target);
         if let Some(windows_shell) = self.windows_shell_for_launch() {
             builder = builder.windows_shell(windows_shell);
@@ -455,6 +487,143 @@ mod tests {
             }
             other => panic!("expected shell launch request, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn build_launch_config_maps_hermes_launch_options() {
+        let mut options = sample_agent_options();
+        options.push(AgentOption {
+            id: "hermes".to_string(),
+            name: "Hermes Agent".to_string(),
+            available: true,
+            installed_version: Some("1.0.0".to_string()),
+            versions: Vec::new(),
+            custom_agent: None,
+        });
+        let mut state = LaunchWizardState::open_with(
+            context(branch("feature/gui"), "feature/gui"),
+            options,
+            Vec::new(),
+        );
+        state.set_agent_id("hermes");
+        state.apply(LaunchWizardAction::SetModel {
+            model: "anthropic/claude-sonnet-4".to_string(),
+        });
+        state.apply(LaunchWizardAction::SetHermesOption {
+            field: "provider".to_string(),
+            value: "openrouter".to_string(),
+        });
+        state.apply(LaunchWizardAction::SetHermesOption {
+            field: "profile".to_string(),
+            value: "work".to_string(),
+        });
+        state.apply(LaunchWizardAction::SetHermesOption {
+            field: "toolsets".to_string(),
+            value: "fs,web".to_string(),
+        });
+        state.apply(LaunchWizardAction::SetHermesOption {
+            field: "skills".to_string(),
+            value: "gwt-build-spec".to_string(),
+        });
+        state.apply(LaunchWizardAction::SetHermesOption {
+            field: "max_turns".to_string(),
+            value: "40".to_string(),
+        });
+        state.apply(LaunchWizardAction::SetHermesSafeMode { enabled: true });
+
+        let config = state.build_launch_config().expect("hermes launch config");
+        assert_eq!(config.agent_id, gwt_agent::AgentId::Hermes);
+        let has_pair =
+            |flag: &str, val: &str| config.args.windows(2).any(|p| p[0] == flag && p[1] == val);
+        assert!(has_pair("--provider", "openrouter"));
+        assert!(has_pair("--model", "anthropic/claude-sonnet-4"));
+        assert!(has_pair("--profile", "work"));
+        assert!(has_pair("--toolsets", "fs,web"));
+        assert!(has_pair("--skills", "gwt-build-spec"));
+        assert!(has_pair("--max-turns", "40"));
+        assert!(config.args.contains(&"--safe-mode".to_string()));
+    }
+
+    #[test]
+    fn hermes_options_are_exposed_in_settings_view_for_hermes_only() {
+        let mut options = sample_agent_options();
+        options.push(AgentOption {
+            id: "hermes".to_string(),
+            name: "Hermes Agent".to_string(),
+            available: true,
+            installed_version: Some("1.0.0".to_string()),
+            versions: Vec::new(),
+            custom_agent: None,
+        });
+        let mut state = LaunchWizardState::open_with(
+            context(branch("feature/gui"), "feature/gui"),
+            options,
+            Vec::new(),
+        );
+        state.mark_runtime_context_unresolved();
+        state.apply(LaunchWizardAction::UseStartMethod {
+            method: LaunchWizardStartMethodKind::ConfigureAndStart,
+        });
+
+        state.apply(LaunchWizardAction::SetAgent {
+            agent_id: "hermes".to_string(),
+        });
+        state.set_hermes_provider_choices(vec!["zai".to_string(), "ollama-launch".to_string()]);
+        state.apply(LaunchWizardAction::SetHermesOption {
+            field: "provider".to_string(),
+            value: "openrouter".to_string(),
+        });
+
+        let view = state.view();
+        assert!(
+            view.show_hermes_options,
+            "Hermes settings section must be shown for the Hermes agent"
+        );
+        assert_eq!(view.hermes_provider, "openrouter");
+        // Provider options come from the user's config, not a hardcoded list.
+        assert_eq!(view.hermes_provider_options, vec!["zai", "ollama-launch"]);
+
+        state.apply(LaunchWizardAction::SetAgent {
+            agent_id: "claude".to_string(),
+        });
+        assert!(
+            !state.view().show_hermes_options,
+            "non-Hermes agents must not show the Hermes section"
+        );
+    }
+
+    #[test]
+    fn hermes_needs_setup_flag_is_exposed_only_for_hermes() {
+        let mut options = sample_agent_options();
+        options.push(AgentOption {
+            id: "hermes".to_string(),
+            name: "Hermes Agent".to_string(),
+            available: true,
+            installed_version: Some("1.0.0".to_string()),
+            versions: Vec::new(),
+            custom_agent: None,
+        });
+        let mut state = LaunchWizardState::open_with(
+            context(branch("feature/gui"), "feature/gui"),
+            options,
+            Vec::new(),
+        );
+        state.mark_runtime_context_unresolved();
+        state.apply(LaunchWizardAction::UseStartMethod {
+            method: LaunchWizardStartMethodKind::ConfigureAndStart,
+        });
+        state.set_hermes_needs_setup(true);
+
+        state.apply(LaunchWizardAction::SetAgent {
+            agent_id: "hermes".to_string(),
+        });
+        assert!(state.view().hermes_needs_setup);
+
+        // Non-Hermes agents never surface the needs-setup hint.
+        state.apply(LaunchWizardAction::SetAgent {
+            agent_id: "claude".to_string(),
+        });
+        assert!(!state.view().hermes_needs_setup);
     }
 
     #[test]

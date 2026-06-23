@@ -7158,6 +7158,13 @@ Context: Issue #3066 PR verification found that some in-process tests used Scope
 Learning: For in-process tests, prefer a thread-local gwt_home override over process-wide HOME mutation. Reserve HOME/USERPROFILE env changes for spawned child processes that must receive an isolated environment.
 Future Action: When adding tests around gwt_core::paths::gwt_home or project storage, use gwt_core::test_support::ScopedGwtHome and only hold env_lock for real environment variables such as GWT_SESSION_ID.
 
+## 2026-06-23 — 外部CLI連携: 選択肢はツールconfigから動的列挙・フラグは実バイナリで裏取り
+
+Type: fix
+Context: SPEC-3152 Hermes 整合。wizard の provider 一覧を docs ベースでハードコードしたら、ユーザーの実プロバイダー zai が抜けていた。フラグも docs を信じて --profile を削除しかけた。UI フォントや起動可否も HTTP 200 だけで未検証だった。
+Learning: 外部ツール所有の選択肢リスト(provider/model 等)は gwt 側でハードコードしない(陳腐化・不完全)。ツール config(~/.hermes/config.yaml の model.provider + providers:)から動的列挙する。CLI フラグは docs でなく実際にインストールされたバイナリ(hermes --help / 実行)で裏取りする(v0.17.0 では --profile は help 非表示だが有効)。UI/挙動は HTTP 200 やビルド成功でなく実起動して検証する。隔離 HOME(HERMES_HOME リダイレクト)は資格情報を持たず壊れるため .env/auth.json を symlink で bridge する(project_isolated_home_breaks_docker_compose と同型)。
+Future Action: 外部 CLI 連携実装時は (1)フラグ/サブコマンドを実バイナリの --help で確認 (2)選択肢リストはツール config から動的列挙 (3)UI は browser-check で実起動して目視 (4)隔離 HOME は資格情報 symlink を seed、を必須チェックにする。
+
 ## 2026-06-21 — WorkspaceAgentSummary に新 discriminator を足す時は sentinel+派生メソッドを優先
 
 Type: project
@@ -7178,3 +7185,10 @@ Type: project
 Context: Phase 2 検証中、cargo test -p gwt のフルランで app_runtime::tests::app_runtime_stop_all_runtimes_kills_every_pane_before_join_waits が 1 回だけ FAILED したが、tests.rs は HEAD と byte 同一かつ単独実行で 3/3 passed だった
 Learning: app_runtime_stop_all_runtimes_kills_every_pane_before_join_waits は PTY teardown/join-wait の timing に依存する flaky test。並列フルラン下の resource contention で稀に落ちる。単独再実行で緑なら回帰ではない。
 Future Action: このテストがフルランで 1 件落ちたら、まず git diff HEAD で当該ファイルが無変更か確認し、単独 -p gwt で 2-3 回再実行して flaky か判定する。緑なら blocker 扱いしない。
+
+## 2026-06-23 — styles bundle must not contain the literal transform layer-hint string (even in comments)
+
+Type: project
+Context: minimap centered-radar で .fleet-minimap__world に静的な transform layer hint を CSS に追加したら embedded_web_canvas_stage_keeps_transform_layer_hint_opt_in が失敗。CSS 宣言を消してもコメント内のリテラル文字列でまた失敗した。
+Learning: このテストは frontend_styles_bundle() 全体を substring 検索するため、CSS 宣言だけでなくコメント内の同リテラル文字列も失敗させる。transform の layer hint は applyViewport が motion 中だけ JS で opt-in し 300ms で解除する設計ポリシー（恒久 pin 禁止）。
+Future Action: CSS で transform の layer hint を恒久 pin しない。コメントでも当該リテラル文字列を書かず言い換える。GPU レイヤが要る要素は JS の motion-scoped opt-in に倣う。

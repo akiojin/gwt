@@ -1,27 +1,28 @@
-// SPEC-2008 camera-focus / FR-094 — Fleet Minimap.
+// SPEC-2008 camera-focus / FR-094 — Fleet Minimap (centered-radar model).
 //
-// A permanent, always-visible carrier element docked in the canvas corner.
-// It keeps a one-glance view of every canvas window in WORLD position even
-// while the camera is focused (framed) on a single window, and overlays the
-// current camera viewport as a cyan frame. Clicking a cell flies the camera
-// to that window (frameWindow).
+// A permanent, always-visible carrier docked in the canvas corner. It mirrors
+// the MAIN canvas's frame of reference: the current camera viewport is FIXED at
+// the minimap centre, and the world (window cells) MOVES underneath as the
+// operator pans — exactly like `#canvas-stage`. The cyan camera frame sits in
+// the centre; its size reflects the canvas zoom. The minimap also has its OWN
+// zoom (minimapScale) so the operator can widen the radar to see the whole
+// fleet or tighten it on the immediate neighbourhood.
 //
-// The minimap lives in an OVERLAY layer OUTSIDE `#canvas-stage`, so it is not
-// affected by the stage transform (translate/scale). It performs its own
-// linear mapping from the world bounding box of all windows into the minimap
-// rect, so it never inherits the camera zoom.
+// Efficiency: cells are laid out once per zoom level inside an inner WORLD layer
+// at `world * minimapScale`; panning only updates ONE transform on that layer
+// (mirroring the canvas stage), never per-cell styles.
 //
-// Rendering is split into two cheap passes so each can be driven from its
-// natural trigger:
-// - renderCells(): rebuild the window cells. Driven by workspace render
-//   (window set / geometry / agent color / telemetry change).
-// - updateCameraFrame(): reposition the camera-viewport frame. Driven by
-//   every `applyViewport()` (pan / zoom / framing tween / server restore).
-//
-// Both passes share `computeWorldBounds()` + `mapRect()` so the cells and the
-// camera frame always use the same coordinate transform.
+// Passes:
+// - renderCells(): rebuild the cell set + lay them out in the world layer
+//   (window set / geometry / agent color / telemetry / radar-zoom change).
+// - update(): translate the world layer so the camera centre lands at the
+//   minimap centre + size the centred camera frame. Driven by every
+//   applyViewport() (pan / zoom / framing tween / server restore).
 
-const MINIMAP_PADDING = 6; // inner px margin so cells/frame never touch edges.
+// Absolute world→minimap-px scale bounds (radar zoom range).
+const MINIMAP_SCALE_MIN = 0.004;
+const MINIMAP_SCALE_MAX = 0.6;
+const MINIMAP_ZOOM_STEP = 1.25; // per wheel notch / button press.
 
 function finiteOr(value, fallback) {
   return Number.isFinite(value) ? value : fallback;
@@ -46,16 +47,28 @@ export function createFleetMinimap({
     // surface so callers never have to null-check the minimap.
     return {
       renderCells() {},
+      update() {},
       updateCameraFrame() {},
+      setZoom() {},
     };
   }
 
-  // Camera-viewport frame overlay. Built once and repositioned in place so
-  // pan/zoom never thrash the DOM.
+  // Inner world layer: holds the cells at absolute `world * minimapScale`
+  // positions. A single transform on this layer pans the radar (mirrors the
+  // canvas `#canvas-stage`), so panning never touches per-cell styles.
+  const worldLayer = document.createElement("div");
+  worldLayer.className = "fleet-minimap__world";
+  container.appendChild(worldLayer);
+
+  // Camera-viewport frame: a centred overlay OUTSIDE the world layer, so it
+  // never moves on pan. Only its size tracks the live canvas zoom.
   const cameraFrame = document.createElement("div");
   cameraFrame.className = "fleet-minimap__camera";
   cameraFrame.setAttribute("aria-hidden", "true");
   container.appendChild(cameraFrame);
+
+  // Radar zoom controls (overlay; adjust minimapScale).
+  container.appendChild(buildZoomControls());
 
   // FR-045 (anshin): resolve a cell's tooltip / aria-label. Prefer the
   // app-provided activity label (title · detail); fall back to the plain
@@ -66,18 +79,16 @@ export function createFleetMinimap({
   // Cells are keyed by window id so unchanged windows keep their node across
   // renders (avoids losing hover/tooltip mid-interaction).
   const cellMap = new Map();
-  // The world→minimap transform from the most recent renderCells(), reused by
-  // updateCameraFrame() so the frame and the cells never disagree.
-  let lastTransform = null;
+  // Absolute world→minimap-px scale. Initialised to a fit-all value the first
+  // time the minimap has windows, then kept stable (operator-controlled zoom).
+  let minimapScale = null;
 
-  function innerSize() {
-    const width = Math.max(container.clientWidth - MINIMAP_PADDING * 2, 1);
-    const height = Math.max(container.clientHeight - MINIMAP_PADDING * 2, 1);
-    return { width, height };
+  function centerPx() {
+    return { x: container.clientWidth / 2, y: container.clientHeight / 2 };
   }
 
-  // World bounding box of every framable window. Returns null when there is
-  // nothing to map (the minimap then renders empty).
+  // World bounding box of every framable window. Null when there is nothing to
+  // map. Used only to seed the initial radar scale.
   function computeWorldBounds(windows) {
     let minX = Infinity;
     let minY = Infinity;
@@ -101,32 +112,19 @@ export function createFleetMinimap({
     return { minX, minY, maxX, maxY };
   }
 
-  // Uniform scale that fits the world bbox into the minimap inner rect,
-  // centered (letterboxed) so window aspect ratios are preserved.
-  function buildTransform(worldBounds) {
-    const { width, height } = innerSize();
-    const worldWidth = Math.max(worldBounds.maxX - worldBounds.minX, 1);
-    const worldHeight = Math.max(worldBounds.maxY - worldBounds.minY, 1);
-    const scale = Math.min(width / worldWidth, height / worldHeight);
-    const scaledWidth = worldWidth * scale;
-    const scaledHeight = worldHeight * scale;
-    // Center the scaled world inside the inner rect.
-    const offsetX = MINIMAP_PADDING + (width - scaledWidth) / 2;
-    const offsetY = MINIMAP_PADDING + (height - scaledHeight) / 2;
-    return { scale, offsetX, offsetY, minX: worldBounds.minX, minY: worldBounds.minY };
+  // Scale that fits the whole fleet into ~85% of the minimap (breathing room).
+  function fitAllScale(windows) {
+    const bounds = computeWorldBounds(windows);
+    if (!bounds) return null;
+    const width = Math.max(container.clientWidth, 1);
+    const height = Math.max(container.clientHeight, 1);
+    const worldWidth = Math.max(bounds.maxX - bounds.minX, 1);
+    const worldHeight = Math.max(bounds.maxY - bounds.minY, 1);
+    return Math.min(width / worldWidth, height / worldHeight) * 0.85;
   }
 
-  function mapRect(transform, rect) {
-    const x = finiteOr(Number(rect.x), 0);
-    const y = finiteOr(Number(rect.y), 0);
-    const w = Math.max(finiteOr(Number(rect.width), 0), 0);
-    const h = Math.max(finiteOr(Number(rect.height), 0), 0);
-    return {
-      left: transform.offsetX + (x - transform.minX) * transform.scale,
-      top: transform.offsetY + (y - transform.minY) * transform.scale,
-      width: Math.max(w * transform.scale, 1),
-      height: Math.max(h * transform.scale, 1),
-    };
+  function clampScale(scale) {
+    return Math.min(MINIMAP_SCALE_MAX, Math.max(MINIMAP_SCALE_MIN, scale));
   }
 
   function ensureCell(windowId) {
@@ -136,45 +134,49 @@ export function createFleetMinimap({
       cell.type = "button";
       cell.className = "fleet-minimap__cell";
       cell.dataset.windowId = windowId;
-      cell.addEventListener("click", () => {
+      cell.addEventListener("click", (event) => {
+        event.stopPropagation();
         frameWindow(windowId);
       });
       cellMap.set(windowId, cell);
-      container.appendChild(cell);
+      worldLayer.appendChild(cell);
     }
     return cell;
   }
 
   function renderCells() {
     const windows = (getWindows() || []).filter((windowData) => windowData?.geometry);
-    const worldBounds = computeWorldBounds(windows);
-    const liveIds = new Set();
-
     container.dataset.empty = windows.length === 0 ? "true" : "false";
 
-    if (!worldBounds) {
-      lastTransform = null;
+    if (windows.length === 0) {
       // Remove any stale cells (window set emptied).
       for (const [id, cell] of cellMap) {
         cell.remove();
         cellMap.delete(id);
       }
-      updateCameraFrame();
+      update();
       return;
     }
 
-    const transform = buildTransform(worldBounds);
-    lastTransform = transform;
+    // Seed the radar scale to fit the whole fleet on the first populated paint;
+    // afterwards it is stable and operator-controlled.
+    if (minimapScale == null) {
+      minimapScale = clampScale(fitAllScale(windows) ?? 0.05);
+    }
+
+    const liveIds = new Set();
     const focusedId = getFocusedId();
 
     for (const windowData of windows) {
       liveIds.add(windowData.id);
       const cell = ensureCell(windowData.id);
-      const placement = mapRect(transform, windowData.geometry);
-      cell.style.left = `${placement.left}px`;
-      cell.style.top = `${placement.top}px`;
-      cell.style.width = `${placement.width}px`;
-      cell.style.height = `${placement.height}px`;
+      const geometry = windowData.geometry;
+      // Absolute world→radar position inside the world layer; panning only
+      // translates the layer, never these.
+      cell.style.left = `${finiteOr(Number(geometry.x), 0) * minimapScale}px`;
+      cell.style.top = `${finiteOr(Number(geometry.y), 0) * minimapScale}px`;
+      cell.style.width = `${Math.max(finiteOr(Number(geometry.width), 0) * minimapScale, 2)}px`;
+      cell.style.height = `${Math.max(finiteOr(Number(geometry.height), 0) * minimapScale, 2)}px`;
 
       // Agent color via the shared data-agent-color → --current-agent map.
       const agentColor = cellAgentColor(windowData);
@@ -207,12 +209,15 @@ export function createFleetMinimap({
       }
     }
 
-    updateCameraFrame();
+    update();
   }
 
-  function updateCameraFrame() {
-    if (!lastTransform) {
+  // Centre the camera in the radar: translate the world layer so the camera's
+  // world centre lands at the minimap centre, then size the centred frame.
+  function update() {
+    if (minimapScale == null) {
       cameraFrame.hidden = true;
+      worldLayer.style.transform = "translate(0px, 0px)";
       return;
     }
     const bounds = getVisibleBounds();
@@ -220,13 +225,68 @@ export function createFleetMinimap({
       cameraFrame.hidden = true;
       return;
     }
-    const placement = mapRect(lastTransform, bounds);
+    const center = centerPx();
+    const camCenterX =
+      finiteOr(Number(bounds.x), 0) + finiteOr(Number(bounds.width), 0) / 2;
+    const camCenterY =
+      finiteOr(Number(bounds.y), 0) + finiteOr(Number(bounds.height), 0) / 2;
+    // Viewport fixed at the centre, world moves: shift the world layer so the
+    // camera centre maps to the minimap centre.
+    const translateX = center.x - camCenterX * minimapScale;
+    const translateY = center.y - camCenterY * minimapScale;
+    worldLayer.style.transform = `translate(${translateX}px, ${translateY}px)`;
+
+    // Centred camera frame, sized to the live viewport at the radar scale.
+    const frameWidth = Math.max(finiteOr(Number(bounds.width), 0) * minimapScale, 2);
+    const frameHeight = Math.max(finiteOr(Number(bounds.height), 0) * minimapScale, 2);
     cameraFrame.hidden = false;
-    cameraFrame.style.left = `${placement.left}px`;
-    cameraFrame.style.top = `${placement.top}px`;
-    cameraFrame.style.width = `${placement.width}px`;
-    cameraFrame.style.height = `${placement.height}px`;
+    cameraFrame.style.left = `${center.x - frameWidth / 2}px`;
+    cameraFrame.style.top = `${center.y - frameHeight / 2}px`;
+    cameraFrame.style.width = `${frameWidth}px`;
+    cameraFrame.style.height = `${frameHeight}px`;
   }
 
-  return { renderCells, updateCameraFrame };
+  // Radar zoom: scale the world→px factor, re-lay the cells, recentre.
+  function setZoom(factor) {
+    if (minimapScale == null || !Number.isFinite(factor) || factor <= 0) {
+      return;
+    }
+    minimapScale = clampScale(minimapScale * factor);
+    renderCells();
+  }
+
+  function buildZoomControls() {
+    const wrap = document.createElement("div");
+    wrap.className = "fleet-minimap__zoom";
+    const make = (label, ariaLabel, factor) => {
+      const button = document.createElement("button");
+      button.type = "button";
+      button.className = "fleet-minimap__zoom-button";
+      button.textContent = label;
+      button.setAttribute("aria-label", ariaLabel);
+      button.addEventListener("click", (event) => {
+        event.stopPropagation();
+        setZoom(factor);
+      });
+      return button;
+    };
+    wrap.append(
+      make("+", "Zoom minimap in", MINIMAP_ZOOM_STEP),
+      make("−", "Zoom minimap out", 1 / MINIMAP_ZOOM_STEP),
+    );
+    return wrap;
+  }
+
+  // Wheel over the minimap zooms the radar (not the page).
+  container.addEventListener(
+    "wheel",
+    (event) => {
+      event.preventDefault();
+      setZoom(event.deltaY < 0 ? MINIMAP_ZOOM_STEP : 1 / MINIMAP_ZOOM_STEP);
+    },
+    { passive: false },
+  );
+
+  // `updateCameraFrame` kept as an alias for existing callers (applyViewport).
+  return { renderCells, update, updateCameraFrame: update, setZoom };
 }

@@ -25,6 +25,7 @@ impl LaunchWizardState {
             && self.launch_target_is_agent()
             && self.current_agent_supports_fast_mode();
         let fast_mode = self.fast_mode_enabled_for_current_agent();
+        let show_hermes_options = show_manual_setup && self.current_agent_supports_hermes_options();
         LaunchWizardView {
             title: if self.wizard_mode == LaunchWizardMode::StartWork {
                 "Start Work".to_string()
@@ -99,6 +100,15 @@ impl LaunchWizardState {
             show_codex_fast_mode: show_manual_setup
                 && self.launch_target_is_agent()
                 && self.agent_is_codex(),
+            show_hermes_options,
+            hermes_needs_setup: show_hermes_options && self.hermes_needs_setup,
+            hermes_provider: self.hermes_provider.clone(),
+            hermes_provider_options: self.hermes_provider_choices.clone(),
+            hermes_profile: self.hermes_profile.clone(),
+            hermes_toolsets: self.hermes_toolsets.clone(),
+            hermes_skills: self.hermes_skills.clone(),
+            hermes_max_turns: self.hermes_max_turns.clone(),
+            hermes_safe_mode: self.hermes_safe_mode,
             show_branch_controls: show_manual_setup && self.wizard_mode == LaunchWizardMode::Branch,
             show_start_methods,
             show_back_button,

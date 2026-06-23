@@ -54,10 +54,13 @@ function makeMinimap(container, windows, overrides = {}) {
 test("createFleetMinimap returns a no-op surface when there is no container", () => {
   const minimap = createFleetMinimap({ container: null });
   assert.equal(typeof minimap.renderCells, "function");
+  assert.equal(typeof minimap.update, "function");
   assert.equal(typeof minimap.updateCameraFrame, "function");
+  assert.equal(typeof minimap.setZoom, "function");
   // Must not throw when driven without a DOM target.
   minimap.renderCells();
-  minimap.updateCameraFrame();
+  minimap.update();
+  minimap.setZoom(1.25);
 });
 
 test("renderCells creates one cell per window keyed by window id", () => {
@@ -191,7 +194,7 @@ test("the focused window's cell gets the is-focused class", () => {
   assert.ok(!other.classList.contains("is-focused"), "unfocused cell is not marked");
 });
 
-test("updateCameraFrame positions a single visible .camera element in place", () => {
+test("centered-radar: the camera frame stays centred and panning translates the world layer", () => {
   const { container } = setupDom();
   const windows = [windowAt("w-1", 0, 0), windowAt("w-2", 400, 300)];
   // A mutable visible-bounds so we can repan and re-drive the same instance.
@@ -202,34 +205,69 @@ test("updateCameraFrame positions a single visible .camera element in place", ()
 
   minimap.renderCells();
 
+  // Exactly one world layer (cells live inside it) + one camera frame.
+  const worldLayers = container.querySelectorAll(".fleet-minimap__world");
+  assert.equal(worldLayers.length, 1, "exactly one world layer");
+  assert.equal(
+    container.querySelectorAll(".fleet-minimap__world .fleet-minimap__cell").length,
+    2,
+    "cells live inside the world layer (so panning translates them as one)",
+  );
   const frames = container.querySelectorAll(".fleet-minimap__camera");
   assert.equal(frames.length, 1, "exactly one camera frame element");
   const frame = frames[0];
   assert.equal(frame.hidden, false, "camera frame is visible while windows exist");
-  // Positioned with inline px geometry.
-  for (const prop of ["left", "top", "width", "height"]) {
-    assert.match(
-      frame.style[prop] || "",
-      /px$/,
-      `camera frame ${prop} must be set in px`,
-    );
-  }
-  const before = { left: frame.style.left, top: frame.style.top };
 
-  // Panning the camera (new visible bounds) and re-driving updateCameraFrame
-  // repositions the SAME node in place — never appends a second frame.
+  // The camera frame is CENTERED: left + width/2 ≈ container centre x (100),
+  // top + height/2 ≈ centre y (60). It represents "your current view" fixed at
+  // the middle of the radar.
+  const center = { x: 100, y: 60 };
+  const frameCenterX = parseFloat(frame.style.left) + parseFloat(frame.style.width) / 2;
+  const frameCenterY = parseFloat(frame.style.top) + parseFloat(frame.style.height) / 2;
+  assert.ok(Math.abs(frameCenterX - center.x) < 0.5, "camera frame is horizontally centred");
+  assert.ok(Math.abs(frameCenterY - center.y) < 0.5, "camera frame is vertically centred");
+
+  const worldLayer = worldLayers[0];
+  const transformBefore = worldLayer.style.transform;
+  const frameBefore = { left: frame.style.left, top: frame.style.top };
+
+  // Panning the camera (same zoom, new x/y) translates the WORLD LAYER (windows
+  // move) while the camera frame stays centred (viewport fixed).
   visibleBounds = { x: 200, y: 150, width: 200, height: 120 };
-  minimap.updateCameraFrame();
+  minimap.update();
   assert.equal(
     container.querySelectorAll(".fleet-minimap__camera").length,
     1,
     "camera frame is repositioned in place, never duplicated",
   );
-  assert.notDeepEqual(
-    { left: frame.style.left, top: frame.style.top },
-    before,
-    "camera frame moves after the camera pans",
+  assert.notEqual(
+    worldLayer.style.transform,
+    transformBefore,
+    "the world layer translates when the camera pans (windows move)",
   );
+  assert.deepEqual(
+    { left: frame.style.left, top: frame.style.top },
+    frameBefore,
+    "the camera frame stays put (centred) on a same-zoom pan",
+  );
+});
+
+test("centered-radar: setZoom rescales the cells (radar zoom)", () => {
+  const { container } = setupDom();
+  const windows = [windowAt("w-1", 0, 0, 100, 80), windowAt("w-2", 400, 0, 100, 80)];
+  const { minimap } = makeMinimap(container, windows);
+
+  minimap.renderCells();
+  const cell = container.querySelector('[data-window-id="w-2"]');
+  const widthBefore = parseFloat(cell.style.width);
+  const leftBefore = parseFloat(cell.style.left);
+
+  // Zooming the radar in enlarges the cells and pushes their world-positions out.
+  minimap.setZoom(2);
+  const widthAfter = parseFloat(cell.style.width);
+  const leftAfter = parseFloat(cell.style.left);
+  assert.ok(widthAfter > widthBefore, "zooming in enlarges the cell");
+  assert.ok(Math.abs(leftAfter) > Math.abs(leftBefore), "zooming in spreads world positions out");
 });
 
 test("the camera frame hides when there are no framable windows", () => {

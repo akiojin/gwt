@@ -4990,6 +4990,77 @@ No viable candidates found in PATH \
     assert!(!message.contains("/private/var/folders"));
 }
 
+// SPEC-3151 FR-003 / AS-3: when neither a native `opencode` binary nor a
+// package runner is available, the raw PTY error must be rewritten into an
+// actionable install hint, matching the Antigravity treatment.
+#[test]
+fn app_runtime_opencode_missing_binary_launch_error_is_actionable() {
+    let temp = tempdir().expect("tempdir");
+    let tab = sample_project_tab_with_window(
+        "tab-1",
+        "agent-1",
+        WindowPreset::Agent,
+        WindowProcessStatus::Running,
+    );
+    let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+    let window_id = combined_window_id("tab-1", "agent-1");
+    let raw_error = "PTY creation failed: Unable to spawn opencode because: \
+No viable candidates found in PATH \
+\"/private/var/folders/tmp/node_modules/.bin:/opt/homebrew/bin:/Users/example/.local/bin\"";
+
+    let events = runtime.handle_launch_complete(window_id.clone(), Err(raw_error.to_string()));
+
+    let detail = events
+        .iter()
+        .find_map(|event| match &event.event {
+            BackendEvent::TerminalStatus { id, status, detail }
+                if id == &window_id && *status == WindowProcessStatus::Error =>
+            {
+                detail.as_deref()
+            }
+            _ => None,
+        })
+        .expect("terminal status detail");
+    assert!(detail.contains("OpenCode (`opencode`) was not found"));
+    assert!(detail.contains("npm i -g opencode-ai"));
+    assert!(detail.contains("bunx/npx"));
+    assert!(!detail.contains("No viable candidates found in PATH"));
+    assert!(!detail.contains("/private/var/folders"));
+}
+
+#[test]
+fn app_runtime_opencode_missing_binary_launch_wizard_error_is_actionable() {
+    let temp = tempdir().expect("tempdir");
+    let mut runtime = sample_runtime(temp.path(), Vec::new(), None);
+    let raw_error = "PTY creation failed: Unable to spawn opencode because: \
+No viable candidates found in PATH \
+\"/private/var/folders/tmp/node_modules/.bin:/opt/homebrew/bin:/Users/example/.local/bin\"";
+
+    let events = runtime.launch_error_events(
+        "tab-1::agent-1".to_string(),
+        raw_error.to_string(),
+        Some(LaunchFeedbackContext {
+            client_id: "client-1".to_string(),
+            title: "Launch failed".to_string(),
+        }),
+    );
+
+    let message = events
+        .iter()
+        .find_map(|event| match &event.event {
+            BackendEvent::LaunchWizardOpenError { title, message } if title == "Launch failed" => {
+                Some(message.as_str())
+            }
+            _ => None,
+        })
+        .expect("launch wizard open error");
+    assert!(message.contains("OpenCode (`opencode`) was not found"));
+    assert!(message.contains("npm i -g opencode-ai"));
+    assert!(message.contains("bunx/npx"));
+    assert!(!message.contains("No viable candidates found in PATH"));
+    assert!(!message.contains("/private/var/folders"));
+}
+
 #[test]
 fn app_runtime_frontend_ready_replays_launch_error_diagnostic_snapshot_without_runtime() {
     let temp = tempdir().expect("tempdir");

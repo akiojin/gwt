@@ -98,6 +98,25 @@ impl AgentId {
     pub fn supports_fast_mode(&self) -> bool {
         matches!(self, Self::ClaudeCode | Self::Codex)
     }
+
+    /// Whether this agent supports selecting an upstream provider at launch
+    /// (Hermes `--provider`). SPEC-3152.
+    pub fn supports_provider_selection(&self) -> bool {
+        matches!(self, Self::Hermes)
+    }
+
+    /// Whether this agent supports selecting a named config profile at launch
+    /// (Hermes `--profile`). SPEC-3152.
+    pub fn supports_profile_selection(&self) -> bool {
+        matches!(self, Self::Hermes)
+    }
+
+    /// Whether this agent takes a free-text model string rather than a fixed
+    /// gwt model list, because the available models depend on the chosen
+    /// provider (Hermes). SPEC-3152.
+    pub fn supports_freetext_model(&self) -> bool {
+        matches!(self, Self::Hermes)
+    }
 }
 
 impl std::fmt::Display for AgentId {
@@ -173,7 +192,10 @@ const BUILTIN_AGENT_DESCRIPTORS: &[BuiltinAgentDescriptor] = &[
         id: AgentId::OpenCode,
         command: "opencode",
         display_name: "OpenCode",
-        package_name: None,
+        // SPEC-3151: OpenCode ships on npm as `opencode-ai` (bin `opencode`),
+        // so versioned launches route through the bunx/npx package runner like
+        // Codex/Claude Code instead of requiring a native binary in PATH.
+        package_name: Some("opencode-ai"),
         color: AgentColor::Green,
         aliases: &["opencode", "open-code"],
         cache_key: "opencode",
@@ -398,7 +420,7 @@ mod tests {
         );
         assert_eq!(AgentId::Antigravity.package_name(), None);
         assert_eq!(AgentId::Gemini.package_name(), Some("@google/gemini-cli"));
-        assert_eq!(AgentId::OpenCode.package_name(), None);
+        assert_eq!(AgentId::OpenCode.package_name(), Some("opencode-ai"));
         assert_eq!(AgentId::OpenClaw.package_name(), None);
         assert_eq!(AgentId::Hermes.package_name(), None);
         assert_eq!(AgentId::Custom("x".into()).package_name(), None);
@@ -596,6 +618,23 @@ mod tests {
                 !unsupported.supports_fast_mode(),
                 "{unsupported:?} should not advertise Fast mode support"
             );
+        }
+    }
+
+    #[test]
+    fn hermes_advertises_provider_profile_and_freetext_model() {
+        assert!(AgentId::Hermes.supports_provider_selection());
+        assert!(AgentId::Hermes.supports_profile_selection());
+        assert!(AgentId::Hermes.supports_freetext_model());
+        for other in [
+            AgentId::ClaudeCode,
+            AgentId::Codex,
+            AgentId::Gemini,
+            AgentId::OpenCode,
+        ] {
+            assert!(!other.supports_provider_selection());
+            assert!(!other.supports_profile_selection());
+            assert!(!other.supports_freetext_model());
         }
     }
 
