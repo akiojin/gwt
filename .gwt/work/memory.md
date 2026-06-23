@@ -7178,3 +7178,10 @@ Type: project
 Context: Phase 2 検証中、cargo test -p gwt のフルランで app_runtime::tests::app_runtime_stop_all_runtimes_kills_every_pane_before_join_waits が 1 回だけ FAILED したが、tests.rs は HEAD と byte 同一かつ単独実行で 3/3 passed だった
 Learning: app_runtime_stop_all_runtimes_kills_every_pane_before_join_waits は PTY teardown/join-wait の timing に依存する flaky test。並列フルラン下の resource contention で稀に落ちる。単独再実行で緑なら回帰ではない。
 Future Action: このテストがフルランで 1 件落ちたら、まず git diff HEAD で当該ファイルが無変更か確認し、単独 -p gwt で 2-3 回再実行して flaky か判定する。緑なら blocker 扱いしない。
+
+## 2026-06-23 — styles bundle must not contain the literal transform layer-hint string (even in comments)
+
+Type: project
+Context: minimap centered-radar で .fleet-minimap__world に静的な transform layer hint を CSS に追加したら embedded_web_canvas_stage_keeps_transform_layer_hint_opt_in が失敗。CSS 宣言を消してもコメント内のリテラル文字列でまた失敗した。
+Learning: このテストは frontend_styles_bundle() 全体を substring 検索するため、CSS 宣言だけでなくコメント内の同リテラル文字列も失敗させる。transform の layer hint は applyViewport が motion 中だけ JS で opt-in し 300ms で解除する設計ポリシー（恒久 pin 禁止）。
+Future Action: CSS で transform の layer hint を恒久 pin しない。コメントでも当該リテラル文字列を書かず言い換える。GPU レイヤが要る要素は JS の motion-scoped opt-in に倣う。
