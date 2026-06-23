@@ -173,7 +173,10 @@ const BUILTIN_AGENT_DESCRIPTORS: &[BuiltinAgentDescriptor] = &[
         id: AgentId::OpenCode,
         command: "opencode",
         display_name: "OpenCode",
-        package_name: None,
+        // SPEC-3151: OpenCode ships on npm as `opencode-ai` (bin `opencode`),
+        // so versioned launches route through the bunx/npx package runner like
+        // Codex/Claude Code instead of requiring a native binary in PATH.
+        package_name: Some("opencode-ai"),
         color: AgentColor::Green,
         aliases: &["opencode", "open-code"],
         cache_key: "opencode",
@@ -398,7 +401,7 @@ mod tests {
         );
         assert_eq!(AgentId::Antigravity.package_name(), None);
         assert_eq!(AgentId::Gemini.package_name(), Some("@google/gemini-cli"));
-        assert_eq!(AgentId::OpenCode.package_name(), None);
+        assert_eq!(AgentId::OpenCode.package_name(), Some("opencode-ai"));
         assert_eq!(AgentId::OpenClaw.package_name(), None);
         assert_eq!(AgentId::Hermes.package_name(), None);
         assert_eq!(AgentId::Custom("x".into()).package_name(), None);
