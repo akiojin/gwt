@@ -3208,6 +3208,37 @@ test("FR-040 (安心): in-app attention toasts are wired with click-to-jump", ()
   );
 });
 
+test("FR-040 refinement: error toasts persist, stack newest-on-top, share a fixed width", () => {
+  // Error toasts must stay until the operator dismisses them (no auto-hide),
+  // while quieter flavors still auto-hide.
+  assert.match(
+    appSource,
+    /if\s*\(\s*flavor\s*!==\s*"error"\s*\)\s*\{[\s\S]*?setTimeout/,
+    "only non-error flavors may arm the auto-hide timer",
+  );
+  // Newest toast on top: the renderer prepends into the stack.
+  assert.match(
+    appSource,
+    /attentionToastStack\(\)\.prepend\(toast\)/,
+    "new toasts must prepend so the freshest sits on top",
+  );
+  // Closing collapses the toast so the rest of the stack settles down.
+  assert.match(appSource, /function dismissAttentionToast/);
+  assert.match(appSource, /dataset\.leaving\s*=\s*"true"/);
+  // Fixed width (not content-sized) so toasts line up.
+  assert.match(
+    inlineStyle,
+    /\.attention-toast\s*\{[^}]*width:\s*min\(\s*360px/,
+    "attention toasts must use a fixed width",
+  );
+  // The leaving state collapses height to let the stack settle.
+  assert.match(
+    inlineStyle,
+    /\.attention-toast\[data-leaving="true"\]\s*\{[^}]*max-height:\s*0/,
+    "leaving toasts must collapse their height",
+  );
+});
+
 test("Work surface lifecycle badge styles every agent-session state (SPEC-2359 W-12 FR-351)", () => {
   const css = readFileSync(resolve(here, "../styles/components.css"), "utf8");
   // Slice 3 retires the sidebar `op-agent-card` states; the Work surface now

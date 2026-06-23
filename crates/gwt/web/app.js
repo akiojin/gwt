@@ -1718,9 +1718,10 @@
           zoom: viewport.zoom,
         });
         viewportDomApplied = true;
-        // SPEC-2008 camera-focus / FR-094: every viewport change repositions
-        // the Fleet Minimap camera frame so it tracks pan / zoom / framing.
-        fleetMinimap?.updateCameraFrame();
+        // SPEC-2008 camera-focus / FR-094: every viewport change re-centres the
+        // Fleet Minimap radar — the camera stays fixed at the minimap centre and
+        // the world (cells) slides under it, mirroring the canvas stage.
+        fleetMinimap?.update();
       }
 
       // Issue #2698 PR 2 (B1) — throttle the `update_viewport` WS
@@ -3951,9 +3952,10 @@
 
       // SPEC-2356 Anshin Addendum (FR-040): in-app attention toast. Distinct from
       // the away-only desktop notification above — this surfaces even while the
-      // operator is present. Click flies the camera to the window (frameWindow);
-      // a dismiss control and an auto-hide keep it from lingering. needs_input /
-      // error toasts hold longer than the quiet "done" toast.
+      // operator is present. Click flies the camera to the window (frameWindow).
+      // Newest toasts stack on top; closing one lets the rest settle down. Quiet
+      // flavors auto-hide, but ERROR toasts persist until the operator dismisses
+      // them so a failure is never missed.
       function showAttentionToast(notice) {
         const flavor = notice.flavor || "needs_input";
         const existing = document.getElementById(`attention-toast-${notice.windowId}`);
@@ -3973,7 +3975,7 @@
         jump.append(title, body);
         jump.addEventListener("click", () => {
           frameWindow(notice.windowId);
-          toast.remove();
+          dismissAttentionToast(toast);
         });
 
         const dismiss = createNode("button", "attention-toast__dismiss", "×");
@@ -3981,17 +3983,43 @@
         dismiss.setAttribute("aria-label", "Dismiss notification");
         dismiss.addEventListener("click", (event) => {
           event.stopPropagation();
-          toast.remove();
+          dismissAttentionToast(toast);
         });
 
         toast.append(jump, dismiss);
-        attentionToastStack().appendChild(toast);
-        const holdMs = flavor === "done" ? 8_000 : 14_000;
-        window.setTimeout(() => {
-          if (toast.isConnected) {
+        // Newest on top: prepend so the freshest attention sits above older ones
+        // and closing a toast lets the stack settle downward.
+        attentionToastStack().prepend(toast);
+        // ERROR holds until the operator dismisses it; quieter flavors auto-hide
+        // so transient notices never pile up.
+        if (flavor !== "error") {
+          const holdMs = flavor === "done" ? 8_000 : 14_000;
+          window.setTimeout(() => {
+            if (toast.isConnected) {
+              dismissAttentionToast(toast);
+            }
+          }, holdMs);
+        }
+      }
+
+      // Collapse a toast out (height + fade) so the rest of the stack settles
+      // smoothly, then remove it. A fallback timer guarantees removal even when
+      // the transition is skipped (reduced-motion / detached node).
+      function dismissAttentionToast(toast) {
+        if (!toast || toast.dataset.leaving === "true") {
+          return;
+        }
+        toast.dataset.leaving = "true";
+        toast.addEventListener(
+          "transitionend",
+          () => {
             toast.remove();
-          }
-        }, holdMs);
+          },
+          { once: true },
+        );
+        window.setTimeout(() => {
+          toast.remove();
+        }, 320);
       }
 
       // The attention toasts stack in a fixed column so multiple windows can
