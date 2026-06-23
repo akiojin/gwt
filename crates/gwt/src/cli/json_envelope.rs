@@ -97,6 +97,9 @@ fn parse(input: &str) -> Result<ParsedEnvelope, CliParseError> {
         }
         "board.show" => board_show(params)?,
         "board.post" => board_post(params)?,
+        "board.config.show" | "board.config-show" => {
+            CliCommand::Board(crate::cli::board::BoardCommand::ConfigShow)
+        }
         "issue.view" => CliCommand::Issue(IssueCommand::View {
             number: required_u64(params, "number")?,
             refresh: optional_bool(params, "refresh")?.unwrap_or(false),

@@ -325,6 +325,90 @@ pub fn provider_for(worktree_root: &Path) -> Box<dyn BoardProvider> {
     }
 }
 
+/// A JSON/human-facing view of how a repo's Board routes (SPEC-2963 FR-026).
+/// Lets `gwtd board.config.show` confirm, per repo, the resolved provider and
+/// channel — so two projects visibly resolve to two different channels without
+/// needing a live Slack/Teams workspace.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct BoardRouting {
+    /// Effective provider kind: `local` / `slack` / `teams`.
+    pub provider: String,
+    /// Where the provider kind came from: `project` (board.toml) or `global`.
+    pub provider_source: &'static str,
+    /// Resolved channel (`None` for local or when unset).
+    pub channel: Option<String>,
+    /// Tenant the channel belongs to (`None` for local / single-tenant legacy).
+    pub tenant: Option<String>,
+    /// Whether a usable token exists for this provider+tenant (`false` for local).
+    pub signed_in: bool,
+    /// Absolute path of the per-project config file consulted.
+    pub config_path: String,
+}
+
+/// Whether a token exists for `provider`+`tenant` (tenant-keyed, legacy fallback).
+fn token_present(provider: &str, tenant: Option<&str>) -> bool {
+    load_tenant_token(provider, tenant).is_some()
+}
+
+/// Resolve the Board routing for a repo, for inspection / confirmation
+/// (`gwtd board.config.show`). Reuses the exact resolution `provider_for` uses.
+pub fn routing_for(worktree_root: &Path) -> BoardRouting {
+    let work_dir = gwt_repo_local_work_dir(worktree_root);
+    let project = ProjectBoardConfig::load_from_work_dir(&work_dir);
+    let provider_source = if project.provider.is_some() {
+        "project"
+    } else {
+        "global"
+    };
+    let settings = Settings::load().unwrap_or_default();
+    let resolved = resolve_board(&project, &settings, current_kind());
+    let signed_in = match resolved.kind {
+        BoardProviderKind::Local => false,
+        BoardProviderKind::Slack => token_present("slack", resolved.tenant.as_deref()),
+        BoardProviderKind::Teams => token_present("teams", resolved.tenant.as_deref()),
+    };
+    BoardRouting {
+        provider: resolved.kind.as_str().to_string(),
+        provider_source,
+        channel: resolved.channel,
+        tenant: resolved.tenant,
+        signed_in,
+        config_path: work_dir
+            .join(gwt_config::PROJECT_BOARD_FILE)
+            .display()
+            .to_string(),
+    }
+}
+
+/// Update a repo's per-project `board.toml` (`gwtd board.config.set`). For each
+/// field: `Some(value)` sets it (`Some(None)` clears → inherit global),
+/// `None` leaves it unchanged. Returns the resulting routing.
+pub fn update_project_board_config(
+    worktree_root: &Path,
+    provider: Option<Option<BoardProviderKind>>,
+    channel: Option<Option<String>>,
+    tenant: Option<Option<String>>,
+) -> std::io::Result<BoardRouting> {
+    let work_dir = gwt_repo_local_work_dir(worktree_root);
+    let mut cfg = ProjectBoardConfig::load_from_work_dir(&work_dir);
+    let trim_nonempty = |value: Option<String>| {
+        value
+            .map(|v| v.trim().to_string())
+            .filter(|v| !v.is_empty())
+    };
+    if let Some(provider) = provider {
+        cfg.provider = provider;
+    }
+    if let Some(channel) = channel {
+        cfg.channel = trim_nonempty(channel);
+    }
+    if let Some(tenant) = tenant {
+        cfg.tenant = trim_nonempty(tenant);
+    }
+    cfg.save_to_work_dir(&work_dir)?;
+    Ok(routing_for(worktree_root))
+}
+
 /// Build the active remote provider from settings + stored credentials.
 fn build_remote(kind: BoardProviderKind, settings: &Settings) -> Box<dyn BoardProvider> {
     match kind {
@@ -616,6 +700,58 @@ mod tests {
             load_tenant_token_in(dir.path(), "slack", Some("acme")),
             Some(tok)
         );
+    }
+
+    #[test]
+    fn routing_for_reports_per_project_channels() {
+        // gwtd board.config.show: two repos resolve to two distinct channels.
+        let dir_a = tempfile::tempdir().unwrap();
+        let dir_b = tempfile::tempdir().unwrap();
+        update_project_board_config(
+            dir_a.path(),
+            Some(Some(BoardProviderKind::Slack)),
+            Some(Some("C-AAA".into())),
+            Some(Some("acme".into())),
+        )
+        .unwrap();
+        update_project_board_config(
+            dir_b.path(),
+            Some(Some(BoardProviderKind::Slack)),
+            Some(Some("C-BBB".into())),
+            Some(Some("beta".into())),
+        )
+        .unwrap();
+        let a = routing_for(dir_a.path());
+        let b = routing_for(dir_b.path());
+        assert_eq!(a.provider, "slack");
+        assert_eq!(a.provider_source, "project");
+        assert_eq!(a.channel.as_deref(), Some("C-AAA"));
+        assert_eq!(a.tenant.as_deref(), Some("acme"));
+        assert_eq!(b.channel.as_deref(), Some("C-BBB"));
+        assert_ne!(a.channel, b.channel, "two projects resolve to two channels");
+    }
+
+    #[test]
+    fn update_project_board_config_clear_inherits_global() {
+        // Setting then clearing the provider returns to global inheritance.
+        let dir = tempfile::tempdir().unwrap();
+        update_project_board_config(
+            dir.path(),
+            Some(Some(BoardProviderKind::Slack)),
+            Some(Some("C".into())),
+            None,
+        )
+        .unwrap();
+        let routing = update_project_board_config(
+            dir.path(),
+            Some(None), // clear provider → inherit global
+            Some(None), // clear channel
+            None,
+        )
+        .unwrap();
+        assert_eq!(routing.provider_source, "global");
+        // In unit tests the global kind defaults to local (test override).
+        assert_eq!(routing.provider, "local");
     }
 
     #[test]
