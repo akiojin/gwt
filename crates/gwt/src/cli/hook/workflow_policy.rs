@@ -142,33 +142,6 @@ pub fn evaluate(event: &HookEvent, worktree_root: &Path) -> Result<HookOutput, H
     evaluate_with_context(event, worktree_root, &context)
 }
 
-pub fn evaluate_improvement_stop_guard(worktree_root: &Path, stop_hook_active: bool) -> HookOutput {
-    if stop_hook_active {
-        return HookOutput::Silent;
-    }
-    let candidates =
-        crate::cli::improvement::pending_high_confidence_contract_violations(worktree_root);
-    if candidates.is_empty() {
-        return HookOutput::Silent;
-    }
-    let mut reason = String::from(
-        "High-confidence gwt improvement candidate requires handling before stopping.\n\n",
-    );
-    reason.push_str("Unhandled candidates:\n");
-    for candidate in &candidates {
-        reason.push_str(&format!(
-            "- {} [{}]: {}\n",
-            candidate.id, candidate.target_artifact, candidate.summary
-        ));
-    }
-    reason.push_str(
-        "\nNext action: run `improvement.promote_issue` for actionable gwt-caused problems, \
-run `improvement.dismiss` with a reason for false positives, or explicitly park the candidate \
-before stopping.",
-    );
-    HookOutput::StopBlock { reason }
-}
-
 pub fn handle() -> Result<HookOutput, HookError> {
     let mut input = String::new();
     std::io::stdin().read_to_string(&mut input)?;

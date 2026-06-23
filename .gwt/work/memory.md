@@ -7192,3 +7192,10 @@ Type: project
 Context: minimap centered-radar で .fleet-minimap__world に静的な transform layer hint を CSS に追加したら embedded_web_canvas_stage_keeps_transform_layer_hint_opt_in が失敗。CSS 宣言を消してもコメント内のリテラル文字列でまた失敗した。
 Learning: このテストは frontend_styles_bundle() 全体を substring 検索するため、CSS 宣言だけでなくコメント内の同リテラル文字列も失敗させる。transform の layer hint は applyViewport が motion 中だけ JS で opt-in し 300ms で解除する設計ポリシー（恒久 pin 禁止）。
 Future Action: CSS で transform の layer hint を恒久 pin しない。コメントでも当該リテラル文字列を書かず言い換える。GPU レイヤが要る要素は JS の motion-scoped opt-in に倣う。
+
+## 2026-06-24 — Keep gwt self-improvement stop hooks repo-local
+
+Type: agent workflow correction
+Context: SPEC-3164 direct self-improvement hook work clarified that the high-confidence self-improvement Stop block is for developing gwt itself, not for arbitrary projects opened by gwt.
+Learning: Do not wire self-improvement hard Stop blocks into shared gwt Managed Hooks. Put the blocking check behind gwt-repo-owned direct hook config and make provider-generated assets include it only when the worktree remote is akiojin/gwt; non-gwt projects must either omit the hook name or no-op.
+Future Action: When adding agent workflow guards, classify whether the guard is gwt product behavior or gwt-repo development policy before choosing Managed Hooks, generated guidance, or repo-local direct hook config.

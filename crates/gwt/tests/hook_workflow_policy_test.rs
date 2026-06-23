@@ -6,7 +6,9 @@ use std::{
 };
 
 use chrono::Utc;
-use gwt::cli::hook::{workflow_policy, HookEvent, HookOutput};
+use gwt::cli::hook::{
+    event_dispatcher, gwt_self_improvement_stop, workflow_policy, HookEvent, HookOutput,
+};
 use gwt_agent::{session::GWT_SESSION_ID_ENV, AgentId, Session};
 use gwt_core::{
     coordination::{
@@ -81,9 +83,28 @@ fn write_improvement_store(repo_path: &Path, candidates: serde_json::Value) {
     std::fs::write(path, candidates.to_string()).expect("write candidates");
 }
 
-#[test]
-fn improvement_stop_guard_blocks_high_confidence_gwt_contract_violation() {
+fn init_repo_with_origin(remote_url: &str) -> TempDir {
     let repo = tempfile::tempdir().expect("repo");
+    assert!(std::process::Command::new("git")
+        .arg("init")
+        .arg("-q")
+        .arg(repo.path())
+        .status()
+        .expect("git init")
+        .success());
+    assert!(std::process::Command::new("git")
+        .arg("-C")
+        .arg(repo.path())
+        .args(["remote", "add", "origin", remote_url])
+        .status()
+        .expect("git remote add")
+        .success());
+    repo
+}
+
+#[test]
+fn gwt_self_improvement_stop_blocks_high_confidence_gwt_contract_violation_in_gwt_repo() {
+    let repo = init_repo_with_origin("https://github.com/akiojin/gwt.git");
     write_improvement_store(
         repo.path(),
         json!({
@@ -108,7 +129,7 @@ fn improvement_stop_guard_blocks_high_confidence_gwt_contract_violation() {
         }),
     );
 
-    let output = workflow_policy::evaluate_improvement_stop_guard(repo.path(), false);
+    let output = gwt_self_improvement_stop::evaluate(repo.path(), false);
     let HookOutput::StopBlock { reason } = output else {
         panic!("expected StopBlock, got {output:?}");
     };
@@ -118,8 +139,8 @@ fn improvement_stop_guard_blocks_high_confidence_gwt_contract_violation() {
 }
 
 #[test]
-fn improvement_stop_guard_ignores_low_confidence_or_handled_candidates() {
-    let repo = tempfile::tempdir().expect("repo");
+fn gwt_self_improvement_stop_ignores_low_confidence_or_handled_candidates() {
+    let repo = init_repo_with_origin("git@github.com:akiojin/gwt.git");
     write_improvement_store(
         repo.path(),
         json!({
@@ -165,8 +186,109 @@ fn improvement_stop_guard_ignores_low_confidence_or_handled_candidates() {
     );
 
     assert_eq!(
-        workflow_policy::evaluate_improvement_stop_guard(repo.path(), false),
+        gwt_self_improvement_stop::evaluate(repo.path(), false),
         HookOutput::Silent
+    );
+}
+
+#[test]
+fn gwt_self_improvement_stop_is_noop_outside_gwt_repo() {
+    let repo = init_repo_with_origin("https://github.com/example/target-project.git");
+    write_improvement_store(
+        repo.path(),
+        json!({
+            "candidates": [{
+                "id": "impr-target",
+                "created_at": "2026-06-23T00:00:00Z",
+                "updated_at": "2026-06-23T00:00:00Z",
+                "source": "agent-failure",
+                "target_artifact": "skill",
+                "classification": "gwt-caused",
+                "confidence": "high",
+                "state": "pending",
+                "dedupe_key": "target:skill",
+                "occurrences": 1,
+                "sanitized_summary": "Target project saw a gwt hook problem",
+                "sanitized_details": null,
+                "evidence_digest": null,
+                "local_evidence": [],
+                "linked_issue": null,
+                "dismissed_reason": null
+            }]
+        }),
+    );
+
+    assert_eq!(
+        gwt_self_improvement_stop::evaluate(repo.path(), false),
+        HookOutput::Silent
+    );
+}
+
+#[test]
+fn gwt_self_improvement_stop_respects_stop_hook_active() {
+    let repo = init_repo_with_origin("https://github.com/akiojin/gwt.git");
+    write_improvement_store(
+        repo.path(),
+        json!({
+            "candidates": [{
+                "id": "impr-active-stop",
+                "created_at": "2026-06-23T00:00:00Z",
+                "updated_at": "2026-06-23T00:00:00Z",
+                "source": "agent-failure",
+                "target_artifact": "hook",
+                "classification": "gwt-caused",
+                "confidence": "high",
+                "state": "pending",
+                "dedupe_key": "hook:active-stop",
+                "occurrences": 1,
+                "sanitized_summary": "Stop hook recursion must not block again",
+                "sanitized_details": null,
+                "evidence_digest": null,
+                "local_evidence": [],
+                "linked_issue": null,
+                "dismissed_reason": null
+            }]
+        }),
+    );
+
+    assert_eq!(
+        gwt_self_improvement_stop::evaluate(repo.path(), true),
+        HookOutput::Silent
+    );
+}
+
+#[test]
+fn common_stop_dispatcher_does_not_run_gwt_self_improvement_stop() {
+    let repo = init_repo_with_origin("https://github.com/akiojin/gwt.git");
+    write_improvement_store(
+        repo.path(),
+        json!({
+            "candidates": [{
+                "id": "impr-common-stop",
+                "created_at": "2026-06-23T00:00:00Z",
+                "updated_at": "2026-06-23T00:00:00Z",
+                "source": "agent-failure",
+                "target_artifact": "hook",
+                "classification": "gwt-caused",
+                "confidence": "high",
+                "state": "pending",
+                "dedupe_key": "hook:common-stop",
+                "occurrences": 1,
+                "sanitized_summary": "Common Stop dispatcher must not own self-improvement",
+                "sanitized_details": null,
+                "evidence_digest": null,
+                "local_evidence": [],
+                "linked_issue": null,
+                "dismissed_reason": null
+            }]
+        }),
+    );
+
+    let output = event_dispatcher::handle_with_input("Stop", "{}", repo.path(), None)
+        .expect("Stop dispatch");
+    assert!(
+        !matches!(output, HookOutput::StopBlock { .. }),
+        "self-improvement must be invoked by direct gwt repo hook config, not common Stop dispatcher: {output:?}"
     );
 }
 
