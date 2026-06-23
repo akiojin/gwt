@@ -4812,6 +4812,8 @@ mod tests {
             env_vars: HashMap::from([("EXTRA_FLAG".to_string(), "1".to_string())]),
             remove_env: vec!["SECRET".to_string()],
             windows_shell: None,
+            command_override: None,
+            command_args_override: None,
         };
 
         let launch = build_shell_process_launch(&worktree, &mut config).expect("shell launch");
@@ -4849,6 +4851,8 @@ mod tests {
             env_vars: HashMap::new(),
             remove_env: Vec::new(),
             windows_shell: Some(gwt_agent::WindowsShellKind::WindowsPowerShell),
+            command_override: None,
+            command_args_override: None,
         };
 
         let launch = build_shell_process_launch(&worktree, &mut config).expect("shell launch");
@@ -4862,6 +4866,51 @@ mod tests {
             assert_ne!(launch.command, "powershell");
             assert_ne!(launch.command, "cmd.exe");
         }
+    }
+
+    #[test]
+    fn build_shell_process_launch_for_host_uses_command_override() {
+        // SPEC-3151 FR-010: a command override (the OpenCode setup launcher)
+        // replaces the detected interactive shell while keeping the worktree
+        // env and GWT_PROJECT_ROOT.
+        let temp = tempdir().expect("tempdir");
+        let worktree = temp.path().join("repo-feature");
+        fs::create_dir_all(&worktree).expect("create worktree");
+        let mut config = ShellLaunchConfig {
+            working_dir: Some(worktree.clone()),
+            branch: Some("feature/gui".to_string()),
+            base_branch: None,
+            display_name: "OpenCode Setup".to_string(),
+            runtime_target: LaunchRuntimeTarget::Host,
+            docker_service: None,
+            docker_lifecycle_intent: DockerLifecycleIntent::Connect,
+            env_vars: HashMap::new(),
+            remove_env: Vec::new(),
+            windows_shell: None,
+            command_override: Some("bunx".to_string()),
+            command_args_override: Some(vec![
+                "opencode-ai@latest".to_string(),
+                "auth".to_string(),
+                "login".to_string(),
+            ]),
+        };
+
+        let launch = build_shell_process_launch(&worktree, &mut config).expect("shell launch");
+
+        assert_eq!(launch.command, "bunx");
+        assert_eq!(
+            launch.args,
+            vec![
+                "opencode-ai@latest".to_string(),
+                "auth".to_string(),
+                "login".to_string()
+            ]
+        );
+        assert_eq!(launch.cwd.as_deref(), Some(worktree.as_path()));
+        assert_eq!(
+            launch.env.get("GWT_PROJECT_ROOT").map(String::as_str),
+            Some(worktree.display().to_string().as_str())
+        );
     }
 
     #[test]
@@ -5719,6 +5768,8 @@ mod tests {
             env_vars: HashMap::new(),
             remove_env: Vec::new(),
             windows_shell: None,
+            command_override: None,
+            command_args_override: None,
         };
         super::resolve_shell_launch_worktree(&repo, &mut shell_config)
             .expect("shell launch wrapper");

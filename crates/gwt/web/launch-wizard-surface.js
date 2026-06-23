@@ -1455,6 +1455,50 @@ export function createLaunchWizardSurface({
           panel.appendChild(section);
         }
 
+        // SPEC-3151 FR-008/009/010: OpenCode-specific launch options, rendered
+        // only for the OpenCode agent. OpenCode takes a single free-text
+        // `provider/model` string (auth is host-global, so no provider bridge
+        // is needed). When no AI provider is configured, a non-blocking note
+        // offers an in-pane setup launcher that runs `opencode auth login`.
+        if (showSetupForms && launchWizard.show_opencode_options) {
+          const section = createLaunchSection(
+            "OpenCode options",
+            "Model and provider sign-in for the OpenCode agent. Blank model uses your OpenCode config.",
+          );
+          if (launchWizard.opencode_needs_setup) {
+            const note = createNode(
+              "div",
+              "launch-note",
+              "OpenCode has no AI provider configured yet. Run `/connect` inside OpenCode or `opencode auth login` to sign in. You can still launch — OpenCode will prompt for setup.",
+            );
+            const setupButton = createNode(
+              "button",
+              "launch-choice-button",
+              "Run OpenCode setup",
+            );
+            setupButton.type = "button";
+            setupButton.addEventListener("click", () =>
+              sendWizardAction({ kind: "run_opencode_setup" }),
+            );
+            note.appendChild(setupButton);
+            section.appendChild(note);
+          }
+          const grid = createNode("div", "launch-form-grid");
+          appendTextField(
+            grid,
+            "Model",
+            launchWizard.selected_model,
+            "e.g. anthropic/claude-sonnet-4 (blank = config)",
+            (value) =>
+              sendWizardAction({
+                kind: "set_model",
+                model: value,
+              }),
+          );
+          section.appendChild(grid);
+          panel.appendChild(section);
+        }
+
         // SPEC-2014 Amendment 2026-05-20 (FR-057 / FR-058):
         // The Linked issue section renders only when the wizard was opened
         // through the Knowledge Issue Bridge. The issue number is shown as

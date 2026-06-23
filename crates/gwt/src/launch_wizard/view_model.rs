@@ -26,6 +26,7 @@ impl LaunchWizardState {
             && self.current_agent_supports_fast_mode();
         let fast_mode = self.fast_mode_enabled_for_current_agent();
         let show_hermes_options = show_manual_setup && self.current_agent_supports_hermes_options();
+        let show_opencode_options = show_manual_setup && self.current_agent_is_opencode();
         LaunchWizardView {
             title: if self.wizard_mode == LaunchWizardMode::StartWork {
                 "Start Work".to_string()
@@ -102,6 +103,8 @@ impl LaunchWizardState {
                 && self.agent_is_codex(),
             show_hermes_options,
             hermes_needs_setup: show_hermes_options && self.hermes_needs_setup,
+            show_opencode_options,
+            opencode_needs_setup: show_opencode_options && self.opencode_needs_setup,
             hermes_provider: self.hermes_provider.clone(),
             hermes_provider_options: self.hermes_provider_choices.clone(),
             hermes_profile: self.hermes_profile.clone(),
