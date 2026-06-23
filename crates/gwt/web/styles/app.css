@@ -1784,6 +1784,7 @@ body {
 }
 
 .improvement-inbox-meta-item {
+  gap: 4px;
   max-width: 100%;
   padding: 2px 6px;
   background: var(--color-surface);

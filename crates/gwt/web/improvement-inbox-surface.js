@@ -49,7 +49,7 @@ export function createImprovementInboxSurface({ createNode, send }) {
 
   function appendMeta(parent, label, value) {
     const item = node("span", "improvement-inbox-meta-item");
-    item.appendChild(node("span", "improvement-inbox-meta-label", label));
+    item.appendChild(node("span", "improvement-inbox-meta-label", `${label}:`));
     item.appendChild(node("span", "improvement-inbox-meta-value", value));
     parent.appendChild(item);
   }

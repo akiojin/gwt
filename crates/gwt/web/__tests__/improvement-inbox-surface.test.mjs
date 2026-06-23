@@ -78,6 +78,8 @@ test("Improvement Inbox renders candidate states and issue links", () => {
   );
   assert.match(fixture.body.textContent, /Skill failed to update/);
   assert.match(fixture.body.textContent, /Verification skip regression/);
+  assert.match(fixture.body.textContent, /Target:/);
+  assert.match(fixture.body.textContent, /Cause:/);
   assert.match(fixture.body.textContent, /#3164/);
   assert.match(fixture.body.textContent, /Not a gwt problem/);
 });
