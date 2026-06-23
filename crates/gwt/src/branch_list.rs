@@ -461,19 +461,38 @@ pub fn remote_start_work_eligibility(
         .collect()
 }
 
-/// SPEC-2359 US-83 / FR-444: names of remote branches that are eligible
-/// "Start Work / Open" sources, used to populate the Launch Wizard's existing
-/// branch picker. Derived purely from [`remote_start_work_eligibility`].
+/// SPEC-2359 US-83 / FR-444: the most-recently-updated eligible remote branches
+/// a user can start work on, used to populate the Workspace "Start work on a
+/// branch" rows. Derived from [`remote_start_work_eligibility`], then sorted by
+/// most-recent commit first and capped at [`REMOTE_START_WORK_BRANCH_CAP`] — a
+/// busy repo can have hundreds of stale remote refs, and flooding the Workspace
+/// list with all of them is worse than surfacing the recently-active ones.
 pub fn eligible_remote_start_work_branch_names(
     entries: &[BranchListEntry],
     active_session_branches: &HashSet<String>,
 ) -> Vec<String> {
-    remote_start_work_eligibility(entries, active_session_branches)
+    let eligible: HashSet<String> = remote_start_work_eligibility(entries, active_session_branches)
         .into_iter()
         .filter(|(_, eligibility)| *eligibility == RemoteStartWorkEligibility::StartWork)
         .map(|(name, _)| name)
+        .collect();
+    let mut rows: Vec<&BranchListEntry> = entries
+        .iter()
+        .filter(|entry| eligible.contains(&entry.name))
+        .collect();
+    // `last_commit_date` is a sortable `YYYY-MM-DD HH:MM:SS ...` string; reverse
+    // (b vs a) puts the newest first. Missing dates sort last.
+    rows.sort_by(|a, b| b.last_commit_date.cmp(&a.last_commit_date));
+    rows.into_iter()
+        .take(REMOTE_START_WORK_BRANCH_CAP)
+        .map(|entry| entry.name.clone())
         .collect()
 }
+
+/// SPEC-2359 US-83: cap on the eligible remote branches surfaced in the
+/// Workspace "Start work on a branch" rows so a repo with hundreds of stale
+/// remote refs does not flood the list.
+pub const REMOTE_START_WORK_BRANCH_CAP: usize = 20;
 
 fn classify_remote_start_work_eligibility(
     remote_entry_name: &str,
@@ -644,6 +663,39 @@ mod tests {
             remote_branch_name: Some(remote_branch_name.to_string()),
             ..make_branch(name, false, false, last_commit_date)
         }
+    }
+
+    #[test]
+    fn eligible_remote_start_work_branch_names_caps_and_sorts_by_recency() {
+        // SPEC-2359 US-83: a busy repo can have hundreds of eligible remote
+        // refs; the Workspace rows surface only the most recent, capped.
+        let branches = (0..25)
+            .map(|i| {
+                make_branch(
+                    &format!("origin/feature/b{i:02}"),
+                    false,
+                    false,
+                    Some(&format!("2026-04-{:02} 00:00:00 +0000", i + 1)),
+                )
+            })
+            .collect();
+        let entries = adapt_branch_inventory(branches);
+        let names = eligible_remote_start_work_branch_names(&entries, &HashSet::new());
+
+        assert_eq!(
+            names.len(),
+            REMOTE_START_WORK_BRANCH_CAP,
+            "capped at the limit"
+        );
+        assert_eq!(
+            names.first().map(String::as_str),
+            Some("origin/feature/b24"),
+            "most recent branch is listed first"
+        );
+        assert!(
+            !names.iter().any(|name| name == "origin/feature/b00"),
+            "the oldest branches are dropped past the cap"
+        );
     }
 
     #[test]
