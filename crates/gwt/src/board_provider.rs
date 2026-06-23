@@ -11,14 +11,16 @@
 //! `LocalProvider`, so behavior is identical to the pre-abstraction path.
 //! A future Slack/Teams adapter (Issue #2960) plugs in via [`provider`].
 
+use std::collections::BTreeMap;
 use std::path::Path;
 
 use chrono::{DateTime, Utc};
-use gwt_config::{BoardProviderKind, Settings, SlackConfig, TeamsConfig};
+use gwt_config::{BoardProviderKind, ProjectBoardConfig, Settings, SlackConfig, TeamsConfig};
 use gwt_core::coordination::{
     BoardAudienceScope, BoardEntry, BoardEntryKind, BoardHistoryPage, BoardProvider,
     CoordinationSnapshot, LocalProvider,
 };
+use gwt_core::paths::gwt_repo_local_work_dir;
 use gwt_core::{GwtError, Result};
 
 use crate::board_remote::http::ReqwestHttpClient;
@@ -198,6 +200,128 @@ fn build_teams(
     )))
 }
 
+/// Resolved Board routing for one repo: the effective provider kind plus, for
+/// remote providers, the project's channel and tenant (SPEC-2963 FR-026).
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ResolvedBoard {
+    kind: BoardProviderKind,
+    channel: Option<String>,
+    tenant: Option<String>,
+}
+
+/// Overlay the per-project `board.toml` onto the global `[board]` config.
+/// Precedence: project board.toml → global `[board]` (FR-031). `global_kind` is
+/// the global provider kind (the test-override-aware `current_kind()` in unit
+/// tests). The channel falls back to the global default channel for the
+/// resolved kind; the tenant is project-only (FR-029).
+fn resolve_board(
+    project: &ProjectBoardConfig,
+    settings: &Settings,
+    global_kind: BoardProviderKind,
+) -> ResolvedBoard {
+    let kind = project.provider.unwrap_or(global_kind);
+    let global_channel = match kind {
+        BoardProviderKind::Slack => settings.board.slack.default_channel.clone(),
+        BoardProviderKind::Teams => settings.board.teams.default_channel.clone(),
+        BoardProviderKind::Local => None,
+    };
+    let trim_nonempty = |value: String| {
+        let trimmed = value.trim().to_string();
+        (!trimmed.is_empty()).then_some(trimmed)
+    };
+    ResolvedBoard {
+        kind,
+        channel: project
+            .channel
+            .clone()
+            .or(global_channel)
+            .and_then(trim_nonempty),
+        tenant: project.tenant.clone().and_then(trim_nonempty),
+    }
+}
+
+/// Load the OAuth token for a remote provider, keyed by tenant (FR-029). A
+/// tenant-scoped token (`board-<provider>-<tenant>.json`) is preferred so
+/// projects in different tenants stay independent; the legacy provider-only key
+/// is the migration fallback. `dir` is the credentials directory (injectable
+/// for hermetic tests).
+fn load_tenant_token_in(dir: &Path, provider: &str, tenant: Option<&str>) -> Option<TokenSet> {
+    if let Some(tenant) = tenant.map(str::trim).filter(|t| !t.is_empty()) {
+        if let Ok(Some(token)) = token_store::load_in(dir, &format!("{provider}-{tenant}")) {
+            return Some(token);
+        }
+    }
+    token_store::load_in(dir, provider).ok().flatten()
+}
+
+/// Tenant-keyed token from the default credentials directory.
+fn load_tenant_token(provider: &str, tenant: Option<&str>) -> Option<TokenSet> {
+    load_tenant_token_in(&token_store::default_dir(), provider, tenant)
+}
+
+/// Build a remote provider scoped to a single project's channel. The provider
+/// is constructed with an **empty** workspace channel_map so its read history
+/// touches only this project's channel — never another project's (FR-027).
+fn build_remote_for(
+    provider: &str,
+    resolved: &ResolvedBoard,
+) -> std::result::Result<Box<dyn BoardProvider>, String> {
+    let channel = resolved
+        .channel
+        .clone()
+        .ok_or_else(|| format!("{provider} channel is not configured for this project"))?;
+    let token = load_tenant_token(provider, resolved.tenant.as_deref()).ok_or_else(|| {
+        match resolved.tenant.as_deref() {
+            Some(tenant) => {
+                format!("{provider} is not signed in for tenant '{tenant}' (this project)")
+            }
+            None => format!("{provider} is not signed in"),
+        }
+    })?;
+    let http = Box::new(ReqwestHttpClient::new());
+    Ok(match provider {
+        "teams" => Box::new(TeamsProvider::new(
+            token.access_token,
+            channel,
+            BTreeMap::new(),
+            http,
+            60,
+        )),
+        _ => Box::new(SlackProvider::new(
+            token.access_token,
+            channel,
+            BTreeMap::new(),
+            http,
+            60,
+        )),
+    })
+}
+
+/// The active provider for a specific repo, resolved from the repo's
+/// `.gwt/work/board.toml` overlaid on the global settings (SPEC-2963 FR-026).
+/// Each repo gets its own provider scoped to its own channel, so Board posts and
+/// reads never mix across projects. `local` stays on the zero-cost fast path.
+pub fn provider_for(worktree_root: &Path) -> Box<dyn BoardProvider> {
+    let project = ProjectBoardConfig::load_from_work_dir(&gwt_repo_local_work_dir(worktree_root));
+    let global_kind = current_kind();
+    // Fast path: no project override and global is local → zero-cost local,
+    // identical to the pre-per-project behaviour (avoids loading Settings).
+    if project.is_empty() && global_kind == BoardProviderKind::Local {
+        return Box::new(LocalProvider);
+    }
+    let settings = Settings::load().unwrap_or_default();
+    let resolved = resolve_board(&project, &settings, global_kind);
+    match resolved.kind {
+        BoardProviderKind::Local => Box::new(LocalProvider),
+        BoardProviderKind::Slack => {
+            build_remote_for("slack", &resolved).unwrap_or_else(UnconfiguredProvider::boxed)
+        }
+        BoardProviderKind::Teams => {
+            build_remote_for("teams", &resolved).unwrap_or_else(UnconfiguredProvider::boxed)
+        }
+    }
+}
+
 /// Build the active remote provider from settings + stored credentials.
 fn build_remote(kind: BoardProviderKind, settings: &Settings) -> Box<dyn BoardProvider> {
     match kind {
@@ -228,12 +352,12 @@ pub fn provider() -> Box<dyn BoardProvider> {
 
 /// Append a Board entry through the active provider.
 pub fn post_entry(worktree_root: &Path, entry: BoardEntry) -> Result<CoordinationSnapshot> {
-    provider().post_entry(worktree_root, entry)
+    provider_for(worktree_root).post_entry(worktree_root, entry)
 }
 
 /// Load the hot projection snapshot through the active provider.
 pub fn load_snapshot(worktree_root: &Path) -> Result<CoordinationSnapshot> {
-    provider().load_snapshot(worktree_root)
+    provider_for(worktree_root).load_snapshot(worktree_root)
 }
 
 /// Load the snapshot filtered to an audience scope.
@@ -241,12 +365,12 @@ pub fn load_snapshot_for_scope(
     worktree_root: &Path,
     scope: &BoardAudienceScope,
 ) -> Result<CoordinationSnapshot> {
-    provider().load_snapshot_for_scope(worktree_root, scope)
+    provider_for(worktree_root).load_snapshot_for_scope(worktree_root, scope)
 }
 
 /// Load entries updated strictly after `since`.
 pub fn load_entries_since(worktree_root: &Path, since: DateTime<Utc>) -> Result<Vec<BoardEntry>> {
-    provider().load_entries_since(worktree_root, since)
+    provider_for(worktree_root).load_entries_since(worktree_root, since)
 }
 
 /// Load entries updated strictly after `since`, filtered to a scope.
@@ -255,7 +379,7 @@ pub fn load_entries_since_for_scope(
     since: DateTime<Utc>,
     scope: &BoardAudienceScope,
 ) -> Result<Vec<BoardEntry>> {
-    provider().load_entries_since_for_scope(worktree_root, since, scope)
+    provider_for(worktree_root).load_entries_since_for_scope(worktree_root, since, scope)
 }
 
 /// Whether `author` posted a message of `kind` within `within`.
@@ -265,12 +389,12 @@ pub fn has_recent_post_by(
     kind: &BoardEntryKind,
     within: chrono::Duration,
 ) -> Result<bool> {
-    provider().has_recent_post_by(worktree_root, author, kind, within)
+    provider_for(worktree_root).has_recent_post_by(worktree_root, author, kind, within)
 }
 
 /// Whether an entry with `entry_id` exists.
 pub fn board_entry_exists(worktree_root: &Path, entry_id: &str) -> Result<bool> {
-    provider().board_entry_exists(worktree_root, entry_id)
+    provider_for(worktree_root).board_entry_exists(worktree_root, entry_id)
 }
 
 /// Load a page of older entries before `before_entry_id`.
@@ -279,7 +403,7 @@ pub fn load_entries_before(
     before_entry_id: Option<&str>,
     limit: usize,
 ) -> Result<BoardHistoryPage> {
-    provider().load_entries_before(worktree_root, before_entry_id, limit)
+    provider_for(worktree_root).load_entries_before(worktree_root, before_entry_id, limit)
 }
 
 /// Load a page of older entries before `before_entry_id`, filtered to a scope.
@@ -289,7 +413,12 @@ pub fn load_entries_before_for_scope(
     limit: usize,
     scope: &BoardAudienceScope,
 ) -> Result<BoardHistoryPage> {
-    provider().load_entries_before_for_scope(worktree_root, before_entry_id, limit, scope)
+    provider_for(worktree_root).load_entries_before_for_scope(
+        worktree_root,
+        before_entry_id,
+        limit,
+        scope,
+    )
 }
 
 #[cfg(test)]
@@ -353,6 +482,137 @@ mod tests {
             assert_eq!(current_kind(), BoardProviderKind::Teams);
         }
         assert_eq!(current_kind(), BoardProviderKind::Local);
+    }
+
+    // --- Per-project isolation (SPEC-2963 FR-025..FR-032) -------------------
+
+    #[test]
+    fn resolve_board_uses_project_channel_per_project() {
+        // FR-027 separation: two projects resolve to two different channels.
+        let settings = Settings::default();
+        let proj_a = ProjectBoardConfig {
+            provider: Some(BoardProviderKind::Slack),
+            channel: Some("C-A".into()),
+            tenant: Some("acme".into()),
+        };
+        let proj_b = ProjectBoardConfig {
+            provider: Some(BoardProviderKind::Slack),
+            channel: Some("C-B".into()),
+            tenant: Some("beta".into()),
+        };
+        let a = resolve_board(&proj_a, &settings, BoardProviderKind::Local);
+        let b = resolve_board(&proj_b, &settings, BoardProviderKind::Local);
+        assert_eq!(a.kind, BoardProviderKind::Slack);
+        assert_eq!(a.channel.as_deref(), Some("C-A"));
+        assert_eq!(a.tenant.as_deref(), Some("acme"));
+        assert_eq!(b.channel.as_deref(), Some("C-B"));
+        assert_ne!(a.channel, b.channel, "projects must not share a channel");
+    }
+
+    #[test]
+    fn resolve_board_falls_back_to_global_default_channel() {
+        // FR-031: an empty project inherits the global default channel + kind.
+        let mut settings = Settings::default();
+        settings.board.slack.default_channel = Some("  C-GLOBAL  ".into());
+        let resolved = resolve_board(
+            &ProjectBoardConfig::default(),
+            &settings,
+            BoardProviderKind::Slack,
+        );
+        assert_eq!(resolved.kind, BoardProviderKind::Slack);
+        assert_eq!(resolved.channel.as_deref(), Some("C-GLOBAL"));
+        assert!(resolved.tenant.is_none());
+    }
+
+    #[test]
+    fn resolve_board_project_provider_overrides_global() {
+        // FR-028: a project can pick local while global is slack, and vice versa.
+        let settings = Settings::default();
+        let local_proj = ProjectBoardConfig {
+            provider: Some(BoardProviderKind::Local),
+            ..Default::default()
+        };
+        assert_eq!(
+            resolve_board(&local_proj, &settings, BoardProviderKind::Slack).kind,
+            BoardProviderKind::Local
+        );
+        let teams_proj = ProjectBoardConfig {
+            provider: Some(BoardProviderKind::Teams),
+            channel: Some("team/chan".into()),
+            ..Default::default()
+        };
+        assert_eq!(
+            resolve_board(&teams_proj, &settings, BoardProviderKind::Local).kind,
+            BoardProviderKind::Teams
+        );
+    }
+
+    #[test]
+    fn provider_for_honors_project_local_override_while_global_remote() {
+        // End-to-end (hermetic): a repo pinned to local works even when the
+        // global provider is Slack — proving per-project provider selection
+        // without touching any remote credentials.
+        let dir = tempfile::tempdir().unwrap();
+        let work = dir.path().join(".gwt").join("work");
+        ProjectBoardConfig {
+            provider: Some(BoardProviderKind::Local),
+            ..Default::default()
+        }
+        .save_to_work_dir(&work)
+        .unwrap();
+        let _slack = test_provider_override::force(BoardProviderKind::Slack);
+        assert!(provider_for(dir.path()).load_snapshot(dir.path()).is_ok());
+    }
+
+    #[test]
+    fn build_remote_for_without_channel_is_unconfigured() {
+        // FR-010: a remote with no resolved channel surfaces an error (no silent local).
+        let resolved = ResolvedBoard {
+            kind: BoardProviderKind::Slack,
+            channel: None,
+            tenant: None,
+        };
+        assert!(build_remote_for("slack", &resolved).is_err());
+    }
+
+    #[test]
+    fn tenant_token_keys_are_isolated_per_tenant() {
+        // FR-029: each tenant's token is independent; another tenant cannot read it.
+        let dir = tempfile::tempdir().unwrap();
+        let tok = TokenSet {
+            access_token: "xoxb-acme".into(),
+            refresh_token: None,
+            expires_at: None,
+        };
+        token_store::save_in(dir.path(), "slack-acme", &tok).unwrap();
+        assert_eq!(
+            load_tenant_token_in(dir.path(), "slack", Some("acme")),
+            Some(tok)
+        );
+        assert_eq!(
+            load_tenant_token_in(dir.path(), "slack", Some("beta")),
+            None
+        );
+    }
+
+    #[test]
+    fn tenant_token_falls_back_to_legacy_provider_key() {
+        // Migration: a legacy provider-only token is still found.
+        let dir = tempfile::tempdir().unwrap();
+        let tok = TokenSet {
+            access_token: "legacy".into(),
+            refresh_token: None,
+            expires_at: None,
+        };
+        token_store::save_in(dir.path(), "slack", &tok).unwrap();
+        assert_eq!(
+            load_tenant_token_in(dir.path(), "slack", None),
+            Some(tok.clone())
+        );
+        assert_eq!(
+            load_tenant_token_in(dir.path(), "slack", Some("acme")),
+            Some(tok)
+        );
     }
 
     #[test]

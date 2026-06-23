@@ -877,6 +877,48 @@ mod tests {
     }
 
     #[test]
+    fn load_snapshot_reads_only_the_project_channel_no_cross_project_union() {
+        // SPEC-2963 FR-027: a per-project provider built with an EMPTY
+        // channel_map (as `board_provider::build_remote_for` does) queries ONLY
+        // its own channel on read — never another project's channel — so two
+        // projects' Boards never mix when reading.
+        let root = root();
+        let calls = std::sync::Arc::new(Mutex::new(Vec::new()));
+        let mock = MockHttp {
+            history_body: r#"{"ok":true,"messages":[]}"#.to_string(),
+            replies_body: r#"{"ok":true,"messages":[]}"#.to_string(),
+            calls: calls.clone(),
+            ..Default::default()
+        };
+        let provider = SlackProvider::new(
+            "xoxb-token",
+            "CH-PROJ-A",
+            BTreeMap::new(),
+            Box::new(mock),
+            60,
+        );
+        provider.load_snapshot(&root).unwrap();
+
+        let history_channels: Vec<String> = calls
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|(url, _)| url.contains("conversations.history"))
+            .filter_map(|(_, query)| {
+                query
+                    .iter()
+                    .find(|(key, _)| key == "channel")
+                    .map(|(_, value)| value.clone())
+            })
+            .collect();
+        assert_eq!(
+            history_channels,
+            vec!["CH-PROJ-A".to_string()],
+            "only the project's own channel is read; no cross-project union"
+        );
+    }
+
+    #[test]
     fn load_snapshot_reads_workspace_thread_replies_and_ignores_flat_history() {
         let root = root();
         append_slack_root(&root, "ws-a", "CH-DEFAULT", "1700000000.000100");

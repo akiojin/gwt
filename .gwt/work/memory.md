@@ -7192,3 +7192,10 @@ Type: project
 Context: minimap centered-radar で .fleet-minimap__world に静的な transform layer hint を CSS に追加したら embedded_web_canvas_stage_keeps_transform_layer_hint_opt_in が失敗。CSS 宣言を消してもコメント内のリテラル文字列でまた失敗した。
 Learning: このテストは frontend_styles_bundle() 全体を substring 検索するため、CSS 宣言だけでなくコメント内の同リテラル文字列も失敗させる。transform の layer hint は applyViewport が motion 中だけ JS で opt-in し 300ms で解除する設計ポリシー（恒久 pin 禁止）。
 Future Action: CSS で transform の layer hint を恒久 pin しない。コメントでも当該リテラル文字列を書かず言い換える。GPU レイヤが要る要素は JS の motion-scoped opt-in に倣う。
+
+## 2026-06-23 — Board settings are global-only; per-project config belongs in committed .gwt/work
+
+Type: project
+Context: Board remote(Slack/Teams)が複数プロジェクトを同一チャンネルに混在させる問題(SPEC-2963)の改善設計。
+Learning: gwt の Settings は ~/.gwt/config.toml のグローバルのみで per-project config realm が無い(settings.rs:96)。per-project の committed データ層は <repo>/.gwt/work/(paths.rs:387, merge=union)に既存(board-remote-roots.jsonl 等)。remote provider は provider()/current_kind() がグローバル設定を repo 引数なしで読み、書き込みも読み戻し(history_channels の channel 和集合)も repo 次元が無いため全プロジェクトが混在。
+Future Action: Board の per-project 設定は <repo>/.gwt/work/board.toml(committed)、provider() を provider_for(worktree_root) に repo-aware 化。グローバル config は OAuth client_id/tenant_id とフォールバック既定のみ、token は tenant 単位 machine-local。SPEC-2963 を再オープンし per-project isolation フェーズで実装。
