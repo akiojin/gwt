@@ -294,14 +294,6 @@ export function createBranchesCleanupSurface({
         return row;
       }
 
-      // SPEC-2359 US-83: launch-facing surfaces abstract the remote/local
-      // distinction — strip the `origin/` prefix so the user thinks in branch
-      // names ("feature-foo"), not remote refs. Display-only: selection,
-      // cleanup keying, and message payloads keep the raw `entry.name`.
-      function displayBranchName(name) {
-        return typeof name === "string" ? name.replace(/^origin\//, "") : name;
-      }
-
       function updateBranchRow(row, entry, state) {
         const fields = row._fields;
         row.classList.toggle("selected", state.selectedBranchName === entry.name);
@@ -311,7 +303,7 @@ export function createBranchesCleanupSurface({
         fields.toggle.textContent = cleanupToggleSymbol(entry, state);
         fields.toggle.title = cleanupToggleTitle(entry, state);
 
-        fields.nameText.textContent = displayBranchName(entry.name);
+        fields.nameText.textContent = entry.name;
 
         if (entry.is_head) {
           if (!fields.headBadge) {
@@ -345,71 +337,27 @@ export function createBranchesCleanupSurface({
           fields.cleanupDetail = null;
         }
 
-        // SPEC-2359 US-83: show a subtle "remote" chip only for branches that
-        // exist ONLY on the remote (eligible Start Work sources). Local rows and
-        // remote rows that have a local twin / are protected show no scope chip,
-        // so the common view reads as plain branch names. Cleanup is unaffected.
-        if (entry.scope === "remote" && entry.start_work_eligibility === "start_work") {
-          fields.scope.hidden = false;
-          fields.scope.textContent = "remote";
-          fields.scope.className = "branch-scope remote-only";
-        } else {
-          fields.scope.hidden = true;
-          fields.scope.textContent = "";
-          fields.scope.className = "branch-scope";
-        }
+        fields.scope.textContent = entry.scope;
         fields.cleanupBadge.className =
           `branch-cleanup-badge ${cleanupAvailabilityForRender(entry, state)}`;
         fields.cleanupBadge.textContent = cleanupBadgeText(entry, state);
         fields.summary.textContent =
           entry.ahead || entry.behind ? `↑${entry.ahead} ↓${entry.behind}` : "synced";
 
-        const branchLabel = displayBranchName(entry.name);
         const resumeAvailable = entry.resume && entry.resume.available;
         const resumeReason = entry.resume?.reason || "No resumable session";
         fields.resumeButton.disabled = !resumeAvailable;
         fields.resumeButton.title = resumeAvailable
-          ? `Resume latest agent on ${branchLabel}`
+          ? `Resume latest agent on ${entry.name}`
           : resumeReason;
         fields.resumeButton.setAttribute(
           "aria-label",
           resumeAvailable
-            ? `Resume latest agent on ${branchLabel}`
-            : `Resume unavailable for ${branchLabel}: ${resumeReason}`,
+            ? `Resume latest agent on ${entry.name}`
+            : `Resume unavailable for ${entry.name}: ${resumeReason}`,
         );
-        fields.launchButton.title = `Launch Agent on ${branchLabel}`;
-        fields.launchButton.setAttribute("aria-label", `Launch Agent on ${branchLabel}`);
-
-        // SPEC-2359 US-83 / FR-443 / FR-444: refine the remote-row launch
-        // affordance from the backend-supplied eligibility. A fresh origin
-        // branch becomes a "Start Work / Open" source (continue on the branch
-        // itself); a protected base or non-origin remote is not offered. The
-        // action reuses the existing open_launch_wizard message; the wizard
-        // opens in continue-on-branch mode so launching materializes a worktree
-        // tracking origin/<branch> without minting a new work/* branch.
-        const startWorkEligibility = entry.start_work_eligibility;
-        if (entry.scope === "remote" && startWorkEligibility === "start_work") {
-          fields.launchButton.hidden = false;
-          fields.launchButton.textContent = "Start Work";
-          fields.launchButton.title =
-            `Start work on ${branchLabel} (creates a worktree tracking it)`;
-          fields.launchButton.setAttribute(
-            "aria-label",
-            `Start work on ${branchLabel}`,
-          );
-        } else if (entry.scope === "remote" && startWorkEligibility === "hidden") {
-          fields.launchButton.hidden = true;
-        } else if (entry.scope === "remote" && startWorkEligibility === "resume_existing") {
-          // The branch already has a local counterpart / live Work — resuming is
-          // the primary affordance, so don't mislabel the row as a fresh launch.
-          fields.launchButton.hidden = false;
-          fields.launchButton.textContent = "Resume";
-          fields.launchButton.title = `Resume work on ${branchLabel}`;
-          fields.launchButton.setAttribute("aria-label", `Resume work on ${branchLabel}`);
-        } else {
-          fields.launchButton.hidden = false;
-          fields.launchButton.textContent = "Launch";
-        }
+        fields.launchButton.title = `Launch Agent on ${entry.name}`;
+        fields.launchButton.setAttribute("aria-label", `Launch Agent on ${entry.name}`);
       }
 
       function setBranchListPlaceholder(list, text) {

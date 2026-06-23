@@ -388,6 +388,12 @@ pub enum FrontendEvent {
     LoadBranches {
         id: String,
     },
+    /// SPEC-2359 US-83: the Workspace surface requests the list of eligible
+    /// existing remote branches a user can start work on (the "Open a branch…"
+    /// toolbar action / picker). `id` is the requesting Workspace window id.
+    RequestRemoteStartWorkBranches {
+        id: String,
+    },
     LoadBoard {
         id: String,
         #[serde(default)]
@@ -1481,6 +1487,13 @@ pub enum BackendEvent {
         #[serde(default)]
         load_id: u64,
     },
+    /// SPEC-2359 US-83: eligible existing remote branches for the Workspace
+    /// "Open a branch…" picker. `id` echoes the requesting Workspace window id;
+    /// `branches` are remote ref names (e.g. `origin/feature-foo`).
+    RemoteStartWorkBranches {
+        id: String,
+        branches: Vec<String>,
+    },
     BoardEntries {
         id: String,
         entries: Vec<BoardEntry>,
@@ -2438,6 +2451,7 @@ impl BackendEvent {
             BackendEvent::FileContentSaved { .. } => "file_content_saved",
             BackendEvent::FileContentSaveError { .. } => "file_content_save_error",
             BackendEvent::BranchEntries { .. } => "branch_entries",
+            BackendEvent::RemoteStartWorkBranches { .. } => "remote_start_work_branches",
             BackendEvent::BoardEntries { .. } => "board_entries",
             BackendEvent::BoardHistoryPage { .. } => "board_history_page",
             BackendEvent::ProfileSnapshot { .. } => "profile_snapshot",
@@ -3131,6 +3145,35 @@ mod tests {
         assert!(
             matches!(event, FrontendEvent::OpenStartWork),
             "Start Work must be a global command, not a Branches window event"
+        );
+    }
+
+    #[test]
+    fn remote_start_work_branches_wire_contract_is_stable() {
+        // SPEC-2359 US-83: the Workspace "Open a branch…" picker depends on
+        // these exact wire `kind` strings, so lock them.
+        let request: FrontendEvent = serde_json::from_value(serde_json::json!({
+            "kind": "request_remote_start_work_branches",
+            "id": "tab-1::work-1",
+        }))
+        .expect("deserialize request_remote_start_work_branches");
+        assert!(matches!(
+            request,
+            FrontendEvent::RequestRemoteStartWorkBranches { id } if id == "tab-1::work-1"
+        ));
+
+        let value = serde_json::to_value(BackendEvent::RemoteStartWorkBranches {
+            id: "tab-1::work-1".to_string(),
+            branches: vec!["origin/feature-foo".to_string()],
+        })
+        .expect("serialize RemoteStartWorkBranches");
+        assert_eq!(
+            value.pointer("/kind").and_then(Value::as_str),
+            Some("remote_start_work_branches")
+        );
+        assert_eq!(
+            value.pointer("/branches/0").and_then(Value::as_str),
+            Some("origin/feature-foo")
         );
     }
 

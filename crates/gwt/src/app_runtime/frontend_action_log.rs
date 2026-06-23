@@ -262,6 +262,9 @@ pub(super) fn frontend_user_action_log(event: &FrontendEvent) -> Option<Frontend
         FrontendEvent::LoadBranches { id } => {
             FrontendUserActionLog::new("load_branches", "branches").window(id)
         }
+        FrontendEvent::RequestRemoteStartWorkBranches { id } => {
+            FrontendUserActionLog::new("request_remote_start_work_branches", "branches").window(id)
+        }
         FrontendEvent::RunBranchCleanup {
             id,
             branches,

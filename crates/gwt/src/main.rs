@@ -10,7 +10,9 @@ use std::{
     time::{Duration, Instant},
 };
 
-use crate::repo_browser::{preferred_issue_launch_branch, spawn_branch_load_async};
+use crate::repo_browser::{
+    preferred_issue_launch_branch, spawn_branch_load_async, spawn_remote_start_work_branches_async,
+};
 use base64::Engine;
 use gwt::protocol::{FileContentErrorKind, FileContentMode};
 use gwt::{

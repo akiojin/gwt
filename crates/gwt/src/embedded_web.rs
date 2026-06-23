@@ -86,6 +86,7 @@ root_js_modules! {
     "agent-kanban-surface.js" => "createAgentKanbanSurface",
     "workspace-kanban-surface.js" => "createWorkspaceKanbanSurface",
     "workspace-resume-picker-modal.js" => "createWorkspaceResumePickerController",
+    "workspace-branch-picker-modal.js" => "createWorkspaceBranchPickerController",
     "update-cta.js" => "createUpdateCtaController",
     "terminal-context-menu.js" => "createTerminalContextMenuController",
     "terminal-copy-shortcut.js" => "classifyTerminalCopyKeyEvent",

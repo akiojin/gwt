@@ -10,6 +10,7 @@ export function createWorkspaceKanbanSurface({
   windowMap,
   workspaceWindowById,
   openWorkspaceResumePicker,
+  openWorkspaceBranchPicker,
   getResumeBounds,
   focusBoardEntry,
   branchesSurface,
@@ -1468,6 +1469,18 @@ export function createWorkspaceKanbanSurface({
     // toggle is removed. The spine lists persistent Workspaces (Active+Paused);
     // the detail pane shows the selected Workspace's sessions / branch / PR.
     const toolbarActions = createNode("div", "workspace-toolbar-actions");
+    // SPEC-2359 US-83: start work on an existing remote branch from the
+    // Workspace surface. Opens the "Open a branch…" picker (eligible remote
+    // branches), and picking one continues on that branch.
+    const openBranchBtn = createNode(
+      "button",
+      "wizard-button workspace-open-branch-button",
+      "Open a branch…",
+    );
+    openBranchBtn.type = "button";
+    openBranchBtn.dataset.action = "open-workspace-branch-picker";
+    openBranchBtn.setAttribute("aria-label", "Open an existing branch");
+    toolbarActions.appendChild(openBranchBtn);
     const refreshBtn = createNode("button", "icon-button", "↻");
     refreshBtn.dataset.action = "refresh-workspace-overview";
     refreshBtn.setAttribute("aria-label", "Refresh Workspaces");
@@ -1501,6 +1514,17 @@ export function createWorkspaceKanbanSurface({
     refresh?.addEventListener("click", (event) => {
       event.stopPropagation();
       renderWorkspaceOverviewWindow(windowData.id, true);
+    });
+
+    // SPEC-2359 US-83: "Open a branch…" opens the remote-branch picker and asks
+    // the backend for the eligible branches (fetched off the UI thread).
+    const openBranch = parent.querySelector(
+      "[data-action='open-workspace-branch-picker']",
+    );
+    openBranch?.addEventListener("click", (event) => {
+      event.stopPropagation();
+      openWorkspaceBranchPicker?.(windowData.id);
+      send({ kind: "request_remote_start_work_branches", id: windowData.id });
     });
 
     // Keyboard navigation: ArrowUp / ArrowDown move the Workspace selection
