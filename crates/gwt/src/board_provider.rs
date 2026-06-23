@@ -6,10 +6,13 @@
 //! `gwt` crate, which depends on both.
 //!
 //! Call sites route Board reads/writes through the free-function shims below
-//! instead of calling `gwt_core::coordination` directly. With `board.provider
-//! = local` (the default and only implemented backend) the shims delegate to
-//! `LocalProvider`, so behavior is identical to the pre-abstraction path.
-//! A future Slack/Teams adapter (Issue #2960) plugs in via [`provider`].
+//! instead of calling `gwt_core::coordination` directly. Each shim resolves the
+//! provider per-repo via [`provider_for`], which overlays the repo's
+//! `.gwt/work/board.toml` (provider / channel / tenant) onto the global
+//! `[board]` config (SPEC-2963 FR-026). With a `local` resolution the shims
+//! delegate to `LocalProvider` (the zero-cost default); `slack` / `teams`
+//! resolve to a remote provider scoped to that project's own channel, so Board
+//! posts and reads never mix across projects (FR-027).
 
 use std::collections::BTreeMap;
 use std::path::Path;

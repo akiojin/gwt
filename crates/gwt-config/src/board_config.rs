@@ -1,8 +1,12 @@
-//! Board provider configuration (SPEC-2959).
+//! Board provider configuration (SPEC-2959 / SPEC-2963).
 //!
-//! Selects which backend serves the coordination Board. `local` is the
-//! default and the only implemented provider; `slack` / `teams` are reserved
-//! for a future adapter (Issue #2960) and currently fall back to `local`.
+//! Selects which backend serves the coordination Board. `local` is the default;
+//! `slack` and `teams` are implemented remote providers (SPEC-2963). The global
+//! `[board]` block holds org/app-wide settings (OAuth `client_id`, Teams
+//! `tenant_id`, redirect port) and the fallback defaults; per-project overrides
+//! (provider / channel / tenant) live in [`ProjectBoardConfig`], persisted as a
+//! git-tracked `<repo>/.gwt/work/board.toml` so each project routes to its own
+//! channel (SPEC-2963 FR-025..FR-032).
 
 use std::collections::BTreeMap;
 use std::path::Path;
