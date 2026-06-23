@@ -7164,3 +7164,24 @@ Type: fix
 Context: SPEC-3152 Hermes 整合。wizard の provider 一覧を docs ベースでハードコードしたら、ユーザーの実プロバイダー zai が抜けていた。フラグも docs を信じて --profile を削除しかけた。UI フォントや起動可否も HTTP 200 だけで未検証だった。
 Learning: 外部ツール所有の選択肢リスト(provider/model 等)は gwt 側でハードコードしない(陳腐化・不完全)。ツール config(~/.hermes/config.yaml の model.provider + providers:)から動的列挙する。CLI フラグは docs でなく実際にインストールされたバイナリ(hermes --help / 実行)で裏取りする(v0.17.0 では --profile は help 非表示だが有効)。UI/挙動は HTTP 200 やビルド成功でなく実起動して検証する。隔離 HOME(HERMES_HOME リダイレクト)は資格情報を持たず壊れるため .env/auth.json を symlink で bridge する(project_isolated_home_breaks_docker_compose と同型)。
 Future Action: 外部 CLI 連携実装時は (1)フラグ/サブコマンドを実バイナリの --help で確認 (2)選択肢リストはツール config から動的列挙 (3)UI は browser-check で実起動して目視 (4)隔離 HOME は資格情報 symlink を seed、を必須チェックにする。
+
+## 2026-06-21 — WorkspaceAgentSummary に新 discriminator を足す時は sentinel+派生メソッドを優先
+
+Type: project
+Context: SPEC-2359 US-80: 非 agent Shell Work を Active Work projection の一級 Work にする実装。WorkspaceAgentSummary に work_kind フィールドを足そうとしたら struct literal コンストラクタが gwt-core/gwt 全体に ~50 箇所あり全破壊だった。
+Learning: WorkspaceAgentSummary は struct literal で ~50 箇所構築されるため bare フィールド追加は全箇所コンパイル破壊する。Work 種別の識別は新フィールドではなく予約 agent_id sentinel(SHELL_WORK_AGENT_ID=shell) + 派生メソッド work_kind()/is_shell_work() にすると churn ゼロ・後方互換も構造的に自明。Active Work projection は projection.agents のみから構築され Work=agent session(FR-348)が設計境界。agent 起動 save の retain は agent session でしか生存判定できないので shell を間引かない retain_live_agents_keep_shells を使う。
+Future Action: projection の WorkspaceAgentSummary に新しい discriminator を足す時は、まず構築箇所数を grep し、フィールド追加より sentinel+派生メソッドを優先。retain 系を触る時は agent/shell の liveness 判定が別ソース(agent session vs PTY window)である点に注意。
+
+## 2026-06-21 — 隔離起動で Start Work 新規ブランチ検証する時の git 認証配線
+
+Type: project
+Context: SPEC-2359 US-80 の視覚検証で、browser-check 隔離起動(GIT_TERMINAL_PROMPT=0)の Start Work 新規ブランチが remote push に失敗し『fatal: could not read Username for https://github.com: terminal prompts disabled』で Shell が PTY 起動前に落ちた。feature ではなく検証環境のブロッカー。
+Learning: 原因: 隔離 HOME の osxkeychain には git 用 github トークンが無く(ユーザーは gh keyring で認証)、push が prompt fallback→GIT_TERMINAL_PROMPT=0 で失敗。回避手段の比較: (1) GIT_CONFIG_COUNT/KEY/VALUE env で credential.https://github.com.helper を注入 → URL subsection を含む key の解析に失敗し効かない(GIT_CONFIG_VALUE が途中で切れる)。(2) 堅牢策: CHECK_HOME に real .gitconfig([include]実config + [credential] helper= リセット後 helper=store)と .git-credentials(gh auth token 埋め込み, chmod 600)を置く。gwt は git CLI を hidden_command で呼び env_clear しないため HOME=CHECK_HOME を継承し store helper で解決する。git push --dry-run origin HEAD:refs/heads/__tmp__ で副作用なく認証を実証してから検証依頼するとユーザー往復を減らせる。
+Future Action: Start Work 新規ブランチを含む GUI 視覚検証では、browser-check の隔離 HOME に real .gitconfig(store helper)+ .git-credentials(gh token)を用意し、git push --dry-run で push 認証を事前実証してからユーザーに依頼する。GIT_CONFIG_* env での credential.<url>.helper 注入は使わない。検証後は token 入り CHECK_HOME を rm -rf する。
+
+## 2026-06-21 — stop_all_runtimes join-wait test is flaky under parallel full run
+
+Type: project
+Context: Phase 2 検証中、cargo test -p gwt のフルランで app_runtime::tests::app_runtime_stop_all_runtimes_kills_every_pane_before_join_waits が 1 回だけ FAILED したが、tests.rs は HEAD と byte 同一かつ単独実行で 3/3 passed だった
+Learning: app_runtime_stop_all_runtimes_kills_every_pane_before_join_waits は PTY teardown/join-wait の timing に依存する flaky test。並列フルラン下の resource contention で稀に落ちる。単独再実行で緑なら回帰ではない。
+Future Action: このテストがフルランで 1 件落ちたら、まず git diff HEAD で当該ファイルが無変更か確認し、単独 -p gwt で 2-3 回再実行して flaky か判定する。緑なら blocker 扱いしない。

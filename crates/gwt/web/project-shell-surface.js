@@ -555,9 +555,20 @@ export function createProjectShellSurface({
         const roleBadge = roleBadgeLabel
           ? `<span class="window-role-badge window-list-role">${escapeHtml(roleBadgeLabel)}</span>`
           : "";
+        // FR-045 (anshin): surface the agent's live activity detail
+        // (dynamic_title_detail) as a glanceable line when it differs from the
+        // display title, so the operator can read what each pane is doing now
+        // without focusing it.
+        const displayTitle = windowDisplayTitle(entry);
+        const activityDetail = String(entry?.dynamic_title_detail || "").trim();
+        const activityLine =
+          activityDetail && activityDetail !== displayTitle
+            ? `<div class="window-list-activity">${escapeHtml(activityDetail)}</div>`
+            : "";
         row.innerHTML = `
           <div class="window-list-copy">
-            <div class="window-list-title">${escapeHtml(windowDisplayTitle(entry))}</div>
+            <div class="window-list-title">${escapeHtml(displayTitle)}</div>
+            ${activityLine}
             <div class="window-list-meta">
               ${roleBadge}
               <span class="window-list-geometry">${geometryLabel}</span>
