@@ -1207,27 +1207,41 @@ impl AppRuntime {
             quick_start_entries,
             previous_profiles,
         );
-        // SPEC-2359 US-83 / FR-444: offer eligible existing remote branches in
-        // the Start Work "open existing branch" picker. Derived from the current
-        // branch listing (Branches refresh fetches origin; this open uses the
-        // refs already present to avoid blocking the UI thread on a network call).
-        let active_session_branches = self.active_session_branches_for_tab(tab_id);
-        wizard.open_branch_candidates =
-            list_branch_entries_with_active_sessions(project_root, &active_session_branches)
-                .map(|entries| {
-                    gwt::branch_list::eligible_remote_start_work_branch_names(
-                        &entries,
-                        &active_session_branches,
-                    )
-                })
-                .unwrap_or_default();
         wizard.mark_runtime_context_unresolved();
         self.launch_wizard = Some(LaunchWizardSession {
             tab_id: tab_id.to_string(),
-            wizard_id,
+            wizard_id: wizard_id.clone(),
             wizard,
             workspace_resume_context,
             agent_kanban_target: None,
+        });
+
+        // SPEC-2359 US-83 / FR-444 + FR-445: populate the "open existing branch"
+        // picker off the UI thread. Fetch origin first so a teammate's freshly
+        // pushed branch appears even when the Branches tab was never opened, then
+        // push the candidates into the live wizard via a typed event.
+        let proxy = self.proxy.clone();
+        let candidates_root = project_root.to_path_buf();
+        let active_session_branches = self.active_session_branches_for_tab(tab_id);
+        thread::spawn(move || {
+            if let Ok(git_root) = gwt_git::worktree::main_worktree_root(&candidates_root) {
+                let _ = gwt_git::WorktreeManager::new(&git_root).fetch_origin();
+            }
+            let candidates = list_branch_entries_with_active_sessions(
+                &candidates_root,
+                &active_session_branches,
+            )
+            .map(|entries| {
+                gwt::branch_list::eligible_remote_start_work_branch_names(
+                    &entries,
+                    &active_session_branches,
+                )
+            })
+            .unwrap_or_default();
+            proxy.send(UserEvent::RefreshLaunchWizardBranchCandidates {
+                wizard_id,
+                candidates,
+            });
         });
 
         Ok(())

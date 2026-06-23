@@ -378,6 +378,13 @@ export function createBranchesCleanupSurface({
           );
         } else if (entry.scope === "remote" && startWorkEligibility === "hidden") {
           fields.launchButton.hidden = true;
+        } else if (entry.scope === "remote" && startWorkEligibility === "resume_existing") {
+          // The branch already has a local counterpart / live Work — resuming is
+          // the primary affordance, so don't mislabel the row as a fresh launch.
+          fields.launchButton.hidden = false;
+          fields.launchButton.textContent = "Resume";
+          fields.launchButton.title = `Resume work on ${entry.name}`;
+          fields.launchButton.setAttribute("aria-label", `Resume work on ${entry.name}`);
         } else {
           fields.launchButton.hidden = false;
           fields.launchButton.textContent = "Launch";

@@ -1010,6 +1010,13 @@ enum UserEvent {
     /// Applied to the Launch Wizard cache on the main thread so branch Resume
     /// availability/resolution stay fresh without main-thread disk I/O.
     RefreshLaunchWizardSessions(Vec<gwt_agent::Session>),
+    /// SPEC-2359 US-83 / FR-444: deliver the "open existing branch" picker
+    /// candidates computed off the UI thread (after `fetch_origin`) into the
+    /// live Launch Wizard identified by `wizard_id`.
+    RefreshLaunchWizardBranchCandidates {
+        wizard_id: String,
+        candidates: Vec<String>,
+    },
     UpdateAvailable(gwt_core::update::UpdateState),
     ApplyUpdate {
         state: gwt_core::update::UpdateState,
@@ -7069,6 +7076,12 @@ fn main() -> std::io::Result<()> {
             }
             Event::UserEvent(UserEvent::RefreshLaunchWizardSessions(sessions)) => {
                 app.apply_refreshed_launch_wizard_sessions(sessions);
+            }
+            Event::UserEvent(UserEvent::RefreshLaunchWizardBranchCandidates {
+                wizard_id,
+                candidates,
+            }) => {
+                clients.dispatch(app.apply_launch_wizard_branch_candidates(wizard_id, candidates));
             }
             Event::UserEvent(UserEvent::UpdateAvailable(state)) => {
                 clients.dispatch(record_update_available(&mut app, state));
