@@ -75,6 +75,7 @@ impl LaunchWizardState {
             hermes_skills: String::new(),
             hermes_max_turns: String::new(),
             hermes_safe_mode: false,
+            hermes_provider_choices: Vec::new(),
             branch_name: String::new(),
             initial_prompt: String::new(),
             completion: None,
@@ -1431,6 +1432,12 @@ impl LaunchWizardState {
     pub(super) fn current_agent_supports_freetext_model(&self) -> bool {
         self.launch_target_is_agent()
             && agent_id_from_key(self.effective_agent_id()).supports_freetext_model()
+    }
+
+    /// SPEC-3152: provider choices enumerated from the user's Hermes config,
+    /// populated by the app runtime at wizard open.
+    pub fn set_hermes_provider_choices(&mut self, choices: Vec<String>) {
+        self.hermes_provider_choices = choices;
     }
 
     /// SPEC-3152: persist a Hermes free-text launch option by field key.

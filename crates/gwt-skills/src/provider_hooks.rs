@@ -69,6 +69,59 @@ pub fn hermes_is_configured(source_home: &Path) -> bool {
     env_ok || source_home.join("auth.json").exists()
 }
 
+/// Enumerate the Hermes providers configured in the user's `config.yaml`:
+/// the currently-selected `model.provider` first, then the keys under
+/// `providers:`. Used to populate the launch wizard's provider dropdown from
+/// real config instead of a stale hardcoded list. Returns an empty vec when
+/// the config is absent or unparseable (the wizard then offers only the
+/// "use config default" and free-text "Other" entries).
+pub fn hermes_provider_choices(source_home: &Path) -> Vec<String> {
+    let Ok(text) = fs::read_to_string(source_home.join("config.yaml")) else {
+        return Vec::new();
+    };
+    let Ok(serde_yaml::Value::Mapping(root)) = serde_yaml::from_str::<serde_yaml::Value>(&text)
+    else {
+        return Vec::new();
+    };
+
+    let mut choices: Vec<String> = Vec::new();
+    let mut push = |name: &str| {
+        let name = name.trim();
+        if !name.is_empty() && !choices.iter().any(|p| p == name) {
+            choices.push(name.to_string());
+        }
+    };
+
+    if let Some(serde_yaml::Value::Mapping(model)) = root.get("model") {
+        if let Some(serde_yaml::Value::String(provider)) = model.get("provider") {
+            push(provider);
+        }
+    }
+    if let Some(serde_yaml::Value::Mapping(providers)) = root.get("providers") {
+        for key in providers.keys() {
+            if let serde_yaml::Value::String(name) = key {
+                push(name);
+            }
+        }
+    }
+    choices
+}
+
+/// Enumerate Hermes providers from the user's global HERMES_HOME
+/// (`$HERMES_HOME` or `~/.hermes`). Convenience wrapper over
+/// [`hermes_provider_choices`] for callers (e.g. the launch wizard) that only
+/// have the global home, not a worktree.
+pub fn hermes_provider_choices_global() -> Vec<String> {
+    let home = match env::var_os("HERMES_HOME") {
+        Some(value) if !value.is_empty() => PathBuf::from(value),
+        _ => match home_dir() {
+            Some(home) => home.join(".hermes"),
+            None => return Vec::new(),
+        },
+    };
+    hermes_provider_choices(&home)
+}
+
 /// Resolve the user's real HERMES_HOME to bridge from. Honors an explicit
 /// `HERMES_HOME` env var, else falls back to `~/.hermes`. Returns `None`
 /// when it cannot be resolved or would point inside the worktree's managed
@@ -506,6 +559,28 @@ mod hermes_tests {
         let second = fs::read_to_string(&dest_config).unwrap();
         assert_eq!(first, second, "merge must be byte-identical on refresh");
         assert!(wt.path().join(".gwt/hermes/.env").exists());
+    }
+
+    #[test]
+    fn provider_choices_reads_model_provider_then_providers_keys() {
+        let src = tempfile::tempdir().unwrap();
+        fs::write(
+            src.path().join("config.yaml"),
+            "model:\n  provider: zai\n  default: glm-5.2\nproviders:\n  ollama-launch:\n    base_url: http://x\n  myvault:\n    base_url: http://y\n",
+        )
+        .unwrap();
+
+        let choices = hermes_provider_choices(src.path());
+        // The currently-selected provider comes first, then user-defined keys.
+        assert_eq!(choices.first().map(String::as_str), Some("zai"));
+        assert!(choices.iter().any(|p| p == "ollama-launch"));
+        assert!(choices.iter().any(|p| p == "myvault"));
+    }
+
+    #[test]
+    fn provider_choices_empty_without_config() {
+        let src = tempfile::tempdir().unwrap();
+        assert!(hermes_provider_choices(src.path()).is_empty());
     }
 
     #[test]

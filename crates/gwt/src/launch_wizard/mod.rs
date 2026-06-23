@@ -311,6 +311,7 @@ pub struct LaunchWizardView {
     /// profile / advanced) in the Settings form.
     pub show_hermes_options: bool,
     pub hermes_provider: String,
+    pub hermes_provider_options: Vec<String>,
     pub hermes_profile: String,
     pub hermes_toolsets: String,
     pub hermes_skills: String,
@@ -693,6 +694,11 @@ pub struct LaunchWizardState {
     pub hermes_skills: String,
     pub hermes_max_turns: String,
     pub hermes_safe_mode: bool,
+    /// SPEC-3152: providers enumerated from the user's `~/.hermes/config.yaml`
+    /// (model.provider + `providers:` keys), populated at wizard open. Empty
+    /// in tests / when no config exists; the wizard then offers only the
+    /// "use config default" and free-text "Other" provider entries.
+    pub hermes_provider_choices: Vec<String>,
     pub branch_name: String,
     /// SPEC-2359 US-80: optional Start Work intake prompt (always skippable).
     /// Empty string means the step was skipped or left blank.

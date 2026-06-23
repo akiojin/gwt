@@ -102,6 +102,7 @@ impl LaunchWizardState {
                 && self.agent_is_codex(),
             show_hermes_options,
             hermes_provider: self.hermes_provider.clone(),
+            hermes_provider_options: self.hermes_provider_choices.clone(),
             hermes_profile: self.hermes_profile.clone(),
             hermes_toolsets: self.hermes_toolsets.clone(),
             hermes_skills: self.hermes_skills.clone(),

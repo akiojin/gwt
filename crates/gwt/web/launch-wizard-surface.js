@@ -222,7 +222,7 @@ export function createLaunchWizardSurface({
         return field;
       }
 
-      // SPEC-3152: free-text launch option (Hermes provider/model/profile/etc.).
+      // SPEC-3152: free-text / numeric launch option (Hermes advanced fields).
       // Dispatches on change (blur/enter) so typing does not re-render mid-edit.
       function appendTextField(
         parent,
@@ -231,11 +231,12 @@ export function createLaunchWizardSurface({
         placeholder,
         onChange,
         wide = false,
+        inputType = "text",
       ) {
         const field = createLaunchField(label, wide);
         const input = document.createElement("input");
-        input.type = "text";
-        input.className = "launch-select";
+        input.type = inputType;
+        input.className = "launch-input";
         input.setAttribute("aria-label", label);
         if (placeholder) {
           input.placeholder = placeholder;
@@ -243,6 +244,57 @@ export function createLaunchWizardSurface({
         input.value = value || "";
         input.addEventListener("change", () => onChange(input.value));
         field.appendChild(input);
+        parent.appendChild(field);
+        return field;
+      }
+
+      // SPEC-3152: Hermes provider picker. The choices are enumerated from the
+      // user's own ~/.hermes/config.yaml (model.provider + providers: keys) and
+      // passed in via launchWizard.hermes_provider_options — gwt does not
+      // hardcode a provider list (it would go stale). A leading "use config
+      // default" option and a trailing "Other…" free-text entry cover the
+      // default path and the long tail (built-ins not present in config).
+      function appendHermesProviderField(parent, currentValue, choices, onChange) {
+        const providers = Array.isArray(choices) ? choices : [];
+        const field = createLaunchField("Provider", false);
+        const select = createNode("select", "launch-select");
+        select.setAttribute("aria-label", "Provider");
+        const addOption = (value, label) => {
+          const option = document.createElement("option");
+          option.value = value;
+          option.textContent = label;
+          select.appendChild(option);
+        };
+        addOption("", "(use config default)");
+        for (const provider of providers) {
+          addOption(provider, provider);
+        }
+        addOption("__other__", "Other…");
+        const isKnown = Boolean(currentValue) && providers.includes(currentValue);
+        const isOther = Boolean(currentValue) && !isKnown;
+        select.value = currentValue ? (isKnown ? currentValue : "__other__") : "";
+
+        const otherInput = document.createElement("input");
+        otherInput.type = "text";
+        otherInput.className = "launch-input";
+        otherInput.placeholder = "custom provider id";
+        otherInput.setAttribute("aria-label", "Custom provider");
+        otherInput.value = isOther ? currentValue : "";
+        otherInput.style.display = isOther ? "" : "none";
+        otherInput.style.marginTop = "6px";
+        otherInput.addEventListener("change", () => onChange(otherInput.value));
+
+        select.addEventListener("change", () => {
+          if (select.value === "__other__") {
+            otherInput.style.display = "";
+            otherInput.focus();
+          } else {
+            otherInput.style.display = "none";
+            onChange(select.value);
+          }
+        });
+        field.appendChild(select);
+        field.appendChild(otherInput);
         parent.appendChild(field);
         return field;
       }
@@ -1297,19 +1349,20 @@ export function createLaunchWizardSurface({
           panel.appendChild(section);
         }
 
-        // SPEC-3152: Hermes-specific launch options (provider / free-text model
-        // / profile / advanced). Rendered only for the Hermes agent.
+        // SPEC-3152: Hermes-specific launch options. Provider is a curated
+        // dropdown; the long-tail / unbounded fields (model, profile, toolsets,
+        // skills) live in a collapsed "Advanced" group so the common path stays
+        // selection-based. Rendered only for the Hermes agent.
         if (showSetupForms && launchWizard.show_hermes_options) {
           const section = createLaunchSection(
             "Hermes options",
-            "Provider, model, profile, and advanced flags for the Hermes agent.",
+            "Provider override and advanced flags for the Hermes agent. Model and profile default to your hermes setup (config.yaml).",
           );
           const grid = createNode("div", "launch-form-grid");
-          appendTextField(
+          appendHermesProviderField(
             grid,
-            "Provider",
             launchWizard.hermes_provider,
-            "e.g. openrouter, nous, anthropic",
+            launchWizard.hermes_provider_options || [],
             (value) =>
               sendWizardAction({
                 kind: "set_hermes_option",
@@ -1319,62 +1372,17 @@ export function createLaunchWizardSurface({
           );
           appendTextField(
             grid,
-            "Model",
-            launchWizard.selected_model,
-            "e.g. anthropic/claude-sonnet-4 (blank uses config.yaml)",
-            (value) =>
-              sendWizardAction({
-                kind: "set_model",
-                model: value,
-              }),
-          );
-          appendTextField(
-            grid,
-            "Profile",
-            launchWizard.hermes_profile,
-            "Hermes profile name (optional)",
-            (value) =>
-              sendWizardAction({
-                kind: "set_hermes_option",
-                field: "profile",
-                value,
-              }),
-          );
-          appendTextField(
-            grid,
-            "Toolsets",
-            launchWizard.hermes_toolsets,
-            "comma-separated, e.g. fs,web (optional)",
-            (value) =>
-              sendWizardAction({
-                kind: "set_hermes_option",
-                field: "toolsets",
-                value,
-              }),
-          );
-          appendTextField(
-            grid,
-            "Skills",
-            launchWizard.hermes_skills,
-            "preloaded skills (optional)",
-            (value) =>
-              sendWizardAction({
-                kind: "set_hermes_option",
-                field: "skills",
-                value,
-              }),
-          );
-          appendTextField(
-            grid,
             "Max turns",
             launchWizard.hermes_max_turns,
-            "max tool-calls per turn (optional)",
+            "e.g. 40 (optional)",
             (value) =>
               sendWizardAction({
                 kind: "set_hermes_option",
                 field: "max_turns",
                 value,
               }),
+            false,
+            "number",
           );
           appendToggleField(
             grid,
@@ -1388,6 +1396,75 @@ export function createLaunchWizardSurface({
               }),
           );
           section.appendChild(grid);
+
+          const advanced = document.createElement("details");
+          advanced.className = "launch-advanced";
+          advanced.style.marginTop = "8px";
+          advanced.open = Boolean(
+            launchWizard.selected_model ||
+              launchWizard.hermes_profile ||
+              launchWizard.hermes_toolsets ||
+              launchWizard.hermes_skills,
+          );
+          const summary = document.createElement("summary");
+          summary.textContent = "Advanced (model, profile, toolsets, skills)";
+          summary.style.cursor = "pointer";
+          summary.style.padding = "4px 0";
+          summary.style.fontFamily = "var(--font-body)";
+          summary.style.fontSize = "var(--type-sm)";
+          summary.style.color = "var(--color-text-muted)";
+          advanced.appendChild(summary);
+          const advancedGrid = createNode("div", "launch-form-grid");
+          appendTextField(
+            advancedGrid,
+            "Model",
+            launchWizard.selected_model,
+            "e.g. anthropic/claude-sonnet-4 (blank = config.yaml)",
+            (value) =>
+              sendWizardAction({
+                kind: "set_model",
+                model: value,
+              }),
+          );
+          appendTextField(
+            advancedGrid,
+            "Profile",
+            launchWizard.hermes_profile,
+            "Hermes profile name (optional)",
+            (value) =>
+              sendWizardAction({
+                kind: "set_hermes_option",
+                field: "profile",
+                value,
+              }),
+          );
+          appendTextField(
+            advancedGrid,
+            "Toolsets",
+            launchWizard.hermes_toolsets,
+            "comma-separated, e.g. fs,web (optional)",
+            (value) =>
+              sendWizardAction({
+                kind: "set_hermes_option",
+                field: "toolsets",
+                value,
+              }),
+          );
+          appendTextField(
+            advancedGrid,
+            "Skills",
+            launchWizard.hermes_skills,
+            "preloaded skills (optional)",
+            (value) =>
+              sendWizardAction({
+                kind: "set_hermes_option",
+                field: "skills",
+                value,
+              }),
+          );
+          advanced.appendChild(advancedGrid);
+          section.appendChild(advanced);
+
           panel.appendChild(section);
         }
 

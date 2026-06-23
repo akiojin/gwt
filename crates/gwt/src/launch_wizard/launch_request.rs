@@ -568,6 +568,7 @@ mod tests {
         state.apply(LaunchWizardAction::SetAgent {
             agent_id: "hermes".to_string(),
         });
+        state.set_hermes_provider_choices(vec!["zai".to_string(), "ollama-launch".to_string()]);
         state.apply(LaunchWizardAction::SetHermesOption {
             field: "provider".to_string(),
             value: "openrouter".to_string(),
@@ -579,6 +580,8 @@ mod tests {
             "Hermes settings section must be shown for the Hermes agent"
         );
         assert_eq!(view.hermes_provider, "openrouter");
+        // Provider options come from the user's config, not a hardcoded list.
+        assert_eq!(view.hermes_provider_options, vec!["zai", "ollama-launch"]);
 
         state.apply(LaunchWizardAction::SetAgent {
             agent_id: "claude".to_string(),
