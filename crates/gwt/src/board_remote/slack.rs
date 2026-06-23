@@ -81,6 +81,10 @@ pub struct SlackProvider {
     channel_map: BTreeMap<String, String>,
     http: Box<dyn HttpClient>,
     cache: TimedCache<Vec<BoardEntry>>,
+    /// Base URL of the Slack Web API. Defaults to [`SLACK_API`]; overridable via
+    /// [`SlackProvider::new_with_base`] so an end-to-end test can drive the real
+    /// HTTP client against a local Slack-compatible server.
+    api_base: String,
 }
 
 impl SlackProvider {
@@ -93,12 +97,33 @@ impl SlackProvider {
         http: Box<dyn HttpClient>,
         cache_ttl_secs: i64,
     ) -> Self {
+        Self::new_with_base(
+            SLACK_API,
+            token,
+            default_channel,
+            channel_map,
+            http,
+            cache_ttl_secs,
+        )
+    }
+
+    /// Build a provider against a specific API base URL. Used by the production
+    /// `new` (real Slack) and by end-to-end tests pointing at a local server.
+    pub fn new_with_base(
+        api_base: impl Into<String>,
+        token: impl Into<String>,
+        default_channel: impl Into<String>,
+        channel_map: BTreeMap<String, String>,
+        http: Box<dyn HttpClient>,
+        cache_ttl_secs: i64,
+    ) -> Self {
         Self {
             token: token.into(),
             default_channel: default_channel.into(),
             channel_map,
             http,
             cache: TimedCache::new(cache_ttl_secs),
+            api_base: api_base.into(),
         }
     }
 
@@ -122,7 +147,7 @@ impl SlackProvider {
             let response = self
                 .http
                 .get(
-                    &format!("{SLACK_API}/conversations.replies"),
+                    &format!("{}/conversations.replies", self.api_base),
                     &self.token,
                     &query,
                 )
@@ -173,7 +198,7 @@ impl SlackProvider {
         let response = self
             .http
             .get(
-                &format!("{SLACK_API}/conversations.history"),
+                &format!("{}/conversations.history", self.api_base),
                 &self.token,
                 &[("channel", channel), ("limit", &limit)],
             )
@@ -312,7 +337,7 @@ impl SlackProvider {
         let response = self
             .http
             .post_form(
-                &format!("{SLACK_API}/chat.postMessage"),
+                &format!("{}/chat.postMessage", self.api_base),
                 &self.token,
                 &params,
             )
@@ -349,7 +374,11 @@ impl SlackProvider {
         }
         let response = self
             .http
-            .post_form(&format!("{SLACK_API}/chat.update"), &self.token, &params)
+            .post_form(
+                &format!("{}/chat.update", self.api_base),
+                &self.token,
+                &params,
+            )
             .map_err(GwtError::Other)?;
         check_status(&response, "chat.update")?;
         let parsed: SlackPostResponse = serde_json::from_str(&response.body)
