@@ -2595,6 +2595,20 @@ fn embedded_web_add_window_modal_hides_direct_terminal_presets() {
 }
 
 #[test]
+fn embedded_web_add_window_modal_offers_improvement_inbox() {
+    let html = frontend_bundle_source();
+
+    assert!(
+        html.contains(r#"data-preset="improvement""#),
+        "expected Add window modal to expose the Improvement Inbox preset",
+    );
+    assert!(
+        html.contains("<strong>Improvement Inbox</strong>"),
+        "expected Improvement Inbox to have a visible preset label",
+    );
+}
+
+#[test]
 fn embedded_web_launch_wizard_actions_flow_through_named_transport() {
     let html = frontend_bundle_source();
     let submit_bounds = regex::Regex::new(
