@@ -66,6 +66,14 @@ fn dispatch_branch_load_progressive(
     active_session_branches: &HashSet<String>,
     resume_sessions: &[gwt_agent::Session],
 ) {
+    // SPEC-2359 US-83 / FR-445: refresh origin's remote-tracking refs on this
+    // spawned (off-UI) thread so the Branches list — and the Launch Wizard's
+    // existing-branch picker derived from the same listing — reflect branches
+    // pushed by teammates or other machines. Best-effort: an offline fetch
+    // failure still yields the cached refs below.
+    if let Ok(git_root) = gwt_git::worktree::main_worktree_root(project_root) {
+        let _ = gwt_git::WorktreeManager::new(&git_root).fetch_origin();
+    }
     // SPEC-2009 FR-067: one load id shared by this load's inventory + hydrated
     // events so the frontend can drop a stale earlier load delivered out of
     // order after an evict/reconnect.
