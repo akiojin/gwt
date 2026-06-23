@@ -128,9 +128,19 @@ impl ProjectBoardConfig {
     }
 
     /// Persist to `<work_dir>/board.toml`, creating the directory if needed.
+    /// An empty config (everything inherits global) removes any existing file
+    /// instead of leaving an empty `board.toml` behind, so "inherit global"
+    /// never commits noise to the repo.
     pub fn save_to_work_dir(&self, work_dir: &Path) -> std::io::Result<()> {
-        std::fs::create_dir_all(work_dir)?;
         let path = work_dir.join(PROJECT_BOARD_FILE);
+        if self.is_empty() {
+            return match std::fs::remove_file(&path) {
+                Ok(()) => Ok(()),
+                Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(()),
+                Err(err) => Err(err),
+            };
+        }
+        std::fs::create_dir_all(work_dir)?;
         let body = toml::to_string_pretty(self).map_err(std::io::Error::other)?;
         std::fs::write(path, body)
     }
@@ -353,5 +363,28 @@ tenant_id = "tenant-1"
         std::fs::write(dir.path().join(PROJECT_BOARD_FILE), "this is = not [valid").unwrap();
         let cfg = ProjectBoardConfig::load_from_work_dir(dir.path());
         assert!(cfg.is_empty());
+    }
+
+    #[test]
+    fn project_board_config_empty_save_removes_file() {
+        // "Inherit global" (empty) must not leave a stray empty board.toml.
+        let dir = tempfile::tempdir().unwrap();
+        ProjectBoardConfig {
+            provider: Some(BoardProviderKind::Slack),
+            channel: Some("C".into()),
+            ..Default::default()
+        }
+        .save_to_work_dir(dir.path())
+        .unwrap();
+        assert!(dir.path().join(PROJECT_BOARD_FILE).exists());
+
+        ProjectBoardConfig::default()
+            .save_to_work_dir(dir.path())
+            .unwrap();
+        assert!(!dir.path().join(PROJECT_BOARD_FILE).exists());
+        // Idempotent when already absent.
+        ProjectBoardConfig::default()
+            .save_to_work_dir(dir.path())
+            .unwrap();
     }
 }
