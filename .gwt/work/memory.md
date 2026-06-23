@@ -7157,3 +7157,10 @@ Type: lesson
 Context: Issue #3066 PR verification found that some in-process tests used ScopedHome/std::env::set_var("HOME") while cargo ran tests in parallel, causing unrelated workspace projection tests to write temp project state into the real ~/.gwt/projects.
 Learning: For in-process tests, prefer a thread-local gwt_home override over process-wide HOME mutation. Reserve HOME/USERPROFILE env changes for spawned child processes that must receive an isolated environment.
 Future Action: When adding tests around gwt_core::paths::gwt_home or project storage, use gwt_core::test_support::ScopedGwtHome and only hold env_lock for real environment variables such as GWT_SESSION_ID.
+
+## 2026-06-23 — 外部CLI連携: 選択肢はツールconfigから動的列挙・フラグは実バイナリで裏取り
+
+Type: fix
+Context: SPEC-3152 Hermes 整合。wizard の provider 一覧を docs ベースでハードコードしたら、ユーザーの実プロバイダー zai が抜けていた。フラグも docs を信じて --profile を削除しかけた。UI フォントや起動可否も HTTP 200 だけで未検証だった。
+Learning: 外部ツール所有の選択肢リスト(provider/model 等)は gwt 側でハードコードしない(陳腐化・不完全)。ツール config(~/.hermes/config.yaml の model.provider + providers:)から動的列挙する。CLI フラグは docs でなく実際にインストールされたバイナリ(hermes --help / 実行)で裏取りする(v0.17.0 では --profile は help 非表示だが有効)。UI/挙動は HTTP 200 やビルド成功でなく実起動して検証する。隔離 HOME(HERMES_HOME リダイレクト)は資格情報を持たず壊れるため .env/auth.json を symlink で bridge する(project_isolated_home_breaks_docker_compose と同型)。
+Future Action: 外部 CLI 連携実装時は (1)フラグ/サブコマンドを実バイナリの --help で確認 (2)選択肢リストはツール config から動的列挙 (3)UI は browser-check で実起動して目視 (4)隔離 HOME は資格情報 symlink を seed、を必須チェックにする。
