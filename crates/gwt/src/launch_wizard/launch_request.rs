@@ -534,6 +534,64 @@ mod tests {
     }
 
     #[test]
+    fn select_existing_branch_continues_on_branch_without_new_work_branch() {
+        // SPEC-2359 US-83 / FR-444: picking an existing branch in the wizard
+        // switches out of "new work branch" mode and produces a launch config
+        // that continues on the branch itself (branch=X, no base) so
+        // resolve_launch_worktree_request materializes it via create_from_remote.
+        let mut state = LaunchWizardState::open_with(
+            context(branch("develop"), "develop"),
+            sample_agent_options(),
+            Vec::new(),
+        );
+        state.apply(LaunchWizardAction::SetBranchMode { create_new: true });
+        assert!(state.is_new_branch, "starts in new-work-branch mode");
+
+        state.apply(LaunchWizardAction::SelectExistingBranch {
+            branch_name: "origin/feature-foo".to_string(),
+        });
+        assert!(
+            state.error.is_none(),
+            "selecting a fresh branch must not error"
+        );
+        assert!(
+            !state.is_new_branch,
+            "continue-on-branch clears new-branch mode"
+        );
+
+        let config = state.build_launch_config().expect("launch config");
+        assert_eq!(
+            config.branch.as_deref(),
+            Some("feature-foo"),
+            "origin/ prefix is normalized to the local branch name"
+        );
+        assert!(
+            config.base_branch.is_none(),
+            "continue-on-branch must not set a base branch (no new work/* is minted)"
+        );
+    }
+
+    #[test]
+    fn select_existing_branch_rejects_protected_base() {
+        // SPEC-2359 US-83 / FR-446: the new-path backend guard refuses a
+        // protected base branch even if the UI eligibility filter were bypassed.
+        let mut state = LaunchWizardState::open_with(
+            context(branch("develop"), "develop"),
+            sample_agent_options(),
+            Vec::new(),
+        );
+
+        state.apply(LaunchWizardAction::SelectExistingBranch {
+            branch_name: "origin/develop".to_string(),
+        });
+
+        assert!(
+            state.error.is_some(),
+            "a protected base branch must be rejected on the continue-on-branch path"
+        );
+    }
+
+    #[test]
     fn build_launch_config_rejects_loading_state() {
         let state = LaunchWizardState::open_loading(
             context(branch("feature/gui"), "feature/gui"),

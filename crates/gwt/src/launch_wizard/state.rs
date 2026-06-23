@@ -396,6 +396,9 @@ impl LaunchWizardState {
             LaunchWizardAction::SetBranchName { value } => {
                 self.branch_name = value;
             }
+            LaunchWizardAction::SelectExistingBranch { branch_name } => {
+                self.select_existing_branch(&branch_name);
+            }
             LaunchWizardAction::SetInitialPrompt { value } => {
                 self.initial_prompt = value;
             }
@@ -1094,6 +1097,42 @@ impl LaunchWizardState {
             self.base_branch_name = None;
             self.branch_name = self.context.normalized_branch_name.clone();
         }
+    }
+
+    /// SPEC-2359 US-83 / FR-444 + FR-446: switch the wizard to "continue on an
+    /// existing branch" mode. The worktree will materialize on `branch_name`
+    /// (tracking `origin/<branch_name>` when only the remote exists, via the
+    /// existing `resolve_launch_worktree_request` → `create_from_remote` path)
+    /// without minting a new `work/*` branch. Protected base branches are
+    /// rejected here as the new-path backend guard; the shared general
+    /// open-wizard flow is intentionally left unchanged.
+    pub(super) fn select_existing_branch(&mut self, branch_name: &str) {
+        // The lib-side wizard cannot reach the bin-side `normalize_branch_name`,
+        // so strip remote-tracking prefixes inline
+        // (`origin/X` | `refs/remotes/origin/X` → `X`).
+        let normalized = branch_name
+            .strip_prefix("refs/remotes/")
+            .map(|rest| rest.strip_prefix("origin/").unwrap_or(rest))
+            .or_else(|| branch_name.strip_prefix("origin/"))
+            .unwrap_or(branch_name)
+            .to_string();
+        if normalized.is_empty() {
+            self.error = Some("Branch name is required".to_string());
+            return;
+        }
+        if gwt_git::is_protected_branch(&normalized) {
+            self.error = Some(format!(
+                "{normalized} is a protected base branch and cannot be opened as a Work branch"
+            ));
+            return;
+        }
+        self.context.normalized_branch_name = normalized.clone();
+        // Force a fresh materialization through resolve_launch_worktree_request
+        // rather than reusing any stale worktree path from the prior context.
+        self.context.worktree_path = None;
+        self.is_new_branch = false;
+        self.base_branch_name = None;
+        self.branch_name = normalized;
     }
 
     pub(super) fn set_branch_type(&mut self, prefix: &str) {

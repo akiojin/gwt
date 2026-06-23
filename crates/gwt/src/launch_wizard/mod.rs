@@ -581,6 +581,14 @@ pub enum LaunchWizardAction {
     SetBranchName {
         value: String,
     },
+    /// SPEC-2359 US-83 / FR-444: pick an existing branch to continue on it. The
+    /// worktree materializes on `<branch_name>` (tracking origin/<branch_name>
+    /// when only the remote exists) without minting a new work/* branch, by
+    /// switching the wizard out of the "new work branch" mode. `branch_name`
+    /// may arrive as `origin/X` / `refs/remotes/origin/X` and is normalized.
+    SelectExistingBranch {
+        branch_name: String,
+    },
     /// SPEC-2359 US-80: the optional Start Work intake prompt describing the
     /// work about to begin. Drives the duplicate-work advisory query.
     SetInitialPrompt {
