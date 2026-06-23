@@ -319,6 +319,77 @@ impl AppRuntime {
         self.board_auth_status_events(client_id, message)
     }
 
+    /// SPEC-2963 FR-030: reply with a repo's per-project Board config (the raw
+    /// `board.toml` override) plus its resolved effective routing, for the
+    /// Settings Board tab's per-project section.
+    pub(super) fn project_board_config_events(
+        &self,
+        client_id: ClientId,
+        project_root: String,
+    ) -> Vec<OutboundEvent> {
+        let event = self.project_board_config_event(&project_root, None);
+        vec![OutboundEvent::reply(client_id, event)]
+    }
+
+    /// SPEC-2963 FR-025/FR-030: write per-project Board config to the repo's
+    /// `.gwt/work/board.toml`, then reply with the refreshed config + routing.
+    /// `Some("")` / `inherit` clears a field (inherit global), `Some(value)`
+    /// sets it, `None` leaves it unchanged.
+    pub(super) fn project_board_config_update_events(
+        &self,
+        client_id: ClientId,
+        project_root: String,
+        provider: Option<String>,
+        channel: Option<String>,
+        tenant: Option<String>,
+    ) -> Vec<OutboundEvent> {
+        let path = std::path::Path::new(&project_root);
+        let provider_arg = provider.map(|raw| match raw.trim().to_ascii_lowercase().as_str() {
+            "local" => Some(gwt_config::BoardProviderKind::Local),
+            "slack" => Some(gwt_config::BoardProviderKind::Slack),
+            "teams" => Some(gwt_config::BoardProviderKind::Teams),
+            // "" / "inherit" / unknown → clear the override (inherit global).
+            _ => None,
+        });
+        let message = match gwt::board_provider::update_project_board_config(
+            path,
+            provider_arg,
+            channel.map(Some),
+            tenant.map(Some),
+        ) {
+            Ok(_) => Some("Saved project Board configuration.".to_string()),
+            Err(error) => Some(format!(
+                "Failed to save project Board configuration: {error}"
+            )),
+        };
+        let event = self.project_board_config_event(&project_root, message);
+        vec![OutboundEvent::reply(client_id, event)]
+    }
+
+    /// Build a [`BackendEvent::ProjectBoardConfig`] from a repo's `board.toml`
+    /// override and its resolved routing.
+    fn project_board_config_event(
+        &self,
+        project_root: &str,
+        message: Option<String>,
+    ) -> BackendEvent {
+        let path = std::path::Path::new(project_root);
+        let work_dir = gwt_core::paths::gwt_repo_local_work_dir(path);
+        let project = gwt_config::ProjectBoardConfig::load_from_work_dir(&work_dir);
+        let routing = gwt::board_provider::routing_for(path);
+        BackendEvent::ProjectBoardConfig {
+            project_root: project_root.to_string(),
+            provider: project.provider.map(|kind| kind.as_str().to_string()),
+            channel: project.channel,
+            tenant: project.tenant,
+            resolved_provider: routing.provider,
+            resolved_source: routing.provider_source.to_string(),
+            resolved_channel: routing.channel,
+            signed_in: routing.signed_in,
+            message,
+        }
+    }
+
     /// SPEC-2963 FR-005: persist the fixed OAuth callback port, then reply with
     /// the refreshed auth/config view. The new port binds on the next launch.
     pub(super) fn board_oauth_port_update_events(
