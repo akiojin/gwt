@@ -479,6 +479,11 @@ pub fn eligible_remote_start_work_branch_names(
     let mut rows: Vec<&BranchListEntry> = entries
         .iter()
         .filter(|entry| eligible.contains(&entry.name))
+        // Drop dependency-bot branches (dependabot/* , renovate/*): you review
+        // those via their PR, you don't "start fresh work" on the branch, so
+        // surfacing them — often the most recently pushed — as the top Start
+        // Work suggestions is noise.
+        .filter(|entry| !is_bot_branch(&entry.name))
         .collect();
     // `last_commit_date` is a sortable `YYYY-MM-DD HH:MM:SS ...` string; reverse
     // (b vs a) puts the newest first. Missing dates sort last.
@@ -487,6 +492,16 @@ pub fn eligible_remote_start_work_branch_names(
         .take(REMOTE_START_WORK_BRANCH_CAP)
         .map(|entry| entry.name.clone())
         .collect()
+}
+
+/// Dependency-bot branches are reviewed through their PR, not continued as a
+/// fresh worktree, so they are excluded from the Workspace Start Work rows.
+fn is_bot_branch(remote_entry_name: &str) -> bool {
+    let branch = remote_entry_name
+        .split_once('/')
+        .map(|(_, branch)| branch)
+        .unwrap_or(remote_entry_name);
+    branch.starts_with("dependabot/") || branch.starts_with("renovate/")
 }
 
 /// SPEC-2359 US-83: cap on the eligible remote branches surfaced in the
@@ -663,6 +678,38 @@ mod tests {
             remote_branch_name: Some(remote_branch_name.to_string()),
             ..make_branch(name, false, false, last_commit_date)
         }
+    }
+
+    #[test]
+    fn eligible_remote_start_work_branch_names_drops_dependency_bot_branches() {
+        // SPEC-2359 US-83: dependabot/renovate branches are reviewed via PR, not
+        // continued as fresh work, so they must not surface as Start Work rows.
+        let entries = adapt_branch_inventory(vec![
+            make_branch(
+                "origin/dependabot/cargo/serde-1.0",
+                false,
+                false,
+                Some("2026-05-01 00:00:00 +0000"),
+            ),
+            make_branch(
+                "origin/renovate/eslint",
+                false,
+                false,
+                Some("2026-05-02 00:00:00 +0000"),
+            ),
+            make_branch(
+                "origin/feature/real-work",
+                false,
+                false,
+                Some("2026-04-01 00:00:00 +0000"),
+            ),
+        ]);
+        let names = eligible_remote_start_work_branch_names(&entries, &HashSet::new());
+        assert_eq!(
+            names,
+            vec!["origin/feature/real-work".to_string()],
+            "bot branches are excluded even though they are the most recent"
+        );
     }
 
     #[test]
