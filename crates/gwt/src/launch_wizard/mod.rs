@@ -310,6 +310,24 @@ pub struct LaunchWizardView {
     pub show_fast_mode: bool,
     /// Legacy Codex-only compatibility field for older frontend payloads.
     pub show_codex_fast_mode: bool,
+    /// SPEC-3152: render the Hermes launch-options section (provider / model /
+    /// profile / advanced) in the Settings form.
+    pub show_hermes_options: bool,
+    pub hermes_needs_setup: bool,
+    /// SPEC-3151 FR-008: render the OpenCode launch-options section (free-text
+    /// `provider/model`) in the Settings form.
+    pub show_opencode_options: bool,
+    /// SPEC-3151 FR-009: `true` when OpenCode has no AI provider configured, so
+    /// the wizard shows a non-blocking "OpenCode is not set up" hint with an
+    /// in-pane setup launcher. Only meaningful for the OpenCode agent.
+    pub opencode_needs_setup: bool,
+    pub hermes_provider: String,
+    pub hermes_provider_options: Vec<String>,
+    pub hermes_profile: String,
+    pub hermes_toolsets: String,
+    pub hermes_skills: String,
+    pub hermes_max_turns: String,
+    pub hermes_safe_mode: bool,
     pub show_branch_controls: bool,
     pub show_start_methods: bool,
     pub show_back_button: bool,
@@ -446,6 +464,13 @@ pub struct ShellLaunchConfig {
     pub windows_shell: Option<gwt_agent::WindowsShellKind>,
     pub env_vars: HashMap<String, String>,
     pub remove_env: Vec<String>,
+    /// SPEC-3151 FR-010: when `Some`, run this command on the host instead of
+    /// the detected interactive shell (e.g. `bunx`/`opencode` for the OpenCode
+    /// setup launcher). `None` keeps the default shell behavior.
+    pub command_override: Option<String>,
+    /// SPEC-3151 FR-010: arguments for `command_override`. Ignored when
+    /// `command_override` is `None`.
+    pub command_args_override: Option<Vec<String>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -644,6 +669,25 @@ pub enum LaunchWizardAction {
     SetCodexFastMode {
         enabled: bool,
     },
+    /// SPEC-3152: set a Hermes free-text launch option by field key
+    /// (`provider` | `profile` | `toolsets` | `skills` | `max_turns`).
+    SetHermesOption {
+        field: String,
+        value: String,
+    },
+    /// SPEC-3152: toggle Hermes `--safe-mode`.
+    SetHermesSafeMode {
+        enabled: bool,
+    },
+    /// SPEC-3151 FR-010: launch `<opencode runner> auth login` in an in-pane
+    /// host shell so the user can sign in to an AI provider without leaving the
+    /// wizard. OpenCode auth is host-global, so this always runs on the host.
+    ///
+    /// Explicit serde rename: the default snake_case of `RunOpenCodeSetup` is
+    /// `run_open_code_setup`, but the frontend and the action-label use the
+    /// `opencode` convention, so the wire tag is `run_opencode_setup`.
+    #[serde(rename = "run_opencode_setup")]
+    RunOpenCodeSetup,
     Submit,
     /// SPEC-2014 FR-128: progress rail クリックで指定フェーズへ直接移動する。
     GotoStep {
@@ -679,6 +723,30 @@ pub struct LaunchWizardState {
     pub docker_lifecycle_intent: gwt_agent::DockerLifecycleIntent,
     pub skip_permissions: bool,
     pub codex_fast_mode: bool,
+    /// SPEC-3152: Hermes-specific launch options. Free-text fields map to
+    /// `--provider` / `--profile` / `--toolsets` / `--skills` / `--max-turns`;
+    /// `hermes_safe_mode` maps to `--safe-mode`. Only consumed for the Hermes
+    /// agent; ignored otherwise.
+    pub hermes_provider: String,
+    pub hermes_profile: String,
+    pub hermes_toolsets: String,
+    pub hermes_skills: String,
+    pub hermes_max_turns: String,
+    pub hermes_safe_mode: bool,
+    /// SPEC-3152: providers enumerated from the user's `~/.hermes/config.yaml`
+    /// (model.provider + `providers:` keys), populated at wizard open. Empty
+    /// in tests / when no config exists; the wizard then offers only the
+    /// "use config default" and free-text "Other" provider entries.
+    pub hermes_provider_choices: Vec<String>,
+    /// SPEC-3152 FR-005: `true` when the user's global Hermes home has no
+    /// resolvable credentials, so the wizard shows a non-blocking "Hermes is
+    /// not set up" hint. Populated at wizard open; never blocks launch.
+    pub hermes_needs_setup: bool,
+    /// SPEC-3151 FR-009: `true` when OpenCode has no AI provider configured in
+    /// its global data home, so the wizard shows a non-blocking "OpenCode is
+    /// not set up" hint with an in-pane setup launcher. Populated at wizard
+    /// open; never blocks launch.
+    pub opencode_needs_setup: bool,
     pub branch_name: String,
     /// SPEC-2359 US-80: optional Start Work intake prompt (always skippable).
     /// Empty string means the step was skipped or left blank.

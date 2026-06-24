@@ -94,6 +94,38 @@ impl LaunchWizardState {
             builder = builder.fast_mode(true);
         }
 
+        // SPEC-3152: Hermes-specific launch options. Free-text/CSV fields map
+        // to their CLI flags; safe-mode is a boolean toggle. Only applied for
+        // the Hermes agent.
+        if agent_id == gwt_agent::AgentId::Hermes {
+            let trimmed = |value: &str| {
+                let value = value.trim();
+                (!value.is_empty()).then(|| value.to_string())
+            };
+            if let Some(provider) = trimmed(&self.hermes_provider) {
+                builder = builder.provider(provider);
+            }
+            if let Some(profile) = trimmed(&self.hermes_profile) {
+                builder = builder.profile(profile);
+            }
+            if let Some(toolsets) = trimmed(&self.hermes_toolsets) {
+                builder = builder.toolsets(toolsets);
+            }
+            if let Some(skills) = trimmed(&self.hermes_skills) {
+                builder = builder.skills(skills);
+            }
+            if let Some(max_turns) =
+                trimmed(&self.hermes_max_turns).and_then(|value| value.parse::<u32>().ok())
+            {
+                if max_turns > 0 {
+                    builder = builder.max_turns(max_turns);
+                }
+            }
+            if self.hermes_safe_mode {
+                builder = builder.safe_mode(true);
+            }
+        }
+
         builder = builder.runtime_target(self.runtime_target);
         if let Some(windows_shell) = self.windows_shell_for_launch() {
             builder = builder.windows_shell(windows_shell);
@@ -167,6 +199,8 @@ impl LaunchWizardState {
             windows_shell: self.windows_shell_for_launch(),
             env_vars,
             remove_env: Vec::new(),
+            command_override: None,
+            command_args_override: None,
         })
     }
 
@@ -455,6 +489,322 @@ mod tests {
             }
             other => panic!("expected shell launch request, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn build_launch_config_maps_hermes_launch_options() {
+        let mut options = sample_agent_options();
+        options.push(AgentOption {
+            id: "hermes".to_string(),
+            name: "Hermes Agent".to_string(),
+            available: true,
+            installed_version: Some("1.0.0".to_string()),
+            versions: Vec::new(),
+            custom_agent: None,
+        });
+        let mut state = LaunchWizardState::open_with(
+            context(branch("feature/gui"), "feature/gui"),
+            options,
+            Vec::new(),
+        );
+        state.set_agent_id("hermes");
+        state.apply(LaunchWizardAction::SetModel {
+            model: "anthropic/claude-sonnet-4".to_string(),
+        });
+        state.apply(LaunchWizardAction::SetHermesOption {
+            field: "provider".to_string(),
+            value: "openrouter".to_string(),
+        });
+        state.apply(LaunchWizardAction::SetHermesOption {
+            field: "profile".to_string(),
+            value: "work".to_string(),
+        });
+        state.apply(LaunchWizardAction::SetHermesOption {
+            field: "toolsets".to_string(),
+            value: "fs,web".to_string(),
+        });
+        state.apply(LaunchWizardAction::SetHermesOption {
+            field: "skills".to_string(),
+            value: "gwt-build-spec".to_string(),
+        });
+        state.apply(LaunchWizardAction::SetHermesOption {
+            field: "max_turns".to_string(),
+            value: "40".to_string(),
+        });
+        state.apply(LaunchWizardAction::SetHermesSafeMode { enabled: true });
+
+        let config = state.build_launch_config().expect("hermes launch config");
+        assert_eq!(config.agent_id, gwt_agent::AgentId::Hermes);
+        let has_pair =
+            |flag: &str, val: &str| config.args.windows(2).any(|p| p[0] == flag && p[1] == val);
+        assert!(has_pair("--provider", "openrouter"));
+        assert!(has_pair("--model", "anthropic/claude-sonnet-4"));
+        assert!(has_pair("--profile", "work"));
+        assert!(has_pair("--toolsets", "fs,web"));
+        assert!(has_pair("--skills", "gwt-build-spec"));
+        assert!(has_pair("--max-turns", "40"));
+        assert!(config.args.contains(&"--safe-mode".to_string()));
+    }
+
+    #[test]
+    fn hermes_options_are_exposed_in_settings_view_for_hermes_only() {
+        let mut options = sample_agent_options();
+        options.push(AgentOption {
+            id: "hermes".to_string(),
+            name: "Hermes Agent".to_string(),
+            available: true,
+            installed_version: Some("1.0.0".to_string()),
+            versions: Vec::new(),
+            custom_agent: None,
+        });
+        let mut state = LaunchWizardState::open_with(
+            context(branch("feature/gui"), "feature/gui"),
+            options,
+            Vec::new(),
+        );
+        state.mark_runtime_context_unresolved();
+        state.apply(LaunchWizardAction::UseStartMethod {
+            method: LaunchWizardStartMethodKind::ConfigureAndStart,
+        });
+
+        state.apply(LaunchWizardAction::SetAgent {
+            agent_id: "hermes".to_string(),
+        });
+        state.set_hermes_provider_choices(vec!["zai".to_string(), "ollama-launch".to_string()]);
+        state.apply(LaunchWizardAction::SetHermesOption {
+            field: "provider".to_string(),
+            value: "openrouter".to_string(),
+        });
+
+        let view = state.view();
+        assert!(
+            view.show_hermes_options,
+            "Hermes settings section must be shown for the Hermes agent"
+        );
+        assert_eq!(view.hermes_provider, "openrouter");
+        // Provider options come from the user's config, not a hardcoded list.
+        assert_eq!(view.hermes_provider_options, vec!["zai", "ollama-launch"]);
+
+        state.apply(LaunchWizardAction::SetAgent {
+            agent_id: "claude".to_string(),
+        });
+        assert!(
+            !state.view().show_hermes_options,
+            "non-Hermes agents must not show the Hermes section"
+        );
+    }
+
+    #[test]
+    fn hermes_needs_setup_flag_is_exposed_only_for_hermes() {
+        let mut options = sample_agent_options();
+        options.push(AgentOption {
+            id: "hermes".to_string(),
+            name: "Hermes Agent".to_string(),
+            available: true,
+            installed_version: Some("1.0.0".to_string()),
+            versions: Vec::new(),
+            custom_agent: None,
+        });
+        let mut state = LaunchWizardState::open_with(
+            context(branch("feature/gui"), "feature/gui"),
+            options,
+            Vec::new(),
+        );
+        state.mark_runtime_context_unresolved();
+        state.apply(LaunchWizardAction::UseStartMethod {
+            method: LaunchWizardStartMethodKind::ConfigureAndStart,
+        });
+        state.set_hermes_needs_setup(true);
+
+        state.apply(LaunchWizardAction::SetAgent {
+            agent_id: "hermes".to_string(),
+        });
+        assert!(state.view().hermes_needs_setup);
+
+        // Non-Hermes agents never surface the needs-setup hint.
+        state.apply(LaunchWizardAction::SetAgent {
+            agent_id: "claude".to_string(),
+        });
+        assert!(!state.view().hermes_needs_setup);
+    }
+
+    #[test]
+    fn opencode_options_expose_freetext_model_in_settings_view_for_opencode_only() {
+        // SPEC-3151 FR-008: OpenCode shows a free-text provider/model field
+        // (no fixed gwt model list) only when the OpenCode agent is selected.
+        let mut options = sample_agent_options();
+        options.push(AgentOption {
+            id: "opencode".to_string(),
+            name: "OpenCode".to_string(),
+            available: true,
+            installed_version: Some("1.0.0".to_string()),
+            versions: Vec::new(),
+            custom_agent: None,
+        });
+        let mut state = LaunchWizardState::open_with(
+            context(branch("feature/gui"), "feature/gui"),
+            options,
+            Vec::new(),
+        );
+        state.mark_runtime_context_unresolved();
+        state.apply(LaunchWizardAction::UseStartMethod {
+            method: LaunchWizardStartMethodKind::ConfigureAndStart,
+        });
+
+        state.apply(LaunchWizardAction::SetAgent {
+            agent_id: "opencode".to_string(),
+        });
+        // Free-text model is accepted without a fixed list (provider/model).
+        state.apply(LaunchWizardAction::SetModel {
+            model: "anthropic/claude-sonnet-4".to_string(),
+        });
+
+        let view = state.view();
+        assert!(
+            view.show_opencode_options,
+            "OpenCode settings section must be shown for the OpenCode agent"
+        );
+        assert_eq!(view.selected_model, "anthropic/claude-sonnet-4");
+        // OpenCode is not a Hermes-style provider/profile agent.
+        assert!(!view.show_hermes_options);
+
+        state.apply(LaunchWizardAction::SetAgent {
+            agent_id: "claude".to_string(),
+        });
+        assert!(
+            !state.view().show_opencode_options,
+            "non-OpenCode agents must not show the OpenCode section"
+        );
+    }
+
+    #[test]
+    fn build_launch_config_maps_opencode_freetext_model() {
+        // SPEC-3151 FR-008: the free-text model reaches the CLI as `--model`.
+        let mut options = sample_agent_options();
+        options.push(AgentOption {
+            id: "opencode".to_string(),
+            name: "OpenCode".to_string(),
+            available: true,
+            installed_version: Some("1.0.0".to_string()),
+            versions: Vec::new(),
+            custom_agent: None,
+        });
+        let mut state = LaunchWizardState::open_with(
+            context(branch("feature/gui"), "feature/gui"),
+            options,
+            Vec::new(),
+        );
+        state.set_agent_id("opencode");
+        state.apply(LaunchWizardAction::SetModel {
+            model: "anthropic/claude-sonnet-4".to_string(),
+        });
+
+        let config = state.build_launch_config().expect("opencode launch config");
+        assert_eq!(config.agent_id, gwt_agent::AgentId::OpenCode);
+        assert!(config
+            .args
+            .windows(2)
+            .any(|p| p[0] == "--model" && p[1] == "anthropic/claude-sonnet-4"));
+    }
+
+    #[test]
+    fn opencode_needs_setup_flag_is_exposed_only_for_opencode() {
+        // SPEC-3151 FR-009: the non-blocking needs-setup hint only surfaces for
+        // the OpenCode agent.
+        let mut options = sample_agent_options();
+        options.push(AgentOption {
+            id: "opencode".to_string(),
+            name: "OpenCode".to_string(),
+            available: true,
+            installed_version: Some("1.0.0".to_string()),
+            versions: Vec::new(),
+            custom_agent: None,
+        });
+        let mut state = LaunchWizardState::open_with(
+            context(branch("feature/gui"), "feature/gui"),
+            options,
+            Vec::new(),
+        );
+        state.mark_runtime_context_unresolved();
+        state.apply(LaunchWizardAction::UseStartMethod {
+            method: LaunchWizardStartMethodKind::ConfigureAndStart,
+        });
+        state.set_opencode_needs_setup(true);
+
+        state.apply(LaunchWizardAction::SetAgent {
+            agent_id: "opencode".to_string(),
+        });
+        assert!(state.view().opencode_needs_setup);
+
+        // Non-OpenCode agents never surface the needs-setup hint.
+        state.apply(LaunchWizardAction::SetAgent {
+            agent_id: "claude".to_string(),
+        });
+        assert!(!state.view().opencode_needs_setup);
+    }
+
+    #[test]
+    fn run_opencode_setup_yields_shell_completion_with_auth_login_command() {
+        // SPEC-3151 FR-010: the in-pane setup launcher produces a Host shell
+        // launch running `<opencode runner> auth login`.
+        let mut options = sample_agent_options();
+        options.push(AgentOption {
+            id: "opencode".to_string(),
+            name: "OpenCode".to_string(),
+            available: true,
+            installed_version: Some("1.0.0".to_string()),
+            versions: Vec::new(),
+            custom_agent: None,
+        });
+        let mut ctx = context(branch("feature/gui"), "feature/gui");
+        ctx.worktree_path = Some(PathBuf::from("/tmp/repo-feature"));
+        let mut state = LaunchWizardState::open_with(ctx, options, Vec::new());
+        state.set_agent_id("opencode");
+        state.version = "latest".to_string();
+
+        state.apply(LaunchWizardAction::RunOpenCodeSetup);
+
+        match state.completion.as_ref() {
+            Some(LaunchWizardCompletion::Launch(request)) => match request.as_ref() {
+                LaunchWizardLaunchRequest::Shell(config) => {
+                    assert_eq!(config.display_name, "OpenCode Setup");
+                    assert_eq!(config.runtime_target, gwt_agent::LaunchRuntimeTarget::Host);
+                    assert_eq!(
+                        config.working_dir.as_deref(),
+                        Some(Path::new("/tmp/repo-feature"))
+                    );
+                    let runner =
+                        gwt_agent::launch::resolve_runner(&gwt_agent::AgentId::OpenCode, "latest");
+                    assert_eq!(
+                        config.command_override.as_deref(),
+                        Some(runner.executable.as_str())
+                    );
+                    let args = config
+                        .command_args_override
+                        .as_ref()
+                        .expect("command args override");
+                    assert_eq!(&args[args.len() - 2..], &["auth", "login"]);
+                    for base_arg in &runner.base_args {
+                        assert!(
+                            args.contains(base_arg),
+                            "expected base arg {base_arg} in {args:?}"
+                        );
+                    }
+                }
+                other => panic!("expected shell launch request, got {other:?}"),
+            },
+            other => panic!("expected launch completion, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn run_opencode_setup_action_deserializes_from_frontend_wire_tag() {
+        // SPEC-3151 FR-010: the frontend dispatches `{"kind":"run_opencode_setup"}`.
+        // Default snake_case would produce `run_open_code_setup`, so the variant
+        // carries an explicit serde rename; this locks the wire contract.
+        let action: LaunchWizardAction =
+            serde_json::from_str(r#"{"kind":"run_opencode_setup"}"#).expect("deserialize action");
+        assert_eq!(action, LaunchWizardAction::RunOpenCodeSetup);
     }
 
     #[test]

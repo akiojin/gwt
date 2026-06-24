@@ -104,6 +104,9 @@ impl AppRuntime {
             gwt::LaunchWizardAction::SetSkipPermissions { .. } => "set_skip_permissions",
             gwt::LaunchWizardAction::SetFastMode { .. } => "set_fast_mode",
             gwt::LaunchWizardAction::SetCodexFastMode { .. } => "set_codex_fast_mode",
+            gwt::LaunchWizardAction::SetHermesOption { .. } => "set_hermes_option",
+            gwt::LaunchWizardAction::SetHermesSafeMode { .. } => "set_hermes_safe_mode",
+            gwt::LaunchWizardAction::RunOpenCodeSetup => "run_opencode_setup",
             gwt::LaunchWizardAction::Submit => "submit",
             gwt::LaunchWizardAction::GotoStep { .. } => "goto_step",
         }

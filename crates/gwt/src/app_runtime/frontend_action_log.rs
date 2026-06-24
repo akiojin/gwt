@@ -595,6 +595,13 @@ pub(super) fn frontend_user_action_log(event: &FrontendEvent) -> Option<Frontend
             FrontendUserActionLog::new("update_board_oauth_port", "settings")
                 .target(port.to_string())
         }
+        FrontendEvent::GetProjectBoardConfig { project_root } => {
+            FrontendUserActionLog::new("get_project_board_config", "settings").target(project_root)
+        }
+        FrontendEvent::UpdateProjectBoardConfig { project_root, .. } => {
+            FrontendUserActionLog::new("update_project_board_config", "settings")
+                .target(project_root)
+        }
         FrontendEvent::UpdateSystemSettings {
             language,
             codex_trust_managed_hooks,

@@ -212,6 +212,9 @@ impl AppRuntime {
             quick_start_entries,
             previous_profiles,
         );
+        wizard.set_hermes_provider_choices(gwt_skills::hermes_provider_choices_global());
+        wizard.set_hermes_needs_setup(!gwt_skills::hermes_is_configured_global());
+        wizard.set_opencode_needs_setup(!gwt_skills::opencode_is_configured_global());
         wizard.mark_runtime_context_unresolved();
         self.launch_wizard = Some(LaunchWizardSession {
             tab_id: tab_id.to_string(),
@@ -271,6 +274,9 @@ impl AppRuntime {
             quick_start_entries,
             previous_profiles,
         );
+        wizard.set_hermes_provider_choices(gwt_skills::hermes_provider_choices_global());
+        wizard.set_hermes_needs_setup(!gwt_skills::hermes_is_configured_global());
+        wizard.set_opencode_needs_setup(!gwt_skills::opencode_is_configured_global());
         wizard.mark_runtime_context_unresolved();
         self.launch_wizard = Some(LaunchWizardSession {
             tab_id: tab_id.to_string(),
@@ -1207,6 +1213,9 @@ impl AppRuntime {
             quick_start_entries,
             previous_profiles,
         );
+        wizard.set_hermes_provider_choices(gwt_skills::hermes_provider_choices_global());
+        wizard.set_hermes_needs_setup(!gwt_skills::hermes_is_configured_global());
+        wizard.set_opencode_needs_setup(!gwt_skills::opencode_is_configured_global());
         wizard.mark_runtime_context_unresolved();
         self.launch_wizard = Some(LaunchWizardSession {
             tab_id: tab_id.to_string(),

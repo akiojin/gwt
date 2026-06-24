@@ -234,17 +234,28 @@ pub fn build_shell_process_launch(
     base_env.apply_to_parts(&mut env, &mut remove_env);
 
     if config.runtime_target != gwt_agent::LaunchRuntimeTarget::Docker {
-        let windows_shell = if cfg!(windows) {
-            config.windows_shell
+        // SPEC-3151 FR-010: an explicit command override (e.g. the OpenCode
+        // setup launcher `bunx opencode-ai@latest auth login`) replaces the
+        // detected interactive shell. `detect_shell_program()` is only called
+        // when there is no override.
+        let shell = if let Some(command) = config.command_override.clone() {
+            gwt::ShellProgram {
+                command,
+                args: config.command_args_override.clone().unwrap_or_default(),
+            }
         } else {
-            None
-        };
-        let shell = match windows_shell {
-            Some(windows_shell) => gwt::ShellProgram {
-                command: windows_shell_process_command(windows_shell).to_string(),
-                args: interactive_windows_shell_args(windows_shell),
-            },
-            None => detect_shell_program().map_err(|error| error.to_string())?,
+            let windows_shell = if cfg!(windows) {
+                config.windows_shell
+            } else {
+                None
+            };
+            match windows_shell {
+                Some(windows_shell) => gwt::ShellProgram {
+                    command: windows_shell_process_command(windows_shell).to_string(),
+                    args: interactive_windows_shell_args(windows_shell),
+                },
+                None => detect_shell_program().map_err(|error| error.to_string())?,
+            }
         };
         env.insert(
             "GWT_PROJECT_ROOT".to_string(),
@@ -2378,6 +2389,8 @@ mod tests {
             windows_shell: Some(gwt_agent::WindowsShellKind::CommandPrompt),
             env_vars: HashMap::new(),
             remove_env: Vec::new(),
+            command_override: None,
+            command_args_override: None,
         };
 
         let launch = build_shell_process_launch(Path::new("/tmp/fallback"), &mut config)

@@ -2078,6 +2078,157 @@ body {
   gap: 8px;
 }
 
+/* SPEC-2963 FR-030: per-project Board destination chip + config popover.
+   The chip is a deliberate settings affordance — a provider dot, the
+   destination text, and a gear — set apart from the ghost filter buttons so it
+   reads as "configure where this Board goes", not another filter. */
+.board-destination-chip {
+  margin-right: auto;
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  padding: 3px 9px 3px 8px;
+  border: 1px solid var(--color-border-strong);
+  border-radius: 999px;
+  background: var(--color-surface);
+  color: var(--color-text);
+  font-size: var(--type-xs, 11px);
+  line-height: 1.6;
+  white-space: nowrap;
+  cursor: pointer;
+  transition:
+    border-color 0.12s ease,
+    background 0.12s ease;
+}
+
+.board-destination-chip:hover,
+.board-destination-chip:focus-visible {
+  outline: none;
+  border-color: var(--color-state-active);
+  background: color-mix(in oklab, var(--color-state-active) 10%, var(--color-surface));
+}
+
+.board-destination-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  flex: 0 0 auto;
+  background: var(--color-text-disabled);
+}
+
+.board-destination-chip[data-provider="slack"] .board-destination-dot {
+  background: #36c5f0;
+}
+.board-destination-chip[data-provider="teams"] .board-destination-dot {
+  background: #6264a7;
+}
+.board-destination-chip[data-provider="local"] .board-destination-dot {
+  background: var(--color-text-disabled);
+}
+.board-destination-chip[data-signed-in="false"] .board-destination-dot {
+  background: #f59e0b;
+  box-shadow: 0 0 0 3px color-mix(in oklab, #f59e0b 22%, transparent);
+}
+
+.board-destination-text {
+  font-weight: 600;
+  letter-spacing: 0.01em;
+}
+
+.board-destination-gear {
+  color: var(--color-text-muted);
+  font-size: 11px;
+  margin-left: 1px;
+}
+
+.board-destination-chip:hover .board-destination-gear {
+  color: var(--color-state-active);
+}
+
+.board-destination-popover {
+  position: fixed;
+  z-index: 10001;
+  min-width: 300px;
+  max-width: 360px;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  padding: 14px;
+  border: 1px solid var(--color-border-strong);
+  border-radius: var(--radius-md);
+  background: var(--color-surface-elevated);
+  box-shadow: var(--shadow-2);
+}
+
+.board-destination-popover-header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 8px;
+  padding-bottom: 10px;
+  border-bottom: 1px solid var(--color-border);
+}
+
+.board-destination-popover-title {
+  font-weight: 700;
+  color: var(--color-text-strong);
+}
+
+.board-destination-popover-sub {
+  margin-top: 2px;
+  font-size: var(--type-xs, 11px);
+  color: var(--color-text-muted);
+}
+
+.board-destination-popover-close {
+  flex: 0 0 auto;
+  border: 0;
+  background: transparent;
+  color: var(--color-text-muted);
+  font-size: 13px;
+  line-height: 1;
+  padding: 2px 4px;
+  cursor: pointer;
+  border-radius: var(--radius-sm, 4px);
+}
+
+.board-destination-popover-close:hover {
+  color: var(--color-text-strong);
+  background: color-mix(in oklab, var(--color-state-active) 14%, transparent);
+}
+
+.board-destination-field {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+}
+
+.board-destination-popover-status {
+  font-size: var(--type-xs, 11px);
+  color: var(--color-text-muted);
+  padding: 7px 9px;
+  border-radius: var(--radius-sm, 4px);
+  background: color-mix(in oklab, var(--color-state-active) 8%, transparent);
+  border: 1px solid var(--color-border);
+}
+
+.board-destination-popover-hint {
+  font-size: var(--type-xs, 11px);
+  color: var(--color-text-muted);
+}
+
+.board-destination-popover-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  margin-top: 2px;
+}
+
+.board-destination-popover-foot {
+  font-size: var(--type-xs, 11px);
+  color: var(--color-text-disabled);
+}
+
 .workspace-tab-group {
   display: inline-flex;
   align-items: center;

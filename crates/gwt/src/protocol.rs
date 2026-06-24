@@ -779,6 +779,26 @@ pub enum FrontendEvent {
     UpdateBoardOauthPort {
         port: u16,
     },
+    /// SPEC-2963 FR-030: read the per-project Board config + resolved routing for
+    /// `project_root` (the Settings Board tab's per-project section). Backend
+    /// replies with [`BackendEvent::ProjectBoardConfig`].
+    GetProjectBoardConfig {
+        project_root: String,
+    },
+    /// SPEC-2963 FR-025/FR-030: write per-project Board config to the repo's
+    /// `<project_root>/.gwt/work/board.toml`. Each field: `Some("")` clears the
+    /// override (inherit global), `Some(value)` sets it, `None` leaves it
+    /// unchanged. Backend replies with [`BackendEvent::ProjectBoardConfig`]
+    /// carrying the refreshed config + resolved routing.
+    UpdateProjectBoardConfig {
+        project_root: String,
+        #[serde(default)]
+        provider: Option<String>,
+        #[serde(default)]
+        channel: Option<String>,
+        #[serde(default)]
+        tenant: Option<String>,
+    },
     /// SPEC-1933 US-4: Settings > System > Language select changed. Backend
     /// persists the value to `~/.gwt/config.toml` under `[ai].language` and
     /// replies with [`BackendEvent::SystemSettingsUpdated`] on success or
@@ -1862,6 +1882,30 @@ pub enum BackendEvent {
         #[serde(default)]
         oauth_redirect_port: u16,
     },
+    /// SPEC-2963 FR-030: a repo's per-project Board config (the raw
+    /// `board.toml` override) plus its resolved effective routing, for the
+    /// Settings Board tab's per-project section. The `provider` / `channel` /
+    /// `tenant` fields are the project override (`None` = inherit global) used
+    /// to prefill inputs; the `resolved_*` fields show the effective routing.
+    ProjectBoardConfig {
+        project_root: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        provider: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        channel: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        tenant: Option<String>,
+        /// Resolved effective provider (`local` / `slack` / `teams`).
+        resolved_provider: String,
+        /// Where the resolved provider came from (`project` / `global`).
+        resolved_source: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        resolved_channel: Option<String>,
+        /// Whether a usable token exists for the resolved provider + tenant.
+        signed_in: bool,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        message: Option<String>,
+    },
     /// SPEC-1933 US-4: confirmation that
     /// [`FrontendEvent::UpdateSystemSettings`] persisted successfully.
     /// `language` echoes the saved value so the frontend can reconcile
@@ -2511,6 +2555,7 @@ impl BackendEvent {
             BackendEvent::MigrationError { .. } => "migration_error",
             BackendEvent::SystemSettings { .. } => "system_settings",
             BackendEvent::BoardAuthStatus { .. } => "board_auth_status",
+            BackendEvent::ProjectBoardConfig { .. } => "project_board_config",
             BackendEvent::SystemSettingsUpdated { .. } => "system_settings_updated",
             BackendEvent::SystemSettingsError { .. } => "system_settings_error",
             BackendEvent::AutostartStatus { .. } => "autostart_status",
@@ -4242,6 +4287,67 @@ mod tests {
             }
             other => panic!("unexpected variant: {other:?}"),
         }
+    }
+
+    #[test]
+    fn frontend_event_get_project_board_config_round_trips() {
+        // SPEC-2963 FR-030: Settings Board tab reads a repo's per-project config.
+        let payload = r#"{"kind":"get_project_board_config","project_root":"/repo/a"}"#;
+        let event: FrontendEvent =
+            serde_json::from_str(payload).expect("deserialize GetProjectBoardConfig");
+        match event {
+            FrontendEvent::GetProjectBoardConfig { project_root } => {
+                assert_eq!(project_root, "/repo/a");
+            }
+            other => panic!("unexpected variant: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn frontend_event_update_project_board_config_round_trips() {
+        // SPEC-2963 FR-025/FR-030: Settings Board tab writes a repo's board.toml.
+        let payload = r#"{"kind":"update_project_board_config","project_root":"/repo/a","provider":"slack","channel":"C-A","tenant":"acme"}"#;
+        let event: FrontendEvent =
+            serde_json::from_str(payload).expect("deserialize UpdateProjectBoardConfig");
+        match event {
+            FrontendEvent::UpdateProjectBoardConfig {
+                project_root,
+                provider,
+                channel,
+                tenant,
+            } => {
+                assert_eq!(project_root, "/repo/a");
+                assert_eq!(provider.as_deref(), Some("slack"));
+                assert_eq!(channel.as_deref(), Some("C-A"));
+                assert_eq!(tenant.as_deref(), Some("acme"));
+            }
+            other => panic!("unexpected variant: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn backend_event_project_board_config_serializes_override_and_resolved() {
+        // SPEC-2963 FR-030: the Board tab prefills inputs from `provider`/
+        // `channel`/`tenant` and shows the resolved routing.
+        let event = BackendEvent::ProjectBoardConfig {
+            project_root: "/repo/a".to_string(),
+            provider: Some("slack".to_string()),
+            channel: Some("C-A".to_string()),
+            tenant: Some("acme".to_string()),
+            resolved_provider: "slack".to_string(),
+            resolved_source: "project".to_string(),
+            resolved_channel: Some("C-A".to_string()),
+            signed_in: true,
+            message: Some("Saved project Board configuration.".to_string()),
+        };
+        let value = serde_json::to_value(&event).expect("serialize");
+        assert_eq!(value["kind"], "project_board_config");
+        assert_eq!(value["project_root"], "/repo/a");
+        assert_eq!(value["provider"], "slack");
+        assert_eq!(value["channel"], "C-A");
+        assert_eq!(value["resolved_provider"], "slack");
+        assert_eq!(value["resolved_source"], "project");
+        assert_eq!(value["signed_in"], true);
     }
 
     #[test]

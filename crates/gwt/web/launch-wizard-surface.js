@@ -229,6 +229,83 @@ export function createLaunchWizardSurface({
         return field;
       }
 
+      // SPEC-3152: free-text / numeric launch option (Hermes option fields).
+      // Dispatches on change (blur/enter) so typing does not re-render mid-edit.
+      function appendTextField(
+        parent,
+        label,
+        value,
+        placeholder,
+        onChange,
+        wide = false,
+        inputType = "text",
+      ) {
+        const field = createLaunchField(label, wide);
+        const input = document.createElement("input");
+        input.type = inputType;
+        input.className = "launch-input";
+        input.setAttribute("aria-label", label);
+        if (placeholder) {
+          input.placeholder = placeholder;
+        }
+        input.value = value || "";
+        input.addEventListener("change", () => onChange(input.value));
+        field.appendChild(input);
+        parent.appendChild(field);
+        return field;
+      }
+
+      // SPEC-3152: Hermes provider picker. The choices are enumerated from the
+      // user's own ~/.hermes/config.yaml (model.provider + providers: keys) and
+      // passed in via launchWizard.hermes_provider_options — gwt does not
+      // hardcode a provider list (it would go stale). A leading "use config
+      // default" option and a trailing "Other…" free-text entry cover the
+      // default path and the long tail (built-ins not present in config).
+      function appendHermesProviderField(parent, currentValue, choices, onChange) {
+        const providers = Array.isArray(choices) ? choices : [];
+        const field = createLaunchField("Provider", false);
+        const select = createNode("select", "launch-select");
+        select.setAttribute("aria-label", "Provider");
+        const addOption = (value, label) => {
+          const option = document.createElement("option");
+          option.value = value;
+          option.textContent = label;
+          select.appendChild(option);
+        };
+        addOption("", "(use config default)");
+        for (const provider of providers) {
+          addOption(provider, provider);
+        }
+        addOption("__other__", "Other…");
+        const isKnown = Boolean(currentValue) && providers.includes(currentValue);
+        const isOther = Boolean(currentValue) && !isKnown;
+        select.value = currentValue ? (isKnown ? currentValue : "__other__") : "";
+
+        const otherInput = document.createElement("input");
+        otherInput.type = "text";
+        otherInput.className = "launch-input";
+        otherInput.placeholder = "custom provider id";
+        otherInput.setAttribute("aria-label", "Custom provider");
+        otherInput.value = isOther ? currentValue : "";
+        otherInput.style.display = isOther ? "" : "none";
+        otherInput.style.marginTop = "6px";
+        otherInput.addEventListener("change", () => onChange(otherInput.value));
+
+        select.addEventListener("change", () => {
+          if (select.value === "__other__") {
+            otherInput.style.display = "";
+            otherInput.focus();
+          } else {
+            otherInput.style.display = "none";
+            onChange(select.value);
+          }
+        });
+        field.appendChild(select);
+        field.appendChild(otherInput);
+        parent.appendChild(field);
+        return field;
+      }
+
       function appendCheckboxField(
         parent,
         label,
@@ -1323,6 +1400,156 @@ export function createLaunchWizardSurface({
                 }),
             );
           }
+          section.appendChild(grid);
+          panel.appendChild(section);
+        }
+
+        // SPEC-3152: Hermes-specific launch options, rendered only for the
+        // Hermes agent. Provider is a curated dropdown sourced from the user's
+        // config; the remaining fields are optional overrides (blank uses the
+        // user's hermes setup / config.yaml). The wizard stays flat — no
+        // nested disclosure — per the launch-wizard flatness invariant.
+        if (showSetupForms && launchWizard.show_hermes_options) {
+          const section = createLaunchSection(
+            "Hermes options",
+            "Provider and optional overrides for the Hermes agent. Blank fields use your hermes setup (config.yaml).",
+          );
+          if (launchWizard.hermes_needs_setup) {
+            const note = createNode(
+              "div",
+              "launch-note",
+              "Hermes is not set up yet (no credentials in ~/.hermes). Run `hermes setup` (or `hermes model`) in a terminal to choose a provider and sign in; gwt will then bridge it into every worktree. You can still launch — Hermes will prompt for setup.",
+            );
+            section.appendChild(note);
+          }
+          const grid = createNode("div", "launch-form-grid");
+          appendHermesProviderField(
+            grid,
+            launchWizard.hermes_provider,
+            launchWizard.hermes_provider_options || [],
+            (value) =>
+              sendWizardAction({
+                kind: "set_hermes_option",
+                field: "provider",
+                value,
+              }),
+          );
+          appendTextField(
+            grid,
+            "Model",
+            launchWizard.selected_model,
+            "e.g. anthropic/claude-sonnet-4 (blank = config.yaml)",
+            (value) =>
+              sendWizardAction({
+                kind: "set_model",
+                model: value,
+              }),
+          );
+          appendTextField(
+            grid,
+            "Profile",
+            launchWizard.hermes_profile,
+            "Hermes profile name (optional)",
+            (value) =>
+              sendWizardAction({
+                kind: "set_hermes_option",
+                field: "profile",
+                value,
+              }),
+          );
+          appendTextField(
+            grid,
+            "Toolsets",
+            launchWizard.hermes_toolsets,
+            "comma-separated, e.g. fs,web (optional)",
+            (value) =>
+              sendWizardAction({
+                kind: "set_hermes_option",
+                field: "toolsets",
+                value,
+              }),
+          );
+          appendTextField(
+            grid,
+            "Skills",
+            launchWizard.hermes_skills,
+            "preloaded skills (optional)",
+            (value) =>
+              sendWizardAction({
+                kind: "set_hermes_option",
+                field: "skills",
+                value,
+              }),
+          );
+          appendTextField(
+            grid,
+            "Max turns",
+            launchWizard.hermes_max_turns,
+            "e.g. 40 (optional)",
+            (value) =>
+              sendWizardAction({
+                kind: "set_hermes_option",
+                field: "max_turns",
+                value,
+              }),
+            false,
+            "number",
+          );
+          appendToggleField(
+            grid,
+            "Safe mode",
+            "Disable user config/plugins (also disables gwt hooks)",
+            Boolean(launchWizard.hermes_safe_mode),
+            (enabled) =>
+              sendWizardAction({
+                kind: "set_hermes_safe_mode",
+                enabled,
+              }),
+          );
+          section.appendChild(grid);
+          panel.appendChild(section);
+        }
+
+        // SPEC-3151 FR-008/009/010: OpenCode-specific launch options, rendered
+        // only for the OpenCode agent. OpenCode takes a single free-text
+        // `provider/model` string (auth is host-global, so no provider bridge
+        // is needed). When no AI provider is configured, a non-blocking note
+        // offers an in-pane setup launcher that runs `opencode auth login`.
+        if (showSetupForms && launchWizard.show_opencode_options) {
+          const section = createLaunchSection(
+            "OpenCode options",
+            "Model and provider sign-in for the OpenCode agent. Blank model uses your OpenCode config.",
+          );
+          if (launchWizard.opencode_needs_setup) {
+            const note = createNode(
+              "div",
+              "launch-note",
+              "OpenCode has no AI provider configured yet. Run `/connect` inside OpenCode or `opencode auth login` to sign in. You can still launch — OpenCode will prompt for setup.",
+            );
+            const setupButton = createNode(
+              "button",
+              "launch-choice-button",
+              "Run OpenCode setup",
+            );
+            setupButton.type = "button";
+            setupButton.addEventListener("click", () =>
+              sendWizardAction({ kind: "run_opencode_setup" }),
+            );
+            note.appendChild(setupButton);
+            section.appendChild(note);
+          }
+          const grid = createNode("div", "launch-form-grid");
+          appendTextField(
+            grid,
+            "Model",
+            launchWizard.selected_model,
+            "e.g. anthropic/claude-sonnet-4 (blank = config)",
+            (value) =>
+              sendWizardAction({
+                kind: "set_model",
+                model: value,
+              }),
+          );
           section.appendChild(grid);
           panel.appendChild(section);
         }

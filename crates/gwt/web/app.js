@@ -3865,6 +3865,7 @@
         mountBoardWindow,
         mountLogsWindow,
         applyBoardLogsReceiveEvent,
+        applyProjectBoardConfigEventToBoard,
       } = createBoardLogsSurface({
         send,
         createNode,
@@ -5190,6 +5191,10 @@
           case "log_entries":
           case "log_entry_appended":
             applyBoardLogsReceiveEvent(event);
+            break;
+          case "project_board_config":
+            // SPEC-2963 FR-030: per-project Board routing → Board window chip.
+            applyProjectBoardConfigEventToBoard(event);
             break;
           case "process_line":
             // SPEC-2809 Phase F1/F2 — fan out the redacted, ANSI-stripped

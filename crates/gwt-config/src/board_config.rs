@@ -1,10 +1,15 @@
-//! Board provider configuration (SPEC-2959).
+//! Board provider configuration (SPEC-2959 / SPEC-2963).
 //!
-//! Selects which backend serves the coordination Board. `local` is the
-//! default and the only implemented provider; `slack` / `teams` are reserved
-//! for a future adapter (Issue #2960) and currently fall back to `local`.
+//! Selects which backend serves the coordination Board. `local` is the default;
+//! `slack` and `teams` are implemented remote providers (SPEC-2963). The global
+//! `[board]` block holds org/app-wide settings (OAuth `client_id`, Teams
+//! `tenant_id`, redirect port) and the fallback defaults; per-project overrides
+//! (provider / channel / tenant) live in [`ProjectBoardConfig`], persisted as a
+//! git-tracked `<repo>/.gwt/work/board.toml` so each project routes to its own
+//! channel (SPEC-2963 FR-025..FR-032).
 
 use std::collections::BTreeMap;
+use std::path::Path;
 
 use serde::{Deserialize, Deserializer, Serialize};
 
@@ -79,6 +84,71 @@ pub struct TeamsConfig {
     pub default_channel: Option<String>,
     /// `workspace_id` → `team_id/channel_id` mapping (FR-007).
     pub channel_map: BTreeMap<String, String>,
+}
+
+/// File name of the per-project Board config under `<repo>/.gwt/work/`.
+pub const PROJECT_BOARD_FILE: &str = "board.toml";
+
+/// Per-project Board provider override (SPEC-2963 FR-025..FR-032).
+///
+/// Persisted as a git-tracked `<repo>/.gwt/work/board.toml`, so the channel
+/// binding and provider choice travel with the repo and are shared by the whole
+/// team / every machine / every agent. Absent fields inherit the global
+/// `[board]` config (precedence: project board.toml → global `[board]` →
+/// local). Tokens are **never** stored here — they live machine-local in the
+/// token store, keyed by tenant (FR-029).
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq, Eq)]
+#[serde(default)]
+pub struct ProjectBoardConfig {
+    /// Per-project provider. `None` inherits the global provider (FR-028/FR-031).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub provider: Option<BoardProviderKind>,
+    /// Channel this project's Board posts/reads use (Slack channel id, or Teams
+    /// `team_id/channel_id`). `None` inherits the global default channel
+    /// (FR-025/FR-027).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub channel: Option<String>,
+    /// Tenant the channel belongs to (Slack `team_id` / Teams `tenant_id`), used
+    /// to key the machine-local OAuth token so projects in different tenants
+    /// authenticate independently (FR-029).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tenant: Option<String>,
+}
+
+impl ProjectBoardConfig {
+    /// Load `<work_dir>/board.toml`. A missing or unparseable file yields the
+    /// empty config (inherit global), mirroring `Settings::load`'s
+    /// default-on-error behaviour so a stray file never breaks Board loading.
+    pub fn load_from_work_dir(work_dir: &Path) -> Self {
+        let path = work_dir.join(PROJECT_BOARD_FILE);
+        match std::fs::read_to_string(&path) {
+            Ok(raw) => toml::from_str(&raw).unwrap_or_default(),
+            Err(_) => Self::default(),
+        }
+    }
+
+    /// Persist to `<work_dir>/board.toml`, creating the directory if needed.
+    /// An empty config (everything inherits global) removes any existing file
+    /// instead of leaving an empty `board.toml` behind, so "inherit global"
+    /// never commits noise to the repo.
+    pub fn save_to_work_dir(&self, work_dir: &Path) -> std::io::Result<()> {
+        let path = work_dir.join(PROJECT_BOARD_FILE);
+        if self.is_empty() {
+            return match std::fs::remove_file(&path) {
+                Ok(()) => Ok(()),
+                Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(()),
+                Err(err) => Err(err),
+            };
+        }
+        std::fs::create_dir_all(work_dir)?;
+        let body = toml::to_string_pretty(self).map_err(std::io::Error::other)?;
+        std::fs::write(path, body)
+    }
+
+    /// Whether the project sets nothing (so the global config fully applies).
+    pub fn is_empty(&self) -> bool {
+        self.provider.is_none() && self.channel.is_none() && self.tenant.is_none()
+    }
 }
 
 /// Default fixed loopback port for the OAuth redirect callback (SPEC-2963).
@@ -224,5 +294,97 @@ tenant_id = "tenant-1"
         let restored: BoardConfig = toml::from_str(&serialized).unwrap();
         assert_eq!(restored.slack, cfg.slack);
         assert_eq!(restored.teams, cfg.teams);
+    }
+
+    #[test]
+    fn project_board_config_missing_file_is_empty_inherit_global() {
+        // FR-031: a repo with no board.toml inherits the global config.
+        let dir = tempfile::tempdir().unwrap();
+        let cfg = ProjectBoardConfig::load_from_work_dir(dir.path());
+        assert!(cfg.is_empty());
+        assert!(cfg.provider.is_none());
+        assert!(cfg.channel.is_none());
+        assert!(cfg.tenant.is_none());
+    }
+
+    #[test]
+    fn project_board_config_roundtrips_through_work_dir() {
+        // FR-025: provider + channel + tenant persist to <repo>/.gwt/work/board.toml.
+        let dir = tempfile::tempdir().unwrap();
+        let cfg = ProjectBoardConfig {
+            provider: Some(BoardProviderKind::Slack),
+            channel: Some("C-PROJ-A".to_string()),
+            tenant: Some("T-ACME".to_string()),
+        };
+        cfg.save_to_work_dir(dir.path()).unwrap();
+        assert!(dir.path().join(PROJECT_BOARD_FILE).exists());
+        let restored = ProjectBoardConfig::load_from_work_dir(dir.path());
+        assert_eq!(restored, cfg);
+        assert!(!restored.is_empty());
+    }
+
+    #[test]
+    fn project_board_config_partial_only_channel() {
+        // Absent provider/tenant stay None so they inherit global.
+        let toml_src = "channel = \"C-ONLY\"\n";
+        let cfg: ProjectBoardConfig = toml::from_str(toml_src).unwrap();
+        assert_eq!(cfg.channel.as_deref(), Some("C-ONLY"));
+        assert!(cfg.provider.is_none());
+        assert!(cfg.tenant.is_none());
+    }
+
+    #[test]
+    fn project_board_config_per_project_provider_kinds() {
+        // FR-028: each project can pick a different provider kind.
+        for kind in [
+            BoardProviderKind::Local,
+            BoardProviderKind::Slack,
+            BoardProviderKind::Teams,
+        ] {
+            let dir = tempfile::tempdir().unwrap();
+            let cfg = ProjectBoardConfig {
+                provider: Some(kind),
+                ..Default::default()
+            };
+            cfg.save_to_work_dir(dir.path()).unwrap();
+            let restored = ProjectBoardConfig::load_from_work_dir(dir.path());
+            assert_eq!(
+                restored.provider,
+                Some(kind),
+                "round-trip failed for {kind:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn project_board_config_unparseable_falls_back_to_empty() {
+        // A stray/corrupt board.toml never breaks Board loading (inherit global).
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join(PROJECT_BOARD_FILE), "this is = not [valid").unwrap();
+        let cfg = ProjectBoardConfig::load_from_work_dir(dir.path());
+        assert!(cfg.is_empty());
+    }
+
+    #[test]
+    fn project_board_config_empty_save_removes_file() {
+        // "Inherit global" (empty) must not leave a stray empty board.toml.
+        let dir = tempfile::tempdir().unwrap();
+        ProjectBoardConfig {
+            provider: Some(BoardProviderKind::Slack),
+            channel: Some("C".into()),
+            ..Default::default()
+        }
+        .save_to_work_dir(dir.path())
+        .unwrap();
+        assert!(dir.path().join(PROJECT_BOARD_FILE).exists());
+
+        ProjectBoardConfig::default()
+            .save_to_work_dir(dir.path())
+            .unwrap();
+        assert!(!dir.path().join(PROJECT_BOARD_FILE).exists());
+        // Idempotent when already absent.
+        ProjectBoardConfig::default()
+            .save_to_work_dir(dir.path())
+            .unwrap();
     }
 }
