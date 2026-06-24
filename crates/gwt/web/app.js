@@ -972,7 +972,7 @@
       if (appVersionLabel && !appVersionLabel.dataset.releaseNotesBound) {
         appVersionLabel.dataset.releaseNotesBound = "true";
         const openReleaseNotesFromLabel = () => {
-          releaseNotesWindow.open(versionState.current || null);
+          releaseNotesWindow.open(versionState.latest || versionState.current || null);
         };
         appVersionLabel.addEventListener("click", openReleaseNotesFromLabel);
         appVersionLabel.addEventListener("keydown", (event) => {
