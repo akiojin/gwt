@@ -440,48 +440,44 @@ export function createWorkspaceKanbanSurface({
     return typeof name === "string" ? name.replace(/^origin\//, "") : name;
   }
 
-  // SPEC-2359 US-83: render the eligible existing remote branches as a "Start
-  // work on a branch" section in the Workspace list. Each row continues on the
-  // branch itself via the existing open_launch_wizard path (no new work/*).
-  function renderRemoteBranchSection(windowId, state) {
+  // SPEC-2359 US-83 (UX revision 2026-06-24): existing origin branches the user
+  // can start work on fold into the SAME Workspace list as ordinary rows that
+  // carry the shared "Remote" tag — there is no separate local/remote section.
+  // The user grasps remote vs local from the tag alone. Each eligible branch
+  // becomes a paused remote-only stub so it flows through the same row renderer,
+  // lane sort, filter counts, and keyboard navigation as real Works; the row's
+  // ▶ Launch sends the branch through open_launch_wizard, which the backend
+  // normalizes (strips origin/) to continue on the branch itself — so sending
+  // the stripped display name is equivalent to the raw ref. `startable_remote`
+  // marks these synthetic rows so the detail pane offers only Launch (there is
+  // no Work yet to mark Done / Discard). Branches already represented by a real
+  // Workspace (same branch) are de-duped away.
+  function remoteStartWorkItems(state, existingWorkspaces) {
     const branches = Array.isArray(state.remoteBranches) ? state.remoteBranches : [];
-    if (branches.length === 0) return null;
-    const section = createNode("div", "workspace-overview-remote-branches");
-    section.appendChild(
-      createNode(
-        "div",
-        "workspace-overview-remote-branches-heading",
-        "Start work on a branch",
-      ),
+    if (branches.length === 0) return [];
+    const taken = new Set(
+      (existingWorkspaces || [])
+        .map((workspace) => compactText(workspace?.branch))
+        .filter(Boolean),
     );
-    const list = createNode("div", "workspace-overview-remote-branches-list");
-    for (const branch of branches) {
-      const row = createNode("div", "workspace-overview-remote-branch-row");
-      row.dataset.branchName = branch;
-      const copy = createNode("span", "workspace-overview-remote-branch-copy");
-      copy.appendChild(
-        createNode("span", "workspace-overview-remote-branch-name", displayBranchName(branch)),
-      );
-      copy.appendChild(createNode("span", "workspace-overview-remote", "Remote"));
-      row.appendChild(copy);
-      const start = createNode(
-        "button",
-        "icon-button workspace-overview-row-action",
-        "▶",
-      );
-      start.type = "button";
-      start.dataset.action = "start-work-remote-branch";
-      start.title = "Start work on this branch";
-      start.setAttribute("aria-label", `Start work on ${displayBranchName(branch)}`);
-      start.addEventListener("click", (event) => {
-        event.stopPropagation();
-        send({ kind: "open_launch_wizard", id: windowId, branch_name: branch });
+    const seen = new Set();
+    const items = [];
+    for (const raw of branches) {
+      const name = displayBranchName(compactText(raw));
+      if (!name || taken.has(name) || seen.has(name)) continue;
+      seen.add(name);
+      const item = normalizeWorkspaceItem({
+        id: `remote-start:${name}`,
+        title: name,
+        branch: name,
+        remote_only: true,
+        status_category: "idle",
+        lifecycle_state: "paused",
       });
-      row.appendChild(start);
-      list.appendChild(row);
+      item.startable_remote = true;
+      items.push(item);
     }
-    section.appendChild(list);
-    return section;
+    return items;
   }
 
   function renderWorkspaceRow(windowId, state, item) {
@@ -517,20 +513,25 @@ export function createWorkspaceKanbanSurface({
     // SPEC-2359 W16-4 (FR-391): a merged-and-stale Workspace classifies as
     // derived Done — the badge reads Done (data-derived marks it apart from
     // an explicit close) and the row never presents as Active/Paused.
-    const doneEquivalent = Boolean(item.done_equivalent);
-    const lifecycleBadge = createNode(
-      "span",
-      "workspace-overview-lifecycle",
-      doneEquivalent ? "Done" : formatLifecycleStateLabel(item.lifecycle_state),
-    );
-    lifecycleBadge.dataset.lifecycle = doneEquivalent
-      ? "done"
-      : String(item.lifecycle_state || "active").toLowerCase();
-    if (doneEquivalent) {
-      lifecycleBadge.dataset.derived = "true";
-      lifecycleBadge.title = "Merged with no updates since — derived Done (no close recorded)";
+    // SPEC-2359 US-83 (UX revision 2026-06-24): a startable remote branch has
+    // no Work yet, so a lifecycle state ("Paused") would misread as a stalled
+    // Work. The Remote tag is its only state marker.
+    if (!item.startable_remote) {
+      const doneEquivalent = Boolean(item.done_equivalent);
+      const lifecycleBadge = createNode(
+        "span",
+        "workspace-overview-lifecycle",
+        doneEquivalent ? "Done" : formatLifecycleStateLabel(item.lifecycle_state),
+      );
+      lifecycleBadge.dataset.lifecycle = doneEquivalent
+        ? "done"
+        : String(item.lifecycle_state || "active").toLowerCase();
+      if (doneEquivalent) {
+        lifecycleBadge.dataset.derived = "true";
+        lifecycleBadge.title = "Merged with no updates since — derived Done (no close recorded)";
+      }
+      titleRow.appendChild(lifecycleBadge);
     }
-    titleRow.appendChild(lifecycleBadge);
     if (item.merged_into_base) {
       // SPEC-2359 W-15 (FR-386): branch merged into a base — safe to delete.
       titleRow.appendChild(createNode("span", "workspace-overview-merged", "Merged"));
@@ -540,10 +541,16 @@ export function createWorkspaceKanbanSurface({
       // ref; Launch Agent creates the worktree on demand.
       titleRow.appendChild(createNode("span", "workspace-overview-remote", "Remote"));
     }
-    const hookHealth = item.managed_hook_health;
-    const hookStatus = hookHealthStatus(hookHealth);
-    if (hookStatus && hookStatus !== "ready" && hookStatus !== "inactive") {
-      const hookBadge = createNode("span", "workspace-overview-hook-health", "Hooks");
+    // UI/UX pass (2026-06-24): the managed-hook badge only earns a place on the
+    // persistent row when a hook is actually BROKEN (degraded) — a per-row,
+    // per-Work fault the user can act on. The far more common "needs setup"
+    // (needs_attention) and benign states (ready / inactive / self_healed /
+    // waiting_for_first_hook_event) are systemic, not per-row signal, so they
+    // stay in the detail pane's Managed Hooks section instead of flooding every
+    // row. The label names the condition, not the opaque subsystem ("Hooks").
+    const hookStatus = hookHealthStatus(item.managed_hook_health);
+    if (hookStatus === "degraded") {
+      const hookBadge = createNode("span", "workspace-overview-hook-health", "Hook error");
       hookBadge.dataset.status = hookStatus;
       hookBadge.title = `Managed Hooks: ${hookHealthStatusLabel(hookStatus)}`;
       titleRow.appendChild(hookBadge);
@@ -1331,7 +1338,13 @@ export function createWorkspaceKanbanSurface({
     // alone never closes a Work). The actual cleanup is a follow-up slice, so
     // these buttons only emit the `close_work` message for now.
     const lifecycleState = String(workspace.lifecycle_state || "active").toLowerCase();
-    if (lifecycleState !== "done" && lifecycleState !== "discarded") {
+    // SPEC-2359 US-83: a startable remote branch has no Work yet, so the detail
+    // offers only Launch — Done / Discard would close a Work that does not exist.
+    if (
+      !workspace.startable_remote &&
+      lifecycleState !== "done" &&
+      lifecycleState !== "discarded"
+    ) {
       const doneButton = createNode("button", "wizard-button", "Done");
       doneButton.type = "button";
       doneButton.dataset.action = "close-work-done";
@@ -1452,8 +1465,14 @@ export function createWorkspaceKanbanSurface({
     state._lastSignature = signature;
 
     const workspaces = workspacesFromProjection(projection);
+    // SPEC-2359 US-83: fold eligible existing remote branches into the same
+    // list as ordinary rows (tagged Remote), de-duped against real Workspaces,
+    // so they share lane sort, filter counts, and keyboard navigation.
+    const remoteItems = remoteStartWorkItems(state, workspaces);
+    const allWorkspaces =
+      remoteItems.length > 0 ? workspaces.concat(remoteItems) : workspaces;
     const unassignedAgents = unassignedAgentsFromProjection(projection);
-    const listOrder = workspacesInListOrder(workspaces);
+    const listOrder = workspacesInListOrder(allWorkspaces);
     if (!WORKSPACE_FILTERS.some((filter) => filter.id === state.filter)) {
       state.filter = "all";
     }
@@ -1465,21 +1484,27 @@ export function createWorkspaceKanbanSurface({
 
     const status = root.querySelector(".workspace-overview-status-line");
     if (status) {
+      // The headline counts real Workspaces (works you have). Eligible remote
+      // branches are surfaced as a separate "Startable" count, not folded into
+      // "Workspaces", so the number still answers "how many Workspaces do I
+      // have" even when the list also shows startable branches as rows.
+      const startable = remoteItems.length;
       status.textContent = projection
-        ? `${workspaces.length} Workspaces · ${needsAttentionCount} Needs Attention · ${unassignedAgents.length} Unassigned Agents`
+        ? `${workspaces.length} Workspaces${startable > 0 ? ` · ${startable} Startable` : ""} · ${needsAttentionCount} Needs Attention · ${unassignedAgents.length} Unassigned Agents`
         : "No Workspace projection";
     }
 
     const listPane = root.querySelector(".workspace-overview-list-pane");
     listPane.innerHTML = "";
-    if (workspaces.length === 0) {
+    if (allWorkspaces.length === 0) {
       listPane.appendChild(createNode("div", "workspace-overview-empty", "No Workspaces"));
     } else {
       listPane.appendChild(renderWorkspaceFilterBar(windowId, state, listOrder));
       // User verification 2026-06-12 + SPEC-2359 US-78: completed local
       // branches need a BULK cleanup path, but only for backend-vetted row
-      // candidates.
-      const mergedRows = workspaces.filter((workspace) => workspace.cleanup_candidate);
+      // candidates. Remote-start stubs never carry cleanup_candidate, so they
+      // stay out of this set.
+      const mergedRows = allWorkspaces.filter((workspace) => workspace.cleanup_candidate);
       if (mergedRows.length > 0) {
         const bulkRow = createNode("div", "workspace-overview-bulk-cleanup");
         const bulk = createNode(
@@ -1500,11 +1525,6 @@ export function createWorkspaceKanbanSurface({
       }
       listPane.appendChild(renderWorkspaceList(windowId, state, visibleWorkspaces));
     }
-
-    // SPEC-2359 US-83: eligible existing remote branches the user can start
-    // work on, rendered as rows in the Workspace list (below the Works).
-    const remoteSection = renderRemoteBranchSection(windowId, state);
-    if (remoteSection) listPane.appendChild(remoteSection);
 
     renderUnassignedQueue(listPane, unassignedAgents);
 
@@ -1605,13 +1625,17 @@ export function createWorkspaceKanbanSurface({
   }
 
   // SPEC-2359 US-83: store the backend-supplied eligible remote branches for a
-  // Workspace window and re-render so they appear as "Start work on a branch"
-  // rows. Scoped by window id so a stale response can't clobber another window.
+  // Workspace window and re-render so they fold into the unified Workspace list
+  // as ordinary Remote-tagged rows. Scoped by window id so a stale response
+  // can't clobber another window. Use ensureState (not a raw get) so a fast
+  // backend response that arrives before the first projection render still
+  // lands its branches; a later render then surfaces them. windowMap.has guards
+  // against a closed/unknown window.
   function applyRemoteStartWorkBranches(event) {
     const windowId = event?.id;
     if (!windowId) return;
-    const state = workspaceStateMap.get(windowId);
-    if (!state) return;
+    if (!windowMap.has(windowId)) return;
+    const state = ensureState(windowId);
     state.remoteBranches = Array.isArray(event.branches) ? event.branches : [];
     renderWorkspaceOverviewWindow(windowId, true);
   }

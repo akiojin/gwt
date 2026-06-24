@@ -1,8 +1,9 @@
-// SPEC-2359 US-83 — eligible existing remote branches render as "Start work on
-// a branch" rows IN the Workspace list (the surface the user actually sees),
-// not as a separate toolbar action / modal. Picking ▶ continues on the branch
-// via the existing open_launch_wizard path. This E2E renders the real UI so the
-// rows are proven to appear on the reachable Workspace surface.
+// SPEC-2359 US-83 (UX revision 2026-06-24) — eligible existing remote branches
+// fold into the SAME Workspace list as ordinary rows, distinguished only by the
+// shared "Remote" tag (no separate "Start work on a branch" section, no
+// local/remote split). Picking ▶ continues on the branch via the existing
+// open_launch_wizard path. This E2E renders the real UI so the rows are proven
+// to appear, styled, on the reachable Workspace surface.
 
 import { expect, test } from "@playwright/test";
 import { APP_URL, installEmbeddedRoutes } from "./_helpers/embedded-frontend";
@@ -12,7 +13,7 @@ test.beforeEach(async ({ page }) => {
   await installBackend(page);
 });
 
-test("remote branches render as Start work on a branch rows in the Workspace list", async ({
+test("remote branches fold into the unified Workspace list as Remote-tagged rows", async ({
   page,
 }) => {
   await page.goto(APP_URL);
@@ -20,29 +21,32 @@ test("remote branches render as Start work on a branch rows in the Workspace lis
   // The Workspace surface (the reachable one) mounts.
   await expect(page.locator(".workspace-overview-root")).toBeVisible();
 
-  // The eligible remote branches appear as a section in the list.
-  const section = page.locator(".workspace-overview-remote-branches");
-  await expect(section).toBeVisible();
-  await expect(
-    section.locator(".workspace-overview-remote-branches-heading"),
-  ).toHaveText("Start work on a branch");
+  // There is no separate remote-branch section — the rows are in the list.
+  await expect(page.locator(".workspace-overview-remote-branches")).toHaveCount(0);
 
-  const rows = section.locator(".workspace-overview-remote-branch-row");
-  await expect(rows).toHaveCount(2);
-  // Bare names (origin/ stripped) + a Remote chip.
-  await expect(
-    rows.first().locator(".workspace-overview-remote-branch-name"),
-  ).toHaveText("feature-foo");
-  await expect(rows.first().locator(".workspace-overview-remote")).toHaveText("Remote");
+  const list = page.locator(".workspace-overview-list");
+  // The local Work and the two eligible remote branches share one list.
+  await expect(list.locator('.workspace-overview-row[data-workspace-id="work-local"]')).toBeVisible();
+  const remoteRows = list.locator('.workspace-overview-row[data-workspace-id^="remote-start:"]');
+  await expect(remoteRows).toHaveCount(2);
 
-  // ▶ starts work on the branch via open_launch_wizard with the raw ref.
-  await rows.first().locator("[data-action='start-work-remote-branch']").click();
+  const firstRemote = list.locator(
+    '.workspace-overview-row[data-workspace-id="remote-start:feature-foo"]',
+  );
+  // Bare name (origin/ stripped) + the shared Remote tag, styled like any row.
+  await expect(firstRemote.locator(".workspace-overview-row-title")).toHaveText("feature-foo");
+  await expect(firstRemote.locator(".workspace-overview-remote")).toHaveText("Remote");
+  await expect(firstRemote).toHaveAttribute("data-attention", "paused");
+
+  // ▶ continues on the branch via open_launch_wizard; the backend normalizes
+  // the (already stripped) name to continue-on-branch.
+  await firstRemote.locator("[data-action='launch-workspace-row']").click();
   const sent = await page.evaluate(
     () => (window as unknown as { __sent: Array<{ kind: string; branch_name?: string }> }).__sent,
   );
   const launch = sent.find((m) => m.kind === "open_launch_wizard");
   expect(launch).toBeTruthy();
-  expect(launch?.branch_name).toBe("origin/feature-foo");
+  expect(launch?.branch_name).toBe("feature-foo");
 });
 
 async function installBackend(page: any) {
@@ -101,7 +105,18 @@ async function installBackend(page: any) {
         owner: null,
         branch: null,
         workspaces: [],
-        active_works: [],
+        active_works: [
+          {
+            id: "work-local",
+            title: "Local paused work",
+            status_category: "idle",
+            lifecycle_state: "paused",
+            branch: "work/local-1",
+            active_agents: 0,
+            blocked_agents: 0,
+            agents: [],
+          },
+        ],
         unassigned_agents: [],
         agents: [],
         journal_entries: [],
