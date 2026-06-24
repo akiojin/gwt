@@ -1267,6 +1267,9 @@ impl AppRuntime {
                 ),
             )],
             FrontendEvent::LoadBranches { id } => self.load_branches_events(&client_id, &id),
+            FrontendEvent::RequestRemoteStartWorkBranches { id } => {
+                self.request_remote_start_work_branches_events(&client_id, &id)
+            }
             FrontendEvent::LoadBoard { id, all } => self.load_board_events(&client_id, &id, all),
             FrontendEvent::LoadBoardHistory {
                 id,

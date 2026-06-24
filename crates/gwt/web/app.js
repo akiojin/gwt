@@ -4352,6 +4352,12 @@
             focusWindowLocally,
             sendFocus: (id) => socketTransport.send({ kind: "focus_window", id }),
           });
+          // SPEC-2359 US-83: fetch the eligible remote branches for this
+          // Workspace window so they fold into the unified Workspace list as
+          // Remote-tagged rows. Sent from app.js (not the surface's mount) so
+          // the surface stays a pure renderer and its unit tests keep their
+          // exact-message contracts.
+          send({ kind: "request_remote_start_work_branches", id: windowData.id });
           return;
         }
 
@@ -5258,6 +5264,11 @@
           // SPEC-2359 US-42 — Resume Picker dispatcher slots.
           case "workspace_resumable_agents":
             workspaceResumePicker.handleAgentsList(event);
+            break;
+          // SPEC-2359 US-83 — eligible remote branches render as "Start work on
+          // a branch" rows in the Workspace list.
+          case "remote_start_work_branches":
+            workspaceOverviewSurface.applyRemoteStartWorkBranches(event);
             break;
           case "workspace_resume_agent_error":
             launchPending.settleAck(event);

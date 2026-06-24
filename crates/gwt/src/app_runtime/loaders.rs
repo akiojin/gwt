@@ -13,7 +13,10 @@
 
 use std::path::Path;
 
-use super::{spawn_branch_load_async, AppRuntime, BackendEvent, OutboundEvent, WindowPreset};
+use super::{
+    spawn_branch_load_async, spawn_remote_start_work_branches_async, AppRuntime, BackendEvent,
+    OutboundEvent, WindowPreset,
+};
 
 /// Read the active canonical log file via the SPEC-1924 FR-035 reader.
 ///
@@ -97,6 +100,42 @@ impl AppRuntime {
             // candidates fresh from disk instead of the stale in-memory cache
             // snapshot (#2995).
             self.sessions_dir.clone(),
+        );
+        Vec::new()
+    }
+
+    /// SPEC-2359 US-83: serve the Workspace "Open a branch…" picker. Resolves
+    /// the requesting window's project, then computes the eligible existing
+    /// remote branches off the UI thread and replies with
+    /// `RemoteStartWorkBranches`.
+    pub(crate) fn request_remote_start_work_branches_events(
+        &self,
+        client_id: &str,
+        id: &str,
+    ) -> Vec<OutboundEvent> {
+        let Some(address) = self.window_lookup.get(id) else {
+            return vec![OutboundEvent::reply(
+                client_id,
+                BackendEvent::BranchError {
+                    id: id.to_string(),
+                    message: "Window not found".to_string(),
+                },
+            )];
+        };
+        let Some(tab) = self.tab(&address.tab_id) else {
+            return vec![OutboundEvent::reply(
+                client_id,
+                BackendEvent::BranchError {
+                    id: id.to_string(),
+                    message: "Project tab not found".to_string(),
+                },
+            )];
+        };
+        spawn_remote_start_work_branches_async(
+            self.proxy.clone(),
+            id.to_string(),
+            tab.project_root.clone(),
+            self.active_session_branches_for_tab(&address.tab_id),
         );
         Vec::new()
     }

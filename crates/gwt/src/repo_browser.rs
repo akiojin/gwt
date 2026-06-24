@@ -6,8 +6,9 @@ use std::{
 
 use crate::{AppEventProxy, OutboundEvent, UserEvent};
 use gwt::{
-    hydrate_branch_entries_with_active_sessions, list_branch_inventory, BackendEvent,
-    BranchEntriesPhase, BranchListEntry, BranchResumeInfo, BranchScope,
+    hydrate_branch_entries_with_active_sessions, list_branch_entries_with_active_sessions,
+    list_branch_inventory, BackendEvent, BranchEntriesPhase, BranchListEntry, BranchResumeInfo,
+    BranchScope,
 };
 
 pub fn spawn_branch_load_async(
@@ -41,6 +42,41 @@ pub fn spawn_branch_load_async(
     });
 }
 
+/// SPEC-2359 US-83: compute the eligible existing remote branches for the
+/// Workspace "Open a branch…" picker off the UI thread. Fetches origin first
+/// (best-effort, FR-445) so teammates' freshly pushed branches appear, then
+/// emits a `RemoteStartWorkBranches` event the Workspace surface renders.
+pub fn spawn_remote_start_work_branches_async(
+    proxy: AppEventProxy,
+    window_id: String,
+    project_root: PathBuf,
+    active_session_branches: HashSet<String>,
+) {
+    thread::spawn(move || {
+        if let Ok(git_root) = gwt_git::worktree::main_worktree_root(&project_root) {
+            let _ = gwt_git::WorktreeManager::new(&git_root).fetch_origin();
+        }
+        let branches =
+            list_branch_entries_with_active_sessions(&project_root, &active_session_branches)
+                .map(|entries| {
+                    gwt::branch_list::eligible_remote_start_work_branch_names(
+                        &entries,
+                        &active_session_branches,
+                    )
+                })
+                .unwrap_or_default();
+        dispatch_async_events(
+            &proxy,
+            vec![OutboundEvent::broadcast(
+                BackendEvent::RemoteStartWorkBranches {
+                    id: window_id,
+                    branches,
+                },
+            )],
+        );
+    });
+}
+
 pub fn preferred_issue_launch_branch(entries: &[BranchListEntry]) -> Option<String> {
     let mut locals = entries
         .iter()
@@ -66,6 +102,14 @@ fn dispatch_branch_load_progressive(
     active_session_branches: &HashSet<String>,
     resume_sessions: &[gwt_agent::Session],
 ) {
+    // SPEC-2359 US-83 / FR-445: refresh origin's remote-tracking refs on this
+    // spawned (off-UI) thread so the Branches list — and the Launch Wizard's
+    // existing-branch picker derived from the same listing — reflect branches
+    // pushed by teammates or other machines. Best-effort: an offline fetch
+    // failure still yields the cached refs below.
+    if let Ok(git_root) = gwt_git::worktree::main_worktree_root(project_root) {
+        let _ = gwt_git::WorktreeManager::new(&git_root).fetch_origin();
+    }
     // SPEC-2009 FR-067: one load id shared by this load's inventory + hydrated
     // events so the frontend can drop a stale earlier load delivered out of
     // order after an evict/reconnect.
@@ -165,6 +209,7 @@ mod tests {
             cleanup_ready: true,
             cleanup: BranchCleanupInfo::default(),
             resume: BranchResumeInfo::unavailable(),
+            start_work_eligibility: None,
         }
     }
 
@@ -180,6 +225,7 @@ mod tests {
             cleanup_ready: true,
             cleanup: BranchCleanupInfo::default(),
             resume: BranchResumeInfo::unavailable(),
+            start_work_eligibility: None,
         }
     }
 
