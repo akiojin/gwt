@@ -4441,6 +4441,18 @@
         }
       }
 
+      function refreshMountedImprovementInboxWindows() {
+        for (const element of document.querySelectorAll(
+          '.workspace-window[data-preset="improvement"]',
+        )) {
+          const body = element.querySelector(".window-body");
+          if (!body) continue;
+          improvementInboxSurface.mount(body, {
+            improvement_candidates: improvementCandidates,
+          });
+        }
+      }
+
       // SPEC-3064 Phase 3 (E4): the Settings windows surface (tabbed
       // Settings body, customAgentsState / agentBackendsState /
       // systemSettingsState, Teams channel converters, add-from-preset
@@ -5110,7 +5122,17 @@
           case "improvement_candidates":
             improvementCandidates = Array.isArray(event.candidates) ? event.candidates : [];
             improvementCandidatesRevision += 1;
-            renderWorkspace(activeWorkspace() || emptyWorkspace());
+            {
+              const workspace = activeWorkspace() || emptyWorkspace();
+              renderWorkspace(workspace);
+              if (
+                !(workspace?.windows || []).some(
+                  (windowData) => presetSurface(windowData?.preset) === "improvement",
+                )
+              ) {
+                refreshMountedImprovementInboxWindows();
+              }
+            }
             break;
           case "improvement_action_result":
             // Candidate list refresh is delivered as a separate

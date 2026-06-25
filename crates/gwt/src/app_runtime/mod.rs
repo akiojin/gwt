@@ -1786,7 +1786,7 @@ impl AppRuntime {
             BackendEvent::ImprovementActionError {
                 id: id.map(str::to_string),
                 action: action.to_string(),
-                message: message.into(),
+                message: improvement_action_error_message(message.into()),
             },
         )]
     }
@@ -2146,6 +2146,18 @@ impl AppRuntime {
         self.persist_dispatcher.enqueue(snapshot);
         Ok(())
     }
+}
+
+fn improvement_action_error_message(message: impl Into<String>) -> String {
+    let message = message.into();
+    if message
+        .to_ascii_lowercase()
+        .contains("authentication required")
+    {
+        return "GitHub authentication is required to promote this improvement. Run `gh auth login`, or restart browser-check with `GH_TOKEN` available."
+            .to_string();
+    }
+    message
 }
 
 #[cfg(test)]

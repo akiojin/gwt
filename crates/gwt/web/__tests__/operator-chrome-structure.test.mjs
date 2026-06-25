@@ -1522,6 +1522,34 @@ test("renderWorkspace refreshes operator telemetry when windows mount/unmount (S
   );
 });
 
+test("Improvement candidates refresh already-mounted inbox windows without workspace_state", () => {
+  const refreshBody = extractFunctionBody(appSource, "refreshMountedImprovementInboxWindows");
+  assert.match(
+    refreshBody,
+    /querySelectorAll\(\s*["']\.workspace-window\[data-preset="improvement"\]["']\s*,?\s*\)/,
+    "refresh helper must target already-mounted Improvement Inbox windows",
+  );
+  assert.match(
+    refreshBody,
+    /querySelector\(\s*["']\.window-body["']\s*\)/,
+    "refresh helper must remount the existing window body",
+  );
+  assert.match(
+    refreshBody,
+    /improvementInboxSurface\.mount\(\s*body\s*,\s*\{\s*improvement_candidates:\s*improvementCandidates\s*,?\s*\}/,
+    "refresh helper must pass the latest candidate snapshot into the mounted surface",
+  );
+
+  const receiveBody = extractFunctionBody(appSource, "receive");
+  const caseIndex = receiveBody.indexOf('case "improvement_candidates":');
+  const revisionIndex = receiveBody.indexOf("improvementCandidatesRevision += 1;", caseIndex);
+  const refreshIndex = receiveBody.indexOf("refreshMountedImprovementInboxWindows();", caseIndex);
+  assert.ok(
+    caseIndex >= 0 && revisionIndex > caseIndex && refreshIndex > revisionIndex,
+    "improvement_candidates receive path must refresh mounted inbox windows after recording the new revision",
+  );
+});
+
 test("SPEC-3038 (2026-06-20): Windows badge counts windows across all project tabs", () => {
   const body = extractFunctionBody(appSource, "recomputeOperatorTelemetry");
   assert.match(

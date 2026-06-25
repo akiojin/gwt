@@ -51,6 +51,24 @@ use crate::{
     PtyWriterRegistry, UploadedAttachment,
 };
 
+#[test]
+fn improvement_action_error_message_explains_missing_github_auth() {
+    let message = super::improvement_action_error_message("network error: authentication required");
+
+    assert!(
+        message.contains("GitHub authentication is required"),
+        "message should explain the missing auth cause: {message}"
+    );
+    assert!(
+        message.contains("gh auth login"),
+        "message should give a concrete recovery command: {message}"
+    );
+    assert!(
+        message.contains("GH_TOKEN"),
+        "message should mention browser-check token bridging: {message}"
+    );
+}
+
 #[derive(Debug, Clone)]
 struct CapturedTracingEvent {
     level: Level,

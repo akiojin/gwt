@@ -523,9 +523,52 @@ fn issue_title(candidate: &ImprovementCandidate) -> String {
 
 fn render_public_issue_body(candidate: &ImprovementCandidate) -> String {
     let mut body = String::new();
-    body.push_str("## Summary\n\n");
+    body.push_str("## Problem\n\n");
     body.push_str(&candidate.sanitized_summary);
-    body.push_str("\n\n## Candidate\n\n");
+    body.push_str("\n\n");
+    match &candidate.sanitized_details {
+        Some(details) if !details.trim().is_empty() => {
+            body.push_str("Context:\n\n");
+            body.push_str(details);
+            body.push_str("\n\n");
+        }
+        _ => {
+            body.push_str("Context:\n\nNo public-safe details were provided.\n\n");
+        }
+    }
+    body.push_str("## Expected behavior\n\n");
+    body.push_str(&format!(
+        "gwt should handle `{target}` self-improvement failures with enough public-safe context for maintainers to reproduce, prioritize, and implement the fix without relying on private local logs.\n",
+        target = candidate.target_artifact
+    ));
+    body.push_str("\n## Observed evidence\n\n");
+    match &candidate.evidence_digest {
+        Some(digest) if !digest.trim().is_empty() => body.push_str(digest),
+        _ => body.push_str("No public-safe evidence digest was provided."),
+    }
+    body.push_str(&format!(
+        "\n\nPublic metadata reports {occurrences} occurrence(s), classification `{classification}`, confidence `{confidence}`, and source `{source}`.",
+        occurrences = candidate.occurrences,
+        classification = candidate.classification,
+        confidence = candidate.confidence,
+        source = candidate.source
+    ));
+    body.push_str("\n\n## Impact\n\n");
+    body.push_str(&format!(
+        "If this remains unresolved, gwt-caused `{target}` regressions can stay local to an agent session instead of becoming trackable upstream work. This increases the chance that the same failure is repeated by future agents or users.",
+        target = candidate.target_artifact
+    ));
+    body.push_str("\n\n## Suggested verification\n\n");
+    body.push_str(&format!(
+        "- Confirm whether the gwt-owned {target} behavior still violates the expected contract.\n",
+        target = candidate.target_artifact
+    ));
+    body.push_str("- Reproduce the candidate trigger or inspect the sanitized evidence digest.\n");
+    body.push_str("- Add or update a regression test that fails before the fix.\n");
+    body.push_str(
+        "- Verify the fix without requiring private target-project logs, paths, or secrets.\n",
+    );
+    body.push_str("\n## Source candidate\n\n");
     body.push_str(&format!("- Candidate ID: {}\n", candidate.id));
     body.push_str(&format!("- Source: {}\n", candidate.source));
     body.push_str(&format!(
@@ -536,16 +579,6 @@ fn render_public_issue_body(candidate: &ImprovementCandidate) -> String {
     body.push_str(&format!("- Confidence: {}\n", candidate.confidence));
     body.push_str(&format!("- Dedupe key: {}\n", candidate.dedupe_key));
     body.push_str(&format!("- Occurrences: {}\n", candidate.occurrences));
-    body.push_str("\n## Evidence Digest\n\n");
-    match &candidate.evidence_digest {
-        Some(digest) if !digest.trim().is_empty() => body.push_str(digest),
-        _ => body.push_str("No public-safe evidence digest was provided."),
-    }
-    body.push_str("\n\n## Details\n\n");
-    match &candidate.sanitized_details {
-        Some(details) if !details.trim().is_empty() => body.push_str(details),
-        _ => body.push_str("No public-safe details were provided."),
-    }
     body.push_str("\n\n## Privacy\n\n");
     body.push_str("- Public body generated from sanitized candidate fields only.\n");
     body.push_str("- Raw target project paths, repository names, secrets, logs, and code excerpts are local-only.\n");
@@ -583,6 +616,11 @@ fn candidate_public_json(candidate: &ImprovementCandidate) -> Value {
         "linked_issue": candidate.linked_issue,
         "dismissed_reason": candidate.dismissed_reason,
         "updated_at": candidate.updated_at,
+        "issue_preview": {
+            "repository": UPSTREAM_REPOSITORY,
+            "title": issue_title(candidate),
+            "body": render_public_issue_body(candidate),
+        },
     })
 }
 
@@ -942,6 +980,12 @@ mod tests {
             "public Issue body must not contain token-like secrets: {}",
             call.body
         );
+        assert!(call.body.contains("## Problem"));
+        assert!(call.body.contains("## Expected behavior"));
+        assert!(call.body.contains("## Observed evidence"));
+        assert!(call.body.contains("## Impact"));
+        assert!(call.body.contains("## Suggested verification"));
+        assert!(call.body.contains("## Source candidate"));
         assert!(call.body.contains("- Target artifact: skill"));
         assert!(call.body.contains("Candidate ID"));
         assert!(call.body.contains(&id));
@@ -949,6 +993,75 @@ mod tests {
             std::fs::read_to_string(&skill_path).expect("skill file"),
             "original skill",
             "promotion must not auto-mutate skill files"
+        );
+    }
+
+    #[test]
+    fn list_candidates_includes_sanitized_upstream_issue_preview() {
+        let project = tempfile::tempdir().expect("project");
+        let mut env = TestEnv::new(project.path().join("cache"));
+        env.repo_path = project.path().join("target-project");
+        std::fs::create_dir_all(&env.repo_path).expect("repo path");
+
+        let (capture_code, _capture_out) = run_collect(
+            &mut env,
+            CliCommand::Improvement(ImprovementCommand::Capture(ImprovementCaptureCommand {
+                source: "agent-failure".to_string(),
+                target_artifact: "skill".to_string(),
+                classification: "gwt-caused".to_string(),
+                confidence: "high".to_string(),
+                summary: "Skill update missing for /Users/alice/private-app".to_string(),
+                details: Some(
+                    "Failure came from /Users/alice/private-app/AGENTS.md and token ghp_1234567890abcdef."
+                        .to_string(),
+                ),
+                evidence_digest: Some("Stop hook allowed completion without capture.".to_string()),
+                dedupe_key: Some("skill:gwt-discussion:self-improvement".to_string()),
+                local_evidence: Vec::new(),
+            })),
+        )
+        .expect("capture");
+        assert_eq!(capture_code, 0);
+
+        let (list_code, list_out) = run_collect(
+            &mut env,
+            CliCommand::Improvement(ImprovementCommand::List(ImprovementListCommand {
+                state: Some("pending".to_string()),
+                classification: None,
+                confidence: None,
+                limit: None,
+            })),
+        )
+        .expect("list");
+
+        assert_eq!(list_code, 0, "list output: {list_out}");
+        let output = parse_output(&list_out);
+        let preview = &output["candidates"][0]["issue_preview"];
+        assert_eq!(preview["repository"], "akiojin/gwt");
+        assert!(preview["title"]
+            .as_str()
+            .expect("preview title")
+            .starts_with("fix(gwt): Skill update missing"));
+        let body = preview["body"].as_str().expect("preview body");
+        assert!(body.contains("## Problem"));
+        assert!(body.contains("## Expected behavior"));
+        assert!(body.contains("## Observed evidence"));
+        assert!(body.contains("## Impact"));
+        assert!(body.contains("## Suggested verification"));
+        assert!(body.contains("## Source candidate"));
+        assert!(body.contains("## Privacy"));
+        assert!(body.contains("Stop hook allowed completion without capture."));
+        assert!(body.contains(
+            "Confirm whether the gwt-owned skill behavior still violates the expected contract."
+        ));
+        assert!(body.contains("- Target artifact: skill"));
+        assert!(
+            !body.contains("/Users/alice"),
+            "preview body must not contain private paths: {body}"
+        );
+        assert!(
+            !body.contains("ghp_1234567890abcdef"),
+            "preview body must not contain token-like secrets: {body}"
         );
     }
 
