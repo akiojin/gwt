@@ -284,6 +284,30 @@ fn frontend_event_may_change_project_tabs(event: &FrontendEvent) -> bool {
     )
 }
 
+/// Phase 0 perf instrumentation (measure-first; see plan
+/// `launch-agent-ultrathink-shimmering-lake.md`). `handle_frontend_event` runs
+/// on the tao main event-loop thread, so any handler doing synchronous
+/// repository-size-scaling work freezes the whole GUI (the reported "Launch
+/// Agent wizard freezes on large repos" symptom). A handler that blocks longer
+/// than this many milliseconds is logged at `warn` so the offending event is
+/// identifiable from `~/.gwt/logs/`. Inter-event timestamps on the `debug`
+/// line additionally expose CPU starvation (handler fast, but the event loop
+/// thread is not getting scheduled because a background indexer saturates all
+/// cores).
+const GUI_EVENT_LOOP_SLOW_DISPATCH_MS: u64 = 30;
+
+/// Cheap variant-name label for a `FrontendEvent`, derived from `Debug` and
+/// truncated to the leading identifier so dispatch-timing logs name the
+/// handler without ever emitting payload fields (which may contain env vars or
+/// tokens). Used only by the Phase 0 dispatch instrumentation.
+fn frontend_event_kind_label(event: &FrontendEvent) -> String {
+    format!("{event:?}")
+        .split(|c: char| !(c.is_ascii_alphanumeric() || c == '_'))
+        .find(|token| !token.is_empty())
+        .unwrap_or("Unknown")
+        .to_string()
+}
+
 const GUI_SHUTDOWN_BACKSTOP_GRACE: Duration = Duration::from_secs(5);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -6994,7 +7018,29 @@ fn main() -> std::io::Result<()> {
             Event::UserEvent(UserEvent::Frontend { client_id, event }) => {
                 let refresh_index_status = matches!(event, FrontendEvent::FrontendReady);
                 let sync_board_projection_watchers = frontend_event_may_change_project_tabs(&event);
+                // Phase 0 perf instrumentation (measure-first): time the handler
+                // on the main event-loop thread so a synchronous repo-scaling
+                // handler that freezes the GUI is diagnosable, and inter-event
+                // timestamps reveal CPU starvation by background indexers.
+                let dispatch_kind = frontend_event_kind_label(&event);
+                let dispatch_started = std::time::Instant::now();
                 let events = app.handle_frontend_event(client_id, event);
+                let dispatch_elapsed_ms = dispatch_started.elapsed().as_millis() as u64;
+                if dispatch_elapsed_ms >= GUI_EVENT_LOOP_SLOW_DISPATCH_MS {
+                    tracing::warn!(
+                        target: "gwt.frontend.timing",
+                        event = %dispatch_kind,
+                        elapsed_ms = dispatch_elapsed_ms,
+                        "frontend event handler blocked the GUI event loop"
+                    );
+                } else {
+                    tracing::debug!(
+                        target: "gwt.frontend.timing",
+                        event = %dispatch_kind,
+                        elapsed_ms = dispatch_elapsed_ms,
+                        "frontend event handled"
+                    );
+                }
                 if sync_board_projection_watchers {
                     board_projection_watchers.sync(&app, proxy.clone());
                     workspace_projection_watchers.sync(&app, proxy.clone());
