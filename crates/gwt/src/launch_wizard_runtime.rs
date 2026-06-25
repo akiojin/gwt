@@ -412,6 +412,12 @@ fn resolve_launch_wizard_hydration(
     ));
     let entries = list_branch_entries_with_active_sessions(project_root, active_session_branches)
         .map_err(|error| error.to_string())?;
+    // SPEC-2359 US-83 / FR-444: offer eligible existing remote branches in the
+    // wizard's "open existing branch" picker.
+    let open_branch_candidates = gwt::branch_list::eligible_remote_start_work_branch_names(
+        &entries,
+        active_session_branches,
+    );
     let selected_branch = entries
         .into_iter()
         .find(|entry| entry.name == branch_name)
@@ -440,5 +446,6 @@ fn resolve_launch_wizard_hydration(
         agent_options,
         quick_start_entries,
         previous_profiles: Some(previous_profiles),
+        open_branch_candidates,
     })
 }

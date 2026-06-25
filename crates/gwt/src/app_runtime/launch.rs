@@ -637,6 +637,24 @@ impl AppRuntime {
         self.launch_wizard_cache.replace_sessions(sessions);
     }
 
+    /// SPEC-2359 US-83 / FR-444: update the live wizard's "open existing branch"
+    /// picker candidates (computed off the UI thread after `fetch_origin`) and
+    /// re-emit its state so the picker renders. Scoped to the matching
+    /// `wizard_id` so a stale background result can't clobber a newer wizard.
+    pub(crate) fn apply_launch_wizard_branch_candidates(
+        &mut self,
+        wizard_id: String,
+        candidates: Vec<String>,
+    ) -> Vec<OutboundEvent> {
+        if let Some(session) = self.launch_wizard.as_mut() {
+            if session.wizard_id == wizard_id {
+                session.wizard.open_branch_candidates = candidates;
+                return vec![self.launch_wizard_state_outbound()];
+            }
+        }
+        Vec::new()
+    }
+
     pub(crate) fn live_sessions_for_branch(
         &self,
         tab_id: &str,

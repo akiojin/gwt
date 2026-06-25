@@ -123,6 +123,12 @@ pub struct BranchListEntry {
     pub cleanup: BranchCleanupInfo,
     #[serde(default)]
     pub resume: BranchResumeInfo,
+    /// SPEC-2359 US-83 / FR-443: whether this row is an eligible "Start Work /
+    /// Open" source for an existing remote branch. Populated for remote-tracking
+    /// rows during hydration; `None` on local rows and on payloads from older
+    /// backends (serde default).
+    #[serde(default)]
+    pub start_work_eligibility: Option<RemoteStartWorkEligibility>,
 }
 
 pub fn list_branch_entries(repo_path: &Path) -> std::io::Result<Vec<BranchListEntry>> {
@@ -219,6 +225,7 @@ fn adapt_branch_inventory(branches: Vec<gwt_git::Branch>) -> Vec<BranchListEntry
             cleanup_ready: false,
             cleanup: BranchCleanupInfo::default(),
             resume: BranchResumeInfo::unavailable(),
+            start_work_eligibility: None,
         })
         .collect();
 
@@ -253,6 +260,12 @@ fn hydrate_branch_entries(
         .filter(|branch| branch.scope == BranchScope::Local)
         .map(|branch| (branch.name.clone(), (branch.ahead, branch.behind)))
         .collect();
+    // SPEC-2359 US-83 / FR-443: classify remote rows for the "Start Work / Open"
+    // entry points before consuming the entries. Pure — no git spawn.
+    let start_work_eligibility: HashMap<String, RemoteStartWorkEligibility> =
+        remote_start_work_eligibility(&entries, active_session_branches)
+            .into_iter()
+            .collect();
     let entries: Vec<BranchListEntry> = entries
         .into_iter()
         .map(|mut branch| {
@@ -265,6 +278,7 @@ fn hydrate_branch_entries(
                 cleanup_targets,
             );
             branch.cleanup_ready = true;
+            branch.start_work_eligibility = start_work_eligibility.get(&branch.name).copied();
             branch
         })
         .collect();
@@ -396,6 +410,126 @@ fn cleanup_execution_branch(
 
 fn local_branch_for_remote_ref(name: &str) -> Option<&str> {
     name.split_once('/').map(|(_, branch_name)| branch_name)
+}
+
+/// SPEC-2359 US-83 / FR-443: per-remote-row eligibility for "Start Work / Open"
+/// from an existing branch. Pure classification over already-assembled branch
+/// entries — performs no git spawn, so it is safe to call during view assembly.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RemoteStartWorkEligibility {
+    /// Offer "Start Work / Open": an origin branch with no local counterpart and
+    /// no live session — launching materializes a worktree on the branch itself.
+    StartWork,
+    /// The branch already exists locally or has a live Work; surface focus /
+    /// Resume instead of minting a second Work (FR-332 / US-79).
+    ResumeExisting,
+    /// Not offered as a Start Work source: a non-origin remote (FR-447), a
+    /// protected base branch (main/master/develop), or a non-branch ref such as
+    /// `origin/HEAD`.
+    Hidden,
+}
+
+/// Classify each remote-tracking entry in `entries` for the "Start Work from an
+/// existing remote branch" entry points (SPEC-2359 US-83 / FR-443).
+///
+/// Only `origin` remote branches are eligible. Protected base branches and refs
+/// without a branch name are `Hidden`. A branch that already has a local
+/// counterpart or a live session is `ResumeExisting`, so the UI surfaces
+/// focus/Resume rather than a duplicate Work. The result is keyed by the remote
+/// entry name (e.g. `"origin/feature-foo"`).
+pub fn remote_start_work_eligibility(
+    entries: &[BranchListEntry],
+    active_session_branches: &HashSet<String>,
+) -> Vec<(String, RemoteStartWorkEligibility)> {
+    let local_branch_names: HashSet<&str> = entries
+        .iter()
+        .filter(|entry| entry.scope == BranchScope::Local)
+        .map(|entry| entry.name.as_str())
+        .collect();
+    entries
+        .iter()
+        .filter(|entry| entry.scope == BranchScope::Remote)
+        .map(|entry| {
+            let eligibility = classify_remote_start_work_eligibility(
+                &entry.name,
+                &local_branch_names,
+                active_session_branches,
+            );
+            (entry.name.clone(), eligibility)
+        })
+        .collect()
+}
+
+/// SPEC-2359 US-83 / FR-444: the most-recently-updated eligible remote branches
+/// a user can start work on, used to populate the Workspace "Start work on a
+/// branch" rows. Derived from [`remote_start_work_eligibility`], then sorted by
+/// most-recent commit first and capped at [`REMOTE_START_WORK_BRANCH_CAP`] — a
+/// busy repo can have hundreds of stale remote refs, and flooding the Workspace
+/// list with all of them is worse than surfacing the recently-active ones.
+pub fn eligible_remote_start_work_branch_names(
+    entries: &[BranchListEntry],
+    active_session_branches: &HashSet<String>,
+) -> Vec<String> {
+    let eligible: HashSet<String> = remote_start_work_eligibility(entries, active_session_branches)
+        .into_iter()
+        .filter(|(_, eligibility)| *eligibility == RemoteStartWorkEligibility::StartWork)
+        .map(|(name, _)| name)
+        .collect();
+    let mut rows: Vec<&BranchListEntry> = entries
+        .iter()
+        .filter(|entry| eligible.contains(&entry.name))
+        // Drop dependency-bot branches (dependabot/* , renovate/*): you review
+        // those via their PR, you don't "start fresh work" on the branch, so
+        // surfacing them — often the most recently pushed — as the top Start
+        // Work suggestions is noise.
+        .filter(|entry| !is_bot_branch(&entry.name))
+        .collect();
+    // `last_commit_date` is a sortable `YYYY-MM-DD HH:MM:SS ...` string; reverse
+    // (b vs a) puts the newest first. Missing dates sort last.
+    rows.sort_by(|a, b| b.last_commit_date.cmp(&a.last_commit_date));
+    rows.into_iter()
+        .take(REMOTE_START_WORK_BRANCH_CAP)
+        .map(|entry| entry.name.clone())
+        .collect()
+}
+
+/// Dependency-bot branches are reviewed through their PR, not continued as a
+/// fresh worktree, so they are excluded from the Workspace Start Work rows.
+fn is_bot_branch(remote_entry_name: &str) -> bool {
+    let branch = remote_entry_name
+        .split_once('/')
+        .map(|(_, branch)| branch)
+        .unwrap_or(remote_entry_name);
+    branch.starts_with("dependabot/") || branch.starts_with("renovate/")
+}
+
+/// SPEC-2359 US-83: cap on the eligible remote branches surfaced in the
+/// Workspace "Start work on a branch" rows so a repo with hundreds of stale
+/// remote refs does not flood the list.
+pub const REMOTE_START_WORK_BRANCH_CAP: usize = 20;
+
+fn classify_remote_start_work_eligibility(
+    remote_entry_name: &str,
+    local_branch_names: &HashSet<&str>,
+    active_session_branches: &HashSet<String>,
+) -> RemoteStartWorkEligibility {
+    let Some((remote, branch_name)) = remote_entry_name.split_once('/') else {
+        return RemoteStartWorkEligibility::Hidden;
+    };
+    // origin only — fork/upstream remotes are Out of Scope (FR-447).
+    if remote != "origin" || branch_name.is_empty() || branch_name == "HEAD" {
+        return RemoteStartWorkEligibility::Hidden;
+    }
+    // Never start work directly on a protected base branch (FR-443).
+    if gwt_git::is_protected_branch(remote_entry_name) {
+        return RemoteStartWorkEligibility::Hidden;
+    }
+    // Already materialized locally or running → focus/Resume, not a 2nd Work.
+    if local_branch_names.contains(branch_name) || active_session_branches.contains(branch_name) {
+        return RemoteStartWorkEligibility::ResumeExisting;
+    }
+    RemoteStartWorkEligibility::StartWork
 }
 
 fn remote_base_branch_ranks(branches: &[gwt_git::Branch]) -> RemoteBaseBranchRanks {
@@ -544,6 +678,168 @@ mod tests {
             remote_branch_name: Some(remote_branch_name.to_string()),
             ..make_branch(name, false, false, last_commit_date)
         }
+    }
+
+    #[test]
+    fn eligible_remote_start_work_branch_names_drops_dependency_bot_branches() {
+        // SPEC-2359 US-83: dependabot/renovate branches are reviewed via PR, not
+        // continued as fresh work, so they must not surface as Start Work rows.
+        let entries = adapt_branch_inventory(vec![
+            make_branch(
+                "origin/dependabot/cargo/serde-1.0",
+                false,
+                false,
+                Some("2026-05-01 00:00:00 +0000"),
+            ),
+            make_branch(
+                "origin/renovate/eslint",
+                false,
+                false,
+                Some("2026-05-02 00:00:00 +0000"),
+            ),
+            make_branch(
+                "origin/feature/real-work",
+                false,
+                false,
+                Some("2026-04-01 00:00:00 +0000"),
+            ),
+        ]);
+        let names = eligible_remote_start_work_branch_names(&entries, &HashSet::new());
+        assert_eq!(
+            names,
+            vec!["origin/feature/real-work".to_string()],
+            "bot branches are excluded even though they are the most recent"
+        );
+    }
+
+    #[test]
+    fn eligible_remote_start_work_branch_names_caps_and_sorts_by_recency() {
+        // SPEC-2359 US-83: a busy repo can have hundreds of eligible remote
+        // refs; the Workspace rows surface only the most recent, capped.
+        let branches = (0..25)
+            .map(|i| {
+                make_branch(
+                    &format!("origin/feature/b{i:02}"),
+                    false,
+                    false,
+                    Some(&format!("2026-04-{:02} 00:00:00 +0000", i + 1)),
+                )
+            })
+            .collect();
+        let entries = adapt_branch_inventory(branches);
+        let names = eligible_remote_start_work_branch_names(&entries, &HashSet::new());
+
+        assert_eq!(
+            names.len(),
+            REMOTE_START_WORK_BRANCH_CAP,
+            "capped at the limit"
+        );
+        assert_eq!(
+            names.first().map(String::as_str),
+            Some("origin/feature/b24"),
+            "most recent branch is listed first"
+        );
+        assert!(
+            !names.iter().any(|name| name == "origin/feature/b00"),
+            "the oldest branches are dropped past the cap"
+        );
+    }
+
+    #[test]
+    fn eligible_remote_start_work_branch_names_lists_only_fresh_origin_branches() {
+        // SPEC-2359 US-83 / FR-444: the wizard picker offers only fresh origin
+        // branches — protected base, local rows, and non-origin remotes drop out.
+        let entries = adapt_branch_inventory(vec![
+            make_branch("origin/feature/fresh", false, false, None),
+            make_branch("origin/develop", false, false, None),
+            make_branch("upstream/feature/fork", false, false, None),
+            make_branch("feature/local", true, false, None),
+        ]);
+        let names = eligible_remote_start_work_branch_names(&entries, &HashSet::new());
+        assert_eq!(names, vec!["origin/feature/fresh".to_string()]);
+    }
+
+    #[test]
+    fn hydrate_attaches_start_work_eligibility_to_remote_rows() {
+        // SPEC-2359 US-83 / FR-443: hydration carries per-remote-row eligibility
+        // to the Branches payload so the frontend can render "Start Work / Open".
+        let entries = adapt_branch_inventory(vec![
+            make_branch("origin/feature/fresh", false, false, None),
+            make_branch("feature/local", true, false, None),
+        ]);
+        let hydrated = hydrate_branch_entries(entries, &HashSet::new(), &HashMap::new(), true);
+
+        let fresh = hydrated
+            .iter()
+            .find(|entry| entry.name == "origin/feature/fresh")
+            .expect("remote row present");
+        assert_eq!(
+            fresh.start_work_eligibility,
+            Some(RemoteStartWorkEligibility::StartWork),
+            "a fresh origin row carries StartWork eligibility for the frontend"
+        );
+
+        let local = hydrated
+            .iter()
+            .find(|entry| entry.name == "feature/local")
+            .expect("local row present");
+        assert!(
+            local.start_work_eligibility.is_none(),
+            "local rows carry no start-work eligibility"
+        );
+    }
+
+    #[test]
+    fn remote_start_work_eligibility_classifies_origin_protected_and_existing() {
+        // SPEC-2359 US-83 / FR-443 / SC-302: only fresh origin branches are
+        // "Start Work / Open" sources. Protected base and non-origin remotes are
+        // Hidden; a branch with a local counterpart or a live session resumes.
+        let entries = adapt_branch_inventory(vec![
+            make_branch("feature/alpha", true, false, None),
+            gwt_git::Branch {
+                upstream: Some("origin/feature/alpha".to_string()),
+                ..make_branch("origin/feature/alpha", false, false, None)
+            },
+            make_branch("origin/feature/fresh", false, false, None),
+            make_branch("origin/develop", false, false, None),
+            make_branch("origin/feature/busy", false, false, None),
+            make_branch("upstream/feature/fork", false, false, None),
+        ]);
+        let mut active = HashSet::new();
+        active.insert("feature/busy".to_string());
+
+        let eligibility: HashMap<String, RemoteStartWorkEligibility> =
+            remote_start_work_eligibility(&entries, &active)
+                .into_iter()
+                .collect();
+
+        assert_eq!(
+            eligibility.get("origin/feature/fresh"),
+            Some(&RemoteStartWorkEligibility::StartWork),
+            "a fresh origin branch with no local copy is a Start Work source"
+        );
+        assert_eq!(
+            eligibility.get("origin/feature/alpha"),
+            Some(&RemoteStartWorkEligibility::ResumeExisting),
+            "an origin branch with a local counterpart resumes instead"
+        );
+        assert_eq!(
+            eligibility.get("origin/feature/busy"),
+            Some(&RemoteStartWorkEligibility::ResumeExisting),
+            "an origin branch with a live session resumes instead"
+        );
+        assert_eq!(
+            eligibility.get("origin/develop"),
+            Some(&RemoteStartWorkEligibility::Hidden),
+            "a protected base branch is never a Start Work source"
+        );
+        assert_eq!(
+            eligibility.get("upstream/feature/fork"),
+            Some(&RemoteStartWorkEligibility::Hidden),
+            "non-origin remotes are out of scope"
+        );
+        // Local-only rows are never offered as remote Start Work sources.
+        assert!(!eligibility.contains_key("feature/alpha"));
     }
 
     #[test]
@@ -714,6 +1010,7 @@ mod tests {
             cleanup_ready: false,
             cleanup: BranchCleanupInfo::default(),
             resume: BranchResumeInfo::unavailable(),
+            start_work_eligibility: None,
         }];
         let cleanup_targets = HashMap::from([(
             String::from("feature/demo"),
@@ -752,6 +1049,7 @@ mod tests {
             cleanup_ready: false,
             cleanup: BranchCleanupInfo::default(),
             resume: BranchResumeInfo::unavailable(),
+            start_work_eligibility: None,
         }
     }
 

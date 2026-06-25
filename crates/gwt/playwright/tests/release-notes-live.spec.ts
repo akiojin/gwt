@@ -34,14 +34,18 @@ test.describe.serial("Release Notes window (live backend)", () => {
     await expect(page.locator("#project-picker")).toBeHidden();
   });
 
-  test("clicking #app-version opens the Release Notes window with current version focused", async ({
+  test("clicking #app-version opens the Release Notes window with the label target focused", async ({
     page,
   }) => {
     const label = page.locator("#app-version");
     await expect(label).toBeVisible();
     const labelText = (await label.textContent())?.trim() ?? "";
-    const currentVersion = labelText.replace(/^v/, "").split(" -> ")[0];
+    const [currentVersion, latestVersion = ""] = labelText
+      .replace(/^v/, "")
+      .split(" -> ");
+    const expectedVersion = latestVersion || currentVersion;
     expect(currentVersion).toMatch(/^\d+\.\d+\.\d+$/);
+    expect(expectedVersion).toMatch(/^\d+\.\d+\.\d+$/);
 
     await label.click();
 
@@ -50,12 +54,19 @@ test.describe.serial("Release Notes window (live backend)", () => {
     await expect(window).toHaveAttribute("role", "dialog");
 
     const selected = window.locator(".release-notes-sidebar-item.is-selected");
-    await expect(selected).toHaveAttribute("data-version", currentVersion);
+    await expect(selected).toHaveAttribute("data-version", expectedVersion);
+    const currentRow = window.locator(
+      `.release-notes-sidebar-item[data-version="${currentVersion}"]`,
+    );
+    await expect(currentRow).toHaveClass(/is-current-version/);
+    await expect(currentRow.locator(".release-notes-sidebar-current")).toHaveText(
+      "Current",
+    );
 
     // Right pane should render the corresponding entry's H2 (`v<version>`).
     await expect(
       window.locator(".release-notes-content h2"),
-    ).toHaveText(`v${currentVersion}`);
+    ).toHaveText(`v${expectedVersion}`);
   });
 
   test("selecting a different version in the sidebar updates the content pane", async ({
@@ -77,6 +88,15 @@ test.describe.serial("Release Notes window (live backend)", () => {
     await expect(
       window.locator(".release-notes-content h2"),
     ).toHaveText(`v${target}`);
+  });
+
+  test("rendered notes omit merge and develop-sync noise", async ({ page }) => {
+    await page.locator("#app-version").click();
+    const window = page.locator("#release-notes-window");
+    await expect(window).toBeVisible();
+    await expect(window.locator(".release-notes-content")).not.toContainText(
+      /Merge .*develop|develop sync|sync develop|develop.*(sync|同期)|Developを同期/i,
+    );
   });
 
   test("close button removes the window and isOpen reflects that", async ({

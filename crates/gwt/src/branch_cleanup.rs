@@ -288,6 +288,7 @@ mod tests {
             cleanup_ready: true,
             cleanup: BranchCleanupInfo::default(),
             resume: crate::BranchResumeInfo::unavailable(),
+            start_work_eligibility: None,
         }
     }
 
