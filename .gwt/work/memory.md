@@ -7325,3 +7325,10 @@ Type: user-feedback
 Context: SPEC-3164 Improvement Inbox visual verification: backend dismiss updated candidates.json, but the visible row did not change when the frontend waited only for the refreshed snapshot.
 Learning: For local review actions that succeed through a backend write and then refresh asynchronously, the surface should reconcile the visible local state immediately after confirmation. Otherwise a dropped websocket reply, process restart, or delayed snapshot leaves the UI looking unchanged even when the store has changed.
 Future Action: When adding approve/reject style review queues, add focused UI tests that assert post-confirm local state transitions before any backend snapshot arrives, and separately verify backend persistence.
+
+## 2026-06-25 — Reopened singleton surfaces must raise z-index locally
+
+Type: Bug Prevention
+Context: UI/UX audit of gwt WebView surface windows
+Learning: When reopening an existing singleton surface from Add Window or Window List, local focus styling is not enough. The DOM z-index must be raised optimistically before the backend focus_window workspace_state ack, otherwise the selected surface can remain visually behind another window during latency.
+Future Action: Add Playwright coverage that stubs focus_window without sending a backend ack and asserts the reopened surface becomes top z-index within the local UI latency budget.

@@ -3016,6 +3016,7 @@
       function focusWindowLocally(windowId) {
         const targetElement = windowMap.get(windowId);
         if (focusedId === windowId && targetElement?.classList.contains("focused")) {
+          raiseWindowElementLocally(targetElement);
           return;
         }
         const previousFocusedId = focusedId;
@@ -3026,6 +3027,29 @@
         }
         if (targetElement) {
           targetElement.classList.add("focused");
+          raiseWindowElementLocally(targetElement);
+        }
+      }
+
+      function numericZIndex(value) {
+        const numeric = Number.parseInt(value || "0", 10);
+        return Number.isFinite(numeric) ? numeric : 0;
+      }
+
+      function raiseWindowElementLocally(targetElement) {
+        if (!targetElement) {
+          return;
+        }
+        const targetZ = numericZIndex(targetElement.style.zIndex);
+        let maxPeerZ = 0;
+        for (const element of windowMap.values()) {
+          if (element === targetElement) {
+            continue;
+          }
+          maxPeerZ = Math.max(maxPeerZ, numericZIndex(element.style.zIndex));
+        }
+        if (targetZ <= maxPeerZ) {
+          targetElement.style.zIndex = String(maxPeerZ + 1);
         }
       }
 
