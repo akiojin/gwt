@@ -7139,7 +7139,7 @@ Future Action: When changing managed `gwt-*` skill assets, update the canonical 
 
 ## 2026-06-20 — Playwright embedded routes must cover transitive module imports
 
-Type: failure pattern
+Type: failure-pattern
 Context: Issue #3037: embedded Playwright specs failed before workspace_state rendered because project-shell-surface.js imported /window-list-model.js, but installEmbeddedRoutes only served a hard-coded ROOT_MODULES list and the guard test only checked direct app.js imports.
 Learning: Direct import coverage is insufficient for browser module fixtures. A missing transitive module manifests as unrelated UI timeouts (0 project tabs / windows) because app.js evaluation aborts before the WebSocket fixture can render state.
 Future Action: When adding or moving frontend modules imported by routed Playwright fixtures, ensure the embedded route helper allowlist includes transitive imports and keep the recursive playwright-embedded-routes test green before triaging downstream visual failures.
@@ -7332,3 +7332,10 @@ Type: Bug Prevention
 Context: UI/UX audit of gwt WebView surface windows
 Learning: When reopening an existing singleton surface from Add Window or Window List, local focus styling is not enough. The DOM z-index must be raised optimistically before the backend focus_window workspace_state ack, otherwise the selected surface can remain visually behind another window during latency.
 Future Action: Add Playwright coverage that stubs focus_window without sending a backend ack and asserts the reopened surface becomes top z-index within the local UI latency budget.
+
+## 2026-06-25 — Update failed modal must clear applying CTA state
+
+Type: failure pattern
+Context: During the 2026-06-25 UI/UX Playwright audit, the post-click update failed modal rendered correctly but the bottom-right update CTA stayed in the stale `applying` state with text `Applying update...` after `update_apply_error`.
+Learning: A modal transition alone is not enough for the update UX; the persistent CTA is also visible and must mirror the same failure/ready/downloading state. `handleUpdateApplyError` should move CTA to `error`, and retry paths must explicitly restore `applying` before returning to the download modal.
+Future Action: When changing update modal flows, assert both `#update-modal` state and `#update-cta` `data-status`/text in unit and Playwright tests, then verify with a fresh rebuilt gwt screenshot.

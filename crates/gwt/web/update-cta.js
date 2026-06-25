@@ -3,8 +3,7 @@
 // The CTA hands user clicks to #update-modal. The modal owns three states:
 // `downloading` (progress bar + Cancel), `ready` (Later / Restart now),
 // `failed` (Stage / Reason / Log + Open log / Retry / Close). The CTA itself
-// has four observable statuses: `available` | `applying` | `ready` | `error`,
-// where `applying` means a modal is mounted on top of it.
+// has four observable statuses: `available` | `applying` | `ready` | `error`.
 
 export function createUpdateCtaController({
   document,
@@ -159,6 +158,10 @@ export function createUpdateCtaController({
     return renderCta("error", `Update failed: ${detail} Click to retry.`);
   }
 
+  function updateFailureDetail(payload) {
+    return payload?.reason || payload?.message || "Unknown reason";
+  }
+
   function handleUpdateState(event) {
     if (!event || event.state !== "available") {
       return;
@@ -200,7 +203,7 @@ export function createUpdateCtaController({
     // surface the failure modal even in the `ready` state — silently dropping
     // the error would leave the user believing Restart is safe when it isn't.
     if (status === "applying" || status === "ready") {
-      renderCta("applying", "Applying update...");
+      showError(updateFailureDetail(payload));
       renderModalFailed(payload);
     }
   }
@@ -229,9 +232,11 @@ export function createUpdateCtaController({
       renderModalReady(pendingVersion);
       return;
     }
-    if (!latestVersion) return;
+    const version = latestVersion || pendingVersion;
+    if (!version) return;
+    latestVersion = version;
     renderCta("applying", "Applying update...");
-    renderModalDownloading(latestVersion);
+    renderModalDownloading(version);
     send({ kind: "apply_update_start" });
   }
 
@@ -530,6 +535,7 @@ export function createUpdateCtaController({
 
   function onRetryFailed() {
     lastProgress = null;
+    renderCta("applying", "Applying update...");
     renderModalDownloading(latestVersion || pendingVersion || "");
     send({ kind: "apply_update_start" });
   }
