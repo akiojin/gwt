@@ -500,3 +500,108 @@ fn generated_managed_hook_commands_stay_within_gwtd_argv_allowlist() {
         );
     }
 }
+
+/// Walk up from the gwt crate dir to the repository root that owns the
+/// committed managed-hook settings (`.claude/settings.json`).
+fn repo_root() -> std::path::PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR"))
+        .ancestors()
+        .find(|dir| dir.join(".claude/settings.json").is_file())
+        .map(Path::to_path_buf)
+        .expect("locate repository root containing .claude/settings.json")
+}
+
+/// Collect every committed managed-hook `command` string that invokes the
+/// repo-owned `gwt-self-improvement-stop` hook (Claude + Codex transports).
+fn committed_self_improvement_stop_commands() -> Vec<String> {
+    let root = repo_root();
+    let mut commands = Vec::new();
+    for relative in [".claude/settings.json", ".codex/hooks.json"] {
+        let path = root.join(relative);
+        let Ok(text) = fs::read_to_string(&path) else {
+            continue;
+        };
+        let value: serde_json::Value =
+            serde_json::from_str(&text).unwrap_or_else(|err| panic!("parse {relative}: {err}"));
+        let Some(events) = value.get("hooks").and_then(|hooks| hooks.as_object()) else {
+            continue;
+        };
+        for matchers in events.values() {
+            for matcher in matchers.as_array().into_iter().flatten() {
+                for hook in matcher
+                    .get("hooks")
+                    .and_then(|hooks| hooks.as_array())
+                    .into_iter()
+                    .flatten()
+                {
+                    if let Some(command) = hook.get("command").and_then(|c| c.as_str()) {
+                        if command.contains("gwt-self-improvement-stop") {
+                            commands.push(command.to_string());
+                        }
+                    }
+                }
+            }
+        }
+    }
+    commands
+}
+
+/// Regression guard for issue #3178's actual harm: the committed self-improvement
+/// Stop hook command must NOT leak gwtd's legacy-argv rejection into the agent's
+/// Stop loop when the installed gwtd predates the `gwt-self-improvement-stop`
+/// transport exception (e.g. v9.61.0). The command is repo-committed, so it runs
+/// against whatever gwtd a developer has installed; it must degrade silently on
+/// older binaries the same way the OpenCode/OpenClaw JS bridges already do
+/// (stderr/exit ignored). A `HookOutput::StopBlock` from a current binary exits 0
+/// and writes its decision JSON to stdout, so a graceful wrapper that drops
+/// stderr and forces exit 0 still surfaces a real block.
+#[test]
+fn committed_self_improvement_stop_hook_degrades_on_unsupported_gwtd() {
+    let commands = committed_self_improvement_stop_commands();
+    assert!(
+        !commands.is_empty(),
+        "expected at least one committed gwt-self-improvement-stop hook command to guard"
+    );
+
+    // A fake gwtd that mimics a pre-v9.63.0 binary: it rejects the unknown argv
+    // with the legacy-argv error on stderr and a non-zero exit.
+    let fake_dir = tempfile::tempdir().expect("fake bin dir");
+    let fake_gwtd = fake_dir.path().join("gwtd");
+    fs::write(
+        &fake_gwtd,
+        "#!/bin/sh\n\
+         echo 'gwtd hook: legacy argv invocation is disabled; use stdin JSON envelope.' >&2\n\
+         exit 2\n",
+    )
+    .expect("write fake gwtd");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(&fake_gwtd, fs::Permissions::from_mode(0o755))
+            .expect("chmod fake gwtd");
+    }
+
+    for command in &commands {
+        let output = Command::new("sh")
+            .arg("-c")
+            .arg(command)
+            .env("GWT_BIN_PATH", &fake_gwtd)
+            .stdin(Stdio::null())
+            .output()
+            .expect("run committed self-improvement stop command");
+
+        assert_eq!(
+            output.status.code(),
+            Some(0),
+            "committed self-improvement Stop command must exit 0 on an unsupported gwtd so it \
+             does not block the agent's Stop loop (issue #3178); command: {command}; stderr: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(
+            output.stderr.is_empty(),
+            "committed self-improvement Stop command must not leak gwtd's legacy-argv rejection \
+             into the agent's Stop feedback (issue #3178); command: {command}; stderr: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+}
