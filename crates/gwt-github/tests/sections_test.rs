@@ -1,8 +1,6 @@
 //! Contract tests for the `sections` module (SPEC-12 tdd.md Layer 1).
 
-use gwt_github::sections::{
-    extract_sections, SectionName, SectionParseError, SectionPart,
-};
+use gwt_github::sections::{extract_sections, SectionName, SectionParseError, SectionPart};
 
 fn name(s: &str) -> SectionName {
     SectionName(s.to_string())
