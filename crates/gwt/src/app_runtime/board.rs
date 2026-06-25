@@ -245,8 +245,7 @@ impl AppRuntime {
             .find(|(_, session)| session.session_id == origin_session_id)
             .map(|(window_id, _)| window_id.clone());
         if let Some(window_id) = live_window_id {
-            let mut events = self.restore_window_events(&window_id);
-            events.extend(self.focus_window_events(&window_id, bounds));
+            let events = self.focus_window_events(&window_id, bounds);
             return if events.is_empty() {
                 board_error(
                     client_id,

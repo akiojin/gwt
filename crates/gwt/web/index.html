@@ -135,34 +135,11 @@
                 <kbd class="op-rail__kbd">⌘ G</kbd>
               </span>
             </button>
-            <button
-              class="op-rail__item"
-              type="button"
-              data-cmd="open-board"
-              aria-label="Open Board (Cmd+B)"
-              aria-keyshortcuts="Meta+B"
-              title="Board"
-            >
-              <span class="op-rail__icon" aria-hidden="true">▦</span>
-              <span class="op-rail__flyout" aria-hidden="true">
-                <span class="op-rail__flyout-label">Board</span>
-                <kbd class="op-rail__kbd">⌘ B</kbd>
-              </span>
-            </button>
-            <button
-              class="op-rail__item"
-              type="button"
-              data-cmd="open-logs"
-              aria-label="Open Logs (Cmd+L)"
-              aria-keyshortcuts="Meta+L"
-              title="Logs"
-            >
-              <span class="op-rail__icon" aria-hidden="true">≣</span>
-              <span class="op-rail__flyout" aria-hidden="true">
-                <span class="op-rail__flyout-label">Logs</span>
-                <kbd class="op-rail__kbd">⌘ L</kbd>
-              </span>
-            </button>
+            <!-- 2026-06-20 Update: Board (⌘B) and Logs (⌘L) were demoted out of
+                 the Navigate rail group per user feedback. They stay reachable
+                 via the Add Window presets, the command palette, and the ⌘B /
+                 ⌘L hotkeys; the op:command handlers (open-board / open-logs)
+                 and operator-shell.js wiring are unchanged. -->
           </div>
           <div class="op-rail__divider" aria-hidden="true"></div>
           <div class="op-rail__group" role="group" aria-label="Windows">
@@ -208,6 +185,18 @@
             </button>
           </div>
           <div class="op-rail__spacer" aria-hidden="true"></div>
+          <div class="op-rail__group" role="group" aria-label="Agents">
+            <!-- SPEC-2356 Anshin Addendum (FR-042): STOP ALL kill-switch. Halts
+                 every running agent runtime (windows stay on canvas) after a
+                 confirm. The op:command handler in app.js owns the prompt. -->
+            <button class="op-rail__item op-rail__item--stop-all" type="button" data-cmd="stop-all-windows" aria-label="Stop all agents" title="Stop all agents">
+              <span class="op-rail__icon" aria-hidden="true">⏹</span>
+              <span class="op-rail__flyout" aria-hidden="true">
+                <span class="op-rail__flyout-label">Stop all agents</span>
+              </span>
+            </button>
+          </div>
+          <div class="op-rail__divider" aria-hidden="true"></div>
           <div class="op-rail__group op-rail__group--system" role="group" aria-label="System">
             <button
               class="op-rail__item"
@@ -232,6 +221,11 @@
             <div class="canvas-world-grid" id="canvas-world-grid" aria-hidden="true"></div>
             <div class="canvas-stage" id="canvas-stage"></div>
           </div>
+          <!-- SPEC-2008 camera-focus / FR-094: the always-on Fleet Minimap.
+               Lives in canvas-area, OUTSIDE #canvas-stage, so the camera
+               transform never scales it. Cells + camera frame are built by
+               fleet-minimap.js. -->
+          <div class="fleet-minimap" id="fleet-minimap" data-empty="true" aria-label="Fleet minimap"></div>
           <div class="project-picker" id="project-picker">
             <div class="project-picker-card">
               <h2 class="project-picker-title">Open a project</h2>
@@ -292,17 +286,25 @@
             <span class="op-status-strip__live-dot" aria-hidden="true"></span>
             <span class="op-status-strip__label" data-role="connection-label">ONLINE</span>
           </div>
-          <div class="op-status-strip__cell op-status-strip__cell--active">
-            <span class="op-status-strip__label">ACTIVE</span>
-            <span class="op-status-strip__value" id="op-strip-active" aria-label="Active agents">0</span>
+          <div class="op-status-strip__cell op-status-strip__cell--running">
+            <span class="op-status-strip__label">RUNNING</span>
+            <span class="op-status-strip__value" id="op-strip-running" aria-label="Running agents">0</span>
           </div>
           <div class="op-status-strip__cell op-status-strip__cell--idle">
             <span class="op-status-strip__label">IDLE</span>
             <span class="op-status-strip__value" id="op-strip-idle" aria-label="Idle agents">0</span>
           </div>
-          <div class="op-status-strip__cell op-status-strip__cell--blocked">
-            <span class="op-status-strip__label">BLOCKED</span>
-            <span class="op-status-strip__value" id="op-strip-blocked" aria-label="Blocked agents">0</span>
+          <div class="op-status-strip__cell op-status-strip__cell--waiting">
+            <span class="op-status-strip__label">WAITING</span>
+            <span class="op-status-strip__value" id="op-strip-waiting" aria-label="Agents waiting for input">0</span>
+          </div>
+          <div class="op-status-strip__cell op-status-strip__cell--error">
+            <span class="op-status-strip__label">ERROR</span>
+            <span class="op-status-strip__value" id="op-strip-error" aria-label="Agents with runtime errors">0</span>
+          </div>
+          <div class="op-status-strip__cell op-status-strip__cell--mission">
+            <span class="op-status-strip__label">MISSION</span>
+            <span class="op-status-strip__value" id="op-strip-mission" aria-label="Agents completed out of total">—</span>
           </div>
           <div class="op-status-strip__cell">
             <span class="op-status-strip__label">WORK</span>
@@ -512,6 +514,13 @@
                 <span class="preset-button__text">
                   <strong>Workspace</strong>
                   <span>Open the Workspace overview</span>
+                </span>
+              </button>
+              <button class="preset-button" data-preset="improvement" data-category="surface">
+                <span class="preset-button__icon" aria-hidden="true">◇</span>
+                <span class="preset-button__text">
+                  <strong>Improvement Inbox</strong>
+                  <span>Review gwt improvement candidates</span>
                 </span>
               </button>
             </div>

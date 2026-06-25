@@ -15,7 +15,7 @@ long after the conversation is gone.
 
 ## Required fields
 
-Every closure comment must fill all five fields. Do not omit a field; if a field
+Every closure comment must fill all six fields. Do not omit a field; if a field
 is genuinely empty, state that explicitly (e.g. `Remaining Work: none`).
 
 ### Root Cause
@@ -39,6 +39,14 @@ The exact `gwt-verify --mode full` outcome (`Overall: PASS`) plus the runners it
 selected for the changed surfaces (cargo / frontend / Playwright / docs). Name
 any test or command run beyond the matrix.
 
+### Completion Checklist
+
+The pre-completion self-check, mirroring the project's done criteria. Mark each
+item explicitly; if one does not apply, say so. Cover at least: all relevant
+tests pass, lint / type checks pass, no leftover TODO or unfinished work, the
+owner SPEC / Issue is updated when applicable, and the change is committed and
+pushed.
+
 ### Remaining Work
 
 Any follow-up that is intentionally out of scope, or `none`. Remaining items
@@ -60,6 +68,13 @@ must not be delivery blockers for this fix.
 - Runners: <cargo | frontend | Playwright | docs>
 - Additional: <any extra command/test, or none>
 
+**Completion Checklist:**
+- [ ] All relevant tests pass
+- [ ] Lint / type checks pass
+- [ ] No leftover TODO or unfinished work
+- [ ] Owner SPEC / Issue updated if applicable
+- [ ] Committed and pushed
+
 **Remaining Work:** <follow-up items, or none>
 ```
 
@@ -78,7 +93,7 @@ Direct `gh issue comment ...` is not part of the normal path.
 
 ## Anti-patterns
 
-- Omitting any of the five required fields.
+- Omitting any of the six required fields.
 - Speculative root cause ("this might be caused by ...") instead of a verified
   statement.
 - Claiming completion without the `gwt-verify --mode full` `Overall: PASS`

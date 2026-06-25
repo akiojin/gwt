@@ -701,13 +701,64 @@ where
             .filter(|item| ids.iter().any(|id| id == &item.workspace_id))
             .collect()
     };
-    let summary = apply_prune_plan(&filtered, dry_run).map_err(core_error)?;
+    let mut summary = apply_prune_plan(&filtered, dry_run).map_err(core_error)?;
+    let legacy_summary =
+        prune_empty_workspace_state_files(scan_root, dry_run, ids).map_err(core_error)?;
+    summary.archived += legacy_summary.archived;
+    summary.deleted += legacy_summary.deleted;
+    summary.skipped += legacy_summary.skipped;
     let mode = if dry_run { "DRY-RUN" } else { "APPLIED" };
     out.push_str(&format!(
         "{}: archive={} delete={} skip={}\n",
         mode, summary.archived, summary.deleted, summary.skipped,
     ));
     Ok(0)
+}
+
+fn prune_empty_workspace_state_files(
+    scan_root: &Path,
+    dry_run: bool,
+    ids: &[String],
+) -> gwt_core::Result<gwt_core::workspace_projection::PruneSummary> {
+    let mut summary = gwt_core::workspace_projection::PruneSummary::default();
+    if !ids.is_empty() {
+        return Ok(summary);
+    }
+
+    let entries = match std::fs::read_dir(scan_root) {
+        Ok(entries) => entries,
+        Err(_) => return Ok(summary),
+    };
+
+    for entry in entries.flatten() {
+        let project_dir = entry.path();
+        if !project_dir.is_dir() {
+            continue;
+        }
+        let workspace_path = project_dir.join("workspace.json");
+        if !workspace_path.is_file() {
+            continue;
+        }
+        let Ok(state) = crate::load_workspace_state(&workspace_path) else {
+            continue;
+        };
+        if !state.windows.is_empty() {
+            continue;
+        }
+        if !dry_run {
+            std::fs::remove_file(&workspace_path).map_err(|err| {
+                gwt_core::GwtError::Other(format!(
+                    "failed to remove no-window workspace state {}: {}",
+                    workspace_path.display(),
+                    err
+                ))
+            })?;
+            let _ = std::fs::remove_dir(&project_dir);
+        }
+        summary.deleted += 1;
+    }
+
+    Ok(summary)
 }
 
 fn filter_projection_list(
@@ -1149,8 +1200,6 @@ mod tests {
         save_workspace_projection, WorkspaceAgentAffiliationStatus, WorkspaceAgentSummary,
         WorkspaceProjection,
     };
-    use std::ffi::OsString;
-
     fn s(value: &str) -> String {
         value.to_string()
     }
@@ -1162,23 +1211,13 @@ mod tests {
     }
 
     struct ScopedHome {
-        previous_home: Option<OsString>,
+        _home: gwt_core::test_support::ScopedGwtHome,
     }
 
     impl ScopedHome {
         fn set(path: &std::path::Path) -> Self {
-            let previous_home = std::env::var_os("HOME");
-            std::env::set_var("HOME", path);
-            Self { previous_home }
-        }
-    }
-
-    impl Drop for ScopedHome {
-        fn drop(&mut self) {
-            if let Some(previous_home) = self.previous_home.as_ref() {
-                std::env::set_var("HOME", previous_home);
-            } else {
-                std::env::remove_var("HOME");
+            Self {
+                _home: gwt_core::test_support::ScopedGwtHome::set(path),
             }
         }
     }
@@ -2481,5 +2520,96 @@ mod tests {
         .expect("load take")
         .expect("present");
         assert_eq!(take.lifecycle_stage, WorkspaceLifecycleStage::Archived);
+    }
+
+    #[test]
+    fn run_projection_prune_with_scan_root_dry_run_counts_empty_workspace_state_file() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let project_dir = tmp.path().join("canvas-state-only");
+        std::fs::create_dir_all(&project_dir).expect("project dir");
+        crate::save_workspace_state(
+            &project_dir.join("workspace.json"),
+            &crate::empty_workspace_state(),
+        )
+        .expect("save empty workspace state");
+
+        let mut out = String::new();
+        let code = run_projection_prune_with_scan_root(
+            tmp.path(),
+            &WorkspaceRetentionConfig::default(),
+            Utc::now(),
+            true,
+            &[],
+            |_| false,
+            &mut out,
+        )
+        .expect("prune dry-run");
+
+        assert_eq!(code, 0);
+        assert!(out.contains("DRY-RUN: archive=0 delete=1 skip=0"));
+        assert!(
+            project_dir.join("workspace.json").is_file(),
+            "dry-run must not remove the legacy canvas state file"
+        );
+    }
+
+    #[test]
+    fn run_projection_prune_with_scan_root_counts_no_window_workspace_state_with_custom_viewport() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let project_dir = tmp.path().join("viewport-only-canvas-state");
+        std::fs::create_dir_all(&project_dir).expect("project dir");
+        let mut state = crate::empty_workspace_state();
+        state.viewport.x = 24.0;
+        state.viewport.y = 36.0;
+        state.viewport.zoom = 1.5;
+        state.next_z_index = 8;
+        crate::save_workspace_state(&project_dir.join("workspace.json"), &state)
+            .expect("save viewport-only workspace state");
+
+        let mut out = String::new();
+        let code = run_projection_prune_with_scan_root(
+            tmp.path(),
+            &WorkspaceRetentionConfig::default(),
+            Utc::now(),
+            true,
+            &[],
+            |_| false,
+            &mut out,
+        )
+        .expect("prune dry-run");
+
+        assert_eq!(code, 0);
+        assert!(out.contains("DRY-RUN: archive=0 delete=1 skip=0"));
+    }
+
+    #[test]
+    fn run_projection_prune_with_scan_root_removes_empty_workspace_state_project_dir() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let project_dir = tmp.path().join("canvas-state-only");
+        std::fs::create_dir_all(&project_dir).expect("project dir");
+        crate::save_workspace_state(
+            &project_dir.join("workspace.json"),
+            &crate::empty_workspace_state(),
+        )
+        .expect("save empty workspace state");
+
+        let mut out = String::new();
+        let code = run_projection_prune_with_scan_root(
+            tmp.path(),
+            &WorkspaceRetentionConfig::default(),
+            Utc::now(),
+            false,
+            &[],
+            |_| false,
+            &mut out,
+        )
+        .expect("prune apply");
+
+        assert_eq!(code, 0);
+        assert!(out.contains("APPLIED: archive=0 delete=1 skip=0"));
+        assert!(
+            !project_dir.exists(),
+            "empty project dir should be removed after deleting its only legacy canvas state"
+        );
     }
 }

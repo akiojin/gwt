@@ -76,6 +76,8 @@ const STRIP_PALETTE = {
   active: "#22d3ee",
   idle: "#94a3b8",
   blocked: "#f87171",
+  // FR-039 (安心) — WAITING cell uses the bright amber on the dark strip band.
+  "needs-input": "#fbbf24",
 };
 
 for (const themeName of ["dark", "light"]) {
@@ -102,6 +104,7 @@ const STATE_TEXT_TOKENS = [
   "--color-state-idle",
   "--color-state-blocked",
   "--color-state-done",
+  "--color-state-needs-input",
 ];
 // State colors are used as TEXT inside cards / status chips that sit on
 // surface bg. They are NOT used directly on canvas as text — canvas text
@@ -139,6 +142,7 @@ test("components.css scopes the on-strip state palette to bright on-dark variant
   assert.match(stripBlock[1], /--color-state-active:\s*#22d3ee/i);
   assert.match(stripBlock[1], /--color-state-idle:\s*#94a3b8/i);
   assert.match(stripBlock[1], /--color-state-blocked:\s*#f87171/i);
+  assert.match(stripBlock[1], /--color-state-needs-input:\s*#fbbf24/i);
 });
 
 // SPEC-2356 — Focus ring is a UI component, so WCAG 2.2 SC 1.4.11

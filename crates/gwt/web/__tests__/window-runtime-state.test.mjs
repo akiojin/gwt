@@ -82,14 +82,15 @@ test("windowRuntimeLabel maps states and falls back to Running", () => {
   assert.equal(windowRuntimeLabel(undefined), "Running");
 });
 
-test("telemetry mapping projects runtime states to semantic states", () => {
-  assert.equal(mapAgentTelemetryState("running"), "active");
-  assert.equal(mapAgentTelemetryState("starting"), "not_started");
+test("telemetry mapping projects runtime states to status strip states", () => {
+  assert.equal(mapAgentTelemetryState("running"), "running");
+  assert.equal(mapAgentTelemetryState("starting"), "running");
   assert.equal(mapAgentTelemetryState("ready"), "idle");
   assert.equal(mapAgentTelemetryState("idle"), "idle");
-  assert.equal(mapAgentTelemetryState("waiting"), "idle");
+  // FR-039 (安心): waiting is its own LOUD telemetry state, not quiet idle.
+  assert.equal(mapAgentTelemetryState("waiting"), "waiting");
   assert.equal(mapAgentTelemetryState("stopped"), "done");
   assert.equal(mapAgentTelemetryState("exited"), "done");
-  assert.equal(mapAgentTelemetryState("error"), "blocked");
+  assert.equal(mapAgentTelemetryState("error"), "error");
   assert.equal(mapAgentTelemetryState("future-state"), "idle");
 });

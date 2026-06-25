@@ -163,8 +163,7 @@ impl WindowCanvasState {
             .iter()
             .enumerate()
             .filter_map(|(index, window)| {
-                (!window.minimized
-                    && window.placement.is_canvas()
+                (window.placement.is_canvas()
                     && (window.tab_group_id.is_none() || window.tab_group_active))
                     .then_some(index)
             })
@@ -206,7 +205,7 @@ impl WindowCanvasState {
             .windows
             .iter()
             .enumerate()
-            .filter(|(_, w)| !w.minimized && w.placement.is_canvas())
+            .filter(|(_, w)| w.placement.is_canvas())
             .map(|(i, _)| i)
             .collect();
         if eligible.is_empty() {
@@ -244,16 +243,7 @@ impl WindowCanvasState {
             FocusCycleDirection::Forward => (pos + 1) % eligible.len(),
             FocusCycleDirection::Backward => (pos + eligible.len() - 1) % eligible.len(),
         };
-        let current_id = self.persisted.windows[current_idx].id.clone();
         let next_id = self.persisted.windows[eligible[next_pos]].id.clone();
-        if self
-            .persisted
-            .windows
-            .get(current_idx)
-            .is_some_and(|window| window.maximized)
-        {
-            let _ = self.restore_window(&current_id);
-        }
         let _ = self.activate_window_tab(&next_id);
         self.center_window(&next_id, bounds);
         Some(next_id)
@@ -287,16 +277,14 @@ impl WindowCanvasState {
             .persisted
             .windows
             .iter()
-            .filter(|w| !w.minimized && !w.maximized && w.placement.is_canvas())
+            .filter(|w| w.placement.is_canvas())
             .count();
         let mut step = 0usize;
         while step <= visible_window_count {
             let candidate_x = center_x + (step as f64) * STACK_OFFSET_X;
             let candidate_y = center_y + (step as f64) * STACK_OFFSET_Y;
             let occupied = self.persisted.windows.iter().any(|w| {
-                !w.minimized
-                    && !w.maximized
-                    && w.placement.is_canvas()
+                w.placement.is_canvas()
                     && (w.geometry.x - candidate_x).abs() < 1.0
                     && (w.geometry.y - candidate_y).abs() < 1.0
             });
@@ -345,9 +333,6 @@ impl WindowCanvasState {
             geometry_revision: 0,
             z_index: self.persisted.next_z_index,
             status: WindowProcessStatus::Running,
-            minimized: false,
-            maximized: false,
-            pre_maximize_geometry: None,
             placement: WindowPlacement::Canvas,
             persist,
             purpose_title: None,
@@ -362,136 +347,6 @@ impl WindowCanvasState {
         self.persisted.next_z_index += 1;
         self.persisted.windows.push(window.clone());
         window
-    }
-
-    /// Idempotent "ensure maximized at these bounds" command.
-    ///
-    /// Issue #2757 follow-up: this used to toggle between maximized and
-    /// restored on every call, which created a WebSocket flood when the
-    /// frontend's `syncMaximizedWindowsToViewport()` re-sent the same
-    /// `maximize_window` event after each `workspace_state` broadcast
-    /// (~3000+ frames/sec observed in the wild). The frontend always
-    /// uses `restore_window` to unmaximize, so `maximize_window` is only
-    /// ever meant to assert "set to maximized with this geometry".
-    ///
-    /// Returns `true` only when state actually changed, so the caller
-    /// can suppress the redundant broadcast that fuels the loop.
-    pub fn maximize_window(&mut self, id: &str, bounds: WindowGeometry) -> bool {
-        let Some(index) = self.window_index(id) else {
-            return false;
-        };
-        if !self.persisted.windows[index].placement.is_canvas() {
-            return false;
-        }
-        let group_id = self.persisted.windows[index].tab_group_id.clone();
-        let was_maximized = self.persisted.windows[index].maximized;
-        let pre_geometry = self.persisted.windows[index].geometry.clone();
-        // The frontend sends the FINAL maximized geometry (with a zoom-corrected
-        // screen-space inset already applied in `maximizedGeometry`), so store it
-        // verbatim. The previous code added a constant `ARRANGE_PADDING` in WORLD
-        // units here, which rendered as an `ARRANGE_PADDING * zoom` SCREEN inset
-        // under the canvas-stage `scale(zoom)` transform and drifted the maximized
-        // window off the visible viewport at any zoom != 1.
-        let target_geometry = bounds;
-
-        // No-op fast path: already maximized at the exact target geometry.
-        // Without this, repeated sync events from the frontend turn into a
-        // feedback loop with the backend broadcasting a fresh
-        // `workspace_state` every iteration.
-        if was_maximized && self.persisted.windows[index].geometry == target_geometry {
-            return false;
-        }
-
-        let members = self.group_member_indices(group_id.as_deref(), index);
-        let geometry_revision = self.next_geometry_revision(&members);
-        for member in members {
-            let window = &mut self.persisted.windows[member];
-            if !was_maximized {
-                // First-time maximize: remember the previous geometry so
-                // `restore_window` can put it back.
-                window.pre_maximize_geometry = Some(pre_geometry.clone());
-            }
-            window.geometry = target_geometry.clone();
-            window.minimized = false;
-            window.maximized = true;
-            window.geometry_revision = geometry_revision;
-        }
-        self.bring_to_front(index);
-        true
-    }
-
-    pub fn minimize_window(&mut self, id: &str) -> bool {
-        let Some(index) = self.window_index(id) else {
-            return false;
-        };
-        if !self.persisted.windows[index].placement.is_canvas() {
-            return false;
-        }
-        let group_id = self.persisted.windows[index].tab_group_id.clone();
-        let was_minimized = self.persisted.windows[index].minimized;
-        let was_maximized = self.persisted.windows[index].maximized;
-        let restore_geometry = self.persisted.windows[index].pre_maximize_geometry.clone();
-
-        let members = self.group_member_indices(group_id.as_deref(), index);
-        let geometry_revision = was_maximized.then(|| self.next_geometry_revision(&members));
-        for member in members {
-            let window = &mut self.persisted.windows[member];
-            if was_minimized {
-                window.minimized = false;
-            } else {
-                if was_maximized {
-                    if let Some(geometry) = restore_geometry.clone() {
-                        window.geometry = geometry;
-                    }
-                    if let Some(geometry_revision) = geometry_revision {
-                        window.geometry_revision = geometry_revision;
-                    }
-                    window.pre_maximize_geometry = None;
-                    window.maximized = false;
-                }
-                window.minimized = true;
-            }
-        }
-        self.bring_to_front(index);
-        true
-    }
-
-    pub fn restore_window(&mut self, id: &str) -> bool {
-        let Some(index) = self.window_index(id) else {
-            return false;
-        };
-        if !self.persisted.windows[index].placement.is_canvas() {
-            return false;
-        }
-        let window = &self.persisted.windows[index];
-        let was_maximized = window.maximized;
-        let was_minimized = window.minimized;
-        if !was_maximized && !was_minimized {
-            return false;
-        }
-        let group_id = window.tab_group_id.clone();
-        let restore_geometry = window.pre_maximize_geometry.clone();
-
-        let members = self.group_member_indices(group_id.as_deref(), index);
-        let geometry_revision = was_maximized.then(|| self.next_geometry_revision(&members));
-        for member in members {
-            let window = &mut self.persisted.windows[member];
-            if was_maximized {
-                if let Some(geometry) = restore_geometry.clone() {
-                    window.geometry = geometry;
-                }
-                if let Some(geometry_revision) = geometry_revision {
-                    window.geometry_revision = geometry_revision;
-                }
-                window.pre_maximize_geometry = None;
-                window.maximized = false;
-                window.minimized = false;
-            } else {
-                window.minimized = false;
-            }
-        }
-        self.bring_to_front(index);
-        true
     }
 
     pub fn update_geometry(&mut self, id: &str, geometry: WindowGeometry) -> bool {
@@ -571,9 +426,6 @@ impl WindowCanvasState {
             window.tab_group_active = window.id == id;
             window.geometry = group_geometry.clone();
             window.geometry_revision = geometry_revision;
-            window.minimized = false;
-            window.maximized = false;
-            window.pre_maximize_geometry = None;
             window.z_index = next_z_index;
         }
         if let Some(source_group_id) = source_group_id {
@@ -594,9 +446,9 @@ impl WindowCanvasState {
         let Some(group_id) = self.persisted.windows[index].tab_group_id.clone() else {
             return self.focus_window(id, None);
         };
-        // SPEC-2008 FR-043C: chrome 状態 (geometry / maximize / minimize /
-        // pre_maximize_geometry) は group-aware mutator で常時同期されている
-        // ため、activate ではアクティブマーカと z_index のみを更新する。
+        // SPEC-2008 FR-043C: chrome 状態 (geometry) は group-aware mutator で
+        // 常時同期されているため、activate ではアクティブマーカと z_index のみを
+        // 更新する。
         let next_z_index = self.persisted.next_z_index;
         self.persisted.next_z_index += 1;
         for window in &mut self.persisted.windows {
@@ -623,9 +475,6 @@ impl WindowCanvasState {
         self.persisted.windows[index].tab_group_id = None;
         self.persisted.windows[index].tab_group_active = false;
         self.set_geometry_for_indices(&[index], &geometry);
-        self.persisted.windows[index].minimized = false;
-        self.persisted.windows[index].maximized = false;
-        self.persisted.windows[index].pre_maximize_geometry = None;
         self.bring_to_front(index);
         self.normalize_group(&group_id);
         true
@@ -662,9 +511,6 @@ impl WindowCanvasState {
             order,
             collapsed: false,
         };
-        window.minimized = false;
-        window.maximized = false;
-        window.pre_maximize_geometry = None;
         self.normalize_agent_kanban_orders(board_id);
         true
     }
@@ -742,9 +588,6 @@ impl WindowCanvasState {
         if let Some(geometry) = geometry {
             self.set_geometry_for_indices(&[index], &geometry);
         }
-        self.persisted.windows[index].minimized = false;
-        self.persisted.windows[index].maximized = false;
-        self.persisted.windows[index].pre_maximize_geometry = None;
         self.bring_to_front(index);
         true
     }
@@ -780,8 +623,6 @@ impl WindowCanvasState {
                 let window = &mut self.persisted.windows[member];
                 window.geometry = geometry.clone();
                 window.geometry_revision = geometry_revision;
-                window.maximized = false;
-                window.pre_maximize_geometry = None;
             }
         }
     }
@@ -811,8 +652,6 @@ impl WindowCanvasState {
                 let window = &mut self.persisted.windows[member];
                 window.geometry = geometry.clone();
                 window.geometry_revision = geometry_revision;
-                window.maximized = false;
-                window.pre_maximize_geometry = None;
             }
         }
     }
@@ -821,22 +660,6 @@ impl WindowCanvasState {
         let count = open_indices.len();
         let columns = (count as f64).sqrt().ceil() as usize;
         let rows = count.div_ceil(columns);
-
-        for &window_index in open_indices {
-            let group_id = self.persisted.windows[window_index].tab_group_id.clone();
-            let members = self.group_member_indices(group_id.as_deref(), window_index);
-            if let Some(geometry) = self.persisted.windows[window_index]
-                .pre_maximize_geometry
-                .clone()
-            {
-                for member in members {
-                    let window = &mut self.persisted.windows[member];
-                    window.geometry.width = geometry.width;
-                    window.geometry.height = geometry.height;
-                    window.pre_maximize_geometry = None;
-                }
-            }
-        }
 
         let mut column_widths = vec![0.0_f64; columns];
         let mut row_heights = vec![0.0_f64; rows];
@@ -868,8 +691,6 @@ impl WindowCanvasState {
                 window.geometry.x = column_offsets[column];
                 window.geometry.y = row_offsets[row];
                 window.geometry_revision = geometry_revision;
-                window.maximized = false;
-                window.pre_maximize_geometry = None;
             }
         }
     }
@@ -1025,9 +846,6 @@ impl WindowCanvasState {
                 } if current_board_id == board_id
             ) {
                 window.placement = WindowPlacement::Canvas;
-                window.minimized = false;
-                window.maximized = false;
-                window.pre_maximize_geometry = None;
             }
         }
     }
@@ -1173,8 +991,6 @@ mod tests {
                 collapsed: false,
             }
         );
-        assert!(!agent.minimized);
-        assert!(!agent.maximized);
     }
 
     #[test]
@@ -1294,9 +1110,10 @@ mod tests {
 
         let window = workspace.add_window(WindowPreset::Shell, bounds);
 
-        // Shell preset is 720x420 so the geometry must center inside bounds.
-        assert_eq!(window.geometry.x, 360.0);
-        assert_eq!(window.geometry.y, 250.0);
+        // SPEC-2008 camera-focus: Shell is a terminal preset (1280×800), so it
+        // centers inside the 1440×920 bounds at ((1440-1280)/2, (920-800)/2).
+        assert_eq!(window.geometry.x, 80.0);
+        assert_eq!(window.geometry.y, 60.0);
     }
 
     #[test]
@@ -1313,9 +1130,11 @@ mod tests {
         let second = workspace.add_window(WindowPreset::Shell, bounds.clone());
         let third = workspace.add_window(WindowPreset::Shell, bounds);
 
-        assert_eq!((first.geometry.x, first.geometry.y), (360.0, 250.0));
-        assert_eq!((second.geometry.x, second.geometry.y), (388.0, 274.0));
-        assert_eq!((third.geometry.x, third.geometry.y), (416.0, 298.0));
+        // Shell terminal preset (1280×800) centers at (80, 60) in 1440×920
+        // bounds; the cascade steps by STACK_OFFSET_X/Y (28, 24) per window.
+        assert_eq!((first.geometry.x, first.geometry.y), (80.0, 60.0));
+        assert_eq!((second.geometry.x, second.geometry.y), (108.0, 84.0));
+        assert_eq!((third.geometry.x, third.geometry.y), (136.0, 108.0));
     }
 
     #[test]
@@ -1338,33 +1157,14 @@ mod tests {
 
         assert_eq!(
             (ninth.geometry.x, ninth.geometry.y),
-            (360.0 + 8.0 * 28.0, 250.0 + 8.0 * 24.0),
+            (80.0 + 8.0 * 28.0, 60.0 + 8.0 * 24.0),
         );
         // And the 10th continues from there without overlapping the 9th.
         let tenth = workspace.add_window(WindowPreset::Shell, bounds);
         assert_eq!(
             (tenth.geometry.x, tenth.geometry.y),
-            (360.0 + 9.0 * 28.0, 250.0 + 9.0 * 24.0),
+            (80.0 + 9.0 * 28.0, 60.0 + 9.0 * 24.0),
         );
-    }
-
-    #[test]
-    fn adding_window_skips_minimized_collisions() {
-        let mut workspace = WindowCanvasState::from_persisted(empty_workspace_state());
-        let bounds = WindowGeometry {
-            x: 0.0,
-            y: 0.0,
-            width: 1440.0,
-            height: 920.0,
-        };
-
-        let first = workspace.add_window(WindowPreset::Shell, bounds.clone());
-        assert!(workspace.minimize_window(&first.id));
-
-        // A minimized window must not block the cascade slot it was created in,
-        // so the next launch lands back at the viewport center.
-        let next = workspace.add_window(WindowPreset::Shell, bounds);
-        assert_eq!((next.geometry.x, next.geometry.y), (360.0, 250.0));
     }
 
     #[test]
@@ -1384,9 +1184,6 @@ mod tests {
                 geometry_revision: 0,
                 z_index: 1,
                 status: WindowProcessStatus::Running,
-                minimized: false,
-                maximized: false,
-                pre_maximize_geometry: None,
                 placement: WindowPlacement::Canvas,
                 persist: false,
                 purpose_title: None,
@@ -1619,29 +1416,6 @@ mod tests {
     }
 
     #[test]
-    fn align_arrangement_restores_maximized_window_size_before_positioning() {
-        let mut workspace = WindowCanvasState::from_persisted(default_workspace_state());
-        let original = workspace
-            .window("claude-1")
-            .expect("claude")
-            .geometry
-            .clone();
-
-        assert!(workspace.maximize_window("claude-1", arrange_bounds()));
-        assert!(workspace.arrange_windows(ArrangeMode::Align, arrange_bounds()));
-
-        let claude = workspace.window("claude-1").expect("claude");
-        assert!(!claude.maximized);
-        assert_eq!(claude.pre_maximize_geometry, None);
-        assert_eq!(claude.geometry.width, original.width);
-        assert_eq!(claude.geometry.height, original.height);
-        // After maximize, claude.z=3 sorts after codex.z=2 -> open_indices = [codex, claude].
-        // column 0 width = codex.width = 720, column 1 width = claude.width = 720.
-        assert_eq!(claude.geometry.x, 868.0);
-        assert_eq!(claude.geometry.y, 64.0);
-    }
-
-    #[test]
     fn cycling_focus_forward_brings_next_window_to_front_and_centers_it() {
         let mut workspace = WindowCanvasState::from_persisted(default_workspace_state());
         workspace.add_window(WindowPreset::Shell, arrange_bounds());
@@ -1758,268 +1532,6 @@ mod tests {
                 .expect("claude")
                 .tab_group_active
         );
-    }
-
-    #[test]
-    fn cycling_focus_restores_maximized_source_before_activating_next_window() {
-        let mut workspace = WindowCanvasState::from_persisted(default_workspace_state());
-        let bounds = WindowGeometry {
-            x: 0.0,
-            y: 0.0,
-            width: 1200.0,
-            height: 800.0,
-        };
-        let codex_original = workspace.window("codex-1").expect("codex").geometry.clone();
-        let claude = workspace
-            .window("claude-1")
-            .expect("claude")
-            .geometry
-            .clone();
-
-        assert!(workspace.maximize_window("codex-1", bounds.clone()));
-        let focused = workspace
-            .cycle_focus(FocusCycleDirection::Forward, bounds.clone())
-            .expect("focused window");
-
-        assert_eq!(focused, "claude-1");
-        let codex = workspace.window("codex-1").expect("codex");
-        assert_eq!(codex.geometry, codex_original);
-        assert!(!codex.maximized);
-        assert_eq!(codex.pre_maximize_geometry, None);
-        assert!(
-            workspace.window("claude-1").expect("claude").z_index > codex.z_index,
-            "next window must end as topmost after source restore"
-        );
-        assert_eq!(
-            workspace.persisted().viewport.x,
-            bounds.width / 2.0 - (claude.x + claude.width / 2.0)
-        );
-        assert_eq!(
-            workspace.persisted().viewport.y,
-            bounds.height / 2.0 - (claude.y + claude.height / 2.0)
-        );
-    }
-
-    #[test]
-    fn cycling_focus_restores_maximized_group_before_activating_hidden_tab() {
-        let mut workspace = WindowCanvasState::from_persisted(default_workspace_state());
-        assert!(workspace.dock_window_tab("codex-1", "claude-1"));
-        let bounds = arrange_bounds();
-        let original = workspace.window("codex-1").expect("codex").geometry.clone();
-
-        assert!(workspace.maximize_window("codex-1", bounds.clone()));
-        let focused = workspace
-            .cycle_focus(FocusCycleDirection::Forward, bounds)
-            .expect("focused window");
-
-        assert_eq!(focused, "claude-1");
-        let codex = workspace.window("codex-1").expect("codex");
-        let claude = workspace.window("claude-1").expect("claude");
-        assert_eq!(codex.geometry, original);
-        assert_eq!(claude.geometry, original);
-        assert!(!codex.maximized);
-        assert!(!claude.maximized);
-        assert!(claude.tab_group_active);
-        assert!(!codex.tab_group_active);
-    }
-
-    #[test]
-    fn cycling_focus_keeps_single_maximized_window_maximized() {
-        let mut workspace = WindowCanvasState::from_persisted(empty_workspace_state());
-        let window = workspace.add_window(WindowPreset::Shell, arrange_bounds());
-        assert!(workspace.maximize_window(&window.id, arrange_bounds()));
-
-        let focused = workspace
-            .cycle_focus(FocusCycleDirection::Forward, arrange_bounds())
-            .expect("focused window");
-
-        assert_eq!(focused, window.id);
-        assert!(workspace.window(&window.id).expect("window").maximized);
-    }
-
-    #[test]
-    fn maximizing_window_is_idempotent_and_uses_restore_to_revert() {
-        let mut workspace = WindowCanvasState::from_persisted(default_workspace_state());
-        let original = workspace
-            .window("claude-1")
-            .expect("claude")
-            .geometry
-            .clone();
-
-        assert!(workspace.maximize_window("claude-1", arrange_bounds()));
-
-        let maximized = workspace.window("claude-1").expect("claude");
-        assert!(maximized.maximized);
-        assert!(!maximized.minimized);
-        assert_eq!(maximized.pre_maximize_geometry, Some(original.clone()));
-        // The backend now stores the received geometry VERBATIM — the frontend
-        // applies the zoom-corrected screen inset in `maximizedGeometry` before
-        // sending. (Previously the backend added ARRANGE_PADDING here, which
-        // became a zoom-scaled inset under the canvas-stage transform and drifted
-        // the maximized window off the viewport at any zoom != 1.)
-        assert_eq!(maximized.geometry, arrange_bounds());
-
-        // Issue #2757 follow-up: repeated maximize_window with the same
-        // bounds must be a no-op. The frontend's viewport-sync path used to
-        // trigger this every workspace_state broadcast; the old toggle
-        // behaviour produced a 400+ msg/sec WebSocket flood that starved
-        // resume_workspace and other clicks.
-        assert!(
-            !workspace.maximize_window("claude-1", arrange_bounds()),
-            "re-issuing maximize at identical bounds must be reported as no-op",
-        );
-        let still_maximized = workspace.window("claude-1").expect("claude");
-        assert!(still_maximized.maximized);
-        assert_eq!(
-            still_maximized.pre_maximize_geometry,
-            Some(original.clone())
-        );
-
-        assert!(workspace.restore_window("claude-1"));
-        let restored = workspace.window("claude-1").expect("claude");
-        assert!(!restored.maximized);
-        assert!(!restored.minimized);
-        assert_eq!(restored.pre_maximize_geometry, None);
-        assert_eq!(restored.geometry, original);
-    }
-
-    #[test]
-    fn maximize_window_stores_received_geometry_verbatim_without_world_padding() {
-        // Regression: the zoom-correct maximize inset is applied on the frontend
-        // (`maximizedGeometry` divides the 24px screen inset by zoom). The backend
-        // must NOT re-pad in world units, otherwise the inset scales with zoom and
-        // the maximized window drifts off the visible viewport.
-        let mut workspace = WindowCanvasState::from_persisted(default_workspace_state());
-        let geometry = WindowGeometry {
-            x: 312.5,
-            y: 88.0,
-            width: 640.0,
-            height: 360.0,
-        };
-        assert!(workspace.maximize_window("claude-1", geometry.clone()));
-        let maximized = workspace.window("claude-1").expect("claude");
-        assert!(maximized.maximized);
-        assert_eq!(
-            maximized.geometry, geometry,
-            "backend must store the frontend-computed maximize geometry unchanged",
-        );
-    }
-
-    #[test]
-    fn minimizing_window_toggles_and_preserves_normal_geometry() {
-        let mut workspace = WindowCanvasState::from_persisted(default_workspace_state());
-        let original = workspace
-            .window("claude-1")
-            .expect("claude")
-            .geometry
-            .clone();
-
-        assert!(workspace.minimize_window("claude-1"));
-        assert!(workspace.window("claude-1").expect("claude").minimized);
-        assert_eq!(
-            workspace.window("claude-1").expect("claude").geometry,
-            original
-        );
-
-        assert!(workspace.minimize_window("claude-1"));
-        assert!(!workspace.window("claude-1").expect("claude").minimized);
-        assert_eq!(
-            workspace.window("claude-1").expect("claude").geometry,
-            original
-        );
-    }
-
-    #[test]
-    fn restoring_window_clears_maximized_and_minimized_states() {
-        let mut workspace = WindowCanvasState::from_persisted(default_workspace_state());
-        let original = workspace
-            .window("claude-1")
-            .expect("claude")
-            .geometry
-            .clone();
-
-        assert!(workspace.maximize_window("claude-1", arrange_bounds()));
-        assert!(workspace.restore_window("claude-1"));
-        let restored = workspace.window("claude-1").expect("claude");
-        assert_eq!(restored.geometry, original);
-        assert!(!restored.maximized);
-        assert!(!restored.minimized);
-
-        assert!(workspace.minimize_window("claude-1"));
-        assert!(workspace.restore_window("claude-1"));
-        assert!(!workspace.window("claude-1").expect("claude").minimized);
-        assert_eq!(
-            workspace.window("claude-1").expect("claude").geometry,
-            original
-        );
-    }
-
-    #[test]
-    fn minimizing_maximized_window_restores_original_geometry_before_collapsing() {
-        let mut workspace = WindowCanvasState::from_persisted(default_workspace_state());
-        let original = workspace
-            .window("claude-1")
-            .expect("claude")
-            .geometry
-            .clone();
-
-        assert!(workspace.maximize_window("claude-1", arrange_bounds()));
-        assert!(workspace.minimize_window("claude-1"));
-
-        let minimized = workspace.window("claude-1").expect("claude");
-        assert!(minimized.minimized);
-        assert!(!minimized.maximized);
-        assert_eq!(minimized.geometry, original);
-        assert_eq!(minimized.pre_maximize_geometry, None);
-
-        assert!(workspace.restore_window("claude-1"));
-        let restored = workspace.window("claude-1").expect("claude");
-        assert_eq!(restored.geometry, original);
-        assert!(!restored.minimized);
-        assert!(!restored.maximized);
-    }
-
-    #[test]
-    fn cycling_focus_skips_minimized_windows() {
-        let mut workspace = WindowCanvasState::from_persisted(default_workspace_state());
-        workspace.add_window(WindowPreset::Shell, arrange_bounds());
-        assert!(workspace.minimize_window("codex-1"));
-
-        let focused = workspace
-            .cycle_focus(
-                FocusCycleDirection::Forward,
-                WindowGeometry {
-                    x: 0.0,
-                    y: 0.0,
-                    width: 1200.0,
-                    height: 800.0,
-                },
-            )
-            .expect("focused window");
-
-        assert_eq!(focused, "claude-1");
-        assert_eq!(workspace.window("claude-1").expect("claude").z_index, 5);
-    }
-
-    #[test]
-    fn arranging_windows_skips_minimized_windows() {
-        let mut workspace = WindowCanvasState::from_persisted(default_workspace_state());
-        workspace.add_window(WindowPreset::Shell, arrange_bounds());
-        let minimized_geometry = workspace.window("codex-1").expect("codex").geometry.clone();
-        assert!(workspace.minimize_window("codex-1"));
-
-        assert!(workspace.arrange_windows(ArrangeMode::Tile, arrange_bounds()));
-
-        let claude = workspace.window("claude-1").expect("claude");
-        let shell = workspace.window("shell-1").expect("shell");
-        let codex = workspace.window("codex-1").expect("codex");
-
-        assert_eq!(claude.geometry.x, 124.0);
-        assert_eq!(claude.geometry.y, 64.0);
-        assert_eq!(shell.geometry.x, 612.0);
-        assert_eq!(shell.geometry.y, 64.0);
-        assert!(codex.minimized);
-        assert_eq!(codex.geometry, minimized_geometry);
     }
 
     #[test]
@@ -2214,11 +1726,10 @@ mod tests {
         );
     }
 
-    // SPEC-2008 US-14 / FR-043C: tab グループに属するウィンドウの geometry /
-    // maximize / minimize / pre_maximize_geometry を変更する mutator は、同じ
-    // tab_group_id を持つ全メンバーへ同一の値を伝播しなければならない。
-    // activate_window_tab はアクティブマーカと z_index 以外の chrome 状態を
-    // 変更してはならない。
+    // SPEC-2008 US-14 / FR-043C: tab グループに属するウィンドウの geometry を
+    // 変更する mutator は、同じ tab_group_id を持つ全メンバーへ同一の値を
+    // 伝播しなければならない。activate_window_tab はアクティブマーカと z_index
+    // 以外の chrome 状態を変更してはならない。
     #[test]
     fn geometry_update_propagates_across_grouped_tabs() {
         let mut workspace = WindowCanvasState::from_persisted(default_workspace_state());
@@ -2276,74 +1787,6 @@ mod tests {
     }
 
     #[test]
-    fn maximize_propagates_across_grouped_tabs() {
-        let mut workspace = WindowCanvasState::from_persisted(default_workspace_state());
-        assert!(workspace.dock_window_tab("codex-1", "claude-1"));
-        let pre_geometry = workspace.window("codex-1").expect("codex").geometry.clone();
-
-        let bounds = WindowGeometry {
-            x: 0.0,
-            y: 0.0,
-            width: 1440.0,
-            height: 900.0,
-        };
-        assert!(workspace.maximize_window("codex-1", bounds.clone()));
-
-        let codex = workspace.window("codex-1").expect("codex");
-        let claude = workspace.window("claude-1").expect("claude");
-        assert!(codex.maximized);
-        assert!(
-            claude.maximized,
-            "grouped sibling must share maximize state"
-        );
-        assert_eq!(codex.geometry, claude.geometry);
-        assert_eq!(
-            codex.pre_maximize_geometry.as_ref(),
-            Some(&pre_geometry),
-            "pre_maximize_geometry must record the geometry shared before maximize"
-        );
-        assert_eq!(
-            claude.pre_maximize_geometry.as_ref(),
-            Some(&pre_geometry),
-            "grouped sibling must share pre_maximize_geometry so restore is symmetric"
-        );
-
-        // Issue #2757 follow-up: re-issuing maximize at the same bounds is
-        // a no-op. Restoring grouped siblings must go through
-        // `restore_window` instead.
-        assert!(!workspace.maximize_window("codex-1", bounds));
-        assert!(workspace.restore_window("codex-1"));
-        let codex = workspace.window("codex-1").expect("codex");
-        let claude = workspace.window("claude-1").expect("claude");
-        assert!(!codex.maximized, "restore must clear maximized");
-        assert!(!claude.maximized, "grouped sibling must restore together");
-        assert_eq!(codex.geometry, pre_geometry);
-        assert_eq!(claude.geometry, pre_geometry);
-        assert!(codex.pre_maximize_geometry.is_none());
-        assert!(claude.pre_maximize_geometry.is_none());
-    }
-
-    #[test]
-    fn minimize_and_restore_propagate_across_grouped_tabs() {
-        let mut workspace = WindowCanvasState::from_persisted(default_workspace_state());
-        assert!(workspace.dock_window_tab("codex-1", "claude-1"));
-
-        assert!(workspace.minimize_window("codex-1"));
-        assert!(workspace.window("codex-1").expect("codex").minimized);
-        assert!(
-            workspace.window("claude-1").expect("claude").minimized,
-            "grouped sibling must share minimize state"
-        );
-
-        assert!(workspace.restore_window("codex-1"));
-        assert!(!workspace.window("codex-1").expect("codex").minimized);
-        assert!(
-            !workspace.window("claude-1").expect("claude").minimized,
-            "grouped sibling must restore together"
-        );
-    }
-
-    #[test]
     fn activate_window_tab_preserves_grouped_chrome_state() {
         let mut workspace = WindowCanvasState::from_persisted(default_workspace_state());
         assert!(workspace.dock_window_tab("codex-1", "claude-1"));
@@ -2364,11 +1807,7 @@ mod tests {
         assert!(!codex.tab_group_active);
         assert_eq!(claude.geometry, new_geometry);
         assert_eq!(codex.geometry, new_geometry);
-        assert_eq!(claude.maximized, snapshot.maximized);
-        assert_eq!(codex.maximized, snapshot.maximized);
-        assert_eq!(claude.minimized, snapshot.minimized);
-        assert_eq!(codex.minimized, snapshot.minimized);
-        assert_eq!(claude.pre_maximize_geometry, snapshot.pre_maximize_geometry);
-        assert_eq!(codex.pre_maximize_geometry, snapshot.pre_maximize_geometry);
+        assert_eq!(claude.geometry_revision, snapshot.geometry_revision);
+        assert_eq!(codex.geometry_revision, snapshot.geometry_revision);
     }
 }

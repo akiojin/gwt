@@ -872,6 +872,108 @@ fn resolve_workspace_id_for_mention_user_or_branch_kind_returns_none() {
     );
 }
 
+#[test]
+fn classify_workspace_projections_deletes_empty_default_projection() {
+    let _guard = lock_test_env();
+    let home = tempfile::tempdir().expect("home");
+    let _home = ScopedHome::set(home.path());
+    let repo = tempfile::tempdir().expect("repo");
+    let projection = WorkspaceProjection::default_for_project(repo.path());
+    save_workspace_projection(repo.path(), &projection).expect("save projection");
+
+    let plan = classify_workspace_projections(
+        &home.path().join(".gwt/projects"),
+        &WorkspaceRetentionConfig::default(),
+        Utc::now(),
+        |_| false,
+    );
+
+    assert_eq!(plan.len(), 1);
+    assert_eq!(plan[0].workspace_id, projection.id);
+    assert_eq!(plan[0].stale_reason, Some(StaleReason::EmptyProjection));
+    assert_eq!(plan[0].action, PruneAction::Delete);
+}
+
+#[test]
+fn classify_workspace_projections_deletes_empty_projection_with_agent_stub() {
+    let _guard = lock_test_env();
+    let home = tempfile::tempdir().expect("home");
+    let _home = ScopedHome::set(home.path());
+    let repo = tempfile::tempdir().expect("repo");
+    let mut projection = WorkspaceProjection::default_for_project(repo.path());
+    projection
+        .agents
+        .push(unassigned_agent("sess-stub", "codex"));
+    save_workspace_projection(repo.path(), &projection).expect("save projection");
+
+    let plan = classify_workspace_projections(
+        &home.path().join(".gwt/projects"),
+        &WorkspaceRetentionConfig::default(),
+        Utc::now(),
+        |_| false,
+    );
+
+    assert_eq!(plan.len(), 1);
+    assert_eq!(plan[0].stale_reason, Some(StaleReason::EmptyProjection));
+    assert_eq!(plan[0].action, PruneAction::Delete);
+}
+
+#[test]
+fn classify_workspace_projections_keeps_projection_with_agent_worktree() {
+    let _guard = lock_test_env();
+    let home = tempfile::tempdir().expect("home");
+    let _home = ScopedHome::set(home.path());
+    let repo = tempfile::tempdir().expect("repo");
+    let worktree = tempfile::tempdir().expect("worktree");
+    let mut projection = WorkspaceProjection::default_for_project(repo.path());
+    let mut agent = unassigned_agent("sess-real", "codex");
+    agent.worktree_path = Some(worktree.path().to_path_buf());
+    projection.agents.push(agent);
+    save_workspace_projection(repo.path(), &projection).expect("save projection");
+
+    let plan = classify_workspace_projections(
+        &home.path().join(".gwt/projects"),
+        &WorkspaceRetentionConfig::default(),
+        Utc::now(),
+        |_| false,
+    );
+
+    assert_eq!(plan.len(), 1);
+    assert_eq!(plan[0].stale_reason, None);
+    assert!(matches!(
+        plan[0].action,
+        PruneAction::Skip {
+            reason: PruneSkipReason::NotStale
+        }
+    ));
+}
+
+#[test]
+fn apply_prune_plan_removes_empty_project_dir_after_projection_delete() {
+    let _guard = lock_test_env();
+    let home = tempfile::tempdir().expect("home");
+    let _home = ScopedHome::set(home.path());
+    let repo = tempfile::tempdir().expect("repo");
+    let projection = WorkspaceProjection::default_for_project(repo.path());
+    save_workspace_projection(repo.path(), &projection).expect("save projection");
+
+    let project_dir = gwt_project_dir_for_repo_path(repo.path());
+    let plan = classify_workspace_projections(
+        &home.path().join(".gwt/projects"),
+        &WorkspaceRetentionConfig::default(),
+        Utc::now(),
+        |_| false,
+    );
+
+    let summary = apply_prune_plan(&plan, false).expect("apply prune");
+
+    assert_eq!(summary.deleted, 1);
+    assert!(
+        !project_dir.exists(),
+        "empty project dir should be removed after deleting its only projection"
+    );
+}
+
 // SPEC-2359 US-37 / T-236..T-239: auto-done emit helper and retroactive migration scanner.
 
 #[test]
@@ -1860,27 +1962,17 @@ fn record_workspace_work_paused_event_does_not_reopen_done_work() {
 // event log persistent core is repo-local and git-tracked.
 // ---------------------------------------------------------------------
 
-/// Override `HOME` for the duration of a test so the home-side projection
+/// Override `gwt_home()` for the duration of a test so the home-side projection
 /// writes (works.json, project-state) and the legacy migration sources
-/// resolve under an isolated temp directory. Restores the previous value
-/// on drop.
+/// resolve under an isolated temp directory.
 struct ScopedHome {
-    previous_home: Option<std::ffi::OsString>,
+    _home: crate::test_support::ScopedGwtHome,
 }
 
 impl ScopedHome {
     fn set(path: &Path) -> Self {
-        let previous_home = std::env::var_os("HOME");
-        std::env::set_var("HOME", path);
-        Self { previous_home }
-    }
-}
-
-impl Drop for ScopedHome {
-    fn drop(&mut self) {
-        match self.previous_home.as_ref() {
-            Some(previous) => std::env::set_var("HOME", previous),
-            None => std::env::remove_var("HOME"),
+        Self {
+            _home: crate::test_support::ScopedGwtHome::set(path),
         }
     }
 }

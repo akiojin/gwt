@@ -1,6 +1,6 @@
 /* SPEC-1939 Phase 13+15 — project-bar Index badge withdrawn. The remaining
  * coverage exercises the dedicated Index window health panel (per-cell
- * rebuild IPC) and the separation from the project-tab Agent activity dot
+ * rebuild IPC) and the separation from the project-tab Agent activity cue
  * using the SPEC-2017 Kanban fixture pattern:
  * the embedded frontend is served via `installEmbeddedRoutes`
  * (`_helpers/embedded-frontend.ts`) and the WebSocket is stubbed with a
@@ -24,11 +24,11 @@ test.describe("Project Index status surface", () => {
     await expect(page.locator("#index-status")).toHaveCount(0);
   });
 
-  test("project_index_status does not drive the project tab Agent activity dot", async ({ page }) => {
+  test("project_index_status does not drive the project tab Agent activity cue", async ({ page }) => {
     await installEmbeddedRoutes(page);
 
-    // SPEC-2013 Phase 6 supersedes the old Index-health project-tab dot:
-    // the dot now reflects only running Agent windows. Index health remains
+    // SPEC-2013 Phase 6 supersedes the old Index-health project-tab cue:
+    // the cue now reflects only running Agent windows. Index health remains
     // visible in the dedicated Index window Health surface.
     await installIndexStatusBackend(page, {
       state: "repair_required",
@@ -51,11 +51,13 @@ test.describe("Project Index status surface", () => {
     });
 
     await page.goto(APP_URL);
-    const dot = page.locator(".project-tab .project-tab-dot");
-    await expect(dot).toHaveAttribute("data-state", "", { timeout: 10_000 });
+    const cue = page.locator(
+      ".project-tab [data-role='project-tab-state-cue']",
+    );
+    await expect(cue).toHaveAttribute("data-state", "", { timeout: 10_000 });
 
     // Project Index transitions still update the Index Health surface, but
-    // must not light the project tab activity dot.
+    // must not light the project tab activity cue.
     await page.evaluate(() => {
       window.__gwtFixtureWebSocket.emit({
         kind: "project_index_status",
@@ -82,7 +84,7 @@ test.describe("Project Index status surface", () => {
         },
       });
     });
-    await expect(dot).toHaveAttribute("data-state", "", { timeout: 5_000 });
+    await expect(cue).toHaveAttribute("data-state", "", { timeout: 5_000 });
 
     await page.evaluate(() => {
       window.__gwtFixtureWebSocket.emit({
@@ -107,7 +109,7 @@ test.describe("Project Index status surface", () => {
         },
       });
     });
-    await expect(dot).toHaveAttribute("data-state", "", { timeout: 5_000 });
+    await expect(cue).toHaveAttribute("data-state", "", { timeout: 5_000 });
   });
 
   test("Index window Health renders the scope health table from project_index_status (T-IDX-106)", async ({

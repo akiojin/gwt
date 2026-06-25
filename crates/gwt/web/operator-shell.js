@@ -180,21 +180,41 @@ export function applyTelemetryCounts(doc, counts = {}) {
     const el = doc.getElementById(id);
     if (el) el.textContent = String(v);
   };
-  // SPEC-2356 — toggle the blocked alert state so the BLOCKED cell pulses when
-  // anything actually needs attention, and stays still otherwise.
-  if ("blocked" in counts) {
-    const blockedCell = doc.querySelector(".op-status-strip__cell--blocked");
-    if (blockedCell) {
-      if ((counts.blocked ?? 0) > 0) blockedCell.classList.add("op-status-strip__cell--alert");
-      else blockedCell.classList.remove("op-status-strip__cell--alert");
+  // SPEC-2356 — toggle the ERROR alert state so the ERROR cell pulses when a
+  // runtime error needs attention, and stays still otherwise. FR-039 (anshin)
+  // applies the same alert toggle to the WAITING cell so "agents waiting for
+  // input" is just as loud as runtime errors.
+  const toggleAlert = (modifier, count) => {
+    const cell = doc.querySelector(`.op-status-strip__cell--${modifier}`);
+    if (!cell) return;
+    if ((count ?? 0) > 0) cell.classList.add("op-status-strip__cell--alert");
+    else cell.classList.remove("op-status-strip__cell--alert");
+  };
+  if ("error" in counts) toggleAlert("error", counts.error);
+  if ("waiting" in counts) toggleAlert("waiting", counts.waiting);
+  // FR-047 (anshin): MISSION convergence indicator. Shows done/total agents so
+  // the operator can see the fleet trending toward completion at a glance, and
+  // flips a positive "complete" state (not an alert pulse) when every agent has
+  // converged (done === agents > 0).
+  const agents = Number(counts.agents ?? 0);
+  const done = Number(counts.done ?? 0);
+  setText("op-strip-mission", agents > 0 ? `${done}/${agents}` : "—");
+  const missionCell = doc.querySelector(".op-status-strip__cell--mission");
+  if (missionCell) {
+    if (agents > 0 && done === agents) {
+      missionCell.classList.add("op-status-strip__cell--complete");
+    } else {
+      missionCell.classList.remove("op-status-strip__cell--complete");
     }
   }
   // SPEC-2356 operator chrome cleanup: the dead Sidebar Layers rows and their
   // per-layer counters are removed; telemetry now lives solely in the Status
   // Strip cells below.
-  setText("op-strip-active", counts.active ?? 0);
+  setText("op-strip-running", counts.running ?? 0);
   setText("op-strip-idle", counts.idle ?? 0);
-  setText("op-strip-blocked", counts.blocked ?? 0);
+  // FR-039 (anshin): WAITING cell counts agents waiting on the operator.
+  setText("op-strip-waiting", counts.waiting ?? 0);
+  setText("op-strip-error", counts.error ?? 0);
   if ("branches" in counts) setText("op-strip-branches", counts.branches ?? "—");
   // SPEC-3038 AS-1.4: the rail Windows item badges the open-window count.
   if ("windows" in counts) {

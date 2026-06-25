@@ -146,14 +146,14 @@ use startup::mark_auto_resume_source_completed;
 use ui_trace::save_ui_trace_to_log_dir;
 use workspace::{
     active_agent_summary_from_session, merge_active_sessions_into_projection,
-    retain_live_workspace_agents, save_workspace_launch_projection,
+    retain_live_workspace_agents, save_shell_work_projection, save_workspace_launch_projection,
     workspace_cleanup_candidate_for_projection, workspace_projection_for_current_resume,
-    workspace_projection_owner_title,
+    workspace_projection_owner_title, WorkspaceLaunchProjectionKind,
 };
 use workspace_views::{
     active_agent_session_matches_work, active_work_cleanup_candidate_view_from_candidate,
     active_work_projection_from_saved_with_journal, agent_launch_purpose_title,
-    non_empty_workspace_text, save_resumed_workspace_projection,
+    linked_issue_workspace_context, non_empty_workspace_text, save_resumed_workspace_projection,
     save_start_work_workspace_projection, session_exact_resume_materializable, work_session_index,
     workspace_journal_entry_view_from_entry, workspace_resume_branch_exists,
     workspace_resume_branch_from_journal_project_root, workspace_resume_context_for_work_item,
@@ -1112,11 +1112,6 @@ impl AppRuntime {
             FrontendEvent::ArrangeWindows { mode, bounds } => {
                 self.arrange_windows_events(mode, bounds)
             }
-            FrontendEvent::MaximizeWindow { id, bounds } => {
-                self.maximize_window_events(&id, bounds)
-            }
-            FrontendEvent::MinimizeWindow { id } => self.minimize_window_events(&id),
-            FrontendEvent::RestoreWindow { id } => self.restore_window_events(&id),
             FrontendEvent::DockWindowTab { id, target_id } => {
                 self.dock_window_tab_events(&id, &target_id)
             }
@@ -1162,6 +1157,9 @@ impl AppRuntime {
                 base_geometry_revision,
             ),
             FrontendEvent::CloseWindow { id } => self.close_window_events(&id),
+            FrontendEvent::StopWindow { id } => self.stop_window_events(&id),
+            FrontendEvent::StopAllWindows {} => self.stop_all_windows_events(),
+            FrontendEvent::RestartWindow { id } => self.restart_window_events(&id),
             FrontendEvent::TerminalInput { id, data } => self.terminal_input_events(&id, &data),
             FrontendEvent::PaneSendInput { session_id, text } => {
                 self.pane_send_input_events(client_id, &session_id, &text)
@@ -1269,6 +1267,9 @@ impl AppRuntime {
                 ),
             )],
             FrontendEvent::LoadBranches { id } => self.load_branches_events(&client_id, &id),
+            FrontendEvent::RequestRemoteStartWorkBranches { id } => {
+                self.request_remote_start_work_branches_events(&client_id, &id)
+            }
             FrontendEvent::LoadBoard { id, all } => self.load_board_events(&client_id, &id, all),
             FrontendEvent::LoadBoardHistory {
                 id,
@@ -1508,6 +1509,12 @@ impl AppRuntime {
                 work_id,
                 close_kind,
             } => self.close_work(&work_id, &close_kind),
+            FrontendEvent::ImprovementPromoteIssue { id } => {
+                self.improvement_promote_issue_events(&client_id, &id)
+            }
+            FrontendEvent::ImprovementDismiss { id, reason } => {
+                self.improvement_dismiss_events(&client_id, &id, reason.as_deref())
+            }
             FrontendEvent::CancelUpdateDownload => self.cancel_update_download_events(&client_id),
             FrontendEvent::ApplyUpdateLater => self.apply_update_later_events(&client_id),
             FrontendEvent::ApplyUpdateRestartNow => {
@@ -1597,6 +1604,21 @@ impl AppRuntime {
             FrontendEvent::UpdateBoardOauthPort { port } => {
                 self.board_oauth_port_update_events(client_id, port)
             }
+            FrontendEvent::GetProjectBoardConfig { project_root } => {
+                self.project_board_config_events(client_id, project_root)
+            }
+            FrontendEvent::UpdateProjectBoardConfig {
+                project_root,
+                provider,
+                channel,
+                tenant,
+            } => self.project_board_config_update_events(
+                client_id,
+                project_root,
+                provider,
+                channel,
+                tenant,
+            ),
             FrontendEvent::UpdateSystemSettings {
                 language,
                 codex_trust_managed_hooks,
@@ -1670,6 +1692,9 @@ impl AppRuntime {
         );
         if let Some(event) = self.active_work_projection_reply(client_id) {
             events.insert(1, event);
+        }
+        if let Some(event) = self.improvement_candidates_reply(client_id) {
+            events.push(event);
         }
         // SPEC-1934 US-6.1: surface pending migrations to a newly-connected
         // frontend during state hydration so the modal opens without waiting
@@ -1755,6 +1780,127 @@ impl AppRuntime {
         OutboundEvent::broadcast(BackendEvent::WindowCanvasState {
             workspace: self.app_state_view(),
         })
+    }
+
+    fn improvement_candidates_reply(&self, client_id: &str) -> Option<OutboundEvent> {
+        let project_root = self.active_project_root()?;
+        Some(OutboundEvent::reply(
+            client_id.to_string(),
+            BackendEvent::ImprovementCandidates {
+                candidates: gwt::cli::improvement::candidate_public_values(project_root),
+            },
+        ))
+    }
+
+    fn improvement_action_error(
+        &self,
+        client_id: &str,
+        action: &str,
+        id: Option<&str>,
+        message: impl Into<String>,
+    ) -> Vec<OutboundEvent> {
+        vec![OutboundEvent::reply(
+            client_id.to_string(),
+            BackendEvent::ImprovementActionError {
+                id: id.map(str::to_string),
+                action: action.to_string(),
+                message: improvement_action_error_message(message.into()),
+            },
+        )]
+    }
+
+    fn improvement_promote_issue_events(&self, client_id: &str, id: &str) -> Vec<OutboundEvent> {
+        let Some(project_root) = self.active_project_root() else {
+            return self.improvement_action_error(
+                client_id,
+                "promote_issue",
+                Some(id),
+                "No active project is selected.",
+            );
+        };
+        let mut env = gwt::cli::DefaultCliEnv::new("akiojin", "gwt", project_root.to_path_buf());
+        let mut output = String::new();
+        match gwt::cli::improvement::run(
+            &mut env,
+            gwt::cli::ImprovementCommand::PromoteIssue(
+                gwt::cli::improvement::ImprovementPromoteIssueCommand {
+                    id: id.to_string(),
+                    force: false,
+                    labels: Vec::new(),
+                },
+            ),
+            &mut output,
+        ) {
+            Ok(_) => {
+                let mut events = vec![OutboundEvent::reply(
+                    client_id.to_string(),
+                    BackendEvent::ImprovementActionResult {
+                        id: id.to_string(),
+                        action: "promote_issue".to_string(),
+                        message: Some(output.trim().to_string()),
+                    },
+                )];
+                if let Some(event) = self.improvement_candidates_reply(client_id) {
+                    events.push(event);
+                }
+                events
+            }
+            Err(error) => self.improvement_action_error(
+                client_id,
+                "promote_issue",
+                Some(id),
+                error.to_string(),
+            ),
+        }
+    }
+
+    fn improvement_dismiss_events(
+        &self,
+        client_id: &str,
+        id: &str,
+        reason: Option<&str>,
+    ) -> Vec<OutboundEvent> {
+        let Some(project_root) = self.active_project_root() else {
+            return self.improvement_action_error(
+                client_id,
+                "dismiss",
+                Some(id),
+                "No active project is selected.",
+            );
+        };
+        let mut env = gwt::cli::DefaultCliEnv::new("akiojin", "gwt", project_root.to_path_buf());
+        let mut output = String::new();
+        match gwt::cli::improvement::run(
+            &mut env,
+            gwt::cli::ImprovementCommand::Dismiss(
+                gwt::cli::improvement::ImprovementDismissCommand {
+                    id: id.to_string(),
+                    reason: reason
+                        .filter(|value| !value.trim().is_empty())
+                        .unwrap_or("Dismissed from Improvement Inbox.")
+                        .to_string(),
+                },
+            ),
+            &mut output,
+        ) {
+            Ok(_) => {
+                let mut events = vec![OutboundEvent::reply(
+                    client_id.to_string(),
+                    BackendEvent::ImprovementActionResult {
+                        id: id.to_string(),
+                        action: "dismiss".to_string(),
+                        message: Some(output.trim().to_string()),
+                    },
+                )];
+                if let Some(event) = self.improvement_candidates_reply(client_id) {
+                    events.push(event);
+                }
+                events
+            }
+            Err(error) => {
+                self.improvement_action_error(client_id, "dismiss", Some(id), error.to_string())
+            }
+        }
     }
 
     pub(crate) fn push_workspace_and_active_work_projection_broadcasts(
@@ -2018,6 +2164,18 @@ impl AppRuntime {
         self.persist_dispatcher.enqueue(snapshot);
         Ok(())
     }
+}
+
+fn improvement_action_error_message(message: impl Into<String>) -> String {
+    let message = message.into();
+    if message
+        .to_ascii_lowercase()
+        .contains("authentication required")
+    {
+        return "GitHub authentication is required to promote this improvement. Run `gh auth login`, or restart browser-check with `GH_TOKEN` available."
+            .to_string();
+    }
+    message
 }
 
 #[cfg(test)]

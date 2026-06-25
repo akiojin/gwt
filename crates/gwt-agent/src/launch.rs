@@ -445,6 +445,16 @@ pub struct AgentLaunchBuilder {
     /// (no env override). Set only for built-in agents that support
     /// Backend Override (Claude Code, Codex).
     backend_profile: Option<crate::backend::AgentBackendProfile>,
+    /// Hermes-specific launch options (SPEC-3152). `provider` maps to
+    /// `--provider`, `profile` to `--profile`, `toolsets`/`skills` to the
+    /// CSV/`--skills` flags, `max_turns` to `--max-turns`, and `safe_mode`
+    /// to `--safe-mode`. Ignored by agents that do not consume them.
+    provider: Option<String>,
+    profile: Option<String>,
+    toolsets: Option<String>,
+    skills: Option<String>,
+    max_turns: Option<u32>,
+    safe_mode: bool,
     extra_args: Vec<String>,
     runtime_target: LaunchRuntimeTarget,
     docker_service: Option<String>,
@@ -472,6 +482,12 @@ impl AgentLaunchBuilder {
             env_overrides: HashMap::new(),
             custom_agent_env: HashMap::new(),
             backend_profile: None,
+            provider: None,
+            profile: None,
+            toolsets: None,
+            skills: None,
+            max_turns: None,
+            safe_mode: false,
             extra_args: Vec::new(),
             runtime_target: LaunchRuntimeTarget::Host,
             docker_service: None,
@@ -565,6 +581,44 @@ impl AgentLaunchBuilder {
 
     pub fn permission_mode(mut self, mode: PermissionMode) -> Self {
         self.permission_mode = Some(mode);
+        self
+    }
+
+    /// SPEC-3152: Hermes provider selection (`--provider`), e.g. `openrouter`,
+    /// `nous`, `anthropic`. Ignored by agents that do not consume it.
+    pub fn provider(mut self, provider: impl Into<String>) -> Self {
+        self.provider = Some(provider.into());
+        self
+    }
+
+    /// SPEC-3152: Hermes profile selection (`--profile`).
+    pub fn profile(mut self, profile: impl Into<String>) -> Self {
+        self.profile = Some(profile.into());
+        self
+    }
+
+    /// SPEC-3152: Hermes toolsets CSV (`--toolsets`).
+    pub fn toolsets(mut self, toolsets: impl Into<String>) -> Self {
+        self.toolsets = Some(toolsets.into());
+        self
+    }
+
+    /// SPEC-3152: Hermes preloaded skills (`--skills`).
+    pub fn skills(mut self, skills: impl Into<String>) -> Self {
+        self.skills = Some(skills.into());
+        self
+    }
+
+    /// SPEC-3152: Hermes per-turn tool-call cap (`--max-turns`).
+    pub fn max_turns(mut self, turns: u32) -> Self {
+        self.max_turns = Some(turns);
+        self
+    }
+
+    /// SPEC-3152: Hermes safe-mode (`--safe-mode`). Note: safe-mode disables
+    /// user config / rules / plugins, which also disables gwt hooks.
+    pub fn safe_mode(mut self, enabled: bool) -> Self {
+        self.safe_mode = enabled;
         self
     }
 
@@ -1044,6 +1098,19 @@ impl AgentLaunchBuilder {
                 "OPENCODE_CONFIG_DIR".to_string(),
                 dir.join(".gwt/opencode").to_string_lossy().into_owned(),
             );
+            // SPEC-3151 FR-005: OpenCode has no skip-permissions CLI flag; honor
+            // the per-launch toggle by layering the permissive permission overlay
+            // (generated under .gwt/opencode) on top of OPENCODE_CONFIG_DIR via
+            // OPENCODE_CONFIG. Left unset otherwise so OpenCode's default
+            // permission prompts apply.
+            if self.skip_permissions {
+                env_vars.insert(
+                    "OPENCODE_CONFIG".to_string(),
+                    dir.join(".gwt/opencode/skip-permissions.json")
+                        .to_string_lossy()
+                        .into_owned(),
+                );
+            }
         }
         match self.session_mode {
             SessionMode::Continue => args.push("--continue".to_string()),
@@ -1117,9 +1184,32 @@ impl AgentLaunchBuilder {
             }
             SessionMode::Normal => {}
         }
+        if let Some(ref provider) = self.provider {
+            args.push("--provider".to_string());
+            args.push(provider.clone());
+        }
         if let Some(ref model) = self.model {
             args.push("--model".to_string());
             args.push(model.clone());
+        }
+        if let Some(ref profile) = self.profile {
+            args.push("--profile".to_string());
+            args.push(profile.clone());
+        }
+        if let Some(ref toolsets) = self.toolsets {
+            args.push("--toolsets".to_string());
+            args.push(toolsets.clone());
+        }
+        if let Some(ref skills) = self.skills {
+            args.push("--skills".to_string());
+            args.push(skills.clone());
+        }
+        if let Some(max_turns) = self.max_turns {
+            args.push("--max-turns".to_string());
+            args.push(max_turns.to_string());
+        }
+        if self.safe_mode {
+            args.push("--safe-mode".to_string());
         }
         if self.skip_permissions {
             args.push("--yolo".to_string());
@@ -1980,8 +2070,10 @@ mod tests {
 
     #[test]
     fn resolve_runner_no_npm_package_falls_back_to_direct() {
-        let runner = resolve_runner(&AgentId::OpenCode, "latest");
-        assert_eq!(runner.executable, "opencode");
+        // OpenClaw still has no npm package, so a versioned request must fall
+        // back to the direct command rather than a package runner.
+        let runner = resolve_runner(&AgentId::OpenClaw, "latest");
+        assert_eq!(runner.executable, "openclaw");
         assert!(runner.base_args.is_empty());
     }
 
@@ -2001,6 +2093,76 @@ mod tests {
             config.env_vars.get("OPENCODE_CONFIG_DIR"),
             Some(&project_relative_path(".gwt/opencode"))
         );
+    }
+
+    // SPEC-3151 FR-006 / AS-4: OpenCode resume maps a concrete session id to
+    // `--session <id>`, while Continue (or Resume without an id) uses
+    // `--continue`. OpenCode has no interactive resume picker, so resume-picker
+    // support stays out of scope.
+    #[test]
+    fn build_opencode_resume_passes_session_id() {
+        let config = AgentLaunchBuilder::new(AgentId::OpenCode)
+            .working_dir("/tmp/project")
+            .session_mode(SessionMode::Resume)
+            .resume_session_id("sess-9")
+            .build();
+
+        assert_eq!(config.command, "opencode");
+        assert!(config
+            .args
+            .windows(2)
+            .any(|pair| pair[0] == "--session" && pair[1] == "sess-9"));
+        assert!(!config.args.contains(&"--continue".to_string()));
+    }
+
+    #[test]
+    fn build_opencode_continue_uses_continue_flag() {
+        let config = AgentLaunchBuilder::new(AgentId::OpenCode)
+            .working_dir("/tmp/project")
+            .session_mode(SessionMode::Continue)
+            .build();
+
+        assert!(config.args.contains(&"--continue".to_string()));
+    }
+
+    #[test]
+    fn build_opencode_resume_without_session_id_falls_back_to_continue() {
+        let config = AgentLaunchBuilder::new(AgentId::OpenCode)
+            .working_dir("/tmp/project")
+            .session_mode(SessionMode::Resume)
+            .build();
+
+        assert!(config.args.contains(&"--continue".to_string()));
+        assert!(!config.args.contains(&"--session".to_string()));
+    }
+
+    // SPEC-3151 FR-005: OpenCode has no skip-permissions CLI flag; non-interactive
+    // operation is controlled by the opencode.json `permission` config. When a
+    // launch opts into skip_permissions, gwt layers a permissive config overlay
+    // via OPENCODE_CONFIG, faithfully honoring the per-launch toggle (parity with
+    // Codex `--yolo` / Claude `--dangerously-skip-permissions`).
+    #[test]
+    fn build_opencode_skip_permissions_sets_config_overlay() {
+        let config = AgentLaunchBuilder::new(AgentId::OpenCode)
+            .working_dir("/tmp/project")
+            .skip_permissions(true)
+            .build();
+
+        assert_eq!(
+            config.env_vars.get("OPENCODE_CONFIG"),
+            Some(&project_relative_path(
+                ".gwt/opencode/skip-permissions.json"
+            ))
+        );
+    }
+
+    #[test]
+    fn build_opencode_without_skip_permissions_omits_config_overlay() {
+        let config = AgentLaunchBuilder::new(AgentId::OpenCode)
+            .working_dir("/tmp/project")
+            .build();
+
+        assert!(!config.env_vars.contains_key("OPENCODE_CONFIG"));
     }
 
     #[test]
@@ -2058,6 +2220,51 @@ mod tests {
             config.env_vars.get("HERMES_ACCEPT_HOOKS"),
             Some(&"1".to_string())
         );
+    }
+
+    #[test]
+    fn build_hermes_maps_provider_profile_and_advanced_options() {
+        let config = AgentLaunchBuilder::new(AgentId::Hermes)
+            .working_dir("/tmp/project")
+            .provider("openrouter")
+            .model("anthropic/claude-sonnet-4")
+            .profile("work")
+            .toolsets("fs,web")
+            .skills("gwt-build-spec")
+            .max_turns(40)
+            .safe_mode(true)
+            .build();
+
+        let has_pair =
+            |flag: &str, val: &str| config.args.windows(2).any(|p| p[0] == flag && p[1] == val);
+        assert!(has_pair("--provider", "openrouter"));
+        assert!(has_pair("--model", "anthropic/claude-sonnet-4"));
+        assert!(has_pair("--profile", "work"));
+        assert!(has_pair("--toolsets", "fs,web"));
+        assert!(has_pair("--skills", "gwt-build-spec"));
+        assert!(has_pair("--max-turns", "40"));
+        assert!(config.args.contains(&"--safe-mode".to_string()));
+    }
+
+    #[test]
+    fn build_hermes_omits_unset_optional_flags() {
+        let config = AgentLaunchBuilder::new(AgentId::Hermes)
+            .working_dir("/tmp/project")
+            .build();
+
+        for flag in [
+            "--provider",
+            "--profile",
+            "--toolsets",
+            "--skills",
+            "--max-turns",
+            "--safe-mode",
+        ] {
+            assert!(
+                !config.args.iter().any(|a| a == flag),
+                "unset option must not emit {flag}"
+            );
+        }
     }
 
     #[cfg(windows)]
@@ -2185,6 +2392,26 @@ mod tests {
 
         assert_eq!(PathBuf::from(runner.executable), bunx);
         assert_eq!(runner.base_args, vec!["@openai/codex@latest".to_string()]);
+    }
+
+    // SPEC-3151 FR-001/FR-002: OpenCode launches through the `opencode-ai` npm
+    // package runner just like Codex/Claude Code. Per the SPEC decision the
+    // runner keeps bunx-first ordering (OpenCode is not on the npx-preference
+    // list), so a versioned launch resolves bunx + `opencode-ai@<version>`.
+    #[cfg(all(not(windows), unix))]
+    #[test]
+    fn opencode_latest_keeps_bunx_first_on_nonwindows() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let bunx = temp.path().join("bunx");
+        let npx = temp.path().join("npx");
+        write_test_runner(&bunx);
+        write_test_runner(&npx);
+        let env = HashMap::from([("PATH".to_string(), temp.path().display().to_string())]);
+
+        let runner = resolve_runner_with_env(&AgentId::OpenCode, "latest", &env);
+
+        assert_eq!(PathBuf::from(runner.executable), bunx);
+        assert_eq!(runner.base_args, vec!["opencode-ai@latest".to_string()]);
     }
 
     // Issue #2981: the host `bunx`→`npx` fallback must resolve a Windows-spawnable

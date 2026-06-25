@@ -24,7 +24,7 @@ mod persistence;
 mod projection;
 mod work_items;
 
-pub use agents::WorkspaceAgentSummary;
+pub use agents::{WorkKind, WorkspaceAgentSummary, SHELL_WORK_AGENT_ID};
 pub use identity::{canonical_work_id, workspace_group_key_for_item};
 pub use lifecycle::{
     decide_work_close, derive_merged_done_equivalent, recompute_lifecycle_stage,

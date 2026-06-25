@@ -34,7 +34,7 @@ use super::{
     retain_live_workspace_agents, same_worktree_path, save_workspace_launch_projection,
     workspace_cleanup_candidate_for_projection, workspace_projection_owner_title,
     ActiveAgentSession, AppRuntime, BackendEvent, ClientId, IssueBranchLinkStore, OutboundEvent,
-    ProjectTabRuntime, WorkspaceResumeContext,
+    ProjectTabRuntime, WorkspaceLaunchProjectionKind, WorkspaceResumeContext,
 };
 
 fn workspace_status_category_wire(
@@ -1254,6 +1254,21 @@ pub(super) fn workspace_resume_owner_issue_number(owner: Option<&str>) -> Option
     digits.parse::<u64>().ok()
 }
 
+pub(super) fn linked_issue_workspace_context(
+    project_root: &Path,
+    issue_number: u64,
+    owner_label: impl Into<String>,
+) -> WorkspaceResumeContext {
+    let owner_label = owner_label.into();
+    WorkspaceResumeContext {
+        title: issue_title_from_cache(project_root, issue_number)
+            .or_else(|| Some(owner_label.clone())),
+        owner: Some(owner_label),
+        summary: None,
+        next_action: None,
+    }
+}
+
 pub(super) fn workspace_resume_branch_from_journal_project_root(
     project_root: &Path,
     active_project_root: &Path,
@@ -2035,7 +2050,7 @@ pub(super) fn save_start_work_workspace_projection(
         Some(_base_branch),
         linked_issue_number,
         workspace_resume_context,
-        true,
+        WorkspaceLaunchProjectionKind::StartWork,
         live_session_ids,
     )
 }
@@ -2054,7 +2069,9 @@ pub(super) fn save_resumed_workspace_projection(
         base_branch,
         linked_issue_number,
         Some(workspace_resume_context),
-        session.branch_name.starts_with("work/"),
+        WorkspaceLaunchProjectionKind::Resume {
+            created_by_start_work: session.branch_name.starts_with("work/"),
+        },
         live_session_ids,
     )
 }
@@ -2207,6 +2224,18 @@ impl AppRuntime {
             );
             let updated_at = chrono::Utc::now();
             retain_live_workspace_agents(&mut projection, &sessions, updated_at);
+            // SPEC-2359 US-80 (FR-428): derive each Shell Work's status from its
+            // live PTY — running → Active, otherwise (exited or post-restart) →
+            // Idle — so the rail never shows a dead shell as Active.
+            projection.reconcile_shell_status(
+                |window_id| {
+                    matches!(
+                        self.window_pty_statuses.get(window_id),
+                        Some(crate::WindowProcessStatus::Running)
+                    )
+                },
+                updated_at,
+            );
             if had_saved_agents && !projection.has_current_agents() {
                 projection.reset_idle_identity(&tab.title, updated_at);
             }

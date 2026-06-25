@@ -109,12 +109,6 @@ pub struct PersistedWindowState {
     pub geometry_revision: u64,
     pub z_index: u32,
     pub status: WindowState,
-    #[serde(default)]
-    pub minimized: bool,
-    #[serde(default)]
-    pub maximized: bool,
-    #[serde(default)]
-    pub pre_maximize_geometry: Option<WindowGeometry>,
     #[serde(default, skip_serializing_if = "WindowPlacement::is_canvas")]
     pub placement: WindowPlacement,
     #[serde(default = "default_persist_window")]
@@ -224,9 +218,6 @@ pub fn default_workspace_state() -> PersistedWindowCanvasState {
                 geometry_revision: 0,
                 z_index: 1,
                 status: WindowState::Running,
-                minimized: false,
-                maximized: false,
-                pre_maximize_geometry: None,
                 placement: WindowPlacement::Canvas,
                 persist: true,
                 purpose_title: None,
@@ -251,9 +242,6 @@ pub fn default_workspace_state() -> PersistedWindowCanvasState {
                 geometry_revision: 0,
                 z_index: 2,
                 status: WindowState::Running,
-                minimized: false,
-                maximized: false,
-                pre_maximize_geometry: None,
                 placement: WindowPlacement::Canvas,
                 persist: true,
                 purpose_title: None,
@@ -478,9 +466,14 @@ pub fn project_title_from_path(path: &Path) -> String {
 
 #[cfg(test)]
 mod tests {
+    use gwt_core::test_support::ScopedGwtHome;
     use tempfile::tempdir;
 
     use super::*;
+
+    fn scoped_home(path: &std::path::Path) -> ScopedGwtHome {
+        ScopedGwtHome::set(path)
+    }
 
     #[test]
     fn empty_workspace_contains_no_windows() {
@@ -500,12 +493,6 @@ mod tests {
             .map(|window| window.title.as_str())
             .collect();
         assert_eq!(titles, vec!["Claude", "Codex"]);
-        assert!(state.windows.iter().all(|window| !window.minimized));
-        assert!(state.windows.iter().all(|window| !window.maximized));
-        assert!(state
-            .windows
-            .iter()
-            .all(|window| window.pre_maximize_geometry.is_none()));
         assert_eq!(state.next_z_index, 3);
     }
 
@@ -591,14 +578,6 @@ mod tests {
                     geometry_revision: 0,
                     z_index: 4,
                     status: WindowProcessStatus::Running,
-                    minimized: false,
-                    maximized: true,
-                    pre_maximize_geometry: Some(WindowGeometry {
-                        x: 48.0,
-                        y: 64.0,
-                        width: 720.0,
-                        height: 480.0,
-                    }),
                     placement: WindowPlacement::Canvas,
                     persist: true,
                     purpose_title: None,
@@ -623,9 +602,6 @@ mod tests {
                     geometry_revision: 0,
                     z_index: 5,
                     status: WindowState::Running,
-                    minimized: true,
-                    maximized: false,
-                    pre_maximize_geometry: None,
                     placement: WindowPlacement::Canvas,
                     persist: true,
                     purpose_title: None,
@@ -672,9 +648,6 @@ mod tests {
         let loaded = load_workspace_state(&path).expect("legacy load");
         assert_eq!(loaded.viewport, default_canvas_viewport());
         assert_eq!(loaded.next_z_index, 2);
-        assert!(!loaded.windows[0].minimized);
-        assert!(!loaded.windows[0].maximized);
-        assert!(loaded.windows[0].pre_maximize_geometry.is_none());
         // SPEC #2133: legacy window payloads predate agent_id / agent_color.
         // serde `default` は無い値を None に初期化する。
         assert!(loaded.windows[0].agent_id.is_none());
@@ -682,6 +655,46 @@ mod tests {
         assert!(loaded.windows[0].tab_group_id.is_none());
         assert!(!loaded.windows[0].tab_group_active);
         assert_eq!(loaded.windows[0].placement, WindowPlacement::Canvas);
+    }
+
+    // SPEC-2008 FR-097: the canvas window model dropped manual
+    // maximize/minimize/restore. Old workspace.json files predate that change
+    // and still carry `minimized` / `maximized` / `pre_maximize_geometry`
+    // keys. serde ignores unknown fields by default (no
+    // `#[serde(deny_unknown_fields)]`), so those legacy blobs must still
+    // deserialize cleanly into the trimmed [`PersistedWindowState`].
+    #[test]
+    fn load_workspace_state_ignores_legacy_maximize_minimize_keys() {
+        let dir = tempdir().expect("tempdir");
+        let path = dir.path().join("workspace.json");
+        std::fs::write(
+            &path,
+            r#"{
+  "windows": [
+    {
+      "id": "shell-1",
+      "title": "Shell",
+      "preset": "shell",
+      "geometry": { "x": 20.0, "y": 40.0, "width": 640.0, "height": 420.0 },
+      "z_index": 1,
+      "status": "ready",
+      "persist": true,
+      "minimized": true,
+      "maximized": true,
+      "pre_maximize_geometry": { "x": 1.0, "y": 2.0, "width": 800.0, "height": 600.0 }
+    }
+  ],
+  "next_z_index": 2
+}"#,
+        )
+        .expect("legacy workspace write");
+
+        let loaded =
+            load_workspace_state(&path).expect("legacy maximize/minimize keys must be ignored");
+        assert_eq!(loaded.windows.len(), 1);
+        assert_eq!(loaded.windows[0].id, "shell-1");
+        assert_eq!(loaded.windows[0].placement, WindowPlacement::Canvas);
+        assert_eq!(loaded.next_z_index, 2);
     }
 
     #[test]
@@ -839,9 +852,6 @@ mod tests {
                 geometry_revision: 0,
                 z_index: 1,
                 status: WindowProcessStatus::Running,
-                minimized: false,
-                maximized: false,
-                pre_maximize_geometry: None,
                 placement: WindowPlacement::Canvas,
                 persist: true,
                 purpose_title: None,
@@ -931,9 +941,6 @@ mod tests {
             geometry_revision: 0,
             z_index: 1,
             status: WindowProcessStatus::Running,
-            minimized: false,
-            maximized: false,
-            pre_maximize_geometry: None,
             placement: WindowPlacement::Canvas,
             persist: true,
             purpose_title: Some("Review launch flow".into()),
@@ -975,6 +982,7 @@ mod tests {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         let dir = tempdir().expect("tempdir");
+        let _home = scoped_home(dir.path());
         let path = workspace_state_path(dir.path());
         let hash = gwt_core::paths::project_scope_hash(dir.path());
         assert!(path.ends_with(format!("projects/{}/workspace.json", hash.as_str())));
@@ -986,6 +994,7 @@ mod tests {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         let dir = tempdir().expect("tempdir");
+        let _home = scoped_home(dir.path());
         let project_root = dir.path().join("project");
         std::fs::create_dir_all(&project_root).expect("project dir");
         let state = PersistedWindowCanvasState {
@@ -1004,9 +1013,6 @@ mod tests {
                     geometry_revision: 0,
                     z_index: 1,
                     status: WindowProcessStatus::Running,
-                    minimized: false,
-                    maximized: false,
-                    pre_maximize_geometry: None,
                     placement: WindowPlacement::Canvas,
                     persist: true,
                     purpose_title: None,
@@ -1031,9 +1037,6 @@ mod tests {
                     geometry_revision: 0,
                     z_index: 2,
                     status: WindowState::Running,
-                    minimized: false,
-                    maximized: false,
-                    pre_maximize_geometry: None,
                     placement: WindowPlacement::Canvas,
                     persist: true,
                     purpose_title: None,
@@ -1061,6 +1064,7 @@ mod tests {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         let dir = tempdir().expect("tempdir");
+        let _home = scoped_home(dir.path());
         let legacy_path = dir.path().join("legacy-workspace.json");
         let session_path = dir.path().join("session.json");
         let project_one = dir.path().join("project-one");
@@ -1131,6 +1135,7 @@ mod tests {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         let dir = tempdir().expect("tempdir");
+        let _home = scoped_home(dir.path());
         let legacy_path = dir.path().join("legacy-workspace.json");
         let session_path = dir.path().join("session.json");
         let project_root = dir.path().join("workspace");
@@ -1169,6 +1174,7 @@ mod tests {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         let dir = tempdir().expect("tempdir");
+        let _home = scoped_home(dir.path());
         let legacy_path = dir.path().join("legacy-workspace.json");
         let session_path = dir.path().join("session.json");
         let project_root = dir.path().join("project");
@@ -1243,9 +1249,6 @@ mod tests {
                     geometry_revision: 0,
                     z_index: 1,
                     status: WindowProcessStatus::Running,
-                    minimized: false,
-                    maximized: false,
-                    pre_maximize_geometry: None,
                     placement: WindowPlacement::Canvas,
                     persist: true,
                     purpose_title: None,
@@ -1270,9 +1273,6 @@ mod tests {
                     geometry_revision: 0,
                     z_index: 2,
                     status: WindowState::Running,
-                    minimized: false,
-                    maximized: false,
-                    pre_maximize_geometry: None,
                     placement: WindowPlacement::Canvas,
                     persist: true,
                     purpose_title: None,

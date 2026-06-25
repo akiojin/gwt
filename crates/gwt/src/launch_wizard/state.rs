@@ -69,6 +69,15 @@ impl LaunchWizardState {
             docker_lifecycle_intent,
             skip_permissions: false,
             codex_fast_mode: false,
+            hermes_provider: String::new(),
+            hermes_profile: String::new(),
+            hermes_toolsets: String::new(),
+            hermes_skills: String::new(),
+            hermes_max_turns: String::new(),
+            hermes_safe_mode: false,
+            hermes_provider_choices: Vec::new(),
+            hermes_needs_setup: false,
+            opencode_needs_setup: false,
             branch_name: String::new(),
             initial_prompt: String::new(),
             completion: None,
@@ -84,6 +93,7 @@ impl LaunchWizardState {
             runtime_confirmed: false,
             settings_revisited: false,
             resolved_branch_name: None,
+            open_branch_candidates: Vec::new(),
         };
         state.branch_name = state.context.normalized_branch_name.clone();
         state.sync_selected_agent_options();
@@ -242,7 +252,13 @@ impl LaunchWizardState {
             agent_options,
             mut quick_start_entries,
             previous_profiles,
+            open_branch_candidates,
         } = hydration;
+        // FR-444: preserve picker candidates from the initial hydration across
+        // runtime re-resolution (which carries an empty list).
+        if !open_branch_candidates.is_empty() {
+            self.open_branch_candidates = open_branch_candidates;
+        }
         if let Some(selected_branch) = selected_branch {
             self.context.selected_branch = selected_branch;
         }
@@ -396,6 +412,9 @@ impl LaunchWizardState {
             LaunchWizardAction::SetBranchName { value } => {
                 self.branch_name = value;
             }
+            LaunchWizardAction::SelectExistingBranch { branch_name } => {
+                self.select_existing_branch(&branch_name);
+            }
             LaunchWizardAction::SetInitialPrompt { value } => {
                 self.initial_prompt = value;
             }
@@ -443,6 +462,15 @@ impl LaunchWizardState {
             }
             LaunchWizardAction::SetCodexFastMode { enabled } => {
                 self.codex_fast_mode = enabled && self.agent_is_codex();
+            }
+            LaunchWizardAction::SetHermesOption { field, value } => {
+                self.set_hermes_option(&field, value);
+            }
+            LaunchWizardAction::SetHermesSafeMode { enabled } => {
+                self.hermes_safe_mode = enabled;
+            }
+            LaunchWizardAction::RunOpenCodeSetup => {
+                self.run_opencode_setup();
             }
             LaunchWizardAction::Back => {
                 if self.show_confirm() {
@@ -1096,6 +1124,42 @@ impl LaunchWizardState {
         }
     }
 
+    /// SPEC-2359 US-83 / FR-444 + FR-446: switch the wizard to "continue on an
+    /// existing branch" mode. The worktree will materialize on `branch_name`
+    /// (tracking `origin/<branch_name>` when only the remote exists, via the
+    /// existing `resolve_launch_worktree_request` → `create_from_remote` path)
+    /// without minting a new `work/*` branch. Protected base branches are
+    /// rejected here as the new-path backend guard; the shared general
+    /// open-wizard flow is intentionally left unchanged.
+    pub(super) fn select_existing_branch(&mut self, branch_name: &str) {
+        // The lib-side wizard cannot reach the bin-side `normalize_branch_name`,
+        // so strip remote-tracking prefixes inline
+        // (`origin/X` | `refs/remotes/origin/X` → `X`).
+        let normalized = branch_name
+            .strip_prefix("refs/remotes/")
+            .map(|rest| rest.strip_prefix("origin/").unwrap_or(rest))
+            .or_else(|| branch_name.strip_prefix("origin/"))
+            .unwrap_or(branch_name)
+            .to_string();
+        if normalized.is_empty() {
+            self.error = Some("Branch name is required".to_string());
+            return;
+        }
+        if gwt_git::is_protected_branch(&normalized) {
+            self.error = Some(format!(
+                "{normalized} is a protected base branch and cannot be opened as a Work branch"
+            ));
+            return;
+        }
+        self.context.normalized_branch_name = normalized.clone();
+        // Force a fresh materialization through resolve_launch_worktree_request
+        // rather than reusing any stale worktree path from the prior context.
+        self.context.worktree_path = None;
+        self.is_new_branch = false;
+        self.base_branch_name = None;
+        self.branch_name = normalized;
+    }
+
     pub(super) fn set_branch_type(&mut self, prefix: &str) {
         if !BRANCH_TYPE_PREFIXES
             .iter()
@@ -1171,6 +1235,10 @@ impl LaunchWizardState {
         {
             self.model = model.to_string();
             self.sync_reasoning_state();
+        } else if self.current_agent_supports_freetext_model() {
+            // SPEC-3152: Hermes models are provider-dependent free text, so any
+            // value (including empty to clear) is accepted without a fixed list.
+            self.model = model.to_string();
         } else if model.is_empty() && !self.agent_has_models() {
             self.model.clear();
         } else {
@@ -1400,6 +1468,95 @@ impl LaunchWizardState {
     pub(super) fn current_agent_supports_fast_mode(&self) -> bool {
         self.launch_target_is_agent()
             && agent_id_from_key(self.effective_agent_id()).supports_fast_mode()
+    }
+
+    /// SPEC-3152: whether the current agent exposes Hermes-style launch
+    /// options (provider / profile / free-text model / advanced) in the
+    /// Settings form.
+    pub(super) fn current_agent_supports_hermes_options(&self) -> bool {
+        self.launch_target_is_agent()
+            && agent_id_from_key(self.effective_agent_id()).supports_provider_selection()
+    }
+
+    /// SPEC-3152: whether the current agent takes a free-text model string
+    /// rather than a fixed gwt model list (Hermes / OpenCode).
+    pub(super) fn current_agent_supports_freetext_model(&self) -> bool {
+        self.launch_target_is_agent()
+            && agent_id_from_key(self.effective_agent_id()).supports_freetext_model()
+    }
+
+    /// SPEC-3151 FR-008: whether the current agent is OpenCode, which exposes a
+    /// free-text `provider/model` field and the in-pane setup launcher in the
+    /// Settings form.
+    pub(super) fn current_agent_is_opencode(&self) -> bool {
+        self.launch_target_is_agent()
+            && agent_id_from_key(self.effective_agent_id()) == gwt_agent::AgentId::OpenCode
+    }
+
+    /// SPEC-3152: provider choices enumerated from the user's Hermes config,
+    /// populated by the app runtime at wizard open.
+    pub fn set_hermes_provider_choices(&mut self, choices: Vec<String>) {
+        self.hermes_provider_choices = choices;
+    }
+
+    /// SPEC-3152 FR-005: whether the user's global Hermes home is unconfigured,
+    /// populated by the app runtime at wizard open.
+    pub fn set_hermes_needs_setup(&mut self, needs_setup: bool) {
+        self.hermes_needs_setup = needs_setup;
+    }
+
+    /// SPEC-3151 FR-009: whether OpenCode's global data home has no configured
+    /// AI provider, populated by the app runtime at wizard open.
+    pub fn set_opencode_needs_setup(&mut self, needs_setup: bool) {
+        self.opencode_needs_setup = needs_setup;
+    }
+
+    /// SPEC-3151 FR-010: resolve the OpenCode runner for the wizard's selected
+    /// version and produce a Shell launch that runs `<runner> auth login` on the
+    /// host. OpenCode auth is host-global (`$XDG_DATA_HOME/opencode/auth.json`),
+    /// so the setup launcher is forced to the Host runtime regardless of the
+    /// wizard's Docker selection.
+    fn run_opencode_setup(&mut self) {
+        let version = if self.version.is_empty() {
+            "latest"
+        } else {
+            self.version.as_str()
+        };
+        let runner = gwt_agent::launch::resolve_runner(&gwt_agent::AgentId::OpenCode, version);
+        let mut args = runner.base_args.clone();
+        args.push("auth".to_string());
+        args.push("login".to_string());
+
+        self.launch_target = LaunchTargetKind::Shell;
+        let config = ShellLaunchConfig {
+            working_dir: self.context.worktree_path.clone(),
+            branch: (!self.branch_name.is_empty()).then(|| self.branch_name.clone()),
+            base_branch: None,
+            display_name: "OpenCode Setup".to_string(),
+            runtime_target: gwt_agent::LaunchRuntimeTarget::Host,
+            docker_service: None,
+            docker_lifecycle_intent: gwt_agent::DockerLifecycleIntent::default(),
+            windows_shell: self.windows_shell_for_launch(),
+            env_vars: HashMap::new(),
+            remove_env: Vec::new(),
+            command_override: Some(runner.executable),
+            command_args_override: Some(args),
+        };
+        self.completion = Some(LaunchWizardCompletion::Launch(Box::new(
+            LaunchWizardLaunchRequest::Shell(Box::new(config)),
+        )));
+    }
+
+    /// SPEC-3152: persist a Hermes free-text launch option by field key.
+    pub(super) fn set_hermes_option(&mut self, field: &str, value: String) {
+        match field {
+            "provider" => self.hermes_provider = value,
+            "profile" => self.hermes_profile = value,
+            "toolsets" => self.hermes_toolsets = value,
+            "skills" => self.hermes_skills = value,
+            "max_turns" => self.hermes_max_turns = value,
+            _ => self.error = Some(format!("Unknown Hermes option: {field}")),
+        }
     }
 
     pub(super) fn fast_mode_enabled_for_current_agent(&self) -> bool {
@@ -2097,6 +2254,7 @@ mod tests {
             agent_options: sample_agent_options(),
             quick_start_entries: Vec::new(),
             previous_profiles: None,
+            open_branch_candidates: Vec::new(),
         });
         let view = state.view();
         assert_eq!(view.selected_runtime_target, "host");
@@ -2282,6 +2440,7 @@ mod tests {
             agent_options: sample_agent_options(),
             quick_start_entries: Vec::new(),
             previous_profiles: Some(Default::default()),
+            open_branch_candidates: Vec::new(),
         });
 
         state.apply(LaunchWizardAction::Submit);
@@ -2539,6 +2698,7 @@ mod tests {
                     windows_shell: None,
                 },
             ))),
+            open_branch_candidates: Vec::new(),
         });
 
         assert_eq!(
@@ -2584,6 +2744,7 @@ mod tests {
             agent_options: sample_agent_options(),
             quick_start_entries: Vec::new(),
             previous_profiles: None,
+            open_branch_candidates: Vec::new(),
         });
 
         let view = state.view();
@@ -2634,6 +2795,7 @@ mod tests {
             agent_options: sample_agent_options(),
             quick_start_entries: Vec::new(),
             previous_profiles: Some(previous_profiles),
+            open_branch_candidates: Vec::new(),
         });
 
         let view = state.view();
@@ -2678,6 +2840,7 @@ mod tests {
                 agent_options: sample_agent_options(),
                 quick_start_entries: Vec::new(),
                 previous_profiles: Some(previous_profiles),
+                open_branch_candidates: Vec::new(),
             });
 
             assert_eq!(state.view().selected_execution_mode, mode);
@@ -2884,6 +3047,7 @@ mod tests {
             agent_options: sample_agent_options(),
             quick_start_entries: Vec::new(),
             previous_profiles: Some(previous_profiles),
+            open_branch_candidates: Vec::new(),
         });
 
         let view = state.view();
@@ -2937,6 +3101,7 @@ mod tests {
             agent_options: sample_agent_options(),
             quick_start_entries: Vec::new(),
             previous_profiles: Some(Default::default()),
+            open_branch_candidates: Vec::new(),
         });
 
         assert!(state.view().fast_mode);
@@ -3114,6 +3279,7 @@ mod tests {
                 docker_lifecycle_intent: gwt_agent::DockerLifecycleIntent::Connect,
             }],
             previous_profiles: Some(LaunchWizardPreviousProfiles::default()),
+            open_branch_candidates: Vec::new(),
         });
 
         let view = state.view();

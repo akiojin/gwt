@@ -13,8 +13,6 @@
 //   `const appState = getAppState();` prologue), because app.js reassigns
 //   `appState` on every workspace_state,
 // - `projectError` reads go through `getProjectError()` the same way,
-// - `viewport.zoom` reads go through `getViewport().zoom` (viewport is
-//   reassigned on pan/zoom in app.js),
 // - in-module references that previously went through
 //   `frontendUnits.projectWorkspaceShell.*` became direct local calls
 //   (sendOpenProjectDialog, toggleWindowList, renderWindowList),
@@ -31,8 +29,8 @@
 // - send(message): forward a frontend event over the WebSocket bridge.
 // - createNode(tag, className, textContent): shared DOM helper owned by
 //   app.js (also used by Board / settings / wizard surfaces).
-// - getAppState() / getProjectError() / getViewport(): accessors for
-//   app.js-owned mutable shell state.
+// - getAppState() / getProjectError(): accessors for app.js-owned mutable
+//   shell state.
 // - activeProjectTab() / activeWorkspace(): app.js workspace selectors.
 // - windowMap: workspace window element map owned by app.js.
 // - appendRenderKeyPart(parts, value): shared render-key primitive (also
@@ -42,6 +40,8 @@
 //   visibleWindowData / presetSurface: window presentation helpers owned
 //   by app.js (still used by the core window renderers there).
 // - focusWindowRemotely(windowId, opts): focus path owned by app.js.
+// - frameWindow(windowId, opts): SPEC-2008 camera-focus path owned by app.js;
+//   flies the local camera to frame a window (used by the switcher rows).
 // - scheduleTerminalFit(windowId, persist): terminal core scheduler.
 // - visibleBounds(): current visible canvas bounds in world space.
 // - addButton / tileButton / stackButton: toolbar buttons owned by app.js
@@ -62,15 +62,14 @@ import {
   shouldHandleProjectSwitcherShortcut,
   shouldTriggerOpenFolderHotkey,
 } from "/project-switcher.js";
-import { maximizedGeometry } from "/window-geometry-sync.js";
 import { windowRuntimeLabel } from "/window-runtime-state.js";
+import { groupProjectWindowList } from "/window-list-model.js";
 
 export function createProjectShellSurface({
   send,
   createNode,
   getAppState,
   getProjectError,
-  getViewport,
   activeProjectTab,
   activeWorkspace,
   windowMap,
@@ -84,6 +83,9 @@ export function createProjectShellSurface({
   visibleWindowData,
   presetSurface,
   focusWindowRemotely,
+  // SPEC-2008 camera-focus: window-list rows teleport the camera to a window
+  // (frameWindow) instead of maximizing/restoring it.
+  frameWindow,
   scheduleTerminalFit,
   visibleBounds,
   addButton,
@@ -127,7 +129,6 @@ export function createProjectShellSurface({
       let renderedProjectPickerKey = "";
       let renderedProjectOnboardingKey = "";
       let renderedActionAvailabilityKey = "";
-      let maximizedViewportSyncFrame = null;
       const unreadProjectIds = new Set();
 
       function recentProjectsRenderKey(state) {
@@ -204,12 +205,10 @@ export function createProjectShellSurface({
 
       function windowListRenderKey() {
         const appState = getAppState();
-        const workspace = activeWorkspace();
-        const workspaceWindows = workspace.windows || [];
-        const workspaceWindowMap = new Map();
-        for (const windowData of workspaceWindows) {
-          workspaceWindowMap.set(windowData.id, windowData);
-        }
+        // SPEC-3038 (2026-06-20): the popover is a cross-tab list; the render
+        // key must change when any project tab's windows change, not only the
+        // active tab's.
+        const model = groupProjectWindowList(appState, windowListEntries);
         const appendEntryKey = (parts, entry) => {
           const geometry = entry?.geometry || {};
           const runtimeState = runtimeStateForWindow(entry);
@@ -270,31 +269,17 @@ export function createProjectShellSurface({
         appendRenderKeyPart(parts, appState?.active_tab_id || null);
         appendRenderKeyPart(parts, "window_list_entries");
         appendRenderKeyPart(parts, windowListEntries.length);
-        for (const entry of windowListEntries) {
-          appendEntryKey(parts, entry);
-        }
-        appendRenderKeyPart(parts, "active_window_ids");
-        appendRenderKeyPart(parts, workspaceWindows.length);
-        for (const windowData of workspaceWindows) {
-          appendRenderKeyPart(parts, windowData?.id || "");
-        }
+        appendRenderKeyPart(parts, "multi_project");
+        appendRenderKeyPart(parts, Boolean(model.multiProject));
         appendRenderKeyPart(parts, "rows");
-        if (windowListEntries.length > 0) {
-          let rowCount = 0;
-          for (const entry of windowListEntries) {
-            if (workspaceWindowMap.size === 0 || workspaceWindowMap.has(entry.id)) {
-              rowCount += 1;
-            }
-          }
-          appendRenderKeyPart(parts, rowCount);
-          for (const entry of windowListEntries) {
-            if (workspaceWindowMap.size === 0 || workspaceWindowMap.has(entry.id)) {
-              appendEntryKey(parts, workspaceWindowMap.get(entry.id) || entry);
-            }
-          }
-        } else {
-          appendRenderKeyPart(parts, workspaceWindows.length);
-          for (const entry of workspaceWindows) {
+        appendRenderKeyPart(parts, model.count);
+        for (const group of model.groups) {
+          appendRenderKeyPart(parts, "group");
+          appendRenderKeyPart(parts, group.tabId);
+          appendRenderKeyPart(parts, group.tabTitle);
+          appendRenderKeyPart(parts, Boolean(group.isActiveTab));
+          appendRenderKeyPart(parts, group.entries.length);
+          for (const entry of group.entries) {
             appendEntryKey(parts, entry);
           }
         }
@@ -524,71 +509,85 @@ export function createProjectShellSurface({
           return;
         }
         renderedWindowListKey = nextWindowListKey;
-        const workspaceWindows = activeWorkspace().windows || [];
-        let entries = workspaceWindows;
-        if (windowListEntries.length > 0) {
-          const workspaceWindowMap = new Map();
-          for (const windowData of workspaceWindows) {
-            workspaceWindowMap.set(windowData.id, windowData);
-          }
-          entries = [];
-          for (const entry of windowListEntries) {
-            const workspaceEntry = workspaceWindowMap.get(entry.id);
-            if (workspaceWindowMap.size === 0 || workspaceEntry) {
-              entries.push(workspaceEntry || entry);
-            }
-          }
-        }
+        // SPEC-3038 (2026-06-20): list windows from every project tab so the
+        // popover matches the cross-tab open-window badge. Multi-project
+        // shells get per-project group headers; single-project shells stay
+        // flat. The window set and order come from groupProjectWindowList.
+        const model = groupProjectWindowList(getAppState(), windowListEntries);
         windowListPanel.innerHTML = "";
-        if (entries.length === 0) {
+        if (model.count === 0) {
           const empty = document.createElement("div");
           empty.className = "window-list-empty";
           empty.textContent = "No windows";
           windowListPanel.appendChild(empty);
           return;
         }
-        for (const entry of entries) {
-          const row = document.createElement("button");
-          row.type = "button";
-          row.className = "window-list-row";
-          if (entry.agent_color) {
-            row.dataset.agentColor = entry.agent_color;
+        for (const group of model.groups) {
+          if (model.multiProject) {
+            const header = document.createElement("div");
+            header.className = "window-list-group";
+            header.textContent = group.tabTitle || "Project";
+            windowListPanel.appendChild(header);
           }
-          const geometryLabel = windowGeometryLabel(entry);
-          const runtimeState = runtimeStateForWindow(entry);
-          const runtimeLabel = windowRuntimeLabel(runtimeState);
-          const runtimeChip = shouldShowRuntimeStatus(entry)
-            ? `<span class="status-chip ${runtimeState}">
-                <span class="status-dot"></span>
-                <span class="status-label">${runtimeLabel}</span>
-              </span>`
-            : "";
-          const roleBadgeLabel = windowRoleBadgeLabel(entry);
-          const roleBadge = roleBadgeLabel
-            ? `<span class="window-role-badge window-list-role">${escapeHtml(roleBadgeLabel)}</span>`
-            : "";
-          row.innerHTML = `
-            <div class="window-list-copy">
-              <div class="window-list-title">${escapeHtml(windowDisplayTitle(entry))}</div>
-              <div class="window-list-meta">
-                ${roleBadge}
-                <span class="window-list-geometry">${geometryLabel}</span>
-              </div>
-            </div>
-            ${runtimeChip}
-          `;
-          const windowListTitle = row.querySelector(".window-list-title");
-          if (windowListTitle) windowListTitle.title = windowTitleTooltip(entry);
-          row.addEventListener("click", () => {
-            windowListOpen = false;
-            renderWindowList();
-            focusWindowRemotely(entry.id, { center: true });
-            if (entry.minimized) {
-              send({ kind: "restore_window", id: entry.id });
-            }
-          });
-          windowListPanel.appendChild(row);
+          for (const entry of group.entries) {
+            windowListPanel.appendChild(createWindowListRow(entry));
+          }
         }
+      }
+
+      function createWindowListRow(entry) {
+        const row = document.createElement("button");
+        row.type = "button";
+        row.className = "window-list-row";
+        if (entry.agent_color) {
+          row.dataset.agentColor = entry.agent_color;
+        }
+        const geometryLabel = windowGeometryLabel(entry);
+        const runtimeState = runtimeStateForWindow(entry);
+        const runtimeLabel = windowRuntimeLabel(runtimeState);
+        const runtimeChip = shouldShowRuntimeStatus(entry)
+          ? `<span class="status-chip ${runtimeState}">
+              <span class="status-dot"></span>
+              <span class="status-label">${runtimeLabel}</span>
+            </span>`
+          : "";
+        const roleBadgeLabel = windowRoleBadgeLabel(entry);
+        const roleBadge = roleBadgeLabel
+          ? `<span class="window-role-badge window-list-role">${escapeHtml(roleBadgeLabel)}</span>`
+          : "";
+        // FR-045 (anshin): surface the agent's live activity detail
+        // (dynamic_title_detail) as a glanceable line when it differs from the
+        // display title, so the operator can read what each pane is doing now
+        // without focusing it.
+        const displayTitle = windowDisplayTitle(entry);
+        const activityDetail = String(entry?.dynamic_title_detail || "").trim();
+        const activityLine =
+          activityDetail && activityDetail !== displayTitle
+            ? `<div class="window-list-activity">${escapeHtml(activityDetail)}</div>`
+            : "";
+        row.innerHTML = `
+          <div class="window-list-copy">
+            <div class="window-list-title">${escapeHtml(displayTitle)}</div>
+            ${activityLine}
+            <div class="window-list-meta">
+              ${roleBadge}
+              <span class="window-list-geometry">${geometryLabel}</span>
+            </div>
+          </div>
+          ${runtimeChip}
+        `;
+        const windowListTitle = row.querySelector(".window-list-title");
+        if (windowListTitle) windowListTitle.title = windowTitleTooltip(entry);
+        // SPEC-2008 camera-focus / FR-094: the persistent switcher row flies
+        // the local camera to frame the chosen window (teleport). There is no
+        // maximize/restore anymore; frameWindow applies local focus + sends
+        // focus_window for highlight.
+        row.addEventListener("click", () => {
+          windowListOpen = false;
+          renderWindowList();
+          frameWindow(entry.id);
+        });
+        return row;
       }
 
       function toggleWindowList() {
@@ -604,70 +603,13 @@ export function createProjectShellSurface({
         }
       }
 
-      function geometryMatches(left, right) {
-        return (
-          Math.abs(left.x - right.x) < 0.5 &&
-          Math.abs(left.y - right.y) < 0.5 &&
-          Math.abs(left.width - right.width) < 0.5 &&
-          Math.abs(left.height - right.height) < 0.5
-        );
-      }
-
-      function syncMaximizedWindowsToViewport() {
-        // A maximized window fills THIS client's viewport locally. Re-apply the
-        // fill directly to the element and NEVER send a maximize_window
-        // correction: broadcasting one let two clients with different viewport
-        // sizes ping-pong the shared maximized geometry forever (the flicker
-        // bug). The shared `maximized` flag is enough; the pixel fill is a
-        // per-client view concern computed from each client's visibleBounds.
-        const fill = maximizedGeometry(visibleBounds(), getViewport().zoom);
-        for (const windowData of activeWorkspace().windows || []) {
-          if (!windowData.maximized || windowData.minimized) {
-            continue;
-          }
-          const element = windowMap.get(windowData.id);
-          if (!element) {
-            continue;
-          }
-          const current = {
-            x: parseFloat(element.style.left || "0"),
-            y: parseFloat(element.style.top || "0"),
-            width: parseFloat(element.style.width || "0"),
-            height: parseFloat(element.style.height || "0"),
-          };
-          if (geometryMatches(current, fill)) {
-            continue;
-          }
-          element.style.left = `${fill.x}px`;
-          element.style.top = `${fill.y}px`;
-          element.style.width = `${fill.width}px`;
-          element.style.height = `${fill.height}px`;
-          if (presetSurface(windowData.preset) === "terminal") {
-            // Visual re-fit only (persist=false): never round-trip geometry from
-            // the sync path, so this client cannot churn the shared state.
-            scheduleTerminalFit(windowData.id, false);
-          }
-        }
-      }
-
-      function scheduleMaximizedWindowsToViewportSync() {
-        if (maximizedViewportSyncFrame !== null) {
-          return;
-        }
-        maximizedViewportSyncFrame = requestAnimationFrame(() => {
-          maximizedViewportSyncFrame = null;
-          syncMaximizedWindowsToViewport();
-        });
-      }
-
-      function workspaceHasVisibleMaximizedWindow(workspace) {
-        return (workspace?.windows || []).some(
-          (windowData) =>
-            Boolean(windowData?.maximized) &&
-            !windowData?.minimized &&
-            visibleWindowData(windowData),
-        );
-      }
+      // SPEC-2008 camera-focus: the maximized-window viewport sync
+      // (geometryMatches / syncMaximizedWindowsToViewport /
+      // scheduleMaximizedWindowsToViewportSync /
+      // workspaceHasVisibleMaximizedWindow) was removed. Windows render at
+      // their own geometry and the camera is driven locally by app.js
+      // (frameWindow / enterOverview), so there is no shared maximized fill to
+      // reconcile per client.
 
       function renderProjectTabs() {
         const appState = getAppState();
@@ -1197,9 +1139,6 @@ export function createProjectShellSurface({
         requestWindowList,
         renderWindowList,
         toggleWindowList,
-        syncMaximizedWindowsToViewport,
-        scheduleMaximizedWindowsToViewportSync,
-        workspaceHasVisibleMaximizedWindow,
         renderProjectTabs,
         refreshProjectTabStateCues,
         markProjectUnread,

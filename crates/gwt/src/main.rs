@@ -10,7 +10,9 @@ use std::{
     time::{Duration, Instant},
 };
 
-use crate::repo_browser::{preferred_issue_launch_branch, spawn_branch_load_async};
+use crate::repo_browser::{
+    preferred_issue_launch_branch, spawn_branch_load_async, spawn_remote_start_work_branches_async,
+};
 use base64::Engine;
 use gwt::protocol::{FileContentErrorKind, FileContentMode};
 use gwt::{
@@ -280,6 +282,30 @@ fn frontend_event_may_change_project_tabs(event: &FrontendEvent) -> bool {
             | FrontendEvent::ReopenRecentProject { .. }
             | FrontendEvent::CloseProjectTab { .. }
     )
+}
+
+/// Phase 0 perf instrumentation (measure-first; see plan
+/// `launch-agent-ultrathink-shimmering-lake.md`). `handle_frontend_event` runs
+/// on the tao main event-loop thread, so any handler doing synchronous
+/// repository-size-scaling work freezes the whole GUI (the reported "Launch
+/// Agent wizard freezes on large repos" symptom). A handler that blocks longer
+/// than this many milliseconds is logged at `warn` so the offending event is
+/// identifiable from `~/.gwt/logs/`. Inter-event timestamps on the `debug`
+/// line additionally expose CPU starvation (handler fast, but the event loop
+/// thread is not getting scheduled because a background indexer saturates all
+/// cores).
+const GUI_EVENT_LOOP_SLOW_DISPATCH_MS: u64 = 30;
+
+/// Cheap variant-name label for a `FrontendEvent`, derived from `Debug` and
+/// truncated to the leading identifier so dispatch-timing logs name the
+/// handler without ever emitting payload fields (which may contain env vars or
+/// tokens). Used only by the Phase 0 dispatch instrumentation.
+fn frontend_event_kind_label(event: &FrontendEvent) -> String {
+    format!("{event:?}")
+        .split(|c: char| !(c.is_ascii_alphanumeric() || c == '_'))
+        .find(|token| !token.is_empty())
+        .unwrap_or("Unknown")
+        .to_string()
 }
 
 const GUI_SHUTDOWN_BACKSTOP_GRACE: Duration = Duration::from_secs(5);
@@ -1010,6 +1036,13 @@ enum UserEvent {
     /// Applied to the Launch Wizard cache on the main thread so branch Resume
     /// availability/resolution stay fresh without main-thread disk I/O.
     RefreshLaunchWizardSessions(Vec<gwt_agent::Session>),
+    /// SPEC-2359 US-83 / FR-444: deliver the "open existing branch" picker
+    /// candidates computed off the UI thread (after `fetch_origin`) into the
+    /// live Launch Wizard identified by `wizard_id`.
+    RefreshLaunchWizardBranchCandidates {
+        wizard_id: String,
+        candidates: Vec<String>,
+    },
     UpdateAvailable(gwt_core::update::UpdateState),
     ApplyUpdate {
         state: gwt_core::update::UpdateState,
@@ -1493,9 +1526,6 @@ mod tests {
             geometry_revision: 0,
             z_index: 1,
             status,
-            minimized: false,
-            maximized: false,
-            pre_maximize_geometry: None,
             placement: gwt::WindowPlacement::Canvas,
             persist: true,
             purpose_title: None,
@@ -2314,6 +2344,7 @@ mod tests {
                         cleanup_ready: true,
                         cleanup: BranchCleanupInfo::default(),
                         resume: gwt::BranchResumeInfo::unavailable(),
+                        start_work_eligibility: None,
                     },
                     normalized_branch_name: "feature/demo".to_string(),
                     worktree_path: None,
@@ -2345,6 +2376,7 @@ mod tests {
             cleanup_ready: true,
             cleanup: BranchCleanupInfo::default(),
             resume: gwt::BranchResumeInfo::unavailable(),
+            start_work_eligibility: None,
         }
     }
 
@@ -2493,8 +2525,34 @@ mod tests {
             "Repo",
             repo.clone(),
             ProjectKind::NonRepo,
-            &[WindowPreset::FileTree],
+            &[WindowPreset::FileTree, WindowPreset::Improvement],
         );
+        fs::create_dir_all(repo.join(".gwt/improvements")).expect("create improvement dir");
+        fs::write(
+            repo.join(".gwt/improvements/candidates.json"),
+            serde_json::json!({
+                "candidates": [{
+                    "id": "impr-sync",
+                    "created_at": "2026-06-23T00:00:00Z",
+                    "updated_at": "2026-06-23T00:00:00Z",
+                    "source": "agent-failure",
+                    "target_artifact": "skill",
+                    "classification": "gwt-caused",
+                    "confidence": "high",
+                    "state": "pending",
+                    "dedupe_key": "skill:sync",
+                    "occurrences": 1,
+                    "sanitized_summary": "Sync candidate",
+                    "sanitized_details": null,
+                    "evidence_digest": null,
+                    "local_evidence": [],
+                    "linked_issue": null,
+                    "dismissed_reason": null
+                }]
+            })
+            .to_string(),
+        )
+        .expect("write improvement candidates");
         let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
         let window_id = window_id_for_preset(&runtime, "tab-1", WindowPreset::FileTree, 0);
         runtime
@@ -2527,6 +2585,12 @@ mod tests {
         assert!(events.iter().any(|event| matches!(
             event.event,
             BackendEvent::UpdateState(gwt_core::update::UpdateState::UpToDate { .. })
+        )));
+        assert!(events.iter().any(|event| matches!(
+            &event.event,
+            BackendEvent::ImprovementCandidates { candidates }
+                if candidates.first().and_then(|candidate| candidate.get("id")).and_then(serde_json::Value::as_str)
+                    == Some("impr-sync")
         )));
     }
 
@@ -2747,16 +2811,6 @@ mod tests {
             .expect("file tree lookup")
             .raw_id
             .clone();
-        assert!(
-            !runtime
-                .tab("tab-1")
-                .expect("tab")
-                .workspace
-                .window(&file_tree_raw_id)
-                .expect("window")
-                .maximized,
-            "windows should not be auto-maximized on create"
-        );
 
         assert_eq!(
             runtime.window_status(&branches_id),
@@ -2790,26 +2844,6 @@ mod tests {
                 .len(),
             1
         );
-        assert_eq!(runtime.minimize_window_events(&file_tree_id).len(), 1);
-        assert!(
-            runtime
-                .tab("tab-1")
-                .expect("tab")
-                .workspace
-                .window(&file_tree_raw_id)
-                .expect("window")
-                .minimized
-        );
-        assert_eq!(runtime.restore_window_events(&file_tree_id).len(), 1);
-        assert!(
-            !runtime
-                .tab("tab-1")
-                .expect("tab")
-                .workspace
-                .window(&file_tree_raw_id)
-                .expect("window")
-                .minimized
-        );
 
         let geometry = WindowGeometry {
             x: 30.0,
@@ -2840,8 +2874,11 @@ mod tests {
         assert!(!runtime.window_lookup.contains_key(&file_tree_id));
     }
 
+    // SPEC-2008 FR-096/FR-097: the Camera-focus model replaced manual maximize.
+    // Windows now open and focus at their normal floating size; nothing
+    // auto-maximizes. Framing is the frontend camera's responsibility.
     #[test]
-    fn non_agent_window_presets_open_and_focus_maximized() {
+    fn non_agent_window_presets_open_and_focus_at_normal_floating_size() {
         let temp = tempdir().expect("tempdir");
         let repo = temp.path().join("repo");
         fs::create_dir_all(&repo).expect("create repo");
@@ -2862,15 +2899,18 @@ mod tests {
             .expect("board lookup")
             .raw_id
             .clone();
-        assert!(
-            !runtime
-                .tab("tab-1")
-                .expect("tab")
-                .workspace
-                .window(&board_raw_id)
-                .expect("board window")
-                .maximized,
-            "Board windows should not auto-maximize",
+        let board_geometry = runtime
+            .tab("tab-1")
+            .expect("tab")
+            .workspace
+            .window(&board_raw_id)
+            .expect("board window")
+            .geometry
+            .clone();
+        assert_eq!(
+            (board_geometry.width, board_geometry.height),
+            (720.0, 420.0),
+            "Board windows open at their normal floating size",
         );
         assert_eq!(
             runtime
@@ -2878,15 +2918,18 @@ mod tests {
                 .len(),
             1
         );
-        assert!(
-            !runtime
-                .tab("tab-1")
-                .expect("tab")
-                .workspace
-                .window(&board_raw_id)
-                .expect("board window")
-                .maximized,
-            "focusing a window should not auto-maximize it",
+        let board_after_focus = runtime
+            .tab("tab-1")
+            .expect("tab")
+            .workspace
+            .window(&board_raw_id)
+            .expect("board window")
+            .geometry
+            .clone();
+        assert_eq!(
+            (board_after_focus.width, board_after_focus.height),
+            (720.0, 420.0),
+            "focusing a window must not resize it",
         );
 
         let shell_id = window_id_for_preset(&runtime, "tab-1", WindowPreset::Shell, 0);
@@ -2902,15 +2945,18 @@ mod tests {
             .expect("shell lookup")
             .raw_id
             .clone();
-        assert!(
-            !runtime
-                .tab("tab-1")
-                .expect("tab")
-                .workspace
-                .window(&shell_raw_id)
-                .expect("shell window")
-                .maximized,
-            "shell windows should keep their normal floating size",
+        let shell_geometry = runtime
+            .tab("tab-1")
+            .expect("tab")
+            .workspace
+            .window(&shell_raw_id)
+            .expect("shell window")
+            .geometry
+            .clone();
+        assert_eq!(
+            (shell_geometry.width, shell_geometry.height),
+            (1280.0, 800.0),
+            "shell is a terminal preset, so it opens work-area large for camera framing",
         );
 
         for preset in [
@@ -2922,6 +2968,7 @@ mod tests {
             WindowPreset::Issue,
             WindowPreset::Spec,
             WindowPreset::Work,
+            WindowPreset::Improvement,
             WindowPreset::Pr,
         ] {
             assert_eq!(
@@ -2942,9 +2989,8 @@ mod tests {
                 .workspace
                 .window(&raw_id)
                 .expect("window");
-            assert!(!window.maximized, "{id} should not be auto-maximized");
-            assert_eq!(window.geometry.width, 720.0);
-            assert_eq!(window.geometry.height, 420.0);
+            assert_eq!(window.geometry.width, 720.0, "{id} opens at normal width");
+            assert_eq!(window.geometry.height, 420.0, "{id} opens at normal height");
         }
     }
 
@@ -3849,40 +3895,6 @@ mod tests {
                     gwt::FrontendEvent::ArrangeWindows {
                         mode: ArrangeMode::Tile,
                         bounds: bounds.clone(),
-                    },
-                )
-                .len(),
-            1
-        );
-        assert_eq!(
-            runtime
-                .handle_frontend_event(
-                    "client-1".to_string(),
-                    gwt::FrontendEvent::MaximizeWindow {
-                        id: file_tree_id.clone(),
-                        bounds,
-                    },
-                )
-                .len(),
-            1
-        );
-        assert_eq!(
-            runtime
-                .handle_frontend_event(
-                    "client-1".to_string(),
-                    gwt::FrontendEvent::MinimizeWindow {
-                        id: file_tree_id.clone(),
-                    },
-                )
-                .len(),
-            1
-        );
-        assert_eq!(
-            runtime
-                .handle_frontend_event(
-                    "client-1".to_string(),
-                    gwt::FrontendEvent::RestoreWindow {
-                        id: file_tree_id.clone(),
                     },
                 )
                 .len(),
@@ -4835,6 +4847,8 @@ mod tests {
             env_vars: HashMap::from([("EXTRA_FLAG".to_string(), "1".to_string())]),
             remove_env: vec!["SECRET".to_string()],
             windows_shell: None,
+            command_override: None,
+            command_args_override: None,
         };
 
         let launch = build_shell_process_launch(&worktree, &mut config).expect("shell launch");
@@ -4872,6 +4886,8 @@ mod tests {
             env_vars: HashMap::new(),
             remove_env: Vec::new(),
             windows_shell: Some(gwt_agent::WindowsShellKind::WindowsPowerShell),
+            command_override: None,
+            command_args_override: None,
         };
 
         let launch = build_shell_process_launch(&worktree, &mut config).expect("shell launch");
@@ -4885,6 +4901,51 @@ mod tests {
             assert_ne!(launch.command, "powershell");
             assert_ne!(launch.command, "cmd.exe");
         }
+    }
+
+    #[test]
+    fn build_shell_process_launch_for_host_uses_command_override() {
+        // SPEC-3151 FR-010: a command override (the OpenCode setup launcher)
+        // replaces the detected interactive shell while keeping the worktree
+        // env and GWT_PROJECT_ROOT.
+        let temp = tempdir().expect("tempdir");
+        let worktree = temp.path().join("repo-feature");
+        fs::create_dir_all(&worktree).expect("create worktree");
+        let mut config = ShellLaunchConfig {
+            working_dir: Some(worktree.clone()),
+            branch: Some("feature/gui".to_string()),
+            base_branch: None,
+            display_name: "OpenCode Setup".to_string(),
+            runtime_target: LaunchRuntimeTarget::Host,
+            docker_service: None,
+            docker_lifecycle_intent: DockerLifecycleIntent::Connect,
+            env_vars: HashMap::new(),
+            remove_env: Vec::new(),
+            windows_shell: None,
+            command_override: Some("bunx".to_string()),
+            command_args_override: Some(vec![
+                "opencode-ai@latest".to_string(),
+                "auth".to_string(),
+                "login".to_string(),
+            ]),
+        };
+
+        let launch = build_shell_process_launch(&worktree, &mut config).expect("shell launch");
+
+        assert_eq!(launch.command, "bunx");
+        assert_eq!(
+            launch.args,
+            vec![
+                "opencode-ai@latest".to_string(),
+                "auth".to_string(),
+                "login".to_string()
+            ]
+        );
+        assert_eq!(launch.cwd.as_deref(), Some(worktree.as_path()));
+        assert_eq!(
+            launch.env.get("GWT_PROJECT_ROOT").map(String::as_str),
+            Some(worktree.display().to_string().as_str())
+        );
     }
 
     #[test]
@@ -5054,6 +5115,7 @@ mod tests {
                 cleanup_ready: true,
                 cleanup: BranchCleanupInfo::default(),
                 resume: gwt::BranchResumeInfo::unavailable(),
+                start_work_eligibility: None,
             },
             BranchListEntry {
                 name: "develop".to_string(),
@@ -5066,6 +5128,7 @@ mod tests {
                 cleanup_ready: true,
                 cleanup: BranchCleanupInfo::default(),
                 resume: gwt::BranchResumeInfo::unavailable(),
+                start_work_eligibility: None,
             },
         ];
         assert_eq!(
@@ -5084,6 +5147,7 @@ mod tests {
             cleanup_ready: true,
             cleanup: BranchCleanupInfo::default(),
             resume: gwt::BranchResumeInfo::unavailable(),
+            start_work_eligibility: None,
         }];
         assert_eq!(
             super::preferred_issue_launch_branch(&head_only),
@@ -5742,6 +5806,8 @@ mod tests {
             env_vars: HashMap::new(),
             remove_env: Vec::new(),
             windows_shell: None,
+            command_override: None,
+            command_args_override: None,
         };
         super::resolve_shell_launch_worktree(&repo, &mut shell_config)
             .expect("shell launch wrapper");
@@ -5749,6 +5815,112 @@ mod tests {
             .working_dir
             .as_deref()
             .is_some_and(|value| super::same_worktree_path(value, &existing_worktree)));
+    }
+
+    #[test]
+    fn resolve_launch_worktree_continues_existing_remote_branch_without_new_work_branch() {
+        // SPEC-2359 US-83 / FR-440 / FR-441 / SC-300: starting work from an
+        // existing origin branch must materialize a worktree on a local branch
+        // that tracks origin/<X> ("continue on the branch itself"), and must NOT
+        // mint a new work/* branch. This locks the routing contract that both
+        // entry points (Branches row + Launch Wizard picker) reuse.
+        let temp = tempdir().expect("tempdir");
+        let repo = temp.path().join("repo");
+        init_git_clone_with_origin(&repo);
+
+        // Publish an existing remote branch, then drop the local copy so only
+        // origin/feature-foo remains (the "colleague pushed a branch" case).
+        for args in [
+            vec!["checkout", "-q", "-b", "feature-foo"],
+            vec!["commit", "-q", "--allow-empty", "-m", "remote work"],
+            vec!["push", "-q", "origin", "feature-foo"],
+            vec!["checkout", "-q", "develop"],
+            vec!["branch", "-D", "feature-foo"],
+            vec!["fetch", "-q", "origin", "--prune"],
+        ] {
+            let status = gwt_core::process::hidden_command("git")
+                .args(&args)
+                .current_dir(&repo)
+                .status()
+                .expect("git fixture step");
+            assert!(status.success(), "git {:?} failed", args);
+        }
+
+        // Pre-conditions: no local feature-foo, origin/feature-foo present.
+        let local = gwt_core::process::hidden_command("git")
+            .args(["show-ref", "--verify", "--quiet", "refs/heads/feature-foo"])
+            .current_dir(&repo)
+            .status()
+            .expect("probe local branch");
+        assert_eq!(local.code(), Some(1), "local feature-foo must be absent");
+        let remote = gwt_core::process::hidden_command("git")
+            .args([
+                "show-ref",
+                "--verify",
+                "--quiet",
+                "refs/remotes/origin/feature-foo",
+            ])
+            .current_dir(&repo)
+            .status()
+            .expect("probe remote branch");
+        assert!(remote.success(), "origin/feature-foo must exist");
+
+        let mut working_dir = None;
+        let mut env_vars = HashMap::new();
+        let mut base_branch = None;
+        super::resolve_launch_worktree_request(
+            &repo,
+            Some("feature-foo"),
+            &mut base_branch,
+            &mut working_dir,
+            &mut env_vars,
+        )
+        .expect("continue existing remote branch");
+        let worktree_dir = working_dir.expect("worktree dir for existing remote branch");
+        assert!(worktree_dir.exists(), "worktree must be materialized");
+
+        // The worktree HEAD is the remote branch itself, not a new work/* branch.
+        let current = gwt_core::process::hidden_command("git")
+            .args(["branch", "--show-current"])
+            .current_dir(&worktree_dir)
+            .output()
+            .expect("current branch in worktree");
+        assert!(current.status.success(), "git branch --show-current failed");
+        assert_eq!(
+            String::from_utf8_lossy(&current.stdout).trim(),
+            "feature-foo"
+        );
+
+        // Local feature-foo tracks origin/feature-foo.
+        let upstream = gwt_core::process::hidden_command("git")
+            .args([
+                "rev-parse",
+                "--abbrev-ref",
+                "--symbolic-full-name",
+                "feature-foo@{upstream}",
+            ])
+            .current_dir(&worktree_dir)
+            .output()
+            .expect("upstream of feature-foo");
+        assert!(upstream.status.success(), "no upstream configured");
+        assert_eq!(
+            String::from_utf8_lossy(&upstream.stdout).trim(),
+            "origin/feature-foo"
+        );
+
+        // No work/* branch was created anywhere.
+        let work_branches = gwt_core::process::hidden_command("git")
+            .args(["branch", "--list", "work/*"])
+            .current_dir(&repo)
+            .output()
+            .expect("list work branches");
+        assert!(work_branches.status.success(), "git branch --list failed");
+        assert!(
+            String::from_utf8_lossy(&work_branches.stdout)
+                .trim()
+                .is_empty(),
+            "Start Work from an existing remote branch must not mint a work/* branch"
+        );
     }
 
     #[test]
@@ -6846,7 +7018,29 @@ fn main() -> std::io::Result<()> {
             Event::UserEvent(UserEvent::Frontend { client_id, event }) => {
                 let refresh_index_status = matches!(event, FrontendEvent::FrontendReady);
                 let sync_board_projection_watchers = frontend_event_may_change_project_tabs(&event);
+                // Phase 0 perf instrumentation (measure-first): time the handler
+                // on the main event-loop thread so a synchronous repo-scaling
+                // handler that freezes the GUI is diagnosable, and inter-event
+                // timestamps reveal CPU starvation by background indexers.
+                let dispatch_kind = frontend_event_kind_label(&event);
+                let dispatch_started = std::time::Instant::now();
                 let events = app.handle_frontend_event(client_id, event);
+                let dispatch_elapsed_ms = dispatch_started.elapsed().as_millis() as u64;
+                if dispatch_elapsed_ms >= GUI_EVENT_LOOP_SLOW_DISPATCH_MS {
+                    tracing::warn!(
+                        target: "gwt.frontend.timing",
+                        event = %dispatch_kind,
+                        elapsed_ms = dispatch_elapsed_ms,
+                        "frontend event handler blocked the GUI event loop"
+                    );
+                } else {
+                    tracing::debug!(
+                        target: "gwt.frontend.timing",
+                        event = %dispatch_kind,
+                        elapsed_ms = dispatch_elapsed_ms,
+                        "frontend event handled"
+                    );
+                }
                 if sync_board_projection_watchers {
                     board_projection_watchers.sync(&app, proxy.clone());
                     workspace_projection_watchers.sync(&app, proxy.clone());
@@ -7014,6 +7208,12 @@ fn main() -> std::io::Result<()> {
             }
             Event::UserEvent(UserEvent::RefreshLaunchWizardSessions(sessions)) => {
                 app.apply_refreshed_launch_wizard_sessions(sessions);
+            }
+            Event::UserEvent(UserEvent::RefreshLaunchWizardBranchCandidates {
+                wizard_id,
+                candidates,
+            }) => {
+                clients.dispatch(app.apply_launch_wizard_branch_candidates(wizard_id, candidates));
             }
             Event::UserEvent(UserEvent::UpdateAvailable(state)) => {
                 clients.dispatch(record_update_available(&mut app, state));

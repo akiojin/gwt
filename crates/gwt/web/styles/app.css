@@ -609,6 +609,18 @@ body {
   white-space: nowrap;
 }
 
+/* FR-045 (anshin) — the agent's live activity detail under the title. Muted
+   single line that ellipsis-truncates so long activity text never wraps. */
+.window-list-activity {
+  margin-top: 3px;
+  font-family: var(--font-body);
+  font-size: var(--type-xs);
+  color: var(--color-text-muted);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .window-list-meta {
   margin-top: 4px;
   display: flex;
@@ -633,6 +645,24 @@ body {
   color: var(--color-text-muted);
   font-family: var(--font-body);
   font-size: var(--type-sm);
+}
+
+/* SPEC-3038 (2026-06-20) — per-project group header in the cross-tab Windows
+ * popover (shown only when more than one project tab contributes windows). */
+.window-list-group {
+  padding: 4px 6px 2px;
+  font-family: var(--font-mono);
+  font-size: var(--type-xs);
+  font-weight: 600;
+  letter-spacing: var(--tracking-mono);
+  text-transform: uppercase;
+  color: var(--color-text-muted);
+}
+
+.window-list-group:not(:first-child) {
+  margin-top: 6px;
+  border-top: 1px solid var(--color-border);
+  padding-top: 8px;
 }
 
 .arrange-button {
@@ -688,10 +718,6 @@ body {
     0 0 0 1px var(--color-focus-ring);
 }
 
-.workspace-window.minimized {
-  min-height: 38px;
-}
-
 .workspace-window.surface-terminal {
   /* Terminal chrome follows the app theme; xterm content stays on the
      Dark Operator palette for terminal readability. */
@@ -708,6 +734,7 @@ body {
 .workspace-window.surface-knowledge,
 .workspace-window.surface-index,
 .workspace-window.surface-profile,
+.workspace-window.surface-improvement,
 .workspace-window.surface-console {
   background: var(--color-surface);
 }
@@ -740,6 +767,7 @@ body {
 .surface-index .titlebar,
 .surface-work .titlebar,
 .surface-profile .titlebar,
+.surface-improvement .titlebar,
 .surface-console .titlebar {
   background: var(--color-surface-elevated);
   color: var(--color-text);
@@ -748,10 +776,6 @@ body {
 
 .titlebar:active {
   cursor: grabbing;
-}
-
-.workspace-window.maximized .titlebar {
-  cursor: default;
 }
 
 .title {
@@ -829,6 +853,7 @@ body {
 .surface-index .status-chip,
 .surface-work .status-chip,
 .surface-profile .status-chip,
+.surface-improvement .status-chip,
 .surface-console .status-chip,
 .surface-mock .status-chip {
   color: var(--color-text);
@@ -895,6 +920,7 @@ body {
 .surface-index .icon-button,
 .surface-work .icon-button,
 .surface-profile .icon-button,
+.surface-improvement .icon-button,
 .surface-console .icon-button,
 .surface-mock .icon-button {
   color: var(--color-text);
@@ -914,6 +940,36 @@ body {
 
 .workspace-window.tabbed .window-body {
   top: 70px;
+}
+
+/* SPEC-2008 camera-focus: manual window resize handle. Framing fits the
+   CAMERA to a window; this grip still lets the user resize the WINDOW itself
+   (e.g. grow a tiled window back up). There is no maximized/minimized state,
+   so only the base + hover affordance exist. */
+.resize-handle {
+  position: absolute;
+  right: 0;
+  bottom: 0;
+  width: 18px;
+  height: 18px;
+  cursor: nwse-resize;
+  background:
+    linear-gradient(135deg,
+      transparent 0 50%,
+      color-mix(in oklab, var(--color-text-muted) 50%, transparent) 50% 60%,
+      transparent 60% 70%,
+      color-mix(in oklab, var(--color-text-muted) 50%, transparent) 70% 80%,
+      transparent 80%);
+}
+
+.resize-handle:hover {
+  background:
+    linear-gradient(135deg,
+      transparent 0 50%,
+      color-mix(in oklab, var(--color-state-active) 70%, transparent) 50% 60%,
+      transparent 60% 70%,
+      color-mix(in oklab, var(--color-state-active) 70%, transparent) 70% 80%,
+      transparent 80%);
 }
 
 .workspace-window.dock-target .titlebar {
@@ -1057,9 +1113,17 @@ body {
   animation: none;
 }
 
+/* FR-039 (anshin): waiting maps to the LOUD needs-input state, so the WAIT cue
+   stays prominent on an inactive tab through amber text + an amber tab edge —
+   the same loud-but-static treatment blocked gets, so "your turn" is never
+   lost in the quiet idle palette. */
 .window-tab[data-agent-state="waiting"] .window-tab-state {
-  color: var(--color-state-idle);
+  color: var(--color-state-needs-input);
   animation: none;
+}
+
+.window-tab[data-agent-state="waiting"] {
+  border-color: color-mix(in oklab, var(--color-state-needs-input) 55%, var(--color-border));
 }
 
 /* AS-2.3: blocked stays loud even on an inactive tab through red text,
@@ -1141,12 +1205,6 @@ body {
   color: var(--color-text);
 }
 
-.workspace-window.minimized .window-body,
-.workspace-window.minimized .resize-handle,
-.workspace-window.maximized .resize-handle {
-  display: none;
-}
-
 /* SPEC-2356 FR-013 (revised): the terminal surface body must stay
    continuous with the xterm Dark Operator background (#0a0d12). If
    Light theme leaks var(--color-canvas) here, the xterm region picks
@@ -1168,6 +1226,7 @@ body {
 .surface-work .window-body,
 .surface-console .window-body,
 .surface-mock .window-body,
+.surface-improvement .window-body,
 .surface-profile .window-body {
   background: var(--color-surface);
 }
@@ -1554,6 +1613,7 @@ body {
 .logs-root,
 .knowledge-root,
 .index-search-root,
+.improvement-inbox-root,
 .profile-root,
 .workspace-kanban-root,
 .workspace-overview-root,
@@ -1586,6 +1646,498 @@ body {
 
 .index-search-root {
   overflow: hidden;
+}
+
+.improvement-inbox-root {
+  min-width: 0;
+  min-height: 0;
+  background: var(--color-surface);
+  color: var(--color-text);
+}
+
+.improvement-inbox-toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 10px 12px;
+  border-bottom: 1px solid var(--color-border);
+  background: var(--color-surface-elevated);
+}
+
+.improvement-inbox-heading {
+  min-width: 0;
+  margin: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-family: var(--font-display);
+  font-stretch: 75%;
+  font-size: var(--type-sm);
+  font-weight: 700;
+  letter-spacing: 0;
+  text-transform: uppercase;
+  color: var(--color-display-fg);
+}
+
+.improvement-inbox-count {
+  flex-shrink: 0;
+  min-width: 24px;
+  padding: 2px 7px;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-pill);
+  color: var(--color-text-muted);
+  font-family: var(--font-mono);
+  font-size: var(--type-xs);
+  text-align: center;
+}
+
+.improvement-inbox-tabs {
+  display: flex;
+  gap: 6px;
+  padding: 8px 10px 0;
+  border-bottom: 1px solid var(--color-border);
+  background: var(--color-surface);
+}
+
+.improvement-inbox-tab {
+  min-width: 0;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 7px 10px;
+  border: 1px solid var(--color-border);
+  border-bottom-color: transparent;
+  border-radius: var(--radius-sm) var(--radius-sm) 0 0;
+  background: var(--color-surface);
+  color: var(--color-text-muted);
+  font-family: var(--font-display);
+  font-stretch: 75%;
+  font-size: var(--type-xs);
+  font-weight: 700;
+  letter-spacing: 0;
+  text-transform: uppercase;
+  cursor: pointer;
+}
+
+.improvement-inbox-tab.is-active {
+  background: var(--color-surface-elevated);
+  color: var(--color-display-fg);
+}
+
+.improvement-inbox-tab-count {
+  min-width: 20px;
+  padding: 1px 6px;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-pill);
+  background: var(--color-surface);
+  color: var(--color-text-muted);
+  font-family: var(--font-mono);
+  font-size: var(--type-xs);
+  line-height: 1.2;
+  text-align: center;
+}
+
+.improvement-inbox-sections {
+  min-height: 0;
+  display: grid;
+  align-content: start;
+  gap: 14px;
+  padding: 10px;
+  overflow: auto;
+}
+
+.improvement-inbox-section {
+  min-width: 0;
+  display: grid;
+  gap: 8px;
+}
+
+[data-improvement-panel][hidden] {
+  display: none !important;
+}
+
+.improvement-inbox-section-header {
+  min-width: 0;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: start;
+  gap: 10px;
+  padding: 2px 2px 0;
+}
+
+.improvement-inbox-section-heading {
+  min-width: 0;
+  display: grid;
+  gap: 3px;
+}
+
+.improvement-inbox-section-title {
+  margin: 0;
+  color: var(--color-display-fg);
+  font-family: var(--font-display);
+  font-stretch: 75%;
+  font-size: var(--type-sm);
+  font-weight: 700;
+  letter-spacing: 0;
+  text-transform: uppercase;
+}
+
+.improvement-inbox-section-description {
+  margin: 0;
+  color: var(--color-text-muted);
+  font-size: var(--type-xs);
+  line-height: 1.35;
+}
+
+.improvement-inbox-section-count {
+  min-width: 24px;
+  padding: 2px 7px;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-pill);
+  color: var(--color-text-muted);
+  background: var(--color-surface);
+  font-family: var(--font-mono);
+  font-size: var(--type-xs);
+  line-height: 1.25;
+  text-align: center;
+}
+
+.improvement-inbox-list {
+  min-width: 0;
+  display: grid;
+  align-content: start;
+  gap: 8px;
+}
+
+.improvement-inbox-row {
+  min-width: 0;
+  display: grid;
+  gap: 8px;
+  padding: 10px;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  background: color-mix(in oklab, var(--color-surface-elevated) 84%, var(--color-canvas));
+}
+
+.improvement-inbox-row.is-processed {
+  background: color-mix(in oklab, var(--color-surface-elevated) 58%, var(--color-canvas));
+}
+
+.improvement-inbox-row-header {
+  min-width: 0;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: start;
+  gap: 10px;
+}
+
+.improvement-inbox-title {
+  min-width: 0;
+  color: var(--color-text-strong);
+  font-size: var(--type-sm);
+  font-weight: 700;
+  line-height: 1.35;
+}
+
+.improvement-inbox-badges,
+.improvement-inbox-actions,
+.improvement-inbox-meta {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.improvement-inbox-badges,
+.improvement-inbox-meta {
+  flex-wrap: wrap;
+}
+
+.improvement-inbox-badge,
+.improvement-inbox-meta-item {
+  display: inline-flex;
+  align-items: center;
+  min-width: 0;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-pill);
+  font-family: var(--font-mono);
+  font-size: var(--type-xs);
+  line-height: 1.2;
+}
+
+.improvement-inbox-badge {
+  padding: 3px 7px;
+  color: var(--color-text);
+  background: var(--color-surface);
+}
+
+.improvement-inbox-badge.state-pending {
+  border-color: color-mix(in oklab, var(--color-state-active) 42%, var(--color-border));
+}
+
+.improvement-inbox-badge.state-promoted,
+.improvement-inbox-badge.state-linked {
+  border-color: color-mix(in oklab, var(--color-state-done) 44%, var(--color-border));
+}
+
+.improvement-inbox-badge.state-dismissed {
+  color: var(--color-text-muted);
+}
+
+.improvement-inbox-badge.confidence-high {
+  background: color-mix(in oklab, var(--color-state-blocked) 14%, var(--color-surface));
+}
+
+.improvement-inbox-badge.confidence-medium {
+  background: color-mix(in oklab, var(--color-state-active) 12%, var(--color-surface));
+}
+
+.improvement-inbox-meta {
+  color: var(--color-text-muted);
+}
+
+.improvement-inbox-meta-item {
+  gap: 4px;
+  max-width: 100%;
+  padding: 2px 6px;
+  background: var(--color-surface);
+}
+
+.improvement-inbox-meta-label {
+  flex-shrink: 0;
+  color: var(--color-text-muted);
+}
+
+.improvement-inbox-meta-value {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--color-text);
+}
+
+.improvement-inbox-note {
+  padding: 7px 8px;
+  border-left: 2px solid var(--color-border-strong);
+  color: var(--color-text-muted);
+  font-size: var(--type-xs);
+  line-height: 1.4;
+  background: var(--color-surface);
+}
+
+.improvement-inbox-actions {
+  justify-content: flex-end;
+  flex-wrap: wrap;
+}
+
+.improvement-inbox-action {
+  min-width: 64px;
+  min-height: 26px;
+  padding: 3px 8px;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-sm);
+  background: var(--color-surface);
+  color: var(--color-text);
+  font-family: var(--font-mono);
+  font-size: var(--type-xs);
+  cursor: pointer;
+}
+
+.improvement-inbox-action.is-primary {
+  border-color: color-mix(in oklab, var(--color-state-active) 58%, var(--color-border));
+  background: color-mix(in oklab, var(--color-state-active) 15%, var(--color-surface));
+}
+
+.improvement-inbox-action.is-danger {
+  border-color: color-mix(in oklab, var(--color-state-blocked) 48%, var(--color-border));
+  background: color-mix(in oklab, var(--color-state-blocked) 12%, var(--color-surface));
+}
+
+.improvement-inbox-action.is-secondary,
+.improvement-inbox-action.is-ghost {
+  color: var(--color-text-muted);
+}
+
+.improvement-inbox-action.is-ghost {
+  min-width: 28px;
+  padding-inline: 7px;
+}
+
+.improvement-inbox-action:hover {
+  background: color-mix(in oklab, var(--color-text-muted) 18%, var(--color-surface));
+}
+
+.improvement-inbox-modal-backdrop {
+  position: absolute;
+  inset: 0;
+  z-index: 8;
+  display: grid;
+  place-items: center;
+  padding: 18px;
+  background: color-mix(in oklab, var(--color-canvas) 48%, transparent);
+}
+
+.improvement-inbox-modal-panel {
+  width: min(560px, 100%);
+  max-height: 100%;
+  display: grid;
+  grid-template-rows: auto minmax(0, 1fr) auto;
+  border: 1px solid var(--color-border-strong);
+  border-radius: var(--radius-md);
+  background: var(--color-surface);
+  box-shadow: var(--shadow-2);
+  overflow: hidden;
+}
+
+.improvement-inbox-modal-header,
+.improvement-inbox-modal-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 12px;
+  background: var(--color-surface-elevated);
+}
+
+.improvement-inbox-modal-header {
+  justify-content: space-between;
+  border-bottom: 1px solid var(--color-border);
+}
+
+.improvement-inbox-modal-title {
+  min-width: 0;
+  margin: 0;
+  color: var(--color-display-fg);
+  font-family: var(--font-display);
+  font-stretch: 75%;
+  font-size: var(--type-sm);
+  font-weight: 700;
+  letter-spacing: 0;
+  text-transform: uppercase;
+}
+
+.improvement-inbox-modal-body {
+  min-width: 0;
+  display: grid;
+  align-content: start;
+  gap: 8px;
+  padding: 12px;
+  overflow: auto;
+}
+
+.improvement-inbox-modal-summary {
+  margin: 0 0 2px;
+  color: var(--color-text-strong);
+  font-size: var(--type-sm);
+  font-weight: 700;
+  line-height: 1.4;
+}
+
+.improvement-inbox-modal-note {
+  margin: 4px 0 0;
+  padding: 8px;
+  border-left: 2px solid var(--color-border-strong);
+  color: var(--color-text-muted);
+  background: var(--color-surface-elevated);
+  font-size: var(--type-xs);
+  line-height: 1.4;
+}
+
+.improvement-inbox-issue-preview {
+  min-width: 0;
+  display: grid;
+  gap: 8px;
+  padding: 10px;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-sm);
+  background: var(--color-surface-elevated);
+}
+
+.improvement-inbox-issue-preview-heading {
+  margin: 0;
+  color: var(--color-display-fg);
+  font-family: var(--font-display);
+  font-stretch: 75%;
+  font-size: var(--type-sm);
+  font-weight: 700;
+  letter-spacing: 0;
+  text-transform: uppercase;
+}
+
+.improvement-inbox-issue-preview-label {
+  color: var(--color-text-muted);
+  font-family: var(--font-mono);
+  font-size: var(--type-xs);
+}
+
+.improvement-inbox-issue-preview-body {
+  max-height: min(360px, 46vh);
+  margin: 0;
+  padding: 10px;
+  overflow: auto;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-sm);
+  background: var(--color-canvas);
+  color: var(--color-text);
+  font-family: var(--font-mono);
+  font-size: var(--type-xs);
+  line-height: 1.45;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.improvement-inbox-modal-detail {
+  min-width: 0;
+  display: grid;
+  grid-template-columns: max-content minmax(0, 1fr);
+  gap: 8px;
+  color: var(--color-text);
+  font-family: var(--font-mono);
+  font-size: var(--type-xs);
+  line-height: 1.4;
+}
+
+.improvement-inbox-modal-detail-label {
+  color: var(--color-text-muted);
+}
+
+.improvement-inbox-modal-detail-value {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.improvement-inbox-reject-label {
+  display: grid;
+  gap: 6px;
+  color: var(--color-text-muted);
+  font-size: var(--type-xs);
+}
+
+.improvement-inbox-reject-reason {
+  width: 100%;
+  resize: vertical;
+  min-height: 72px;
+  padding: 8px;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-sm);
+  background: var(--color-surface-elevated);
+  color: var(--color-text);
+  font: inherit;
+}
+
+.improvement-inbox-modal-actions {
+  justify-content: flex-end;
+  flex-wrap: wrap;
+  border-top: 1px solid var(--color-border);
+}
+
+.improvement-inbox-empty {
+  padding: 28px 16px;
+  border: 1px dashed var(--color-border);
+  border-radius: var(--radius-md);
+  color: var(--color-text-muted);
+  font-size: var(--type-sm);
+  text-align: center;
+  background: color-mix(in oklab, var(--color-surface-elevated) 72%, var(--color-canvas));
 }
 
 .index-search-panel,
@@ -2022,6 +2574,157 @@ body {
   display: flex;
   align-items: center;
   gap: 8px;
+}
+
+/* SPEC-2963 FR-030: per-project Board destination chip + config popover.
+   The chip is a deliberate settings affordance — a provider dot, the
+   destination text, and a gear — set apart from the ghost filter buttons so it
+   reads as "configure where this Board goes", not another filter. */
+.board-destination-chip {
+  margin-right: auto;
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  padding: 3px 9px 3px 8px;
+  border: 1px solid var(--color-border-strong);
+  border-radius: 999px;
+  background: var(--color-surface);
+  color: var(--color-text);
+  font-size: var(--type-xs, 11px);
+  line-height: 1.6;
+  white-space: nowrap;
+  cursor: pointer;
+  transition:
+    border-color 0.12s ease,
+    background 0.12s ease;
+}
+
+.board-destination-chip:hover,
+.board-destination-chip:focus-visible {
+  outline: none;
+  border-color: var(--color-state-active);
+  background: color-mix(in oklab, var(--color-state-active) 10%, var(--color-surface));
+}
+
+.board-destination-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  flex: 0 0 auto;
+  background: var(--color-text-disabled);
+}
+
+.board-destination-chip[data-provider="slack"] .board-destination-dot {
+  background: #36c5f0;
+}
+.board-destination-chip[data-provider="teams"] .board-destination-dot {
+  background: #6264a7;
+}
+.board-destination-chip[data-provider="local"] .board-destination-dot {
+  background: var(--color-text-disabled);
+}
+.board-destination-chip[data-signed-in="false"] .board-destination-dot {
+  background: #f59e0b;
+  box-shadow: 0 0 0 3px color-mix(in oklab, #f59e0b 22%, transparent);
+}
+
+.board-destination-text {
+  font-weight: 600;
+  letter-spacing: 0.01em;
+}
+
+.board-destination-gear {
+  color: var(--color-text-muted);
+  font-size: 11px;
+  margin-left: 1px;
+}
+
+.board-destination-chip:hover .board-destination-gear {
+  color: var(--color-state-active);
+}
+
+.board-destination-popover {
+  position: fixed;
+  z-index: 10001;
+  min-width: 300px;
+  max-width: 360px;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  padding: 14px;
+  border: 1px solid var(--color-border-strong);
+  border-radius: var(--radius-md);
+  background: var(--color-surface-elevated);
+  box-shadow: var(--shadow-2);
+}
+
+.board-destination-popover-header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 8px;
+  padding-bottom: 10px;
+  border-bottom: 1px solid var(--color-border);
+}
+
+.board-destination-popover-title {
+  font-weight: 700;
+  color: var(--color-text-strong);
+}
+
+.board-destination-popover-sub {
+  margin-top: 2px;
+  font-size: var(--type-xs, 11px);
+  color: var(--color-text-muted);
+}
+
+.board-destination-popover-close {
+  flex: 0 0 auto;
+  border: 0;
+  background: transparent;
+  color: var(--color-text-muted);
+  font-size: 13px;
+  line-height: 1;
+  padding: 2px 4px;
+  cursor: pointer;
+  border-radius: var(--radius-sm, 4px);
+}
+
+.board-destination-popover-close:hover {
+  color: var(--color-text-strong);
+  background: color-mix(in oklab, var(--color-state-active) 14%, transparent);
+}
+
+.board-destination-field {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+}
+
+.board-destination-popover-status {
+  font-size: var(--type-xs, 11px);
+  color: var(--color-text-muted);
+  padding: 7px 9px;
+  border-radius: var(--radius-sm, 4px);
+  background: color-mix(in oklab, var(--color-state-active) 8%, transparent);
+  border: 1px solid var(--color-border);
+}
+
+.board-destination-popover-hint {
+  font-size: var(--type-xs, 11px);
+  color: var(--color-text-muted);
+}
+
+.board-destination-popover-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  margin-top: 2px;
+}
+
+.board-destination-popover-foot {
+  font-size: var(--type-xs, 11px);
+  color: var(--color-text-disabled);
 }
 
 .workspace-tab-group {
@@ -3349,6 +4052,114 @@ body {
   color: var(--color-text-muted);
 }
 
+/* SPEC-2356 Anshin Addendum (FR-040): in-app attention toasts. They stack in a
+   fixed bottom-right column above the completion toast slot, each carrying a
+   left accent rim keyed to its flavor (needs_input amber / error red / done
+   muted). */
+.attention-toast-stack {
+  position: fixed;
+  right: 18px;
+  bottom: 122px;
+  z-index: 1001;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 8px;
+  pointer-events: none;
+}
+
+.attention-toast {
+  display: grid;
+  grid-template-columns: 1fr auto;
+  align-items: stretch;
+  gap: 4px;
+  /* FR-040 refinement: a fixed width so every toast lines up regardless of how
+     long its copy is (no more ragged, content-sized toasts). */
+  width: min(360px, calc(100vw - 36px));
+  max-height: 200px;
+  overflow: hidden;
+  border: 1px solid var(--color-border-strong);
+  border-left: 3px solid var(--color-state-needs-input);
+  border-radius: var(--radius-md);
+  background: var(--color-surface-elevated);
+  box-shadow: var(--shadow-3);
+  pointer-events: auto;
+  animation: attention-toast-in var(--motion-medium) var(--motion-curve);
+  /* FR-040 refinement: collapse + fade on close so the rest of the stack
+     settles down smoothly instead of snapping. */
+  transition:
+    max-height var(--motion-medium) var(--motion-curve),
+    opacity var(--motion-medium) var(--motion-curve),
+    margin-top var(--motion-medium) var(--motion-curve);
+}
+
+.attention-toast[data-leaving="true"] {
+  max-height: 0;
+  opacity: 0;
+  margin-top: -8px;
+  pointer-events: none;
+}
+
+.attention-toast[data-flavor="error"] {
+  border-left-color: var(--color-state-blocked);
+}
+
+.attention-toast[data-flavor="done"] {
+  border-left-color: var(--color-state-done);
+}
+
+.attention-toast__jump {
+  display: grid;
+  gap: 2px;
+  min-height: 44px;
+  padding: 10px 12px;
+  border: 0;
+  background: transparent;
+  color: var(--color-text);
+  font-family: var(--font-body);
+  font-size: var(--type-sm);
+  text-align: left;
+  cursor: pointer;
+}
+
+.attention-toast__title {
+  font-weight: 700;
+  color: var(--color-text-strong);
+}
+
+.attention-toast__body {
+  color: var(--color-text-muted);
+}
+
+.attention-toast__dismiss {
+  align-self: stretch;
+  width: 32px;
+  border: 0;
+  border-left: 1px solid var(--color-border);
+  background: transparent;
+  color: var(--color-text-muted);
+  font-size: 16px;
+  line-height: 1;
+  cursor: pointer;
+}
+
+.attention-toast__dismiss:hover {
+  color: var(--color-text-strong);
+  background: color-mix(in oklab, var(--color-text-strong) 8%, transparent);
+}
+
+@keyframes attention-toast-in {
+  from { opacity: 0; transform: translateY(6px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .attention-toast {
+    animation: none;
+    transition: none;
+  }
+}
+
 .attachment-progress {
   position: absolute;
   right: 12px;
@@ -4229,22 +5040,6 @@ body {
   font-family: var(--font-mono);
   font-size: var(--type-xs);
   letter-spacing: var(--tracking-mono);
-}
-
-.resize-handle {
-  position: absolute;
-  right: 0;
-  bottom: 0;
-  width: 18px;
-  height: 18px;
-  cursor: nwse-resize;
-  background:
-    linear-gradient(135deg,
-      transparent 0 50%,
-      color-mix(in oklab, var(--color-text-muted) 50%, transparent) 50% 60%,
-      transparent 60% 70%,
-      color-mix(in oklab, var(--color-text-muted) 50%, transparent) 70% 80%,
-      transparent 80%);
 }
 
 /* SPEC-2008 FR-035: shared modal frame primitives. Surface modals

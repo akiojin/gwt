@@ -464,7 +464,7 @@ mod tests {
 
     #[test]
     fn build_version_options_installed_without_npm() {
-        // OpenCode/Copilot: installed but no npm package
+        // Antigravity/Copilot: installed but no npm package
         let opts = build_version_options(true, Some("0.1.0"), false, &[]);
         assert_eq!(opts.len(), 1);
         assert_eq!(opts[0].label, "Installed");

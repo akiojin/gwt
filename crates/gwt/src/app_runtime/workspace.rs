@@ -118,10 +118,48 @@ pub(super) fn retain_live_workspace_agents(
     sessions: &[&ActiveAgentSession],
     updated_at: chrono::DateTime<chrono::Utc>,
 ) {
-    projection.retain_live_agents(
+    // SPEC-2359 US-80 (FR-429): live agent sessions have no authority over
+    // shell liveness, so keep every Shell Work here — otherwise the broadcast
+    // rebuild would prune a just-registered Shell Work that has no agent
+    // session. Shell Works are pruned only by their own PTY / window lifecycle.
+    projection.retain_live_agents_keep_shells(
         sessions.iter().map(|session| session.session_id.as_str()),
         updated_at,
     );
+}
+
+/// SPEC-2359 US-80 (FR-427): register a Start-Work Shell as a first-class Work
+/// in the persisted projection so it appears in the Active Work / Workspace
+/// overview like an agent. Shell Works carry the window id as their identity
+/// (no agent session) and reuse the agent canonical Work id derivation via the
+/// shell's branch / worktree, so a shell groups into the same Work row as an
+/// agent on the same branch. `retain_live_agents_keep_shells` drops only dead
+/// agents (FR-429): launching the shell never prunes other live or paused
+/// shells.
+pub(super) fn save_shell_work_projection(
+    project_root: &Path,
+    window_id: &str,
+    worktree_path: Option<PathBuf>,
+    branch: Option<String>,
+    live_session_ids: &std::collections::HashSet<String>,
+) -> Result<(), String> {
+    let now = chrono::Utc::now();
+    let mut projection =
+        gwt_core::workspace_projection::load_or_default_workspace_projection(project_root)
+            .map_err(|error| error.to_string())?;
+    projection.project_root = project_root.to_path_buf();
+    projection.retain_live_agents_keep_shells(live_session_ids.iter().map(String::as_str), now);
+    let summary = gwt_core::workspace_projection::WorkspaceAgentSummary::shell_work(
+        window_id.to_string(),
+        worktree_path,
+        branch,
+        gwt_core::workspace_projection::WorkspaceStatusCategory::Active,
+        now,
+    );
+    projection.upsert_agent_summary(summary);
+    projection.updated_at = now;
+    gwt_core::workspace_projection::save_workspace_projection(project_root, &projection)
+        .map_err(|error| error.to_string())
 }
 
 pub(super) fn workspace_projection_for_current_resume(
@@ -148,13 +186,37 @@ pub(super) fn workspace_cleanup_candidate_for_projection(
     Some(active_work_cleanup_candidate_view_from_candidate(candidate))
 }
 
+#[derive(Debug, Clone, Copy)]
+pub(super) enum WorkspaceLaunchProjectionKind {
+    StartWork,
+    Resume { created_by_start_work: bool },
+}
+
+impl WorkspaceLaunchProjectionKind {
+    fn work_event_kind(self) -> gwt_core::workspace_projection::WorkEventKind {
+        match self {
+            Self::StartWork => gwt_core::workspace_projection::WorkEventKind::Start,
+            Self::Resume { .. } => gwt_core::workspace_projection::WorkEventKind::Resume,
+        }
+    }
+
+    fn created_by_start_work(self) -> bool {
+        match self {
+            Self::StartWork => true,
+            Self::Resume {
+                created_by_start_work,
+            } => created_by_start_work,
+        }
+    }
+}
+
 pub(super) fn save_workspace_launch_projection(
     project_root: &Path,
     session: &ActiveAgentSession,
     base_branch: Option<&str>,
     linked_issue_number: Option<u64>,
     workspace_resume_context: Option<&WorkspaceResumeContext>,
-    created_by_start_work: bool,
+    launch_kind: WorkspaceLaunchProjectionKind,
     live_session_ids: &std::collections::HashSet<String>,
 ) -> Result<(), String> {
     let now = chrono::Utc::now();
@@ -165,7 +227,10 @@ pub(super) fn save_workspace_launch_projection(
     // #3065: drop dead agent entries before computing the running-agents
     // status text — the shared projection otherwise accumulates one entry
     // per historical session ("765 active agents").
-    projection.retain_live_agents(live_session_ids.iter().map(String::as_str), now);
+    // SPEC-2359 US-80 (FR-429): an agent launch has no authority over shell
+    // liveness, so keep every Shell Work — they are pruned only by their own
+    // PTY / window lifecycle, never by an unrelated agent launch.
+    projection.retain_live_agents_keep_shells(live_session_ids.iter().map(String::as_str), now);
     let work_id = gwt_core::workspace_projection::canonical_work_id(
         project_root,
         Some(session.branch_name.as_str()),
@@ -188,7 +253,7 @@ pub(super) fn save_workspace_launch_projection(
             branch: session.branch_name.clone(),
             worktree_path: session.worktree_path.clone(),
             base_branch: base_branch.map(str::to_string),
-            created_by_start_work,
+            created_by_start_work: launch_kind.created_by_start_work(),
         },
         agent,
         now,
@@ -196,13 +261,12 @@ pub(super) fn save_workspace_launch_projection(
 
     gwt_core::workspace_projection::save_workspace_projection(project_root, &projection)
         .map_err(|error| error.to_string())?;
-    let work_event_kind = if workspace_resume_context.is_some() {
-        gwt_core::workspace_projection::WorkEventKind::Resume
-    } else {
-        gwt_core::workspace_projection::WorkEventKind::Start
-    };
-    let work_event =
-        workspace_work_event_from_launch_projection(&projection, session, work_event_kind, now);
+    let work_event = workspace_work_event_from_launch_projection(
+        &projection,
+        session,
+        launch_kind.work_event_kind(),
+        now,
+    );
     gwt_core::workspace_projection::record_workspace_work_event(project_root, work_event)
         .map_err(|error| error.to_string())
 }

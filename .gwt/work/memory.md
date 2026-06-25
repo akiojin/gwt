@@ -7088,3 +7088,247 @@ Type: agent workflow correction
 Context: During SPEC #1935 Phase 22 implementation, two build.phase JSON operations were sent in parallel against .gwt/skill-state/build-spec.json.
 Learning: skill-state JSON operations are not safe to parallelize for the same state file; concurrent writes can interleave or leave trailing characters, causing build.phase/load failures.
 Future Action: Run build.start/build.phase/build.complete/build.abort sequentially only. Do not place same skill-state JSON updates inside multi_tool_use.parallel.
+
+## 2026-06-20 — node --test はこの環境で stdin 待ちハングするため < /dev/null 必須
+
+Type: lesson
+Context: Command Rail から Board/Logs を外す作業で frontend unit を回す際、scripts/run-node-tests-with-linkedom.sh / 直接 node --preserve-symlinks --test ともに出力ゼロのまま長時間ハングした。linkedom 直接ロードの素のスクリプトは即終了するのに --test だけが固まった。
+Learning: このランタイムでは node --test がデフォルトで stdin を待ち続けてハングする。`node ... --test <files> < /dev/null` のように stdin を閉じると即実行・完了する。加えて zsh では未クォートの $VAR が単語分割されない(bash と異なる)ため、ファイルリストを node に渡すときは zsh 配列 `${(f)...}` で展開する必要がある。linkedom は bun/npm install が走るため scripts 経由は重い→ /tmp に linkedom を一度入れ crates を symlink し `--preserve-symlinks` で回すと速い。
+Future Action: このリポジトリで frontend unit (web/__tests__/*.mjs) を個別/一括実行するときは必ず `< /dev/null` を付ける。複数ファイルを変数で渡す場合は zsh 配列展開を使う。
+
+## 2026-06-20 — issue.spec.edit structured merge は日本語 SPEC を破損する
+
+Type: lesson
+Context: SPEC-2008（日本語見出し + 多数の日付付き amendment サブセクション）に新しい US/FR を追記しようとして issue.spec.edit の structured body を検討した。merge_structured_spec は CANONICAL_SECTION_HEADINGS（英語: Background/User Stories/Edge Cases/Functional Requirements/Non-Functional Requirements/Success Criteria のみ）に一致する canonical セクションを丸ごと置換し、それ以外は unknown として温存する。
+Learning: 日本語見出し SPEC では『ユーザーストーリー/機能要件/成功基準』が unknown 扱いになり、structured merge は英語の重複 canonical セクション（US-1.../FR-001... を再採番）を並走追加してしまう。既存番号と参照を壊し、二言語の重複構造を生む。replace=true は全置換でさらに危険。
+Future Action: 日本語 / amendment 中心の SPEC（例 SPEC-2008）へ追記する時は issue.spec.edit の structured body を使わない。既存パターン（『## YYYY-MM-DD Amendment: ...』『### YYYY-MM-DD 追記: ...』の raw markdown ブロック）に倣い、spec セクション全文を read → 末尾に amendment を append → raw section write で書き戻す。または gwt-plan-spec / gwt-register-spec の安全な edit 経路を使う。
+## 2026-06-20 — Verify related session dedupe with rendered action/card counts
+
+Type: failure_pattern
+Context: SPEC-1938 Issue Knowledge Bridge related sessions: a first fix deduped by conversation id, but user screenshots still showed duplicate Issue #3133 related Resume-looking rows because a stale same-target no-session agent remained in the rendered Related Work section.
+Learning: Counting unique agent_session_id values is insufficient for Related Work/Session UX. Distinct conversations and empty historical agent rows can still render duplicate Resume/Focus-looking cards for the same issue/worktree/branch/agent target.
+Future Action: For fixes touching Related Work/Session aggregation or Resume/Focus rendering, verify backend KnowledgeDetail rows and Playwright DOM counts: target related work cards, agent rows, session rows, empty No session yet rows, and Resume/Focus action count for the reported issue.
+
+## 2026-06-20 — Verify related Work absence, not only target presence
+
+Type: lesson
+Context: SPEC-1938 Issue detail Related Work showed extra Unknown cards even after duplicate Resume/Focus fixes. The earlier Playwright check only counted the expected target card and did not assert that unrelated Unknown/no-session cards were absent.
+Learning: Branch-only Issue inference is weak when a legacy WorkItem has multiple execution containers. Owner/session links are authoritative, but branch-only links must be unambiguous. Visual checks for Related Work must assert the entire rendered section: card count, Unknown status count, No session rows, and action count.
+Future Action: When fixing related Work/Session UI, add a backend regression test for ambiguous legacy Work items and a live DOM assertion that no unexpected Unknown/no-session related cards remain.
+
+## 2026-06-20 — Project-scope GC must include no-op projections and no-window canvas state
+
+Type: lesson
+Context: Issue #3066 investigation found tens of thousands of ~/.gwt/projects/<hash> directories created from fallback path-hash storage for temp/non-repo project roots. Existing workspace.projection_prune only handled workspace/current.json and project-state/current.json stale projections, and it left root legacy workspace.json canvas-only directories plus initial/no-op WorkspaceProjection records behind.
+Learning: Project-scoped cleanup must classify default/no-op WorkspaceProjection records as delete candidates when they have no active session, no work identity, no Board/Git/linked references, and only empty agent stubs. It must also prune root legacy workspace.json files that have no windows, even if viewport/next_z_index changed, while preserving any canvas file with windows because that may contain user layout.
+Future Action: When changing ~/.gwt/projects retention or projection storage, add dry-run/apply tests for workspace/current.json, project-state/current.json, and root workspace.json. Verify dry-run against a real populated ~/.gwt/projects tree and ensure deleting a child projection also attempts to remove the now-empty project directory.
+
+## 2026-06-20 — Project storage tests must prove real HOME does not grow
+
+Type: lesson
+Context: Issue #3066 follow-up: cleanup-only fix passed tests, but full cargo test still created new ~/.gwt/projects entries. Remaining writers were gwt test binaries and gwtd child integration tests touching workspace_state_path/project-state without isolated HOME.
+Learning: For project-scoped storage changes, verification must compare the real ~/.gwt/projects count before and after focused and full tests. gwt-core used as a normal dependency will not see #[cfg(test)], so test-harness HOME fallback must be runtime-detected or tests must explicitly pass HOME/USERPROFILE to spawned binaries.
+Future Action: When adding tests that call workspace_state_path/save_workspace_projection or spawn gwtd/gwt with workspace JSON envelopes, hold env_test_lock where needed and set HOME/USERPROFILE to a tempdir; include a before/after real HOME project-dir count in verification for Issue #3066-class bugs.
+
+## 2026-06-20 — Managed gwt skill parity must cover full skill directories
+
+Type: lesson
+Context: Issue #3056 fixed a drift where runtime-independent additions existed only under .codex/skills while materialization writes managed Codex skill assets from the .claude bundle byte-for-byte.
+Learning: Checking only SKILL.md or only the currently reported divergent files is too narrow. Managed `gwt-*` parity must cover the whole skill directory tree, including references/ and scripts/, and runtime-specific path references should be expressed in runtime-neutral terms unless per-target generation is explicitly designed.
+Future Action: When changing managed `gwt-*` skill assets, update the canonical .claude tree first, sync .codex from it, run a recursive .claude/.codex parity check, and add/extend contract tests if a drift class is not already guarded.
+
+## 2026-06-20 — Playwright embedded routes must cover transitive module imports
+
+Type: failure pattern
+Context: Issue #3037: embedded Playwright specs failed before workspace_state rendered because project-shell-surface.js imported /window-list-model.js, but installEmbeddedRoutes only served a hard-coded ROOT_MODULES list and the guard test only checked direct app.js imports.
+Learning: Direct import coverage is insufficient for browser module fixtures. A missing transitive module manifests as unrelated UI timeouts (0 project tabs / windows) because app.js evaluation aborts before the WebSocket fixture can render state.
+Future Action: When adding or moving frontend modules imported by routed Playwright fixtures, ensure the embedded route helper allowlist includes transitive imports and keep the recursive playwright-embedded-routes test green before triaging downstream visual failures.
+
+## 2026-06-20 — Embedded route graph tests must resolve relative web imports
+
+Type: review-learning
+Context: Codex review on PR #3130 found that playwright-embedded-routes.test.mjs only followed absolute /module.js imports, so relative chains such as project-tabs-renderer.js -> ./window-runtime-state.js -> ./protocol-enums.js could be missed by the recurrence guard.
+Learning: A frontend route-coverage test that validates browser-served modules must resolve import specifiers the same way the browser module graph does, including relative ./ and ../ imports, not just absolute root imports.
+Future Action: When adding or updating embedded frontend route guards, include a focused test for a relative import chain and normalize web module specifiers with POSIX path semantics before comparing against ROOT_MODULES.
+
+## 2026-06-20 — Test home override for project storage
+
+Type: lesson
+Context: Issue #3066 PR verification found that some in-process tests used ScopedHome/std::env::set_var("HOME") while cargo ran tests in parallel, causing unrelated workspace projection tests to write temp project state into the real ~/.gwt/projects.
+Learning: For in-process tests, prefer a thread-local gwt_home override over process-wide HOME mutation. Reserve HOME/USERPROFILE env changes for spawned child processes that must receive an isolated environment.
+Future Action: When adding tests around gwt_core::paths::gwt_home or project storage, use gwt_core::test_support::ScopedGwtHome and only hold env_lock for real environment variables such as GWT_SESSION_ID.
+
+## 2026-06-23 — 外部CLI連携: 選択肢はツールconfigから動的列挙・フラグは実バイナリで裏取り
+
+Type: fix
+Context: SPEC-3152 Hermes 整合。wizard の provider 一覧を docs ベースでハードコードしたら、ユーザーの実プロバイダー zai が抜けていた。フラグも docs を信じて --profile を削除しかけた。UI フォントや起動可否も HTTP 200 だけで未検証だった。
+Learning: 外部ツール所有の選択肢リスト(provider/model 等)は gwt 側でハードコードしない(陳腐化・不完全)。ツール config(~/.hermes/config.yaml の model.provider + providers:)から動的列挙する。CLI フラグは docs でなく実際にインストールされたバイナリ(hermes --help / 実行)で裏取りする(v0.17.0 では --profile は help 非表示だが有効)。UI/挙動は HTTP 200 やビルド成功でなく実起動して検証する。隔離 HOME(HERMES_HOME リダイレクト)は資格情報を持たず壊れるため .env/auth.json を symlink で bridge する(project_isolated_home_breaks_docker_compose と同型)。
+Future Action: 外部 CLI 連携実装時は (1)フラグ/サブコマンドを実バイナリの --help で確認 (2)選択肢リストはツール config から動的列挙 (3)UI は browser-check で実起動して目視 (4)隔離 HOME は資格情報 symlink を seed、を必須チェックにする。
+
+## 2026-06-21 — WorkspaceAgentSummary に新 discriminator を足す時は sentinel+派生メソッドを優先
+
+Type: project
+Context: SPEC-2359 US-80: 非 agent Shell Work を Active Work projection の一級 Work にする実装。WorkspaceAgentSummary に work_kind フィールドを足そうとしたら struct literal コンストラクタが gwt-core/gwt 全体に ~50 箇所あり全破壊だった。
+Learning: WorkspaceAgentSummary は struct literal で ~50 箇所構築されるため bare フィールド追加は全箇所コンパイル破壊する。Work 種別の識別は新フィールドではなく予約 agent_id sentinel(SHELL_WORK_AGENT_ID=shell) + 派生メソッド work_kind()/is_shell_work() にすると churn ゼロ・後方互換も構造的に自明。Active Work projection は projection.agents のみから構築され Work=agent session(FR-348)が設計境界。agent 起動 save の retain は agent session でしか生存判定できないので shell を間引かない retain_live_agents_keep_shells を使う。
+Future Action: projection の WorkspaceAgentSummary に新しい discriminator を足す時は、まず構築箇所数を grep し、フィールド追加より sentinel+派生メソッドを優先。retain 系を触る時は agent/shell の liveness 判定が別ソース(agent session vs PTY window)である点に注意。
+
+## 2026-06-21 — 隔離起動で Start Work 新規ブランチ検証する時の git 認証配線
+
+Type: project
+Context: SPEC-2359 US-80 の視覚検証で、browser-check 隔離起動(`GIT_TERMINAL_PROMPT=0`)の Start Work 新規ブランチが remote push に失敗し `fatal: could not read Username for https://github.com: terminal prompts disabled` で Shell が PTY 起動前に落ちた。feature ではなく検証環境のブロッカー。
+Learning: 原因: 隔離 HOME の osxkeychain には git 用 github トークンが無く(ユーザーは gh keyring で認証)、push が prompt fallback→`GIT_TERMINAL_PROMPT=0` で失敗。回避手段の比較: (1) `GIT_CONFIG_COUNT` / `GIT_CONFIG_KEY` / `GIT_CONFIG_VALUE` env で `credential.https://github.com.helper` を注入 → URL subsection を含む key の解析に失敗し効かない(`GIT_CONFIG_VALUE` が途中で切れる)。(2) 堅牢策: `CHECK_HOME` に real `.gitconfig`([include]実config + [credential] helper= リセット後 helper=store)と `.git-credentials`(gh auth token 埋め込み, chmod 600)を置く。gwt は git CLI を hidden_command で呼び env_clear しないため `HOME=CHECK_HOME` を継承し store helper で解決する。`git push --dry-run origin HEAD:refs/heads/__tmp__` で副作用なく認証を実証してから検証依頼するとユーザー往復を減らせる。
+Future Action: Start Work 新規ブランチを含む GUI 視覚検証では、browser-check の隔離 HOME に real .gitconfig(store helper)+ .git-credentials(gh token)を用意し、git push --dry-run で push 認証を事前実証してからユーザーに依頼する。GIT_CONFIG_* env での credential.<url>.helper 注入は使わない。検証後は token 入り CHECK_HOME を rm -rf する。
+
+## 2026-06-21 — stop_all_runtimes join-wait test is flaky under parallel full run
+
+Type: project
+Context: Phase 2 検証中、cargo test -p gwt のフルランで app_runtime::tests::app_runtime_stop_all_runtimes_kills_every_pane_before_join_waits が 1 回だけ FAILED したが、tests.rs は HEAD と byte 同一かつ単独実行で 3/3 passed だった
+Learning: app_runtime_stop_all_runtimes_kills_every_pane_before_join_waits は PTY teardown/join-wait の timing に依存する flaky test。並列フルラン下の resource contention で稀に落ちる。単独再実行で緑なら回帰ではない。
+Future Action: このテストがフルランで 1 件落ちたら、まず git diff HEAD で当該ファイルが無変更か確認し、単独 -p gwt で 2-3 回再実行して flaky か判定する。緑なら blocker 扱いしない。
+
+## 2026-06-23 — styles bundle must not contain the literal transform layer-hint string (even in comments)
+
+Type: project
+Context: minimap centered-radar で .fleet-minimap__world に静的な transform layer hint を CSS に追加したら embedded_web_canvas_stage_keeps_transform_layer_hint_opt_in が失敗。CSS 宣言を消してもコメント内のリテラル文字列でまた失敗した。
+Learning: このテストは frontend_styles_bundle() 全体を substring 検索するため、CSS 宣言だけでなくコメント内の同リテラル文字列も失敗させる。transform の layer hint は applyViewport が motion 中だけ JS で opt-in し 300ms で解除する設計ポリシー（恒久 pin 禁止）。
+Future Action: CSS で transform の layer hint を恒久 pin しない。コメントでも当該リテラル文字列を書かず言い換える。GPU レイヤが要る要素は JS の motion-scoped opt-in に倣う。
+
+## 2026-06-24 — Keep gwt self-improvement stop hooks repo-local
+
+Type: agent workflow correction
+Context: SPEC-3164 direct self-improvement hook work clarified that the high-confidence self-improvement Stop block is for developing gwt itself, not for arbitrary projects opened by gwt.
+Learning: Do not wire self-improvement hard Stop blocks into shared gwt Managed Hooks. Put the blocking check behind gwt-repo-owned direct hook config and make provider-generated assets include it only when the worktree remote is akiojin/gwt; non-gwt projects must either omit the hook name or no-op.
+Future Action: When adding agent workflow guards, classify whether the guard is gwt product behavior or gwt-repo development policy before choosing Managed Hooks, generated guidance, or repo-local direct hook config.
+
+## 2026-06-23 — struct-literal 一括挿入で `-> Type {` 関数本体を破壊する罠
+
+Type: agent-workflow
+Context: SPEC-2359 US-83 で BranchListEntry / LaunchWizardHydration に新フィールドを追加する際、多数の struct-literal 構築サイト（テスト含む）へ機械的に `field: None,` を挿入するスクリプトを書いた。
+Learning: 正規表現 `TypeName\s*\{` は struct literal だけでなく `-> TypeName {`（関数戻り値型 + 関数本体の開き波括弧）や `pub struct TypeName {`（型定義）にもマッチする。これらに挿入すると関数本体や型定義を破壊し `expected ;` 系パースエラーになる。実際 22 サイト挿入のうち関数シグネチャ系を破壊し revert した。
+Future Action: フィールド一括挿入スクリプトはマッチ直前テキストが `->` / `struct` で終わる場合を除外し、『ブロック内に当該フィールドが既存なら skip』ガードも入れる。最も安全なのは cargo build の E0063 missing-field が指す行を1件ずつ対象にする compiler 駆動方式。
+
+## 2026-06-23 — Branches cleanup は per-ref local/remote 行に依存。表示抽象化は frontend display-transform で行う
+
+Type: project
+Context: SPEC-2359 US-83b で『リモートを気にさせない』ため、Branches タブの同名 local/remote 行を canonical 名で 1 行に集約する案を検討した。
+Learning: 同名 local/remote 行の完全集約は SPEC-2009 cleanup を 7+ 箇所 BREAKING する: (1) cleanupSelected が name キーの Set で local/remote を個別選択できなくなる、(2) cleanup lookup と delete_remote_branch の upstream routing が per-row execution_branch+upstream に依存（非 origin remote も壊れる）、(3) BranchCleanupInfo が単一 execution_branch 前提で union 化が必要、(4) 保護ブランチは local=Risky / origin=Blocked と per-scope availability が異なる、(5) RemoteTrackingWithoutLocal blocked 行が表現不能になる。一方 BranchListEntry / canonical_work_branch_identity / start_work_eligibility は表示抽象化に必要な情報を既に持つ。
+Future Action: 『remote/local を気にさせない』要求は、行集約ではなく frontend-only display-transform で実装する: 表示名から origin/ を除去（selection・cleanup keying・payload は raw entry.name を保持）、scope ラベルを remote-only 時だけの控えめ chip に置換。backend select_existing_branch が origin/ を正規化するため wire 契約は不変。cleanup（破壊的操作）のデータプレーンは透明性維持のため無改修にする。
+
+## 2026-06-24 — UI 配線の『到達可能性』は実 render（Playwright E2E）で証明する。構造文字列 assert だけで到達可能と見なさない
+
+Type: agent-workflow
+Context: SPEC-2359 US-83 で、branches-cleanup-surface.js（WindowPreset::Branches）に Start Work 行を実装し『end-to-end 完成・検証済み』と報告したが、実機未確認だった。ユーザー指摘で presetSurface(branches)->work / Add Window 非掲載 / command redirect により到達不能 dead code と判明。
+Learning: embedded_web の構造文字列アサートや cargo/frontend unit が全 green でも、その UI が現行の到達可能サーフェスに描画されるとは限らない。gwt は preset->surface マッピング（app.js presetSurface）や Add Window / command palette の露出で到達性が決まり、過去フェーズの surface が dead code 化していることがある。
+Future Action: UI 配線（ボタン/行/モーダル）を追加・変更したら、必ず実 UI を render する Playwright E2E（installEmbeddedRoutes + workspace_state seed + FixtureWebSocket mock、tests/quiet-work-ui-e2e.spec.ts が雛形）で『到達可能サーフェスに表示され click で機能する』ことを証明する。実装先 surface が現行 UI で開けるか（presetSurface のマッピング先、Add Window/command の露出）を先に確認する。
+
+## 2026-06-24 — linkedom assert.equal(element, null) hangs node:test
+
+Type: reference
+Context: linkedom + node:test の frontend unit テストで assert.equal(domElement, null) が失敗すると、AssertionError の diff 生成で linkedom DOM ノードを util.inspect しようとし循環参照で病的に遅くなり、同期ループ的にハングする（--test-timeout も同期ブロックのため効かない）。RED 段階で『tests 1 / fail 1・duration 190s』のように丸ごと失敗に見えた。
+Learning: DOM 要素の不在は element===null ではなく container.querySelectorAll(selector).length === 0（数値比較）で assert する。これなら失敗時も数値比較で高速。truthy 確認は assert.ok(element) を使う（成功時は inspect されない）。
+Future Action: frontend unit テストで『要素が無いこと』を検証する時は必ず querySelectorAll(...).length===0 を使い、assert.equal(el, null) / assert.strictEqual(el, null) を書かない。
+
+## 2026-06-24 — UI 監査の前提は live 実データで検証してから実装する
+
+Type: feedback
+Context: Workspace badge 配色の UI/UX 監査が『Hooks バッジは大半が benign な waiting_for_first_hook_event』と仮定し、waiting を除外し needs_attention を amber で色付けする案を出した。だが実 checkout の worktree はほぼ全てが needs_attention で、amber『Hook setup』が全行に出て逆にノイズが増幅した。live screenshot を撮って初めて気づいた。
+Learning: UI/UX 監査やデザイン提案がデータ分布の仮定に依存する場合、その仮定を live 実データ(実 screenshot / 実 DOM 計算値)で検証してから実装する。per-row 指標が ~100% の行に出るなら、それは per-row signal ではなく systemic 状態であり、行から外して detail/集約に回す(quiet by default, loud only when actionable)。
+Future Action: badge/indicator の表示条件を決める前に、対象リポジトリの実データでその状態がどれだけの行に出るかを screenshot か DOM 集計で確認する。仮定のまま色や閾値を決めない。
+
+## 2026-06-23 — Board settings are global-only; per-project config belongs in committed .gwt/work
+
+Type: project
+Context: Board remote(Slack/Teams)が複数プロジェクトを同一チャンネルに混在させる問題(SPEC-2963)の改善設計。
+Learning: gwt の Settings は ~/.gwt/config.toml のグローバルのみで per-project config realm が無い(settings.rs:96)。per-project の committed データ層は <repo>/.gwt/work/(paths.rs:387, merge=union)に既存(board-remote-roots.jsonl 等)。remote provider は provider()/current_kind() がグローバル設定を repo 引数なしで読み、書き込みも読み戻し(history_channels の channel 和集合)も repo 次元が無いため全プロジェクトが混在。
+Future Action: Board の per-project 設定は <repo>/.gwt/work/board.toml(committed)、provider() を provider_for(worktree_root) に repo-aware 化。グローバル config は OAuth client_id/tenant_id とフォールバック既定のみ、token は tenant 単位 machine-local。SPEC-2963 を再オープンし per-project isolation フェーズで実装。
+
+## 2026-06-24 — per-project Board config UI belongs in the Board window, not Settings
+
+Type: feedback
+Context: SPEC-2963 per-project Board 分離の GUI(T11-6)。最初 Settings に専用 Board タブを作ったがユーザーが却下。
+Learning: per-project(プロジェクト単位)の設定は、グローバルな Settings ウィンドウではなく、その対象を表示する場所(Board ウィンドウ)に置くべき。Board ウィンドウヘッダの宛先チップ(provider 色ドット+宛先+⚙ギア)にすると、各プロジェクトの宛先が常時可視化され分離の確認も兼ねる。グローバルな OAuth アプリ設定/既定だけ Settings に残す。設定ボタンはフィルタボタンと視覚的に明確に差別化する(ピル+ギア+色ドット)。
+Future Action: per-project の GUI 設定は対象の文脈(その window)に配置する。global=Settings / per-project=対象 window、というスコープ分離を既定にする。Board: board-logs-surface.js の destination chip + popover、backend は board_provider::routing_for/update_project_board_config を再利用。
+
+## 2026-06-23 — OpenCode auth は global＝wizard 整合に credential bridge 不要、serde rename は実機 E2E で捕捉
+
+Type: lesson
+Context: SPEC-3151 第2弾で OpenCode に Hermes 同等の wizard 整合（model free-text・未設定バナー・in-pane setup launcher）を実装。Hermes は HERMES_HOME を丸ごと .gwt/hermes へ差し替えるため credential bridge(symlink) が必要だが、OpenCode は OPENCODE_CONFIG_DIR(config) のみ差し替えで auth(data dir=$XDG_DATA_HOME/opencode or ~/.local/share/opencode) は差し替えない＝auth は global。よって bridge 不要（OPENCODE_CONFIG_DIR を変えても auth path 不変、XDG_DATA_HOME のみが auth を移動、を bunx opencode-ai auth list で実機確認）。in-pane launcher は ShellLaunchConfig に command_override を足して任意コマンドを pane 起動。enum variant RunOpenCodeSetup は serde rename_all=snake_case で run_open_code_setup になり JS の run_opencode_setup を拒否したが unit テストでは漏れ、Playwright 目視 E2E（ボタン click 後に pane が出ない＋server log の invalid frontend message）で捕捉。
+Learning: 外部 CLI の wizard 整合では、その CLI の auth/config がどの env で隔離されるかを実機(auth list 等)で確認してから bridge 要否を決める。serde rename_all=snake_case は CamelCase の連続大文字(OpenCode→open_code)を JS の慣用(opencode)と乖離させるので、frontend が dispatch する action は wire-tag の deser テストで contract を固定する。
+Future Action: agent wizard 整合では (1) auth 隔離の実機確認 → bridge 要否判断、(2) frontend→backend の action は {kind:...} の deser テストを必ず追加、(3) GUI 配線は unit だけでなく Playwright 目視 E2E で wire path を通す。
+
+## 2026-06-23 — gwt-register-spec lifecycle は start の spec 値で固定（real id rebind 不可）
+
+Type: lesson
+Context: gwt-register-spec で issue.spec.create 後に register.phase create を real issue 番号(#3151)で呼ぶと 'phase refused: state owns SPEC-Some(0)' で exit 2。crates/gwt/src/cli/skill_state_runtime.rs は register.start で owner_spec を固定し、owner_spec != spec の phase/complete を拒否する（rebind 経路なし）。SKILL.md の『phase create が real spec id を bind する』記述は実装と不一致。
+Learning: register.start を spec:0 で開始したら、以降の register.phase / register.complete も spec:0 のまま呼ぶ。real Issue 番号は GitHub Issue 側で追跡され、skill-state は Stop-block guard としての lifecycle 同一性のみを保持する。
+Future Action: gwt-register-spec 実行時は start で使った spec 値を全 lifecycle 呼び出しで一貫させる。doc と実装の乖離は gwt-register-spec skill 側の別 Issue で是正検討。
+
+## 2026-06-23 — OpenCode hook 配線は実機検証で正当・package は opencode-ai
+
+Type: lesson
+Context: SPEC-3151 で OpenCode 起動不可（types.rs descriptor が package_name:None で npx/bunx 経路に未接続）を修正。npm パッケージは opencode-ai（bin opencode）。当初 docs から『opencode.json の plugin キーは npm パッケージ名のみで相対パスは無効』と疑ったが、実 opencode 1.17.9 で実測すると相対 plugin パスも有効・OPENCODE_CONFIG_DIR/plugins/ も自動ロード・両方指しても 1 回だけ load（dedup）だった。permission は CLI フラグでなく opencode.json の permission（shorthand permission:allow）で制御し、OPENCODE_CONFIG overlay は OPENCODE_CONFIG_DIR と共存して merge する。
+Learning: OpenCode 連携は docs だけで判断せず実機（bunx opencode-ai@latest run ... --print-logs --log-level DEBUG + plugin の load-time side effect marker）で確認する。generator(provider_hooks.rs) の出力を実挙動で検証してから『変更要否』を決める。
+Future Action: OpenCode 関連の hook/config/permission を変更する前に、bunx opencode-ai で隔離 OPENCODE_CONFIG_DIR/OPENCODE_CONFIG を立てて load/merge/dedup を実測する。skip_permissions は per-launch で OPENCODE_CONFIG=skip-permissions.json を指す方式。
+
+## 2026-06-23 — browser-check は push 不可、Start Work 系は local mirror insteadOf で検証
+
+Type: lesson
+Context: SPEC-3151 の OpenCode 起動を GUI 目視検証する際、browser-check 隔離 HOME(GIT_TERMINAL_PROMPT=0)では Start Work の create_remote_branch(git push origin develop:refs/heads/work/<ts>) が 'could not read Username' で失敗し、OpenCode spawn に到達できなかった。ls-remote は public 匿名 read で成功するが push は credential 解決不可。wizard_mode!=Branch のため『現在ブランチ使用(push 無し)』も選べない。
+Learning: 隔離 HOME の `.gitconfig`（symlink を実ファイル化して [include] real + [url "<bare-mirror>"] `insteadOf=https://github.com/<owner>/<repo>`）で origin をローカル bare ミラー(`git clone --mirror`)へ差し替えると、Start Work の push が認証不要でローカルに通り、実リモートに触れずに launch を完走できる。gwt の子 git は config を都度読むのでサーバ再起動不要。
+Future Action: push を伴う gwt フロー(Start Work / branch 作成)を browser-check で目視検証する時は、最初から local bare mirror + url.insteadOf を隔離 gitconfig に仕込む。bodyText でのエラー検知は旧失敗ウィンドウの残骸で誤検知するため、新規ウィンドウの状態/スクリーンショットで判定する。
+
+## 2026-06-23 — .gwt/work/memory.md は git 管理対象＝merge unblock で checkout 破棄するな
+
+Type: lesson
+Context: SPEC-3151 作業中、PR の develop merge が .gwt/work/{events.jsonl,memory.md} のローカル変更で阻まれ、git checkout -- .gwt/work/memory.md で破棄して merge を通した。結果、その時点で未コミットだった memory.add 3 件（register-spec lifecycle / OpenCode hook 実機検証 / browser-check mirror）が消失。memory.md を『ランタイム/スクラッチ』と誤認し PR 対象外と報告したが、実際は git-tracked の正本ログでコミット必須。
+Learning: memory.md は管理対象。merge を阻むのは events.jsonl(ランタイム)だけ。memory.md の追記は checkout で捨てず、stash か別コミットで保全する。failure/lesson 系の作業成果は最後に必ず memory.md を commit して PR に含める。
+Future Action: merge unblock では git checkout の対象を events.jsonl 等の純ランタイムに限定し memory.md は除外する。作業完了時に memory.md の差分を確認し、未コミットなら chore(memory) で commit+PR する。
+
+## 2026-06-25 — owner 未リンクの gated セッションは finisher script(.md・CRLF対応) を user shell で走らせて実装する
+
+Type: lesson
+Context: owner Issue 未リンクの gwt セッションで dead-code cleanup を依頼された。managed hook workflow_policy が全 .rs 編集・git commit・bash script・issue.create を permissionDecision:deny でハード拒否し、エージェントは実装系を一切実行できなかった。owner linkage は session.linked_issue_number / issue-links store(~/.gwt 配下=worktree 外) への書き込みが必要で、いずれもゲート対象。さらに最初の finisher script が CRLF ファイルに LF 検索文字列で 0 マッチして失敗した。
+Learning: ゲート対象はエージェントのツール呼び出しのみで、user が自分のターミナルで走らせる bash script はゲート対象外。完全な finisher script を tasks/ に書き user に 1 コマンドで実行させれば commit/.rs 編集/push まで通る。ただし: (1) doc 例外の prefix 判定が "tasks/"(前方 slash) で Windows 相対パスは tasks\(backslash) のため .sh は書けず .md 名にする(bash は拡張子非依存で実行可)。(2) deny メッセージは gwt-register-issue を案内するのに issue.create 自体が deny される自己矛盾(owner を CLI で作成・リンクできない)。(3) core.autocrlf=true の repo では node の文字列置換は CRLF↔LF 正規化必須。冪等化(git ls-files --error-unmatch で既コミット判定)と各編集の exact-match アサーションで安全に再実行できる。
+Future Action: gated ownerless セッションで実装を頼まれたら、tasks/<name>.md に CRLF-aware・冪等・正確一致アサーション付きの finisher script を書き、user に `bash tasks/<name>.md` を実行してもらう。issue.create の gate-deny と Windows tasks/ prefix(doc 例外) bug は gwt 側の別 fix Issue 候補。
+
+## 2026-06-24 — issue.spec.edit replaces entire sections
+
+Type: agent workflow correction
+Context: While adding SPEC #3164 tasks for the Improvement Inbox browser-check auth fix, issue.spec.edit was used with only the new task fragment. The command replaced the entire tasks section instead of appending, and the full section had to be restored from a fresh section read before adding T-911〜T-913.
+Learning: issue.spec.edit is a full section replacement operation. Treat every edit as read-modify-write: read the current section, compose the complete intended section body, write it once, then read back and verify all prior content remains.
+Future Action: Before any issue.spec.edit call, capture the existing section content and prepare a complete replacement body. After writing, run issue.spec.section immediately and compare that unrelated existing entries are still present before continuing.
+
+## 2026-06-24 — Improvement Inbox details must preview the exact Issue body
+
+Type: lesson
+Context: SPEC #3164 visual verification: user rejected a Details modal that showed candidate metadata instead of the content that would be registered to akiojin/gwt as a public Issue.
+Learning: For self-improvement approval UX, the review surface must show the same sanitized Issue title/body renderer used by improvement.promote_issue. Candidate metadata is supporting context, not the approval artifact.
+Future Action: When changing Improvement Inbox or approval flows, add backend payload tests for issue_preview and frontend tests proving Details/Approve show the public Issue body before Create public Issue.
+
+## 2026-06-24 — Review queue UI must not mix pending work with processed history
+
+Type: failure-pattern
+Context: Improvement Inbox initially rendered Pending, Linked, and Rejected candidates as equally weighted rows in one list. User visual review interpreted Linked/Rejected rows as missing Approve/Reject controls.
+Learning: Approval-oriented UI should put actionable pending items in a primary review queue and demote processed linked/rejected items into explicit history with state explanations. Lifecycle states alone are not enough as user-facing information architecture.
+Future Action: When designing gwt approval/review surfaces, first separate actionable queue from processed history, then add state-specific explanations and tests proving processed rows do not expose mutation controls.
+
+## 2026-06-24 — Improvement Issue previews must be actionable GitHub Issue bodies
+
+Type: failure-pattern
+Context: During SPEC-3164 visual review, the user saw the Improvement Inbox Issue Preview and asked whether that thin Summary/Candidate/Evidence body was really the Issue content.
+Learning: An approval preview is the user's last gate before creating a public upstream Issue. It must show an actionable Issue body, not a sparse metadata dump, and History should be separated from the active review queue when processed items distract from approval decisions.
+Future Action: For self-improvement approval UI, render the exact public Issue body with Problem, Expected behavior, Observed evidence, Impact, Suggested verification, Source candidate, and Privacy sections before enabling approval; use a separate History tab for processed candidates.
+
+## 2026-06-24 — Hidden tab panels need CSS display guard
+
+Type: user-feedback
+Context: SPEC-3164 Improvement Inbox History tab visibility regression after moving History to a separate tab.
+Learning: DOM hidden attributes are not enough when the same element has an author CSS display rule such as display:grid. The browser can still render inactive panels unless a CSS-level [hidden] display:none guard comes after the component display rule.
+Future Action: For tabbed UI surfaces, add tests that verify the CSS hidden guard as well as DOM hidden state, and run a fresh rebuilt browser-check URL before asking the user to visually confirm.
+
+## 2026-06-25 — Reject actions need local UI reconciliation
+
+Type: user-feedback
+Context: SPEC-3164 Improvement Inbox visual verification: backend dismiss updated candidates.json, but the visible row did not change when the frontend waited only for the refreshed snapshot.
+Learning: For local review actions that succeed through a backend write and then refresh asynchronously, the surface should reconcile the visible local state immediately after confirmation. Otherwise a dropped websocket reply, process restart, or delayed snapshot leaves the UI looking unchanged even when the store has changed.
+Future Action: When adding approve/reject style review queues, add focused UI tests that assert post-confirm local state transitions before any backend snapshot arrives, and separately verify backend persistence.

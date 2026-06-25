@@ -183,15 +183,6 @@ pub(super) fn frontend_user_action_log(event: &FrontendEvent) -> Option<Frontend
         FrontendEvent::ArrangeWindows { mode, .. } => {
             FrontendUserActionLog::new("arrange_windows", "window").mode(format!("{mode:?}"))
         }
-        FrontendEvent::MaximizeWindow { id, .. } => {
-            FrontendUserActionLog::new("maximize_window", "window").window(id)
-        }
-        FrontendEvent::MinimizeWindow { id } => {
-            FrontendUserActionLog::new("minimize_window", "window").window(id)
-        }
-        FrontendEvent::RestoreWindow { id } => {
-            FrontendUserActionLog::new("restore_window", "window").window(id)
-        }
         FrontendEvent::DockWindowTab { id, target_id } => {
             FrontendUserActionLog::new("dock_window_tab", "window")
                 .window(id)
@@ -234,6 +225,15 @@ pub(super) fn frontend_user_action_log(event: &FrontendEvent) -> Option<Frontend
         FrontendEvent::CloseWindow { id } => {
             FrontendUserActionLog::new("close_window", "window").window(id)
         }
+        FrontendEvent::StopWindow { id } => {
+            FrontendUserActionLog::new("stop_window", "window").window(id)
+        }
+        FrontendEvent::StopAllWindows {} => {
+            FrontendUserActionLog::new("stop_all_windows", "window")
+        }
+        FrontendEvent::RestartWindow { id } => {
+            FrontendUserActionLog::new("restart_window", "window").window(id)
+        }
         FrontendEvent::LoadFileTree { id, path } => {
             FrontendUserActionLog::new("load_file_tree", "file")
                 .window(id)
@@ -261,6 +261,9 @@ pub(super) fn frontend_user_action_log(event: &FrontendEvent) -> Option<Frontend
         }
         FrontendEvent::LoadBranches { id } => {
             FrontendUserActionLog::new("load_branches", "branches").window(id)
+        }
+        FrontendEvent::RequestRemoteStartWorkBranches { id } => {
+            FrontendUserActionLog::new("request_remote_start_work_branches", "branches").window(id)
         }
         FrontendEvent::RunBranchCleanup {
             id,
@@ -592,6 +595,13 @@ pub(super) fn frontend_user_action_log(event: &FrontendEvent) -> Option<Frontend
             FrontendUserActionLog::new("update_board_oauth_port", "settings")
                 .target(port.to_string())
         }
+        FrontendEvent::GetProjectBoardConfig { project_root } => {
+            FrontendUserActionLog::new("get_project_board_config", "settings").target(project_root)
+        }
+        FrontendEvent::UpdateProjectBoardConfig { project_root, .. } => {
+            FrontendUserActionLog::new("update_project_board_config", "settings")
+                .target(project_root)
+        }
         FrontendEvent::UpdateSystemSettings {
             language,
             codex_trust_managed_hooks,
@@ -628,6 +638,12 @@ pub(super) fn frontend_user_action_log(event: &FrontendEvent) -> Option<Frontend
             close_kind,
         } => FrontendUserActionLog::new("close_work", "workspace")
             .target(format!("{work_id} ({close_kind})")),
+        FrontendEvent::ImprovementPromoteIssue { id } => {
+            FrontendUserActionLog::new("improvement_promote_issue", "improvement").target(id)
+        }
+        FrontendEvent::ImprovementDismiss { id, .. } => {
+            FrontendUserActionLog::new("improvement_dismiss", "improvement").target(id)
+        }
         // SPEC-3050: log the injection request without its text payload —
         // the injected line lands in the PTY transcript anyway.
         FrontendEvent::PaneSendInput { session_id, .. } => {

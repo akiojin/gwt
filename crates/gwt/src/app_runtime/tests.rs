@@ -17,8 +17,8 @@ use gwt::{
     empty_workspace_state, load_restored_workspace_state, load_session_state, ArrangeMode,
     BackendEvent, BranchCleanupInfo, BranchListEntry, BranchScope, ContentLimits,
     FocusCycleDirection, FrontendEvent, LaunchWizardAction, LaunchWizardContext, LaunchWizardState,
-    ProfileEnvEntryView, ProjectKind, UiTracePayload, WindowCanvasState, WindowGeometry,
-    WindowPlacement, WindowPreset, WindowProcessStatus,
+    LinkedIssueKind, ProfileEnvEntryView, ProjectKind, UiTracePayload, WindowCanvasState,
+    WindowGeometry, WindowPlacement, WindowPreset, WindowProcessStatus,
 };
 use gwt_config::{Profile, Settings};
 use gwt_core::{
@@ -44,12 +44,30 @@ use super::{
     AttachmentProgressPhase, BlockingTaskSpawner, DispatchTarget, KnowledgeLoadRequest,
     KnowledgeRefreshTask, KnowledgeSearchRequest, LaunchFeedbackContext, LaunchWizardMemoryCache,
     LaunchWizardSession, OutboundEvent, ProcessLaunch, ProjectTabRuntime, UserEvent, WindowRuntime,
-    WorkspaceResumeContext,
+    WorkspaceLaunchProjectionKind, WorkspaceResumeContext,
 };
 use crate::{
     combined_window_id, geometry_to_pty_size, same_worktree_path, AttachmentUploadStore,
     PtyWriterRegistry, UploadedAttachment,
 };
+
+#[test]
+fn improvement_action_error_message_explains_missing_github_auth() {
+    let message = super::improvement_action_error_message("network error: authentication required");
+
+    assert!(
+        message.contains("GitHub authentication is required"),
+        "message should explain the missing auth cause: {message}"
+    );
+    assert!(
+        message.contains("gh auth login"),
+        "message should give a concrete recovery command: {message}"
+    );
+    assert!(
+        message.contains("GH_TOKEN"),
+        "message should mention browser-check token bridging: {message}"
+    );
+}
 
 #[derive(Debug, Clone)]
 struct CapturedTracingEvent {
@@ -445,9 +463,6 @@ fn sample_window(
         geometry_revision: 0,
         z_index: 1,
         status,
-        minimized: false,
-        maximized: false,
-        pre_maximize_geometry: None,
         placement: WindowPlacement::Canvas,
         persist: true,
         purpose_title: None,
@@ -619,7 +634,7 @@ fn save_assigned_workspace_projection_for_test(
         Some("develop"),
         None,
         Some(&context),
-        true,
+        WorkspaceLaunchProjectionKind::StartWork,
         &live,
     )
 }
@@ -754,7 +769,7 @@ fn save_workspace_launch_projection_retains_only_live_agents() {
         Some("develop"),
         None,
         Some(&context),
-        true,
+        WorkspaceLaunchProjectionKind::StartWork,
         &live,
     )
     .expect("save launch projection");
@@ -777,6 +792,143 @@ fn save_workspace_launch_projection_retains_only_live_agents() {
         "launching session is kept"
     );
     assert_eq!(stored.status_text, "Codex is running");
+}
+
+// SPEC-2359 US-80 (FR-427/FR-429): a Start-Work Shell registers as a
+// first-class Work and is not pruned when an agent later launches on another
+// branch.
+#[test]
+fn save_shell_work_projection_registers_shell_and_survives_agent_launch() {
+    let _env_guard = env_test_lock().lock().expect("env lock");
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedEnvVar::set("HOME", temp.path());
+    let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+    let repo = temp.path().join("repo");
+    std::fs::create_dir_all(&repo).expect("repo dir");
+
+    // シナリオ1: registering a Start-Work Shell makes it a Work in the projection.
+    let empty: std::collections::HashSet<String> = std::collections::HashSet::new();
+    super::save_shell_work_projection(
+        &repo,
+        "tab-1:shell-3",
+        Some(repo.join("wt-shell")),
+        Some("work/shell-x".to_string()),
+        &empty,
+    )
+    .expect("register shell work");
+
+    let stored = gwt_core::workspace_projection::load_workspace_projection(&repo)
+        .expect("load")
+        .expect("projection exists");
+    let shell = stored
+        .agents
+        .iter()
+        .find(|agent| agent.is_shell_work())
+        .expect("shell work present");
+    assert_eq!(shell.session_id, "tab-1:shell-3");
+    assert_eq!(shell.display_name, "Shell");
+    assert_eq!(shell.branch.as_deref(), Some("work/shell-x"));
+
+    // シナリオ3 / FR-429: launching an agent on a different branch keeps the
+    // running Shell Work.
+    let session = sample_active_agent_session("tab-2", "win-2");
+    save_assigned_workspace_projection_for_test(&repo, &session).expect("agent launch save");
+
+    let after = gwt_core::workspace_projection::load_workspace_projection(&repo)
+        .expect("load")
+        .expect("projection exists");
+    assert!(
+        after
+            .agents
+            .iter()
+            .any(|agent| agent.is_shell_work() && agent.session_id == "tab-1:shell-3"),
+        "agent launch on another branch must keep the Shell Work"
+    );
+    assert!(
+        after
+            .agents
+            .iter()
+            .any(|agent| !agent.is_shell_work() && agent.session_id == session.session_id),
+        "the launched agent is present"
+    );
+}
+
+// SPEC-2359 US-80 (FR-429): the Active Work broadcast rebuild prunes dead
+// agents but must keep Shell Works (no agent session), otherwise a
+// just-registered shell would vanish from the broadcast.
+#[test]
+fn retain_live_workspace_agents_keeps_shell_work_with_no_live_sessions() {
+    let repo = std::path::Path::new("/repo");
+    let now = chrono::Utc::now();
+    let mut projection =
+        gwt_core::workspace_projection::WorkspaceProjection::default_for_project(repo);
+    projection.agents.push(
+        gwt_core::workspace_projection::WorkspaceAgentSummary::shell_work(
+            "tab-1:shell-3",
+            Some(repo.join("wt-x")),
+            Some("work/x".to_string()),
+            gwt_core::workspace_projection::WorkspaceStatusCategory::Active,
+            now,
+        ),
+    );
+    projection
+        .agents
+        .push(workspace_agent_summary_for_test("dead-agent", None));
+
+    super::retain_live_workspace_agents(&mut projection, &[], now);
+
+    assert!(
+        projection.agents.iter().any(|agent| agent.is_shell_work()),
+        "shell work survives the broadcast retain with no live sessions"
+    );
+    assert!(
+        !projection
+            .agents
+            .iter()
+            .any(|agent| agent.session_id == "dead-agent"),
+        "dead agent is pruned"
+    );
+    assert!(
+        projection.has_current_agents(),
+        "a lone shell keeps the projection out of the idle reset"
+    );
+}
+
+// SPEC-2359 US-80 (FR-430, シナリオ1/2): a Shell Work summary surfaces as a
+// Work row in the Active Work projection view, and an agent on the same branch
+// groups into the same Work.
+#[test]
+fn active_work_view_surfaces_shell_work_and_groups_with_same_branch_agent() {
+    let repo = std::path::Path::new("/repo");
+    let now = chrono::Utc::now();
+    let mut projection =
+        gwt_core::workspace_projection::WorkspaceProjection::default_for_project(repo);
+    projection.agents.push(
+        gwt_core::workspace_projection::WorkspaceAgentSummary::shell_work(
+            "tab-1:shell-3",
+            Some(repo.join("wt-x")),
+            Some("work/x".to_string()),
+            gwt_core::workspace_projection::WorkspaceStatusCategory::Active,
+            now,
+        ),
+    );
+
+    let view = super::active_work_projection_from_saved(projection.clone());
+    assert_eq!(
+        view.active_agents, 1,
+        "the shell work surfaces as one active work row"
+    );
+
+    // Same-branch agent groups into one Work (FR-430 / シナリオ2).
+    let mut agent = workspace_agent_summary_for_test("agent-1", None);
+    agent.branch = Some("work/x".to_string());
+    agent.worktree_path = Some(repo.join("wt-x"));
+    projection.agents.push(agent);
+    let grouped = super::active_work_projection_from_saved(projection);
+    assert_eq!(
+        grouped.active_agents, 2,
+        "shell + agent on the same branch both appear as active rows"
+    );
 }
 
 #[test]
@@ -2082,6 +2234,7 @@ fn sample_launch_wizard_session(tab_id: &str, project_root: &Path) -> LaunchWiza
                     cleanup_ready: true,
                     cleanup: BranchCleanupInfo::default(),
                     resume: gwt::BranchResumeInfo::unavailable(),
+                    start_work_eligibility: None,
                 },
                 normalized_branch_name: "feature/demo".to_string(),
                 worktree_path: None,
@@ -2232,6 +2385,7 @@ fn sample_no_agent_launch_wizard_session(tab_id: &str, project_root: &Path) -> L
                     cleanup_ready: true,
                     cleanup: BranchCleanupInfo::default(),
                     resume: gwt::BranchResumeInfo::unavailable(),
+                    start_work_eligibility: None,
                 },
                 normalized_branch_name: "feature/demo".to_string(),
                 worktree_path: Some(project_root.to_path_buf()),
@@ -2272,6 +2426,7 @@ fn sample_ready_agent_launch_wizard_session(
                     cleanup_ready: true,
                     cleanup: BranchCleanupInfo::default(),
                     resume: gwt::BranchResumeInfo::unavailable(),
+                    start_work_eligibility: None,
                 },
                 normalized_branch_name: "feature/demo".to_string(),
                 worktree_path: Some(project_root.to_path_buf()),
@@ -2970,56 +3125,6 @@ fn app_runtime_update_terminal_grid_resizes_runtime_without_workspace_broadcast(
 }
 
 #[test]
-fn app_runtime_cycle_focus_restores_maximized_source_geometry() {
-    // Switching focus away from a maximized window restores its
-    // pre-maximize geometry (workspace.cycle_focus behavior, surfaced
-    // at the app_runtime integration level). The PTY is intentionally
-    // NOT resized here anymore — the frontend real fit owns PTY size.
-    let temp = tempdir().expect("tempdir");
-    let bounds = canvas_bounds();
-    let tab = sample_project_tab(
-        "tab-1",
-        "Repo",
-        temp.path().to_path_buf(),
-        ProjectKind::Git,
-        &[WindowPreset::Shell, WindowPreset::Claude],
-    );
-    let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
-    let claude_id = combined_window_id("tab-1", "claude-1");
-
-    let original_claude_geometry = runtime
-        .tab("tab-1")
-        .expect("tab")
-        .workspace
-        .window("claude-1")
-        .expect("claude")
-        .geometry
-        .clone();
-
-    assert_eq!(
-        runtime
-            .maximize_window_events(&claude_id, bounds.clone())
-            .len(),
-        1
-    );
-    assert_eq!(
-        runtime
-            .cycle_focus_events(FocusCycleDirection::Forward, bounds)
-            .len(),
-        1
-    );
-
-    let claude_window = runtime
-        .tab("tab-1")
-        .expect("tab")
-        .workspace
-        .window("claude-1")
-        .expect("claude");
-    assert_eq!(claude_window.geometry, original_claude_geometry);
-    assert!(!claude_window.maximized);
-}
-
-#[test]
 fn app_runtime_cycle_focus_preserves_real_fit_pty_size() {
     // Issue #2937: cycle_focus must NOT clobber the PTY size that the
     // frontend established via its real xterm fit. The backend's
@@ -3099,13 +3204,12 @@ fn app_runtime_cycle_focus_preserves_real_fit_pty_size() {
 }
 
 #[test]
-fn app_runtime_activate_maximized_window_tab_preserves_real_fit_pty_size() {
-    // SPEC-2008 Phase 34 / Issue #2937 companion: maximized tab activation
-    // changes only the active marker. The backend must not resize the PTY
-    // from shared maximized geometry, because the frontend's visible xterm
-    // fit owns the real cols/rows for the revealed tab.
+fn app_runtime_activate_window_tab_preserves_real_fit_pty_size() {
+    // SPEC-2008 Phase 34 / Issue #2937 companion: tab activation changes only
+    // the active marker. The backend must not resize the PTY from the shared
+    // group geometry, because the frontend's visible xterm fit owns the real
+    // cols/rows for the revealed tab.
     let temp = tempdir().expect("tempdir");
-    let bounds = canvas_bounds();
     let tab = sample_project_tab(
         "tab-1",
         "Repo",
@@ -3119,12 +3223,6 @@ fn app_runtime_activate_maximized_window_tab_preserves_real_fit_pty_size() {
 
     assert_eq!(
         runtime.dock_window_tab_events(&shell_id, &claude_id).len(),
-        1
-    );
-    assert_eq!(
-        runtime
-            .maximize_window_events(&shell_id, bounds.clone())
-            .len(),
         1
     );
     let _ = runtime.activate_window_tab_events(&shell_id);
@@ -3146,7 +3244,7 @@ fn app_runtime_activate_maximized_window_tab_preserves_real_fit_pty_size() {
         assert_ne!(
             geometry_to_pty_size(&geometry),
             (REAL_COLS, REAL_ROWS),
-            "sentinel must differ from the maximized-geometry approximation",
+            "sentinel must differ from the shared-geometry approximation",
         );
     }
 
@@ -3173,8 +3271,6 @@ fn app_runtime_activate_maximized_window_tab_preserves_real_fit_pty_size() {
             .tab_group_active
     );
     assert!(!workspace.window("shell-1").expect("shell").tab_group_active);
-    assert!(workspace.window("claude-1").expect("claude").maximized);
-    assert!(workspace.window("shell-1").expect("shell").maximized);
     for window_id in [&shell_id, &claude_id] {
         let pane = runtime
             .runtimes
@@ -4251,6 +4347,41 @@ fn app_runtime_window_list_normalizes_pre_lifecycle_agent_windows() {
 }
 
 #[test]
+fn app_runtime_window_list_enumerates_all_project_tabs() {
+    // SPEC-3038 (2026-06-20): the Command Rail Windows popover lists windows
+    // from every project tab, not just the active one, so the list matches the
+    // cross-tab open-window badge.
+    let temp = tempdir().expect("tempdir");
+    let tab_a = sample_project_tab_with_window(
+        "tab-a",
+        "win-a1",
+        WindowPreset::Codex,
+        WindowProcessStatus::Running,
+    );
+    let tab_b = sample_project_tab_with_window(
+        "tab-b",
+        "win-b1",
+        WindowPreset::Codex,
+        WindowProcessStatus::Running,
+    );
+    let runtime = sample_runtime(temp.path(), vec![tab_a, tab_b], Some("tab-a"));
+
+    let BackendEvent::WindowList { windows } = runtime.list_windows_event() else {
+        panic!("expected window list");
+    };
+    let ids: Vec<String> = windows.iter().map(|window| window.id.clone()).collect();
+    assert!(
+        ids.contains(&"tab-a::win-a1".to_string()),
+        "active tab window must be listed: {ids:?}"
+    );
+    assert!(
+        ids.contains(&"tab-b::win-b1".to_string()),
+        "non-active tab window must also be listed: {ids:?}"
+    );
+    assert_eq!(windows.len(), 2, "all project-tab windows must be listed");
+}
+
+#[test]
 fn app_runtime_open_start_work_defers_remote_develop_preparation_until_launch() {
     let _env_guard = env_test_lock().lock().expect("env lock");
     let temp = tempdir().expect("tempdir");
@@ -4880,6 +5011,77 @@ No viable candidates found in PATH \
     assert!(!message.contains("/private/var/folders"));
 }
 
+// SPEC-3151 FR-003 / AS-3: when neither a native `opencode` binary nor a
+// package runner is available, the raw PTY error must be rewritten into an
+// actionable install hint, matching the Antigravity treatment.
+#[test]
+fn app_runtime_opencode_missing_binary_launch_error_is_actionable() {
+    let temp = tempdir().expect("tempdir");
+    let tab = sample_project_tab_with_window(
+        "tab-1",
+        "agent-1",
+        WindowPreset::Agent,
+        WindowProcessStatus::Running,
+    );
+    let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+    let window_id = combined_window_id("tab-1", "agent-1");
+    let raw_error = "PTY creation failed: Unable to spawn opencode because: \
+No viable candidates found in PATH \
+\"/private/var/folders/tmp/node_modules/.bin:/opt/homebrew/bin:/Users/example/.local/bin\"";
+
+    let events = runtime.handle_launch_complete(window_id.clone(), Err(raw_error.to_string()));
+
+    let detail = events
+        .iter()
+        .find_map(|event| match &event.event {
+            BackendEvent::TerminalStatus { id, status, detail }
+                if id == &window_id && *status == WindowProcessStatus::Error =>
+            {
+                detail.as_deref()
+            }
+            _ => None,
+        })
+        .expect("terminal status detail");
+    assert!(detail.contains("OpenCode (`opencode`) was not found"));
+    assert!(detail.contains("npm i -g opencode-ai"));
+    assert!(detail.contains("bunx/npx"));
+    assert!(!detail.contains("No viable candidates found in PATH"));
+    assert!(!detail.contains("/private/var/folders"));
+}
+
+#[test]
+fn app_runtime_opencode_missing_binary_launch_wizard_error_is_actionable() {
+    let temp = tempdir().expect("tempdir");
+    let mut runtime = sample_runtime(temp.path(), Vec::new(), None);
+    let raw_error = "PTY creation failed: Unable to spawn opencode because: \
+No viable candidates found in PATH \
+\"/private/var/folders/tmp/node_modules/.bin:/opt/homebrew/bin:/Users/example/.local/bin\"";
+
+    let events = runtime.launch_error_events(
+        "tab-1::agent-1".to_string(),
+        raw_error.to_string(),
+        Some(LaunchFeedbackContext {
+            client_id: "client-1".to_string(),
+            title: "Launch failed".to_string(),
+        }),
+    );
+
+    let message = events
+        .iter()
+        .find_map(|event| match &event.event {
+            BackendEvent::LaunchWizardOpenError { title, message } if title == "Launch failed" => {
+                Some(message.as_str())
+            }
+            _ => None,
+        })
+        .expect("launch wizard open error");
+    assert!(message.contains("OpenCode (`opencode`) was not found"));
+    assert!(message.contains("npm i -g opencode-ai"));
+    assert!(message.contains("bunx/npx"));
+    assert!(!message.contains("No viable candidates found in PATH"));
+    assert!(!message.contains("/private/var/folders"));
+}
+
 #[test]
 fn app_runtime_frontend_ready_replays_launch_error_diagnostic_snapshot_without_runtime() {
     let temp = tempdir().expect("tempdir");
@@ -5284,6 +5486,135 @@ fn app_runtime_workspace_resume_launch_completion_carries_context_to_projection(
     assert_eq!(
         work_items.work_items[0].events[0].kind,
         gwt_core::workspace_projection::WorkEventKind::Resume
+    );
+}
+
+#[test]
+fn app_runtime_issue_launch_wizard_seeds_issue_workspace_context() {
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedEnvVar::set("HOME", temp.path());
+    let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+    let repo = temp.path().join("repo");
+    fs::create_dir_all(&repo).expect("create repo");
+    init_repo(&repo);
+    Cache::new(issue_cache_root(&repo))
+        .write_snapshot(&sample_issue_snapshot(
+            3096,
+            "Fix Launch Agent trace",
+            &["bug"],
+            "Launch trace missing",
+            "2026-06-20T00:00:00Z",
+        ))
+        .expect("write issue cache");
+    let tab = sample_project_tab("tab-1", "Repo", repo.clone(), ProjectKind::Git, &[]);
+    let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+
+    runtime
+        .open_knowledge_launch_wizard_for_base_branch(
+            "tab-1",
+            &repo,
+            "develop",
+            3096,
+            LinkedIssueKind::Issue,
+        )
+        .expect("open issue launch wizard");
+
+    let context = runtime
+        .launch_wizard
+        .as_ref()
+        .and_then(|session| session.workspace_resume_context.as_ref())
+        .expect("issue launch wizard should carry workspace context");
+    assert_eq!(context.owner.as_deref(), Some("Issue #3096"));
+    assert_eq!(context.title.as_deref(), Some("Fix Launch Agent trace"));
+}
+
+#[test]
+fn app_runtime_issue_launch_completion_records_issue_owned_start_work_event() {
+    let _env_guard = env_test_lock().lock().expect("env lock");
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedEnvVar::set("HOME", temp.path());
+    let repo = temp.path().join("repo");
+    let worktree = temp.path().join("repo-work-issue-3096");
+    fs::create_dir_all(&repo).expect("create repo");
+    fs::create_dir_all(&worktree).expect("create worktree");
+    init_repo(&repo);
+    let tab = sample_project_tab_with_window_at(
+        "tab-1",
+        "agent-1",
+        repo.clone(),
+        WindowPreset::Agent,
+        WindowProcessStatus::Running,
+    );
+    let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+    let window_id = combined_window_id("tab-1", "agent-1");
+    runtime.pending_workspace_resume_contexts.insert(
+        window_id.clone(),
+        WorkspaceResumeContext {
+            title: Some("Fix Launch Agent trace".to_string()),
+            owner: Some("Issue #3096".to_string()),
+            summary: None,
+            next_action: None,
+        },
+    );
+    let (command, args) = if cfg!(windows) {
+        (
+            "cmd".to_string(),
+            vec![
+                "/d".to_string(),
+                "/s".to_string(),
+                "/c".to_string(),
+                "exit /b 0".to_string(),
+            ],
+        )
+    } else {
+        (
+            "/bin/sh".to_string(),
+            vec!["-lc".to_string(), "exit 0".to_string()],
+        )
+    };
+
+    let _events = runtime.handle_launch_complete(
+        window_id,
+        Ok((
+            ProcessLaunch {
+                command,
+                args,
+                env: HashMap::new(),
+                remove_env: Vec::new(),
+                cwd: Some(worktree.clone()),
+            },
+            "session-issue-3096".to_string(),
+            "work/issue-3096".to_string(),
+            "Codex".to_string(),
+            worktree.clone(),
+            gwt_agent::AgentId::Codex,
+            Some(3096),
+            Some("develop".to_string()),
+            gwt_agent::LaunchRuntimeTarget::Host,
+            worktree.display().to_string(),
+        )),
+    );
+
+    let work_items = gwt_core::workspace_projection::load_workspace_work_items(&repo)
+        .expect("load work items")
+        .expect("work items");
+    let item = work_items
+        .work_items
+        .iter()
+        .find(|item| item.owner.as_deref() == Some("Issue #3096"))
+        .expect("issue-owned work item");
+    assert_eq!(item.title, "Fix Launch Agent trace");
+    assert_eq!(item.agents[0].session_id, "session-issue-3096");
+    assert_eq!(
+        item.events[0].kind,
+        gwt_core::workspace_projection::WorkEventKind::Start
+    );
+    assert_eq!(
+        item.execution_containers[0].branch.as_deref(),
+        Some("work/issue-3096")
     );
 }
 
@@ -8341,9 +8672,9 @@ fn app_runtime_startup_auto_resume_uses_centered_stack_bounds() {
             .map(|geometry| (geometry.x, geometry.y, geometry.width, geometry.height))
             .collect::<Vec<_>>(),
         vec![
-            (312.0, 216.0, 720.0, 420.0),
-            (340.0, 240.0, 720.0, 420.0),
-            (368.0, 264.0, 720.0, 420.0),
+            (32.0, 26.0, 1280.0, 800.0),
+            (60.0, 50.0, 1280.0, 800.0),
+            (88.0, 74.0, 1280.0, 800.0),
         ],
         "restored agent windows should form a stack centered in the startup canvas"
     );
@@ -10065,6 +10396,259 @@ fn app_runtime_start_window_registers_running_process_runtime_and_pty_writer() {
     runtime.stop_window_runtime(&window_id);
 }
 
+// SPEC-2356 安心 Addendum (FR-041): StopWindow tears down the runtime but KEEPS
+// the window on the canvas, rendered as Stopped, unlike CloseWindow.
+#[test]
+fn stop_window_events_keeps_window_and_marks_stopped() {
+    let temp = tempdir().expect("tempdir");
+    let repo = temp.path().join("repo");
+    fs::create_dir_all(&repo).expect("create repo");
+    let tab = sample_project_tab(
+        "tab-1",
+        "Repo",
+        repo,
+        ProjectKind::NonRepo,
+        &[WindowPreset::Shell],
+    );
+    let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+    let window = runtime.tabs[0].workspace.persisted().windows[0].clone();
+    let window_id = combined_window_id("tab-1", &window.id);
+    runtime.register_window("tab-1", &window.id);
+    insert_test_pane_runtime(&mut runtime, &window_id);
+    runtime
+        .window_pty_statuses
+        .insert(window_id.clone(), WindowProcessStatus::Running);
+
+    let events = runtime.stop_window_events(&window_id);
+
+    // The runtime is gone (PTY killed) but the window record survives.
+    assert!(!runtime.runtimes.contains_key(&window_id));
+    assert!(runtime.window_lookup.contains_key(&window_id));
+    assert!(
+        runtime.tabs[0].workspace.window(&window.id).is_some(),
+        "StopWindow must keep the window on the canvas, unlike CloseWindow"
+    );
+    assert_eq!(
+        runtime.window_status(&window_id),
+        Some(WindowProcessStatus::Stopped),
+        "stopped window must render as Stopped"
+    );
+    assert!(events.iter().any(|event| matches!(
+        &event.event,
+        BackendEvent::WindowState { window_id: id, state }
+            if id == &window_id && *state == WindowProcessStatus::Stopped
+    )));
+}
+
+// SPEC-2356 安心 Addendum (FR-041): StopWindow is idempotent — stopping an
+// already-stopped window keeps it on the canvas and stays Stopped.
+#[test]
+fn stop_window_events_is_idempotent_when_already_stopped() {
+    let temp = tempdir().expect("tempdir");
+    let repo = temp.path().join("repo");
+    fs::create_dir_all(&repo).expect("create repo");
+    let tab = sample_project_tab_with_window_at(
+        "tab-1",
+        "shell-1",
+        repo,
+        WindowPreset::Shell,
+        WindowProcessStatus::Stopped,
+    );
+    let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+    let window_id = combined_window_id("tab-1", "shell-1");
+    runtime.register_window("tab-1", "shell-1");
+
+    let events = runtime.stop_window_events(&window_id);
+
+    assert!(runtime.tabs[0].workspace.window("shell-1").is_some());
+    assert_eq!(
+        runtime.window_status(&window_id),
+        Some(WindowProcessStatus::Stopped)
+    );
+    // Idempotent: it still emits the authoritative Stopped status, never an error.
+    assert!(events.iter().all(|event| !matches!(
+        &event.event,
+        BackendEvent::WindowState { state, .. } if *state == WindowProcessStatus::Error
+    )));
+}
+
+// SPEC-2356 安心 Addendum (FR-041): CloseWindow vs StopWindow contract — Close
+// removes the window, Stop keeps it. This guards the distinction directly.
+#[test]
+fn close_window_removes_while_stop_window_keeps() {
+    let temp = tempdir().expect("tempdir");
+    let repo = temp.path().join("repo");
+    fs::create_dir_all(&repo).expect("create repo");
+    let tab = sample_project_tab(
+        "tab-1",
+        "Repo",
+        repo,
+        ProjectKind::NonRepo,
+        &[WindowPreset::Shell, WindowPreset::Shell],
+    );
+    let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+    let windows: Vec<_> = runtime.tabs[0]
+        .workspace
+        .persisted()
+        .windows
+        .iter()
+        .map(|window| window.id.clone())
+        .collect();
+    let stop_raw = windows[0].clone();
+    let close_raw = windows[1].clone();
+    let stop_id = combined_window_id("tab-1", &stop_raw);
+    let close_id = combined_window_id("tab-1", &close_raw);
+    runtime.register_window("tab-1", &stop_raw);
+    runtime.register_window("tab-1", &close_raw);
+
+    runtime.stop_window_events(&stop_id);
+    runtime.close_window_events(&close_id);
+
+    assert!(
+        runtime.tabs[0].workspace.window(&stop_raw).is_some(),
+        "StopWindow keeps the window"
+    );
+    assert!(
+        runtime.tabs[0].workspace.window(&close_raw).is_none(),
+        "CloseWindow removes the window"
+    );
+}
+
+// SPEC-2356 安心 Addendum (FR-042): StopAllWindows stops every running agent
+// window's runtime while keeping all windows on the canvas.
+#[test]
+fn stop_all_windows_events_stops_every_runtime_keeping_windows() {
+    let temp = tempdir().expect("tempdir");
+    let repo = temp.path().join("repo");
+    fs::create_dir_all(&repo).expect("create repo");
+    let tab = sample_project_tab(
+        "tab-1",
+        "Repo",
+        repo,
+        ProjectKind::NonRepo,
+        &[WindowPreset::Claude, WindowPreset::Codex],
+    );
+    let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+    let raw_ids: Vec<_> = runtime.tabs[0]
+        .workspace
+        .persisted()
+        .windows
+        .iter()
+        .map(|window| window.id.clone())
+        .collect();
+    for raw in &raw_ids {
+        let window_id = combined_window_id("tab-1", raw);
+        runtime.register_window("tab-1", raw);
+        insert_test_pane_runtime(&mut runtime, &window_id);
+        runtime
+            .window_pty_statuses
+            .insert(window_id.clone(), WindowProcessStatus::Running);
+    }
+
+    runtime.stop_all_windows_events();
+
+    for raw in &raw_ids {
+        let window_id = combined_window_id("tab-1", raw);
+        assert!(
+            !runtime.runtimes.contains_key(&window_id),
+            "every agent runtime must be torn down"
+        );
+        assert!(
+            runtime.tabs[0].workspace.window(raw).is_some(),
+            "StopAllWindows must keep all windows on the canvas"
+        );
+        assert_eq!(
+            runtime.window_status(&window_id),
+            Some(WindowProcessStatus::Stopped)
+        );
+    }
+}
+
+// SPEC-2356 安心 Addendum (FR-044): RestartWindow relaunches a stopped process
+// preset in place, preserving the window id and re-registering its runtime.
+#[test]
+fn restart_window_events_relaunches_stopped_process_window_in_place() {
+    let temp = tempdir().expect("tempdir");
+    let repo = temp.path().join("repo");
+    fs::create_dir_all(&repo).expect("create repo");
+    let tab = sample_project_tab_with_window_at(
+        "tab-1",
+        "shell-1",
+        repo,
+        WindowPreset::Shell,
+        WindowProcessStatus::Stopped,
+    );
+    let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+    let window_id = combined_window_id("tab-1", "shell-1");
+    runtime.register_window("tab-1", "shell-1");
+    assert!(!runtime.runtimes.contains_key(&window_id));
+
+    let events = runtime.restart_window_events(&window_id);
+
+    // Same window id, freshly-running runtime + PTY writer registered.
+    assert!(
+        runtime.tabs[0].workspace.window("shell-1").is_some(),
+        "RestartWindow must preserve the window id"
+    );
+    assert!(runtime.runtimes.contains_key(&window_id));
+    assert_eq!(
+        runtime.window_status(&window_id),
+        Some(WindowProcessStatus::Running)
+    );
+    assert!(events.iter().any(|event| matches!(
+        &event.event,
+        BackendEvent::WindowState { window_id: id, state }
+            if id == &window_id && *state == WindowProcessStatus::Running
+    )));
+
+    runtime.stop_window_runtime(&window_id);
+}
+
+// SPEC-2356 安心 Addendum (FR-044): RestartWindow only acts on stopped/errored
+// windows — restarting a window that is already running is a no-op so a live
+// agent is never double-spawned.
+#[test]
+fn restart_window_events_is_noop_when_window_already_running() {
+    let temp = tempdir().expect("tempdir");
+    let repo = temp.path().join("repo");
+    fs::create_dir_all(&repo).expect("create repo");
+    let tab = sample_project_tab(
+        "tab-1",
+        "Repo",
+        repo,
+        ProjectKind::NonRepo,
+        &[WindowPreset::Shell],
+    );
+    let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+    let window = runtime.tabs[0].workspace.persisted().windows[0].clone();
+    let window_id = combined_window_id("tab-1", &window.id);
+    runtime.register_window("tab-1", &window.id);
+    insert_test_pane_runtime(&mut runtime, &window_id);
+    runtime
+        .window_pty_statuses
+        .insert(window_id.clone(), WindowProcessStatus::Running);
+    let original_pane = runtime
+        .runtimes
+        .get(&window_id)
+        .map(|runtime| Arc::as_ptr(&runtime.pane) as usize)
+        .expect("runtime present");
+
+    let events = runtime.restart_window_events(&window_id);
+
+    assert!(events.is_empty(), "restarting a running window is a no-op");
+    let after_pane = runtime
+        .runtimes
+        .get(&window_id)
+        .map(|runtime| Arc::as_ptr(&runtime.pane) as usize)
+        .expect("runtime still present");
+    assert_eq!(
+        original_pane, after_pane,
+        "running window's runtime must not be replaced"
+    );
+
+    runtime.stop_window_runtime(&window_id);
+}
+
 #[test]
 fn app_runtime_stop_all_runtimes_kills_every_pane_before_join_waits() {
     let temp = tempdir().expect("tempdir");
@@ -10861,6 +11445,614 @@ fn app_runtime_load_knowledge_bridge_replies_with_cache_backed_issue_and_spec_vi
 }
 
 #[test]
+fn app_runtime_load_knowledge_bridge_projects_related_issue_work_sessions() {
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedEnvVar::set("HOME", temp.path());
+    let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+    let repo = temp.path().join("repo");
+    let worktree = temp.path().join("repo-work-issue-3096");
+    fs::create_dir_all(&repo).expect("create repo");
+    fs::create_dir_all(&worktree).expect("create worktree");
+    init_repo(&repo);
+    Cache::new(issue_cache_root(&repo))
+        .write_snapshot(&sample_issue_snapshot(
+            3096,
+            "Fix Launch Agent trace",
+            &["bug"],
+            "Issue body",
+            "2026-06-20T09:00:00Z",
+        ))
+        .expect("write issue snapshot");
+
+    let tab = sample_project_tab_with_window_at(
+        "tab-1",
+        "issue-1",
+        repo.clone(),
+        WindowPreset::Issue,
+        WindowProcessStatus::Ready,
+    );
+    let runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+
+    let mut session =
+        gwt_agent::Session::new(&worktree, "work/issue-3096", gwt_agent::AgentId::Codex);
+    session.id = "session-issue-3096".to_string();
+    session.agent_session_id = Some("conv-issue-3096".to_string());
+    session.display_name = "Codex".to_string();
+    session.linked_issue_number = Some(3096);
+    session.save(&runtime.sessions_dir).expect("save session");
+
+    let now = Utc.with_ymd_and_hms(2026, 6, 20, 9, 5, 0).unwrap();
+    let work_id = gwt_core::workspace_projection::canonical_work_id(
+        &repo,
+        Some("work/issue-3096"),
+        Some(&worktree),
+    )
+    .expect("work id");
+    let mut event = gwt_core::workspace_projection::WorkEvent::new(
+        gwt_core::workspace_projection::WorkEventKind::Start,
+        work_id,
+        now,
+    );
+    event.title = Some("Fix Launch Agent trace".to_string());
+    event.owner = Some("Issue #3096".to_string());
+    event.agent_session_id = Some("session-issue-3096".to_string());
+    event.agent_id = Some("codex".to_string());
+    event.display_name = Some("Codex".to_string());
+    event.execution_container = Some(
+        gwt_core::workspace_projection::WorkspaceExecutionContainerRef {
+            branch: Some("work/issue-3096".to_string()),
+            worktree_path: Some(worktree.clone()),
+            pr_number: None,
+            pr_url: None,
+            pr_state: None,
+        },
+    );
+    gwt_core::workspace_projection::record_workspace_work_event(&repo, event)
+        .expect("record work event");
+
+    let events = runtime.load_knowledge_bridge_events(
+        "client-1",
+        KnowledgeLoadRequest {
+            id: &combined_window_id("tab-1", "issue-1"),
+            kind: gwt::KnowledgeKind::Issue,
+            request_id: None,
+            selected_number: Some(3096),
+            refresh: false,
+        },
+    );
+
+    let entries = match &events[0].event {
+        BackendEvent::KnowledgeEntries { entries, .. } => entries,
+        other => panic!("unexpected entries event: {other:?}"),
+    };
+    assert_eq!(entries[0].number, 3096);
+    assert_eq!(entries[0].related_work_count, 1);
+    assert_eq!(entries[0].related_session_count, 1);
+
+    let detail = match &events[1].event {
+        BackendEvent::KnowledgeDetail { detail, .. } => detail,
+        other => panic!("unexpected detail event: {other:?}"),
+    };
+    assert_eq!(detail.related_works.len(), 1);
+    let work = &detail.related_works[0];
+    assert_eq!(work.title, "Fix Launch Agent trace");
+    assert_eq!(work.branch.as_deref(), Some("work/issue-3096"));
+    assert_eq!(work.agents[0].session_id, "session-issue-3096");
+    assert_eq!(
+        work.agents[0].sessions[0].agent_session_id,
+        "conv-issue-3096"
+    );
+}
+
+#[test]
+fn app_runtime_load_knowledge_bridge_marks_session_only_stopped_related_session_past() {
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedEnvVar::set("HOME", temp.path());
+    let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+    let repo = temp.path().join("repo");
+    let worktree = temp.path().join("repo-work-issue-3133");
+    fs::create_dir_all(&repo).expect("create repo");
+    fs::create_dir_all(&worktree).expect("create worktree");
+    init_repo(&repo);
+    Cache::new(issue_cache_root(&repo))
+        .write_snapshot(&sample_issue_snapshot(
+            3133,
+            "Resume historical Launch Agent session",
+            &["bug"],
+            "Issue body",
+            "2026-06-20T09:00:00Z",
+        ))
+        .expect("write issue snapshot");
+
+    let tab = sample_project_tab_with_window_at(
+        "tab-1",
+        "issue-1",
+        repo.clone(),
+        WindowPreset::Issue,
+        WindowProcessStatus::Ready,
+    );
+    let runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+
+    let stopped_at = Utc.with_ymd_and_hms(2026, 6, 20, 9, 5, 0).unwrap();
+    let mut session =
+        gwt_agent::Session::new(&worktree, "work/issue-3133", gwt_agent::AgentId::Codex);
+    session.id = "session-issue-3133-stopped".to_string();
+    session.agent_session_id = Some("conv-issue-3133-stopped".to_string());
+    session.status = gwt_agent::AgentStatus::Stopped;
+    session.linked_issue_number = Some(3133);
+    session.created_at = stopped_at;
+    session.updated_at = stopped_at;
+    session.last_activity_at = stopped_at;
+    session.save(&runtime.sessions_dir).expect("save session");
+
+    let events = runtime.load_knowledge_bridge_events(
+        "client-1",
+        KnowledgeLoadRequest {
+            id: &combined_window_id("tab-1", "issue-1"),
+            kind: gwt::KnowledgeKind::Issue,
+            request_id: None,
+            selected_number: Some(3133),
+            refresh: false,
+        },
+    );
+
+    let detail = match &events[1].event {
+        BackendEvent::KnowledgeDetail { detail, .. } => detail,
+        other => panic!("unexpected detail event: {other:?}"),
+    };
+    assert_eq!(detail.related_works.len(), 1);
+    assert_eq!(detail.related_works[0].status_category, "idle");
+    assert_eq!(detail.related_works[0].agents[0].sessions.len(), 1);
+    assert!(
+        !detail.related_works[0].agents[0].sessions[0].is_active,
+        "session-only stopped related sessions must render as Past, not Current"
+    );
+}
+
+#[test]
+fn app_runtime_load_knowledge_bridge_dedupes_related_issue_sessions_by_conversation() {
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedEnvVar::set("HOME", temp.path());
+    let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+    let repo = temp.path().join("repo");
+    let worktree = temp.path().join("repo-work-issue-3133");
+    fs::create_dir_all(&repo).expect("create repo");
+    fs::create_dir_all(&worktree).expect("create worktree");
+    init_repo(&repo);
+    Cache::new(issue_cache_root(&repo))
+        .write_snapshot(&sample_issue_snapshot(
+            3133,
+            "Resume Launch Agent session",
+            &["bug"],
+            "Issue body",
+            "2026-06-20T09:00:00Z",
+        ))
+        .expect("write issue snapshot");
+
+    let tab = sample_project_tab_with_window_at(
+        "tab-1",
+        "issue-1",
+        repo.clone(),
+        WindowPreset::Issue,
+        WindowProcessStatus::Ready,
+    );
+    let runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+
+    let conversation_id = "conv-issue-3133";
+    let old_at = Utc.with_ymd_and_hms(2026, 6, 20, 9, 0, 0).unwrap();
+    let new_at = Utc.with_ymd_and_hms(2026, 6, 20, 9, 5, 0).unwrap();
+
+    let mut stale_session =
+        gwt_agent::Session::new(&worktree, "work/issue-3133", gwt_agent::AgentId::Codex);
+    stale_session.id = "session-issue-3133-stale".to_string();
+    stale_session.agent_session_id = Some(conversation_id.to_string());
+    stale_session.status = gwt_agent::AgentStatus::Stopped;
+    stale_session.linked_issue_number = Some(3133);
+    stale_session.created_at = old_at;
+    stale_session.updated_at = old_at;
+    stale_session.last_activity_at = old_at;
+    stale_session
+        .save(&runtime.sessions_dir)
+        .expect("save stale session");
+
+    let mut current_session =
+        gwt_agent::Session::new(&worktree, "work/issue-3133", gwt_agent::AgentId::Codex);
+    current_session.id = "session-issue-3133-current".to_string();
+    current_session.agent_session_id = Some(conversation_id.to_string());
+    current_session.status = gwt_agent::AgentStatus::Running;
+    current_session.linked_issue_number = Some(3133);
+    current_session.created_at = new_at;
+    current_session.updated_at = new_at;
+    current_session.last_activity_at = new_at;
+    current_session
+        .save(&runtime.sessions_dir)
+        .expect("save current session");
+
+    let work_id = gwt_core::workspace_projection::canonical_work_id(
+        &repo,
+        Some("work/issue-3133"),
+        Some(&worktree),
+    )
+    .expect("work id");
+    let mut event = gwt_core::workspace_projection::WorkEvent::new(
+        gwt_core::workspace_projection::WorkEventKind::Start,
+        work_id,
+        new_at,
+    );
+    event.title = Some("Resume Launch Agent session".to_string());
+    event.owner = Some("Issue #3133".to_string());
+    event.agent_session_id = Some("session-issue-3133-current".to_string());
+    event.agent_id = Some("codex".to_string());
+    event.display_name = Some("Codex".to_string());
+    event.execution_container = Some(
+        gwt_core::workspace_projection::WorkspaceExecutionContainerRef {
+            branch: Some("work/issue-3133".to_string()),
+            worktree_path: Some(worktree.clone()),
+            pr_number: None,
+            pr_url: None,
+            pr_state: None,
+        },
+    );
+    gwt_core::workspace_projection::record_workspace_work_event(&repo, event)
+        .expect("record work event");
+
+    let events = runtime.load_knowledge_bridge_events(
+        "client-1",
+        KnowledgeLoadRequest {
+            id: &combined_window_id("tab-1", "issue-1"),
+            kind: gwt::KnowledgeKind::Issue,
+            request_id: None,
+            selected_number: Some(3133),
+            refresh: false,
+        },
+    );
+
+    let entries = match &events[0].event {
+        BackendEvent::KnowledgeEntries { entries, .. } => entries,
+        other => panic!("unexpected entries event: {other:?}"),
+    };
+    assert_eq!(entries[0].number, 3133);
+    assert_eq!(entries[0].related_session_count, 1);
+
+    let detail = match &events[1].event {
+        BackendEvent::KnowledgeDetail { detail, .. } => detail,
+        other => panic!("unexpected detail event: {other:?}"),
+    };
+    assert_eq!(detail.related_works.len(), 1);
+    assert_eq!(detail.related_works[0].agents.len(), 1);
+    assert_eq!(detail.related_works[0].agents[0].sessions.len(), 1);
+    assert_eq!(
+        detail.related_works[0].agents[0].session_id,
+        "session-issue-3133-current"
+    );
+    assert_eq!(
+        detail.related_works[0].agents[0].sessions[0].agent_session_id,
+        conversation_id
+    );
+}
+
+#[test]
+fn app_runtime_load_knowledge_bridge_collapses_related_issue_session_actions_to_live_latest() {
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedEnvVar::set("HOME", temp.path());
+    let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+    let repo = temp.path().join("repo");
+    let worktree = temp.path().join("repo-work-issue-3133");
+    fs::create_dir_all(&repo).expect("create repo");
+    fs::create_dir_all(&worktree).expect("create worktree");
+    init_repo(&repo);
+    Cache::new(issue_cache_root(&repo))
+        .write_snapshot(&sample_issue_snapshot(
+            3133,
+            "Resume Launch Agent session",
+            &["bug"],
+            "Issue body",
+            "2026-06-20T09:00:00Z",
+        ))
+        .expect("write issue snapshot");
+
+    let tab = sample_project_tab_with_window_at(
+        "tab-1",
+        "issue-1",
+        repo.clone(),
+        WindowPreset::Issue,
+        WindowProcessStatus::Ready,
+    );
+    let runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+
+    let stale_at = Utc.with_ymd_and_hms(2026, 6, 20, 9, 0, 0).unwrap();
+    let past_at = Utc.with_ymd_and_hms(2026, 6, 20, 9, 1, 0).unwrap();
+    let live_at = Utc.with_ymd_and_hms(2026, 6, 20, 9, 5, 0).unwrap();
+    let empty_agent_at = Utc.with_ymd_and_hms(2026, 6, 20, 9, 6, 0).unwrap();
+
+    for (id, conversation_id, status, timestamp) in [
+        (
+            "session-issue-3133-stale-live",
+            "conv-issue-3133-live",
+            gwt_agent::AgentStatus::Stopped,
+            stale_at,
+        ),
+        (
+            "session-issue-3133-past",
+            "conv-issue-3133-past",
+            gwt_agent::AgentStatus::Stopped,
+            past_at,
+        ),
+        (
+            "session-issue-3133-current-live",
+            "conv-issue-3133-live",
+            gwt_agent::AgentStatus::Running,
+            live_at,
+        ),
+    ] {
+        let mut session =
+            gwt_agent::Session::new(&worktree, "work/issue-3133", gwt_agent::AgentId::Codex);
+        session.id = id.to_string();
+        session.agent_session_id = Some(conversation_id.to_string());
+        session.status = status;
+        session.linked_issue_number = Some(3133);
+        session.created_at = timestamp;
+        session.updated_at = timestamp;
+        session.last_activity_at = timestamp;
+        session.save(&runtime.sessions_dir).expect("save session");
+    }
+
+    let work_id = gwt_core::workspace_projection::canonical_work_id(
+        &repo,
+        Some("work/issue-3133"),
+        Some(&worktree),
+    )
+    .expect("work id");
+    for (session_id, timestamp) in [
+        ("session-issue-3133-stale-live", stale_at),
+        ("session-issue-3133-past", past_at),
+        ("session-issue-3133-current-live", live_at),
+    ] {
+        let mut event = gwt_core::workspace_projection::WorkEvent::new(
+            gwt_core::workspace_projection::WorkEventKind::Start,
+            work_id.clone(),
+            timestamp,
+        );
+        event.title = Some("Resume Launch Agent session".to_string());
+        event.owner = Some("Issue #3133".to_string());
+        event.agent_session_id = Some(session_id.to_string());
+        event.agent_id = Some("codex".to_string());
+        event.display_name = Some("Codex".to_string());
+        event.execution_container = Some(
+            gwt_core::workspace_projection::WorkspaceExecutionContainerRef {
+                branch: Some("work/issue-3133".to_string()),
+                worktree_path: Some(worktree.clone()),
+                pr_number: None,
+                pr_url: None,
+                pr_state: None,
+            },
+        );
+        gwt_core::workspace_projection::record_workspace_work_event(&repo, event)
+            .expect("record work event");
+    }
+    let mut empty_agent_event = gwt_core::workspace_projection::WorkEvent::new(
+        gwt_core::workspace_projection::WorkEventKind::Start,
+        work_id.clone(),
+        empty_agent_at,
+    );
+    empty_agent_event.title = Some("Resume Launch Agent session".to_string());
+    empty_agent_event.owner = Some("Issue #3133".to_string());
+    empty_agent_event.agent_session_id = Some("session-issue-3133-empty".to_string());
+    empty_agent_event.agent_id = Some("codex".to_string());
+    empty_agent_event.display_name = Some("Codex".to_string());
+    empty_agent_event.execution_container = Some(
+        gwt_core::workspace_projection::WorkspaceExecutionContainerRef {
+            branch: Some("work/issue-3133".to_string()),
+            worktree_path: Some(worktree.clone()),
+            pr_number: None,
+            pr_url: None,
+            pr_state: None,
+        },
+    );
+    gwt_core::workspace_projection::record_workspace_work_event(&repo, empty_agent_event)
+        .expect("record empty agent work event");
+
+    let events = runtime.load_knowledge_bridge_events(
+        "client-1",
+        KnowledgeLoadRequest {
+            id: &combined_window_id("tab-1", "issue-1"),
+            kind: gwt::KnowledgeKind::Issue,
+            request_id: None,
+            selected_number: Some(3133),
+            refresh: false,
+        },
+    );
+
+    let entries = match &events[0].event {
+        BackendEvent::KnowledgeEntries { entries, .. } => entries,
+        other => panic!("unexpected entries event: {other:?}"),
+    };
+    assert_eq!(entries[0].number, 3133);
+    assert_eq!(entries[0].related_session_count, 1);
+
+    let detail = match &events[1].event {
+        BackendEvent::KnowledgeDetail { detail, .. } => detail,
+        other => panic!("unexpected detail event: {other:?}"),
+    };
+    assert_eq!(detail.related_works.len(), 1);
+    assert_eq!(detail.related_works[0].agents.len(), 1);
+    assert_eq!(
+        detail.related_works[0].agents[0].session_id,
+        "session-issue-3133-current-live"
+    );
+    assert_eq!(detail.related_works[0].agents[0].sessions.len(), 1);
+    assert_eq!(
+        detail.related_works[0].agents[0].sessions[0].agent_session_id,
+        "conv-issue-3133-live"
+    );
+}
+
+#[test]
+fn app_runtime_load_knowledge_bridge_ignores_ambiguous_branch_only_related_work() {
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedEnvVar::set("HOME", temp.path());
+    let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+    let repo = temp.path().join("repo");
+    let develop_worktree = temp.path().join("repo-develop");
+    let issue_worktree = temp.path().join("repo-work-issue-3133");
+    fs::create_dir_all(&repo).expect("create repo");
+    fs::create_dir_all(&develop_worktree).expect("create develop worktree");
+    fs::create_dir_all(&issue_worktree).expect("create issue worktree");
+    init_repo(&repo);
+    Cache::new(issue_cache_root(&repo))
+        .write_snapshot(&sample_issue_snapshot(
+            3133,
+            "Resume Launch Agent session",
+            &["bug"],
+            "Issue body",
+            "2026-06-20T09:00:00Z",
+        ))
+        .expect("write issue snapshot");
+    write_issue_link_store(
+        &repo,
+        HashMap::from([("work/issue-3133".to_string(), 3133)]),
+    );
+
+    let tab = sample_project_tab_with_window_at(
+        "tab-1",
+        "issue-1",
+        repo.clone(),
+        WindowPreset::Issue,
+        WindowProcessStatus::Ready,
+    );
+    let runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+
+    let live_at = Utc.with_ymd_and_hms(2026, 6, 20, 9, 5, 0).unwrap();
+    let mut session = gwt_agent::Session::new(
+        &issue_worktree,
+        "work/issue-3133",
+        gwt_agent::AgentId::Codex,
+    );
+    session.id = "session-issue-3133-current".to_string();
+    session.agent_session_id = Some("conv-issue-3133-current".to_string());
+    session.status = gwt_agent::AgentStatus::Running;
+    session.linked_issue_number = Some(3133);
+    session.created_at = live_at;
+    session.updated_at = live_at;
+    session.last_activity_at = live_at;
+    session.save(&runtime.sessions_dir).expect("save session");
+
+    let issue_work_id = gwt_core::workspace_projection::canonical_work_id(
+        &repo,
+        Some("work/issue-3133"),
+        Some(&issue_worktree),
+    )
+    .expect("issue work id");
+    let mut issue_event = gwt_core::workspace_projection::WorkEvent::new(
+        gwt_core::workspace_projection::WorkEventKind::Start,
+        issue_work_id,
+        live_at,
+    );
+    issue_event.title = Some("Issue #3133 visual verification".to_string());
+    issue_event.owner = Some("Issue #3133".to_string());
+    issue_event.agent_session_id = Some("session-issue-3133-current".to_string());
+    issue_event.agent_id = Some("codex".to_string());
+    issue_event.display_name = Some("Codex".to_string());
+    issue_event.execution_container = Some(
+        gwt_core::workspace_projection::WorkspaceExecutionContainerRef {
+            branch: Some("work/issue-3133".to_string()),
+            worktree_path: Some(issue_worktree.clone()),
+            pr_number: None,
+            pr_url: None,
+            pr_state: None,
+        },
+    );
+    gwt_core::workspace_projection::record_workspace_work_event(&repo, issue_event)
+        .expect("record issue work event");
+
+    let ambiguous_id = "legacy-ambiguous-branch-only";
+    for (branch, worktree, at) in [
+        (
+            "develop",
+            develop_worktree.as_path(),
+            Utc.with_ymd_and_hms(2026, 6, 20, 9, 6, 0).unwrap(),
+        ),
+        (
+            "work/issue-3133",
+            issue_worktree.as_path(),
+            Utc.with_ymd_and_hms(2026, 6, 20, 9, 7, 0).unwrap(),
+        ),
+    ] {
+        let mut event = gwt_core::workspace_projection::WorkEvent::new(
+            gwt_core::workspace_projection::WorkEventKind::Update,
+            ambiguous_id,
+            at,
+        );
+        event.title = Some("Work progress summary detail".to_string());
+        event.status_category =
+            Some(gwt_core::workspace_projection::WorkspaceStatusCategory::Unknown);
+        event.agent_session_id = Some("missing-legacy-session".to_string());
+        event.execution_container = Some(
+            gwt_core::workspace_projection::WorkspaceExecutionContainerRef {
+                branch: Some(branch.to_string()),
+                worktree_path: Some(worktree.to_path_buf()),
+                pr_number: None,
+                pr_url: None,
+                pr_state: None,
+            },
+        );
+        gwt_core::workspace_projection::record_workspace_work_event(&repo, event)
+            .expect("record ambiguous work event");
+    }
+
+    let events = runtime.load_knowledge_bridge_events(
+        "client-1",
+        KnowledgeLoadRequest {
+            id: &combined_window_id("tab-1", "issue-1"),
+            kind: gwt::KnowledgeKind::Issue,
+            request_id: None,
+            selected_number: Some(3133),
+            refresh: false,
+        },
+    );
+
+    let entries = match &events[0].event {
+        BackendEvent::KnowledgeEntries { entries, .. } => entries,
+        other => panic!("unexpected entries event: {other:?}"),
+    };
+    assert_eq!(entries[0].number, 3133);
+    assert_eq!(entries[0].related_work_count, 1);
+    assert_eq!(entries[0].related_session_count, 1);
+
+    let detail = match &events[1].event {
+        BackendEvent::KnowledgeDetail { detail, .. } => detail,
+        other => panic!("unexpected detail event: {other:?}"),
+    };
+    assert_eq!(detail.related_works.len(), 1);
+    assert_eq!(
+        detail.related_works[0].title,
+        "Issue #3133 visual verification"
+    );
+    assert!(
+        detail
+            .related_works
+            .iter()
+            .all(|work| work.title != "Work progress summary detail"),
+        "ambiguous branch-only Work must not appear in Issue related work"
+    );
+}
+
+#[test]
 fn app_runtime_knowledge_search_errors_for_wrong_surface() {
     let temp = tempdir().expect("tempdir");
     let repo = temp.path().join("repo");
@@ -11257,6 +12449,8 @@ fn app_runtime_background_knowledge_refresh_silent_paths_do_not_dispatch() {
         request_id: Some(33),
         selected_number: None,
         force: false,
+        sessions_dir: runtime.sessions_dir.clone(),
+        issue_link_cache_dir: runtime.issue_link_cache_dir.clone(),
     });
     wait_for_path("stale knowledge refresh gh invocation", &marker);
     assert!(
@@ -11276,6 +12470,8 @@ fn app_runtime_background_knowledge_refresh_silent_paths_do_not_dispatch() {
         request_id: Some(34),
         selected_number: Some(43),
         force: false,
+        sessions_dir: runtime.sessions_dir.clone(),
+        issue_link_cache_dir: runtime.issue_link_cache_dir.clone(),
     });
     thread::sleep(Duration::from_millis(250));
     assert!(

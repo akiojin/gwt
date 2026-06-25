@@ -12,6 +12,7 @@ use gwt::cli::hook::event_dispatcher;
 use gwt_agent::{session::GWT_SESSION_ID_ENV, AgentId, Session};
 use gwt_core::{
     paths::gwt_sessions_dir,
+    test_support::{ScopedEnvVar, ScopedGwtHome},
     workspace_projection::{
         load_workspace_projection, update_workspace_projection_with_journal,
         WorkspaceProjectionUpdate,
@@ -25,17 +26,18 @@ fn env_lock() -> &'static Mutex<()> {
 }
 
 struct EnvGuard {
-    _guard: std::sync::MutexGuard<'static, ()>,
-    previous_home: Option<std::ffi::OsString>,
     previous_session_id: Option<std::ffi::OsString>,
+    _home: ScopedGwtHome,
+    _home_env: ScopedEnvVar,
+    _userprofile_env: ScopedEnvVar,
+    // Declared last so it drops last: the env-lock stays held while the
+    // ScopedEnvVar guards above restore HOME / USERPROFILE, keeping the
+    // process-global env mutation serialized against other tests.
+    _guard: std::sync::MutexGuard<'static, ()>,
 }
 
 impl Drop for EnvGuard {
     fn drop(&mut self) {
-        match self.previous_home.take() {
-            Some(value) => std::env::set_var("HOME", value),
-            None => std::env::remove_var("HOME"),
-        }
         match self.previous_session_id.take() {
             Some(value) => std::env::set_var(GWT_SESSION_ID_ENV, value),
             None => std::env::remove_var(GWT_SESSION_ID_ENV),
@@ -47,14 +49,24 @@ fn with_temp_env(home: &Path, session_id: &str) -> EnvGuard {
     let guard = env_lock()
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
-    let previous_home = std::env::var_os("HOME");
+    let home_guard = ScopedGwtHome::set(home);
+    // Isolate gwt-config's HOME-based resolution as well. `Settings::load()`
+    // (and therefore Board provider selection) reads `$HOME/.gwt/config.toml`,
+    // which `ScopedGwtHome` (a gwt-core thread-local) does not cover. Without
+    // this, a developer machine configured with `board.provider = slack|teams`
+    // makes the SessionStart Board dispatch fail with "<provider> is not signed
+    // in", so the test is non-hermetic. Pointing HOME/USERPROFILE at the temp
+    // home leaves no config there, defaulting the provider to local.
+    let home_env = ScopedEnvVar::set("HOME", home);
+    let userprofile_env = ScopedEnvVar::set("USERPROFILE", home);
     let previous_session_id = std::env::var_os(GWT_SESSION_ID_ENV);
-    std::env::set_var("HOME", home);
     std::env::set_var(GWT_SESSION_ID_ENV, session_id);
     EnvGuard {
-        _guard: guard,
-        previous_home,
         previous_session_id,
+        _home: home_guard,
+        _home_env: home_env,
+        _userprofile_env: userprofile_env,
+        _guard: guard,
     }
 }
 

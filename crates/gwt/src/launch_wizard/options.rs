@@ -1266,7 +1266,7 @@ mod tests {
         assert!(is_explicit_model_selection("gpt-5.5"));
         assert!(!is_explicit_model_selection("Default (Installed)"));
         assert!(agent_has_npm_package("codex"));
-        assert!(!agent_has_npm_package("opencode"));
+        assert!(agent_has_npm_package("opencode"));
         assert!(!agent_has_npm_package("openclaw"));
         assert!(!agent_has_npm_package("hermes"));
         assert!(!agent_has_npm_package("custom"));

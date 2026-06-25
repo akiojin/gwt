@@ -289,6 +289,13 @@ export function createProviderUsageSurface({ send, renderWorkspaceWindows }) {
         }
         card.appendChild(head);
 
+        if (account.account_label) {
+          const accountLine = document.createElement("div");
+          accountLine.className = "op-usage-card__account";
+          accountLine.textContent = `Account: ${account.account_label}`;
+          card.appendChild(accountLine);
+        }
+
         const windows = account.windows || [];
         if (windows.length) {
           const wins = document.createElement("div");

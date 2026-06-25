@@ -9,12 +9,10 @@
 //! - [`AppRuntime::update_viewport_events`] /
 //!   [`AppRuntime::arrange_windows_events`] — viewport pan/zoom and arrange
 //!   tile / stack
-//! - [`AppRuntime::maximize_window_events`] /
-//!   [`AppRuntime::minimize_window_events`] /
-//!   [`AppRuntime::restore_window_events`] /
-//!   [`AppRuntime::update_window_geometry_events`] — per-window geometry
+//! - [`AppRuntime::update_window_geometry_events`] — per-window geometry
 //!   adjustments (delegates terminal resize to the live runtime)
-//! - [`AppRuntime::list_windows_event`] — workspace snapshot for the active tab
+//! - [`AppRuntime::list_windows_event`] — workspace snapshot across all
+//!   project tabs (the Command Rail Windows popover is a cross-tab list)
 //!
 //! GUI-side window contracts (canvas viewport pan/zoom, arrange/stack
 //! semantics) remain owned by SPEC-2008. This split keeps `mod.rs` lean
@@ -25,7 +23,7 @@ use gwt::{AgentKanbanLane, ArrangeMode, CanvasViewport, FocusCycleDirection};
 
 use super::{
     close_window_from_workspace, combined_window_id, AppRuntime, BackendEvent, OutboundEvent,
-    WindowGeometry, WindowPreset,
+    WindowGeometry, WindowPreset, WindowProcessStatus,
 };
 
 impl AppRuntime {
@@ -44,13 +42,7 @@ impl AppRuntime {
             let Some(tab) = self.tab_mut(&tab_id) else {
                 return Vec::new();
             };
-            let window = tab.workspace.add_window(preset, bounds.clone());
-            if preset.opens_maximized_by_default() {
-                let _ = tab.workspace.maximize_window(&window.id, bounds.clone());
-                tab.workspace.window(&window.id).cloned().unwrap_or(window)
-            } else {
-                window
-            }
+            tab.workspace.add_window(preset, bounds.clone())
         };
         self.register_window(&tab_id, &window.id);
         let runtime_events = self.start_window(&tab_id, &window.id, window.preset, window.geometry);
@@ -71,32 +63,8 @@ impl AppRuntime {
         let Some(tab) = self.tab_mut(&address.tab_id) else {
             return Vec::new();
         };
-        let opens_maximized = tab
-            .workspace
-            .window(&address.raw_id)
-            .map(|window| window.preset.opens_maximized_by_default())
-            .unwrap_or(false);
-        if !tab.workspace.focus_window(
-            &address.raw_id,
-            if opens_maximized {
-                None
-            } else {
-                bounds.clone()
-            },
-        ) {
+        if !tab.workspace.focus_window(&address.raw_id, bounds) {
             return Vec::new();
-        }
-        if opens_maximized {
-            if let Some(bounds) = bounds {
-                let already_maximized = tab
-                    .workspace
-                    .window(&address.raw_id)
-                    .map(|window| window.maximized)
-                    .unwrap_or(false);
-                if !already_maximized {
-                    let _ = tab.workspace.maximize_window(&address.raw_id, bounds);
-                }
-            }
         }
         self.active_tab_id = Some(address.tab_id);
         let _ = self.persist();
@@ -169,67 +137,6 @@ impl AppRuntime {
         // terminal (applyWorkspaceGeometry → fitTerminal → sendGeometry) on
         // the resulting workspace_state render. The backend approximation
         // must not clobber those frontend-fitted cols/rows.
-        let _ = self.persist();
-        vec![self.workspace_state_broadcast()]
-    }
-
-    pub(crate) fn maximize_window_events(
-        &mut self,
-        id: &str,
-        bounds: WindowGeometry,
-    ) -> Vec<OutboundEvent> {
-        let Some(address) = self.window_lookup.get(id).cloned() else {
-            return Vec::new();
-        };
-        let updated = {
-            let Some(tab) = self.tab_mut(&address.tab_id) else {
-                return Vec::new();
-            };
-            tab.workspace.maximize_window(&address.raw_id, bounds)
-        };
-        if !updated {
-            return Vec::new();
-        }
-        let _ = self.set_active_tab(address.tab_id);
-        self.resize_runtime_to_window(id);
-        let _ = self.persist();
-        vec![self.workspace_state_broadcast()]
-    }
-
-    pub(crate) fn minimize_window_events(&mut self, id: &str) -> Vec<OutboundEvent> {
-        let Some(address) = self.window_lookup.get(id).cloned() else {
-            return Vec::new();
-        };
-        let updated = {
-            let Some(tab) = self.tab_mut(&address.tab_id) else {
-                return Vec::new();
-            };
-            tab.workspace.minimize_window(&address.raw_id)
-        };
-        if !updated {
-            return Vec::new();
-        }
-        let _ = self.set_active_tab(address.tab_id);
-        self.resize_runtime_to_window(id);
-        let _ = self.persist();
-        vec![self.workspace_state_broadcast()]
-    }
-
-    pub(crate) fn restore_window_events(&mut self, id: &str) -> Vec<OutboundEvent> {
-        let Some(address) = self.window_lookup.get(id).cloned() else {
-            return Vec::new();
-        };
-        let updated = {
-            let Some(tab) = self.tab_mut(&address.tab_id) else {
-                return Vec::new();
-            };
-            tab.workspace.restore_window(&address.raw_id)
-        };
-        if !updated {
-            return Vec::new();
-        }
-        let _ = self.set_active_tab(address.tab_id);
-        self.resize_runtime_to_window(id);
         let _ = self.persist();
         vec![self.workspace_state_broadcast()]
     }
@@ -517,13 +424,117 @@ impl AppRuntime {
         events
     }
 
+    /// SPEC-2356 安心 Addendum (FR-041): stop a single window's agent runtime
+    /// (kill the PTY through the existing stop path) but keep the window and its
+    /// terminal output on the canvas, rendered as `Stopped`. Unlike
+    /// [`Self::close_window_events`], the window record is never removed, so the
+    /// operator keeps the prior output and can later relaunch it through
+    /// [`Self::restart_window_events`]. Idempotent: stopping an already-stopped
+    /// window simply re-broadcasts the authoritative `Stopped` status.
+    pub(crate) fn stop_window_events(&mut self, id: &str) -> Vec<OutboundEvent> {
+        let Some(address) = self.window_lookup.get(id).cloned() else {
+            return Vec::new();
+        };
+        // Tear down the live runtime (kills the PTY + joins reader/status
+        // threads + deregisters the writer). This reuses the exact same stop
+        // primitive that `close_window_events` uses, so no PTY management is
+        // reimplemented. `stop_window_runtime` also persists the Paused Work
+        // marker for an agent session via `mark_agent_session_stopped`.
+        self.stop_window_runtime(id);
+        // Render the surviving window as Stopped. `stop_window_runtime` already
+        // removed the pty/hook tracking, so the workspace record is the source
+        // of truth for the post-stop status.
+        self.set_window_status(
+            &address.tab_id,
+            &address.raw_id,
+            WindowProcessStatus::Stopped,
+        );
+        let _ = self.persist();
+        let mut events = vec![self.workspace_state_broadcast()];
+        events.extend(Self::status_events(
+            id.to_string(),
+            WindowProcessStatus::Stopped,
+            None,
+        ));
+        if let Some(event) = self.active_work_projection_broadcast_for_active_tab() {
+            events.push(event);
+        }
+        events
+    }
+
+    /// SPEC-2356 安心 Addendum (FR-042): stop every running agent window's
+    /// runtime, keeping all windows on the canvas. Iterates the open windows
+    /// and applies the per-window [`Self::stop_window_events`] stop to each
+    /// window that currently has a live runtime, so the confirm-on-frontend
+    /// "stop all" button resolves to the same kept-but-stopped state as the
+    /// single-window kill switch.
+    pub(crate) fn stop_all_windows_events(&mut self) -> Vec<OutboundEvent> {
+        let running_ids: Vec<String> = self.runtimes.keys().cloned().collect();
+        let mut events = Vec::new();
+        for window_id in running_ids {
+            events.extend(self.stop_window_events(&window_id));
+        }
+        events
+    }
+
+    /// SPEC-2356 安心 Addendum (FR-044): relaunch a window's agent in place. The
+    /// window id, geometry, and placement are preserved; the prior terminal
+    /// output is appended to (never wiped) because the window record — and the
+    /// frontend's xterm buffer bound to its id — survive the restart. Only acts
+    /// on a window that is currently `Stopped` or `Error`; restarting a running
+    /// window is a no-op so a live agent is never double-spawned.
+    ///
+    /// Process-spec presets (`Shell` / `Claude` / `Codex`) re-spawn through the
+    /// existing [`Self::start_window`] primitive. `Agent` windows re-spawn
+    /// through the persisted Session (the same resume path the Workspace /
+    /// Board resume buttons use) bound to the existing window id.
+    pub(crate) fn restart_window_events(&mut self, id: &str) -> Vec<OutboundEvent> {
+        let Some(address) = self.window_lookup.get(id).cloned() else {
+            return Vec::new();
+        };
+        let Some(tab) = self.tab(&address.tab_id) else {
+            return Vec::new();
+        };
+        let Some(window) = tab.workspace.window(&address.raw_id) else {
+            return Vec::new();
+        };
+        if !window.preset.requires_process() {
+            return Vec::new();
+        }
+        // Idempotency / safety guard: only relaunch a window that is actually
+        // stopped or errored. A running agent must never be double-spawned.
+        match self.window_status(id) {
+            Some(WindowProcessStatus::Stopped) | Some(WindowProcessStatus::Error) => {}
+            _ => return Vec::new(),
+        }
+
+        let preset = window.preset;
+        let geometry = window.geometry.clone();
+
+        if preset == WindowPreset::Agent {
+            return self.restart_agent_window_in_place(&address.tab_id, &address.raw_id, geometry);
+        }
+
+        // Clear any stale "restored window is paused" detail before relaunching
+        // so the new PTY's status is the authoritative one.
+        self.window_details.remove(id);
+        let events = self.start_window(&address.tab_id, &address.raw_id, preset, geometry);
+        let _ = self.persist();
+        let mut all = vec![self.workspace_state_broadcast()];
+        all.extend(events);
+        all
+    }
+
     pub(crate) fn list_windows_event(&self) -> BackendEvent {
+        // SPEC-3038 (2026-06-20): the Windows popover lists windows from every
+        // project tab so it matches the cross-tab open-window badge. Windows
+        // carry combined ids, so focusing a non-active-tab entry switches tabs
+        // via `focus_window_events`.
         let windows = self
-            .active_tab_id
-            .as_ref()
-            .and_then(|tab_id| self.tab(tab_id))
-            .map(|tab| self.workspace_view_for_tab(tab).windows)
-            .unwrap_or_default();
+            .tabs
+            .iter()
+            .flat_map(|tab| self.workspace_view_for_tab(tab).windows)
+            .collect();
         BackendEvent::WindowList { windows }
     }
 }

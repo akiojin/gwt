@@ -62,16 +62,16 @@ fn start_work_open_error(client_id: &str, message: impl Into<String>) -> Vec<Out
 
 use super::{
     build_shell_process_launch, combined_window_id, detect_wizard_docker_context_and_status,
-    knowledge_error_event, knowledge_kind_for_preset, list_branch_entries_with_active_sessions,
-    normalize_branch_name, preferred_issue_launch_branch, resolve_shell_launch_worktree,
-    session_exact_resume_materializable, synthetic_branch_entry,
-    workspace_projection_for_current_resume, workspace_resume_branch_exists,
-    workspace_resume_branch_from_journal_project_root, workspace_resume_context_for_work_item,
-    workspace_resume_context_from_journal, workspace_resume_context_from_projection,
-    workspace_resume_owner_issue_number, AgentKanbanLaunchTarget, AppEventProxy, AppRuntime,
-    BackendEvent, IssueLaunchWizardPrepared, LaunchFeedbackContext, LaunchWizardMemoryCache,
-    LaunchWizardSession, OutboundEvent, WindowPreset, WindowProcessStatus, WorkspaceResumeContext,
-    WORKSPACE_OVERVIEW_JOURNAL_LIMIT,
+    knowledge_error_event, knowledge_kind_for_preset, linked_issue_workspace_context,
+    list_branch_entries_with_active_sessions, normalize_branch_name, preferred_issue_launch_branch,
+    resolve_shell_launch_worktree, save_shell_work_projection, session_exact_resume_materializable,
+    synthetic_branch_entry, workspace_projection_for_current_resume,
+    workspace_resume_branch_exists, workspace_resume_branch_from_journal_project_root,
+    workspace_resume_context_for_work_item, workspace_resume_context_from_journal,
+    workspace_resume_context_from_projection, workspace_resume_owner_issue_number,
+    AgentKanbanLaunchTarget, AppEventProxy, AppRuntime, BackendEvent, IssueLaunchWizardPrepared,
+    LaunchFeedbackContext, LaunchWizardMemoryCache, LaunchWizardSession, OutboundEvent,
+    WindowPreset, WindowProcessStatus, WorkspaceResumeContext, WORKSPACE_OVERVIEW_JOURNAL_LIMIT,
 };
 use crate::usable_worktree_path_for_branch;
 
@@ -205,13 +205,16 @@ impl AppRuntime {
                 docker_service_status,
                 linked_issue_number,
                 linked_issue_kind,
-                ultracode_supported: gwt_agent::claude_ultracode_supported(),
-                claude_workflows_enabled: gwt_agent::claude_workflows_enabled(),
+                ultracode_supported: self.launch_wizard_cache.claude_ultracode_supported(),
+                claude_workflows_enabled: self.launch_wizard_cache.claude_workflows_enabled(),
             },
             agent_options,
             quick_start_entries,
             previous_profiles,
         );
+        wizard.set_hermes_provider_choices(gwt_skills::hermes_provider_choices_global());
+        wizard.set_hermes_needs_setup(!gwt_skills::hermes_is_configured_global());
+        wizard.set_opencode_needs_setup(!gwt_skills::opencode_is_configured_global());
         wizard.mark_runtime_context_unresolved();
         self.launch_wizard = Some(LaunchWizardSession {
             tab_id: tab_id.to_string(),
@@ -243,6 +246,15 @@ impl AppRuntime {
         let docker_context = None;
         let docker_service_status = gwt_docker::ComposeServiceStatus::NotFound;
         let wizard_id = Uuid::new_v4().to_string();
+        let owner_label = match linked_issue_kind {
+            LinkedIssueKind::Issue => format!("Issue #{issue_number}"),
+            LinkedIssueKind::Spec => format!("SPEC #{issue_number}"),
+        };
+        let workspace_resume_context = Some(linked_issue_workspace_context(
+            project_root,
+            issue_number,
+            owner_label,
+        ));
         let mut wizard = LaunchWizardState::open_knowledge_launch_with_previous_profiles(
             LaunchWizardContext {
                 selected_branch: synthetic_branch_entry(&base_branch_name),
@@ -254,20 +266,23 @@ impl AppRuntime {
                 docker_service_status,
                 linked_issue_number: Some(issue_number),
                 linked_issue_kind: Some(linked_issue_kind),
-                ultracode_supported: gwt_agent::claude_ultracode_supported(),
-                claude_workflows_enabled: gwt_agent::claude_workflows_enabled(),
+                ultracode_supported: self.launch_wizard_cache.claude_ultracode_supported(),
+                claude_workflows_enabled: self.launch_wizard_cache.claude_workflows_enabled(),
             },
             base_branch_name,
             agent_options,
             quick_start_entries,
             previous_profiles,
         );
+        wizard.set_hermes_provider_choices(gwt_skills::hermes_provider_choices_global());
+        wizard.set_hermes_needs_setup(!gwt_skills::hermes_is_configured_global());
+        wizard.set_opencode_needs_setup(!gwt_skills::opencode_is_configured_global());
         wizard.mark_runtime_context_unresolved();
         self.launch_wizard = Some(LaunchWizardSession {
             tab_id: tab_id.to_string(),
             wizard_id,
             wizard,
-            workspace_resume_context: None,
+            workspace_resume_context,
             agent_kanban_target: None,
         });
 
@@ -933,8 +948,7 @@ impl AppRuntime {
             if !self.window_lookup.contains_key(&window_id) {
                 return branch_error(format!("Agent window not found for session {}", session.id));
             }
-            let mut events = self.restore_window_events(&window_id);
-            events.extend(self.focus_window_events(&window_id, Some(bounds)));
+            let mut events = self.focus_window_events(&window_id, Some(bounds));
             if events.is_empty() {
                 events.push(self.workspace_state_broadcast());
             }
@@ -1191,21 +1205,52 @@ impl AppRuntime {
                     workspace_resume_owner_issue_number(context.owner.as_deref())
                 }),
                 linked_issue_kind: None,
-                ultracode_supported: gwt_agent::claude_ultracode_supported(),
-                claude_workflows_enabled: gwt_agent::claude_workflows_enabled(),
+                ultracode_supported: self.launch_wizard_cache.claude_ultracode_supported(),
+                claude_workflows_enabled: self.launch_wizard_cache.claude_workflows_enabled(),
             },
             base_branch,
             agent_options,
             quick_start_entries,
             previous_profiles,
         );
+        wizard.set_hermes_provider_choices(gwt_skills::hermes_provider_choices_global());
+        wizard.set_hermes_needs_setup(!gwt_skills::hermes_is_configured_global());
+        wizard.set_opencode_needs_setup(!gwt_skills::opencode_is_configured_global());
         wizard.mark_runtime_context_unresolved();
         self.launch_wizard = Some(LaunchWizardSession {
             tab_id: tab_id.to_string(),
-            wizard_id,
+            wizard_id: wizard_id.clone(),
             wizard,
             workspace_resume_context,
             agent_kanban_target: None,
+        });
+
+        // SPEC-2359 US-83 / FR-444 + FR-445: populate the "open existing branch"
+        // picker off the UI thread. Fetch origin first so a teammate's freshly
+        // pushed branch appears even when the Branches tab was never opened, then
+        // push the candidates into the live wizard via a typed event.
+        let proxy = self.proxy.clone();
+        let candidates_root = project_root.to_path_buf();
+        let active_session_branches = self.active_session_branches_for_tab(tab_id);
+        thread::spawn(move || {
+            if let Ok(git_root) = gwt_git::worktree::main_worktree_root(&candidates_root) {
+                let _ = gwt_git::WorktreeManager::new(&git_root).fetch_origin();
+            }
+            let candidates = list_branch_entries_with_active_sessions(
+                &candidates_root,
+                &active_session_branches,
+            )
+            .map(|entries| {
+                gwt::branch_list::eligible_remote_start_work_branch_names(
+                    &entries,
+                    &active_session_branches,
+                )
+            })
+            .unwrap_or_default();
+            proxy.send(UserEvent::RefreshLaunchWizardBranchCandidates {
+                wizard_id,
+                candidates,
+            });
         });
 
         Ok(())
@@ -1634,6 +1679,8 @@ fn resolve_launch_wizard_runtime_context_hydration(
         agent_options,
         quick_start_entries,
         previous_profiles: Some(previous_profiles),
+        // Runtime re-resolution preserves picker candidates set at first hydration.
+        open_branch_candidates: Vec::new(),
     })
 }
 
@@ -1707,6 +1754,7 @@ impl AppRuntime {
             .tab_mut(tab_id)
             .ok_or_else(|| "Project tab not found".to_string())?;
         let project_root = tab.project_root.display().to_string();
+        let project_root_path = tab.project_root.clone();
         let title = format!(
             "{} · {}",
             config.display_name,
@@ -1722,7 +1770,48 @@ impl AppRuntime {
             .insert(window_id.clone(), WindowProcessStatus::Running);
         self.window_hook_states.remove(&window_id);
 
+        // SPEC-2359 US-80 (FR-427): register the Start-Work Shell as a
+        // first-class Work so it appears in the Active Work / Workspace
+        // projection like an agent. `config.branch` is set even for new
+        // branches, so the branch-derived Work id is stable before the worktree
+        // exists; `config.working_dir` is `None` until the async launch creates
+        // a new-branch worktree.
+        let live_session_ids: std::collections::HashSet<String> = self
+            .active_agent_sessions
+            .values()
+            .map(|session| session.session_id.clone())
+            .collect();
+        let shell_work_registered = match save_shell_work_projection(
+            &project_root_path,
+            &window_id,
+            config.working_dir.clone(),
+            config.branch.clone(),
+            &live_session_ids,
+        ) {
+            Ok(()) => true,
+            Err(error) => {
+                tracing::warn!(
+                    project_root = %project_root_path.display(),
+                    window_id = %window_id,
+                    error = %error,
+                    "shell Work projection registration skipped"
+                );
+                false
+            }
+        };
+
         let mut events = vec![self.workspace_state_broadcast()];
+        if shell_work_registered && self.active_tab_id.as_deref() == Some(tab_id) {
+            if let Some(tab) = self.tab(tab_id) {
+                if let Some(projection) = self.active_work_projection_for_tab(tab_id, tab) {
+                    events.push(OutboundEvent::broadcast(
+                        BackendEvent::ActiveWorkProjection {
+                            projection: Box::new(projection),
+                        },
+                    ));
+                }
+            }
+        }
         events.extend(Self::status_events(
             window_id.clone(),
             WindowProcessStatus::Running,
@@ -1800,6 +1889,8 @@ impl AppRuntime {
             agent_options,
             quick_start_entries,
             previous_profiles: None,
+            // Cache refresh preserves picker candidates set at first hydration.
+            open_branch_candidates: Vec::new(),
         });
     }
 }

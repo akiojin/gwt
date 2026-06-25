@@ -24,6 +24,7 @@ pub enum WindowPreset {
     #[serde(alias = "workspace")]
     Work,
     Index,
+    Improvement,
     Board,
     Pr,
     /// SPEC-2809 — independent Console window surface for external
@@ -44,6 +45,7 @@ pub enum WindowSurface {
     Index,
     Work,
     AgentKanban,
+    Improvement,
     Console,
     Mock,
 }
@@ -65,6 +67,7 @@ impl WindowSurface {
             Self::Index => "index",
             Self::Work => "work",
             Self::AgentKanban => "agent-kanban",
+            Self::Improvement => "improvement",
             Self::Console => "console",
             Self::Mock => "mock",
         }
@@ -72,7 +75,7 @@ impl WindowSurface {
 }
 
 impl WindowPreset {
-    pub const ALL: [WindowPreset; 16] = [
+    pub const ALL: [WindowPreset; 17] = [
         WindowPreset::Shell,
         WindowPreset::Claude,
         WindowPreset::Codex,
@@ -86,6 +89,7 @@ impl WindowPreset {
         WindowPreset::Spec,
         WindowPreset::Work,
         WindowPreset::Index,
+        WindowPreset::Improvement,
         WindowPreset::Board,
         WindowPreset::Pr,
         WindowPreset::Console,
@@ -108,6 +112,7 @@ impl WindowPreset {
             Self::Spec => "SPEC",
             Self::Work => "Workspace",
             Self::Index => "Index",
+            Self::Improvement => "Improvement Inbox",
             Self::Board => "Board",
             Self::Pr => "PR",
             Self::Console => "Console",
@@ -131,6 +136,7 @@ impl WindowPreset {
             Self::Spec => "Placeholder SPEC surface",
             Self::Work => "Workspace overview",
             Self::Index => "Search indexed project knowledge",
+            Self::Improvement => "Review gwt improvement candidates",
             Self::Board => "Placeholder board surface",
             Self::Pr => "Placeholder PR surface",
             Self::Console => "External process stdout/stderr per kind",
@@ -154,6 +160,7 @@ impl WindowPreset {
             Self::Spec => "spec",
             Self::Work => "work",
             Self::Index => "index",
+            Self::Improvement => "improvement",
             Self::Board => "board",
             Self::Pr => "pr",
             Self::Console => "console",
@@ -173,6 +180,7 @@ impl WindowPreset {
             Self::Issue | Self::Spec | Self::Pr => WindowSurface::Knowledge,
             Self::Work => WindowSurface::Work,
             Self::Index => WindowSurface::Index,
+            Self::Improvement => WindowSurface::Improvement,
             Self::Console => WindowSurface::Console,
             Self::Settings => WindowSurface::Mock,
         }
@@ -186,9 +194,19 @@ impl WindowPreset {
         matches!(self, Self::Agent | Self::Claude | Self::Codex)
     }
 
+    /// Default open size for a fresh window of this preset.
+    ///
+    /// SPEC-2008 camera-focus: terminal-surface presets (Shell / Claude /
+    /// Codex / Agent) open work-area large (1280×800) so that flying the camera
+    /// to frame a single terminal at zoom 1.0 fills the viewport crisply — the
+    /// camera no longer maximizes, it frames the window's own world geometry.
+    /// Non-terminal panels keep the compact 720×420 footprint.
     pub fn default_size(self) -> (f64, f64) {
-        let _ = self;
-        (720.0, 420.0)
+        if self.surface() == WindowSurface::Terminal {
+            (1280.0, 800.0)
+        } else {
+            (720.0, 420.0)
+        }
     }
 
     pub fn opens_maximized_by_default(self) -> bool {
@@ -213,6 +231,7 @@ impl WindowPreset {
             | Self::Spec
             | Self::Work
             | Self::Index
+            | Self::Improvement
             | Self::Board
             | Self::Pr
             | Self::Console => None,
@@ -360,6 +379,7 @@ where
         | WindowPreset::Spec
         | WindowPreset::Work
         | WindowPreset::Index
+        | WindowPreset::Improvement
         | WindowPreset::Board
         | WindowPreset::Pr
         | WindowPreset::Console => unreachable!("non-process presets are rejected above"),
@@ -481,17 +501,19 @@ mod tests {
 
     #[test]
     fn preset_metadata_exposes_titles_prefixes_and_defaults() {
-        assert_eq!(WindowPreset::ALL.len(), 16);
+        assert_eq!(WindowPreset::ALL.len(), 17);
         assert_eq!(WindowPreset::Issue.title(), "Issue");
         assert_eq!(WindowPreset::Spec.title(), "SPEC");
         assert_eq!(WindowPreset::AgentKanban.title(), "Agent Kanban");
         assert_eq!(WindowPreset::Work.title(), "Workspace");
         assert_eq!(WindowPreset::Index.title(), "Index");
+        assert_eq!(WindowPreset::Improvement.title(), "Improvement Inbox");
         assert_eq!(WindowPreset::Pr.title(), "PR");
         assert_eq!(WindowPreset::AgentKanban.id_prefix(), "agent-kanban");
         assert_eq!(WindowPreset::Board.id_prefix(), "board");
         assert_eq!(WindowPreset::Work.id_prefix(), "work");
         assert_eq!(WindowPreset::Index.id_prefix(), "index");
+        assert_eq!(WindowPreset::Improvement.id_prefix(), "improvement");
         assert_eq!(WindowPreset::Agent.id_prefix(), "agent");
         assert_eq!(
             WindowPreset::AgentKanban.surface(),
@@ -504,13 +526,25 @@ mod tests {
         assert_eq!(WindowPreset::Spec.surface(), WindowSurface::Knowledge);
         assert_eq!(WindowPreset::Work.surface(), WindowSurface::Work);
         assert_eq!(WindowPreset::Index.surface(), WindowSurface::Index);
+        assert_eq!(
+            WindowPreset::Improvement.surface(),
+            WindowSurface::Improvement
+        );
         assert_eq!(WindowPreset::Pr.surface(), WindowSurface::Knowledge);
         assert_eq!(WindowPreset::Settings.surface(), WindowSurface::Mock);
+        // SPEC-2008 camera-focus: terminal-surface presets open work-area large
+        // (1280×800) so that flying the camera to frame one at zoom 1.0 fills
+        // the viewport crisply; non-terminal panels keep the compact 720×420.
         for preset in WindowPreset::ALL {
+            let expected = if preset.surface() == WindowSurface::Terminal {
+                (1280.0, 800.0)
+            } else {
+                (720.0, 420.0)
+            };
             assert_eq!(
                 preset.default_size(),
-                (720.0, 420.0),
-                "{preset:?} should have uniform 720×420 default size",
+                expected,
+                "{preset:?} default size must match its surface class",
             );
             assert!(
                 !preset.opens_maximized_by_default(),
@@ -579,9 +613,14 @@ mod tests {
             assert!(!preset.title().is_empty());
             assert!(!preset.subtitle().is_empty());
 
+            // SPEC-2008 camera-focus: terminal-surface presets open work-area
+            // large (1280×800) for crisp zoom-1.0 framing; panels stay 720×420.
             let (width, height) = preset.default_size();
-            assert_eq!(width, 720.0);
-            assert_eq!(height, 420.0);
+            if preset.surface() == WindowSurface::Terminal {
+                assert_eq!((width, height), (1280.0, 800.0));
+            } else {
+                assert_eq!((width, height), (720.0, 420.0));
+            }
 
             match preset {
                 WindowPreset::Shell => {
@@ -647,6 +686,11 @@ mod tests {
                     assert!(!preset.requires_process());
                     assert_eq!(preset.command_name(), None);
                 }
+                WindowPreset::Improvement => {
+                    assert_eq!(preset.surface(), WindowSurface::Improvement);
+                    assert!(!preset.requires_process());
+                    assert_eq!(preset.command_name(), None);
+                }
                 WindowPreset::Console => {
                     assert_eq!(preset.surface(), WindowSurface::Console);
                     assert!(!preset.requires_process());
@@ -667,7 +711,9 @@ mod tests {
         assert!(WindowPreset::Codex.is_agent_terminal());
         assert!(!WindowPreset::Shell.is_agent_terminal());
         assert_eq!(WindowPreset::Agent.command_name(), None);
-        assert_eq!(WindowPreset::Agent.default_size(), (720.0, 420.0));
+        // SPEC-2008 camera-focus: Agent is a terminal-surface preset, so it
+        // opens work-area large for crisp zoom-1.0 camera framing.
+        assert_eq!(WindowPreset::Agent.default_size(), (1280.0, 800.0));
     }
 
     #[test]

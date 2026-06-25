@@ -39,8 +39,11 @@ const ROOT_MODULES = new Set([
   "custom-agent-env-editor.js",
   // SPEC-3064 Phase 3 (E6a) — File Tree window surface.
   "file-tree-surface.js",
+  // SPEC-2008 camera-focus / FR-094 — always-on Fleet Minimap carrier.
+  "fleet-minimap.js",
   "focus-trap.js",
   "hotkey.js",
+  "improvement-inbox-surface.js",
   "index-settings-panel.js",
   // SPEC-2014 2026-05-29 — Launch Agent setting controls (reasoning slider +
   // Auto toggle, count-adaptive segmented/select, boolean toggle).
@@ -94,6 +97,7 @@ const ROOT_MODULES = new Set([
   // Issue #2698 PR 2 (B1) — throttle update_viewport WS sends.
   "viewport-persist-throttle.js",
   "viewport-sync.js",
+  "window-list-model.js",
   "window-geometry-sync.js",
   "window-docking.js",
   "workspace-kanban-surface.js",

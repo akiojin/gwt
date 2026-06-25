@@ -45,10 +45,10 @@ test("rail commands: [data-cmd] item click が op:command を dispatch する", 
     fixture.document.addEventListener("op:command", (event) => {
       received.push(event.detail?.id);
     });
-    const board = fixture.document.querySelector('.op-rail__item[data-cmd="open-board"]');
-    assert.ok(board, "expected Board rail item");
-    board.dispatchEvent(new fixture.window.Event("click", { bubbles: true }));
-    assert.deepEqual(received, ["open-board"]);
+    const startWork = fixture.document.querySelector('.op-rail__item[data-cmd="start-work"]');
+    assert.ok(startWork, "expected Start Work rail item");
+    startWork.dispatchEvent(new fixture.window.Event("click", { bubbles: true }));
+    assert.deepEqual(received, ["start-work"]);
   } finally {
     fixture.dispose();
   }
@@ -68,6 +68,32 @@ test("rail window badge: applyTelemetryCounts が windows 数を badge に反映
 
   applyTelemetryCounts(document, { windows: 0 });
   assert.equal(badge.hidden, true);
+});
+
+test("FR-039 (安心): applyTelemetryCounts が waiting を WAITING cell に反映しアラート点滅する", async () => {
+  // The WAITING cell mirrors ERROR: waiting drives both the count value
+  // and the --alert pulse so an agent waiting for the operator stays loud.
+  const { applyTelemetryCounts } = await importOperatorShell();
+  const { document } = parseHTML(html);
+  const value = document.getElementById("op-strip-waiting");
+  const cell = document.querySelector(".op-status-strip__cell--waiting");
+  assert.ok(value, "expected #op-strip-waiting value in the strip");
+  assert.ok(cell, "expected .op-status-strip__cell--waiting cell in the strip");
+  assert.equal(value.getAttribute("aria-label"), "Agents waiting for input");
+
+  applyTelemetryCounts(document, { waiting: 2 });
+  assert.equal(value.textContent, "2");
+  assert.ok(
+    cell.classList.contains("op-status-strip__cell--alert"),
+    "WAITING cell pulses while agents wait for input",
+  );
+
+  applyTelemetryCounts(document, { waiting: 0 });
+  assert.equal(value.textContent, "0");
+  assert.ok(
+    !cell.classList.contains("op-status-strip__cell--alert"),
+    "WAITING cell stops pulsing once no agent is waiting",
+  );
 });
 
 test("migration: 起動時に旧 localStorage キーが removeItem される", async () => {

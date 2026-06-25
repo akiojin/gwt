@@ -181,6 +181,50 @@ fn open_path_with_os_default(path: &str) -> Result<(), std::io::Error> {
     Ok(())
 }
 
+fn release_notes_version_present(
+    entries: &[gwt_core::release_notes::ReleaseEntry],
+    version: &str,
+) -> bool {
+    let version = gwt_core::release_notes::normalize_version(version);
+    entries
+        .iter()
+        .any(|entry| gwt_core::release_notes::normalize_version(&entry.version) == version)
+}
+
+fn release_notes_payload_event(
+    id: String,
+    entries: Vec<gwt_core::release_notes::ReleaseEntry>,
+    focus_version: Option<String>,
+) -> BackendEvent {
+    BackendEvent::ReleaseNotesPayload {
+        id,
+        entries,
+        focus_version,
+        current_version: env!("CARGO_PKG_VERSION").to_string(),
+    }
+}
+
+fn release_notes_error_event(id: String, message: impl Into<String>) -> BackendEvent {
+    BackendEvent::ReleaseNotesError {
+        id,
+        message: message.into(),
+    }
+}
+
+fn merge_remote_release_entry(
+    mut entry: gwt_core::release_notes::ReleaseEntry,
+    bundled: Vec<gwt_core::release_notes::ReleaseEntry>,
+) -> Vec<gwt_core::release_notes::ReleaseEntry> {
+    let version = gwt_core::release_notes::normalize_version(&entry.version);
+    entry.version = version.clone();
+    let mut entries = Vec::with_capacity(bundled.len() + 1);
+    entries.push(entry);
+    entries.extend(bundled.into_iter().filter(|bundled_entry| {
+        gwt_core::release_notes::normalize_version(&bundled_entry.version) != version
+    }));
+    entries
+}
+
 impl AppRuntime {
     /// SPEC #2780: serve the bundled `CHANGELOG.md` to the Release Notes
     /// window. The parse runs once per process (cached) so this handler is
@@ -194,19 +238,47 @@ impl AppRuntime {
         id: String,
         focus_version: Option<String>,
     ) -> Vec<OutboundEvent> {
-        let entries = gwt_core::release_notes::bundled_releases();
+        let entries = gwt_core::release_notes::bundled_releases().to_vec();
+        let needs_remote_focus = focus_version
+            .as_deref()
+            .is_some_and(|version| !release_notes_version_present(&entries, version));
+
+        if needs_remote_focus {
+            let proxy = self.proxy.clone();
+            let client_id_owned = client_id.clone();
+            let id_owned = id.clone();
+            let focus_version_owned = focus_version.clone();
+            self.blocking_tasks.spawn(move || {
+                let manager = gwt_core::update::UpdateManager::new();
+                let event = match focus_version_owned.as_deref() {
+                    Some(version) => match manager.fetch_release_notes_entry(version) {
+                        Ok(Some(remote_entry)) => release_notes_payload_event(
+                            id_owned,
+                            merge_remote_release_entry(remote_entry, entries),
+                            focus_version_owned,
+                        ),
+                        Ok(None) => release_notes_error_event(
+                            id_owned,
+                            format!("Release notes for v{} could not be loaded.", version),
+                        ),
+                        Err(message) => release_notes_error_event(id_owned, message),
+                    },
+                    None => {
+                        release_notes_error_event(id_owned, "Release notes could not be loaded.")
+                    }
+                };
+                proxy.send(UserEvent::Dispatch(vec![OutboundEvent::reply(
+                    client_id_owned,
+                    event,
+                )]));
+            });
+            return vec![];
+        }
+
         let event = if entries.is_empty() {
-            BackendEvent::ReleaseNotesError {
-                id,
-                message: "Release notes could not be loaded.".to_string(),
-            }
+            release_notes_error_event(id, "Release notes could not be loaded.")
         } else {
-            BackendEvent::ReleaseNotesPayload {
-                id,
-                entries: entries.to_vec(),
-                focus_version,
-                current_version: env!("CARGO_PKG_VERSION").to_string(),
-            }
+            release_notes_payload_event(id, entries, focus_version)
         };
         vec![OutboundEvent::reply(client_id, event)]
     }
@@ -317,6 +389,77 @@ impl AppRuntime {
             Err(error) => Some(format!("Failed to save configuration: {error}")),
         };
         self.board_auth_status_events(client_id, message)
+    }
+
+    /// SPEC-2963 FR-030: reply with a repo's per-project Board config (the raw
+    /// `board.toml` override) plus its resolved effective routing, for the
+    /// Settings Board tab's per-project section.
+    pub(super) fn project_board_config_events(
+        &self,
+        client_id: ClientId,
+        project_root: String,
+    ) -> Vec<OutboundEvent> {
+        let event = self.project_board_config_event(&project_root, None);
+        vec![OutboundEvent::reply(client_id, event)]
+    }
+
+    /// SPEC-2963 FR-025/FR-030: write per-project Board config to the repo's
+    /// `.gwt/work/board.toml`, then reply with the refreshed config + routing.
+    /// `Some("")` / `inherit` clears a field (inherit global), `Some(value)`
+    /// sets it, `None` leaves it unchanged.
+    pub(super) fn project_board_config_update_events(
+        &self,
+        client_id: ClientId,
+        project_root: String,
+        provider: Option<String>,
+        channel: Option<String>,
+        tenant: Option<String>,
+    ) -> Vec<OutboundEvent> {
+        let path = std::path::Path::new(&project_root);
+        let provider_arg = provider.map(|raw| match raw.trim().to_ascii_lowercase().as_str() {
+            "local" => Some(gwt_config::BoardProviderKind::Local),
+            "slack" => Some(gwt_config::BoardProviderKind::Slack),
+            "teams" => Some(gwt_config::BoardProviderKind::Teams),
+            // "" / "inherit" / unknown → clear the override (inherit global).
+            _ => None,
+        });
+        let message = match gwt::board_provider::update_project_board_config(
+            path,
+            provider_arg,
+            channel.map(Some),
+            tenant.map(Some),
+        ) {
+            Ok(_) => Some("Saved project Board configuration.".to_string()),
+            Err(error) => Some(format!(
+                "Failed to save project Board configuration: {error}"
+            )),
+        };
+        let event = self.project_board_config_event(&project_root, message);
+        vec![OutboundEvent::reply(client_id, event)]
+    }
+
+    /// Build a [`BackendEvent::ProjectBoardConfig`] from a repo's `board.toml`
+    /// override and its resolved routing.
+    fn project_board_config_event(
+        &self,
+        project_root: &str,
+        message: Option<String>,
+    ) -> BackendEvent {
+        let path = std::path::Path::new(project_root);
+        let work_dir = gwt_core::paths::gwt_repo_local_work_dir(path);
+        let project = gwt_config::ProjectBoardConfig::load_from_work_dir(&work_dir);
+        let routing = gwt::board_provider::routing_for(path);
+        BackendEvent::ProjectBoardConfig {
+            project_root: project_root.to_string(),
+            provider: project.provider.map(|kind| kind.as_str().to_string()),
+            channel: project.channel,
+            tenant: project.tenant,
+            resolved_provider: routing.provider,
+            resolved_source: routing.provider_source.to_string(),
+            resolved_channel: routing.channel,
+            signed_in: routing.signed_in,
+            message,
+        }
     }
 
     /// SPEC-2963 FR-005: persist the fixed OAuth callback port, then reply with
@@ -718,5 +861,52 @@ impl AppRuntime {
             }
         }
         vec![]
+    }
+}
+
+#[cfg(test)]
+mod release_notes_tests {
+    use super::*;
+    use gwt_core::release_notes::{ReleaseEntry, Section};
+
+    fn release_entry(version: &str, item: &str) -> ReleaseEntry {
+        ReleaseEntry {
+            version: version.to_string(),
+            date: "2026-06-20".to_string(),
+            sections: vec![Section {
+                heading: "Notes".to_string(),
+                items: vec![item.to_string()],
+            }],
+        }
+    }
+
+    #[test]
+    fn remote_release_entry_precedes_and_replaces_bundled_version() {
+        let entries = merge_remote_release_entry(
+            release_entry("v9.62.0", "Remote notes"),
+            vec![
+                release_entry("9.61.0", "Bundled current notes"),
+                release_entry("9.60.0", "Bundled older notes"),
+            ],
+        );
+
+        let versions: Vec<&str> = entries.iter().map(|entry| entry.version.as_str()).collect();
+        assert_eq!(versions, vec!["9.62.0", "9.61.0", "9.60.0"]);
+        assert_eq!(entries[0].sections[0].items, vec!["Remote notes"]);
+    }
+
+    #[test]
+    fn remote_release_entry_deduplicates_same_bundled_version() {
+        let entries = merge_remote_release_entry(
+            release_entry("v9.62.0", "Remote notes"),
+            vec![
+                release_entry("9.62.0", "Stale bundled notes"),
+                release_entry("9.61.0", "Bundled current notes"),
+            ],
+        );
+
+        let versions: Vec<&str> = entries.iter().map(|entry| entry.version.as_str()).collect();
+        assert_eq!(versions, vec!["9.62.0", "9.61.0"]);
+        assert_eq!(entries[0].sections[0].items, vec!["Remote notes"]);
     }
 }

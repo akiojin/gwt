@@ -9,7 +9,7 @@ jobs:
     name: Test (Rust)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
       - name: Install tray + GTK dependencies (Linux)
         run: |
           sudo apt-get update
@@ -33,7 +33,7 @@ jobs:
     name: Test (Python runner)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
       - uses: actions/setup-python@v6
         with:
           python-version: "3.11"
@@ -53,7 +53,7 @@ jobs:
     runs-on: ubuntu-latest
     if: ${{ github.event.pull_request.draft == false }}
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
         continue-on-error: true
@@ -81,7 +81,7 @@ jobs:
     name: Test (Rust, Windows)
     runs-on: windows-latest
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
       - uses: actions/setup-node@v6
         with:
           node-version: 22
@@ -93,4 +93,32 @@ jobs:
         timeout-minutes: 15
       - name: Run release asset contract tests
         run: node scripts/test_release_assets.cjs
+        timeout-minutes: 15
+
+  test-frontend:
+    name: Test (Frontend + WebView E2E)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 22
+      - uses: oven-sh/setup-bun@v2
+      - name: Run frontend unit tests
+        run: bash scripts/run-frontend-unit-tests.sh
+        timeout-minutes: 10
+      - name: Run frontend smoke tests
+        run: bash scripts/run-frontend-smoke-tests.sh
+        timeout-minutes: 10
+      # Browsers must match run-visual-tests.sh's pinned Playwright version
+      # (GWT_PLAYWRIGHT_VERSION default). The shared ~/.cache/ms-playwright is
+      # reused by the script's temp-dir Playwright install of the same version.
+      - name: Install Playwright chromium + system deps
+        run: npx --yes playwright@1.49.1 install --with-deps chromium
+        timeout-minutes: 10
+      # Embedded-frontend specs stub WebSocket + serve crates/gwt/web via
+      # page.route, so they run without a live gwt. live-gwt specs self-skip
+      # when GWT_PLAYWRIGHT_BASE_URL is unset.
+      - name: Run WebView E2E (embedded Playwright specs)
+        run: bash scripts/run-visual-tests.sh
         timeout-minutes: 15

@@ -57,6 +57,15 @@
   --color-state-idle: #828c9b;
   --color-state-blocked: #f87171;
   --color-state-done: #94a3b8;
+  /* FR-039 (anshin) — "needs input" / your-turn attention state. LOUD but not
+     error-red: warm amber (amber-400) clears WCAG AA as text on every dark
+     surface (11.04 / 9.89) and stays distinct from blocked (#f87171). */
+  --color-state-needs-input: #fbbf24;
+  /* SPEC-2359 US-83 (UX 2026-06-24) — "remote / elsewhere" badge accent. Violet
+     is unused by any live state (active=cyan, blocked=red, done=slate,
+     needs-input=amber, idle=gray), so a Remote tag reads as "a place, not a
+     state". violet-400 clears WCAG AA as text on dark surfaces (~7.0 / ~6.0). */
+  --color-state-remote: #a78bfa;
 
   /* Agent colors — SPEC-2133 semantic mapping, dark-tuned */
   --agent-claude: #fbbf24;
@@ -146,6 +155,14 @@
   --color-state-idle: #4b5563;
   --color-state-blocked: #991b1b;
   --color-state-done: #334155;
+  /* FR-039 (anshin) — "needs input" / your-turn attention state. A deep amber
+     gold (amber-700) clears WCAG AA as text on bone surfaces (5.02 / 4.62)
+     and reads as warm attention, clearly distinct from blocked red. */
+  --color-state-needs-input: #b45309;
+  /* SPEC-2359 US-83 (UX 2026-06-24) — "remote / elsewhere" badge accent.
+     violet-700 clears WCAG AA as text on bone surfaces (~7.4 / ~6.9) and is
+     distinct from active/blocked/done/needs-input. */
+  --color-state-remote: #6d28d9;
 
   /* Agent colors — dark-tuned chroma for bone background */
   --agent-claude: #92400e;
@@ -236,6 +253,8 @@
     --color-state-idle: GrayText;
     --color-state-blocked: Mark;
     --color-state-done: GrayText;
+    --color-state-needs-input: Highlight;
+    --color-state-remote: LinkText;
 
     --agent-claude: Highlight;
     --agent-codex: Highlight;

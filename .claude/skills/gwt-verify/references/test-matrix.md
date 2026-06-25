@@ -43,11 +43,15 @@ the project-specific recipe.
 1. **Multiple surfaces match** — run the union of all matched commands.
    Skip duplicates (e.g. only run `cargo clippy --all-targets` once per
    invocation).
-2. **Browser column is empty → do not invoke Playwright.** This is the
-   strong constraint inherited from SPEC-1935 FR-124: only WebView /
-   browser UI surfaces are eligible for Playwright. The same rule applies
-   to any other UI runner (Cypress / Selenium / WinAppDriver) in
-   future-arriving projects.
+2. **Browser column is empty → do not invoke Playwright** unless
+   acceptance-aware escalation (`surface-taxonomy.md`) promotes a
+   backend-only diff to a UI surface because its acceptance manifests in
+   the WebView. Only WebView / browser UI surfaces — by diff or by
+   acceptance — are eligible for Playwright. The same rule applies to any
+   other UI runner (Cypress / Selenium / WinAppDriver) in future-arriving
+   projects. This is part of the gwt-verify verification contract that
+   prevents over-eager Playwright invocation, not an external SPEC
+   requirement.
 3. **`crates/gwt/web/**` ambiguity** — if any of `*.html`, `*.css`,
    `theme-*.js`, or visible UI assets changed, treat the surface as
    "UI / CSS / HTML" and include `pnpm test:visual`. If only non-visual
@@ -59,6 +63,34 @@ the project-specific recipe.
    `Changed surfaces: (none)` and no executed commands. User
    Verification is `skipped(no-change)`. The caller decides whether
    that means "nothing to verify" or "baseline drift".
+6. **WebView-driving backend seam (acceptance-aware).** Changes under
+   `crates/gwt/src/**` (the server / WebSocket protocol / app runtime that
+   renders into the WebView) classify as business logic by path. But when
+   the Issue / repro acceptance is a WebView behavior, acceptance-aware
+   escalation (`surface-taxonomy.md`) promotes them to UI surface and
+   `pnpm test:visual` is included. A pure-backend change here with no
+   WebView acceptance keeps the business-logic classification (no
+   Playwright).
+
+### Worked example: acceptance-aware escalation (gwt repo)
+
+A bug fix lands only in `crates/gwt/src/app_runtime.rs` (no `web/**` file
+changed), but the Issue says "the workspace list fails to re-render after a
+viewport update." The acceptance is a WebView behavior. By diff path this is
+business logic (Browser column empty), but acceptance-aware escalation
+promotes it to UI surface:
+
+```text
+Changed surfaces: business logic (crates/gwt/src/**)
+Acceptance Surface: UI surface (escalated — repro is a WebView re-render)
+Executed: cargo test -p gwt, pnpm test:visual
+User Verification: required
+```
+
+The reverse holds too: a pure refactor under `crates/gwt/src/**` with no
+WebView-visible acceptance records `Acceptance Surface:
+non-user-facing(internal refactor, no rendered behavior change)` and skips
+`pnpm test:visual`.
 
 ### Mode → Subset (gwt repo)
 

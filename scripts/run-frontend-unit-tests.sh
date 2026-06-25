@@ -12,8 +12,10 @@ bash scripts/run-node-tests-with-linkedom.sh \
   crates/gwt/web/__tests__/launch-wizard-intake.test.mjs \
   crates/gwt/web/__tests__/operator-chrome-structure.test.mjs \
   crates/gwt/web/__tests__/operator-shell-runtime.test.mjs \
+  crates/gwt/web/__tests__/provider-usage-surface.test.mjs \
   crates/gwt/web/__tests__/operator-rail.test.mjs \
   crates/gwt/web/__tests__/board-surface.test.mjs \
+  crates/gwt/web/__tests__/improvement-inbox-surface.test.mjs \
   crates/gwt/web/__tests__/board-lane.test.mjs \
   crates/gwt/web/__tests__/focus-trap.test.mjs \
   crates/gwt/web/__tests__/kanban-structure.test.mjs \
@@ -34,6 +36,7 @@ bash scripts/run-node-tests-with-linkedom.sh \
   crates/gwt/web/__tests__/canvas-wheel-gesture.test.mjs \
   crates/gwt/web/__tests__/terminal-viewport-reflow.test.mjs \
   crates/gwt/web/__tests__/window-geometry-sync.test.mjs \
+  crates/gwt/web/__tests__/fleet-minimap.test.mjs \
   crates/gwt/web/__tests__/custom-agent-env-editor.test.mjs \
   crates/gwt/web/__tests__/settings-system-tab.test.mjs \
   crates/gwt/web/__tests__/settings-agent-backends-tab.test.mjs \
@@ -63,4 +66,5 @@ bash scripts/run-node-tests-with-linkedom.sh \
   crates/gwt/web/__tests__/preset-modal-surface-deck.test.mjs \
   crates/gwt/web/__tests__/logs-process-facet.test.mjs \
   crates/gwt/web/__tests__/window-runtime-state.test.mjs \
+  crates/gwt/web/__tests__/window-list-model.test.mjs \
   crates/gwt/web/__tests__/window-close-confirm-modal.test.mjs

@@ -1013,7 +1013,35 @@ pub fn default_rebuild_runner(
             needs_worktree_hash: true,
         },
     };
+    // Phase 0 perf instrumentation (measure-first; see plan
+    // `launch-agent-ultrathink-shimmering-lake.md`). The auto-repair path
+    // rebuilds the per-worktree `files` / `files-docs` embedding index from
+    // scratch for every new worktree, and this `run_runner_rebuild` blocks on
+    // the Python embedding build. Logging its duration lets us correlate the
+    // heavy build against GUI freeze timestamps and confirm whether the
+    // embedding runner (which currently saturates all cores at normal
+    // priority) is the cause of wizard sluggishness on large repositories.
+    let rebuild_started = Instant::now();
+    let rebuild_label = action.label;
+    let rebuild_action = action.action;
+    let rebuild_worktree_hash = ctx.worktree_hash.clone();
+    tracing::info!(
+        target: "gwt::index",
+        scope = rebuild_label,
+        worktree_hash = %rebuild_worktree_hash,
+        action = rebuild_action,
+        "project index rebuild started"
+    );
     let output = run_runner_rebuild(&ctx, action).map_err(|err| err.to_string())?;
+    tracing::info!(
+        target: "gwt::index",
+        scope = rebuild_label,
+        worktree_hash = %rebuild_worktree_hash,
+        action = rebuild_action,
+        elapsed_ms = rebuild_started.elapsed().as_millis() as u64,
+        exit_status = %output.status,
+        "project index rebuild completed"
+    );
     if !output.status.success() {
         return Err(format_runner_failure(&output));
     }

@@ -180,3 +180,96 @@ export function createAgentCompletionNotifier({
     forgetWindow,
   };
 }
+
+// SPEC-2356 Anshin Addendum (FR-040) — in-app attention toaster.
+//
+// Distinct from createAgentCompletionNotifier above, which only fires DESKTOP
+// notifications when the operator is AWAY for a sustained run. This is the
+// in-app, always-on counterpart: the moment an agent transitions into a state
+// that wants the operator's eyes (needs_input / blocked / error / done), a
+// quiet in-app toast appears even while the operator is present. Clicking a
+// toast flies the camera to that window (frameWindow), so attention is one
+// click from action. Pure controller: DOM rendering is injected via
+// `showToast`. The mapping keys off the runtime wire state, not the Living
+// Telemetry projection, so this stays independent of CSS state names.
+const ATTENTION_STATES = Object.freeze({
+  waiting: "needs_input",
+  error: "error",
+  stopped: "done",
+  exited: "done",
+});
+
+function attentionNoticeForFlavor({ flavor, windowData, windowId }) {
+  const agentName = windowLabel(windowData);
+  switch (flavor) {
+    case "needs_input":
+      return {
+        flavor,
+        title: "Waiting for input",
+        body: `${agentName} is waiting for your input.`,
+        windowId,
+      };
+    case "error":
+      return {
+        flavor,
+        title: "Agent error",
+        body: `${agentName} hit an error.`,
+        windowId,
+      };
+    case "done":
+      return {
+        flavor,
+        title: "Agent finished",
+        body: `${agentName} stopped.`,
+        windowId,
+      };
+    default:
+      return null;
+  }
+}
+
+export function createAgentAttentionToaster({
+  showToast = () => {},
+  now = () => Date.now(),
+} = {}) {
+  // Last toasted flavor per window. We only fire when the flavor CHANGES, so a
+  // string of waiting status frames does not spam the operator. Leaving the
+  // attention set (e.g. back to running/idle) clears the entry so the next
+  // entry into the same flavor toasts again.
+  const lastFlavor = new Map();
+
+  function handleRuntimeState({ windowId, runtimeState, windowData = null }) {
+    if (!windowId) {
+      return null;
+    }
+    const state = normalizeState(runtimeState);
+    const flavor = ATTENTION_STATES[state] || null;
+
+    if (!flavor) {
+      lastFlavor.delete(windowId);
+      return null;
+    }
+
+    if (lastFlavor.get(windowId) === flavor) {
+      return null;
+    }
+    lastFlavor.set(windowId, flavor);
+
+    const notice = attentionNoticeForFlavor({ flavor, windowData, windowId });
+    if (!notice) {
+      return null;
+    }
+    notice.createdAt = now();
+    showToast(notice);
+    return notice;
+  }
+
+  function forgetWindow(windowId) {
+    lastFlavor.delete(windowId);
+  }
+
+  return {
+    handleRuntimeState,
+    forgetWindow,
+  };
+}

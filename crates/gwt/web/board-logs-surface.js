@@ -138,6 +138,246 @@ export function createBoardLogsSurface({
         return boardStateMap.get(windowId);
       }
 
+      // SPEC-2963 FR-030: per-project Board routing (provider/channel/tenant +
+      // resolved routing), keyed by project_root. Populated by the
+      // `project_board_config` backend event; read by the Board window's
+      // destination chip + config popover.
+      const boardConfigByProjectRoot = new Map();
+      let activeDestinationPopover = null;
+
+      function boardDestinationLabel(config) {
+        if (!config || !config.resolvedProvider) return "Board: …";
+        if (config.resolvedProvider === "local") return "Board: Local";
+        const name =
+          config.resolvedProvider === "slack"
+            ? "Slack"
+            : config.resolvedProvider === "teams"
+              ? "Teams"
+              : config.resolvedProvider;
+        const channel = config.resolvedChannel ? ` ${config.resolvedChannel}` : "";
+        const warn = config.signedIn ? "" : " ⚠";
+        return `Board: ${name}${channel}${warn}`;
+      }
+
+      // Short destination text for the chip (no "Board:" prefix; the gear icon
+      // already signals this is the Board destination control).
+      function boardDestinationText(config) {
+        if (!config || !config.resolvedProvider) return "Not set";
+        if (config.resolvedProvider === "local") return "Local";
+        const name =
+          config.resolvedProvider === "slack"
+            ? "Slack"
+            : config.resolvedProvider === "teams"
+              ? "Teams"
+              : config.resolvedProvider;
+        const channel = config.resolvedChannel ? ` ${config.resolvedChannel}` : "";
+        const warn = config.signedIn ? " ⚠" : "";
+        return `${name}${channel}${warn}`;
+      }
+
+      function boardDestinationTitle(config) {
+        const base = "Click to configure this project's Board destination.";
+        if (!config || !config.resolvedProvider) return base;
+        const source =
+          config.resolvedSource === "project"
+            ? "from this project's board.toml"
+            : "inherited from global settings";
+        const signedIn =
+          config.resolvedProvider !== "local"
+            ? config.signedIn
+              ? " · signed in"
+              : " · not signed in"
+            : "";
+        return `${boardDestinationLabel(config)} (${source})${signedIn}\n${base}`;
+      }
+
+      function closeBoardDestinationPopover() {
+        if (activeDestinationPopover) {
+          document.removeEventListener(
+            "mousedown",
+            activeDestinationPopover._onOutside,
+            true,
+          );
+          document.removeEventListener(
+            "keydown",
+            activeDestinationPopover._onEsc,
+            true,
+          );
+          activeDestinationPopover.remove();
+          activeDestinationPopover = null;
+        }
+      }
+
+      function openBoardDestinationPopover(anchorButton) {
+        closeBoardDestinationPopover();
+        const projectRoot = activeProjectTab()?.project_root || "";
+        if (!projectRoot) return;
+        const config = boardConfigByProjectRoot.get(projectRoot) || {};
+
+        const pop = createNode("div", "board-destination-popover");
+
+        const header = createNode("div", "board-destination-popover-header");
+        const heads = createNode("div", "board-destination-popover-heads");
+        heads.appendChild(
+          createNode("div", "board-destination-popover-title", "Board destination"),
+        );
+        heads.appendChild(
+          createNode(
+            "div",
+            "board-destination-popover-sub",
+            "Where this project's Board posts go",
+          ),
+        );
+        header.appendChild(heads);
+        const closeBtn = createNode("button", "board-destination-popover-close", "✕");
+        closeBtn.type = "button";
+        closeBtn.setAttribute("aria-label", "Close");
+        closeBtn.addEventListener("click", () => closeBoardDestinationPopover());
+        header.appendChild(closeBtn);
+        pop.appendChild(header);
+
+        const labelWrap = (text, control, hint) => {
+          const field = createNode("div", "board-destination-field");
+          field.appendChild(createNode("label", "settings-label", text));
+          field.appendChild(control);
+          if (hint) field.appendChild(createNode("div", "settings-help", hint));
+          pop.appendChild(field);
+          return field;
+        };
+
+        const provSelect = document.createElement("select");
+        provSelect.className = "settings-select";
+        for (const [value, text] of [
+          ["", "Inherit global"],
+          ["local", "Local (offline)"],
+          ["slack", "Slack"],
+          ["teams", "Teams"],
+        ]) {
+          const option = document.createElement("option");
+          option.value = value;
+          option.textContent = text;
+          provSelect.appendChild(option);
+        }
+        provSelect.value = config.provider || "";
+        labelWrap(
+          "Provider",
+          provSelect,
+          "Local keeps the Board offline. Slack and Teams share it with your team.",
+        );
+
+        const channelInput = document.createElement("input");
+        channelInput.className = "settings-input";
+        channelInput.type = "text";
+        channelInput.value = config.channel || "";
+        channelInput.placeholder = "Slack C0123… / Teams team_id/channel_id";
+        const channelField = labelWrap("Channel", channelInput);
+
+        const tenantInput = document.createElement("input");
+        tenantInput.className = "settings-input";
+        tenantInput.type = "text";
+        tenantInput.value = config.tenant || "";
+        tenantInput.placeholder = "team_id / tenant_id (optional)";
+        const tenantField = labelWrap("Tenant", tenantInput);
+
+        // SPEC-2963 FR-030: Channel / Tenant only apply to a remote provider.
+        // Switching to Local hides them (and they are cleared on Save), so the
+        // form reflects the selected provider.
+        const syncProviderFields = () => {
+          const remote = provSelect.value !== "local";
+          channelField.style.display = remote ? "" : "none";
+          tenantField.style.display = remote ? "" : "none";
+        };
+        provSelect.addEventListener("change", syncProviderFields);
+        syncProviderFields();
+
+        if (config.resolvedProvider) {
+          const sourceText =
+            config.resolvedSource === "project"
+              ? "set for this project"
+              : "from the global default";
+          pop.appendChild(
+            createNode(
+              "div",
+              "board-destination-popover-status",
+              `Currently: ${boardDestinationText(config)} (${sourceText})`,
+            ),
+          );
+        }
+        if (config.message) {
+          pop.appendChild(
+            createNode("div", "board-destination-popover-hint", config.message),
+          );
+        }
+
+        const actions = createNode("div", "board-destination-popover-actions");
+        const cancelBtn = createNode("button", "text-button", "Cancel");
+        cancelBtn.type = "button";
+        cancelBtn.addEventListener("click", () => closeBoardDestinationPopover());
+        const saveBtn = createNode("button", "wizard-button primary", "Save");
+        saveBtn.type = "button";
+        saveBtn.addEventListener("click", () => {
+          // Local has no channel/tenant — clear them so they don't persist.
+          const isLocal = provSelect.value === "local";
+          send({
+            kind: "update_project_board_config",
+            project_root: projectRoot,
+            provider: provSelect.value,
+            channel: isLocal ? "" : channelInput.value.trim(),
+            tenant: isLocal ? "" : tenantInput.value.trim(),
+          });
+          closeBoardDestinationPopover();
+        });
+        actions.appendChild(cancelBtn);
+        actions.appendChild(saveBtn);
+        pop.appendChild(actions);
+        pop.appendChild(
+          createNode(
+            "div",
+            "board-destination-popover-foot",
+            "Saved to this repo's .gwt/work/board.toml — shared with your team.",
+          ),
+        );
+
+        const rect = anchorButton.getBoundingClientRect();
+        pop.style.position = "fixed";
+        pop.style.top = `${Math.round(rect.bottom + 4)}px`;
+        pop.style.left = `${Math.round(rect.left)}px`;
+        pop.addEventListener("mousedown", (event) => event.stopPropagation());
+
+        pop._onOutside = (event) => {
+          if (!pop.contains(event.target) && event.target !== anchorButton) {
+            closeBoardDestinationPopover();
+          }
+        };
+        pop._onEsc = (event) => {
+          if (event.key === "Escape") closeBoardDestinationPopover();
+        };
+        document.body.appendChild(pop);
+        activeDestinationPopover = pop;
+        setTimeout(() => {
+          document.addEventListener("mousedown", pop._onOutside, true);
+          document.addEventListener("keydown", pop._onEsc, true);
+        }, 0);
+      }
+
+      // SPEC-2963 FR-030: apply a `project_board_config` backend event to the
+      // Board windows — refreshes the destination chip for the matching project.
+      function applyProjectBoardConfigEventToBoard(event) {
+        if (!event || !event.project_root) return;
+        boardConfigByProjectRoot.set(event.project_root, {
+          provider: event.provider || "",
+          channel: event.channel || "",
+          tenant: event.tenant || "",
+          resolvedProvider: event.resolved_provider || "",
+          resolvedSource: event.resolved_source || "",
+          resolvedChannel: event.resolved_channel || "",
+          signedIn: event.signed_in === true,
+          message: event.message || "",
+        });
+        for (const windowId of activeBoardWindowIds()) {
+          renderBoard(windowId);
+        }
+      }
 
       // SPEC-2359 FR-098/101 + US-53: track every live assigned Work id for
       // the Board Work filter. Broadcast entries remain visible everywhere;
@@ -719,6 +959,30 @@ export function createBoardLogsSurface({
         if (!status || !timeline || !composer) {
           return;
         }
+        // SPEC-2963 FR-030: reflect this project's resolved Board destination.
+        const destinationChip = body.querySelector("[data-action='board-destination']");
+        if (destinationChip) {
+          const config = boardConfigByProjectRoot.get(
+            activeProjectTab()?.project_root || "",
+          );
+          destinationChip.replaceChildren(
+            createNode("span", "board-destination-dot"),
+            createNode(
+              "span",
+              "board-destination-text",
+              boardDestinationText(config),
+            ),
+            createNode("span", "board-destination-gear", "⚙"),
+          );
+          destinationChip.title = boardDestinationTitle(config);
+          destinationChip.dataset.provider = config?.resolvedProvider || "";
+          destinationChip.dataset.signedIn =
+            config && config.resolvedProvider !== "local"
+              ? config.signedIn
+                ? "true"
+                : "false"
+              : "";
+        }
         if (pendingBoardEntryFocusId && !state.focusEntryId) {
           state.focusEntryId = pendingBoardEntryFocusId;
           state.pendingFocusScroll = true;
@@ -1110,6 +1374,7 @@ export function createBoardLogsSurface({
                   <div class="board-status"></div>
                 </div>
                 <div class="workspace-toolbar-actions">
+                  <button class="board-destination-chip" data-action="board-destination" type="button" aria-label="Board destination settings"></button>
                   <button class="text-button board-all-filter" data-action="toggle-board-all" type="button" aria-pressed="false">All</button>
                   <button class="text-button board-for-you-filter" data-action="toggle-board-for-you" type="button" aria-pressed="false">For you</button>
                   <button class="text-button board-workspace-filter" data-action="toggle-board-workspace" type="button" aria-pressed="false">Work</button>
@@ -1177,6 +1442,17 @@ export function createBoardLogsSurface({
               requestBoard(windowData.id);
               renderBoard(windowData.id);
             });
+          // SPEC-2963 FR-030: per-project Board destination chip → config popover.
+          body
+            .querySelector("[data-action='board-destination']")
+            .addEventListener("click", (event) => {
+              event.stopPropagation();
+              openBoardDestinationPopover(event.currentTarget);
+            });
+          const projectRoot = activeProjectTab()?.project_root || "";
+          if (projectRoot && !boardConfigByProjectRoot.has(projectRoot)) {
+            send({ kind: "get_project_board_config", project_root: projectRoot });
+          }
           const state = ensureBoardState(windowData.id);
           if (state.entries.length === 0 && !state.loading && !state.error) {
             requestBoard(windowData.id);
@@ -1430,5 +1706,6 @@ export function createBoardLogsSurface({
         mountBoardWindow,
         mountLogsWindow,
         applyBoardLogsReceiveEvent,
+        applyProjectBoardConfigEventToBoard,
       };
 }

@@ -161,7 +161,6 @@ fn handle_stop(
             return Ok(output);
         }
     }
-
     run_step(event, "completed-stop", || {
         super::runtime_state::record_completed_stop_from_env()
     })?;

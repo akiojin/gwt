@@ -5,7 +5,9 @@ use std::{
 };
 
 use gwt_agent::{AgentId, Session};
-use gwt_core::workspace_projection::load_or_default_workspace_projection;
+use gwt_core::{
+    paths::project_scope_hash, workspace_projection::load_workspace_projection_from_path,
+};
 use tempfile::TempDir;
 
 fn prepared_hook_session() -> (TempDir, TempDir, String) {
@@ -61,9 +63,12 @@ fn gwtd_help_describes_the_headless_cli_surface() {
 
 #[test]
 fn gwtd_no_args_dispatches_stdin_json_envelope() {
+    let home = tempfile::tempdir().expect("home tempdir");
     let project = tempfile::tempdir().expect("project tempdir");
     let mut child = Command::new(env!("CARGO_BIN_EXE_gwtd"))
         .current_dir(project.path())
+        .env("HOME", home.path())
+        .env("USERPROFILE", home.path())
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -101,8 +106,14 @@ fn gwtd_no_args_dispatches_stdin_json_envelope() {
         "stdout should be success JSON with ok=true, got: {}",
         String::from_utf8_lossy(&output.stdout)
     );
-    let projection =
-        load_or_default_workspace_projection(project.path()).expect("load workspace projection");
+    let projection_path = home
+        .path()
+        .join(".gwt/projects")
+        .join(project_scope_hash(project.path()).as_str())
+        .join("project-state/current.json");
+    let projection = load_workspace_projection_from_path(&projection_path)
+        .expect("load workspace projection")
+        .expect("workspace projection should be written under isolated home");
     let agent = projection
         .agents
         .iter()
@@ -275,6 +286,51 @@ fn gwtd_provider_hook_event_remains_argv_transport_exception() {
     assert!(
         String::from_utf8_lossy(&output.stdout).contains("hookSpecificOutput"),
         "provider SessionStart should keep the hook stdout contract, got: {}",
+        String::from_utf8_lossy(&output.stdout)
+    );
+}
+
+#[test]
+fn gwtd_gwt_self_improvement_stop_remains_argv_transport_exception() {
+    let home = tempfile::tempdir().expect("home tempdir");
+    let repo = tempfile::tempdir().expect("repo tempdir");
+    assert!(Command::new("git")
+        .arg("init")
+        .arg("-q")
+        .arg(repo.path())
+        .status()
+        .expect("git init")
+        .success());
+    assert!(Command::new("git")
+        .arg("-C")
+        .arg(repo.path())
+        .args([
+            "remote",
+            "add",
+            "origin",
+            "https://github.com/example/project.git"
+        ])
+        .status()
+        .expect("git remote add")
+        .success());
+
+    let output = Command::new(env!("CARGO_BIN_EXE_gwtd"))
+        .current_dir(repo.path())
+        .args(["hook", "gwt-self-improvement-stop"])
+        .env("HOME", home.path())
+        .env("USERPROFILE", home.path())
+        .stdin(Stdio::null())
+        .output()
+        .expect("run gwtd gwt self-improvement hook");
+
+    assert!(
+        output.status.success(),
+        "direct self-improvement hook should exit 0 outside akiojin/gwt, stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        output.stdout.is_empty(),
+        "non-gwt repos must receive no hook output, got: {}",
         String::from_utf8_lossy(&output.stdout)
     );
 }

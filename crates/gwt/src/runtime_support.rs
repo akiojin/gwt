@@ -302,6 +302,7 @@ pub fn synthetic_branch_entry(branch_name: &str) -> BranchListEntry {
         cleanup_ready: true,
         cleanup: gwt::BranchCleanupInfo::default(),
         resume: gwt::BranchResumeInfo::unavailable(),
+        start_work_eligibility: None,
     }
 }
 
