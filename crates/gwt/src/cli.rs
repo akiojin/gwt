@@ -460,7 +460,6 @@ pub fn should_dispatch_cli(args: &[String]) -> bool {
                     | "register"
                     | "daemon"
                     | "workspace"
-                    | "work"
                     | "pane"
                     | "open"
                     | "search"
