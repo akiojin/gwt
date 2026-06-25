@@ -17,7 +17,8 @@ pub mod voice_config;
 pub use agent_config::AgentConfig;
 pub use ai_settings::AISettings;
 pub use board_config::{
-    BoardConfig, BoardProviderKind, SlackConfig, TeamsConfig, DEFAULT_OAUTH_REDIRECT_PORT,
+    BoardConfig, BoardProviderKind, ProjectBoardConfig, SlackConfig, TeamsConfig,
+    DEFAULT_OAUTH_REDIRECT_PORT, PROJECT_BOARD_FILE,
 };
 pub use error::{ConfigError, Result};
 pub use locale::{

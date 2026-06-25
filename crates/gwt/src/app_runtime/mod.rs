@@ -1267,6 +1267,9 @@ impl AppRuntime {
                 ),
             )],
             FrontendEvent::LoadBranches { id } => self.load_branches_events(&client_id, &id),
+            FrontendEvent::RequestRemoteStartWorkBranches { id } => {
+                self.request_remote_start_work_branches_events(&client_id, &id)
+            }
             FrontendEvent::LoadBoard { id, all } => self.load_board_events(&client_id, &id, all),
             FrontendEvent::LoadBoardHistory {
                 id,
@@ -1601,6 +1604,21 @@ impl AppRuntime {
             FrontendEvent::UpdateBoardOauthPort { port } => {
                 self.board_oauth_port_update_events(client_id, port)
             }
+            FrontendEvent::GetProjectBoardConfig { project_root } => {
+                self.project_board_config_events(client_id, project_root)
+            }
+            FrontendEvent::UpdateProjectBoardConfig {
+                project_root,
+                provider,
+                channel,
+                tenant,
+            } => self.project_board_config_update_events(
+                client_id,
+                project_root,
+                provider,
+                channel,
+                tenant,
+            ),
             FrontendEvent::UpdateSystemSettings {
                 language,
                 codex_trust_managed_hooks,

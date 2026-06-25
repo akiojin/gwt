@@ -1878,8 +1878,25 @@ kbd.op-kbd {
   background: var(--color-surface-elevated);
   border-left-color: var(--color-accent);
 }
+.release-notes-sidebar-item.is-current-version {
+  background: color-mix(in oklab, var(--color-accent) 8%, transparent);
+}
+.release-notes-sidebar-item.is-selected.is-current-version {
+  background: var(--color-surface-elevated);
+}
 .release-notes-sidebar-version {
   font-weight: 600;
+}
+.release-notes-sidebar-current {
+  align-self: flex-start;
+  border: 1px solid color-mix(in oklab, var(--color-accent) 45%, transparent);
+  border-radius: 999px;
+  color: var(--color-accent);
+  font-size: 10px;
+  font-weight: 700;
+  line-height: 1;
+  padding: 2px 6px;
+  text-transform: uppercase;
 }
 .release-notes-sidebar-date {
   font-size: 11px;
@@ -2333,7 +2350,11 @@ kbd.op-kbd {
   color: var(--color-state-active);
 }
 
+/* Paused is the quiet baseline (UX 2026-06-24): a defined slate pill, but
+   deliberately uncolored so the tinted badges (Remote/Merged/Hook/Active) read
+   as the only real signals against it. */
 .workspace-overview-lifecycle[data-lifecycle="paused"] {
+  border-color: color-mix(in oklab, var(--color-state-idle) 55%, var(--color-border));
   color: var(--color-state-idle);
 }
 
@@ -2484,12 +2505,18 @@ kbd.op-kbd {
 
 /* SPEC-2359 W16-3 (FR-390): fetched-remote-only badge — Launch creates the
    worktree on demand. */
+/* Badge color language (UX 2026-06-24): each badge gets a distinct, calm tint
+   on the BORDER + TEXT (no loud fills, except a faint wash for terminal/error
+   states) so the badge strip is scannable at a glance instead of monochrome:
+   Active=cyan, Paused=neutral slate (the quiet baseline), Done/Discarded=slate,
+   Merged=slate + faint wash (archival), Remote=violet (a place, not a state),
+   Hook badge=amber when setup-needed / red wash when error (and only then). */
 .workspace-overview-remote {
   flex: 0 0 auto;
   padding: 0 var(--space-2);
-  border: 1px solid var(--color-border-strong);
+  border: 1px solid color-mix(in oklab, var(--color-state-remote) 55%, var(--color-border));
   border-radius: var(--radius-sm);
-  color: var(--color-text-muted);
+  color: var(--color-state-remote);
   font-family: var(--font-mono);
   font-size: 10px;
   font-weight: 650;
@@ -2497,13 +2524,16 @@ kbd.op-kbd {
   line-height: 1.5;
 }
 
-/* SPEC-2359 W-15 (FR-386): merged-into-base badge — safe to delete. */
+/* SPEC-2359 W-15 (FR-386): merged-into-base badge — safe to delete. A faint
+   slate wash (UX 2026-06-24) lifts this terminal/archival state off the gray
+   field and pairs it with the Done lifecycle. */
 .workspace-overview-merged {
   flex: 0 0 auto;
   padding: 0 var(--space-2);
-  border: 1px solid color-mix(in oklab, var(--color-state-done) 60%, var(--color-border));
+  border: 1px solid color-mix(in oklab, var(--color-state-done) 78%, var(--color-border));
   border-radius: var(--radius-sm);
   color: var(--color-state-done);
+  background: color-mix(in oklab, var(--color-state-done) 10%, transparent);
   font-family: var(--font-mono);
   font-size: 10px;
   font-weight: 650;
@@ -2524,15 +2554,18 @@ kbd.op-kbd {
   line-height: 1.5;
 }
 
-.workspace-overview-hook-health[data-status="needs_attention"],
-.workspace-overview-hook-health[data-status="waiting_for_first_hook_event"] {
-  border-color: var(--color-state-idle);
-  color: var(--color-state-idle);
+/* Hook badge is only rendered for actionable states (UX 2026-06-24): amber when
+   setup is needed, a red wash when a hook is actually broken — so a Hook badge
+   always means "do something", never ambient noise. */
+.workspace-overview-hook-health[data-status="needs_attention"] {
+  border-color: color-mix(in oklab, var(--color-state-needs-input) 60%, var(--color-border));
+  color: var(--color-state-needs-input);
 }
 
 .workspace-overview-hook-health[data-status="degraded"] {
   border-color: var(--color-state-blocked);
   color: var(--color-state-blocked);
+  background: color-mix(in oklab, var(--color-state-blocked) 12%, transparent);
 }
 
 .workspace-overview-agent-name,
@@ -4957,6 +4990,10 @@ button.workspace-board-ref:focus-visible {
   gap: var(--space-2);
   padding-top: var(--space-2);
 }
+
+/* SPEC-2359 US-83 (UX revision 2026-06-24): eligible existing remote branches
+   now render as ordinary .workspace-overview-row rows tagged .workspace-overview-remote
+   inside the unified Workspace list, so they need no dedicated section styling. */
 
 /* SPEC-2009 amendment Phase 2: File Tree editor affordance.
    - dirty marker shows a leading ● when the textarea/hex view has unsaved

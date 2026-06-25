@@ -262,6 +262,9 @@ pub(super) fn frontend_user_action_log(event: &FrontendEvent) -> Option<Frontend
         FrontendEvent::LoadBranches { id } => {
             FrontendUserActionLog::new("load_branches", "branches").window(id)
         }
+        FrontendEvent::RequestRemoteStartWorkBranches { id } => {
+            FrontendUserActionLog::new("request_remote_start_work_branches", "branches").window(id)
+        }
         FrontendEvent::RunBranchCleanup {
             id,
             branches,
@@ -591,6 +594,13 @@ pub(super) fn frontend_user_action_log(event: &FrontendEvent) -> Option<Frontend
         FrontendEvent::UpdateBoardOauthPort { port } => {
             FrontendUserActionLog::new("update_board_oauth_port", "settings")
                 .target(port.to_string())
+        }
+        FrontendEvent::GetProjectBoardConfig { project_root } => {
+            FrontendUserActionLog::new("get_project_board_config", "settings").target(project_root)
+        }
+        FrontendEvent::UpdateProjectBoardConfig { project_root, .. } => {
+            FrontendUserActionLog::new("update_project_board_config", "settings")
+                .target(project_root)
         }
         FrontendEvent::UpdateSystemSettings {
             language,

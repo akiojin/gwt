@@ -982,7 +982,7 @@
       if (appVersionLabel && !appVersionLabel.dataset.releaseNotesBound) {
         appVersionLabel.dataset.releaseNotesBound = "true";
         const openReleaseNotesFromLabel = () => {
-          releaseNotesWindow.open(versionState.current || null);
+          releaseNotesWindow.open(versionState.latest || versionState.current || null);
         };
         appVersionLabel.addEventListener("click", openReleaseNotesFromLabel);
         appVersionLabel.addEventListener("keydown", (event) => {
@@ -3875,6 +3875,7 @@
         mountBoardWindow,
         mountLogsWindow,
         applyBoardLogsReceiveEvent,
+        applyProjectBoardConfigEventToBoard,
       } = createBoardLogsSurface({
         send,
         createNode,
@@ -4366,6 +4367,12 @@
             focusWindowLocally,
             sendFocus: (id) => socketTransport.send({ kind: "focus_window", id }),
           });
+          // SPEC-2359 US-83: fetch the eligible remote branches for this
+          // Workspace window so they fold into the unified Workspace list as
+          // Remote-tagged rows. Sent from app.js (not the surface's mount) so
+          // the surface stays a pure renderer and its unit tests keep their
+          // exact-message contracts.
+          send({ kind: "request_remote_start_work_branches", id: windowData.id });
           return;
         }
 
@@ -5242,6 +5249,10 @@
           case "log_entry_appended":
             applyBoardLogsReceiveEvent(event);
             break;
+          case "project_board_config":
+            // SPEC-2963 FR-030: per-project Board routing → Board window chip.
+            applyProjectBoardConfigEventToBoard(event);
+            break;
           case "process_line":
             // SPEC-2809 Phase F1/F2 — fan out the redacted, ANSI-stripped
             // line from `ProcessConsoleHub` to every Console window
@@ -5310,6 +5321,11 @@
           // SPEC-2359 US-42 — Resume Picker dispatcher slots.
           case "workspace_resumable_agents":
             workspaceResumePicker.handleAgentsList(event);
+            break;
+          // SPEC-2359 US-83 — eligible remote branches render as "Start work on
+          // a branch" rows in the Workspace list.
+          case "remote_start_work_branches":
+            workspaceOverviewSurface.applyRemoteStartWorkBranches(event);
             break;
           case "workspace_resume_agent_error":
             launchPending.settleAck(event);

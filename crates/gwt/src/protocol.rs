@@ -388,6 +388,12 @@ pub enum FrontendEvent {
     LoadBranches {
         id: String,
     },
+    /// SPEC-2359 US-83: the Workspace surface requests the list of eligible
+    /// existing remote branches a user can start work on (the "Open a branch…"
+    /// toolbar action / picker). `id` is the requesting Workspace window id.
+    RequestRemoteStartWorkBranches {
+        id: String,
+    },
     LoadBoard {
         id: String,
         #[serde(default)]
@@ -772,6 +778,26 @@ pub enum FrontendEvent {
     /// effect on the next launch (the callback listener binds at server boot).
     UpdateBoardOauthPort {
         port: u16,
+    },
+    /// SPEC-2963 FR-030: read the per-project Board config + resolved routing for
+    /// `project_root` (the Settings Board tab's per-project section). Backend
+    /// replies with [`BackendEvent::ProjectBoardConfig`].
+    GetProjectBoardConfig {
+        project_root: String,
+    },
+    /// SPEC-2963 FR-025/FR-030: write per-project Board config to the repo's
+    /// `<project_root>/.gwt/work/board.toml`. Each field: `Some("")` clears the
+    /// override (inherit global), `Some(value)` sets it, `None` leaves it
+    /// unchanged. Backend replies with [`BackendEvent::ProjectBoardConfig`]
+    /// carrying the refreshed config + resolved routing.
+    UpdateProjectBoardConfig {
+        project_root: String,
+        #[serde(default)]
+        provider: Option<String>,
+        #[serde(default)]
+        channel: Option<String>,
+        #[serde(default)]
+        tenant: Option<String>,
     },
     /// SPEC-1933 US-4: Settings > System > Language select changed. Backend
     /// persists the value to `~/.gwt/config.toml` under `[ai].language` and
@@ -1502,6 +1528,13 @@ pub enum BackendEvent {
         #[serde(default)]
         load_id: u64,
     },
+    /// SPEC-2359 US-83: eligible existing remote branches for the Workspace
+    /// "Open a branch…" picker. `id` echoes the requesting Workspace window id;
+    /// `branches` are remote ref names (e.g. `origin/feature-foo`).
+    RemoteStartWorkBranches {
+        id: String,
+        branches: Vec<String>,
+    },
     BoardEntries {
         id: String,
         entries: Vec<BoardEntry>,
@@ -1869,6 +1902,30 @@ pub enum BackendEvent {
         /// redirect URL `http://127.0.0.1:<port>/oauth/callback` to register.
         #[serde(default)]
         oauth_redirect_port: u16,
+    },
+    /// SPEC-2963 FR-030: a repo's per-project Board config (the raw
+    /// `board.toml` override) plus its resolved effective routing, for the
+    /// Settings Board tab's per-project section. The `provider` / `channel` /
+    /// `tenant` fields are the project override (`None` = inherit global) used
+    /// to prefill inputs; the `resolved_*` fields show the effective routing.
+    ProjectBoardConfig {
+        project_root: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        provider: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        channel: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        tenant: Option<String>,
+        /// Resolved effective provider (`local` / `slack` / `teams`).
+        resolved_provider: String,
+        /// Where the resolved provider came from (`project` / `global`).
+        resolved_source: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        resolved_channel: Option<String>,
+        /// Whether a usable token exists for the resolved provider + tenant.
+        signed_in: bool,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        message: Option<String>,
     },
     /// SPEC-1933 US-4: confirmation that
     /// [`FrontendEvent::UpdateSystemSettings`] persisted successfully.
@@ -2477,6 +2534,7 @@ impl BackendEvent {
             BackendEvent::FileContentSaved { .. } => "file_content_saved",
             BackendEvent::FileContentSaveError { .. } => "file_content_save_error",
             BackendEvent::BranchEntries { .. } => "branch_entries",
+            BackendEvent::RemoteStartWorkBranches { .. } => "remote_start_work_branches",
             BackendEvent::BoardEntries { .. } => "board_entries",
             BackendEvent::BoardHistoryPage { .. } => "board_history_page",
             BackendEvent::ProfileSnapshot { .. } => "profile_snapshot",
@@ -2536,6 +2594,7 @@ impl BackendEvent {
             BackendEvent::MigrationError { .. } => "migration_error",
             BackendEvent::SystemSettings { .. } => "system_settings",
             BackendEvent::BoardAuthStatus { .. } => "board_auth_status",
+            BackendEvent::ProjectBoardConfig { .. } => "project_board_config",
             BackendEvent::SystemSettingsUpdated { .. } => "system_settings_updated",
             BackendEvent::SystemSettingsError { .. } => "system_settings_error",
             BackendEvent::AutostartStatus { .. } => "autostart_status",
@@ -2780,6 +2839,7 @@ mod tests {
                     available: true,
                     reason: None,
                 },
+                start_work_eligibility: None,
             }],
             load_id: 0,
         };
@@ -2846,6 +2906,7 @@ mod tests {
                     available: true,
                     reason: None,
                 },
+                start_work_eligibility: None,
             }],
             load_id: 0,
         };
@@ -3168,6 +3229,35 @@ mod tests {
         assert!(
             matches!(event, FrontendEvent::OpenStartWork),
             "Start Work must be a global command, not a Branches window event"
+        );
+    }
+
+    #[test]
+    fn remote_start_work_branches_wire_contract_is_stable() {
+        // SPEC-2359 US-83: the Workspace "Open a branch…" picker depends on
+        // these exact wire `kind` strings, so lock them.
+        let request: FrontendEvent = serde_json::from_value(serde_json::json!({
+            "kind": "request_remote_start_work_branches",
+            "id": "tab-1::work-1",
+        }))
+        .expect("deserialize request_remote_start_work_branches");
+        assert!(matches!(
+            request,
+            FrontendEvent::RequestRemoteStartWorkBranches { id } if id == "tab-1::work-1"
+        ));
+
+        let value = serde_json::to_value(BackendEvent::RemoteStartWorkBranches {
+            id: "tab-1::work-1".to_string(),
+            branches: vec!["origin/feature-foo".to_string()],
+        })
+        .expect("serialize RemoteStartWorkBranches");
+        assert_eq!(
+            value.pointer("/kind").and_then(Value::as_str),
+            Some("remote_start_work_branches")
+        );
+        assert_eq!(
+            value.pointer("/branches/0").and_then(Value::as_str),
+            Some("origin/feature-foo")
         );
     }
 
@@ -4236,6 +4326,67 @@ mod tests {
             }
             other => panic!("unexpected variant: {other:?}"),
         }
+    }
+
+    #[test]
+    fn frontend_event_get_project_board_config_round_trips() {
+        // SPEC-2963 FR-030: Settings Board tab reads a repo's per-project config.
+        let payload = r#"{"kind":"get_project_board_config","project_root":"/repo/a"}"#;
+        let event: FrontendEvent =
+            serde_json::from_str(payload).expect("deserialize GetProjectBoardConfig");
+        match event {
+            FrontendEvent::GetProjectBoardConfig { project_root } => {
+                assert_eq!(project_root, "/repo/a");
+            }
+            other => panic!("unexpected variant: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn frontend_event_update_project_board_config_round_trips() {
+        // SPEC-2963 FR-025/FR-030: Settings Board tab writes a repo's board.toml.
+        let payload = r#"{"kind":"update_project_board_config","project_root":"/repo/a","provider":"slack","channel":"C-A","tenant":"acme"}"#;
+        let event: FrontendEvent =
+            serde_json::from_str(payload).expect("deserialize UpdateProjectBoardConfig");
+        match event {
+            FrontendEvent::UpdateProjectBoardConfig {
+                project_root,
+                provider,
+                channel,
+                tenant,
+            } => {
+                assert_eq!(project_root, "/repo/a");
+                assert_eq!(provider.as_deref(), Some("slack"));
+                assert_eq!(channel.as_deref(), Some("C-A"));
+                assert_eq!(tenant.as_deref(), Some("acme"));
+            }
+            other => panic!("unexpected variant: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn backend_event_project_board_config_serializes_override_and_resolved() {
+        // SPEC-2963 FR-030: the Board tab prefills inputs from `provider`/
+        // `channel`/`tenant` and shows the resolved routing.
+        let event = BackendEvent::ProjectBoardConfig {
+            project_root: "/repo/a".to_string(),
+            provider: Some("slack".to_string()),
+            channel: Some("C-A".to_string()),
+            tenant: Some("acme".to_string()),
+            resolved_provider: "slack".to_string(),
+            resolved_source: "project".to_string(),
+            resolved_channel: Some("C-A".to_string()),
+            signed_in: true,
+            message: Some("Saved project Board configuration.".to_string()),
+        };
+        let value = serde_json::to_value(&event).expect("serialize");
+        assert_eq!(value["kind"], "project_board_config");
+        assert_eq!(value["project_root"], "/repo/a");
+        assert_eq!(value["provider"], "slack");
+        assert_eq!(value["channel"], "C-A");
+        assert_eq!(value["resolved_provider"], "slack");
+        assert_eq!(value["resolved_source"], "project");
+        assert_eq!(value["signed_in"], true);
     }
 
     #[test]

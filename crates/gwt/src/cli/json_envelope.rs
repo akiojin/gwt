@@ -97,6 +97,9 @@ fn parse(input: &str) -> Result<ParsedEnvelope, CliParseError> {
         }
         "board.show" => board_show(params)?,
         "board.post" => board_post(params)?,
+        "board.config.show" | "board.config-show" => {
+            CliCommand::Board(crate::cli::board::BoardCommand::ConfigShow)
+        }
         "improvement.capture" => improvement_capture(params)?,
         "improvement.list" => improvement_list(params)?,
         "improvement.dismiss" => improvement_dismiss(params)?,

@@ -7200,6 +7200,55 @@ Context: SPEC-3164 direct self-improvement hook work clarified that the high-con
 Learning: Do not wire self-improvement hard Stop blocks into shared gwt Managed Hooks. Put the blocking check behind gwt-repo-owned direct hook config and make provider-generated assets include it only when the worktree remote is akiojin/gwt; non-gwt projects must either omit the hook name or no-op.
 Future Action: When adding agent workflow guards, classify whether the guard is gwt product behavior or gwt-repo development policy before choosing Managed Hooks, generated guidance, or repo-local direct hook config.
 
+## 2026-06-23 — struct-literal 一括挿入で `-> Type {` 関数本体を破壊する罠
+
+Type: agent-workflow
+Context: SPEC-2359 US-83 で BranchListEntry / LaunchWizardHydration に新フィールドを追加する際、多数の struct-literal 構築サイト（テスト含む）へ機械的に `field: None,` を挿入するスクリプトを書いた。
+Learning: 正規表現 `TypeName\s*\{` は struct literal だけでなく `-> TypeName {`（関数戻り値型 + 関数本体の開き波括弧）や `pub struct TypeName {`（型定義）にもマッチする。これらに挿入すると関数本体や型定義を破壊し `expected ;` 系パースエラーになる。実際 22 サイト挿入のうち関数シグネチャ系を破壊し revert した。
+Future Action: フィールド一括挿入スクリプトはマッチ直前テキストが `->` / `struct` で終わる場合を除外し、『ブロック内に当該フィールドが既存なら skip』ガードも入れる。最も安全なのは cargo build の E0063 missing-field が指す行を1件ずつ対象にする compiler 駆動方式。
+
+## 2026-06-23 — Branches cleanup は per-ref local/remote 行に依存。表示抽象化は frontend display-transform で行う
+
+Type: project
+Context: SPEC-2359 US-83b で『リモートを気にさせない』ため、Branches タブの同名 local/remote 行を canonical 名で 1 行に集約する案を検討した。
+Learning: 同名 local/remote 行の完全集約は SPEC-2009 cleanup を 7+ 箇所 BREAKING する: (1) cleanupSelected が name キーの Set で local/remote を個別選択できなくなる、(2) cleanup lookup と delete_remote_branch の upstream routing が per-row execution_branch+upstream に依存（非 origin remote も壊れる）、(3) BranchCleanupInfo が単一 execution_branch 前提で union 化が必要、(4) 保護ブランチは local=Risky / origin=Blocked と per-scope availability が異なる、(5) RemoteTrackingWithoutLocal blocked 行が表現不能になる。一方 BranchListEntry / canonical_work_branch_identity / start_work_eligibility は表示抽象化に必要な情報を既に持つ。
+Future Action: 『remote/local を気にさせない』要求は、行集約ではなく frontend-only display-transform で実装する: 表示名から origin/ を除去（selection・cleanup keying・payload は raw entry.name を保持）、scope ラベルを remote-only 時だけの控えめ chip に置換。backend select_existing_branch が origin/ を正規化するため wire 契約は不変。cleanup（破壊的操作）のデータプレーンは透明性維持のため無改修にする。
+
+## 2026-06-24 — UI 配線の『到達可能性』は実 render（Playwright E2E）で証明する。構造文字列 assert だけで到達可能と見なさない
+
+Type: agent-workflow
+Context: SPEC-2359 US-83 で、branches-cleanup-surface.js（WindowPreset::Branches）に Start Work 行を実装し『end-to-end 完成・検証済み』と報告したが、実機未確認だった。ユーザー指摘で presetSurface(branches)->work / Add Window 非掲載 / command redirect により到達不能 dead code と判明。
+Learning: embedded_web の構造文字列アサートや cargo/frontend unit が全 green でも、その UI が現行の到達可能サーフェスに描画されるとは限らない。gwt は preset->surface マッピング（app.js presetSurface）や Add Window / command palette の露出で到達性が決まり、過去フェーズの surface が dead code 化していることがある。
+Future Action: UI 配線（ボタン/行/モーダル）を追加・変更したら、必ず実 UI を render する Playwright E2E（installEmbeddedRoutes + workspace_state seed + FixtureWebSocket mock、tests/quiet-work-ui-e2e.spec.ts が雛形）で『到達可能サーフェスに表示され click で機能する』ことを証明する。実装先 surface が現行 UI で開けるか（presetSurface のマッピング先、Add Window/command の露出）を先に確認する。
+
+## 2026-06-24 — linkedom assert.equal(element, null) hangs node:test
+
+Type: reference
+Context: linkedom + node:test の frontend unit テストで assert.equal(domElement, null) が失敗すると、AssertionError の diff 生成で linkedom DOM ノードを util.inspect しようとし循環参照で病的に遅くなり、同期ループ的にハングする（--test-timeout も同期ブロックのため効かない）。RED 段階で『tests 1 / fail 1・duration 190s』のように丸ごと失敗に見えた。
+Learning: DOM 要素の不在は element===null ではなく container.querySelectorAll(selector).length === 0（数値比較）で assert する。これなら失敗時も数値比較で高速。truthy 確認は assert.ok(element) を使う（成功時は inspect されない）。
+Future Action: frontend unit テストで『要素が無いこと』を検証する時は必ず querySelectorAll(...).length===0 を使い、assert.equal(el, null) / assert.strictEqual(el, null) を書かない。
+
+## 2026-06-24 — UI 監査の前提は live 実データで検証してから実装する
+
+Type: feedback
+Context: Workspace badge 配色の UI/UX 監査が『Hooks バッジは大半が benign な waiting_for_first_hook_event』と仮定し、waiting を除外し needs_attention を amber で色付けする案を出した。だが実 checkout の worktree はほぼ全てが needs_attention で、amber『Hook setup』が全行に出て逆にノイズが増幅した。live screenshot を撮って初めて気づいた。
+Learning: UI/UX 監査やデザイン提案がデータ分布の仮定に依存する場合、その仮定を live 実データ(実 screenshot / 実 DOM 計算値)で検証してから実装する。per-row 指標が ~100% の行に出るなら、それは per-row signal ではなく systemic 状態であり、行から外して detail/集約に回す(quiet by default, loud only when actionable)。
+Future Action: badge/indicator の表示条件を決める前に、対象リポジトリの実データでその状態がどれだけの行に出るかを screenshot か DOM 集計で確認する。仮定のまま色や閾値を決めない。
+
+## 2026-06-23 — Board settings are global-only; per-project config belongs in committed .gwt/work
+
+Type: project
+Context: Board remote(Slack/Teams)が複数プロジェクトを同一チャンネルに混在させる問題(SPEC-2963)の改善設計。
+Learning: gwt の Settings は ~/.gwt/config.toml のグローバルのみで per-project config realm が無い(settings.rs:96)。per-project の committed データ層は <repo>/.gwt/work/(paths.rs:387, merge=union)に既存(board-remote-roots.jsonl 等)。remote provider は provider()/current_kind() がグローバル設定を repo 引数なしで読み、書き込みも読み戻し(history_channels の channel 和集合)も repo 次元が無いため全プロジェクトが混在。
+Future Action: Board の per-project 設定は <repo>/.gwt/work/board.toml(committed)、provider() を provider_for(worktree_root) に repo-aware 化。グローバル config は OAuth client_id/tenant_id とフォールバック既定のみ、token は tenant 単位 machine-local。SPEC-2963 を再オープンし per-project isolation フェーズで実装。
+
+## 2026-06-24 — per-project Board config UI belongs in the Board window, not Settings
+
+Type: feedback
+Context: SPEC-2963 per-project Board 分離の GUI(T11-6)。最初 Settings に専用 Board タブを作ったがユーザーが却下。
+Learning: per-project(プロジェクト単位)の設定は、グローバルな Settings ウィンドウではなく、その対象を表示する場所(Board ウィンドウ)に置くべき。Board ウィンドウヘッダの宛先チップ(provider 色ドット+宛先+⚙ギア)にすると、各プロジェクトの宛先が常時可視化され分離の確認も兼ねる。グローバルな OAuth アプリ設定/既定だけ Settings に残す。設定ボタンはフィルタボタンと視覚的に明確に差別化する(ピル+ギア+色ドット)。
+Future Action: per-project の GUI 設定は対象の文脈(その window)に配置する。global=Settings / per-project=対象 window、というスコープ分離を既定にする。Board: board-logs-surface.js の destination chip + popover、backend は board_provider::routing_for/update_project_board_config を再利用。
+
 ## 2026-06-23 — OpenCode auth は global＝wizard 整合に credential bridge 不要、serde rename は実機 E2E で捕捉
 
 Type: lesson

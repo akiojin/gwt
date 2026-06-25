@@ -155,6 +155,38 @@ test("handlePayload honours backend focus_version", () => {
   assert.equal(controller.selectedVersion(), "9.37.0");
 });
 
+test("sidebar marks current version independently from selected version", () => {
+  const { document, controller, entries } = makeFixture();
+  controller.handlePayload({
+    id: "rn-test-1",
+    entries,
+    focus_version: "9.38.0",
+    current_version: "9.37.0",
+  });
+
+  const selected = document.querySelector(
+    ".release-notes-sidebar-item.is-selected",
+  );
+  assert.ok(selected, "focused latest release should be selected");
+  assert.equal(selected.dataset.version, "9.38.0");
+  assert.equal(
+    selected.querySelector(".release-notes-sidebar-current"),
+    null,
+    "selected latest row should not inherit the current badge",
+  );
+
+  const current = document.querySelector(
+    ".release-notes-sidebar-item.is-current-version",
+  );
+  assert.ok(current, "current version row should be visibly marked");
+  assert.equal(current.dataset.version, "9.37.0");
+  assert.equal(current.getAttribute("aria-current"), "true");
+  assert.equal(
+    current.querySelector(".release-notes-sidebar-current").textContent.trim(),
+    "Current",
+  );
+});
+
 test("handlePayload renders heading and **bold** as DOM, not literal markup", () => {
   const { document, controller, entries } = makeFixture();
   controller.handlePayload({ id: "rn-test-1", entries, focus_version: null });
