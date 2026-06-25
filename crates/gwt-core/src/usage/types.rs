@@ -107,6 +107,8 @@ pub enum UsageState {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ProviderUsage {
     pub provider: UsageProvider,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub account_label: Option<String>,
     pub plan: Option<String>,
     pub windows: Vec<UsageWindow>,
     pub limit_reached: bool,
@@ -119,6 +121,7 @@ impl ProviderUsage {
     pub fn degraded(provider: UsageProvider, state: UsageState) -> Self {
         Self {
             provider,
+            account_label: None,
             plan: None,
             windows: Vec::new(),
             limit_reached: false,
@@ -237,6 +240,7 @@ mod tests {
         let snap = UsageSnapshot {
             accounts: vec![ProviderUsage {
                 provider: UsageProvider::Codex,
+                account_label: Some("codex@example.com".into()),
                 plan: Some("pro".into()),
                 windows: vec![UsageWindow::new(WindowKind::FiveHour, 12.0, None)],
                 limit_reached: false,

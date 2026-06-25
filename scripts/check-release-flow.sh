@@ -3,6 +3,7 @@ set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 RELEASE="$ROOT/.github/workflows/release.yml"
+CLIFF="$ROOT/cliff.toml"
 README_EN="$ROOT/README.md"
 README_JA="$ROOT/README.ja.md"
 INDEX_HTML="$ROOT/crates/gwt/web/index.html"
@@ -17,6 +18,16 @@ fi
 
 if grep -qE "publish-npm|npm publish|registry\.npmjs\.org|NPM_TOKEN" "$RELEASE"; then
   echo "[FAIL] release.yml still contains npm publishing"
+  fail=1
+fi
+
+if ! grep -q 'filter(attribute="merge_commit", value=false)' "$CLIFF"; then
+  echo "[FAIL] cliff.toml does not filter merge commits from release notes"
+  fail=1
+fi
+
+if ! grep -qiE 'merge .*develop|sync.*develop|develop.*sync|develop.*同期' "$CLIFF"; then
+  echo "[FAIL] cliff.toml does not skip develop-sync chore commits"
   fail=1
 fi
 

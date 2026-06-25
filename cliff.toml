@@ -13,7 +13,7 @@ body = """
 {% else %}\
     ## [Unreleased]
 {% endif %}\
-{% for group, commits in commits | group_by(attribute="group") %}
+{% for group, commits in commits | filter(attribute="merge_commit", value=false) | group_by(attribute="group") %}
     ### {{ group | striptags | trim | upper_first }}
     {% for commit in commits %}
         - {% if commit.scope %}**{{ commit.scope }}:** {% endif %}\
@@ -39,6 +39,9 @@ commit_parsers = [
     { message = "^test", group = "Testing" },
     { message = "^chore\\(release\\)", skip = true },
     { message = "^chore\\(deps\\)", skip = true },
+    { message = "(?i)^chore(\\([^)]*\\))?: .*merge .*develop", skip = true },
+    { message = "(?i)^chore(\\([^)]*\\))?: .*sync.*develop", skip = true },
+    { message = "(?i)^chore(\\([^)]*\\))?: .*develop.*(sync|同期|再同期)", skip = true },
     { message = "^chore", group = "Miscellaneous Tasks" },
     { body = ".*security", group = "Security" },
 ]

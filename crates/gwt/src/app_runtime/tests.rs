@@ -51,6 +51,24 @@ use crate::{
     PtyWriterRegistry, UploadedAttachment,
 };
 
+#[test]
+fn improvement_action_error_message_explains_missing_github_auth() {
+    let message = super::improvement_action_error_message("network error: authentication required");
+
+    assert!(
+        message.contains("GitHub authentication is required"),
+        "message should explain the missing auth cause: {message}"
+    );
+    assert!(
+        message.contains("gh auth login"),
+        "message should give a concrete recovery command: {message}"
+    );
+    assert!(
+        message.contains("GH_TOKEN"),
+        "message should mention browser-check token bridging: {message}"
+    );
+}
+
 #[derive(Debug, Clone)]
 struct CapturedTracingEvent {
     level: Level,
@@ -2216,6 +2234,7 @@ fn sample_launch_wizard_session(tab_id: &str, project_root: &Path) -> LaunchWiza
                     cleanup_ready: true,
                     cleanup: BranchCleanupInfo::default(),
                     resume: gwt::BranchResumeInfo::unavailable(),
+                    start_work_eligibility: None,
                 },
                 normalized_branch_name: "feature/demo".to_string(),
                 worktree_path: None,
@@ -2366,6 +2385,7 @@ fn sample_no_agent_launch_wizard_session(tab_id: &str, project_root: &Path) -> L
                     cleanup_ready: true,
                     cleanup: BranchCleanupInfo::default(),
                     resume: gwt::BranchResumeInfo::unavailable(),
+                    start_work_eligibility: None,
                 },
                 normalized_branch_name: "feature/demo".to_string(),
                 worktree_path: Some(project_root.to_path_buf()),
@@ -2406,6 +2426,7 @@ fn sample_ready_agent_launch_wizard_session(
                     cleanup_ready: true,
                     cleanup: BranchCleanupInfo::default(),
                     resume: gwt::BranchResumeInfo::unavailable(),
+                    start_work_eligibility: None,
                 },
                 normalized_branch_name: "feature/demo".to_string(),
                 worktree_path: Some(project_root.to_path_buf()),

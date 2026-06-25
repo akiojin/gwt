@@ -1522,6 +1522,34 @@ test("renderWorkspace refreshes operator telemetry when windows mount/unmount (S
   );
 });
 
+test("Improvement candidates refresh already-mounted inbox windows without workspace_state", () => {
+  const refreshBody = extractFunctionBody(appSource, "refreshMountedImprovementInboxWindows");
+  assert.match(
+    refreshBody,
+    /querySelectorAll\(\s*["']\.workspace-window\[data-preset="improvement"\]["']\s*,?\s*\)/,
+    "refresh helper must target already-mounted Improvement Inbox windows",
+  );
+  assert.match(
+    refreshBody,
+    /querySelector\(\s*["']\.window-body["']\s*\)/,
+    "refresh helper must remount the existing window body",
+  );
+  assert.match(
+    refreshBody,
+    /improvementInboxSurface\.mount\(\s*body\s*,\s*\{\s*improvement_candidates:\s*improvementCandidates\s*,?\s*\}/,
+    "refresh helper must pass the latest candidate snapshot into the mounted surface",
+  );
+
+  const receiveBody = extractFunctionBody(appSource, "receive");
+  const caseIndex = receiveBody.indexOf('case "improvement_candidates":');
+  const revisionIndex = receiveBody.indexOf("improvementCandidatesRevision += 1;", caseIndex);
+  const refreshIndex = receiveBody.indexOf("refreshMountedImprovementInboxWindows();", caseIndex);
+  assert.ok(
+    caseIndex >= 0 && revisionIndex > caseIndex && refreshIndex > revisionIndex,
+    "improvement_candidates receive path must refresh mounted inbox windows after recording the new revision",
+  );
+});
+
 test("SPEC-3038 (2026-06-20): Windows badge counts windows across all project tabs", () => {
   const body = extractFunctionBody(appSource, "recomputeOperatorTelemetry");
   assert.match(
@@ -3404,10 +3432,10 @@ test("agent-state telemetry never makes readable workspace windows translucent (
 test("non-terminal surface bodies still follow the overall theme (FR-013 boundary)", () => {
   // The Dark fix is scoped to .surface-terminal.  Other surfaces (Board /
   // Logs / File Tree / Branches / Knowledge / Workspace / Agent Kanban /
-  // Console / Mock / Profile) must keep tracking the active theme via --color-surface so tabbed windows
+  // Console / Mock / Profile / Improvement) must keep tracking the active theme via --color-surface so tabbed windows
   // still flip body color when a non-terminal tab is selected.
   const otherSurfaceRule =
-    /(?:\.surface-(?:file-tree|agent-kanban|branches|board|logs|knowledge|index|work|console|mock|profile)\s+\.window-body,?\s*)+\{[^}]*background:\s*var\(\s*--color-surface\s*\)/;
+    /(?:\.surface-(?:file-tree|agent-kanban|branches|board|logs|knowledge|index|work|console|mock|profile|improvement)\s+\.window-body,?\s*)+\{[^}]*background:\s*var\(\s*--color-surface\s*\)/;
   assert.match(
     inlineStyle,
     otherSurfaceRule,
@@ -3431,6 +3459,7 @@ test("mountWindowBody clears every known surface class before applying the activ
     "surface-index",
     "surface-work",
     "surface-profile",
+    "surface-improvement",
     "surface-console",
     "surface-mock",
   ]) {
@@ -3452,6 +3481,7 @@ test("every readable non-terminal surface participates in the opaque window chro
     "index",
     "work",
     "profile",
+    "improvement",
     "console",
     "mock",
   ]) {
@@ -4416,6 +4446,14 @@ test("Static project chrome renderers guard unchanged DOM writes", () => {
       actionGuardIndex > actionKeyIndex &&
       actionGuardIndex < disabledIndex,
     "updateActionAvailability must return before unchanged disabled-state DOM writes",
+  );
+});
+
+test("App version label opens latest release notes when an update is available", () => {
+  assert.match(
+    appSource,
+    /const\s+openReleaseNotesFromLabel\s*=\s*\(\)\s*=>\s*{\s*releaseNotesWindow\.open\(versionState\.latest\s*\|\|\s*versionState\.current\s*\|\|\s*null\);\s*};/s,
+    "#app-version should focus the latest available release notes before falling back to the running version",
   );
 });
 

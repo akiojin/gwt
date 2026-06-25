@@ -51,6 +51,16 @@ an old browser tab.
      `$HOME/.docker/cli-plugins`, so an isolated HOME without this symlink
      fails the launch preflight with `docker compose is not available`
      (Issue #3029).
+   - If the visual check needs GitHub-backed actions, bridge authentication
+     into the isolated process without printing secrets:
+     - Prefer an existing non-empty `GH_TOKEN`.
+     - Else prefer an existing non-empty `GITHUB_TOKEN`.
+     - Else, if `gh` is available, run `gh auth token` from the real HOME and
+       capture stdout into a shell variable.
+     - Never echo, log, write, or Board-post the token. Pass it only as
+       `GH_TOKEN` / `GITHUB_TOKEN` in the fresh process environment.
+     - If no token can be obtained and the check requires a GitHub mutation,
+       stop before sharing a URL and ask the user to run `gh auth login`.
    - Seed `"$CHECK_HOME/.gwt/session.json"` with one active project tab for
      the current repository root so the user lands in the actual app instead
      of the Open Project picker.
@@ -62,9 +72,21 @@ an old browser tab.
    - Run:
 
      ```bash
-     HOME="$CHECK_HOME" USERPROFILE="$CHECK_HOME" \
-       GIT_TERMINAL_PROMPT=0 \
-       GWT_BROWSER_URL_FILE="$URL_FILE" \
+     CHECK_GH_TOKEN="${GH_TOKEN:-${GITHUB_TOKEN:-}}"
+     if [ -z "$CHECK_GH_TOKEN" ] && command -v gh >/dev/null 2>&1; then
+       CHECK_GH_TOKEN="$(gh auth token 2>/dev/null || true)"
+     fi
+     ENV_ARGS=(
+       HOME="$CHECK_HOME"
+       USERPROFILE="$CHECK_HOME"
+       GIT_TERMINAL_PROMPT=0
+       GH_PROMPT_DISABLED=1
+       GWT_BROWSER_URL_FILE="$URL_FILE"
+     )
+     if [ -n "$CHECK_GH_TOKEN" ]; then
+       ENV_ARGS+=(GH_TOKEN="$CHECK_GH_TOKEN" GITHUB_TOKEN="$CHECK_GH_TOKEN")
+     fi
+     env "${ENV_ARGS[@]}" \
        <repo-root>/target/debug/gwt --no-tray --no-open 2>&1 | tee "$LOG_FILE"
      ```
 

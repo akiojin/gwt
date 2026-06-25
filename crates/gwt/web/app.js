@@ -18,6 +18,7 @@
         resolveDragReleasePoint,
       } from "/window-docking.js";
       import { createWorkspaceKanbanSurface as createWorkspaceOverviewSurface } from "/workspace-kanban-surface.js";
+      import { createImprovementInboxSurface } from "/improvement-inbox-surface.js";
       import {
         createAgentKanbanPendingPlacementController,
         createAgentKanbanSurface,
@@ -411,6 +412,8 @@
         active_tab_id: null,
         recent_projects: [],
       };
+      let improvementCandidates = [];
+      let improvementCandidatesRevision = 0;
       let renderedProjectTabsKey = "";
       let renderedWorkspaceWindowsKey = "";
       let renderedAppVersionLabel = null;
@@ -475,6 +478,10 @@
         }
         appendRenderKeyPart(parts, "windows");
         appendRenderKeyPart(parts, windows.length);
+        if (windows.some((windowData) => presetSurface(windowData?.preset) === "improvement")) {
+          appendRenderKeyPart(parts, "improvement_candidates_revision");
+          appendRenderKeyPart(parts, improvementCandidatesRevision);
+        }
         for (const windowData of windows) {
           const geometry = windowData?.geometry || {};
           appendRenderKeyPart(parts, "id");
@@ -776,6 +783,9 @@
         if (preset === "work" || preset === "workspace") {
           return "work";
         }
+        if (preset === "improvement" || preset === "improvements") {
+          return "improvement";
+        }
         if (preset === "console") {
           return "console";
         }
@@ -972,7 +982,7 @@
       if (appVersionLabel && !appVersionLabel.dataset.releaseNotesBound) {
         appVersionLabel.dataset.releaseNotesBound = "true";
         const openReleaseNotesFromLabel = () => {
-          releaseNotesWindow.open(versionState.current || null);
+          releaseNotesWindow.open(versionState.latest || versionState.current || null);
         };
         appVersionLabel.addEventListener("click", openReleaseNotesFromLabel);
         appVersionLabel.addEventListener("keydown", (event) => {
@@ -4120,6 +4130,10 @@
           openBranchCleanupModal: (...a) => openBranchCleanupModal(...a),
         },
       });
+      const improvementInboxSurface = createImprovementInboxSurface({
+        createNode,
+        send,
+      });
 
       // SPEC-3064 Phase 3 (E5): the Launch Wizard surface (wizard state,
       // interaction guard, field builders, state transitions,
@@ -4256,6 +4270,7 @@
           "surface-knowledge",
           "surface-index",
           "surface-work",
+          "surface-improvement",
           "surface-profile",
           "surface-console",
           "surface-mock",
@@ -4352,6 +4367,20 @@
             focusWindowLocally,
             sendFocus: (id) => socketTransport.send({ kind: "focus_window", id }),
           });
+          // SPEC-2359 US-83: fetch the eligible remote branches for this
+          // Workspace window so they fold into the unified Workspace list as
+          // Remote-tagged rows. Sent from app.js (not the surface's mount) so
+          // the surface stays a pure renderer and its unit tests keep their
+          // exact-message contracts.
+          send({ kind: "request_remote_start_work_branches", id: windowData.id });
+          return;
+        }
+
+        if (surface === "improvement") {
+          improvementInboxSurface.mount(body, {
+            ...windowData,
+            improvement_candidates: improvementCandidates,
+          });
           return;
         }
 
@@ -4416,6 +4445,18 @@
             </div>
           `;
           scroll.appendChild(section);
+        }
+      }
+
+      function refreshMountedImprovementInboxWindows() {
+        for (const element of document.querySelectorAll(
+          '.workspace-window[data-preset="improvement"]',
+        )) {
+          const body = element.querySelector(".window-body");
+          if (!body) continue;
+          improvementInboxSurface.mount(body, {
+            improvement_candidates: improvementCandidates,
+          });
         }
       }
 
@@ -5085,6 +5126,28 @@
           case "window_list":
             applyWindowListEvent(event);
             break;
+          case "improvement_candidates":
+            improvementCandidates = Array.isArray(event.candidates) ? event.candidates : [];
+            improvementCandidatesRevision += 1;
+            {
+              const workspace = activeWorkspace() || emptyWorkspace();
+              renderWorkspace(workspace);
+              if (
+                !(workspace?.windows || []).some(
+                  (windowData) => presetSurface(windowData?.preset) === "improvement",
+                )
+              ) {
+                refreshMountedImprovementInboxWindows();
+              }
+            }
+            break;
+          case "improvement_action_result":
+            // Candidate list refresh is delivered as a separate
+            // improvement_candidates snapshot; no extra UI state is needed here.
+            break;
+          case "improvement_action_error":
+            window.alert(`Improvement action error: ${event.message}`);
+            break;
           case "provider_usage":
             applyProviderUsageUi({
               accounts: event.accounts || [],
@@ -5258,6 +5321,11 @@
           // SPEC-2359 US-42 — Resume Picker dispatcher slots.
           case "workspace_resumable_agents":
             workspaceResumePicker.handleAgentsList(event);
+            break;
+          // SPEC-2359 US-83 — eligible remote branches render as "Start work on
+          // a branch" rows in the Workspace list.
+          case "remote_start_work_branches":
+            workspaceOverviewSurface.applyRemoteStartWorkBranches(event);
             break;
           case "workspace_resume_agent_error":
             launchPending.settleAck(event);

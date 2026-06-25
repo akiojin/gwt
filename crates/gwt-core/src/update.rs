@@ -97,6 +97,8 @@ struct GitHubRelease {
     tag_name: String,
     html_url: String,
     #[serde(default)]
+    body: Option<String>,
+    #[serde(default)]
     assets: Vec<GitHubAsset>,
 }
 
@@ -927,6 +929,35 @@ impl UpdateManager {
             normalized
         );
         self.fetch_release(&url, &format!("release v{normalized}"))
+    }
+
+    /// Fetch and parse release notes for a single GitHub Release tag.
+    ///
+    /// This is used by older binaries whose bundled `CHANGELOG.md` cannot
+    /// contain notes for a newer release discovered through update polling.
+    pub fn fetch_release_notes_entry(
+        &self,
+        version: &str,
+    ) -> Result<Option<crate::release_notes::ReleaseEntry>, String> {
+        let release = self.fetch_release_by_tag(version)?;
+        let normalized = parse_tag_version(&release.tag_name).ok_or_else(|| {
+            format!(
+                "Failed to parse release tag as version: {}",
+                release.tag_name
+            )
+        })?;
+        let requested = version.trim().trim_start_matches('v');
+        let normalized = normalized.to_string();
+        if normalized != requested {
+            return Err(format!(
+                "Release tag mismatch: requested v{requested} but server returned v{normalized}"
+            ));
+        }
+
+        Ok(release
+            .body
+            .as_deref()
+            .and_then(|body| crate::release_notes::parse_release_body(&normalized, body)))
     }
 
     fn fetch_release(&self, url: &str, label: &str) -> Result<GitHubRelease, String> {
@@ -4067,6 +4098,44 @@ mod tests {
         assert_eq!(release.tag_name, "v9.36.0");
         assert_eq!(release.assets.len(), 1);
         assert_eq!(release.assets[0].name, "gwt-windows-x86_64.zip");
+    }
+
+    #[test]
+    fn fetch_release_notes_entry_returns_sanitized_entry() {
+        let temp = tempfile::tempdir().unwrap();
+        let release_body = r###"{
+  "tag_name": "v9.62.0",
+  "html_url": "https://github.com/akiojin/gwt/releases/tag/v9.62.0",
+  "body": "## [9.62.0] - 2026-06-20\n\n### Miscellaneous Tasks\n\n- **work:** Merge origin/develop into develop\n- **release:** Publish v9.62.0\n\n### Bug Fixes\n\n- Show latest release notes in older binaries",
+  "assets": []
+}"###
+        .as_bytes()
+        .to_vec();
+        let base_url = serve_once("/", "200 OK", "application/json", release_body);
+        let mgr = UpdateManager::new()
+            .with_api_base_url(base_url)
+            .with_cache_path(temp.path().join("update-check.json"))
+            .with_updates_dir(temp.path().join("updates"));
+
+        let entry = mgr
+            .fetch_release_notes_entry("v9.62.0")
+            .expect("release body fetch should succeed")
+            .expect("release body should parse into an entry");
+
+        assert_eq!(entry.version, "9.62.0");
+        assert_eq!(entry.date, "2026-06-20");
+        let items: Vec<&str> = entry
+            .sections
+            .iter()
+            .flat_map(|section| section.items.iter().map(String::as_str))
+            .collect();
+        assert_eq!(
+            items,
+            vec![
+                "**release:** Publish v9.62.0",
+                "Show latest release notes in older binaries"
+            ]
+        );
     }
 
     #[test]
