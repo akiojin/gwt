@@ -64,6 +64,7 @@ test("Surface Deck — categories own the expected preset members", () => {
     "board",
     "console",
     "file_tree",
+    "issue_monitor",
     "logs",
     "work",
   ]);
@@ -76,12 +77,13 @@ test("Surface Deck — categories own the expected preset members", () => {
   assert.deepEqual(presetsIn("config").sort(), ["profile", "settings"]);
 });
 
-test("Surface Deck — all 11 visible data-preset values are preserved", () => {
+test("Surface Deck — all 12 visible data-preset values are preserved", () => {
   const presets = [...modal.querySelectorAll(".preset-button[data-preset]")].map(
     (btn) => btn.dataset.preset,
   );
   const expected = [
     "file_tree",
+    "issue_monitor",
     "settings",
     "index",
     "profile",
@@ -94,7 +96,7 @@ test("Surface Deck — all 11 visible data-preset values are preserved", () => {
     "console",
   ].sort();
   assert.deepEqual(presets.sort(), expected);
-  assert.equal(presets.length, 11, "expected exactly 11 preset buttons");
+  assert.equal(presets.length, 12, "expected exactly 12 preset buttons");
 });
 
 test("Surface Deck — no forbidden presets leak into the modal", () => {
@@ -109,7 +111,7 @@ test("Surface Deck — no forbidden presets leak into the modal", () => {
 
 test("Surface Deck — every button carries icon glyph + strong label + description", () => {
   const buttons = [...modal.querySelectorAll(".preset-button")];
-  assert.equal(buttons.length, 11);
+  assert.equal(buttons.length, 12);
   for (const btn of buttons) {
     const preset = btn.dataset.preset;
     assert.ok(
@@ -360,26 +362,27 @@ test("Surface Deck JS — wires the roving keydown listener and clears state on 
 
 // Behavioral lock for the geometry direction-nearest roving math. linkedom does
 // no layout, so we replicate the exact scorer from app.js against synthetic rect
-// centers modeling the weighted deck (SURFACES 2-col x 3-row, KNOWLEDGE 2-col x 2-row,
-// CONFIG 1-col x 2-row) and assert intuitive navigation. A future scorer change that
-// breaks cross-column / clamp behavior trips this test.
+// centers modeling the weighted deck (SURFACES 2-col x 3-row, KNOWLEDGE 2-col
+// x 2-row, CONFIG 1-col x 2-row) and assert intuitive navigation. A future
+// scorer change that breaks cross-column / clamp behavior trips this test.
 test("Surface Deck behavioral — geometry roving picks the nearest tile in the pressed direction", () => {
   const buttons = [...modal.querySelectorAll(".preset-button")];
-  assert.equal(buttons.length, 11);
+  assert.equal(buttons.length, 12);
 
-  // center coords keyed by DOM order: SURFACES(0-4), KNOWLEDGE(5-8), CONFIG(9-10)
+  // center coords keyed by DOM order: SURFACES(0-5), KNOWLEDGE(6-9), CONFIG(10-11)
   const centers = [
     { x: 100, y: 100 }, // 0 file_tree   (SURFACES col1 row1)
     { x: 250, y: 100 }, // 1 logs        (SURFACES col2 row1)
     { x: 100, y: 180 }, // 2 console     (SURFACES col1 row2)
     { x: 250, y: 180 }, // 3 board       (SURFACES col2 row2)
     { x: 100, y: 260 }, // 4 work        (SURFACES col1 row3)
-    { x: 450, y: 100 }, // 5 issue       (KNOWLEDGE col1 row1)
-    { x: 580, y: 100 }, // 6 spec        (KNOWLEDGE col2 row1)
-    { x: 450, y: 180 }, // 7 pr          (KNOWLEDGE col1 row2)
-    { x: 580, y: 180 }, // 8 index       (KNOWLEDGE col2 row2)
-    { x: 750, y: 100 }, // 9 settings    (CONFIG row1)
-    { x: 750, y: 180 }, // 10 profile    (CONFIG row2)
+    { x: 250, y: 260 }, // 5 monitor     (SURFACES col2 row3)
+    { x: 450, y: 100 }, // 6 issue       (KNOWLEDGE col1 row1)
+    { x: 580, y: 100 }, // 7 spec        (KNOWLEDGE col2 row1)
+    { x: 450, y: 180 }, // 8 pr          (KNOWLEDGE col1 row2)
+    { x: 580, y: 180 }, // 9 index       (KNOWLEDGE col2 row2)
+    { x: 750, y: 100 }, // 10 settings   (CONFIG row1)
+    { x: 750, y: 180 }, // 11 profile    (CONFIG row2)
   ];
 
   // Replica of app.js findGeometryNeighbor: direction half-plane filter +
@@ -419,16 +422,16 @@ test("Surface Deck behavioral — geometry roving picks the nearest tile in the 
   assert.equal(move(0, "ArrowDown"), 2, "File Tree → Console");
   assert.equal(move(2, "ArrowUp"), 0, "Console → File Tree");
   assert.equal(move(1, "ArrowDown"), 3, "Logs → Board (same inner column)");
-  assert.equal(move(3, "ArrowDown"), 4, "Board → Workspace");
+  assert.equal(move(3, "ArrowDown"), 5, "Board → Issue Monitor");
   // Cross-column to the next category at the same row.
-  assert.equal(move(1, "ArrowRight"), 5, "Logs → Issue (jump to KNOWLEDGE)");
-  assert.equal(move(6, "ArrowRight"), 9, "SPEC → Settings (jump to CONFIG)");
+  assert.equal(move(1, "ArrowRight"), 6, "Logs → Issue (jump to KNOWLEDGE)");
+  assert.equal(move(7, "ArrowRight"), 10, "SPEC → Settings (jump to CONFIG)");
   // CONFIG single column.
-  assert.equal(move(9, "ArrowDown"), 10, "Settings → Profile");
-  assert.equal(move(10, "ArrowUp"), 9, "Profile → Settings");
+  assert.equal(move(10, "ArrowDown"), 11, "Settings → Profile");
+  assert.equal(move(11, "ArrowUp"), 10, "Profile → Settings");
   // Clamp at edges (no wrap).
   assert.equal(move(0, "ArrowLeft"), 0, "left edge clamps");
   assert.equal(move(0, "ArrowUp"), 0, "top edge clamps");
-  assert.equal(move(10, "ArrowDown"), 10, "bottom of CONFIG clamps");
-  assert.equal(move(9, "ArrowRight"), 9, "right edge clamps");
+  assert.equal(move(11, "ArrowDown"), 11, "bottom of CONFIG clamps");
+  assert.equal(move(10, "ArrowRight"), 10, "right edge clamps");
 });

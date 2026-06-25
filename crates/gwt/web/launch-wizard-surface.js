@@ -667,8 +667,8 @@ export function createLaunchWizardSurface({
       function openStartWorkPendingWizard() {
         openLaunchPendingWizard({
           title: "Start Work",
-          meta: "Work launch",
-          message: "Preparing Start Work...",
+          meta: "Plan Agent launch",
+          message: "Preparing Plan Agent...",
         });
       }
 
@@ -789,7 +789,7 @@ export function createLaunchWizardSurface({
           if (wizardTitle) {
             wizardTitle.textContent = launchWizardOpening.title || "Start Work";
           }
-          wizardMeta.textContent = launchWizardOpening.meta || "Work launch";
+          wizardMeta.textContent = launchWizardOpening.meta || "Plan Agent launch";
           wizardBackButton.hidden = true;
           wizardBackButton.disabled = true;
           wizardSubmitButton.hidden = true;
@@ -805,7 +805,7 @@ export function createLaunchWizardSurface({
             createNode(
               "div",
               "launch-note launch-pending-note",
-              launchWizardOpening.message || "Preparing Start Work...",
+              launchWizardOpening.message || "Preparing Plan Agent...",
             ),
           );
           wizardBody.appendChild(openingPanel);
@@ -818,7 +818,7 @@ export function createLaunchWizardSurface({
           }
           wizardMeta.textContent =
             launchWizardOpenError.title === "Start Work"
-              ? "Work launch"
+              ? "Plan Agent launch"
               : "Launch Agent";
           wizardBackButton.hidden = true;
           wizardBackButton.disabled = false;
@@ -845,7 +845,7 @@ export function createLaunchWizardSurface({
         wizardCancelButton.textContent = "Cancel";
         if (wizardTitle) wizardTitle.textContent = launchWizard.title || "Launch Agent";
         wizardMeta.textContent = launchWizard.show_branch_controls === false
-          ? "Work launch"
+          ? "Plan Agent launch"
           : `Selected branch · ${
             launchWizard.selected_branch_name || launchWizard.branch_name || "Work"
           }`;
@@ -943,16 +943,15 @@ export function createLaunchWizardSurface({
           );
         }
 
-        // SPEC-2359 US-80 — optional, always-skippable Start Work intake
-        // prompt. Typing it surfaces similar prior work (non-blocking advisory)
-        // before a duplicate work branch is created. Only shown for Start Work.
+        // SPEC-3165 — Start Work is now the Plan Agent entrypoint. The prompt
+        // is still skippable and still drives the duplicate-work advisory.
         if (isStartWorkLaunch()) {
           const section = createLaunchSection(
-            "What are you working on?",
-            "Optional — describe the work to surface similar prior work before you start. You can skip this.",
+            "Register an Issue",
+            "Optional — describe the work for the Plan Agent to turn into an Issue or SPEC. You can skip this.",
           );
           const textarea = createNode("textarea", "launch-intake-input");
-          textarea.placeholder = "e.g. fix the login auth bug";
+          textarea.placeholder = "e.g. register an issue for the login auth bug";
           textarea.rows = 2;
           textarea.value = wizardPromptDraft;
           textarea.addEventListener("input", () => {

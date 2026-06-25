@@ -295,6 +295,20 @@ test("Status Strip ACTIVE counter filters non-agent preset windows", () => {
   );
 });
 
+test("Status Strip does not count empty active Work projection as an idle agent", () => {
+  const body = extractFunctionBody(appSource, "recomputeOperatorTelemetry");
+  assert.doesNotMatch(
+    body,
+    /category\s*===\s*"idle"[\s\S]{0,120}counts\.idle\s*=\s*Math\.max\(counts\.idle,\s*1\)/,
+    "an active_work_projection with zero agents must not make the Status Strip show IDLE 1",
+  );
+  assert.match(
+    body,
+    /category\s*===\s*"idle"[\s\S]{0,180}activeAgents\s*>\s*0[\s\S]{0,180}counts\.idle/,
+    "the idle fallback must be guarded by a real active agent count",
+  );
+});
+
 test("Sidebar retires the Active Works overview in favor of the Work surface (SPEC-2359 W-12 FR-351)", () => {
   // Slice 3 aggregates Work lifecycle into the Work surface (Workspace
   // Overview / Kanban). The sidebar no longer renders an Active Works region
@@ -1943,7 +1957,7 @@ test("WebView modal text uses native selection and terminal overlays use explici
   );
 });
 
-test("terminal overlay never covers raw terminal status details", () => {
+test("terminal overlay only surfaces error status details", () => {
   const visibleToggle = appSource.match(
     /overlay\.classList\.toggle\(\s*"visible",\s*([\s\S]*?)\s*\);/,
   );
@@ -1957,15 +1971,10 @@ test("terminal overlay never covers raw terminal status details", () => {
     /const\s+shouldShowOverlay\s*=\s*([\s\S]*?);\s*const\s+shouldSpin/,
   );
   assert.ok(overlayVisibilitySource, "expected shouldShowOverlay guard");
-  assert.equal(
-    overlayVisibilitySource[1].trim(),
-    "false",
-    "terminal status details must never add a foreground overlay over the raw TTY",
-  );
-  assert.doesNotMatch(
+  assert.match(
     overlayVisibilitySource[1],
-    /runtimeState\s*===\s*"error"/,
-    "error status details must stay in terminal status surfaces instead of an overlay",
+    /Boolean\(effectiveDetail\)\s*&&\s*runtimeState\s*===\s*"error"/,
+    "error status details must show a readable foreground overlay",
   );
   assert.doesNotMatch(
     overlayVisibilitySource[1],

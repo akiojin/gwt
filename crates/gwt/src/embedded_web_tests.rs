@@ -233,6 +233,39 @@ fn embedded_web_issue_monitor_surface_is_registered_and_wired() {
 }
 
 #[test]
+fn embedded_web_issue_monitor_surface_exposes_priority_and_concurrency_controls() {
+    let surface_js = root_js_module_source("/issue-monitor-surface.js");
+
+    assert!(
+        surface_js.contains("set_issue_monitor_max_active_agents"),
+        "Issue Monitor must let users change max active agents"
+    );
+    assert!(
+        surface_js.contains("reorder_issue_monitor_issues"),
+        "Issue Monitor must send priority reorder events"
+    );
+    assert!(
+        surface_js.contains("↑")
+            && surface_js.contains("↓")
+            && surface_js.contains("Move up")
+            && surface_js.contains("Move down"),
+        "Issue Monitor queue must expose icon priority controls with accessible labels"
+    );
+    assert!(
+        surface_js.contains("Start") && surface_js.contains("Stop"),
+        "Issue Monitor processing control must use Start/Stop labels"
+    );
+    assert!(
+        surface_js.contains("Configure"),
+        "Issue Monitor queue must let users configure queued Issue work before processing"
+    );
+    assert!(
+        surface_js.contains("No queued issues"),
+        "Issue Monitor empty state must describe the all-Issue queue, not watched labels"
+    );
+}
+
+#[test]
 fn embedded_web_terminal_windows_ctrl_c_copy_clears_selection() {
     let html = frontend_bundle_source();
 
@@ -2775,8 +2808,8 @@ fn embedded_web_start_work_mode_hides_branch_controls_in_shared_wizard_renderer(
     );
     assert!(
         html.contains("launchWizard.show_branch_controls !== false")
-            && html.contains("Work launch"),
-        "expected Start Work wizard mode to suppress branch controls and branch-oriented meta copy",
+            && html.contains("Plan Agent launch"),
+        "expected Start Work wizard mode to suppress branch controls and use Plan Agent meta copy",
     );
     assert!(
         !html.contains("isStartWorkMode")

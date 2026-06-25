@@ -615,9 +615,22 @@ pub enum FrontendEvent {
     SetIssueMonitorEnabled {
         enabled: bool,
     },
+    SetIssueMonitorMaxActiveAgents {
+        max_active_agents: usize,
+    },
+    ReorderIssueMonitorIssues {
+        issue_numbers: Vec<u64>,
+    },
     ListIssueMonitor,
     IssueMonitorLaunchNow {
         issue_number: u64,
+        #[serde(default)]
+        linked_issue_kind: Option<crate::LinkedIssueKind>,
+    },
+    IssueMonitorConfigureIssue {
+        issue_number: u64,
+        #[serde(default)]
+        linked_issue_kind: Option<crate::LinkedIssueKind>,
     },
     /// Legacy Phase 14 entry point. Frontend now sends
     /// [`FrontendEvent::ApplyUpdateStart`] / [`FrontendEvent::ApplyUpdateRestartNow`]
@@ -1386,6 +1399,10 @@ pub enum BackendEvent {
     },
     IssueMonitorInbox {
         items: Vec<IssueMonitorInboxItem>,
+    },
+    IssueMonitorLaunchFailed {
+        issue_number: u64,
+        message: String,
     },
     IssueMonitorToast {
         level: String,
@@ -2461,6 +2478,7 @@ impl BackendEvent {
             BackendEvent::PaneSendResult { .. } => "pane_send_result",
             BackendEvent::IssueMonitorStatus { .. } => "issue_monitor_status",
             BackendEvent::IssueMonitorInbox { .. } => "issue_monitor_inbox",
+            BackendEvent::IssueMonitorLaunchFailed { .. } => "issue_monitor_launch_failed",
             BackendEvent::IssueMonitorToast { .. } => "issue_monitor_toast",
             BackendEvent::AttachmentProgress { .. } => "attachment_progress",
             BackendEvent::WindowState { .. } => "window_state",

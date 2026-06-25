@@ -310,6 +310,21 @@
             <span class="op-status-strip__label">WORK</span>
             <span class="op-status-strip__value" id="op-strip-branches" aria-label="Work">—</span>
           </div>
+          <button
+            type="button"
+            class="op-status-strip__cell op-status-strip__cell--issue-monitor"
+            id="op-strip-issue-monitor"
+            data-state="disabled"
+            aria-label="Issue Monitor: Off"
+            title="Issue Monitor: Off"
+          >
+            <span class="op-status-strip__label">MONITOR</span>
+            <span
+              class="op-status-strip__value"
+              id="op-strip-issue-monitor-value"
+              aria-label="Issue Monitor status"
+            >Off</span>
+          </button>
           <div
             class="op-status-strip__cell op-status-strip__cell--runtime-health"
             id="op-strip-runtime-health"
@@ -520,7 +535,7 @@
                 <span class="preset-button__icon" aria-hidden="true">◈</span>
                 <span class="preset-button__text">
                   <strong>Issue Monitor</strong>
-                  <span>Watch labeled Issues and launch agents</span>
+                  <span>Watch Issues and launch agents</span>
                 </span>
               </button>
             </div>

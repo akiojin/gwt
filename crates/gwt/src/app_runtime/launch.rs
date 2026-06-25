@@ -854,7 +854,22 @@ impl AppRuntime {
                         let composed_status = self
                             .window_status(&window_id)
                             .unwrap_or(WindowProcessStatus::Running);
-                        events.extend(Self::status_events(window_id, composed_status, None));
+                        events.extend(Self::status_events(
+                            window_id.clone(),
+                            composed_status,
+                            None,
+                        ));
+                        if let Some(issue_number) = launch_feedback_context
+                            .as_ref()
+                            .and_then(|context| context.issue_monitor_issue_number)
+                        {
+                            events.extend(
+                                self.issue_monitor_launch_succeeded_events(
+                                    issue_number,
+                                    &window_id,
+                                ),
+                            );
+                        }
                         events
                     }
                     Err(error) => {
@@ -1144,6 +1159,24 @@ impl AppRuntime {
             tab_id,
             config,
             AgentWindowPlacement::Centered(bounds),
+            workspace_resume_context,
+            Some(launch_feedback_context),
+            None,
+        )
+    }
+
+    pub(crate) fn spawn_agent_window_with_feedback_at_geometry(
+        &mut self,
+        tab_id: &str,
+        config: gwt_agent::LaunchConfig,
+        geometry: WindowGeometry,
+        workspace_resume_context: Option<WorkspaceResumeContext>,
+        launch_feedback_context: LaunchFeedbackContext,
+    ) -> Result<Vec<OutboundEvent>, String> {
+        self.spawn_agent_window_with_placement(
+            tab_id,
+            config,
+            AgentWindowPlacement::Exact(geometry),
             workspace_resume_context,
             Some(launch_feedback_context),
             None,

@@ -51,6 +51,12 @@ an old browser tab.
      `$HOME/.docker/cli-plugins`, so an isolated HOME without this symlink
      fails the launch preflight with `docker compose is not available`
      (Issue #3029).
+   - If the check exercises GitHub-backed UI such as Issue Monitor, resolve
+     the host credential before switching `HOME`:
+     `GWT_CHECK_GH_TOKEN="$(gh auth token 2>/dev/null || true)"`. Do not
+     print this value. Pass it to the fresh process as `GH_TOKEN` so
+     `gh auth token` still works inside the isolated HOME; Git HTTPS
+     operations continue to use the host Git credential helper.
    - Seed `"$CHECK_HOME/.gwt/session.json"` with one active project tab for
      the current repository root so the user lands in the actual app instead
      of the Open Project picker.
@@ -62,10 +68,17 @@ an old browser tab.
    - Run:
 
      ```bash
-     HOME="$CHECK_HOME" USERPROFILE="$CHECK_HOME" \
-       GIT_TERMINAL_PROMPT=0 \
-       GWT_BROWSER_URL_FILE="$URL_FILE" \
-       <repo-root>/target/debug/gwt --no-tray --no-open 2>&1 | tee "$LOG_FILE"
+    GWT_CHECK_GH_TOKEN="$(gh auth token 2>/dev/null || true)"
+    if [ -n "$GWT_CHECK_GH_TOKEN" ]; then
+      GWT_CHECK_ENV=(GH_TOKEN="$GWT_CHECK_GH_TOKEN")
+    else
+      GWT_CHECK_ENV=()
+    fi
+    env "${GWT_CHECK_ENV[@]}" \
+      HOME="$CHECK_HOME" USERPROFILE="$CHECK_HOME" \
+      GIT_TERMINAL_PROMPT=0 \
+      GWT_BROWSER_URL_FILE="$URL_FILE" \
+      <repo-root>/target/debug/gwt --no-tray --no-open 2>&1 | tee "$LOG_FILE"
      ```
 
    - Keep this process running until the user says the check is finished.

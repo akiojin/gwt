@@ -404,7 +404,7 @@ pub struct LaunchWizardPreviousProfiles {
 }
 
 impl LaunchWizardPreviousProfiles {
-    fn from_profile(profile: Option<LaunchWizardPreviousProfile>) -> Self {
+    pub fn from_profile(profile: Option<LaunchWizardPreviousProfile>) -> Self {
         let Some(profile) = profile else {
             return Self::default();
         };
@@ -424,17 +424,23 @@ impl LaunchWizardPreviousProfiles {
         self
     }
 
-    fn preferred_agent_id(&self) -> Option<&str> {
+    pub fn preferred_agent_id(&self) -> Option<&str> {
         self.default_agent_id.as_deref()
     }
 
-    fn profile_for(&self, agent_id: &str) -> Option<&LaunchWizardPreviousProfile> {
+    pub fn profile_for(&self, agent_id: &str) -> Option<&LaunchWizardPreviousProfile> {
         self.by_agent.get(agent_id)
     }
 
     /// SPEC-2014 FR-032/FR-035: repo-local previous profile を返す。
-    fn repo_local(&self) -> Option<&LaunchWizardPreviousProfile> {
+    pub fn repo_local(&self) -> Option<&LaunchWizardPreviousProfile> {
         self.repo_local.as_ref()
+    }
+
+    pub fn preferred_profile(&self) -> Option<&LaunchWizardPreviousProfile> {
+        self.preferred_agent_id()
+            .and_then(|agent_id| self.profile_for(agent_id))
+            .or_else(|| self.repo_local())
     }
 }
 

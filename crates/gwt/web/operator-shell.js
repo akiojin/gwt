@@ -227,6 +227,64 @@ export function applyTelemetryCounts(doc, counts = {}) {
   }
 }
 
+export function applyIssueMonitorStatus(doc, status = {}) {
+  const cell = doc.getElementById("op-strip-issue-monitor");
+  const value = doc.getElementById("op-strip-issue-monitor-value");
+  if (!cell || !value) return;
+
+  wireIssueMonitorStatusCell(doc, cell);
+  const view = issueMonitorStatusStripView(status);
+  value.textContent = view.value;
+  cell.dataset.state = view.state;
+  cell.setAttribute("aria-label", `Issue Monitor: ${view.value}`);
+  cell.setAttribute("title", view.title);
+  if (view.alert) {
+    cell.classList.add("op-status-strip__cell--alert");
+  } else {
+    cell.classList.remove("op-status-strip__cell--alert");
+  }
+}
+
+function wireIssueMonitorStatusCell(doc, cell) {
+  if (cell.dataset.issueMonitorBound === "true") return;
+  cell.dataset.issueMonitorBound = "true";
+  cell.addEventListener("click", () => {
+    doc.dispatchEvent(new CustomEvent("op:command", { detail: { id: "open-issue-monitor" } }));
+  });
+}
+
+function issueMonitorStatusStripView(status = {}) {
+  const enabled = Boolean(status.enabled);
+  const rawState = String(status.state || (enabled ? "idle" : "disabled"));
+  const state = enabled ? rawState : "disabled";
+  const queue = Math.max(0, Number(status.queue_len || 0));
+  const active = Math.max(0, Number(status.active_count || 0));
+  const maxActive = Math.max(1, Number(status.max_active_agents || 1));
+
+  if (state === "disabled") {
+    return {
+      state,
+      value: "Off",
+      title: "Issue Monitor: Off",
+      alert: false,
+    };
+  }
+
+  let label = "Idle";
+  if (state === "error") label = "Error";
+  else if (state === "auth_required") label = "Auth";
+  else if (state === "launching" || state === "active") label = "Run";
+
+  const value = `${label} Q${queue} A${active}/${maxActive}`;
+  const lastError = typeof status.last_error === "string" ? status.last_error.trim() : "";
+  return {
+    state,
+    value,
+    title: lastError ? `Issue Monitor: ${value} | ${lastError}` : `Issue Monitor: ${value}`,
+    alert: state === "error" || state === "auth_required",
+  };
+}
+
 // ------------------------------------------------------------
 // Provider usage pill (SPEC-2970)
 // ------------------------------------------------------------
