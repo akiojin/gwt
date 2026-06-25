@@ -1058,6 +1058,7 @@ impl AppRuntime {
         Vec::new()
     }
 
+    #[cfg(unix)]
     fn publish_issue_monitor_control(&self, payload: serde_json::Value) -> Result<(), String> {
         let Some(project_root) = self.active_project_root() else {
             return Err("no active project".to_string());
@@ -1072,6 +1073,11 @@ impl AppRuntime {
             gwt::runtime_daemon_events::ISSUE_MONITOR_CONTROL_CHANNEL,
             payload,
         )
+    }
+
+    #[cfg(not(unix))]
+    fn publish_issue_monitor_control(&self, _payload: serde_json::Value) -> Result<(), String> {
+        Err("Issue Monitor daemon control is unavailable on this platform".to_string())
     }
 
     pub(crate) fn issue_monitor_launch_failed_events(
