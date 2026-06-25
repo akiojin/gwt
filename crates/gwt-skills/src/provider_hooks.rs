@@ -426,7 +426,10 @@ fn hermes_hook_script_content(bin: &str, self_improvement_stop: bool) -> String 
     let self_improvement_block = if self_improvement_stop {
         r#"self_output=""
 if [ "$event" = "on_session_end" ]; then
-  self_output="$(printf '%s' "$payload" | __GWT_HOOK_BIN__ hook gwt-self-improvement-stop)"
+  # Drop stderr so a gwtd that predates the gwt-self-improvement-stop transport
+  # exception (e.g. <v9.63.0) degrades silently instead of leaking its
+  # legacy-argv rejection into the Stop loop (issue #3178).
+  self_output="$(printf '%s' "$payload" | __GWT_HOOK_BIN__ hook gwt-self-improvement-stop 2>/dev/null)"
 fi
 "#
     } else {
