@@ -74,6 +74,9 @@ root_js_modules! {
     // SPEC-2013 2026-06-16 amendment: project switcher popover and
     // Shift+Cmd+Up/Down project tab cycling helpers.
     "project-switcher.js" => "createProjectSwitcherController",
+    // SPEC-2008 Camera Focus: rail-safe viewport framing math for local
+    // per-viewer camera moves.
+    "camera-framing.js" => "computeCameraFrameArea",
     // SPEC-2013 2026-06-16 amendment: quiet long-running Agent completion
     // notification controller.
     "agent-completion-notifications.js" => "createAgentCompletionNotifier",

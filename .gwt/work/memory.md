@@ -7346,3 +7346,10 @@ Type: failure-pattern
 Context: Project Switcher mobile audit showed the panel first clipped off the left side at 390px. A viewport-only clamp moved it to x=12 but the fixed command rail still covered the left edge, hiding the OPEN PROJECTS heading.
 Learning: For mobile overlays in gwt, viewport bounds are not enough when persistent chrome such as #op-rail occupies part of the visual area. Clamp floating panels against the usable safe area, including rail/sidebar bounds, and verify with screenshots rather than only bounding boxes.
 Future Action: When adding or auditing floating panels/popovers on compact viewports, measure persistent chrome (for example #op-rail) and assert the panel stays inside that safe area. Include Playwright screenshots after any viewport-clamp fix to catch overlap that numeric viewport checks may miss.
+
+## 2026-06-26 — Camera framing uses rendered layout and bounded placement
+
+Type: ui-regression
+Context: SPEC-2008 camera framing and surface audit, 2026-06-26
+Learning: Camera framing cannot rely only on persisted world geometry. Compact or tiled surfaces may render with CSS min sizes larger than stored geometry, and focus_window echoes can race with local camera updates. Desktop cascade placement also needs bounds-aware slot wrapping rather than unbounded diagonal steps.
+Future Action: For surface framing regressions, add RED tests for rendered layout size, local viewport reservation before focus_window, host viewport resize reframe, and bounds-aware initial placement. Verify with fresh browser-check Playwright audit across desktop and mobile before declaring UI complete.

@@ -77,8 +77,8 @@ test("existing surface helper frames the window via the local camera (no restore
   );
   assert.match(
     helperBody,
-    /frameWindow\(\s*windowData\.id\s*\)/,
-    "reopening an existing surface must fly the local camera to frame it",
+    /frameWindow\(\s*windowData\.id,\s*\{\s*animate:\s*shouldAnimateWindowFrame\(\)\s*\}\s*\)/,
+    "reopening an existing surface must frame locally and skip animation on compact viewports",
   );
   // The restore/minimize protocol is gone — the helper must not resurrect it.
   assert.doesNotMatch(
@@ -112,6 +112,46 @@ test("frameWindow sends a bounds-less focus_window for highlight only (per-viewe
     frameBody,
     /animateViewportTo\(\s*target/,
     "frameWindow must move the local viewport to frame the window",
+  );
+});
+
+test("frameWindow reserves the local camera target before focus_window can echo stale viewport", () => {
+  const frameBody = extractFunctionBody(appSource, "frameWindow");
+  const reserveIndex = frameBody.indexOf("reserveLocalViewportTarget(target)");
+  const sendIndex = frameBody.indexOf('send({ kind: "focus_window", id: windowId })');
+
+  assert.ok(
+    reserveIndex !== -1,
+    "frameWindow must mark the target as a local viewport edit before sending focus_window",
+  );
+  assert.ok(
+    reserveIndex < sendIndex,
+    "local camera target reservation must happen before the backend focus echo can arrive",
+  );
+});
+
+test("frameWindow schedules a DOM-rect clamp after the camera lands", () => {
+  const frameBody = extractFunctionBody(appSource, "frameWindow");
+
+  assert.match(
+    frameBody,
+    /scheduleWindowFrameClamp\(\s*windowId,\s*\{\s*animate\s*\}\s*\)/,
+    "frameWindow must verify the rendered DOM rect after layout and clamp it into the camera frame",
+  );
+});
+
+test("host viewport resize reframes the focused window without broadcasting focus", () => {
+  const resizeBody = extractFunctionBody(appSource, "frameFocusedWindowAfterViewportResize");
+
+  assert.match(
+    appSource,
+    /window\.addEventListener\("resize",\s*scheduleFocusedWindowViewportReframe\)/,
+    "host resize must schedule a focused-window camera reframe",
+  );
+  assert.match(
+    resizeBody,
+    /frameWindow\(\s*focusedId,\s*\{\s*animate:\s*false,\s*notifyFocus:\s*false\s*\}\s*\)/,
+    "host resize reframe must be local-only and must not send focus_window",
   );
 });
 
