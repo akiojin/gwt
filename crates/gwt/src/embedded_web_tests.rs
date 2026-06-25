@@ -1429,7 +1429,7 @@ fn embedded_web_agent_runtime_maps_idle_to_idle_telemetry() {
 }
 
 #[test]
-fn embedded_web_agent_runtime_maps_starting_separately() {
+fn embedded_web_agent_runtime_maps_starting_to_running_telemetry() {
     // SPEC-3015: the starting state ships through the generated contract and
     // the extracted window-runtime-state.js module (US-69).
     let runtime_js = window_runtime_state_js();
@@ -1440,8 +1440,12 @@ fn embedded_web_agent_runtime_maps_starting_separately() {
         "expected the generated protocol enum contract to carry the starting wire state (US-69)",
     );
     assert!(
-        runtime_js.contains("case \"starting\":") && runtime_js.contains("return \"not_started\";"),
-        "expected the starting runtime state to map onto the separate not_started telemetry rim",
+        runtime_js.contains("case \"starting\":") && runtime_js.contains("return \"running\";"),
+        "expected the starting runtime state to aggregate into running telemetry",
+    );
+    assert!(
+        !runtime_js.contains("return \"not_started\";"),
+        "starting must not reintroduce the retired not_started Status Strip telemetry",
     );
     assert!(
         html.contains(".status-chip.starting .status-dot"),
