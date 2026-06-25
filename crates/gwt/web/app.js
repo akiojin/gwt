@@ -2644,16 +2644,16 @@
       // sidebar layer for the "Quick" section's hint.
       function operatorTelemetryRenderKey(counts) {
         const parts = [];
-        appendRenderKeyPart(parts, "active");
-        appendRenderKeyPart(parts, counts?.active ?? null);
+        appendRenderKeyPart(parts, "running");
+        appendRenderKeyPart(parts, counts?.running ?? null);
         appendRenderKeyPart(parts, "idle");
         appendRenderKeyPart(parts, counts?.idle ?? null);
-        // FR-039 (anshin): the WAITING cell refreshes when the needs_input count
+        // FR-039 (anshin): the WAITING cell refreshes when the waiting count
         // changes; include it in the render key so the strip is not skipped.
-        appendRenderKeyPart(parts, "needs_input");
-        appendRenderKeyPart(parts, counts?.needs_input ?? null);
-        appendRenderKeyPart(parts, "blocked");
-        appendRenderKeyPart(parts, counts?.blocked ?? null);
+        appendRenderKeyPart(parts, "waiting");
+        appendRenderKeyPart(parts, counts?.waiting ?? null);
+        appendRenderKeyPart(parts, "error");
+        appendRenderKeyPart(parts, counts?.error ?? null);
         appendRenderKeyPart(parts, "done");
         appendRenderKeyPart(parts, counts?.done ?? null);
         appendRenderKeyPart(parts, "agents");
@@ -2711,13 +2711,13 @@
         // Windows popover. windowMap only holds windows mounted in visited
         // tabs, so it undercounts; allProjectWindowIds() is the true total.
         const counts = {
-          active: 0,
+          running: 0,
           idle: 0,
-          // FR-039 (anshin): needs_input is its own LOUD telemetry state for
+          // FR-039 (anshin): waiting is its own LOUD telemetry state for
           // agents waiting on the operator. It used to collapse into idle;
           // now it drives the WAITING strip cell instead.
-          needs_input: 0,
-          blocked: 0,
+          waiting: 0,
+          error: 0,
           done: 0,
           agents: 0,
           windows: allProjectWindowIds().length,
@@ -2749,19 +2749,16 @@
               (total, work) => total + (Array.isArray(work.agents) ? work.agents.length : 0),
               0,
             );
-            counts.active = Math.max(counts.active, activeAgents || activeWorks.length);
-            counts.blocked = Math.max(counts.blocked, blockedAgents);
+            counts.running = Math.max(counts.running, activeAgents || activeWorks.length);
             counts.agents = Math.max(counts.agents, totalAgents || activeAgents + blockedAgents);
             counts.branches = Math.max(Number(counts.branches || 0), activeWorks.length);
           } else {
             const category = activeWorkProjection.status_category || "unknown";
             const activeAgents = Number(activeWorkProjection.active_agents || 0);
             const blockedAgents = Number(activeWorkProjection.blocked_agents || 0);
-            if (category === "active") counts.active = Math.max(counts.active, activeAgents || 1);
+            if (category === "active") counts.running = Math.max(counts.running, activeAgents || 1);
             if (category === "idle") counts.idle = Math.max(counts.idle, 1);
-            if (category === "blocked") counts.blocked = Math.max(counts.blocked, blockedAgents || 1);
             if (category === "done") counts.done = Math.max(counts.done, 1);
-            counts.blocked = Math.max(counts.blocked, blockedAgents);
             counts.agents = Math.max(counts.agents, activeAgents + blockedAgents);
           }
         }
