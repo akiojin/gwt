@@ -6,6 +6,7 @@
       import {
         initOperatorShell,
         applyTelemetryCounts,
+        applyIssueMonitorStatus,
         applyProviderUsage,
         applyRuntimeHealth,
       } from "/operator-shell.js";
@@ -55,6 +56,7 @@
       // launch-controls / interaction-guard imports) moved to
       // /launch-wizard-surface.js.
       import { createLaunchWizardSurface } from "/launch-wizard-surface.js";
+      import { createIssueMonitorSurface } from "/issue-monitor-surface.js";
       // SPEC-3064 Phase 3 (E6a): the File Tree window surface moved to
       // /file-tree-surface.js.
       import { createFileTreeSurface } from "/file-tree-surface.js";
@@ -147,6 +149,7 @@
         hotkey: __op.hotkey,
         palette: __op.palette,
         applyTelemetryCounts: (counts) => applyTelemetryCounts(document, counts),
+        applyIssueMonitorStatus: (status) => applyIssueMonitorStatus(document, status),
         applyProviderUsage: (snapshot) => applyProviderUsage(document, snapshot),
         applyRuntimeHealth: (snapshot) =>
           applyRuntimeHealth(document, snapshot, {
@@ -777,6 +780,9 @@
         if (preset === "issue" || preset === "spec" || preset === "pr") {
           return "knowledge";
         }
+        if (preset === "issue_monitor") {
+          return "issue-monitor";
+        }
         if (preset === "index") {
           return "index";
         }
@@ -1109,14 +1115,17 @@
       // synthetic flow and clobber the modal's reason / detach buttons
       // mid-click. The flag is page-scoped (no global state outlives the
       // Playwright page) so it never leaks into the production runtime.
-      let __testInjectModeActive = false;
+      const __testInjectDropPrefixes = new Set();
       window.addEventListener("__gwt_test_inject", (event) => {
         const payload = event && event.detail;
         if (!payload || typeof payload.kind !== "string") {
           return;
         }
         if (payload.kind.startsWith("update_")) {
-          __testInjectModeActive = true;
+          __testInjectDropPrefixes.add("update_");
+        }
+        if (payload.kind.startsWith("issue_monitor_")) {
+          __testInjectDropPrefixes.add("issue_monitor_");
         }
         payload.__injected = true;
         try {
@@ -1126,10 +1135,15 @@
         }
       });
       function shouldDropLiveEventForTestMode(event) {
-        if (!__testInjectModeActive) return false;
+        if (typeof __testInjectDropPrefixes === "undefined" || __testInjectDropPrefixes.size === 0) {
+          return false;
+        }
         if (!event || typeof event.kind !== "string") return false;
         if (event.__injected) return false;
-        return event.kind.startsWith("update_");
+        for (const prefix of __testInjectDropPrefixes) {
+          if (event.kind.startsWith(prefix)) return true;
+        }
+        return false;
       }
 
       function handleSocketClose() {
@@ -1353,6 +1367,7 @@
           logs: "Logs",
           agent_kanban: "Agent Kanban",
           issue: "Issue",
+          issue_monitor: "Issue Monitor",
           spec: "SPEC",
           workspace: "Work",
           board: "Board",
@@ -2757,7 +2772,7 @@
             const activeAgents = Number(activeWorkProjection.active_agents || 0);
             const blockedAgents = Number(activeWorkProjection.blocked_agents || 0);
             if (category === "active") counts.running = Math.max(counts.running, activeAgents || 1);
-            if (category === "idle") counts.idle = Math.max(counts.idle, 1);
+            if (category === "idle" && activeAgents > 0) counts.idle = Math.max(counts.idle, activeAgents);
             if (category === "done") counts.done = Math.max(counts.done, 1);
             counts.agents = Math.max(counts.agents, activeAgents + blockedAgents);
           }
@@ -2855,21 +2870,6 @@
               windowContext?.windowData || workspaceWindowById(windowId);
             const runtimeState = normalizeWindowRuntimeState(status, windowData?.preset);
             windowRuntimeStateMap.set(windowId, runtimeState);
-            agentCompletionNotifier.handleRuntimeState({
-              windowId,
-              runtimeState,
-              windowData,
-              projectTab: windowContext?.tab || activeProjectTab(),
-            });
-            // SPEC-2356 Anshin Addendum (FR-040): only agent panes (the presets
-            // that carry a waiting state) raise in-app attention toasts.
-            if (windowData && presetSupportsWaitingStatus(windowData.preset)) {
-              agentAttentionToaster.handleRuntimeState({
-                windowId,
-                runtimeState,
-                windowData,
-              });
-            }
             if (detail) {
               detailMap.set(windowId, detail);
             } else if (
@@ -2881,6 +2881,23 @@
               detailMap.delete(windowId);
             }
             const effectiveDetail = detailMap.get(windowId) || "";
+            agentCompletionNotifier.handleRuntimeState({
+              windowId,
+              runtimeState,
+              windowData,
+              projectTab: windowContext?.tab || activeProjectTab(),
+              statusDetail: effectiveDetail,
+            });
+            // SPEC-2356 Anshin Addendum (FR-040): only agent panes (the presets
+            // that carry a waiting state) raise in-app attention toasts.
+            if (windowData && presetSupportsWaitingStatus(windowData.preset)) {
+              agentAttentionToaster.handleRuntimeState({
+                windowId,
+                runtimeState,
+                windowData,
+                statusDetail: effectiveDetail,
+              });
+            }
             const nextRuntimeStatusKey = windowRuntimeStatusRenderKey(
               windowId,
               runtimeState,
@@ -2939,7 +2956,7 @@
                 overlay.textContent = effectiveDetail || "";
               }
               updateTerminalOverlayCopyState(overlay);
-              const shouldShowOverlay = false;
+              const shouldShowOverlay = Boolean(effectiveDetail) && runtimeState === "error";
               const shouldSpin = false;
               const spinner = overlay.querySelector(".overlay-spinner");
               if (spinner) {
@@ -4156,6 +4173,11 @@
         requestWorkAdvisory,
       });
 
+      const issueMonitorSurface = createIssueMonitorSurface({
+        document,
+        send,
+      });
+
       const agentKanbanSurface = createAgentKanbanSurface({
         activeWorkspace,
         createTerminalRuntime: (id, terminalRoot) =>
@@ -4265,6 +4287,7 @@
           "surface-board",
           "surface-logs",
           "surface-knowledge",
+          "surface-issue-monitor",
           "surface-index",
           "surface-work",
           "surface-improvement",
@@ -4404,6 +4427,11 @@
           // SPEC-3064 Phase 3 (E6d): the Knowledge window mount moved to
           // the knowledge kanban surface.
           mountKnowledgeWindow(windowData, body);
+          return;
+        }
+
+        if (surface === "issue-monitor") {
+          issueMonitorSurface.mount(body, windowData);
           return;
         }
 
@@ -5056,6 +5084,7 @@
         boardSurface,
         logsSurface,
         agentKanbanSurface,
+        issueMonitorSurface,
         knowledgeSettingsSurface,
       });
 
@@ -5154,6 +5183,19 @@
             break;
           case "runtime_health":
             window.__operatorShell?.applyRuntimeHealth?.(event.snapshot || {});
+            break;
+          case "issue_monitor_status":
+            frontendUnits.issueMonitorSurface.applyStatus(event.status || {});
+            window.__operatorShell?.applyIssueMonitorStatus?.(event.status || {});
+            break;
+          case "issue_monitor_inbox":
+            frontendUnits.issueMonitorSurface.applyInbox(event.items || []);
+            break;
+          case "issue_monitor_launch_failed":
+            frontendUnits.issueMonitorSurface.applyLaunchFailed(event);
+            break;
+          case "issue_monitor_toast":
+            frontendUnits.issueMonitorSurface.showToast(event);
             break;
           case "terminal_output":
             frontendUnits.terminalHost.writeOutput(event.id, event.data_base64);
@@ -6342,6 +6384,9 @@
             return;
           case "open-index":
             focusOrSpawnPreset("index");
+            return;
+          case "open-issue-monitor":
+            focusOrSpawnPreset("issue_monitor");
             return;
           case "spawn-shell":
             focusOrSpawnPreset("shell");

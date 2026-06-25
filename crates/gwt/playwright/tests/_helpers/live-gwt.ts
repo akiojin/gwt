@@ -42,15 +42,17 @@ export async function gotoLiveGwt(
 
   await page.goto(base);
 
-  const modalBackdropRule = options.keepPresetModal
-    ? ".modal-backdrop:not(#preset-modal)"
-    : ".modal-backdrop";
+  const hiddenStartupSelectors = [
+    "#op-briefing",
+    "#project-picker",
+    "#project-onboarding",
+  ];
+  if (!options.keepPresetModal) {
+    hiddenStartupSelectors.push("#preset-modal");
+  }
   await page.addStyleTag({
     content: `
-      #op-briefing,
-      #project-picker,
-      #project-onboarding,
-      ${modalBackdropRule} {
+      ${hiddenStartupSelectors.join(",\n      ")} {
         display: none !important;
         pointer-events: none !important;
       }
@@ -63,12 +65,39 @@ export async function gotoLiveGwt(
       if (element) element.hidden = true;
     }
   });
+
+  if (options.enableTestBridge) {
+    await page.waitForFunction(
+      () => (window as any).__gwtPlaywrightTestBridgeInstalled === true,
+    );
+  }
 }
 
 export async function sendLiveGwtEvent(page: Page, payload: unknown): Promise<void> {
   await page.evaluate((detail) => {
     window.dispatchEvent(new CustomEvent("__gwt_test_send", { detail }));
   }, payload);
+}
+
+export async function suppressInitialFrontendReady(page: Page): Promise<void> {
+  await page.addInitScript(() => {
+    const originalSend = WebSocket.prototype.send;
+    WebSocket.prototype.send = function sendWithInitialReadySuppressed(data) {
+      try {
+        const payload = typeof data === "string" ? JSON.parse(data) : null;
+        if (
+          payload?.kind === "frontend_ready" &&
+          (window as any).__gwtDropInitialFrontendReady !== false
+        ) {
+          (window as any).__gwtDropInitialFrontendReady = false;
+          return;
+        }
+      } catch {
+        /* no-op */
+      }
+      return originalSend.call(this, data);
+    };
+  });
 }
 
 export async function openLiveGwtProject(

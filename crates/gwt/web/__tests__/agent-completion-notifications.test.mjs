@@ -187,6 +187,37 @@ test("notifier reports stopped and error transitions as separate categories", ()
   );
 });
 
+test("notifier includes error detail in agent error notices", () => {
+  let now = 0;
+  const notices = [];
+  const notifier = createAgentCompletionNotifier({
+    document: setupDocument({ hidden: true, focused: false }),
+    now: () => now,
+    minRunningMs: 300_000,
+    getDesktopNotificationPermission: () => "denied",
+    showToast: (notice) => notices.push(notice),
+  });
+
+  notifier.handleRuntimeState({
+    windowId: "agent-1",
+    runtimeState: "running",
+    windowData: makeWindow(),
+    projectTab: makeProject(),
+  });
+  now += 301_000;
+  const notice = notifier.handleRuntimeState({
+    windowId: "agent-1",
+    runtimeState: "error",
+    windowData: makeWindow(),
+    projectTab: makeProject(),
+    statusDetail: "Stop-block hit an error",
+  });
+
+  assert.equal(notice.kind, "agent_error");
+  assert.match(notice.body, /Stop-block hit an error/);
+  assert.deepEqual(notices, [notice]);
+});
+
 // SPEC-2356 Anshin Addendum (FR-040) — in-app attention toaster.
 function collectAttentionToaster() {
   const toasts = [];
@@ -220,6 +251,19 @@ test("FR-040: blocked/error and done states also toast", () => {
     toasts.map((t) => t.flavor),
     ["error", "done", "done"],
   );
+});
+
+test("FR-040: error toast includes the runtime status detail", () => {
+  const { toaster, toasts } = collectAttentionToaster();
+  const notice = toaster.handleRuntimeState({
+    windowId: "w-err",
+    runtimeState: "error",
+    windowData: { title: "a" },
+    statusDetail: "Stop-block hit an error",
+  });
+  assert.equal(notice.flavor, "error");
+  assert.match(notice.body, /Stop-block hit an error/);
+  assert.deepEqual(toasts, [notice]);
 });
 
 test("FR-040: running / starting / idle never toast", () => {

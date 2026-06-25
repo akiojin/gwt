@@ -7,6 +7,8 @@ use crate::WindowProcessStatus;
 pub const RUNTIME_OUTPUT_CHANNEL: &str = "runtime_output";
 pub const RUNTIME_STATUS_CHANNEL: &str = "runtime_status";
 pub const RUNTIME_HOOK_CHANNEL: &str = "runtime_hook";
+pub const ISSUE_MONITOR_CHANNEL: &str = "issue_monitor";
+pub const ISSUE_MONITOR_CONTROL_CHANNEL: &str = "issue_monitor_control";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RuntimeDaemonEvent {
@@ -21,6 +23,9 @@ pub enum RuntimeDaemonEvent {
     },
     Hook {
         event: crate::RuntimeHookEvent,
+    },
+    IssueMonitor {
+        event: Value,
     },
 }
 
@@ -43,6 +48,13 @@ struct RuntimeStatusPayload {
 struct RuntimeHookPayload {
     source_pid: u32,
     event: crate::RuntimeHookEvent,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct IssueMonitorPayload {
+    source_pid: u32,
+    event: String,
+    payload: Value,
 }
 
 pub fn runtime_output_payload(id: &str, data: &[u8], source_pid: u32) -> Value {
@@ -75,6 +87,15 @@ pub fn runtime_hook_payload(event: &crate::RuntimeHookEvent, source_pid: u32) ->
         event: event.clone(),
     })
     .expect("runtime hook payload serializes")
+}
+
+pub fn issue_monitor_payload(event: &str, payload: Value, source_pid: u32) -> Value {
+    serde_json::to_value(IssueMonitorPayload {
+        source_pid,
+        event: event.to_string(),
+        payload,
+    })
+    .expect("issue monitor payload serializes")
 }
 
 pub fn decode_runtime_daemon_event(
@@ -116,6 +137,18 @@ pub fn decode_runtime_daemon_event(
                 event: payload.event,
             })
         }
+        ISSUE_MONITOR_CHANNEL => {
+            let payload: IssueMonitorPayload = serde_json::from_value(payload).ok()?;
+            if payload.source_pid == current_pid {
+                return None;
+            }
+            Some(RuntimeDaemonEvent::IssueMonitor {
+                event: serde_json::json!({
+                    "event": payload.event,
+                    "payload": payload.payload,
+                }),
+            })
+        }
         _ => None,
     }
 }
@@ -123,9 +156,9 @@ pub fn decode_runtime_daemon_event(
 #[cfg(test)]
 mod tests {
     use super::{
-        decode_runtime_daemon_event, runtime_hook_payload, runtime_output_payload,
-        runtime_status_payload, RuntimeDaemonEvent, RUNTIME_HOOK_CHANNEL, RUNTIME_OUTPUT_CHANNEL,
-        RUNTIME_STATUS_CHANNEL,
+        decode_runtime_daemon_event, issue_monitor_payload, runtime_hook_payload,
+        runtime_output_payload, runtime_status_payload, RuntimeDaemonEvent, ISSUE_MONITOR_CHANNEL,
+        RUNTIME_HOOK_CHANNEL, RUNTIME_OUTPUT_CHANNEL, RUNTIME_STATUS_CHANNEL,
     };
     use crate::{RuntimeHookEvent, RuntimeHookEventKind, WindowProcessStatus};
 
@@ -193,6 +226,26 @@ mod tests {
         );
         assert_eq!(
             decode_runtime_daemon_event(RUNTIME_HOOK_CHANNEL, payload, 42),
+            None
+        );
+    }
+
+    #[test]
+    fn issue_monitor_payload_round_trips_and_ignores_same_process() {
+        let payload = issue_monitor_payload(
+            "status",
+            serde_json::json!({"enabled": true, "queue_len": 2}),
+            42,
+        );
+
+        assert_eq!(
+            decode_runtime_daemon_event(ISSUE_MONITOR_CHANNEL, payload.clone(), 99),
+            Some(RuntimeDaemonEvent::IssueMonitor {
+                event: serde_json::json!({"event": "status", "payload": {"enabled": true, "queue_len": 2}}),
+            })
+        );
+        assert_eq!(
+            decode_runtime_daemon_event(ISSUE_MONITOR_CHANNEL, payload, 42),
             None
         );
     }
