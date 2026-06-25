@@ -4419,6 +4419,14 @@ test("Static project chrome renderers guard unchanged DOM writes", () => {
   );
 });
 
+test("App version label opens latest release notes when an update is available", () => {
+  assert.match(
+    appSource,
+    /const\s+openReleaseNotesFromLabel\s*=\s*\(\)\s*=>\s*{\s*releaseNotesWindow\.open\(versionState\.latest\s*\|\|\s*versionState\.current\s*\|\|\s*null\);\s*};/s,
+    "#app-version should focus the latest available release notes before falling back to the running version",
+  );
+});
+
 test("Static project chrome keys ignore workspace geometry and include visible transition state", () => {
   const pickerKeyBody = extractFunctionBody(
     projectShellSurfaceSource,

@@ -1878,8 +1878,25 @@ kbd.op-kbd {
   background: var(--color-surface-elevated);
   border-left-color: var(--color-accent);
 }
+.release-notes-sidebar-item.is-current-version {
+  background: color-mix(in oklab, var(--color-accent) 8%, transparent);
+}
+.release-notes-sidebar-item.is-selected.is-current-version {
+  background: var(--color-surface-elevated);
+}
 .release-notes-sidebar-version {
   font-weight: 600;
+}
+.release-notes-sidebar-current {
+  align-self: flex-start;
+  border: 1px solid color-mix(in oklab, var(--color-accent) 45%, transparent);
+  border-radius: 999px;
+  color: var(--color-accent);
+  font-size: 10px;
+  font-weight: 700;
+  line-height: 1;
+  padding: 2px 6px;
+  text-transform: uppercase;
 }
 .release-notes-sidebar-date {
   font-size: 11px;
