@@ -343,6 +343,15 @@ pub struct LaunchWizardSession {
     pub(crate) wizard: LaunchWizardState,
     pub(crate) workspace_resume_context: Option<WorkspaceResumeContext>,
     pub(crate) agent_kanban_target: Option<AgentKanbanLaunchTarget>,
+    pub(crate) auto_submit_after_runtime_resolution: Option<WindowGeometry>,
+    pub(crate) issue_monitor_profile_save: Option<IssueMonitorProfileSaveContext>,
+    pub(crate) issue_monitor_launch_issue_number: Option<u64>,
+}
+
+#[derive(Debug, Clone)]
+pub struct IssueMonitorProfileSaveContext {
+    pub(crate) client_id: ClientId,
+    pub(crate) issue_number: u64,
 }
 
 #[derive(Debug, Clone)]
@@ -355,6 +364,7 @@ pub struct AgentKanbanLaunchTarget {
 pub struct LaunchFeedbackContext {
     pub(crate) client_id: ClientId,
     pub(crate) title: String,
+    pub(crate) issue_monitor_issue_number: Option<u64>,
 }
 
 #[derive(Debug, Clone)]
@@ -1048,6 +1058,389 @@ impl AppRuntime {
         Vec::new()
     }
 
+    #[cfg(unix)]
+    fn publish_issue_monitor_control(&self, payload: serde_json::Value) -> Result<(), String> {
+        let Some(project_root) = self.active_project_root() else {
+            return Err("no active project".to_string());
+        };
+        let payload = gwt::runtime_daemon_events::issue_monitor_payload(
+            "control",
+            payload,
+            std::process::id(),
+        );
+        gwt::daemon_publisher::publish_event(
+            project_root,
+            gwt::runtime_daemon_events::ISSUE_MONITOR_CONTROL_CHANNEL,
+            payload,
+        )
+    }
+
+    #[cfg(not(unix))]
+    fn publish_issue_monitor_control(&self, _payload: serde_json::Value) -> Result<(), String> {
+        Err("Issue Monitor daemon control is unavailable on this platform".to_string())
+    }
+
+    pub(crate) fn issue_monitor_launch_failed_events(
+        &self,
+        issue_number: u64,
+        message: &str,
+    ) -> Vec<OutboundEvent> {
+        let message = if gwt::issue_monitor::is_git_https_auth_error(message) {
+            gwt::issue_monitor::git_https_auth_setup_message(message)
+        } else {
+            message.to_string()
+        };
+        if let Err(error) = self.publish_issue_monitor_control(serde_json::json!({
+            "launch_failed": {
+                "issue_number": issue_number,
+                "message": message,
+            }
+        })) {
+            tracing::debug!(
+                error = %error,
+                issue_number,
+                "issue monitor launch-failed daemon publish failed"
+            );
+        }
+        vec![
+            OutboundEvent::broadcast(BackendEvent::IssueMonitorLaunchFailed {
+                issue_number,
+                message: message.clone(),
+            }),
+            OutboundEvent::broadcast(BackendEvent::IssueMonitorToast {
+                level: "error".to_string(),
+                message,
+                issue_number: Some(issue_number),
+            }),
+        ]
+    }
+
+    pub(crate) fn issue_monitor_launch_succeeded_events(
+        &mut self,
+        issue_number: u64,
+        window_id: &str,
+    ) -> Vec<OutboundEvent> {
+        if let Err(error) = self.publish_issue_monitor_control(serde_json::json!({
+            "launched": {
+                "issue_number": issue_number,
+                "window_id": window_id,
+            }
+        })) {
+            tracing::debug!(
+                error = %error,
+                issue_number,
+                window_id,
+                "issue monitor launched daemon publish failed"
+            );
+        }
+        let window_id = window_id.to_string();
+        self.local_issue_monitor_events_for(None, |monitor| {
+            monitor.complete_active_launch(issue_number, window_id)
+        })
+    }
+
+    pub(crate) fn issue_monitor_agent_failed_events(
+        &mut self,
+        window_id: &str,
+        message: &str,
+    ) -> Vec<OutboundEvent> {
+        let message = message.trim();
+        let message = if message.is_empty() {
+            "Agent entered error state"
+        } else {
+            message
+        };
+        let issue_number_hint = self
+            .pending_launch_feedback_contexts
+            .get(window_id)
+            .and_then(|context| context.issue_monitor_issue_number);
+        let mut agent_failed_payload = serde_json::json!({
+            "window_id": window_id,
+            "message": message,
+        });
+        if let Some(issue_number) = issue_number_hint {
+            agent_failed_payload["issue_number"] = serde_json::json!(issue_number);
+        }
+        if let Err(error) = self.publish_issue_monitor_control(serde_json::json!({
+            "agent_failed": agent_failed_payload,
+        })) {
+            tracing::debug!(
+                error = %error,
+                window_id,
+                "issue monitor agent-failed daemon publish failed"
+            );
+        }
+        self.local_issue_monitor_agent_failed_events(window_id, message, issue_number_hint)
+    }
+
+    fn local_issue_monitor_events(
+        &mut self,
+        client_id: &str,
+        apply: impl FnOnce(&mut gwt::IssueMonitorState),
+    ) -> Vec<OutboundEvent> {
+        self.local_issue_monitor_events_for(Some(client_id), apply)
+    }
+
+    fn local_issue_monitor_events_for(
+        &mut self,
+        client_id: Option<&str>,
+        apply: impl FnOnce(&mut gwt::IssueMonitorState),
+    ) -> Vec<OutboundEvent> {
+        let now = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+        let Some(project_root) = self.active_project_root().map(Path::to_path_buf) else {
+            let mut monitor = gwt::IssueMonitorState::new(gwt::IssueMonitorConfig::default());
+            monitor.record_scan_error(now, "No active project");
+            return self.issue_monitor_snapshot_events_for(client_id, monitor);
+        };
+
+        let prefs_path = gwt::issue_monitor_prefs_path_for_repo_path(&project_root);
+        let prefs = gwt::load_issue_monitor_prefs(&prefs_path).unwrap_or_default();
+        let mut monitor =
+            gwt::IssueMonitorState::with_prefs(gwt::IssueMonitorConfig::default(), prefs);
+        apply(&mut monitor);
+        let _ = gwt::save_issue_monitor_prefs(&prefs_path, &monitor.prefs());
+        let mut launch_requests = Vec::new();
+        let mut settings_required_request = None;
+
+        match gwt::issue_monitor_worker::github_remote_owner_and_repo(&project_root) {
+            Some((owner, repo)) => {
+                match gwt::issue_monitor_worker::load_open_issue_monitor_candidates_for_repo_path(
+                    &project_root,
+                    &owner,
+                    &repo,
+                ) {
+                    Ok(issues) => {
+                        gwt::scan_issue_monitor_candidates(&mut monitor, &issues, &now);
+                        if monitor.config.enabled {
+                            monitor.set_gui_connected(true);
+                            let launch_profile_ready = self
+                                .issue_monitor_previous_profiles(&project_root)
+                                .preferred_profile()
+                                .is_some();
+                            let active_cap = if launch_profile_ready {
+                                monitor.config.max_active.max(1)
+                            } else {
+                                0
+                            };
+                            if !launch_profile_ready {
+                                settings_required_request = monitor.inbox.iter().find_map(|item| {
+                                    (item.state == gwt::MonitorInboxState::Queued).then(|| {
+                                        (
+                                            item.issue.number,
+                                            gwt::issue_monitor::issue_monitor_linked_issue_kind(
+                                                &item.issue,
+                                            ),
+                                        )
+                                    })
+                                });
+                            } else if monitor.active_count() < active_cap {
+                                let monitor_owner =
+                                    format!("{}:{}", whoami::username(), std::process::id());
+                                match gwt_github::client::http::HttpIssueClient::from_gh_auth(
+                                    &owner, &repo,
+                                ) {
+                                    Ok(client) => {
+                                        launch_requests = monitor
+                                            .claim_next_launch_requests_with_active_cap(
+                                                &client,
+                                                &monitor_owner,
+                                                &now,
+                                                active_cap,
+                                            );
+                                    }
+                                    Err(error) => {
+                                        tracing::warn!(
+                                            error = %error,
+                                            "issue monitor GitHub claim authentication unavailable"
+                                        );
+                                        monitor.record_launch_auth_required(now);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    Err(error) => {
+                        monitor
+                            .record_scan_error(now.as_str(), format!("issue list failed: {error}"));
+                    }
+                }
+            }
+            None => {
+                monitor.record_scan_error(now.as_str(), "GitHub origin remote is unavailable");
+            }
+        }
+
+        let mut launch_events = Vec::new();
+        if let Some((issue_number, linked_issue_kind)) = settings_required_request {
+            launch_events.extend(self.open_issue_monitor_settings_required_events(
+                client_id,
+                issue_number,
+                linked_issue_kind,
+            ));
+        }
+        for request in launch_requests {
+            let request_events = self.auto_launch_issue_monitor_request_events(
+                request.issue_number,
+                request.linked_issue_kind,
+            );
+            if let Some(message) = request_events.iter().find_map(|event| match &event.event {
+                BackendEvent::IssueMonitorLaunchFailed {
+                    issue_number,
+                    message,
+                } if *issue_number == request.issue_number => Some(message.clone()),
+                _ => None,
+            }) {
+                monitor.record_launch_failed(request.issue_number, message);
+            }
+            launch_events.extend(request_events);
+        }
+        let mut events = launch_events;
+        events.extend(self.issue_monitor_snapshot_events_for(client_id, monitor));
+        events
+    }
+
+    fn open_issue_monitor_settings_required_events(
+        &mut self,
+        client_id: Option<&str>,
+        issue_number: u64,
+        linked_issue_kind: gwt::LinkedIssueKind,
+    ) -> Vec<OutboundEvent> {
+        if self.launch_wizard.is_some() {
+            return Vec::new();
+        }
+        let target_client_id = client_id.unwrap_or("__issue_monitor__");
+        let events = self.open_issue_monitor_configure_wizard_events(
+            target_client_id,
+            issue_number,
+            linked_issue_kind,
+        );
+        if client_id.is_some() {
+            return events;
+        }
+        events
+            .into_iter()
+            .map(|mut event| {
+                if matches!(event.target, DispatchTarget::Client(_)) {
+                    event.target = DispatchTarget::Broadcast;
+                }
+                event
+            })
+            .collect()
+    }
+
+    fn local_issue_monitor_agent_failed_events(
+        &mut self,
+        window_id: &str,
+        message: &str,
+        issue_number_hint: Option<u64>,
+    ) -> Vec<OutboundEvent> {
+        let now = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+        let Some(project_root) = self.active_project_root().map(Path::to_path_buf) else {
+            return Vec::new();
+        };
+
+        let prefs_path = gwt::issue_monitor_prefs_path_for_repo_path(&project_root);
+        let prefs = gwt::load_issue_monitor_prefs(&prefs_path).unwrap_or_default();
+        let mut monitor =
+            gwt::IssueMonitorState::with_prefs(gwt::IssueMonitorConfig::default(), prefs);
+
+        match gwt::issue_monitor_worker::github_remote_owner_and_repo(&project_root) {
+            Some((owner, repo)) => {
+                match gwt::issue_monitor_worker::load_open_issue_monitor_candidates_for_repo_path(
+                    &project_root,
+                    &owner,
+                    &repo,
+                ) {
+                    Ok(issues) => {
+                        gwt::scan_issue_monitor_candidates(&mut monitor, &issues, &now);
+                    }
+                    Err(error) => {
+                        monitor
+                            .record_scan_error(now.as_str(), format!("issue list failed: {error}"));
+                    }
+                }
+            }
+            None => {
+                monitor.record_scan_error(now.as_str(), "GitHub origin remote is unavailable");
+            }
+        }
+
+        let issue_number = if let Some(issue_number) = issue_number_hint {
+            monitor.record_agent_issue_failed(issue_number, message.to_string());
+            Some(issue_number)
+        } else {
+            monitor.record_agent_window_failed(window_id, message.to_string())
+        };
+        if issue_number.is_none() {
+            monitor.record_scan_error(
+                now.as_str(),
+                format!("agent window {window_id} failed but no monitored Issue mapping was found: {message}"),
+            );
+        }
+        let _ = gwt::save_issue_monitor_prefs(&prefs_path, &monitor.prefs());
+        if issue_number_hint.is_some() {
+            self.pending_launch_feedback_contexts.remove(window_id);
+        }
+
+        let mut events = self.issue_monitor_snapshot_events_for(None, monitor);
+        events.push(OutboundEvent::broadcast(BackendEvent::IssueMonitorToast {
+            level: "error".to_string(),
+            message: message.to_string(),
+            issue_number,
+        }));
+        events
+    }
+
+    fn issue_monitor_snapshot_events_for(
+        &self,
+        client_id: Option<&str>,
+        monitor: gwt::IssueMonitorState,
+    ) -> Vec<OutboundEvent> {
+        let mut status = monitor.status_view();
+        let project_root = self
+            .active_tab_id
+            .as_deref()
+            .and_then(|tab_id| self.tab(tab_id))
+            .map(|tab| tab.project_root.clone());
+        self.apply_issue_monitor_launch_profile_status(&mut status, project_root.as_deref());
+        let status_event = BackendEvent::IssueMonitorStatus { status };
+        let inbox_event = BackendEvent::IssueMonitorInbox {
+            items: monitor.inbox,
+        };
+        match client_id {
+            Some(client_id) => vec![
+                OutboundEvent::reply(client_id.to_string(), status_event),
+                OutboundEvent::reply(client_id.to_string(), inbox_event),
+            ],
+            None => vec![
+                OutboundEvent::broadcast(status_event),
+                OutboundEvent::broadcast(inbox_event),
+            ],
+        }
+    }
+
+    fn apply_issue_monitor_launch_profile_status(
+        &self,
+        status: &mut gwt::IssueMonitorStatusView,
+        project_root: Option<&Path>,
+    ) {
+        if status.launch_profile_source == gwt::IssueMonitorLaunchProfileSource::Saved {
+            return;
+        }
+        let previous_profiles = project_root
+            .map(|project_root| self.issue_monitor_previous_profiles(project_root))
+            .unwrap_or_else(|| self.launch_wizard_cache.agent_preferences());
+        if let Some(profile) = previous_profiles.preferred_profile() {
+            status.launch_profile_source = gwt::IssueMonitorLaunchProfileSource::LastSettings;
+            status.launch_profile_summary = gwt::issue_monitor_launch_profile_summary(profile);
+            if status.state == "settings_required" {
+                status.state = "idle".to_string();
+            }
+        } else if status.state == "settings_required" {
+            status.launch_profile_summary = "configure before auto start".to_string();
+        }
+    }
+
     pub(crate) fn handle_frontend_event(
         &mut self,
         client_id: ClientId,
@@ -1500,6 +1893,77 @@ impl AppRuntime {
             FrontendEvent::LaunchWizardAction { action, bounds } => {
                 self.handle_launch_wizard_action_for_client(Some(&client_id), action, bounds)
             }
+            FrontendEvent::SetIssueMonitorEnabled { enabled } => {
+                match self.publish_issue_monitor_control(serde_json::json!({ "enabled": enabled }))
+                {
+                    Ok(()) => self.local_issue_monitor_events(&client_id, |monitor| {
+                        monitor.set_enabled(enabled)
+                    }),
+                    Err(error) => {
+                        tracing::debug!(
+                            error = %error,
+                            "issue monitor control daemon publish failed; using local fallback"
+                        );
+                        self.local_issue_monitor_events(&client_id, |monitor| {
+                            monitor.set_enabled(enabled)
+                        })
+                    }
+                }
+            }
+            FrontendEvent::SetIssueMonitorMaxActiveAgents { max_active_agents } => {
+                match self.publish_issue_monitor_control(
+                    serde_json::json!({ "max_active_agents": max_active_agents }),
+                ) {
+                    Ok(()) => self.local_issue_monitor_events(&client_id, |monitor| {
+                        monitor.set_max_active_agents(max_active_agents)
+                    }),
+                    Err(error) => {
+                        tracing::debug!(
+                            error = %error,
+                            "issue monitor max-active daemon publish failed; using local fallback"
+                        );
+                        self.local_issue_monitor_events(&client_id, |monitor| {
+                            monitor.set_max_active_agents(max_active_agents)
+                        })
+                    }
+                }
+            }
+            FrontendEvent::ReorderIssueMonitorIssues { issue_numbers } => {
+                let priority_order = issue_numbers;
+                match self.publish_issue_monitor_control(
+                    serde_json::json!({ "priority_order": priority_order.clone() }),
+                ) {
+                    Ok(()) => self.local_issue_monitor_events(&client_id, |monitor| {
+                        monitor.reorder_queued_issues(&priority_order)
+                    }),
+                    Err(error) => {
+                        tracing::debug!(
+                            error = %error,
+                            "issue monitor reorder daemon publish failed; using local fallback"
+                        );
+                        self.local_issue_monitor_events(&client_id, |monitor| {
+                            monitor.reorder_queued_issues(&priority_order)
+                        })
+                    }
+                }
+            }
+            FrontendEvent::ListIssueMonitor => self.local_issue_monitor_events(&client_id, |_| {}),
+            FrontendEvent::IssueMonitorLaunchNow {
+                issue_number,
+                linked_issue_kind,
+            } => self.open_issue_monitor_launch_wizard_events(
+                &client_id,
+                issue_number,
+                linked_issue_kind.unwrap_or(gwt::LinkedIssueKind::Issue),
+            ),
+            FrontendEvent::IssueMonitorConfigureIssue {
+                issue_number,
+                linked_issue_kind,
+            } => self.open_issue_monitor_configure_wizard_events(
+                &client_id,
+                issue_number,
+                linked_issue_kind.unwrap_or(gwt::LinkedIssueKind::Issue),
+            ),
             FrontendEvent::ApplyUpdate => self.apply_pending_update_events(&client_id),
             FrontendEvent::ApplyUpdateStart => self.apply_update_start_events(&client_id),
             FrontendEvent::ApplyUpdateToVersion { version } => {

@@ -30,6 +30,7 @@ const SPEC_LABEL: &str = "gwt-spec";
 /// [`gwt_github::body::SpecBody::parse`].
 const SPEC_BODY_HEADER_MARKER: &str = "<!-- gwt-spec id=";
 const ISSUE_CACHE_REFRESH_META_FILE: &str = "refresh-meta.json";
+const ISSUE_CACHE_REFRESH_LIMIT: &str = "1000";
 pub const ISSUE_CACHE_TTL: Duration = Duration::from_secs(15 * 60);
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -408,7 +409,7 @@ fn fetch_issue_list_snapshots(repo_path: &Path) -> Result<Vec<IssueSnapshot>, St
             "--state",
             "all",
             "--limit",
-            "200",
+            ISSUE_CACHE_REFRESH_LIMIT,
             "--json",
             "number,title,body,labels,state,url,updatedAt",
         ])
@@ -674,6 +675,11 @@ mod tests {
 
         let err = parse_issue_list_snapshots("{not-json").unwrap_err();
         assert!(!err.is_empty());
+    }
+
+    #[test]
+    fn issue_cache_refresh_limit_is_high_enough_for_large_repositories() {
+        assert_eq!(ISSUE_CACHE_REFRESH_LIMIT, "1000");
     }
 
     #[cfg(target_os = "windows")]

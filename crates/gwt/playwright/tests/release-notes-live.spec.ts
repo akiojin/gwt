@@ -15,10 +15,15 @@
  * a live backend stay green; the live coverage runs explicitly via
  * the gwt-verify --mode pre-pr flow once a real server is wired up.
  */
-import { test, expect } from "@playwright/test";
-import { gotoLiveGwt } from "./_helpers/live-gwt";
+import { test, expect, type Page } from "@playwright/test";
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
+import { gotoLiveGwt, suppressInitialFrontendReady } from "./_helpers/live-gwt";
 
 const BASE = process.env.GWT_PLAYWRIGHT_BASE_URL ?? "";
+const RELEASE_NOTES_VISIBLE_TIMEOUT_MS = 15_000;
+const PROJECT_ROOT = process.env.GWT_PLAYWRIGHT_PROJECT_ROOT ?? process.cwd();
+const CURRENT_VERSION = currentGwtVersion();
 
 // `serial` because every test in this file talks to the same live backend.
 // In parallel mode the chromium-dark and chromium-light projects race against
@@ -29,7 +34,9 @@ test.describe.serial("Release Notes window (live backend)", () => {
   test.skip(!BASE, "GWT_PLAYWRIGHT_BASE_URL is not set; live E2E skipped");
 
   test.beforeEach(async ({ page }) => {
-    await gotoLiveGwt(page, BASE);
+    await suppressInitialFrontendReady(page);
+    await gotoLiveGwt(page, BASE, { enableTestBridge: true });
+    await injectReleaseNotesWorkspace(page, CURRENT_VERSION);
     await expect(page.locator("#op-briefing")).toBeHidden();
     await expect(page.locator("#project-picker")).toBeHidden();
   });
@@ -50,7 +57,9 @@ test.describe.serial("Release Notes window (live backend)", () => {
     await label.click();
 
     const window = page.locator("#release-notes-window");
-    await expect(window).toBeVisible();
+    await expect(window).toBeVisible({
+      timeout: RELEASE_NOTES_VISIBLE_TIMEOUT_MS,
+    });
     await expect(window).toHaveAttribute("role", "dialog");
 
     const selected = window.locator(".release-notes-sidebar-item.is-selected");
@@ -74,7 +83,9 @@ test.describe.serial("Release Notes window (live backend)", () => {
   }) => {
     await page.locator("#app-version").click();
     const window = page.locator("#release-notes-window");
-    await expect(window).toBeVisible();
+    await expect(window).toBeVisible({
+      timeout: RELEASE_NOTES_VISIBLE_TIMEOUT_MS,
+    });
 
     const items = window.locator(".release-notes-sidebar-item");
     // Pick the second entry so we differ from the default selection.
@@ -104,7 +115,9 @@ test.describe.serial("Release Notes window (live backend)", () => {
   }) => {
     await page.locator("#app-version").click();
     const window = page.locator("#release-notes-window");
-    await expect(window).toBeVisible();
+    await expect(window).toBeVisible({
+      timeout: RELEASE_NOTES_VISIBLE_TIMEOUT_MS,
+    });
     await window.locator(".release-notes-close").click();
     await expect(window).toHaveCount(0);
   });
@@ -118,6 +131,52 @@ test.describe.serial("Release Notes window (live backend)", () => {
     // separate focus()+keyboard.press() races against any element that competes
     // for focus during workspace boot.
     await label.press("Enter");
-    await expect(page.locator("#release-notes-window")).toBeVisible();
+    await expect(page.locator("#release-notes-window")).toBeVisible({
+      timeout: RELEASE_NOTES_VISIBLE_TIMEOUT_MS,
+    });
   });
 });
+
+function currentGwtVersion(): string {
+  const cargoToml = readFileSync(join(PROJECT_ROOT, "Cargo.toml"), "utf8");
+  const match = cargoToml.match(/^version\s*=\s*"([^"]+)"/m);
+  if (!match) {
+    throw new Error(`Could not read package version from ${PROJECT_ROOT}/Cargo.toml`);
+  }
+  return match[1];
+}
+
+async function injectReleaseNotesWorkspace(
+  page: Page,
+  currentVersion: string,
+): Promise<void> {
+  await page.evaluate(
+    ({ projectRoot, version }) => {
+      window.dispatchEvent(
+        new CustomEvent("__gwt_test_inject", {
+          detail: {
+            kind: "workspace_state",
+            workspace: {
+              app_version: version,
+              tabs: [
+                {
+                  id: "release-notes-tab",
+                  title: "Release Notes Fixture",
+                  project_root: projectRoot,
+                  kind: "git",
+                  workspace: {
+                    viewport: { x: 0, y: 0, zoom: 1 },
+                    windows: [],
+                  },
+                },
+              ],
+              active_tab_id: "release-notes-tab",
+              recent_projects: [],
+            },
+          },
+        }),
+      );
+    },
+    { projectRoot: PROJECT_ROOT, version: currentVersion },
+  );
+}

@@ -18,6 +18,7 @@
 pub mod body;
 pub mod cache;
 pub mod client;
+pub mod issue_auto_claim;
 pub mod migration;
 pub mod routing;
 pub mod sections;

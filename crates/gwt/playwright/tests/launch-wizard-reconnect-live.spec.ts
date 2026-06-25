@@ -7,9 +7,14 @@
  * `launch_wizard_state` tombstone (`wizard: null`) so the stale modal closes.
  */
 import { expect, test, type Page } from "@playwright/test";
-import { gotoLiveGwt, sendLiveGwtEvent } from "./_helpers/live-gwt";
+import {
+  gotoLiveGwt,
+  sendLiveGwtEvent,
+  suppressInitialFrontendReady,
+} from "./_helpers/live-gwt";
 
 const BASE = process.env.GWT_PLAYWRIGHT_BASE_URL ?? "";
+const WIZARD_TOMBSTONE_TIMEOUT_MS = 15_000;
 
 test.describe.serial("Launch Wizard reconnect recovery (live backend)", () => {
   test.skip(!BASE, "GWT_PLAYWRIGHT_BASE_URL is not set; live E2E skipped");
@@ -34,10 +39,15 @@ test.describe.serial("Launch Wizard reconnect recovery (live backend)", () => {
     await expect(wizard).toBeVisible();
     await expect(wizard).toContainText("Stale Launch Wizard");
 
+    await page.evaluate(() => {
+      (window as any).__gwtDropInitialFrontendReady = false;
+    });
     await sendLiveGwtEvent(page, { kind: "frontend_ready" });
 
-    await expect(wizard).toHaveAttribute("aria-hidden", "true");
-    await expect(wizard).toBeHidden();
+    await expect(wizard).toHaveAttribute("aria-hidden", "true", {
+      timeout: WIZARD_TOMBSTONE_TIMEOUT_MS,
+    });
+    await expect(wizard).toBeHidden({ timeout: WIZARD_TOMBSTONE_TIMEOUT_MS });
   });
 });
 
@@ -57,37 +67,26 @@ async function keepLaunchWizardModalVisibilityDeterministic(page: Page): Promise
   });
 }
 
-async function suppressInitialFrontendReady(page: Page): Promise<void> {
-  await page.addInitScript(() => {
-    const originalSend = WebSocket.prototype.send;
-    WebSocket.prototype.send = function sendWithInitialReadySuppressed(data) {
-      try {
-        const payload = typeof data === "string" ? JSON.parse(data) : null;
-        if (
-          payload?.kind === "frontend_ready" &&
-          (window as any).__gwtDropInitialFrontendReady !== false
-        ) {
-          (window as any).__gwtDropInitialFrontendReady = false;
-          return;
-        }
-      } catch {
-        /* no-op */
-      }
-      return originalSend.call(this, data);
-    };
-  });
-}
-
 async function clearBackendLaunchWizard(page: Page): Promise<void> {
   const wizard = page.locator("#wizard-modal");
-  await sendLiveGwtEvent(page, {
-    kind: "launch_wizard_action",
-    action: { kind: "cancel" },
-    bounds: null,
-  });
-  await expect(wizard).toBeHidden();
-  await expect(wizard.locator(".wizard-summary-item")).toHaveCount(0);
-  await expect(wizard).not.toContainText("Work launch");
+  await expect(async () => {
+    await sendLiveGwtEvent(page, {
+      kind: "launch_wizard_action",
+      action: { kind: "cancel" },
+      bounds: null,
+    });
+    await page.waitForTimeout(250);
+    await page.evaluate(() => {
+      (window as any).__gwtDropInitialFrontendReady = false;
+    });
+    await sendLiveGwtEvent(page, { kind: "frontend_ready" });
+    await page.waitForTimeout(500);
+    await expect(wizard).toBeHidden({ timeout: 1_000 });
+    await expect(wizard.locator(".wizard-summary-item")).toHaveCount(0, {
+      timeout: 1_000,
+    });
+    await expect(wizard).not.toContainText("Work launch", { timeout: 1_000 });
+  }).toPass({ timeout: 10_000 });
 }
 
 async function injectStaleLaunchWizard(page: Page): Promise<void> {

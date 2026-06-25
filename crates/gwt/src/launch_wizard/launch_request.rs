@@ -157,6 +157,11 @@ impl LaunchWizardState {
             builder = builder.linked_issue_number(n);
         }
 
+        let initial_prompt = self.initial_prompt.trim();
+        if !initial_prompt.is_empty() {
+            builder = builder.extra_arg(initial_prompt.to_string());
+        }
+
         let mut config = builder.build();
         if !self.version.is_empty() {
             config.tool_version = Some(self.version.clone());
@@ -275,6 +280,26 @@ mod tests {
         // Codex builder must produce `codex resume` (picker) — no `--last`.
         assert!(!config.args.contains(&"--last".to_string()));
         assert!(config.args.iter().any(|arg| arg == "resume"));
+    }
+
+    #[test]
+    fn build_launch_config_appends_initial_prompt_to_agent_args() {
+        let mut state = LaunchWizardState::open_with(
+            context(branch("feature/spec-3165"), "feature/spec-3165"),
+            sample_agent_options(),
+            Vec::new(),
+        );
+        state.agent_id = "codex".to_string();
+        state.apply(LaunchWizardAction::SetInitialPrompt {
+            value: "$gwt-build-spec SPEC-3165".to_string(),
+        });
+
+        let config = state.build_launch_config().expect("launch config");
+
+        assert_eq!(
+            config.args.last().map(String::as_str),
+            Some("$gwt-build-spec SPEC-3165")
+        );
     }
 
     #[test]

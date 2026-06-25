@@ -96,6 +96,56 @@ test("FR-039 (安心): applyTelemetryCounts が waiting を WAITING cell に反�
   );
 });
 
+test("Issue Monitor status strip cell stays visible and opens the monitor surface", async () => {
+  const { applyIssueMonitorStatus } = await importOperatorShell();
+  const { document, window } = parseHTML(html);
+  const originalCustomEvent = globalThis.CustomEvent;
+  globalThis.CustomEvent = window.CustomEvent;
+  try {
+    const cell = document.getElementById("op-strip-issue-monitor");
+    const value = document.getElementById("op-strip-issue-monitor-value");
+    assert.ok(cell, "expected Issue Monitor status cell in the strip");
+    assert.ok(value, "expected Issue Monitor status value in the strip");
+
+    const commands = [];
+    document.addEventListener("op:command", (event) => {
+      commands.push(event.detail?.id);
+    });
+
+    applyIssueMonitorStatus(document, {
+      enabled: true,
+      state: "launching",
+      queue_len: 3,
+      active_count: 1,
+      max_active_agents: 2,
+    });
+
+    assert.equal(value.textContent, "Run Q3 A1/2");
+    assert.equal(cell.dataset.state, "launching");
+    assert.equal(cell.getAttribute("aria-label"), "Issue Monitor: Run Q3 A1/2");
+    assert.equal(cell.classList.contains("op-status-strip__cell--alert"), false);
+
+    applyIssueMonitorStatus(document, {
+      enabled: true,
+      state: "error",
+      queue_len: 3,
+      active_count: 0,
+      max_active_agents: 2,
+      last_error: "issue #3165: failed",
+    });
+
+    assert.equal(value.textContent, "Error Q3 A0/2");
+    assert.equal(cell.dataset.state, "error");
+    assert.equal(cell.classList.contains("op-status-strip__cell--alert"), true);
+    assert.match(cell.getAttribute("title") ?? "", /issue #3165: failed/);
+
+    cell.dispatchEvent(new window.Event("click", { bubbles: true }));
+    assert.deepEqual(commands, ["open-issue-monitor"]);
+  } finally {
+    globalThis.CustomEvent = originalCustomEvent;
+  }
+});
+
 test("migration: 起動時に旧 localStorage キーが removeItem される", async () => {
   const fixture = await mountFixture();
   try {
