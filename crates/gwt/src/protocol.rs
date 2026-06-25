@@ -870,6 +870,14 @@ pub enum FrontendEvent {
         work_id: String,
         close_kind: String,
     },
+    ImprovementPromoteIssue {
+        id: String,
+    },
+    ImprovementDismiss {
+        id: String,
+        #[serde(default)]
+        reason: Option<String>,
+    },
 }
 
 /// Browser-side metadata-only UI trace payload sent by Diagnostics > Stop UI
@@ -1367,6 +1375,19 @@ pub enum BackendEvent {
     },
     WindowList {
         windows: Vec<PersistedWindowState>,
+    },
+    ImprovementCandidates {
+        candidates: Vec<serde_json::Value>,
+    },
+    ImprovementActionResult {
+        id: String,
+        action: String,
+        message: Option<String>,
+    },
+    ImprovementActionError {
+        id: Option<String>,
+        action: String,
+        message: String,
     },
     /// Provider usage snapshot: account-level windows + per-session usage +
     /// daily/weekly consumption (SPEC-2970 FR-010). Reuses the gwt-core domain
@@ -2050,6 +2071,21 @@ pub const BACKEND_EVENT_POLICIES: &[BackendEventPolicy] = &[
         BackendEventBackpressurePolicy::LatestWins,
     ),
     BackendEventPolicy::new(
+        "improvement_candidates",
+        BackendEventDeliveryClass::IdempotentLatest,
+        BackendEventBackpressurePolicy::LatestWins,
+    ),
+    BackendEventPolicy::new(
+        "improvement_action_result",
+        BackendEventDeliveryClass::EphemeralStatus,
+        BackendEventBackpressurePolicy::BestEffort,
+    ),
+    BackendEventPolicy::new(
+        "improvement_action_error",
+        BackendEventDeliveryClass::Error,
+        BackendEventBackpressurePolicy::FailOpenError,
+    ),
+    BackendEventPolicy::new(
         "provider_usage",
         BackendEventDeliveryClass::IdempotentLatest,
         BackendEventBackpressurePolicy::LatestWins,
@@ -2476,6 +2512,9 @@ impl BackendEvent {
             BackendEvent::WindowCanvasState { .. } => "workspace_state",
             BackendEvent::ActiveWorkProjection { .. } => "active_work_projection",
             BackendEvent::WindowList { .. } => "window_list",
+            BackendEvent::ImprovementCandidates { .. } => "improvement_candidates",
+            BackendEvent::ImprovementActionResult { .. } => "improvement_action_result",
+            BackendEvent::ImprovementActionError { .. } => "improvement_action_error",
             BackendEvent::ProviderUsage { .. } => "provider_usage",
             BackendEvent::RuntimeHealth { .. } => "runtime_health",
             BackendEvent::TerminalOutput { .. } => "terminal_output",

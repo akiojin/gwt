@@ -1509,6 +1509,12 @@ impl AppRuntime {
                 work_id,
                 close_kind,
             } => self.close_work(&work_id, &close_kind),
+            FrontendEvent::ImprovementPromoteIssue { id } => {
+                self.improvement_promote_issue_events(&client_id, &id)
+            }
+            FrontendEvent::ImprovementDismiss { id, reason } => {
+                self.improvement_dismiss_events(&client_id, &id, reason.as_deref())
+            }
             FrontendEvent::CancelUpdateDownload => self.cancel_update_download_events(&client_id),
             FrontendEvent::ApplyUpdateLater => self.apply_update_later_events(&client_id),
             FrontendEvent::ApplyUpdateRestartNow => {
@@ -1687,6 +1693,9 @@ impl AppRuntime {
         if let Some(event) = self.active_work_projection_reply(client_id) {
             events.insert(1, event);
         }
+        if let Some(event) = self.improvement_candidates_reply(client_id) {
+            events.push(event);
+        }
         // SPEC-1934 US-6.1: surface pending migrations to a newly-connected
         // frontend during state hydration so the modal opens without waiting
         // for another roundtrip.
@@ -1771,6 +1780,127 @@ impl AppRuntime {
         OutboundEvent::broadcast(BackendEvent::WindowCanvasState {
             workspace: self.app_state_view(),
         })
+    }
+
+    fn improvement_candidates_reply(&self, client_id: &str) -> Option<OutboundEvent> {
+        let project_root = self.active_project_root()?;
+        Some(OutboundEvent::reply(
+            client_id.to_string(),
+            BackendEvent::ImprovementCandidates {
+                candidates: gwt::cli::improvement::candidate_public_values(project_root),
+            },
+        ))
+    }
+
+    fn improvement_action_error(
+        &self,
+        client_id: &str,
+        action: &str,
+        id: Option<&str>,
+        message: impl Into<String>,
+    ) -> Vec<OutboundEvent> {
+        vec![OutboundEvent::reply(
+            client_id.to_string(),
+            BackendEvent::ImprovementActionError {
+                id: id.map(str::to_string),
+                action: action.to_string(),
+                message: improvement_action_error_message(message.into()),
+            },
+        )]
+    }
+
+    fn improvement_promote_issue_events(&self, client_id: &str, id: &str) -> Vec<OutboundEvent> {
+        let Some(project_root) = self.active_project_root() else {
+            return self.improvement_action_error(
+                client_id,
+                "promote_issue",
+                Some(id),
+                "No active project is selected.",
+            );
+        };
+        let mut env = gwt::cli::DefaultCliEnv::new("akiojin", "gwt", project_root.to_path_buf());
+        let mut output = String::new();
+        match gwt::cli::improvement::run(
+            &mut env,
+            gwt::cli::ImprovementCommand::PromoteIssue(
+                gwt::cli::improvement::ImprovementPromoteIssueCommand {
+                    id: id.to_string(),
+                    force: false,
+                    labels: Vec::new(),
+                },
+            ),
+            &mut output,
+        ) {
+            Ok(_) => {
+                let mut events = vec![OutboundEvent::reply(
+                    client_id.to_string(),
+                    BackendEvent::ImprovementActionResult {
+                        id: id.to_string(),
+                        action: "promote_issue".to_string(),
+                        message: Some(output.trim().to_string()),
+                    },
+                )];
+                if let Some(event) = self.improvement_candidates_reply(client_id) {
+                    events.push(event);
+                }
+                events
+            }
+            Err(error) => self.improvement_action_error(
+                client_id,
+                "promote_issue",
+                Some(id),
+                error.to_string(),
+            ),
+        }
+    }
+
+    fn improvement_dismiss_events(
+        &self,
+        client_id: &str,
+        id: &str,
+        reason: Option<&str>,
+    ) -> Vec<OutboundEvent> {
+        let Some(project_root) = self.active_project_root() else {
+            return self.improvement_action_error(
+                client_id,
+                "dismiss",
+                Some(id),
+                "No active project is selected.",
+            );
+        };
+        let mut env = gwt::cli::DefaultCliEnv::new("akiojin", "gwt", project_root.to_path_buf());
+        let mut output = String::new();
+        match gwt::cli::improvement::run(
+            &mut env,
+            gwt::cli::ImprovementCommand::Dismiss(
+                gwt::cli::improvement::ImprovementDismissCommand {
+                    id: id.to_string(),
+                    reason: reason
+                        .filter(|value| !value.trim().is_empty())
+                        .unwrap_or("Dismissed from Improvement Inbox.")
+                        .to_string(),
+                },
+            ),
+            &mut output,
+        ) {
+            Ok(_) => {
+                let mut events = vec![OutboundEvent::reply(
+                    client_id.to_string(),
+                    BackendEvent::ImprovementActionResult {
+                        id: id.to_string(),
+                        action: "dismiss".to_string(),
+                        message: Some(output.trim().to_string()),
+                    },
+                )];
+                if let Some(event) = self.improvement_candidates_reply(client_id) {
+                    events.push(event);
+                }
+                events
+            }
+            Err(error) => {
+                self.improvement_action_error(client_id, "dismiss", Some(id), error.to_string())
+            }
+        }
     }
 
     pub(crate) fn push_workspace_and_active_work_projection_broadcasts(
@@ -2034,6 +2164,18 @@ impl AppRuntime {
         self.persist_dispatcher.enqueue(snapshot);
         Ok(())
     }
+}
+
+fn improvement_action_error_message(message: impl Into<String>) -> String {
+    let message = message.into();
+    if message
+        .to_ascii_lowercase()
+        .contains("authentication required")
+    {
+        return "GitHub authentication is required to promote this improvement. Run `gh auth login`, or restart browser-check with `GH_TOKEN` available."
+            .to_string();
+    }
+    message
 }
 
 #[cfg(test)]

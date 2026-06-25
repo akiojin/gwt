@@ -289,3 +289,48 @@ fn gwtd_provider_hook_event_remains_argv_transport_exception() {
         String::from_utf8_lossy(&output.stdout)
     );
 }
+
+#[test]
+fn gwtd_gwt_self_improvement_stop_remains_argv_transport_exception() {
+    let home = tempfile::tempdir().expect("home tempdir");
+    let repo = tempfile::tempdir().expect("repo tempdir");
+    assert!(Command::new("git")
+        .arg("init")
+        .arg("-q")
+        .arg(repo.path())
+        .status()
+        .expect("git init")
+        .success());
+    assert!(Command::new("git")
+        .arg("-C")
+        .arg(repo.path())
+        .args([
+            "remote",
+            "add",
+            "origin",
+            "https://github.com/example/project.git"
+        ])
+        .status()
+        .expect("git remote add")
+        .success());
+
+    let output = Command::new(env!("CARGO_BIN_EXE_gwtd"))
+        .current_dir(repo.path())
+        .args(["hook", "gwt-self-improvement-stop"])
+        .env("HOME", home.path())
+        .env("USERPROFILE", home.path())
+        .stdin(Stdio::null())
+        .output()
+        .expect("run gwtd gwt self-improvement hook");
+
+    assert!(
+        output.status.success(),
+        "direct self-improvement hook should exit 0 outside akiojin/gwt, stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        output.stdout.is_empty(),
+        "non-gwt repos must receive no hook output, got: {}",
+        String::from_utf8_lossy(&output.stdout)
+    );
+}

@@ -19,7 +19,7 @@ pub use default::DefaultCliEnv;
 #[cfg(test)]
 pub use default::{IssueClientFactory, LazyIssueClient};
 pub(crate) use stdout_capture::StdoutCaptureEnv;
-pub use test_env::TestEnv;
+pub use test_env::{TargetIssueCreateCall, TestEnv};
 
 use std::{
     io::{self},
@@ -27,7 +27,7 @@ use std::{
 };
 
 use gwt_git::PrStatus;
-use gwt_github::{client::IssueClient, IssueNumber, SpecListFilter};
+use gwt_github::{client::IssueClient, IssueNumber, IssueSnapshot, SpecListFilter};
 
 use super::{
     parse_actions_args, parse_board_args, parse_discussion_args, parse_hook_args, parse_issue_args,
@@ -47,6 +47,14 @@ pub trait CliEnv {
     fn stderr(&mut self) -> &mut dyn io::Write;
     fn read_stdin(&mut self) -> io::Result<String>;
     fn read_file(&self, path: &str) -> io::Result<String>;
+    fn create_issue_in_repo(
+        &mut self,
+        owner: &str,
+        repo: &str,
+        title: &str,
+        body: &str,
+        labels: &[String],
+    ) -> io::Result<IssueSnapshot>;
     fn fetch_linked_prs(&mut self, number: IssueNumber) -> io::Result<Vec<LinkedPrSummary>>;
     fn fetch_current_pr(&mut self) -> io::Result<Option<PrStatus>>;
     fn create_pr(

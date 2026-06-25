@@ -11,13 +11,23 @@ use std::{
 };
 
 use gwt_git::PrStatus;
-use gwt_github::{client::fake::FakeIssueClient, IssueNumber};
+use gwt_github::{client::fake::FakeIssueClient, IssueClient, IssueNumber, IssueSnapshot};
 
 use super::{CliEnv, InternalCommandCall, InternalCommandOutput};
 
 use crate::cli::{
     LinkedPrSummary, PrChecksSummary, PrCreateCall, PrEditCall, PrReview, PrReviewThread,
 };
+
+/// Test-visible log entry for repository-targeted Issue creation.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TargetIssueCreateCall {
+    pub owner: String,
+    pub repo: String,
+    pub title: String,
+    pub body: String,
+    pub labels: Vec<String>,
+}
 
 pub struct TestEnv {
     pub client: FakeIssueClient,
@@ -27,6 +37,7 @@ pub struct TestEnv {
     pub stdout: Vec<u8>,
     pub stderr: Vec<u8>,
     pub files: HashMap<String, String>,
+    pub target_issue_create_call_log: Vec<TargetIssueCreateCall>,
     pub linked_prs: HashMap<u64, Vec<LinkedPrSummary>>,
     pub linked_pr_call_log: Vec<u64>,
     pub current_pr: Option<PrStatus>,
@@ -62,6 +73,7 @@ impl TestEnv {
             stdout: Vec::new(),
             stderr: Vec::new(),
             files: HashMap::new(),
+            target_issue_create_call_log: Vec::new(),
             linked_prs: HashMap::new(),
             linked_pr_call_log: Vec::new(),
             current_pr: None,
@@ -157,6 +169,26 @@ impl CliEnv for TestEnv {
             .get(path)
             .cloned()
             .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, format!("no such file: {path}")))
+    }
+    fn create_issue_in_repo(
+        &mut self,
+        owner: &str,
+        repo: &str,
+        title: &str,
+        body: &str,
+        labels: &[String],
+    ) -> io::Result<IssueSnapshot> {
+        self.target_issue_create_call_log
+            .push(TargetIssueCreateCall {
+                owner: owner.to_string(),
+                repo: repo.to_string(),
+                title: title.to_string(),
+                body: body.to_string(),
+                labels: labels.to_vec(),
+            });
+        self.client
+            .create_issue(title, body, labels)
+            .map_err(|err| io::Error::other(err.to_string()))
     }
     fn fetch_linked_prs(&mut self, number: IssueNumber) -> io::Result<Vec<LinkedPrSummary>> {
         self.linked_pr_call_log.push(number.0);

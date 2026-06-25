@@ -16,6 +16,7 @@ pub(crate) mod discussion;
 mod env;
 pub mod gwtd_resolver;
 pub mod hook;
+pub mod improvement;
 pub(crate) mod index;
 mod issue;
 mod issue_spec;
@@ -45,8 +46,9 @@ pub use diagnostics::DiagnosticsCommand;
 pub use discuss::DiscussAction;
 pub use discussion::DiscussionCommand;
 pub(crate) use env::ClientRef;
-pub use env::{dispatch, CliEnv, DefaultCliEnv, TestEnv};
+pub use env::{dispatch, CliEnv, DefaultCliEnv, TargetIssueCreateCall, TestEnv};
 use gwt_github::{ApiError, SpecOpsError};
+pub use improvement::ImprovementCommand;
 pub use index::{IndexCommand, IndexScope};
 pub use memory::MemoryCommand;
 pub use search::SearchCommand;
@@ -143,6 +145,7 @@ pub enum CliCommand {
     Actions(ActionsCommand),
     Board(BoardCommand),
     Hook(HookCommand),
+    Improvement(ImprovementCommand),
     Index(IndexCommand),
     Diagnostics(DiagnosticsCommand),
     Memory(MemoryCommand),
@@ -654,6 +657,7 @@ pub(crate) fn run_collect<E: CliEnv>(
         CliCommand::Pr(inner) => pr::run(env, inner, &mut out)?,
         CliCommand::Actions(inner) => actions::run(env, inner, &mut out)?,
         CliCommand::Board(inner) => board::run(env, inner, &mut out)?,
+        CliCommand::Improvement(inner) => improvement::run(env, inner, &mut out)?,
         CliCommand::Index(inner) => index::run(env, inner, &mut out)?,
         CliCommand::Memory(inner) => memory::run(env, inner, &mut out)?,
         CliCommand::Discuss(action) => discuss::run(env, action, &mut out)?,

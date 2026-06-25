@@ -2525,8 +2525,34 @@ mod tests {
             "Repo",
             repo.clone(),
             ProjectKind::NonRepo,
-            &[WindowPreset::FileTree],
+            &[WindowPreset::FileTree, WindowPreset::Improvement],
         );
+        fs::create_dir_all(repo.join(".gwt/improvements")).expect("create improvement dir");
+        fs::write(
+            repo.join(".gwt/improvements/candidates.json"),
+            serde_json::json!({
+                "candidates": [{
+                    "id": "impr-sync",
+                    "created_at": "2026-06-23T00:00:00Z",
+                    "updated_at": "2026-06-23T00:00:00Z",
+                    "source": "agent-failure",
+                    "target_artifact": "skill",
+                    "classification": "gwt-caused",
+                    "confidence": "high",
+                    "state": "pending",
+                    "dedupe_key": "skill:sync",
+                    "occurrences": 1,
+                    "sanitized_summary": "Sync candidate",
+                    "sanitized_details": null,
+                    "evidence_digest": null,
+                    "local_evidence": [],
+                    "linked_issue": null,
+                    "dismissed_reason": null
+                }]
+            })
+            .to_string(),
+        )
+        .expect("write improvement candidates");
         let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
         let window_id = window_id_for_preset(&runtime, "tab-1", WindowPreset::FileTree, 0);
         runtime
@@ -2559,6 +2585,12 @@ mod tests {
         assert!(events.iter().any(|event| matches!(
             event.event,
             BackendEvent::UpdateState(gwt_core::update::UpdateState::UpToDate { .. })
+        )));
+        assert!(events.iter().any(|event| matches!(
+            &event.event,
+            BackendEvent::ImprovementCandidates { candidates }
+                if candidates.first().and_then(|candidate| candidate.get("id")).and_then(serde_json::Value::as_str)
+                    == Some("impr-sync")
         )));
     }
 
@@ -2936,6 +2968,7 @@ mod tests {
             WindowPreset::Issue,
             WindowPreset::Spec,
             WindowPreset::Work,
+            WindowPreset::Improvement,
             WindowPreset::Pr,
         ] {
             assert_eq!(
