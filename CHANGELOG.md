@@ -1,6 +1,29 @@
 # Changelog
 
 All notable changes to this project will be documented in this file.
+## [9.64.0] - 2026-06-25
+
+### Bug Fixes
+
+- Require SessionStart session id association
+- **hook:** Self-improvement Stop hook を古い gwtd でも graceful degrade させる (#3178)
+- Render issue monitor as canvas window
+- **test:** Set playwright project root
+- **windows:** Guard issue monitor daemon publish
+
+### Features
+
+- Add issue auto-improve monitor
+- Complete issue monitor auto queue
+
+### Miscellaneous Tasks
+
+- **work:** Record #3178 graceful-degradation lesson
+
+### Testing
+
+- **hook:** Guard managed-hook 生成コマンドが gwtd argv allowlist に収まることを検証 (#3178)
+
 ## [9.63.0] - 2026-06-25
 
 ### Bug Fixes

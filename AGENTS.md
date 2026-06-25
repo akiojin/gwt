@@ -47,6 +47,9 @@
 - バックエンド: Rust (`gwt` + `gwt-core` / `gwt-agent` / `gwt-skills` / `gwt-github` などのドメインクレート)
 - ターミナルエミュレーション: vt100 crate
 - UI アイコンは Unicode シンボルを使用する
+- GUI/CSS 変更では Operator Design System (`crates/gwt/web/styles/tokens.css` と typography tokens) を必ず使用し、新規 UI CSS に raw hex / rgb / rgba 色や独自 palette を直書きしない。必要な token が無い場合は、理由を明示して token 追加を検討する
+- Modal / dialog / overlay を追加・変更する場合は、共有 primitive (`.modal-backdrop` / `.modal-shell` / `.modal-header` / `.modal-body` / `.modal-footer`) と WAI-ARIA dialog 契約を使用し、独自の fixed/absolute overlay shell を作らない
+- 新規・変更 UI surface では、Operator token 使用と共有 primitive 準拠が崩れやすい箇所に frontend contract test / embedded web test を追加・更新してから実装する
 
 ### 🔒 ブランチ保護ルール
 

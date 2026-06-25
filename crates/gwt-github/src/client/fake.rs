@@ -77,6 +77,18 @@ impl FakeIssueClient {
             .clone()
     }
 
+    /// Snapshot comments for one Issue. Used by higher-level tests that need
+    /// to assert whether a workflow wrote GitHub comments.
+    pub fn comments(&self, number: IssueNumber) -> Vec<CommentSnapshot> {
+        self.inner
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .issues
+            .get(&number)
+            .map(|issue| issue.comments.clone())
+            .unwrap_or_default()
+    }
+
     fn record(&self, state: &mut FakeState, op: &str, target: &str) {
         state.call_log.push(format!("{op}:{target}"));
     }

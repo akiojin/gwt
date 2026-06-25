@@ -1266,7 +1266,7 @@ dependencies = [
 
 [[package]]
 name = "gwt"
-version = "9.63.0"
+version = "9.64.0"
 dependencies = [
  "ammonia",
  "auto-launch",
@@ -1323,7 +1323,7 @@ dependencies = [
 
 [[package]]
 name = "gwt-agent"
-version = "9.63.0"
+version = "9.64.0"
 dependencies = [
  "chrono",
  "dunce",
@@ -1350,7 +1350,7 @@ dependencies = [
 
 [[package]]
 name = "gwt-ai"
-version = "9.63.0"
+version = "9.64.0"
 dependencies = [
  "reqwest",
  "serde",
@@ -1360,7 +1360,7 @@ dependencies = [
 
 [[package]]
 name = "gwt-clipboard"
-version = "9.63.0"
+version = "9.64.0"
 dependencies = [
  "gwt-core",
  "tempfile",
@@ -1369,7 +1369,7 @@ dependencies = [
 
 [[package]]
 name = "gwt-config"
-version = "9.63.0"
+version = "9.64.0"
 dependencies = [
  "dirs 6.0.0",
  "serde",
@@ -1381,7 +1381,7 @@ dependencies = [
 
 [[package]]
 name = "gwt-core"
-version = "9.63.0"
+version = "9.64.0"
 dependencies = [
  "base64",
  "chrono",
@@ -1415,7 +1415,7 @@ dependencies = [
 
 [[package]]
 name = "gwt-docker"
-version = "9.63.0"
+version = "9.64.0"
 dependencies = [
  "gwt-core",
  "serde",
@@ -1428,7 +1428,7 @@ dependencies = [
 
 [[package]]
 name = "gwt-git"
-version = "9.63.0"
+version = "9.64.0"
 dependencies = [
  "chrono",
  "dirs 6.0.0",
@@ -1441,7 +1441,7 @@ dependencies = [
 
 [[package]]
 name = "gwt-github"
-version = "9.63.0"
+version = "9.64.0"
 dependencies = [
  "gwt-core",
  "regex",
@@ -1454,7 +1454,7 @@ dependencies = [
 
 [[package]]
 name = "gwt-skills"
-version = "9.63.0"
+version = "9.64.0"
 dependencies = [
  "chrono",
  "fs2",
@@ -1471,7 +1471,7 @@ dependencies = [
 
 [[package]]
 name = "gwt-terminal"
-version = "9.63.0"
+version = "9.64.0"
 dependencies = [
  "gwt-core",
  "libc",
@@ -1488,7 +1488,7 @@ dependencies = [
 
 [[package]]
 name = "gwt-voice"
-version = "9.63.0"
+version = "9.64.0"
 dependencies = [
  "gwt-core",
  "tempfile",

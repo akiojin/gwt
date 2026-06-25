@@ -15,7 +15,9 @@
 //! - Block hook returning `Some(..)`   → 2 (block + stdout JSON)
 
 use chrono::Utc;
-use gwt::cli::hook::{event_dispatcher, runtime_state::RuntimeState, HookOutput};
+use gwt::cli::hook::{
+    event_dispatcher, runtime_state::RuntimeState, HookOutput, IntentBoundaryEvent,
+};
 use gwt::cli::{dispatch, TestEnv};
 use gwt_agent::{AgentId, Session, GWT_SESSION_ID_ENV, GWT_SESSION_RUNTIME_PATH_ENV};
 use gwt_core::skill_state::{self, SkillState};
@@ -352,7 +354,14 @@ fn event_dispatcher_session_start_fails_open_when_session_toml_is_corrupt() {
     )
     .expect("corrupt session TOML must not make SessionStart exit 1");
 
-    assert_eq!(output, HookOutput::Silent);
+    let HookOutput::HookSpecificAdditionalContext { event, text } = output else {
+        panic!("expected SessionStart metadata diagnostic");
+    };
+    assert_eq!(event, IntentBoundaryEvent::SessionStart);
+    assert!(
+        text.contains("provider session id from SessionStart was not persisted"),
+        "{text}"
+    );
     let runtime_raw = std::fs::read_to_string(&runtime_path).unwrap();
     let runtime_state: RuntimeState = serde_json::from_str(&runtime_raw).unwrap();
     assert_eq!(runtime_state.status, "Idle");

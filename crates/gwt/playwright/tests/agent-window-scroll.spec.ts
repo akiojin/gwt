@@ -51,6 +51,22 @@ test.describe("Agent window scrollback lifecycle", () => {
     await waitForScrollableTerminal(page, "agent-1");
     await expectWheelMovesScrollback(page, "agent-1");
   });
+
+  test("shows runtime error detail in the agent window and attention toast", async ({ page }) => {
+    await installEmbeddedRoutes(page);
+    await installAgentScrollBackend(page);
+    await page.goto(APP_URL);
+
+    await expect(page.locator(".workspace-window[data-id='agent-1']")).toBeVisible();
+    await emitTerminalStatus(page, "agent-1", "error", "Stop-block hit an error");
+
+    const window = page.locator(".workspace-window[data-id='agent-1']");
+    const overlay = window.locator(".terminal-overlay");
+    await expect(overlay).toBeVisible();
+    await expect(overlay.locator(".overlay-message")).toContainText("Stop-block hit an error");
+    await expect(window.locator(".status-chip")).toHaveAttribute("title", /Stop-block hit an error/);
+    await expect(page.locator(".attention-toast").first()).toContainText("Stop-block hit an error");
+  });
 });
 
 async function waitForScrollableTerminal(page: Page, windowId: string): Promise<void> {

@@ -243,6 +243,9 @@ impl AppRuntime {
     ) -> Vec<OutboundEvent> {
         self.log_window_launch_error("launch_complete", &window_id, &detail);
         let user_detail = Self::user_facing_launch_error_detail(&detail);
+        let issue_monitor_issue_number = launch_feedback_context
+            .as_ref()
+            .and_then(|context| context.issue_monitor_issue_number);
         let terminal_output =
             Self::launch_error_terminal_output_event(window_id.clone(), &user_detail);
         if self.tracked_window_exists(&window_id) {
@@ -254,6 +257,9 @@ impl AppRuntime {
                 Some(user_detail),
             );
             events.push(terminal_output);
+            if let Some(issue_number) = issue_monitor_issue_number {
+                events.extend(self.issue_monitor_launch_failed_events(issue_number, &detail));
+            }
             return events;
         }
         let mut events = Self::status_events(
@@ -270,6 +276,9 @@ impl AppRuntime {
                     message: user_detail,
                 },
             ));
+        }
+        if let Some(issue_number) = issue_monitor_issue_number {
+            events.extend(self.issue_monitor_launch_failed_events(issue_number, &detail));
         }
         events
     }
