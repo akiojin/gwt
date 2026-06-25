@@ -649,6 +649,29 @@ pub(super) fn frontend_user_action_log(event: &FrontendEvent) -> Option<Frontend
         FrontendEvent::PaneSendInput { session_id, .. } => {
             FrontendUserActionLog::new("pane_send_input", "terminal").target(session_id)
         }
+        FrontendEvent::SetIssueMonitorEnabled { enabled } => {
+            FrontendUserActionLog::new("set_issue_monitor_enabled", "issue_monitor")
+                .mode(if *enabled { "on" } else { "off" })
+        }
+        FrontendEvent::SetIssueMonitorMaxActiveAgents { max_active_agents } => {
+            FrontendUserActionLog::new("set_issue_monitor_max_active_agents", "issue_monitor")
+                .target(max_active_agents.to_string())
+        }
+        FrontendEvent::ReorderIssueMonitorIssues { issue_numbers } => {
+            FrontendUserActionLog::new("reorder_issue_monitor_issues", "issue_monitor")
+                .target(issue_numbers.len().to_string())
+        }
+        FrontendEvent::ListIssueMonitor => {
+            FrontendUserActionLog::new("list_issue_monitor", "issue_monitor")
+        }
+        FrontendEvent::IssueMonitorLaunchNow { issue_number, .. } => {
+            FrontendUserActionLog::new("issue_monitor_launch_now", "issue_monitor")
+                .target(issue_number.to_string())
+        }
+        FrontendEvent::IssueMonitorConfigureIssue { issue_number, .. } => {
+            FrontendUserActionLog::new("issue_monitor_configure_issue", "issue_monitor")
+                .target(issue_number.to_string())
+        }
         // These events can contain high-volume, high-frequency, or sensitive
         // payloads. They are handled by more specific logs or diagnostics.
         FrontendEvent::StartupAutoResumeReady { .. }

@@ -80,6 +80,14 @@ impl BroadcastHub {
         }
     }
 
+    pub(crate) fn receiver_count(&self, channel: &str) -> usize {
+        let guard = self.channels.lock().expect("BroadcastHub mutex poisoned");
+        guard
+            .get(channel)
+            .map(tokio::sync::broadcast::Sender::receiver_count)
+            .unwrap_or(0)
+    }
+
     /// Number of distinct channels currently tracked. Used by the
     /// daemon's status snapshot frame and by tests.
     pub(crate) fn channel_count(&self) -> usize {

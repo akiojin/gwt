@@ -22,6 +22,8 @@ pub mod handlers;
 pub mod index_search;
 pub mod index_worker;
 pub mod issue_cache;
+pub mod issue_monitor;
+pub mod issue_monitor_worker;
 pub mod knowledge_bridge;
 pub mod launch_wizard;
 pub mod managed_assets;
@@ -81,6 +83,15 @@ pub use index_worker::{
     IndexRebuildSpawner, ProjectIndexScopes, ProjectIndexStatusState, ProjectIndexStatusView,
     RebuildProgress, RebuildTarget, ScopeHealthView, WorktreeMeta, WorktreeProbeInput,
     WorktreeProbeOutcome,
+};
+pub use issue_monitor::{
+    is_auto_improve_candidate, issue_monitor_launch_plan, issue_monitor_launch_profile_summary,
+    issue_monitor_launch_prompt, issue_monitor_prefs_path_for_repo_path, load_issue_monitor_prefs,
+    save_issue_monitor_prefs, scan_issue_monitor_candidates, IssueMonitorConfig,
+    IssueMonitorFailedIssue, IssueMonitorInboxItem, IssueMonitorIssue, IssueMonitorIssueState,
+    IssueMonitorLaunchPlan, IssueMonitorLaunchProfile, IssueMonitorLaunchProfileSource,
+    IssueMonitorLaunchRequest, IssueMonitorLaunchedIssue, IssueMonitorPrefs,
+    IssueMonitorScanSummary, IssueMonitorState, IssueMonitorStatusView, MonitorInboxState,
 };
 pub use knowledge_bridge::{
     load_knowledge_bridge, refresh_knowledge_bridge_cache, search_knowledge_bridge,

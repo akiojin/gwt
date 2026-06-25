@@ -12,6 +12,7 @@ bash scripts/run-node-tests-with-linkedom.sh \
   crates/gwt/web/__tests__/launch-wizard-intake.test.mjs \
   crates/gwt/web/__tests__/operator-chrome-structure.test.mjs \
   crates/gwt/web/__tests__/operator-shell-runtime.test.mjs \
+  crates/gwt/web/__tests__/provider-usage-surface.test.mjs \
   crates/gwt/web/__tests__/operator-rail.test.mjs \
   crates/gwt/web/__tests__/board-surface.test.mjs \
   crates/gwt/web/__tests__/improvement-inbox-surface.test.mjs \
@@ -25,6 +26,7 @@ bash scripts/run-node-tests-with-linkedom.sh \
   crates/gwt/web/__tests__/workspace-kanban-surface.test.mjs \
   crates/gwt/web/__tests__/launch-pending-controller.test.mjs \
   crates/gwt/web/__tests__/workspace-resume-picker-pending.test.mjs \
+  crates/gwt/web/__tests__/issue-monitor-surface.test.mjs \
   crates/gwt/web/__tests__/connection-overlay.test.mjs \
   crates/gwt/web/__tests__/update-button.test.mjs \
   crates/gwt/web/__tests__/window-docking.test.mjs \

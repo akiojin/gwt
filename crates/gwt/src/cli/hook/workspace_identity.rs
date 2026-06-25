@@ -30,6 +30,14 @@ pub(crate) fn handle_session_start() -> Result<(), HookError> {
     let Some(session) = current_session_from_env()? else {
         return Ok(());
     };
+    if session.exact_resume_session_id().is_none() {
+        tracing::warn!(
+            gwt_session_id = %session.id,
+            agent_id = %session.agent_id.command(),
+            "workspace-registration skipped: SessionStart has no persisted provider session id"
+        );
+        return Ok(());
+    }
     ensure_coordination_assets_for_session(&session);
     let project_state_root = project_state_root_for_session(&session);
     let mut projection = load_or_default_workspace_projection(&project_state_root)?;

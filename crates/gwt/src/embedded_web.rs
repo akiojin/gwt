@@ -175,6 +175,8 @@ root_js_modules! {
     // interaction guard, field builders, transitions, renderLaunchWizard,
     // chrome listeners) extracted from app.js.
     "launch-wizard-surface.js" => "createLaunchWizardSurface",
+    // SPEC-3165 — Issue auto-improve monitor card, inbox, and toast surface.
+    "issue-monitor-surface.js" => "createIssueMonitorSurface",
     // SPEC-3064 Phase 3 (E6a) — File Tree window surface (tree state +
     // worktree picker + text/hex viewer + window mount) extracted from
     // app.js.

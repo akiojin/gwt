@@ -1,6 +1,152 @@
 # Changelog
 
 All notable changes to this project will be documented in this file.
+## [9.64.0] - 2026-06-25
+
+### Bug Fixes
+
+- Require SessionStart session id association
+- **hook:** Self-improvement Stop hook を古い gwtd でも graceful degrade させる (#3178)
+- Render issue monitor as canvas window
+- **test:** Set playwright project root
+- **windows:** Guard issue monitor daemon publish
+
+### Features
+
+- Add issue auto-improve monitor
+- Complete issue monitor auto queue
+
+### Miscellaneous Tasks
+
+- **work:** Record #3178 graceful-degradation lesson
+
+### Testing
+
+- **hook:** Guard managed-hook 生成コマンドが gwtd argv allowlist に収まることを検証 (#3178)
+
+## [9.63.0] - 2026-06-25
+
+### Bug Fixes
+
+- Windows バッジと一覧を全プロジェクトタブ横断に整合 (SPEC-3038)
+- Rail Windows バッジが非エージェントウィンドウ追加で更新されない問題を修正
+- **workspace:** Prune no-op project storage
+- **test:** Isolate project storage home
+- **skills:** Preserve managed skill parity
+- **migration:** Rollback で正規化前の fetch refspec を復元 (SPEC-1934)
+- **docs:** Drop broken rustdoc intra-doc link in migration backup (SPEC-1934)
+- **test:** Isolate in-process gwt home overrides
+- **test:** SessionStart 統合テストを Board provider 設定から hermetic 化
+- Mark stopped issue sessions as past
+- **workspace:** Shell Work が Active Work broadcast の retain で消える不具合を修正
+- **gui:** Launch wizard テレメトリ label に Hermes option アクションを追加
+- **gui:** Hermes options を flat 化（Advanced disclosure 廃止で wizard 不変条件に整合）
+- **agent:** OpenCode を opencode-ai npm パッケージ runner で起動可能にする
+- **gui:** Keep error toasts until dismissed; fixed width; newest-on-top stack
+- **gui:** Drop pinned transform layer hint from minimap world layer
+- Publish improvement candidate board updates
+- Expose improvement inbox preset
+- Separate improvement inbox metadata labels
+- Isolate gwt self-improvement hooks
+- **workspace:** Resume label and fresh wizard picker candidates (SPEC-2359 US-83)
+- **workspace:** Move remote-branch Start Work to the reachable Workspace surface (SPEC-2359 US-83)
+- **workspace:** Cap remote-branch rows to the 20 most recent (SPEC-2359 US-83)
+- **workspace:** Exclude dependency-bot branches from Start Work rows (SPEC-2359 US-83)
+- 空の per-project Board 設定では board.toml を作らず削除する
+- Improve release notes latest version handling
+- **usage:** Show provider account labels
+- **ui:** Align agent status vocabulary
+- Drop dead 'work' CLI verb that always returned UnknownSubcommand
+
+### Documentation
+
+- Command Rail の README 記述から Board / Logs を外す
+- **gwt-fix-issue:** 調査ゲート必須化・委譲/PR gate/完了チェックを SPEC-1935 規定に整合
+- **gwt-fix-issue:** SPEC-gap バグの routing を関連付け/新規作成の分岐で明確化
+- **gwt-verify:** E2E 選定を acceptance-aware にして全環境の検証取りこぼしを解消
+- Board provider のモジュールコメントを per-project 実態へ更新
+
+### Features
+
+- **gui:** Camera-focus canvas window model with Fleet Minimap
+- Link issue launch sessions in knowledge bridge
+- **gui:** Surface agent needs-input as a distinct loud telemetry state
+- **gui:** Add stop/stop-all/restart agent kill-switch protocol
+- **gui:** Wire anshin kill-switch UI + in-app attention toast
+- **gui:** Surface agent last activity on minimap and switcher
+- **gui:** Add mission convergence indicator to status strip
+- **workspace:** Start-Work Shell を Active Work projection の一級 Work として登録
+- **workspace:** Shell Work の status を live PTY から導出し Work 名を読みやすくする
+- **skills:** Hermes 隔離 HOME に認証情報を bridge し config を merge
+- **agent:** Hermes 起動オプション(provider/profile/toolsets/skills/max-turns/safe-mode)を反映
+- **gui:** Launch wizard に Hermes 起動オプションを反映
+- **gui:** Hermes options UX 改善（provider 動的列挙・フォント統一・Advanced 折りたたみ）
+- **gui:** Hermes 未設定検知のノンブロッキング案内バナーを追加
+- **gui:** Make the fleet minimap a centered radar with its own zoom
+- Add gwt improvement feedback loop
+- **gui:** OpenCode の Launch wizard 整合（model・未設定案内・setup launcher）
+- Improve improvement inbox review workflow
+- **workspace:** Add remote-branch start-work eligibility (SPEC-2359 US-83)
+- **workspace:** Add wizard SelectExistingBranch continue-on-branch action (SPEC-2359 US-83)
+- **workspace:** Carry start-work eligibility on branch payload (SPEC-2359 US-83)
+- **workspace:** Surface Start Work / Open on eligible remote branch rows (SPEC-2359 US-83)
+- **workspace:** Add Launch Wizard open-existing-branch picker (SPEC-2359 US-83)
+- **workspace:** Fetch origin on Branches load for fresh remote candidates (SPEC-2359 US-83)
+- **workspace:** Abstract remote/local in launch-facing branch display (SPEC-2359 US-83)
+- **workspace:** Show startable remote branches as Workspace list rows, not a toolbar picker (SPEC-2359 US-83)
+- **workspace:** Fold startable remote branches into the list with a scannable badge palette
+- Board remote をプロジェクト単位に分離する provider 解決層を追加
+- Gwtd board.config.show でプロジェクト単位の Board ルーティングを確認可能に
+- Board ウィンドウに per-project の宛先設定 UI（チップ + ポップオーバー）を追加
+
+### Miscellaneous Tasks
+
+- Record rail removal coordination state and node --test lesson
+- Record SPEC structured-merge lesson and session coordination state
+- **memory:** Record skill parity lesson
+- **work:** Record issue 3056 completion
+- **memory:** Record embedded route lesson
+- Record stop_all_runtimes join-wait flaky test lesson
+- **memory:** SPEC-2359 US-80 の projection モデル拡張と隔離検証の learning を記録
+- **memory:** 外部CLI連携の選択肢動的列挙・実バイナリ裏取りの教訓を記録
+- Record transform layer-hint policy lesson for minimap world layer
+- Record PR preflight workspace event
+- **memory:** SPEC-3151 OpenCode 整合の lesson を記録
+- Per-project Board UI 配置の判断を memory に記録
+- Record release notes work status
+- **launch:** Instrument frontend-event dispatch and index rebuild timing
+- **work:** Record completion event
+- **memory:** Record gated-session finisher-script pattern and gate bugs
+
+### Performance
+
+- **launch:** Cache Claude capability probes off the wizard-open path
+
+### Refactor
+
+- **ui:** Command Rail から Board / Logs を撤去
+- Remove 5 never-compiled orphan source files (1576 LOC dead code)
+- Remove in-file dead code (spawn_process_window, ResolvedPath fields, _layout_anchor, mk helper)
+- Drop now-unused ExtractedSection import after mk helper removal
+- Format sections_test import onto a single line
+
+### Testing
+
+- **playwright:** Restore embedded visual suite routes
+- **playwright:** Cover relative embedded route imports
+- **gui:** Project-tab-state-cue 刷新に追従し stale な Playwright を更新
+- **board:** Board.post / board.show の gwtd 統合テストを追加
+- **workspace:** Workspace.candidates / create / update の gwtd 統合テストを追加
+- **discuss:** Discuss.park/reject/clear_next_question の gwtd 統合テストを追加
+- Include improvement inbox in frontend runner
+- **workspace:** Playwright E2E proves Open a branch… is on the reachable surface (SPEC-2359 US-83)
+- Board 分離を実 HTTP 往復で確認する end-to-end テストを追加
+- Isolate stop dispatcher hook environment
+
+### Ci
+
+- **test:** Frontend unit/smoke と Playwright WebView E2E を CI で実行
+
 ## [9.62.0] - 2026-06-20
 
 ### Bug Fixes

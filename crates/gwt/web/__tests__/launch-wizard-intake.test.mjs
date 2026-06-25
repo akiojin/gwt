@@ -25,7 +25,8 @@ test("wizard surface dispatches set_initial_prompt and request_work_advisory", (
 
 test("intake panel is gated on the Start Work launch and is skippable copy", () => {
   assert.match(surface, /isStartWorkLaunch/);
-  assert.match(surface, /What are you working on\?/);
+  assert.match(surface, /Register an Issue/);
+  assert.match(surface, /Plan Agent/);
   assert.match(surface, /You can skip this/);
 });
 

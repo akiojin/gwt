@@ -7193,6 +7193,83 @@ Context: minimap centered-radar で .fleet-minimap__world に静的な transform
 Learning: このテストは frontend_styles_bundle() 全体を substring 検索するため、CSS 宣言だけでなくコメント内の同リテラル文字列も失敗させる。transform の layer hint は applyViewport が motion 中だけ JS で opt-in し 300ms で解除する設計ポリシー（恒久 pin 禁止）。
 Future Action: CSS で transform の layer hint を恒久 pin しない。コメントでも当該リテラル文字列を書かず言い換える。GPU レイヤが要る要素は JS の motion-scoped opt-in に倣う。
 
+## 2026-06-25 — Issue Monitor last settings must preserve runtime target
+
+Type: lesson
+Context: SPEC-3165 Issue Monitor automatic launch used Docker even after the user selected Host in the preceding launch flow.
+Learning: Issue Monitor's Start with last settings semantics must carry the runtime target as part of the launch profile. The normal Launch Wizard intentionally keeps cross-repo runtime selection separate, but Issue Monitor auto-launch needs a repo-local/fallback profile so Host is not overwritten by Docker context defaults.
+Future Action: When changing Issue Monitor auto-launch or Launch Wizard profile plumbing, add a regression that exercises Docker context present plus previous Host settings and asserts auto-launch stays Host.
+
+## 2026-06-25 — Issue Monitor claim auth failure is not a scan failure
+
+Type: lesson
+Context: SPEC-3165 Issue Monitor browser verification showed a red `GitHub auth failed: authentication required` banner even though cached Issues were listed correctly. The failure came from the just-in-time GitHub claim client initialization, not from Issue scanning or cache fallback.
+Learning: Do not store claim-auth unavailability in `IssueMonitorStatusView.last_error`; that field renders as a fatal red scan error in the UI. Preserve the cached queue, keep rows queued, and expose a non-fatal `auth_required` state so automatic launch stays blocked without hiding the queue.
+Future Action: When changing Issue Monitor scan/claim flows, test cache-only environments and assert Start keeps the queue visible without a red auth banner. Keep claim enforcement enabled; do not auto-launch without acquiring a GitHub claim.
+
+## 2026-06-25 — UI CSS must compose Operator tokens and modal primitives
+
+Type: failure pattern
+Context: SPEC-3165 Issue Monitor UI initially shipped injected CSS with raw colors and a bespoke detail modal overlay. User review caught that it did not follow Operator design rules.
+Learning: For gwt WebView UI, new surface CSS must use tokens.css/typography tokens and dialogs must compose .modal-backdrop/.modal-shell/.modal-header/.modal-body/.modal-footer. Test helpers must not globally hide .modal-backdrop because that masks shared primitive adoption.
+Future Action: Before implementing or verifying a UI surface, add/adjust frontend contract tests for raw color rejection and shared modal primitive usage, then run Playwright against a fresh browser-check URL.
+
+## 2026-06-25 — Issue Monitor live E2E needs clean backend state and issue cache
+
+Type: failure pattern
+Context: SPEC-3165 verification: fresh browser-check with isolated HOME showed Issue Monitor rows as 0 until ~/.gwt/cache/issues was symlinked; full Playwright visual run also failed after unrelated live specs left Console/Wizard windows over the Issue Monitor.
+Learning: Issue Monitor live E2E must run against the real checkout via GWT_PLAYWRIGHT_PROJECT_ROOT and a fresh isolated gwt process with issue cache available. Full visual live specs share app state and can interfere with each other; target Issue Monitor E2E should be run in a clean process for reliable evidence.
+Future Action: For Issue Monitor verification, start a fresh browser-check process, symlink ~/.gwt/cache/issues into the isolated HOME when GitHub auth is unavailable, set GWT_PLAYWRIGHT_PROJECT_ROOT to the checkout, run issue-monitor-live.spec.ts first, and restart before user visual handoff.
+
+## 2026-06-25 — browser-check isolated HOME needs GH_TOKEN for GitHub-backed UI
+
+Type: postmortem
+Context: Issue Monitor visual verification used browser-check with an isolated HOME. Host `gh auth status` passed, but inside the fresh HOME `gh auth token` failed because the GitHub CLI keyring/default account state did not follow HOME cleanly.
+Learning: For GitHub-backed UI checks such as Issue Monitor, browser-check must resolve the host token before switching HOME and pass it as `GH_TOKEN` to the fresh gwt process. Git HTTPS checks can still rely on the host Git credential helper when `git ls-remote origin HEAD` succeeds.
+Future Action: When launching fresh gwt for Issue Monitor verification, run `GWT_CHECK_GH_TOKEN=$(gh auth token 2>/dev/null || true)` before changing HOME and pass `GH_TOKEN` to the process without printing it. Verify with isolated `gh auth token >/dev/null` and `curl -fsS -I <url>`.
+
+## 2026-06-25 — Issue Monitor auto-launch must gate unconfigured launches and inject prompt before last-settings resolution
+
+Type: lesson
+Context: SPEC-3165 Issue Monitor auto-improvement loop. User reported that auto-start opened multiple configuration windows when max_active_agents >= 2 and that launched Codex agents reached the picker without the expected prompt.
+Learning: The scheduler can claim multiple issues before a launch profile exists, and StartWithLastSettings resolves LaunchConfig immediately when runtime context is already resolved. If SetInitialPrompt is applied after StartWithLastSettings, the auto-launched agent can start without $gwt-build-spec/$gwt-fix-issue input.
+Future Action: For monitor-style background launches, cap auto-claimed launches to 1 until a saved/inherited launch profile exists, guard against opening a second settings wizard, and always SetInitialPrompt before applying StartWithLastSettings or resolving launch config.
+
+## 2026-06-25 — Issue Monitor launch state must be ordered after real window launch request
+
+Type: bugfix
+Context: SPEC-3165 Issue Monitor showed Launching even when no agent window existed, and launch success could leave local state reconstructed as Launching.
+Learning: Emit issue_monitor_launch_request before any Launching status snapshot, persist launched window ids, and treat Launched rows as active capacity until the work actually stops. Do not clear active capacity at launch success just to drain the queue.
+Future Action: For Issue Monitor auto-run changes, test both daemon and local GUI event order plus persisted prefs reconstruction. Include a live browser-check that confirms an agent window exists before/with Launching and the row transitions to Launched/Active.
+
+## 2026-06-25 — Set GWT_PLAYWRIGHT_PROJECT_ROOT for live Playwright specs
+
+Type: verification
+Context: Issue Monitor live Playwright E2E in scripts/run-visual-tests.sh
+Learning: scripts/run-visual-tests.sh runs Playwright from a temporary RUN_DIR, so live-gwt helper defaults process.cwd() to that temp dir unless GWT_PLAYWRIGHT_PROJECT_ROOT is set. This makes Issue Monitor open the wrong project and show 0 issues even when the isolated HOME has a populated issue cache.
+Future Action: For live gwt Playwright specs that call openLiveGwtProject, always pass GWT_PLAYWRIGHT_PROJECT_ROOT=<repo checkout path> together with GWT_PLAYWRIGHT_BASE_URL.
+
+## 2026-06-25 — Verify visible error-detail surfaces, not just status state
+
+Type: verification
+Context: SPEC-3165 Issue Monitor auto-launch agent runtime errors
+Learning: A runtime error detail can be present in frontend state or DOM but still be invisible when the terminal overlay visibility guard stays false and toasts ignore status detail. Status badges alone are insufficient for user-visible diagnostics.
+Future Action: When fixing agent/runtime error UX, add E2E or browser checks that assert the concrete error message is visible in the agent window and toast, not only that the state badge says Error.
+
+## 2026-06-25 — Issue Monitor manual launches must retain issue feedback context
+
+Type: postmortem
+Context: SPEC-3165 Issue Monitor manual Launch now showed Agent windows/errors while queue rows stayed Queued.
+Learning: Issue Monitor manual launch uses the normal Launch Wizard path, so the wizard session must retain the originating issue number and copy it into LaunchFeedbackContext on frontend LaunchWizardAction submit. Tests must exercise FrontendEvent::LaunchWizardAction, not the no-client helper, or feedback context is intentionally absent.
+Future Action: For Issue Monitor launch-state bugs, add a RED Rust test that follows IssueMonitorLaunchNow -> frontend LaunchWizardAction submits -> pending_launch_feedback_contexts and verifies issue_monitor_issue_number is Some(issue).
+
+## 2026-06-25 — Issue Monitor stale launching without launch settings
+
+Type: failure-pattern
+Context: Issue Monitor showed Launching/Active and Status Strip IDLE 1 even though no agent window existed.
+Learning: The monitor loop must not claim GitHub Issues until a saved or previous launch profile is available. UI agent counters must be derived from real agent counts, not empty Work projection status categories.
+Future Action: When changing Issue Monitor auto-run logic, add tests for no-profile capacity 0, no GitHub claim/comment creation, and Status Strip zero-agent telemetry before manual/browser verification.
+
 ## 2026-06-24 — Keep gwt self-improvement stop hooks repo-local
 
 Type: agent workflow correction
@@ -7284,6 +7361,13 @@ Context: SPEC-3151 作業中、PR の develop merge が .gwt/work/{events.jsonl,
 Learning: memory.md は管理対象。merge を阻むのは events.jsonl(ランタイム)だけ。memory.md の追記は checkout で捨てず、stash か別コミットで保全する。failure/lesson 系の作業成果は最後に必ず memory.md を commit して PR に含める。
 Future Action: merge unblock では git checkout の対象を events.jsonl 等の純ランタイムに限定し memory.md は除外する。作業完了時に memory.md の差分を確認し、未コミットなら chore(memory) で commit+PR する。
 
+## 2026-06-25 — owner 未リンクの gated セッションは finisher script(.md・CRLF対応) を user shell で走らせて実装する
+
+Type: lesson
+Context: owner Issue 未リンクの gwt セッションで dead-code cleanup を依頼された。managed hook workflow_policy が全 .rs 編集・git commit・bash script・issue.create を permissionDecision:deny でハード拒否し、エージェントは実装系を一切実行できなかった。owner linkage は session.linked_issue_number / issue-links store(~/.gwt 配下=worktree 外) への書き込みが必要で、いずれもゲート対象。さらに最初の finisher script が CRLF ファイルに LF 検索文字列で 0 マッチして失敗した。
+Learning: ゲート対象はエージェントのツール呼び出しのみで、user が自分のターミナルで走らせる bash script はゲート対象外。完全な finisher script を tasks/ に書き user に 1 コマンドで実行させれば commit/.rs 編集/push まで通る。ただし: (1) doc 例外の prefix 判定が "tasks/"(前方 slash) で Windows 相対パスは tasks\(backslash) のため .sh は書けず .md 名にする(bash は拡張子非依存で実行可)。(2) deny メッセージは gwt-register-issue を案内するのに issue.create 自体が deny される自己矛盾(owner を CLI で作成・リンクできない)。(3) core.autocrlf=true の repo では node の文字列置換は CRLF↔LF 正規化必須。冪等化(git ls-files --error-unmatch で既コミット判定)と各編集の exact-match アサーションで安全に再実行できる。
+Future Action: gated ownerless セッションで実装を頼まれたら、tasks/<name>.md に CRLF-aware・冪等・正確一致アサーション付きの finisher script を書き、user に `bash tasks/<name>.md` を実行してもらう。issue.create の gate-deny と Windows tasks/ prefix(doc 例外) bug は gwt 側の別 fix Issue 候補。
+
 ## 2026-06-24 — issue.spec.edit replaces entire sections
 
 Type: agent workflow correction
@@ -7353,3 +7437,17 @@ Type: ui-regression
 Context: SPEC-2008 camera framing and surface audit, 2026-06-26
 Learning: Camera framing cannot rely only on persisted world geometry. Compact or tiled surfaces may render with CSS min sizes larger than stored geometry, and focus_window echoes can race with local camera updates. Desktop cascade placement also needs bounds-aware slot wrapping rather than unbounded diagonal steps.
 Future Action: For surface framing regressions, add RED tests for rendered layout size, local viewport reservation before focus_window, host viewport resize reframe, and bounds-aware initial placement. Verify with fresh browser-check Playwright audit across desktop and mobile before declaring UI complete.
+
+## 2026-06-26 — SessionStart id 欠落は No session fallback ではなく関連付け破綻として扱う
+
+Type: lesson
+Context: Hooks/Resume 調査で、Claude Code / Codex は SessionStart で provider session id を渡す前提なのに Workspace detail が No session yet + Resume を表示しうることが分かった。
+Learning: SessionStart で provider session id が無い、または id が session TOML の agent_session_id/session_history に保存されない状態は正常な空状態ではなく、gwt session と provider conversation の関連付け破綻である。UI で Resume を隠すだけでは根本対策にならない。
+Future Action: Resume/Workspace session 欠落の修正では、SessionStart payload → session TOML → Workspace projection/view の順に実データを確認し、id 欠落時は hook additionalContext と diagnostic に集約して通常の resumable agent として登録しない。
+
+## 2026-06-26 — Hook 'legacy argv' 失敗はまず installed binary version を疑う
+
+Type: lesson
+Context: Issue #3178: self-improvement Stop hook が 'legacy argv invocation is disabled' で毎回失敗。Issue 本文は『gwtd が legacy argv を廃止したので生成側を stdin JSON envelope 化すべき』と提案していた。
+Learning: hook transport は『argv でルーティング + stdin で payload』設計で、gwtd の is_allowed_argv_exception (crates/gwt/src/bin/gwtd.rs) が hook event/<gwt-self-improvement-stop>/provider-event を意図的に許可する Managed hook transport exception。真因は生成側の drift ではなく、インストール済み binary が古かったこと(v9.61.0 は gwt-self-improvement-stop 例外未対応、ae058ced5/v9.63.0 で追加)。stdin JSON 化提案は transport 設計と衝突する誤り。
+Future Action: hook の 'legacy argv invocation is disabled' を見たら、(1) `gwtd --version` で installed binary を確認し source の is_allowed_argv_exception と突き合わせる、(2) 現行ソースを build して round-trip で再現可否を確認する、(3) 生成側を stdin JSON 化しない。再発防止は generated managed-hook command を実 binary に通す回帰ガード(generated_managed_hook_commands_stay_within_gwtd_argv_allowlist)で担保済み。

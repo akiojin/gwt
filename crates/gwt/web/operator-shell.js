@@ -180,18 +180,18 @@ export function applyTelemetryCounts(doc, counts = {}) {
     const el = doc.getElementById(id);
     if (el) el.textContent = String(v);
   };
-  // SPEC-2356 — toggle the blocked alert state so the BLOCKED cell pulses when
-  // anything actually needs attention, and stays still otherwise. FR-039 (anshin)
+  // SPEC-2356 — toggle the ERROR alert state so the ERROR cell pulses when a
+  // runtime error needs attention, and stays still otherwise. FR-039 (anshin)
   // applies the same alert toggle to the WAITING cell so "agents waiting for
-  // input" is just as loud as blocked.
+  // input" is just as loud as runtime errors.
   const toggleAlert = (modifier, count) => {
     const cell = doc.querySelector(`.op-status-strip__cell--${modifier}`);
     if (!cell) return;
     if ((count ?? 0) > 0) cell.classList.add("op-status-strip__cell--alert");
     else cell.classList.remove("op-status-strip__cell--alert");
   };
-  if ("blocked" in counts) toggleAlert("blocked", counts.blocked);
-  if ("needs_input" in counts) toggleAlert("waiting", counts.needs_input);
+  if ("error" in counts) toggleAlert("error", counts.error);
+  if ("waiting" in counts) toggleAlert("waiting", counts.waiting);
   // FR-047 (anshin): MISSION convergence indicator. Shows done/total agents so
   // the operator can see the fleet trending toward completion at a glance, and
   // flips a positive "complete" state (not an alert pulse) when every agent has
@@ -210,11 +210,11 @@ export function applyTelemetryCounts(doc, counts = {}) {
   // SPEC-2356 operator chrome cleanup: the dead Sidebar Layers rows and their
   // per-layer counters are removed; telemetry now lives solely in the Status
   // Strip cells below.
-  setText("op-strip-active", counts.active ?? 0);
+  setText("op-strip-running", counts.running ?? 0);
   setText("op-strip-idle", counts.idle ?? 0);
   // FR-039 (anshin): WAITING cell counts agents waiting on the operator.
-  setText("op-strip-waiting", counts.needs_input ?? 0);
-  setText("op-strip-blocked", counts.blocked ?? 0);
+  setText("op-strip-waiting", counts.waiting ?? 0);
+  setText("op-strip-error", counts.error ?? 0);
   if ("branches" in counts) setText("op-strip-branches", counts.branches ?? "—");
   // SPEC-3038 AS-1.4: the rail Windows item badges the open-window count.
   if ("windows" in counts) {
@@ -225,6 +225,64 @@ export function applyTelemetryCounts(doc, counts = {}) {
       badge.hidden = value <= 0;
     }
   }
+}
+
+export function applyIssueMonitorStatus(doc, status = {}) {
+  const cell = doc.getElementById("op-strip-issue-monitor");
+  const value = doc.getElementById("op-strip-issue-monitor-value");
+  if (!cell || !value) return;
+
+  wireIssueMonitorStatusCell(doc, cell);
+  const view = issueMonitorStatusStripView(status);
+  value.textContent = view.value;
+  cell.dataset.state = view.state;
+  cell.setAttribute("aria-label", `Issue Monitor: ${view.value}`);
+  cell.setAttribute("title", view.title);
+  if (view.alert) {
+    cell.classList.add("op-status-strip__cell--alert");
+  } else {
+    cell.classList.remove("op-status-strip__cell--alert");
+  }
+}
+
+function wireIssueMonitorStatusCell(doc, cell) {
+  if (cell.dataset.issueMonitorBound === "true") return;
+  cell.dataset.issueMonitorBound = "true";
+  cell.addEventListener("click", () => {
+    doc.dispatchEvent(new CustomEvent("op:command", { detail: { id: "open-issue-monitor" } }));
+  });
+}
+
+function issueMonitorStatusStripView(status = {}) {
+  const enabled = Boolean(status.enabled);
+  const rawState = String(status.state || (enabled ? "idle" : "disabled"));
+  const state = enabled ? rawState : "disabled";
+  const queue = Math.max(0, Number(status.queue_len || 0));
+  const active = Math.max(0, Number(status.active_count || 0));
+  const maxActive = Math.max(1, Number(status.max_active_agents || 1));
+
+  if (state === "disabled") {
+    return {
+      state,
+      value: "Off",
+      title: "Issue Monitor: Off",
+      alert: false,
+    };
+  }
+
+  let label = "Idle";
+  if (state === "error") label = "Error";
+  else if (state === "auth_required") label = "Auth";
+  else if (state === "launching" || state === "active") label = "Run";
+
+  const value = `${label} Q${queue} A${active}/${maxActive}`;
+  const lastError = typeof status.last_error === "string" ? status.last_error.trim() : "";
+  return {
+    state,
+    value,
+    title: lastError ? `Issue Monitor: ${value} | ${lastError}` : `Issue Monitor: ${value}`,
+    alert: state === "error" || state === "auth_required",
+  };
 }
 
 // ------------------------------------------------------------

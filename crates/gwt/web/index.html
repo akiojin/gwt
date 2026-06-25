@@ -286,9 +286,9 @@
             <span class="op-status-strip__live-dot" aria-hidden="true"></span>
             <span class="op-status-strip__label" data-role="connection-label">ONLINE</span>
           </div>
-          <div class="op-status-strip__cell op-status-strip__cell--active">
-            <span class="op-status-strip__label">ACTIVE</span>
-            <span class="op-status-strip__value" id="op-strip-active" aria-label="Active agents">0</span>
+          <div class="op-status-strip__cell op-status-strip__cell--running">
+            <span class="op-status-strip__label">RUNNING</span>
+            <span class="op-status-strip__value" id="op-strip-running" aria-label="Running agents">0</span>
           </div>
           <div class="op-status-strip__cell op-status-strip__cell--idle">
             <span class="op-status-strip__label">IDLE</span>
@@ -298,9 +298,9 @@
             <span class="op-status-strip__label">WAITING</span>
             <span class="op-status-strip__value" id="op-strip-waiting" aria-label="Agents waiting for input">0</span>
           </div>
-          <div class="op-status-strip__cell op-status-strip__cell--blocked">
-            <span class="op-status-strip__label">BLOCKED</span>
-            <span class="op-status-strip__value" id="op-strip-blocked" aria-label="Blocked agents">0</span>
+          <div class="op-status-strip__cell op-status-strip__cell--error">
+            <span class="op-status-strip__label">ERROR</span>
+            <span class="op-status-strip__value" id="op-strip-error" aria-label="Agents with runtime errors">0</span>
           </div>
           <div class="op-status-strip__cell op-status-strip__cell--mission">
             <span class="op-status-strip__label">MISSION</span>
@@ -310,6 +310,21 @@
             <span class="op-status-strip__label">WORK</span>
             <span class="op-status-strip__value" id="op-strip-branches" aria-label="Work">—</span>
           </div>
+          <button
+            type="button"
+            class="op-status-strip__cell op-status-strip__cell--issue-monitor"
+            id="op-strip-issue-monitor"
+            data-state="disabled"
+            aria-label="Issue Monitor: Off"
+            title="Issue Monitor: Off"
+          >
+            <span class="op-status-strip__label">MONITOR</span>
+            <span
+              class="op-status-strip__value"
+              id="op-strip-issue-monitor-value"
+              aria-label="Issue Monitor status"
+            >Off</span>
+          </button>
           <div
             class="op-status-strip__cell op-status-strip__cell--runtime-health"
             id="op-strip-runtime-health"
@@ -514,6 +529,13 @@
                 <span class="preset-button__text">
                   <strong>Workspace</strong>
                   <span>Open the Workspace overview</span>
+                </span>
+              </button>
+              <button class="preset-button" data-preset="issue_monitor" data-category="surface">
+                <span class="preset-button__icon" aria-hidden="true">◈</span>
+                <span class="preset-button__text">
+                  <strong>Issue Monitor</strong>
+                  <span>Watch Issues and launch agents</span>
                 </span>
               </button>
               <button class="preset-button" data-preset="improvement" data-category="surface">

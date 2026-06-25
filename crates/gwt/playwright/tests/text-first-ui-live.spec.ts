@@ -5,7 +5,7 @@
  * composited by a headed browser.
  */
 import { expect, test } from "@playwright/test";
-import { gotoLiveGwt } from "./_helpers/live-gwt";
+import { gotoLiveGwt, suppressInitialFrontendReady } from "./_helpers/live-gwt";
 
 const BASE = process.env.GWT_PLAYWRIGHT_BASE_URL ?? "http://127.0.0.1:0/";
 
@@ -15,7 +15,12 @@ test.describe("Text-first UI live readability", () => {
   test("workspace windows remain fully opaque across Light/Dark themes", async ({
     page,
   }, testInfo) => {
+    await suppressInitialFrontendReady(page);
     await gotoLiveGwt(page, BASE, { enableTestBridge: true });
+
+    const theme = testInfo.project.name.includes("light") ? "light" : "dark";
+    await page.locator(`#op-theme-toggle [data-theme-value="${theme}"]`).click();
+    await expect(page.locator("html")).toHaveAttribute("data-theme", theme);
 
     await page.evaluate(() => {
       window.dispatchEvent(
@@ -82,10 +87,6 @@ test.describe("Text-first UI live readability", () => {
         }),
       );
     });
-
-    const theme = testInfo.project.name.includes("light") ? "light" : "dark";
-    await page.locator(`#op-theme-toggle [data-theme-value="${theme}"]`).click();
-    await expect(page.locator("html")).toHaveAttribute("data-theme", theme);
 
     for (const id of ["text-first-idle-agent", "text-first-starting-agent"]) {
       const workspaceWindow = page.locator(`.workspace-window[data-id="${id}"]`);

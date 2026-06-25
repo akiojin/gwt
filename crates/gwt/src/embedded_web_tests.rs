@@ -99,6 +99,9 @@ fn frontend_bundle_source() -> &'static str {
         // app.js.
         include_str!("../web/launch-wizard-surface.js"),
         "\n",
+        // SPEC-3165 — Issue auto-improve monitor card/inbox/toast surface.
+        include_str!("../web/issue-monitor-surface.js"),
+        "\n",
         // SPEC-3064 Phase 3 (E6a) — File Tree window surface moved out of
         // app.js.
         include_str!("../web/file-tree-surface.js"),
@@ -175,6 +178,90 @@ fn embedded_web_terminal_copy_shortcut_module_is_registered() {
     assert!(
         paths.contains(&"/terminal-copy-shortcut.js"),
         "expected terminal copy shortcut helper to be served as a root JS module",
+    );
+}
+
+#[test]
+fn embedded_web_issue_monitor_surface_is_registered_and_wired() {
+    let paths: Vec<&str> = root_js_module_assets()
+        .iter()
+        .map(|asset| asset.path)
+        .collect();
+    assert!(
+        paths.contains(&"/issue-monitor-surface.js"),
+        "issue monitor surface must be served as a root JS module"
+    );
+
+    let html = app_js();
+    assert!(
+        html.contains("createIssueMonitorSurface"),
+        "app.js must import and instantiate the issue monitor surface"
+    );
+    assert!(
+        html.contains("issueMonitorSurface"),
+        "issue monitor surface must be reachable through frontendUnits"
+    );
+    assert!(
+        html.contains("surface === \"issue-monitor\""),
+        "Issue Monitor must mount through the canvas window body surface path"
+    );
+    assert!(
+        index_html().contains("data-preset=\"issue_monitor\""),
+        "Issue Monitor must be available through the same Add Window preset flow as other canvas windows"
+    );
+    let surface_js = root_js_module_source("/issue-monitor-surface.js");
+    assert!(
+        surface_js.contains("mount(body"),
+        "issue monitor surface must expose a window-body mount API"
+    );
+    assert!(
+        !surface_js.contains("position: fixed"),
+        "Issue Monitor must not render as a fixed overlay card"
+    );
+    assert!(
+        html.contains("case \"issue_monitor_status\""),
+        "app.js must handle issue monitor status events"
+    );
+    assert!(
+        html.contains("case \"issue_monitor_inbox\""),
+        "app.js must handle issue monitor inbox events"
+    );
+    assert!(
+        html.contains("case \"issue_monitor_toast\""),
+        "app.js must handle issue monitor toast events"
+    );
+}
+
+#[test]
+fn embedded_web_issue_monitor_surface_exposes_priority_and_concurrency_controls() {
+    let surface_js = root_js_module_source("/issue-monitor-surface.js");
+
+    assert!(
+        surface_js.contains("set_issue_monitor_max_active_agents"),
+        "Issue Monitor must let users change max active agents"
+    );
+    assert!(
+        surface_js.contains("reorder_issue_monitor_issues"),
+        "Issue Monitor must send priority reorder events"
+    );
+    assert!(
+        surface_js.contains("↑")
+            && surface_js.contains("↓")
+            && surface_js.contains("Move up")
+            && surface_js.contains("Move down"),
+        "Issue Monitor queue must expose icon priority controls with accessible labels"
+    );
+    assert!(
+        surface_js.contains("Start") && surface_js.contains("Stop"),
+        "Issue Monitor processing control must use Start/Stop labels"
+    );
+    assert!(
+        surface_js.contains("Configure"),
+        "Issue Monitor queue must let users configure queued Issue work before processing"
+    );
+    assert!(
+        surface_js.contains("No queued issues"),
+        "Issue Monitor empty state must describe the all-Issue queue, not watched labels"
     );
 }
 
@@ -1429,7 +1516,7 @@ fn embedded_web_agent_runtime_maps_idle_to_idle_telemetry() {
 }
 
 #[test]
-fn embedded_web_agent_runtime_maps_starting_separately() {
+fn embedded_web_agent_runtime_maps_starting_to_running_telemetry() {
     // SPEC-3015: the starting state ships through the generated contract and
     // the extracted window-runtime-state.js module (US-69).
     let runtime_js = window_runtime_state_js();
@@ -1440,8 +1527,12 @@ fn embedded_web_agent_runtime_maps_starting_separately() {
         "expected the generated protocol enum contract to carry the starting wire state (US-69)",
     );
     assert!(
-        runtime_js.contains("case \"starting\":") && runtime_js.contains("return \"not_started\";"),
-        "expected the starting runtime state to map onto the separate not_started telemetry rim",
+        runtime_js.contains("case \"starting\":") && runtime_js.contains("return \"running\";"),
+        "expected the starting runtime state to aggregate into running telemetry",
+    );
+    assert!(
+        !runtime_js.contains("return \"not_started\";"),
+        "starting must not reintroduce the retired not_started Status Strip telemetry",
     );
     assert!(
         html.contains(".status-chip.starting .status-dot"),
@@ -2735,8 +2826,8 @@ fn embedded_web_start_work_mode_hides_branch_controls_in_shared_wizard_renderer(
     );
     assert!(
         html.contains("launchWizard.show_branch_controls !== false")
-            && html.contains("Work launch"),
-        "expected Start Work wizard mode to suppress branch controls and branch-oriented meta copy",
+            && html.contains("Plan Agent launch"),
+        "expected Start Work wizard mode to suppress branch controls and use Plan Agent meta copy",
     );
     assert!(
         !html.contains("isStartWorkMode")
@@ -3325,6 +3416,7 @@ fn embedded_web_window_surface_enum_aligns_with_js_preset_surface() {
         (WindowSurface::Work, "work"),
         (WindowSurface::AgentKanban, "agent-kanban"),
         (WindowSurface::Console, "console"),
+        (WindowSurface::IssueMonitor, "issue-monitor"),
         (WindowSurface::Mock, "mock"),
     ];
 

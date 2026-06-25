@@ -6,10 +6,8 @@ use std::{
 };
 
 use gwt_agent::PendingDiscussionResume;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
-
-use super::runtime_state::RuntimeState;
 
 const SLOW_HANDLER_THRESHOLD_MS: f64 = 1000.0;
 const MANAGED_EVENTS: &[&str] = &[
@@ -97,6 +95,18 @@ pub struct ManagedHookRepairOutcome {
     pub repaired: bool,
 }
 
+#[derive(Debug, Deserialize)]
+struct RuntimeStateReadModel {
+    pub status: String,
+    pub updated_at: String,
+    #[allow(dead_code)]
+    pub last_activity_at: String,
+    #[serde(default)]
+    pub source_event: Option<String>,
+    #[serde(default)]
+    pub pending_discussion: Option<PendingDiscussionResume>,
+}
+
 pub fn read_managed_hook_health(input: &ManagedHookHealthInput) -> ManagedHookHealth {
     let mut health = ManagedHookHealth {
         status: ManagedHookHealthStatus::Ready,
@@ -136,8 +146,12 @@ pub fn read_managed_hook_health(input: &ManagedHookHealthInput) -> ManagedHookHe
 
     match read_runtime_state(runtime_state_path) {
         Ok(runtime_state) => {
-            health.last_event = Some(runtime_state.source_event);
-            health.last_event_at = Some(runtime_state.updated_at);
+            if let Some(source_event) = runtime_state.source_event {
+                health.last_event = Some(source_event);
+                health.last_event_at = Some(runtime_state.updated_at);
+            } else if health.status == ManagedHookHealthStatus::Ready {
+                health.status = ManagedHookHealthStatus::WaitingForFirstHookEvent;
+            }
             health.pending_discussion = runtime_state.pending_discussion;
             if runtime_state.status == "Stopped" && health.status == ManagedHookHealthStatus::Ready
             {
@@ -367,7 +381,7 @@ fn degraded(health: &mut ManagedHookHealth, issue: impl Into<String>) {
     health.issues.push(issue.into());
 }
 
-fn read_runtime_state(path: &Path) -> Result<RuntimeState, String> {
+fn read_runtime_state(path: &Path) -> Result<RuntimeStateReadModel, String> {
     let raw = fs::read_to_string(path).map_err(|error| error.to_string())?;
     serde_json::from_str(&raw).map_err(|error| error.to_string())
 }
