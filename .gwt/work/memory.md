@@ -7410,6 +7410,13 @@ Context: SPEC-3164 Improvement Inbox visual verification: backend dismiss update
 Learning: For local review actions that succeed through a backend write and then refresh asynchronously, the surface should reconcile the visible local state immediately after confirmation. Otherwise a dropped websocket reply, process restart, or delayed snapshot leaves the UI looking unchanged even when the store has changed.
 Future Action: When adding approve/reject style review queues, add focused UI tests that assert post-confirm local state transitions before any backend snapshot arrives, and separately verify backend persistence.
 
+## 2026-06-26 — SessionStart id 欠落は No session fallback ではなく関連付け破綻として扱う
+
+Type: lesson
+Context: Hooks/Resume 調査で、Claude Code / Codex は SessionStart で provider session id を渡す前提なのに Workspace detail が No session yet + Resume を表示しうることが分かった。
+Learning: SessionStart で provider session id が無い、または id が session TOML の agent_session_id/session_history に保存されない状態は正常な空状態ではなく、gwt session と provider conversation の関連付け破綻である。UI で Resume を隠すだけでは根本対策にならない。
+Future Action: Resume/Workspace session 欠落の修正では、SessionStart payload → session TOML → Workspace projection/view の順に実データを確認し、id 欠落時は hook additionalContext と diagnostic に集約して通常の resumable agent として登録しない。
+
 ## 2026-06-26 — Hook 'legacy argv' 失敗はまず installed binary version を疑う
 
 Type: lesson
