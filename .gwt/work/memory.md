@@ -7339,3 +7339,10 @@ Type: failure pattern
 Context: During the 2026-06-25 UI/UX Playwright audit, the post-click update failed modal rendered correctly but the bottom-right update CTA stayed in the stale `applying` state with text `Applying update...` after `update_apply_error`.
 Learning: A modal transition alone is not enough for the update UX; the persistent CTA is also visible and must mirror the same failure/ready/downloading state. `handleUpdateApplyError` should move CTA to `error`, and retry paths must explicitly restore `applying` before returning to the download modal.
 Future Action: When changing update modal flows, assert both `#update-modal` state and `#update-cta` `data-status`/text in unit and Playwright tests, then verify with a fresh rebuilt gwt screenshot.
+
+## 2026-06-25 — Mobile overlays need rail-safe viewport clamping
+
+Type: failure-pattern
+Context: Project Switcher mobile audit showed the panel first clipped off the left side at 390px. A viewport-only clamp moved it to x=12 but the fixed command rail still covered the left edge, hiding the OPEN PROJECTS heading.
+Learning: For mobile overlays in gwt, viewport bounds are not enough when persistent chrome such as #op-rail occupies part of the visual area. Clamp floating panels against the usable safe area, including rail/sidebar bounds, and verify with screenshots rather than only bounding boxes.
+Future Action: When adding or auditing floating panels/popovers on compact viewports, measure persistent chrome (for example #op-rail) and assert the panel stays inside that safe area. Include Playwright screenshots after any viewport-clamp fix to catch overlap that numeric viewport checks may miss.

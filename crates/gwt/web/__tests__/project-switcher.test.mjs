@@ -5,6 +5,7 @@ import { parseHTML } from "linkedom";
 
 import {
   buildProjectSwitcherRows,
+  computeProjectSwitcherPanelPlacement,
   createProjectSwitcherController,
   nextProjectTabId,
   shouldHandleProjectSwitcherShortcut,
@@ -191,6 +192,106 @@ test("project switcher controller renders rows, clears unread on project select,
     .dispatchEvent(new document.defaultView.Event("click", { bubbles: true }));
   assert.deepEqual(sends, [{ kind: "select_project_tab", tab_id: "tab-2" }]);
   assert.deepEqual(cleared, ["tab-2"]);
+});
+
+// SPEC-2013 Phase 9: on narrow mobile viewports the Projects panel must stay
+// inside the visual viewport instead of right-aligning to a near-left button
+// and clipping the Open Projects list off-screen.
+test("project switcher controller clamps the panel inside a narrow viewport", () => {
+  const { document } = parseHTML(`
+    <aside id="op-rail"></aside>
+    <button id="project-switcher-button"></button>
+    <div id="project-switcher-panel"></div>
+  `);
+  const railEl = document.getElementById("op-rail");
+  const buttonEl = document.getElementById("project-switcher-button");
+  const panelEl = document.getElementById("project-switcher-panel");
+  railEl.getBoundingClientRect = () => ({
+    left: 0,
+    right: 56,
+    top: 44,
+    bottom: 844,
+    width: 56,
+    height: 800,
+  });
+  buttonEl.getBoundingClientRect = () => ({
+    left: 91,
+    right: 175,
+    top: 4,
+    bottom: 40,
+    width: 84,
+    height: 36,
+  });
+  Object.defineProperty(document.defaultView, "innerWidth", {
+    configurable: true,
+    value: 390,
+  });
+  Object.defineProperty(document.defaultView, "innerHeight", {
+    configurable: true,
+    value: 844,
+  });
+  const createNode = (tagName, className, textContent) => {
+    const node = document.createElement(tagName);
+    if (className) node.className = className;
+    if (textContent !== undefined) node.textContent = textContent;
+    return node;
+  };
+
+  const controller = createProjectSwitcherController({
+    buttonEl,
+    panelEl,
+    getState: () => ({
+      tabs: makeTabs(),
+      active_tab_id: "tab-1",
+      recent_projects: [{ title: "Repo Three", kind: "git", path: "/repo/three" }],
+    }),
+    send: () => {},
+    createNode,
+    runtimeStateForWindow: (windowData) => windowData.status,
+  });
+
+  controller.open();
+
+  assert.equal(panelEl.style.position, "fixed");
+  assert.equal(panelEl.style.left, "68px");
+  assert.equal(panelEl.style.top, "46px");
+  assert.equal(panelEl.style.width, "310px");
+  assert.equal(panelEl.style.right, "auto");
+});
+
+test("computeProjectSwitcherPanelPlacement keeps a near-left trigger in bounds", () => {
+  const placement = computeProjectSwitcherPanelPlacement({
+    buttonRect: { right: 175, bottom: 40 },
+    viewportWidth: 390,
+    viewportHeight: 844,
+  });
+
+  assert.deepEqual(placement, {
+    left: 12,
+    top: 46,
+    width: 366,
+    maxHeight: 786,
+  });
+  assert.ok(placement.left >= 12);
+  assert.ok(placement.left + placement.width <= 378);
+});
+
+test("computeProjectSwitcherPanelPlacement can reserve a left-side rail safe area", () => {
+  const placement = computeProjectSwitcherPanelPlacement({
+    buttonRect: { right: 175, bottom: 40 },
+    viewportWidth: 390,
+    viewportHeight: 844,
+    leftBoundary: 68,
+  });
+
+  assert.deepEqual(placement, {
+    left: 68,
+    top: 46,
+    width: 310,
+    maxHeight: 786,
+  });
+  assert.ok(placement.left >= 68);
+  assert.ok(placement.left + placement.width <= 378);
 });
 
 // SPEC-2013 Phase 8 (US-9, FR-024): the consolidated panel ends with the
