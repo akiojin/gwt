@@ -5467,6 +5467,13 @@ button.workspace-board-ref:focus-visible {
   color: var(--color-text-muted, #9aa0ad);
 }
 
+.op-usage-card__account {
+  margin: -2px 0 8px 24px;
+  color: var(--color-text-muted, #9aa0ad);
+  font-size: var(--type-xs, 0.72rem);
+  overflow-wrap: anywhere;
+}
+
 .op-usage-card__reason {
   font-size: var(--type-sm, 0.85rem);
   color: var(--color-text-muted, #9aa0ad);
