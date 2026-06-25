@@ -38,6 +38,9 @@ fn handle_session_start(
     run_step(event, "runtime-state", || {
         crate::daemon_runtime::handle_runtime_state(event, input)
     })?;
+    let session_start_diagnostic = run_value(event, "session-start-session-id-diagnostic", || {
+        super::runtime_state::session_start_agent_session_diagnostic(input)
+    });
     run_step(event, "forward", || {
         crate::daemon_runtime::handle_forward(input)
     })?;
@@ -56,6 +59,11 @@ fn handle_session_start(
     let output = run_step(event, "board-reminder", || {
         board_reminder::handle_with_input(event, input)
     })?;
+    let output = append_additional_context(
+        output,
+        IntentBoundaryEvent::SessionStart,
+        session_start_diagnostic,
+    );
     let pending_goal = run_value(event, "discussion-goal-start", || {
         load_pending_goal_for_hook_worktree(worktree_root)
     });
@@ -204,7 +212,17 @@ fn append_pending_discussion_goal_context(
     let Some(goal) = pending_goal else {
         return output;
     };
-    let text = pending_discussion_goal_context(&goal);
+    append_additional_context(output, event, Some(pending_discussion_goal_context(&goal)))
+}
+
+fn append_additional_context(
+    output: HookOutput,
+    event: IntentBoundaryEvent,
+    text: Option<String>,
+) -> HookOutput {
+    let Some(text) = text else {
+        return output;
+    };
     match output {
         HookOutput::HookSpecificAdditionalContext {
             event: existing_event,

@@ -247,6 +247,57 @@ pub fn handle_with_input(event: &str, input: &str) -> Result<(), HookError> {
     write_for_event_with_pending_discussion(&runtime_path, event, pending_discussion)
 }
 
+pub(crate) fn session_start_agent_session_diagnostic(input: &str) -> Option<String> {
+    let runtime_path = std::env::var_os(gwt_agent::GWT_SESSION_RUNTIME_PATH_ENV)?;
+    let runtime_path = PathBuf::from(runtime_path);
+    let sessions_dir = sessions_dir_for_runtime_path(&runtime_path);
+    let gwt_session_id = GwtSessionId::from_env()?;
+    let hook_event = match RawHookEvent::read_from_str(input) {
+        Ok(event) => event,
+        Err(_) => return None,
+    };
+    let session = current_session_for_id(&sessions_dir, &gwt_session_id);
+    match resolve_hook_agent_session_id(session.as_ref(), hook_event.as_ref()) {
+        HookAgentSessionId::Provided(_) => {
+            let Some(session) = current_session_for_id(&sessions_dir, &gwt_session_id) else {
+                return Some(session_start_persisted_id_missing_message(
+                    gwt_session_id.as_str(),
+                ));
+            };
+            if session.exact_resume_session_id().is_some() {
+                None
+            } else {
+                Some(session_start_persisted_id_missing_message(
+                    gwt_session_id.as_str(),
+                ))
+            }
+        }
+        HookAgentSessionId::MissingRequiredForCodex | HookAgentSessionId::MissingOptional => Some(
+            session_start_provider_id_missing_message(gwt_session_id.as_str()),
+        ),
+    }
+}
+
+fn session_start_provider_id_missing_message(gwt_session_id: &str) -> String {
+    format!(
+        "gwt could not associate this agent session because SessionStart did not include a provider session id.\n\
+\n\
+GWT session: {gwt_session_id}\n\
+Expected: Claude Code / Codex SessionStart must provide a concrete provider session id so gwt can persist it as agent_session_id and session_history.\n\
+Impact: this Work cannot be treated as resumable until the provider session id is captured."
+    )
+}
+
+fn session_start_persisted_id_missing_message(gwt_session_id: &str) -> String {
+    format!(
+        "gwt could not associate this agent session because the provider session id from SessionStart was not persisted into session metadata.\n\
+\n\
+GWT session: {gwt_session_id}\n\
+Expected: SessionStart should write agent_session_id and session_history before Workspace registration.\n\
+Impact: this Work cannot be treated as resumable until session metadata is repaired."
+    )
+}
+
 pub fn record_completed_stop_from_env() -> Result<(), HookError> {
     let Some(gwt_session_id) = GwtSessionId::from_env() else {
         return Ok(());
