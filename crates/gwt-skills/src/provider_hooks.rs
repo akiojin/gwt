@@ -28,7 +28,7 @@ pub fn generate_opencode_hooks(worktree: &Path) -> io::Result<()> {
     let plugin_path = config_dir.join("plugins/gwt-hooks.js");
     let config_path = config_dir.join("opencode.json");
     let skip_permissions_path = config_dir.join("skip-permissions.json");
-    let plugin_content = opencode_plugin_content(&gwt_hook_bin_path());
+    let plugin_content = opencode_plugin_content(&gwt_hook_bin_path(), is_gwt_repository(worktree));
     let config = json!({
         "plugin": ["./plugins/gwt-hooks.js"],
     });
@@ -100,7 +100,7 @@ pub(crate) fn generate_hermes_hooks_with_source(
 
     write_text_atomically(
         &script_path,
-        &hermes_hook_script_content(&gwt_hook_bin_path()),
+        &hermes_hook_script_content(&gwt_hook_bin_path(), is_gwt_repository(worktree)),
     )?;
     set_executable(&script_path)?;
 
@@ -291,7 +291,7 @@ pub fn generate_openclaw_hooks(worktree: &Path) -> io::Result<()> {
     )?;
     write_text_atomically(
         &plugin_dir.join("plugin.ts"),
-        &openclaw_plugin_content(&gwt_hook_bin_path()),
+        &openclaw_plugin_content(&gwt_hook_bin_path(), is_gwt_repository(worktree)),
     )
 }
 
@@ -299,8 +299,29 @@ fn js_string_literal(value: &str) -> String {
     serde_json::to_string(value).unwrap_or_else(|_| "\"gwtd\"".to_string())
 }
 
-fn opencode_plugin_content(bin: &str) -> String {
+fn opencode_plugin_content(bin: &str, self_improvement_stop: bool) -> String {
     let bin = js_string_literal(bin);
+    let self_improvement_dispatch = if self_improvement_stop {
+        r#"function dispatchSelfImprovementStop() {
+  const result = spawnSync(
+    GWT_HOOK_BIN,
+    ["hook", "gwt-self-improvement-stop"],
+    {
+      input: "",
+      encoding: "utf8",
+      stdio: ["pipe", "pipe", "ignore"],
+    },
+  );
+  try {
+    return result.stdout ? JSON.parse(result.stdout) : {};
+  } catch {
+    return {};
+  }
+}
+"#
+    } else {
+        "function dispatchSelfImprovementStop() { return {}; }\n"
+    };
     format!(
         r#"import {{ spawnSync }} from "node:child_process";
 
@@ -342,6 +363,8 @@ function blockReason(result) {{
   return result.hookSpecificOutput?.permissionDecisionReason ?? result.reason;
 }}
 
+{self_improvement_dispatch}
+
 export const GwtHooks = async (context) => ({{
   "session.created": async (input, output) => dispatch("session.created", input, output, context),
   "message.updated": async (input, output) => dispatch("message.updated", input, output, context),
@@ -350,7 +373,12 @@ export const GwtHooks = async (context) => ({{
     if (reason) throw new Error(reason);
   }},
   "tool.execute.after": async (input, output) => dispatch("tool.execute.after", input, output, context),
-  "session.idle": async (input, output) => dispatch("session.idle", input, output, context),
+  "session.idle": async (input, output) => {{
+    const result = dispatch("session.idle", input, output, context);
+    const reason = blockReason(dispatchSelfImprovementStop());
+    if (reason) throw new Error(reason);
+    return result;
+  }},
 }});
 "#
     )
@@ -393,8 +421,21 @@ hooks_auto_accept: true
     )
 }
 
-fn hermes_hook_script_content(bin: &str) -> String {
+fn hermes_hook_script_content(bin: &str, self_improvement_stop: bool) -> String {
     let bin = posix_shell_quote(bin);
+    let self_improvement_block = if self_improvement_stop {
+        r#"self_output=""
+if [ "$event" = "on_session_end" ]; then
+  # Drop stderr so a gwtd that predates the gwt-self-improvement-stop transport
+  # exception (e.g. <v9.63.0) degrades silently instead of leaking its
+  # legacy-argv rejection into the Stop loop (issue #3178).
+  self_output="$(printf '%s' "$payload" | __GWT_HOOK_BIN__ hook gwt-self-improvement-stop 2>/dev/null)"
+fi
+"#
+    } else {
+        r#"self_output=""
+"#
+    };
     r#"#!/bin/sh
 set -eu
 
@@ -406,12 +447,16 @@ fi
 payload="$(cat)"
 set +e
 output="$(printf '%s' "$payload" | __GWT_HOOK_BIN__ hook provider-event hermes "$event")"
+__GWT_SELF_IMPROVEMENT_BLOCK__
 set -e
-if [ -n "$output" ]; then
+if [ -n "$self_output" ]; then
+  printf '%s\n' "$self_output"
+elif [ -n "$output" ]; then
   printf '%s\n' "$output"
 fi
 exit 0
 "#
+    .replace("__GWT_SELF_IMPROVEMENT_BLOCK__", self_improvement_block)
     .replace("__GWT_HOOK_BIN__", &bin)
 }
 
@@ -467,8 +512,29 @@ fn openclaw_package_content() -> String {
     .to_string()
 }
 
-fn openclaw_plugin_content(bin: &str) -> String {
+fn openclaw_plugin_content(bin: &str, self_improvement_stop: bool) -> String {
     let bin = js_string_literal(bin);
+    let self_improvement_dispatch = if self_improvement_stop {
+        r#"function dispatchSelfImprovementStop() {
+  const result = spawnSync(
+    GWT_HOOK_BIN,
+    ["hook", "gwt-self-improvement-stop"],
+    {
+      input: "",
+      encoding: "utf8",
+      stdio: ["pipe", "pipe", "ignore"],
+    },
+  );
+  try {
+    return result.stdout ? JSON.parse(result.stdout) : {};
+  } catch {
+    return {};
+  }
+}
+"#
+    } else {
+        "function dispatchSelfImprovementStop() { return {}; }\n"
+    };
     format!(
         r#"import {{ spawnSync }} from "node:child_process";
 import {{ definePluginEntry }} from "openclaw/plugin-sdk/plugin-entry";
@@ -508,6 +574,8 @@ function blockResult(result) {{
   return {{ block: true, blockReason: reason }};
 }}
 
+{self_improvement_dispatch}
+
 function promptContextResult(result) {{
   const text = result.hookSpecificOutput?.additionalContext ?? result.context;
   if (!text) return undefined;
@@ -523,11 +591,56 @@ export default definePluginEntry({{
     api.on("before_prompt_build", async (event, ctx) => promptContextResult(dispatch("before_prompt_build", event, ctx)));
     api.on("before_tool_call", async (event, ctx) => blockResult(dispatch("before_tool_call", event, ctx)));
     api.on("after_tool_call", async (event, ctx) => dispatch("after_tool_call", event, ctx));
-    api.on("session_end", async (event, ctx) => dispatch("session_end", event, ctx));
+    api.on("session_end", async (event, ctx) => {{
+      const result = dispatch("session_end", event, ctx);
+      return blockResult(dispatchSelfImprovementStop()) ?? result;
+    }});
   }},
 }});
 "#
     )
+}
+
+fn is_gwt_repository(worktree: &Path) -> bool {
+    origin_remote_url(worktree)
+        .and_then(|url| github_slug_from_remote_url(&url))
+        .is_some_and(|slug| slug == "akiojin/gwt")
+}
+
+fn origin_remote_url(worktree: &Path) -> Option<String> {
+    let output = std::process::Command::new("git")
+        .arg("-C")
+        .arg(worktree)
+        .args(["config", "--get", "remote.origin.url"])
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    String::from_utf8(output.stdout)
+        .ok()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+}
+
+fn github_slug_from_remote_url(url: &str) -> Option<String> {
+    let value = url.trim().trim_end_matches('/').trim_end_matches(".git");
+    let rest = value
+        .strip_prefix("https://github.com/")
+        .or_else(|| value.strip_prefix("http://github.com/"))
+        .or_else(|| value.strip_prefix("ssh://git@github.com/"))
+        .or_else(|| value.strip_prefix("git@github.com:"))?;
+    let slug = rest
+        .trim_matches('/')
+        .trim_end_matches(".git")
+        .to_ascii_lowercase();
+    let mut parts = slug.split('/');
+    let owner = parts.next()?.trim();
+    let repo = parts.next()?.trim();
+    if owner.is_empty() || repo.is_empty() || parts.next().is_some() {
+        return None;
+    }
+    Some(format!("{owner}/{repo}"))
 }
 
 #[cfg(test)]

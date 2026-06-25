@@ -1,8 +1,6 @@
 //! Contract tests for the `sections` module (SPEC-12 tdd.md Layer 1).
 
-use gwt_github::sections::{
-    extract_sections, ExtractedSection, SectionName, SectionParseError, SectionPart,
-};
+use gwt_github::sections::{extract_sections, SectionName, SectionParseError, SectionPart};
 
 fn name(s: &str) -> SectionName {
     SectionName(s.to_string())
@@ -151,14 +149,4 @@ fn red_10_empty_section_body() {
     let input = "<!-- artifact:plan BEGIN -->\n<!-- artifact:plan END -->";
     let got = extract_sections(input).unwrap();
     assert_eq!(got[0].content, "");
-}
-
-// Helper: construct an ExtractedSection for assertions in other layers.
-#[allow(dead_code)]
-fn mk(name_str: &str, content: &str) -> ExtractedSection {
-    ExtractedSection {
-        name: name(name_str),
-        content: content.to_string(),
-        part: None,
-    }
 }

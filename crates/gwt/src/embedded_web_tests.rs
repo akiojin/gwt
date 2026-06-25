@@ -1516,7 +1516,7 @@ fn embedded_web_agent_runtime_maps_idle_to_idle_telemetry() {
 }
 
 #[test]
-fn embedded_web_agent_runtime_maps_starting_separately() {
+fn embedded_web_agent_runtime_maps_starting_to_running_telemetry() {
     // SPEC-3015: the starting state ships through the generated contract and
     // the extracted window-runtime-state.js module (US-69).
     let runtime_js = window_runtime_state_js();
@@ -1527,8 +1527,12 @@ fn embedded_web_agent_runtime_maps_starting_separately() {
         "expected the generated protocol enum contract to carry the starting wire state (US-69)",
     );
     assert!(
-        runtime_js.contains("case \"starting\":") && runtime_js.contains("return \"not_started\";"),
-        "expected the starting runtime state to map onto the separate not_started telemetry rim",
+        runtime_js.contains("case \"starting\":") && runtime_js.contains("return \"running\";"),
+        "expected the starting runtime state to aggregate into running telemetry",
+    );
+    assert!(
+        !runtime_js.contains("return \"not_started\";"),
+        "starting must not reintroduce the retired not_started Status Strip telemetry",
     );
     assert!(
         html.contains(".status-chip.starting .status-dot"),
@@ -2682,6 +2686,20 @@ fn embedded_web_add_window_modal_hides_direct_terminal_presets() {
 }
 
 #[test]
+fn embedded_web_add_window_modal_offers_improvement_inbox() {
+    let html = frontend_bundle_source();
+
+    assert!(
+        html.contains(r#"data-preset="improvement""#),
+        "expected Add window modal to expose the Improvement Inbox preset",
+    );
+    assert!(
+        html.contains("<strong>Improvement Inbox</strong>"),
+        "expected Improvement Inbox to have a visible preset label",
+    );
+}
+
+#[test]
 fn embedded_web_launch_wizard_actions_flow_through_named_transport() {
     let html = frontend_bundle_source();
     let submit_bounds = regex::Regex::new(
@@ -3115,6 +3133,7 @@ fn embedded_web_panel_surfaces_share_opaque_window_chrome_and_body() {
         ".surface-knowledge",
         ".surface-mock",
         ".surface-profile",
+        ".surface-improvement",
     ];
 
     for (anchor, role) in [

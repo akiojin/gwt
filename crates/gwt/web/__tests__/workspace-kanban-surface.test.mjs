@@ -1983,6 +1983,206 @@ test("remote-only Workspace shows the Remote badge and keeps the prefilled Launc
   assert.equal(sent.at(-1)?.branch_name, "work/fetched");
 });
 
+// SPEC-2359 US-83 (UX revision 2026-06-24): eligible existing remote branches
+// the user can start work on are NOT a separate "Start work on a branch"
+// section — they fold into the same Workspace list as ordinary rows carrying
+// the shared "Remote" tag. A branch already represented by a real Workspace is
+// de-duped away; the row's ▶ continues on the branch via open_launch_wizard.
+test("eligible remote branches render as unified Workspace rows tagged Remote", () => {
+  const fixture = createFixture();
+  const sent = [];
+  const surface = createSurface(
+    fixture,
+    {
+      id: "proj-1",
+      title: "projection",
+      status_category: "idle",
+      active_work_count: 1,
+      active_works: [
+        {
+          id: "work-local",
+          title: "Local paused work",
+          status_category: "idle",
+          lifecycle_state: "paused",
+          branch: "work/local-1",
+          active_agents: 0,
+          blocked_agents: 0,
+          agents: [],
+        },
+      ],
+      agents: [],
+    },
+    { send: (message) => sent.push(message) },
+  );
+
+  surface.mount(fixture.body, fixture.windowData, {
+    focusWindowLocally() {},
+    sendFocus() {},
+  });
+
+  // Before any backend response the list holds only the local work.
+  assert.deepEqual(rowIdsInList(fixture), ["work-local"]);
+
+  // Backend reports eligible origin branches (raw origin/ refs). One duplicates
+  // the existing local work and must be de-duped away.
+  surface.applyRemoteStartWorkBranches({
+    id: fixture.windowData.id,
+    branches: ["origin/feature-foo", "origin/feature/bar", "origin/work/local-1"],
+  });
+
+  // No separate remote-branch section — the rows live in the unified list.
+  // (Assert via count, not element === null, so a failure compares numbers
+  // instead of inspecting a circular linkedom node.)
+  assert.equal(
+    fixture.body.querySelectorAll(".workspace-overview-remote-branches").length,
+    0,
+    "the separate 'Start work on a branch' section is gone",
+  );
+
+  assert.deepEqual(
+    rowIdsInList(fixture),
+    ["work-local", "remote-start:feature-foo", "remote-start:feature/bar"],
+    "eligible remote branches join the list as rows; a duplicate of a real work is dropped",
+  );
+
+  // The headline still counts real Workspaces only; startable remote branches
+  // are a separate count, so "N Workspaces" never conflates the two.
+  assert.equal(
+    fixture.body.querySelector(".workspace-overview-status-line").textContent,
+    "1 Workspaces · 2 Startable · 0 Needs Attention · 0 Unassigned Agents",
+  );
+
+  const remoteRow = fixture.body.querySelector(
+    '.workspace-overview-row[data-workspace-id="remote-start:feature-foo"]',
+  );
+  assert.equal(
+    remoteRow.dataset.attention,
+    "paused",
+    "a startable remote branch sits in the Paused lane",
+  );
+  const tag = remoteRow.querySelector(".workspace-overview-remote");
+  assert.ok(tag, "the row carries the shared Remote tag");
+  assert.equal(tag.textContent, "Remote");
+  assert.equal(
+    remoteRow.querySelector(".workspace-overview-row-title").textContent,
+    "feature-foo",
+    "the displayed name strips the origin/ prefix",
+  );
+  // A never-started branch must NOT read as "Paused" — the Remote tag is its
+  // only state marker, so the lifecycle badge is suppressed for startable rows.
+  assert.equal(
+    remoteRow.querySelectorAll(".workspace-overview-lifecycle").length,
+    0,
+    "startable remote rows do not show a (misleading) Paused lifecycle badge",
+  );
+
+  // ▶ continues on the branch via open_launch_wizard; the backend normalizes
+  // the (already stripped) name to continue-on-branch.
+  sent.length = 0;
+  remoteRow.querySelector('[data-action="launch-workspace-row"]').click();
+  assert.equal(sent.at(-1)?.kind, "open_launch_wizard");
+  assert.equal(sent.at(-1)?.branch_name, "feature-foo");
+});
+
+// SPEC-2359 US-83: a startable remote branch has no Work yet, so its detail
+// pane offers only Launch — Done / Discard would close a Work that does not
+// exist.
+test("a startable remote branch row offers only Launch in detail (no Done/Discard)", () => {
+  const fixture = createFixture();
+  const sent = [];
+  const surface = createSurface(
+    fixture,
+    {
+      id: "proj-1",
+      title: "projection",
+      status_category: "idle",
+      active_works: [],
+      workspaces: [],
+      journal_entries: [],
+      agents: [],
+    },
+    { send: (message) => sent.push(message) },
+  );
+
+  surface.mount(fixture.body, fixture.windowData, {
+    focusWindowLocally() {},
+    sendFocus() {},
+  });
+
+  surface.applyRemoteStartWorkBranches({
+    id: fixture.windowData.id,
+    branches: ["origin/feature-foo"],
+  });
+
+  const remoteRow = fixture.body.querySelector(
+    '.workspace-overview-row[data-workspace-id="remote-start:feature-foo"]',
+  );
+  assert.ok(remoteRow, "the startable remote branch renders as a row");
+  remoteRow.click();
+
+  const detail = fixture.body.querySelector(".workspace-overview-detail-pane");
+  assert.ok(
+    detail.querySelector('[data-action="launch-workspace"]'),
+    "Launch stays available for a startable remote branch",
+  );
+  assert.equal(
+    detail.querySelectorAll('[data-action="close-work-done"]').length,
+    0,
+    "no Done for a not-yet-started branch",
+  );
+  assert.equal(
+    detail.querySelectorAll('[data-action="close-work-discard"]').length,
+    0,
+    "no Discard for a not-yet-started branch",
+  );
+});
+
+// UI/UX pass (2026-06-24, user feedback): the row "Hooks" badge fired for
+// benign + systemic states (waiting_for_first_hook_event / self_healed /
+// needs_attention) on nearly every row, reading as meaningless noise. The row
+// badge now appears ONLY when a hook is actually broken (degraded) — a per-row
+// fault the user can act on — and names the condition, not the subsystem.
+// needs_attention / setup info stays in the detail pane's Managed Hooks section.
+test("the row hook badge only shows when a hook is broken (degraded)", () => {
+  const fixture = createFixture();
+  const surface = createSurface(
+    fixture,
+    {
+      id: "proj-1",
+      title: "projection",
+      status_category: "idle",
+      active_works: [
+        { id: "w-wait", title: "Waiting", status_category: "idle", lifecycle_state: "paused", branch: "work/wait", agents: [], managed_hook_health: { status: "waiting_for_first_hook_event" } },
+        { id: "w-healed", title: "Healed", status_category: "idle", lifecycle_state: "paused", branch: "work/healed", agents: [], managed_hook_health: { status: "self_healed" } },
+        { id: "w-setup", title: "Setup", status_category: "idle", lifecycle_state: "paused", branch: "work/setup", agents: [], managed_hook_health: { status: "needs_attention" } },
+        { id: "w-error", title: "Error", status_category: "idle", lifecycle_state: "paused", branch: "work/error", agents: [], managed_hook_health: { status: "degraded" } },
+      ],
+      agents: [],
+    },
+    { send() {} },
+  );
+
+  surface.mount(fixture.body, fixture.windowData, {
+    focusWindowLocally() {},
+    sendFocus() {},
+  });
+
+  const badgeCountFor = (id) =>
+    fixture.body
+      .querySelector(`.workspace-overview-row[data-workspace-id="${id}"]`)
+      .querySelectorAll(".workspace-overview-hook-health").length;
+  const badgeFor = (id) =>
+    fixture.body
+      .querySelector(`.workspace-overview-row[data-workspace-id="${id}"]`)
+      .querySelector(".workspace-overview-hook-health");
+
+  assert.equal(badgeCountFor("w-wait"), 0, "benign waiting state shows no row badge");
+  assert.equal(badgeCountFor("w-healed"), 0, "self-healed state shows no row badge");
+  assert.equal(badgeCountFor("w-setup"), 0, "systemic needs_attention stays in the detail pane, not the row");
+  assert.equal(badgeFor("w-error").textContent, "Hook error", "a broken hook names the condition");
+  assert.equal(badgeFor("w-error").dataset.status, "degraded");
+});
+
 // Design pass (2026-06-11, frontend-design): the branch name renders with a
 // dimmed namespace prefix and a strong leaf so 200+ work/* rows scan by leaf;
 // the full text content stays the verbatim branch for copy / a11y.

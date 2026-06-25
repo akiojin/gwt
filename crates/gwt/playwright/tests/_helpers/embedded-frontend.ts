@@ -43,6 +43,7 @@ const ROOT_MODULES = new Set([
   "fleet-minimap.js",
   "focus-trap.js",
   "hotkey.js",
+  "improvement-inbox-surface.js",
   "index-settings-panel.js",
   // SPEC-3165 — Issue Monitor surface.
   "issue-monitor-surface.js",

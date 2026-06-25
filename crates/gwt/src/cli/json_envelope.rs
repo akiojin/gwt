@@ -6,8 +6,8 @@ use crate::protocol::{IndexSearchMatchMode, IndexSearchScope};
 
 use super::{
     memory::MemoryAddCommand, ActionsCommand, CliCommand, CliEnv, CliParseError, DaemonCommand,
-    DiagnosticsCommand, HookCommand, IndexCommand, IndexScope, IssueCommand, MemoryCommand,
-    PaneCommand, PrCommand, SearchCommand, SkillStateAction, WorkspaceCommand,
+    DiagnosticsCommand, HookCommand, ImprovementCommand, IndexCommand, IndexScope, IssueCommand,
+    MemoryCommand, PaneCommand, PrCommand, SearchCommand, SkillStateAction, WorkspaceCommand,
 };
 use super::{BoardCommand, BoardPostCommand};
 
@@ -97,6 +97,16 @@ fn parse(input: &str) -> Result<ParsedEnvelope, CliParseError> {
         }
         "board.show" => board_show(params)?,
         "board.post" => board_post(params)?,
+        "board.config.show" | "board.config-show" => {
+            CliCommand::Board(crate::cli::board::BoardCommand::ConfigShow)
+        }
+        "improvement.capture" => improvement_capture(params)?,
+        "improvement.list" => improvement_list(params)?,
+        "improvement.dismiss" => improvement_dismiss(params)?,
+        "improvement.link_issue" | "improvement.link-issue" => improvement_link_issue(params)?,
+        "improvement.promote_issue" | "improvement.promote-issue" => {
+            improvement_promote_issue(params)?
+        }
         "issue.view" => CliCommand::Issue(IssueCommand::View {
             number: required_u64(params, "number")?,
             refresh: optional_bool(params, "refresh")?.unwrap_or(false),
@@ -377,6 +387,63 @@ fn board_post(params: &Map<String, Value>) -> Result<CliCommand, CliParseError> 
             broadcast: optional_bool(params, "broadcast")?.unwrap_or(false),
         },
     ))))
+}
+
+fn improvement_capture(params: &Map<String, Value>) -> Result<CliCommand, CliParseError> {
+    Ok(CliCommand::Improvement(ImprovementCommand::Capture(
+        super::improvement::ImprovementCaptureCommand {
+            source: required_string(params, "source")?,
+            target_artifact: required_string(params, "target_artifact")?,
+            classification: required_string(params, "classification")?,
+            confidence: required_string(params, "confidence")?,
+            summary: required_string(params, "summary")?,
+            details: optional_string(params, "details")?,
+            evidence_digest: optional_string(params, "evidence_digest")?,
+            dedupe_key: optional_string(params, "dedupe_key")?,
+            local_evidence: optional_json_array(params, "local_evidence")?,
+        },
+    )))
+}
+
+fn improvement_list(params: &Map<String, Value>) -> Result<CliCommand, CliParseError> {
+    Ok(CliCommand::Improvement(ImprovementCommand::List(
+        super::improvement::ImprovementListCommand {
+            state: optional_string(params, "state")?,
+            classification: optional_string(params, "classification")?,
+            confidence: optional_string(params, "confidence")?,
+            limit: optional_usize(params, "limit")?,
+        },
+    )))
+}
+
+fn improvement_dismiss(params: &Map<String, Value>) -> Result<CliCommand, CliParseError> {
+    Ok(CliCommand::Improvement(ImprovementCommand::Dismiss(
+        super::improvement::ImprovementDismissCommand {
+            id: required_string(params, "id")?,
+            reason: required_string(params, "reason")?,
+        },
+    )))
+}
+
+fn improvement_link_issue(params: &Map<String, Value>) -> Result<CliCommand, CliParseError> {
+    Ok(CliCommand::Improvement(ImprovementCommand::LinkIssue(
+        super::improvement::ImprovementLinkIssueCommand {
+            id: required_string(params, "id")?,
+            number: required_u64(params, "number")?,
+            url: optional_string(params, "url")?,
+            repository: optional_string(params, "repository")?,
+        },
+    )))
+}
+
+fn improvement_promote_issue(params: &Map<String, Value>) -> Result<CliCommand, CliParseError> {
+    Ok(CliCommand::Improvement(ImprovementCommand::PromoteIssue(
+        super::improvement::ImprovementPromoteIssueCommand {
+            id: required_string(params, "id")?,
+            force: optional_bool(params, "force")?.unwrap_or(false),
+            labels: optional_string_vec(params, "labels")?,
+        },
+    )))
 }
 
 fn issue_spec_edit(params: &Map<String, Value>) -> Result<CliCommand, CliParseError> {
@@ -786,6 +853,22 @@ fn optional_string_vec(
         Value::Null => Ok(Vec::new()),
         _ => Err(CliParseError::InvalidJson(format!(
             "{key} must be an array of strings"
+        ))),
+    }
+}
+
+fn optional_json_array(
+    params: &Map<String, Value>,
+    key: &'static str,
+) -> Result<Vec<Value>, CliParseError> {
+    let Some(value) = params.get(key) else {
+        return Ok(Vec::new());
+    };
+    match value {
+        Value::Array(items) => Ok(items.clone()),
+        Value::Null => Ok(Vec::new()),
+        _ => Err(CliParseError::InvalidJson(format!(
+            "{key} must be an array"
         ))),
     }
 }

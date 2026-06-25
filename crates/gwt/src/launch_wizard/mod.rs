@@ -261,6 +261,9 @@ pub struct LaunchWizardView {
     pub mode: LaunchWizardMode,
     pub branch_name: String,
     pub selected_branch_name: String,
+    /// SPEC-2359 US-83 / FR-444: existing remote branches offered by the "open
+    /// existing branch" picker (each dispatches `SelectExistingBranch`).
+    pub open_branch_candidates: Vec<String>,
     pub linked_issue_number: Option<u64>,
     pub is_hydrating: bool,
     pub runtime_context_resolved: bool,
@@ -557,6 +560,10 @@ pub struct LaunchWizardHydration {
     pub agent_options: Vec<AgentOption>,
     pub quick_start_entries: Vec<QuickStartEntry>,
     pub previous_profiles: Option<LaunchWizardPreviousProfiles>,
+    /// SPEC-2359 US-83 / FR-444: eligible existing remote branches the user can
+    /// pick to continue on (the "open existing branch" picker). Empty when no
+    /// branch listing was available. Preserved across runtime re-resolution.
+    pub open_branch_candidates: Vec<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -611,6 +618,14 @@ pub enum LaunchWizardAction {
     },
     SetBranchName {
         value: String,
+    },
+    /// SPEC-2359 US-83 / FR-444: pick an existing branch to continue on it. The
+    /// worktree materializes on `<branch_name>` (tracking origin/<branch_name>
+    /// when only the remote exists) without minting a new work/* branch, by
+    /// switching the wizard out of the "new work branch" mode. `branch_name`
+    /// may arrive as `origin/X` / `refs/remotes/origin/X` and is normalized.
+    SelectExistingBranch {
+        branch_name: String,
     },
     /// SPEC-2359 US-80: the optional Start Work intake prompt describing the
     /// work about to begin. Drives the duplicate-work advisory query.
@@ -761,4 +776,7 @@ pub struct LaunchWizardState {
     settings_revisited: bool,
     /// SPEC-2014 FR-128: 最後に runtime を解決した branch 名。branch 変更検出に使う。
     resolved_branch_name: Option<String>,
+    /// SPEC-2359 US-83 / FR-444: eligible existing remote branches offered by the
+    /// "open existing branch" picker. Set at hydration / Start Work open.
+    pub open_branch_candidates: Vec<String>,
 }

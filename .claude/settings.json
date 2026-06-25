@@ -1,5 +1,17 @@
 {
-  "hooks": {},
+  "hooks": {
+    "Stop": [
+      {
+        "matcher": "*",
+        "hooks": [
+          {
+            "command": "gwt_bin=\"${GWT_BIN_PATH:-gwtd}\"; \"$gwt_bin\" hook gwt-self-improvement-stop 2>/dev/null || true",
+            "type": "command"
+          }
+        ]
+      }
+    ]
+  },
   "enabledPlugins": {
     "cli-design@akiojin-skills": true,
     "code-review@claude-plugins-official": true,

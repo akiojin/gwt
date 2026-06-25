@@ -150,7 +150,7 @@ test("clicking a cell flies the camera to that window via frameWindow", () => {
 test("cells carry agent color and telemetry datasets only when present", () => {
   const { container } = setupDom();
   const windows = [
-    windowAt("w-agent", 0, 0, 100, 80, { agent_color: "violet", telemetry: "active" }),
+    windowAt("w-agent", 0, 0, 100, 80, { agent_color: "violet", telemetry: "running" }),
     windowAt("w-plain", 300, 0),
   ];
   const { minimap } = makeMinimap(container, windows);
@@ -159,24 +159,24 @@ test("cells carry agent color and telemetry datasets only when present", () => {
 
   const agentCell = container.querySelector('[data-window-id="w-agent"]');
   assert.equal(agentCell.dataset.agentColor, "violet");
-  assert.equal(agentCell.dataset.telemetry, "active");
+  assert.equal(agentCell.dataset.telemetry, "running");
 
   const plainCell = container.querySelector('[data-window-id="w-plain"]');
   assert.equal(plainCell.dataset.agentColor, undefined, "non-agent cell omits agent color");
   assert.equal(plainCell.dataset.telemetry, undefined, "non-agent cell omits telemetry");
 });
 
-test("FR-039 (安心): a needs_input telemetry surfaces as its own minimap dataset", () => {
+test("FR-039 (安心): a waiting telemetry surfaces as its own minimap dataset", () => {
   // The minimap dot color/pulse keys off data-telemetry, so the loud
-  // needs_input state must round-trip onto the cell rather than collapse.
+  // waiting state must round-trip onto the cell rather than collapse.
   const { container } = setupDom();
-  const windows = [windowAt("w-wait", 0, 0, 100, 80, { agent_color: "amber", telemetry: "needs_input" })];
+  const windows = [windowAt("w-wait", 0, 0, 100, 80, { agent_color: "amber", telemetry: "waiting" })];
   const { minimap } = makeMinimap(container, windows);
 
   minimap.renderCells();
 
   const cell = container.querySelector('[data-window-id="w-wait"]');
-  assert.equal(cell.dataset.telemetry, "needs_input");
+  assert.equal(cell.dataset.telemetry, "waiting");
 });
 
 test("the focused window's cell gets the is-focused class", () => {

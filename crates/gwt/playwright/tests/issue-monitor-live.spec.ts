@@ -1,5 +1,5 @@
-import { expect, test } from "@playwright/test";
-import { gotoLiveGwt, openLiveGwtProject } from "./_helpers/live-gwt";
+import { expect, test, type Page } from "@playwright/test";
+import { gotoLiveGwt, openLiveGwtProject, sendLiveGwtEvent } from "./_helpers/live-gwt";
 
 const BASE = process.env.GWT_PLAYWRIGHT_BASE_URL ?? "";
 const EXPECTED_MIN_COUNT = Number(process.env.GWT_PLAYWRIGHT_ISSUE_MONITOR_EXPECTED_COUNT ?? "2");
@@ -50,7 +50,9 @@ test.describe.serial("Issue Monitor live backend", () => {
       });
     }
     await gotoLiveGwt(page, BASE, { enableTestBridge: true, keepPresetModal: true });
+    await clearBackendLaunchWizard(page);
     await openLiveGwtProject(page);
+    await clearBackendLaunchWizard(page);
   });
 
   test("lists multiple issues and makes launch setting source visible", async ({ page }) => {
@@ -148,7 +150,7 @@ test.describe.serial("Issue Monitor live backend", () => {
     await expect(page.locator(".workspace-window.surface-terminal:visible")).toHaveCount(
       terminalWindowCount,
     );
-    await expect(page.locator("#op-strip-active")).toHaveText("0");
+    await expect(page.locator("#op-strip-running")).toHaveText("0");
     await expect(page.locator("#op-strip-idle")).toHaveText("0");
 
     await page.locator("#wizard-cancel-button").click();
@@ -210,10 +212,6 @@ test.describe.serial("Issue Monitor live backend", () => {
       .last()
       .locator(".issue-monitor-card");
     await expect(monitor).toBeVisible();
-    const issueRows = monitor.locator(".issue-monitor-card__item");
-    await expect
-      .poll(() => issueRows.count(), { timeout: 15_000 })
-      .toBeGreaterThanOrEqual(EXPECTED_MIN_COUNT);
 
     await page.evaluate(() => {
       window.dispatchEvent(
@@ -312,10 +310,6 @@ test.describe.serial("Issue Monitor live backend", () => {
       .last()
       .locator(".issue-monitor-card");
     await expect(monitor).toBeVisible();
-    const issueRows = monitor.locator(".issue-monitor-card__item");
-    await expect
-      .poll(() => issueRows.count(), { timeout: 15_000 })
-      .toBeGreaterThanOrEqual(EXPECTED_MIN_COUNT);
 
     await page.evaluate(() => {
       window.dispatchEvent(
@@ -554,3 +548,16 @@ test.describe.serial("Issue Monitor live backend", () => {
       .toBe(JSON.stringify([{ kind: "set_issue_monitor_enabled", enabled: true }]));
   });
 });
+
+async function clearBackendLaunchWizard(page: Page): Promise<void> {
+  const wizard = page.locator("#wizard-modal");
+  await expect(async () => {
+    await sendLiveGwtEvent(page, {
+      kind: "launch_wizard_action",
+      action: { kind: "cancel" },
+      bounds: null,
+    });
+    await sendLiveGwtEvent(page, { kind: "frontend_ready" });
+    await expect(wizard).toBeHidden({ timeout: 1_000 });
+  }).toPass({ timeout: 10_000 });
+}

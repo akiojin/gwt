@@ -229,8 +229,8 @@ impl AppRuntime {
                 docker_service_status,
                 linked_issue_number,
                 linked_issue_kind,
-                ultracode_supported: gwt_agent::claude_ultracode_supported(),
-                claude_workflows_enabled: gwt_agent::claude_workflows_enabled(),
+                ultracode_supported: self.launch_wizard_cache.claude_ultracode_supported(),
+                claude_workflows_enabled: self.launch_wizard_cache.claude_workflows_enabled(),
             },
             agent_options,
             quick_start_entries,
@@ -333,8 +333,8 @@ impl AppRuntime {
                 docker_service_status,
                 linked_issue_number: Some(issue_number),
                 linked_issue_kind: Some(linked_issue_kind),
-                ultracode_supported: gwt_agent::claude_ultracode_supported(),
-                claude_workflows_enabled: gwt_agent::claude_workflows_enabled(),
+                ultracode_supported: self.launch_wizard_cache.claude_ultracode_supported(),
+                claude_workflows_enabled: self.launch_wizard_cache.claude_workflows_enabled(),
             },
             base_branch_name,
             agent_options,
@@ -1273,8 +1273,8 @@ impl AppRuntime {
                     workspace_resume_owner_issue_number(context.owner.as_deref())
                 }),
                 linked_issue_kind: None,
-                ultracode_supported: gwt_agent::claude_ultracode_supported(),
-                claude_workflows_enabled: gwt_agent::claude_workflows_enabled(),
+                ultracode_supported: self.launch_wizard_cache.claude_ultracode_supported(),
+                claude_workflows_enabled: self.launch_wizard_cache.claude_workflows_enabled(),
             },
             base_branch,
             agent_options,
@@ -1287,13 +1287,41 @@ impl AppRuntime {
         wizard.mark_runtime_context_unresolved();
         self.launch_wizard = Some(LaunchWizardSession {
             tab_id: tab_id.to_string(),
-            wizard_id,
+            wizard_id: wizard_id.clone(),
             wizard,
             workspace_resume_context,
             agent_kanban_target: None,
             auto_submit_after_runtime_resolution: None,
             issue_monitor_profile_save: None,
             issue_monitor_launch_issue_number: None,
+        });
+
+        // SPEC-2359 US-83 / FR-444 + FR-445: populate the "open existing branch"
+        // picker off the UI thread. Fetch origin first so a teammate's freshly
+        // pushed branch appears even when the Branches tab was never opened, then
+        // push the candidates into the live wizard via a typed event.
+        let proxy = self.proxy.clone();
+        let candidates_root = project_root.to_path_buf();
+        let active_session_branches = self.active_session_branches_for_tab(tab_id);
+        thread::spawn(move || {
+            if let Ok(git_root) = gwt_git::worktree::main_worktree_root(&candidates_root) {
+                let _ = gwt_git::WorktreeManager::new(&git_root).fetch_origin();
+            }
+            let candidates = list_branch_entries_with_active_sessions(
+                &candidates_root,
+                &active_session_branches,
+            )
+            .map(|entries| {
+                gwt::branch_list::eligible_remote_start_work_branch_names(
+                    &entries,
+                    &active_session_branches,
+                )
+            })
+            .unwrap_or_default();
+            proxy.send(UserEvent::RefreshLaunchWizardBranchCandidates {
+                wizard_id,
+                candidates,
+            });
         });
 
         Ok(())
@@ -2139,6 +2167,8 @@ fn resolve_launch_wizard_runtime_context_hydration(
         agent_options,
         quick_start_entries,
         previous_profiles: Some(previous_profiles),
+        // Runtime re-resolution preserves picker candidates set at first hydration.
+        open_branch_candidates: Vec::new(),
     })
 }
 
@@ -2347,6 +2377,8 @@ impl AppRuntime {
             agent_options,
             quick_start_entries,
             previous_profiles: None,
+            // Cache refresh preserves picker candidates set at first hydration.
+            open_branch_candidates: Vec::new(),
         });
     }
 }

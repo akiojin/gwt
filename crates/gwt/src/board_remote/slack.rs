@@ -81,6 +81,10 @@ pub struct SlackProvider {
     channel_map: BTreeMap<String, String>,
     http: Box<dyn HttpClient>,
     cache: TimedCache<Vec<BoardEntry>>,
+    /// Base URL of the Slack Web API. Defaults to [`SLACK_API`]; overridable via
+    /// [`SlackProvider::new_with_base`] so an end-to-end test can drive the real
+    /// HTTP client against a local Slack-compatible server.
+    api_base: String,
 }
 
 impl SlackProvider {
@@ -93,12 +97,33 @@ impl SlackProvider {
         http: Box<dyn HttpClient>,
         cache_ttl_secs: i64,
     ) -> Self {
+        Self::new_with_base(
+            SLACK_API,
+            token,
+            default_channel,
+            channel_map,
+            http,
+            cache_ttl_secs,
+        )
+    }
+
+    /// Build a provider against a specific API base URL. Used by the production
+    /// `new` (real Slack) and by end-to-end tests pointing at a local server.
+    pub fn new_with_base(
+        api_base: impl Into<String>,
+        token: impl Into<String>,
+        default_channel: impl Into<String>,
+        channel_map: BTreeMap<String, String>,
+        http: Box<dyn HttpClient>,
+        cache_ttl_secs: i64,
+    ) -> Self {
         Self {
             token: token.into(),
             default_channel: default_channel.into(),
             channel_map,
             http,
             cache: TimedCache::new(cache_ttl_secs),
+            api_base: api_base.into(),
         }
     }
 
@@ -122,7 +147,7 @@ impl SlackProvider {
             let response = self
                 .http
                 .get(
-                    &format!("{SLACK_API}/conversations.replies"),
+                    &format!("{}/conversations.replies", self.api_base),
                     &self.token,
                     &query,
                 )
@@ -173,7 +198,7 @@ impl SlackProvider {
         let response = self
             .http
             .get(
-                &format!("{SLACK_API}/conversations.history"),
+                &format!("{}/conversations.history", self.api_base),
                 &self.token,
                 &[("channel", channel), ("limit", &limit)],
             )
@@ -312,7 +337,7 @@ impl SlackProvider {
         let response = self
             .http
             .post_form(
-                &format!("{SLACK_API}/chat.postMessage"),
+                &format!("{}/chat.postMessage", self.api_base),
                 &self.token,
                 &params,
             )
@@ -349,7 +374,11 @@ impl SlackProvider {
         }
         let response = self
             .http
-            .post_form(&format!("{SLACK_API}/chat.update"), &self.token, &params)
+            .post_form(
+                &format!("{}/chat.update", self.api_base),
+                &self.token,
+                &params,
+            )
             .map_err(GwtError::Other)?;
         check_status(&response, "chat.update")?;
         let parsed: SlackPostResponse = serde_json::from_str(&response.body)
@@ -874,6 +903,48 @@ mod tests {
             "the hidden Workspace/General root is not exposed as a parent entry"
         );
         assert_eq!(snapshot.board.total_entries, 1);
+    }
+
+    #[test]
+    fn load_snapshot_reads_only_the_project_channel_no_cross_project_union() {
+        // SPEC-2963 FR-027: a per-project provider built with an EMPTY
+        // channel_map (as `board_provider::build_remote_for` does) queries ONLY
+        // its own channel on read — never another project's channel — so two
+        // projects' Boards never mix when reading.
+        let root = root();
+        let calls = std::sync::Arc::new(Mutex::new(Vec::new()));
+        let mock = MockHttp {
+            history_body: r#"{"ok":true,"messages":[]}"#.to_string(),
+            replies_body: r#"{"ok":true,"messages":[]}"#.to_string(),
+            calls: calls.clone(),
+            ..Default::default()
+        };
+        let provider = SlackProvider::new(
+            "xoxb-token",
+            "CH-PROJ-A",
+            BTreeMap::new(),
+            Box::new(mock),
+            60,
+        );
+        provider.load_snapshot(&root).unwrap();
+
+        let history_channels: Vec<String> = calls
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|(url, _)| url.contains("conversations.history"))
+            .filter_map(|(_, query)| {
+                query
+                    .iter()
+                    .find(|(key, _)| key == "channel")
+                    .map(|(_, value)| value.clone())
+            })
+            .collect();
+        assert_eq!(
+            history_channels,
+            vec!["CH-PROJ-A".to_string()],
+            "only the project's own channel is read; no cross-project union"
+        );
     }
 
     #[test]

@@ -64,6 +64,7 @@ pub(super) fn branch(name: &str) -> BranchListEntry {
         cleanup_ready: true,
         cleanup: crate::BranchCleanupInfo::default(),
         resume: crate::BranchResumeInfo::unavailable(),
+        start_work_eligibility: None,
     }
 }
 

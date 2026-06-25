@@ -85,6 +85,7 @@ root_js_modules! {
     "board-surface.js" => "boardEntryMentionsSelf",
     "agent-kanban-surface.js" => "createAgentKanbanSurface",
     "workspace-kanban-surface.js" => "createWorkspaceKanbanSurface",
+    "improvement-inbox-surface.js" => "createImprovementInboxSurface",
     "workspace-resume-picker-modal.js" => "createWorkspaceResumePickerController",
     "update-cta.js" => "createUpdateCtaController",
     "terminal-context-menu.js" => "createTerminalContextMenuController",

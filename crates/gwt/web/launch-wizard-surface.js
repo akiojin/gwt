@@ -44,6 +44,13 @@ export function createLaunchWizardSurface({
       const wizardCancelButton = document.getElementById("wizard-cancel-button");
       const wizardSubmitButton = document.getElementById("wizard-submit-button");
 
+      // SPEC-2359 US-83: the launch-facing wizard abstracts the remote/local
+      // distinction — show plain branch names ("feature-foo") by stripping the
+      // `origin/` prefix. Display-only: the action payload keeps the raw name
+      // (the backend `select_existing_branch` normalizes either form).
+      const displayBranchName = (name) =>
+        typeof name === "string" ? name.replace(/^origin\//, "") : name;
+
       let launchWizard = null;
       let launchWizardOpenError = null;
       let launchWizardOpening = null;
@@ -847,7 +854,9 @@ export function createLaunchWizardSurface({
         wizardMeta.textContent = launchWizard.show_branch_controls === false
           ? "Plan Agent launch"
           : `Selected branch · ${
-            launchWizard.selected_branch_name || launchWizard.branch_name || "Work"
+            displayBranchName(
+              launchWizard.selected_branch_name || launchWizard.branch_name || "Work",
+            )
           }`;
         wizardSubmitButton.textContent = isLaunchSubmitPending
           ? "Launching..."
@@ -1113,6 +1122,52 @@ export function createLaunchWizardSurface({
           section.appendChild(methodList);
 
           panel.appendChild(section);
+        }
+
+        // SPEC-2359 US-83 / FR-444: "open an existing branch" picker. Lets the
+        // user continue on an eligible remote branch (no new work/* branch)
+        // instead of starting a fresh work branch. Each candidate dispatches
+        // SelectExistingBranch, which flips the wizard to continue-on-branch.
+        const openBranchCandidates = Array.isArray(launchWizard.open_branch_candidates)
+          ? launchWizard.open_branch_candidates
+          : [];
+        if (showStartMethods && openBranchCandidates.length > 0) {
+          const branchPickerSection = createLaunchSection(
+            "Open an existing branch",
+            "Continue on a remote branch instead of creating a new work branch.",
+          );
+          const candidateList = createNode("div", "start-method-list");
+          for (const candidate of openBranchCandidates) {
+            const button = createNode("button", "start-method-button");
+            button.type = "button";
+            button.setAttribute("data-existing-branch", candidate);
+            button.appendChild(
+              createNode("div", "start-method-title", displayBranchName(candidate)),
+            );
+            button.appendChild(
+              createNode(
+                "div",
+                "start-method-summary",
+                "Continue on this branch (tracks the remote)",
+              ),
+            );
+            const openExistingBranch = () => {
+              if (
+                !releaseWizardInteractionGuardForChromeAction()
+                || launchWizardPendingAction
+              ) {
+                return;
+              }
+              sendWizardAction({
+                kind: "select_existing_branch",
+                branch_name: candidate,
+              });
+            };
+            button.addEventListener("click", openExistingBranch);
+            candidateList.appendChild(button);
+          }
+          branchPickerSection.appendChild(candidateList);
+          panel.appendChild(branchPickerSection);
         }
 
         if (showSetupForms && launchWizard.show_branch_controls !== false) {

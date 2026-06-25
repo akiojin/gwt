@@ -83,6 +83,17 @@ export function createReleaseNotesWindow({
     return 0;
   }
 
+  function normalizeVersion(value) {
+    return typeof value === "string" ? value.trim().replace(/^v/, "") : "";
+  }
+
+  function isCurrentVersion(version) {
+    return (
+      state.currentVersion &&
+      normalizeVersion(version) === normalizeVersion(state.currentVersion)
+    );
+  }
+
   function clearChildren(node) {
     while (node.firstChild) {
       node.removeChild(node.firstChild);
@@ -406,16 +417,26 @@ export function createReleaseNotesWindow({
     }
     for (const entry of state.entries) {
       const selected = entry.version === state.selectedVersion;
+      const current = isCurrentVersion(entry.version);
       const btn = document.createElement("button");
       btn.type = "button";
-      btn.className = `release-notes-sidebar-item${selected ? " is-selected" : ""}`;
+      btn.className = `release-notes-sidebar-item${selected ? " is-selected" : ""}${current ? " is-current-version" : ""}`;
       btn.setAttribute("role", "option");
       btn.setAttribute("aria-selected", selected ? "true" : "false");
+      if (current) {
+        btn.setAttribute("aria-current", "true");
+      }
       btn.dataset.version = entry.version;
       const versionSpan = document.createElement("span");
       versionSpan.className = "release-notes-sidebar-version";
       versionSpan.textContent = `v${entry.version}`;
       btn.appendChild(versionSpan);
+      if (current) {
+        const currentSpan = document.createElement("span");
+        currentSpan.className = "release-notes-sidebar-current";
+        currentSpan.textContent = "Current";
+        btn.appendChild(currentSpan);
+      }
       if (entry.date) {
         const dateSpan = document.createElement("span");
         dateSpan.className = "release-notes-sidebar-date";

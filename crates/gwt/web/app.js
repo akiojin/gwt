@@ -19,6 +19,7 @@
         resolveDragReleasePoint,
       } from "/window-docking.js";
       import { createWorkspaceKanbanSurface as createWorkspaceOverviewSurface } from "/workspace-kanban-surface.js";
+      import { createImprovementInboxSurface } from "/improvement-inbox-surface.js";
       import {
         createAgentKanbanPendingPlacementController,
         createAgentKanbanSurface,
@@ -414,6 +415,8 @@
         active_tab_id: null,
         recent_projects: [],
       };
+      let improvementCandidates = [];
+      let improvementCandidatesRevision = 0;
       let renderedProjectTabsKey = "";
       let renderedWorkspaceWindowsKey = "";
       let renderedAppVersionLabel = null;
@@ -478,6 +481,10 @@
         }
         appendRenderKeyPart(parts, "windows");
         appendRenderKeyPart(parts, windows.length);
+        if (windows.some((windowData) => presetSurface(windowData?.preset) === "improvement")) {
+          appendRenderKeyPart(parts, "improvement_candidates_revision");
+          appendRenderKeyPart(parts, improvementCandidatesRevision);
+        }
         for (const windowData of windows) {
           const geometry = windowData?.geometry || {};
           appendRenderKeyPart(parts, "id");
@@ -782,6 +789,9 @@
         if (preset === "work" || preset === "workspace") {
           return "work";
         }
+        if (preset === "improvement" || preset === "improvements") {
+          return "improvement";
+        }
         if (preset === "console") {
           return "console";
         }
@@ -978,7 +988,7 @@
       if (appVersionLabel && !appVersionLabel.dataset.releaseNotesBound) {
         appVersionLabel.dataset.releaseNotesBound = "true";
         const openReleaseNotesFromLabel = () => {
-          releaseNotesWindow.open(versionState.current || null);
+          releaseNotesWindow.open(versionState.latest || versionState.current || null);
         };
         appVersionLabel.addEventListener("click", openReleaseNotesFromLabel);
         appVersionLabel.addEventListener("keydown", (event) => {
@@ -2649,16 +2659,16 @@
       // sidebar layer for the "Quick" section's hint.
       function operatorTelemetryRenderKey(counts) {
         const parts = [];
-        appendRenderKeyPart(parts, "active");
-        appendRenderKeyPart(parts, counts?.active ?? null);
+        appendRenderKeyPart(parts, "running");
+        appendRenderKeyPart(parts, counts?.running ?? null);
         appendRenderKeyPart(parts, "idle");
         appendRenderKeyPart(parts, counts?.idle ?? null);
-        // FR-039 (anshin): the WAITING cell refreshes when the needs_input count
+        // FR-039 (anshin): the WAITING cell refreshes when the waiting count
         // changes; include it in the render key so the strip is not skipped.
-        appendRenderKeyPart(parts, "needs_input");
-        appendRenderKeyPart(parts, counts?.needs_input ?? null);
-        appendRenderKeyPart(parts, "blocked");
-        appendRenderKeyPart(parts, counts?.blocked ?? null);
+        appendRenderKeyPart(parts, "waiting");
+        appendRenderKeyPart(parts, counts?.waiting ?? null);
+        appendRenderKeyPart(parts, "error");
+        appendRenderKeyPart(parts, counts?.error ?? null);
         appendRenderKeyPart(parts, "done");
         appendRenderKeyPart(parts, counts?.done ?? null);
         appendRenderKeyPart(parts, "agents");
@@ -2716,13 +2726,13 @@
         // Windows popover. windowMap only holds windows mounted in visited
         // tabs, so it undercounts; allProjectWindowIds() is the true total.
         const counts = {
-          active: 0,
+          running: 0,
           idle: 0,
-          // FR-039 (anshin): needs_input is its own LOUD telemetry state for
+          // FR-039 (anshin): waiting is its own LOUD telemetry state for
           // agents waiting on the operator. It used to collapse into idle;
           // now it drives the WAITING strip cell instead.
-          needs_input: 0,
-          blocked: 0,
+          waiting: 0,
+          error: 0,
           done: 0,
           agents: 0,
           windows: allProjectWindowIds().length,
@@ -2754,19 +2764,16 @@
               (total, work) => total + (Array.isArray(work.agents) ? work.agents.length : 0),
               0,
             );
-            counts.active = Math.max(counts.active, activeAgents || activeWorks.length);
-            counts.blocked = Math.max(counts.blocked, blockedAgents);
+            counts.running = Math.max(counts.running, activeAgents || activeWorks.length);
             counts.agents = Math.max(counts.agents, totalAgents || activeAgents + blockedAgents);
             counts.branches = Math.max(Number(counts.branches || 0), activeWorks.length);
           } else {
             const category = activeWorkProjection.status_category || "unknown";
             const activeAgents = Number(activeWorkProjection.active_agents || 0);
             const blockedAgents = Number(activeWorkProjection.blocked_agents || 0);
-            if (category === "active") counts.active = Math.max(counts.active, activeAgents || 1);
+            if (category === "active") counts.running = Math.max(counts.running, activeAgents || 1);
             if (category === "idle" && activeAgents > 0) counts.idle = Math.max(counts.idle, activeAgents);
-            if (category === "blocked") counts.blocked = Math.max(counts.blocked, blockedAgents || 1);
             if (category === "done") counts.done = Math.max(counts.done, 1);
-            counts.blocked = Math.max(counts.blocked, blockedAgents);
             counts.agents = Math.max(counts.agents, activeAgents + blockedAgents);
           }
         }
@@ -3882,6 +3889,7 @@
         mountBoardWindow,
         mountLogsWindow,
         applyBoardLogsReceiveEvent,
+        applyProjectBoardConfigEventToBoard,
       } = createBoardLogsSurface({
         send,
         createNode,
@@ -4136,6 +4144,10 @@
           openBranchCleanupModal: (...a) => openBranchCleanupModal(...a),
         },
       });
+      const improvementInboxSurface = createImprovementInboxSurface({
+        createNode,
+        send,
+      });
 
       // SPEC-3064 Phase 3 (E5): the Launch Wizard surface (wizard state,
       // interaction guard, field builders, state transitions,
@@ -4278,6 +4290,7 @@
           "surface-issue-monitor",
           "surface-index",
           "surface-work",
+          "surface-improvement",
           "surface-profile",
           "surface-console",
           "surface-mock",
@@ -4374,6 +4387,20 @@
             focusWindowLocally,
             sendFocus: (id) => socketTransport.send({ kind: "focus_window", id }),
           });
+          // SPEC-2359 US-83: fetch the eligible remote branches for this
+          // Workspace window so they fold into the unified Workspace list as
+          // Remote-tagged rows. Sent from app.js (not the surface's mount) so
+          // the surface stays a pure renderer and its unit tests keep their
+          // exact-message contracts.
+          send({ kind: "request_remote_start_work_branches", id: windowData.id });
+          return;
+        }
+
+        if (surface === "improvement") {
+          improvementInboxSurface.mount(body, {
+            ...windowData,
+            improvement_candidates: improvementCandidates,
+          });
           return;
         }
 
@@ -4443,6 +4470,18 @@
             </div>
           `;
           scroll.appendChild(section);
+        }
+      }
+
+      function refreshMountedImprovementInboxWindows() {
+        for (const element of document.querySelectorAll(
+          '.workspace-window[data-preset="improvement"]',
+        )) {
+          const body = element.querySelector(".window-body");
+          if (!body) continue;
+          improvementInboxSurface.mount(body, {
+            improvement_candidates: improvementCandidates,
+          });
         }
       }
 
@@ -5113,6 +5152,28 @@
           case "window_list":
             applyWindowListEvent(event);
             break;
+          case "improvement_candidates":
+            improvementCandidates = Array.isArray(event.candidates) ? event.candidates : [];
+            improvementCandidatesRevision += 1;
+            {
+              const workspace = activeWorkspace() || emptyWorkspace();
+              renderWorkspace(workspace);
+              if (
+                !(workspace?.windows || []).some(
+                  (windowData) => presetSurface(windowData?.preset) === "improvement",
+                )
+              ) {
+                refreshMountedImprovementInboxWindows();
+              }
+            }
+            break;
+          case "improvement_action_result":
+            // Candidate list refresh is delivered as a separate
+            // improvement_candidates snapshot; no extra UI state is needed here.
+            break;
+          case "improvement_action_error":
+            window.alert(`Improvement action error: ${event.message}`);
+            break;
           case "provider_usage":
             applyProviderUsageUi({
               accounts: event.accounts || [],
@@ -5227,6 +5288,10 @@
           case "log_entry_appended":
             applyBoardLogsReceiveEvent(event);
             break;
+          case "project_board_config":
+            // SPEC-2963 FR-030: per-project Board routing → Board window chip.
+            applyProjectBoardConfigEventToBoard(event);
+            break;
           case "process_line":
             // SPEC-2809 Phase F1/F2 — fan out the redacted, ANSI-stripped
             // line from `ProcessConsoleHub` to every Console window
@@ -5295,6 +5360,11 @@
           // SPEC-2359 US-42 — Resume Picker dispatcher slots.
           case "workspace_resumable_agents":
             workspaceResumePicker.handleAgentsList(event);
+            break;
+          // SPEC-2359 US-83 — eligible remote branches render as "Start work on
+          // a branch" rows in the Workspace list.
+          case "remote_start_work_branches":
+            workspaceOverviewSurface.applyRemoteStartWorkBranches(event);
             break;
           case "workspace_resume_agent_error":
             launchPending.settleAck(event);

@@ -16,6 +16,7 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
+use base64::{engine::general_purpose, Engine as _};
 use chrono::{DateTime, Duration, Utc};
 use serde_json::Value;
 
@@ -139,6 +140,41 @@ pub fn parse_codex_account(jsonl: &str, now: DateTime<Utc>) -> Option<CodexAccou
     let tc = last_token_count(jsonl)?;
     let rl = tc.get("rate_limits")?;
     parse_rate_limits(rl, now)
+}
+
+fn decode_base64url(segment: &str) -> Option<Vec<u8>> {
+    general_purpose::URL_SAFE_NO_PAD
+        .decode(segment)
+        .or_else(|_| general_purpose::URL_SAFE.decode(segment))
+        .ok()
+}
+
+/// Parse a display-only account label from Codex auth JSON. The token itself is
+/// never surfaced; only non-empty `email`/`name` claims from the JWT payload are
+/// used for UI identification.
+pub fn parse_auth_account_label(body: &str) -> Option<String> {
+    let v: Value = serde_json::from_str(body).ok()?;
+    let token = v
+        .get("tokens")
+        .and_then(|tokens| tokens.get("id_token"))
+        .or_else(|| v.get("id_token"))
+        .and_then(Value::as_str)?;
+    let payload = token.split('.').nth(1)?;
+    let decoded = decode_base64url(payload)?;
+    let claims: Value = serde_json::from_slice(&decoded).ok()?;
+    ["email", "name"].into_iter().find_map(|key| {
+        claims
+            .get(key)
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(str::to_string)
+    })
+}
+
+fn read_auth_account_label(home: &Path) -> Option<String> {
+    let text = fs::read_to_string(home.join("auth.json")).ok()?;
+    parse_auth_account_label(&text)
 }
 
 /// Parse per-session usage from full rollout JSONL text.
@@ -294,6 +330,7 @@ pub fn rollout_for_session(home: &Path, session_id: &str) -> Option<PathBuf> {
 /// the most recent one is the freshest account state. Returns degraded
 /// `NoData` when none have account data.
 pub fn read_codex_account(home: &Path, now: DateTime<Utc>) -> ProviderUsage {
+    let account_label = read_auth_account_label(home);
     for path in recent_rollouts(home, 8) {
         let Ok(text) = fs::read_to_string(&path) else {
             continue;
@@ -301,6 +338,7 @@ pub fn read_codex_account(home: &Path, now: DateTime<Utc>) -> ProviderUsage {
         if let Some(acc) = parse_codex_account(&text, now) {
             return ProviderUsage {
                 provider: UsageProvider::Codex,
+                account_label,
                 plan: acc.plan,
                 windows: acc.windows,
                 limit_reached: acc.limit_reached,
@@ -405,6 +443,33 @@ mod tests {
     }
 
     #[test]
+    fn auth_account_label_prefers_email_from_id_token() {
+        let body = r#"{"tokens":{"id_token":"eyJhbGciOiJub25lIn0.eyJlbWFpbCI6ImNvZGV4QGV4YW1wbGUuY29tIiwibmFtZSI6IkNvZGV4IFVzZXIifQ.sig"}}"#;
+        assert_eq!(
+            parse_auth_account_label(body).as_deref(),
+            Some("codex@example.com")
+        );
+    }
+
+    #[test]
+    fn auth_account_label_falls_back_to_name() {
+        let body =
+            r#"{"tokens":{"id_token":"eyJhbGciOiJub25lIn0.eyJuYW1lIjoiQ29kZXggVXNlciJ9.sig"}}"#;
+        assert_eq!(
+            parse_auth_account_label(body).as_deref(),
+            Some("Codex User")
+        );
+    }
+
+    #[test]
+    fn auth_account_label_ignores_invalid_token() {
+        assert_eq!(
+            parse_auth_account_label(r#"{"tokens":{"id_token":"not-a-jwt"}}"#),
+            None
+        );
+    }
+
+    #[test]
     fn session_usage_aggregates_totals_and_context() {
         let jsonl = concat!(
             r#"{"type":"session_meta","payload":{"id":"abc","model":"gpt-5.5"}}"#,
@@ -474,6 +539,28 @@ mod tests {
         let acc = read_codex_account(dir.path(), now());
         assert_eq!(acc.state, UsageState::Ok);
         assert_eq!(acc.windows[0].used_percent, 7.0);
+    }
+
+    #[test]
+    fn read_account_includes_local_auth_account_label() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(
+            dir.path().join("auth.json"),
+            r#"{"tokens":{"id_token":"eyJhbGciOiJub25lIn0.eyJlbWFpbCI6ImNvZGV4QGV4YW1wbGUuY29tIiwibmFtZSI6IkNvZGV4IFVzZXIifQ.sig"}}"#,
+        )
+        .unwrap();
+        let day = dir.path().join("sessions/2026/06/25");
+        fs::create_dir_all(&day).unwrap();
+        fs::write(
+            day.join("rollout-2026-06-25T08-00-00-aaaa.jsonl"),
+            r#"{"payload":{"type":"token_count","rate_limits":{"primary":{"used_percent":12.0},"plan_type":"pro"},"info":{}}}"#,
+        )
+        .unwrap();
+
+        let acc = read_codex_account(dir.path(), now());
+
+        assert_eq!(acc.account_label.as_deref(), Some("codex@example.com"));
+        assert_eq!(acc.plan.as_deref(), Some("pro"));
     }
 
     #[test]

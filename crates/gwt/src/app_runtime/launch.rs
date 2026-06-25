@@ -154,13 +154,27 @@ impl AgentWindowPlacement {
 pub struct LaunchWizardMemoryCache {
     sessions: Vec<gwt_agent::Session>,
     agent_options: Vec<gwt::AgentOption>,
+    // SPEC-3170 FR-001: `claude_ultracode_supported()` spawns `claude --version`
+    // (a Node CLI, ~100-200ms cold) and `claude_workflows_enabled()` reads a
+    // settings file. They are stable for a session, so we resolve them once at
+    // cache load time and reuse the booleans on every wizard open instead of
+    // re-probing on the tao main event-loop thread (the measured open hitch).
+    claude_ultracode_supported: bool,
+    claude_workflows_enabled: bool,
 }
 
 impl LaunchWizardMemoryCache {
     pub(crate) fn load(sessions_dir: &Path) -> Self {
+        // Resolve the Claude capability probes once here (see field docs). The
+        // wizard open path then reads the cached booleans rather than spawning
+        // `claude --version` per open.
+        let claude_workflows_enabled = gwt_agent::claude_workflows_enabled();
+        let claude_ultracode_supported = gwt_agent::claude_ultracode_supported();
         Self {
             sessions: Self::load_sessions(sessions_dir),
             agent_options: Self::load_agent_options(),
+            claude_ultracode_supported,
+            claude_workflows_enabled,
         }
     }
 
@@ -169,9 +183,21 @@ impl LaunchWizardMemoryCache {
         sessions_dir: &Path,
         agent_options: Vec<gwt::AgentOption>,
     ) -> Self {
+        Self::load_with_agent_options_and_capabilities(sessions_dir, agent_options, false, false)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn load_with_agent_options_and_capabilities(
+        sessions_dir: &Path,
+        agent_options: Vec<gwt::AgentOption>,
+        claude_ultracode_supported: bool,
+        claude_workflows_enabled: bool,
+    ) -> Self {
         Self {
             sessions: Self::load_sessions(sessions_dir),
             agent_options,
+            claude_ultracode_supported,
+            claude_workflows_enabled,
         }
     }
 
@@ -201,6 +227,18 @@ impl LaunchWizardMemoryCache {
 
     pub(super) fn agent_options(&self) -> Vec<gwt::AgentOption> {
         self.agent_options.clone()
+    }
+
+    /// SPEC-3170 FR-001: cached `claude --version`-derived ultracode capability,
+    /// resolved once at load time so wizard open never re-spawns the probe.
+    pub(super) fn claude_ultracode_supported(&self) -> bool {
+        self.claude_ultracode_supported
+    }
+
+    /// SPEC-3170 FR-001: cached Claude dynamic-workflows capability, resolved
+    /// once at load time so wizard open never re-reads the settings file.
+    pub(super) fn claude_workflows_enabled(&self) -> bool {
+        self.claude_workflows_enabled
     }
 
     pub(super) fn quick_start_entries(
@@ -597,6 +635,24 @@ impl AppRuntime {
         sessions: Vec<gwt_agent::Session>,
     ) {
         self.launch_wizard_cache.replace_sessions(sessions);
+    }
+
+    /// SPEC-2359 US-83 / FR-444: update the live wizard's "open existing branch"
+    /// picker candidates (computed off the UI thread after `fetch_origin`) and
+    /// re-emit its state so the picker renders. Scoped to the matching
+    /// `wizard_id` so a stale background result can't clobber a newer wizard.
+    pub(crate) fn apply_launch_wizard_branch_candidates(
+        &mut self,
+        wizard_id: String,
+        candidates: Vec<String>,
+    ) -> Vec<OutboundEvent> {
+        if let Some(session) = self.launch_wizard.as_mut() {
+            if session.wizard_id == wizard_id {
+                session.wizard.open_branch_candidates = candidates;
+                return vec![self.launch_wizard_state_outbound()];
+            }
+        }
+        Vec::new()
     }
 
     pub(crate) fn live_sessions_for_branch(
@@ -1065,16 +1121,6 @@ impl AppRuntime {
                 Self::status_events(window_id, WindowProcessStatus::Error, Some(error))
             }
         }
-    }
-
-    #[allow(dead_code)]
-    pub(crate) fn spawn_process_window(
-        &mut self,
-        id: &str,
-        geometry: WindowGeometry,
-        launch: ProcessLaunch,
-    ) -> Result<(), String> {
-        self.spawn_process_window_with_console_kind(id, geometry, launch, None)
     }
 
     pub(crate) fn spawn_process_window_with_console_kind(
@@ -1997,3 +2043,35 @@ impl AppRuntime {
 #[cfg(test)]
 #[path = "agent_launch_stage_tests.rs"]
 mod agent_launch_stage_tests;
+
+#[cfg(test)]
+mod fr001_capability_cache_tests {
+    use super::LaunchWizardMemoryCache;
+
+    // SPEC-3170 FR-001: the Claude capability probes are resolved once at cache
+    // load time and the getters return the stored booleans verbatim, so opening
+    // the Launch wizard reads cached values instead of re-spawning
+    // `claude --version` on the tao main event-loop thread.
+    #[test]
+    fn caches_claude_capabilities_for_reuse_without_reprobe() {
+        let dir = tempfile::tempdir().expect("tempdir");
+
+        let on = LaunchWizardMemoryCache::load_with_agent_options_and_capabilities(
+            dir.path(),
+            Vec::new(),
+            true,
+            true,
+        );
+        assert!(on.claude_ultracode_supported());
+        assert!(on.claude_workflows_enabled());
+
+        let off = LaunchWizardMemoryCache::load_with_agent_options_and_capabilities(
+            dir.path(),
+            Vec::new(),
+            false,
+            false,
+        );
+        assert!(!off.claude_ultracode_supported());
+        assert!(!off.claude_workflows_enabled());
+    }
+}

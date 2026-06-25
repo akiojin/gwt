@@ -720,6 +720,23 @@ mod tests {
             .collect()
     }
 
+    fn init_repo_with_origin(worktree: &Path, remote_url: &str) {
+        assert!(Command::new("git")
+            .arg("init")
+            .arg("-q")
+            .arg(worktree)
+            .status()
+            .expect("git init")
+            .success());
+        assert!(Command::new("git")
+            .arg("-C")
+            .arg(worktree)
+            .args(["remote", "add", "origin", remote_url])
+            .status()
+            .expect("git remote add")
+            .success());
+    }
+
     #[test]
     fn managed_hooks_use_one_event_dispatcher_command_per_event() {
         let dir = tempfile::tempdir().unwrap();
@@ -869,6 +886,59 @@ mod tests {
         assert!(plugin.contains("openclaw"));
         assert!(plugin.contains("blockReason"));
         assert!(plugin.contains("prependContext"));
+    }
+
+    #[test]
+    fn provider_hooks_add_self_improvement_stop_only_for_gwt_repo() {
+        let gwt_repo = tempfile::tempdir().unwrap();
+        init_repo_with_origin(gwt_repo.path(), "https://github.com/akiojin/gwt.git");
+        generate_opencode_hooks(gwt_repo.path()).unwrap();
+        generate_openclaw_hooks(gwt_repo.path()).unwrap();
+        generate_hermes_hooks_with_source(gwt_repo.path(), None).unwrap();
+
+        let opencode =
+            fs::read_to_string(gwt_repo.path().join(".gwt/opencode/plugins/gwt-hooks.js")).unwrap();
+        let openclaw = fs::read_to_string(
+            gwt_repo
+                .path()
+                .join(".gwt/openclaw/plugins/gwt-hook-bridge/plugin.ts"),
+        )
+        .unwrap();
+        let hermes =
+            fs::read_to_string(gwt_repo.path().join(".gwt/hermes/agent-hooks/gwt-hook.sh"))
+                .unwrap();
+        assert!(opencode.contains("gwt-self-improvement-stop"));
+        assert!(openclaw.contains("gwt-self-improvement-stop"));
+        assert!(hermes.contains("gwt-self-improvement-stop"));
+
+        let target_repo = tempfile::tempdir().unwrap();
+        init_repo_with_origin(
+            target_repo.path(),
+            "https://github.com/example/target-project.git",
+        );
+        generate_opencode_hooks(target_repo.path()).unwrap();
+        generate_openclaw_hooks(target_repo.path()).unwrap();
+        generate_hermes_hooks_with_source(target_repo.path(), None).unwrap();
+
+        let generated = [
+            target_repo
+                .path()
+                .join(".gwt/opencode/plugins/gwt-hooks.js"),
+            target_repo
+                .path()
+                .join(".gwt/openclaw/plugins/gwt-hook-bridge/plugin.ts"),
+            target_repo
+                .path()
+                .join(".gwt/hermes/agent-hooks/gwt-hook.sh"),
+        ];
+        for path in generated {
+            let content = fs::read_to_string(&path).unwrap();
+            assert!(
+                !content.contains("gwt-self-improvement-stop"),
+                "non-gwt repo must not receive direct self-improvement hook: {}",
+                path.display()
+            );
+        }
     }
 
     #[test]
@@ -1483,6 +1553,47 @@ mod tests {
         assert!(pre_tool_commands
             .iter()
             .any(|command| command.contains(" hook event PreToolUse")));
+    }
+
+    #[test]
+    fn generate_codex_hooks_preserves_direct_gwt_self_improvement_hook() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(".codex/hooks.json");
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(
+            &path,
+            serde_json::to_string_pretty(&json!({
+                "hooks": {
+                    "Stop": [{
+                        "matcher": "*",
+                        "hooks": [{
+                            "command": "gwt_bin=\"${GWT_BIN_PATH:-gwtd}\"; \"$gwt_bin\" hook gwt-self-improvement-stop",
+                            "type": "command"
+                        }]
+                    }]
+                }
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+
+        generate_codex_hooks(dir.path()).unwrap();
+
+        let content = fs::read_to_string(&path).unwrap();
+        let value: Value = serde_json::from_str(&content).unwrap();
+        let stop_commands = commands_for_event(&value, "Stop");
+        assert!(
+            stop_commands
+                .iter()
+                .any(|command| command.contains(" hook event Stop")),
+            "managed Stop dispatcher must still be present: {stop_commands:?}"
+        );
+        assert!(
+            stop_commands
+                .iter()
+                .any(|command| command.contains(" hook gwt-self-improvement-stop")),
+            "direct gwt self-improvement hook must be preserved as a repo-owned hook: {stop_commands:?}"
+        );
     }
 
     #[test]

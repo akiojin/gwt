@@ -14,7 +14,7 @@ use crate::{
     board_audience::{
         current_session_board_scope, gui_default_board_scope, post_audience_for_session,
     },
-    board_provider::{load_snapshot, load_snapshot_for_scope, post_entry},
+    board_provider::{load_snapshot, load_snapshot_for_scope, post_entry, routing_for},
     cli::{CliEnv, CliParseError},
 };
 
@@ -31,6 +31,10 @@ pub enum BoardCommand {
     /// fields such as `params.targets`, `params.mentions`, and
     /// `params.broadcast`.
     Post(Box<BoardPostCommand>),
+    /// `board.config.show` — print this repo's resolved Board routing (provider /
+    /// channel / tenant) so per-project separation can be confirmed by running
+    /// it in two repos and seeing two different channels (SPEC-2963 FR-026).
+    ConfigShow,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
@@ -78,6 +82,10 @@ pub fn parse(args: &[String]) -> Result<BoardCommand, CliParseError> {
             })
         }
         Some("post") => parse_post_args(it.collect::<Vec<_>>().as_slice()),
+        Some("config") => match it.next().map(String::as_str) {
+            Some("show") | None => Ok(BoardCommand::ConfigShow),
+            Some(other) => Err(CliParseError::UnknownSubcommand(other.to_string())),
+        },
         Some(other) => Err(CliParseError::UnknownSubcommand(other.to_string())),
         None => Err(CliParseError::Usage),
     }
@@ -216,6 +224,14 @@ pub(super) fn run<E: CliEnv>(
                 "board entries: {}\n",
                 snapshot.board.entries.len()
             ));
+            0
+        }
+        BoardCommand::ConfigShow => {
+            let routing = routing_for(env.repo_path());
+            let rendered = serde_json::to_string_pretty(&routing)
+                .map_err(|err| io_as_spec_ops_error(io::Error::other(err.to_string())))?;
+            out.push_str(&rendered);
+            out.push('\n');
             0
         }
     };

@@ -862,7 +862,7 @@ button.op-status-strip__cell {
   50% { opacity: 0.4; transform: scale(0.85); }
 }
 
-.op-status-strip__cell--active .op-status-strip__value {
+.op-status-strip__cell--running .op-status-strip__value {
   color: var(--color-state-active);
 }
 
@@ -876,7 +876,7 @@ button.op-status-strip__cell {
   color: var(--color-state-needs-input);
 }
 
-.op-status-strip__cell--blocked .op-status-strip__value {
+.op-status-strip__cell--error .op-status-strip__value {
   color: var(--color-state-blocked);
 }
 
@@ -1277,7 +1277,7 @@ button.op-runtime-health-detail__process {
   isolation: isolate;
 }
 
-[data-agent-state="active"] {
+[data-agent-state="running"] {
   --agent-color: var(--current-agent, var(--color-state-active));
   box-shadow: var(--shadow-glow-active);
   animation: op-rim-pulse var(--motion-pulse) ease-in-out infinite;
@@ -1302,22 +1302,22 @@ button.op-runtime-health-detail__process {
   opacity: 1;
 }
 
-[data-agent-state="blocked"] {
+[data-agent-state="error"] {
   --agent-color: var(--color-state-blocked);
   box-shadow: 0 0 0 1px var(--agent-color),
               0 0 14px 0 color-mix(in oklab, var(--agent-color) 50%, transparent);
-  animation: op-rim-blocked calc(var(--motion-pulse) * 0.5) ease-in-out infinite;
+  animation: op-rim-alert calc(var(--motion-pulse) * 0.5) ease-in-out infinite;
 }
 
-/* FR-039 (anshin) — "needs input" is a LOUD your-turn rim: it pulses like
-   blocked (so the operator notices it) but uses the warm amber state colour
-   instead of error red. Reuses the op-rim-blocked keyframe, which is driven
+/* FR-039 (anshin) — waiting is a LOUD your-turn rim: it pulses like
+   error (so the operator notices it) but uses the warm amber state colour
+   instead of error red. Reuses the op-rim-alert keyframe, which is driven
    by --agent-color, so the glow tracks the needs-input token. */
-[data-agent-state="needs_input"] {
+[data-agent-state="waiting"] {
   --agent-color: var(--color-state-needs-input);
   box-shadow: 0 0 0 1px var(--agent-color),
               0 0 14px 0 color-mix(in oklab, var(--agent-color) 50%, transparent);
-  animation: op-rim-blocked calc(var(--motion-pulse) * 0.5) ease-in-out infinite;
+  animation: op-rim-alert calc(var(--motion-pulse) * 0.5) ease-in-out infinite;
 }
 
 [data-agent-state="done"] {
@@ -1333,7 +1333,7 @@ button.op-runtime-health-detail__process {
                      0 0 22px 2px color-mix(in oklab, var(--agent-color) 55%, transparent); }
 }
 
-@keyframes op-rim-blocked {
+@keyframes op-rim-alert {
   0%, 100% { box-shadow: 0 0 0 1px var(--agent-color),
                           0 0 14px 0 color-mix(in oklab, var(--agent-color) 50%, transparent); }
   50%      { box-shadow: 0 0 0 2px var(--agent-color),
@@ -1341,9 +1341,9 @@ button.op-runtime-health-detail__process {
 }
 
 @media (prefers-reduced-motion: reduce) {
-  [data-agent-state="active"],
-  [data-agent-state="blocked"],
-  [data-agent-state="needs_input"] {
+  [data-agent-state="running"],
+  [data-agent-state="error"],
+  [data-agent-state="waiting"] {
     animation: none;
   }
   /* SPEC-2356 — Status Strip live dot pulses to signal "system is alive".
@@ -1920,8 +1920,25 @@ kbd.op-kbd {
   background: var(--color-surface-elevated);
   border-left-color: var(--color-accent);
 }
+.release-notes-sidebar-item.is-current-version {
+  background: color-mix(in oklab, var(--color-accent) 8%, transparent);
+}
+.release-notes-sidebar-item.is-selected.is-current-version {
+  background: var(--color-surface-elevated);
+}
 .release-notes-sidebar-version {
   font-weight: 600;
+}
+.release-notes-sidebar-current {
+  align-self: flex-start;
+  border: 1px solid color-mix(in oklab, var(--color-accent) 45%, transparent);
+  border-radius: 999px;
+  color: var(--color-accent);
+  font-size: 10px;
+  font-weight: 700;
+  line-height: 1;
+  padding: 2px 6px;
+  text-transform: uppercase;
 }
 .release-notes-sidebar-date {
   font-size: 11px;
@@ -2375,7 +2392,11 @@ kbd.op-kbd {
   color: var(--color-state-active);
 }
 
+/* Paused is the quiet baseline (UX 2026-06-24): a defined slate pill, but
+   deliberately uncolored so the tinted badges (Remote/Merged/Hook/Active) read
+   as the only real signals against it. */
 .workspace-overview-lifecycle[data-lifecycle="paused"] {
+  border-color: color-mix(in oklab, var(--color-state-idle) 55%, var(--color-border));
   color: var(--color-state-idle);
 }
 
@@ -2526,12 +2547,18 @@ kbd.op-kbd {
 
 /* SPEC-2359 W16-3 (FR-390): fetched-remote-only badge — Launch creates the
    worktree on demand. */
+/* Badge color language (UX 2026-06-24): each badge gets a distinct, calm tint
+   on the BORDER + TEXT (no loud fills, except a faint wash for terminal/error
+   states) so the badge strip is scannable at a glance instead of monochrome:
+   Active=cyan, Paused=neutral slate (the quiet baseline), Done/Discarded=slate,
+   Merged=slate + faint wash (archival), Remote=violet (a place, not a state),
+   Hook badge=amber when setup-needed / red wash when error (and only then). */
 .workspace-overview-remote {
   flex: 0 0 auto;
   padding: 0 var(--space-2);
-  border: 1px solid var(--color-border-strong);
+  border: 1px solid color-mix(in oklab, var(--color-state-remote) 55%, var(--color-border));
   border-radius: var(--radius-sm);
-  color: var(--color-text-muted);
+  color: var(--color-state-remote);
   font-family: var(--font-mono);
   font-size: 10px;
   font-weight: 650;
@@ -2539,13 +2566,16 @@ kbd.op-kbd {
   line-height: 1.5;
 }
 
-/* SPEC-2359 W-15 (FR-386): merged-into-base badge — safe to delete. */
+/* SPEC-2359 W-15 (FR-386): merged-into-base badge — safe to delete. A faint
+   slate wash (UX 2026-06-24) lifts this terminal/archival state off the gray
+   field and pairs it with the Done lifecycle. */
 .workspace-overview-merged {
   flex: 0 0 auto;
   padding: 0 var(--space-2);
-  border: 1px solid color-mix(in oklab, var(--color-state-done) 60%, var(--color-border));
+  border: 1px solid color-mix(in oklab, var(--color-state-done) 78%, var(--color-border));
   border-radius: var(--radius-sm);
   color: var(--color-state-done);
+  background: color-mix(in oklab, var(--color-state-done) 10%, transparent);
   font-family: var(--font-mono);
   font-size: 10px;
   font-weight: 650;
@@ -2566,15 +2596,18 @@ kbd.op-kbd {
   line-height: 1.5;
 }
 
-.workspace-overview-hook-health[data-status="needs_attention"],
-.workspace-overview-hook-health[data-status="waiting_for_first_hook_event"] {
-  border-color: var(--color-state-idle);
-  color: var(--color-state-idle);
+/* Hook badge is only rendered for actionable states (UX 2026-06-24): amber when
+   setup is needed, a red wash when a hook is actually broken — so a Hook badge
+   always means "do something", never ambient noise. */
+.workspace-overview-hook-health[data-status="needs_attention"] {
+  border-color: color-mix(in oklab, var(--color-state-needs-input) 60%, var(--color-border));
+  color: var(--color-state-needs-input);
 }
 
 .workspace-overview-hook-health[data-status="degraded"] {
   border-color: var(--color-state-blocked);
   color: var(--color-state-blocked);
+  background: color-mix(in oklab, var(--color-state-blocked) 12%, transparent);
 }
 
 .workspace-overview-agent-name,
@@ -3514,24 +3547,24 @@ button.workspace-board-ref:focus-visible {
   }
 }
 
-/* SPEC-2356 — when blocked count > 0 the BLOCKED cell pulses subtly so
-   the user notices something needs attention. FR-039 (anshin) extends the same
-   alert pulse to the WAITING cell so "agents waiting for input" is just as
-   loud as blocked. The animation is keyframed on opacity (no shadow / repaint
-   cost) and disabled by reduced-motion and forced-colors. */
-@keyframes op-status-strip-blocked-pulse {
+/* SPEC-2356 — when error count > 0 the ERROR cell pulses subtly so the user
+   notices runtime failures. FR-039 (anshin) extends the same alert pulse to the
+   WAITING cell so "agents waiting for input" is just as loud as errors. The
+   animation is keyframed on opacity (no shadow / repaint cost) and disabled by
+   reduced-motion and forced-colors. */
+@keyframes op-status-strip-alert-pulse {
   0%, 100% { opacity: 1; }
   50%      { opacity: 0.55; }
 }
 
-:root[data-theme] .op-status-strip__cell--blocked.op-status-strip__cell--alert .op-status-strip__value,
+:root[data-theme] .op-status-strip__cell--error.op-status-strip__cell--alert .op-status-strip__value,
 :root[data-theme] .op-status-strip__cell--waiting.op-status-strip__cell--alert .op-status-strip__value,
 :root[data-theme] .op-status-strip__cell--issue-monitor.op-status-strip__cell--alert .op-status-strip__value {
-  animation: op-status-strip-blocked-pulse var(--motion-pulse) ease-in-out infinite;
+  animation: op-status-strip-alert-pulse var(--motion-pulse) ease-in-out infinite;
 }
 
 @media (prefers-reduced-motion: reduce) {
-  :root[data-theme] .op-status-strip__cell--blocked.op-status-strip__cell--alert .op-status-strip__value,
+  :root[data-theme] .op-status-strip__cell--error.op-status-strip__cell--alert .op-status-strip__value,
   :root[data-theme] .op-status-strip__cell--waiting.op-status-strip__cell--alert .op-status-strip__value,
   :root[data-theme] .op-status-strip__cell--issue-monitor.op-status-strip__cell--alert .op-status-strip__value {
     animation: none;
@@ -3539,7 +3572,7 @@ button.workspace-board-ref:focus-visible {
 }
 
 @media (forced-colors: active) {
-  :root[data-theme] .op-status-strip__cell--blocked.op-status-strip__cell--alert .op-status-strip__value,
+  :root[data-theme] .op-status-strip__cell--error.op-status-strip__cell--alert .op-status-strip__value,
   :root[data-theme] .op-status-strip__cell--waiting.op-status-strip__cell--alert .op-status-strip__value,
   :root[data-theme] .op-status-strip__cell--issue-monitor.op-status-strip__cell--alert .op-status-strip__value {
     animation: none;
@@ -5003,6 +5036,10 @@ button.workspace-board-ref:focus-visible {
   padding-top: var(--space-2);
 }
 
+/* SPEC-2359 US-83 (UX revision 2026-06-24): eligible existing remote branches
+   now render as ordinary .workspace-overview-row rows tagged .workspace-overview-remote
+   inside the unified Workspace list, so they need no dedicated section styling. */
+
 /* SPEC-2009 amendment Phase 2: File Tree editor affordance.
    - dirty marker shows a leading ● when the textarea/hex view has unsaved
      edits.
@@ -5475,6 +5512,13 @@ button.workspace-board-ref:focus-visible {
   color: var(--color-text-muted, #9aa0ad);
 }
 
+.op-usage-card__account {
+  margin: -2px 0 8px 24px;
+  color: var(--color-text-muted, #9aa0ad);
+  font-size: var(--type-xs, 0.72rem);
+  overflow-wrap: anywhere;
+}
+
 .op-usage-card__reason {
   font-size: var(--type-sm, 0.85rem);
   color: var(--color-text-muted, #9aa0ad);
@@ -5944,7 +5988,7 @@ button.workspace-board-ref:focus-visible {
 }
 
 /* Living Telemetry dot — agent panes only. Color from the semantic state
-   tokens; active / blocked pulse via --motion-pulse (0ms under
+   tokens; running / waiting / error pulse via --motion-pulse (0ms under
    reduced-motion, so the dot simply holds steady). */
 .fleet-minimap__cell[data-telemetry]::after {
   content: "";
@@ -5957,7 +6001,7 @@ button.workspace-board-ref:focus-visible {
   background: var(--color-state-idle);
 }
 
-.fleet-minimap__cell[data-telemetry="active"]::after {
+.fleet-minimap__cell[data-telemetry="running"]::after {
   background: var(--color-state-active);
   animation: op-live-pulse var(--motion-pulse) ease-in-out infinite;
 }
@@ -5966,14 +6010,14 @@ button.workspace-board-ref:focus-visible {
   background: var(--color-state-idle);
 }
 
-.fleet-minimap__cell[data-telemetry="blocked"]::after {
+.fleet-minimap__cell[data-telemetry="error"]::after {
   background: var(--color-state-blocked);
   animation: op-live-pulse var(--motion-pulse) ease-in-out infinite;
 }
 
-/* FR-039 (anshin) — needs-input dot pulses (loud) in amber so the minimap
-   surfaces "this pane is waiting for you" the same way it surfaces blocked. */
-.fleet-minimap__cell[data-telemetry="needs_input"]::after {
+/* FR-039 (anshin) — waiting dot pulses (loud) in amber so the minimap
+   surfaces "this pane is waiting for you" the same way it surfaces errors. */
+.fleet-minimap__cell[data-telemetry="waiting"]::after {
   background: var(--color-state-needs-input);
   animation: op-live-pulse var(--motion-pulse) ease-in-out infinite;
 }
@@ -6032,9 +6076,9 @@ button.workspace-board-ref:focus-visible {
 }
 
 @media (prefers-reduced-motion: reduce) {
-  .fleet-minimap__cell[data-telemetry="active"]::after,
-  .fleet-minimap__cell[data-telemetry="blocked"]::after,
-  .fleet-minimap__cell[data-telemetry="needs_input"]::after {
+  .fleet-minimap__cell[data-telemetry="running"]::after,
+  .fleet-minimap__cell[data-telemetry="error"]::after,
+  .fleet-minimap__cell[data-telemetry="waiting"]::after {
     animation: none;
   }
 }

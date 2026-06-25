@@ -195,10 +195,10 @@ test("index.html declares Operator chrome scaffold", () => {
     ".op-rail",
     ".op-status-strip",
     "#op-strip-clock",
-    "#op-strip-active",
+    "#op-strip-running",
     "#op-strip-idle",
     "#op-strip-waiting",
-    "#op-strip-blocked",
+    "#op-strip-error",
     "#op-briefing",
     "#op-palette-backdrop",
     "#op-palette-input",
@@ -269,11 +269,11 @@ test("frontend handles active work projection as status-strip telemetry", () => 
   );
 });
 
-test("Status Strip ACTIVE counter filters non-agent preset windows", () => {
+test("Status Strip RUNNING counter filters non-agent preset windows", () => {
   // SPEC-2356 follow-up: recomputeOperatorTelemetry walked windowMap.values()
   // without checking preset, so every workspace window with data-agent-state
   // (Board / Workspace / Logs / Branches / etc.) inflated counts.agents and
-  // the Status Strip ACTIVE cell showed e.g. 4 when only 2 agent panes were
+  // the Status Strip RUNNING cell showed e.g. 4 when only 2 agent panes were
   // live. The DOM walk must scope to presets that represent agent panes.
   const fnMatch = appSource.match(
     /function\s+recomputeOperatorTelemetry[\s\S]*?(?=\n\s+function\s+\w)/,
@@ -1141,10 +1141,10 @@ test("Status Strip is exposed as a live region with semantic value labels", () =
   assert.equal(strip.getAttribute("role"), "status");
   assert.equal(strip.getAttribute("aria-live"), "polite");
   for (const id of [
-    "op-strip-active",
+    "op-strip-running",
     "op-strip-idle",
     "op-strip-waiting",
-    "op-strip-blocked",
+    "op-strip-error",
     "op-strip-branches",
     "op-strip-runtime-health-value",
   ]) {
@@ -1536,6 +1536,34 @@ test("renderWorkspace refreshes operator telemetry when windows mount/unmount (S
   );
 });
 
+test("Improvement candidates refresh already-mounted inbox windows without workspace_state", () => {
+  const refreshBody = extractFunctionBody(appSource, "refreshMountedImprovementInboxWindows");
+  assert.match(
+    refreshBody,
+    /querySelectorAll\(\s*["']\.workspace-window\[data-preset="improvement"\]["']\s*,?\s*\)/,
+    "refresh helper must target already-mounted Improvement Inbox windows",
+  );
+  assert.match(
+    refreshBody,
+    /querySelector\(\s*["']\.window-body["']\s*\)/,
+    "refresh helper must remount the existing window body",
+  );
+  assert.match(
+    refreshBody,
+    /improvementInboxSurface\.mount\(\s*body\s*,\s*\{\s*improvement_candidates:\s*improvementCandidates\s*,?\s*\}/,
+    "refresh helper must pass the latest candidate snapshot into the mounted surface",
+  );
+
+  const receiveBody = extractFunctionBody(appSource, "receive");
+  const caseIndex = receiveBody.indexOf('case "improvement_candidates":');
+  const revisionIndex = receiveBody.indexOf("improvementCandidatesRevision += 1;", caseIndex);
+  const refreshIndex = receiveBody.indexOf("refreshMountedImprovementInboxWindows();", caseIndex);
+  assert.ok(
+    caseIndex >= 0 && revisionIndex > caseIndex && refreshIndex > revisionIndex,
+    "improvement_candidates receive path must refresh mounted inbox windows after recording the new revision",
+  );
+});
+
 test("SPEC-3038 (2026-06-20): Windows badge counts windows across all project tabs", () => {
   const body = extractFunctionBody(appSource, "recomputeOperatorTelemetry");
   assert.match(
@@ -1877,11 +1905,11 @@ test("operator-shell migrates legacy chrome keys and drops the hover-reveal mach
   assert.doesNotMatch(operatorShell, /op:chrome-visibility-changed/);
 });
 
-test("components.css declares Status Strip BLOCKED pulse", () => {
+test("components.css declares Status Strip alert pulse", () => {
   const css = readFileSync(resolve(here, "../styles/components.css"), "utf8");
   // PR #2414 introduced the pulse animation. SPEC-2356 chrome cleanup retires
   // the Layers `data-live` row indicator together with the Layers section.
-  assert.match(css, /op-status-strip-blocked-pulse/);
+  assert.match(css, /op-status-strip-alert-pulse/);
   assert.doesNotMatch(css, /\.op-layer\[data-live="true"\]/);
 });
 
@@ -3121,9 +3149,9 @@ test("mapAgentTelemetryState emits only Living Telemetry states CSS handles", ()
   for (const m of mapperBlock[0].matchAll(/return\s+"([^"]+)"/g)) {
     returnedStates.add(m[1]);
   }
-  // FR-039 (安心): needs_input joins the Living Telemetry vocabulary as the
-  // LOUD "your turn" state CSS renders via [data-agent-state="needs_input"].
-  const allowed = new Set(["active", "not_started", "idle", "blocked", "done", "needs_input"]);
+  // FR-039 / SPEC-2356 follow-up: the telemetry vocabulary mirrors runtime
+  // states for user-facing consistency. STARTING aggregates into RUNNING.
+  const allowed = new Set(["running", "idle", "waiting", "error", "done"]);
   for (const state of returnedStates) {
     assert.ok(allowed.has(state), `mapAgentTelemetryState returned undeclared state: ${state}`);
   }
@@ -3133,40 +3161,71 @@ test("mapAgentTelemetryState emits only Living Telemetry states CSS handles", ()
   }
 });
 
-test("Status Strip ACTIVE / IDLE / WAITING / BLOCKED cells all tint with their state color", () => {
+test("Status Strip RUNNING / IDLE / WAITING / ERROR cells all tint with their state color", () => {
   const css = readFileSync(resolve(here, "../styles/components.css"), "utf8");
-  // The ACTIVE / IDLE cells previously had no tonal hint — only BLOCKED did.
+  // The RUNNING / IDLE cells previously had no tonal hint — only ERROR did.
   // Add parallel symmetry so the count cells render with matching state colors
   // (cyan / gray / amber / red) for at-a-glance scanning. FR-039 (安心) adds the
   // WAITING cell tinted with the needs-input amber.
-  assert.match(css, /\.op-status-strip__cell--active\s+\.op-status-strip__value\s*\{[^}]*--color-state-active/);
+  assert.match(css, /\.op-status-strip__cell--running\s+\.op-status-strip__value\s*\{[^}]*--color-state-active/);
   assert.match(css, /\.op-status-strip__cell--idle\s+\.op-status-strip__value\s*\{[^}]*--color-state-idle/);
   assert.match(css, /\.op-status-strip__cell--waiting\s+\.op-status-strip__value\s*\{[^}]*--color-state-needs-input/);
-  assert.match(css, /\.op-status-strip__cell--blocked\s+\.op-status-strip__value\s*\{[^}]*--color-state-blocked/);
+  assert.match(css, /\.op-status-strip__cell--error\s+\.op-status-strip__value\s*\{[^}]*--color-state-blocked/);
   // Markup also needs the modifiers wired so the CSS selectors actually match.
   const indexHtml = readFileSync(resolve(here, "../index.html"), "utf8");
-  assert.match(indexHtml, /op-status-strip__cell\s+op-status-strip__cell--active/);
+  assert.match(indexHtml, /op-status-strip__cell\s+op-status-strip__cell--running/);
   assert.match(indexHtml, /op-status-strip__cell\s+op-status-strip__cell--idle/);
   assert.match(indexHtml, /op-status-strip__cell\s+op-status-strip__cell--waiting/);
+  assert.match(indexHtml, /op-status-strip__cell\s+op-status-strip__cell--error/);
+  assert.doesNotMatch(indexHtml, /op-status-strip__cell\s+op-status-strip__cell--active/);
+  assert.doesNotMatch(indexHtml, /op-status-strip__cell\s+op-status-strip__cell--blocked/);
+  assert.match(indexHtml, /<span class="op-status-strip__label">RUNNING<\/span>/);
+  assert.match(indexHtml, /<span class="op-status-strip__label">ERROR<\/span>/);
   assert.match(indexHtml, /op-status-strip__cell\s+op-status-strip__cell--runtime-health/);
   assert.match(css, /\.op-status-strip__cell--runtime-health\[data-state="warn"\]/);
 });
 
-test("FR-039 (安心): WAITING cell drives a LOUD needs_input alert pulse like BLOCKED", () => {
+test("FR-039 (安心): WAITING cell drives a LOUD waiting alert pulse like ERROR", () => {
   const css = readFileSync(resolve(here, "../styles/components.css"), "utf8");
   // The WAITING cell must pulse via the same op-status-strip alert mechanism the
-  // BLOCKED cell uses, so "agents waiting for input" reads just as loud.
+  // ERROR cell uses, so "agents waiting for input" reads just as loud.
   assert.match(
     css,
     /\.op-status-strip__cell--waiting\.op-status-strip__cell--alert\s+\.op-status-strip__value/,
-    "WAITING cell needs an --alert pulse rule mirroring BLOCKED",
+    "WAITING cell needs an --alert pulse rule mirroring ERROR",
   );
-  // The window rim + minimap dot must render the needs_input telemetry state.
-  assert.match(css, /\[data-agent-state="needs_input"\]\s*\{/);
-  assert.match(css, /\.fleet-minimap__cell\[data-telemetry="needs_input"\]::after/);
-  // applyTelemetryCounts must route the needs_input count into the WAITING cell.
+  // The window rim + minimap dot must render the waiting telemetry state.
+  assert.match(css, /\[data-agent-state="waiting"\]\s*\{/);
+  assert.match(css, /\.fleet-minimap__cell\[data-telemetry="waiting"\]::after/);
+  // applyTelemetryCounts must route the waiting count into the WAITING cell.
   assert.match(operatorShellSource, /op-strip-waiting/);
-  assert.match(operatorShellSource, /needs_input/);
+  assert.match(operatorShellSource, /counts\.waiting/);
+});
+
+test("active work projection only upgrades live work to RUNNING telemetry", () => {
+  const fnMatch = appSource.match(
+    /function\s+recomputeOperatorTelemetry[\s\S]*?(?=\n\s+function\s+\w)/,
+  );
+  assert.ok(
+    fnMatch,
+    "expected recomputeOperatorTelemetry definition in app.js",
+  );
+  const body = fnMatch[0];
+  assert.match(
+    body,
+    /counts\.running\s*=\s*Math\.max\(counts\.running,\s*activeAgents\s*\|\|\s*activeWorks\.length\)/,
+    "active work projection should lift live work into RUNNING telemetry",
+  );
+  assert.doesNotMatch(
+    body,
+    /counts\.error\s*=\s*Math\.max\(counts\.error,\s*blockedAgents/,
+    "workspace-level blocked_agents must not become Status Strip ERROR",
+  );
+  assert.doesNotMatch(
+    body,
+    /category\s*===\s*"blocked"[\s\S]{0,120}counts\.error/,
+    "workspace status_category=blocked must not become Status Strip ERROR",
+  );
 });
 
 test("FR-041/044 (安心): window chrome carries STOP + RESTART kill-switch controls", () => {
@@ -3413,10 +3472,10 @@ test("agent-state telemetry never makes readable workspace windows translucent (
 test("non-terminal surface bodies still follow the overall theme (FR-013 boundary)", () => {
   // The Dark fix is scoped to .surface-terminal.  Other surfaces (Board /
   // Logs / File Tree / Branches / Knowledge / Workspace / Agent Kanban /
-  // Console / Mock / Profile) must keep tracking the active theme via --color-surface so tabbed windows
+  // Console / Mock / Profile / Improvement) must keep tracking the active theme via --color-surface so tabbed windows
   // still flip body color when a non-terminal tab is selected.
   const otherSurfaceRule =
-    /(?:\.surface-(?:file-tree|agent-kanban|branches|board|logs|knowledge|index|work|console|mock|profile)\s+\.window-body,?\s*)+\{[^}]*background:\s*var\(\s*--color-surface\s*\)/;
+    /(?:\.surface-(?:file-tree|agent-kanban|branches|board|logs|knowledge|index|work|console|mock|profile|improvement)\s+\.window-body,?\s*)+\{[^}]*background:\s*var\(\s*--color-surface\s*\)/;
   assert.match(
     inlineStyle,
     otherSurfaceRule,
@@ -3440,6 +3499,7 @@ test("mountWindowBody clears every known surface class before applying the activ
     "surface-index",
     "surface-work",
     "surface-profile",
+    "surface-improvement",
     "surface-console",
     "surface-mock",
   ]) {
@@ -3461,6 +3521,7 @@ test("every readable non-terminal surface participates in the opaque window chro
     "index",
     "work",
     "profile",
+    "improvement",
     "console",
     "mock",
   ]) {
@@ -4425,6 +4486,14 @@ test("Static project chrome renderers guard unchanged DOM writes", () => {
       actionGuardIndex > actionKeyIndex &&
       actionGuardIndex < disabledIndex,
     "updateActionAvailability must return before unchanged disabled-state DOM writes",
+  );
+});
+
+test("App version label opens latest release notes when an update is available", () => {
+  assert.match(
+    appSource,
+    /const\s+openReleaseNotesFromLabel\s*=\s*\(\)\s*=>\s*{\s*releaseNotesWindow\.open\(versionState\.latest\s*\|\|\s*versionState\.current\s*\|\|\s*null\);\s*};/s,
+    "#app-version should focus the latest available release notes before falling back to the running version",
   );
 });
 

@@ -70,8 +70,8 @@ test("rail window badge: applyTelemetryCounts が windows 数を badge に反映
   assert.equal(badge.hidden, true);
 });
 
-test("FR-039 (安心): applyTelemetryCounts が needs_input を WAITING cell に反映しアラート点滅する", async () => {
-  // The WAITING cell mirrors BLOCKED: needs_input drives both the count value
+test("FR-039 (安心): applyTelemetryCounts が waiting を WAITING cell に反映しアラート点滅する", async () => {
+  // The WAITING cell mirrors ERROR: waiting drives both the count value
   // and the --alert pulse so an agent waiting for the operator stays loud.
   const { applyTelemetryCounts } = await importOperatorShell();
   const { document } = parseHTML(html);
@@ -81,14 +81,14 @@ test("FR-039 (安心): applyTelemetryCounts が needs_input を WAITING cell に
   assert.ok(cell, "expected .op-status-strip__cell--waiting cell in the strip");
   assert.equal(value.getAttribute("aria-label"), "Agents waiting for input");
 
-  applyTelemetryCounts(document, { needs_input: 2 });
+  applyTelemetryCounts(document, { waiting: 2 });
   assert.equal(value.textContent, "2");
   assert.ok(
     cell.classList.contains("op-status-strip__cell--alert"),
     "WAITING cell pulses while agents wait for input",
   );
 
-  applyTelemetryCounts(document, { needs_input: 0 });
+  applyTelemetryCounts(document, { waiting: 0 });
   assert.equal(value.textContent, "0");
   assert.ok(
     !cell.classList.contains("op-status-strip__cell--alert"),
