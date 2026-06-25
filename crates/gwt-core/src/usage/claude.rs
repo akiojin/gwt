@@ -33,6 +33,7 @@ pub struct ClaudeAccount {
 pub struct ClaudeCreds {
     pub access_token: String,
     pub subscription_type: Option<String>,
+    pub account_label: Option<String>,
 }
 
 fn claude_window(obj: &Value, kind: WindowKind, _now: DateTime<Utc>) -> Option<UsageWindow> {
@@ -90,9 +91,18 @@ pub fn parse_creds_json(body: &str) -> Option<ClaudeCreds> {
         .get("subscriptionType")
         .and_then(Value::as_str)
         .map(str::to_string);
+    let account_label = ["email", "name"].into_iter().find_map(|key| {
+        oauth
+            .get(key)
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(str::to_string)
+    });
     Some(ClaudeCreds {
         access_token,
         subscription_type,
+        account_label,
     })
 }
 
@@ -165,6 +175,7 @@ pub async fn fetch_claude_account(
     now: DateTime<Utc>,
 ) -> ProviderUsage {
     let plan = creds.subscription_type.clone();
+    let account_label = creds.account_label.clone();
     let client = reqwest::Client::new();
     let resp = client
         .get(OAUTH_USAGE_URL)
@@ -184,6 +195,7 @@ pub async fn fetch_claude_account(
             match parse_oauth_usage(&body, now) {
                 Some(acc) => ProviderUsage {
                     provider: UsageProvider::ClaudeCode,
+                    account_label,
                     plan,
                     windows: acc.windows,
                     limit_reached: acc.limit_reached,
@@ -192,6 +204,7 @@ pub async fn fetch_claude_account(
                 },
                 None => ProviderUsage {
                     provider: UsageProvider::ClaudeCode,
+                    account_label,
                     plan,
                     windows: Vec::new(),
                     limit_reached: false,
@@ -204,18 +217,24 @@ pub async fn fetch_claude_account(
         }
         Ok(r) => ProviderUsage {
             provider: UsageProvider::ClaudeCode,
+            account_label,
             plan,
             windows: Vec::new(),
             limit_reached: false,
             state: map_status_to_state(r.status().as_u16()),
             fetched_at: Some(now),
         },
-        Err(_) => ProviderUsage::degraded(
-            UsageProvider::ClaudeCode,
-            UsageState::Unavailable {
+        Err(_) => ProviderUsage {
+            provider: UsageProvider::ClaudeCode,
+            account_label,
+            plan,
+            windows: Vec::new(),
+            limit_reached: false,
+            state: UsageState::Unavailable {
                 reason: "request failed".to_string(),
             },
-        ),
+            fetched_at: Some(now),
+        },
     }
 }
 
@@ -439,10 +458,18 @@ mod tests {
 
     #[test]
     fn creds_parsed_from_oauth_shape() {
-        let body = r#"{"claudeAiOauth":{"accessToken":"tok123","refreshToken":"r","expiresAt":1,"subscriptionType":"max"}}"#;
+        let body = r#"{"claudeAiOauth":{"accessToken":"tok123","refreshToken":"r","expiresAt":1,"subscriptionType":"max","email":"claude@example.com"}}"#;
         let c = parse_creds_json(body).unwrap();
         assert_eq!(c.access_token, "tok123");
         assert_eq!(c.subscription_type.as_deref(), Some("max"));
+        assert_eq!(c.account_label.as_deref(), Some("claude@example.com"));
+    }
+
+    #[test]
+    fn creds_account_label_falls_back_to_name() {
+        let body = r#"{"claudeAiOauth":{"accessToken":"tok123","name":"Claude User"}}"#;
+        let c = parse_creds_json(body).unwrap();
+        assert_eq!(c.account_label.as_deref(), Some("Claude User"));
     }
 
     #[test]

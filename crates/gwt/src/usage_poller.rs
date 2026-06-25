@@ -332,6 +332,7 @@ mod tests {
         let when = now();
         let good = ProviderUsage {
             provider: UsageProvider::ClaudeCode,
+            account_label: Some("claude@example.com".into()),
             plan: Some("max".into()),
             windows: vec![gwt_core::usage::UsageWindow::new(
                 WindowKind::FiveHour,
@@ -351,6 +352,7 @@ mod tests {
         // A transient failure must not wipe a usable cached value.
         let served = serve_cached_or(&Some(good), when, fail.clone());
         assert!(!served.windows.is_empty());
+        assert_eq!(served.account_label.as_deref(), Some("claude@example.com"));
         assert_eq!(served.plan.as_deref(), Some("max"));
         // No cache → fallback is returned.
         let served2 = serve_cached_or(&None, when, fail);
@@ -416,6 +418,7 @@ mod tests {
         };
         ProviderUsage {
             provider,
+            account_label: None,
             plan: None,
             windows: vec![gwt_core::usage::UsageWindow::new(kind, 10.0, reset)],
             limit_reached: false,
