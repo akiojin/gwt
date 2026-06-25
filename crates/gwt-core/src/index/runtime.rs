@@ -21,7 +21,6 @@ use serde::{Deserialize, Serialize};
 
 use crate::{
     error::{GwtError, Result},
-    index::paths::gwt_index_worktree_dir,
     repo_hash::RepoHash,
     worktree_hash::compute_worktree_hash,
 };
@@ -286,15 +285,6 @@ impl RunnerSpawner for PythonRunnerSpawner {
 }
 
 static RUNNER_SPAWN_COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
-
-// gwt_index_worktree_dir is re-exported from `crate::index::paths`; keep this
-// path in scope so tests can verify the layout matches.
-#[allow(dead_code)]
-fn _layout_anchor(repo: &RepoHash, wt_hash: &str) -> PathBuf {
-    let _ = (repo, wt_hash);
-    let _ = gwt_index_worktree_dir;
-    PathBuf::new()
-}
 
 #[cfg(test)]
 mod tests {

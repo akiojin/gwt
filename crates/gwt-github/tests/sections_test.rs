@@ -152,13 +152,3 @@ fn red_10_empty_section_body() {
     let got = extract_sections(input).unwrap();
     assert_eq!(got[0].content, "");
 }
-
-// Helper: construct an ExtractedSection for assertions in other layers.
-#[allow(dead_code)]
-fn mk(name_str: &str, content: &str) -> ExtractedSection {
-    ExtractedSection {
-        name: name(name_str),
-        content: content.to_string(),
-        part: None,
-    }
-}

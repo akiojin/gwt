@@ -11,11 +11,7 @@ pub(crate) enum PathFilterError {
 }
 
 pub(crate) struct ResolvedPath {
-    #[allow(dead_code)]
-    pub canonical_root: PathBuf,
     pub canonical_path: PathBuf,
-    #[allow(dead_code)]
-    pub relative: PathBuf,
 }
 
 pub(crate) fn canonical_root(root: &Path) -> PathBuf {
@@ -44,11 +40,7 @@ pub(crate) fn safe_resolve(root: &Path, relative: &Path) -> Result<ResolvedPath,
     if !canonical_path.starts_with(&canonical_root) {
         return Err(PathFilterError::Escape);
     }
-    Ok(ResolvedPath {
-        canonical_root,
-        canonical_path,
-        relative: normalized,
-    })
+    Ok(ResolvedPath { canonical_path })
 }
 
 pub(crate) fn build_gitignore(root: &Path) -> ProjectIgnoreMatcher {
