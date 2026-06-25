@@ -1108,16 +1108,6 @@ impl AppRuntime {
         }
     }
 
-    #[allow(dead_code)]
-    pub(crate) fn spawn_process_window(
-        &mut self,
-        id: &str,
-        geometry: WindowGeometry,
-        launch: ProcessLaunch,
-    ) -> Result<(), String> {
-        self.spawn_process_window_with_console_kind(id, geometry, launch, None)
-    }
-
     pub(crate) fn spawn_process_window_with_console_kind(
         &mut self,
         id: &str,
