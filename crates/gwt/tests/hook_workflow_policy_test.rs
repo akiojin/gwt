@@ -9,7 +9,7 @@ use chrono::Utc;
 use gwt::cli::hook::{
     event_dispatcher, gwt_self_improvement_stop, workflow_policy, HookEvent, HookOutput,
 };
-use gwt_agent::{session::GWT_SESSION_ID_ENV, AgentId, Session};
+use gwt_agent::{session::GWT_SESSION_ID_ENV, AgentId, Session, GWT_SESSION_RUNTIME_PATH_ENV};
 use gwt_core::{
     coordination::{
         post_entry, AuthorKind, BoardEntry, BoardEntryKind, BoardMention, BoardMentionTargetKind,
@@ -259,6 +259,11 @@ fn gwt_self_improvement_stop_respects_stop_hook_active() {
 
 #[test]
 fn common_stop_dispatcher_does_not_run_gwt_self_improvement_stop() {
+    let _env_guard = env_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let _session_id = ScopedEnvVar::unset(GWT_SESSION_ID_ENV);
+    let _runtime_path = ScopedEnvVar::unset(GWT_SESSION_RUNTIME_PATH_ENV);
     let repo = init_repo_with_origin("https://github.com/akiojin/gwt.git");
     write_improvement_store(
         repo.path(),
