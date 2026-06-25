@@ -7339,3 +7339,10 @@ Type: lesson
 Context: Hooks/Resume 調査で、Claude Code / Codex は SessionStart で provider session id を渡す前提なのに Workspace detail が No session yet + Resume を表示しうることが分かった。
 Learning: SessionStart で provider session id が無い、または id が session TOML の agent_session_id/session_history に保存されない状態は正常な空状態ではなく、gwt session と provider conversation の関連付け破綻である。UI で Resume を隠すだけでは根本対策にならない。
 Future Action: Resume/Workspace session 欠落の修正では、SessionStart payload → session TOML → Workspace projection/view の順に実データを確認し、id 欠落時は hook additionalContext と diagnostic に集約して通常の resumable agent として登録しない。
+
+## 2026-06-26 — Hook 'legacy argv' 失敗はまず installed binary version を疑う
+
+Type: lesson
+Context: Issue #3178: self-improvement Stop hook が 'legacy argv invocation is disabled' で毎回失敗。Issue 本文は『gwtd が legacy argv を廃止したので生成側を stdin JSON envelope 化すべき』と提案していた。
+Learning: hook transport は『argv でルーティング + stdin で payload』設計で、gwtd の is_allowed_argv_exception (crates/gwt/src/bin/gwtd.rs) が hook event/<gwt-self-improvement-stop>/provider-event を意図的に許可する Managed hook transport exception。真因は生成側の drift ではなく、インストール済み binary が古かったこと(v9.61.0 は gwt-self-improvement-stop 例外未対応、ae058ced5/v9.63.0 で追加)。stdin JSON 化提案は transport 設計と衝突する誤り。
+Future Action: hook の 'legacy argv invocation is disabled' を見たら、(1) `gwtd --version` で installed binary を確認し source の is_allowed_argv_exception と突き合わせる、(2) 現行ソースを build して round-trip で再現可否を確認する、(3) 生成側を stdin JSON 化しない。再発防止は generated managed-hook command を実 binary に通す回帰ガード(generated_managed_hook_commands_stay_within_gwtd_argv_allowlist)で担保済み。
