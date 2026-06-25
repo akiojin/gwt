@@ -5132,13 +5132,7 @@
             {
               const workspace = activeWorkspace() || emptyWorkspace();
               renderWorkspace(workspace);
-              if (
-                !(workspace?.windows || []).some(
-                  (windowData) => presetSurface(windowData?.preset) === "improvement",
-                )
-              ) {
-                refreshMountedImprovementInboxWindows();
-              }
+              refreshMountedImprovementInboxWindows();
             }
             break;
           case "improvement_action_result":
