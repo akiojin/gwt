@@ -86,6 +86,8 @@ impl LaunchWizardState {
             runtime_context_resolved: true,
             runtime_resolution_pending: false,
             runtime_resolution_message: None,
+            launch_materialization_pending: false,
+            launch_materialization_message: None,
             hydration_error: None,
             linked_issue_number: context.linked_issue_number,
             start_method_selected: false,
@@ -274,6 +276,8 @@ impl LaunchWizardState {
         self.runtime_context_resolved = true;
         self.runtime_resolution_pending = false;
         self.runtime_resolution_message = None;
+        self.launch_materialization_pending = false;
+        self.launch_materialization_message = None;
         self.hydration_error = None;
         if was_hydrating {
             self.reset_default_launch_path();
@@ -319,6 +323,8 @@ impl LaunchWizardState {
         self.runtime_context_resolved = false;
         self.runtime_resolution_pending = false;
         self.runtime_resolution_message = None;
+        self.launch_materialization_pending = false;
+        self.launch_materialization_message = None;
         self.runtime_confirmed = false;
         self.settings_revisited = false;
         self.resolved_branch_name = None;
@@ -336,9 +342,22 @@ impl LaunchWizardState {
         self.runtime_context_resolved = false;
         self.runtime_resolution_pending = true;
         self.runtime_resolution_message = Some(message.into());
+        self.launch_materialization_pending = false;
+        self.launch_materialization_message = None;
         self.runtime_confirmed = false;
         self.settings_revisited = false;
         self.error = None;
+    }
+
+    pub fn mark_launch_materialization_pending(&mut self, message: impl Into<String>) {
+        self.launch_materialization_pending = true;
+        self.launch_materialization_message = Some(message.into());
+        self.error = None;
+    }
+
+    pub fn clear_launch_materialization_pending(&mut self) {
+        self.launch_materialization_pending = false;
+        self.launch_materialization_message = None;
     }
 
     pub fn apply_runtime_context(&mut self, hydration: LaunchWizardHydration) {
@@ -350,6 +369,8 @@ impl LaunchWizardState {
         self.runtime_context_resolved = true;
         self.runtime_resolution_pending = false;
         self.runtime_resolution_message = None;
+        self.launch_materialization_pending = false;
+        self.launch_materialization_message = None;
         // SPEC-2014 FR-127/FR-128: 解決完了直後は Runtime ステップ（Confirm 未確認）。
         self.runtime_confirmed = false;
         self.settings_revisited = false;
@@ -360,12 +381,14 @@ impl LaunchWizardState {
         self.is_hydrating = false;
         self.runtime_resolution_pending = false;
         self.runtime_resolution_message = None;
+        self.launch_materialization_pending = false;
+        self.launch_materialization_message = None;
         self.hydration_error = Some(error);
     }
 
     pub fn apply(&mut self, action: LaunchWizardAction) {
         self.error = None;
-        if self.runtime_resolution_pending {
+        if self.runtime_resolution_pending || self.launch_materialization_pending {
             match action {
                 LaunchWizardAction::Cancel => {
                     self.completion = Some(LaunchWizardCompletion::Cancelled);
