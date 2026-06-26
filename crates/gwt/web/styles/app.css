@@ -5180,7 +5180,7 @@ body {
    widest, CONFIGURATION (2) narrowest. */
 .modal-shell.is-surface-deck {
   width: min(940px, calc(100vw - 32px));
-  max-height: min(580px, calc(100vh - 60px));
+  max-height: min(720px, calc(100vh - 60px));
 }
 
 .preset-deck {
@@ -5188,9 +5188,12 @@ body {
   grid-template-columns: 45fr 33fr 22fr;
   gap: 0;
   align-items: start;
+  min-height: 0;
   border: 1px solid var(--color-border);
   border-radius: var(--radius-md);
-  overflow: hidden;
+  overflow-x: hidden;
+  overflow-y: auto;
+  scrollbar-gutter: stable;
 }
 
 .preset-deck .preset-section {

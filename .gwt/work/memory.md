@@ -7139,7 +7139,7 @@ Future Action: When changing managed `gwt-*` skill assets, update the canonical 
 
 ## 2026-06-20 — Playwright embedded routes must cover transitive module imports
 
-Type: failure pattern
+Type: failure-pattern
 Context: Issue #3037: embedded Playwright specs failed before workspace_state rendered because project-shell-surface.js imported /window-list-model.js, but installEmbeddedRoutes only served a hard-coded ROOT_MODULES list and the guard test only checked direct app.js imports.
 Learning: Direct import coverage is insufficient for browser module fixtures. A missing transitive module manifests as unrelated UI timeouts (0 project tabs / windows) because app.js evaluation aborts before the WebSocket fixture can render state.
 Future Action: When adding or moving frontend modules imported by routed Playwright fixtures, ensure the embedded route helper allowlist includes transitive imports and keep the recursive playwright-embedded-routes test green before triaging downstream visual failures.
@@ -7410,6 +7410,34 @@ Context: SPEC-3164 Improvement Inbox visual verification: backend dismiss update
 Learning: For local review actions that succeed through a backend write and then refresh asynchronously, the surface should reconcile the visible local state immediately after confirmation. Otherwise a dropped websocket reply, process restart, or delayed snapshot leaves the UI looking unchanged even when the store has changed.
 Future Action: When adding approve/reject style review queues, add focused UI tests that assert post-confirm local state transitions before any backend snapshot arrives, and separately verify backend persistence.
 
+## 2026-06-25 — Reopened singleton surfaces must raise z-index locally
+
+Type: Bug Prevention
+Context: UI/UX audit of gwt WebView surface windows
+Learning: When reopening an existing singleton surface from Add Window or Window List, local focus styling is not enough. The DOM z-index must be raised optimistically before the backend focus_window workspace_state ack, otherwise the selected surface can remain visually behind another window during latency.
+Future Action: Add Playwright coverage that stubs focus_window without sending a backend ack and asserts the reopened surface becomes top z-index within the local UI latency budget.
+
+## 2026-06-25 — Update failed modal must clear applying CTA state
+
+Type: failure pattern
+Context: During the 2026-06-25 UI/UX Playwright audit, the post-click update failed modal rendered correctly but the bottom-right update CTA stayed in the stale `applying` state with text `Applying update...` after `update_apply_error`.
+Learning: A modal transition alone is not enough for the update UX; the persistent CTA is also visible and must mirror the same failure/ready/downloading state. `handleUpdateApplyError` should move CTA to `error`, and retry paths must explicitly restore `applying` before returning to the download modal.
+Future Action: When changing update modal flows, assert both `#update-modal` state and `#update-cta` `data-status`/text in unit and Playwright tests, then verify with a fresh rebuilt gwt screenshot.
+
+## 2026-06-25 — Mobile overlays need rail-safe viewport clamping
+
+Type: failure-pattern
+Context: Project Switcher mobile audit showed the panel first clipped off the left side at 390px. A viewport-only clamp moved it to x=12 but the fixed command rail still covered the left edge, hiding the OPEN PROJECTS heading.
+Learning: For mobile overlays in gwt, viewport bounds are not enough when persistent chrome such as #op-rail occupies part of the visual area. Clamp floating panels against the usable safe area, including rail/sidebar bounds, and verify with screenshots rather than only bounding boxes.
+Future Action: When adding or auditing floating panels/popovers on compact viewports, measure persistent chrome (for example #op-rail) and assert the panel stays inside that safe area. Include Playwright screenshots after any viewport-clamp fix to catch overlap that numeric viewport checks may miss.
+
+## 2026-06-26 — Camera framing uses rendered layout and bounded placement
+
+Type: ui-regression
+Context: SPEC-2008 camera framing and surface audit, 2026-06-26
+Learning: Camera framing cannot rely only on persisted world geometry. Compact or tiled surfaces may render with CSS min sizes larger than stored geometry, and focus_window echoes can race with local camera updates. Desktop cascade placement also needs bounds-aware slot wrapping rather than unbounded diagonal steps.
+Future Action: For surface framing regressions, add RED tests for rendered layout size, local viewport reservation before focus_window, host viewport resize reframe, and bounds-aware initial placement. Verify with fresh browser-check Playwright audit across desktop and mobile before declaring UI complete.
+
 ## 2026-06-26 — SessionStart id 欠落は No session fallback ではなく関連付け破綻として扱う
 
 Type: lesson
@@ -7423,3 +7451,10 @@ Type: lesson
 Context: Issue #3178: self-improvement Stop hook が 'legacy argv invocation is disabled' で毎回失敗。Issue 本文は『gwtd が legacy argv を廃止したので生成側を stdin JSON envelope 化すべき』と提案していた。
 Learning: hook transport は『argv でルーティング + stdin で payload』設計で、gwtd の is_allowed_argv_exception (crates/gwt/src/bin/gwtd.rs) が hook event/<gwt-self-improvement-stop>/provider-event を意図的に許可する Managed hook transport exception。真因は生成側の drift ではなく、インストール済み binary が古かったこと(v9.61.0 は gwt-self-improvement-stop 例外未対応、ae058ced5/v9.63.0 で追加)。stdin JSON 化提案は transport 設計と衝突する誤り。
 Future Action: hook の 'legacy argv invocation is disabled' を見たら、(1) `gwtd --version` で installed binary を確認し source の is_allowed_argv_exception と突き合わせる、(2) 現行ソースを build して round-trip で再現可否を確認する、(3) 生成側を stdin JSON 化しない。再発防止は generated managed-hook command を実 binary に通す回帰ガード(generated_managed_hook_commands_stay_within_gwtd_argv_allowlist)で担保済み。
+
+## 2026-06-26 — feature commit が完了済み FR の guard test を反転させ TTY前面overlay回帰を隠した
+
+Type: fix
+Context: Docker起動エラーが TTY 前面に被さる回帰 (SPEC-2014 US-36 / FR-120/121)。terminal-overlay を error 時に表示する形式は commit 1e948b7a0 で廃止 (shouldShowOverlay=false 固定) 済みだったが、無関係な feature commit a93afd199 'feat: complete issue monitor auto queue' が app.js を Boolean(effectiveDetail) && runtimeState==='error' へ revert し、同時に contract test (operator-chrome-structure.test.mjs) と playwright test (agent-window-scroll.spec.ts) の assertion も regressed 側へ書き換えたため CI が素通りした。
+Learning: test rename + assert.equal('false')->assert.match(error) のような『契約の反転』は新規ケース追加と違い regression を隠す。TTY 前面 overlay は .terminal-overlay.visible 1 箇所(app.js shouldShowOverlay)のみで Docker 固有ではなく全 error window で発火する。error は overlay 無しでも inline TTY text(launch_error_terminal_output_event) / status chip tooltip / attention toast / Console docker tab / Logs Process facet の 5 面で可視。
+Future Action: contract test の assertion が『追加』ではなく『反転』している diff は regression の赤信号として扱う。完了済み FR を touch する大型 feature commit では guard test が意味を保っているか必ず確認する。前面 overlay を復活させる変更は SPEC-2014 US-36 違反。

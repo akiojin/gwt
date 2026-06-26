@@ -86,7 +86,9 @@ export function createLaunchWizardSurface({
             return;
           }
           if (deferred.kind === "launch_wizard_state") {
-            clearLaunchWizardPendingAction();
+            if (!deferred.wizard?.launch_materialization_pending) {
+              clearLaunchWizardPendingAction();
+            }
             clearLaunchWizardOpening();
             if (deferred.wizard) {
               launchWizardOpenError = null;
@@ -768,9 +770,14 @@ export function createLaunchWizardSurface({
 
         syncWizardDraftState();
         closeModal();
-        const isLaunchActionPending = Boolean(launchWizardPendingAction);
+        const isLaunchMaterializationPending = Boolean(
+          launchWizard.launch_materialization_pending,
+        );
+        const isLaunchActionPending =
+          Boolean(launchWizardPendingAction) || isLaunchMaterializationPending;
         const isLaunchOpeningPending = Boolean(launchWizardOpening);
-        const isLaunchSubmitPending = launchWizardPendingAction?.kind === "submit";
+        const isLaunchSubmitPending =
+          launchWizardPendingAction?.kind === "submit" || isLaunchMaterializationPending;
         syncLaunchWizardPendingChrome(isLaunchActionPending || isLaunchOpeningPending);
         const wasOpenWizard = wizardModal.classList.contains("open");
         if (!wasOpenWizard) {
@@ -947,7 +954,7 @@ export function createLaunchWizardSurface({
             createNode(
               "div",
               "launch-note launch-pending-note",
-              "Creating agent window...",
+              launchWizard.launch_materialization_message || "Preparing worktree...",
             ),
           );
         }
@@ -1680,7 +1687,9 @@ export function createLaunchWizardSurface({
         ) {
           return;
         }
-        clearLaunchWizardPendingAction();
+        if (!event.wizard?.launch_materialization_pending) {
+          clearLaunchWizardPendingAction();
+        }
         clearLaunchWizardOpening();
         if (event.wizard) {
           launchWizardOpenError = null;

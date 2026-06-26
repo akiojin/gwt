@@ -1965,92 +1965,119 @@ impl AppRuntime {
                     self.launch_wizard = Some(session);
                     return vec![self.launch_wizard_state_outbound()];
                 };
-                match *config {
-                    LaunchWizardLaunchRequest::Agent(config) => {
-                        let workspace_resume_context = session.workspace_resume_context.clone();
-                        let launch_feedback_context =
-                            client_id.map(|client_id| LaunchFeedbackContext {
-                                client_id: client_id.to_string(),
-                                title: if session.wizard.wizard_mode
-                                    == gwt::LaunchWizardMode::StartWork
-                                {
-                                    "Start Work".to_string()
-                                } else {
-                                    "Launch Agent".to_string()
-                                },
-                                issue_monitor_issue_number: session
-                                    .issue_monitor_launch_issue_number,
-                            });
-                        let spawn_result = if let Some(target) = session.agent_kanban_target.clone()
-                        {
-                            self.spawn_agent_window_in_agent_kanban(
-                                &session.tab_id,
-                                *config,
-                                bounds,
-                                workspace_resume_context,
-                                launch_feedback_context,
-                                target,
-                            )
-                        } else if let Some(launch_feedback_context) = launch_feedback_context {
-                            self.spawn_agent_window_with_feedback(
-                                &session.tab_id,
-                                *config,
-                                bounds,
-                                workspace_resume_context,
-                                launch_feedback_context,
-                            )
-                        } else {
-                            self.spawn_agent_window(
-                                &session.tab_id,
-                                *config,
-                                bounds,
-                                workspace_resume_context,
-                            )
-                        };
-                        match spawn_result {
-                            Ok(mut events) => {
-                                events.insert(0, self.launch_wizard_state_broadcast(None));
-                                events
-                            }
-                            Err(error) => {
-                                Self::log_launch_wizard_error(
-                                    &session,
-                                    "spawn_agent_window",
-                                    action_label,
-                                    requested_agent_id.as_deref(),
-                                    &error,
-                                );
-                                session.wizard.error = Some(error);
-                                self.launch_wizard = Some(session);
-                                vec![self.launch_wizard_state_outbound()]
-                            }
-                        }
-                    }
-                    LaunchWizardLaunchRequest::Shell(config) => {
-                        match self.spawn_wizard_shell_window(&session.tab_id, *config, bounds) {
-                            Ok(mut events) => {
-                                events.insert(0, self.launch_wizard_state_broadcast(None));
-                                events
-                            }
-                            Err(error) => {
-                                Self::log_launch_wizard_error(
-                                    &session,
-                                    "spawn_shell_window",
-                                    action_label,
-                                    requested_agent_id.as_deref(),
-                                    &error,
-                                );
-                                session.wizard.error = Some(error);
-                                self.launch_wizard = Some(session);
-                                vec![self.launch_wizard_state_outbound()]
-                            }
-                        }
-                    }
-                }
+                session
+                    .wizard
+                    .mark_launch_materialization_pending("Preparing worktree...");
+                self.proxy
+                    .send(UserEvent::LaunchWizardLaunchMaterializationRequested {
+                        wizard_id: session.wizard_id.clone(),
+                        client_id: client_id.map(str::to_string),
+                        config,
+                        bounds,
+                    });
+                self.launch_wizard = Some(session);
+                vec![self.launch_wizard_state_outbound()]
             }
             None => {
                 self.launch_wizard = Some(session);
                 vec![self.launch_wizard_state_outbound()]
+            }
+        }
+    }
+
+    pub(crate) fn handle_launch_wizard_launch_materialization_requested(
+        &mut self,
+        wizard_id: String,
+        client_id: Option<String>,
+        config: LaunchWizardLaunchRequest,
+        bounds: WindowGeometry,
+    ) -> Vec<OutboundEvent> {
+        let Some(mut session) = self.launch_wizard.take() else {
+            return Vec::new();
+        };
+        if session.wizard_id != wizard_id {
+            self.launch_wizard = Some(session);
+            return Vec::new();
+        }
+
+        match config {
+            LaunchWizardLaunchRequest::Agent(config) => {
+                let requested_agent_id = config.agent_id.command().to_string();
+                let workspace_resume_context = session.workspace_resume_context.clone();
+                let launch_feedback_context = client_id.map(|client_id| LaunchFeedbackContext {
+                    client_id,
+                    title: if session.wizard.wizard_mode == gwt::LaunchWizardMode::StartWork {
+                        "Start Work".to_string()
+                    } else {
+                        "Launch Agent".to_string()
+                    },
+                    issue_monitor_issue_number: session.issue_monitor_launch_issue_number,
+                });
+                let spawn_result = if let Some(target) = session.agent_kanban_target.clone() {
+                    self.spawn_agent_window_in_agent_kanban(
+                        &session.tab_id,
+                        *config,
+                        bounds,
+                        workspace_resume_context,
+                        launch_feedback_context,
+                        target,
+                    )
+                } else if let Some(launch_feedback_context) = launch_feedback_context {
+                    self.spawn_agent_window_with_feedback(
+                        &session.tab_id,
+                        *config,
+                        bounds,
+                        workspace_resume_context,
+                        launch_feedback_context,
+                    )
+                } else {
+                    self.spawn_agent_window(
+                        &session.tab_id,
+                        *config,
+                        bounds,
+                        workspace_resume_context,
+                    )
+                };
+                match spawn_result {
+                    Ok(mut events) => {
+                        events.insert(0, self.launch_wizard_state_broadcast(None));
+                        events
+                    }
+                    Err(error) => {
+                        Self::log_launch_wizard_error(
+                            &session,
+                            "spawn_agent_window",
+                            "submit",
+                            Some(requested_agent_id.as_str()),
+                            &error,
+                        );
+                        session.wizard.clear_launch_materialization_pending();
+                        session.wizard.error = Some(error);
+                        self.launch_wizard = Some(session);
+                        vec![self.launch_wizard_state_outbound()]
+                    }
+                }
+            }
+            LaunchWizardLaunchRequest::Shell(config) => {
+                match self.spawn_wizard_shell_window(&session.tab_id, *config, bounds) {
+                    Ok(mut events) => {
+                        events.insert(0, self.launch_wizard_state_broadcast(None));
+                        events
+                    }
+                    Err(error) => {
+                        Self::log_launch_wizard_error(
+                            &session,
+                            "spawn_shell_window",
+                            "submit",
+                            None,
+                            &error,
+                        );
+                        session.wizard.clear_launch_materialization_pending();
+                        session.wizard.error = Some(error);
+                        self.launch_wizard = Some(session);
+                        vec![self.launch_wizard_state_outbound()]
+                    }
+                }
             }
         }
     }

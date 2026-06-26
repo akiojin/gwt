@@ -265,8 +265,12 @@ impl WindowCanvasState {
         bounds: WindowGeometry,
     ) -> PersistedWindowState {
         let (width, height) = preset.default_size();
-        let center_x = bounds.x + (bounds.width - width) / 2.0;
-        let center_y = bounds.y + (bounds.height - height) / 2.0;
+        let min_x = bounds.x;
+        let min_y = bounds.y;
+        let max_x = bounds.x + (bounds.width - width).max(0.0);
+        let max_y = bounds.y + (bounds.height - height).max(0.0);
+        let center_x = (bounds.x + (bounds.width - width) / 2.0).clamp(min_x, max_x);
+        let center_y = (bounds.y + (bounds.height - height) / 2.0).clamp(min_y, max_y);
 
         // Walk the cascade diagonal starting at the viewport center and pick
         // the first slot that no visible window already occupies. The search
@@ -279,33 +283,64 @@ impl WindowCanvasState {
             .iter()
             .filter(|w| w.placement.is_canvas())
             .count();
-        let mut step = 0usize;
-        while step <= visible_window_count {
-            let candidate_x = center_x + (step as f64) * STACK_OFFSET_X;
-            let candidate_y = center_y + (step as f64) * STACK_OFFSET_Y;
-            let occupied = self.persisted.windows.iter().any(|w| {
+        let origin_is_occupied = |candidate_x: f64, candidate_y: f64| {
+            self.persisted.windows.iter().any(|w| {
                 w.placement.is_canvas()
                     && (w.geometry.x - candidate_x).abs() < 1.0
                     && (w.geometry.y - candidate_y).abs() < 1.0
-            });
-            if !occupied {
+            })
+        };
+
+        let mut geometry = None;
+        for step in 0..=visible_window_count {
+            let candidate_x = center_x + (step as f64) * STACK_OFFSET_X;
+            let candidate_y = center_y + (step as f64) * STACK_OFFSET_Y;
+            if candidate_x <= max_x
+                && candidate_y <= max_y
+                && !origin_is_occupied(candidate_x, candidate_y)
+            {
+                geometry = Some(WindowGeometry {
+                    x: candidate_x,
+                    y: candidate_y,
+                    width,
+                    height,
+                });
                 break;
             }
-            step += 1;
         }
-        let step = step as f64;
 
-        self.push_window_with_geometry(
-            preset,
-            title,
-            persist,
+        if geometry.is_none() {
+            let columns = cascade_slot_count(center_x, max_x, STACK_OFFSET_X);
+            let rows = cascade_slot_count(center_y, max_y, STACK_OFFSET_Y);
+            'slots: for row in 0..rows {
+                for column in 0..columns {
+                    let candidate_x =
+                        cascade_slot_coordinate(center_x, max_x, STACK_OFFSET_X, column);
+                    let candidate_y = cascade_slot_coordinate(center_y, max_y, STACK_OFFSET_Y, row);
+                    if !origin_is_occupied(candidate_x, candidate_y) {
+                        geometry = Some(WindowGeometry {
+                            x: candidate_x,
+                            y: candidate_y,
+                            width,
+                            height,
+                        });
+                        break 'slots;
+                    }
+                }
+            }
+        }
+
+        let geometry = geometry.unwrap_or_else(|| {
+            let step = visible_window_count as f64;
             WindowGeometry {
-                x: center_x + step * STACK_OFFSET_X,
-                y: center_y + step * STACK_OFFSET_Y,
+                x: (center_x + step * STACK_OFFSET_X).min(max_x),
+                y: (center_y + step * STACK_OFFSET_Y).min(max_y),
                 width,
                 height,
-            },
-        )
+            }
+        });
+
+        self.push_window_with_geometry(preset, title, persist, geometry)
     }
 
     pub fn add_window_at_geometry_with_title(
@@ -892,6 +927,18 @@ fn normalize_title(title: String) -> Option<String> {
     (!trimmed.is_empty()).then(|| trimmed.to_string())
 }
 
+fn cascade_slot_count(start: f64, max: f64, offset: f64) -> usize {
+    if max <= start {
+        1
+    } else {
+        ((max - start) / offset).ceil() as usize + 1
+    }
+}
+
+fn cascade_slot_coordinate(start: f64, max: f64, offset: f64, index: usize) -> f64 {
+    (start + index as f64 * offset).min(max)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1138,7 +1185,7 @@ mod tests {
     }
 
     #[test]
-    fn adding_window_keeps_cascading_past_eight_to_avoid_overlap() {
+    fn adding_window_keeps_cascade_inside_bounds_when_slots_wrap() {
         let mut workspace = WindowCanvasState::from_persisted(empty_workspace_state());
         let bounds = WindowGeometry {
             x: 0.0,
@@ -1147,24 +1194,47 @@ mod tests {
             height: 920.0,
         };
 
-        // Fill the first cascade ring with 8 windows (steps 0..7).
+        // Fill enough terminal slots that the old diagonal cascade would push
+        // the next origin past the right and bottom edges.
         for _ in 0..8 {
             workspace.add_window(WindowPreset::Shell, bounds.clone());
         }
-        // The 9th launch must keep cascading (step 8) instead of collapsing
-        // back onto the viewport center where window #1 already lives.
         let ninth = workspace.add_window(WindowPreset::Shell, bounds.clone());
 
-        assert_eq!(
-            (ninth.geometry.x, ninth.geometry.y),
-            (80.0 + 8.0 * 28.0, 60.0 + 8.0 * 24.0),
-        );
-        // And the 10th continues from there without overlapping the 9th.
+        assert!(ninth.geometry.x >= bounds.x);
+        assert!(ninth.geometry.y >= bounds.y);
+        assert!(ninth.geometry.x + ninth.geometry.width <= bounds.x + bounds.width);
+        assert!(ninth.geometry.y + ninth.geometry.height <= bounds.y + bounds.height);
+
         let tenth = workspace.add_window(WindowPreset::Shell, bounds);
-        assert_eq!(
+        assert_ne!(
             (tenth.geometry.x, tenth.geometry.y),
-            (80.0 + 9.0 * 28.0, 60.0 + 9.0 * 24.0),
+            (ninth.geometry.x, ninth.geometry.y)
         );
+    }
+
+    #[test]
+    fn adding_many_panel_windows_keeps_each_origin_inside_desktop_bounds() {
+        let mut workspace = WindowCanvasState::from_persisted(empty_workspace_state());
+        let bounds = WindowGeometry {
+            x: 56.0,
+            y: 44.0,
+            width: 1224.0,
+            height: 856.0,
+        };
+
+        for _ in 0..12 {
+            let window = workspace.add_window(WindowPreset::Settings, bounds.clone());
+            assert!(
+                window.geometry.x >= bounds.x
+                    && window.geometry.y >= bounds.y
+                    && window.geometry.x + window.geometry.width <= bounds.x + bounds.width
+                    && window.geometry.y + window.geometry.height <= bounds.y + bounds.height,
+                "window {:?} escaped {:?}",
+                window.geometry,
+                bounds
+            );
+        }
     }
 
     #[test]

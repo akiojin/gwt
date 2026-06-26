@@ -44,6 +44,11 @@
       } from "/agent-completion-notifications.js";
       import { createReleaseNotesWindow } from "/release-notes-window.js";
       import { createConsoleWindow } from "/console-window.js";
+      import {
+        computeCameraFrameArea,
+        computeViewportForWorldRect,
+        expandWorldRectForLayoutSize,
+      } from "/camera-framing.js";
       import { createTerminalWheelScrollController } from "/terminal-wheel-scroll.js";
       import { renderWindowTabs as renderWindowTabsView } from "/window-tabs-renderer.js";
       // SPEC-3038 US-3: Close Guard confirm modal renderer.
@@ -1790,6 +1795,12 @@
         });
       }
 
+      function reserveLocalViewportTarget(target) {
+        viewportSyncState.applyLocalViewport(target, {
+          scopeKey: activeViewportScopeKey(),
+        });
+      }
+
       function sameViewportValues(left, right) {
         return left
           && right
@@ -1882,51 +1893,199 @@
         persistViewport();
       }
 
-      // Compute the viewport that fits a WORLD-space rect into the canvas work
-      // area, centered, with a small margin. screen = world*zoom + offset, so
-      // to center the rect's center on the canvas center we solve
-      // offset = canvasCenter - worldCenter*zoom.
+      function canvasScreenRect() {
+        const rect =
+          typeof canvas.getBoundingClientRect === "function"
+            ? canvas.getBoundingClientRect()
+            : null;
+        const left = Number.isFinite(rect?.left) ? rect.left : 0;
+        const top = Number.isFinite(rect?.top) ? rect.top : 0;
+        const width = Math.max(Number(rect?.width) || canvas.clientWidth || 0, 1);
+        const height = Math.max(Number(rect?.height) || canvas.clientHeight || 0, 1);
+        return {
+          left,
+          top,
+          right: left + width,
+          bottom: top + height,
+          width,
+          height,
+        };
+      }
+
+      function cameraFrameArea() {
+        const obstructionRects = [];
+        const railRect = document
+          .getElementById("op-rail")
+          ?.getBoundingClientRect?.();
+        if (railRect) {
+          obstructionRects.push(railRect);
+        }
+        return computeCameraFrameArea({
+          canvasRect: canvasScreenRect(),
+          obstructionRects,
+        });
+      }
+
+      function shouldAnimateWindowFrame() {
+        const frame = cameraFrameArea();
+        return frame.width >= 560 && frame.height >= 420;
+      }
+
+      function clampWindowElementToCameraFrame(windowId) {
+        const element = windowMap.get(windowId);
+        if (!element) {
+          return;
+        }
+        const rect = element.getBoundingClientRect();
+        const canvasRect = canvas.getBoundingClientRect();
+        const frame = cameraFrameArea();
+        const frameLeft = canvasRect.left + frame.left;
+        const frameTop = canvasRect.top + frame.top;
+        const frameRight = frameLeft + frame.width;
+        const frameBottom = frameTop + frame.height;
+        let deltaX = 0;
+        let deltaY = 0;
+        if (rect.left < frameLeft) {
+          deltaX = frameLeft - rect.left;
+        } else if (rect.right > frameRight) {
+          deltaX = frameRight - rect.right;
+        }
+        if (rect.top < frameTop) {
+          deltaY = frameTop - rect.top;
+        } else if (rect.bottom > frameBottom) {
+          deltaY = frameBottom - rect.bottom;
+        }
+        if (Math.abs(deltaX) < 0.5 && Math.abs(deltaY) < 0.5) {
+          return;
+        }
+        viewport = {
+          x: viewport.x + deltaX,
+          y: viewport.y + deltaY,
+          zoom: viewport.zoom,
+        };
+        recordLocalViewportEdit();
+        applyViewport();
+        persistViewport();
+      }
+
+      let pendingWindowFrameClampTimer = null;
+      let pendingWindowFrameClampFrame = null;
+      let windowFrameClampToken = 0;
+
+      function scheduleWindowFrameClamp(windowId, { animate = false } = {}) {
+        windowFrameClampToken += 1;
+        const clampToken = windowFrameClampToken;
+        if (pendingWindowFrameClampTimer !== null) {
+          clearTimeout(pendingWindowFrameClampTimer);
+          pendingWindowFrameClampTimer = null;
+        }
+        if (
+          pendingWindowFrameClampFrame !== null &&
+          typeof cancelAnimationFrame === "function"
+        ) {
+          cancelAnimationFrame(pendingWindowFrameClampFrame);
+          pendingWindowFrameClampFrame = null;
+        }
+        const run = () => {
+          pendingWindowFrameClampTimer = null;
+          if (clampToken !== windowFrameClampToken) {
+            return;
+          }
+          if (typeof requestAnimationFrame === "function") {
+            pendingWindowFrameClampFrame = requestAnimationFrame(() => {
+              pendingWindowFrameClampFrame = null;
+              if (clampToken !== windowFrameClampToken) {
+                return;
+              }
+              clampWindowElementToCameraFrame(windowId);
+            });
+            return;
+          }
+          clampWindowElementToCameraFrame(windowId);
+        };
+        if (animate) {
+          pendingWindowFrameClampTimer = setTimeout(run, 240);
+          return;
+        }
+        run();
+      }
+
+      // Compute the viewport that fits a WORLD-space rect into the usable
+      // visual camera area, centered, with a small fill margin. screen =
+      // world*zoom + offset, so to center the rect's center on the frame center
+      // we solve offset = frameCenter - worldCenter*zoom.
       function viewportForWorldRect(
         rect,
         { minZoom = VIEWPORT_ZOOM_MIN, maxZoom = VIEWPORT_ZOOM_MAX } = {},
       ) {
-        const width = Math.max(Number(rect?.width) || 0, 1);
-        const height = Math.max(Number(rect?.height) || 0, 1);
-        const canvasWidth = Math.max(canvas.clientWidth, 1);
-        const canvasHeight = Math.max(canvas.clientHeight, 1);
-        const zoom = clampRange(
-          Math.min(
-            (canvasWidth * FRAME_FILL_RATIO) / width,
-            (canvasHeight * FRAME_FILL_RATIO) / height,
-          ),
+        return computeViewportForWorldRect(rect, {
+          frameArea: cameraFrameArea(),
+          fillRatio: FRAME_FILL_RATIO,
           minZoom,
           maxZoom,
-        );
-        const worldCenterX = (Number(rect?.x) || 0) + width / 2;
-        const worldCenterY = (Number(rect?.y) || 0) + height / 2;
-        return {
-          x: canvasWidth / 2 - worldCenterX * zoom,
-          y: canvasHeight / 2 - worldCenterY * zoom,
-          zoom,
-        };
+        });
+      }
+
+      function framingRectForWindow(windowData) {
+        const geometry = windowData?.geometry || {};
+        const element = windowMap.get(windowData?.id);
+        return expandWorldRectForLayoutSize(geometry, {
+          width: element?.offsetWidth,
+          height: element?.offsetHeight,
+        });
       }
 
       // Fly the camera so `windowId`'s world geometry fills the work area. The
       // window stays fixed in world space; only the viewport moves (camera
       // model). Also applies local focus + z-order highlight (focus_window
       // stays for highlight; maximize_window is gone).
-      function frameWindow(windowId, { animate = true } = {}) {
+      function frameWindow(windowId, { animate = true, notifyFocus = true } = {}) {
         const windowData = workspaceWindowById(windowId);
         if (!windowData) {
           return;
         }
-        const geometry = windowData.geometry || {};
         // Cap framing at 1:1 so the focused terminal never CSS-upscales (blur).
-        const target = viewportForWorldRect(geometry, { maxZoom: FRAME_ZOOM_MAX });
+        const target = viewportForWorldRect(framingRectForWindow(windowData), {
+          maxZoom: FRAME_ZOOM_MAX,
+        });
+        reserveLocalViewportTarget(target);
         focusWindowLocally(windowId);
-        send({ kind: "focus_window", id: windowId });
+        if (notifyFocus) {
+          send({ kind: "focus_window", id: windowId });
+        }
         animateViewportTo(target, { animate });
+        scheduleWindowFrameClamp(windowId, { animate });
       }
+
+      let focusedWindowViewportReframeFrame = null;
+
+      function frameFocusedWindowAfterViewportResize() {
+        if (!focusedId) {
+          return;
+        }
+        const windowData = workspaceWindowById(focusedId);
+        if (!windowData?.geometry || !visibleWindowData(windowData)) {
+          return;
+        }
+        frameWindow(focusedId, { animate: false, notifyFocus: false });
+      }
+
+      function scheduleFocusedWindowViewportReframe() {
+        if (focusedWindowViewportReframeFrame !== null) {
+          cancelAnimationFrame(focusedWindowViewportReframeFrame);
+          focusedWindowViewportReframeFrame = null;
+        }
+        if (typeof requestAnimationFrame !== "function") {
+          frameFocusedWindowAfterViewportResize();
+          return;
+        }
+        focusedWindowViewportReframeFrame = requestAnimationFrame(() => {
+          focusedWindowViewportReframeFrame = null;
+          frameFocusedWindowAfterViewportResize();
+        });
+      }
+
+      window.addEventListener("resize", scheduleFocusedWindowViewportReframe);
 
       // Frame the bounding box of every canvas window so all windows are in
       // view (overview / fit-all). Falls back to a gentle zoom-to-fit-nothing
@@ -2956,7 +3115,7 @@
                 overlay.textContent = effectiveDetail || "";
               }
               updateTerminalOverlayCopyState(overlay);
-              const shouldShowOverlay = Boolean(effectiveDetail) && runtimeState === "error";
+              const shouldShowOverlay = false;
               const shouldSpin = false;
               const spinner = overlay.querySelector(".overlay-spinner");
               if (spinner) {
@@ -3030,6 +3189,7 @@
       function focusWindowLocally(windowId) {
         const targetElement = windowMap.get(windowId);
         if (focusedId === windowId && targetElement?.classList.contains("focused")) {
+          raiseWindowElementLocally(targetElement);
           return;
         }
         const previousFocusedId = focusedId;
@@ -3040,6 +3200,29 @@
         }
         if (targetElement) {
           targetElement.classList.add("focused");
+          raiseWindowElementLocally(targetElement);
+        }
+      }
+
+      function numericZIndex(value) {
+        const numeric = Number.parseInt(value || "0", 10);
+        return Number.isFinite(numeric) ? numeric : 0;
+      }
+
+      function raiseWindowElementLocally(targetElement) {
+        if (!targetElement) {
+          return;
+        }
+        const targetZ = numericZIndex(targetElement.style.zIndex);
+        let maxPeerZ = 0;
+        for (const element of windowMap.values()) {
+          if (element === targetElement) {
+            continue;
+          }
+          maxPeerZ = Math.max(maxPeerZ, numericZIndex(element.style.zIndex));
+        }
+        if (targetZ <= maxPeerZ) {
+          targetElement.style.zIndex = String(maxPeerZ + 1);
         }
       }
 
@@ -5158,13 +5341,7 @@
             {
               const workspace = activeWorkspace() || emptyWorkspace();
               renderWorkspace(workspace);
-              if (
-                !(workspace?.windows || []).some(
-                  (windowData) => presetSurface(windowData?.preset) === "improvement",
-                )
-              ) {
-                refreshMountedImprovementInboxWindows();
-              }
+              refreshMountedImprovementInboxWindows();
             }
             break;
           case "improvement_action_result":
@@ -6341,7 +6518,7 @@
         // SPEC-2008 camera-focus: reopening an existing surface flies the local
         // camera to frame it (frameWindow sends focus_window for highlight);
         // restore_window/minimize no longer exist.
-        frameWindow(windowData.id);
+        frameWindow(windowData.id, { animate: shouldAnimateWindowFrame() });
       }
 
       function focusOrSpawnPreset(preset) {
