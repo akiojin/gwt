@@ -7423,3 +7423,10 @@ Type: lesson
 Context: Issue #3178: self-improvement Stop hook が 'legacy argv invocation is disabled' で毎回失敗。Issue 本文は『gwtd が legacy argv を廃止したので生成側を stdin JSON envelope 化すべき』と提案していた。
 Learning: hook transport は『argv でルーティング + stdin で payload』設計で、gwtd の is_allowed_argv_exception (crates/gwt/src/bin/gwtd.rs) が hook event/<gwt-self-improvement-stop>/provider-event を意図的に許可する Managed hook transport exception。真因は生成側の drift ではなく、インストール済み binary が古かったこと(v9.61.0 は gwt-self-improvement-stop 例外未対応、ae058ced5/v9.63.0 で追加)。stdin JSON 化提案は transport 設計と衝突する誤り。
 Future Action: hook の 'legacy argv invocation is disabled' を見たら、(1) `gwtd --version` で installed binary を確認し source の is_allowed_argv_exception と突き合わせる、(2) 現行ソースを build して round-trip で再現可否を確認する、(3) 生成側を stdin JSON 化しない。再発防止は generated managed-hook command を実 binary に通す回帰ガード(generated_managed_hook_commands_stay_within_gwtd_argv_allowlist)で担保済み。
+
+## 2026-06-26 — feature commit が完了済み FR の guard test を反転させ TTY前面overlay回帰を隠した
+
+Type: fix
+Context: Docker起動エラーが TTY 前面に被さる回帰 (SPEC-2014 US-36 / FR-120/121)。terminal-overlay を error 時に表示する形式は commit 1e948b7a0 で廃止 (shouldShowOverlay=false 固定) 済みだったが、無関係な feature commit a93afd199 'feat: complete issue monitor auto queue' が app.js を Boolean(effectiveDetail) && runtimeState==='error' へ revert し、同時に contract test (operator-chrome-structure.test.mjs) と playwright test (agent-window-scroll.spec.ts) の assertion も regressed 側へ書き換えたため CI が素通りした。
+Learning: test rename + assert.equal('false')->assert.match(error) のような『契約の反転』は新規ケース追加と違い regression を隠す。TTY 前面 overlay は .terminal-overlay.visible 1 箇所(app.js shouldShowOverlay)のみで Docker 固有ではなく全 error window で発火する。error は overlay 無しでも inline TTY text(launch_error_terminal_output_event) / status chip tooltip / attention toast / Console docker tab / Logs Process facet の 5 面で可視。
+Future Action: contract test の assertion が『追加』ではなく『反転』している diff は regression の赤信号として扱う。完了済み FR を touch する大型 feature commit では guard test が意味を保っているか必ず確認する。前面 overlay を復活させる変更は SPEC-2014 US-36 違反。
