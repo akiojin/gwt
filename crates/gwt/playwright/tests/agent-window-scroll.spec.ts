@@ -52,7 +52,7 @@ test.describe("Agent window scrollback lifecycle", () => {
     await expectWheelMovesScrollback(page, "agent-1");
   });
 
-  test("shows runtime error detail in the agent window and attention toast", async ({ page }) => {
+  test("surfaces runtime error detail without covering the terminal with an overlay", async ({ page }) => {
     await installEmbeddedRoutes(page);
     await installAgentScrollBackend(page);
     await page.goto(APP_URL);
@@ -61,9 +61,11 @@ test.describe("Agent window scrollback lifecycle", () => {
     await emitTerminalStatus(page, "agent-1", "error", "Stop-block hit an error");
 
     const window = page.locator(".workspace-window[data-id='agent-1']");
+    // SPEC-2014 US-36 (FR-120/121): the raw TTY must never be covered by a
+    // foreground status/error overlay. Error detail surfaces in the window
+    // chrome status chip and the attention toast instead of an xterm overlay.
     const overlay = window.locator(".terminal-overlay");
-    await expect(overlay).toBeVisible();
-    await expect(overlay.locator(".overlay-message")).toContainText("Stop-block hit an error");
+    await expect(overlay).toBeHidden();
     await expect(window.locator(".status-chip")).toHaveAttribute("title", /Stop-block hit an error/);
     await expect(page.locator(".attention-toast").first()).toContainText("Stop-block hit an error");
   });

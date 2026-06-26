@@ -3115,7 +3115,7 @@
                 overlay.textContent = effectiveDetail || "";
               }
               updateTerminalOverlayCopyState(overlay);
-              const shouldShowOverlay = Boolean(effectiveDetail) && runtimeState === "error";
+              const shouldShowOverlay = false;
               const shouldSpin = false;
               const spinner = overlay.querySelector(".overlay-spinner");
               if (spinner) {

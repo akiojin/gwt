@@ -1985,7 +1985,7 @@ test("WebView modal text uses native selection and terminal overlays use explici
   );
 });
 
-test("terminal overlay only surfaces error status details", () => {
+test("terminal overlay never covers raw terminal status details", () => {
   const visibleToggle = appSource.match(
     /overlay\.classList\.toggle\(\s*"visible",\s*([\s\S]*?)\s*\);/,
   );
@@ -1999,10 +1999,15 @@ test("terminal overlay only surfaces error status details", () => {
     /const\s+shouldShowOverlay\s*=\s*([\s\S]*?);\s*const\s+shouldSpin/,
   );
   assert.ok(overlayVisibilitySource, "expected shouldShowOverlay guard");
-  assert.match(
+  assert.equal(
+    overlayVisibilitySource[1].trim(),
+    "false",
+    "terminal status details must never add a foreground overlay over the raw TTY",
+  );
+  assert.doesNotMatch(
     overlayVisibilitySource[1],
-    /Boolean\(effectiveDetail\)\s*&&\s*runtimeState\s*===\s*"error"/,
-    "error status details must show a readable foreground overlay",
+    /runtimeState\s*===\s*"error"/,
+    "error status details must stay in terminal status surfaces instead of an overlay",
   );
   assert.doesNotMatch(
     overlayVisibilitySource[1],
