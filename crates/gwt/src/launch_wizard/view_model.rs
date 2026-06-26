@@ -125,6 +125,8 @@ impl LaunchWizardState {
             ) && self.linked_issue_number.is_some(),
             runtime_resolution_pending: self.runtime_resolution_pending,
             runtime_resolution_message: self.runtime_resolution_message.clone(),
+            launch_materialization_pending: self.launch_materialization_pending,
+            launch_materialization_message: self.launch_materialization_message.clone(),
             primary_action_label: self.primary_action_label(),
             primary_action_enabled: self.primary_action_enabled(),
             progress_steps: self.progress_steps_view(),
@@ -526,6 +528,9 @@ impl LaunchWizardState {
         if self.is_hydrating {
             return "Loading...".to_string();
         }
+        if self.launch_materialization_pending {
+            return "Launching...".to_string();
+        }
         if self.runtime_resolution_pending {
             return "Preparing...".to_string();
         }
@@ -558,7 +563,11 @@ impl LaunchWizardState {
     }
 
     fn primary_action_enabled(&self) -> bool {
-        if self.is_hydrating || self.runtime_resolution_pending || self.show_start_methods() {
+        if self.is_hydrating
+            || self.runtime_resolution_pending
+            || self.launch_materialization_pending
+            || self.show_start_methods()
+        {
             return false;
         }
         match self.launch_path {
@@ -614,7 +623,8 @@ impl LaunchWizardState {
                 }
             }
         };
-        let start_state = if self.launch_path == LaunchWizardLaunchPath::FocusSession
+        let start_state = if self.launch_materialization_pending
+            || self.launch_path == LaunchWizardLaunchPath::FocusSession
             || phase == WizardPhase::Confirm
         {
             "active"
@@ -644,7 +654,7 @@ impl LaunchWizardState {
                 key: "start".to_string(),
                 label: "Start".to_string(),
                 state: start_state.to_string(),
-                detail: None,
+                detail: self.launch_materialization_message.clone(),
             },
         ]
     }
@@ -2539,6 +2549,36 @@ mod tests {
             .progress_steps
             .iter()
             .any(|step| step.key == "runtime" && step.state == "active"));
+    }
+
+    #[test]
+    fn launch_materialization_pending_updates_footer_and_progress() {
+        let mut state = manual_setup_to_runtime_step("work/20260625-1702");
+        state.apply(LaunchWizardAction::Submit);
+        assert_eq!(state.view().phase, WizardPhase::Confirm);
+
+        state.mark_launch_materialization_pending("Preparing worktree...");
+
+        let view = state.view();
+        assert!(view.launch_materialization_pending);
+        assert_eq!(
+            view.launch_materialization_message.as_deref(),
+            Some("Preparing worktree...")
+        );
+        assert_eq!(view.primary_action_label, "Launching...");
+        assert!(!view.primary_action_enabled);
+        assert!(view.progress_steps.iter().any(|step| {
+            step.key == "start"
+                && step.state == "active"
+                && step.detail.as_deref() == Some("Preparing worktree...")
+        }));
+
+        state.completion = None;
+        state.apply(LaunchWizardAction::Submit);
+        assert!(
+            state.completion.is_none(),
+            "duplicate submit while launch materialization is pending must be ignored",
+        );
     }
 
     #[test]
