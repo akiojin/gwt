@@ -228,6 +228,11 @@ test("Surface Deck CSS — shell widens for landscape and keeps a vertical scrol
     /\.modal-shell\.is-surface-deck\s*\{[^}]*width:\s*min\(\s*940px/,
     "is-surface-deck must widen to a landscape width",
   );
+  assert.match(
+    appCss,
+    /\.modal-shell\.is-surface-deck\s*\{[^}]*max-height:\s*min\(\s*720px,\s*calc\(100vh\s*-\s*60px\)\s*\)/,
+    "is-surface-deck must not hard-cap desktop height so low that the final tile row is clipped",
+  );
   // Judge catch: the atmosphere shell previously set `overflow: hidden`, which
   // kills the scroll safety net on very short viewports. It must allow vertical
   // scroll while still clipping the horizontal atmosphere bleed.
@@ -240,6 +245,27 @@ test("Surface Deck CSS — shell widens for landscape and keeps a vertical scrol
     componentsCss,
     /\.modal-shell\.is-surface-deck\s*\{[^}]*overflow-y:\s*auto/,
     "is-surface-deck must allow vertical scroll as a safety net",
+  );
+});
+
+test("Surface Deck CSS — deck scrolls above the footer instead of clipping bottom tiles", () => {
+  const deckRule = appCss.match(/\.preset-deck\s*\{([\s\S]*?)\}/);
+  assert.ok(deckRule, "expected a .preset-deck rule");
+
+  assert.match(
+    deckRule[1],
+    /min-height:\s*0/,
+    "preset-deck must be allowed to shrink inside the modal flex column",
+  );
+  assert.match(
+    deckRule[1],
+    /overflow-y:\s*auto/,
+    "preset-deck must scroll vertically instead of clipping bottom preset tiles",
+  );
+  assert.doesNotMatch(
+    deckRule[1],
+    /\boverflow:\s*hidden/,
+    "preset-deck must not hard-clip the final row behind the footer",
   );
 });
 

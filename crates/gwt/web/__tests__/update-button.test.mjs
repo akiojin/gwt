@@ -607,6 +607,9 @@ test("phase19: update_apply_error transitions modal to failed state with stage/r
   assert.ok(modal.querySelector("[data-update-modal-open-log]"));
   assert.ok(modal.querySelector("[data-update-modal-retry]"));
   assert.ok(modal.querySelector("[data-update-modal-close]"));
+  const cta = fixture.document.getElementById("update-cta");
+  assert.equal(cta.dataset.status, "error");
+  assert.match(cta.textContent, /Update failed: HTTP 503 Click to retry\./);
 });
 
 test("phase19: failed-state [Retry] resends apply_update_start and switches modal back to downloading", () => {
@@ -632,6 +635,9 @@ test("phase19: failed-state [Retry] resends apply_update_start and switches moda
     fixture.document.getElementById("update-modal").dataset.state,
     "downloading",
   );
+  const cta = fixture.document.getElementById("update-cta");
+  assert.equal(cta.dataset.status, "applying");
+  assert.equal(cta.textContent, "Applying update...");
 });
 
 test("phase19: failed-state [Open log] sends open_update_log with the log_path", () => {
@@ -728,9 +734,10 @@ test("phase19: update_apply_error in ready state re-opens failed modal", () => {
   const cta = fixture.document.getElementById("update-cta");
   assert.equal(
     cta.dataset.status,
-    "applying",
-    "CTA flips to applying so the modal sits visually on top",
+    "error",
+    "CTA mirrors the failed modal instead of leaving a stale applying message",
   );
+  assert.match(cta.textContent, /Update failed: Pending update manifest is missing/);
 });
 
 test("phase19: controller exposes the Phase 19 event handlers required by app.js wiring", () => {
