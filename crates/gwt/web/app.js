@@ -5275,6 +5275,15 @@
             }
             break;
           }
+          // SPEC-3064 Phase 3 (E6b): branch cleanup progress/result state
+          // lives in the branches cleanup surface. Without these top-level
+          // receive arms, completed backend cleanup leaves the modal in its
+          // optimistic queued state.
+          case "branch_cleanup_result":
+          case "branch_cleanup_progress":
+          case "branch_error":
+            applyBranchCleanupReceiveEvent(event);
+            break;
           // SPEC-3064 Phase 3 (E6e): profile state and rendering live in
           // the profile window surface.
           case "profile_snapshot":

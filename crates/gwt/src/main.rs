@@ -1011,6 +1011,7 @@ enum UserEvent {
     WorkMergeStatus {
         project_root: PathBuf,
         merged_branches: std::collections::HashMap<String, chrono::DateTime<chrono::Utc>>,
+        cleanup_ready_branches: std::collections::HashMap<String, String>,
     },
     /// SPEC-3075: result of the background tip-commit-subject scan. The runtime
     /// caches the `branch -> subject` map and rebroadcasts the Workspace
@@ -2419,6 +2420,7 @@ mod tests {
             pending_startup_auto_resume_sessions: Vec::new(),
             active_agent_sessions: HashMap::new(),
             work_merged_branches: HashMap::new(),
+            work_cleanup_ready_branches: HashMap::new(),
             work_tip_subjects: HashMap::new(),
             work_pr_titles: HashMap::new(),
             work_ai_summaries: HashMap::new(),
@@ -7230,8 +7232,13 @@ fn main() -> std::io::Result<()> {
             Event::UserEvent(UserEvent::WorkMergeStatus {
                 project_root,
                 merged_branches,
+                cleanup_ready_branches,
             }) => {
-                let events = app.apply_work_merge_status(&project_root, merged_branches);
+                let events = app.apply_work_merge_status(
+                    &project_root,
+                    merged_branches,
+                    cleanup_ready_branches,
+                );
                 clients.dispatch(events);
             }
             Event::UserEvent(UserEvent::WorkTipSubjects {

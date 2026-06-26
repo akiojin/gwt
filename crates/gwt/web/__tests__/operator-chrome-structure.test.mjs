@@ -5302,6 +5302,21 @@ test("branch_entries telemetry uses the guarded helper without the retired git l
   );
 });
 
+test("Branch cleanup progress and result events are routed by app receive", () => {
+  const cleanupCase = appSource.match(
+    /case\s+"branch_cleanup_result":[\s\S]*?case\s+"branch_error":[\s\S]*?break;/,
+  );
+  assert.ok(
+    cleanupCase,
+    "expected top-level receive to route branch cleanup result/progress/error events",
+  );
+  assert.match(
+    cleanupCase[0],
+    /applyBranchCleanupReceiveEvent\(event\)/,
+    "branch cleanup events must update the modal state instead of leaving rows queued",
+  );
+});
+
 // Layout regression (2026-06-10 user verification): app.css carried a stale
 // `.workspace-overview-shell { display: flex }` block that overrode the
 // canonical grid layout in components.css. Under flex, long Workspace rows

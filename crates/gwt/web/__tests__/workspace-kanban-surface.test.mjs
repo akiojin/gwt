@@ -881,10 +881,10 @@ test("Merged Workspace without a cleanup candidate does not claim it is safe to 
     fixture.body.querySelector("[data-action='cleanup-merged-workspace']"),
     null,
   );
-  assert.equal(
-    fixture.body.querySelector("[data-action='cleanup-merged-workspaces']"),
-    null,
-  );
+  const bulk = fixture.body.querySelector("[data-action='cleanup-merged-workspaces']");
+  assert.ok(bulk, "header cleanup control remains visible");
+  assert.match(bulk.textContent, /Clean Up Ready \(0\)/);
+  assert.equal(bulk.disabled, true);
 });
 
 test("Work surface renders a lifecycle_state badge on each Work row (SPEC-2359 W-12 FR-351)", () => {
@@ -1793,10 +1793,107 @@ test("merged Workspace without cleanup candidate does not offer Clean Up", () =>
   assert.equal(cleanupCalls.length, 0);
 });
 
-// User verification 2026-06-12: completed (merged) local branches need a
-// BULK cleanup path — the list header offers "Clean Up Merged (N)" that opens
-// the cleanup flow with every merged row preselected.
-test("list header offers bulk Clean Up Merged for all merged Workspaces", () => {
+test("blocked cleanup Workspace shows a disabled Clean Up action with a reason", () => {
+  const fixture = createFixture();
+  const cleanupCalls = [];
+  const surface = createSurface(
+    fixture,
+    {
+      id: "proj-1",
+      title: "projection",
+      status_category: "idle",
+      active_work_count: 1,
+      active_works: [
+        {
+          id: "work-work-live-12345678",
+          title: "work/live",
+          status_category: "active",
+          lifecycle_state: "active",
+          branch: "work/live",
+          merged_into_base: true,
+          cleanup_blocked_reason: "live_agent",
+          active_agents: 1,
+          blocked_agents: 0,
+          agents: [],
+        },
+      ],
+      agents: [],
+    },
+    {
+      send() {},
+      openWorkspaceCleanup: (candidate) => cleanupCalls.push(candidate),
+    },
+  );
+
+  surface.mount(fixture.body, fixture.windowData, {
+    focusWindowLocally() {},
+    sendFocus() {},
+  });
+
+  const cleanup = fixture.body.querySelector("[data-action='cleanup-blocked-workspace']");
+  assert.ok(cleanup, "eligible-but-blocked Workspace still shows Clean Up");
+  assert.equal(cleanup.disabled, true);
+  assert.match(cleanup.title, /agent/i);
+  cleanup.click();
+  assert.equal(cleanupCalls.length, 0);
+});
+
+test("no-changes cleanup candidate shows Clean Up and no-changes detail signal", () => {
+  const fixture = createFixture();
+  const cleanupCalls = [];
+  const surface = createSurface(
+    fixture,
+    {
+      id: "proj-1",
+      title: "projection",
+      status_category: "idle",
+      active_work_count: 1,
+      active_works: [
+        {
+          id: "work-work-no-changes-12345678",
+          title: "work/no-changes",
+          status_category: "idle",
+          lifecycle_state: "paused",
+          branch: "work/no-changes",
+          cleanup_candidate: {
+            branch: "work/no-changes",
+            reason: "no_changes",
+            default_delete_remote: false,
+            remote_delete_available: true,
+          },
+          active_agents: 0,
+          blocked_agents: 0,
+          agents: [],
+        },
+      ],
+      agents: [],
+    },
+    {
+      send() {},
+      openWorkspaceCleanup: (candidate) => cleanupCalls.push(candidate),
+    },
+  );
+
+  surface.mount(fixture.body, fixture.windowData, {
+    focusWindowLocally() {},
+    sendFocus() {},
+  });
+
+  assert.match(
+    fixture.body.querySelector(".workspace-detail-subtitle").textContent,
+    /No changes — safe to delete/,
+  );
+  const cleanup = fixture.body.querySelector("[data-action='cleanup-merged-workspace']");
+  assert.ok(cleanup, "no-changes Workspace must offer Clean Up");
+  cleanup.click();
+  assert.equal(cleanupCalls.length, 1);
+  assert.equal(cleanupCalls[0]?.reason, "no_changes");
+});
+
+// User verification 2026-06-26: merged and no-changes local branches need a
+// BULK cleanup path. The list header offers "Clean Up Ready (N)" that opens
+// the cleanup flow with every enabled backend-vetted row preselected.
+test("list header offers bulk Clean Up Ready for enabled cleanup Workspaces", () => {
   const fixture = createFixture();
   const cleanupCalls = [];
   const surface = createSurface(
@@ -1831,10 +1928,10 @@ test("list header offers bulk Clean Up Merged for all merged Workspaces", () => 
           status_category: "idle",
           lifecycle_state: "paused",
           branch: "work/b",
-          merged_into_base: true,
+          merged_into_base: false,
           cleanup_candidate: {
             branch: "work/b",
-            reason: "pr_merged",
+            reason: "no_changes",
             default_delete_remote: false,
             remote_delete_available: true,
           },
@@ -1849,6 +1946,7 @@ test("list header offers bulk Clean Up Merged for all merged Workspaces", () => 
           lifecycle_state: "active",
           branch: "work/live",
           merged_into_base: true,
+          cleanup_blocked_reason: "live_agent",
           active_agents: 1,
           blocked_agents: 0,
           agents: [
@@ -1884,12 +1982,76 @@ test("list header offers bulk Clean Up Merged for all merged Workspaces", () => 
   });
 
   const bulk = fixture.body.querySelector('[data-action="cleanup-merged-workspaces"]');
-  assert.ok(bulk, "bulk Clean Up Merged control must exist");
-  assert.match(bulk.textContent, /Clean Up Merged \(2\)/);
+  assert.ok(bulk, "bulk Clean Up Ready control must exist");
+  assert.match(bulk.textContent, /Clean Up Ready \(2\)/);
   bulk.click();
   assert.equal(cleanupCalls.length, 1);
   const branches = cleanupCalls[0].map((candidate) => candidate.branch).sort();
   assert.deepEqual(branches, ["work/a", "work/b"]);
+});
+
+test("list header keeps bulk Clean Up Ready visible but disabled without cleanup Workspaces", () => {
+  const fixture = createFixture();
+  const cleanupCalls = [];
+  const surface = createSurface(
+    fixture,
+    {
+      id: "proj-1",
+      title: "projection",
+      status_category: "idle",
+      active_work_count: 2,
+      active_works: [
+        {
+          id: "work-work-open-12345678",
+          title: "work/open",
+          status_category: "idle",
+          lifecycle_state: "paused",
+          branch: "work/open",
+          active_agents: 0,
+          blocked_agents: 0,
+          agents: [],
+        },
+        {
+          id: "work-work-live-12345678",
+          title: "work/live",
+          status_category: "active",
+          lifecycle_state: "active",
+          branch: "work/live",
+          active_agents: 1,
+          blocked_agents: 0,
+          agents: [
+            {
+              session_id: "session-live",
+              display_name: "Codex",
+              status_category: "active",
+            },
+          ],
+        },
+      ],
+      agents: [],
+    },
+    {
+      send() {},
+      openWorkspaceCleanup: (candidates) => cleanupCalls.push(candidates),
+    },
+  );
+
+  surface.mount(fixture.body, fixture.windowData, {
+    focusWindowLocally() {},
+    sendFocus() {},
+  });
+
+  const bulk = fixture.body.querySelector('[data-action="cleanup-merged-workspaces"]');
+  assert.ok(bulk, "bulk Clean Up Ready control must stay visible even at 0");
+  assert.match(bulk.textContent, /Clean Up Ready \(0\)/);
+  assert.equal(bulk.disabled, true, "bulk cleanup is disabled when there are no targets");
+  assert.equal(
+    bulk.title,
+    "No cleanup-ready Workspaces",
+    "disabled cleanup explains that no targets are available",
+  );
+  bulk.click();
+  assert.equal(cleanupCalls.length, 0);
 });
 
 // SPEC-2359 W16-4 (FR-391 / SC-262): a merged-and-stale Workspace presents
