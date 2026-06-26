@@ -99,6 +99,26 @@ test("settings-tab uses Operator color/space tokens (no hardcoded colors)", () =
   assert.doesNotMatch(body, /\brgb\(/, "no raw rgb() literals");
 });
 
+test("settings toolbar lets tabs wrap inside compact tiled windows", () => {
+  const toolbarBlock = componentsCss.match(
+    /:root\[data-theme\]\s+\.settings-toolbar\s*\{([\s\S]*?)\}/,
+  );
+  assert.ok(toolbarBlock, "expected .settings-toolbar block in components.css");
+  assert.match(
+    toolbarBlock[1],
+    /flex-wrap:\s*wrap/,
+    "settings toolbar must wrap instead of clipping the tab strip",
+  );
+
+  const tabsBlock = componentsCss.match(
+    /:root\[data-theme\]\s+\.settings-tabs\s*\{([\s\S]*?)\}/,
+  );
+  assert.ok(tabsBlock, "expected .settings-tabs block in components.css");
+  assert.match(tabsBlock[1], /flex-wrap:\s*wrap/);
+  assert.match(tabsBlock[1], /min-width:\s*0/);
+  assert.match(tabsBlock[1], /max-width:\s*100%/);
+});
+
 test("settings-tab[aria-selected=true] uses --color-state-active tint", () => {
   // The active state must inherit the Operator accent so the tab strip
   // picks up the same accent as Project Bar / Sidebar Layers / etc.

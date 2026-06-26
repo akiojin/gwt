@@ -1,6 +1,28 @@
 # Changelog
 
 All notable changes to this project will be documented in this file.
+## [9.64.1] - 2026-06-26
+
+### Bug Fixes
+
+- **ui:** エージェントTTY前面に被さるエラーoverlay回帰を解消 (SPEC-2014 US-36)
+- Show launch materialization progress
+- Refresh mounted improvement inbox candidates
+- Raise reopened surface windows immediately
+- Sync update failed CTA state
+- Clamp project switcher on mobile
+- Keep surface framing inside usable viewport
+- **ui:** Prevent add window modal clipping
+- **ui:** Guard stale window frame clamps
+
+### Miscellaneous Tasks
+
+- Record ui audit work state
+- Record UI audit handoff
+- Record browser check setup
+- Record agent title issue intake
+- Restore UI audit work purpose
+
 ## [9.64.0] - 2026-06-25
 
 ### Bug Fixes

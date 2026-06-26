@@ -118,5 +118,7 @@ test.describe("Update modal", () => {
     await expect(page.locator("[data-update-modal-open-log]")).toBeVisible();
     await expect(page.locator("[data-update-modal-retry]")).toBeVisible();
     await expect(page.locator("[data-update-modal-close]")).toBeVisible();
+    await expect(page.locator("#update-cta")).toHaveAttribute("data-status", "error");
+    await expect(page.locator("#update-cta")).toContainText("Update failed: HTTP 503");
   });
 });

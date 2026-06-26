@@ -1081,6 +1081,12 @@ enum UserEvent {
         wizard_id: String,
         result: Box<Result<gwt::LaunchWizardHydration, String>>,
     },
+    LaunchWizardLaunchMaterializationRequested {
+        wizard_id: String,
+        client_id: Option<ClientId>,
+        config: Box<gwt::LaunchWizardLaunchRequest>,
+        bounds: WindowGeometry,
+    },
     ProjectIndexStatus {
         project_root: String,
         status: gwt::ProjectIndexStatusView,
@@ -1683,7 +1689,8 @@ mod tests {
             migration_pending: false,
             main_worktree_root_cache: std::sync::Arc::new(std::sync::OnceLock::new()),
         };
-        let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+        let (mut runtime, _recorded_events) =
+            sample_runtime_with_events(temp.path(), vec![tab], Some("tab-1"));
 
         // SPEC-3050 FR-002: 他 session を名乗る注入は拒否され、明示的な
         // 失敗 reply が返る (silent drop 禁止: FR-005)。
@@ -3767,7 +3774,7 @@ mod tests {
         let temp = tempdir().expect("tempdir");
         let repo = temp.path().join("repo");
         fs::create_dir_all(&repo).expect("create repo");
-        let mut runtime = sample_runtime(
+        let (mut runtime, _recorded_events) = sample_runtime_with_events(
             temp.path(),
             vec![sample_project_tab(
                 "tab-1",
@@ -4238,7 +4245,7 @@ mod tests {
         let temp = tempdir().expect("tempdir");
         let repo = temp.path().join("repo");
         fs::create_dir_all(&repo).expect("create repo");
-        let (mut runtime, _events) = sample_runtime_with_events(
+        let (mut runtime, recorded_events) = sample_runtime_with_events(
             temp.path(),
             vec![sample_project_tab(
                 "tab-1",
@@ -4380,6 +4387,39 @@ mod tests {
             },
             Some(canvas_bounds()),
         );
+        assert!(focus_events.iter().any(|event| {
+            matches!(
+                &event.event,
+                BackendEvent::LaunchWizardState {
+                    wizard: Some(wizard)
+                } if wizard.launch_materialization_pending
+            )
+        }));
+        let request = {
+            let mut recorded_events = recorded_events.lock().expect("event log");
+            recorded_events
+                .iter()
+                .position(|event| {
+                    matches!(
+                        event,
+                        UserEvent::LaunchWizardLaunchMaterializationRequested { .. }
+                    )
+                })
+                .map(|index| recorded_events.remove(index))
+                .expect("launch materialization event")
+        };
+        let UserEvent::LaunchWizardLaunchMaterializationRequested {
+            wizard_id,
+            client_id,
+            config,
+            bounds,
+        } = request
+        else {
+            unreachable!("matched above")
+        };
+        let focus_events = runtime.handle_launch_wizard_launch_materialization_requested(
+            wizard_id, client_id, *config, bounds,
+        );
         assert!(focus_events.len() >= 2);
         assert!(runtime.launch_wizard.is_none());
 
@@ -4413,7 +4453,7 @@ mod tests {
         let temp = tempdir().expect("tempdir");
         let repo = temp.path().join("repo");
         fs::create_dir_all(&repo).expect("create repo");
-        let mut runtime = sample_runtime(
+        let (mut runtime, recorded_events) = sample_runtime_with_events(
             temp.path(),
             vec![sample_project_tab(
                 "tab-1",
@@ -4477,6 +4517,39 @@ mod tests {
         let launch_events =
             runtime.handle_launch_wizard_action(LaunchWizardAction::Submit, Some(canvas_bounds()));
 
+        assert!(launch_events.iter().any(|event| {
+            matches!(
+                event.event,
+                BackendEvent::LaunchWizardState {
+                    wizard: Some(ref wizard)
+                } if wizard.launch_materialization_pending
+            )
+        }));
+        let request = {
+            let mut recorded_events = recorded_events.lock().expect("event log");
+            recorded_events
+                .iter()
+                .position(|event| {
+                    matches!(
+                        event,
+                        UserEvent::LaunchWizardLaunchMaterializationRequested { .. }
+                    )
+                })
+                .map(|index| recorded_events.remove(index))
+                .expect("launch materialization event")
+        };
+        let UserEvent::LaunchWizardLaunchMaterializationRequested {
+            wizard_id,
+            client_id,
+            config,
+            bounds,
+        } = request
+        else {
+            unreachable!("matched above")
+        };
+        let launch_events = runtime.handle_launch_wizard_launch_materialization_requested(
+            wizard_id, client_id, *config, bounds,
+        );
         assert!(runtime.launch_wizard.is_none());
         assert!(launch_events.iter().any(|event| {
             matches!(
@@ -7325,6 +7398,17 @@ fn main() -> std::io::Result<()> {
             }
             Event::UserEvent(UserEvent::LaunchWizardRuntimeResolved { wizard_id, result }) => {
                 let events = app.handle_launch_wizard_runtime_resolved(wizard_id, *result);
+                clients.dispatch(events);
+            }
+            Event::UserEvent(UserEvent::LaunchWizardLaunchMaterializationRequested {
+                wizard_id,
+                client_id,
+                config,
+                bounds,
+            }) => {
+                let events = app.handle_launch_wizard_launch_materialization_requested(
+                    wizard_id, client_id, *config, bounds,
+                );
                 clients.dispatch(events);
             }
             Event::UserEvent(UserEvent::ProjectIndexStatus {
