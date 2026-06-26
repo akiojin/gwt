@@ -135,7 +135,54 @@ pub fn load_cached_issue_monitor_candidates(
     Ok(issues)
 }
 
-pub fn github_remote_owner_and_repo(repo_path: &Path) -> Option<(String, String)> {
+/// Why [`resolve_github_remote`] could not produce a GitHub `(owner, repo)`.
+///
+/// The Issue Monitor previously collapsed every one of these into the single
+/// opaque banner "GitHub origin remote is unavailable", which made a transient
+/// process-start failure indistinguishable from an origin that genuinely is not
+/// a GitHub remote (Issue #3190). Keep the variants distinct so the scan error
+/// names the real cause.
+#[derive(Debug)]
+pub enum RemoteResolveError {
+    /// `git remote get-url origin` could not be started at all — e.g. `git` is
+    /// not on `PATH`, or the process/file-descriptor table is exhausted.
+    Spawn(String),
+    /// `git` ran but exited non-zero. `stderr` carries the real reason (no
+    /// `origin` remote configured, not a git repository, lock contention, …).
+    GitFailed { code: Option<i32>, stderr: String },
+    /// `origin` resolved, but its URL is not a recognizable GitHub URL.
+    NotGitHub { url: String },
+}
+
+impl RemoteResolveError {
+    /// English, user-facing message recorded as the Issue Monitor scan error.
+    /// (TUI/GUI surfaces are English-only.)
+    pub fn user_message(&self) -> String {
+        match self {
+            RemoteResolveError::Spawn(detail) => {
+                format!("Could not run `git remote get-url origin` (git failed to start): {detail}")
+            }
+            RemoteResolveError::GitFailed { code, stderr } => {
+                let code = code
+                    .map(|c| c.to_string())
+                    .unwrap_or_else(|| "signal".to_string());
+                let stderr = stderr.trim();
+                if stderr.is_empty() {
+                    format!("`git remote get-url origin` failed (exit {code})")
+                } else {
+                    format!("`git remote get-url origin` failed (exit {code}): {stderr}")
+                }
+            }
+            RemoteResolveError::NotGitHub { url } => {
+                format!("origin remote is not a GitHub URL: {url}")
+            }
+        }
+    }
+}
+
+/// Resolve the GitHub `(owner, repo)` for the repository at `repo_path`,
+/// surfacing the specific failure mode instead of a bare `None`.
+pub fn resolve_github_remote(repo_path: &Path) -> Result<(String, String), RemoteResolveError> {
     let hub = gwt_core::process_console::global();
     let output = gwt_core::process_console::spawn_logged_blocking(
         &hub,
@@ -145,11 +192,37 @@ pub fn github_remote_owner_and_repo(repo_path: &Path) -> Option<(String, String)
         gwt_core::process_console::SpawnOptions::new("git remote get-url origin")
             .current_dir(repo_path),
     )
-    .ok()?;
-    if !output.success() {
-        return None;
+    .map_err(|error| RemoteResolveError::Spawn(error.to_string()))?;
+    classify_github_remote(
+        output.success(),
+        output.exit_code,
+        &output.stdout,
+        &output.stderr,
+    )
+}
+
+/// Pure classifier for a `git remote get-url origin` result. Split out so the
+/// failure-mode → message mapping is unit-testable without spawning git.
+pub fn classify_github_remote(
+    success: bool,
+    exit_code: Option<i32>,
+    stdout: &str,
+    stderr: &str,
+) -> Result<(String, String), RemoteResolveError> {
+    if !success {
+        return Err(RemoteResolveError::GitFailed {
+            code: exit_code,
+            stderr: stderr.trim().to_string(),
+        });
     }
-    parse_github_remote_url(output.stdout.trim())
+    let url = stdout.trim();
+    parse_github_remote_url(url).ok_or_else(|| RemoteResolveError::NotGitHub {
+        url: url.to_string(),
+    })
+}
+
+pub fn github_remote_owner_and_repo(repo_path: &Path) -> Option<(String, String)> {
+    resolve_github_remote(repo_path).ok()
 }
 
 pub fn parse_github_remote_url(remote_url: &str) -> Option<(String, String)> {
@@ -334,6 +407,84 @@ mod tests {
         assert_eq!(
             parse_github_remote_url("https://example.com/owner/repo"),
             None
+        );
+    }
+
+    #[test]
+    fn classify_github_remote_ok_for_github_url() {
+        assert_eq!(
+            classify_github_remote(true, Some(0), "https://github.com/akiojin/gwt\n", "")
+                .expect("github url resolves"),
+            ("akiojin".to_string(), "gwt".to_string())
+        );
+    }
+
+    #[test]
+    fn classify_github_remote_non_github_url_is_not_github_error() {
+        let err = classify_github_remote(true, Some(0), "https://gitlab.com/x/y\n", "")
+            .expect_err("non-github url is rejected");
+        assert!(matches!(err, RemoteResolveError::NotGitHub { .. }));
+        let msg = err.user_message();
+        assert!(msg.contains("not a GitHub"), "msg: {msg}");
+        assert!(
+            msg.contains("gitlab.com"),
+            "msg should name the offending url: {msg}"
+        );
+    }
+
+    #[test]
+    fn classify_github_remote_missing_origin_is_git_failed_with_stderr() {
+        let err = classify_github_remote(false, Some(2), "", "error: No such remote 'origin'\n")
+            .expect_err("missing origin fails");
+        assert!(matches!(
+            err,
+            RemoteResolveError::GitFailed { code: Some(2), .. }
+        ));
+        let msg = err.user_message();
+        assert!(msg.contains("No such remote 'origin'"), "msg: {msg}");
+        assert!(msg.contains('2'), "msg should include the exit code: {msg}");
+    }
+
+    #[test]
+    fn classify_github_remote_not_a_repo_is_git_failed() {
+        let err = classify_github_remote(false, Some(128), "", "fatal: not a git repository\n")
+            .expect_err("non-repo fails");
+        assert!(matches!(
+            err,
+            RemoteResolveError::GitFailed {
+                code: Some(128),
+                ..
+            }
+        ));
+        assert!(err.user_message().contains("not a git repository"));
+    }
+
+    #[test]
+    fn remote_resolve_error_messages_are_distinct_per_failure_mode() {
+        // The historical bug collapsed spawn failure, git non-zero exit, and a
+        // non-GitHub origin URL into the single opaque string "GitHub origin
+        // remote is unavailable". Each failure mode must now map to a different,
+        // self-explaining message.
+        let spawn = RemoteResolveError::Spawn("No such file or directory (os error 2)".to_string())
+            .user_message();
+        let git_failed = RemoteResolveError::GitFailed {
+            code: Some(128),
+            stderr: "fatal: not a git repository".to_string(),
+        }
+        .user_message();
+        let not_github = RemoteResolveError::NotGitHub {
+            url: "https://gitlab.com/x/y".to_string(),
+        }
+        .user_message();
+
+        assert_ne!(spawn, git_failed);
+        assert_ne!(git_failed, not_github);
+        assert_ne!(spawn, not_github);
+        // A spawn failure (git could not start, e.g. fd exhaustion) must read as
+        // a process-start problem, never as "origin is not a GitHub remote".
+        assert!(
+            spawn.contains("failed to start"),
+            "spawn message should name a start failure: {spawn}"
         );
     }
 }

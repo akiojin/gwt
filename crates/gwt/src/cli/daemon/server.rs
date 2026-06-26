@@ -429,12 +429,14 @@ fn scan_issue_monitor_once_blocking(
     gui_connected: bool,
 ) -> crate::IssueMonitorState {
     let now = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
-    let Some((owner, repo)) =
-        crate::issue_monitor_worker::github_remote_owner_and_repo(&scope.project_root)
-    else {
-        monitor.record_scan_error(now, "GitHub origin remote is unavailable");
-        return monitor;
-    };
+    let (owner, repo) =
+        match crate::issue_monitor_worker::resolve_github_remote(&scope.project_root) {
+            Ok(pair) => pair,
+            Err(error) => {
+                monitor.record_scan_error(now, error.user_message());
+                return monitor;
+            }
+        };
     let issues = match crate::issue_monitor_worker::load_open_issue_monitor_candidates_for_repo_path(
         &scope.project_root,
         &owner,

@@ -109,10 +109,42 @@ pub fn spawn_logged_blocking(
     args: &[impl AsRef<std::ffi::OsStr>],
     options: SpawnOptions,
 ) -> std::io::Result<SpawnOutput> {
+    if let Some(runtime) = shared_blocking_runtime() {
+        return runtime.block_on(spawn_logged(hub, kind, program, args, options));
+    }
+    // Fallback when the shared runtime could not be created at all: build a
+    // transient current-thread runtime so behavior matches the historical path.
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()?;
     runtime.block_on(spawn_logged(hub, kind, program, args, options))
+}
+
+/// Process-wide runtime reused by every [`spawn_logged_blocking`] call.
+///
+/// Building a fresh `enable_all()` runtime on each call allocates a new I/O
+/// driver descriptor (kqueue / epoll). Under file-descriptor pressure — e.g.
+/// many agent PTYs open — that per-call build can fail, and callers that map
+/// the failure to `None` then surface misleading downstream errors such as
+/// Issue Monitor's "GitHub origin remote is unavailable" (Issue #3190).
+/// Reusing one runtime pays the descriptor cost once for the process.
+///
+/// `block_on` is invoked from external (non-async) threads only — every
+/// `spawn_logged_blocking` caller is synchronous or runs inside a blocking
+/// pool thread, never inside an async task — which the multi-thread runtime
+/// supports from any number of threads concurrently.
+fn shared_blocking_runtime() -> Option<&'static tokio::runtime::Runtime> {
+    static SHARED: std::sync::OnceLock<Option<tokio::runtime::Runtime>> =
+        std::sync::OnceLock::new();
+    SHARED
+        .get_or_init(|| {
+            tokio::runtime::Builder::new_multi_thread()
+                .worker_threads(1)
+                .enable_all()
+                .build()
+                .ok()
+        })
+        .as_ref()
 }
 
 /// Spawn `program` with `args`, forwarding lines to `hub` and emitting
@@ -439,5 +471,44 @@ mod tests {
         assert_eq!(out.stdout_lines, 0);
         let lines = hub.snapshot_kind(ProcessKind::Git);
         assert!(lines.is_empty());
+    }
+
+    #[test]
+    fn spawn_logged_blocking_runs_and_reuses_shared_runtime() {
+        // Issue #3190 regression guard: repeated blocking spawns must succeed
+        // without building a fresh `enable_all()` runtime (and a new I/O-driver
+        // file descriptor) on every call. The per-call build previously failed
+        // under file-descriptor pressure and surfaced as misleading downstream
+        // errors such as Issue Monitor's "GitHub origin remote is unavailable".
+        let hub = ProcessConsoleHub::new();
+        for _ in 0..25 {
+            let (cmd, args) = echo_command();
+            let out = spawn_logged_blocking(
+                &hub,
+                ProcessKind::Git,
+                cmd,
+                &args,
+                SpawnOptions::new("blocking echo"),
+            )
+            .expect("blocking spawn succeeds");
+            assert!(out.success());
+            assert!(out.stdout.contains("hello world"));
+        }
+    }
+
+    #[test]
+    fn spawn_logged_blocking_surfaces_non_zero_exit() {
+        let hub = ProcessConsoleHub::new();
+        let (cmd, args) = failing_command();
+        let out = spawn_logged_blocking(
+            &hub,
+            ProcessKind::Gh,
+            cmd,
+            &args,
+            SpawnOptions::new("blocking fail"),
+        )
+        .expect("blocking spawn returns output even on non-zero exit");
+        assert!(!out.success());
+        assert_eq!(out.exit_code, Some(7));
     }
 }
