@@ -56,6 +56,27 @@ export function createWorkspaceKanbanSurface({
     return "Idle";
   }
 
+  function cleanupCandidateLabel(candidate) {
+    return candidate?.reason === "no_changes"
+      ? "No changes — safe to delete"
+      : "Merged — safe to delete";
+  }
+
+  function cleanupBlockedLabel(workspace) {
+    if (workspace?.cleanup_candidate?.reason === "no_changes") {
+      return "No changes — cleanup unavailable";
+    }
+    return workspace?.merged_into_base
+      ? "Merged — cleanup unavailable"
+      : "Cleanup unavailable";
+  }
+
+  function cleanupBlockedTitle(reason) {
+    return reason === "live_process"
+      ? "Clean Up unavailable while a process is still using this worktree."
+      : "Clean Up unavailable while an agent is still using this worktree.";
+  }
+
   function formatLifecycleStageLabel(stage) {
     const normalized = String(stage || "").toLowerCase();
     switch (normalized) {
@@ -292,6 +313,7 @@ export function createWorkspaceKanbanSurface({
         Number(item?.session_agent_total) || Number(fallback.session_agent_total) || 0,
       events: Array.isArray(item?.events) ? item.events : [],
       cleanup_candidate: item?.cleanup_candidate || null,
+      cleanup_blocked_reason: compactText(item?.cleanup_blocked_reason),
       updated_at: compactText(item?.updated_at || fallback.updated_at),
     };
   }
@@ -1313,7 +1335,9 @@ export function createWorkspaceKanbanSurface({
       appendMetaText(subtitle, branchLabel);
     }
     if (workspace.cleanup_candidate) {
-      appendMetaText(subtitle, "Merged — safe to delete");
+      appendMetaText(subtitle, cleanupCandidateLabel(workspace.cleanup_candidate));
+    } else if (workspace.cleanup_blocked_reason) {
+      appendMetaText(subtitle, cleanupBlockedLabel(workspace));
     } else if (workspace.merged_into_base) {
       appendMetaText(subtitle, "Merged");
     }
@@ -1370,6 +1394,14 @@ export function createWorkspaceKanbanSurface({
       cleanupButton.addEventListener("click", () =>
         openWorkspaceCleanup?.(workspace.cleanup_candidate, windowId),
       );
+      actions.appendChild(cleanupButton);
+    } else if (workspace.cleanup_blocked_reason) {
+      const cleanupButton = createNode("button", "wizard-button", "Clean Up");
+      cleanupButton.type = "button";
+      cleanupButton.disabled = true;
+      cleanupButton.dataset.action = "cleanup-blocked-workspace";
+      cleanupButton.title = cleanupBlockedTitle(workspace.cleanup_blocked_reason);
+      cleanupButton.setAttribute("aria-label", cleanupButton.title);
       actions.appendChild(cleanupButton);
     }
     header.appendChild(actions);
@@ -1504,25 +1536,29 @@ export function createWorkspaceKanbanSurface({
       // branches need a BULK cleanup path, but only for backend-vetted row
       // candidates. Remote-start stubs never carry cleanup_candidate, so they
       // stay out of this set.
-      const mergedRows = allWorkspaces.filter((workspace) => workspace.cleanup_candidate);
-      if (mergedRows.length > 0) {
-        const bulkRow = createNode("div", "workspace-overview-bulk-cleanup");
-        const bulk = createNode(
-          "button",
-          "wizard-button is-compact",
-          `Clean Up Merged (${mergedRows.length})`,
-        );
-        bulk.type = "button";
-        bulk.dataset.action = "cleanup-merged-workspaces";
+      const cleanupReadyRows = allWorkspaces.filter((workspace) => workspace.cleanup_candidate);
+      const bulkRow = createNode("div", "workspace-overview-bulk-cleanup");
+      const bulk = createNode(
+        "button",
+        "wizard-button is-compact",
+        `Clean Up Ready (${cleanupReadyRows.length})`,
+      );
+      bulk.type = "button";
+      bulk.dataset.action = "cleanup-merged-workspaces";
+      if (cleanupReadyRows.length === 0) {
+        bulk.disabled = true;
+        bulk.title = "No cleanup-ready Workspaces";
+        bulk.setAttribute("aria-label", bulk.title);
+      } else {
         bulk.addEventListener("click", () =>
           openWorkspaceCleanup?.(
-            mergedRows.map((workspace) => workspace.cleanup_candidate),
+            cleanupReadyRows.map((workspace) => workspace.cleanup_candidate),
             windowId,
           ),
         );
-        bulkRow.appendChild(bulk);
-        listPane.appendChild(bulkRow);
       }
+      bulkRow.appendChild(bulk);
+      listPane.appendChild(bulkRow);
       listPane.appendChild(renderWorkspaceList(windowId, state, visibleWorkspaces));
     }
 

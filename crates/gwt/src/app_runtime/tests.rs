@@ -2003,6 +2003,7 @@ fn sample_runtime_with_events(
         pending_startup_auto_resume_sessions: Vec::new(),
         active_agent_sessions: HashMap::<String, ActiveAgentSession>::new(),
         work_merged_branches: HashMap::new(),
+        work_cleanup_ready_branches: HashMap::new(),
         work_tip_subjects: HashMap::new(),
         work_pr_titles: HashMap::new(),
         work_ai_summaries: HashMap::new(),
@@ -18197,6 +18198,7 @@ fn attach_registry_sessions_caps_total_agents_on_the_wire() {
         remote_only: false,
         done_equivalent: false,
         cleanup_candidate: None,
+        cleanup_blocked_reason: None,
         updated_at: String::new(),
     }];
 
@@ -18316,6 +18318,7 @@ fn attach_registry_sessions_keeps_latest_entry_per_agent_identity() {
         remote_only: false,
         done_equivalent: false,
         cleanup_candidate: None,
+        cleanup_blocked_reason: None,
         updated_at: String::new(),
     }];
 
@@ -18424,6 +18427,7 @@ fn attach_registry_sessions_recomputes_agent_counters_after_identity_collapse() 
         remote_only: false,
         done_equivalent: false,
         cleanup_candidate: None,
+        cleanup_blocked_reason: None,
         updated_at: String::new(),
     }];
 
@@ -18506,6 +18510,7 @@ fn attach_registry_sessions_drops_ghost_agents_without_identity_or_sessions() {
         remote_only: false,
         done_equivalent: false,
         cleanup_candidate: None,
+        cleanup_blocked_reason: None,
         updated_at: String::new(),
     }];
 
@@ -18636,6 +18641,7 @@ fn attach_registry_sessions_dedupes_agents_sharing_a_conversation() {
         remote_only: false,
         done_equivalent: false,
         cleanup_candidate: None,
+        cleanup_blocked_reason: None,
         updated_at: String::new(),
     }];
 
@@ -18768,6 +18774,7 @@ fn attach_registry_sessions_filters_agents_from_other_workspace_rows() {
         remote_only: false,
         done_equivalent: false,
         cleanup_candidate: None,
+        cleanup_blocked_reason: None,
         updated_at: "2026-06-19T13:49:00Z".to_string(),
     }];
 
@@ -18928,6 +18935,7 @@ fn active_works_are_sorted_by_latest_update_descending() {
         remote_only: false,
         done_equivalent: false,
         cleanup_candidate: None,
+        cleanup_blocked_reason: None,
         updated_at: updated_at.to_string(),
     };
     let mut works = vec![
@@ -19003,6 +19011,7 @@ fn mark_merged_active_works_flags_cache_and_pr_state() {
         remote_only: false,
         done_equivalent: false,
         cleanup_candidate: None,
+        cleanup_blocked_reason: None,
         updated_at: String::new(),
     };
     let mut works = vec![
@@ -19026,6 +19035,64 @@ fn mark_merged_active_works_flags_cache_and_pr_state() {
         "unmerged branch stays unflagged"
     );
     assert!(works[2].merged_into_base, "PR state merged flags the row");
+}
+
+#[test]
+fn dirty_worktree_pr_state_merged_does_not_flag_or_cleanup() {
+    let temp = tempdir().expect("tempdir");
+    let repo = temp.path().join("repo");
+    fs::create_dir_all(&repo).expect("create repo");
+    run_git(&repo, &["init", "-q", "-b", "develop"]);
+    run_git(&repo, &["config", "user.name", "Codex"]);
+    run_git(&repo, &["config", "user.email", "codex@example.com"]);
+    fs::write(repo.join("README.md"), "repo\n").expect("write readme");
+    run_git(&repo, &["add", "README.md"]);
+    run_git(&repo, &["commit", "-qm", "init"]);
+    run_git(&repo, &["checkout", "-q", "-b", "work/dirty"]);
+    fs::write(repo.join("local-change.txt"), "current edits\n").expect("write dirty file");
+
+    let mut works = vec![gwt::ActiveWorkItemView {
+        id: "w-dirty".to_string(),
+        title: "Dirty work".to_string(),
+        status_category: "idle".to_string(),
+        status_text: "Paused".to_string(),
+        summary: None,
+        progress_summary: None,
+        work_summary: None,
+        owner: None,
+        next_action: None,
+        active_agents: 0,
+        blocked_agents: 0,
+        branch: Some("work/dirty".to_string()),
+        worktree_path: Some(repo.display().to_string()),
+        pr_number: Some(123),
+        pr_url: None,
+        pr_state: Some("MERGED".to_string()),
+        board_refs: Vec::new(),
+        agents: Vec::new(),
+        lifecycle_state: "paused".to_string(),
+        closed_at: None,
+        session_agent_total: 0,
+        merged_into_base: false,
+        workspace_key: None,
+        remote_only: false,
+        done_equivalent: false,
+        cleanup_candidate: None,
+        cleanup_blocked_reason: None,
+        updated_at: "2026-06-10T12:00:00Z".to_string(),
+    }];
+
+    super::mark_merged_active_works(&mut works, None);
+    super::mark_workspace_cleanup_candidates(&mut works, None, &[], &HashSet::new());
+
+    assert!(
+        !works[0].merged_into_base,
+        "dirty current worktree must not inherit an old merged PR badge"
+    );
+    assert_eq!(
+        works[0].cleanup_candidate, None,
+        "dirty current worktree must not become cleanup-ready from old PR state"
+    );
 }
 
 /// SPEC-2359 W-15 (FR-386): apply_work_merge_status stores the scan result
@@ -19068,7 +19135,7 @@ fn apply_work_merge_status_caches_and_flags_rows() {
         [("work/merged".to_string(), chrono::Utc::now())]
             .into_iter()
             .collect();
-    let _ = runtime.apply_work_merge_status(&repo, merged);
+    let _ = runtime.apply_work_merge_status(&repo, merged, HashMap::new());
 
     let view = runtime
         .active_work_projection_for_tab("tab-1", &runtime.tabs[0])
@@ -19079,6 +19146,162 @@ fn apply_work_merge_status_caches_and_flags_rows() {
         .find(|work| work.id == "work-merged-row")
         .expect("row");
     assert!(row.merged_into_base, "cached merge scan flags the row");
+}
+
+#[test]
+fn spawn_work_merge_status_scan_skips_dirty_worktree_branch() {
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedEnvVar::set("HOME", temp.path());
+    let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+    let repo = temp.path().join("repo");
+    fs::create_dir_all(&repo).expect("create repo");
+    run_git(&repo, &["init", "-q", "-b", "develop"]);
+    run_git(&repo, &["config", "user.name", "Codex"]);
+    run_git(&repo, &["config", "user.email", "codex@example.com"]);
+    fs::write(repo.join("README.md"), "seed\n").expect("seed");
+    run_git(&repo, &["add", "README.md"]);
+    run_git(&repo, &["commit", "-qm", "seed"]);
+    run_git(&repo, &["branch", "work/dirty"]);
+    run_git(
+        &repo,
+        &["update-ref", "refs/remotes/origin/develop", "develop"],
+    );
+    fs::write(repo.join("local-change.txt"), "uncommitted\n").expect("dirty file");
+
+    gwt_core::workspace_projection::record_workspace_work_event(&repo, {
+        let mut event = gwt_core::workspace_projection::WorkEvent::new(
+            gwt_core::workspace_projection::WorkEventKind::Update,
+            "work-dirty-row",
+            chrono::Utc::now(),
+        );
+        event.title = Some("dirty work".to_string());
+        event.execution_container = Some(
+            gwt_core::workspace_projection::WorkspaceExecutionContainerRef {
+                branch: Some("work/dirty".to_string()),
+                worktree_path: Some(repo.clone()),
+                pr_number: None,
+                pr_url: None,
+                pr_state: None,
+            },
+        );
+        event
+    })
+    .expect("record work");
+
+    let tab = sample_project_tab("tab-1", "Repo", repo.clone(), ProjectKind::Git, &[]);
+    let (runtime, events) = sample_runtime_with_events(temp.path(), vec![tab], Some("tab-1"));
+    runtime.spawn_work_merge_status_scan(repo.clone());
+
+    wait_for_recorded_event("dirty work merge status", &events, |events| {
+        events.iter().any(|event| {
+            matches!(
+                event,
+                UserEvent::WorkMergeStatus {
+                    project_root,
+                    ..
+                } if project_root == &repo
+            )
+        })
+    });
+
+    let snapshot = events.lock().expect("event log").clone();
+    let (_, merged_branches, cleanup_ready_branches) = snapshot
+        .iter()
+        .find_map(|event| match event {
+            UserEvent::WorkMergeStatus {
+                project_root,
+                merged_branches,
+                cleanup_ready_branches,
+            } if project_root == &repo => {
+                Some((project_root, merged_branches, cleanup_ready_branches))
+            }
+            _ => None,
+        })
+        .expect("work merge status event");
+
+    assert!(
+        merged_branches.is_empty(),
+        "dirty worktree branch must not render as merged: {merged_branches:?}"
+    );
+    assert!(
+        cleanup_ready_branches.is_empty(),
+        "dirty worktree branch must not become cleanup-ready: {cleanup_ready_branches:?}"
+    );
+}
+
+#[test]
+fn apply_work_merge_status_caches_no_changes_cleanup_readiness() {
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedEnvVar::set("HOME", temp.path());
+    let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+    let repo = temp.path().join("repo");
+    fs::create_dir_all(&repo).expect("create repo");
+    init_repo(&repo);
+    let worktree = repo.join("work/no-changes");
+    fs::create_dir_all(&worktree).expect("create worktree");
+    gwt_core::workspace_projection::record_workspace_work_event(&repo, {
+        let mut event = gwt_core::workspace_projection::WorkEvent::new(
+            gwt_core::workspace_projection::WorkEventKind::Update,
+            "work-no-changes-row",
+            chrono::Utc::now(),
+        );
+        event.title = Some("no changes work".to_string());
+        event.execution_container = Some(
+            gwt_core::workspace_projection::WorkspaceExecutionContainerRef {
+                branch: Some("work/no-changes".to_string()),
+                worktree_path: Some(worktree.clone()),
+                pr_number: None,
+                pr_url: None,
+                pr_state: None,
+            },
+        );
+        event
+    })
+    .expect("record work");
+
+    let tab = sample_project_tab("tab-1", "Repo", repo.clone(), ProjectKind::Git, &[]);
+    let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+    let cleanup_ready: HashMap<String, String> =
+        [("work/no-changes".to_string(), "no_changes".to_string())]
+            .into_iter()
+            .collect();
+    let _ = runtime.apply_work_merge_status(&repo, HashMap::new(), cleanup_ready);
+
+    let view = runtime
+        .active_work_projection_for_tab("tab-1", &runtime.tabs[0])
+        .expect("projection view");
+    let row = view
+        .active_works
+        .iter()
+        .find(|work| work.id == "work-no-changes-row")
+        .expect("row");
+    let candidate = row
+        .cleanup_candidate
+        .as_ref()
+        .expect("no-changes readiness produces cleanup candidate");
+
+    assert_eq!(candidate.reason, "no_changes");
+    assert!(!row.merged_into_base, "no-changes is not a merged badge");
+
+    let _ = runtime.apply_work_merge_status(&repo, HashMap::new(), HashMap::new());
+    let view = runtime
+        .active_work_projection_for_tab("tab-1", &runtime.tabs[0])
+        .expect("projection view after cache clear");
+    let row = view
+        .active_works
+        .iter()
+        .find(|work| work.id == "work-no-changes-row")
+        .expect("row after cache clear");
+    assert_eq!(
+        row.cleanup_candidate, None,
+        "empty readiness result clears stale no-changes cleanup candidate"
+    );
 }
 
 // SPEC-2359 W-17 (FR-396): when a client's queue dropped streamed output,
@@ -19405,6 +19628,7 @@ fn assign_and_merge_workspace_groups_unifies_same_branch_rows() {
             remote_only: false,
             done_equivalent: false,
             cleanup_candidate: None,
+            cleanup_blocked_reason: None,
             updated_at: updated_at.to_string(),
         }
     }
@@ -19492,6 +19716,7 @@ fn mark_remote_only_flags_fetched_branches_without_local_worktree() {
             remote_only: false,
             done_equivalent: false,
             cleanup_candidate: None,
+            cleanup_blocked_reason: None,
             updated_at: String::new(),
         }
     }
@@ -19553,6 +19778,7 @@ fn mark_merged_classifies_done_equivalent_for_stale_merged_rows() {
             remote_only: false,
             done_equivalent: false,
             cleanup_candidate: None,
+            cleanup_blocked_reason: None,
             updated_at: updated_at.to_string(),
         }
     }
@@ -19596,6 +19822,171 @@ fn mark_merged_classifies_done_equivalent_for_stale_merged_rows() {
         "pr_state stays badge-only — membership rides the scan verdict"
     );
     assert!(works[3].merged_into_base, "pr_state still drives the badge");
+}
+
+#[test]
+fn mark_cleanup_candidates_exposes_no_changes_reason_without_merged_badge() {
+    let mut works = vec![gwt::ActiveWorkItemView {
+        id: "w-no-changes".to_string(),
+        title: "No changes".to_string(),
+        status_category: "idle".to_string(),
+        status_text: "Paused".to_string(),
+        summary: None,
+        progress_summary: None,
+        work_summary: None,
+        owner: None,
+        next_action: None,
+        active_agents: 0,
+        blocked_agents: 0,
+        branch: Some("work/no-changes".to_string()),
+        worktree_path: Some("/tmp/gwt-no-changes".to_string()),
+        pr_number: None,
+        pr_url: None,
+        pr_state: None,
+        board_refs: Vec::new(),
+        agents: Vec::new(),
+        lifecycle_state: "paused".to_string(),
+        closed_at: None,
+        session_agent_total: 0,
+        merged_into_base: false,
+        workspace_key: None,
+        remote_only: false,
+        done_equivalent: false,
+        cleanup_candidate: None,
+        cleanup_blocked_reason: None,
+        updated_at: String::new(),
+    }];
+    let cleanup_ready: HashMap<String, String> =
+        [("work/no-changes".to_string(), "no_changes".to_string())]
+            .into_iter()
+            .collect();
+
+    super::mark_workspace_cleanup_candidates(
+        &mut works,
+        Some(&cleanup_ready),
+        &[],
+        &HashSet::new(),
+    );
+
+    let candidate = works[0]
+        .cleanup_candidate
+        .as_ref()
+        .expect("no-changes branch is cleanup-ready");
+    assert_eq!(candidate.branch, "work/no-changes");
+    assert_eq!(candidate.reason, "no_changes");
+    assert_eq!(works[0].cleanup_blocked_reason, None);
+    assert!(
+        !works[0].merged_into_base,
+        "no-changes cleanup does not claim a merged badge"
+    );
+}
+
+#[test]
+fn mark_cleanup_candidates_sets_blocked_reason_for_live_agent_and_process() {
+    let temp = tempdir().expect("tempdir");
+    let live_process_worktree = temp.path().join("gwt-live-process");
+    fs::create_dir_all(&live_process_worktree).expect("create live process worktree");
+    let mut works = vec![
+        gwt::ActiveWorkItemView {
+            id: "w-live-agent".to_string(),
+            title: "Live agent".to_string(),
+            status_category: "active".to_string(),
+            status_text: "Active".to_string(),
+            summary: None,
+            progress_summary: None,
+            work_summary: None,
+            owner: None,
+            next_action: None,
+            active_agents: 1,
+            blocked_agents: 0,
+            branch: Some("work/live-agent".to_string()),
+            worktree_path: Some("/tmp/gwt-live-agent".to_string()),
+            pr_number: None,
+            pr_url: None,
+            pr_state: Some("MERGED".to_string()),
+            board_refs: Vec::new(),
+            agents: Vec::new(),
+            lifecycle_state: "active".to_string(),
+            closed_at: None,
+            session_agent_total: 0,
+            merged_into_base: true,
+            workspace_key: None,
+            remote_only: false,
+            done_equivalent: false,
+            cleanup_candidate: None,
+            cleanup_blocked_reason: None,
+            updated_at: String::new(),
+        },
+        gwt::ActiveWorkItemView {
+            id: "w-live-process".to_string(),
+            title: "Live process".to_string(),
+            status_category: "idle".to_string(),
+            status_text: "Paused".to_string(),
+            summary: None,
+            progress_summary: None,
+            work_summary: None,
+            owner: None,
+            next_action: None,
+            active_agents: 0,
+            blocked_agents: 0,
+            branch: Some("work/live-process".to_string()),
+            worktree_path: Some(live_process_worktree.display().to_string()),
+            pr_number: None,
+            pr_url: None,
+            pr_state: None,
+            board_refs: Vec::new(),
+            agents: Vec::new(),
+            lifecycle_state: "paused".to_string(),
+            closed_at: None,
+            session_agent_total: 0,
+            merged_into_base: false,
+            workspace_key: None,
+            remote_only: false,
+            done_equivalent: false,
+            cleanup_candidate: None,
+            cleanup_blocked_reason: None,
+            updated_at: String::new(),
+        },
+    ];
+    let cleanup_ready: HashMap<String, String> = [
+        ("work/live-agent".to_string(), "pr_merged".to_string()),
+        ("work/live-process".to_string(), "no_changes".to_string()),
+    ]
+    .into_iter()
+    .collect();
+    let session = ActiveAgentSession {
+        window_id: "window-live-agent".to_string(),
+        session_id: "session-live-agent".to_string(),
+        agent_id: "codex".to_string(),
+        branch_name: "work/live-agent".to_string(),
+        display_name: "Codex".to_string(),
+        worktree_path: PathBuf::from("/tmp/gwt-live-agent"),
+        agent_project_root: "/tmp/gwt-live-agent".to_string(),
+        runtime_target: gwt_agent::LaunchRuntimeTarget::Host,
+        tab_id: "tab-1".to_string(),
+    };
+    let live_process_paths: HashSet<PathBuf> =
+        [fs::canonicalize(&live_process_worktree).expect("canonical live process worktree")]
+            .into_iter()
+            .collect();
+
+    super::mark_workspace_cleanup_candidates(
+        &mut works,
+        Some(&cleanup_ready),
+        &[&session],
+        &live_process_paths,
+    );
+
+    assert_eq!(works[0].cleanup_candidate, None);
+    assert_eq!(
+        works[0].cleanup_blocked_reason.as_deref(),
+        Some("live_agent")
+    );
+    assert_eq!(works[1].cleanup_candidate, None);
+    assert_eq!(
+        works[1].cleanup_blocked_reason.as_deref(),
+        Some("live_process")
+    );
 }
 
 // SPEC-3075: the rail "what work was running" summary derivation. Surfaces the
@@ -19732,6 +20123,7 @@ fn apply_work_summary_external_sources_prefers_pr_then_ai_then_commit_subject() 
         remote_only: false,
         done_equivalent: false,
         cleanup_candidate: None,
+        cleanup_blocked_reason: None,
     };
     let mut works = vec![
         base("work/20260614-0444", None), // no PR, gap -> filled by commit subject

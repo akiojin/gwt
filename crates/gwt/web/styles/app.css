@@ -4897,6 +4897,7 @@ body {
 }
 
 .branch-cleanup-progress-item {
+  position: relative;
   display: grid;
   grid-template-columns: minmax(0, 1fr) auto;
   gap: 8px;
@@ -4907,9 +4908,24 @@ body {
   background: var(--color-surface-elevated);
   font-family: var(--font-mono);
   font-size: var(--type-xs);
+  overflow: hidden;
+}
+
+.branch-cleanup-progress-item.running {
+  border-color: color-mix(in oklab, var(--color-state-active) 42%, var(--color-border));
+}
+
+.branch-cleanup-progress-item.done {
+  border-color: color-mix(in oklab, var(--color-state-active) 28%, var(--color-border));
+}
+
+.branch-cleanup-progress-item.failed {
+  border-color: color-mix(in oklab, var(--agent-claude) 36%, var(--color-border));
 }
 
 .branch-cleanup-progress-branch {
+  position: relative;
+  z-index: 1;
   min-width: 0;
   overflow: hidden;
   color: var(--color-text);
@@ -4918,13 +4934,87 @@ body {
 }
 
 .branch-cleanup-progress-status {
+  position: relative;
+  z-index: 1;
   color: var(--color-text-muted);
   text-transform: uppercase;
 }
 
+.branch-cleanup-progress-item.pending .branch-cleanup-progress-status,
+.branch-cleanup-progress-item.running .branch-cleanup-progress-status {
+  color: var(--color-state-active);
+}
+
+.branch-cleanup-progress-item.failed .branch-cleanup-progress-status {
+  color: var(--agent-claude);
+}
+
 .branch-cleanup-progress-message {
+  position: relative;
+  z-index: 1;
   grid-column: 1 / -1;
   color: var(--color-text-muted);
+}
+
+@keyframes branch-cleanup-queue-sweep {
+  0% {
+    opacity: 0;
+    transform: translateX(-100%);
+  }
+
+  35% {
+    opacity: 1;
+  }
+
+  100% {
+    opacity: 0;
+    transform: translateX(100%);
+  }
+}
+
+@keyframes branch-cleanup-status-dots {
+  0% {
+    content: "";
+  }
+
+  33% {
+    content: ".";
+  }
+
+  66% {
+    content: "..";
+  }
+
+  100% {
+    content: "...";
+  }
+}
+
+@media (prefers-reduced-motion: no-preference) {
+  .branch-cleanup-progress-item.pending::before {
+    content: "";
+    position: absolute;
+    inset: 0;
+    pointer-events: none;
+    background: linear-gradient(
+      100deg,
+      transparent 0%,
+      color-mix(in oklab, var(--color-state-active) 14%, transparent) 48%,
+      transparent 72%
+    );
+    transform: translateX(-100%);
+    animation: branch-cleanup-queue-sweep 1800ms ease-in-out infinite;
+  }
+
+  .branch-cleanup-running.is-preparing::after,
+  .branch-cleanup-progress-item.pending .branch-cleanup-progress-status::after,
+  .branch-cleanup-progress-item.running .branch-cleanup-progress-status::after {
+    display: inline-block;
+    width: 3ch;
+    text-align: left;
+    content: "";
+    animation: branch-cleanup-status-dots 1200ms steps(1, end) infinite;
+  }
 }
 
 .branch-cleanup-results-summary {
