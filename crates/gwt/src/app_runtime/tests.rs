@@ -2052,6 +2052,46 @@ fn wait_for_recorded_event(
     panic!("timed out waiting for {label}: {snapshot:?}");
 }
 
+fn dispatch_launch_materialization_request(
+    runtime: &mut AppRuntime,
+    recorded_events: &Arc<Mutex<Vec<UserEvent>>>,
+    label: &str,
+) -> Vec<OutboundEvent> {
+    wait_for_recorded_event(label, recorded_events, |events| {
+        events.iter().any(|event| {
+            matches!(
+                event,
+                UserEvent::LaunchWizardLaunchMaterializationRequested { .. }
+            )
+        })
+    });
+    let request = {
+        let mut events = recorded_events.lock().expect("event log");
+        events
+            .iter()
+            .position(|event| {
+                matches!(
+                    event,
+                    UserEvent::LaunchWizardLaunchMaterializationRequested { .. }
+                )
+            })
+            .map(|index| events.remove(index))
+            .expect("launch materialization event")
+    };
+    let UserEvent::LaunchWizardLaunchMaterializationRequested {
+        wizard_id,
+        client_id,
+        config,
+        bounds,
+    } = request
+    else {
+        unreachable!("matched above")
+    };
+    runtime.handle_launch_wizard_launch_materialization_requested(
+        wizard_id, client_id, *config, bounds,
+    )
+}
+
 fn resolve_launch_wizard_runtime_confirmation(
     runtime: &mut AppRuntime,
     recorded_events: &Arc<Mutex<Vec<UserEvent>>>,
@@ -2404,6 +2444,73 @@ fn sample_no_agent_launch_wizard_session(tab_id: &str, project_root: &Path) -> L
             Vec::new(),
             Vec::new(),
         ),
+        workspace_resume_context: None,
+        agent_kanban_target: None,
+        auto_submit_after_runtime_resolution: None,
+        issue_monitor_profile_save: None,
+        issue_monitor_launch_issue_number: None,
+    }
+}
+
+fn sample_start_work_confirm_session(tab_id: &str, project_root: &Path) -> LaunchWizardSession {
+    let base_branch = "origin/develop".to_string();
+    let work_branch = "work/20260625-1702".to_string();
+    let mut wizard = LaunchWizardState::open_start_work_with_previous_profiles(
+        LaunchWizardContext {
+            selected_branch: BranchListEntry {
+                name: base_branch.clone(),
+                scope: BranchScope::Remote,
+                is_head: false,
+                upstream: None,
+                ahead: 0,
+                behind: 0,
+                last_commit_date: None,
+                cleanup_ready: false,
+                cleanup: BranchCleanupInfo::default(),
+                resume: gwt::BranchResumeInfo::unavailable(),
+                start_work_eligibility: None,
+            },
+            normalized_branch_name: work_branch.clone(),
+            worktree_path: None,
+            quick_start_root: project_root.to_path_buf(),
+            live_sessions: Vec::new(),
+            docker_context: None,
+            docker_service_status: gwt_docker::ComposeServiceStatus::NotFound,
+            linked_issue_number: None,
+            linked_issue_kind: None,
+            ultracode_supported: false,
+            claude_workflows_enabled: false,
+        },
+        base_branch,
+        sample_agent_options(),
+        Vec::new(),
+        Default::default(),
+    );
+    wizard.mark_runtime_context_unresolved();
+    wizard.apply(LaunchWizardAction::UseStartMethod {
+        method: gwt::LaunchWizardStartMethodKind::ConfigureAndStart,
+    });
+    wizard.apply(LaunchWizardAction::Submit);
+    wizard.completion = None;
+    wizard.apply_runtime_context(gwt::LaunchWizardHydration {
+        selected_branch: None,
+        normalized_branch_name: work_branch,
+        worktree_path: None,
+        quick_start_root: project_root.to_path_buf(),
+        docker_context: None,
+        docker_service_status: gwt_docker::ComposeServiceStatus::NotFound,
+        agent_options: sample_agent_options(),
+        quick_start_entries: Vec::new(),
+        previous_profiles: Some(Default::default()),
+        open_branch_candidates: Vec::new(),
+    });
+    wizard.apply(LaunchWizardAction::Submit);
+    assert!(wizard.view().show_confirm);
+
+    LaunchWizardSession {
+        tab_id: tab_id.to_string(),
+        wizard_id: "wizard-start-work-confirm".to_string(),
+        wizard,
         workspace_resume_context: None,
         agent_kanban_target: None,
         auto_submit_after_runtime_resolution: None,
@@ -4795,6 +4902,78 @@ fn app_runtime_launch_wizard_submit_failure_emits_structured_error_log() {
 }
 
 #[test]
+fn app_runtime_launch_submit_returns_materialization_pending_before_dispatch() {
+    let temp = tempdir().expect("tempdir");
+    let repo = temp.path().join("repo");
+    fs::create_dir_all(&repo).expect("create repo");
+    init_repo(&repo);
+    let tab = sample_project_tab("tab-1", "Repo", repo.clone(), ProjectKind::Git, &[]);
+    let (mut runtime, recorded_events) =
+        sample_runtime_with_events(temp.path(), vec![tab], Some("tab-1"));
+    runtime.launch_wizard = Some(sample_start_work_confirm_session("tab-1", &repo));
+
+    let events = runtime.handle_launch_wizard_action_for_client(
+        Some("client-1"),
+        LaunchWizardAction::Submit,
+        Some(canvas_bounds()),
+    );
+
+    assert_eq!(events.len(), 1);
+    let BackendEvent::LaunchWizardState {
+        wizard: Some(wizard),
+    } = &events[0].event
+    else {
+        panic!("expected pending wizard state before launch dispatch: {events:?}");
+    };
+    assert!(wizard.launch_materialization_pending);
+    assert_eq!(
+        wizard.launch_materialization_message.as_deref(),
+        Some("Preparing worktree...")
+    );
+    assert_eq!(wizard.primary_action_label, "Launching...");
+    assert!(!wizard.primary_action_enabled);
+
+    let recorded = recorded_events.lock().expect("event log");
+    assert_eq!(
+        recorded
+            .iter()
+            .filter(|event| {
+                matches!(
+                    event,
+                    UserEvent::LaunchWizardLaunchMaterializationRequested { .. }
+                )
+            })
+            .count(),
+        1,
+        "actual launch must be deferred to exactly one internal event",
+    );
+    drop(recorded);
+
+    let duplicate_events =
+        runtime.handle_launch_wizard_action(LaunchWizardAction::Submit, Some(canvas_bounds()));
+    assert!(
+        duplicate_events
+            .iter()
+            .any(|event| matches!(event.event, BackendEvent::LaunchWizardState { .. })),
+        "duplicate submit should keep returning the pending wizard state",
+    );
+    let recorded = recorded_events.lock().expect("event log");
+    assert_eq!(
+        recorded
+            .iter()
+            .filter(|event| {
+                matches!(
+                    event,
+                    UserEvent::LaunchWizardLaunchMaterializationRequested { .. }
+                )
+            })
+            .count(),
+        1,
+        "duplicate submit while pending must not enqueue a second launch",
+    );
+}
+
+#[test]
 fn app_runtime_launch_wizard_set_agent_failure_logs_requested_agent() {
     let temp = tempdir().expect("tempdir");
     let repo = temp.path().join("repo");
@@ -5536,15 +5715,30 @@ fn app_runtime_launch_wizard_submit_emits_agent_window_launching_status() {
     fs::create_dir_all(&repo).expect("create repo");
     init_repo(&repo);
     let tab = sample_project_tab("tab-1", "Repo", repo.clone(), ProjectKind::Git, &[]);
-    let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+    let (mut runtime, recorded_events) =
+        sample_runtime_with_events(temp.path(), vec![tab], Some("tab-1"));
     runtime.launch_wizard = Some(sample_ready_agent_launch_wizard_session("tab-1", &repo));
 
-    let events = runtime.handle_frontend_event(
+    let submit_events = runtime.handle_frontend_event(
         "client-1".to_string(),
         FrontendEvent::LaunchWizardAction {
             action: LaunchWizardAction::Submit,
             bounds: Some(canvas_bounds()),
         },
+    );
+    assert!(submit_events.iter().any(|event| {
+        matches!(
+            &event.event,
+            BackendEvent::LaunchWizardState {
+                wizard: Some(wizard)
+            } if wizard.launch_materialization_pending
+        )
+    }));
+
+    let events = dispatch_launch_materialization_request(
+        &mut runtime,
+        &recorded_events,
+        "launch wizard submit materialization",
     );
 
     let workspace = events
@@ -5600,17 +5794,23 @@ fn app_runtime_launch_complete_missing_wizard_window_surfaces_open_error() {
     fs::create_dir_all(&repo).expect("create repo");
     init_repo(&repo);
     let tab = sample_project_tab("tab-1", "Repo", repo.clone(), ProjectKind::Git, &[]);
-    let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+    let (mut runtime, recorded_events) =
+        sample_runtime_with_events(temp.path(), vec![tab], Some("tab-1"));
     runtime.launch_wizard = Some(sample_ready_agent_launch_wizard_session("tab-1", &repo));
 
-    let submit_events = runtime.handle_frontend_event(
+    let _submit_events = runtime.handle_frontend_event(
         "client-1".to_string(),
         FrontendEvent::LaunchWizardAction {
             action: LaunchWizardAction::Submit,
             bounds: Some(canvas_bounds()),
         },
     );
-    let window_id = submit_events
+    let launch_events = dispatch_launch_materialization_request(
+        &mut runtime,
+        &recorded_events,
+        "launch wizard complete materialization",
+    );
+    let window_id = launch_events
         .iter()
         .find_map(|event| match &event.event {
             BackendEvent::TerminalStatus { id, detail, .. }
@@ -14842,11 +15042,27 @@ fn app_runtime_issue_monitor_launch_now_wires_launch_feedback_to_issue_row() {
     assert!(
         launch_events.iter().any(|event| {
             matches!(
+                &event.event,
+                BackendEvent::LaunchWizardState {
+                    wizard: Some(wizard)
+                } if wizard.launch_materialization_pending
+            )
+        }),
+        "confirm submit should report materialization progress before creating an agent window"
+    );
+    let launch_events = dispatch_launch_materialization_request(
+        &mut runtime,
+        &recorded_events,
+        "issue monitor launch now materialization",
+    );
+    assert!(
+        launch_events.iter().any(|event| {
+            matches!(
                 event.event,
                 BackendEvent::LaunchWizardState { wizard: None }
             )
         }),
-        "confirm submit should close the wizard and create an agent window"
+        "materialization dispatch should close the wizard and create an agent window"
     );
     assert!(
         runtime
