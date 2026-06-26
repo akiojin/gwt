@@ -818,6 +818,11 @@ impl AppRuntime {
             };
             let targets = work_branch_scan_targets(&projection);
             if targets.is_empty() {
+                proxy.send(UserEvent::WorkMergeStatus {
+                    project_root,
+                    merged_branches: HashMap::new(),
+                    cleanup_ready_branches: HashMap::new(),
+                });
                 return;
             }
             let mut merged: Vec<String> = Vec::new();

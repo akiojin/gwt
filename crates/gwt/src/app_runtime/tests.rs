@@ -19233,6 +19233,59 @@ fn spawn_work_merge_status_scan_skips_dirty_worktree_branch() {
 }
 
 #[test]
+fn spawn_work_merge_status_scan_clears_stale_cache_when_no_targets_remain() {
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedEnvVar::set("HOME", temp.path());
+    let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+    let repo = temp.path().join("repo");
+    fs::create_dir_all(&repo).expect("create repo");
+    init_repo(&repo);
+
+    gwt_core::workspace_projection::record_workspace_work_event(&repo, {
+        let mut event = gwt_core::workspace_projection::WorkEvent::new(
+            gwt_core::workspace_projection::WorkEventKind::Done,
+            "work-terminal-row",
+            chrono::Utc::now(),
+        );
+        event.title = Some("terminal work".to_string());
+        event.status_category = Some(gwt_core::workspace_projection::WorkspaceStatusCategory::Done);
+        event.execution_container = Some(
+            gwt_core::workspace_projection::WorkspaceExecutionContainerRef {
+                branch: Some("work/merged".to_string()),
+                worktree_path: None,
+                pr_number: None,
+                pr_url: None,
+                pr_state: None,
+            },
+        );
+        event
+    })
+    .expect("record terminal work");
+
+    let tab = sample_project_tab("tab-1", "Repo", repo.clone(), ProjectKind::Git, &[]);
+    let (runtime, events) = sample_runtime_with_events(temp.path(), vec![tab], Some("tab-1"));
+    runtime.spawn_work_merge_status_scan(repo.clone());
+
+    wait_for_recorded_event("empty work merge status", &events, |events| {
+        events.iter().any(|event| {
+            matches!(
+                event,
+                UserEvent::WorkMergeStatus {
+                    project_root,
+                    merged_branches,
+                    cleanup_ready_branches,
+                } if project_root == &repo
+                    && merged_branches.is_empty()
+                    && cleanup_ready_branches.is_empty()
+            )
+        })
+    });
+}
+
+#[test]
 fn apply_work_merge_status_caches_no_changes_cleanup_readiness() {
     let _env_lock = env_test_lock()
         .lock()
