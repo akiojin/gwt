@@ -1968,16 +1968,43 @@
         persistViewport();
       }
 
+      let pendingWindowFrameClampTimer = null;
+      let pendingWindowFrameClampFrame = null;
+      let windowFrameClampToken = 0;
+
       function scheduleWindowFrameClamp(windowId, { animate = false } = {}) {
+        windowFrameClampToken += 1;
+        const clampToken = windowFrameClampToken;
+        if (pendingWindowFrameClampTimer !== null) {
+          clearTimeout(pendingWindowFrameClampTimer);
+          pendingWindowFrameClampTimer = null;
+        }
+        if (
+          pendingWindowFrameClampFrame !== null &&
+          typeof cancelAnimationFrame === "function"
+        ) {
+          cancelAnimationFrame(pendingWindowFrameClampFrame);
+          pendingWindowFrameClampFrame = null;
+        }
         const run = () => {
+          pendingWindowFrameClampTimer = null;
+          if (clampToken !== windowFrameClampToken) {
+            return;
+          }
           if (typeof requestAnimationFrame === "function") {
-            requestAnimationFrame(() => clampWindowElementToCameraFrame(windowId));
+            pendingWindowFrameClampFrame = requestAnimationFrame(() => {
+              pendingWindowFrameClampFrame = null;
+              if (clampToken !== windowFrameClampToken) {
+                return;
+              }
+              clampWindowElementToCameraFrame(windowId);
+            });
             return;
           }
           clampWindowElementToCameraFrame(windowId);
         };
         if (animate) {
-          setTimeout(run, 240);
+          pendingWindowFrameClampTimer = setTimeout(run, 240);
           return;
         }
         run();

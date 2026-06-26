@@ -140,6 +140,41 @@ test("frameWindow schedules a DOM-rect clamp after the camera lands", () => {
   );
 });
 
+test("window frame clamps ignore stale delayed framing callbacks", () => {
+  const scheduleBody = extractFunctionBody(appSource, "scheduleWindowFrameClamp");
+
+  assert.match(
+    appSource,
+    /let\s+windowFrameClampToken\s*=\s*0/,
+    "frame clamp scheduling must track generations across frame requests",
+  );
+  assert.match(
+    scheduleBody,
+    /windowFrameClampToken\s*\+=\s*1/,
+    "each frame request must invalidate older delayed clamps",
+  );
+  assert.match(
+    scheduleBody,
+    /const\s+clampToken\s*=\s*windowFrameClampToken/,
+    "scheduled callbacks must capture the current generation",
+  );
+  assert.match(
+    scheduleBody,
+    /clampToken\s*!==\s*windowFrameClampToken/,
+    "stale clamp callbacks must exit before mutating the viewport",
+  );
+  assert.match(
+    scheduleBody,
+    /clearTimeout\(\s*pendingWindowFrameClampTimer\s*\)/,
+    "a new frame request must cancel the previous delayed clamp timer",
+  );
+  assert.match(
+    scheduleBody,
+    /cancelAnimationFrame\(\s*pendingWindowFrameClampFrame\s*\)/,
+    "a new frame request must cancel the previous pending clamp frame",
+  );
+});
+
 test("host viewport resize reframes the focused window without broadcasting focus", () => {
   const resizeBody = extractFunctionBody(appSource, "frameFocusedWindowAfterViewportResize");
 
