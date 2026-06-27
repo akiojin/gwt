@@ -7464,7 +7464,7 @@ Future Action: contract test の assertion が『追加』ではなく『反転�
 Type: failure-pattern
 Context: Issue #3192 and Issue #3190 verification used browser-check/fresh HOME. The agent shell HOME pointed to an isolated gwt-fresh-home, so plain cargo/rustup saw no installed/default toolchains even though the real developer HOME had stable installed.
 Learning: When HOME is an isolated verification directory, rustup resolves toolchains under that HOME and cargo commands can fail with 'no default is configured'. This is an environment issue, not a Rust project failure.
-Future Action: Before Cargo/Rust verification after browser-check or isolated HOME work, print HOME/RUSTUP_HOME/CARGO_HOME when cargo cannot find a toolchain. If HOME is isolated, run cargo/rustup with HOME=/Users/akiojin USERPROFILE=/Users/akiojin RUSTUP_HOME=/Users/akiojin/.rustup CARGO_HOME=/Users/akiojin/.cargo or otherwise bridge the real toolchain home.
+Future Action: Before Cargo/Rust verification after browser-check or isolated HOME work, print HOME/RUSTUP_HOME/CARGO_HOME when cargo cannot find a toolchain. If HOME is isolated, resolve the real user home from the pre-isolation environment, OS user lookup, or `getent passwd "$USER" | cut -d: -f6`; then run cargo/rustup with `HOME="$REAL_HOME" USERPROFILE="$REAL_HOME" RUSTUP_HOME="$REAL_HOME/.rustup" CARGO_HOME="$REAL_HOME/.cargo"` or otherwise bridge the real toolchain home.
 
 ## 2026-06-27 — Visual auto-refresh fixtures should not fire timers before initial load settles
 
