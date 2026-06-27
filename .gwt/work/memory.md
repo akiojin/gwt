@@ -7459,9 +7459,16 @@ Context: Docker起動エラーが TTY 前面に被さる回帰 (SPEC-2014 US-36 
 Learning: test rename + assert.equal('false')->assert.match(error) のような『契約の反転』は新規ケース追加と違い regression を隠す。TTY 前面 overlay は .terminal-overlay.visible 1 箇所(app.js shouldShowOverlay)のみで Docker 固有ではなく全 error window で発火する。error は overlay 無しでも inline TTY text(launch_error_terminal_output_event) / status chip tooltip / attention toast / Console docker tab / Logs Process facet の 5 面で可視。
 Future Action: contract test の assertion が『追加』ではなく『反転』している diff は regression の赤信号として扱う。完了済み FR を touch する大型 feature commit では guard test が意味を保っているか必ず確認する。前面 overlay を復活させる変更は SPEC-2014 US-36 違反。
 
-## 2026-06-26 — renderLaunchWizard: 早期return前のlaunchWizard参照はnull安全に
+## 2026-06-27 — Browser-check isolated HOME can hide Rust toolchains
 
-Type: lesson
-Context: Issue #3192 — Start Work ボタン無反応。renderLaunchWizard() が opening/openError 早期 return より前で launchWizard.launch_materialization_pending を裸参照し、pending 状態(launchWizard=null)で TypeError → モーダルが .open に到達せず。commit 1fdbe25c0 のリグレッション。click ハンドラ内同期クラッシュなので後続の open_start_work WS send も止まり『押しても無反応』になる。
-Learning: renderLaunchWizard の冒頭(状態分岐前)で実行される計算は Start Work/Launch Agent の pending 状態と openError 状態で launchWizard=null になり得る。early return より前で launchWizard を参照するコードは必ず optional chaining(?.)で null 安全にする。early return 後の参照(通常 wizard 描画/renderWizardSummary/renderWizardProgressRail)は非null保証なので裸で良い。
-Future Action: launchWizard 由来の新フィールドを render に追加する時は参照位置が opening/openError 早期 return の前か後かを確認し、前なら ?. を付ける。回帰は Playwright embedded spec crates/gwt/playwright/tests/start-work-launch-pending.spec.ts (Start Work クリック→#wizard-modal が .open) で behavioral に固定済み。
+Type: failure-pattern
+Context: Issue #3192 and Issue #3190 verification used browser-check/fresh HOME. The agent shell HOME pointed to an isolated gwt-fresh-home, so plain cargo/rustup saw no installed/default toolchains even though the real developer HOME had stable installed.
+Learning: When HOME is an isolated verification directory, rustup resolves toolchains under that HOME and cargo commands can fail with 'no default is configured'. This is an environment issue, not a Rust project failure.
+Future Action: Before Cargo/Rust verification after browser-check or isolated HOME work, print HOME/RUSTUP_HOME/CARGO_HOME when cargo cannot find a toolchain. If HOME is isolated, resolve the real user home from the pre-isolation environment, OS user lookup, or `getent passwd "$USER" | cut -d: -f6`; then run cargo/rustup with `HOME="$REAL_HOME" USERPROFILE="$REAL_HOME" RUSTUP_HOME="$REAL_HOME/.rustup" CARGO_HOME="$REAL_HOME/.cargo"` or otherwise bridge the real toolchain home.
+
+## 2026-06-27 — Visual auto-refresh fixtures should not fire timers before initial load settles
+
+Type: failure-pattern
+Context: During PR #3193 pre-PR visual verification, the Issue Bridge auto-refresh Playwright fixture fired a 60000ms interval callback via a fixed 50ms timeout. In the full suite, initial knowledge load sometimes still held the busy flag, so the auto-refresh request was dropped and the test timed out although single-test runs passed.
+Learning: Timer-shortening fixtures are flaky when the production callback can legally no-op while state is busy. Tests should expose a deterministic trigger and call it after asserting the state that makes the callback meaningful.
+Future Action: For Playwright fixtures that validate periodic behavior, capture interval callbacks and trigger them explicitly after the initial render/load assertions instead of relying on arbitrary short timeouts.
