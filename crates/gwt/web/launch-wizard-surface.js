@@ -770,8 +770,14 @@ export function createLaunchWizardSurface({
 
         syncWizardDraftState();
         closeModal();
-        // Local opening states reach this point before backend wizard state
-        // exists, so any value shared across states must stay null-safe.
+        // Issue #3192 — this derivation runs BEFORE the opening/openError
+        // early returns below, so it is reached for the Start Work /
+        // Launch Agent pending states where `launchWizard` is null
+        // (`launchWizardOpening` is set instead). Read the field null-safely:
+        // a bare `launchWizard.launch_materialization_pending` throws and
+        // renderLaunchWizard() never reaches the `.open` toggle, so the rail
+        // button silently does nothing. Dereferences AFTER those early
+        // returns are non-null by construction and stay bare.
         const isLaunchMaterializationPending = Boolean(
           launchWizard?.launch_materialization_pending,
         );
