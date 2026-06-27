@@ -210,10 +210,15 @@ test("wizard backend launch materialization state preserves pending feedback", (
     /function\s+applyLaunchWizardStateEvent\(event\)[\s\S]{0,700}?event\.wizard\?\.launch_materialization_pending[\s\S]{0,180}?clearLaunchWizardPendingAction\(\)/,
     "backend launch materialization state must not clear local pending chrome",
   );
+  // Issue #3192 — this derivation runs BEFORE the opening/openError early
+  // returns, so `launchWizard` is null for the Start Work / Launch Agent
+  // pending states. It must read the field null-safely (optional chaining);
+  // a bare `launchWizard.launch_materialization_pending` throws and the modal
+  // never receives its `.open` class (the button silently does nothing).
   assert.match(
     wizardSource,
-    /const\s+isLaunchMaterializationPending\s*=\s*Boolean\(\s*launchWizard\.launch_materialization_pending,?\s*\)/,
-    "expected renderer to derive backend launch materialization pending state",
+    /const\s+isLaunchMaterializationPending\s*=\s*Boolean\(\s*launchWizard\?\.launch_materialization_pending,?\s*\)/,
+    "expected renderer to derive backend launch materialization pending state null-safely",
   );
   assert.match(
     wizardSource,

@@ -7458,3 +7458,10 @@ Type: fix
 Context: Docker起動エラーが TTY 前面に被さる回帰 (SPEC-2014 US-36 / FR-120/121)。terminal-overlay を error 時に表示する形式は commit 1e948b7a0 で廃止 (shouldShowOverlay=false 固定) 済みだったが、無関係な feature commit a93afd199 'feat: complete issue monitor auto queue' が app.js を Boolean(effectiveDetail) && runtimeState==='error' へ revert し、同時に contract test (operator-chrome-structure.test.mjs) と playwright test (agent-window-scroll.spec.ts) の assertion も regressed 側へ書き換えたため CI が素通りした。
 Learning: test rename + assert.equal('false')->assert.match(error) のような『契約の反転』は新規ケース追加と違い regression を隠す。TTY 前面 overlay は .terminal-overlay.visible 1 箇所(app.js shouldShowOverlay)のみで Docker 固有ではなく全 error window で発火する。error は overlay 無しでも inline TTY text(launch_error_terminal_output_event) / status chip tooltip / attention toast / Console docker tab / Logs Process facet の 5 面で可視。
 Future Action: contract test の assertion が『追加』ではなく『反転』している diff は regression の赤信号として扱う。完了済み FR を touch する大型 feature commit では guard test が意味を保っているか必ず確認する。前面 overlay を復活させる変更は SPEC-2014 US-36 違反。
+
+## 2026-06-26 — renderLaunchWizard: 早期return前のlaunchWizard参照はnull安全に
+
+Type: lesson
+Context: Issue #3192 — Start Work ボタン無反応。renderLaunchWizard() が opening/openError 早期 return より前で launchWizard.launch_materialization_pending を裸参照し、pending 状態(launchWizard=null)で TypeError → モーダルが .open に到達せず。commit 1fdbe25c0 のリグレッション。click ハンドラ内同期クラッシュなので後続の open_start_work WS send も止まり『押しても無反応』になる。
+Learning: renderLaunchWizard の冒頭(状態分岐前)で実行される計算は Start Work/Launch Agent の pending 状態と openError 状態で launchWizard=null になり得る。early return より前で launchWizard を参照するコードは必ず optional chaining(?.)で null 安全にする。early return 後の参照(通常 wizard 描画/renderWizardSummary/renderWizardProgressRail)は非null保証なので裸で良い。
+Future Action: launchWizard 由来の新フィールドを render に追加する時は参照位置が opening/openError 早期 return の前か後かを確認し、前なら ?. を付ける。回帰は Playwright embedded spec crates/gwt/playwright/tests/start-work-launch-pending.spec.ts (Start Work クリック→#wizard-modal が .open) で behavioral に固定済み。
