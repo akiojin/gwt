@@ -770,8 +770,10 @@ export function createLaunchWizardSurface({
 
         syncWizardDraftState();
         closeModal();
+        // Local opening states reach this point before backend wizard state
+        // exists, so any value shared across states must stay null-safe.
         const isLaunchMaterializationPending = Boolean(
-          launchWizard.launch_materialization_pending,
+          launchWizard?.launch_materialization_pending,
         );
         const isLaunchActionPending =
           Boolean(launchWizardPendingAction) || isLaunchMaterializationPending;

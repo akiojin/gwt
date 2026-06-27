@@ -212,8 +212,13 @@ test("wizard backend launch materialization state preserves pending feedback", (
   );
   assert.match(
     wizardSource,
-    /const\s+isLaunchMaterializationPending\s*=\s*Boolean\(\s*launchWizard\.launch_materialization_pending,?\s*\)/,
-    "expected renderer to derive backend launch materialization pending state",
+    /const\s+isLaunchMaterializationPending\s*=\s*Boolean\(\s*launchWizard\?\.launch_materialization_pending,?\s*\)/,
+    "renderer must read backend launch materialization pending state null-safely",
+  );
+  assert.doesNotMatch(
+    wizardSource,
+    /Boolean\(\s*launchWizard\.launch_materialization_pending,?\s*\)/,
+    "renderer must not dereference launchWizard while local opening state has no backend wizard",
   );
   assert.match(
     wizardSource,
