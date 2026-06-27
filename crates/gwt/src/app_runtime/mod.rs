@@ -1211,7 +1211,7 @@ impl AppRuntime {
         let mut settings_required_request = None;
 
         match gwt::issue_monitor_worker::github_remote_owner_and_repo(&project_root) {
-            Some((owner, repo)) => {
+            Ok((owner, repo)) => {
                 match gwt::issue_monitor_worker::load_open_issue_monitor_candidates_for_repo_path(
                     &project_root,
                     &owner,
@@ -1273,8 +1273,8 @@ impl AppRuntime {
                     }
                 }
             }
-            None => {
-                monitor.record_scan_error(now.as_str(), "GitHub origin remote is unavailable");
+            Err(error) => {
+                monitor.record_scan_error(now.as_str(), error.to_string());
             }
         }
 
@@ -1353,7 +1353,7 @@ impl AppRuntime {
             gwt::IssueMonitorState::with_prefs(gwt::IssueMonitorConfig::default(), prefs);
 
         match gwt::issue_monitor_worker::github_remote_owner_and_repo(&project_root) {
-            Some((owner, repo)) => {
+            Ok((owner, repo)) => {
                 match gwt::issue_monitor_worker::load_open_issue_monitor_candidates_for_repo_path(
                     &project_root,
                     &owner,
@@ -1368,8 +1368,8 @@ impl AppRuntime {
                     }
                 }
             }
-            None => {
-                monitor.record_scan_error(now.as_str(), "GitHub origin remote is unavailable");
+            Err(error) => {
+                monitor.record_scan_error(now.as_str(), error.to_string());
             }
         }
 
