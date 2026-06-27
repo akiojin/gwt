@@ -7458,3 +7458,10 @@ Type: fix
 Context: Docker起動エラーが TTY 前面に被さる回帰 (SPEC-2014 US-36 / FR-120/121)。terminal-overlay を error 時に表示する形式は commit 1e948b7a0 で廃止 (shouldShowOverlay=false 固定) 済みだったが、無関係な feature commit a93afd199 'feat: complete issue monitor auto queue' が app.js を Boolean(effectiveDetail) && runtimeState==='error' へ revert し、同時に contract test (operator-chrome-structure.test.mjs) と playwright test (agent-window-scroll.spec.ts) の assertion も regressed 側へ書き換えたため CI が素通りした。
 Learning: test rename + assert.equal('false')->assert.match(error) のような『契約の反転』は新規ケース追加と違い regression を隠す。TTY 前面 overlay は .terminal-overlay.visible 1 箇所(app.js shouldShowOverlay)のみで Docker 固有ではなく全 error window で発火する。error は overlay 無しでも inline TTY text(launch_error_terminal_output_event) / status chip tooltip / attention toast / Console docker tab / Logs Process facet の 5 面で可視。
 Future Action: contract test の assertion が『追加』ではなく『反転』している diff は regression の赤信号として扱う。完了済み FR を touch する大型 feature commit では guard test が意味を保っているか必ず確認する。前面 overlay を復活させる変更は SPEC-2014 US-36 違反。
+
+## 2026-06-27 — cargo verification after browser-check fresh HOME
+
+Type: lesson
+Context: During Issue #3190 verification, the agent shell HOME pointed to a browser-check isolated fresh HOME, so rustup saw no installed/default toolchains and plain cargo failed before using the real developer toolchain.
+Learning: When browser-check/fresh HOME is active but repo verification uses Cargo, run Cargo with the real HOME/RUSTUP_HOME/CARGO_HOME or ensure the toolchain environment is bridged.
+Future Action: Before Cargo verification in gwt worktrees after browser-check, print HOME/RUSTUP_HOME/CARGO_HOME when cargo cannot find a toolchain, then run cargo with HOME=/Users/akiojin RUSTUP_HOME=/Users/akiojin/.rustup CARGO_HOME=/Users/akiojin/.cargo.

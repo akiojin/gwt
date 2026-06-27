@@ -236,6 +236,19 @@ fn init_repo(repo_path: &Path) {
     }
 }
 
+fn init_repo_without_origin(repo_path: &Path) {
+    let output = gwt_core::process::hidden_command("git")
+        .args(["init", "-q"])
+        .current_dir(repo_path)
+        .output()
+        .expect("run git init");
+    assert!(
+        output.status.success(),
+        "git init failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
 #[cfg(unix)]
 fn init_workspace_home_with_child_bare(workspace_home: &Path) -> PathBuf {
     fs::create_dir_all(workspace_home).expect("create workspace home");
@@ -14299,6 +14312,41 @@ fn app_runtime_issue_monitor_enable_opens_single_settings_wizard_without_launch_
         runtime.window_details.is_empty(),
         "settings-required Start must not spawn an agent window"
     );
+}
+
+#[test]
+fn app_runtime_issue_monitor_enable_reports_missing_origin_detail() {
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedEnvVar::set("HOME", temp.path());
+    let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+
+    let repo = temp.path().join("repo");
+    fs::create_dir_all(&repo).expect("create repo");
+    init_repo_without_origin(&repo);
+    let tab = sample_project_tab("tab-1", "Repo", repo, ProjectKind::Git, &[]);
+    let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+
+    let events = runtime.handle_frontend_event(
+        "client-1".to_string(),
+        FrontendEvent::SetIssueMonitorEnabled { enabled: true },
+    );
+
+    let status = events
+        .iter()
+        .find_map(|event| match &event.event {
+            BackendEvent::IssueMonitorStatus { status } => Some(status),
+            _ => None,
+        })
+        .expect("issue monitor status");
+    let error = status.last_error.as_deref().expect("origin error");
+    assert!(
+        error.starts_with("Git origin remote is not configured"),
+        "unexpected error: {error}"
+    );
+    assert_ne!(error, "GitHub origin remote is unavailable");
 }
 
 #[test]
