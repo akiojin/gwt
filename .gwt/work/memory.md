@@ -7465,3 +7465,10 @@ Type: failure-pattern
 Context: Issue #3192 and Issue #3190 verification used browser-check/fresh HOME. The agent shell HOME pointed to an isolated gwt-fresh-home, so plain cargo/rustup saw no installed/default toolchains even though the real developer HOME had stable installed.
 Learning: When HOME is an isolated verification directory, rustup resolves toolchains under that HOME and cargo commands can fail with 'no default is configured'. This is an environment issue, not a Rust project failure.
 Future Action: Before Cargo/Rust verification after browser-check or isolated HOME work, print HOME/RUSTUP_HOME/CARGO_HOME when cargo cannot find a toolchain. If HOME is isolated, run cargo/rustup with HOME=/Users/akiojin USERPROFILE=/Users/akiojin RUSTUP_HOME=/Users/akiojin/.rustup CARGO_HOME=/Users/akiojin/.cargo or otherwise bridge the real toolchain home.
+
+## 2026-06-27 — Visual auto-refresh fixtures should not fire timers before initial load settles
+
+Type: failure-pattern
+Context: During PR #3193 pre-PR visual verification, the Issue Bridge auto-refresh Playwright fixture fired a 60000ms interval callback via a fixed 50ms timeout. In the full suite, initial knowledge load sometimes still held the busy flag, so the auto-refresh request was dropped and the test timed out although single-test runs passed.
+Learning: Timer-shortening fixtures are flaky when the production callback can legally no-op while state is busy. Tests should expose a deterministic trigger and call it after asserting the state that makes the callback meaningful.
+Future Action: For Playwright fixtures that validate periodic behavior, capture interval callbacks and trigger them explicitly after the initial render/load assertions instead of relying on arbitrary short timeouts.

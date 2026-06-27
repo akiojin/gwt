@@ -123,6 +123,10 @@ test.describe("Issue Bridge load recovery", () => {
     await expect(
       page.locator(".surface-knowledge .knowledge-detail-pane"),
     ).toContainText("Issue #3095");
+    await page.waitForFunction(
+      () => typeof window.__triggerKnowledgeAutoRefresh === "function",
+    );
+    await page.evaluate(() => window.__triggerKnowledgeAutoRefresh());
     await page.waitForFunction(() =>
       window.__knowledgeLoadMessages?.filter(
         (message) => message.kind === "load_knowledge_bridge",
@@ -393,10 +397,17 @@ async function installIssueBridgeBackend(
     }) => {
       window.__knowledgeLoadMessages = [];
       if (shouldTriggerAutoRefreshOnce) {
+        window.__knowledgeAutoRefreshCallbacks = [];
+        window.__triggerKnowledgeAutoRefresh = () => {
+          const callbacks = window.__knowledgeAutoRefreshCallbacks || [];
+          for (const callback of callbacks) {
+            callback();
+          }
+        };
         const originalSetInterval = window.setInterval.bind(window);
         window.setInterval = (callback, delay, ...args) => {
           if (delay === 60000) {
-            setTimeout(() => callback(...args), 50);
+            window.__knowledgeAutoRefreshCallbacks.push(() => callback(...args));
           }
           return originalSetInterval(callback, delay, ...args);
         };
