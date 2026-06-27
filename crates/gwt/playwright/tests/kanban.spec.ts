@@ -124,7 +124,7 @@ test.describe("Issue Bridge load recovery", () => {
       page.locator(".surface-knowledge .knowledge-detail-pane"),
     ).toContainText("Issue #3095");
     await page.waitForFunction(
-      () => typeof window.__triggerKnowledgeAutoRefresh === "function",
+      () => window.__knowledgeAutoRefreshCallbacks?.length > 0,
     );
     await page.evaluate(() => window.__triggerKnowledgeAutoRefresh());
     await page.waitForFunction(() =>
