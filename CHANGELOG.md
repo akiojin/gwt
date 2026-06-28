@@ -1,6 +1,24 @@
 # Changelog
 
 All notable changes to this project will be documented in this file.
+## [9.64.2] - 2026-06-28
+
+### Bug Fixes
+
+- **gui:** Start Work ボタン無反応を解消（launch wizard の null 参照クラッシュ修正, #3192）
+- Restore workspace cleanup readiness
+- Clear stale workspace cleanup cache
+- Prevent launch wizard pending crash
+- Preserve issue monitor origin errors
+
+### Documentation
+
+- Remove user-specific memory path
+
+### Testing
+
+- Stabilize issue bridge auto refresh visual test
+
 ## [9.64.1] - 2026-06-26
 
 ### Bug Fixes

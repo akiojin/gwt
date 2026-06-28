@@ -441,10 +441,10 @@ fn scan_issue_monitor_once_blocking(
 ) -> crate::IssueMonitorState {
     let now = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
     let (owner, repo) =
-        match crate::issue_monitor_worker::resolve_github_remote(&scope.project_root) {
-            Ok(pair) => pair,
+        match crate::issue_monitor_worker::github_remote_owner_and_repo(&scope.project_root) {
+            Ok(owner_repo) => owner_repo,
             Err(error) => {
-                monitor.record_scan_error(now, error.user_message());
+                monitor.record_scan_error(now, error.to_string());
                 return monitor;
             }
         };
@@ -848,6 +848,24 @@ mod tests {
         .expect("scope")
     }
 
+    fn init_git_repo(path: &Path) {
+        let status = gwt_core::process::hidden_command("git")
+            .args(["init", "-q"])
+            .current_dir(path)
+            .status()
+            .expect("git init");
+        assert!(status.success(), "git init must succeed");
+    }
+
+    fn git_remote_add_origin(path: &Path, remote_url: &str) {
+        let status = gwt_core::process::hidden_command("git")
+            .args(["remote", "add", "origin", remote_url])
+            .current_dir(path)
+            .status()
+            .expect("git remote add origin");
+        assert!(status.success(), "git remote add origin must succeed");
+    }
+
     #[test]
     fn build_handshake_response_rejects_protocol_version_mismatch() {
         let temp = TempDir::new().unwrap();
@@ -1093,6 +1111,46 @@ mod tests {
             IssueMonitorControl::PriorityOrder(vec![43, 42]),
         );
         assert!(should_scan);
+    }
+
+    #[test]
+    fn issue_monitor_scan_reports_missing_origin_instead_of_generic_unavailable() {
+        let temp = TempDir::new().expect("tempdir");
+        init_git_repo(temp.path());
+        let scope = sample_scope(&temp);
+        let monitor = crate::IssueMonitorState::new(crate::IssueMonitorConfig::default());
+
+        let monitor = super::scan_issue_monitor_once_blocking(scope, monitor, false);
+
+        let error = monitor
+            .status_view()
+            .last_error
+            .expect("origin resolution error");
+        assert!(
+            error.starts_with("Git origin remote is not configured"),
+            "unexpected error: {error}"
+        );
+        assert_ne!(error, "GitHub origin remote is unavailable");
+    }
+
+    #[test]
+    fn issue_monitor_scan_reports_non_github_origin_instead_of_generic_unavailable() {
+        let temp = TempDir::new().expect("tempdir");
+        init_git_repo(temp.path());
+        git_remote_add_origin(temp.path(), "https://example.com/owner/repo.git");
+        let scope = sample_scope(&temp);
+        let monitor = crate::IssueMonitorState::new(crate::IssueMonitorConfig::default());
+
+        let monitor = super::scan_issue_monitor_once_blocking(scope, monitor, false);
+
+        let error = monitor
+            .status_view()
+            .last_error
+            .expect("origin resolution error");
+        assert_eq!(
+            error,
+            "Git origin remote is not a GitHub URL: https://example.com/owner/repo.git"
+        );
     }
 
     #[tokio::test]

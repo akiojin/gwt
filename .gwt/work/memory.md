@@ -7479,3 +7479,16 @@ Type: decision
 Context: Issue Monitor を「完全に自走して Issue を解決し merge まで」する autonomous mode の設計議論（新 SPEC）。現状は配管はあるが人間ゲート必須で完全自走ではない。
 Learning: 完全自走は人間の視認/承認ゲートを消すことではなく、強い自動ゲートに置換することで達成する。CI green+テスト pass だけでは不十分: 実装エージェントがコードとテストの両方を書くと「自分の宿題を自分で採点」になり、要件誤解のまま通るテストで壊れた修正が merge され得る。だから独立レビューエージェント（実装したのと別の model/agent が Issue の受け入れ基準に adversarial 検証）を必須化する。発動は二段 opt-in（project 設定 autonomous_mode + Issue ラベル）で blast radius を制御し default OFF で既存挙動を保つ。無人で実際に回すには skip_permissions 適用・max-retry/needs-human エスカレーション・transient リトライ・stuck 検知も併せて必要。
 Future Action: autonomous/unattended な agent loop を設計するときは『人間ゲートを何の自動ゲートで置換するか』を最初に決める。最低でも CI+テスト+独立レビュー(別 model)を必須化し、自己採点を避ける。opt-in 二段・default OFF・ループ上限(needs-human)・stuck 回収をセットで入れる。gwt では FR-015(no bypass)を opt-in 条件付きで明示的に relax する条項を SPEC に書く。
+## 2026-06-27 — Browser-check isolated HOME can hide Rust toolchains
+
+Type: failure-pattern
+Context: Issue #3192 and Issue #3190 verification used browser-check/fresh HOME. The agent shell HOME pointed to an isolated gwt-fresh-home, so plain cargo/rustup saw no installed/default toolchains even though the real developer HOME had stable installed.
+Learning: When HOME is an isolated verification directory, rustup resolves toolchains under that HOME and cargo commands can fail with 'no default is configured'. This is an environment issue, not a Rust project failure.
+Future Action: Before Cargo/Rust verification after browser-check or isolated HOME work, print HOME/RUSTUP_HOME/CARGO_HOME when cargo cannot find a toolchain. If HOME is isolated, resolve the real user home from the pre-isolation environment, OS user lookup, or `getent passwd "$USER" | cut -d: -f6`; then run cargo/rustup with `HOME="$REAL_HOME" USERPROFILE="$REAL_HOME" RUSTUP_HOME="$REAL_HOME/.rustup" CARGO_HOME="$REAL_HOME/.cargo"` or otherwise bridge the real toolchain home.
+
+## 2026-06-27 — Visual auto-refresh fixtures should not fire timers before initial load settles
+
+Type: failure-pattern
+Context: During PR #3193 pre-PR visual verification, the Issue Bridge auto-refresh Playwright fixture fired a 60000ms interval callback via a fixed 50ms timeout. In the full suite, initial knowledge load sometimes still held the busy flag, so the auto-refresh request was dropped and the test timed out although single-test runs passed.
+Learning: Timer-shortening fixtures are flaky when the production callback can legally no-op while state is busy. Tests should expose a deterministic trigger and call it after asserting the state that makes the callback meaningful.
+Future Action: For Playwright fixtures that validate periodic behavior, capture interval callbacks and trigger them explicitly after the initial render/load assertions instead of relying on arbitrary short timeouts.

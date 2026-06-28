@@ -757,6 +757,7 @@ fn active_work_items_from_projection(
                 remote_only: false,
                 done_equivalent: false,
                 cleanup_candidate: None,
+                cleanup_blocked_reason: None,
                 updated_at: row_updated_at,
             }
         })
@@ -861,6 +862,7 @@ fn append_paused_work_items(
             remote_only: false,
             done_equivalent: false,
             cleanup_candidate: None,
+            cleanup_blocked_reason: None,
             // FR-403: paused/backfill rows carry the record's last update.
             updated_at: work.updated_at.clone(),
         });
@@ -1773,6 +1775,11 @@ pub(super) fn mark_merged_active_works(
     merged_branches: Option<&HashMap<String, chrono::DateTime<chrono::Utc>>>,
 ) {
     for work in active_works.iter_mut() {
+        if active_work_has_dirty_worktree(work) {
+            work.merged_into_base = false;
+            work.done_equivalent = false;
+            continue;
+        }
         let merge_reference = work
             .branch
             .as_deref()
@@ -1812,17 +1819,51 @@ pub(super) fn mark_merged_active_works(
     }
 }
 
+fn active_work_has_dirty_worktree(work: &gwt::ActiveWorkItemView) -> bool {
+    work.worktree_path
+        .as_deref()
+        .map(Path::new)
+        .filter(|path| active_work_path_is_git_toplevel(path))
+        .is_some_and(|path| {
+            gwt_git::diff::get_status(path)
+                .map(|entries| !entries.is_empty())
+                .unwrap_or(false)
+        })
+}
+
+fn active_work_path_is_git_toplevel(path: &Path) -> bool {
+    let Ok(path) = dunce::canonicalize(path) else {
+        return false;
+    };
+    let Ok(output) = gwt_core::process::run_git_logged(
+        &["rev-parse", "--path-format=absolute", "--show-toplevel"],
+        Some(&path),
+    ) else {
+        return false;
+    };
+    if !output.status.success() {
+        return false;
+    }
+    let toplevel = PathBuf::from(String::from_utf8_lossy(&output.stdout).trim());
+    if toplevel.as_os_str().is_empty() {
+        return false;
+    }
+    dunce::canonicalize(toplevel).is_ok_and(|toplevel| toplevel == path)
+}
+
 /// SPEC-2359 US-78: cleanup eligibility is backend-owned per Workspace row.
 /// `merged_into_base` remains a display badge; this candidate is the action
 /// gate after filtering out live-agent branches/worktrees and remote-only rows.
 pub(super) fn mark_workspace_cleanup_candidates(
     active_works: &mut [gwt::ActiveWorkItemView],
+    cleanup_ready_branches: Option<&HashMap<String, String>>,
     sessions: &[&ActiveAgentSession],
     live_process_worktree_paths: &HashSet<PathBuf>,
 ) {
     for work in active_works.iter_mut() {
         work.cleanup_candidate = None;
-        if !work.merged_into_base || work.remote_only {
+        work.cleanup_blocked_reason = None;
+        if work.remote_only {
             continue;
         }
         let Some(branch) = work
@@ -1833,42 +1874,82 @@ pub(super) fn mark_workspace_cleanup_candidates(
         else {
             continue;
         };
+        let Some(reason) = cleanup_reason_for_work(work, cleanup_ready_branches, &branch) else {
+            continue;
+        };
         let worktree_path = work.worktree_path.as_deref().map(Path::new);
         if sessions.iter().any(|session| {
             active_agent_session_matches_work(session, Some(branch.as_str()), worktree_path)
         }) {
+            work.cleanup_blocked_reason = Some("live_agent".to_string());
             continue;
         }
         if worktree_path
             .and_then(normalize_existing_worktree_path)
             .is_some_and(|path| live_process_worktree_paths.contains(&path))
         {
+            work.cleanup_blocked_reason = Some("live_process".to_string());
             continue;
         }
         work.cleanup_candidate = Some(gwt::ActiveWorkCleanupCandidateView {
             branch: branch.to_string(),
             worktree_path: work.worktree_path.clone(),
-            reason: gwt_core::workspace_projection::WorkspaceCleanupReason::PrMerged
-                .as_str()
-                .to_string(),
+            reason,
             default_delete_remote: false,
             remote_delete_available: true,
         });
     }
 }
 
+fn cleanup_reason_for_work(
+    work: &gwt::ActiveWorkItemView,
+    cleanup_ready_branches: Option<&HashMap<String, String>>,
+    branch: &str,
+) -> Option<String> {
+    if active_work_has_dirty_worktree(work) {
+        return None;
+    }
+    if let Some(reason) = cleanup_ready_branches
+        .and_then(|map| map.get(branch))
+        .cloned()
+    {
+        return Some(reason);
+    }
+    if work.merged_into_base
+        || work
+            .pr_state
+            .as_deref()
+            .is_some_and(|state| state.eq_ignore_ascii_case("merged"))
+    {
+        return Some(
+            gwt_core::workspace_projection::WorkspaceCleanupReason::PrMerged
+                .as_str()
+                .to_string(),
+        );
+    }
+    None
+}
+
 fn live_process_worktree_paths_for_cleanup(
     active_works: &[gwt::ActiveWorkItemView],
+    cleanup_ready_branches: Option<&HashMap<String, String>>,
     projection_cleanup_candidate: Option<&gwt::ActiveWorkCleanupCandidateView>,
 ) -> HashSet<PathBuf> {
     let mut candidate_paths = active_works
         .iter()
-        .filter(|work| work.merged_into_base && !work.remote_only)
+        .filter(|work| !work.remote_only)
         .filter(|work| {
             work.branch
                 .as_deref()
                 .map(normalize_branch_name)
                 .is_some_and(|branch| branch.starts_with("work/"))
+        })
+        .filter(|work| {
+            work.branch
+                .as_deref()
+                .map(normalize_branch_name)
+                .and_then(|branch| cleanup_reason_for_work(work, cleanup_ready_branches, &branch))
+                .is_some()
         })
         .filter_map(|work| {
             work.worktree_path
@@ -2314,8 +2395,10 @@ impl AppRuntime {
                 &mut view.active_works,
                 self.local_worktree_branches.borrow().get(&tab.project_root),
             );
+            let cleanup_ready_branches = self.work_cleanup_ready_branches.get(&tab.project_root);
             let live_process_worktree_paths = live_process_worktree_paths_for_cleanup(
                 &view.active_works,
+                cleanup_ready_branches,
                 view.cleanup_candidate.as_ref(),
             );
             if view.cleanup_candidate.as_ref().is_some_and(|candidate| {
@@ -2325,6 +2408,7 @@ impl AppRuntime {
             }
             mark_workspace_cleanup_candidates(
                 &mut view.active_works,
+                cleanup_ready_branches,
                 &sessions,
                 &live_process_worktree_paths,
             );
@@ -2385,6 +2469,7 @@ impl AppRuntime {
             remote_only: false,
             done_equivalent: false,
             cleanup_candidate: None,
+            cleanup_blocked_reason: None,
             updated_at: now.to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
         }];
         Some(gwt::ActiveWorkProjectionView {

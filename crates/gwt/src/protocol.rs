@@ -1310,6 +1310,11 @@ pub struct ActiveWorkItemView {
     /// cleanup eligibility from `merged_into_base` alone.
     #[serde(default)]
     pub cleanup_candidate: Option<ActiveWorkCleanupCandidateView>,
+    /// SPEC-2359 US-84: row-level cleanup was eligible, but actual deletion is
+    /// blocked by live use (for example a live agent or process cwd). Display
+    /// only; the frontend must keep the action disabled while this is present.
+    #[serde(default)]
+    pub cleanup_blocked_reason: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -3191,6 +3196,7 @@ mod tests {
                     remote_only: false,
                     done_equivalent: false,
                     cleanup_candidate: None,
+                    cleanup_blocked_reason: None,
                     updated_at: "2026-01-01T00:00:00Z".to_string(),
                 }],
                 agents: vec![super::ActiveWorkAgentView {
