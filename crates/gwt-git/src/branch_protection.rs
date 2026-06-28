@@ -86,6 +86,66 @@ pub fn parse_branch_protection(json: &str) -> BranchProtectionStatus {
     }
 }
 
+/// Classify the outcome of a `gh api .../branches/{branch}/protection` call
+/// into a [`BranchProtectionStatus`]. Fail-closed: only a successful (HTTP 200)
+/// fetch is parsed; a `404` / "Not Found" maps to `Absent`; a `403` maps to
+/// `Unreadable`; and any other failure (network, rate limit, unexpected) also
+/// maps to `Unreadable` so the gate never treats an unknown error as
+/// "protection genuinely absent" (SPEC #3200 FR-010, Sc 4).
+pub fn classify_branch_protection_fetch(
+    success: bool,
+    stdout: &str,
+    stderr: &str,
+) -> BranchProtectionStatus {
+    if success {
+        return parse_branch_protection(stdout);
+    }
+    let lower = stderr.to_ascii_lowercase();
+    if lower.contains("404") || lower.contains("not found") {
+        BranchProtectionStatus::Absent
+    } else if lower.contains("403") {
+        BranchProtectionStatus::Unreadable(format!(
+            "branch protection not readable with this token: {}",
+            stderr.trim()
+        ))
+    } else {
+        BranchProtectionStatus::Unreadable(format!(
+            "branch protection could not be read: {}",
+            stderr.trim()
+        ))
+    }
+}
+
+/// Fetch the base-branch protection for `repo_slug` (`owner/repo`) and `branch`
+/// via `gh api`, returning a fail-closed [`BranchProtectionStatus`]. Never
+/// errors: a failure to spawn `gh`, or any non-200 response, yields a
+/// gate-unavailable status rather than an `Err` (SPEC #3200 FR-010).
+pub fn fetch_branch_protection(repo_slug: &str, branch: &str) -> BranchProtectionStatus {
+    let hub = gwt_core::process_console::global();
+    let endpoint = format!("repos/{repo_slug}/branches/{branch}/protection");
+    let args = [
+        "api",
+        "-H",
+        "Accept: application/vnd.github+json",
+        &endpoint,
+    ];
+    let output = match gwt_core::process_console::spawn_logged_blocking(
+        &hub,
+        gwt_core::process_console::ProcessKind::Gh,
+        "gh",
+        &args,
+        gwt_core::process_console::SpawnOptions::new(format!("gh api {endpoint}")),
+    ) {
+        Ok(output) => output,
+        Err(error) => {
+            return BranchProtectionStatus::Unreadable(format!(
+                "could not run gh api for branch protection: {error}"
+            ));
+        }
+    };
+    classify_branch_protection_fetch(output.success(), &output.stdout, &output.stderr)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -150,5 +210,45 @@ mod tests {
             BranchProtectionStatus::Absent,
             BranchProtectionStatus::Unreadable("403".into())
         );
+    }
+
+    #[test]
+    fn fetch_classifier_parses_a_200_body() {
+        let body = r#"{
+            "required_status_checks": {"contexts": ["build"]},
+            "restrictions": {"users": []},
+            "allow_force_pushes": {"enabled": false}
+        }"#;
+        let status = classify_branch_protection_fetch(true, body, "");
+        assert!(status.is_verified());
+    }
+
+    #[test]
+    fn fetch_classifier_maps_404_to_absent() {
+        // `gh api` exits non-zero with a Not Found message when the branch has
+        // no protection configured.
+        let status = classify_branch_protection_fetch(false, "", "gh: Not Found (HTTP 404)");
+        assert_eq!(status, BranchProtectionStatus::Absent);
+    }
+
+    #[test]
+    fn fetch_classifier_maps_403_to_unreadable() {
+        // A 403 means protection may exist but the token cannot read it —
+        // distinct from Absent, still gate-unavailable.
+        let status = classify_branch_protection_fetch(
+            false,
+            "",
+            "gh: Resource not accessible by integration (HTTP 403)",
+        );
+        assert!(matches!(status, BranchProtectionStatus::Unreadable(_)));
+        assert!(!status.is_verified());
+    }
+
+    #[test]
+    fn fetch_classifier_unknown_failure_fails_closed_to_unreadable() {
+        // Any other failure (network, rate limit, unexpected) must NOT be read
+        // as Absent — fail closed to Unreadable so the gate stays unavailable.
+        let status = classify_branch_protection_fetch(false, "", "could not resolve host");
+        assert!(matches!(status, BranchProtectionStatus::Unreadable(_)));
     }
 }
