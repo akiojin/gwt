@@ -1645,6 +1645,19 @@ impl AppRuntime {
         }
         let launch_profiles = previous_profiles.clone();
 
+        // FR-022: an Issue whose agent window was previously closed without a
+        // merge keeps a resumable session. Re-engage by resuming that session
+        // (continuing the conversation) instead of launching a fresh agent.
+        let target_branch = knowledge_launch_target_branch_name(linked_issue_kind, issue_number);
+        if let Some(events) = self.silent_issue_monitor_resume_events(
+            &tab_id,
+            &project_root,
+            &target_branch,
+            issue_number,
+        )? {
+            return Ok(Some(events));
+        }
+
         let mut session = self.build_knowledge_launch_wizard_session(
             &tab_id,
             &project_root,
@@ -1701,6 +1714,72 @@ impl AppRuntime {
         events.push(OutboundEvent::broadcast(BackendEvent::IssueMonitorToast {
             level: "info".to_string(),
             message: "Issue Monitor launch requested".to_string(),
+            issue_number: Some(issue_number),
+        }));
+        Ok(Some(events))
+    }
+
+    /// FR-022: resume an existing agent session for `target_branch` when one is
+    /// available, instead of launching a fresh agent. Returns `Ok(None)` when no
+    /// resumable session exists so the caller falls back to a fresh launch.
+    fn silent_issue_monitor_resume_events(
+        &mut self,
+        tab_id: &str,
+        project_root: &Path,
+        target_branch: &str,
+        issue_number: u64,
+    ) -> Result<Option<Vec<OutboundEvent>>, String> {
+        let Some(session) = self.latest_resumable_branch_session(project_root, target_branch)
+        else {
+            return Ok(None);
+        };
+        if !session_exact_resume_materializable(project_root, &session) {
+            return Ok(None);
+        }
+        let mut config = super::launch_config_from_persisted_session(&session);
+        if !session.worktree_path.as_path().exists() {
+            config.working_dir = None;
+        }
+        if config.session_mode != gwt_agent::SessionMode::Resume {
+            return Ok(None);
+        }
+        let resume_context_root = if session.worktree_path.as_path().exists() {
+            session.worktree_path.as_path()
+        } else {
+            project_root
+        };
+        let workspace_resume_context = Some(workspace_resume_context_for_work_item(
+            resume_context_root,
+            Some(session.branch.as_str()),
+            resume_context_root,
+        ));
+        let launch_index = self
+            .tab(tab_id)
+            .map(|tab| {
+                tab.workspace
+                    .persisted()
+                    .windows
+                    .iter()
+                    .filter(|window| window.preset == WindowPreset::Agent)
+                    .count()
+            })
+            .unwrap_or(0);
+        let geometry = issue_monitor_auto_launch_geometry(launch_index);
+        let feedback = LaunchFeedbackContext {
+            client_id: "__issue_monitor__".to_string(),
+            title: "Issue Monitor".to_string(),
+            issue_monitor_issue_number: Some(issue_number),
+        };
+        let mut events = self.spawn_agent_window_with_feedback_at_geometry(
+            tab_id,
+            config,
+            geometry,
+            workspace_resume_context,
+            feedback,
+        )?;
+        events.push(OutboundEvent::broadcast(BackendEvent::IssueMonitorToast {
+            level: "info".to_string(),
+            message: "Issue Monitor resumed existing session".to_string(),
             issue_number: Some(issue_number),
         }));
         Ok(Some(events))
