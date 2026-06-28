@@ -5,6 +5,7 @@
 
 pub mod blob;
 pub mod branch;
+pub mod branch_protection;
 pub mod commit;
 pub mod diff;
 pub mod issue;

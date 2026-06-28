@@ -59,6 +59,44 @@ pub struct IssueMonitorConfig {
     pub queue_when_gui_absent: bool,
 }
 
+/// SPEC #3200 FR-030: tunable bounds for autonomous (unattended) operation.
+/// Every field has a documented default so older prefs deserialize cleanly.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AutonomousTuning {
+    /// Max failed attempts per issue before escalating to `NeedsHuman`
+    /// (FR-021). Bounds the auto-relaunch / Deliver-fix loop.
+    pub max_attempts: u32,
+    /// An active agent with no liveness progress for this long is considered
+    /// stuck; its active slot is recovered (FR-025).
+    pub stuck_timeout_secs: u64,
+    /// Heartbeat freshness window used by stuck/idle detection (FR-025).
+    pub heartbeat_interval_secs: u64,
+    /// Max time to watch a PR toward merge before treating it as stuck
+    /// (FR-018 merge-watch).
+    pub merge_watch_timeout_secs: u64,
+    /// Max Deliver Fix-loop iterations within one attempt before the attempt
+    /// counts as a failure.
+    pub deliver_fix_loop_cap: u32,
+    /// Base backoff seconds for transient-failure retry (FR-022/FR-024).
+    pub retry_backoff_base_secs: u64,
+    /// Upper bound for the (exponential) retry backoff.
+    pub retry_backoff_cap_secs: u64,
+}
+
+impl Default for AutonomousTuning {
+    fn default() -> Self {
+        Self {
+            max_attempts: 3,
+            stuck_timeout_secs: 1800,
+            heartbeat_interval_secs: 120,
+            merge_watch_timeout_secs: 3600,
+            deliver_fix_loop_cap: 5,
+            retry_backoff_base_secs: 60,
+            retry_backoff_cap_secs: 1800,
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct IssueMonitorPrefs {
     pub enabled: bool,
@@ -74,6 +112,13 @@ pub struct IssueMonitorPrefs {
     /// auto-relaunched while its GitHub Issue remains open until release.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub merged_issues: Vec<u64>,
+    /// SPEC #3200: opt-in autonomous (unattended) resolution mode. Default
+    /// `false` preserves SPEC #3165 human-gated behavior exactly (FR-001).
+    #[serde(default)]
+    pub autonomous_mode: bool,
+    /// SPEC #3200 FR-030: tunable bounds for unattended operation.
+    #[serde(default)]
+    pub autonomous_tuning: AutonomousTuning,
 }
 
 impl Default for IssueMonitorPrefs {
@@ -86,6 +131,8 @@ impl Default for IssueMonitorPrefs {
             launched_issues: Vec::new(),
             failed_issues: Vec::new(),
             merged_issues: Vec::new(),
+            autonomous_mode: false,
+            autonomous_tuning: AutonomousTuning::default(),
         }
     }
 }
@@ -249,11 +296,17 @@ pub enum MonitorInboxState {
     AgentFailed,
     BlockedByClaim,
     Skipped,
+    /// SPEC #3200 FR-027: autonomous resolution exhausted its bounded retries,
+    /// hit a terminal review failure, or could not verify its safety gates, and
+    /// has been handed back to a human. Terminal: scan / requeue / window-close
+    /// must never revive it; only an explicit human reset exits it.
+    NeedsHuman,
 }
 
 impl MonitorInboxState {
     /// A terminal state whose meaning must not be overwritten by a later
-    /// window/project close (which only re-queues still-active work).
+    /// window/project close (which only re-queues still-active work) or by a
+    /// scan re-queue.
     fn is_terminal(self) -> bool {
         matches!(
             self,
@@ -261,6 +314,7 @@ impl MonitorInboxState {
                 | MonitorInboxState::Released
                 | MonitorInboxState::LaunchFailed
                 | MonitorInboxState::AgentFailed
+                | MonitorInboxState::NeedsHuman
         )
     }
 }
@@ -326,6 +380,10 @@ pub struct IssueMonitorState {
     /// Issues whose work PR merged (state `Merged`). Persisted so the monitor
     /// does not auto-relaunch completed work even while the Issue stays open.
     merged_issues: BTreeSet<u64>,
+    /// SPEC #3200 FR-001: opt-in autonomous (unattended) resolution mode.
+    autonomous_mode: bool,
+    /// SPEC #3200 FR-030: tunable bounds for unattended operation.
+    autonomous_tuning: AutonomousTuning,
     failed_issues: BTreeMap<u64, String>,
     queue: VecDeque<u64>,
     pending_launches: VecDeque<IssueMonitorLaunchRequest>,
@@ -403,6 +461,8 @@ impl IssueMonitorState {
             launched_windows: BTreeMap::new(),
             launched_branches: BTreeMap::new(),
             merged_issues: BTreeSet::new(),
+            autonomous_mode: false,
+            autonomous_tuning: AutonomousTuning::default(),
             failed_issues: BTreeMap::new(),
             queue: VecDeque::new(),
             pending_launches: VecDeque::new(),
@@ -435,6 +495,8 @@ impl IssueMonitorState {
                 .insert(failed.issue_number, failed.message);
         }
         state.merged_issues = prefs.merged_issues.into_iter().collect();
+        state.autonomous_mode = prefs.autonomous_mode;
+        state.autonomous_tuning = prefs.autonomous_tuning;
         state
     }
 
@@ -461,6 +523,8 @@ impl IssueMonitorState {
                 })
                 .collect(),
             merged_issues: self.merged_issues.iter().copied().collect(),
+            autonomous_mode: self.autonomous_mode,
+            autonomous_tuning: self.autonomous_tuning.clone(),
         }
     }
 
@@ -1291,6 +1355,41 @@ mod tests {
         let merged: BTreeSet<String> = ["work/some-other-branch".to_string()].into_iter().collect();
         assert!(monitor.reconcile_merged_branches(&merged).is_empty());
         assert_eq!(monitor.active_count(), 1, "unmerged work stays launched");
+    }
+
+    #[test]
+    fn autonomous_mode_defaults_false_and_back_compat_deserializes() {
+        // SPEC #3200 FR-001/FR-030, Sc 23: pre-autonomous prefs (no
+        // autonomous_mode / tuning fields) deserialize with documented defaults
+        // and existing fields are preserved.
+        let legacy = r#"{"enabled":true,"max_active_agents":1,"priority_order":[101,102],"merged_issues":[42]}"#;
+        let prefs: IssueMonitorPrefs =
+            serde_json::from_str(legacy).expect("legacy prefs deserialize");
+        assert!(!prefs.autonomous_mode, "autonomous_mode defaults to false");
+        assert_eq!(prefs.autonomous_tuning, AutonomousTuning::default());
+        assert_eq!(prefs.autonomous_tuning.max_attempts, 3);
+        assert_eq!(prefs.merged_issues, vec![42], "existing fields preserved");
+        assert!(!IssueMonitorPrefs::default().autonomous_mode);
+    }
+
+    #[test]
+    fn needs_human_is_terminal_and_not_revived_by_requeue() {
+        // SPEC #3200 FR-027, Sc 12/21: NeedsHuman is terminal and a window-close
+        // requeue must never revive it.
+        assert!(MonitorInboxState::NeedsHuman.is_terminal());
+        let mut monitor = launched_monitor(42, "tab-1::agent-1");
+        if let Some(item) = monitor.inbox.iter_mut().find(|i| i.issue.number == 42) {
+            item.state = MonitorInboxState::NeedsHuman;
+        }
+        assert_eq!(
+            monitor.requeue_window("tab-1::agent-1"),
+            None,
+            "requeue must not revive a terminal NeedsHuman item"
+        );
+        assert_eq!(
+            monitor.inbox_item(42).map(|item| item.state),
+            Some(MonitorInboxState::NeedsHuman)
+        );
     }
 
     #[test]
