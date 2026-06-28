@@ -1,5 +1,5 @@
 use std::{
-    collections::{BTreeMap, VecDeque},
+    collections::{BTreeMap, BTreeSet, VecDeque},
     fs, io,
     path::Path,
 };
@@ -70,6 +70,10 @@ pub struct IssueMonitorPrefs {
     pub launched_issues: Vec<IssueMonitorLaunchedIssue>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub failed_issues: Vec<IssueMonitorFailedIssue>,
+    /// Issues whose work PR merged. Persisted so completed work is not
+    /// auto-relaunched while its GitHub Issue remains open until release.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub merged_issues: Vec<u64>,
 }
 
 impl Default for IssueMonitorPrefs {
@@ -81,6 +85,7 @@ impl Default for IssueMonitorPrefs {
             launch_profile: None,
             launched_issues: Vec::new(),
             failed_issues: Vec::new(),
+            merged_issues: Vec::new(),
         }
     }
 }
@@ -234,10 +239,30 @@ pub enum MonitorInboxState {
     Queued,
     Launching,
     Launched,
+    /// Work PR merged into the base branch — the agent's work is done and the
+    /// active slot is freed. The GitHub Issue may still be open (gwt closes
+    /// Issues at release time), so this is distinct from `Released`.
+    Merged,
+    /// The GitHub Issue was closed (e.g. at release). Final terminal state.
+    Released,
     LaunchFailed,
     AgentFailed,
     BlockedByClaim,
     Skipped,
+}
+
+impl MonitorInboxState {
+    /// A terminal state whose meaning must not be overwritten by a later
+    /// window/project close (which only re-queues still-active work).
+    fn is_terminal(self) -> bool {
+        matches!(
+            self,
+            MonitorInboxState::Merged
+                | MonitorInboxState::Released
+                | MonitorInboxState::LaunchFailed
+                | MonitorInboxState::AgentFailed
+        )
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -295,6 +320,12 @@ pub struct IssueMonitorState {
     priority_order: Vec<u64>,
     launch_profile: Option<IssueMonitorLaunchProfile>,
     launched_windows: BTreeMap<u64, String>,
+    /// issue → work branch for currently launched Issues, used to look up the
+    /// PR when checking whether the work has merged.
+    launched_branches: BTreeMap<u64, String>,
+    /// Issues whose work PR merged (state `Merged`). Persisted so the monitor
+    /// does not auto-relaunch completed work even while the Issue stays open.
+    merged_issues: BTreeSet<u64>,
     failed_issues: BTreeMap<u64, String>,
     queue: VecDeque<u64>,
     pending_launches: VecDeque<IssueMonitorLaunchRequest>,
@@ -370,6 +401,8 @@ impl IssueMonitorState {
             priority_order: Vec::new(),
             launch_profile: None,
             launched_windows: BTreeMap::new(),
+            launched_branches: BTreeMap::new(),
+            merged_issues: BTreeSet::new(),
             failed_issues: BTreeMap::new(),
             queue: VecDeque::new(),
             pending_launches: VecDeque::new(),
@@ -401,6 +434,7 @@ impl IssueMonitorState {
                 .failed_issues
                 .insert(failed.issue_number, failed.message);
         }
+        state.merged_issues = prefs.merged_issues.into_iter().collect();
         state
     }
 
@@ -426,6 +460,7 @@ impl IssueMonitorState {
                     message: message.clone(),
                 })
                 .collect(),
+            merged_issues: self.merged_issues.iter().copied().collect(),
         }
     }
 
@@ -587,12 +622,17 @@ impl IssueMonitorState {
                 }
             })
         });
-        let launched_window_id = if error_message.is_some() {
+        let merged = self.merged_issues.contains(&issue_number);
+        let launched_window_id = if error_message.is_some() || merged {
             None
         } else {
             self.launched_windows.get(&issue_number).cloned()
         };
-        let state = if error_message.is_some() {
+        let state = if merged {
+            // Completed work stays Merged and is never re-queued while its Issue
+            // remains open until release.
+            MonitorInboxState::Merged
+        } else if error_message.is_some() {
             existing
                 .as_ref()
                 .filter(|item| item.state == MonitorInboxState::LaunchFailed)
@@ -601,10 +641,14 @@ impl IssueMonitorState {
         } else if launched_window_id.is_some() {
             MonitorInboxState::Launched
         } else {
-            existing
-                .as_ref()
-                .map(|item| item.state)
-                .unwrap_or(MonitorInboxState::Queued)
+            match existing.as_ref().map(|item| item.state) {
+                // A reopened Issue previously marked Released/Merged (but no
+                // longer tracked as merged) returns to the queue.
+                Some(MonitorInboxState::Released) | Some(MonitorInboxState::Merged) | None => {
+                    MonitorInboxState::Queued
+                }
+                Some(other) => other,
+            }
         };
         let item = IssueMonitorInboxItem {
             launch_plan: Some(issue_monitor_launch_plan(&issue)),
@@ -815,6 +859,16 @@ impl IssueMonitorState {
         }
         self.launched_windows
             .insert(issue_number, window_id.clone());
+        if let Some(branch) = self
+            .inbox_item(issue_number)
+            .and_then(|item| item.launch_plan.as_ref())
+            .map(|plan| plan.branch_name.clone())
+        {
+            self.launched_branches.insert(issue_number, branch);
+        }
+        // A fresh launch supersedes any prior Merged completion (e.g. manual
+        // Launch Now of already-merged work).
+        self.merged_issues.remove(&issue_number);
         self.failed_issues.remove(&issue_number);
         self.queue.retain(|queued| *queued != issue_number);
         self.pending_launches
@@ -862,6 +916,90 @@ impl IssueMonitorState {
 
     pub fn record_agent_issue_failed(&mut self, issue_number: u64, message: impl Into<String>) {
         self.record_failed_issue(issue_number, message, MonitorInboxState::AgentFailed);
+    }
+
+    /// Reverse-lookup the Issue associated with a launched agent `window_id`.
+    fn issue_for_window(&self, window_id: &str) -> Option<u64> {
+        self.launched_windows
+            .iter()
+            .find_map(|(issue_number, launched_window_id)| {
+                issue_monitor_window_ids_match(launched_window_id, window_id)
+                    .then_some(*issue_number)
+            })
+            .or_else(|| {
+                self.inbox.iter().find_map(|item| {
+                    item.launched_window_id
+                        .as_deref()
+                        .filter(|launched_window_id| {
+                            issue_monitor_window_ids_match(launched_window_id, window_id)
+                        })
+                        .map(|_| item.issue.number)
+                })
+            })
+    }
+
+    fn clear_active_tracking(&mut self, issue_number: u64) {
+        self.active_launches
+            .retain(|active| *active != issue_number);
+        self.launched_windows.remove(&issue_number);
+        self.launched_branches.remove(&issue_number);
+        self.pending_launches
+            .retain(|pending| pending.issue_number != issue_number);
+    }
+
+    fn set_inbox_state(&mut self, issue_number: u64, state: MonitorInboxState) {
+        if let Some(item) = self
+            .inbox
+            .iter_mut()
+            .find(|item| item.issue.number == issue_number)
+        {
+            item.state = state;
+            item.launched_window_id = None;
+            item.error_message = None;
+        }
+    }
+
+    /// Record that the launched work for `issue_number` merged into the base
+    /// branch. Frees the active slot and marks the Issue `Merged` (persisted so
+    /// completed work is not auto-relaunched while the Issue stays open until
+    /// release).
+    pub fn record_merged(&mut self, issue_number: u64) {
+        self.clear_active_tracking(issue_number);
+        self.queue.retain(|queued| *queued != issue_number);
+        self.merged_issues.insert(issue_number);
+        self.set_inbox_state(issue_number, MonitorInboxState::Merged);
+    }
+
+    /// Record that the GitHub Issue for `issue_number` was closed (released).
+    pub fn record_released(&mut self, issue_number: u64) {
+        self.clear_active_tracking(issue_number);
+        self.queue.retain(|queued| *queued != issue_number);
+        self.set_inbox_state(issue_number, MonitorInboxState::Released);
+    }
+
+    /// An agent window closed without the work completing. Frees the active
+    /// slot and returns the Issue to pending (`Queued`) — never a fabricated
+    /// "done" state. Terminal states (Merged/Released/failed) are preserved.
+    /// Returns the affected Issue number when the window mapped to an active
+    /// launch that was re-queued.
+    pub fn requeue_window(&mut self, window_id: &str) -> Option<u64> {
+        let issue_number = self.issue_for_window(window_id)?;
+        if self.merged_issues.contains(&issue_number) {
+            return None;
+        }
+        if self
+            .inbox_item(issue_number)
+            .is_some_and(|item| item.state.is_terminal())
+        {
+            return None;
+        }
+        self.clear_active_tracking(issue_number);
+        self.set_inbox_state(issue_number, MonitorInboxState::Queued);
+        if !self.queue.contains(&issue_number) {
+            self.queue.push_back(issue_number);
+            self.apply_priority_order_to_queue();
+        }
+        Some(issue_number)
     }
 
     fn record_failed_issue(
@@ -1032,5 +1170,86 @@ mod tests {
             monitor.next_launch_request().is_none(),
             "max_active=1 must keep the next queued issue waiting while launched work is active"
         );
+    }
+
+    fn launched_monitor(number: u64, window_id: &str) -> IssueMonitorState {
+        let mut monitor = IssueMonitorState::new(IssueMonitorConfig::default());
+        scan_issue_monitor_candidates(&mut monitor, &[issue(number)], "2026-06-26T00:00:00Z");
+        monitor.complete_active_launch(number, window_id);
+        assert_eq!(monitor.active_count(), 1);
+        monitor
+    }
+
+    #[test]
+    fn record_merged_frees_slot_marks_done_and_is_not_requeued() {
+        let mut monitor = launched_monitor(42, "tab-1::agent-1");
+        monitor.record_merged(42);
+        assert_eq!(monitor.active_count(), 0, "Merged frees the active slot");
+        assert_eq!(
+            monitor.inbox_item(42).map(|item| item.state),
+            Some(MonitorInboxState::Merged)
+        );
+        // A later scan must keep it Merged (not re-queued) while the Issue is
+        // still open.
+        scan_issue_monitor_candidates(&mut monitor, &[issue(42)], "2026-06-26T01:00:00Z");
+        assert_eq!(
+            monitor.inbox_item(42).map(|item| item.state),
+            Some(MonitorInboxState::Merged)
+        );
+        assert_eq!(monitor.queue_len(), 0);
+        assert_eq!(monitor.active_count(), 0);
+    }
+
+    #[test]
+    fn requeue_window_returns_unmerged_issue_to_pending() {
+        let mut monitor = launched_monitor(42, "tab-1::agent-1");
+        let requeued = monitor.requeue_window("tab-1::agent-1");
+        assert_eq!(requeued, Some(42));
+        assert_eq!(monitor.active_count(), 0, "closing frees the slot");
+        assert_eq!(
+            monitor.inbox_item(42).map(|item| item.state),
+            Some(MonitorInboxState::Queued),
+            "closing an unmerged window returns to pending, never a fake done state"
+        );
+        assert_eq!(monitor.queue_len(), 1);
+    }
+
+    #[test]
+    fn requeue_window_does_not_revert_merged() {
+        let mut monitor = launched_monitor(42, "tab-1::agent-1");
+        monitor.record_merged(42);
+        assert_eq!(monitor.requeue_window("tab-1::agent-1"), None);
+        assert_eq!(
+            monitor.inbox_item(42).map(|item| item.state),
+            Some(MonitorInboxState::Merged)
+        );
+    }
+
+    #[test]
+    fn record_released_marks_released_and_frees_slot() {
+        let mut monitor = launched_monitor(42, "tab-1::agent-1");
+        monitor.record_released(42);
+        assert_eq!(monitor.active_count(), 0);
+        assert_eq!(
+            monitor.inbox_item(42).map(|item| item.state),
+            Some(MonitorInboxState::Released)
+        );
+    }
+
+    #[test]
+    fn merged_issues_survive_prefs_roundtrip_and_block_relaunch() {
+        let mut monitor = launched_monitor(42, "tab-1::agent-1");
+        monitor.record_merged(42);
+        let prefs = monitor.prefs();
+        assert_eq!(prefs.merged_issues, vec![42]);
+
+        let mut restored = IssueMonitorState::with_prefs(IssueMonitorConfig::default(), prefs);
+        scan_issue_monitor_candidates(&mut restored, &[issue(42)], "2026-06-26T02:00:00Z");
+        assert_eq!(
+            restored.inbox_item(42).map(|item| item.state),
+            Some(MonitorInboxState::Merged),
+            "restored monitor must not re-launch already-merged work"
+        );
+        assert_eq!(restored.queue_len(), 0);
     }
 }

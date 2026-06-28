@@ -205,6 +205,10 @@ export function createIssueMonitorSurface({ document, send }) {
       .issue-monitor-card__item[data-state="agent_failed"] {
         border-left-color: var(--color-state-blocked);
       }
+      .issue-monitor-card__item[data-state="merged"],
+      .issue-monitor-card__item[data-state="released"] {
+        border-left-color: var(--color-state-done);
+      }
       .issue-monitor-card__status-dot {
         align-self: center;
         width: 7px;
@@ -225,6 +229,10 @@ export function createIssueMonitorSurface({ document, send }) {
       }
       .issue-monitor-card__item[data-state="agent_failed"] .issue-monitor-card__status-dot {
         background: var(--color-state-blocked);
+      }
+      .issue-monitor-card__item[data-state="merged"] .issue-monitor-card__status-dot,
+      .issue-monitor-card__item[data-state="released"] .issue-monitor-card__status-dot {
+        background: var(--color-state-done);
       }
       .issue-monitor-card__issue {
         min-width: 0;
@@ -266,6 +274,10 @@ export function createIssueMonitorSurface({ document, send }) {
       }
       .issue-monitor-card__state-badge[data-state="agent_failed"] {
         color: var(--color-state-blocked);
+      }
+      .issue-monitor-card__state-badge[data-state="merged"],
+      .issue-monitor-card__state-badge[data-state="released"] {
+        color: var(--color-state-done);
       }
       .issue-monitor-card__issue-meta {
         margin-top: var(--space-1);
@@ -498,6 +510,10 @@ export function createIssueMonitorSurface({ document, send }) {
         return "Launching";
       case "launched":
         return "Launched";
+      case "merged":
+        return "Merged";
+      case "released":
+        return "Released";
       case "launch_failed":
         return "Launch failed";
       case "agent_failed":
