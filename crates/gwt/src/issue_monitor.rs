@@ -517,6 +517,27 @@ pub struct AutonomousIssueRecord {
     pub acceptance_snapshot: Option<crate::issue_monitor_gate::AcceptanceSnapshot>,
 }
 
+/// SPEC #3200 T-042: how an autonomous attempt's failure should be routed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FailureClass {
+    /// Transient (launch failure / network / abnormal exit): retry with bounded
+    /// backoff until the per-issue attempt counter reaches `max_attempts`.
+    Transient,
+    /// Terminal for autonomous resolution (independent-review rejected, criteria
+    /// unsatisfiable, gate structurally unavailable): escalate to `NeedsHuman`
+    /// immediately — another attempt cannot fix it.
+    Terminal,
+}
+
+/// SPEC #3200 T-042: the routing outcome of dispatching an autonomous failure.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AutonomousFailureOutcome {
+    /// Re-queued for another attempt; carries the new attempt count.
+    Retry { attempt: u32 },
+    /// Escalated to `NeedsHuman`; carries the human-facing reason.
+    Escalated(String),
+}
+
 impl AutonomousIssueRecord {
     fn new(issue_number: u64) -> Self {
         Self {
@@ -720,6 +741,65 @@ impl IssueMonitorState {
     /// attempt counter) once the work merges or is otherwise resolved.
     pub fn clear_autonomous_record(&mut self, issue_number: u64) {
         self.autonomous_records.remove(&issue_number);
+    }
+
+    /// SPEC #3200 T-042/T-033 / FR-026/FR-027: dispatch an autonomous attempt
+    /// failure. Counts the attempt, then either re-queues for a bounded retry
+    /// (transient AND still under `max_attempts`) or escalates to `NeedsHuman`
+    /// (terminal failure, OR transient with attempts exhausted). The retry path
+    /// frees the slot and returns the issue to `Queued` for resume — never a
+    /// fabricated "done" state.
+    pub fn record_autonomous_failure(
+        &mut self,
+        issue_number: u64,
+        class: FailureClass,
+        message: impl Into<String>,
+    ) -> AutonomousFailureOutcome {
+        let message = message.into();
+        let attempt = self.record_attempt(issue_number);
+        let max = self.autonomous_tuning.max_attempts;
+        let exhausted = attempt >= max;
+        if matches!(class, FailureClass::Terminal) || exhausted {
+            let reason = if matches!(class, FailureClass::Terminal) {
+                format!("autonomous resolution failed terminally: {message}")
+            } else {
+                format!("autonomous attempts exhausted ({attempt}/{max}): {message}")
+            };
+            self.escalate_to_needs_human(issue_number, reason.clone());
+            AutonomousFailureOutcome::Escalated(reason)
+        } else {
+            self.clear_active_tracking(issue_number);
+            self.set_autonomous_phase(issue_number, AutonomousPhase::Idle);
+            self.set_active_launch_id(issue_number, None);
+            self.set_inbox_state(issue_number, MonitorInboxState::Queued);
+            if !self.queue.contains(&issue_number) {
+                self.queue.push_back(issue_number);
+                self.apply_priority_order_to_queue();
+            }
+            AutonomousFailureOutcome::Retry { attempt }
+        }
+    }
+
+    /// SPEC #3200 FR-027: escalate an issue to the terminal `NeedsHuman` state —
+    /// frees the slot, records the reason, marks the autonomous phase, and never
+    /// auto-relaunches. Reused by the strong-gate path when review rejects.
+    pub fn escalate_to_needs_human(&mut self, issue_number: u64, reason: impl Into<String>) {
+        let reason = reason.into();
+        self.clear_active_tracking(issue_number);
+        self.queue.retain(|queued| *queued != issue_number);
+        self.set_autonomous_phase(issue_number, AutonomousPhase::NeedsHuman);
+        self.set_active_launch_id(issue_number, None);
+        self.failed_issues.insert(issue_number, reason.clone());
+        self.last_error = Some(format!("issue #{issue_number}: {reason}"));
+        if let Some(item) = self
+            .inbox
+            .iter_mut()
+            .find(|item| item.issue.number == issue_number)
+        {
+            item.state = MonitorInboxState::NeedsHuman;
+            item.launched_window_id = None;
+            item.error_message = Some(reason);
+        }
     }
 
     pub fn set_gui_connected(&mut self, connected: bool) {
@@ -1712,6 +1792,89 @@ mod tests {
             None,
             "active launch id clears when the attempt's launch ends"
         );
+    }
+
+    #[test]
+    fn transient_failure_under_cap_retries_and_counts() {
+        // SPEC #3200 T-042/FR-026: a transient failure below max_attempts
+        // re-queues the issue for resume and increments the attempt counter.
+        let mut monitor = launched_monitor(42, "tab-1::agent-1");
+        monitor.set_autonomous_phase(42, AutonomousPhase::Implementing);
+        monitor.set_active_launch_id(42, Some("tab-1::agent-1".to_string()));
+
+        assert_eq!(
+            monitor.record_autonomous_failure(42, FailureClass::Transient, "network blip"),
+            AutonomousFailureOutcome::Retry { attempt: 1 }
+        );
+        assert_eq!(
+            monitor.inbox_item(42).map(|item| item.state),
+            Some(MonitorInboxState::Queued),
+            "transient retry re-queues (never a fake done state)"
+        );
+        assert_eq!(monitor.attempt_count(42), 1);
+        assert_eq!(monitor.active_count(), 0, "slot freed for the retry");
+        assert_eq!(
+            monitor
+                .autonomous_record(42)
+                .map(|r| r.active_launch_id.clone()),
+            Some(None),
+            "the in-flight launch id is cleared on retry"
+        );
+    }
+
+    #[test]
+    fn transient_failure_at_cap_escalates_to_needs_human() {
+        // SPEC #3200 T-033/FR-027, Sc 12: once the attempt counter reaches
+        // max_attempts the issue escalates to NeedsHuman and is not relaunched.
+        let mut monitor = launched_monitor(42, "tab-1::agent-1");
+        monitor.autonomous_tuning.max_attempts = 2;
+        assert_eq!(
+            monitor.record_autonomous_failure(42, FailureClass::Transient, "fail 1"),
+            AutonomousFailureOutcome::Retry { attempt: 1 }
+        );
+        // Re-launch the retried attempt, then fail again at the cap.
+        monitor.complete_active_launch(42, "tab-1::agent-1b");
+        match monitor.record_autonomous_failure(42, FailureClass::Transient, "fail 2") {
+            AutonomousFailureOutcome::Escalated(reason) => {
+                assert!(
+                    reason.contains("exhausted"),
+                    "reason names exhaustion: {reason}"
+                )
+            }
+            other => panic!("expected escalation, got {other:?}"),
+        }
+        assert_eq!(
+            monitor.inbox_item(42).map(|item| item.state),
+            Some(MonitorInboxState::NeedsHuman)
+        );
+        assert_eq!(
+            monitor.autonomous_record(42).map(|r| r.phase),
+            Some(AutonomousPhase::NeedsHuman)
+        );
+        assert_eq!(monitor.active_count(), 0, "slot freed on escalation");
+        // Terminal: a window-close requeue must not revive it.
+        assert_eq!(monitor.requeue_window("tab-1::agent-1b"), None);
+    }
+
+    #[test]
+    fn terminal_failure_escalates_immediately_regardless_of_attempts() {
+        // SPEC #3200 T-042: a terminal failure (retry cannot fix) escalates on
+        // the first attempt without exhausting the counter.
+        let mut monitor = launched_monitor(42, "tab-1::agent-1");
+        match monitor.record_autonomous_failure(42, FailureClass::Terminal, "review rejected") {
+            AutonomousFailureOutcome::Escalated(reason) => {
+                assert!(
+                    reason.contains("terminal"),
+                    "reason names terminal: {reason}"
+                )
+            }
+            other => panic!("expected escalation, got {other:?}"),
+        }
+        assert_eq!(
+            monitor.inbox_item(42).map(|item| item.state),
+            Some(MonitorInboxState::NeedsHuman)
+        );
+        assert_eq!(monitor.attempt_count(42), 1, "the attempt is still counted");
     }
 
     #[test]
