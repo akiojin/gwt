@@ -265,6 +265,9 @@ fn spawn_issue_monitor_worker(scope: RuntimeScope, hub: BroadcastHub, shutdown: 
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum IssueMonitorControl {
     Enabled(bool),
+    /// SPEC #3200 T-046/FR-024: arm/disarm the unattended autonomous mode kill
+    /// switch. Disarming stops new autonomous candidates on the next scan.
+    AutonomousMode(bool),
     MaxActiveAgents(usize),
     PriorityOrder(Vec<u64>),
     Launched {
@@ -292,6 +295,10 @@ fn apply_issue_monitor_control(
     match control {
         IssueMonitorControl::Enabled(enabled) => {
             monitor.set_enabled(enabled);
+            true
+        }
+        IssueMonitorControl::AutonomousMode(enabled) => {
+            monitor.set_autonomous_mode(enabled);
             true
         }
         IssueMonitorControl::MaxActiveAgents(max_active_agents) => {
@@ -348,6 +355,12 @@ fn decode_issue_monitor_control(payload: serde_json::Value) -> Option<IssueMonit
             let payload = event.get("payload")?;
             if let Some(enabled) = payload.get("enabled").and_then(serde_json::Value::as_bool) {
                 return Some(IssueMonitorControl::Enabled(enabled));
+            }
+            if let Some(autonomous_mode) = payload
+                .get("autonomous_mode")
+                .and_then(serde_json::Value::as_bool)
+            {
+                return Some(IssueMonitorControl::AutonomousMode(autonomous_mode));
             }
             if let Some(max_active_agents) = payload
                 .get("max_active_agents")
@@ -915,6 +928,41 @@ mod tests {
         let response = build_handshake_response(&endpoint, &request);
         assert!(response.accepted);
         assert!(response.rejection_reason.is_none());
+    }
+
+    #[test]
+    fn issue_monitor_autonomous_mode_control_toggles_kill_switch() {
+        // SPEC #3200 T-046/FR-024: the autonomous_mode control arms/disarms the
+        // kill switch, observable in the status view, and requests a rescan.
+        let mut monitor = crate::IssueMonitorState::new(crate::IssueMonitorConfig {
+            enabled: true,
+            ..crate::IssueMonitorConfig::default()
+        });
+        assert!(!monitor.autonomous_mode());
+
+        let arm =
+            decode_issue_monitor_control(crate::runtime_daemon_events::issue_monitor_payload(
+                "control",
+                serde_json::json!({ "autonomous_mode": true }),
+                std::process::id() + 1,
+            ))
+            .expect("arm control decodes");
+        assert!(
+            apply_issue_monitor_control(&mut monitor, arm),
+            "rescan requested"
+        );
+        assert!(monitor.autonomous_mode(), "kill switch armed");
+        assert!(monitor.status_view().autonomous_mode);
+
+        let disarm =
+            decode_issue_monitor_control(crate::runtime_daemon_events::issue_monitor_payload(
+                "control",
+                serde_json::json!({ "autonomous_mode": false }),
+                std::process::id() + 1,
+            ))
+            .expect("disarm control decodes");
+        apply_issue_monitor_control(&mut monitor, disarm);
+        assert!(!monitor.autonomous_mode(), "kill switch disarmed");
     }
 
     #[test]
