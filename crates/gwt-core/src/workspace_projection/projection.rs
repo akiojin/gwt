@@ -43,12 +43,13 @@ pub fn workspace_projection_default_created_at() -> DateTime<Utc> {
 }
 
 /// Why a branch/worktree pair is offered for cleanup: its Workspace reached
-/// Done, or its PR merged.
+/// Done, its PR merged, or it has no effective changes from the base.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum WorkspaceCleanupReason {
     WorkspaceDone,
     PrMerged,
+    NoChanges,
 }
 
 impl WorkspaceCleanupReason {
@@ -56,6 +57,7 @@ impl WorkspaceCleanupReason {
         match self {
             Self::WorkspaceDone => "workspace_done",
             Self::PrMerged => "pr_merged",
+            Self::NoChanges => "no_changes",
         }
     }
 }

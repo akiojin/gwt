@@ -15,6 +15,18 @@ const focusReturnMap = new WeakMap();
 // the focus-return pattern.
 const focusTrapMap = new WeakMap();
 
+const progressStatusLabels = {
+  pending: "Queued",
+  running: "Running",
+  done: "Done",
+  failed: "Failed",
+};
+
+function progressStatusLabel(status) {
+  const normalized = status || "pending";
+  return progressStatusLabels[normalized] || normalized;
+}
+
 export function renderBranchCleanupModal({
   modalEl,
   dialogEl,
@@ -93,31 +105,38 @@ export function renderBranchCleanupModal({
 
   if (state.cleanupModal.stage === "running") {
     dialogEl.appendChild(createNode("h2", "", "Cleaning up branches"));
-    const count = Math.max(selectedEntries.length, 1);
     const progress = state.cleanupModal.progress || null;
     const current = progress?.current || null;
+    const progressItems = Array.isArray(progress?.items) ? progress.items : [];
+    const count = Math.max(selectedEntries.length, progressItems.length, 1);
     const runningCopy = current
       ? `Cleaning ${current.index} of ${current.total}: ${current.branch}`
-      : `Running cleanup for ${count} branch${count === 1 ? "" : "es"}.`;
-    dialogEl.appendChild(
-      createNode(
-        "div",
-        "branch-cleanup-running",
-        runningCopy,
-      ),
+      : progressItems.length > 0
+        ? `Preparing cleanup queue for ${count} branch${count === 1 ? "" : "es"}.`
+        : `Running cleanup for ${count} branch${count === 1 ? "" : "es"}.`;
+    const running = createNode(
+      "div",
+      `branch-cleanup-running${current ? "" : " is-preparing"}`,
+      runningCopy,
     );
+    running.setAttribute("role", "status");
+    running.setAttribute("aria-live", "polite");
+    dialogEl.appendChild(running);
     if (current?.message) {
       dialogEl.appendChild(
         createNode("div", "branch-cleanup-item-copy", current.message),
       );
     }
-    if (Array.isArray(progress?.items) && progress.items.length > 0) {
+    if (progressItems.length > 0) {
       const progressList = createNode("div", "branch-cleanup-progress-list");
-      for (const item of progress.items) {
+      progressList.setAttribute("aria-live", "polite");
+      for (const item of progressItems) {
+        const status = item.status || "pending";
         const row = createNode(
           "div",
-          `branch-cleanup-progress-item ${item.status || "pending"}`,
+          `branch-cleanup-progress-item ${status}`,
         );
+        row.dataset.status = status;
         row.appendChild(
           createNode("span", "branch-cleanup-progress-branch", item.branch),
         );
@@ -125,7 +144,7 @@ export function renderBranchCleanupModal({
           createNode(
             "span",
             "branch-cleanup-progress-status",
-            item.status || "pending",
+            progressStatusLabel(status),
           ),
         );
         if (item.message) {
