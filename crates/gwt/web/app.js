@@ -62,6 +62,7 @@
       // /launch-wizard-surface.js.
       import { createLaunchWizardSurface } from "/launch-wizard-surface.js";
       import { createIssueMonitorSurface } from "/issue-monitor-surface.js";
+      import { createAutonomousNotifications } from "/autonomous-notifications.js";
       // SPEC-3064 Phase 3 (E6a): the File Tree window surface moved to
       // /file-tree-surface.js.
       import { createFileTreeSurface } from "/file-tree-surface.js";
@@ -4361,6 +4362,13 @@
         send,
       });
 
+      // SPEC #3200 FR-034/FR-035: unattended autonomous events surface as a
+      // scrollable side-toast stack so nothing is missed while the operator is
+      // away. Mounted to the body so it is visible regardless of which window
+      // or surface is focused.
+      const autonomousNotifications = createAutonomousNotifications({ document });
+      autonomousNotifications.mount(document.body);
+
       const agentKanbanSurface = createAgentKanbanSurface({
         activeWorkspace,
         createTerminalRuntime: (id, terminalRoot) =>
@@ -5268,6 +5276,7 @@
         logsSurface,
         agentKanbanSurface,
         issueMonitorSurface,
+        autonomousNotifications,
         knowledgeSettingsSurface,
       });
 
@@ -5373,6 +5382,15 @@
             break;
           case "issue_monitor_toast":
             frontendUnits.issueMonitorSurface.showToast(event);
+            // SPEC #3200 FR-034: also surface as a persistent, scrollable side
+            // toast so unattended autonomous events accumulate where the
+            // operator can review them later.
+            frontendUnits.autonomousNotifications.push({
+              level: event?.level,
+              title: event?.title || "Issue Monitor",
+              message: event?.message,
+              issueNumber: event?.issue_number,
+            });
             break;
           case "terminal_output":
             frontendUnits.terminalHost.writeOutput(event.id, event.data_base64);
