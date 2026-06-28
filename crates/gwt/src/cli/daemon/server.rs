@@ -461,6 +461,7 @@ fn scan_issue_monitor_once_blocking(
     };
     let monitor_owner = format!("{}:{}", whoami::username(), std::process::id());
     crate::scan_issue_monitor_candidates(&mut monitor, &issues, &now);
+    crate::issue_monitor_worker::reconcile_issue_monitor_merges(&mut monitor, &scope.project_root);
     if monitor.config.enabled && gui_connected {
         let active_cap = if monitor.has_launch_profile() {
             monitor.config.max_active.max(1)

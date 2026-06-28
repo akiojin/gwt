@@ -279,6 +279,69 @@ pub fn parse_pr_titles_by_branch(json: &str) -> Result<std::collections::HashMap
         .collect())
 }
 
+/// Branches (PR head refs) whose PR has merged, fetched in ONE `gh pr list`
+/// call. A transient failure returns an `Err` (the caller keeps work as
+/// launched) rather than an empty set, so closing the active slot only happens
+/// on a positive merge signal.
+pub fn fetch_merged_pr_branches(repo_path: &Path) -> Result<std::collections::BTreeSet<String>> {
+    fetch_merged_pr_branches_with(repo_path, run_gh_command)
+}
+
+fn fetch_merged_pr_branches_with<F>(
+    repo_path: &Path,
+    mut run_gh: F,
+) -> Result<std::collections::BTreeSet<String>>
+where
+    F: FnMut(&Path, &[&str]) -> Result<GhCliOutput>,
+{
+    let output = run_gh(
+        repo_path,
+        &[
+            "pr",
+            "list",
+            "--json",
+            "headRefName,state",
+            "--state",
+            "merged",
+            "--limit",
+            "999",
+        ],
+    )?;
+    if !output.success {
+        return Err(GwtError::Git(format!(
+            "gh pr list merged: {}",
+            output.stderr.trim()
+        )));
+    }
+    parse_merged_pr_branches(&output.stdout)
+}
+
+/// Parse `gh pr list --json headRefName,state` into the set of branches whose
+/// PR state is `MERGED`.
+pub fn parse_merged_pr_branches(json: &str) -> Result<std::collections::BTreeSet<String>> {
+    let arr: Vec<serde_json::Value> =
+        serde_json::from_str(json).map_err(|e| GwtError::Other(format!("gh pr list JSON: {e}")))?;
+    let mut branches = std::collections::BTreeSet::new();
+    for value in &arr {
+        let merged = value
+            .get("state")
+            .and_then(serde_json::Value::as_str)
+            .is_some_and(|state| state.eq_ignore_ascii_case("merged"));
+        if !merged {
+            continue;
+        }
+        if let Some(branch) = value
+            .get("headRefName")
+            .and_then(serde_json::Value::as_str)
+            .map(str::trim)
+            .filter(|name| !name.is_empty())
+        {
+            branches.insert(branch.to_string());
+        }
+    }
+    Ok(branches)
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct GhCliOutput {
     success: bool,
@@ -558,6 +621,24 @@ mod tests {
         );
         // Empty titles are skipped.
         assert!(!map.contains_key("work/c"));
+    }
+
+    #[test]
+    fn parse_merged_pr_branches_collects_only_merged_head_refs() {
+        let json = r#"[
+            {"headRefName": "work/a", "state": "MERGED"},
+            {"headRefName": "work/b", "state": "OPEN"},
+            {"headRefName": "work/c", "state": "merged"},
+            {"headRefName": "", "state": "MERGED"}
+        ]"#;
+        let branches = parse_merged_pr_branches(json).unwrap();
+        assert!(branches.contains("work/a"));
+        assert!(
+            branches.contains("work/c"),
+            "state match is case-insensitive"
+        );
+        assert!(!branches.contains("work/b"), "open PRs are excluded");
+        assert_eq!(branches.len(), 2, "empty head refs are skipped");
     }
 
     #[test]

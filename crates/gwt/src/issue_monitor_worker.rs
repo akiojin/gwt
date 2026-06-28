@@ -108,6 +108,33 @@ pub fn load_open_issue_monitor_candidates_for_repo_path(
     }
 }
 
+/// Mark any active launched Issue whose work branch has a merged PR as
+/// `Merged`, freeing the active slot. Skips the network call when nothing is
+/// launched, and leaves work launched when the PR query fails (so a transient
+/// error never closes the slot on a false signal).
+pub fn reconcile_issue_monitor_merges(monitor: &mut IssueMonitorState, repo_path: &Path) {
+    if monitor.active_launched_branches().is_empty() {
+        return;
+    }
+    match gwt_git::pr_status::fetch_merged_pr_branches(repo_path) {
+        Ok(merged_branches) => {
+            let merged = monitor.reconcile_merged_branches(&merged_branches);
+            if !merged.is_empty() {
+                tracing::info!(
+                    issues = ?merged,
+                    "issue monitor marked merged work and freed active slots"
+                );
+            }
+        }
+        Err(error) => {
+            tracing::debug!(
+                error = %error,
+                "issue monitor merge reconciliation skipped (PR query failed)"
+            );
+        }
+    }
+}
+
 pub fn load_cached_issue_monitor_candidates(
     cache_root: &Path,
 ) -> Result<Vec<IssueMonitorIssue>, String> {

@@ -1256,6 +1256,10 @@ impl AppRuntime {
                 ) {
                     Ok(issues) => {
                         gwt::scan_issue_monitor_candidates(&mut monitor, &issues, &now);
+                        gwt::issue_monitor_worker::reconcile_issue_monitor_merges(
+                            &mut monitor,
+                            &project_root,
+                        );
                         if monitor.config.enabled {
                             monitor.set_gui_connected(true);
                             let launch_profile_ready = self

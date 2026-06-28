@@ -977,6 +977,37 @@ impl IssueMonitorState {
         self.set_inbox_state(issue_number, MonitorInboxState::Released);
     }
 
+    /// issue → work branch for every currently active (launched) Issue. Uses
+    /// the stored launch branch, falling back to the inbox launch plan.
+    pub fn active_launched_branches(&self) -> Vec<(u64, String)> {
+        self.active_launches
+            .iter()
+            .filter_map(|number| {
+                let branch = self.launched_branches.get(number).cloned().or_else(|| {
+                    self.inbox_item(*number)
+                        .and_then(|item| item.launch_plan.as_ref())
+                        .map(|plan| plan.branch_name.clone())
+                })?;
+                Some((*number, branch))
+            })
+            .collect()
+    }
+
+    /// Mark any active launched Issue whose work branch has a merged PR as
+    /// `Merged`, freeing the active slot. Returns the affected Issue numbers.
+    pub fn reconcile_merged_branches(&mut self, merged_branches: &BTreeSet<String>) -> Vec<u64> {
+        let to_merge: Vec<u64> = self
+            .active_launched_branches()
+            .into_iter()
+            .filter(|(_, branch)| merged_branches.contains(branch))
+            .map(|(number, _)| number)
+            .collect();
+        for number in &to_merge {
+            self.record_merged(*number);
+        }
+        to_merge
+    }
+
     /// An agent window closed without the work completing. Frees the active
     /// slot and returns the Issue to pending (`Queued`) — never a fabricated
     /// "done" state. Terminal states (Merged/Released/failed) are preserved.
@@ -1234,6 +1265,32 @@ mod tests {
             monitor.inbox_item(42).map(|item| item.state),
             Some(MonitorInboxState::Released)
         );
+    }
+
+    #[test]
+    fn reconcile_merged_branches_marks_merged_and_frees_slot() {
+        let mut monitor = launched_monitor(42, "tab-1::agent-1");
+        let branch = monitor
+            .active_launched_branches()
+            .into_iter()
+            .find(|(number, _)| *number == 42)
+            .map(|(_, branch)| branch)
+            .expect("launched branch");
+        let merged: BTreeSet<String> = [branch].into_iter().collect();
+        assert_eq!(monitor.reconcile_merged_branches(&merged), vec![42]);
+        assert_eq!(monitor.active_count(), 0, "merged work frees the slot");
+        assert_eq!(
+            monitor.inbox_item(42).map(|item| item.state),
+            Some(MonitorInboxState::Merged)
+        );
+    }
+
+    #[test]
+    fn reconcile_merged_branches_ignores_unmerged_branches() {
+        let mut monitor = launched_monitor(42, "tab-1::agent-1");
+        let merged: BTreeSet<String> = ["work/some-other-branch".to_string()].into_iter().collect();
+        assert!(monitor.reconcile_merged_branches(&merged).is_empty());
+        assert_eq!(monitor.active_count(), 1, "unmerged work stays launched");
     }
 
     #[test]
