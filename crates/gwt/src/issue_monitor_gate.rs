@@ -250,6 +250,91 @@ pub fn evaluate_autonomous_gate(inputs: &AutonomousGateInputs) -> GateDecision {
     GateDecision::Pass
 }
 
+/// Classify a `gh pr view --json statusCheckRollup` body against the set of
+/// `required_checks` into a [`CiOutcome`] (SPEC #3200 T-073/FR-009). Fail-closed:
+///
+/// - empty `required_checks` ⇒ `Vacuous` (nothing actually gates),
+/// - any required check absent or not COMPLETED ⇒ `Pending`,
+/// - any required check COMPLETED with a non-success conclusion ⇒ `Failed`,
+/// - an unparseable rollup ⇒ `Pending` (never a pass),
+/// - only every required check COMPLETED + success ⇒ `Success`.
+pub fn classify_ci_rollup(rollup_json: &str, required_checks: &[String]) -> CiOutcome {
+    if required_checks.is_empty() {
+        return CiOutcome::Vacuous;
+    }
+    let items: Vec<serde_json::Value> = match serde_json::from_str(rollup_json) {
+        Ok(serde_json::Value::Array(items)) => items,
+        _ => return CiOutcome::Pending,
+    };
+
+    let mut passed = Vec::new();
+    for required in required_checks {
+        let Some(item) = items
+            .iter()
+            .find(|item| ci_item_name(item) == Some(required.as_str()))
+        else {
+            // Required check has not been reported yet ⇒ still pending.
+            return CiOutcome::Pending;
+        };
+        match ci_item_state(item) {
+            CiItemState::Success => passed.push(required.clone()),
+            CiItemState::Failed => return CiOutcome::Failed,
+            CiItemState::Pending => return CiOutcome::Pending,
+        }
+    }
+    CiOutcome::Success {
+        passed_checks: passed,
+    }
+}
+
+enum CiItemState {
+    Success,
+    Failed,
+    Pending,
+}
+
+/// The check name for a rollup item: `name` for a CheckRun, `context` for a
+/// legacy StatusContext.
+fn ci_item_name(item: &serde_json::Value) -> Option<&str> {
+    item.get("name")
+        .and_then(serde_json::Value::as_str)
+        .or_else(|| item.get("context").and_then(serde_json::Value::as_str))
+}
+
+/// Normalize a rollup item to success / failed / pending. A CheckRun is success
+/// only when `status == COMPLETED` and `conclusion` is a success variant; a
+/// StatusContext is success only when `state == SUCCESS`. Anything still running
+/// is pending; any completed non-success is failed.
+fn ci_item_state(item: &serde_json::Value) -> CiItemState {
+    // Legacy StatusContext: a `state` field carries the whole verdict.
+    if let Some(state) = item.get("state").and_then(serde_json::Value::as_str) {
+        return match state.to_ascii_uppercase().as_str() {
+            "SUCCESS" => CiItemState::Success,
+            "PENDING" | "EXPECTED" => CiItemState::Pending,
+            _ => CiItemState::Failed,
+        };
+    }
+    // CheckRun: gate on status first, then conclusion.
+    let status = item
+        .get("status")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or("")
+        .to_ascii_uppercase();
+    if status != "COMPLETED" {
+        return CiItemState::Pending;
+    }
+    match item
+        .get("conclusion")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or("")
+        .to_ascii_uppercase()
+        .as_str()
+    {
+        "SUCCESS" | "NEUTRAL" | "SKIPPED" => CiItemState::Success,
+        _ => CiItemState::Failed,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -383,6 +468,72 @@ mod tests {
             assert_eq!(
                 evaluate_autonomous_gate(&all_pass_inputs()),
                 GateDecision::Pass
+            );
+        }
+
+        fn req(ids: &[&str]) -> Vec<String> {
+            ids.iter().map(|s| s.to_string()).collect()
+        }
+
+        #[test]
+        fn ci_rollup_all_required_success_is_success() {
+            let rollup = r#"[
+                {"__typename":"CheckRun","name":"build","status":"COMPLETED","conclusion":"SUCCESS"},
+                {"__typename":"StatusContext","context":"test","state":"SUCCESS"}
+            ]"#;
+            assert_eq!(
+                classify_ci_rollup(rollup, &req(&["build", "test"])),
+                CiOutcome::Success {
+                    passed_checks: req(&["build", "test"])
+                }
+            );
+        }
+
+        #[test]
+        fn ci_rollup_pending_required_check_is_pending() {
+            let rollup = r#"[
+                {"__typename":"CheckRun","name":"build","status":"COMPLETED","conclusion":"SUCCESS"},
+                {"__typename":"CheckRun","name":"test","status":"IN_PROGRESS","conclusion":null}
+            ]"#;
+            assert_eq!(
+                classify_ci_rollup(rollup, &req(&["build", "test"])),
+                CiOutcome::Pending
+            );
+        }
+
+        #[test]
+        fn ci_rollup_failed_required_check_is_failed() {
+            let rollup = r#"[
+                {"__typename":"CheckRun","name":"build","status":"COMPLETED","conclusion":"FAILURE"}
+            ]"#;
+            assert_eq!(
+                classify_ci_rollup(rollup, &req(&["build"])),
+                CiOutcome::Failed
+            );
+        }
+
+        #[test]
+        fn ci_rollup_missing_required_check_is_pending() {
+            // A required check absent from the rollup has not run yet ⇒ pending,
+            // never a pass.
+            let rollup = r#"[{"__typename":"CheckRun","name":"build","status":"COMPLETED","conclusion":"SUCCESS"}]"#;
+            assert_eq!(
+                classify_ci_rollup(rollup, &req(&["build", "test"])),
+                CiOutcome::Pending
+            );
+        }
+
+        #[test]
+        fn ci_rollup_no_required_checks_is_vacuous() {
+            assert_eq!(classify_ci_rollup("[]", &req(&[])), CiOutcome::Vacuous);
+        }
+
+        #[test]
+        fn ci_rollup_unparseable_fails_closed() {
+            // A rollup we cannot read must not be treated as success.
+            assert_eq!(
+                classify_ci_rollup("not json", &req(&["build"])),
+                CiOutcome::Pending
             );
         }
 
