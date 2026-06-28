@@ -515,6 +515,28 @@ pub struct AutonomousIssueRecord {
     /// Acceptance-criteria snapshot captured at launch; compared at gate time.
     #[serde(default)]
     pub acceptance_snapshot: Option<crate::issue_monitor_gate::AcceptanceSnapshot>,
+    /// SPEC #3200 T-043/FR-029: earliest RFC3339 time the issue may relaunch
+    /// after a transient retry was scheduled (bounded backoff). `None` ⇒ ready.
+    #[serde(default)]
+    pub retry_not_before: Option<String>,
+}
+
+/// SPEC #3200 T-043/FR-029: bounded exponential backoff (seconds) for the
+/// `attempt`-th transient retry. attempt 1 ⇒ `base_secs`, doubling each
+/// subsequent attempt, clamped to `cap_secs`. Saturating arithmetic so large
+/// attempt counts never overflow or panic on shift.
+pub fn autonomous_retry_backoff_secs(attempt: u32, base_secs: u64, cap_secs: u64) -> u64 {
+    let exponent = attempt.saturating_sub(1).min(32);
+    let scaled = base_secs.saturating_mul(1u64 << exponent);
+    scaled.min(cap_secs)
+}
+
+/// Add `secs` to an RFC3339 instant, returning the new RFC3339 string. `None`
+/// when `now` is not parseable as RFC3339.
+fn rfc3339_plus_secs(now: &str, secs: u64) -> Option<String> {
+    let parsed = chrono::DateTime::parse_from_rfc3339(now).ok()?;
+    let later = parsed + chrono::Duration::seconds(secs as i64);
+    Some(later.to_rfc3339_opts(chrono::SecondsFormat::Secs, true))
 }
 
 /// SPEC #3200 T-042: how an autonomous attempt's failure should be routed.
@@ -546,6 +568,7 @@ impl AutonomousIssueRecord {
             active_launch_id: None,
             attempts: 0,
             acceptance_snapshot: None,
+            retry_not_before: None,
         }
     }
 }
@@ -754,6 +777,7 @@ impl IssueMonitorState {
         issue_number: u64,
         class: FailureClass,
         message: impl Into<String>,
+        now: &str,
     ) -> AutonomousFailureOutcome {
         let message = message.into();
         let attempt = self.record_attempt(issue_number);
@@ -768,15 +792,42 @@ impl IssueMonitorState {
             self.escalate_to_needs_human(issue_number, reason.clone());
             AutonomousFailureOutcome::Escalated(reason)
         } else {
+            let backoff = autonomous_retry_backoff_secs(
+                attempt,
+                self.autonomous_tuning.retry_backoff_base_secs,
+                self.autonomous_tuning.retry_backoff_cap_secs,
+            );
             self.clear_active_tracking(issue_number);
             self.set_autonomous_phase(issue_number, AutonomousPhase::Idle);
             self.set_active_launch_id(issue_number, None);
+            self.autonomous_record_mut(issue_number).retry_not_before =
+                rfc3339_plus_secs(now, backoff);
             self.set_inbox_state(issue_number, MonitorInboxState::Queued);
             if !self.queue.contains(&issue_number) {
                 self.queue.push_back(issue_number);
                 self.apply_priority_order_to_queue();
             }
             AutonomousFailureOutcome::Retry { attempt }
+        }
+    }
+
+    /// SPEC #3200 T-043/FR-029: whether `issue_number` may relaunch now. `true`
+    /// when no retry backoff is pending or the backoff window has elapsed. An
+    /// unparseable clock fails open so a glitch never permanently blocks a retry.
+    pub fn retry_ready(&self, issue_number: u64, now: &str) -> bool {
+        let Some(not_before) = self
+            .autonomous_records
+            .get(&issue_number)
+            .and_then(|record| record.retry_not_before.as_deref())
+        else {
+            return true;
+        };
+        match (
+            chrono::DateTime::parse_from_rfc3339(now),
+            chrono::DateTime::parse_from_rfc3339(not_before),
+        ) {
+            (Ok(now_t), Ok(nb_t)) => now_t >= nb_t,
+            _ => true,
         }
     }
 
@@ -1803,7 +1854,12 @@ mod tests {
         monitor.set_active_launch_id(42, Some("tab-1::agent-1".to_string()));
 
         assert_eq!(
-            monitor.record_autonomous_failure(42, FailureClass::Transient, "network blip"),
+            monitor.record_autonomous_failure(
+                42,
+                FailureClass::Transient,
+                "network blip",
+                "2026-06-29T00:00:00Z"
+            ),
             AutonomousFailureOutcome::Retry { attempt: 1 }
         );
         assert_eq!(
@@ -1820,6 +1876,16 @@ mod tests {
             Some(None),
             "the in-flight launch id is cleared on retry"
         );
+        // T-043: the retry is scheduled for the future (bounded backoff), so the
+        // issue is not eligible to relaunch immediately, but is once time passes.
+        assert!(
+            !monitor.retry_ready(42, "2026-06-29T00:00:00Z"),
+            "not relaunchable before the backoff elapses"
+        );
+        assert!(
+            monitor.retry_ready(42, "2026-06-29T01:00:00Z"),
+            "relaunchable once the backoff window passes"
+        );
     }
 
     #[test]
@@ -1829,12 +1895,22 @@ mod tests {
         let mut monitor = launched_monitor(42, "tab-1::agent-1");
         monitor.autonomous_tuning.max_attempts = 2;
         assert_eq!(
-            monitor.record_autonomous_failure(42, FailureClass::Transient, "fail 1"),
+            monitor.record_autonomous_failure(
+                42,
+                FailureClass::Transient,
+                "fail 1",
+                "2026-06-29T00:00:00Z"
+            ),
             AutonomousFailureOutcome::Retry { attempt: 1 }
         );
         // Re-launch the retried attempt, then fail again at the cap.
         monitor.complete_active_launch(42, "tab-1::agent-1b");
-        match monitor.record_autonomous_failure(42, FailureClass::Transient, "fail 2") {
+        match monitor.record_autonomous_failure(
+            42,
+            FailureClass::Transient,
+            "fail 2",
+            "2026-06-29T00:30:00Z",
+        ) {
             AutonomousFailureOutcome::Escalated(reason) => {
                 assert!(
                     reason.contains("exhausted"),
@@ -1861,7 +1937,12 @@ mod tests {
         // SPEC #3200 T-042: a terminal failure (retry cannot fix) escalates on
         // the first attempt without exhausting the counter.
         let mut monitor = launched_monitor(42, "tab-1::agent-1");
-        match monitor.record_autonomous_failure(42, FailureClass::Terminal, "review rejected") {
+        match monitor.record_autonomous_failure(
+            42,
+            FailureClass::Terminal,
+            "review rejected",
+            "2026-06-29T00:00:00Z",
+        ) {
             AutonomousFailureOutcome::Escalated(reason) => {
                 assert!(
                     reason.contains("terminal"),
@@ -1875,6 +1956,48 @@ mod tests {
             Some(MonitorInboxState::NeedsHuman)
         );
         assert_eq!(monitor.attempt_count(42), 1, "the attempt is still counted");
+    }
+
+    #[test]
+    fn retry_backoff_is_exponential_and_capped() {
+        // SPEC #3200 T-043/FR-029: the transient-retry delay grows exponentially
+        // per attempt and is clamped to the configured cap.
+        assert_eq!(autonomous_retry_backoff_secs(1, 60, 1800), 60);
+        assert_eq!(autonomous_retry_backoff_secs(2, 60, 1800), 120);
+        assert_eq!(autonomous_retry_backoff_secs(3, 60, 1800), 240);
+        assert_eq!(
+            autonomous_retry_backoff_secs(6, 60, 1800),
+            1800,
+            "clamped to cap"
+        );
+        assert_eq!(
+            autonomous_retry_backoff_secs(100, 60, 1800),
+            1800,
+            "no overflow at large attempt counts"
+        );
+        assert_eq!(
+            autonomous_retry_backoff_secs(0, 60, 1800),
+            60,
+            "attempt 0 floors at base"
+        );
+    }
+
+    #[test]
+    fn retry_ready_defaults_true_without_a_schedule() {
+        // An issue with no pending retry schedule is always relaunch-ready, and an
+        // unparseable clock fails open (never permanently blocks a retry).
+        let mut monitor = launched_monitor(42, "tab-1::agent-1");
+        assert!(monitor.retry_ready(42, "2026-06-29T00:00:00Z"));
+        monitor.record_autonomous_failure(
+            42,
+            FailureClass::Transient,
+            "blip",
+            "2026-06-29T00:00:00Z",
+        );
+        assert!(
+            monitor.retry_ready(42, "not-a-timestamp"),
+            "unparseable now fails open"
+        );
     }
 
     #[test]
