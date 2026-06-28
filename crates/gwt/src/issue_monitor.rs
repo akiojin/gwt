@@ -519,6 +519,10 @@ pub struct AutonomousIssueRecord {
     /// after a transient retry was scheduled (bounded backoff). `None` ⇒ ready.
     #[serde(default)]
     pub retry_not_before: Option<String>,
+    /// SPEC #3200 T-044/T-045/FR-013: RFC3339 of the last observed liveness
+    /// signal from the launched agent — the anchor for stuck/idle detection.
+    #[serde(default)]
+    pub last_heartbeat: Option<String>,
 }
 
 /// SPEC #3200 T-043/FR-029: bounded exponential backoff (seconds) for the
@@ -537,6 +541,14 @@ fn rfc3339_plus_secs(now: &str, secs: u64) -> Option<String> {
     let parsed = chrono::DateTime::parse_from_rfc3339(now).ok()?;
     let later = parsed + chrono::Duration::seconds(secs as i64);
     Some(later.to_rfc3339_opts(chrono::SecondsFormat::Secs, true))
+}
+
+/// Whole seconds elapsed from `earlier` to `now` (both RFC3339). `None` when
+/// either is unparseable. Negative when `now` precedes `earlier`.
+fn rfc3339_elapsed_secs(earlier: &str, now: &str) -> Option<i64> {
+    let a = chrono::DateTime::parse_from_rfc3339(earlier).ok()?;
+    let b = chrono::DateTime::parse_from_rfc3339(now).ok()?;
+    Some((b - a).num_seconds())
 }
 
 /// SPEC #3200 T-042: how an autonomous attempt's failure should be routed.
@@ -569,6 +581,7 @@ impl AutonomousIssueRecord {
             attempts: 0,
             acceptance_snapshot: None,
             retry_not_before: None,
+            last_heartbeat: None,
         }
     }
 }
@@ -829,6 +842,58 @@ impl IssueMonitorState {
             (Ok(now_t), Ok(nb_t)) => now_t >= nb_t,
             _ => true,
         }
+    }
+
+    /// SPEC #3200 T-045/FR-013: record an observed liveness signal from the
+    /// launched agent for `issue_number`. Resets the stuck-detection window.
+    pub fn record_autonomous_heartbeat(&mut self, issue_number: u64, now: &str) {
+        self.autonomous_record_mut(issue_number).last_heartbeat = Some(now.to_string());
+    }
+
+    /// SPEC #3200 T-044/T-035/FR-013: launched autonomous issues whose agent has
+    /// shown no liveness for longer than `stuck_timeout_secs`. Issues already in
+    /// a pipeline-in-flight phase (`Reviewing`/`Delivering`, governed by the
+    /// merge-watch timeout) and terminal phases are excluded. Issues with no
+    /// heartbeat yet are conservatively NOT judged stuck (no liveness data).
+    pub fn stuck_autonomous_issues(&self, now: &str) -> Vec<u64> {
+        let timeout = self.autonomous_tuning.stuck_timeout_secs as i64;
+        self.autonomous_records
+            .values()
+            .filter(|record| self.active_launches.contains(&record.issue_number))
+            .filter(|record| {
+                matches!(
+                    record.phase,
+                    AutonomousPhase::Idle | AutonomousPhase::Implementing
+                )
+            })
+            .filter(|record| {
+                record
+                    .last_heartbeat
+                    .as_deref()
+                    .and_then(|hb| rfc3339_elapsed_secs(hb, now))
+                    .is_some_and(|elapsed| elapsed >= timeout)
+            })
+            .map(|record| record.issue_number)
+            .collect()
+    }
+
+    /// SPEC #3200 T-044/T-045/FR-013: reclaim every stuck autonomous slot,
+    /// dispatching each as a transient failure (retry-with-backoff, or escalate
+    /// to `NeedsHuman` when attempts are exhausted). Idempotent: a reclaimed
+    /// issue is no longer launched, so a second pass finds nothing.
+    pub fn recover_stuck_autonomous(&mut self, now: &str) -> Vec<(u64, AutonomousFailureOutcome)> {
+        self.stuck_autonomous_issues(now)
+            .into_iter()
+            .map(|issue_number| {
+                let outcome = self.record_autonomous_failure(
+                    issue_number,
+                    FailureClass::Transient,
+                    "stuck/idle timeout: agent made no progress within stuck_timeout_secs",
+                    now,
+                );
+                (issue_number, outcome)
+            })
+            .collect()
     }
 
     /// SPEC #3200 FR-027: escalate an issue to the terminal `NeedsHuman` state —
@@ -1997,6 +2062,86 @@ mod tests {
         assert!(
             monitor.retry_ready(42, "not-a-timestamp"),
             "unparseable now fails open"
+        );
+    }
+
+    fn stuck_monitor(number: u64, launched_at: &str) -> IssueMonitorState {
+        let mut monitor = launched_monitor(number, "tab-1::agent-1");
+        monitor.autonomous_tuning.stuck_timeout_secs = 1800;
+        monitor.set_autonomous_phase(number, AutonomousPhase::Implementing);
+        monitor.set_active_launch_id(number, Some("tab-1::agent-1".to_string()));
+        monitor.record_autonomous_heartbeat(number, launched_at);
+        monitor
+    }
+
+    #[test]
+    fn stuck_detection_flags_idle_agent_past_timeout() {
+        // SPEC #3200 T-044/T-035/FR-013: a launched autonomous agent with no
+        // heartbeat past stuck_timeout_secs is stuck; a fresh heartbeat is not.
+        let monitor = stuck_monitor(42, "2026-06-29T00:00:00Z");
+        // 20 min later (< 30 min timeout) ⇒ not yet stuck.
+        assert!(monitor
+            .stuck_autonomous_issues("2026-06-29T00:20:00Z")
+            .is_empty());
+        // 31 min later (> 30 min timeout) ⇒ stuck.
+        assert_eq!(
+            monitor.stuck_autonomous_issues("2026-06-29T00:31:00Z"),
+            vec![42]
+        );
+    }
+
+    #[test]
+    fn stuck_detection_ignores_pipeline_in_flight() {
+        // SPEC #3200 T-044: once review / Deliver is in flight, the merge-watch
+        // timeout governs — a stale agent heartbeat must NOT reclaim the slot.
+        let mut monitor = stuck_monitor(42, "2026-06-29T00:00:00Z");
+        monitor.set_autonomous_phase(42, AutonomousPhase::Reviewing);
+        assert!(
+            monitor
+                .stuck_autonomous_issues("2026-06-29T02:00:00Z")
+                .is_empty(),
+            "Reviewing is pipeline-in-flight, not stuck"
+        );
+    }
+
+    #[test]
+    fn recover_stuck_returns_to_queued_and_is_idempotent() {
+        // SPEC #3200 T-044/T-045: recovery reclaims the stuck slot and resumes
+        // (Queued); a second pass finds nothing (idempotent).
+        let mut monitor = stuck_monitor(42, "2026-06-29T00:00:00Z");
+        let recovered = monitor.recover_stuck_autonomous("2026-06-29T01:00:00Z");
+        assert_eq!(recovered.len(), 1);
+        assert!(matches!(
+            recovered[0],
+            (42, AutonomousFailureOutcome::Retry { attempt: 1 })
+        ));
+        assert_eq!(
+            monitor.inbox_item(42).map(|item| item.state),
+            Some(MonitorInboxState::Queued)
+        );
+        assert_eq!(monitor.active_count(), 0, "stuck slot reclaimed");
+        assert!(
+            monitor
+                .recover_stuck_autonomous("2026-06-29T01:05:00Z")
+                .is_empty(),
+            "no longer launched ⇒ idempotent"
+        );
+    }
+
+    #[test]
+    fn recover_stuck_escalates_when_attempts_exhausted() {
+        // SPEC #3200 T-044: a stuck agent on the last attempt escalates to
+        // NeedsHuman rather than looping.
+        let mut monitor = stuck_monitor(42, "2026-06-29T00:00:00Z");
+        monitor.autonomous_tuning.max_attempts = 1;
+        let recovered = monitor.recover_stuck_autonomous("2026-06-29T01:00:00Z");
+        assert!(matches!(
+            recovered.as_slice(),
+            [(42, AutonomousFailureOutcome::Escalated(_))]
+        ));
+        assert_eq!(
+            monitor.inbox_item(42).map(|item| item.state),
+            Some(MonitorInboxState::NeedsHuman)
         );
     }
 
