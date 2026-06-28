@@ -74,6 +74,10 @@ impl PtyHandle {
     #[instrument(skip_all, fields(cmd = %config.command))]
     pub fn spawn(config: SpawnConfig) -> Result<Self, TerminalError> {
         let config = normalize_spawn_config(config);
+        #[cfg(windows)]
+        if let Some(reason) = windows_spawn::reject_non_pe_executable(&config.command) {
+            return Err(TerminalError::PtyCreationFailed { reason });
+        }
         let pty_system = native_pty_system();
         let pair = pty_system
             .openpty(PtySize {
