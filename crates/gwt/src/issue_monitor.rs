@@ -119,6 +119,11 @@ pub struct IssueMonitorPrefs {
     /// SPEC #3200 FR-030: tunable bounds for unattended operation.
     #[serde(default)]
     pub autonomous_tuning: AutonomousTuning,
+    /// SPEC #3200 T-016/T-022: per-issue autonomous state (attempt counter,
+    /// phase, in-flight launch id, acceptance snapshot). Persisted so an
+    /// in-flight attempt survives a daemon restart.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub autonomous_records: Vec<AutonomousIssueRecord>,
 }
 
 impl Default for IssueMonitorPrefs {
@@ -133,6 +138,7 @@ impl Default for IssueMonitorPrefs {
             merged_issues: Vec::new(),
             autonomous_mode: false,
             autonomous_tuning: AutonomousTuning::default(),
+            autonomous_records: Vec::new(),
         }
     }
 }
@@ -384,6 +390,9 @@ pub struct IssueMonitorState {
     autonomous_mode: bool,
     /// SPEC #3200 FR-030: tunable bounds for unattended operation.
     autonomous_tuning: AutonomousTuning,
+    /// SPEC #3200 T-016/T-022: per-issue autonomous lifecycle records keyed by
+    /// issue number (attempt counter, phase, in-flight launch id, snapshot).
+    autonomous_records: BTreeMap<u64, AutonomousIssueRecord>,
     failed_issues: BTreeMap<u64, String>,
     queue: VecDeque<u64>,
     pending_launches: VecDeque<IssueMonitorLaunchRequest>,
@@ -465,6 +474,61 @@ pub fn autonomous_eligibility(
     EligibilityDecision::Eligible
 }
 
+/// SPEC #3200 T-022: lifecycle phase of one issue's current autonomous attempt.
+/// Observable via the status view so every decision boundary is testable
+/// (FR-033). `Idle` is the resting state between attempts.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AutonomousPhase {
+    /// No attempt in flight (never launched, or reset after merge/escalation).
+    #[default]
+    Idle,
+    /// Implementation agent launched and producing changes.
+    Implementing,
+    /// Implementation complete; independent review / strong gate in flight.
+    Reviewing,
+    /// Gate passed; Deliver is driving the PR to merge.
+    Delivering,
+    /// Work merged — terminal success for the autonomous path.
+    Merged,
+    /// Escalated to a human (bounded retries exhausted / gate-unavailable).
+    NeedsHuman,
+}
+
+/// SPEC #3200 T-022/T-016/T-018: the typed container for one issue's autonomous
+/// state. Single source of truth for the attempt counter (FR-026), the current
+/// lifecycle phase, the launch id binding the in-flight attempt (TOCTOU /
+/// stuck-detection anchor, FR-013), and the launch-time acceptance snapshot
+/// (FR-014). Persisted via [`IssueMonitorPrefs`] so a daemon restart never
+/// resets an in-flight attempt's counter or loses its snapshot.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AutonomousIssueRecord {
+    pub issue_number: u64,
+    #[serde(default)]
+    pub phase: AutonomousPhase,
+    /// Launch / window id binding the CURRENT attempt. `None` between attempts.
+    #[serde(default)]
+    pub active_launch_id: Option<String>,
+    /// Failed/started attempts so far (the persisted attempt counter).
+    #[serde(default)]
+    pub attempts: u32,
+    /// Acceptance-criteria snapshot captured at launch; compared at gate time.
+    #[serde(default)]
+    pub acceptance_snapshot: Option<crate::issue_monitor_gate::AcceptanceSnapshot>,
+}
+
+impl AutonomousIssueRecord {
+    fn new(issue_number: u64) -> Self {
+        Self {
+            issue_number,
+            phase: AutonomousPhase::Idle,
+            active_launch_id: None,
+            attempts: 0,
+            acceptance_snapshot: None,
+        }
+    }
+}
+
 pub fn issue_monitor_linked_issue_kind(issue: &IssueMonitorIssue) -> LinkedIssueKind {
     if issue
         .labels
@@ -534,6 +598,7 @@ impl IssueMonitorState {
             merged_issues: BTreeSet::new(),
             autonomous_mode: false,
             autonomous_tuning: AutonomousTuning::default(),
+            autonomous_records: BTreeMap::new(),
             failed_issues: BTreeMap::new(),
             queue: VecDeque::new(),
             pending_launches: VecDeque::new(),
@@ -568,6 +633,9 @@ impl IssueMonitorState {
         state.merged_issues = prefs.merged_issues.into_iter().collect();
         state.autonomous_mode = prefs.autonomous_mode;
         state.autonomous_tuning = prefs.autonomous_tuning;
+        for record in prefs.autonomous_records {
+            state.autonomous_records.insert(record.issue_number, record);
+        }
         state
     }
 
@@ -596,7 +664,62 @@ impl IssueMonitorState {
             merged_issues: self.merged_issues.iter().copied().collect(),
             autonomous_mode: self.autonomous_mode,
             autonomous_tuning: self.autonomous_tuning.clone(),
+            autonomous_records: self.autonomous_records.values().cloned().collect(),
         }
+    }
+
+    /// SPEC #3200 T-022: read-only access to an issue's autonomous record.
+    pub fn autonomous_record(&self, issue_number: u64) -> Option<&AutonomousIssueRecord> {
+        self.autonomous_records.get(&issue_number)
+    }
+
+    fn autonomous_record_mut(&mut self, issue_number: u64) -> &mut AutonomousIssueRecord {
+        self.autonomous_records
+            .entry(issue_number)
+            .or_insert_with(|| AutonomousIssueRecord::new(issue_number))
+    }
+
+    /// SPEC #3200 T-016 / FR-026: failed/started attempts recorded for an issue.
+    pub fn attempt_count(&self, issue_number: u64) -> u32 {
+        self.autonomous_records
+            .get(&issue_number)
+            .map(|record| record.attempts)
+            .unwrap_or(0)
+    }
+
+    /// SPEC #3200 T-016 / FR-026: increment the per-issue attempt counter,
+    /// returning the new count. Drives max-attempts escalation to `NeedsHuman`.
+    pub fn record_attempt(&mut self, issue_number: u64) -> u32 {
+        let record = self.autonomous_record_mut(issue_number);
+        record.attempts = record.attempts.saturating_add(1);
+        record.attempts
+    }
+
+    /// SPEC #3200 T-022: set the lifecycle phase of an issue's current attempt.
+    pub fn set_autonomous_phase(&mut self, issue_number: u64, phase: AutonomousPhase) {
+        self.autonomous_record_mut(issue_number).phase = phase;
+    }
+
+    /// SPEC #3200 T-022 / FR-013: bind (or clear) the launch id of the in-flight
+    /// attempt — the anchor for stuck detection and reviewed-SHA binding.
+    pub fn set_active_launch_id(&mut self, issue_number: u64, launch_id: Option<String>) {
+        self.autonomous_record_mut(issue_number).active_launch_id = launch_id;
+    }
+
+    /// SPEC #3200 T-018 / FR-014: capture the launch-time acceptance snapshot,
+    /// compared against the re-classified Issue body at gate time.
+    pub fn capture_acceptance_snapshot(
+        &mut self,
+        issue_number: u64,
+        snapshot: crate::issue_monitor_gate::AcceptanceSnapshot,
+    ) {
+        self.autonomous_record_mut(issue_number).acceptance_snapshot = Some(snapshot);
+    }
+
+    /// SPEC #3200 T-016/T-022: drop an issue's autonomous record (resets the
+    /// attempt counter) once the work merges or is otherwise resolved.
+    pub fn clear_autonomous_record(&mut self, issue_number: u64) {
+        self.autonomous_records.remove(&issue_number);
     }
 
     pub fn set_gui_connected(&mut self, connected: bool) {
@@ -1538,5 +1661,84 @@ mod tests {
             "restored monitor must not re-launch already-merged work"
         );
         assert_eq!(restored.queue_len(), 0);
+    }
+
+    #[test]
+    fn autonomous_phase_defaults_idle() {
+        // SPEC #3200 T-022: an issue with no autonomous record reports no record,
+        // and a freshly created record starts Idle.
+        assert_eq!(AutonomousPhase::default(), AutonomousPhase::Idle);
+        let monitor = IssueMonitorState::new(IssueMonitorConfig::default());
+        assert!(monitor.autonomous_record(42).is_none());
+        assert_eq!(monitor.attempt_count(42), 0);
+    }
+
+    #[test]
+    fn attempt_counter_increments_and_clears() {
+        // SPEC #3200 T-016 / FR-026: a per-issue attempt counter increments on
+        // each attempt and resets when the record is cleared (success/merge).
+        let mut monitor = IssueMonitorState::new(IssueMonitorConfig::default());
+        assert_eq!(monitor.record_attempt(7), 1);
+        assert_eq!(monitor.record_attempt(7), 2);
+        assert_eq!(monitor.attempt_count(7), 2);
+        assert_eq!(monitor.attempt_count(8), 0, "other issues are independent");
+        monitor.clear_autonomous_record(7);
+        assert_eq!(monitor.attempt_count(7), 0, "clear resets the counter");
+        assert!(monitor.autonomous_record(7).is_none());
+    }
+
+    #[test]
+    fn autonomous_record_tracks_phase_launch_id_and_snapshot() {
+        // SPEC #3200 T-022/T-018: phase, the active launch id binding the current
+        // attempt, and the acceptance snapshot are all tracked per issue.
+        use crate::issue_monitor_gate::classify_acceptance_criteria;
+        let mut monitor = IssueMonitorState::new(IssueMonitorConfig::default());
+        monitor.set_autonomous_phase(9, AutonomousPhase::Implementing);
+        monitor.set_active_launch_id(9, Some("tab-1::agent-9".to_string()));
+        let snapshot =
+            classify_acceptance_criteria("## Acceptance Criteria\n- [ ] AC-1: x\n").snapshot();
+        monitor.capture_acceptance_snapshot(9, snapshot.clone());
+
+        let record = monitor.autonomous_record(9).expect("record exists");
+        assert_eq!(record.phase, AutonomousPhase::Implementing);
+        assert_eq!(record.active_launch_id.as_deref(), Some("tab-1::agent-9"));
+        assert_eq!(record.acceptance_snapshot.as_ref(), Some(&snapshot));
+
+        monitor.set_active_launch_id(9, None);
+        assert_eq!(
+            monitor
+                .autonomous_record(9)
+                .and_then(|r| r.active_launch_id.clone()),
+            None,
+            "active launch id clears when the attempt's launch ends"
+        );
+    }
+
+    #[test]
+    fn autonomous_records_survive_prefs_roundtrip() {
+        // SPEC #3200 T-016/T-022: attempt counter + phase + launch id + snapshot
+        // persist through a prefs round-trip so a daemon restart does not lose an
+        // in-flight autonomous attempt (and does not reset attempts to zero).
+        use crate::issue_monitor_gate::classify_acceptance_criteria;
+        let mut monitor = IssueMonitorState::new(IssueMonitorConfig::default());
+        monitor.record_attempt(11);
+        monitor.record_attempt(11);
+        monitor.set_autonomous_phase(11, AutonomousPhase::Reviewing);
+        monitor.set_active_launch_id(11, Some("tab-2::agent-11".to_string()));
+        monitor.capture_acceptance_snapshot(
+            11,
+            classify_acceptance_criteria("## Acceptance Criteria\n- [ ] AC-1: x\n").snapshot(),
+        );
+
+        let prefs = monitor.prefs();
+        assert_eq!(prefs.autonomous_records.len(), 1);
+
+        let restored = IssueMonitorState::with_prefs(IssueMonitorConfig::default(), prefs);
+        let record = restored.autonomous_record(11).expect("record restored");
+        assert_eq!(record.attempts, 2);
+        assert_eq!(record.phase, AutonomousPhase::Reviewing);
+        assert_eq!(record.active_launch_id.as_deref(), Some("tab-2::agent-11"));
+        assert_eq!(restored.attempt_count(11), 2);
+        assert!(record.acceptance_snapshot.is_some());
     }
 }

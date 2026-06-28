@@ -23,6 +23,49 @@ pub struct AcceptanceCriteria {
     pub visual_surface: bool,
 }
 
+impl AcceptanceCriteria {
+    /// Capture the launch-time snapshot used to detect post-launch drift
+    /// (SPEC #3200 T-018 / FR-014). Only the stable id set and the
+    /// visual-surface flag are retained — these are the gate-relevant facts.
+    pub fn snapshot(&self) -> AcceptanceSnapshot {
+        AcceptanceSnapshot {
+            ids: self.ids.clone(),
+            visual_surface: self.visual_surface,
+        }
+    }
+}
+
+/// Acceptance-criteria snapshot captured at autonomous launch (SPEC #3200
+/// T-018). Re-classified criteria are compared against it at gate time so an
+/// Issue body edited after launch (criteria added/removed/changed, or a visual
+/// tag toggled) is detected and fails the autonomous merge closed (FR-014).
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct AcceptanceSnapshot {
+    /// Stable criterion ids present at launch.
+    pub ids: Vec<String>,
+    /// Whether any criterion targeted a visual surface at launch.
+    pub visual_surface: bool,
+}
+
+impl AcceptanceSnapshot {
+    /// Fail-closed equality: the current criteria match the snapshot iff they
+    /// carry the exact same id set (order-independent) AND the same
+    /// visual-surface flag. Any divergence ⇒ `false` ⇒ the gate must not pass.
+    pub fn matches(&self, current: &AcceptanceCriteria) -> bool {
+        if self.visual_surface != current.visual_surface {
+            return false;
+        }
+        if self.ids.len() != current.ids.len() {
+            return false;
+        }
+        let mut want = self.ids.clone();
+        let mut have = current.ids.clone();
+        want.sort();
+        have.sort();
+        want == have
+    }
+}
+
 /// Heading lines (case-insensitive, trimmed of leading `#`/spaces) that open the
 /// structured acceptance-criteria block.
 const ACCEPTANCE_HEADINGS: &[&str] = &["acceptance criteria", "受け入れ基準", "受け入れシナリオ"];
@@ -146,5 +189,55 @@ mod tests {
             vec!["AC-1"],
             "AC-9 under a later heading is excluded"
         );
+    }
+
+    #[test]
+    fn snapshot_captures_ids_and_visual_flag() {
+        let body = "## Acceptance Criteria\n- [ ] AC-1: x\n- [ ] AC-2: y (visual)\n";
+        let snapshot = classify_acceptance_criteria(body).snapshot();
+        assert_eq!(snapshot.ids, vec!["AC-1", "AC-2"]);
+        assert!(snapshot.visual_surface);
+    }
+
+    #[test]
+    fn snapshot_matches_identical_criteria() {
+        let body = "## Acceptance Criteria\n- [ ] AC-1: x\n- [ ] AC-2: y\n";
+        let snapshot = classify_acceptance_criteria(body).snapshot();
+        // Re-classifying the same body yields criteria the snapshot accepts.
+        assert!(snapshot.matches(&classify_acceptance_criteria(body)));
+    }
+
+    #[test]
+    fn snapshot_rejects_post_launch_criteria_drift() {
+        // A snapshot taken at launch must FAIL CLOSED when the Issue body's
+        // criteria are later edited (added / removed / visual-tag changed),
+        // so a post-launch tamper cannot pass the autonomous gate (FR-014).
+        let at_launch =
+            classify_acceptance_criteria("## Acceptance Criteria\n- [ ] AC-1: x\n").snapshot();
+        let added = classify_acceptance_criteria(
+            "## Acceptance Criteria\n- [ ] AC-1: x\n- [ ] AC-2: new\n",
+        );
+        assert!(!at_launch.matches(&added), "added criterion must not match");
+        let removed =
+            classify_acceptance_criteria("## Acceptance Criteria\n- [ ] AC-9: different\n");
+        assert!(!at_launch.matches(&removed), "changed id must not match");
+        let visual =
+            classify_acceptance_criteria("## Acceptance Criteria\n- [ ] AC-1: x (visual)\n");
+        assert!(
+            !at_launch.matches(&visual),
+            "visual-surface change must not match"
+        );
+    }
+
+    #[test]
+    fn snapshot_order_independent_for_ids() {
+        // The same set of criterion ids in a different order is still a match;
+        // ordering is not semantically meaningful, the id set is.
+        let a =
+            classify_acceptance_criteria("## Acceptance Criteria\n- [ ] AC-1: x\n- [ ] AC-2: y\n")
+                .snapshot();
+        let b =
+            classify_acceptance_criteria("## Acceptance Criteria\n- [ ] AC-2: y\n- [ ] AC-1: x\n");
+        assert!(a.matches(&b), "id set equality is order-independent");
     }
 }
