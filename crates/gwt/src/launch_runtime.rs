@@ -338,6 +338,13 @@ pub fn apply_windows_host_shell_wrapper(
             &config.env_vars,
             &config.remove_env,
         );
+    // Share the PTY path's pre-spawn backstop: if resolution still landed on a
+    // non-PE placeholder stub (no cli-wrapper/native to redirect to), refuse here
+    // rather than embed it into the shell expression and surface the Windows
+    // 16-bit dialog from inside cmd/PowerShell.
+    if let Some(reason) = gwt_terminal::pty::reject_non_pe_executable(&normalized_command) {
+        return Err(reason);
+    }
     let (command, args) = wrap_windows_host_shell_command(
         shell,
         &normalized_command,
@@ -1880,6 +1887,50 @@ mod tests {
         assert!(
             !expression.contains(&placeholder_stub.display().to_string()),
             "wrapper must not direct-launch the placeholder stub: {expression}"
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn command_prompt_agent_wrapper_rejects_unredirectable_placeholder_stub() {
+        // A placeholder bin with NO cli-wrapper.cjs and NO *-win32-x64 native:
+        // resolution cannot redirect, so the host-shell wrapper must refuse with
+        // an actionable error rather than embed the non-PE stub into the shell
+        // expression (which would raise the Windows 16-bit dialog from cmd).
+        let temp = tempdir().expect("tempdir");
+        let package_root = temp
+            .path()
+            .join("node_modules")
+            .join("@anthropic-ai")
+            .join("claude-code");
+        let bin_dir = package_root.join("bin");
+        fs::create_dir_all(&bin_dir).expect("bin dir");
+        let placeholder_stub = bin_dir.join("claude.exe");
+        fs::write(&placeholder_stub, "Error: native binary not installed\n").expect("stub");
+        fs::write(
+            package_root.join("package.json"),
+            r#"{"bin":{"claude":"bin/claude.exe"}}"#,
+        )
+        .expect("package.json");
+
+        let mut config = sample_versioned_launch_config();
+        config.command = placeholder_stub.display().to_string();
+        config.windows_shell = Some(gwt_agent::WindowsShellKind::CommandPrompt);
+        config
+            .env_vars
+            .insert("PATHEXT".to_string(), ".COM;.EXE;.BAT;.CMD".to_string());
+        config.env_vars.insert(
+            "USERPROFILE".to_string(),
+            temp.path().join("no_bun").display().to_string(),
+        );
+
+        let err = match apply_windows_host_shell_wrapper(&mut config) {
+            Ok(()) => panic!("host-shell wrapper must reject a non-PE placeholder stub"),
+            Err(e) => e,
+        };
+        assert!(
+            err.contains("not a valid Windows executable"),
+            "expected actionable non-PE error, got: {err}"
         );
     }
 
