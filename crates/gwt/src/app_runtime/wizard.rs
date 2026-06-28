@@ -1676,11 +1676,20 @@ impl AppRuntime {
             .apply(gwt::LaunchWizardAction::UseStartMethod {
                 method: gwt::LaunchWizardStartMethodKind::StartWithLastSettings,
             });
-        let launch_request = self.resolve_silent_issue_monitor_launch_request(
+        let mut launch_request = self.resolve_silent_issue_monitor_launch_request(
             &mut session,
             &project_root,
             launch_profiles,
         )?;
+        // SPEC #3200 T-040/FR-006: in unattended autonomous mode the
+        // monitor-launched implementation agent must not stall on a permission
+        // prompt. Default OFF leaves the SPEC #3165 human-gated launch untouched.
+        let autonomous_mode = gwt::load_issue_monitor_prefs(
+            &gwt::issue_monitor_prefs_path_for_repo_path(&project_root),
+        )
+        .map(|prefs| prefs.autonomous_mode)
+        .unwrap_or(false);
+        launch_request.force_skip_permissions_for_autonomous(autonomous_mode);
         let launch_index = self
             .tab(&session.tab_id)
             .map(|tab| {

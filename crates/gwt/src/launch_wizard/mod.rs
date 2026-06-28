@@ -574,6 +574,58 @@ pub enum LaunchWizardLaunchRequest {
     Shell(Box<ShellLaunchConfig>),
 }
 
+impl LaunchWizardLaunchRequest {
+    /// SPEC #3200 T-040/FR-006: when the project opted into unattended autonomous
+    /// mode, force `skip_permissions` on a monitor-launched implementation agent
+    /// so it runs without stalling on a permission prompt. A no-op when
+    /// autonomous mode is off (preserves SPEC #3165 human-gated behavior exactly)
+    /// and for non-agent (shell) launches.
+    pub fn force_skip_permissions_for_autonomous(&mut self, autonomous_mode: bool) {
+        if autonomous_mode {
+            if let LaunchWizardLaunchRequest::Agent(config) = self {
+                config.skip_permissions = true;
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod autonomous_launch_tests {
+    use super::LaunchWizardLaunchRequest;
+
+    fn agent_request(skip_permissions: bool) -> LaunchWizardLaunchRequest {
+        let mut config = gwt_agent::AgentLaunchBuilder::new(gwt_agent::AgentId::ClaudeCode).build();
+        config.skip_permissions = skip_permissions;
+        LaunchWizardLaunchRequest::Agent(Box::new(config))
+    }
+
+    #[test]
+    fn autonomous_launch_forces_skip_permissions() {
+        // SPEC #3200 T-040/FR-006: autonomous mode forces skip_permissions on an
+        // agent launch so the unattended agent never stalls on a prompt.
+        let mut request = agent_request(false);
+        request.force_skip_permissions_for_autonomous(true);
+        match request {
+            LaunchWizardLaunchRequest::Agent(config) => assert!(config.skip_permissions),
+            LaunchWizardLaunchRequest::Shell(_) => panic!("expected agent request"),
+        }
+    }
+
+    #[test]
+    fn non_autonomous_launch_leaves_skip_permissions_untouched() {
+        // Default OFF must not change the human-gated launch's skip_permissions.
+        let mut request = agent_request(false);
+        request.force_skip_permissions_for_autonomous(false);
+        match request {
+            LaunchWizardLaunchRequest::Agent(config) => assert!(
+                !config.skip_permissions,
+                "off ⇒ unchanged (SPEC #3165 preserved)"
+            ),
+            LaunchWizardLaunchRequest::Shell(_) => panic!("expected agent request"),
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub enum LaunchWizardCompletion {
     Launch(Box<LaunchWizardLaunchRequest>),
