@@ -394,6 +394,77 @@ pub fn is_auto_improve_candidate(issue: &IssueMonitorIssue, config: &IssueMonito
     issue.state == IssueMonitorIssueState::Open
 }
 
+/// SPEC #3200 FR-003/004/005: routing decision for whether an open Issue may be
+/// resolved by the autonomous (unattended) path.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum EligibilityDecision {
+    /// Two-stage opt-in satisfied and every safety precondition holds — the
+    /// Issue may be resolved autonomously.
+    Eligible,
+    /// The two-stage opt-in is NOT satisfied (autonomous_mode off OR no
+    /// `auto-merge` label) — fall back to the existing SPEC #3165 human-gated
+    /// flow unchanged.
+    HumanGate(String),
+    /// Two-stage opt-in IS satisfied but a safety precondition failed (no
+    /// machine-checkable criteria, unverified branch protection, already
+    /// needs-human, or attempts exhausted) — hand to a human; never auto-run.
+    NeedsHuman(String),
+}
+
+/// Pure autonomous-eligibility predicate (SPEC #3200 FR-003).
+///
+/// Routing (the negatives matter as much as the positive):
+/// - missing (i) `autonomous_mode` or (ii) the `auto-merge` label ⇒ `HumanGate`
+///   — these two-stage-opt-in negatives use the existing #3165 gate, NOT
+///   `NeedsHuman`.
+/// - already needs-human, attempts exhausted, missing (iii) machine-checkable
+///   criteria, or (iv) verified branch protection ⇒ `NeedsHuman(reason)`.
+/// - all satisfied ⇒ `Eligible`.
+#[allow(clippy::too_many_arguments)]
+pub fn autonomous_eligibility(
+    autonomous_mode: bool,
+    has_auto_merge_label: bool,
+    criteria: &crate::issue_monitor_gate::AcceptanceCriteria,
+    protection: &gwt_git::branch_protection::BranchProtectionStatus,
+    is_needs_human: bool,
+    attempt_count: u32,
+    max_attempts: u32,
+) -> EligibilityDecision {
+    // Stage 1 — two-stage opt-in. Either negative falls back to the existing
+    // human-gated #3165 behavior, NOT to needs-human.
+    if !autonomous_mode {
+        return EligibilityDecision::HumanGate("autonomous_mode is off".to_string());
+    }
+    if !has_auto_merge_label {
+        return EligibilityDecision::HumanGate("issue lacks the auto-merge label".to_string());
+    }
+    // Stage 2 — safety preconditions. Opt-in is satisfied, so failures here are
+    // NeedsHuman (the user asked for autonomy but it cannot run safely).
+    if is_needs_human {
+        return EligibilityDecision::NeedsHuman("already escalated to needs-human".to_string());
+    }
+    if attempt_count >= max_attempts {
+        return EligibilityDecision::NeedsHuman(format!(
+            "autonomous attempts exhausted ({attempt_count}/{max_attempts})"
+        ));
+    }
+    if !criteria.machine_checkable {
+        return EligibilityDecision::NeedsHuman(
+            "no machine-checkable acceptance criteria block".to_string(),
+        );
+    }
+    if !protection.is_verified() {
+        let reason = match protection {
+            gwt_git::branch_protection::BranchProtectionStatus::Unreadable(detail) => {
+                format!("branch protection could not be verified (permissions): {detail}")
+            }
+            _ => "branch protection absent or structurally insufficient".to_string(),
+        };
+        return EligibilityDecision::NeedsHuman(reason);
+    }
+    EligibilityDecision::Eligible
+}
+
 pub fn issue_monitor_linked_issue_kind(issue: &IssueMonitorIssue) -> LinkedIssueKind {
     if issue
         .labels
@@ -1370,6 +1441,66 @@ mod tests {
         assert_eq!(prefs.autonomous_tuning.max_attempts, 3);
         assert_eq!(prefs.merged_issues, vec![42], "existing fields preserved");
         assert!(!IssueMonitorPrefs::default().autonomous_mode);
+    }
+
+    #[test]
+    fn autonomous_eligibility_truth_table() {
+        // SPEC #3200 FR-003/004/005, Sc 2/3/4: two-stage-opt-in negatives →
+        // HumanGate; safety-precondition failures → NeedsHuman; all → Eligible.
+        use crate::issue_monitor_gate::AcceptanceCriteria;
+        use gwt_git::branch_protection::BranchProtectionStatus;
+        let ok = AcceptanceCriteria {
+            ids: vec!["AC-1".to_string()],
+            machine_checkable: true,
+            visual_surface: false,
+        };
+        let no_criteria = AcceptanceCriteria {
+            ids: vec![],
+            machine_checkable: false,
+            visual_surface: false,
+        };
+        let verified = BranchProtectionStatus::Verified {
+            required_checks: vec!["ci".to_string()],
+        };
+        let absent = BranchProtectionStatus::Absent;
+        let unreadable = BranchProtectionStatus::Unreadable("403".to_string());
+
+        assert_eq!(
+            autonomous_eligibility(true, true, &ok, &verified, false, 0, 3),
+            EligibilityDecision::Eligible
+        );
+        // (i)/(ii) opt-in negatives → HumanGate (NOT NeedsHuman).
+        assert!(matches!(
+            autonomous_eligibility(false, true, &ok, &verified, false, 0, 3),
+            EligibilityDecision::HumanGate(_)
+        ));
+        assert!(matches!(
+            autonomous_eligibility(true, false, &ok, &verified, false, 0, 3),
+            EligibilityDecision::HumanGate(_)
+        ));
+        // (iii)/(iv)/(v) safety preconditions → NeedsHuman.
+        assert!(matches!(
+            autonomous_eligibility(true, true, &no_criteria, &verified, false, 0, 3),
+            EligibilityDecision::NeedsHuman(_)
+        ));
+        assert!(matches!(
+            autonomous_eligibility(true, true, &ok, &absent, false, 0, 3),
+            EligibilityDecision::NeedsHuman(_)
+        ));
+        match autonomous_eligibility(true, true, &ok, &unreadable, false, 0, 3) {
+            EligibilityDecision::NeedsHuman(reason) => {
+                assert!(reason.contains("permissions"), "distinct reason: {reason}")
+            }
+            other => panic!("expected NeedsHuman, got {other:?}"),
+        }
+        assert!(matches!(
+            autonomous_eligibility(true, true, &ok, &verified, true, 0, 3),
+            EligibilityDecision::NeedsHuman(_)
+        ));
+        assert!(matches!(
+            autonomous_eligibility(true, true, &ok, &verified, false, 3, 3),
+            EligibilityDecision::NeedsHuman(_)
+        ));
     }
 
     #[test]
