@@ -335,6 +335,55 @@ fn ci_item_state(item: &serde_json::Value) -> CiItemState {
     }
 }
 
+/// The monitor action implied by a strong-gate evaluation (SPEC #3200 T-086).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum GateAction {
+    /// Gate passed — authorize the autonomous merge through Deliver.
+    Deliver,
+    /// CI is still running — re-check on the next scan. Consumes NO attempt
+    /// (waiting is not a failure).
+    WaitForCi,
+    /// Agent-remediable failure (CI failed, review rejected, or HEAD advanced so
+    /// the review is stale) — run a bounded Deliver-Fix / re-review attempt.
+    Remediate(String),
+    /// Structural failure the agent cannot fix (branch protection unavailable, or
+    /// the human edited the acceptance criteria after launch) — escalate to a
+    /// human.
+    Escalate(String),
+}
+
+/// Route a strong-gate evaluation to the monitor action (SPEC #3200 T-086).
+///
+/// - all conditions hold ⇒ [`GateAction::Deliver`];
+/// - branch protection not verifiable ⇒ [`GateAction::Escalate`] (repo settings
+///   are not agent-fixable);
+/// - acceptance criteria changed after launch ⇒ [`GateAction::Escalate`] (a human
+///   moved the spec — autonomy must not chase a moving target);
+/// - HEAD advanced past the reviewed SHA ⇒ [`GateAction::Remediate`] (re-review
+///   the new SHA, bounded by attempts);
+/// - CI still pending ⇒ [`GateAction::WaitForCi`] (no attempt consumed);
+/// - CI failed or review rejected ⇒ [`GateAction::Remediate`] (bounded fix loop).
+pub fn route_autonomous_gate(inputs: &AutonomousGateInputs) -> GateAction {
+    if evaluate_autonomous_gate(inputs) == GateDecision::Pass {
+        return GateAction::Deliver;
+    }
+    if !inputs.branch_protection.is_verified() {
+        return GateAction::Escalate("base-branch protection is not verified".to_string());
+    }
+    if !inputs.acceptance_unchanged {
+        return GateAction::Escalate("acceptance criteria changed after launch".to_string());
+    }
+    if inputs.reviewed_sha.is_empty() || inputs.reviewed_sha != inputs.head_sha {
+        return GateAction::Remediate(
+            "HEAD advanced past the reviewed SHA — re-review".to_string(),
+        );
+    }
+    if matches!(inputs.ci, CiOutcome::Pending) {
+        return GateAction::WaitForCi;
+    }
+    GateAction::Remediate("CI failed or independent review rejected — remediate".to_string())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -535,6 +584,80 @@ mod tests {
                 classify_ci_rollup("not json", &req(&["build"])),
                 CiOutcome::Pending
             );
+        }
+
+        #[test]
+        fn route_all_pass_delivers() {
+            assert_eq!(
+                route_autonomous_gate(&all_pass_inputs()),
+                GateAction::Deliver
+            );
+        }
+
+        #[test]
+        fn route_unverified_protection_escalates() {
+            let inputs = AutonomousGateInputs {
+                branch_protection: BranchProtectionStatus::Absent,
+                ..all_pass_inputs()
+            };
+            assert!(matches!(
+                route_autonomous_gate(&inputs),
+                GateAction::Escalate(_)
+            ));
+        }
+
+        #[test]
+        fn route_acceptance_drift_escalates() {
+            let inputs = AutonomousGateInputs {
+                acceptance_unchanged: false,
+                ..all_pass_inputs()
+            };
+            assert!(matches!(
+                route_autonomous_gate(&inputs),
+                GateAction::Escalate(_)
+            ));
+        }
+
+        #[test]
+        fn route_head_advance_remediates() {
+            // A new commit after review is agent-fixable: re-review the new SHA.
+            let inputs = AutonomousGateInputs {
+                head_sha: "def456".to_string(),
+                ..all_pass_inputs()
+            };
+            assert!(matches!(
+                route_autonomous_gate(&inputs),
+                GateAction::Remediate(_)
+            ));
+        }
+
+        #[test]
+        fn route_ci_pending_waits_without_consuming_attempt() {
+            let inputs = AutonomousGateInputs {
+                ci: CiOutcome::Pending,
+                ..all_pass_inputs()
+            };
+            assert_eq!(route_autonomous_gate(&inputs), GateAction::WaitForCi);
+        }
+
+        #[test]
+        fn route_ci_failure_and_review_rejection_remediate() {
+            let ci_failed = AutonomousGateInputs {
+                ci: CiOutcome::Failed,
+                ..all_pass_inputs()
+            };
+            assert!(matches!(
+                route_autonomous_gate(&ci_failed),
+                GateAction::Remediate(_)
+            ));
+            let review_rejected = AutonomousGateInputs {
+                review: ReviewGateOutcome::Fail("nope".to_string()),
+                ..all_pass_inputs()
+            };
+            assert!(matches!(
+                route_autonomous_gate(&review_rejected),
+                GateAction::Remediate(_)
+            ));
         }
 
         #[test]
