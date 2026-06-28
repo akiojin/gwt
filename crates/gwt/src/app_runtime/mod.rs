@@ -1173,6 +1173,51 @@ impl AppRuntime {
         self.local_issue_monitor_agent_failed_events(window_id, message, issue_number_hint)
     }
 
+    /// One or more agent windows were closed (single window close or whole
+    /// project tab close). For any window that was an Issue Monitor launched
+    /// window, return its Issue to pending (`Queued`) and free the active slot —
+    /// never a fabricated completion. Cheaply gated so non-monitor window
+    /// closes do not trigger a scan.
+    pub(crate) fn issue_monitor_windows_closed_events(
+        &mut self,
+        window_ids: &[String],
+    ) -> Vec<OutboundEvent> {
+        let monitor_windows: Vec<String> = {
+            let Some(project_root) = self.active_project_root() else {
+                return Vec::new();
+            };
+            let prefs_path = gwt::issue_monitor_prefs_path_for_repo_path(project_root);
+            let prefs = gwt::load_issue_monitor_prefs(&prefs_path).unwrap_or_default();
+            let monitor =
+                gwt::IssueMonitorState::with_prefs(gwt::IssueMonitorConfig::default(), prefs);
+            window_ids
+                .iter()
+                .filter(|window_id| monitor.launched_window_issue(window_id).is_some())
+                .cloned()
+                .collect()
+        };
+        if monitor_windows.is_empty() {
+            return Vec::new();
+        }
+        for window_id in &monitor_windows {
+            if let Err(error) = self.publish_issue_monitor_control(serde_json::json!({
+                "window_closed": { "window_id": window_id },
+            })) {
+                tracing::debug!(
+                    error = %error,
+                    window_id = %window_id,
+                    "issue monitor window-closed daemon publish failed"
+                );
+            }
+        }
+        let requeue_windows = monitor_windows;
+        self.local_issue_monitor_events_for(None, move |monitor| {
+            for window_id in &requeue_windows {
+                monitor.requeue_window(window_id);
+            }
+        })
+    }
+
     fn local_issue_monitor_events(
         &mut self,
         client_id: &str,

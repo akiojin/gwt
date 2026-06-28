@@ -919,7 +919,7 @@ impl IssueMonitorState {
     }
 
     /// Reverse-lookup the Issue associated with a launched agent `window_id`.
-    fn issue_for_window(&self, window_id: &str) -> Option<u64> {
+    pub fn launched_window_issue(&self, window_id: &str) -> Option<u64> {
         self.launched_windows
             .iter()
             .find_map(|(issue_number, launched_window_id)| {
@@ -983,7 +983,7 @@ impl IssueMonitorState {
     /// Returns the affected Issue number when the window mapped to an active
     /// launch that was re-queued.
     pub fn requeue_window(&mut self, window_id: &str) -> Option<u64> {
-        let issue_number = self.issue_for_window(window_id)?;
+        let issue_number = self.launched_window_issue(window_id)?;
         if self.merged_issues.contains(&issue_number) {
             return None;
         }

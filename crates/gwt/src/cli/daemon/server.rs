@@ -280,6 +280,9 @@ enum IssueMonitorControl {
         window_id: String,
         message: String,
     },
+    WindowClosed {
+        window_id: String,
+    },
 }
 
 fn apply_issue_monitor_control(
@@ -323,6 +326,10 @@ fn apply_issue_monitor_control(
             } else {
                 monitor.record_agent_window_failed(&window_id, message);
             }
+            true
+        }
+        IssueMonitorControl::WindowClosed { window_id } => {
+            monitor.requeue_window(&window_id);
             true
         }
     }
@@ -392,6 +399,10 @@ fn decode_issue_monitor_control(payload: serde_json::Value) -> Option<IssueMonit
                     issue_number,
                     window_id,
                 });
+            }
+            if let Some(window_closed) = payload.get("window_closed") {
+                let window_id = window_closed.get("window_id")?.as_str()?.to_string();
+                return Some(IssueMonitorControl::WindowClosed { window_id });
             }
             let issue_numbers = payload.get("priority_order")?.as_array()?;
             let issue_numbers = issue_numbers

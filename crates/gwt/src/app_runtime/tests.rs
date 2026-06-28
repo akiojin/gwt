@@ -5476,6 +5476,129 @@ fn app_runtime_issue_monitor_launch_complete_marks_issue_launched_and_keeps_acti
 }
 
 #[test]
+fn app_runtime_closing_issue_monitor_window_returns_issue_to_pending() {
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedEnvVar::set("HOME", temp.path());
+    let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+    let repo = temp.path().join("repo");
+    fs::create_dir_all(&repo).expect("create repo");
+    init_repo(&repo);
+    Cache::new(issue_cache_root(&repo))
+        .write_snapshot(&sample_issue_snapshot(
+            42,
+            "Issue Monitor close returns to pending",
+            &["bug"],
+            "Issue body",
+            "2026-06-23T00:00:00Z",
+        ))
+        .expect("write issue cache");
+    gwt::save_issue_monitor_prefs(
+        &gwt::issue_monitor_prefs_path_for_repo_path(&repo),
+        &gwt::IssueMonitorPrefs {
+            enabled: true,
+            max_active_agents: 1,
+            ..gwt::IssueMonitorPrefs::default()
+        },
+    )
+    .expect("save issue monitor prefs");
+    let tab = sample_project_tab_with_window_at(
+        "tab-1",
+        "agent-1",
+        repo.clone(),
+        WindowPreset::Agent,
+        WindowProcessStatus::Running,
+    );
+    let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+    let window_id = combined_window_id("tab-1", "agent-1");
+    runtime.pending_launch_feedback_contexts.insert(
+        window_id.clone(),
+        LaunchFeedbackContext {
+            client_id: "__issue_monitor__".to_string(),
+            title: "Issue Monitor".to_string(),
+            issue_monitor_issue_number: Some(42),
+        },
+    );
+    let (command, args) = if cfg!(windows) {
+        (
+            "cmd".to_string(),
+            vec![
+                "/d".to_string(),
+                "/s".to_string(),
+                "/c".to_string(),
+                "exit /b 0".to_string(),
+            ],
+        )
+    } else {
+        (
+            "/bin/sh".to_string(),
+            vec!["-lc".to_string(), "exit 0".to_string()],
+        )
+    };
+    let _ = runtime.handle_launch_complete(
+        window_id.clone(),
+        Ok((
+            ProcessLaunch {
+                command,
+                args,
+                env: HashMap::new(),
+                remove_env: Vec::new(),
+                cwd: Some(repo.clone()),
+            },
+            "session-issue-42".to_string(),
+            "work/issue-42".to_string(),
+            "Codex".to_string(),
+            repo.clone(),
+            gwt_agent::AgentId::Codex,
+            Some(42),
+            Some("origin/develop".to_string()),
+            gwt_agent::LaunchRuntimeTarget::Host,
+            repo.display().to_string(),
+        )),
+    );
+
+    // Closing the launched window must free the active slot and return the
+    // (unmerged) Issue to pending — never a fabricated completion state.
+    let events = runtime.close_window_events(&window_id);
+    let status = events
+        .iter()
+        .find_map(|event| match &event.event {
+            BackendEvent::IssueMonitorStatus { status } => Some(status),
+            _ => None,
+        })
+        .expect("issue monitor status after close");
+    assert_eq!(
+        status.active_count, 0,
+        "closing the launched window frees the active slot"
+    );
+    let inbox = events
+        .iter()
+        .find_map(|event| match &event.event {
+            BackendEvent::IssueMonitorInbox { items } => Some(items),
+            _ => None,
+        })
+        .expect("issue monitor inbox after close");
+    let item = inbox
+        .iter()
+        .find(|item| item.issue.number == 42)
+        .expect("issue row after close");
+    assert_eq!(
+        item.state,
+        gwt::MonitorInboxState::Queued,
+        "an unmerged close returns the Issue to pending"
+    );
+
+    let prefs = gwt::load_issue_monitor_prefs(&gwt::issue_monitor_prefs_path_for_repo_path(&repo))
+        .expect("load issue monitor prefs");
+    assert!(
+        prefs.launched_issues.is_empty(),
+        "closed window is no longer persisted as an active launch"
+    );
+}
+
+#[test]
 fn app_runtime_runtime_error_marks_issue_monitor_launched_issue_failed() {
     let _env_lock = env_test_lock()
         .lock()
