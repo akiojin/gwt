@@ -84,6 +84,8 @@ fn backend_issue_monitor_status_serializes_for_monitor_card() {
             last_error: None,
             launch_profile_source: gwt::IssueMonitorLaunchProfileSource::LastSettings,
             launch_profile_summary: "codex / gpt-5.5 / high / host".to_string(),
+            autonomous_mode: false,
+            autonomous_issues: Vec::new(),
         },
     };
 

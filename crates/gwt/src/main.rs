@@ -1353,6 +1353,8 @@ mod tests {
             last_error: None,
             launch_profile_source: gwt::IssueMonitorLaunchProfileSource::Default,
             launch_profile_summary: "configure to override".to_string(),
+            autonomous_mode: false,
+            autonomous_issues: Vec::new(),
         };
         let status_payload = gwt::runtime_daemon_events::issue_monitor_payload(
             "status",

@@ -366,6 +366,22 @@ pub struct IssueMonitorStatusView {
     pub last_error: Option<String>,
     pub launch_profile_source: IssueMonitorLaunchProfileSource,
     pub launch_profile_summary: String,
+    /// SPEC #3200 T-048/FR-001: whether unattended autonomous mode is enabled.
+    #[serde(default)]
+    pub autonomous_mode: bool,
+    /// SPEC #3200 T-048/FR-033: per-issue autonomous lifecycle summary, so every
+    /// decision boundary (phase, attempts, needs-human) is observable.
+    #[serde(default)]
+    pub autonomous_issues: Vec<AutonomousIssueSummary>,
+}
+
+/// SPEC #3200 T-048: status-view summary of one issue's autonomous lifecycle.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AutonomousIssueSummary {
+    pub issue_number: u64,
+    pub phase: AutonomousPhase,
+    pub attempts: u32,
+    pub needs_human: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -584,6 +600,18 @@ impl AutonomousIssueRecord {
             last_heartbeat: None,
         }
     }
+}
+
+/// SPEC #3200 FR-004: the GitHub label that, together with project-level
+/// `autonomous_mode`, opts an issue into unattended autonomous resolution.
+pub const AUTO_MERGE_LABEL: &str = "auto-merge";
+
+/// Whether `issue` carries the [`AUTO_MERGE_LABEL`] (case-insensitive).
+pub fn issue_has_auto_merge_label(issue: &IssueMonitorIssue) -> bool {
+    issue
+        .labels
+        .iter()
+        .any(|label| label.eq_ignore_ascii_case(AUTO_MERGE_LABEL))
 }
 
 pub fn issue_monitor_linked_issue_kind(issue: &IssueMonitorIssue) -> LinkedIssueKind {
@@ -1015,7 +1043,37 @@ impl IssueMonitorState {
                 .as_ref()
                 .map(issue_monitor_launch_profile_summary)
                 .unwrap_or_else(|| "configure to override".to_string()),
+            autonomous_mode: self.autonomous_mode,
+            autonomous_issues: self
+                .autonomous_records
+                .values()
+                .map(|record| AutonomousIssueSummary {
+                    issue_number: record.issue_number,
+                    phase: record.phase,
+                    attempts: record.attempts,
+                    needs_human: record.phase == AutonomousPhase::NeedsHuman,
+                })
+                .collect(),
         }
+    }
+
+    /// SPEC #3200 T-001/FR-001: read the opt-in autonomous mode flag.
+    pub fn autonomous_mode(&self) -> bool {
+        self.autonomous_mode
+    }
+
+    /// SPEC #3200 T-047/FR-001: toggle unattended autonomous mode. Default OFF
+    /// keeps the SPEC #3165 human-gated behavior exactly.
+    pub fn set_autonomous_mode(&mut self, enabled: bool) {
+        self.autonomous_mode = enabled;
+    }
+
+    /// SPEC #3200 T-032/FR-003/004: the pure two-stage opt-in pre-gate — an issue
+    /// is an autonomous candidate ONLY when autonomous mode is on AND the issue
+    /// carries the `auto-merge` label. Branch-protection / acceptance-criteria /
+    /// attempt safety preconditions are applied later by [`autonomous_eligibility`].
+    pub fn is_autonomous_two_stage_candidate(&self, issue: &IssueMonitorIssue) -> bool {
+        self.autonomous_mode && issue_has_auto_merge_label(issue)
     }
 
     pub fn inbox_item(&self, issue_number: u64) -> Option<&IssueMonitorInboxItem> {
@@ -2142,6 +2200,68 @@ mod tests {
         assert_eq!(
             monitor.inbox_item(42).map(|item| item.state),
             Some(MonitorInboxState::NeedsHuman)
+        );
+    }
+
+    #[test]
+    fn status_view_surfaces_autonomous_mode_and_per_issue_summary() {
+        // SPEC #3200 T-048/FR-033: autonomous_mode and per-issue phase / attempts
+        // / needs_human are observable in the status view.
+        let mut monitor = IssueMonitorState::with_prefs(
+            IssueMonitorConfig::default(),
+            IssueMonitorPrefs {
+                autonomous_mode: true,
+                ..IssueMonitorPrefs::default()
+            },
+        );
+        monitor.record_attempt(42);
+        monitor.set_autonomous_phase(42, AutonomousPhase::Reviewing);
+        monitor.escalate_to_needs_human(43, "gate unavailable");
+
+        let view = monitor.status_view();
+        assert!(view.autonomous_mode, "autonomous_mode surfaced");
+        let summary_42 = view
+            .autonomous_issues
+            .iter()
+            .find(|s| s.issue_number == 42)
+            .expect("issue 42 summarized");
+        assert_eq!(summary_42.phase, AutonomousPhase::Reviewing);
+        assert_eq!(summary_42.attempts, 1);
+        assert!(!summary_42.needs_human);
+        let summary_43 = view
+            .autonomous_issues
+            .iter()
+            .find(|s| s.issue_number == 43)
+            .expect("issue 43 summarized");
+        assert!(summary_43.needs_human, "escalated issue marked needs_human");
+        assert_eq!(summary_43.phase, AutonomousPhase::NeedsHuman);
+    }
+
+    #[test]
+    fn two_stage_candidate_requires_mode_and_label() {
+        // SPEC #3200 T-032/FR-003/004: the pure pre-gate filter requires BOTH
+        // autonomous_mode ON and the auto-merge label. Either missing ⇒ not a
+        // candidate (falls back to the human-gated path).
+        let labelled = IssueMonitorIssue {
+            labels: vec!["auto-merge".to_string()],
+            ..issue(42)
+        };
+        let unlabelled = issue(43);
+
+        let mut off = IssueMonitorState::new(IssueMonitorConfig::default());
+        assert!(
+            !off.is_autonomous_two_stage_candidate(&labelled),
+            "mode off"
+        );
+
+        off.set_autonomous_mode(true);
+        assert!(
+            off.is_autonomous_two_stage_candidate(&labelled),
+            "mode on + label ⇒ candidate"
+        );
+        assert!(
+            !off.is_autonomous_two_stage_candidate(&unlabelled),
+            "mode on but no label ⇒ not a candidate"
         );
     }
 
