@@ -60,6 +60,16 @@ fn start_work_open_error(client_id: &str, message: impl Into<String>) -> Vec<Out
     vec![launch_wizard_open_error(client_id, "Start Work", message)]
 }
 
+fn issue_monitor_auto_launch_geometry(index: usize) -> WindowGeometry {
+    let offset = ((index % 8) as f64) * 24.0;
+    WindowGeometry {
+        x: 96.0 + offset,
+        y: 96.0 + offset,
+        width: 860.0,
+        height: 520.0,
+    }
+}
+
 use super::{
     build_shell_process_launch, combined_window_id, detect_wizard_docker_context_and_status,
     knowledge_error_event, knowledge_kind_for_preset, linked_issue_workspace_context,
@@ -69,19 +79,33 @@ use super::{
     workspace_resume_branch_exists, workspace_resume_branch_from_journal_project_root,
     workspace_resume_context_for_work_item, workspace_resume_context_from_journal,
     workspace_resume_context_from_projection, workspace_resume_owner_issue_number,
-    AgentKanbanLaunchTarget, AppEventProxy, AppRuntime, BackendEvent, IssueLaunchWizardPrepared,
-    LaunchFeedbackContext, LaunchWizardMemoryCache, LaunchWizardSession, OutboundEvent,
-    WindowPreset, WindowProcessStatus, WorkspaceResumeContext, WORKSPACE_OVERVIEW_JOURNAL_LIMIT,
+    AgentKanbanLaunchTarget, AppEventProxy, AppRuntime, BackendEvent, DispatchTarget,
+    IssueLaunchWizardPrepared, IssueMonitorProfileSaveContext, LaunchFeedbackContext,
+    LaunchWizardMemoryCache, LaunchWizardSession, OutboundEvent, WindowPreset, WindowProcessStatus,
+    WorkspaceResumeContext, WORKSPACE_OVERVIEW_JOURNAL_LIMIT,
 };
 use crate::usable_worktree_path_for_branch;
 
 impl AppRuntime {
+    fn launch_wizard_view_for_session(session: &LaunchWizardSession) -> LaunchWizardView {
+        let mut view = session.wizard.view();
+        if session.issue_monitor_profile_save.is_some() {
+            view.title = "Configure Issue Monitor".to_string();
+            if view.primary_action_label == "Create and launch"
+                || view.primary_action_label == "Launch"
+            {
+                view.primary_action_label = "Save settings".to_string();
+            }
+        }
+        view
+    }
+
     pub(crate) fn launch_wizard_state_outbound(&self) -> OutboundEvent {
         OutboundEvent::broadcast(BackendEvent::LaunchWizardState {
             wizard: self
                 .launch_wizard
                 .as_ref()
-                .map(|wizard| Box::new(wizard.wizard.view())),
+                .map(|wizard| Box::new(Self::launch_wizard_view_for_session(wizard))),
         })
     }
 
@@ -222,6 +246,9 @@ impl AppRuntime {
             wizard,
             workspace_resume_context,
             agent_kanban_target: None,
+            auto_submit_after_runtime_resolution: None,
+            issue_monitor_profile_save: None,
+            issue_monitor_launch_issue_number: None,
         });
 
         Ok(())
@@ -235,13 +262,53 @@ impl AppRuntime {
         issue_number: u64,
         linked_issue_kind: LinkedIssueKind,
     ) -> Result<(), String> {
+        let previous_profiles = self.launch_wizard_cache.agent_preferences();
+        self.open_knowledge_launch_wizard_for_base_branch_with_previous_profiles(
+            tab_id,
+            project_root,
+            base_branch_name,
+            issue_number,
+            linked_issue_kind,
+            previous_profiles,
+        )
+    }
+
+    fn open_knowledge_launch_wizard_for_base_branch_with_previous_profiles(
+        &mut self,
+        tab_id: &str,
+        project_root: &Path,
+        base_branch_name: &str,
+        issue_number: u64,
+        linked_issue_kind: LinkedIssueKind,
+        previous_profiles: gwt::LaunchWizardPreviousProfiles,
+    ) -> Result<(), String> {
+        self.launch_wizard = Some(self.build_knowledge_launch_wizard_session(
+            tab_id,
+            project_root,
+            base_branch_name,
+            issue_number,
+            linked_issue_kind,
+            previous_profiles,
+        ));
+
+        Ok(())
+    }
+
+    fn build_knowledge_launch_wizard_session(
+        &self,
+        tab_id: &str,
+        project_root: &Path,
+        base_branch_name: &str,
+        issue_number: u64,
+        linked_issue_kind: LinkedIssueKind,
+        previous_profiles: gwt::LaunchWizardPreviousProfiles,
+    ) -> LaunchWizardSession {
         let base_branch_name = normalize_branch_name(base_branch_name);
         let target_branch_name =
             knowledge_launch_target_branch_name(linked_issue_kind, issue_number);
         let live_sessions = self.live_sessions_for_branch(tab_id, &target_branch_name);
         let quick_start_root = project_root.to_path_buf();
         let quick_start_entries = Vec::new();
-        let previous_profiles = self.launch_wizard_cache.agent_preferences();
         let agent_options = self.launch_wizard_cache.agent_options();
         let docker_context = None;
         let docker_service_status = gwt_docker::ComposeServiceStatus::NotFound;
@@ -278,15 +345,16 @@ impl AppRuntime {
         wizard.set_hermes_needs_setup(!gwt_skills::hermes_is_configured_global());
         wizard.set_opencode_needs_setup(!gwt_skills::opencode_is_configured_global());
         wizard.mark_runtime_context_unresolved();
-        self.launch_wizard = Some(LaunchWizardSession {
+        LaunchWizardSession {
             tab_id: tab_id.to_string(),
             wizard_id,
             wizard,
             workspace_resume_context,
             agent_kanban_target: None,
-        });
-
-        Ok(())
+            auto_submit_after_runtime_resolution: None,
+            issue_monitor_profile_save: None,
+            issue_monitor_launch_issue_number: None,
+        }
     }
 
     pub(crate) fn open_active_work_launch_wizard(
@@ -1223,6 +1291,9 @@ impl AppRuntime {
             wizard,
             workspace_resume_context,
             agent_kanban_target: None,
+            auto_submit_after_runtime_resolution: None,
+            issue_monitor_profile_save: None,
+            issue_monitor_launch_issue_number: None,
         });
 
         // SPEC-2359 US-83 / FR-444 + FR-445: populate the "open existing branch"
@@ -1339,6 +1410,357 @@ impl AppRuntime {
             ));
         });
         Vec::new()
+    }
+
+    pub(crate) fn open_issue_monitor_launch_wizard_events(
+        &mut self,
+        client_id: &str,
+        issue_number: u64,
+        linked_issue_kind: gwt::LinkedIssueKind,
+    ) -> Vec<OutboundEvent> {
+        let Some(tab_id) = self.active_tab_id.clone() else {
+            return vec![OutboundEvent::reply(
+                client_id,
+                BackendEvent::IssueMonitorToast {
+                    level: "error".to_string(),
+                    message: "Open a project before launching monitored Issue work".to_string(),
+                    issue_number: Some(issue_number),
+                },
+            )];
+        };
+        let Some(tab) = self.tab(&tab_id) else {
+            return vec![OutboundEvent::reply(
+                client_id,
+                BackendEvent::IssueMonitorToast {
+                    level: "error".to_string(),
+                    message: "Project tab not found".to_string(),
+                    issue_number: Some(issue_number),
+                },
+            )];
+        };
+        if tab.kind != gwt::ProjectKind::Git {
+            return vec![OutboundEvent::reply(
+                client_id,
+                BackendEvent::IssueMonitorToast {
+                    level: "error".to_string(),
+                    message: "Issue Monitor launch requires a Git project".to_string(),
+                    issue_number: Some(issue_number),
+                },
+            )];
+        }
+        if tab.migration_pending {
+            return vec![OutboundEvent::reply(
+                client_id,
+                BackendEvent::IssueMonitorToast {
+                    level: "error".to_string(),
+                    message: "Complete the project migration before launching monitored Issue work"
+                        .to_string(),
+                    issue_number: Some(issue_number),
+                },
+            )];
+        }
+
+        let project_root = tab.project_root.clone();
+        let base_branch_name = match current_branch_name_for_launch_agent(&project_root) {
+            Ok(branch) => branch,
+            Err(error) => {
+                return vec![OutboundEvent::reply(
+                    client_id,
+                    BackendEvent::IssueMonitorToast {
+                        level: "error".to_string(),
+                        message: error,
+                        issue_number: Some(issue_number),
+                    },
+                )];
+            }
+        };
+        let previous_profiles = self.issue_monitor_previous_profiles(&project_root);
+        match self.open_knowledge_launch_wizard_for_base_branch_with_previous_profiles(
+            &tab_id,
+            &project_root,
+            &base_branch_name,
+            issue_number,
+            linked_issue_kind,
+            previous_profiles,
+        ) {
+            Ok(()) => {
+                if let Some(session) = self.launch_wizard.as_mut() {
+                    session.issue_monitor_launch_issue_number = Some(issue_number);
+                    session
+                        .wizard
+                        .apply(gwt::LaunchWizardAction::SetInitialPrompt {
+                            value: gwt::issue_monitor_launch_prompt(
+                                linked_issue_kind,
+                                issue_number,
+                            ),
+                        });
+                }
+                vec![
+                    OutboundEvent::reply(
+                        client_id,
+                        BackendEvent::IssueMonitorToast {
+                            level: "info".to_string(),
+                            message: "Issue Monitor launch prepared".to_string(),
+                            issue_number: Some(issue_number),
+                        },
+                    ),
+                    self.launch_wizard_state_outbound(),
+                ]
+            }
+            Err(error) => vec![OutboundEvent::reply(
+                client_id,
+                BackendEvent::IssueMonitorToast {
+                    level: "error".to_string(),
+                    message: error,
+                    issue_number: Some(issue_number),
+                },
+            )],
+        }
+    }
+
+    pub(crate) fn open_issue_monitor_configure_wizard_events(
+        &mut self,
+        client_id: &str,
+        issue_number: u64,
+        linked_issue_kind: gwt::LinkedIssueKind,
+    ) -> Vec<OutboundEvent> {
+        let events = self.open_issue_monitor_launch_wizard_events(
+            client_id,
+            issue_number,
+            linked_issue_kind,
+        );
+        if !matches!(
+            self.launch_wizard.as_mut(),
+            Some(LaunchWizardSession {
+                wizard: _,
+                issue_monitor_profile_save: None,
+                ..
+            })
+        ) {
+            return events;
+        }
+        if let Some(session) = self.launch_wizard.as_mut() {
+            session.issue_monitor_profile_save = Some(IssueMonitorProfileSaveContext {
+                client_id: client_id.to_string(),
+                issue_number,
+            });
+            session
+                .wizard
+                .apply(gwt::LaunchWizardAction::UseStartMethod {
+                    method: gwt::LaunchWizardStartMethodKind::ConfigureAndStart,
+                });
+        }
+        events
+            .into_iter()
+            .map(|mut event| {
+                if let BackendEvent::IssueMonitorToast { message, .. } = &mut event.event {
+                    if message == "Issue Monitor launch prepared" {
+                        *message = "Issue Monitor settings opened".to_string();
+                    }
+                }
+                if matches!(event.event, BackendEvent::LaunchWizardState { .. }) {
+                    event = self.launch_wizard_state_outbound();
+                }
+                event
+            })
+            .collect()
+    }
+
+    pub(super) fn issue_monitor_previous_profiles(
+        &self,
+        project_root: &Path,
+    ) -> gwt::LaunchWizardPreviousProfiles {
+        let prefs_path = gwt::issue_monitor_prefs_path_for_repo_path(project_root);
+        if let Ok(prefs) = gwt::load_issue_monitor_prefs(&prefs_path) {
+            if let Some(profile) = prefs.launch_profile {
+                return gwt::LaunchWizardPreviousProfiles::from_profile(Some(profile.into()));
+            }
+        }
+        let profiles = self.launch_wizard_cache.previous_profiles(project_root);
+        if profiles.repo_local().is_some() {
+            return profiles;
+        }
+        let fallback_profile = profiles.preferred_profile().cloned();
+        profiles.with_repo_local(fallback_profile)
+    }
+
+    pub(crate) fn auto_launch_issue_monitor_request_events(
+        &mut self,
+        issue_number: u64,
+        linked_issue_kind: gwt::LinkedIssueKind,
+    ) -> Vec<OutboundEvent> {
+        match self.silent_issue_monitor_launch_events(issue_number, linked_issue_kind) {
+            Ok(Some(events)) => events,
+            Ok(None) => {
+                if self.launch_wizard.is_some() {
+                    return vec![OutboundEvent::broadcast(BackendEvent::IssueMonitorToast {
+                        level: "info".to_string(),
+                        message: "Issue Monitor settings are already open".to_string(),
+                        issue_number: Some(issue_number),
+                    })];
+                }
+                self.open_issue_monitor_configure_wizard_events(
+                    "__issue_monitor__",
+                    issue_number,
+                    linked_issue_kind,
+                )
+                .into_iter()
+                .map(|mut event| {
+                    if matches!(event.target, DispatchTarget::Client(_)) {
+                        event.target = DispatchTarget::Broadcast;
+                    }
+                    event
+                })
+                .collect()
+            }
+            Err(error) => self.issue_monitor_launch_failed_events(issue_number, &error),
+        }
+    }
+
+    fn silent_issue_monitor_launch_events(
+        &mut self,
+        issue_number: u64,
+        linked_issue_kind: gwt::LinkedIssueKind,
+    ) -> Result<Option<Vec<OutboundEvent>>, String> {
+        let Some(tab_id) = self.active_tab_id.clone() else {
+            return Err("Open a project before launching monitored Issue work".to_string());
+        };
+        let Some(tab) = self.tab(&tab_id) else {
+            return Err("Project tab not found".to_string());
+        };
+        if tab.kind != gwt::ProjectKind::Git {
+            return Err("Issue Monitor launch requires a Git project".to_string());
+        }
+        if tab.migration_pending {
+            return Err(
+                "Complete the project migration before launching monitored Issue work".to_string(),
+            );
+        }
+
+        let project_root = tab.project_root.clone();
+        let base_branch_name = current_branch_name_for_launch_agent(&project_root)?;
+        let previous_profiles = self.issue_monitor_previous_profiles(&project_root);
+        if previous_profiles.preferred_profile().is_none() {
+            return Ok(None);
+        }
+        let launch_profiles = previous_profiles.clone();
+
+        let mut session = self.build_knowledge_launch_wizard_session(
+            &tab_id,
+            &project_root,
+            &base_branch_name,
+            issue_number,
+            linked_issue_kind,
+            previous_profiles,
+        );
+        session
+            .wizard
+            .apply(gwt::LaunchWizardAction::SetInitialPrompt {
+                value: gwt::issue_monitor_launch_prompt(linked_issue_kind, issue_number),
+            });
+        session
+            .wizard
+            .apply(gwt::LaunchWizardAction::UseStartMethod {
+                method: gwt::LaunchWizardStartMethodKind::StartWithLastSettings,
+            });
+        let launch_request = self.resolve_silent_issue_monitor_launch_request(
+            &mut session,
+            &project_root,
+            launch_profiles,
+        )?;
+        let launch_index = self
+            .tab(&session.tab_id)
+            .map(|tab| {
+                tab.workspace
+                    .persisted()
+                    .windows
+                    .iter()
+                    .filter(|window| window.preset == WindowPreset::Agent)
+                    .count()
+            })
+            .unwrap_or(0);
+        let geometry = issue_monitor_auto_launch_geometry(launch_index);
+        let feedback = LaunchFeedbackContext {
+            client_id: "__issue_monitor__".to_string(),
+            title: "Issue Monitor".to_string(),
+            issue_monitor_issue_number: Some(issue_number),
+        };
+        let mut events = match launch_request {
+            LaunchWizardLaunchRequest::Agent(config) => self
+                .spawn_agent_window_with_feedback_at_geometry(
+                    &session.tab_id,
+                    *config,
+                    geometry,
+                    session.workspace_resume_context.clone(),
+                    feedback,
+                )?,
+            LaunchWizardLaunchRequest::Shell(_) => {
+                return Err("Issue Monitor automatic launch requires an agent target".to_string());
+            }
+        };
+        events.push(OutboundEvent::broadcast(BackendEvent::IssueMonitorToast {
+            level: "info".to_string(),
+            message: "Issue Monitor launch requested".to_string(),
+            issue_number: Some(issue_number),
+        }));
+        Ok(Some(events))
+    }
+
+    fn resolve_silent_issue_monitor_launch_request(
+        &self,
+        session: &mut LaunchWizardSession,
+        project_root: &Path,
+        previous_profiles: gwt::LaunchWizardPreviousProfiles,
+    ) -> Result<LaunchWizardLaunchRequest, String> {
+        let completion = session.wizard.completion.take().ok_or_else(|| {
+            session
+                .wizard
+                .error
+                .clone()
+                .unwrap_or_else(|| "Issue Monitor launch settings are incomplete".to_string())
+        })?;
+        let completion = match completion {
+            LaunchWizardCompletion::ResolveRuntime(config) => {
+                let branch_name = session.wizard.branch_name.clone();
+                let preferred_agent_id = previous_profiles.preferred_agent_id().map(str::to_string);
+                let mut hydration = resolve_launch_wizard_runtime_context_hydration(
+                    project_root,
+                    *config,
+                    branch_name,
+                    self.launch_wizard_cache.clone(),
+                )?;
+                hydration.previous_profiles = Some(previous_profiles);
+                session.wizard.apply_runtime_context(hydration);
+                if let Some(agent_id) = preferred_agent_id {
+                    session
+                        .wizard
+                        .apply(gwt::LaunchWizardAction::SetAgent { agent_id });
+                }
+                session
+                    .wizard
+                    .apply(gwt::LaunchWizardAction::UseStartMethod {
+                        method: gwt::LaunchWizardStartMethodKind::StartWithLastSettings,
+                    });
+                session.wizard.completion.take().ok_or_else(|| {
+                    session.wizard.error.clone().unwrap_or_else(|| {
+                        "Issue Monitor launch settings are incomplete".to_string()
+                    })
+                })?
+            }
+            completion => completion,
+        };
+        match completion {
+            LaunchWizardCompletion::Launch(config) => Ok(*config),
+            LaunchWizardCompletion::FocusWindow { window_id } => Err(format!(
+                "Issue Monitor launch resolved to existing window {window_id}"
+            )),
+            LaunchWizardCompletion::Cancelled => {
+                Err("Issue Monitor launch was cancelled".to_string())
+            }
+            LaunchWizardCompletion::ResolveRuntime(_) => {
+                Err("Issue Monitor launch runtime context is unresolved".to_string())
+            }
+        }
     }
 
     pub(crate) fn handle_issue_launch_wizard_prepared(
@@ -1523,6 +1945,13 @@ impl AppRuntime {
                 vec![self.launch_wizard_state_outbound()]
             }
             Some(LaunchWizardCompletion::Launch(config)) => {
+                if let Some(save_context) = session.issue_monitor_profile_save.clone() {
+                    return self.save_issue_monitor_profile_from_launch_request(
+                        session,
+                        save_context,
+                        *config,
+                    );
+                }
                 let Some(bounds) = bounds else {
                     let error = "Viewport bounds are required to launch a window".to_string();
                     Self::log_launch_wizard_error(
@@ -1536,92 +1965,168 @@ impl AppRuntime {
                     self.launch_wizard = Some(session);
                     return vec![self.launch_wizard_state_outbound()];
                 };
-                match *config {
-                    LaunchWizardLaunchRequest::Agent(config) => {
-                        let workspace_resume_context = session.workspace_resume_context.clone();
-                        let launch_feedback_context =
-                            client_id.map(|client_id| LaunchFeedbackContext {
-                                client_id: client_id.to_string(),
-                                title: if session.wizard.wizard_mode
-                                    == gwt::LaunchWizardMode::StartWork
-                                {
-                                    "Start Work".to_string()
-                                } else {
-                                    "Launch Agent".to_string()
-                                },
-                            });
-                        let spawn_result = if let Some(target) = session.agent_kanban_target.clone()
-                        {
-                            self.spawn_agent_window_in_agent_kanban(
-                                &session.tab_id,
-                                *config,
-                                bounds,
-                                workspace_resume_context,
-                                launch_feedback_context,
-                                target,
-                            )
-                        } else if let Some(launch_feedback_context) = launch_feedback_context {
-                            self.spawn_agent_window_with_feedback(
-                                &session.tab_id,
-                                *config,
-                                bounds,
-                                workspace_resume_context,
-                                launch_feedback_context,
-                            )
-                        } else {
-                            self.spawn_agent_window(
-                                &session.tab_id,
-                                *config,
-                                bounds,
-                                workspace_resume_context,
-                            )
-                        };
-                        match spawn_result {
-                            Ok(mut events) => {
-                                events.insert(0, self.launch_wizard_state_broadcast(None));
-                                events
-                            }
-                            Err(error) => {
-                                Self::log_launch_wizard_error(
-                                    &session,
-                                    "spawn_agent_window",
-                                    action_label,
-                                    requested_agent_id.as_deref(),
-                                    &error,
-                                );
-                                session.wizard.error = Some(error);
-                                self.launch_wizard = Some(session);
-                                vec![self.launch_wizard_state_outbound()]
-                            }
-                        }
-                    }
-                    LaunchWizardLaunchRequest::Shell(config) => {
-                        match self.spawn_wizard_shell_window(&session.tab_id, *config, bounds) {
-                            Ok(mut events) => {
-                                events.insert(0, self.launch_wizard_state_broadcast(None));
-                                events
-                            }
-                            Err(error) => {
-                                Self::log_launch_wizard_error(
-                                    &session,
-                                    "spawn_shell_window",
-                                    action_label,
-                                    requested_agent_id.as_deref(),
-                                    &error,
-                                );
-                                session.wizard.error = Some(error);
-                                self.launch_wizard = Some(session);
-                                vec![self.launch_wizard_state_outbound()]
-                            }
-                        }
-                    }
-                }
+                session
+                    .wizard
+                    .mark_launch_materialization_pending("Preparing worktree...");
+                self.proxy
+                    .send(UserEvent::LaunchWizardLaunchMaterializationRequested {
+                        wizard_id: session.wizard_id.clone(),
+                        client_id: client_id.map(str::to_string),
+                        config,
+                        bounds,
+                    });
+                self.launch_wizard = Some(session);
+                vec![self.launch_wizard_state_outbound()]
             }
             None => {
                 self.launch_wizard = Some(session);
                 vec![self.launch_wizard_state_outbound()]
             }
         }
+    }
+
+    pub(crate) fn handle_launch_wizard_launch_materialization_requested(
+        &mut self,
+        wizard_id: String,
+        client_id: Option<String>,
+        config: LaunchWizardLaunchRequest,
+        bounds: WindowGeometry,
+    ) -> Vec<OutboundEvent> {
+        let Some(mut session) = self.launch_wizard.take() else {
+            return Vec::new();
+        };
+        if session.wizard_id != wizard_id {
+            self.launch_wizard = Some(session);
+            return Vec::new();
+        }
+
+        match config {
+            LaunchWizardLaunchRequest::Agent(config) => {
+                let requested_agent_id = config.agent_id.command().to_string();
+                let workspace_resume_context = session.workspace_resume_context.clone();
+                let launch_feedback_context = client_id.map(|client_id| LaunchFeedbackContext {
+                    client_id,
+                    title: if session.wizard.wizard_mode == gwt::LaunchWizardMode::StartWork {
+                        "Start Work".to_string()
+                    } else {
+                        "Launch Agent".to_string()
+                    },
+                    issue_monitor_issue_number: session.issue_monitor_launch_issue_number,
+                });
+                let spawn_result = if let Some(target) = session.agent_kanban_target.clone() {
+                    self.spawn_agent_window_in_agent_kanban(
+                        &session.tab_id,
+                        *config,
+                        bounds,
+                        workspace_resume_context,
+                        launch_feedback_context,
+                        target,
+                    )
+                } else if let Some(launch_feedback_context) = launch_feedback_context {
+                    self.spawn_agent_window_with_feedback(
+                        &session.tab_id,
+                        *config,
+                        bounds,
+                        workspace_resume_context,
+                        launch_feedback_context,
+                    )
+                } else {
+                    self.spawn_agent_window(
+                        &session.tab_id,
+                        *config,
+                        bounds,
+                        workspace_resume_context,
+                    )
+                };
+                match spawn_result {
+                    Ok(mut events) => {
+                        events.insert(0, self.launch_wizard_state_broadcast(None));
+                        events
+                    }
+                    Err(error) => {
+                        Self::log_launch_wizard_error(
+                            &session,
+                            "spawn_agent_window",
+                            "submit",
+                            Some(requested_agent_id.as_str()),
+                            &error,
+                        );
+                        session.wizard.clear_launch_materialization_pending();
+                        session.wizard.error = Some(error);
+                        self.launch_wizard = Some(session);
+                        vec![self.launch_wizard_state_outbound()]
+                    }
+                }
+            }
+            LaunchWizardLaunchRequest::Shell(config) => {
+                match self.spawn_wizard_shell_window(&session.tab_id, *config, bounds) {
+                    Ok(mut events) => {
+                        events.insert(0, self.launch_wizard_state_broadcast(None));
+                        events
+                    }
+                    Err(error) => {
+                        Self::log_launch_wizard_error(
+                            &session,
+                            "spawn_shell_window",
+                            "submit",
+                            None,
+                            &error,
+                        );
+                        session.wizard.clear_launch_materialization_pending();
+                        session.wizard.error = Some(error);
+                        self.launch_wizard = Some(session);
+                        vec![self.launch_wizard_state_outbound()]
+                    }
+                }
+            }
+        }
+    }
+
+    fn save_issue_monitor_profile_from_launch_request(
+        &mut self,
+        mut session: LaunchWizardSession,
+        save_context: IssueMonitorProfileSaveContext,
+        config: LaunchWizardLaunchRequest,
+    ) -> Vec<OutboundEvent> {
+        let IssueMonitorProfileSaveContext {
+            client_id,
+            issue_number,
+        } = save_context;
+        let LaunchWizardLaunchRequest::Agent(config) = config else {
+            session.wizard.error =
+                Some("Issue Monitor settings require an agent launch target".to_string());
+            self.launch_wizard = Some(session);
+            return vec![self.launch_wizard_state_outbound()];
+        };
+        let Some(project_root) = self
+            .tab(&session.tab_id)
+            .map(|tab| tab.project_root.clone())
+        else {
+            session.wizard.error = Some("Project tab not found".to_string());
+            self.launch_wizard = Some(session);
+            return vec![self.launch_wizard_state_outbound()];
+        };
+        let prefs_path = gwt::issue_monitor_prefs_path_for_repo_path(&project_root);
+        let mut prefs = gwt::load_issue_monitor_prefs(&prefs_path).unwrap_or_default();
+        prefs.launch_profile = Some(gwt::IssueMonitorLaunchProfile::from(config.as_ref()));
+        if let Err(error) = gwt::save_issue_monitor_prefs(&prefs_path, &prefs) {
+            session.wizard.error = Some(format!("Failed to save Issue Monitor settings: {error}"));
+            self.launch_wizard = Some(session);
+            return vec![self.launch_wizard_state_outbound()];
+        }
+        let mut events = vec![
+            self.launch_wizard_state_broadcast(None),
+            OutboundEvent::reply(
+                &client_id,
+                BackendEvent::IssueMonitorToast {
+                    level: "info".to_string(),
+                    message: "Issue Monitor settings saved".to_string(),
+                    issue_number: Some(issue_number),
+                },
+            ),
+        ];
+        events.extend(self.local_issue_monitor_events_for(Some(&client_id), |_| {}));
+        events
     }
 
     pub(crate) fn handle_launch_wizard_runtime_resolved(
@@ -1639,6 +2144,16 @@ impl AppRuntime {
         match result {
             Ok(hydration) => {
                 session.wizard.apply_runtime_context(hydration);
+                let auto_submit_bounds = session.auto_submit_after_runtime_resolution.take();
+                self.launch_wizard = Some(session);
+                if let Some(bounds) = auto_submit_bounds {
+                    return self.handle_launch_wizard_action_for_client(
+                        None,
+                        gwt::LaunchWizardAction::Submit,
+                        Some(bounds),
+                    );
+                }
+                vec![self.launch_wizard_state_outbound()]
             }
             Err(error) => {
                 Self::log_launch_wizard_error(
@@ -1649,10 +2164,10 @@ impl AppRuntime {
                     &error,
                 );
                 session.wizard.set_hydration_error(error);
+                self.launch_wizard = Some(session);
+                vec![self.launch_wizard_state_outbound()]
             }
         }
-        self.launch_wizard = Some(session);
-        vec![self.launch_wizard_state_outbound()]
     }
 }
 

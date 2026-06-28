@@ -817,6 +817,21 @@ body::after {
   border-right: 1px solid var(--color-status-strip-divider);
 }
 
+button.op-status-strip__cell {
+  appearance: none;
+  font: inherit;
+  color: inherit;
+  background: transparent;
+  border-top: 0;
+  border-bottom: 0;
+  border-left: 0;
+  margin: 0;
+  padding-left: 0;
+  padding-top: 0;
+  padding-bottom: 0;
+  cursor: pointer;
+}
+
 .op-status-strip__cell:last-child {
   border-right: none;
   margin-left: auto;
@@ -847,7 +862,7 @@ body::after {
   50% { opacity: 0.4; transform: scale(0.85); }
 }
 
-.op-status-strip__cell--active .op-status-strip__value {
+.op-status-strip__cell--running .op-status-strip__value {
   color: var(--color-state-active);
 }
 
@@ -861,7 +876,7 @@ body::after {
   color: var(--color-state-needs-input);
 }
 
-.op-status-strip__cell--blocked .op-status-strip__value {
+.op-status-strip__cell--error .op-status-strip__value {
   color: var(--color-state-blocked);
 }
 
@@ -901,6 +916,33 @@ body::after {
 }
 
 .op-status-strip__cell--runtime-health[data-state="hot"] .op-status-strip__value {
+  color: var(--color-state-blocked);
+}
+
+.op-status-strip__cell--issue-monitor .op-status-strip__value {
+  min-width: 12ch;
+  text-align: left;
+  white-space: nowrap;
+}
+
+.op-status-strip__cell--issue-monitor[data-state="disabled"] .op-status-strip__value {
+  color: var(--color-state-idle);
+}
+
+.op-status-strip__cell--issue-monitor[data-state="idle"] .op-status-strip__value {
+  color: var(--color-status-strip-fg);
+}
+
+.op-status-strip__cell--issue-monitor[data-state="launching"] .op-status-strip__value,
+.op-status-strip__cell--issue-monitor[data-state="active"] .op-status-strip__value {
+  color: var(--color-state-active);
+}
+
+.op-status-strip__cell--issue-monitor[data-state="auth_required"] .op-status-strip__value {
+  color: var(--color-state-needs-input);
+}
+
+.op-status-strip__cell--issue-monitor[data-state="error"] .op-status-strip__value {
   color: var(--color-state-blocked);
 }
 
@@ -1235,7 +1277,7 @@ button.op-runtime-health-detail__process {
   isolation: isolate;
 }
 
-[data-agent-state="active"] {
+[data-agent-state="running"] {
   --agent-color: var(--current-agent, var(--color-state-active));
   box-shadow: var(--shadow-glow-active);
   animation: op-rim-pulse var(--motion-pulse) ease-in-out infinite;
@@ -1260,22 +1302,22 @@ button.op-runtime-health-detail__process {
   opacity: 1;
 }
 
-[data-agent-state="blocked"] {
+[data-agent-state="error"] {
   --agent-color: var(--color-state-blocked);
   box-shadow: 0 0 0 1px var(--agent-color),
               0 0 14px 0 color-mix(in oklab, var(--agent-color) 50%, transparent);
-  animation: op-rim-blocked calc(var(--motion-pulse) * 0.5) ease-in-out infinite;
+  animation: op-rim-alert calc(var(--motion-pulse) * 0.5) ease-in-out infinite;
 }
 
-/* FR-039 (anshin) — "needs input" is a LOUD your-turn rim: it pulses like
-   blocked (so the operator notices it) but uses the warm amber state colour
-   instead of error red. Reuses the op-rim-blocked keyframe, which is driven
+/* FR-039 (anshin) — waiting is a LOUD your-turn rim: it pulses like
+   error (so the operator notices it) but uses the warm amber state colour
+   instead of error red. Reuses the op-rim-alert keyframe, which is driven
    by --agent-color, so the glow tracks the needs-input token. */
-[data-agent-state="needs_input"] {
+[data-agent-state="waiting"] {
   --agent-color: var(--color-state-needs-input);
   box-shadow: 0 0 0 1px var(--agent-color),
               0 0 14px 0 color-mix(in oklab, var(--agent-color) 50%, transparent);
-  animation: op-rim-blocked calc(var(--motion-pulse) * 0.5) ease-in-out infinite;
+  animation: op-rim-alert calc(var(--motion-pulse) * 0.5) ease-in-out infinite;
 }
 
 [data-agent-state="done"] {
@@ -1291,7 +1333,7 @@ button.op-runtime-health-detail__process {
                      0 0 22px 2px color-mix(in oklab, var(--agent-color) 55%, transparent); }
 }
 
-@keyframes op-rim-blocked {
+@keyframes op-rim-alert {
   0%, 100% { box-shadow: 0 0 0 1px var(--agent-color),
                           0 0 14px 0 color-mix(in oklab, var(--agent-color) 50%, transparent); }
   50%      { box-shadow: 0 0 0 2px var(--agent-color),
@@ -1299,9 +1341,9 @@ button.op-runtime-health-detail__process {
 }
 
 @media (prefers-reduced-motion: reduce) {
-  [data-agent-state="active"],
-  [data-agent-state="blocked"],
-  [data-agent-state="needs_input"] {
+  [data-agent-state="running"],
+  [data-agent-state="error"],
+  [data-agent-state="waiting"] {
     animation: none;
   }
   /* SPEC-2356 — Status Strip live dot pulses to signal "system is alive".
@@ -3505,31 +3547,34 @@ button.workspace-board-ref:focus-visible {
   }
 }
 
-/* SPEC-2356 — when blocked count > 0 the BLOCKED cell pulses subtly so
-   the user notices something needs attention. FR-039 (anshin) extends the same
-   alert pulse to the WAITING cell so "agents waiting for input" is just as
-   loud as blocked. The animation is keyframed on opacity (no shadow / repaint
-   cost) and disabled by reduced-motion and forced-colors. */
-@keyframes op-status-strip-blocked-pulse {
+/* SPEC-2356 — when error count > 0 the ERROR cell pulses subtly so the user
+   notices runtime failures. FR-039 (anshin) extends the same alert pulse to the
+   WAITING cell so "agents waiting for input" is just as loud as errors. The
+   animation is keyframed on opacity (no shadow / repaint cost) and disabled by
+   reduced-motion and forced-colors. */
+@keyframes op-status-strip-alert-pulse {
   0%, 100% { opacity: 1; }
   50%      { opacity: 0.55; }
 }
 
-:root[data-theme] .op-status-strip__cell--blocked.op-status-strip__cell--alert .op-status-strip__value,
-:root[data-theme] .op-status-strip__cell--waiting.op-status-strip__cell--alert .op-status-strip__value {
-  animation: op-status-strip-blocked-pulse var(--motion-pulse) ease-in-out infinite;
+:root[data-theme] .op-status-strip__cell--error.op-status-strip__cell--alert .op-status-strip__value,
+:root[data-theme] .op-status-strip__cell--waiting.op-status-strip__cell--alert .op-status-strip__value,
+:root[data-theme] .op-status-strip__cell--issue-monitor.op-status-strip__cell--alert .op-status-strip__value {
+  animation: op-status-strip-alert-pulse var(--motion-pulse) ease-in-out infinite;
 }
 
 @media (prefers-reduced-motion: reduce) {
-  :root[data-theme] .op-status-strip__cell--blocked.op-status-strip__cell--alert .op-status-strip__value,
-  :root[data-theme] .op-status-strip__cell--waiting.op-status-strip__cell--alert .op-status-strip__value {
+  :root[data-theme] .op-status-strip__cell--error.op-status-strip__cell--alert .op-status-strip__value,
+  :root[data-theme] .op-status-strip__cell--waiting.op-status-strip__cell--alert .op-status-strip__value,
+  :root[data-theme] .op-status-strip__cell--issue-monitor.op-status-strip__cell--alert .op-status-strip__value {
     animation: none;
   }
 }
 
 @media (forced-colors: active) {
-  :root[data-theme] .op-status-strip__cell--blocked.op-status-strip__cell--alert .op-status-strip__value,
-  :root[data-theme] .op-status-strip__cell--waiting.op-status-strip__cell--alert .op-status-strip__value {
+  :root[data-theme] .op-status-strip__cell--error.op-status-strip__cell--alert .op-status-strip__value,
+  :root[data-theme] .op-status-strip__cell--waiting.op-status-strip__cell--alert .op-status-strip__value,
+  :root[data-theme] .op-status-strip__cell--issue-monitor.op-status-strip__cell--alert .op-status-strip__value {
     animation: none;
   }
 }
@@ -4353,6 +4398,7 @@ button.workspace-board-ref:focus-visible {
 
 :root[data-theme] .settings-toolbar {
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
   gap: var(--space-4);
   padding: var(--space-3) var(--space-4);
@@ -4372,8 +4418,13 @@ button.workspace-board-ref:focus-visible {
 
 :root[data-theme] .settings-tabs {
   display: flex;
+  flex: 1 1 260px;
+  flex-wrap: wrap;
   gap: var(--space-2);
+  justify-content: flex-end;
   margin-left: auto;
+  min-width: 0;
+  max-width: 100%;
 }
 
 :root[data-theme] .settings-tab {
@@ -5943,7 +5994,7 @@ button.workspace-board-ref:focus-visible {
 }
 
 /* Living Telemetry dot — agent panes only. Color from the semantic state
-   tokens; active / blocked pulse via --motion-pulse (0ms under
+   tokens; running / waiting / error pulse via --motion-pulse (0ms under
    reduced-motion, so the dot simply holds steady). */
 .fleet-minimap__cell[data-telemetry]::after {
   content: "";
@@ -5956,7 +6007,7 @@ button.workspace-board-ref:focus-visible {
   background: var(--color-state-idle);
 }
 
-.fleet-minimap__cell[data-telemetry="active"]::after {
+.fleet-minimap__cell[data-telemetry="running"]::after {
   background: var(--color-state-active);
   animation: op-live-pulse var(--motion-pulse) ease-in-out infinite;
 }
@@ -5965,14 +6016,14 @@ button.workspace-board-ref:focus-visible {
   background: var(--color-state-idle);
 }
 
-.fleet-minimap__cell[data-telemetry="blocked"]::after {
+.fleet-minimap__cell[data-telemetry="error"]::after {
   background: var(--color-state-blocked);
   animation: op-live-pulse var(--motion-pulse) ease-in-out infinite;
 }
 
-/* FR-039 (anshin) — needs-input dot pulses (loud) in amber so the minimap
-   surfaces "this pane is waiting for you" the same way it surfaces blocked. */
-.fleet-minimap__cell[data-telemetry="needs_input"]::after {
+/* FR-039 (anshin) — waiting dot pulses (loud) in amber so the minimap
+   surfaces "this pane is waiting for you" the same way it surfaces errors. */
+.fleet-minimap__cell[data-telemetry="waiting"]::after {
   background: var(--color-state-needs-input);
   animation: op-live-pulse var(--motion-pulse) ease-in-out infinite;
 }
@@ -6031,9 +6082,9 @@ button.workspace-board-ref:focus-visible {
 }
 
 @media (prefers-reduced-motion: reduce) {
-  .fleet-minimap__cell[data-telemetry="active"]::after,
-  .fleet-minimap__cell[data-telemetry="blocked"]::after,
-  .fleet-minimap__cell[data-telemetry="needs_input"]::after {
+  .fleet-minimap__cell[data-telemetry="running"]::after,
+  .fleet-minimap__cell[data-telemetry="error"]::after,
+  .fleet-minimap__cell[data-telemetry="waiting"]::after {
     animation: none;
   }
 }

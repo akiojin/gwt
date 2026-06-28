@@ -835,6 +835,7 @@ fn daemon_subscriber_channels() -> Vec<String> {
         gwt::runtime_daemon_events::RUNTIME_OUTPUT_CHANNEL.to_string(),
         gwt::runtime_daemon_events::RUNTIME_STATUS_CHANNEL.to_string(),
         gwt::runtime_daemon_events::RUNTIME_HOOK_CHANNEL.to_string(),
+        gwt::runtime_daemon_events::ISSUE_MONITOR_CHANNEL.to_string(),
     ]
 }
 
@@ -866,6 +867,63 @@ fn daemon_broadcast_user_event(
         gwt::runtime_daemon_events::RuntimeDaemonEvent::Hook { event } => {
             Some(UserEvent::DaemonRuntimeHook(event))
         }
+        gwt::runtime_daemon_events::RuntimeDaemonEvent::IssueMonitor { event } => {
+            issue_monitor_daemon_user_event(event)
+        }
+    }
+}
+
+#[cfg(unix)]
+fn issue_monitor_daemon_user_event(event: serde_json::Value) -> Option<UserEvent> {
+    let event_name = event.get("event")?.as_str()?;
+    let payload = event
+        .get("payload")
+        .cloned()
+        .unwrap_or(serde_json::Value::Null);
+    match event_name {
+        "status" => {
+            let status: gwt::IssueMonitorStatusView = serde_json::from_value(payload).ok()?;
+            Some(UserEvent::Dispatch(vec![OutboundEvent::broadcast(
+                BackendEvent::IssueMonitorStatus { status },
+            )]))
+        }
+        "inbox" => {
+            let items: Vec<gwt::IssueMonitorInboxItem> = serde_json::from_value(payload).ok()?;
+            Some(UserEvent::Dispatch(vec![OutboundEvent::broadcast(
+                BackendEvent::IssueMonitorInbox { items },
+            )]))
+        }
+        "toast" => {
+            let toast = BackendEvent::IssueMonitorToast {
+                level: payload
+                    .get("level")
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or("info")
+                    .to_string(),
+                message: payload
+                    .get("message")
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or("")
+                    .to_string(),
+                issue_number: payload
+                    .get("issue_number")
+                    .and_then(serde_json::Value::as_u64),
+            };
+            Some(UserEvent::Dispatch(vec![OutboundEvent::broadcast(toast)]))
+        }
+        "launch_request" => {
+            let issue_number = payload.get("issue_number")?.as_u64()?;
+            let linked_issue_kind = payload
+                .get("linked_issue_kind")
+                .cloned()
+                .and_then(|value| serde_json::from_value(value).ok())
+                .unwrap_or(gwt::LinkedIssueKind::Issue);
+            Some(UserEvent::IssueMonitorLaunchRequest {
+                issue_number,
+                linked_issue_kind,
+            })
+        }
+        _ => None,
     }
 }
 
@@ -953,6 +1011,7 @@ enum UserEvent {
     WorkMergeStatus {
         project_root: PathBuf,
         merged_branches: std::collections::HashMap<String, chrono::DateTime<chrono::Utc>>,
+        cleanup_ready_branches: std::collections::HashMap<String, String>,
     },
     /// SPEC-3075: result of the background tip-commit-subject scan. The runtime
     /// caches the `branch -> subject` map and rebroadcasts the Workspace
@@ -989,6 +1048,10 @@ enum UserEvent {
     },
     RuntimeHook(gwt::RuntimeHookEvent),
     DaemonRuntimeHook(gwt::RuntimeHookEvent),
+    IssueMonitorLaunchRequest {
+        issue_number: u64,
+        linked_issue_kind: gwt::LinkedIssueKind,
+    },
     LaunchProgress {
         window_id: String,
         message: String,
@@ -1017,6 +1080,12 @@ enum UserEvent {
     LaunchWizardRuntimeResolved {
         wizard_id: String,
         result: Box<Result<gwt::LaunchWizardHydration, String>>,
+    },
+    LaunchWizardLaunchMaterializationRequested {
+        wizard_id: String,
+        client_id: Option<ClientId>,
+        config: Box<gwt::LaunchWizardLaunchRequest>,
+        bounds: WindowGeometry,
     },
     ProjectIndexStatus {
         project_root: String,
@@ -1266,6 +1335,67 @@ mod tests {
             42,
         )
         .is_none());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn daemon_broadcast_issue_monitor_payloads_map_to_frontend_dispatch_and_launch_request() {
+        let project_root = Path::new("/tmp/gwt-project");
+        let status = gwt::IssueMonitorStatusView {
+            enabled: true,
+            state: "idle".to_string(),
+            queue_len: 1,
+            active_count: 0,
+            max_active_agents: 1,
+            total_candidates: 1,
+            active_issue_number: None,
+            last_scan_at: Some("2026-06-23T10:00:00Z".to_string()),
+            last_error: None,
+            launch_profile_source: gwt::IssueMonitorLaunchProfileSource::Default,
+            launch_profile_summary: "configure to override".to_string(),
+        };
+        let status_payload = gwt::runtime_daemon_events::issue_monitor_payload(
+            "status",
+            serde_json::to_value(status.clone()).expect("status serializes"),
+            42,
+        );
+        match super::daemon_broadcast_user_event(
+            gwt::runtime_daemon_events::ISSUE_MONITOR_CHANNEL,
+            status_payload,
+            project_root,
+            99,
+        ) {
+            Some(UserEvent::Dispatch(events)) => {
+                assert!(events.iter().any(|event| {
+                    matches!(
+                        &event.event,
+                        BackendEvent::IssueMonitorStatus { status: actual } if actual == &status
+                    )
+                }));
+            }
+            other => panic!("unexpected issue monitor status event: {other:?}"),
+        }
+
+        let launch_payload = gwt::runtime_daemon_events::issue_monitor_payload(
+            "launch_request",
+            serde_json::json!({"issue_number": 42, "linked_issue_kind": "spec"}),
+            42,
+        );
+        match super::daemon_broadcast_user_event(
+            gwt::runtime_daemon_events::ISSUE_MONITOR_CHANNEL,
+            launch_payload,
+            project_root,
+            99,
+        ) {
+            Some(UserEvent::IssueMonitorLaunchRequest {
+                issue_number,
+                linked_issue_kind,
+            }) => {
+                assert_eq!(issue_number, 42);
+                assert_eq!(linked_issue_kind, gwt::LinkedIssueKind::Spec);
+            }
+            other => panic!("unexpected issue monitor launch event: {other:?}"),
+        }
     }
 
     #[test]
@@ -1559,7 +1689,8 @@ mod tests {
             migration_pending: false,
             main_worktree_root_cache: std::sync::Arc::new(std::sync::OnceLock::new()),
         };
-        let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+        let (mut runtime, _recorded_events) =
+            sample_runtime_with_events(temp.path(), vec![tab], Some("tab-1"));
 
         // SPEC-3050 FR-002: 他 session を名乗る注入は拒否され、明示的な
         // 失敗 reply が返る (silent drop 禁止: FR-005)。
@@ -2296,6 +2427,7 @@ mod tests {
             pending_startup_auto_resume_sessions: Vec::new(),
             active_agent_sessions: HashMap::new(),
             work_merged_branches: HashMap::new(),
+            work_cleanup_ready_branches: HashMap::new(),
             work_tip_subjects: HashMap::new(),
             work_pr_titles: HashMap::new(),
             work_ai_summaries: HashMap::new(),
@@ -2361,6 +2493,9 @@ mod tests {
             ),
             workspace_resume_context: None,
             agent_kanban_target: None,
+            auto_submit_after_runtime_resolution: None,
+            issue_monitor_profile_save: None,
+            issue_monitor_launch_issue_number: None,
         }
     }
 
@@ -2475,6 +2610,9 @@ mod tests {
             ),
             workspace_resume_context: None,
             agent_kanban_target: None,
+            auto_submit_after_runtime_resolution: None,
+            issue_monitor_profile_save: None,
+            issue_monitor_launch_issue_number: None,
         }
     }
 
@@ -3636,7 +3774,7 @@ mod tests {
         let temp = tempdir().expect("tempdir");
         let repo = temp.path().join("repo");
         fs::create_dir_all(&repo).expect("create repo");
-        let mut runtime = sample_runtime(
+        let (mut runtime, _recorded_events) = sample_runtime_with_events(
             temp.path(),
             vec![sample_project_tab(
                 "tab-1",
@@ -4107,7 +4245,7 @@ mod tests {
         let temp = tempdir().expect("tempdir");
         let repo = temp.path().join("repo");
         fs::create_dir_all(&repo).expect("create repo");
-        let (mut runtime, _events) = sample_runtime_with_events(
+        let (mut runtime, recorded_events) = sample_runtime_with_events(
             temp.path(),
             vec![sample_project_tab(
                 "tab-1",
@@ -4249,6 +4387,39 @@ mod tests {
             },
             Some(canvas_bounds()),
         );
+        assert!(focus_events.iter().any(|event| {
+            matches!(
+                &event.event,
+                BackendEvent::LaunchWizardState {
+                    wizard: Some(wizard)
+                } if wizard.launch_materialization_pending
+            )
+        }));
+        let request = {
+            let mut recorded_events = recorded_events.lock().expect("event log");
+            recorded_events
+                .iter()
+                .position(|event| {
+                    matches!(
+                        event,
+                        UserEvent::LaunchWizardLaunchMaterializationRequested { .. }
+                    )
+                })
+                .map(|index| recorded_events.remove(index))
+                .expect("launch materialization event")
+        };
+        let UserEvent::LaunchWizardLaunchMaterializationRequested {
+            wizard_id,
+            client_id,
+            config,
+            bounds,
+        } = request
+        else {
+            unreachable!("matched above")
+        };
+        let focus_events = runtime.handle_launch_wizard_launch_materialization_requested(
+            wizard_id, client_id, *config, bounds,
+        );
         assert!(focus_events.len() >= 2);
         assert!(runtime.launch_wizard.is_none());
 
@@ -4282,7 +4453,7 @@ mod tests {
         let temp = tempdir().expect("tempdir");
         let repo = temp.path().join("repo");
         fs::create_dir_all(&repo).expect("create repo");
-        let mut runtime = sample_runtime(
+        let (mut runtime, recorded_events) = sample_runtime_with_events(
             temp.path(),
             vec![sample_project_tab(
                 "tab-1",
@@ -4315,6 +4486,9 @@ mod tests {
             ),
             workspace_resume_context: None,
             agent_kanban_target: None,
+            auto_submit_after_runtime_resolution: None,
+            issue_monitor_profile_save: None,
+            issue_monitor_launch_issue_number: None,
         });
         {
             let wizard = &mut runtime.launch_wizard.as_mut().unwrap().wizard;
@@ -4343,6 +4517,39 @@ mod tests {
         let launch_events =
             runtime.handle_launch_wizard_action(LaunchWizardAction::Submit, Some(canvas_bounds()));
 
+        assert!(launch_events.iter().any(|event| {
+            matches!(
+                event.event,
+                BackendEvent::LaunchWizardState {
+                    wizard: Some(ref wizard)
+                } if wizard.launch_materialization_pending
+            )
+        }));
+        let request = {
+            let mut recorded_events = recorded_events.lock().expect("event log");
+            recorded_events
+                .iter()
+                .position(|event| {
+                    matches!(
+                        event,
+                        UserEvent::LaunchWizardLaunchMaterializationRequested { .. }
+                    )
+                })
+                .map(|index| recorded_events.remove(index))
+                .expect("launch materialization event")
+        };
+        let UserEvent::LaunchWizardLaunchMaterializationRequested {
+            wizard_id,
+            client_id,
+            config,
+            bounds,
+        } = request
+        else {
+            unreachable!("matched above")
+        };
+        let launch_events = runtime.handle_launch_wizard_launch_materialization_requested(
+            wizard_id, client_id, *config, bounds,
+        );
         assert!(runtime.launch_wizard.is_none());
         assert!(launch_events.iter().any(|event| {
             matches!(
@@ -7098,8 +7305,13 @@ fn main() -> std::io::Result<()> {
             Event::UserEvent(UserEvent::WorkMergeStatus {
                 project_root,
                 merged_branches,
+                cleanup_ready_branches,
             }) => {
-                let events = app.apply_work_merge_status(&project_root, merged_branches);
+                let events = app.apply_work_merge_status(
+                    &project_root,
+                    merged_branches,
+                    cleanup_ready_branches,
+                );
                 clients.dispatch(events);
             }
             Event::UserEvent(UserEvent::WorkTipSubjects {
@@ -7133,6 +7345,14 @@ fn main() -> std::io::Result<()> {
             }
             Event::UserEvent(UserEvent::DaemonRuntimeHook(event)) => {
                 let events = app.handle_daemon_runtime_hook_event(event);
+                clients.dispatch(events);
+            }
+            Event::UserEvent(UserEvent::IssueMonitorLaunchRequest {
+                issue_number,
+                linked_issue_kind,
+            }) => {
+                let events =
+                    app.auto_launch_issue_monitor_request_events(issue_number, linked_issue_kind);
                 clients.dispatch(events);
             }
             Event::UserEvent(UserEvent::LaunchProgress { window_id, message }) => {
@@ -7178,6 +7398,17 @@ fn main() -> std::io::Result<()> {
             }
             Event::UserEvent(UserEvent::LaunchWizardRuntimeResolved { wizard_id, result }) => {
                 let events = app.handle_launch_wizard_runtime_resolved(wizard_id, *result);
+                clients.dispatch(events);
+            }
+            Event::UserEvent(UserEvent::LaunchWizardLaunchMaterializationRequested {
+                wizard_id,
+                client_id,
+                config,
+                bounds,
+            }) => {
+                let events = app.handle_launch_wizard_launch_materialization_requested(
+                    wizard_id, client_id, *config, bounds,
+                );
                 clients.dispatch(events);
             }
             Event::UserEvent(UserEvent::ProjectIndexStatus {

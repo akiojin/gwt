@@ -70,17 +70,22 @@ test.describe.serial("Console window (live backend)", () => {
       .waitForFunction(
         ({ beforeIds }) => {
           const seen = new Set(beforeIds);
-          const node = Array.from(document.querySelectorAll(".workspace-window"))
-            .find((candidate) =>
-              candidate.querySelector(".console-window") &&
-              !seen.has((candidate as HTMLElement).dataset.id || ""),
-            );
+          const nodes = Array.from(document.querySelectorAll(".workspace-window"))
+            .filter((candidate) => candidate.querySelector(".console-window"));
+          const node =
+            nodes.find(
+              (candidate) =>
+                !seen.has((candidate as HTMLElement).dataset.id || ""),
+            ) ?? nodes[0];
           return node ? (node as HTMLElement).dataset.id || "" : "";
         },
         { beforeIds },
       )
       .then((handle) => handle.jsonValue());
-    return page.locator(`.workspace-window[data-id="${id}"]`);
+    return {
+      windowRoot: page.locator(`.workspace-window[data-id="${id}"]`),
+      reused: beforeIds.includes(id),
+    };
   }
 
   async function openConsoleWindow(page) {
@@ -122,7 +127,7 @@ test.describe.serial("Console window (live backend)", () => {
       };
     });
 
-    const windowRoot = await openConsoleWindow(page);
+    const { windowRoot, reused } = await openConsoleWindow(page);
 
     const consoleRoot = windowRoot.locator(".console-window");
     await expect(consoleRoot).toBeVisible();
@@ -136,19 +141,31 @@ test.describe.serial("Console window (live backend)", () => {
 
     const panes = consoleRoot.locator(".console-window__pane");
     await expect(panes).toHaveCount(KINDS.length);
-    // After SPEC-2809 ConsoleTeeLayer wiring (commit a94015c7b), the
-    // runner tab starts populating as soon as gwt startup emits
-    // `gwt::index` tracing events (project index status runner /
-    // bootstrap helper / repository reconcile). The other four kinds
-    // remain idle until the user opens a project or launches an agent,
-    // so they keep the empty hint. Assert per-kind to reflect that
-    // observable startup behaviour rather than blanket-empty.
+    // Process output can already exist by the time a live Console opens
+    // (for example from GitHub-backed Issue Monitor refreshes). A pane is
+    // valid when it either still shows the empty hint or already has a
+    // rendered process line/header.
     const IDLE_KINDS = ["gh", "git", "docker", "agent"];
     for (const kind of IDLE_KINDS) {
-      const hint = consoleRoot.locator(
-        `.console-window__pane[data-kind='${kind}'] .console-window__empty`,
+      const pane = consoleRoot.locator(
+        `.console-window__pane[data-kind='${kind}']`,
       );
-      await expect(hint).toHaveText(new RegExp(`Waiting for ${kind} process output`));
+      await expect
+        .poll(async () =>
+          await pane.evaluate((node, kind) => {
+            const empty = node.querySelector(".console-window__empty");
+            const hasLine = node.querySelector(
+              ".console-window__line, .console-window__invocation-header",
+            );
+            return (
+              Boolean(hasLine) ||
+              (empty?.textContent ?? "").includes(
+                `Waiting for ${kind} process output`,
+              )
+            );
+          }, kind),
+        )
+        .toBe(true);
     }
     // Runner: either the empty hint is still visible (timing-lucky case
     // where the snapshot reaches the controller before the first
@@ -169,22 +186,25 @@ test.describe.serial("Console window (live backend)", () => {
       )
       .toBe(true);
 
-    // SPEC-2809 Phase F2 snapshot handshake — the controller must emit
-    // `load_process_console` once it mounts so historical lines are
-    // visible immediately on open.
-    await expect
-      .poll(async () =>
-        await page.evaluate(() =>
-          ((window as any).__gwtSentPayloads as string[]).some((payload) =>
-            payload.includes("load_process_console"),
+    // SPEC-2809 Phase F2 snapshot handshake — a freshly mounted Console
+    // controller emits `load_process_console`. If the live backend reused an
+    // existing Console window, no new mount occurs and the existing snapshot is
+    // already visible.
+    if (!reused) {
+      await expect
+        .poll(async () =>
+          await page.evaluate(() =>
+            ((window as any).__gwtSentPayloads as string[]).some((payload) =>
+              payload.includes("load_process_console"),
+            ),
           ),
-        ),
-      )
-      .toBe(true);
+        )
+        .toBe(true);
+    }
   });
 
   test("clicking a tab activates it and hides the others", async ({ page }) => {
-    const windowRoot = await openConsoleWindow(page);
+    const { windowRoot } = await openConsoleWindow(page);
 
     const consoleRoot = windowRoot.locator(".console-window");
     await expect(consoleRoot).toBeVisible();

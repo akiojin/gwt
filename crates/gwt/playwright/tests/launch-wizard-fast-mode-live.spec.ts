@@ -55,6 +55,10 @@ test.describe.serial("Launch Wizard Claude Code Fast mode (live backend)", () =>
     await expect(submit).toHaveText("Continue");
     await submit.click();
 
+    await expect(submit).toHaveText("Continue");
+    await expect(fastModeSummaryValue(page)).toHaveText("on");
+    await submit.click();
+
     await expect(submit).toHaveText(/^(Launch|Create and launch)$/);
     await expect(fastModeSummaryValue(page)).toHaveText("on");
   });
@@ -85,6 +89,9 @@ test.describe.serial("Launch Wizard Claude Code Fast mode (live backend)", () =>
 
       const submit = page.locator("#wizard-submit-button");
       await expect(submit).toHaveText("Continue");
+      await submit.click();
+      await expect(submit).toHaveText("Continue");
+      await expect(fastModeSummaryValue(page)).toHaveText("on");
       await submit.click();
       await expect(submit).toHaveText("Launch");
       await submit.click();
@@ -159,7 +166,7 @@ async function selectWizardAgent(page: Page, agentId: string): Promise<void> {
 
 function fastModeSummaryValue(page: Page) {
   return page
-    .locator(".wizard-summary-item", { hasText: "Fast mode" })
+    .locator("#wizard-summary .wizard-summary-item", { hasText: "Fast mode" })
     .locator(".wizard-summary-value");
 }
 

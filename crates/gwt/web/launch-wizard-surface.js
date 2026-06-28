@@ -86,7 +86,9 @@ export function createLaunchWizardSurface({
             return;
           }
           if (deferred.kind === "launch_wizard_state") {
-            clearLaunchWizardPendingAction();
+            if (!deferred.wizard?.launch_materialization_pending) {
+              clearLaunchWizardPendingAction();
+            }
             clearLaunchWizardOpening();
             if (deferred.wizard) {
               launchWizardOpenError = null;
@@ -674,8 +676,8 @@ export function createLaunchWizardSurface({
       function openStartWorkPendingWizard() {
         openLaunchPendingWizard({
           title: "Start Work",
-          meta: "Work launch",
-          message: "Preparing Start Work...",
+          meta: "Plan Agent launch",
+          message: "Preparing Plan Agent...",
         });
       }
 
@@ -768,9 +770,22 @@ export function createLaunchWizardSurface({
 
         syncWizardDraftState();
         closeModal();
-        const isLaunchActionPending = Boolean(launchWizardPendingAction);
+        // Issue #3192 — this derivation runs BEFORE the opening/openError
+        // early returns below, so it is reached for the Start Work /
+        // Launch Agent pending states where `launchWizard` is null
+        // (`launchWizardOpening` is set instead). Read the field null-safely:
+        // a bare `launchWizard.launch_materialization_pending` throws and
+        // renderLaunchWizard() never reaches the `.open` toggle, so the rail
+        // button silently does nothing. Dereferences AFTER those early
+        // returns are non-null by construction and stay bare.
+        const isLaunchMaterializationPending = Boolean(
+          launchWizard?.launch_materialization_pending,
+        );
+        const isLaunchActionPending =
+          Boolean(launchWizardPendingAction) || isLaunchMaterializationPending;
         const isLaunchOpeningPending = Boolean(launchWizardOpening);
-        const isLaunchSubmitPending = launchWizardPendingAction?.kind === "submit";
+        const isLaunchSubmitPending =
+          launchWizardPendingAction?.kind === "submit" || isLaunchMaterializationPending;
         syncLaunchWizardPendingChrome(isLaunchActionPending || isLaunchOpeningPending);
         const wasOpenWizard = wizardModal.classList.contains("open");
         if (!wasOpenWizard) {
@@ -796,7 +811,7 @@ export function createLaunchWizardSurface({
           if (wizardTitle) {
             wizardTitle.textContent = launchWizardOpening.title || "Start Work";
           }
-          wizardMeta.textContent = launchWizardOpening.meta || "Work launch";
+          wizardMeta.textContent = launchWizardOpening.meta || "Plan Agent launch";
           wizardBackButton.hidden = true;
           wizardBackButton.disabled = true;
           wizardSubmitButton.hidden = true;
@@ -812,7 +827,7 @@ export function createLaunchWizardSurface({
             createNode(
               "div",
               "launch-note launch-pending-note",
-              launchWizardOpening.message || "Preparing Start Work...",
+              launchWizardOpening.message || "Preparing Plan Agent...",
             ),
           );
           wizardBody.appendChild(openingPanel);
@@ -825,7 +840,7 @@ export function createLaunchWizardSurface({
           }
           wizardMeta.textContent =
             launchWizardOpenError.title === "Start Work"
-              ? "Work launch"
+              ? "Plan Agent launch"
               : "Launch Agent";
           wizardBackButton.hidden = true;
           wizardBackButton.disabled = false;
@@ -852,7 +867,7 @@ export function createLaunchWizardSurface({
         wizardCancelButton.textContent = "Cancel";
         if (wizardTitle) wizardTitle.textContent = launchWizard.title || "Launch Agent";
         wizardMeta.textContent = launchWizard.show_branch_controls === false
-          ? "Work launch"
+          ? "Plan Agent launch"
           : `Selected branch · ${
             displayBranchName(
               launchWizard.selected_branch_name || launchWizard.branch_name || "Work",
@@ -947,21 +962,20 @@ export function createLaunchWizardSurface({
             createNode(
               "div",
               "launch-note launch-pending-note",
-              "Creating agent window...",
+              launchWizard.launch_materialization_message || "Preparing worktree...",
             ),
           );
         }
 
-        // SPEC-2359 US-80 — optional, always-skippable Start Work intake
-        // prompt. Typing it surfaces similar prior work (non-blocking advisory)
-        // before a duplicate work branch is created. Only shown for Start Work.
+        // SPEC-3165 — Start Work is now the Plan Agent entrypoint. The prompt
+        // is still skippable and still drives the duplicate-work advisory.
         if (isStartWorkLaunch()) {
           const section = createLaunchSection(
-            "What are you working on?",
-            "Optional — describe the work to surface similar prior work before you start. You can skip this.",
+            "Register an Issue",
+            "Optional — describe the work for the Plan Agent to turn into an Issue or SPEC. You can skip this.",
           );
           const textarea = createNode("textarea", "launch-intake-input");
-          textarea.placeholder = "e.g. fix the login auth bug";
+          textarea.placeholder = "e.g. register an issue for the login auth bug";
           textarea.rows = 2;
           textarea.value = wizardPromptDraft;
           textarea.addEventListener("input", () => {
@@ -1681,7 +1695,9 @@ export function createLaunchWizardSurface({
         ) {
           return;
         }
-        clearLaunchWizardPendingAction();
+        if (!event.wizard?.launch_materialization_pending) {
+          clearLaunchWizardPendingAction();
+        }
         clearLaunchWizardOpening();
         if (event.wizard) {
           launchWizardOpenError = null;

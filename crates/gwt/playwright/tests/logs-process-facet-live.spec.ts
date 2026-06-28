@@ -47,11 +47,15 @@ test.describe.serial("Logs window Process facet (live backend)", () => {
       .waitForFunction(
         ({ beforeIds }) => {
           const seen = new Set(beforeIds);
-          const node = Array.from(document.querySelectorAll(".workspace-window"))
-            .find((candidate) =>
-              candidate.querySelector(".logs-process-kind-select") &&
-              !seen.has((candidate as HTMLElement).dataset.id || ""),
+          const nodes = Array.from(document.querySelectorAll(".workspace-window"))
+            .filter((candidate) =>
+              candidate.querySelector(".logs-process-kind-select"),
             );
+          const node =
+            nodes.find(
+              (candidate) =>
+                !seen.has((candidate as HTMLElement).dataset.id || ""),
+            ) ?? nodes[0];
           return node ? (node as HTMLElement).dataset.id || "" : "";
         },
         { beforeIds },

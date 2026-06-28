@@ -1,4 +1,50 @@
 const AGENT_WINDOW_PRESETS = new Set(["agent", "claude", "codex"]);
+const PROJECT_SWITCHER_PANEL_MARGIN = 12;
+const PROJECT_SWITCHER_PANEL_GAP = 6;
+const PROJECT_SWITCHER_PANEL_MAX_WIDTH = 380;
+const PROJECT_SWITCHER_PANEL_MIN_HEIGHT = 96;
+
+function finiteNumber(value, fallback) {
+  return Number.isFinite(value) ? value : fallback;
+}
+
+export function computeProjectSwitcherPanelPlacement({
+  buttonRect,
+  viewportWidth,
+  viewportHeight,
+  preferredWidth = PROJECT_SWITCHER_PANEL_MAX_WIDTH,
+  margin = PROJECT_SWITCHER_PANEL_MARGIN,
+  gap = PROJECT_SWITCHER_PANEL_GAP,
+  leftBoundary = margin,
+} = {}) {
+  const safeViewportWidth = Math.max(0, finiteNumber(viewportWidth, 0));
+  const safeViewportHeight = Math.max(0, finiteNumber(viewportHeight, 0));
+  const safeLeft = Math.max(margin, finiteNumber(leftBoundary, margin));
+  const panelWidth = Math.max(
+    0,
+    Math.min(preferredWidth, safeViewportWidth - safeLeft - margin),
+  );
+  const maxLeft = Math.max(safeLeft, safeViewportWidth - panelWidth - margin);
+  const preferredLeft =
+    finiteNumber(buttonRect?.right, maxLeft + panelWidth) - panelWidth;
+  const left = Math.min(Math.max(preferredLeft, safeLeft), maxLeft);
+  const rawTop = finiteNumber(buttonRect?.bottom, margin) + gap;
+  const maxTop = Math.max(
+    margin,
+    safeViewportHeight - margin - PROJECT_SWITCHER_PANEL_MIN_HEIGHT,
+  );
+  const top = Math.min(Math.max(rawTop, margin), maxTop);
+  const maxHeight = Math.max(
+    PROJECT_SWITCHER_PANEL_MIN_HEIGHT,
+    safeViewportHeight - top - margin,
+  );
+  return {
+    left: Math.round(left),
+    top: Math.round(top),
+    width: Math.round(panelWidth),
+    maxHeight: Math.round(maxHeight),
+  };
+}
 
 function normalizeRuntimeState(value) {
   return String(value || "").toLowerCase();
@@ -183,6 +229,43 @@ export function createProjectSwitcherController({
   let selectedIndex = 0;
   let lastRows = [];
 
+  function viewportSize() {
+    const win = panelEl?.ownerDocument?.defaultView;
+    const docEl = panelEl?.ownerDocument?.documentElement;
+    return {
+      width: finiteNumber(win?.innerWidth, docEl?.clientWidth || 0),
+      height: finiteNumber(win?.innerHeight, docEl?.clientHeight || 0),
+    };
+  }
+
+  function positionPanel() {
+    if (!open || !buttonEl || !panelEl || typeof buttonEl.getBoundingClientRect !== "function") {
+      return;
+    }
+    const { width, height } = viewportSize();
+    if (width <= 0 || height <= 0) {
+      return;
+    }
+    const railRect = panelEl.ownerDocument
+      ?.getElementById("op-rail")
+      ?.getBoundingClientRect?.();
+    const leftBoundary = Number.isFinite(railRect?.right)
+      ? railRect.right + PROJECT_SWITCHER_PANEL_MARGIN
+      : PROJECT_SWITCHER_PANEL_MARGIN;
+    const placement = computeProjectSwitcherPanelPlacement({
+      buttonRect: buttonEl.getBoundingClientRect(),
+      viewportWidth: width,
+      viewportHeight: height,
+      leftBoundary,
+    });
+    panelEl.style.position = "fixed";
+    panelEl.style.left = `${placement.left}px`;
+    panelEl.style.top = `${placement.top}px`;
+    panelEl.style.right = "auto";
+    panelEl.style.width = `${placement.width}px`;
+    panelEl.style.maxHeight = `${placement.maxHeight}px`;
+  }
+
   function currentRows() {
     const state = getState?.() || {};
     return buildProjectSwitcherRows({
@@ -360,6 +443,7 @@ export function createProjectSwitcherController({
     appendNotificationPermissionAction(fragment);
     appendActions(fragment);
     panelEl.replaceChildren(fragment);
+    positionPanel();
   }
 
   function openSwitcher() {

@@ -30,6 +30,8 @@ const ROOT_MODULES = new Set([
   "branches-cleanup-surface.js",
   // SPEC-2008 Phase 29: latch canvas wheel pan/zoom mode per gesture.
   "canvas-wheel-gesture.js",
+  // SPEC-2008 Camera Focus: rail-safe viewport framing math.
+  "camera-framing.js",
   // SPEC-2013 FR-012 — confirm modal shown when closing a project tab
   // while one or more agent panes are still running.
   "close-project-tab-confirm-modal.js",
@@ -45,6 +47,8 @@ const ROOT_MODULES = new Set([
   "hotkey.js",
   "improvement-inbox-surface.js",
   "index-settings-panel.js",
+  // SPEC-3165 — Issue Monitor surface.
+  "issue-monitor-surface.js",
   // SPEC-2014 2026-05-29 — Launch Agent setting controls (reasoning slider +
   // Auto toggle, count-adaptive segmented/select, boolean toggle).
   "launch-controls.js",

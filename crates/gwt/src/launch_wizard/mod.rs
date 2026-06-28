@@ -341,6 +341,8 @@ pub struct LaunchWizardView {
     pub show_linked_issue: bool,
     pub runtime_resolution_pending: bool,
     pub runtime_resolution_message: Option<String>,
+    pub launch_materialization_pending: bool,
+    pub launch_materialization_message: Option<String>,
     pub primary_action_label: String,
     pub primary_action_enabled: bool,
     pub progress_steps: Vec<LaunchWizardProgressStepView>,
@@ -407,7 +409,7 @@ pub struct LaunchWizardPreviousProfiles {
 }
 
 impl LaunchWizardPreviousProfiles {
-    fn from_profile(profile: Option<LaunchWizardPreviousProfile>) -> Self {
+    pub fn from_profile(profile: Option<LaunchWizardPreviousProfile>) -> Self {
         let Some(profile) = profile else {
             return Self::default();
         };
@@ -427,17 +429,23 @@ impl LaunchWizardPreviousProfiles {
         self
     }
 
-    fn preferred_agent_id(&self) -> Option<&str> {
+    pub fn preferred_agent_id(&self) -> Option<&str> {
         self.default_agent_id.as_deref()
     }
 
-    fn profile_for(&self, agent_id: &str) -> Option<&LaunchWizardPreviousProfile> {
+    pub fn profile_for(&self, agent_id: &str) -> Option<&LaunchWizardPreviousProfile> {
         self.by_agent.get(agent_id)
     }
 
     /// SPEC-2014 FR-032/FR-035: repo-local previous profile を返す。
-    fn repo_local(&self) -> Option<&LaunchWizardPreviousProfile> {
+    pub fn repo_local(&self) -> Option<&LaunchWizardPreviousProfile> {
         self.repo_local.as_ref()
+    }
+
+    pub fn preferred_profile(&self) -> Option<&LaunchWizardPreviousProfile> {
+        self.preferred_agent_id()
+            .and_then(|agent_id| self.profile_for(agent_id))
+            .or_else(|| self.repo_local())
     }
 }
 
@@ -757,6 +765,8 @@ pub struct LaunchWizardState {
     pub runtime_context_resolved: bool,
     pub runtime_resolution_pending: bool,
     pub runtime_resolution_message: Option<String>,
+    pub launch_materialization_pending: bool,
+    pub launch_materialization_message: Option<String>,
     pub hydration_error: Option<String>,
     pub linked_issue_number: Option<u64>,
     start_method_selected: bool,

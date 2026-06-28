@@ -15,7 +15,7 @@ use std::sync::Mutex;
 
 use super::{
     close_window_from_workspace, should_auto_close_agent_window, AppRuntime, BackendEvent,
-    OutboundEvent, WindowProcessStatus,
+    OutboundEvent, WindowPreset, WindowProcessStatus,
 };
 
 impl AppRuntime {
@@ -88,6 +88,7 @@ impl AppRuntime {
             self.window_details.remove(&id);
             return Vec::new();
         };
+        let is_agent_window = self.window_preset(&id) == Some(WindowPreset::Agent);
         if publish_to_daemon {
             if let Some(address) = self.window_lookup.get(&id) {
                 if let Some(tab) = self.tab(&address.tab_id) {
@@ -148,6 +149,16 @@ impl AppRuntime {
         let _ = self.persist();
 
         let mut events = Vec::new();
+        if is_agent_window
+            && composed_status == WindowProcessStatus::Error
+            && !keep_active_agent_session_for_recovery
+        {
+            let message = detail
+                .as_deref()
+                .unwrap_or("Agent entered error state")
+                .to_string();
+            events.extend(self.issue_monitor_agent_failed_events(&id, &message));
+        }
         if matches!(
             status,
             WindowProcessStatus::Error | WindowProcessStatus::Stopped
@@ -193,6 +204,7 @@ impl AppRuntime {
         let Some(window_id) = self.active_window_for_runtime_event(&event) else {
             return events;
         };
+        let is_agent_window = self.window_preset(&window_id) == Some(WindowPreset::Agent);
         let Some(hook_state) = gwt::window_state::runtime_hook_window_state(&event) else {
             return events;
         };
@@ -205,6 +217,12 @@ impl AppRuntime {
         let Some(composed_state) = self.recompute_window_state(&window_id) else {
             return events;
         };
+        let hook_detail = event
+            .message
+            .as_deref()
+            .map(str::trim)
+            .filter(|message| !message.is_empty())
+            .map(str::to_string);
         let should_auto_close = should_auto_close_agent_window(
             &self.active_agent_sessions,
             &window_id,
@@ -227,9 +245,19 @@ impl AppRuntime {
         }
         if gwt::window_state::is_live_agent_hook_state(hook_state) {
             self.window_details.remove(&window_id);
+        } else if let Some(detail) = hook_detail.as_ref() {
+            self.window_details
+                .insert(window_id.clone(), detail.clone());
         }
-        let detail = self.window_details.get(&window_id).cloned();
+        let detail = hook_detail.or_else(|| self.window_details.get(&window_id).cloned());
         let _ = self.persist();
+        if is_agent_window && composed_state == WindowProcessStatus::Error {
+            let message = detail
+                .as_deref()
+                .unwrap_or("Agent entered error state")
+                .to_string();
+            events.extend(self.issue_monitor_agent_failed_events(&window_id, &message));
+        }
         if matches!(
             composed_state,
             WindowProcessStatus::Error | WindowProcessStatus::Stopped

@@ -8,6 +8,8 @@ use std::{
 use gwt_core::{GwtError, Result};
 use serde::{Deserialize, Serialize};
 
+pub const GITHUB_ISSUE_LIST_LIMIT: &str = "1000";
+
 /// A GitHub Issue.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Issue {
@@ -111,7 +113,7 @@ pub fn fetch_issues(owner: &str, repo: &str) -> Result<Vec<Issue>> {
             "--json",
             "number,title,state,labels,assignees,body,url",
             "--limit",
-            "100",
+            GITHUB_ISSUE_LIST_LIMIT,
         ],
         gwt_core::process_console::SpawnOptions::new("gh issue list"),
     )
@@ -212,6 +214,11 @@ mod tests {
     fn parse_gh_issues_json_invalid() {
         let result = parse_gh_issues_json("not json");
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn issue_list_limit_is_high_enough_for_large_repositories() {
+        assert_eq!(GITHUB_ISSUE_LIST_LIMIT, "1000");
     }
 
     #[test]

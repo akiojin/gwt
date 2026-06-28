@@ -53,6 +53,38 @@ fn managed_hook_health_waits_for_first_event_when_session_start_is_delayed() {
 }
 
 #[test]
+fn managed_hook_health_tolerates_legacy_runtime_state_with_null_source_event() {
+    let worktree = tempfile::tempdir().expect("worktree");
+    gwt_skills::generate_settings_local(worktree.path()).expect("claude hooks");
+    gwt_skills::generate_codex_hooks(worktree.path()).expect("codex hooks");
+    let runtime_path = worktree.path().join("runtime-state.json");
+    fs::write(
+        &runtime_path,
+        serde_json::to_vec_pretty(&json!({
+            "status": "Running",
+            "updated_at": "2026-06-24T06:27:01Z",
+            "last_activity_at": "2026-06-24T06:27:01Z",
+            "source_event": null,
+            "pending_discussion": null
+        }))
+        .expect("serialize legacy runtime state"),
+    )
+    .expect("write legacy runtime state");
+
+    let health = read_managed_hook_health(
+        &ManagedHookHealthInput::new(worktree.path()).with_runtime_state_path(&runtime_path),
+    );
+
+    assert_eq!(
+        health.status,
+        ManagedHookHealthStatus::WaitingForFirstHookEvent
+    );
+    assert!(health.last_event.is_none());
+    assert!(health.last_event_at.is_none());
+    assert!(health.issues.is_empty(), "{:?}", health.issues);
+}
+
+#[test]
 fn managed_hook_health_projects_pending_discussion_and_goal() {
     let worktree = tempfile::tempdir().expect("worktree");
     gwt_skills::generate_settings_local(worktree.path()).expect("claude hooks");

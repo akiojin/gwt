@@ -70,8 +70,8 @@ test("rail window badge: applyTelemetryCounts が windows 数を badge に反映
   assert.equal(badge.hidden, true);
 });
 
-test("FR-039 (安心): applyTelemetryCounts が needs_input を WAITING cell に反映しアラート点滅する", async () => {
-  // The WAITING cell mirrors BLOCKED: needs_input drives both the count value
+test("FR-039 (安心): applyTelemetryCounts が waiting を WAITING cell に反映しアラート点滅する", async () => {
+  // The WAITING cell mirrors ERROR: waiting drives both the count value
   // and the --alert pulse so an agent waiting for the operator stays loud.
   const { applyTelemetryCounts } = await importOperatorShell();
   const { document } = parseHTML(html);
@@ -81,19 +81,69 @@ test("FR-039 (安心): applyTelemetryCounts が needs_input を WAITING cell に
   assert.ok(cell, "expected .op-status-strip__cell--waiting cell in the strip");
   assert.equal(value.getAttribute("aria-label"), "Agents waiting for input");
 
-  applyTelemetryCounts(document, { needs_input: 2 });
+  applyTelemetryCounts(document, { waiting: 2 });
   assert.equal(value.textContent, "2");
   assert.ok(
     cell.classList.contains("op-status-strip__cell--alert"),
     "WAITING cell pulses while agents wait for input",
   );
 
-  applyTelemetryCounts(document, { needs_input: 0 });
+  applyTelemetryCounts(document, { waiting: 0 });
   assert.equal(value.textContent, "0");
   assert.ok(
     !cell.classList.contains("op-status-strip__cell--alert"),
     "WAITING cell stops pulsing once no agent is waiting",
   );
+});
+
+test("Issue Monitor status strip cell stays visible and opens the monitor surface", async () => {
+  const { applyIssueMonitorStatus } = await importOperatorShell();
+  const { document, window } = parseHTML(html);
+  const originalCustomEvent = globalThis.CustomEvent;
+  globalThis.CustomEvent = window.CustomEvent;
+  try {
+    const cell = document.getElementById("op-strip-issue-monitor");
+    const value = document.getElementById("op-strip-issue-monitor-value");
+    assert.ok(cell, "expected Issue Monitor status cell in the strip");
+    assert.ok(value, "expected Issue Monitor status value in the strip");
+
+    const commands = [];
+    document.addEventListener("op:command", (event) => {
+      commands.push(event.detail?.id);
+    });
+
+    applyIssueMonitorStatus(document, {
+      enabled: true,
+      state: "launching",
+      queue_len: 3,
+      active_count: 1,
+      max_active_agents: 2,
+    });
+
+    assert.equal(value.textContent, "Run Q3 A1/2");
+    assert.equal(cell.dataset.state, "launching");
+    assert.equal(cell.getAttribute("aria-label"), "Issue Monitor: Run Q3 A1/2");
+    assert.equal(cell.classList.contains("op-status-strip__cell--alert"), false);
+
+    applyIssueMonitorStatus(document, {
+      enabled: true,
+      state: "error",
+      queue_len: 3,
+      active_count: 0,
+      max_active_agents: 2,
+      last_error: "issue #3165: failed",
+    });
+
+    assert.equal(value.textContent, "Error Q3 A0/2");
+    assert.equal(cell.dataset.state, "error");
+    assert.equal(cell.classList.contains("op-status-strip__cell--alert"), true);
+    assert.match(cell.getAttribute("title") ?? "", /issue #3165: failed/);
+
+    cell.dispatchEvent(new window.Event("click", { bubbles: true }));
+    assert.deepEqual(commands, ["open-issue-monitor"]);
+  } finally {
+    globalThis.CustomEvent = originalCustomEvent;
+  }
 });
 
 test("migration: 起動時に旧 localStorage キーが removeItem される", async () => {

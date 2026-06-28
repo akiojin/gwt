@@ -8,8 +8,11 @@ use std::{
     sync::{Mutex, OnceLock},
 };
 
-use gwt::cli::hook::event_dispatcher;
-use gwt_agent::{session::GWT_SESSION_ID_ENV, AgentId, Session};
+use gwt::cli::hook::{event_dispatcher, HookOutput, IntentBoundaryEvent};
+use gwt_agent::{
+    session::{GWT_SESSION_ID_ENV, GWT_SESSION_RUNTIME_PATH_ENV},
+    AgentId, Session,
+};
 use gwt_core::{
     paths::gwt_sessions_dir,
     test_support::{ScopedEnvVar, ScopedGwtHome},
@@ -30,6 +33,8 @@ struct EnvGuard {
     _home: ScopedGwtHome,
     _home_env: ScopedEnvVar,
     _userprofile_env: ScopedEnvVar,
+    _runtime_path_env: ScopedEnvVar,
+    _codex_thread_id_env: ScopedEnvVar,
     // Declared last so it drops last: the env-lock stays held while the
     // ScopedEnvVar guards above restore HOME / USERPROFILE, keeping the
     // process-global env mutation serialized against other tests.
@@ -61,11 +66,16 @@ fn with_temp_env(home: &Path, session_id: &str) -> EnvGuard {
     let userprofile_env = ScopedEnvVar::set("USERPROFILE", home);
     let previous_session_id = std::env::var_os(GWT_SESSION_ID_ENV);
     std::env::set_var(GWT_SESSION_ID_ENV, session_id);
+    let runtime_path = gwt_agent::runtime_state_path(&gwt_sessions_dir(), session_id);
+    let runtime_path_env = ScopedEnvVar::set(GWT_SESSION_RUNTIME_PATH_ENV, &runtime_path);
+    let codex_thread_id_env = ScopedEnvVar::unset("CODEX_THREAD_ID");
     EnvGuard {
         previous_session_id,
         _home: home_guard,
         _home_env: home_env,
         _userprofile_env: userprofile_env,
+        _runtime_path_env: runtime_path_env,
+        _codex_thread_id_env: codex_thread_id_env,
         _guard: guard,
     }
 }
@@ -95,7 +105,11 @@ fn init_repo(home: &TempDir) -> PathBuf {
 }
 
 fn save_session(repo_path: &Path) -> String {
-    let mut session = Session::new(repo_path, "work/session-start-test", AgentId::Codex);
+    save_session_with_agent(repo_path, AgentId::Codex)
+}
+
+fn save_session_with_agent(repo_path: &Path, agent_id: AgentId) -> String {
+    let mut session = Session::new(repo_path, "work/session-start-test", agent_id);
     session.id = "session-start-fixture".to_string();
     session.save(&gwt_sessions_dir()).expect("save session");
     session.id
@@ -108,9 +122,26 @@ fn session_start_hook_registers_agent_so_workspace_update_persists_title_summary
     let repo_path = init_repo(&home);
     let session_id = save_session(&repo_path);
 
-    let output = event_dispatcher::handle_with_input("SessionStart", "{}", &repo_path, None)
-        .expect("SessionStart dispatch should succeed");
+    let output = event_dispatcher::handle_with_input(
+        "SessionStart",
+        r#"{"session_id":"codex-conversation-1"}"#,
+        &repo_path,
+        None,
+    )
+    .expect("SessionStart dispatch should succeed");
     drop(output);
+
+    let loaded = Session::load(&gwt_sessions_dir().join(format!("{session_id}.toml")))
+        .expect("load session");
+    assert_eq!(
+        loaded.agent_session_id.as_deref(),
+        Some("codex-conversation-1")
+    );
+    assert_eq!(loaded.session_history.len(), 1);
+    assert_eq!(
+        loaded.session_history[0].agent_session_id,
+        "codex-conversation-1"
+    );
 
     let projection = load_workspace_projection(&repo_path)
         .expect("load projection")
@@ -161,8 +192,13 @@ fn session_start_hook_is_idempotent_across_repeated_invocations() {
     let session_id = save_session(&repo_path);
 
     for _ in 0..3 {
-        event_dispatcher::handle_with_input("SessionStart", "{}", &repo_path, None)
-            .expect("SessionStart dispatch should succeed");
+        event_dispatcher::handle_with_input(
+            "SessionStart",
+            r#"{"session_id":"codex-conversation-1"}"#,
+            &repo_path,
+            None,
+        )
+        .expect("SessionStart dispatch should succeed");
     }
 
     let projection = load_workspace_projection(&repo_path)
@@ -174,4 +210,58 @@ fn session_start_hook_is_idempotent_across_repeated_invocations() {
         .filter(|agent| agent.session_id == session_id)
         .count();
     assert_eq!(matches, 1, "SessionStart hook must not duplicate agents");
+
+    let loaded = Session::load(&gwt_sessions_dir().join(format!("{session_id}.toml")))
+        .expect("load session");
+    assert_eq!(loaded.session_history.len(), 1);
+    assert_eq!(
+        loaded.session_history[0].agent_session_id,
+        "codex-conversation-1"
+    );
+}
+
+#[test]
+fn session_start_without_provider_session_id_returns_diagnostic_and_does_not_register_agent() {
+    let home = tempfile::tempdir().expect("temp home");
+    let _env = with_temp_env(home.path(), "session-start-fixture");
+    let repo_path = init_repo(&home);
+    let session_id = save_session_with_agent(&repo_path, AgentId::ClaudeCode);
+
+    let output = event_dispatcher::handle_with_input("SessionStart", "{}", &repo_path, None)
+        .expect("SessionStart dispatch should fail open with diagnostics");
+
+    let HookOutput::HookSpecificAdditionalContext { event, text } = output else {
+        panic!("expected SessionStart diagnostic context");
+    };
+    assert_eq!(event, IntentBoundaryEvent::SessionStart);
+    assert!(
+        text.contains("SessionStart did not include a provider session id"),
+        "{text}"
+    );
+    assert!(
+        text.contains("gwt could not associate this agent session"),
+        "{text}"
+    );
+
+    let loaded = Session::load(&gwt_sessions_dir().join(format!("{session_id}.toml")))
+        .expect("load session");
+    assert!(
+        loaded.agent_session_id.is_none(),
+        "missing provider id must not synthesize an exact resume id"
+    );
+    assert!(
+        loaded.session_history.is_empty(),
+        "missing provider id must not synthesize session history"
+    );
+
+    let projection = load_workspace_projection(&repo_path).expect("load projection");
+    if let Some(projection) = projection {
+        assert!(
+            projection
+                .agents
+                .iter()
+                .all(|agent| agent.session_id != session_id),
+            "session-less SessionStart must not register a normal Workspace agent"
+        );
+    }
 }

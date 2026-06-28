@@ -361,7 +361,49 @@ test("running stage: renders running heading and copy", () => {
   const rows = dialogEl.querySelectorAll(".branch-cleanup-progress-item");
   assert.equal(rows.length, 3);
   assert.match(rows[1].textContent, /work\/b/);
-  assert.match(rows[1].textContent, /running/);
+  assert.match(rows[1].textContent, /Running/);
+});
+
+test("running stage: queued branches show preparing feedback before first progress event", () => {
+  const { modalEl, dialogEl, createNode } = mount();
+  const state = makeState({
+    cleanupModal: {
+      open: true,
+      stage: "running",
+      progress: {
+        current: null,
+        items: [
+          { branch: "work/a", status: "pending", message: "" },
+          { branch: "work/b", status: "pending", message: "" },
+        ],
+      },
+    },
+  });
+
+  renderBranchCleanupModal({
+    modalEl,
+    dialogEl,
+    windowId: "win-1",
+    state,
+    selectedEntries: [makeEntry("work/a"), makeEntry("work/b")],
+    createNode,
+    resultSummary,
+    mergeTargetText,
+    riskLabels,
+    onCancel: () => {},
+    onSubmit: () => {},
+    onDeleteRemoteToggle: () => {},
+  });
+
+  const running = dialogEl.querySelector(".branch-cleanup-running");
+  assert.ok(running);
+  assert.equal(running.getAttribute("aria-live"), "polite");
+  assert.match(running.textContent, /Preparing cleanup queue for 2 branches/);
+
+  const statuses = Array.from(
+    dialogEl.querySelectorAll(".branch-cleanup-progress-status"),
+  ).map((node) => node.textContent);
+  assert.deepEqual(statuses, ["Queued", "Queued"]);
 });
 
 test("result stage: renders summary, per-result rows and Close button", () => {

@@ -54,6 +54,13 @@ function defaultDesktopNotification(windowRef, notice) {
   });
 }
 
+function appendStatusDetail(body, detail) {
+  const trimmed = String(detail || "").trim();
+  if (!trimmed) return body;
+  const base = body.replace(/\.$/, "");
+  return `${base}: ${trimmed}`;
+}
+
 function noticeForState({ state, windowData, projectTab, windowId }) {
   const agentName = windowLabel(windowData);
   const projectName = projectLabel(projectTab);
@@ -110,6 +117,7 @@ export function createAgentCompletionNotifier({
     runtimeState,
     windowData = null,
     projectTab = null,
+    statusDetail = "",
   }) {
     if (!windowId) {
       return null;
@@ -167,6 +175,9 @@ export function createAgentCompletionNotifier({
       projectTitle: projectLabel(project),
       createdAt: timestamp,
     };
+    if (notice.kind === "agent_error") {
+      notice.body = appendStatusDetail(notice.body, statusDetail);
+    }
     publish(notice);
     return notice;
   }
@@ -199,7 +210,7 @@ const ATTENTION_STATES = Object.freeze({
   exited: "done",
 });
 
-function attentionNoticeForFlavor({ flavor, windowData, windowId }) {
+function attentionNoticeForFlavor({ flavor, windowData, windowId, statusDetail = "" }) {
   const agentName = windowLabel(windowData);
   switch (flavor) {
     case "needs_input":
@@ -213,7 +224,7 @@ function attentionNoticeForFlavor({ flavor, windowData, windowId }) {
       return {
         flavor,
         title: "Agent error",
-        body: `${agentName} hit an error.`,
+        body: appendStatusDetail(`${agentName} hit an error.`, statusDetail),
         windowId,
       };
     case "done":
@@ -238,7 +249,12 @@ export function createAgentAttentionToaster({
   // entry into the same flavor toasts again.
   const lastFlavor = new Map();
 
-  function handleRuntimeState({ windowId, runtimeState, windowData = null }) {
+  function handleRuntimeState({
+    windowId,
+    runtimeState,
+    windowData = null,
+    statusDetail = "",
+  }) {
     if (!windowId) {
       return null;
     }
@@ -255,7 +271,12 @@ export function createAgentAttentionToaster({
     }
     lastFlavor.set(windowId, flavor);
 
-    const notice = attentionNoticeForFlavor({ flavor, windowData, windowId });
+    const notice = attentionNoticeForFlavor({
+      flavor,
+      windowData,
+      windowId,
+      statusDetail,
+    });
     if (!notice) {
       return null;
     }

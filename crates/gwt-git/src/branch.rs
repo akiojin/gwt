@@ -61,6 +61,19 @@ impl MergeTarget {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CleanupReadinessReason {
+    Merged,
+    NoChanges,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CleanupReadinessTarget {
+    pub target: MergeTargetRef,
+    pub reason: CleanupReadinessReason,
+}
+
 /// Returns true when every commit reachable from `branch` is also reachable
 /// from `base` (FR-018a). Uses `git cherry`, which tolerates squash and rebase
 /// merges by comparing patch IDs.
@@ -183,6 +196,76 @@ pub fn merged_base_target(repo_path: &Path, branch: &str) -> Result<Option<Merge
     }
     let (_, target) = detect_cleanable_target_for_remote(repo_path, branch, "origin")?;
     Ok(target)
+}
+
+/// Resolves whether a branch is ready for Workspace cleanup against origin's
+/// canonical bases. A branch is ready when it is merged by the existing
+/// squash-aware logic, or when its effective tree diff from the base is empty.
+pub fn cleanup_readiness_base_target(
+    repo_path: &Path,
+    branch: &str,
+) -> Result<Option<CleanupReadinessTarget>> {
+    if is_protected_branch(branch) {
+        return Ok(None);
+    }
+    for (base, target) in CANONICAL_BASE_BRANCHES {
+        let refname = format!("origin/{base}");
+        if !ref_exists(repo_path, &refname)? {
+            continue;
+        }
+        let target_ref = MergeTargetRef::new(*target, refname.clone());
+        if is_branch_merged_into(repo_path, branch, &refname)? {
+            return Ok(Some(CleanupReadinessTarget {
+                target: target_ref,
+                reason: CleanupReadinessReason::Merged,
+            }));
+        }
+        if branch_has_no_changes_against_base(repo_path, branch, &refname)? {
+            return Ok(Some(CleanupReadinessTarget {
+                target: target_ref,
+                reason: CleanupReadinessReason::NoChanges,
+            }));
+        }
+    }
+    Ok(None)
+}
+
+fn branch_has_no_changes_against_base(repo_path: &Path, branch: &str, base: &str) -> Result<bool> {
+    if !ref_exists(repo_path, base)? || !ref_exists(repo_path, branch)? {
+        return Ok(false);
+    }
+    let range = format!("{base}...{branch}");
+    if git_diff_quiet(repo_path, &range, None)? {
+        return Ok(true);
+    }
+    git_diff_quiet(repo_path, base, Some(branch))
+}
+
+fn git_diff_quiet(repo_path: &Path, left: &str, right: Option<&str>) -> Result<bool> {
+    let mut args = vec!["diff", "--quiet", "--exit-code", left];
+    if let Some(right) = right {
+        args.push(right);
+    }
+    args.push("--");
+    let output = gwt_core::process::run_git_logged(&args, Some(repo_path)).map_err(|e| {
+        let range = match right {
+            Some(right) => format!("{left} {right}"),
+            None => left.to_string(),
+        };
+        GwtError::Git(format!("diff {range}: {e}"))
+    })?;
+    if output.status.success() {
+        return Ok(true);
+    }
+    if output.status.code() == Some(1) {
+        return Ok(false);
+    }
+    let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+    let range = match right {
+        Some(right) => format!("{left} {right}"),
+        None => left.to_string(),
+    };
+    Err(GwtError::Git(format!("diff {range}: {stderr}")))
 }
 
 /// Returns the set of local branch names whose upstream tracking ref is
@@ -758,6 +841,76 @@ mod tests {
 
         assert!(merged_base_target(repo, "develop").unwrap().is_none());
         assert!(merged_base_target(repo, "main").unwrap().is_none());
+    }
+
+    /// SPEC-2359 US-84 (FR-452): a `work/*` branch with commits whose net tree
+    /// diff against the canonical base is empty is cleanup-ready even when it
+    /// was not merged by commit ancestry or patch-id.
+    #[test]
+    fn cleanup_readiness_base_target_detects_no_changes_without_merge() {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = tmp.path();
+        init_named_repo(repo);
+        run(&["checkout", "-b", "develop"], repo);
+        make_commit(repo, "a.txt", "base\n", "feat: base");
+        run(
+            &["update-ref", "refs/remotes/origin/develop", "develop"],
+            repo,
+        );
+        run(&["checkout", "-b", "work/no-changes", "develop"], repo);
+        make_commit(repo, "a.txt", "changed\n", "feat: temporary change");
+        make_commit(repo, "a.txt", "base\n", "revert: temporary change");
+
+        assert!(
+            merged_base_target(repo, "work/no-changes")
+                .unwrap()
+                .is_none(),
+            "empty net diff is not the same as merged"
+        );
+        let readiness = cleanup_readiness_base_target(repo, "work/no-changes")
+            .unwrap()
+            .expect("empty net diff branch is cleanup-ready");
+
+        assert_eq!(readiness.reason, CleanupReadinessReason::NoChanges);
+        assert_eq!(readiness.target.reference, "origin/develop");
+    }
+
+    /// SPEC-2359 US-84 (FR-452): if a branch's final tree is identical to the
+    /// current base, cleanup is safe even when patch-id merge detection cannot
+    /// prove the branch merged.
+    #[test]
+    fn cleanup_readiness_base_target_detects_current_base_tree_equality() {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = tmp.path();
+        init_named_repo(repo);
+        run(&["checkout", "-b", "develop"], repo);
+        make_commit(repo, "a.txt", "base\n", "feat: base");
+        run(
+            &["update-ref", "refs/remotes/origin/develop", "develop"],
+            repo,
+        );
+        run(&["checkout", "-b", "work/same-tree", "develop"], repo);
+        make_commit(repo, "b.txt", "temporary\n", "feat: temporary shape");
+        make_commit(repo, "b.txt", "final\n", "feat: final shape");
+        run(&["checkout", "develop"], repo);
+        make_commit(repo, "b.txt", "final\n", "feat: base final shape");
+        run(
+            &["update-ref", "refs/remotes/origin/develop", "develop"],
+            repo,
+        );
+
+        assert!(
+            merged_base_target(repo, "work/same-tree")
+                .unwrap()
+                .is_none(),
+            "tree equality is a no-changes case, not a merge-detection case"
+        );
+        let readiness = cleanup_readiness_base_target(repo, "work/same-tree")
+            .unwrap()
+            .expect("same final tree branch is cleanup-ready");
+
+        assert_eq!(readiness.reason, CleanupReadinessReason::NoChanges);
+        assert_eq!(readiness.target.reference, "origin/develop");
     }
 
     #[test]

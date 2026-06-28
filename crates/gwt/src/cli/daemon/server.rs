@@ -38,7 +38,7 @@ use gwt_core::daemon::{
     persist_endpoint, validate_handshake, ClientFrame, DaemonEndpoint, DaemonFrame, DaemonStatus,
     IpcHandshakeRequest, IpcHandshakeResponse, RuntimeScope, DAEMON_PROTOCOL_VERSION,
 };
-use gwt_github::{client::ApiError, SpecOpsError};
+use gwt_github::{client::http::HttpIssueClient, client::ApiError, SpecOpsError};
 use tokio::{
     io::{AsyncBufReadExt, AsyncWriteExt, BufReader},
     net::{UnixListener, UnixStream},
@@ -128,6 +128,7 @@ pub async fn run_server(
 
     let shutdown = Arc::new(Notify::new());
     spawn_signal_watcher(Arc::clone(&shutdown));
+    spawn_issue_monitor_worker(endpoint.scope.clone(), hub.clone(), Arc::clone(&shutdown));
 
     let endpoint = Arc::new(endpoint);
     let started_at = Instant::now();
@@ -214,6 +215,292 @@ fn spawn_signal_watcher(shutdown: Arc<Notify>) {
         }
         term.notify_waiters();
     });
+}
+
+fn spawn_issue_monitor_worker(scope: RuntimeScope, hub: BroadcastHub, shutdown: Arc<Notify>) {
+    tokio::spawn(async move {
+        let mut control_rx =
+            hub.subscribe(crate::runtime_daemon_events::ISSUE_MONITOR_CONTROL_CHANNEL);
+        let prefs_path = crate::issue_monitor_prefs_path_for_repo_path(&scope.project_root);
+        let prefs = crate::load_issue_monitor_prefs(&prefs_path).unwrap_or_default();
+        let mut monitor =
+            crate::IssueMonitorState::with_prefs(crate::IssueMonitorConfig::default(), prefs);
+        publish_issue_monitor_payloads(&hub, &mut monitor);
+        let mut interval =
+            tokio::time::interval(Duration::from_secs(monitor.config.poll_interval_secs));
+
+        loop {
+            tokio::select! {
+                biased;
+                _ = shutdown.notified() => break,
+                control = control_rx.recv() => {
+                    match control {
+                        Ok(DaemonFrame::Event { payload, .. }) => {
+                            if let Some(control) = decode_issue_monitor_control(payload) {
+                                let should_scan = apply_issue_monitor_control(&mut monitor, control);
+                                let _ = crate::save_issue_monitor_prefs(&prefs_path, &monitor.prefs());
+                                publish_issue_monitor_payloads(&hub, &mut monitor);
+                                if should_scan {
+                                    let gui_connected = issue_monitor_gui_connected(&hub);
+                                    monitor = scan_issue_monitor_once(scope.clone(), monitor, gui_connected).await;
+                                    publish_issue_monitor_payloads(&hub, &mut monitor);
+                                }
+                            }
+                        }
+                        Ok(_) => {}
+                        Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {}
+                        Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+                    }
+                }
+                _ = interval.tick() => {
+                    let gui_connected = issue_monitor_gui_connected(&hub);
+                    monitor = scan_issue_monitor_once(scope.clone(), monitor, gui_connected).await;
+                    publish_issue_monitor_payloads(&hub, &mut monitor);
+                }
+            }
+        }
+    });
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum IssueMonitorControl {
+    Enabled(bool),
+    MaxActiveAgents(usize),
+    PriorityOrder(Vec<u64>),
+    Launched {
+        issue_number: u64,
+        window_id: String,
+    },
+    LaunchFailed {
+        issue_number: u64,
+        message: String,
+    },
+    AgentFailed {
+        issue_number: Option<u64>,
+        window_id: String,
+        message: String,
+    },
+}
+
+fn apply_issue_monitor_control(
+    monitor: &mut crate::IssueMonitorState,
+    control: IssueMonitorControl,
+) -> bool {
+    match control {
+        IssueMonitorControl::Enabled(enabled) => {
+            monitor.set_enabled(enabled);
+            true
+        }
+        IssueMonitorControl::MaxActiveAgents(max_active_agents) => {
+            monitor.set_max_active_agents(max_active_agents);
+            true
+        }
+        IssueMonitorControl::PriorityOrder(issue_numbers) => {
+            monitor.set_priority_order(issue_numbers);
+            true
+        }
+        IssueMonitorControl::Launched {
+            issue_number,
+            window_id,
+        } => {
+            monitor.complete_active_launch(issue_number, window_id);
+            true
+        }
+        IssueMonitorControl::LaunchFailed {
+            issue_number,
+            message,
+        } => {
+            monitor.record_launch_failed(issue_number, message);
+            true
+        }
+        IssueMonitorControl::AgentFailed {
+            issue_number,
+            window_id,
+            message,
+        } => {
+            if let Some(issue_number) = issue_number {
+                monitor.record_agent_issue_failed(issue_number, message);
+            } else {
+                monitor.record_agent_window_failed(&window_id, message);
+            }
+            true
+        }
+    }
+}
+
+fn decode_issue_monitor_control(payload: serde_json::Value) -> Option<IssueMonitorControl> {
+    match crate::runtime_daemon_events::decode_runtime_daemon_event(
+        crate::runtime_daemon_events::ISSUE_MONITOR_CHANNEL,
+        payload,
+        std::process::id(),
+    )? {
+        crate::runtime_daemon_events::RuntimeDaemonEvent::IssueMonitor { event } => {
+            if event.get("event")?.as_str()? != "control" {
+                return None;
+            }
+            let payload = event.get("payload")?;
+            if let Some(enabled) = payload.get("enabled").and_then(serde_json::Value::as_bool) {
+                return Some(IssueMonitorControl::Enabled(enabled));
+            }
+            if let Some(max_active_agents) = payload
+                .get("max_active_agents")
+                .and_then(serde_json::Value::as_u64)
+                .and_then(|value| usize::try_from(value).ok())
+            {
+                return Some(IssueMonitorControl::MaxActiveAgents(max_active_agents));
+            }
+            if let Some(launch_failed) = payload.get("launch_failed") {
+                let issue_number = launch_failed.get("issue_number")?.as_u64()?;
+                let message = launch_failed
+                    .get("message")
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or("Launch failed")
+                    .to_string();
+                return Some(IssueMonitorControl::LaunchFailed {
+                    issue_number,
+                    message,
+                });
+            }
+            if let Some(agent_failed) = payload.get("agent_failed") {
+                let issue_number = agent_failed
+                    .get("issue_number")
+                    .and_then(serde_json::Value::as_u64);
+                let window_id = agent_failed
+                    .get("window_id")
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or("")
+                    .to_string();
+                let message = agent_failed
+                    .get("message")
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or("Agent failed")
+                    .to_string();
+                return Some(IssueMonitorControl::AgentFailed {
+                    issue_number,
+                    window_id,
+                    message,
+                });
+            }
+            if let Some(launched) = payload.get("launched") {
+                let issue_number = launched.get("issue_number")?.as_u64()?;
+                let window_id = launched
+                    .get("window_id")
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or("")
+                    .to_string();
+                return Some(IssueMonitorControl::Launched {
+                    issue_number,
+                    window_id,
+                });
+            }
+            let issue_numbers = payload.get("priority_order")?.as_array()?;
+            let issue_numbers = issue_numbers
+                .iter()
+                .map(serde_json::Value::as_u64)
+                .collect::<Option<Vec<_>>>()?;
+            Some(IssueMonitorControl::PriorityOrder(issue_numbers))
+        }
+        _ => None,
+    }
+}
+
+async fn scan_issue_monitor_once(
+    scope: RuntimeScope,
+    monitor: crate::IssueMonitorState,
+    gui_connected: bool,
+) -> crate::IssueMonitorState {
+    tokio::task::spawn_blocking(move || {
+        scan_issue_monitor_once_blocking(scope, monitor, gui_connected)
+    })
+    .await
+    .unwrap_or_else(|error| {
+        let mut monitor = crate::IssueMonitorState::new(crate::IssueMonitorConfig::default());
+        monitor.record_scan_error(
+            chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
+            format!("issue monitor worker join failed: {error}"),
+        );
+        monitor
+    })
+}
+
+fn scan_issue_monitor_once_blocking(
+    scope: RuntimeScope,
+    mut monitor: crate::IssueMonitorState,
+    gui_connected: bool,
+) -> crate::IssueMonitorState {
+    let now = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+    let (owner, repo) =
+        match crate::issue_monitor_worker::github_remote_owner_and_repo(&scope.project_root) {
+            Ok(owner_repo) => owner_repo,
+            Err(error) => {
+                monitor.record_scan_error(now, error.to_string());
+                return monitor;
+            }
+        };
+    let issues = match crate::issue_monitor_worker::load_open_issue_monitor_candidates_for_repo_path(
+        &scope.project_root,
+        &owner,
+        &repo,
+    ) {
+        Ok(issues) => issues,
+        Err(error) => {
+            monitor.record_scan_error(now, format!("issue list failed: {error}"));
+            return monitor;
+        }
+    };
+    let monitor_owner = format!("{}:{}", whoami::username(), std::process::id());
+    crate::scan_issue_monitor_candidates(&mut monitor, &issues, &now);
+    if monitor.config.enabled && gui_connected {
+        let active_cap = if monitor.has_launch_profile() {
+            monitor.config.max_active.max(1)
+        } else {
+            0
+        };
+        if monitor.active_count() < active_cap {
+            match HttpIssueClient::from_gh_auth(&owner, &repo) {
+                Ok(client) => {
+                    monitor.claim_next_launch_requests_with_active_cap(
+                        &client,
+                        &monitor_owner,
+                        &now,
+                        active_cap,
+                    );
+                }
+                Err(error) => {
+                    tracing::warn!(
+                        error = %error,
+                        "issue monitor GitHub claim authentication unavailable"
+                    );
+                    monitor.record_launch_auth_required(now);
+                }
+            }
+        }
+    }
+    monitor
+}
+
+fn publish_issue_monitor_payloads(hub: &BroadcastHub, monitor: &mut crate::IssueMonitorState) {
+    let gui_connected = issue_monitor_gui_connected(hub);
+    for payload in
+        crate::issue_monitor_worker::issue_monitor_daemon_payloads(monitor, gui_connected)
+    {
+        let payload = crate::runtime_daemon_events::issue_monitor_payload(
+            &payload.event,
+            payload.payload,
+            std::process::id(),
+        );
+        let _ = hub.publish(
+            crate::runtime_daemon_events::ISSUE_MONITOR_CHANNEL,
+            DaemonFrame::Event {
+                channel: crate::runtime_daemon_events::ISSUE_MONITOR_CHANNEL.to_string(),
+                payload,
+            },
+        );
+    }
+}
+
+fn issue_monitor_gui_connected(hub: &BroadcastHub) -> bool {
+    hub.receiver_count(crate::runtime_daemon_events::ISSUE_MONITOR_CHANNEL) > 0
 }
 
 async fn handle_connection(
@@ -524,7 +811,10 @@ mod tests {
         net::UnixStream,
     };
 
-    use super::{build_handshake_response, run_server, BroadcastHub};
+    use super::{
+        apply_issue_monitor_control, build_handshake_response, decode_issue_monitor_control,
+        run_server, BroadcastHub, IssueMonitorControl,
+    };
 
     fn sample_endpoint(scope: RuntimeScope, socket_path: &Path, token: &str) -> DaemonEndpoint {
         DaemonEndpoint::new(
@@ -544,6 +834,24 @@ mod tests {
             RuntimeTarget::Host,
         )
         .expect("scope")
+    }
+
+    fn init_git_repo(path: &Path) {
+        let status = gwt_core::process::hidden_command("git")
+            .args(["init", "-q"])
+            .current_dir(path)
+            .status()
+            .expect("git init");
+        assert!(status.success(), "git init must succeed");
+    }
+
+    fn git_remote_add_origin(path: &Path, remote_url: &str) {
+        let status = gwt_core::process::hidden_command("git")
+            .args(["remote", "add", "origin", remote_url])
+            .current_dir(path)
+            .status()
+            .expect("git remote add origin");
+        assert!(status.success(), "git remote add origin must succeed");
     }
 
     #[test]
@@ -595,6 +903,242 @@ mod tests {
         let response = build_handshake_response(&endpoint, &request);
         assert!(response.accepted);
         assert!(response.rejection_reason.is_none());
+    }
+
+    #[test]
+    fn issue_monitor_launch_failed_control_marks_active_item_failed() {
+        let mut monitor = crate::IssueMonitorState::new(crate::IssueMonitorConfig {
+            enabled: true,
+            ..crate::IssueMonitorConfig::default()
+        });
+        monitor.set_gui_connected(true);
+        monitor.record_claimed(
+            crate::IssueMonitorIssue {
+                number: 42,
+                title: "Issue 42".to_string(),
+                labels: Vec::new(),
+                state: crate::IssueMonitorIssueState::Open,
+                body: None,
+                url: None,
+            },
+            "claim-a",
+        );
+        monitor.next_launch_request().expect("launch request");
+        let payload = crate::runtime_daemon_events::issue_monitor_payload(
+            "control",
+            serde_json::json!({
+                "launch_failed": {
+                    "issue_number": 42,
+                    "message": "binary missing",
+                }
+            }),
+            std::process::id() + 1,
+        );
+        let control = decode_issue_monitor_control(payload).expect("control");
+
+        let should_scan = apply_issue_monitor_control(&mut monitor, control);
+
+        assert!(should_scan);
+        assert_eq!(monitor.active_count(), 0);
+        assert_eq!(
+            monitor.inbox_item(42).expect("inbox item").state,
+            crate::MonitorInboxState::LaunchFailed
+        );
+    }
+
+    #[test]
+    fn issue_monitor_launched_control_marks_active_item_launched() {
+        let mut monitor = crate::IssueMonitorState::new(crate::IssueMonitorConfig {
+            enabled: true,
+            ..crate::IssueMonitorConfig::default()
+        });
+        monitor.set_gui_connected(true);
+        monitor.record_claimed(
+            crate::IssueMonitorIssue {
+                number: 42,
+                title: "Issue 42".to_string(),
+                labels: Vec::new(),
+                state: crate::IssueMonitorIssueState::Open,
+                body: None,
+                url: None,
+            },
+            "claim-a",
+        );
+        monitor.next_launch_request().expect("launch request");
+        let payload = crate::runtime_daemon_events::issue_monitor_payload(
+            "control",
+            serde_json::json!({
+                "launched": {
+                    "issue_number": 42,
+                    "window_id": "tab-1::agent-1",
+                }
+            }),
+            std::process::id() + 1,
+        );
+        let control = decode_issue_monitor_control(payload).expect("control");
+
+        let should_scan = apply_issue_monitor_control(&mut monitor, control);
+
+        assert!(should_scan);
+        assert_eq!(monitor.status_view().state, "active");
+        assert_eq!(monitor.active_count(), 1);
+        let item = monitor.inbox_item(42).expect("inbox item");
+        assert_eq!(item.state, crate::MonitorInboxState::Launched);
+        assert_eq!(item.launched_window_id.as_deref(), Some("tab-1::agent-1"));
+    }
+
+    #[test]
+    fn issue_monitor_agent_failed_control_marks_launched_item_failed() {
+        let mut monitor = crate::IssueMonitorState::new(crate::IssueMonitorConfig {
+            enabled: true,
+            ..crate::IssueMonitorConfig::default()
+        });
+        monitor.set_gui_connected(true);
+        monitor.record_claimed(
+            crate::IssueMonitorIssue {
+                number: 42,
+                title: "Issue 42".to_string(),
+                labels: Vec::new(),
+                state: crate::IssueMonitorIssueState::Open,
+                body: None,
+                url: None,
+            },
+            "claim-a",
+        );
+        monitor.next_launch_request().expect("launch request");
+        monitor.complete_active_launch(42, "tab-1::agent-1");
+        let payload = crate::runtime_daemon_events::issue_monitor_payload(
+            "control",
+            serde_json::json!({
+                "agent_failed": {
+                    "window_id": "tab-1::agent-1",
+                    "message": "Stop-block hit an error",
+                }
+            }),
+            std::process::id() + 1,
+        );
+        let control = decode_issue_monitor_control(payload).expect("control");
+
+        let should_scan = apply_issue_monitor_control(&mut monitor, control);
+
+        assert!(should_scan);
+        assert_eq!(monitor.active_count(), 0);
+        assert_eq!(monitor.status_view().state, "error");
+        assert_eq!(
+            monitor.status_view().last_error.as_deref(),
+            Some("issue #42: Stop-block hit an error")
+        );
+        let item = monitor.inbox_item(42).expect("inbox item");
+        assert_eq!(item.state, crate::MonitorInboxState::AgentFailed);
+        assert_eq!(item.launched_window_id, None);
+        assert_eq!(
+            item.error_message.as_deref(),
+            Some("Stop-block hit an error")
+        );
+    }
+
+    #[test]
+    fn issue_monitor_agent_failed_control_uses_issue_number_hint_when_window_is_unmapped() {
+        let mut monitor = crate::IssueMonitorState::new(crate::IssueMonitorConfig {
+            enabled: true,
+            ..crate::IssueMonitorConfig::default()
+        });
+        monitor.set_gui_connected(true);
+        monitor.record_claimed(
+            crate::IssueMonitorIssue {
+                number: 42,
+                title: "Issue 42".to_string(),
+                labels: Vec::new(),
+                state: crate::IssueMonitorIssueState::Open,
+                body: None,
+                url: None,
+            },
+            "claim-a",
+        );
+        monitor.next_launch_request().expect("launch request");
+        let payload = crate::runtime_daemon_events::issue_monitor_payload(
+            "control",
+            serde_json::json!({
+                "agent_failed": {
+                    "issue_number": 42,
+                    "window_id": "unmapped-agent-window",
+                    "message": "Stop-block hit an error",
+                }
+            }),
+            std::process::id() + 1,
+        );
+        let control = decode_issue_monitor_control(payload).expect("control");
+
+        let should_scan = apply_issue_monitor_control(&mut monitor, control);
+
+        assert!(should_scan);
+        assert_eq!(monitor.active_count(), 0);
+        let item = monitor.inbox_item(42).expect("inbox item");
+        assert_eq!(item.state, crate::MonitorInboxState::AgentFailed);
+        assert_eq!(
+            item.error_message.as_deref(),
+            Some("Stop-block hit an error")
+        );
+    }
+
+    #[test]
+    fn issue_monitor_runtime_controls_request_immediate_scan_when_launch_order_changes() {
+        let mut monitor = crate::IssueMonitorState::new(crate::IssueMonitorConfig {
+            enabled: true,
+            max_active: 1,
+            ..crate::IssueMonitorConfig::default()
+        });
+
+        let should_scan =
+            apply_issue_monitor_control(&mut monitor, IssueMonitorControl::MaxActiveAgents(5));
+        assert!(should_scan);
+        assert_eq!(monitor.status_view().max_active_agents, 5);
+
+        let should_scan = apply_issue_monitor_control(
+            &mut monitor,
+            IssueMonitorControl::PriorityOrder(vec![43, 42]),
+        );
+        assert!(should_scan);
+    }
+
+    #[test]
+    fn issue_monitor_scan_reports_missing_origin_instead_of_generic_unavailable() {
+        let temp = TempDir::new().expect("tempdir");
+        init_git_repo(temp.path());
+        let scope = sample_scope(&temp);
+        let monitor = crate::IssueMonitorState::new(crate::IssueMonitorConfig::default());
+
+        let monitor = super::scan_issue_monitor_once_blocking(scope, monitor, false);
+
+        let error = monitor
+            .status_view()
+            .last_error
+            .expect("origin resolution error");
+        assert!(
+            error.starts_with("Git origin remote is not configured"),
+            "unexpected error: {error}"
+        );
+        assert_ne!(error, "GitHub origin remote is unavailable");
+    }
+
+    #[test]
+    fn issue_monitor_scan_reports_non_github_origin_instead_of_generic_unavailable() {
+        let temp = TempDir::new().expect("tempdir");
+        init_git_repo(temp.path());
+        git_remote_add_origin(temp.path(), "https://example.com/owner/repo.git");
+        let scope = sample_scope(&temp);
+        let monitor = crate::IssueMonitorState::new(crate::IssueMonitorConfig::default());
+
+        let monitor = super::scan_issue_monitor_once_blocking(scope, monitor, false);
+
+        let error = monitor
+            .status_view()
+            .last_error
+            .expect("origin resolution error");
+        assert_eq!(
+            error,
+            "Git origin remote is not a GitHub URL: https://example.com/owner/repo.git"
+        );
     }
 
     #[tokio::test]

@@ -7139,7 +7139,7 @@ Future Action: When changing managed `gwt-*` skill assets, update the canonical 
 
 ## 2026-06-20 — Playwright embedded routes must cover transitive module imports
 
-Type: failure pattern
+Type: failure-pattern
 Context: Issue #3037: embedded Playwright specs failed before workspace_state rendered because project-shell-surface.js imported /window-list-model.js, but installEmbeddedRoutes only served a hard-coded ROOT_MODULES list and the guard test only checked direct app.js imports.
 Learning: Direct import coverage is insufficient for browser module fixtures. A missing transitive module manifests as unrelated UI timeouts (0 project tabs / windows) because app.js evaluation aborts before the WebSocket fixture can render state.
 Future Action: When adding or moving frontend modules imported by routed Playwright fixtures, ensure the embedded route helper allowlist includes transitive imports and keep the recursive playwright-embedded-routes test green before triaging downstream visual failures.
@@ -7192,6 +7192,83 @@ Type: project
 Context: minimap centered-radar で .fleet-minimap__world に静的な transform layer hint を CSS に追加したら embedded_web_canvas_stage_keeps_transform_layer_hint_opt_in が失敗。CSS 宣言を消してもコメント内のリテラル文字列でまた失敗した。
 Learning: このテストは frontend_styles_bundle() 全体を substring 検索するため、CSS 宣言だけでなくコメント内の同リテラル文字列も失敗させる。transform の layer hint は applyViewport が motion 中だけ JS で opt-in し 300ms で解除する設計ポリシー（恒久 pin 禁止）。
 Future Action: CSS で transform の layer hint を恒久 pin しない。コメントでも当該リテラル文字列を書かず言い換える。GPU レイヤが要る要素は JS の motion-scoped opt-in に倣う。
+
+## 2026-06-25 — Issue Monitor last settings must preserve runtime target
+
+Type: lesson
+Context: SPEC-3165 Issue Monitor automatic launch used Docker even after the user selected Host in the preceding launch flow.
+Learning: Issue Monitor's Start with last settings semantics must carry the runtime target as part of the launch profile. The normal Launch Wizard intentionally keeps cross-repo runtime selection separate, but Issue Monitor auto-launch needs a repo-local/fallback profile so Host is not overwritten by Docker context defaults.
+Future Action: When changing Issue Monitor auto-launch or Launch Wizard profile plumbing, add a regression that exercises Docker context present plus previous Host settings and asserts auto-launch stays Host.
+
+## 2026-06-25 — Issue Monitor claim auth failure is not a scan failure
+
+Type: lesson
+Context: SPEC-3165 Issue Monitor browser verification showed a red `GitHub auth failed: authentication required` banner even though cached Issues were listed correctly. The failure came from the just-in-time GitHub claim client initialization, not from Issue scanning or cache fallback.
+Learning: Do not store claim-auth unavailability in `IssueMonitorStatusView.last_error`; that field renders as a fatal red scan error in the UI. Preserve the cached queue, keep rows queued, and expose a non-fatal `auth_required` state so automatic launch stays blocked without hiding the queue.
+Future Action: When changing Issue Monitor scan/claim flows, test cache-only environments and assert Start keeps the queue visible without a red auth banner. Keep claim enforcement enabled; do not auto-launch without acquiring a GitHub claim.
+
+## 2026-06-25 — UI CSS must compose Operator tokens and modal primitives
+
+Type: failure pattern
+Context: SPEC-3165 Issue Monitor UI initially shipped injected CSS with raw colors and a bespoke detail modal overlay. User review caught that it did not follow Operator design rules.
+Learning: For gwt WebView UI, new surface CSS must use tokens.css/typography tokens and dialogs must compose .modal-backdrop/.modal-shell/.modal-header/.modal-body/.modal-footer. Test helpers must not globally hide .modal-backdrop because that masks shared primitive adoption.
+Future Action: Before implementing or verifying a UI surface, add/adjust frontend contract tests for raw color rejection and shared modal primitive usage, then run Playwright against a fresh browser-check URL.
+
+## 2026-06-25 — Issue Monitor live E2E needs clean backend state and issue cache
+
+Type: failure pattern
+Context: SPEC-3165 verification: fresh browser-check with isolated HOME showed Issue Monitor rows as 0 until ~/.gwt/cache/issues was symlinked; full Playwright visual run also failed after unrelated live specs left Console/Wizard windows over the Issue Monitor.
+Learning: Issue Monitor live E2E must run against the real checkout via GWT_PLAYWRIGHT_PROJECT_ROOT and a fresh isolated gwt process with issue cache available. Full visual live specs share app state and can interfere with each other; target Issue Monitor E2E should be run in a clean process for reliable evidence.
+Future Action: For Issue Monitor verification, start a fresh browser-check process, symlink ~/.gwt/cache/issues into the isolated HOME when GitHub auth is unavailable, set GWT_PLAYWRIGHT_PROJECT_ROOT to the checkout, run issue-monitor-live.spec.ts first, and restart before user visual handoff.
+
+## 2026-06-25 — browser-check isolated HOME needs GH_TOKEN for GitHub-backed UI
+
+Type: postmortem
+Context: Issue Monitor visual verification used browser-check with an isolated HOME. Host `gh auth status` passed, but inside the fresh HOME `gh auth token` failed because the GitHub CLI keyring/default account state did not follow HOME cleanly.
+Learning: For GitHub-backed UI checks such as Issue Monitor, browser-check must resolve the host token before switching HOME and pass it as `GH_TOKEN` to the fresh gwt process. Git HTTPS checks can still rely on the host Git credential helper when `git ls-remote origin HEAD` succeeds.
+Future Action: When launching fresh gwt for Issue Monitor verification, run `GWT_CHECK_GH_TOKEN=$(gh auth token 2>/dev/null || true)` before changing HOME and pass `GH_TOKEN` to the process without printing it. Verify with isolated `gh auth token >/dev/null` and `curl -fsS -I <url>`.
+
+## 2026-06-25 — Issue Monitor auto-launch must gate unconfigured launches and inject prompt before last-settings resolution
+
+Type: lesson
+Context: SPEC-3165 Issue Monitor auto-improvement loop. User reported that auto-start opened multiple configuration windows when max_active_agents >= 2 and that launched Codex agents reached the picker without the expected prompt.
+Learning: The scheduler can claim multiple issues before a launch profile exists, and StartWithLastSettings resolves LaunchConfig immediately when runtime context is already resolved. If SetInitialPrompt is applied after StartWithLastSettings, the auto-launched agent can start without $gwt-build-spec/$gwt-fix-issue input.
+Future Action: For monitor-style background launches, cap auto-claimed launches to 1 until a saved/inherited launch profile exists, guard against opening a second settings wizard, and always SetInitialPrompt before applying StartWithLastSettings or resolving launch config.
+
+## 2026-06-25 — Issue Monitor launch state must be ordered after real window launch request
+
+Type: bugfix
+Context: SPEC-3165 Issue Monitor showed Launching even when no agent window existed, and launch success could leave local state reconstructed as Launching.
+Learning: Emit issue_monitor_launch_request before any Launching status snapshot, persist launched window ids, and treat Launched rows as active capacity until the work actually stops. Do not clear active capacity at launch success just to drain the queue.
+Future Action: For Issue Monitor auto-run changes, test both daemon and local GUI event order plus persisted prefs reconstruction. Include a live browser-check that confirms an agent window exists before/with Launching and the row transitions to Launched/Active.
+
+## 2026-06-25 — Set GWT_PLAYWRIGHT_PROJECT_ROOT for live Playwright specs
+
+Type: verification
+Context: Issue Monitor live Playwright E2E in scripts/run-visual-tests.sh
+Learning: scripts/run-visual-tests.sh runs Playwright from a temporary RUN_DIR, so live-gwt helper defaults process.cwd() to that temp dir unless GWT_PLAYWRIGHT_PROJECT_ROOT is set. This makes Issue Monitor open the wrong project and show 0 issues even when the isolated HOME has a populated issue cache.
+Future Action: For live gwt Playwright specs that call openLiveGwtProject, always pass GWT_PLAYWRIGHT_PROJECT_ROOT=<repo checkout path> together with GWT_PLAYWRIGHT_BASE_URL.
+
+## 2026-06-25 — Verify visible error-detail surfaces, not just status state
+
+Type: verification
+Context: SPEC-3165 Issue Monitor auto-launch agent runtime errors
+Learning: A runtime error detail can be present in frontend state or DOM but still be invisible when the terminal overlay visibility guard stays false and toasts ignore status detail. Status badges alone are insufficient for user-visible diagnostics.
+Future Action: When fixing agent/runtime error UX, add E2E or browser checks that assert the concrete error message is visible in the agent window and toast, not only that the state badge says Error.
+
+## 2026-06-25 — Issue Monitor manual launches must retain issue feedback context
+
+Type: postmortem
+Context: SPEC-3165 Issue Monitor manual Launch now showed Agent windows/errors while queue rows stayed Queued.
+Learning: Issue Monitor manual launch uses the normal Launch Wizard path, so the wizard session must retain the originating issue number and copy it into LaunchFeedbackContext on frontend LaunchWizardAction submit. Tests must exercise FrontendEvent::LaunchWizardAction, not the no-client helper, or feedback context is intentionally absent.
+Future Action: For Issue Monitor launch-state bugs, add a RED Rust test that follows IssueMonitorLaunchNow -> frontend LaunchWizardAction submits -> pending_launch_feedback_contexts and verifies issue_monitor_issue_number is Some(issue).
+
+## 2026-06-25 — Issue Monitor stale launching without launch settings
+
+Type: failure-pattern
+Context: Issue Monitor showed Launching/Active and Status Strip IDLE 1 even though no agent window existed.
+Learning: The monitor loop must not claim GitHub Issues until a saved or previous launch profile is available. UI agent counters must be derived from real agent counts, not empty Work projection status categories.
+Future Action: When changing Issue Monitor auto-run logic, add tests for no-profile capacity 0, no GitHub claim/comment creation, and Status Strip zero-agent telemetry before manual/browser verification.
 
 ## 2026-06-24 — Keep gwt self-improvement stop hooks repo-local
 
@@ -7332,3 +7409,66 @@ Type: user-feedback
 Context: SPEC-3164 Improvement Inbox visual verification: backend dismiss updated candidates.json, but the visible row did not change when the frontend waited only for the refreshed snapshot.
 Learning: For local review actions that succeed through a backend write and then refresh asynchronously, the surface should reconcile the visible local state immediately after confirmation. Otherwise a dropped websocket reply, process restart, or delayed snapshot leaves the UI looking unchanged even when the store has changed.
 Future Action: When adding approve/reject style review queues, add focused UI tests that assert post-confirm local state transitions before any backend snapshot arrives, and separately verify backend persistence.
+
+## 2026-06-25 — Reopened singleton surfaces must raise z-index locally
+
+Type: Bug Prevention
+Context: UI/UX audit of gwt WebView surface windows
+Learning: When reopening an existing singleton surface from Add Window or Window List, local focus styling is not enough. The DOM z-index must be raised optimistically before the backend focus_window workspace_state ack, otherwise the selected surface can remain visually behind another window during latency.
+Future Action: Add Playwright coverage that stubs focus_window without sending a backend ack and asserts the reopened surface becomes top z-index within the local UI latency budget.
+
+## 2026-06-25 — Update failed modal must clear applying CTA state
+
+Type: failure pattern
+Context: During the 2026-06-25 UI/UX Playwright audit, the post-click update failed modal rendered correctly but the bottom-right update CTA stayed in the stale `applying` state with text `Applying update...` after `update_apply_error`.
+Learning: A modal transition alone is not enough for the update UX; the persistent CTA is also visible and must mirror the same failure/ready/downloading state. `handleUpdateApplyError` should move CTA to `error`, and retry paths must explicitly restore `applying` before returning to the download modal.
+Future Action: When changing update modal flows, assert both `#update-modal` state and `#update-cta` `data-status`/text in unit and Playwright tests, then verify with a fresh rebuilt gwt screenshot.
+
+## 2026-06-25 — Mobile overlays need rail-safe viewport clamping
+
+Type: failure-pattern
+Context: Project Switcher mobile audit showed the panel first clipped off the left side at 390px. A viewport-only clamp moved it to x=12 but the fixed command rail still covered the left edge, hiding the OPEN PROJECTS heading.
+Learning: For mobile overlays in gwt, viewport bounds are not enough when persistent chrome such as #op-rail occupies part of the visual area. Clamp floating panels against the usable safe area, including rail/sidebar bounds, and verify with screenshots rather than only bounding boxes.
+Future Action: When adding or auditing floating panels/popovers on compact viewports, measure persistent chrome (for example #op-rail) and assert the panel stays inside that safe area. Include Playwright screenshots after any viewport-clamp fix to catch overlap that numeric viewport checks may miss.
+
+## 2026-06-26 — Camera framing uses rendered layout and bounded placement
+
+Type: ui-regression
+Context: SPEC-2008 camera framing and surface audit, 2026-06-26
+Learning: Camera framing cannot rely only on persisted world geometry. Compact or tiled surfaces may render with CSS min sizes larger than stored geometry, and focus_window echoes can race with local camera updates. Desktop cascade placement also needs bounds-aware slot wrapping rather than unbounded diagonal steps.
+Future Action: For surface framing regressions, add RED tests for rendered layout size, local viewport reservation before focus_window, host viewport resize reframe, and bounds-aware initial placement. Verify with fresh browser-check Playwright audit across desktop and mobile before declaring UI complete.
+
+## 2026-06-26 — SessionStart id 欠落は No session fallback ではなく関連付け破綻として扱う
+
+Type: lesson
+Context: Hooks/Resume 調査で、Claude Code / Codex は SessionStart で provider session id を渡す前提なのに Workspace detail が No session yet + Resume を表示しうることが分かった。
+Learning: SessionStart で provider session id が無い、または id が session TOML の agent_session_id/session_history に保存されない状態は正常な空状態ではなく、gwt session と provider conversation の関連付け破綻である。UI で Resume を隠すだけでは根本対策にならない。
+Future Action: Resume/Workspace session 欠落の修正では、SessionStart payload → session TOML → Workspace projection/view の順に実データを確認し、id 欠落時は hook additionalContext と diagnostic に集約して通常の resumable agent として登録しない。
+
+## 2026-06-26 — Hook 'legacy argv' 失敗はまず installed binary version を疑う
+
+Type: lesson
+Context: Issue #3178: self-improvement Stop hook が 'legacy argv invocation is disabled' で毎回失敗。Issue 本文は『gwtd が legacy argv を廃止したので生成側を stdin JSON envelope 化すべき』と提案していた。
+Learning: hook transport は『argv でルーティング + stdin で payload』設計で、gwtd の is_allowed_argv_exception (crates/gwt/src/bin/gwtd.rs) が hook event/<gwt-self-improvement-stop>/provider-event を意図的に許可する Managed hook transport exception。真因は生成側の drift ではなく、インストール済み binary が古かったこと(v9.61.0 は gwt-self-improvement-stop 例外未対応、ae058ced5/v9.63.0 で追加)。stdin JSON 化提案は transport 設計と衝突する誤り。
+Future Action: hook の 'legacy argv invocation is disabled' を見たら、(1) `gwtd --version` で installed binary を確認し source の is_allowed_argv_exception と突き合わせる、(2) 現行ソースを build して round-trip で再現可否を確認する、(3) 生成側を stdin JSON 化しない。再発防止は generated managed-hook command を実 binary に通す回帰ガード(generated_managed_hook_commands_stay_within_gwtd_argv_allowlist)で担保済み。
+
+## 2026-06-26 — feature commit が完了済み FR の guard test を反転させ TTY前面overlay回帰を隠した
+
+Type: fix
+Context: Docker起動エラーが TTY 前面に被さる回帰 (SPEC-2014 US-36 / FR-120/121)。terminal-overlay を error 時に表示する形式は commit 1e948b7a0 で廃止 (shouldShowOverlay=false 固定) 済みだったが、無関係な feature commit a93afd199 'feat: complete issue monitor auto queue' が app.js を Boolean(effectiveDetail) && runtimeState==='error' へ revert し、同時に contract test (operator-chrome-structure.test.mjs) と playwright test (agent-window-scroll.spec.ts) の assertion も regressed 側へ書き換えたため CI が素通りした。
+Learning: test rename + assert.equal('false')->assert.match(error) のような『契約の反転』は新規ケース追加と違い regression を隠す。TTY 前面 overlay は .terminal-overlay.visible 1 箇所(app.js shouldShowOverlay)のみで Docker 固有ではなく全 error window で発火する。error は overlay 無しでも inline TTY text(launch_error_terminal_output_event) / status chip tooltip / attention toast / Console docker tab / Logs Process facet の 5 面で可視。
+Future Action: contract test の assertion が『追加』ではなく『反転』している diff は regression の赤信号として扱う。完了済み FR を touch する大型 feature commit では guard test が意味を保っているか必ず確認する。前面 overlay を復活させる変更は SPEC-2014 US-36 違反。
+
+## 2026-06-27 — Browser-check isolated HOME can hide Rust toolchains
+
+Type: failure-pattern
+Context: Issue #3192 and Issue #3190 verification used browser-check/fresh HOME. The agent shell HOME pointed to an isolated gwt-fresh-home, so plain cargo/rustup saw no installed/default toolchains even though the real developer HOME had stable installed.
+Learning: When HOME is an isolated verification directory, rustup resolves toolchains under that HOME and cargo commands can fail with 'no default is configured'. This is an environment issue, not a Rust project failure.
+Future Action: Before Cargo/Rust verification after browser-check or isolated HOME work, print HOME/RUSTUP_HOME/CARGO_HOME when cargo cannot find a toolchain. If HOME is isolated, resolve the real user home from the pre-isolation environment, OS user lookup, or `getent passwd "$USER" | cut -d: -f6`; then run cargo/rustup with `HOME="$REAL_HOME" USERPROFILE="$REAL_HOME" RUSTUP_HOME="$REAL_HOME/.rustup" CARGO_HOME="$REAL_HOME/.cargo"` or otherwise bridge the real toolchain home.
+
+## 2026-06-27 — Visual auto-refresh fixtures should not fire timers before initial load settles
+
+Type: failure-pattern
+Context: During PR #3193 pre-PR visual verification, the Issue Bridge auto-refresh Playwright fixture fired a 60000ms interval callback via a fixed 50ms timeout. In the full suite, initial knowledge load sometimes still held the busy flag, so the auto-refresh request was dropped and the test timed out although single-test runs passed.
+Learning: Timer-shortening fixtures are flaky when the production callback can legally no-op while state is busy. Tests should expose a deterministic trigger and call it after asserting the state that makes the callback meaningful.
+Future Action: For Playwright fixtures that validate periodic behavior, capture interval callbacks and trigger them explicitly after the initial render/load assertions instead of relying on arbitrary short timeouts.

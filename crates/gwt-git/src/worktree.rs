@@ -260,11 +260,10 @@ impl WorktreeManager {
     ) -> Result<()> {
         let base_ref = normalize_remote_ref(base_remote_ref);
         let push_refspec = format!("{base_ref}:refs/heads/{new_branch}");
-        let output = gwt_core::process::run_git_logged(
-            &["push", "origin", &push_refspec],
-            Some(&self.repo_path),
-        )
-        .map_err(|e| GwtError::Git(format!("push origin {push_refspec}: {e}")))?;
+        let args = push_args_with_github_token_helper(&push_refspec);
+        let arg_refs: Vec<&str> = args.iter().map(String::as_str).collect();
+        let output = gwt_core::process::run_git_logged(&arg_refs, Some(&self.repo_path))
+            .map_err(|e| GwtError::Git(format!("push origin {push_refspec}: {e}")))?;
 
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr).to_string();
@@ -500,6 +499,36 @@ impl WorktreeManager {
         crate::branch::delete_local_branch(&self.repo_path, branch, true)?;
         Ok(())
     }
+}
+
+fn push_args_with_github_token_helper(push_refspec: &str) -> Vec<String> {
+    let token_env = if std::env::var_os("GH_TOKEN").is_some() {
+        Some("GH_TOKEN")
+    } else if std::env::var_os("GITHUB_TOKEN").is_some() {
+        Some("GITHUB_TOKEN")
+    } else {
+        None
+    };
+    push_args_with_optional_github_token_helper(push_refspec, token_env)
+}
+
+fn push_args_with_optional_github_token_helper(
+    push_refspec: &str,
+    token_env: Option<&str>,
+) -> Vec<String> {
+    let mut args = Vec::new();
+    if let Some(token_env) = token_env {
+        args.push("-c".to_string());
+        args.push(format!(
+            "credential.helper=!f() {{ echo username=x-access-token; echo password=\"${token_env}\"; }}; f"
+        ));
+    }
+    args.extend([
+        "push".to_string(),
+        "origin".to_string(),
+        push_refspec.to_string(),
+    ]);
+    args
 }
 
 /// Returns true when `err` looks like a `git worktree remove` failure that
@@ -869,6 +898,46 @@ mod tests {
         assert_eq!(
             path_arg_for_git(Path::new(r"\\?\UNC\server\share\work")),
             r"\\server\share\work"
+        );
+    }
+
+    #[test]
+    fn push_args_use_github_token_helper_without_exposing_token_value() {
+        let args = push_args_with_optional_github_token_helper(
+            "origin/develop:refs/heads/feature/spec-3165",
+            Some("GH_TOKEN"),
+        );
+
+        assert_eq!(args[0], "-c");
+        assert!(args[1].contains("credential.helper=!"));
+        assert!(args[1].contains("password=\"$GH_TOKEN\""));
+        assert!(!args[1].contains("secret-token"));
+        let tail: Vec<&str> = args[2..].iter().map(String::as_str).collect();
+        assert_eq!(
+            tail,
+            vec![
+                "push",
+                "origin",
+                "origin/develop:refs/heads/feature/spec-3165"
+            ]
+        );
+    }
+
+    #[test]
+    fn push_args_omit_credential_helper_without_github_token_env() {
+        let args = push_args_with_optional_github_token_helper(
+            "origin/develop:refs/heads/feature/spec-3165",
+            None,
+        );
+        let args: Vec<&str> = args.iter().map(String::as_str).collect();
+
+        assert_eq!(
+            args,
+            vec![
+                "push",
+                "origin",
+                "origin/develop:refs/heads/feature/spec-3165"
+            ]
         );
     }
 

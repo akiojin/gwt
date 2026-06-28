@@ -56,7 +56,7 @@ test("launch_wizard_state applier defers via wizardInteractionGuard before mutat
   );
   assert.match(
     wizardSource,
-    /function\s+applyLaunchWizardStateEvent\(event\)\s*\{[\s\S]{0,400}?wizardInteractionGuard\.defer\([\s\S]{0,200}?\)\s*\)\s*\{\s*return;\s*\}[\s\S]{0,200}?launchWizard\s*=\s*event\.wizard/,
+    /function\s+applyLaunchWizardStateEvent\(event\)\s*\{[\s\S]{0,400}?wizardInteractionGuard\.defer\([\s\S]{0,200}?\)\s*\)\s*\{\s*return;\s*\}[\s\S]{0,400}?launchWizard\s*=\s*event\.wizard/,
     "expected guard.defer() short-circuit before launchWizard mutation",
   );
 });
@@ -199,7 +199,30 @@ test("wizard launch actions expose local pending feedback", () => {
   );
   assert.match(
     wizardSource,
-    /createNode\(\s*"div",\s*"launch-note launch-pending-note",\s*"Creating agent window\.\.\."/,
+    /createNode\(\s*"div",\s*"launch-note launch-pending-note",\s*launchWizard\.launch_materialization_message\s*\|\|\s*"Preparing worktree\.\.\."/,
     "expected pending submit to render visible progress copy in the modal",
+  );
+});
+
+test("wizard backend launch materialization state preserves pending feedback", () => {
+  assert.match(
+    wizardSource,
+    /function\s+applyLaunchWizardStateEvent\(event\)[\s\S]{0,700}?event\.wizard\?\.launch_materialization_pending[\s\S]{0,180}?clearLaunchWizardPendingAction\(\)/,
+    "backend launch materialization state must not clear local pending chrome",
+  );
+  assert.match(
+    wizardSource,
+    /const\s+isLaunchMaterializationPending\s*=\s*Boolean\(\s*launchWizard\?\.launch_materialization_pending,?\s*\)/,
+    "renderer must read backend launch materialization pending state null-safely",
+  );
+  assert.doesNotMatch(
+    wizardSource,
+    /Boolean\(\s*launchWizard\.launch_materialization_pending,?\s*\)/,
+    "renderer must not dereference launchWizard while local opening state has no backend wizard",
+  );
+  assert.match(
+    wizardSource,
+    /launchWizard\.launch_materialization_message\s*\|\|\s*"Preparing worktree\.\.\."/,
+    "expected backend materialization message to render as visible progress copy",
   );
 });

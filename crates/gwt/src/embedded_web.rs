@@ -74,6 +74,9 @@ root_js_modules! {
     // SPEC-2013 2026-06-16 amendment: project switcher popover and
     // Shift+Cmd+Up/Down project tab cycling helpers.
     "project-switcher.js" => "createProjectSwitcherController",
+    // SPEC-2008 Camera Focus: rail-safe viewport framing math for local
+    // per-viewer camera moves.
+    "camera-framing.js" => "computeCameraFrameArea",
     // SPEC-2013 2026-06-16 amendment: quiet long-running Agent completion
     // notification controller.
     "agent-completion-notifications.js" => "createAgentCompletionNotifier",
@@ -172,6 +175,8 @@ root_js_modules! {
     // interaction guard, field builders, transitions, renderLaunchWizard,
     // chrome listeners) extracted from app.js.
     "launch-wizard-surface.js" => "createLaunchWizardSurface",
+    // SPEC-3165 — Issue auto-improve monitor card, inbox, and toast surface.
+    "issue-monitor-surface.js" => "createIssueMonitorSurface",
     // SPEC-3064 Phase 3 (E6a) — File Tree window surface (tree state +
     // worktree picker + text/hex viewer + window mount) extracted from
     // app.js.
