@@ -574,8 +574,26 @@ fn redirect_placeholder_executable(
     remove_env: &[String],
 ) -> Option<WindowsSpawnTarget> {
     let stem = executable.file_stem()?.to_str()?;
-    let package_root = executable.parent()?.parent()?;
-    resolve_bun_placeholder_target(package_root, stem, executable, env, remove_env)
+    let package_root = placeholder_package_root(executable)?;
+    resolve_bun_placeholder_target(&package_root, stem, executable, env, remove_env)
+}
+
+// Find the package root that owns `executable` by walking up from its directory
+// until a `package.json` is found. Covers both the common `<pkg>/bin/<name>.exe`
+// layout and a root-level `<pkg>/<name>.exe`. Falls back to the immediate
+// grandparent so behaviour is never worse than the prior `parent().parent()`.
+fn placeholder_package_root(executable: &Path) -> Option<PathBuf> {
+    let mut current = executable.parent()?;
+    for _ in 0..4 {
+        if current.join("package.json").is_file() {
+            return Some(current.to_path_buf());
+        }
+        let Some(parent) = current.parent() else {
+            break;
+        };
+        current = parent;
+    }
+    executable.parent()?.parent().map(Path::to_path_buf)
 }
 
 // Apply `redirect_placeholder_executable` to a shim-resolved target that points
@@ -743,12 +761,20 @@ pub(super) fn reject_non_pe_executable(command: &str) -> Option<String> {
     if prefix.starts_with(b"MZ") {
         return None;
     }
+    // Tailor the remediation only when the file is a recognised native-binary
+    // placeholder stub; otherwise keep the message accurate for any non-PE file.
+    let detail = if is_bun_text_placeholder_stub(path) {
+        " Its package ships a native-binary placeholder; the real executable was \
+not installed (postinstall did not run). Reinstall the agent (e.g. \
+`bun install -g <package>` or `npm install -g <package>`), or remove the stale \
+install so a working launcher resolves on PATH."
+    } else {
+        ""
+    };
     Some(format!(
-        "'{}' is a placeholder stub, not a runnable native binary — its package's \
-real executable was never installed (postinstall did not run). Reinstall the \
-agent (e.g. `bun install -g <package>` or `npm install -g <package>`) or remove \
-the stale install so a working launcher resolves on PATH.",
-        path.display()
+        "'{}' is not a valid Windows executable (PE) image, so it cannot be launched.{}",
+        path.display(),
+        detail
     ))
 }
 
@@ -1527,6 +1553,134 @@ mod tests {
         assert!(
             reject_non_pe_executable("bun").is_none(),
             "bare command must not be rejected",
+        );
+    }
+
+    #[test]
+    fn generic_npm_cmd_shim_placeholder_redirects_to_cli_wrapper() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        // Drive resolution through a `.cmd` shim using the `%dp0%\` marker so the
+        // parse_cmd_shim -> build_shim_target -> guard_shim_target exit (the
+        // resolve_existing_path call site) is exercised, distinct from the
+        // extensionless shell-shim exit covered above.
+        let npm_dir = temp.path().join("npm");
+        let pkg_root = npm_dir
+            .join("node_modules")
+            .join("@anthropic-ai")
+            .join("claude-code");
+        let bin_dir = pkg_root.join("bin");
+        std::fs::create_dir_all(&bin_dir).expect("bin dir");
+        let bin_exe = bin_dir.join("claude.exe");
+        std::fs::write(
+            &bin_exe,
+            "echo \"Error: claude native binary not installed.\" >&2\nexit 1\n",
+        )
+        .expect("placeholder");
+        let cli_wrapper = pkg_root.join("cli-wrapper.cjs");
+        std::fs::write(&cli_wrapper, "console.log('w');\n").expect("cli-wrapper");
+        std::fs::write(
+            pkg_root.join("package.json"),
+            r#"{"bin":{"claude":"bin/claude.exe"}}"#,
+        )
+        .expect("package.json");
+        let cmd_shim = npm_dir.join("claude.cmd");
+        std::fs::write(
+            &cmd_shim,
+            "@echo off\r\n\"%dp0%\\node_modules\\@anthropic-ai\\claude-code\\bin\\claude.exe\" %*\r\n",
+        )
+        .expect("cmd shim");
+
+        let nodejs_dir = temp.path().join("nodejs");
+        std::fs::create_dir_all(&nodejs_dir).expect("nodejs dir");
+        let node_exe = nodejs_dir.join("node.exe");
+        std::fs::write(&node_exe, b"MZ\x00").expect("node.exe");
+
+        let mut env = HashMap::new();
+        env.insert(
+            "PATH".to_string(),
+            format!("{};{}", npm_dir.display(), nodejs_dir.display()),
+        );
+        env.insert("PATHEXT".to_string(), ".CMD".to_string());
+        env.insert(
+            "USERPROFILE".to_string(),
+            temp.path().join("no_bun").display().to_string(),
+        );
+
+        let normalized = normalized_config("claude", vec!["--version".to_string()], env);
+
+        assert_eq!(
+            normalized.command,
+            node_exe.display().to_string(),
+            "cmd-shim placeholder must redirect through a runtime, got {:?}",
+            normalized.command,
+        );
+        assert_eq!(PathBuf::from(&normalized.args[0]), cli_wrapper);
+        assert_eq!(normalized.args[1], "--version");
+    }
+
+    #[test]
+    fn spawn_rejects_non_pe_placeholder_with_actionable_error() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let stub = temp.path().join("claude.exe");
+        std::fs::write(&stub, "Error: native binary not installed\n").expect("stub");
+
+        let result = PtyHandle::spawn(SpawnConfig {
+            command: stub.display().to_string(),
+            args: Vec::new(),
+            cols: 80,
+            rows: 24,
+            env: HashMap::new(),
+            remove_env: Vec::new(),
+            cwd: None,
+        });
+        let msg = match result {
+            Ok(_) => panic!("spawning a non-PE placeholder stub must fail"),
+            Err(err) => err.to_string(),
+        };
+        assert!(
+            msg.contains("not a valid Windows executable"),
+            "expected actionable non-PE error, got: {msg}"
+        );
+    }
+
+    #[test]
+    fn placeholder_without_redirect_target_is_left_for_pre_spawn_net() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        // Placeholder bin present, but NO cli-wrapper.cjs and NO *-win32-x64
+        // native sibling: redirect must decline, leaving the raw stub for the
+        // pre-spawn reject net to refuse rather than launching it.
+        let pkg_root = temp
+            .path()
+            .join("node_modules")
+            .join("@anthropic-ai")
+            .join("claude-code");
+        let bin_dir = pkg_root.join("bin");
+        std::fs::create_dir_all(&bin_dir).expect("bin dir");
+        let bin_exe = bin_dir.join("claude.exe");
+        std::fs::write(&bin_exe, "Error: native binary not installed\n").expect("stub");
+        std::fs::write(
+            pkg_root.join("package.json"),
+            r#"{"bin":{"claude":"bin/claude.exe"}}"#,
+        )
+        .expect("package.json");
+
+        let mut env = HashMap::new();
+        env.insert("PATH".to_string(), bin_dir.display().to_string());
+        env.insert("PATHEXT".to_string(), ".COM;.EXE;.BAT;.CMD".to_string());
+        env.insert(
+            "USERPROFILE".to_string(),
+            temp.path().join("no_bun").display().to_string(),
+        );
+
+        let normalized = normalized_config(bin_exe.display().to_string().as_str(), vec![], env);
+        assert_eq!(
+            normalized.command,
+            bin_exe.display().to_string(),
+            "redirect should decline when no cli-wrapper/native exists",
+        );
+        assert!(
+            reject_non_pe_executable(&normalized.command).is_some(),
+            "raw placeholder stub must be caught by the pre-spawn net",
         );
     }
 

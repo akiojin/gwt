@@ -74,8 +74,7 @@ impl PtyHandle {
     #[instrument(skip_all, fields(cmd = %config.command))]
     pub fn spawn(config: SpawnConfig) -> Result<Self, TerminalError> {
         let config = normalize_spawn_config(config);
-        #[cfg(windows)]
-        if let Some(reason) = windows_spawn::reject_non_pe_executable(&config.command) {
+        if let Some(reason) = reject_non_pe_executable(&config.command) {
             return Err(TerminalError::PtyCreationFailed { reason });
         }
         let pty_system = native_pty_system();
@@ -327,6 +326,26 @@ fn normalize_spawn_config(config: SpawnConfig) -> SpawnConfig {
     #[cfg(not(windows))]
     {
         normalize_non_windows_spawn_config(config)
+    }
+}
+
+/// Pre-spawn guard shared by the direct PTY path and by host-shell launchers
+/// (which wrap the resolved command into cmd/PowerShell). Returns `Some(reason)`
+/// when `command` resolves to a Windows `.exe`/`.com` that is not a valid PE
+/// image (a native-binary placeholder stub or a corrupt file) — the file
+/// Windows would otherwise reject with the misleading "unsupported 16-bit
+/// application" dialog. Returns `None` on non-Windows and for valid executables
+/// or bare command names.
+pub fn reject_non_pe_executable(command: &str) -> Option<String> {
+    #[cfg(windows)]
+    {
+        windows_spawn::reject_non_pe_executable(command)
+    }
+
+    #[cfg(not(windows))]
+    {
+        let _ = command;
+        None
     }
 }
 
