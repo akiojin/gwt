@@ -141,6 +141,115 @@ pub fn classify_acceptance_criteria(issue_body: &str) -> AcceptanceCriteria {
     }
 }
 
+/// CI outcome for the reviewed SHA, as seen by the strong gate. Only a real,
+/// non-vacuous success against the reviewed SHA may contribute to an autonomous
+/// merge (SPEC #3200 FR-009). Every other state is fail-closed.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CiOutcome {
+    /// Required checks completed successfully. `passed_checks` lists the check
+    /// contexts that actually passed — empty means vacuous green (fail-closed).
+    Success { passed_checks: Vec<String> },
+    /// At least one required check is still pending / running. Fail-closed.
+    Pending,
+    /// A required check failed.
+    Failed,
+    /// No required checks ran at all (vacuous green). Fail-closed.
+    Vacuous,
+}
+
+/// The composed result of the strong automated gate.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum GateDecision {
+    /// Every gate condition held against the reviewed SHA — `skipped(autonomous-mode)`
+    /// may be set and the merge driven. The ONLY value that authorizes an
+    /// autonomous merge.
+    Pass,
+    /// Fail-closed for every other case, with a machine-grep-able reason.
+    Fail(String),
+}
+
+/// All inputs the strong gate composes. Bundled so the evaluation reads as one
+/// fail-closed conjunction and callers cannot forget a condition.
+#[derive(Debug, Clone)]
+pub struct AutonomousGateInputs {
+    /// Base-branch protection (must be `Verified` with ≥1 required check).
+    pub branch_protection: gwt_git::branch_protection::BranchProtectionStatus,
+    /// CI outcome for the reviewed SHA.
+    pub ci: CiOutcome,
+    /// Independent-review verdict (must be `Pass`).
+    pub review: crate::issue_monitor_review::ReviewGateOutcome,
+    /// Whether the launch-time acceptance snapshot still matches the Issue body.
+    pub acceptance_unchanged: bool,
+    /// The SHA the independent review actually evaluated.
+    pub reviewed_sha: String,
+    /// The current branch HEAD SHA that would be merged.
+    pub head_sha: String,
+}
+
+/// SPEC #3200 T-083/T-064/T-065/T-066 (FR-009..FR-016): the strong automated
+/// gate. Returns [`GateDecision::Pass`] ONLY when every condition holds against
+/// the reviewed SHA:
+///
+/// 1. base-branch protection is `Verified` with ≥1 required check,
+/// 2. CI is a real, non-vacuous success covering every required check,
+/// 3. the independent review verdict is `Pass`,
+/// 4. the acceptance criteria are unchanged since launch (no tamper),
+/// 5. the reviewed SHA equals the head SHA and is non-empty (TOCTOU binding).
+///
+/// Any divergence ⇒ [`GateDecision::Fail`] (fail-closed). This is the only
+/// function permitted to authorize `skipped(autonomous-mode)`.
+pub fn evaluate_autonomous_gate(inputs: &AutonomousGateInputs) -> GateDecision {
+    use crate::issue_monitor_review::ReviewGateOutcome;
+
+    let required_checks = match &inputs.branch_protection {
+        gwt_git::branch_protection::BranchProtectionStatus::Verified { required_checks }
+            if !required_checks.is_empty() =>
+        {
+            required_checks
+        }
+        _ => {
+            return GateDecision::Fail("base-branch protection is not verified".to_string());
+        }
+    };
+
+    let passed_checks = match &inputs.ci {
+        CiOutcome::Success { passed_checks } if !passed_checks.is_empty() => passed_checks,
+        CiOutcome::Success { .. } => {
+            return GateDecision::Fail("CI reported success with no checks (vacuous)".to_string());
+        }
+        CiOutcome::Pending => return GateDecision::Fail("CI is still pending".to_string()),
+        CiOutcome::Failed => return GateDecision::Fail("CI failed".to_string()),
+        CiOutcome::Vacuous => {
+            return GateDecision::Fail("CI ran no required checks (vacuous)".to_string());
+        }
+    };
+
+    // Every branch-protection-required check must have actually passed.
+    if let Some(missing) = required_checks
+        .iter()
+        .find(|required| !passed_checks.iter().any(|passed| passed == *required))
+    {
+        return GateDecision::Fail(format!("required check {missing} did not pass"));
+    }
+
+    if inputs.review != ReviewGateOutcome::Pass {
+        return GateDecision::Fail("independent review did not pass".to_string());
+    }
+
+    if !inputs.acceptance_unchanged {
+        return GateDecision::Fail("acceptance criteria changed after launch".to_string());
+    }
+
+    if inputs.reviewed_sha.is_empty() || inputs.reviewed_sha != inputs.head_sha {
+        return GateDecision::Fail(format!(
+            "reviewed SHA {:?} is not the head SHA {:?} (TOCTOU)",
+            inputs.reviewed_sha, inputs.head_sha
+        ));
+    }
+
+    GateDecision::Pass
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -239,5 +348,146 @@ mod tests {
         let b =
             classify_acceptance_criteria("## Acceptance Criteria\n- [ ] AC-2: y\n- [ ] AC-1: x\n");
         assert!(a.matches(&b), "id set equality is order-independent");
+    }
+
+    mod gate {
+        use super::super::*;
+        use crate::issue_monitor_review::ReviewGateOutcome;
+        use gwt_git::branch_protection::BranchProtectionStatus;
+
+        fn verified() -> BranchProtectionStatus {
+            BranchProtectionStatus::Verified {
+                required_checks: vec!["build".to_string(), "test".to_string()],
+            }
+        }
+
+        fn real_ci() -> CiOutcome {
+            CiOutcome::Success {
+                passed_checks: vec!["build".to_string(), "test".to_string()],
+            }
+        }
+
+        fn all_pass_inputs() -> AutonomousGateInputs {
+            AutonomousGateInputs {
+                branch_protection: verified(),
+                ci: real_ci(),
+                review: ReviewGateOutcome::Pass,
+                acceptance_unchanged: true,
+                reviewed_sha: "abc123".to_string(),
+                head_sha: "abc123".to_string(),
+            }
+        }
+
+        #[test]
+        fn all_conditions_pass_yields_pass() {
+            assert_eq!(
+                evaluate_autonomous_gate(&all_pass_inputs()),
+                GateDecision::Pass
+            );
+        }
+
+        #[test]
+        fn unverified_branch_protection_fails_closed() {
+            for bp in [
+                BranchProtectionStatus::Absent,
+                BranchProtectionStatus::Unreadable("403".to_string()),
+                BranchProtectionStatus::Verified {
+                    required_checks: vec![],
+                },
+            ] {
+                let inputs = AutonomousGateInputs {
+                    branch_protection: bp,
+                    ..all_pass_inputs()
+                };
+                assert!(matches!(
+                    evaluate_autonomous_gate(&inputs),
+                    GateDecision::Fail(_)
+                ));
+            }
+        }
+
+        #[test]
+        fn non_real_ci_fails_closed() {
+            for ci in [
+                CiOutcome::Pending,
+                CiOutcome::Failed,
+                CiOutcome::Vacuous,
+                CiOutcome::Success {
+                    passed_checks: vec![],
+                },
+            ] {
+                let inputs = AutonomousGateInputs {
+                    ci,
+                    ..all_pass_inputs()
+                };
+                assert!(matches!(
+                    evaluate_autonomous_gate(&inputs),
+                    GateDecision::Fail(_)
+                ));
+            }
+        }
+
+        #[test]
+        fn ci_missing_a_required_check_fails_closed() {
+            // Vacuous-green defense: every branch-protection required check must
+            // have actually passed; a missing one is not a real green.
+            let inputs = AutonomousGateInputs {
+                ci: CiOutcome::Success {
+                    passed_checks: vec!["build".to_string()], // "test" missing
+                },
+                ..all_pass_inputs()
+            };
+            assert!(matches!(
+                evaluate_autonomous_gate(&inputs),
+                GateDecision::Fail(_)
+            ));
+        }
+
+        #[test]
+        fn review_not_pass_fails_closed() {
+            let inputs = AutonomousGateInputs {
+                review: ReviewGateOutcome::Fail("rejected".to_string()),
+                ..all_pass_inputs()
+            };
+            assert!(matches!(
+                evaluate_autonomous_gate(&inputs),
+                GateDecision::Fail(_)
+            ));
+        }
+
+        #[test]
+        fn acceptance_drift_fails_closed() {
+            let inputs = AutonomousGateInputs {
+                acceptance_unchanged: false,
+                ..all_pass_inputs()
+            };
+            assert!(matches!(
+                evaluate_autonomous_gate(&inputs),
+                GateDecision::Fail(_)
+            ));
+        }
+
+        #[test]
+        fn reviewed_sha_mismatch_fails_closed_toctou() {
+            // TOCTOU: the merge SHA must be exactly the reviewed SHA. A HEAD
+            // advance after review must invalidate the gate.
+            let advanced = AutonomousGateInputs {
+                head_sha: "def456".to_string(),
+                ..all_pass_inputs()
+            };
+            assert!(matches!(
+                evaluate_autonomous_gate(&advanced),
+                GateDecision::Fail(_)
+            ));
+            let empty = AutonomousGateInputs {
+                reviewed_sha: String::new(),
+                head_sha: String::new(),
+                ..all_pass_inputs()
+            };
+            assert!(
+                matches!(evaluate_autonomous_gate(&empty), GateDecision::Fail(_)),
+                "empty SHAs never satisfy the binding"
+            );
+        }
     }
 }
