@@ -37,6 +37,13 @@ pub fn issue_monitor_daemon_payloads(
                 }),
             });
         }
+        // SPEC #3200 Option A: surface review-agent spawn requests to the GUI.
+        for dispatch in monitor.take_pending_review_dispatches() {
+            payloads.push(IssueMonitorDaemonPayload {
+                event: "review_dispatch".to_string(),
+                payload: serde_json::to_value(&dispatch).expect("review dispatch serializes"),
+            });
+        }
     }
 
     payloads.extend([
@@ -197,6 +204,154 @@ pub fn apply_autonomous_eligibility(
     let protection = gwt_git::branch_protection::fetch_branch_protection(repo_slug, &base_branch);
     for issue in candidates {
         let _ = monitor.prepare_autonomous_candidate(issue, &protection, now);
+    }
+}
+
+/// SPEC #3200 Option A (daemon-direct + token): advance every in-flight
+/// autonomous issue one step through the loop, using freshly-fetched signals.
+///
+/// - **Implementing** → detect the implementation agent's open PR; on discovery
+///   bind it (`begin_review`) and emit a `review_dispatch` so the GUI spawns the
+///   independent review agent.
+/// - **Reviewing** → once the verdict has arrived, assemble the strong-gate
+///   inputs and route: `Deliver` arms the auto-merge (after minting an audit
+///   token); `Remediate` re-queues (bounded); `Escalate` → NeedsHuman; `WaitForCi`
+///   waits.
+/// - **Delivering** → watch for the merge; on merge verify `merged_sha ==
+///   reviewed_sha` (TOCTOU layer-4) before completing, else escalate.
+///
+/// No-op unless autonomous mode is on. Review-dispatch requests are queued on the
+/// monitor ([`IssueMonitorState::take_pending_review_dispatches`]) for the GUI to
+/// spawn the review agents.
+pub fn advance_autonomous_in_flight(
+    monitor: &mut IssueMonitorState,
+    issues: &[IssueMonitorIssue],
+    repo_slug: &str,
+    repo_path: &Path,
+    daemon_secret: &[u8],
+    now: &str,
+) {
+    if !monitor.autonomous_mode() {
+        return;
+    }
+    let base_branch = resolve_default_base_branch(repo_path);
+    for issue_number in monitor.autonomous_in_flight_issues() {
+        let Some(record) = monitor.autonomous_record(issue_number).cloned() else {
+            continue;
+        };
+        match record.phase {
+            crate::AutonomousPhase::Implementing => {
+                let Some(branch) = monitor
+                    .inbox_item(issue_number)
+                    .and_then(|item| item.launch_plan.as_ref())
+                    .map(|plan| plan.branch_name.clone())
+                else {
+                    continue;
+                };
+                if let Some(pr) =
+                    gwt_git::pr_status::fetch_open_pr_number_for_branch(repo_path, &branch)
+                {
+                    if let Some(sha) = gwt_git::pr_status::fetch_pr_head_sha(repo_path, pr) {
+                        monitor.begin_review(issue_number, pr, &sha);
+                        let criteria = issues
+                            .iter()
+                            .find(|issue| issue.number == issue_number)
+                            .and_then(|issue| issue.body.clone())
+                            .map(|body| {
+                                crate::issue_monitor_gate::classify_acceptance_criteria(&body).ids
+                            })
+                            .unwrap_or_default();
+                        let diff = gwt_git::pr_status::fetch_pr_diff(repo_path, pr, 200_000)
+                            .unwrap_or_default();
+                        monitor.push_review_dispatch(crate::AutonomousReviewDispatch {
+                            issue_number,
+                            pr_number: pr,
+                            reviewed_sha: sha,
+                            required_criteria: criteria,
+                            diff,
+                        });
+                    }
+                }
+            }
+            crate::AutonomousPhase::Reviewing => {
+                let Some(pr) = record.pr_number else { continue };
+                let protection =
+                    gwt_git::branch_protection::fetch_branch_protection(repo_slug, &base_branch);
+                let rollup = gwt_git::pr_status::fetch_pr_status_check_rollup(repo_path, pr);
+                let head = gwt_git::pr_status::fetch_pr_head_sha(repo_path, pr).unwrap_or_default();
+                let body = issues
+                    .iter()
+                    .find(|issue| issue.number == issue_number)
+                    .and_then(|issue| issue.body.clone())
+                    .unwrap_or_default();
+                let Some(inputs) =
+                    monitor.autonomous_gate_inputs(issue_number, protection, &rollup, &head, &body)
+                else {
+                    continue; // verdict not back yet → wait
+                };
+                match crate::issue_monitor_gate::route_autonomous_gate(&inputs) {
+                    crate::issue_monitor_gate::GateAction::Deliver => {
+                        // Audit: a daemon-signed authorization record bound to the
+                        // reviewed SHA (control-plane proof the gate authorized it).
+                        let token = crate::issue_monitor_authz::sign_merge_authorization(
+                            daemon_secret,
+                            issue_number,
+                            &inputs.reviewed_sha,
+                            &base_branch,
+                        );
+                        tracing::info!(
+                            issue = issue_number,
+                            pr,
+                            reviewed_sha = %inputs.reviewed_sha,
+                            token = %token,
+                            "autonomous gate PASS — arming auto-merge"
+                        );
+                        monitor.begin_delivering(issue_number);
+                        if !gwt_git::pr_status::merge_pr_auto(repo_path, pr) {
+                            tracing::warn!(issue = issue_number, pr, "auto-merge arm failed");
+                        }
+                    }
+                    crate::issue_monitor_gate::GateAction::WaitForCi => {}
+                    crate::issue_monitor_gate::GateAction::Remediate(reason) => {
+                        monitor.record_autonomous_failure(
+                            issue_number,
+                            crate::FailureClass::Transient,
+                            reason,
+                            now,
+                        );
+                    }
+                    crate::issue_monitor_gate::GateAction::Escalate(reason) => {
+                        monitor.escalate_to_needs_human(issue_number, reason);
+                    }
+                }
+            }
+            crate::AutonomousPhase::Delivering => {
+                let Some(pr) = record.pr_number else { continue };
+                if let Some(merged_sha) =
+                    gwt_git::pr_status::fetch_pr_merge_commit_sha(repo_path, pr)
+                {
+                    let reviewed = record.reviewed_sha.clone().unwrap_or_default();
+                    if crate::issue_monitor_authz::merged_sha_matches_reviewed(
+                        &reviewed,
+                        &merged_sha,
+                    ) {
+                        monitor.record_merged(issue_number);
+                    } else {
+                        tracing::error!(
+                            issue = issue_number,
+                            reviewed_sha = %reviewed,
+                            merged_sha = %merged_sha,
+                            "SECURITY: merged SHA != reviewed SHA — escalating"
+                        );
+                        monitor.escalate_to_needs_human(
+                            issue_number,
+                            "merged SHA does not match the reviewed SHA",
+                        );
+                    }
+                }
+            }
+            _ => {}
+        }
     }
 }
 
@@ -637,6 +792,39 @@ mod tests {
             monitor.autonomous_record(50).is_none(),
             "off ⇒ no autonomous state created, no network call",
         );
+    }
+
+    #[test]
+    fn advance_autonomous_in_flight_is_noop_when_mode_off() {
+        // Default OFF ⇒ no phase advancement, no network call, no merge.
+        use crate::{
+            AutonomousPhase, IssueMonitorConfig, IssueMonitorIssue, IssueMonitorIssueState,
+            IssueMonitorState,
+        };
+        let mut monitor = IssueMonitorState::new(IssueMonitorConfig::default());
+        monitor.set_autonomous_phase(50, AutonomousPhase::Reviewing); // would otherwise act
+        let issues = vec![IssueMonitorIssue {
+            number: 50,
+            title: "t".to_string(),
+            labels: vec!["auto-merge".to_string()],
+            state: IssueMonitorIssueState::Open,
+            body: None,
+            url: None,
+        }];
+        advance_autonomous_in_flight(
+            &mut monitor,
+            &issues,
+            "owner/repo",
+            std::path::Path::new("/tmp/repo"),
+            b"secret",
+            "2026-06-29T00:00:00Z",
+        );
+        assert_eq!(
+            monitor.autonomous_record(50).map(|r| r.phase),
+            Some(AutonomousPhase::Reviewing),
+            "off ⇒ phase unchanged, no network/merge",
+        );
+        assert!(monitor.take_pending_review_dispatches().is_empty());
     }
 
     #[test]

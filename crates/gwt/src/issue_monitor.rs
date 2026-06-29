@@ -412,6 +412,9 @@ pub struct IssueMonitorState {
     failed_issues: BTreeMap<u64, String>,
     queue: VecDeque<u64>,
     pending_launches: VecDeque<IssueMonitorLaunchRequest>,
+    /// SPEC #3200 Option A: review-agent spawn requests produced by the
+    /// orchestration loop, drained by the daemon→GUI payload builder.
+    pending_review_dispatches: VecDeque<AutonomousReviewDispatch>,
 }
 
 pub fn is_auto_improve_candidate(issue: &IssueMonitorIssue, config: &IssueMonitorConfig) -> bool {
@@ -582,6 +585,19 @@ fn rfc3339_elapsed_secs(earlier: &str, now: &str) -> Option<i64> {
     Some((b - a).num_seconds())
 }
 
+/// SPEC #3200 Option A: a request for the GUI to spawn an independent review
+/// agent. The GUI launches a fresh-session, different-model agent with a prompt
+/// built from `required_criteria` + `diff`, bound to `reviewed_sha`; that agent
+/// returns its verdict via the `ReviewVerdict` control.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AutonomousReviewDispatch {
+    pub issue_number: u64,
+    pub pr_number: u64,
+    pub reviewed_sha: String,
+    pub required_criteria: Vec<String>,
+    pub diff: String,
+}
+
 /// SPEC #3200 T-042: how an autonomous attempt's failure should be routed.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FailureClass {
@@ -705,6 +721,7 @@ impl IssueMonitorState {
             failed_issues: BTreeMap::new(),
             queue: VecDeque::new(),
             pending_launches: VecDeque::new(),
+            pending_review_dispatches: VecDeque::new(),
         }
     }
 
@@ -1244,6 +1261,52 @@ impl IssueMonitorState {
         self.set_autonomous_phase(issue_number, AutonomousPhase::Delivering);
     }
 
+    /// SPEC #3200 FR-009..FR-016: assemble the strong-gate inputs for an issue
+    /// under review, from the record (reviewed SHA + review verdict + acceptance
+    /// snapshot) and freshly-fetched signals (branch protection, CI rollup JSON,
+    /// the current HEAD SHA, the current Issue body). Returns `None` when the
+    /// review verdict has not yet arrived (gate not ready ⇒ caller waits).
+    pub fn autonomous_gate_inputs(
+        &self,
+        issue_number: u64,
+        branch_protection: gwt_git::branch_protection::BranchProtectionStatus,
+        ci_rollup_json: &str,
+        current_head_sha: &str,
+        current_issue_body: &str,
+    ) -> Option<crate::issue_monitor_gate::AutonomousGateInputs> {
+        use crate::issue_monitor_gate::{classify_acceptance_criteria, classify_ci_rollup};
+        use crate::issue_monitor_review::ReviewGateOutcome;
+        let record = self.autonomous_records.get(&issue_number)?;
+        let reviewed_sha = record.reviewed_sha.clone()?;
+        // Review must have returned a verdict; otherwise the gate is not ready.
+        let review_passed = record.review_passed?;
+        let required_checks = match &branch_protection {
+            gwt_git::branch_protection::BranchProtectionStatus::Verified { required_checks } => {
+                required_checks.clone()
+            }
+            _ => Vec::new(),
+        };
+        let ci = classify_ci_rollup(ci_rollup_json, &required_checks);
+        let acceptance_unchanged = record
+            .acceptance_snapshot
+            .as_ref()
+            .map(|snapshot| snapshot.matches(&classify_acceptance_criteria(current_issue_body)))
+            .unwrap_or(false);
+        let review = if review_passed {
+            ReviewGateOutcome::Pass
+        } else {
+            ReviewGateOutcome::Fail("independent review rejected".to_string())
+        };
+        Some(crate::issue_monitor_gate::AutonomousGateInputs {
+            branch_protection,
+            ci,
+            review,
+            acceptance_unchanged,
+            reviewed_sha,
+            head_sha: current_head_sha.to_string(),
+        })
+    }
+
     pub fn inbox_item(&self, issue_number: u64) -> Option<&IssueMonitorInboxItem> {
         self.inbox
             .iter()
@@ -1530,6 +1593,19 @@ impl IssueMonitorState {
 
     pub fn take_pending_launch_requests(&mut self) -> Vec<IssueMonitorLaunchRequest> {
         self.pending_launches.drain(..).collect()
+    }
+
+    /// SPEC #3200 Option A: queue a review-agent spawn request (orchestration
+    /// loop → GUI). Deduped on issue number so repeated ticks don't pile up.
+    pub fn push_review_dispatch(&mut self, dispatch: AutonomousReviewDispatch) {
+        self.pending_review_dispatches
+            .retain(|pending| pending.issue_number != dispatch.issue_number);
+        self.pending_review_dispatches.push_back(dispatch);
+    }
+
+    /// Drain queued review-agent spawn requests for emission to the GUI.
+    pub fn take_pending_review_dispatches(&mut self) -> Vec<AutonomousReviewDispatch> {
+        self.pending_review_dispatches.drain(..).collect()
     }
 
     pub fn complete_active_launch(&mut self, issue_number: u64, window_id: impl Into<String>) {
@@ -2670,6 +2746,70 @@ mod tests {
         monitor.record_merged(7);
         assert!(monitor.autonomous_record(7).is_none());
         assert!(monitor.autonomous_in_flight_issues().is_empty());
+    }
+
+    #[test]
+    fn autonomous_gate_inputs_assemble_into_a_pass_and_detect_drift() {
+        // SPEC #3200 FR-009..FR-016: assembled inputs run through the real gate.
+        use crate::issue_monitor_gate::{
+            classify_acceptance_criteria, evaluate_autonomous_gate, GateDecision,
+        };
+        use gwt_git::branch_protection::BranchProtectionStatus;
+        let body = "## Acceptance Criteria\n- [ ] AC-1: x\n";
+        let mut monitor = autonomous_state();
+        monitor.capture_acceptance_snapshot(7, classify_acceptance_criteria(body).snapshot());
+        monitor.begin_review(7, 99, "abc123");
+        monitor.record_review_verdict(7, true);
+
+        let bp = BranchProtectionStatus::Verified {
+            required_checks: vec!["ci".to_string()],
+        };
+        let rollup = r#"[{"name":"ci","status":"COMPLETED","conclusion":"SUCCESS"}]"#;
+
+        // All conditions hold at the reviewed SHA ⇒ gate Pass.
+        let inputs = monitor
+            .autonomous_gate_inputs(7, bp.clone(), rollup, "abc123", body)
+            .expect("gate ready");
+        assert_eq!(evaluate_autonomous_gate(&inputs), GateDecision::Pass);
+
+        // Issue body edited after launch ⇒ acceptance drift ⇒ gate Fail.
+        let drifted = monitor
+            .autonomous_gate_inputs(
+                7,
+                bp.clone(),
+                rollup,
+                "abc123",
+                "## Acceptance Criteria\n- [ ] AC-2: new\n",
+            )
+            .expect("gate ready");
+        assert!(matches!(
+            evaluate_autonomous_gate(&drifted),
+            GateDecision::Fail(_)
+        ));
+
+        // HEAD advanced past reviewed SHA ⇒ TOCTOU ⇒ gate Fail.
+        let advanced = monitor
+            .autonomous_gate_inputs(7, bp, rollup, "def456", body)
+            .expect("gate ready");
+        assert!(matches!(
+            evaluate_autonomous_gate(&advanced),
+            GateDecision::Fail(_)
+        ));
+    }
+
+    #[test]
+    fn autonomous_gate_inputs_none_until_review_returns() {
+        let mut monitor = autonomous_state();
+        monitor.begin_review(7, 99, "abc123"); // verdict pending
+        let bp = gwt_git::branch_protection::BranchProtectionStatus::Verified {
+            required_checks: vec!["ci".to_string()],
+        };
+        assert!(
+            monitor
+                .autonomous_gate_inputs(7, bp, "[]", "abc123", "body")
+                .is_none(),
+            "gate not ready while review is in flight",
+        );
     }
 
     #[test]

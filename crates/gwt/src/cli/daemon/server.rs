@@ -479,6 +479,16 @@ async fn scan_issue_monitor_once(
     })
 }
 
+/// SPEC #3200 Option A: a per-process secret the daemon uses to sign autonomous
+/// merge-authorization audit tokens. Agents never see it, so they cannot forge a
+/// daemon authorization. Stable for the daemon's lifetime.
+fn daemon_run_secret() -> &'static [u8] {
+    static SECRET: std::sync::OnceLock<Vec<u8>> = std::sync::OnceLock::new();
+    SECRET
+        .get_or_init(|| uuid::Uuid::new_v4().as_bytes().to_vec())
+        .as_slice()
+}
+
 fn scan_issue_monitor_once_blocking(
     scope: RuntimeScope,
     mut monitor: crate::IssueMonitorState,
@@ -518,6 +528,17 @@ fn scan_issue_monitor_once_blocking(
         &now,
     );
     monitor.recover_stuck_autonomous(&now);
+    // SPEC #3200 Option A: advance in-flight autonomous issues through the loop
+    // (PR detect → review → gate → merge → watch). No-op unless autonomous mode
+    // is on; default OFF keeps the SPEC #3165 flow unchanged.
+    crate::issue_monitor_worker::advance_autonomous_in_flight(
+        &mut monitor,
+        &issues,
+        &format!("{owner}/{repo}"),
+        &scope.project_root,
+        daemon_run_secret(),
+        &now,
+    );
     if monitor.config.enabled && gui_connected {
         let active_cap = if monitor.has_launch_profile() {
             monitor.config.max_active.max(1)
