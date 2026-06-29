@@ -179,6 +179,12 @@ pub struct IssueMonitorLaunchedIssue {
 pub struct IssueMonitorFailedIssue {
     pub issue_number: u64,
     pub message: String,
+    /// #3165 error-window lifecycle: the agent window that was on the canvas
+    /// when this issue failed. Persisted so an explicit Launch Now (even after a
+    /// daemon/GUI restart) can close the stale window before relaunching. `None`
+    /// for failures that never opened a window (e.g. pre-launch errors).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub window_id: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -436,6 +442,9 @@ pub struct IssueMonitorState {
     /// issue number (attempt counter, phase, in-flight launch id, snapshot).
     autonomous_records: BTreeMap<u64, AutonomousIssueRecord>,
     failed_issues: BTreeMap<u64, String>,
+    /// #3165 error-window lifecycle: the stale agent window id retained per
+    /// failed issue, so an explicit Launch Now can close it before relaunching.
+    failed_windows: BTreeMap<u64, String>,
     queue: VecDeque<u64>,
     pending_launches: VecDeque<IssueMonitorLaunchRequest>,
     /// SPEC #3200 Option A: review-agent spawn requests produced by the
@@ -749,6 +758,7 @@ impl IssueMonitorState {
             autonomous_tuning: AutonomousTuning::default(),
             autonomous_records: BTreeMap::new(),
             failed_issues: BTreeMap::new(),
+            failed_windows: BTreeMap::new(),
             queue: VecDeque::new(),
             pending_launches: VecDeque::new(),
             pending_review_dispatches: VecDeque::new(),
@@ -779,6 +789,9 @@ impl IssueMonitorState {
             state
                 .failed_issues
                 .insert(failed.issue_number, failed.message);
+            if let Some(window_id) = failed.window_id.filter(|id| !id.is_empty()) {
+                state.failed_windows.insert(failed.issue_number, window_id);
+            }
         }
         state.merged_issues = prefs.merged_issues.into_iter().collect();
         state.autonomous_mode = prefs.autonomous_mode;
@@ -809,6 +822,7 @@ impl IssueMonitorState {
                 .map(|(issue_number, message)| IssueMonitorFailedIssue {
                     issue_number: *issue_number,
                     message: message.clone(),
+                    window_id: self.failed_windows.get(issue_number).cloned(),
                 })
                 .collect(),
             merged_issues: self.merged_issues.iter().copied().collect(),
@@ -1159,6 +1173,14 @@ impl IssueMonitorState {
             .find(|item| item.issue.number == issue_number)
             .map(|item| self.is_autonomous_two_stage_candidate(&item.issue))
             .unwrap_or(false)
+    }
+
+    /// #3165 error-window lifecycle: remove and return the stale agent window id
+    /// retained for a failed issue, so an explicit Launch Now (default mode) can
+    /// close it before relaunching into a fresh window. `None` when no stale
+    /// window was recorded for the issue.
+    pub fn take_failed_window(&mut self, issue_number: u64) -> Option<String> {
+        self.failed_windows.remove(&issue_number)
     }
 
     /// SPEC #3200 T-041 (FR-003..FR-010): pre-launch autonomous decision + state
@@ -1676,6 +1698,7 @@ impl IssueMonitorState {
         // Launch Now of already-merged work).
         self.merged_issues.remove(&issue_number);
         self.failed_issues.remove(&issue_number);
+        self.failed_windows.remove(&issue_number);
         self.queue.retain(|queued| *queued != issue_number);
         self.pending_launches
             .retain(|pending| pending.issue_number != issue_number);
@@ -1851,7 +1874,18 @@ impl IssueMonitorState {
         let message = message.into();
         self.active_launches
             .retain(|active| *active != issue_number);
-        self.launched_windows.remove(&issue_number);
+        // #3165 error-window lifecycle: retain the stale agent window id so an
+        // explicit Launch Now can close it before relaunching. Prefer the
+        // tracked launched window; fall back to the inbox item's window id.
+        let stale_window = self.launched_windows.remove(&issue_number).or_else(|| {
+            self.inbox
+                .iter()
+                .find(|item| item.issue.number == issue_number)
+                .and_then(|item| item.launched_window_id.clone())
+        });
+        if let Some(window_id) = stale_window {
+            self.failed_windows.insert(issue_number, window_id);
+        }
         self.failed_issues.insert(issue_number, message.clone());
         self.queue.retain(|queued| *queued != issue_number);
         self.pending_launches
@@ -2658,6 +2692,45 @@ mod tests {
             !nolabel.should_autoclose_failed_window(43),
             "no auto-merge label ⇒ keep the failed window"
         );
+    }
+
+    #[test]
+    fn failed_window_is_retained_persisted_and_cleared_on_relaunch() {
+        // #3165 error-window lifecycle: a failed agent window id is retained per
+        // issue (and persisted) so an explicit Launch Now can close the stale
+        // window before relaunching; a successful relaunch clears it.
+        let mut monitor = launched_monitor(42, "tab-1::agent-42");
+        assert_eq!(
+            monitor.record_agent_window_failed("tab-1::agent-42", "boom"),
+            Some(42)
+        );
+
+        // Persisted across a prefs round-trip (daemon/GUI restart).
+        let mut restored =
+            IssueMonitorState::with_prefs(IssueMonitorConfig::default(), monitor.prefs());
+        assert_eq!(
+            restored.take_failed_window(42).as_deref(),
+            Some("tab-1::agent-42"),
+            "stale window id retained + persisted for Launch Now"
+        );
+        // take is one-shot.
+        assert_eq!(restored.take_failed_window(42), None);
+
+        // A successful (re)launch clears any retained stale window.
+        let mut relaunch = launched_monitor(43, "old::agent-43");
+        relaunch.record_agent_window_failed("old::agent-43", "boom");
+        relaunch.complete_active_launch(43, "new::agent-43");
+        assert_eq!(
+            relaunch.take_failed_window(43),
+            None,
+            "relaunch clears the stale window so it is not double-closed"
+        );
+
+        // A pre-launch failure with no window records nothing to close.
+        let mut no_window = IssueMonitorState::new(IssueMonitorConfig::default());
+        scan_issue_monitor_candidates(&mut no_window, &[issue(44)], "2026-06-30T00:00:00Z");
+        no_window.record_launch_failed(44, "could not create branch");
+        assert_eq!(no_window.take_failed_window(44), None);
     }
 
     #[test]

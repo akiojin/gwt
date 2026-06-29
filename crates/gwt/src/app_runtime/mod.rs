@@ -1142,9 +1142,21 @@ impl AppRuntime {
             );
         }
         let window_id = window_id.to_string();
-        self.local_issue_monitor_events_for(None, |monitor| {
-            monitor.complete_active_launch(issue_number, window_id)
-        })
+        // #3165 error-window lifecycle (default mode): when an issue relaunches
+        // after a failure, close the stale agent window from the prior attempt so
+        // it is replaced rather than left on the canvas. Guard against closing the
+        // freshly launched window if it happens to reuse the same id.
+        let mut stale_window: Option<String> = None;
+        let mut events = self.local_issue_monitor_events_for(None, |monitor| {
+            stale_window = monitor
+                .take_failed_window(issue_number)
+                .filter(|stale| *stale != window_id);
+            monitor.complete_active_launch(issue_number, window_id.clone());
+        });
+        if let Some(stale) = stale_window {
+            events.extend(self.close_window_events(&stale));
+        }
+        events
     }
 
     pub(crate) fn issue_monitor_agent_failed_events(

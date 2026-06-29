@@ -5713,6 +5713,9 @@ fn app_runtime_runtime_error_marks_issue_monitor_launched_issue_failed() {
         vec![gwt::IssueMonitorFailedIssue {
             issue_number: 42,
             message: "Stop-block hit an error".to_string(),
+            // #3165 error-window lifecycle: the failed agent window id is
+            // retained so an explicit Launch Now can close the stale window.
+            window_id: Some(window_id.clone()),
         }]
     );
 }
