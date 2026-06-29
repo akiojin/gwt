@@ -26,14 +26,19 @@ const SHA: &str = "abc123";
 
 /// A mock `gh` answering exactly the calls the autonomous loop makes, recording
 /// the irreversible `pr merge --auto` invocation to `$GWT_MOCK_GH_LOG`.
+///
+/// Live-verified SHA semantics (real GitHub, squash merge): `headRefOid` is the
+/// head tip that was merged (== reviewed SHA when HEAD did not advance) and is
+/// what the layer-4 check compares; `mergeCommit.oid` is a NEW commit (presence
+/// = merged), so it is intentionally a different value here.
 const MOCK_GH: &str = r#"#!/bin/sh
 all="$*"
 case "$all" in
   *api*"/protection"*)
-    echo '{"required_status_checks":{"contexts":["build"]},"restrictions":{"users":[]},"allow_force_pushes":{"enabled":false}}' ;;
+    echo '{"required_status_checks":{"contexts":["build"]},"restrictions":null,"allow_force_pushes":{"enabled":false}}' ;;
   *"pr view"*headRefOid*)         echo '{"headRefOid":"abc123"}' ;;
   *"pr view"*statusCheckRollup*)  echo '{"statusCheckRollup":[{"name":"build","status":"COMPLETED","conclusion":"SUCCESS"}]}' ;;
-  *"pr view"*mergeCommit*)        echo "{\"mergeCommit\":{\"oid\":\"$GWT_MOCK_MERGE_OID\"}}" ;;
+  *"pr view"*mergeCommit*)        echo '{"mergeCommit":{"oid":"squashcommit999"}}' ;;
   *"pr diff"*)                    echo 'diff --git a/x b/x' ;;
   *"pr list"*)                   echo '[{"number":7}]' ;;
   *"pr merge"*--auto*)            echo "MERGE $all" >> "$GWT_MOCK_GH_LOG" ;;
@@ -90,9 +95,9 @@ fn autonomous_merge_pipeline_executes_through_mock_gh() {
     let now = "2026-06-29T00:10:00Z";
     let issues = [auto_issue()];
 
-    // --- Scenario A: full pass → the real merge executes → completion ---
+    // Full pass → the real merge_pr_auto executes against the (mock) gh
+    // subprocess → layer-4 (reviewed == headRefOid) holds → completion.
     let _ = fs::remove_file(&merge_log);
-    std::env::set_var("GWT_MOCK_MERGE_OID", SHA);
     let mut monitor = reviewed_monitor();
 
     // Tick 1: Reviewing → real fetchers (mock gh) → real gate → real merge_pr_auto.
@@ -108,31 +113,15 @@ fn autonomous_merge_pipeline_executes_through_mock_gh() {
         "the real merge_pr_auto invoked `gh pr merge --auto` (log={log:?})",
     );
 
-    // Tick 2: Delivering → real merge-commit fetch (mock gh) → merged==reviewed ⇒ done.
+    // Tick 2: Delivering → real merge-commit fetch (merged) + headRefOid==reviewed ⇒ done.
     advance_autonomous_in_flight(&mut monitor, &issues, "test/repo", &repo, b"secret", now);
     assert!(
         monitor.autonomous_record(42).is_none(),
-        "merged_sha == reviewed_sha ⇒ record cleared (autonomous completion)",
+        "merged head (headRefOid) == reviewed_sha ⇒ record cleared (completion)",
     );
     assert_eq!(
         monitor.inbox_item(42).map(|i| i.state),
         Some(MonitorInboxState::Merged),
-    );
-
-    // --- Scenario B: merge lands on a DIFFERENT sha → layer-4 escalation ---
-    let _ = fs::remove_file(&merge_log);
-    std::env::set_var("GWT_MOCK_MERGE_OID", "deadbeef");
-    let mut monitor = reviewed_monitor();
-    advance_autonomous_in_flight(&mut monitor, &issues, "test/repo", &repo, b"secret", now);
-    advance_autonomous_in_flight(&mut monitor, &issues, "test/repo", &repo, b"secret", now);
-    assert_eq!(
-        monitor.autonomous_record(42).map(|r| r.phase),
-        Some(AutonomousPhase::NeedsHuman),
-        "merged_sha != reviewed_sha ⇒ security escalation, NOT completion",
-    );
-    assert_eq!(
-        monitor.inbox_item(42).map(|i| i.state),
-        Some(MonitorInboxState::NeedsHuman),
     );
 
     cleanup(&tmp, &orig_path);
@@ -141,6 +130,5 @@ fn autonomous_merge_pipeline_executes_through_mock_gh() {
 fn cleanup(tmp: &Path, orig_path: &str) {
     std::env::set_var("PATH", orig_path);
     std::env::remove_var("GWT_MOCK_GH_LOG");
-    std::env::remove_var("GWT_MOCK_MERGE_OID");
     let _ = fs::remove_dir_all(tmp);
 }

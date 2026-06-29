@@ -36,11 +36,24 @@ impl BranchProtectionStatus {
 }
 
 /// Parse a `gh api .../branches/{branch}/protection` JSON body into a
-/// [`BranchProtectionStatus`]. This is the success path (HTTP 200): the three
-/// structural conditions are read from the JSON. Non-200 outcomes
-/// (`404`/`403`) are mapped by the caller to `Absent` / `Unreadable` and never
-/// reach this parser. Fail-closed: a body missing any condition → not verified
-/// (treated as `Absent` so callers route to gate-unavailable).
+/// [`BranchProtectionStatus`]. This is the success path (HTTP 200). Non-200
+/// outcomes (`404`/`403`) are mapped by the caller to `Absent` / `Unreadable`
+/// and never reach this parser. Fail-closed: a body missing a required condition
+/// → `Absent` (callers route to gate-unavailable).
+///
+/// The two GitHub-enforceable structural conditions an autonomous merge relies
+/// on are:
+///   1. at least one **required status check** (so GitHub itself refuses to
+///      merge until the gate's checks pass — the vacuous-green guard), and
+///   2. **force pushes disabled** (the reviewed SHA cannot be silently rewritten).
+///
+/// NOTE: push `restrictions` are deliberately NOT required. GitHub only allows
+/// user/team push restrictions on **organization** repositories (a PUT with
+/// `restrictions` on a personal repo fails `422 "Only organization repositories
+/// can have users and team restrictions"`). Requiring them would make autonomous
+/// mode permanently unusable on personal repos, while adding no enforceable
+/// protection there (the owner can always push directly regardless). They are
+/// kept informational only.
 pub fn parse_branch_protection(json: &str) -> BranchProtectionStatus {
     let value: serde_json::Value = match serde_json::from_str(json) {
         Ok(value) => value,
@@ -60,17 +73,8 @@ pub fn parse_branch_protection(json: &str) -> BranchProtectionStatus {
         })
         .unwrap_or_default();
 
-    // (2) merge / push permissions are restricted (restrictions block present).
-    let restricted = value
-        .get("restrictions")
-        .map(|r| !r.is_null())
-        .unwrap_or(false);
-
-    // (3) direct push is disallowed: branch protection is enabled AND either
-    // restrictions exist or force pushes are disabled. GitHub exposes
-    // `allow_force_pushes.enabled`; a protected branch without restrictions but
-    // with required reviews/linear history still blocks ad-hoc direct push, but
-    // we require the explicit restriction to stay fail-closed.
+    // (2) force pushes are disabled: the reviewed SHA cannot be silently
+    // rewritten out from under the gate.
     let force_push_disabled = value
         .get("allow_force_pushes")
         .and_then(|fp| fp.get("enabled"))
@@ -78,7 +82,7 @@ pub fn parse_branch_protection(json: &str) -> BranchProtectionStatus {
         .map(|enabled| !enabled)
         .unwrap_or(false);
 
-    if !required_checks.is_empty() && restricted && force_push_disabled {
+    if !required_checks.is_empty() && force_push_disabled {
         BranchProtectionStatus::Verified { required_checks }
     } else {
         // Protection exists but does not structurally back autonomous merge.
@@ -183,11 +187,25 @@ mod tests {
     }
 
     #[test]
-    fn missing_restrictions_or_force_push_enabled_is_not_verified() {
-        let no_restrictions = r#"{"required_status_checks":{"contexts":["build"]},"restrictions":null,"allow_force_pushes":{"enabled":false}}"#;
-        assert!(!parse_branch_protection(no_restrictions).is_verified());
-        let force_pushes = r#"{"required_status_checks":{"contexts":["build"]},"restrictions":{"users":[]},"allow_force_pushes":{"enabled":true}}"#;
-        assert!(!parse_branch_protection(force_pushes).is_verified());
+    fn personal_repo_without_restrictions_is_verified() {
+        // Live-verified: GitHub forbids push `restrictions` on personal repos
+        // ("Only organization repositories can have users and team restrictions").
+        // Required checks + force-push disabled is the enforceable protection, so
+        // a personal repo with restrictions:null MUST verify.
+        let personal = r#"{"required_status_checks":{"contexts":["ci"]},"restrictions":null,"allow_force_pushes":{"enabled":false}}"#;
+        assert!(
+            parse_branch_protection(personal).is_verified(),
+            "personal repo (restrictions:null) with required checks + no force-push verifies",
+        );
+    }
+
+    #[test]
+    fn force_push_enabled_is_not_verified() {
+        let force_pushes = r#"{"required_status_checks":{"contexts":["build"]},"restrictions":null,"allow_force_pushes":{"enabled":true}}"#;
+        assert!(
+            !parse_branch_protection(force_pushes).is_verified(),
+            "force-push enabled lets the reviewed SHA be rewritten — not verified",
+        );
     }
 
     #[test]

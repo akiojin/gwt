@@ -333,25 +333,31 @@ pub fn advance_autonomous_in_flight(
             }
             crate::AutonomousPhase::Delivering => {
                 let Some(pr) = record.pr_number else { continue };
-                if let Some(merged_sha) =
-                    gwt_git::pr_status::fetch_pr_merge_commit_sha(repo_path, pr)
-                {
+                // Merge completion is detected by the presence of a merge commit.
+                // The layer-4 identity check then compares the reviewed SHA to the
+                // PR's HEAD SHA (`headRefOid`) — NOT the merge commit oid: a squash
+                // / merge-commit produces a NEW oid, while `headRefOid` is the head
+                // tip that was actually merged (== reviewed SHA when HEAD did not
+                // advance). Live-verified against real GitHub (SPEC #3200 layer-4).
+                if gwt_git::pr_status::fetch_pr_merge_commit_sha(repo_path, pr).is_some() {
                     let reviewed = record.reviewed_sha.clone().unwrap_or_default();
+                    let merged_head =
+                        gwt_git::pr_status::fetch_pr_head_sha(repo_path, pr).unwrap_or_default();
                     if crate::issue_monitor_authz::merged_sha_matches_reviewed(
                         &reviewed,
-                        &merged_sha,
+                        &merged_head,
                     ) {
                         monitor.record_merged(issue_number);
                     } else {
                         tracing::error!(
                             issue = issue_number,
                             reviewed_sha = %reviewed,
-                            merged_sha = %merged_sha,
-                            "SECURITY: merged SHA != reviewed SHA — escalating"
+                            merged_head = %merged_head,
+                            "SECURITY: merged head SHA != reviewed SHA — escalating"
                         );
                         monitor.escalate_to_needs_human(
                             issue_number,
-                            "merged SHA does not match the reviewed SHA",
+                            "merged head SHA does not match the reviewed SHA",
                         );
                     }
                 }
