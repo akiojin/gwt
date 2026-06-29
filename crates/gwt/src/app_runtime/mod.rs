@@ -1462,12 +1462,23 @@ impl AppRuntime {
             self.pending_launch_feedback_contexts.remove(window_id);
         }
 
+        // #3165/#3200 error-window lifecycle: an autonomous (two-stage opt-in)
+        // failure auto-closes its stale agent window so the bounded retry
+        // relaunches into a clean canvas. A default failure keeps the window on
+        // the canvas for human inspection (closed later on explicit Launch Now).
+        let autoclose_failed_window = issue_number
+            .map(|number| monitor.should_autoclose_failed_window(number))
+            .unwrap_or(false);
+
         let mut events = self.issue_monitor_snapshot_events_for(None, monitor);
         events.push(OutboundEvent::broadcast(BackendEvent::IssueMonitorToast {
             level: "error".to_string(),
             message: message.to_string(),
             issue_number,
         }));
+        if autoclose_failed_window {
+            events.extend(self.close_window_events(window_id));
+        }
         events
     }
 

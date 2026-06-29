@@ -1146,6 +1146,21 @@ impl IssueMonitorState {
         self.autonomous_mode && issue_has_auto_merge_label(issue)
     }
 
+    /// #3165/#3200 error-window lifecycle: decide whether a just-failed agent
+    /// window should be auto-closed. An autonomous (two-stage opt-in) issue
+    /// auto-closes its stale window so the bounded retry relaunches into a clean
+    /// canvas; a default (non-autonomous) issue KEEPS its failed window so the
+    /// human can inspect the error output and relaunch explicitly via Launch Now.
+    /// The issue is looked up in the inbox, where a freshly recorded failure
+    /// still carries the issue and its labels.
+    pub fn should_autoclose_failed_window(&self, issue_number: u64) -> bool {
+        self.inbox
+            .iter()
+            .find(|item| item.issue.number == issue_number)
+            .map(|item| self.is_autonomous_two_stage_candidate(&item.issue))
+            .unwrap_or(false)
+    }
+
     /// SPEC #3200 T-041 (FR-003..FR-010): pre-launch autonomous decision + state
     /// capture for one candidate, given the freshly fetched base-branch
     /// `branch_protection`. Composes the pure [`autonomous_eligibility`] predicate
@@ -2592,6 +2607,56 @@ mod tests {
         assert!(
             !off.is_autonomous_two_stage_candidate(&unlabelled),
             "mode on but no label ⇒ not a candidate"
+        );
+    }
+
+    #[test]
+    fn autoclose_failed_window_only_for_autonomous_candidates() {
+        // #3165/#3200 error-window lifecycle: a failed autonomous issue
+        // (autonomous_mode ON + auto-merge label) auto-closes its stale window so
+        // the retry relaunches clean; default issues keep theirs for inspection.
+        let now = "2026-06-30T00:00:00Z";
+
+        let mut auto = IssueMonitorState::with_prefs(
+            IssueMonitorConfig::default(),
+            IssueMonitorPrefs {
+                autonomous_mode: true,
+                ..IssueMonitorPrefs::default()
+            },
+        );
+        scan_issue_monitor_candidates(&mut auto, &[auto_issue(42, "b")], now);
+        auto.record_agent_issue_failed(42, "boom");
+        assert!(
+            auto.should_autoclose_failed_window(42),
+            "autonomous candidate failure ⇒ auto-close the stale window"
+        );
+        assert!(
+            !auto.should_autoclose_failed_window(999),
+            "unknown issue ⇒ no close"
+        );
+
+        // autonomous_mode OFF ⇒ keep the window (default human-gated path).
+        let mut def = IssueMonitorState::new(IssueMonitorConfig::default());
+        scan_issue_monitor_candidates(&mut def, &[auto_issue(42, "b")], now);
+        def.record_agent_issue_failed(42, "boom");
+        assert!(
+            !def.should_autoclose_failed_window(42),
+            "autonomous_mode off ⇒ keep the failed window"
+        );
+
+        // autonomous_mode ON but no auto-merge label ⇒ keep the window.
+        let mut nolabel = IssueMonitorState::with_prefs(
+            IssueMonitorConfig::default(),
+            IssueMonitorPrefs {
+                autonomous_mode: true,
+                ..IssueMonitorPrefs::default()
+            },
+        );
+        scan_issue_monitor_candidates(&mut nolabel, &[issue(43)], now);
+        nolabel.record_agent_issue_failed(43, "boom");
+        assert!(
+            !nolabel.should_autoclose_failed_window(43),
+            "no auto-merge label ⇒ keep the failed window"
         );
     }
 
