@@ -1,0 +1,21 @@
+{
+  "enabled": true,
+  "max_active_agents": 2,
+  "priority_order": [201, 202],
+  "launch_profile": {
+    "agent_id": "claude",
+    "model": "claude-opus",
+    "reasoning": "high",
+    "version": null,
+    "session_mode": "Normal",
+    "skip_permissions": false,
+    "codex_fast_mode": false,
+    "runtime_target": "Host",
+    "docker_service": null,
+    "docker_lifecycle_intent": "Connect",
+    "windows_shell": null
+  },
+  "launched_issues": [{ "issue_number": 201, "window_id": "tab-1::agent-1" }],
+  "failed_issues": [{ "issue_number": 203, "message": "agent crashed" }],
+  "merged_issues": [204]
+}

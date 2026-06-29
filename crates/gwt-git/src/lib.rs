@@ -5,6 +5,7 @@
 
 pub mod blob;
 pub mod branch;
+pub mod branch_protection;
 pub mod commit;
 pub mod diff;
 pub mod issue;
@@ -19,6 +20,7 @@ pub use branch::{
     git_divergence, is_branch_merged_into, is_protected_branch, list_gone_branches,
     list_remote_names, Branch, DivergenceInfo, MergeTarget, MergeTargetRef,
 };
+pub use branch_protection::{BranchProtectionStatus, ProtectionReadability};
 pub use commit::CommitEntry;
 pub use diff::{FileEntry, FileStatus};
 pub use issue::{Issue, IssueCache};
