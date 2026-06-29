@@ -24,8 +24,8 @@ use gwt::issue_monitor_gate::{
 };
 use gwt_git::branch_protection::fetch_branch_protection;
 use gwt_git::pr_status::{
-    fetch_open_pr_number_for_branch, fetch_pr_head_sha, fetch_pr_status_check_rollup, merge_pr_auto,
-    parse_pr_merge_commit_sha,
+    fetch_open_pr_number_for_branch, fetch_pr_head_sha, fetch_pr_status_check_rollup,
+    merge_pr_auto, parse_pr_merge_commit_sha,
 };
 
 fn env(name: &str) -> String {
@@ -45,7 +45,10 @@ fn live_autonomous_merge_against_real_github() {
     // 1) Real branch protection → Verified (after the personal-repo restrictions fix).
     let protection = fetch_branch_protection(&slug, "main");
     println!("branch_protection = {protection:?}");
-    assert!(protection.is_verified(), "real branch protection must verify");
+    assert!(
+        protection.is_verified(),
+        "real branch protection must verify"
+    );
 
     // 2) Real PR discovery + head SHA binding.
     assert_eq!(
@@ -82,18 +85,37 @@ fn live_autonomous_merge_against_real_github() {
     let inputs = monitor
         .autonomous_gate_inputs(pr, protection, &rollup, &head, body)
         .expect("gate ready");
-    assert_eq!(evaluate_autonomous_gate(&inputs), GateDecision::Pass, "real gate Pass");
-    assert_eq!(route_autonomous_gate(&inputs), GateAction::Deliver, "route Deliver");
+    assert_eq!(
+        evaluate_autonomous_gate(&inputs),
+        GateDecision::Pass,
+        "real gate Pass"
+    );
+    assert_eq!(
+        route_autonomous_gate(&inputs),
+        GateAction::Deliver,
+        "route Deliver"
+    );
 
     // 5) REAL merge via the production function.
-    assert!(merge_pr_auto(&repo, pr), "real merge_pr_auto armed/succeeded");
+    assert!(
+        merge_pr_auto(&repo, pr),
+        "real merge_pr_auto armed/succeeded"
+    );
 
     // 6) Poll for merge completion, then layer-4: merged head SHA == reviewed SHA.
     let mut merged = false;
     for _ in 0..30 {
         // `gh pr view --json mergeCommit` populated ⇒ merged.
         let view = std::process::Command::new("gh")
-            .args(["pr", "view", &pr.to_string(), "--repo", &slug, "--json", "mergeCommit"])
+            .args([
+                "pr",
+                "view",
+                &pr.to_string(),
+                "--repo",
+                &slug,
+                "--json",
+                "mergeCommit",
+            ])
             .output()
             .expect("gh pr view");
         let stdout = String::from_utf8_lossy(&view.stdout);
