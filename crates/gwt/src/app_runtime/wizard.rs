@@ -70,6 +70,25 @@ fn issue_monitor_auto_launch_geometry(index: usize) -> WindowGeometry {
     }
 }
 
+/// SPEC #3200 Option A: build the independent-review agent's prompt from a
+/// dispatch — the adversarial review prompt (criteria + diff as untrusted data,
+/// bound to the reviewed SHA) plus the instruction to report the verdict back to
+/// the Issue Monitor daemon via the `ReviewVerdict` control for this exact SHA.
+fn build_review_dispatch_prompt(dispatch: &gwt::AutonomousReviewDispatch) -> String {
+    let base = gwt::issue_monitor_review::build_review_prompt(
+        &dispatch.required_criteria,
+        &dispatch.reviewed_sha,
+        &dispatch.diff,
+    );
+    format!(
+        "{base}\n\nAfter producing the verdict JSON, report it to the Issue Monitor \
+         daemon as a ReviewVerdict control for issue #{issue} at reviewed SHA {sha} \
+         (the daemon re-judges it; a verdict for any other SHA is rejected).",
+        issue = dispatch.issue_number,
+        sha = dispatch.reviewed_sha,
+    )
+}
+
 use super::{
     build_shell_process_launch, combined_window_id, detect_wizard_docker_context_and_status,
     knowledge_error_event, knowledge_kind_for_preset, linked_issue_workspace_context,
@@ -1617,6 +1636,34 @@ impl AppRuntime {
         }
     }
 
+    /// SPEC #3200 Option A: handle a daemon `review_dispatch` — prepare the
+    /// independent-review prompt (bound to the reviewed SHA, with the criteria +
+    /// diff as untrusted data) and surface a notification that review was
+    /// dispatched. Spawning the review agent in an isolated worktree on a
+    /// different model, and bridging its verdict back via the `ReviewVerdict`
+    /// control, is the live-integration step verified against a real PR.
+    pub(crate) fn auto_dispatch_issue_monitor_review_events(
+        &mut self,
+        dispatch: gwt::AutonomousReviewDispatch,
+    ) -> Vec<OutboundEvent> {
+        let prompt = build_review_dispatch_prompt(&dispatch);
+        tracing::info!(
+            issue = dispatch.issue_number,
+            pr = dispatch.pr_number,
+            reviewed_sha = %dispatch.reviewed_sha,
+            prompt_bytes = prompt.len(),
+            "autonomous independent-review dispatch prepared"
+        );
+        vec![OutboundEvent::broadcast(BackendEvent::IssueMonitorToast {
+            level: "info".to_string(),
+            message: format!(
+                "Independent review dispatched for #{} (PR #{})",
+                dispatch.issue_number, dispatch.pr_number
+            ),
+            issue_number: Some(dispatch.issue_number),
+        })]
+    }
+
     fn silent_issue_monitor_launch_events(
         &mut self,
         issue_number: u64,
@@ -2495,5 +2542,34 @@ impl AppRuntime {
             // Cache refresh preserves picker candidates set at first hydration.
             open_branch_candidates: Vec::new(),
         });
+    }
+}
+
+#[cfg(test)]
+mod review_dispatch_tests {
+    use super::build_review_dispatch_prompt;
+
+    #[test]
+    fn review_dispatch_prompt_is_adversarial_sha_bound_and_reports_back() {
+        let dispatch = gwt::AutonomousReviewDispatch {
+            issue_number: 42,
+            pr_number: 99,
+            reviewed_sha: "abc123".to_string(),
+            required_criteria: vec!["AC-1".to_string()],
+            diff: "diff --git a/x b/x".to_string(),
+        };
+        let prompt = build_review_dispatch_prompt(&dispatch);
+        assert!(
+            prompt.contains("REFUTE"),
+            "adversarial framing carried through"
+        );
+        assert!(prompt.contains("UNTRUSTED DATA"), "injection framing");
+        assert!(prompt.contains("AC-1"), "required criterion");
+        assert!(prompt.contains("abc123"), "bound to the reviewed SHA");
+        assert!(
+            prompt.contains("ReviewVerdict"),
+            "instructs verdict report-back"
+        );
+        assert!(prompt.contains("#42"), "names the issue");
     }
 }

@@ -923,6 +923,12 @@ fn issue_monitor_daemon_user_event(event: serde_json::Value) -> Option<UserEvent
                 linked_issue_kind,
             })
         }
+        "review_dispatch" => {
+            // SPEC #3200 Option A: the daemon asks the GUI to spawn an independent
+            // review agent for a PR-ready autonomous issue.
+            let dispatch: gwt::AutonomousReviewDispatch = serde_json::from_value(payload).ok()?;
+            Some(UserEvent::IssueMonitorReviewDispatch { dispatch })
+        }
         _ => None,
     }
 }
@@ -1051,6 +1057,11 @@ enum UserEvent {
     IssueMonitorLaunchRequest {
         issue_number: u64,
         linked_issue_kind: gwt::LinkedIssueKind,
+    },
+    /// SPEC #3200 Option A: spawn an independent review agent for a PR-ready
+    /// autonomous issue (daemon → GUI).
+    IssueMonitorReviewDispatch {
+        dispatch: gwt::AutonomousReviewDispatch,
     },
     LaunchProgress {
         window_id: String,
@@ -7355,6 +7366,10 @@ fn main() -> std::io::Result<()> {
             }) => {
                 let events =
                     app.auto_launch_issue_monitor_request_events(issue_number, linked_issue_kind);
+                clients.dispatch(events);
+            }
+            Event::UserEvent(UserEvent::IssueMonitorReviewDispatch { dispatch }) => {
+                let events = app.auto_dispatch_issue_monitor_review_events(dispatch);
                 clients.dispatch(events);
             }
             Event::UserEvent(UserEvent::LaunchProgress { window_id, message }) => {
