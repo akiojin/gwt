@@ -4360,6 +4360,7 @@
       const issueMonitorSurface = createIssueMonitorSurface({
         document,
         send,
+        focusWindow: (windowId) => focusWindowRemotely(windowId, { center: true }),
       });
 
       // SPEC #3200 FR-034/FR-035: unattended autonomous events surface as a
