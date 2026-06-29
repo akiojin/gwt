@@ -268,6 +268,12 @@ enum IssueMonitorControl {
     /// SPEC #3200 T-046/FR-024: arm/disarm the unattended autonomous mode kill
     /// switch. Disarming stops new autonomous candidates on the next scan.
     AutonomousMode(bool),
+    /// SPEC #3200 FR-015: a review agent reported its verdict for a reviewed SHA.
+    ReviewVerdict {
+        issue_number: u64,
+        reviewed_sha: String,
+        verdict_raw: String,
+    },
     MaxActiveAgents(usize),
     PriorityOrder(Vec<u64>),
     Launched {
@@ -299,6 +305,15 @@ fn apply_issue_monitor_control(
         }
         IssueMonitorControl::AutonomousMode(enabled) => {
             monitor.set_autonomous_mode(enabled);
+            true
+        }
+        IssueMonitorControl::ReviewVerdict {
+            issue_number,
+            reviewed_sha,
+            verdict_raw,
+        } => {
+            // The daemon (trusted) judges the raw verdict; agents cannot self-pass.
+            monitor.apply_review_verdict(issue_number, &reviewed_sha, &verdict_raw);
             true
         }
         IssueMonitorControl::MaxActiveAgents(max_active_agents) => {
@@ -361,6 +376,23 @@ fn decode_issue_monitor_control(payload: serde_json::Value) -> Option<IssueMonit
                 .and_then(serde_json::Value::as_bool)
             {
                 return Some(IssueMonitorControl::AutonomousMode(autonomous_mode));
+            }
+            if let Some(review_verdict) = payload.get("review_verdict") {
+                let issue_number = review_verdict.get("issue_number")?.as_u64()?;
+                let reviewed_sha = review_verdict
+                    .get("reviewed_sha")
+                    .and_then(serde_json::Value::as_str)?
+                    .to_string();
+                let verdict_raw = review_verdict
+                    .get("verdict_raw")
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or("")
+                    .to_string();
+                return Some(IssueMonitorControl::ReviewVerdict {
+                    issue_number,
+                    reviewed_sha,
+                    verdict_raw,
+                });
             }
             if let Some(max_active_agents) = payload
                 .get("max_active_agents")
@@ -974,6 +1006,48 @@ mod tests {
             .expect("disarm control decodes");
         apply_issue_monitor_control(&mut monitor, disarm);
         assert!(!monitor.autonomous_mode(), "kill switch disarmed");
+    }
+
+    #[test]
+    fn issue_monitor_review_verdict_control_records_daemon_judged_outcome() {
+        // SPEC #3200 FR-015: a review agent's raw verdict is decoded and judged
+        // by the daemon (SHA-bound), setting review_passed on the record.
+        let mut monitor = crate::IssueMonitorState::with_prefs(
+            crate::IssueMonitorConfig::default(),
+            crate::IssueMonitorPrefs {
+                autonomous_mode: true,
+                ..crate::IssueMonitorPrefs::default()
+            },
+        );
+        monitor.capture_acceptance_snapshot(
+            42,
+            crate::issue_monitor_gate::classify_acceptance_criteria(
+                "## Acceptance Criteria\n- [ ] AC-1: x\n",
+            )
+            .snapshot(),
+        );
+        monitor.begin_review(42, 99, "abc123");
+
+        let verdict = r#"{"schema":"gwt-autonomous-review/v1","overall":"pass","criteria":[{"id":"AC-1","verdict":"pass"}]}"#;
+        let payload = crate::runtime_daemon_events::issue_monitor_payload(
+            "control",
+            serde_json::json!({
+                "review_verdict": {
+                    "issue_number": 42,
+                    "reviewed_sha": "abc123",
+                    "verdict_raw": verdict,
+                }
+            }),
+            std::process::id() + 1,
+        );
+        let control = decode_issue_monitor_control(payload).expect("review verdict decodes");
+        apply_issue_monitor_control(&mut monitor, control);
+
+        assert_eq!(
+            monitor.autonomous_record(42).and_then(|r| r.review_passed),
+            Some(true),
+            "daemon judged the verdict pass",
+        );
     }
 
     #[test]
