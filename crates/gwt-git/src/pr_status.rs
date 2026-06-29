@@ -746,6 +746,73 @@ fn truncate_diff(diff: &str, max_bytes: usize) -> String {
     )
 }
 
+/// SPEC #3200: arm auto-merge for an autonomous PR. This is the IRREVERSIBLE
+/// action — callers MUST have run the strong gate first. Uses GitHub's native
+/// `--auto` so the merge only proceeds once branch-protection's required checks
+/// pass (a second, GitHub-enforced layer behind our gate). Returns `false` on
+/// any gh failure (fail-closed: never report a merge armed when it was not).
+pub fn merge_pr_auto(repo_path: &Path, number: u64) -> bool {
+    merge_pr_auto_with(repo_path, number, run_gh_command)
+}
+
+fn merge_pr_auto_with<F>(repo_path: &Path, number: u64, mut run_gh: F) -> bool
+where
+    F: FnMut(&Path, &[&str]) -> Result<GhCliOutput>,
+{
+    let number = number.to_string();
+    matches!(
+        run_gh(repo_path, &["pr", "merge", &number, "--auto", "--squash"]),
+        Ok(output) if output.success
+    )
+}
+
+/// Disarm a previously-armed auto-merge (SPEC #3200 FR-024: HEAD advanced past
+/// the reviewed SHA ⇒ revoke). Fail-closed `bool`.
+pub fn disable_pr_auto_merge(repo_path: &Path, number: u64) -> bool {
+    disable_pr_auto_merge_with(repo_path, number, run_gh_command)
+}
+
+fn disable_pr_auto_merge_with<F>(repo_path: &Path, number: u64, mut run_gh: F) -> bool
+where
+    F: FnMut(&Path, &[&str]) -> Result<GhCliOutput>,
+{
+    let number = number.to_string();
+    matches!(
+        run_gh(repo_path, &["pr", "merge", &number, "--disable-auto"]),
+        Ok(output) if output.success
+    )
+}
+
+/// Parse `gh pr view <n> --json mergeCommit` into the merge commit SHA. Used for
+/// the SPEC #3200 layer-4 check (merged SHA must equal the reviewed SHA). `None`
+/// until the PR has actually merged.
+pub fn parse_pr_merge_commit_sha(json: &str) -> Option<String> {
+    let value: serde_json::Value = serde_json::from_str(json).ok()?;
+    value
+        .get("mergeCommit")
+        .and_then(|mc| mc.get("oid"))
+        .and_then(serde_json::Value::as_str)
+        .filter(|sha| !sha.trim().is_empty())
+        .map(str::to_string)
+}
+
+/// Fetch a merged PR's merge-commit SHA (fail-closed `Option`).
+pub fn fetch_pr_merge_commit_sha(repo_path: &Path, number: u64) -> Option<String> {
+    fetch_pr_merge_commit_sha_with(repo_path, number, run_gh_command)
+}
+
+fn fetch_pr_merge_commit_sha_with<F>(repo_path: &Path, number: u64, mut run_gh: F) -> Option<String>
+where
+    F: FnMut(&Path, &[&str]) -> Result<GhCliOutput>,
+{
+    let number = number.to_string();
+    let output = run_gh(repo_path, &["pr", "view", &number, "--json", "mergeCommit"]).ok()?;
+    if !output.success {
+        return None;
+    }
+    parse_pr_merge_commit_sha(&output.stdout)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1257,6 +1324,59 @@ mod tests {
             Err(GwtError::Git("nope".to_string()))
         });
         assert_eq!(failed, "[]", "any failure → vacuous, never a pass");
+    }
+
+    #[test]
+    fn merge_pr_auto_with_arms_and_fails_closed() {
+        let repo = Path::new("/tmp/repo");
+        let armed = merge_pr_auto_with(repo, 7, |_p, args| {
+            assert_eq!(args, ["pr", "merge", "7", "--auto", "--squash"]);
+            Ok(GhCliOutput {
+                success: true,
+                stdout: String::new(),
+                stderr: String::new(),
+            })
+        });
+        assert!(armed);
+        let failed = merge_pr_auto_with(repo, 7, |_p, _a| {
+            Ok(GhCliOutput {
+                success: false,
+                stdout: String::new(),
+                stderr: "nope".to_string(),
+            })
+        });
+        assert!(!failed, "gh failure ⇒ not armed (fail-closed)");
+        let errored = merge_pr_auto_with(repo, 7, |_p, _a| Err(GwtError::Git("x".to_string())));
+        assert!(!errored);
+    }
+
+    #[test]
+    fn disable_pr_auto_merge_with_disarms() {
+        let repo = Path::new("/tmp/repo");
+        let ok = disable_pr_auto_merge_with(repo, 7, |_p, args| {
+            assert_eq!(args, ["pr", "merge", "7", "--disable-auto"]);
+            Ok(GhCliOutput {
+                success: true,
+                stdout: String::new(),
+                stderr: String::new(),
+            })
+        });
+        assert!(ok);
+    }
+
+    #[test]
+    fn parse_pr_merge_commit_sha_extracts_or_fails_closed() {
+        assert_eq!(
+            parse_pr_merge_commit_sha(r#"{"mergeCommit":{"oid":"deadbeef"}}"#),
+            Some("deadbeef".to_string()),
+        );
+        assert_eq!(
+            parse_pr_merge_commit_sha(r#"{"mergeCommit":null}"#),
+            None,
+            "not merged yet"
+        );
+        assert_eq!(parse_pr_merge_commit_sha("{}"), None);
+        assert_eq!(parse_pr_merge_commit_sha("nope"), None);
     }
 
     #[test]
