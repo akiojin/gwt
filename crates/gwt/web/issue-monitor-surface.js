@@ -357,6 +357,18 @@ export function createIssueMonitorSurface({ document, send }) {
         background: color-mix(in oklab, var(--color-state-blocked) 22%, var(--color-surface-elevated));
         color: var(--color-text);
       }
+      .issue-monitor-card__autonomous[data-enabled="true"] {
+        border-color: var(--color-state-active);
+      }
+      .issue-monitor-card__autonomous-meta {
+        margin-top: var(--space-1);
+        font-size: var(--font-size-sm, 0.85em);
+        color: var(--color-text-muted);
+      }
+      .issue-monitor-card__autonomous-meta[data-needs-human="true"] {
+        color: var(--color-state-needs-input);
+        font-weight: var(--font-weight-strong, 600);
+      }
       .issue-monitor-detail-modal {
         z-index: 2200;
         padding: var(--space-6);
@@ -472,6 +484,25 @@ export function createIssueMonitorSurface({ document, send }) {
       });
     });
     toolbarActions.appendChild(toggleButton);
+
+    // SPEC #3200 T-047/FR-024: two-stage opt-in — arm/disarm unattended
+    // autonomous mode (the per-issue `auto-merge` label is the second stage).
+    const autonomousButton = element(
+      "button",
+      "wizard-button issue-monitor-card__autonomous",
+      "Autonomous: OFF",
+    );
+    autonomousButton.type = "button";
+    autonomousButton.addEventListener("click", () => {
+      const nextAutonomous = !Boolean(status.autonomous_mode);
+      status = { ...status, autonomous_mode: nextAutonomous };
+      renderStatus();
+      sendMonitorEvent({
+        kind: "set_issue_monitor_autonomous_mode",
+        enabled: nextAutonomous,
+      });
+    });
+    toolbarActions.appendChild(autonomousButton);
     toolbar.appendChild(summary);
     toolbar.appendChild(toolbarActions);
 
@@ -491,6 +522,7 @@ export function createIssueMonitorSurface({ document, send }) {
       detailText,
       maxActiveInput,
       toggleButton,
+      autonomousButton,
       errorText,
       settingsText,
       inboxRoot,
@@ -710,6 +742,32 @@ export function createIssueMonitorSurface({ document, send }) {
         ),
       );
       issue.appendChild(title);
+      // SPEC #3200 T-090/FR-033: surface the per-issue autonomous lifecycle
+      // (NeedsHuman escalation, phase, attempt count) when autonomous mode is on.
+      const autonomousEntry = (status.autonomous_issues || []).find(
+        (entry) => entry && entry.issue_number === number,
+      );
+      if (autonomousEntry) {
+        const autoParts = [];
+        if (autonomousEntry.needs_human) {
+          autoParts.push("⚠ Needs human");
+        }
+        if (autonomousEntry.phase && autonomousEntry.phase !== "idle") {
+          autoParts.push(`Phase ${autonomousEntry.phase}`);
+        }
+        if (autonomousEntry.attempts) {
+          autoParts.push(`Attempts ${autonomousEntry.attempts}`);
+        }
+        if (autoParts.length) {
+          const autoMeta = element(
+            "div",
+            "issue-monitor-card__autonomous-meta",
+            autoParts.join(" | "),
+          );
+          autoMeta.dataset.needsHuman = autonomousEntry.needs_human ? "true" : "false";
+          issue.appendChild(autoMeta);
+        }
+      }
       const metaParts = [];
       if (item.blocked_by_owner) {
         metaParts.push(`Owner ${item.blocked_by_owner}`);
@@ -810,13 +868,19 @@ export function createIssueMonitorSurface({ document, send }) {
     if (!mounted) {
       return;
     }
-    const { toggleButton, stateText, detailText, errorText, maxActiveInput, settingsText } = mounted;
+    const { toggleButton, autonomousButton, stateText, detailText, errorText, maxActiveInput, settingsText } = mounted;
     const enabled = Boolean(status.enabled);
     toggleButton.dataset.enabled = enabled ? "true" : "false";
     toggleButton.textContent = enabled ? "Stop" : "Start";
     toggleButton.className = enabled
       ? "wizard-button issue-monitor-card__toggle"
       : "wizard-button primary issue-monitor-card__toggle";
+    const autonomous = Boolean(status.autonomous_mode);
+    autonomousButton.dataset.enabled = autonomous ? "true" : "false";
+    autonomousButton.textContent = autonomous ? "Autonomous: ON" : "Autonomous: OFF";
+    autonomousButton.className = autonomous
+      ? "wizard-button primary issue-monitor-card__autonomous"
+      : "wizard-button issue-monitor-card__autonomous";
     const stateLabel = String(status.state || (enabled ? "idle" : "disabled"));
     stateText.textContent = statusStateText(stateLabel);
     const maxActive = Math.max(1, Number(status.max_active_agents || 1));
@@ -833,6 +897,12 @@ export function createIssueMonitorSurface({ document, send }) {
     }
     if (status.last_scan_at) {
       details.push(`Scan ${status.last_scan_at}`);
+    }
+    if (autonomous) {
+      const needsHuman = (status.autonomous_issues || []).filter(
+        (entry) => entry && entry.needs_human,
+      ).length;
+      details.push(needsHuman > 0 ? `Autonomous (${needsHuman} need human)` : "Autonomous ON");
     }
     detailText.textContent = details.join(" | ");
     const sourceLabel = launchSettingsSourceLabel(status.launch_profile_source);

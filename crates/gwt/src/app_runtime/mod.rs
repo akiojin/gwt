@@ -1967,6 +1967,24 @@ impl AppRuntime {
                     }
                 }
             }
+            FrontendEvent::SetIssueMonitorAutonomousMode { enabled } => {
+                match self.publish_issue_monitor_control(
+                    serde_json::json!({ "autonomous_mode": enabled }),
+                ) {
+                    Ok(()) => self.local_issue_monitor_events(&client_id, |monitor| {
+                        monitor.set_autonomous_mode(enabled)
+                    }),
+                    Err(error) => {
+                        tracing::debug!(
+                            error = %error,
+                            "issue monitor autonomous-mode daemon publish failed; using local fallback"
+                        );
+                        self.local_issue_monitor_events(&client_id, |monitor| {
+                            monitor.set_autonomous_mode(enabled)
+                        })
+                    }
+                }
+            }
             FrontendEvent::SetIssueMonitorMaxActiveAgents { max_active_agents } => {
                 match self.publish_issue_monitor_control(
                     serde_json::json!({ "max_active_agents": max_active_agents }),

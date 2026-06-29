@@ -324,3 +324,56 @@ test("Issue Monitor renders agent runtime failures in the row and detail modal",
   assert.match(modal.textContent, /Stop-block hit an error/);
   assert.match(modal.textContent, /\$gwt-build-spec SPEC-3164/);
 });
+
+test("autonomous toggle sends the control and reflects status", () => {
+  // SPEC #3200 T-047/FR-024: an Autonomous toggle arms/disarms unattended mode.
+  const { document, sent, surface } = makeFixture();
+  const button = document.querySelector(".issue-monitor-card__autonomous");
+  assert.ok(button, "autonomous toggle is rendered");
+  assert.equal(button.textContent, "Autonomous: OFF");
+
+  button.click();
+  const control = sent.find((e) => e.kind === "set_issue_monitor_autonomous_mode");
+  assert.ok(control, "clicking sends the autonomous-mode control");
+  assert.equal(control.enabled, true);
+  assert.equal(button.textContent, "Autonomous: ON", "optimistic ON");
+
+  // Backend status echo keeps it ON and exposes the indicator.
+  surface.applyStatus({ enabled: true, autonomous_mode: true });
+  assert.equal(button.dataset.enabled, "true");
+  assert.match(
+    document.querySelector(".issue-monitor-card__detail").textContent,
+    /Autonomous ON/,
+  );
+});
+
+test("per-issue NeedsHuman / phase / attempts surface from autonomous_issues", () => {
+  // SPEC #3200 T-090/FR-033: the autonomous lifecycle is visible per issue.
+  const { document, surface } = makeFixture();
+  surface.applyStatus({
+    enabled: true,
+    autonomous_mode: true,
+    autonomous_issues: [
+      { issue_number: 3164, phase: "needs_human", attempts: 3, needs_human: true },
+      { issue_number: 3165, phase: "reviewing", attempts: 1, needs_human: false },
+    ],
+  });
+  surface.applyInbox([issue(3164, "needs_human", ["auto-merge"]), issue(3165, "launched", ["auto-merge"])]);
+
+  const rows = document.querySelectorAll(".issue-monitor-card__item");
+  const meta3164 = rows[0].querySelector(".issue-monitor-card__autonomous-meta");
+  assert.ok(meta3164, "issue 3164 has an autonomous meta line");
+  assert.equal(meta3164.dataset.needsHuman, "true");
+  assert.match(meta3164.textContent, /Needs human/);
+  assert.match(meta3164.textContent, /Attempts 3/);
+
+  const meta3165 = rows[1].querySelector(".issue-monitor-card__autonomous-meta");
+  assert.equal(meta3165.dataset.needsHuman, "false");
+  assert.match(meta3165.textContent, /Phase reviewing/);
+
+  // The detail line shows the needs-human count.
+  assert.match(
+    document.querySelector(".issue-monitor-card__detail").textContent,
+    /1 need human/,
+  );
+});
