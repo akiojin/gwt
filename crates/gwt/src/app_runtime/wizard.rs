@@ -1611,7 +1611,7 @@ impl AppRuntime {
         issue_number: u64,
         linked_issue_kind: gwt::LinkedIssueKind,
     ) -> Vec<OutboundEvent> {
-        match self.silent_issue_monitor_launch_events(issue_number, linked_issue_kind, None) {
+        match self.silent_issue_monitor_launch_events(issue_number, linked_issue_kind, None, None) {
             Ok(Some(events)) => events,
             Ok(None) => {
                 if self.launch_wizard.is_some() {
@@ -1662,10 +1662,20 @@ impl AppRuntime {
         // prompt and reports the verdict via the gwtd issue.monitor.review_verdict
         // op. skip_permissions is forced on the autonomous path so review runs
         // unattended.
+        // SPEC #3200 FR-015: the configured review model (if any) is forced for
+        // the review agent so it differs from the implementer's.
+        let review_model =
+            gwt::load_issue_monitor_prefs(&gwt::issue_monitor_prefs_path_for_repo_path(
+                self.active_project_root()
+                    .unwrap_or(std::path::Path::new(".")),
+            ))
+            .ok()
+            .and_then(|prefs| prefs.autonomous_tuning.review_model);
         match self.silent_issue_monitor_launch_events(
             dispatch.issue_number,
             dispatch.linked_issue_kind,
             Some(prompt),
+            review_model,
         ) {
             Ok(Some(events)) => events,
             Ok(None) => vec![OutboundEvent::broadcast(BackendEvent::IssueMonitorToast {
@@ -1685,6 +1695,7 @@ impl AppRuntime {
         issue_number: u64,
         linked_issue_kind: gwt::LinkedIssueKind,
         review_prompt: Option<String>,
+        review_model: Option<String>,
     ) -> Result<Option<Vec<OutboundEvent>>, String> {
         let Some(tab_id) = self.active_tab_id.clone() else {
             return Err("Open a project before launching monitored Issue work".to_string());
@@ -1707,6 +1718,16 @@ impl AppRuntime {
         if previous_profiles.preferred_profile().is_none() {
             return Ok(None);
         }
+        // SPEC #3200 FR-015: for the independent review, force a different model
+        // than the implementer's (when configured) so the verdict is not a
+        // self-grade. `None` keeps the saved model (still a fresh session).
+        let implementer_model = previous_profiles
+            .preferred_profile()
+            .and_then(|profile| profile.model.clone());
+        let review_model_override = gwt::issue_monitor::resolve_review_model(
+            implementer_model.as_deref(),
+            review_model.as_deref(),
+        );
         let launch_profiles = previous_profiles.clone();
 
         // FR-022: an Issue whose agent window was previously closed without a
@@ -1762,6 +1783,12 @@ impl AppRuntime {
         .map(|prefs| prefs.autonomous_mode)
         .unwrap_or(false);
         launch_request.force_skip_permissions_for_autonomous(autonomous_mode);
+        // SPEC #3200 FR-015: apply the distinct review model for the review agent.
+        if let (Some(model), LaunchWizardLaunchRequest::Agent(config)) =
+            (&review_model_override, &mut launch_request)
+        {
+            config.model = Some(model.clone());
+        }
         let launch_index = self
             .tab(&session.tab_id)
             .map(|tab| {

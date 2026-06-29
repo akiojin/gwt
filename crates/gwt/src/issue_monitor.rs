@@ -81,6 +81,12 @@ pub struct AutonomousTuning {
     pub retry_backoff_base_secs: u64,
     /// Upper bound for the (exponential) retry backoff.
     pub retry_backoff_cap_secs: u64,
+    /// SPEC #3200 FR-015: the model the INDEPENDENT review agent runs on. When
+    /// set (and different from the implementer's model) the review is forced onto
+    /// it so the verdict is not a self-grade. `None` falls back to the saved
+    /// launch profile's model (still a fresh, adversarial session).
+    #[serde(default)]
+    pub review_model: Option<String>,
 }
 
 impl Default for AutonomousTuning {
@@ -93,7 +99,27 @@ impl Default for AutonomousTuning {
             deliver_fix_loop_cap: 5,
             retry_backoff_base_secs: 60,
             retry_backoff_cap_secs: 1800,
+            review_model: None,
         }
+    }
+}
+
+/// SPEC #3200 FR-015: pick the model an independent review should run on, given
+/// the implementer's model and the configured `review_model`. Returns the
+/// configured model only when it is set AND genuinely different from the
+/// implementer's (avoids a self-grade); otherwise `None` (caller keeps the saved
+/// profile model — still a fresh adversarial session).
+pub fn resolve_review_model(
+    implementer_model: Option<&str>,
+    configured_review_model: Option<&str>,
+) -> Option<String> {
+    let configured = configured_review_model?.trim();
+    if configured.is_empty() {
+        return None;
+    }
+    match implementer_model {
+        Some(impl_model) if impl_model.eq_ignore_ascii_case(configured) => None,
+        _ => Some(configured.to_string()),
     }
 }
 
@@ -1179,6 +1205,11 @@ impl IssueMonitorState {
                 // The launch consumes the scheduled retry, so the backoff marker
                 // is cleared to avoid stale state on the in-flight attempt.
                 self.autonomous_record_mut(number).retry_not_before = None;
+                // SPEC #3200 T-045/FR-025: seed the liveness baseline at launch so
+                // stuck detection actually fires for an agent that hangs without
+                // producing a PR within stuck_timeout_secs. Real progress (a
+                // heartbeat, or the Implementing→Reviewing transition) resets it.
+                self.record_autonomous_heartbeat(number, now);
             }
             EligibilityDecision::NeedsHuman(reason) => {
                 self.escalate_to_needs_human(number, reason.clone());
@@ -2069,6 +2100,33 @@ mod tests {
         assert_eq!(prefs.autonomous_tuning.max_attempts, 3);
         assert_eq!(prefs.merged_issues, vec![42], "existing fields preserved");
         assert!(!IssueMonitorPrefs::default().autonomous_mode);
+    }
+
+    #[test]
+    fn resolve_review_model_prefers_different_configured_model() {
+        // Configured + different from implementer ⇒ use it (no self-grade).
+        assert_eq!(
+            resolve_review_model(Some("claude-opus"), Some("claude-sonnet")),
+            Some("claude-sonnet".to_string()),
+        );
+        // Configured == implementer ⇒ None (would be a self-grade).
+        assert_eq!(
+            resolve_review_model(Some("claude-opus"), Some("claude-opus")),
+            None
+        );
+        assert_eq!(
+            resolve_review_model(Some("OPUS"), Some("opus")),
+            None,
+            "case-insensitive"
+        );
+        // Unset / empty ⇒ None (fall back to saved model, still fresh session).
+        assert_eq!(resolve_review_model(Some("claude-opus"), None), None);
+        assert_eq!(resolve_review_model(Some("claude-opus"), Some("  ")), None);
+        // No implementer model known ⇒ use the configured one.
+        assert_eq!(
+            resolve_review_model(None, Some("claude-sonnet")),
+            Some("claude-sonnet".to_string()),
+        );
     }
 
     #[test]

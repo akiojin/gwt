@@ -274,6 +274,12 @@ enum IssueMonitorControl {
         reviewed_sha: String,
         verdict_raw: String,
     },
+    /// SPEC #3200 T-045/FR-025: a monitored autonomous agent showed liveness;
+    /// refresh the stuck-detection window for the issue.
+    Heartbeat {
+        issue_number: u64,
+        at: String,
+    },
     MaxActiveAgents(usize),
     PriorityOrder(Vec<u64>),
     Launched {
@@ -315,6 +321,10 @@ fn apply_issue_monitor_control(
             // The daemon (trusted) judges the raw verdict; agents cannot self-pass.
             monitor.apply_review_verdict(issue_number, &reviewed_sha, &verdict_raw);
             true
+        }
+        IssueMonitorControl::Heartbeat { issue_number, at } => {
+            monitor.record_autonomous_heartbeat(issue_number, &at);
+            false
         }
         IssueMonitorControl::MaxActiveAgents(max_active_agents) => {
             monitor.set_max_active_agents(max_active_agents);
@@ -376,6 +386,14 @@ fn decode_issue_monitor_control(payload: serde_json::Value) -> Option<IssueMonit
                 .and_then(serde_json::Value::as_bool)
             {
                 return Some(IssueMonitorControl::AutonomousMode(autonomous_mode));
+            }
+            if let Some(heartbeat) = payload.get("heartbeat") {
+                let issue_number = heartbeat.get("issue_number")?.as_u64()?;
+                let at = heartbeat
+                    .get("at")
+                    .and_then(serde_json::Value::as_str)?
+                    .to_string();
+                return Some(IssueMonitorControl::Heartbeat { issue_number, at });
             }
             if let Some(review_verdict) = payload.get("review_verdict") {
                 let issue_number = review_verdict.get("issue_number")?.as_u64()?;
@@ -1068,6 +1086,36 @@ mod tests {
             monitor.autonomous_record(42).and_then(|r| r.review_passed),
             Some(true),
             "daemon judged the verdict pass",
+        );
+    }
+
+    #[test]
+    fn issue_monitor_heartbeat_control_refreshes_liveness() {
+        // SPEC #3200 T-045: a heartbeat control refreshes the stuck-detection
+        // window for the issue.
+        let mut monitor = crate::IssueMonitorState::with_prefs(
+            crate::IssueMonitorConfig::default(),
+            crate::IssueMonitorPrefs {
+                autonomous_mode: true,
+                ..crate::IssueMonitorPrefs::default()
+            },
+        );
+        monitor.set_autonomous_phase(42, crate::AutonomousPhase::Implementing);
+        let payload = crate::runtime_daemon_events::issue_monitor_payload(
+            "control",
+            serde_json::json!({
+                "heartbeat": { "issue_number": 42, "at": "2026-06-29T00:05:00Z" }
+            }),
+            std::process::id() + 1,
+        );
+        let control = decode_issue_monitor_control(payload).expect("heartbeat decodes");
+        apply_issue_monitor_control(&mut monitor, control);
+        assert_eq!(
+            monitor
+                .autonomous_record(42)
+                .and_then(|r| r.last_heartbeat.clone())
+                .as_deref(),
+            Some("2026-06-29T00:05:00Z"),
         );
     }
 
