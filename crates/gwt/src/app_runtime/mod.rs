@@ -1181,6 +1181,29 @@ impl AppRuntime {
         self.local_issue_monitor_agent_failed_events(window_id, message, issue_number_hint)
     }
 
+    /// SPEC #3200 T-045/FR-025: a monitored autonomous agent showed liveness
+    /// (a runtime status change). Best-effort refresh of the daemon's
+    /// stuck-detection window for the mapped issue. No-op for non-monitor windows.
+    pub(crate) fn issue_monitor_heartbeat(&mut self, window_id: &str) {
+        let Some(issue_number) = self
+            .pending_launch_feedback_contexts
+            .get(window_id)
+            .and_then(|context| context.issue_monitor_issue_number)
+        else {
+            return;
+        };
+        let now = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+        if let Err(error) = self.publish_issue_monitor_control(serde_json::json!({
+            "heartbeat": { "issue_number": issue_number, "at": now },
+        })) {
+            tracing::debug!(
+                error = %error,
+                window_id,
+                "issue monitor heartbeat daemon publish failed (non-fatal)"
+            );
+        }
+    }
+
     /// One or more agent windows were closed (single window close or whole
     /// project tab close). For any window that was an Issue Monitor launched
     /// window, return its Issue to pending (`Queued`) and free the active slot —
