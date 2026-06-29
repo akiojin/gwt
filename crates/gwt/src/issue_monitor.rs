@@ -539,6 +539,18 @@ pub struct AutonomousIssueRecord {
     /// signal from the launched agent — the anchor for stuck/idle detection.
     #[serde(default)]
     pub last_heartbeat: Option<String>,
+    /// SPEC #3200: the open PR number produced by the implementation agent, set
+    /// when the loop transitions Implementing→Reviewing. `None` until a PR exists.
+    #[serde(default)]
+    pub pr_number: Option<u64>,
+    /// SPEC #3200 FR-016: the SHA the independent review evaluated and the gate is
+    /// bound to (TOCTOU anchor). Set at Reviewing; checked against the merged SHA.
+    #[serde(default)]
+    pub reviewed_sha: Option<String>,
+    /// SPEC #3200 FR-015: the independent-review verdict for `reviewed_sha`.
+    /// `None` while review is in flight; `Some(true/false)` once it returns.
+    #[serde(default)]
+    pub review_passed: Option<bool>,
 }
 
 /// SPEC #3200 T-043/FR-029: bounded exponential backoff (seconds) for the
@@ -601,6 +613,9 @@ impl AutonomousIssueRecord {
             acceptance_snapshot: None,
             retry_not_before: None,
             last_heartbeat: None,
+            pr_number: None,
+            reviewed_sha: None,
+            review_passed: None,
         }
     }
 }
@@ -1150,6 +1165,52 @@ impl IssueMonitorState {
             EligibilityDecision::HumanGate(_) => {}
         }
         decision
+    }
+
+    /// SPEC #3200: autonomous issues currently in flight (phase Implementing /
+    /// Reviewing / Delivering) — the set the daemon orchestration loop advances
+    /// each tick. Terminal/Idle phases are excluded.
+    pub fn autonomous_in_flight_issues(&self) -> Vec<u64> {
+        self.autonomous_records
+            .values()
+            .filter(|record| {
+                matches!(
+                    record.phase,
+                    AutonomousPhase::Implementing
+                        | AutonomousPhase::Reviewing
+                        | AutonomousPhase::Delivering
+                )
+            })
+            .map(|record| record.issue_number)
+            .collect()
+    }
+
+    /// SPEC #3200: transition Implementing→Reviewing once the implementation
+    /// agent has produced an open PR. Binds the PR number and the reviewed SHA
+    /// (the TOCTOU anchor) and clears any prior verdict.
+    pub fn begin_review(
+        &mut self,
+        issue_number: u64,
+        pr_number: u64,
+        reviewed_sha: impl Into<String>,
+    ) {
+        let record = self.autonomous_record_mut(issue_number);
+        record.phase = AutonomousPhase::Reviewing;
+        record.pr_number = Some(pr_number);
+        record.reviewed_sha = Some(reviewed_sha.into());
+        record.review_passed = None;
+    }
+
+    /// SPEC #3200 FR-015: record the independent-review verdict for the in-flight
+    /// reviewed SHA. The gate is evaluated on the next tick.
+    pub fn record_review_verdict(&mut self, issue_number: u64, passed: bool) {
+        self.autonomous_record_mut(issue_number).review_passed = Some(passed);
+    }
+
+    /// SPEC #3200: transition Reviewing→Delivering once the strong gate passes
+    /// (the auto-merge is being armed).
+    pub fn begin_delivering(&mut self, issue_number: u64) {
+        self.set_autonomous_phase(issue_number, AutonomousPhase::Delivering);
     }
 
     pub fn inbox_item(&self, issue_number: u64) -> Option<&IssueMonitorInboxItem> {
@@ -2544,6 +2605,55 @@ mod tests {
         assert!(recovered.is_empty(), "off ⇒ no recovery");
         assert_eq!(monitor.active_count(), 1, "slot untouched when mode off");
         assert_eq!(monitor.attempt_count(42), 0, "no attempt recorded when off");
+    }
+
+    #[test]
+    fn autonomous_loop_transitions_track_pr_sha_and_verdict() {
+        // SPEC #3200: Implementing → Reviewing (bind PR + reviewed SHA) →
+        // verdict recorded → Delivering. autonomous_in_flight_issues tracks it.
+        let mut monitor = autonomous_state();
+        monitor.set_autonomous_phase(7, AutonomousPhase::Implementing);
+        assert_eq!(monitor.autonomous_in_flight_issues(), vec![7]);
+
+        monitor.begin_review(7, 99, "abc123");
+        let record = monitor.autonomous_record(7).expect("record");
+        assert_eq!(record.phase, AutonomousPhase::Reviewing);
+        assert_eq!(record.pr_number, Some(99));
+        assert_eq!(record.reviewed_sha.as_deref(), Some("abc123"));
+        assert_eq!(record.review_passed, None, "verdict pending");
+
+        monitor.record_review_verdict(7, true);
+        assert_eq!(
+            monitor.autonomous_record(7).unwrap().review_passed,
+            Some(true)
+        );
+
+        monitor.begin_delivering(7);
+        assert_eq!(
+            monitor.autonomous_record(7).unwrap().phase,
+            AutonomousPhase::Delivering
+        );
+        assert_eq!(monitor.autonomous_in_flight_issues(), vec![7]);
+
+        // Completion clears the whole record.
+        monitor.record_merged(7);
+        assert!(monitor.autonomous_record(7).is_none());
+        assert!(monitor.autonomous_in_flight_issues().is_empty());
+    }
+
+    #[test]
+    fn autonomous_loop_fields_survive_prefs_roundtrip() {
+        let mut monitor = autonomous_state();
+        monitor.set_autonomous_phase(7, AutonomousPhase::Implementing);
+        monitor.begin_review(7, 99, "abc123");
+        monitor.record_review_verdict(7, false);
+        let restored =
+            IssueMonitorState::with_prefs(IssueMonitorConfig::default(), monitor.prefs());
+        let record = restored.autonomous_record(7).expect("restored");
+        assert_eq!(record.pr_number, Some(99));
+        assert_eq!(record.reviewed_sha.as_deref(), Some("abc123"));
+        assert_eq!(record.review_passed, Some(false));
+        assert_eq!(record.phase, AutonomousPhase::Reviewing);
     }
 
     #[test]
