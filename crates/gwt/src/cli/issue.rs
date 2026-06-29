@@ -115,9 +115,70 @@ pub(super) fn run<E: CliEnv>(
             ));
             0
         }
+        IssueCommand::MonitorReviewVerdict {
+            issue_number,
+            reviewed_sha,
+            verdict_raw,
+        } => run_monitor_review_verdict(env, issue_number, &reviewed_sha, &verdict_raw, out),
         _ => unreachable!("issue::run called with non-issue command"),
     };
     Ok(code)
+}
+
+/// SPEC #3200 Option A: publish an independent-review verdict to the Issue
+/// Monitor daemon's control channel. The daemon re-judges the raw verdict
+/// (SHA-bound) — this only transports it.
+#[cfg(unix)]
+fn run_monitor_review_verdict<E: CliEnv>(
+    env: &mut E,
+    issue_number: u64,
+    reviewed_sha: &str,
+    verdict_raw: &str,
+    out: &mut String,
+) -> i32 {
+    let payload = crate::runtime_daemon_events::issue_monitor_payload(
+        "control",
+        serde_json::json!({
+            "review_verdict": {
+                "issue_number": issue_number,
+                "reviewed_sha": reviewed_sha,
+                "verdict_raw": verdict_raw,
+            }
+        }),
+        std::process::id(),
+    );
+    match crate::daemon_publisher::publish_event(
+        env.repo_path(),
+        crate::runtime_daemon_events::ISSUE_MONITOR_CONTROL_CHANNEL,
+        payload,
+    ) {
+        Ok(()) => {
+            out.push_str(&format!(
+                "review verdict published for #{issue_number} at {reviewed_sha}\n"
+            ));
+            0
+        }
+        Err(error) => {
+            out.push_str(&format!(
+                "review verdict publish failed for #{issue_number}: {error}\n"
+            ));
+            1
+        }
+    }
+}
+
+#[cfg(not(unix))]
+fn run_monitor_review_verdict<E: CliEnv>(
+    _env: &mut E,
+    issue_number: u64,
+    _reviewed_sha: &str,
+    _verdict_raw: &str,
+    out: &mut String,
+) -> i32 {
+    out.push_str(&format!(
+        "review verdict publish unavailable on this platform (#{issue_number})\n"
+    ));
+    1
 }
 
 fn parse_issue_read_args(args: &[&String], mode: &str) -> Result<IssueCommand, CliParseError> {

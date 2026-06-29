@@ -82,8 +82,11 @@ fn build_review_dispatch_prompt(dispatch: &gwt::AutonomousReviewDispatch) -> Str
     );
     format!(
         "{base}\n\nAfter producing the verdict JSON, report it to the Issue Monitor \
-         daemon as a ReviewVerdict control for issue #{issue} at reviewed SHA {sha} \
-         (the daemon re-judges it; a verdict for any other SHA is rejected).",
+         daemon by running the gwtd JSON operation `issue.monitor.review_verdict` \
+         with params {{\"issue_number\": {issue}, \"reviewed_sha\": \"{sha}\", \
+         \"verdict_raw\": <the verdict JSON as a string>}}. The daemon re-judges the \
+         verdict against the launch-time criteria; a verdict for any other SHA is \
+         rejected.",
         issue = dispatch.issue_number,
         sha = dispatch.reviewed_sha,
     )
@@ -2567,9 +2570,9 @@ mod review_dispatch_tests {
         assert!(prompt.contains("AC-1"), "required criterion");
         assert!(prompt.contains("abc123"), "bound to the reviewed SHA");
         assert!(
-            prompt.contains("ReviewVerdict"),
-            "instructs verdict report-back"
+            prompt.contains("issue.monitor.review_verdict"),
+            "instructs verdict report-back via the gwtd op"
         );
-        assert!(prompt.contains("#42"), "names the issue");
+        assert!(prompt.contains("42"), "names the issue");
     }
 }
