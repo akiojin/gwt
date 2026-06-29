@@ -13,6 +13,22 @@ fn frontend_issue_monitor_events_use_snake_case_wire_shape() {
         FrontendEvent::SetIssueMonitorEnabled { enabled: true }
     ));
 
+    // SPEC #3200 T-047: the autonomous-mode toggle wire shape must deserialize.
+    let event: FrontendEvent =
+        serde_json::from_str(r#"{"kind":"set_issue_monitor_autonomous_mode","enabled":true}"#)
+            .expect("autonomous mode enabled event");
+    assert!(matches!(
+        event,
+        FrontendEvent::SetIssueMonitorAutonomousMode { enabled: true }
+    ));
+    let event: FrontendEvent =
+        serde_json::from_str(r#"{"kind":"set_issue_monitor_autonomous_mode","enabled":false}"#)
+            .expect("autonomous mode disabled event");
+    assert!(matches!(
+        event,
+        FrontendEvent::SetIssueMonitorAutonomousMode { enabled: false }
+    ));
+
     let event: FrontendEvent =
         serde_json::from_str(r#"{"kind":"issue_monitor_launch_now","issue_number":42}"#)
             .expect("launch now event");

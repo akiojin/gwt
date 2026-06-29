@@ -177,13 +177,18 @@ pub fn apply_autonomous_eligibility(
     issues: &[IssueMonitorIssue],
     repo_slug: &str,
     repo_path: &Path,
+    now: &str,
 ) {
     if !monitor.autonomous_mode() {
         return;
     }
+    // Only fetch branch protection for candidates whose transient-retry backoff
+    // window has elapsed (retry_ready) — a backed-off issue is skipped this scan
+    // without a network call (SPEC #3200 T-043/FR-029).
     let candidates: Vec<&IssueMonitorIssue> = issues
         .iter()
         .filter(|issue| monitor.is_autonomous_two_stage_candidate(issue))
+        .filter(|issue| monitor.retry_ready(issue.number, now))
         .collect();
     if candidates.is_empty() {
         return;
@@ -191,7 +196,7 @@ pub fn apply_autonomous_eligibility(
     let base_branch = resolve_default_base_branch(repo_path);
     let protection = gwt_git::branch_protection::fetch_branch_protection(repo_slug, &base_branch);
     for issue in candidates {
-        let _ = monitor.prepare_autonomous_candidate(issue, &protection);
+        let _ = monitor.prepare_autonomous_candidate(issue, &protection, now);
     }
 }
 
@@ -600,6 +605,37 @@ mod tests {
         assert_eq!(
             error.to_string(),
             "GitHub origin remote URL is invalid: https://github.com/owner"
+        );
+    }
+
+    #[test]
+    fn apply_autonomous_eligibility_is_noop_when_mode_off() {
+        // SPEC #3200 FR-001: default autonomous_mode OFF ⇒ no autonomous state is
+        // created and (crucially) no branch-protection network call is made. The
+        // early return runs before any gh invocation, so this test exercises the
+        // gate without touching the network.
+        use crate::{
+            IssueMonitorConfig, IssueMonitorIssue, IssueMonitorIssueState, IssueMonitorState,
+        };
+        let mut monitor = IssueMonitorState::new(IssueMonitorConfig::default());
+        let issues = vec![IssueMonitorIssue {
+            number: 50,
+            title: "t".to_string(),
+            labels: vec!["auto-merge".to_string()],
+            state: IssueMonitorIssueState::Open,
+            body: Some("## Acceptance Criteria\n- [ ] AC-1: x\n".to_string()),
+            url: None,
+        }];
+        apply_autonomous_eligibility(
+            &mut monitor,
+            &issues,
+            "owner/repo",
+            std::path::Path::new("/tmp/repo"),
+            "2026-06-29T00:00:00Z",
+        );
+        assert!(
+            monitor.autonomous_record(50).is_none(),
+            "off ⇒ no autonomous state created, no network call",
         );
     }
 

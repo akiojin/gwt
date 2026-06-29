@@ -483,6 +483,7 @@ fn scan_issue_monitor_once_blocking(
         &issues,
         &format!("{owner}/{repo}"),
         &scope.project_root,
+        &now,
     );
     monitor.recover_stuck_autonomous(&now);
     if monitor.config.enabled && gui_connected {

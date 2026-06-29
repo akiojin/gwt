@@ -65,12 +65,12 @@ fn to_hex(bytes: &[u8]) -> String {
     s
 }
 
-/// Constant-time byte-slice equality (no early return on first mismatch).
+/// Byte-slice equality that does not short-circuit on the first differing byte.
+/// A length mismatch folds into the accumulator (rather than an early return),
+/// so a wrong-length token cannot be distinguished from a wrong-content token by
+/// the presence/absence of the byte loop.
 fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
-    if a.len() != b.len() {
-        return false;
-    }
-    let mut diff = 0u8;
+    let mut diff = (a.len() ^ b.len()) as u8;
     for (x, y) in a.iter().zip(b.iter()) {
         diff |= x ^ y;
     }

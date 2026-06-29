@@ -554,8 +554,11 @@ pub fn autonomous_retry_backoff_secs(attempt: u32, base_secs: u64, cap_secs: u64
 /// Add `secs` to an RFC3339 instant, returning the new RFC3339 string. `None`
 /// when `now` is not parseable as RFC3339.
 fn rfc3339_plus_secs(now: &str, secs: u64) -> Option<String> {
+    // Guard the u64→i64 cast: an absurd magnitude (only possible via corrupted
+    // tuning) fails closed to None rather than wrapping negative.
+    let secs = i64::try_from(secs).ok()?;
     let parsed = chrono::DateTime::parse_from_rfc3339(now).ok()?;
-    let later = parsed + chrono::Duration::seconds(secs as i64);
+    let later = parsed + chrono::Duration::seconds(secs);
     Some(later.to_rfc3339_opts(chrono::SecondsFormat::Secs, true))
 }
 
@@ -910,6 +913,11 @@ impl IssueMonitorState {
     /// to `NeedsHuman` when attempts are exhausted). Idempotent: a reclaimed
     /// issue is no longer launched, so a second pass finds nothing.
     pub fn recover_stuck_autonomous(&mut self, now: &str) -> Vec<(u64, AutonomousFailureOutcome)> {
+        // Fail-closed gate: never mutate autonomous state when the mode is off
+        // (default), so the SPEC #3165 path is untouched.
+        if !self.autonomous_mode {
+            return Vec::new();
+        }
         self.stuck_autonomous_issues(now)
             .into_iter()
             .map(|issue_number| {
@@ -1095,6 +1103,7 @@ impl IssueMonitorState {
         &mut self,
         issue: &IssueMonitorIssue,
         branch_protection: &gwt_git::branch_protection::BranchProtectionStatus,
+        now: &str,
     ) -> EligibilityDecision {
         if !self.is_autonomous_two_stage_candidate(issue) {
             return EligibilityDecision::HumanGate("not an autonomous candidate".to_string());
@@ -1103,6 +1112,12 @@ impl IssueMonitorState {
         // Idempotency: a candidate already in flight is left alone.
         if self.active_launches.contains(&number) {
             return EligibilityDecision::Eligible;
+        }
+        // SPEC #3200 T-043/FR-029: honor the transient-retry backoff — a candidate
+        // whose backoff window has not elapsed is skipped this scan (no capture,
+        // no escalation) so the exponential backoff is actually enforced.
+        if !self.retry_ready(number, now) {
+            return EligibilityDecision::HumanGate("retry backoff window not elapsed".to_string());
         }
         let criteria = crate::issue_monitor_gate::classify_acceptance_criteria(
             issue.body.as_deref().unwrap_or(""),
@@ -1125,6 +1140,9 @@ impl IssueMonitorState {
             EligibilityDecision::Eligible => {
                 self.capture_acceptance_snapshot(number, criteria.snapshot());
                 self.set_autonomous_phase(number, AutonomousPhase::Implementing);
+                // The launch consumes the scheduled retry, so the backoff marker
+                // is cleared to avoid stale state on the in-flight attempt.
+                self.autonomous_record_mut(number).retry_not_before = None;
             }
             EligibilityDecision::NeedsHuman(reason) => {
                 self.escalate_to_needs_human(number, reason.clone());
@@ -1882,6 +1900,25 @@ mod tests {
     }
 
     #[test]
+    fn pre_autonomous_prefs_fixture_file_round_trips() {
+        // SPEC #3200 FR-001/FR-023, Sc 23: the committed pre-autonomous prefs
+        // fixture (no autonomous_mode / tuning / records fields) must deserialize
+        // with documented defaults and preserve all existing fields.
+        let fixture = include_str!("../tests/fixtures/issue_monitor_prefs_pre_autonomous.json");
+        let prefs: IssueMonitorPrefs =
+            serde_json::from_str(fixture).expect("pre-autonomous fixture deserializes");
+        assert!(prefs.enabled);
+        assert_eq!(prefs.priority_order, vec![101, 102]);
+        assert_eq!(prefs.merged_issues, vec![42]);
+        assert!(!prefs.autonomous_mode, "autonomous_mode defaults false");
+        assert_eq!(prefs.autonomous_tuning, AutonomousTuning::default());
+        assert!(
+            prefs.autonomous_records.is_empty(),
+            "no records in a pre-autonomous prefs file",
+        );
+    }
+
+    #[test]
     fn autonomous_eligibility_truth_table() {
         // SPEC #3200 FR-003/004/005, Sc 2/3/4: two-stage-opt-in negatives →
         // HumanGate; safety-precondition failures → NeedsHuman; all → Eligible.
@@ -2186,6 +2223,8 @@ mod tests {
 
     fn stuck_monitor(number: u64, launched_at: &str) -> IssueMonitorState {
         let mut monitor = launched_monitor(number, "tab-1::agent-1");
+        // Stuck recovery is an autonomous-only feature (guarded by autonomous_mode).
+        monitor.set_autonomous_mode(true);
         monitor.autonomous_tuning.stuck_timeout_secs = 1800;
         monitor.set_autonomous_phase(number, AutonomousPhase::Implementing);
         monitor.set_active_launch_id(number, Some("tab-1::agent-1".to_string()));
@@ -2386,6 +2425,7 @@ mod tests {
         let decision = monitor.prepare_autonomous_candidate(
             &auto_issue(50, "## Acceptance Criteria\n- [ ] AC-1: x\n"),
             &bp,
+            "2026-06-29T00:00:00Z",
         );
         assert!(matches!(decision, EligibilityDecision::HumanGate(_)));
         assert!(monitor.autonomous_record(50).is_none());
@@ -2400,6 +2440,7 @@ mod tests {
         let decision = monitor.prepare_autonomous_candidate(
             &auto_issue(50, "## Acceptance Criteria\n- [ ] AC-1: x\n"),
             &bp,
+            "2026-06-29T00:00:00Z",
         );
         assert_eq!(decision, EligibilityDecision::Eligible);
         let record = monitor.autonomous_record(50).expect("record");
@@ -2417,6 +2458,7 @@ mod tests {
         let decision = monitor.prepare_autonomous_candidate(
             &auto_issue(50, "## Acceptance Criteria\n- [ ] AC-1: x\n"),
             &bp,
+            "2026-06-29T00:00:00Z",
         );
         assert!(matches!(decision, EligibilityDecision::NeedsHuman(_)));
         assert_eq!(
@@ -2433,13 +2475,75 @@ mod tests {
         let bp = gwt_git::branch_protection::BranchProtectionStatus::Verified {
             required_checks: vec!["ci".to_string()],
         };
-        let decision =
-            monitor.prepare_autonomous_candidate(&auto_issue(50, "free text, no criteria"), &bp);
+        let decision = monitor.prepare_autonomous_candidate(
+            &auto_issue(50, "free text, no criteria"),
+            &bp,
+            "2026-06-29T00:00:00Z",
+        );
         assert!(matches!(decision, EligibilityDecision::NeedsHuman(_)));
         assert_eq!(
             monitor.autonomous_record(50).map(|record| record.phase),
             Some(AutonomousPhase::NeedsHuman),
         );
+    }
+
+    #[test]
+    fn prepare_autonomous_candidate_respects_retry_backoff() {
+        // SPEC #3200 T-043/FR-029: a candidate whose transient-retry backoff has
+        // not elapsed is skipped (no capture/escalation); once it elapses it is
+        // processed normally.
+        let mut monitor = autonomous_state();
+        let bp = gwt_git::branch_protection::BranchProtectionStatus::Verified {
+            required_checks: vec!["ci".to_string()],
+        };
+        // Schedule a backoff: a transient failure sets retry_not_before.
+        monitor.record_attempt(50); // ensure a record exists
+        monitor.record_autonomous_failure(
+            50,
+            FailureClass::Transient,
+            "blip",
+            "2026-06-29T00:00:00Z",
+        );
+        // Still inside the backoff window ⇒ skipped (HumanGate, not captured).
+        let blocked = monitor.prepare_autonomous_candidate(
+            &auto_issue(50, "## Acceptance Criteria\n- [ ] AC-1: x\n"),
+            &bp,
+            "2026-06-29T00:00:30Z",
+        );
+        assert!(matches!(blocked, EligibilityDecision::HumanGate(_)));
+        assert_ne!(
+            monitor.autonomous_record(50).map(|r| r.phase),
+            Some(AutonomousPhase::Implementing),
+            "not launched while backing off",
+        );
+        // After the backoff window ⇒ eligible and prepared.
+        let ready = monitor.prepare_autonomous_candidate(
+            &auto_issue(50, "## Acceptance Criteria\n- [ ] AC-1: x\n"),
+            &bp,
+            "2026-06-29T02:00:00Z",
+        );
+        assert_eq!(ready, EligibilityDecision::Eligible);
+        assert_eq!(
+            monitor
+                .autonomous_record(50)
+                .and_then(|r| r.retry_not_before.clone()),
+            None,
+            "launching clears the consumed backoff marker",
+        );
+    }
+
+    #[test]
+    fn recover_stuck_autonomous_is_noop_when_mode_off() {
+        // Fail-closed: with autonomous_mode OFF, stuck recovery never mutates
+        // state (defends the SPEC #3165 path against the runtime toggle).
+        let mut monitor = launched_monitor(42, "tab-1::agent-1");
+        monitor.set_autonomous_mode(false);
+        monitor.set_autonomous_phase(42, AutonomousPhase::Implementing);
+        monitor.record_autonomous_heartbeat(42, "2026-06-29T00:00:00Z");
+        let recovered = monitor.recover_stuck_autonomous("2026-06-29T05:00:00Z");
+        assert!(recovered.is_empty(), "off ⇒ no recovery");
+        assert_eq!(monitor.active_count(), 1, "slot untouched when mode off");
+        assert_eq!(monitor.attempt_count(42), 0, "no attempt recorded when off");
     }
 
     #[test]
