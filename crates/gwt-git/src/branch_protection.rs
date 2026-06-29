@@ -92,7 +92,14 @@ impl BranchProtectionStatus {
 
     /// Protection is genuinely absent — gate-unavailable (FR-010).
     pub fn absent(branch: impl Into<String>) -> Self {
-        Self::new(branch, false, false, false, ProtectionReadability::Absent, None)
+        Self::new(
+            branch,
+            false,
+            false,
+            false,
+            ProtectionReadability::Absent,
+            None,
+        )
     }
 
     /// Protection could not be read due to permissions — gate-unavailable, with
@@ -158,10 +165,7 @@ mod tests {
     fn absent_is_not_verified_with_reason() {
         let status = BranchProtectionStatus::absent("main");
         assert!(!status.verified);
-        assert!(status
-            .unavailable_reason()
-            .unwrap()
-            .contains("absent"));
+        assert!(status.unavailable_reason().unwrap().contains("absent"));
     }
 
     #[test]

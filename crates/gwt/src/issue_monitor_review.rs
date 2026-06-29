@@ -161,8 +161,14 @@ pub fn parse_verdict(raw: &str, expected_sha: &str, expected_criteria: &[String]
         );
     }
 
-    if verdict.criteria.iter().any(|criterion| !criterion.satisfied) {
-        return VerdictParse::Fail("at least one acceptance criterion is not satisfied".to_string());
+    if verdict
+        .criteria
+        .iter()
+        .any(|criterion| !criterion.satisfied)
+    {
+        return VerdictParse::Fail(
+            "at least one acceptance criterion is not satisfied".to_string(),
+        );
     }
 
     if verdict.scope_clean != CheckOutcome::Pass {
@@ -227,7 +233,10 @@ mod tests {
     #[test]
     fn schema_conformant_affirmative_verdict_passes() {
         let parse = parse_verdict(&valid_raw(), SHA, &expected());
-        assert!(parse.is_pass(), "conformant affirmative verdict must PASS: {parse:?}");
+        assert!(
+            parse.is_pass(),
+            "conformant affirmative verdict must PASS: {parse:?}"
+        );
     }
 
     #[test]
@@ -243,7 +252,10 @@ mod tests {
             SHA,
             &expected(),
         );
-        assert!(!parse.is_pass(), "prompt-injection prose must be fail-closed");
+        assert!(
+            !parse.is_pass(),
+            "prompt-injection prose must be fail-closed"
+        );
     }
 
     #[test]
@@ -293,12 +305,19 @@ mod tests {
             SHA,
             &["AC-1".to_string(), "AC-2".to_string(), "AC-3".to_string()],
         );
-        assert!(!parse.is_pass(), "a snapshot criterion absent from the verdict must FAIL");
+        assert!(
+            !parse.is_pass(),
+            "a snapshot criterion absent from the verdict must FAIL"
+        );
     }
 
     #[test]
     fn reviewed_sha_mismatch_is_fail() {
-        let parse = parse_verdict(&valid_raw(), "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", &expected());
+        let parse = parse_verdict(
+            &valid_raw(),
+            "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+            &expected(),
+        );
         assert!(!parse.is_pass());
     }
 
