@@ -1076,6 +1076,64 @@ impl IssueMonitorState {
         self.autonomous_mode && issue_has_auto_merge_label(issue)
     }
 
+    /// SPEC #3200 T-041 (FR-003..FR-010): pre-launch autonomous decision + state
+    /// capture for one candidate, given the freshly fetched base-branch
+    /// `branch_protection`. Composes the pure [`autonomous_eligibility`] predicate
+    /// with the issue body's acceptance criteria and the persisted attempt count,
+    /// then applies the side effects:
+    ///
+    /// - non-two-stage candidate ⇒ `HumanGate` (caller uses the existing #3165
+    ///   human-gated launch path, no autonomous state created);
+    /// - `NeedsHuman` ⇒ escalate (terminal, removed from the launch queue);
+    /// - `Eligible` ⇒ capture the acceptance snapshot + set `Implementing` phase
+    ///   (idempotent: only on a fresh, not-yet-launched candidate).
+    ///
+    /// Returns the [`EligibilityDecision`] so the caller knows whether to launch.
+    /// Default `autonomous_mode` OFF makes this a no-op `HumanGate` for every
+    /// issue, preserving SPEC #3165 behavior exactly.
+    pub fn prepare_autonomous_candidate(
+        &mut self,
+        issue: &IssueMonitorIssue,
+        branch_protection: &gwt_git::branch_protection::BranchProtectionStatus,
+    ) -> EligibilityDecision {
+        if !self.is_autonomous_two_stage_candidate(issue) {
+            return EligibilityDecision::HumanGate("not an autonomous candidate".to_string());
+        }
+        let number = issue.number;
+        // Idempotency: a candidate already in flight is left alone.
+        if self.active_launches.contains(&number) {
+            return EligibilityDecision::Eligible;
+        }
+        let criteria = crate::issue_monitor_gate::classify_acceptance_criteria(
+            issue.body.as_deref().unwrap_or(""),
+        );
+        let attempt_count = self.attempt_count(number);
+        let is_needs_human = self
+            .autonomous_record(number)
+            .map(|record| record.phase == AutonomousPhase::NeedsHuman)
+            .unwrap_or(false);
+        let decision = autonomous_eligibility(
+            self.autonomous_mode,
+            issue_has_auto_merge_label(issue),
+            &criteria,
+            branch_protection,
+            is_needs_human,
+            attempt_count,
+            self.autonomous_tuning.max_attempts,
+        );
+        match &decision {
+            EligibilityDecision::Eligible => {
+                self.capture_acceptance_snapshot(number, criteria.snapshot());
+                self.set_autonomous_phase(number, AutonomousPhase::Implementing);
+            }
+            EligibilityDecision::NeedsHuman(reason) => {
+                self.escalate_to_needs_human(number, reason.clone());
+            }
+            EligibilityDecision::HumanGate(_) => {}
+        }
+        decision
+    }
+
     pub fn inbox_item(&self, issue_number: u64) -> Option<&IssueMonitorInboxItem> {
         self.inbox
             .iter()
@@ -1480,6 +1538,9 @@ impl IssueMonitorState {
         self.queue.retain(|queued| *queued != issue_number);
         self.merged_issues.insert(issue_number);
         self.set_inbox_state(issue_number, MonitorInboxState::Merged);
+        // SPEC #3200 T-022: completion resets the autonomous lifecycle (attempts,
+        // phase, snapshot, in-flight launch id) so a future reopen starts clean.
+        self.clear_autonomous_record(issue_number);
     }
 
     /// Record that the GitHub Issue for `issue_number` was closed (released).
@@ -2291,5 +2352,109 @@ mod tests {
         assert_eq!(record.active_launch_id.as_deref(), Some("tab-2::agent-11"));
         assert_eq!(restored.attempt_count(11), 2);
         assert!(record.acceptance_snapshot.is_some());
+    }
+
+    fn auto_issue(number: u64, body: &str) -> IssueMonitorIssue {
+        IssueMonitorIssue {
+            number,
+            title: format!("Issue {number}"),
+            labels: vec!["auto-merge".to_string()],
+            state: IssueMonitorIssueState::Open,
+            body: Some(body.to_string()),
+            url: None,
+        }
+    }
+
+    fn autonomous_state() -> IssueMonitorState {
+        IssueMonitorState::with_prefs(
+            IssueMonitorConfig::default(),
+            IssueMonitorPrefs {
+                autonomous_mode: true,
+                ..IssueMonitorPrefs::default()
+            },
+        )
+    }
+
+    #[test]
+    fn prepare_autonomous_candidate_non_candidate_is_human_gate_noop() {
+        // SPEC #3200 FR-001/003: autonomous_mode OFF (or no label) ⇒ no autonomous
+        // state created; the issue uses the existing human-gated path.
+        let mut monitor = IssueMonitorState::new(IssueMonitorConfig::default());
+        let bp = gwt_git::branch_protection::BranchProtectionStatus::Verified {
+            required_checks: vec!["ci".to_string()],
+        };
+        let decision = monitor.prepare_autonomous_candidate(
+            &auto_issue(50, "## Acceptance Criteria\n- [ ] AC-1: x\n"),
+            &bp,
+        );
+        assert!(matches!(decision, EligibilityDecision::HumanGate(_)));
+        assert!(monitor.autonomous_record(50).is_none());
+    }
+
+    #[test]
+    fn prepare_autonomous_candidate_eligible_captures_snapshot_and_phase() {
+        let mut monitor = autonomous_state();
+        let bp = gwt_git::branch_protection::BranchProtectionStatus::Verified {
+            required_checks: vec!["ci".to_string()],
+        };
+        let decision = monitor.prepare_autonomous_candidate(
+            &auto_issue(50, "## Acceptance Criteria\n- [ ] AC-1: x\n"),
+            &bp,
+        );
+        assert_eq!(decision, EligibilityDecision::Eligible);
+        let record = monitor.autonomous_record(50).expect("record");
+        assert_eq!(record.phase, AutonomousPhase::Implementing);
+        assert!(
+            record.acceptance_snapshot.is_some(),
+            "snapshot captured at launch"
+        );
+    }
+
+    #[test]
+    fn prepare_autonomous_candidate_unverified_protection_escalates() {
+        let mut monitor = autonomous_state();
+        let bp = gwt_git::branch_protection::BranchProtectionStatus::Absent;
+        let decision = monitor.prepare_autonomous_candidate(
+            &auto_issue(50, "## Acceptance Criteria\n- [ ] AC-1: x\n"),
+            &bp,
+        );
+        assert!(matches!(decision, EligibilityDecision::NeedsHuman(_)));
+        assert_eq!(
+            monitor.autonomous_record(50).map(|record| record.phase),
+            Some(AutonomousPhase::NeedsHuman),
+            "ineligible candidate is escalated, not launched",
+        );
+    }
+
+    #[test]
+    fn prepare_autonomous_candidate_without_criteria_escalates() {
+        // SPEC #3200 FR-014: no machine-checkable acceptance criteria ⇒ NeedsHuman.
+        let mut monitor = autonomous_state();
+        let bp = gwt_git::branch_protection::BranchProtectionStatus::Verified {
+            required_checks: vec!["ci".to_string()],
+        };
+        let decision =
+            monitor.prepare_autonomous_candidate(&auto_issue(50, "free text, no criteria"), &bp);
+        assert!(matches!(decision, EligibilityDecision::NeedsHuman(_)));
+        assert_eq!(
+            monitor.autonomous_record(50).map(|record| record.phase),
+            Some(AutonomousPhase::NeedsHuman),
+        );
+    }
+
+    #[test]
+    fn merge_clears_the_autonomous_record() {
+        // SPEC #3200 T-022: merging the work resets the per-issue autonomous
+        // lifecycle so a future reopen does not inherit stale attempts/phase.
+        let mut monitor = launched_monitor(42, "tab-1::agent-1");
+        monitor.record_attempt(42);
+        monitor.set_autonomous_phase(42, AutonomousPhase::Delivering);
+        assert!(monitor.autonomous_record(42).is_some());
+        monitor.record_merged(42);
+        assert!(
+            monitor.autonomous_record(42).is_none(),
+            "merge clears the autonomous record",
+        );
+        assert_eq!(monitor.attempt_count(42), 0);
     }
 }
