@@ -1772,6 +1772,11 @@ impl IssueMonitorState {
             .retain(|active| *active != issue_number);
         self.launched_windows.remove(&issue_number);
         self.launched_branches.remove(&issue_number);
+        // #3165 error-window lifecycle: terminal transitions (merged / released /
+        // needs-human) and retry all funnel through here; drop any retained stale
+        // failed-window id so it never orphans (and never persists into prefs)
+        // when the issue ends without an explicit Launch Now relaunch.
+        self.failed_windows.remove(&issue_number);
         self.pending_launches
             .retain(|pending| pending.issue_number != issue_number);
     }
@@ -2731,6 +2736,46 @@ mod tests {
         scan_issue_monitor_candidates(&mut no_window, &[issue(44)], "2026-06-30T00:00:00Z");
         no_window.record_launch_failed(44, "could not create branch");
         assert_eq!(no_window.take_failed_window(44), None);
+    }
+
+    #[test]
+    fn failed_window_does_not_orphan_on_terminal_transition() {
+        // Adversarial-review fix: a failed issue that ends WITHOUT an explicit
+        // Launch Now relaunch (merged / released — both funnel through
+        // clear_active_tracking) must not orphan its retained failed-window id,
+        // which would otherwise persist into prefs unbounded.
+        for terminal in ["merged", "released"] {
+            let mut monitor = launched_monitor(42, "tab-1::agent-42");
+            monitor.record_agent_window_failed("tab-1::agent-42", "boom");
+            assert!(
+                monitor
+                    .prefs()
+                    .failed_issues
+                    .iter()
+                    .any(|f| f.window_id.as_deref() == Some("tab-1::agent-42")),
+                "failed window retained before {terminal}"
+            );
+
+            match terminal {
+                "merged" => monitor.record_merged(42),
+                "released" => monitor.record_released(42),
+                _ => unreachable!(),
+            }
+
+            assert_eq!(
+                monitor.take_failed_window(42),
+                None,
+                "{terminal} must clear the stale failed window (no orphan)"
+            );
+            assert!(
+                monitor
+                    .prefs()
+                    .failed_issues
+                    .iter()
+                    .all(|f| f.window_id.is_none()),
+                "{terminal} must not persist an orphaned window id"
+            );
+        }
     }
 
     #[test]
