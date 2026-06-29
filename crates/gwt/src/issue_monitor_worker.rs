@@ -135,6 +135,66 @@ pub fn reconcile_issue_monitor_merges(monitor: &mut IssueMonitorState, repo_path
     }
 }
 
+/// Parse `git symbolic-ref --short refs/remotes/origin/HEAD` output (e.g.
+/// `origin/main`) into the bare default branch name. Fail-closed to `main`.
+pub fn parse_default_base_branch(symbolic_ref_stdout: &str) -> String {
+    let trimmed = symbolic_ref_stdout.trim();
+    let name = trimmed.strip_prefix("origin/").unwrap_or(trimmed);
+    if name.is_empty() {
+        "main".to_string()
+    } else {
+        name.to_string()
+    }
+}
+
+/// Resolve the repo's default base branch (the branch autonomous PRs merge
+/// into) via `origin/HEAD`. Fail-closed to `main` on any failure.
+pub fn resolve_default_base_branch(repo_path: &Path) -> String {
+    let hub = gwt_core::process_console::global();
+    let output = gwt_core::process_console::spawn_logged_blocking(
+        &hub,
+        gwt_core::process_console::ProcessKind::Git,
+        "git",
+        &["symbolic-ref", "--short", "refs/remotes/origin/HEAD"],
+        gwt_core::process_console::SpawnOptions::new("git symbolic-ref origin/HEAD")
+            .current_dir(repo_path),
+    );
+    match output {
+        Ok(output) if output.success() => parse_default_base_branch(&output.stdout),
+        _ => "main".to_string(),
+    }
+}
+
+/// SPEC #3200 T-041: apply the pre-launch autonomous eligibility gate to every
+/// two-stage candidate before the scan claims/launches them. For each candidate
+/// it fetches the base-branch protection and runs
+/// [`IssueMonitorState::prepare_autonomous_candidate`], which escalates
+/// ineligible issues to `NeedsHuman` (removing them from the launch queue) and
+/// captures the acceptance snapshot + `Implementing` phase for eligible ones.
+/// A no-op unless autonomous mode is on (default OFF preserves SPEC #3165).
+pub fn apply_autonomous_eligibility(
+    monitor: &mut IssueMonitorState,
+    issues: &[IssueMonitorIssue],
+    repo_slug: &str,
+    repo_path: &Path,
+) {
+    if !monitor.autonomous_mode() {
+        return;
+    }
+    let candidates: Vec<&IssueMonitorIssue> = issues
+        .iter()
+        .filter(|issue| monitor.is_autonomous_two_stage_candidate(issue))
+        .collect();
+    if candidates.is_empty() {
+        return;
+    }
+    let base_branch = resolve_default_base_branch(repo_path);
+    let protection = gwt_git::branch_protection::fetch_branch_protection(repo_slug, &base_branch);
+    for issue in candidates {
+        let _ = monitor.prepare_autonomous_candidate(issue, &protection);
+    }
+}
+
 pub fn load_cached_issue_monitor_candidates(
     cache_root: &Path,
 ) -> Result<Vec<IssueMonitorIssue>, String> {
@@ -541,5 +601,16 @@ mod tests {
             error.to_string(),
             "GitHub origin remote URL is invalid: https://github.com/owner"
         );
+    }
+
+    #[test]
+    fn parse_default_base_branch_strips_origin_prefix_and_fails_closed() {
+        assert_eq!(parse_default_base_branch("origin/main\n"), "main");
+        assert_eq!(parse_default_base_branch("origin/develop"), "develop");
+        // A bare name with no origin/ prefix is taken as-is.
+        assert_eq!(parse_default_base_branch("trunk"), "trunk");
+        // Empty / unresolved ⇒ fail-closed to main.
+        assert_eq!(parse_default_base_branch(""), "main");
+        assert_eq!(parse_default_base_branch("origin/"), "main");
     }
 }

@@ -475,6 +475,16 @@ fn scan_issue_monitor_once_blocking(
     let monitor_owner = format!("{}:{}", whoami::username(), std::process::id());
     crate::scan_issue_monitor_candidates(&mut monitor, &issues, &now);
     crate::issue_monitor_worker::reconcile_issue_monitor_merges(&mut monitor, &scope.project_root);
+    // SPEC #3200 T-041/T-044: autonomous pre-launch eligibility gate + stuck-slot
+    // recovery. Both are no-ops unless autonomous mode is on (default OFF keeps
+    // the SPEC #3165 human-gated flow unchanged).
+    crate::issue_monitor_worker::apply_autonomous_eligibility(
+        &mut monitor,
+        &issues,
+        &format!("{owner}/{repo}"),
+        &scope.project_root,
+    );
+    monitor.recover_stuck_autonomous(&now);
     if monitor.config.enabled && gui_connected {
         let active_cap = if monitor.has_launch_profile() {
             monitor.config.max_active.max(1)
