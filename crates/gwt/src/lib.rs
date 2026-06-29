@@ -23,6 +23,7 @@ pub mod index_search;
 pub mod index_worker;
 pub mod issue_cache;
 pub mod issue_monitor;
+pub mod issue_monitor_authz;
 pub mod issue_monitor_gate;
 pub mod issue_monitor_review;
 pub mod issue_monitor_worker;
