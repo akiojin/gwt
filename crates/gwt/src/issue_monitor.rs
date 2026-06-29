@@ -596,6 +596,10 @@ pub struct AutonomousReviewDispatch {
     pub reviewed_sha: String,
     pub required_criteria: Vec<String>,
     pub diff: String,
+    /// SPEC #3200 Option A: the work branch kind, so the GUI spawns the review
+    /// agent in the implementation agent's existing work-branch worktree.
+    #[serde(default)]
+    pub linked_issue_kind: LinkedIssueKind,
 }
 
 /// SPEC #3200 T-042: how an autonomous attempt's failure should be routed.

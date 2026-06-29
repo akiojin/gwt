@@ -263,12 +263,18 @@ pub fn advance_autonomous_in_flight(
                             .unwrap_or_default();
                         let diff = gwt_git::pr_status::fetch_pr_diff(repo_path, pr, 200_000)
                             .unwrap_or_default();
+                        let linked_issue_kind = issues
+                            .iter()
+                            .find(|issue| issue.number == issue_number)
+                            .map(crate::issue_monitor::issue_monitor_linked_issue_kind)
+                            .unwrap_or_default();
                         monitor.push_review_dispatch(crate::AutonomousReviewDispatch {
                             issue_number,
                             pr_number: pr,
                             reviewed_sha: sha,
                             required_criteria: criteria,
                             diff,
+                            linked_issue_kind,
                         });
                     }
                 }

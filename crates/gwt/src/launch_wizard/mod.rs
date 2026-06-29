@@ -33,9 +33,10 @@ const BRANCH_TYPE_PREFIXES: [&str; 4] = ["feature/", "bugfix/", "hotfix/", "rele
 /// Distinguishes the source bridge so branch names seed as `issue-{n}` vs
 /// `spec-{n}` (kept independent of `linked_issue_number` because Branches-window
 /// callers can know the number from a linkage store but not the source kind).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum LinkedIssueKind {
+    #[default]
     Issue,
     Spec,
 }

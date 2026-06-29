@@ -1611,7 +1611,7 @@ impl AppRuntime {
         issue_number: u64,
         linked_issue_kind: gwt::LinkedIssueKind,
     ) -> Vec<OutboundEvent> {
-        match self.silent_issue_monitor_launch_events(issue_number, linked_issue_kind) {
+        match self.silent_issue_monitor_launch_events(issue_number, linked_issue_kind, None) {
             Ok(Some(events)) => events,
             Ok(None) => {
                 if self.launch_wizard.is_some() {
@@ -1655,22 +1655,36 @@ impl AppRuntime {
             pr = dispatch.pr_number,
             reviewed_sha = %dispatch.reviewed_sha,
             prompt_bytes = prompt.len(),
-            "autonomous independent-review dispatch prepared"
+            "autonomous independent-review dispatch"
         );
-        vec![OutboundEvent::broadcast(BackendEvent::IssueMonitorToast {
-            level: "info".to_string(),
-            message: format!(
-                "Independent review dispatched for #{} (PR #{})",
-                dispatch.issue_number, dispatch.pr_number
-            ),
-            issue_number: Some(dispatch.issue_number),
-        })]
+        // Spawn a FRESH-session review agent in the implementation work-branch
+        // worktree (idle by review time); it reviews the diff embedded in its
+        // prompt and reports the verdict via the gwtd issue.monitor.review_verdict
+        // op. skip_permissions is forced on the autonomous path so review runs
+        // unattended.
+        match self.silent_issue_monitor_launch_events(
+            dispatch.issue_number,
+            dispatch.linked_issue_kind,
+            Some(prompt),
+        ) {
+            Ok(Some(events)) => events,
+            Ok(None) => vec![OutboundEvent::broadcast(BackendEvent::IssueMonitorToast {
+                level: "warn".to_string(),
+                message: format!(
+                    "Independent review for #{} could not start (launch settings unavailable)",
+                    dispatch.issue_number
+                ),
+                issue_number: Some(dispatch.issue_number),
+            })],
+            Err(error) => self.issue_monitor_launch_failed_events(dispatch.issue_number, &error),
+        }
     }
 
     fn silent_issue_monitor_launch_events(
         &mut self,
         issue_number: u64,
         linked_issue_kind: gwt::LinkedIssueKind,
+        review_prompt: Option<String>,
     ) -> Result<Option<Vec<OutboundEvent>>, String> {
         let Some(tab_id) = self.active_tab_id.clone() else {
             return Err("Open a project before launching monitored Issue work".to_string());
@@ -1698,14 +1712,19 @@ impl AppRuntime {
         // FR-022: an Issue whose agent window was previously closed without a
         // merge keeps a resumable session. Re-engage by resuming that session
         // (continuing the conversation) instead of launching a fresh agent.
+        // SPEC #3200 Option A: the independent review must be a FRESH session
+        // (no shared context with the implementation agent), so the review path
+        // skips resume and always launches a new agent.
         let target_branch = knowledge_launch_target_branch_name(linked_issue_kind, issue_number);
-        if let Some(events) = self.silent_issue_monitor_resume_events(
-            &tab_id,
-            &project_root,
-            &target_branch,
-            issue_number,
-        )? {
-            return Ok(Some(events));
+        if review_prompt.is_none() {
+            if let Some(events) = self.silent_issue_monitor_resume_events(
+                &tab_id,
+                &project_root,
+                &target_branch,
+                issue_number,
+            )? {
+                return Ok(Some(events));
+            }
         }
 
         let mut session = self.build_knowledge_launch_wizard_session(
@@ -1716,10 +1735,13 @@ impl AppRuntime {
             linked_issue_kind,
             previous_profiles,
         );
+        let initial_prompt = review_prompt
+            .clone()
+            .unwrap_or_else(|| gwt::issue_monitor_launch_prompt(linked_issue_kind, issue_number));
         session
             .wizard
             .apply(gwt::LaunchWizardAction::SetInitialPrompt {
-                value: gwt::issue_monitor_launch_prompt(linked_issue_kind, issue_number),
+                value: initial_prompt,
             });
         session
             .wizard
@@ -1770,9 +1792,14 @@ impl AppRuntime {
                 return Err("Issue Monitor automatic launch requires an agent target".to_string());
             }
         };
+        let message = if review_prompt.is_some() {
+            "Issue Monitor independent review launched".to_string()
+        } else {
+            "Issue Monitor launch requested".to_string()
+        };
         events.push(OutboundEvent::broadcast(BackendEvent::IssueMonitorToast {
             level: "info".to_string(),
-            message: "Issue Monitor launch requested".to_string(),
+            message,
             issue_number: Some(issue_number),
         }));
         Ok(Some(events))
@@ -2560,6 +2587,7 @@ mod review_dispatch_tests {
             reviewed_sha: "abc123".to_string(),
             required_criteria: vec!["AC-1".to_string()],
             diff: "diff --git a/x b/x".to_string(),
+            linked_issue_kind: gwt::LinkedIssueKind::Spec,
         };
         let prompt = build_review_dispatch_prompt(&dispatch);
         assert!(
