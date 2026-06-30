@@ -96,9 +96,9 @@ fn live_autonomous_merge_against_real_github() {
         "route Deliver"
     );
 
-    // 5) REAL merge via the production function.
+    // 5) REAL merge via the production function, bound to the reviewed head SHA.
     assert!(
-        merge_pr_auto(&repo, pr),
+        merge_pr_auto(&repo, pr, &reviewed),
         "real merge_pr_auto armed/succeeded"
     );
 
