@@ -153,6 +153,18 @@ test("timeoutMs auto-dismisses; absent timeout stays sticky", async () => {
   assert.equal(stack.count(), 1, "only the timed toast auto-dismissed");
 });
 
+test("dismiss(id) removes the toast carrying that id (sticky cleanup on target removal)", () => {
+  const { document, stack } = setup();
+  stack.push({ id: "attention-w1", title: "a" });
+  stack.push({ id: "other", title: "b" });
+  assert.equal(stack.count(), 2);
+  stack.dismiss("attention-w1");
+  assert.equal(stack.count(), 1, "only the matching id is dismissed");
+  assert.equal(document.querySelector('[data-toast-id="attention-w1"]'), null);
+  stack.dismiss("nope"); // unknown id is a safe no-op
+  assert.equal(stack.count(), 1);
+});
+
 test("animateDismiss marks leaving then removes via the fallback timer", async () => {
   const { document, stack } = setup({ animateDismiss: true, dismissMs: 10 });
   const item = stack.push({ title: "x" });

@@ -222,9 +222,24 @@ export function createToastStack({
     return item;
   }
 
+  // Dismiss the toast(s) carrying `id` (e.g. a per-window attention toast when
+  // its window is removed) so a sticky toast never orphans a gone target.
+  function dismiss(id) {
+    if (!list || id == null) {
+      return;
+    }
+    const idStr = String(id);
+    for (const child of [...list.children]) {
+      if (child.dataset.toastId === idStr) {
+        removeItem(child);
+      }
+    }
+  }
+
   return Object.freeze({
     mount,
     push,
+    dismiss,
     count: () => (list ? list.children.length : 0),
     droppedCount: () => dropped,
     clear: () => {

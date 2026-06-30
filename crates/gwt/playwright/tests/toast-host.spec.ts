@@ -78,3 +78,82 @@ test.describe("toast-host autonomous log region (real browser)", () => {
     await expect(item).toHaveCount(0);
   });
 });
+
+test.describe("toast-host alerts region (real browser, SPEC #3206 P1)", () => {
+  test.use({ viewport: { width: 1280, height: 900 } });
+
+  test.beforeEach(async ({ page }) => {
+    await page.addInitScript(() => {
+      class NoopSocket {
+        constructor() {}
+        send() {}
+        close() {}
+        addEventListener() {}
+        removeEventListener() {}
+      }
+      // @ts-ignore
+      window.WebSocket = NoopSocket;
+    });
+    await installEmbeddedRoutes(page);
+    await page.goto(APP_URL);
+    await page.evaluate(async () => {
+      const mod = await import("/toast-host.js");
+      document.body.replaceChildren();
+      (window as any).__activated = [];
+      const stack = (mod as any).createToastStack({
+        document,
+        className: "toast-alerts",
+        ariaRole: "status",
+        animateDismiss: true,
+        levels: ["neutral", "info", "warn", "error", "done"],
+        defaultLevel: "neutral",
+      });
+      stack.mount(document.body);
+      (window as any).__alerts = stack;
+    });
+  });
+
+  test("the three former systems share ONE bottom-right stack (no overlap)", async ({ page }) => {
+    await page.evaluate(() => {
+      const s = (window as any).__alerts;
+      s.push({ id: "agent-completion", level: "neutral", title: "Done", message: "ok", dismissible: false });
+      s.push({ id: "attention-w1", level: "warn", title: "Needs input", message: "y", dismissible: true });
+      s.push({ id: "board-mention", level: "info", title: "Board reply", dismissible: false });
+    });
+
+    // All three live in the SAME single container (no per-system fixed offsets).
+    expect(await page.locator(".toast-alerts").count()).toBe(1);
+    const items = page.locator(".toast-alerts__list .toast-alerts__item");
+    await expect(items).toHaveCount(3);
+    await expect(items.first()).toContainText("Board reply"); // newest on top
+
+    const layout = await page.evaluate(() => {
+      const r = getComputedStyle(document.querySelector(".toast-alerts") as HTMLElement);
+      return { position: r.position };
+    });
+    expect(layout.position).toBe("fixed");
+  });
+
+  test("dedup by id replaces; onActivate jumps then dismisses", async ({ page }) => {
+    await page.evaluate(() => {
+      const s = (window as any).__alerts;
+      s.push({ id: "attention-w1", level: "warn", title: "first" });
+      s.push({ id: "attention-w1", level: "error", title: "second", dismissible: true });
+    });
+    const attention = page.locator('.toast-alerts__item[data-toast-id="attention-w1"]');
+    await expect(attention).toHaveCount(1, { timeout: 1000 });
+    await expect(attention).toContainText("second");
+    await expect(attention).toHaveAttribute("data-level", "error");
+
+    await page.evaluate(() =>
+      (window as any).__alerts.push({
+        id: "agent-completion",
+        title: "Done",
+        dismissible: false,
+        onActivate: () => (window as any).__activated.push("completion"),
+      }),
+    );
+    await page.locator('.toast-alerts__item[data-toast-id="agent-completion"]').click();
+    expect(await page.evaluate(() => (window as any).__activated)).toContain("completion");
+  });
+});

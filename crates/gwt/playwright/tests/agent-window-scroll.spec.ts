@@ -67,7 +67,8 @@ test.describe("Agent window scrollback lifecycle", () => {
     const overlay = window.locator(".terminal-overlay");
     await expect(overlay).toBeHidden();
     await expect(window.locator(".status-chip")).toHaveAttribute("title", /Stop-block hit an error/);
-    await expect(page.locator(".attention-toast").first()).toContainText("Stop-block hit an error");
+    // SPEC #3206: attention renders in the shared alerts stack.
+    await expect(page.locator(".toast-alerts__item").first()).toContainText("Stop-block hit an error");
   });
 });
 

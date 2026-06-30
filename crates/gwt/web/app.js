@@ -63,6 +63,7 @@
       import { createLaunchWizardSurface } from "/launch-wizard-surface.js";
       import { createIssueMonitorSurface } from "/issue-monitor-surface.js";
       import { createAutonomousNotifications } from "/autonomous-notifications.js";
+      import { createToastStack } from "/toast-host.js";
       // SPEC-3064 Phase 3 (E6a): the File Tree window surface moved to
       // /file-tree-surface.js.
       import { createFileTreeSurface } from "/file-tree-surface.js";
@@ -4080,6 +4081,9 @@
         createKnowledgeMarkdownBody,
         windowMap,
         focusWindowLocally,
+        // SPEC #3206 — board-mention notices render through the shared alerts
+        // stack. The arrow defers to the alertsToasts binding (created below).
+        pushAlertToast: (notice) => alertsToasts.push(notice),
         sendWindowFocus: (id) => socketTransport.send({ kind: "focus_window", id }),
         focusOrSpawnPreset,
         activeWorkspace,
@@ -4125,122 +4129,45 @@
         return node;
       }
 
+      // SPEC #3206: away-only agent completion notice, rendered through the
+      // shared bottom-right alerts stack. The away-gating + dedup lives in
+      // createAgentCompletionNotifier; this only renders. Singleton via id; the
+      // whole card jumps to the project tab.
       function showAgentCompletionToast(notice) {
-        const existing = document.getElementById("agent-completion-toast");
-        existing?.remove();
-        const toast = createNode("button", "agent-completion-toast");
-        toast.id = "agent-completion-toast";
-        toast.type = "button";
-        toast.setAttribute("aria-live", "polite");
-        toast.title = notice.projectTitle || notice.title || "Agent notification";
-        const title = createNode(
-          "span",
-          "agent-completion-toast__title",
-          notice.title || "Agent notification",
-        );
-        const body = createNode(
-          "span",
-          "agent-completion-toast__body",
-          notice.body || "",
-        );
-        toast.append(title, body);
-        toast.addEventListener("click", () => {
-          if (notice.projectId) {
-            frontendUnits.projectWorkspaceShell.clearProjectUnread(notice.projectId);
-            send({ kind: "select_project_tab", tab_id: notice.projectId });
-          }
-          toast.remove();
+        alertsToasts.push({
+          id: "agent-completion",
+          level: "neutral",
+          title: notice.title || "Agent notification",
+          message: notice.body || "",
+          dismissible: false,
+          timeoutMs: 12_000,
+          onActivate: () => {
+            if (notice.projectId) {
+              frontendUnits.projectWorkspaceShell.clearProjectUnread(notice.projectId);
+              send({ kind: "select_project_tab", tab_id: notice.projectId });
+            }
+          },
         });
-        document.body.appendChild(toast);
-        window.setTimeout(() => {
-          if (toast.isConnected) {
-            toast.remove();
-          }
-        }, 12_000);
       }
 
-      // SPEC-2356 Anshin Addendum (FR-040): in-app attention toast. Distinct from
-      // the away-only desktop notification above — this surfaces even while the
-      // operator is present. Click flies the camera to the window (frameWindow).
-      // Newest toasts stack on top; closing one lets the rest settle down. Quiet
-      // flavors auto-hide, but ERROR toasts persist until the operator dismisses
-      // them so a failure is never missed.
+      // SPEC-2356 Anshin Addendum (FR-040), now on the shared alerts stack
+      // (SPEC #3206): in-app attention toast that surfaces even while the
+      // operator is present. Activation flies the camera to the window
+      // (frameWindow). ERROR is sticky so a failure is never missed; quieter
+      // flavors auto-hide. Deduped per window so a window never doubles up.
       function showAttentionToast(notice) {
         const flavor = notice.flavor || "needs_input";
-        const existing = document.getElementById(`attention-toast-${notice.windowId}`);
-        existing?.remove();
-        const toast = createNode("div", "attention-toast");
-        toast.id = `attention-toast-${notice.windowId}`;
-        toast.dataset.flavor = flavor;
-        toast.setAttribute("role", "status");
-        toast.setAttribute("aria-live", "polite");
-
-        const jump = createNode("button", "attention-toast__jump");
-        jump.type = "button";
-        jump.title = notice.title || "Agent attention";
-        jump.setAttribute("aria-label", `${notice.title}: ${notice.body} (jump to window)`);
-        const title = createNode("span", "attention-toast__title", notice.title || "Agent attention");
-        const body = createNode("span", "attention-toast__body", notice.body || "");
-        jump.append(title, body);
-        jump.addEventListener("click", () => {
-          frameWindow(notice.windowId);
-          dismissAttentionToast(toast);
+        const level = flavor === "error" ? "error" : flavor === "done" ? "done" : "warn";
+        const timeoutMs = flavor === "error" ? 0 : flavor === "done" ? 8_000 : 14_000;
+        alertsToasts.push({
+          id: `attention-${notice.windowId}`,
+          level,
+          title: notice.title || "Agent attention",
+          message: notice.body || "",
+          dismissible: true,
+          timeoutMs,
+          onActivate: () => frameWindow(notice.windowId),
         });
-
-        const dismiss = createNode("button", "attention-toast__dismiss", "×");
-        dismiss.type = "button";
-        dismiss.setAttribute("aria-label", "Dismiss notification");
-        dismiss.addEventListener("click", (event) => {
-          event.stopPropagation();
-          dismissAttentionToast(toast);
-        });
-
-        toast.append(jump, dismiss);
-        // Newest on top: prepend so the freshest attention sits above older ones
-        // and closing a toast lets the stack settle downward.
-        attentionToastStack().prepend(toast);
-        // ERROR holds until the operator dismisses it; quieter flavors auto-hide
-        // so transient notices never pile up.
-        if (flavor !== "error") {
-          const holdMs = flavor === "done" ? 8_000 : 14_000;
-          window.setTimeout(() => {
-            if (toast.isConnected) {
-              dismissAttentionToast(toast);
-            }
-          }, holdMs);
-        }
-      }
-
-      // Collapse a toast out (height + fade) so the rest of the stack settles
-      // smoothly, then remove it. A fallback timer guarantees removal even when
-      // the transition is skipped (reduced-motion / detached node).
-      function dismissAttentionToast(toast) {
-        if (!toast || toast.dataset.leaving === "true") {
-          return;
-        }
-        toast.dataset.leaving = "true";
-        toast.addEventListener(
-          "transitionend",
-          () => {
-            toast.remove();
-          },
-          { once: true },
-        );
-        window.setTimeout(() => {
-          toast.remove();
-        }, 320);
-      }
-
-      // The attention toasts stack in a fixed column so multiple windows can
-      // ask for attention at once without overlapping.
-      function attentionToastStack() {
-        let stackEl = document.getElementById("attention-toast-stack");
-        if (!stackEl) {
-          stackEl = createNode("div", "attention-toast-stack");
-          stackEl.id = "attention-toast-stack";
-          document.body.appendChild(stackEl);
-        }
-        return stackEl;
       }
 
       function createKnowledgeMarkdownBody(section, className = "knowledge-section-body") {
@@ -4369,6 +4296,24 @@
       // or surface is focused.
       const autonomousNotifications = createAutonomousNotifications({ document });
       autonomousNotifications.mount(document.body);
+
+      // SPEC #3206 — one shared bottom-right `alerts` stack for the transient
+      // notifications that used to be three hand-offset systems (agent
+      // completion / attention / board mention). The pure controllers still
+      // own firing/dedup/gating; these only render. CSS lives in app.css
+      // (.toast-alerts*), so no styleText is injected here.
+      const alertsToasts = createToastStack({
+        document,
+        className: "toast-alerts",
+        ariaRole: "status",
+        ariaLive: "polite",
+        ariaLabel: "Agent notifications",
+        newestOnTop: true,
+        animateDismiss: true,
+        levels: ["neutral", "info", "warn", "error", "done"],
+        defaultLevel: "neutral",
+      });
+      alertsToasts.mount(document.body);
 
       const agentKanbanSurface = createAgentKanbanSurface({
         activeWorkspace,
@@ -5043,7 +4988,9 @@
               windowRuntimeStateMap.delete(windowId);
               agentCompletionNotifier.forgetWindow(windowId);
               agentAttentionToaster.forgetWindow(windowId);
-              document.getElementById(`attention-toast-${windowId}`)?.remove();
+              // SPEC #3206: dismiss this window's attention toast from the shared
+              // alerts stack so a sticky error toast never orphans a gone window.
+              alertsToasts.dismiss(`attention-${windowId}`);
               renderedWindowElementKeys.delete(windowId);
               renderedRuntimeStatusKeys.delete(windowId);
               renderedAgentKanbanBodyKeys.delete(windowId);

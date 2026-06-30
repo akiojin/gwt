@@ -3273,41 +3273,38 @@ test("FR-040 (安心): in-app attention toasts are wired with click-to-jump", ()
   assert.match(appSource, /agentAttentionToaster\.handleRuntimeState/);
   assert.match(appSource, /function showAttentionToast/);
   assert.match(appSource, /frameWindow\(notice\.windowId\)/);
-  assert.match(inlineStyle, /\.attention-toast\s*\{/);
+  // SPEC #3206: attention now renders through the shared bottom-right alerts
+  // stack (.toast-alerts*), not its own .attention-toast block.
+  assert.match(inlineStyle, /\.toast-alerts__item\s*\{/);
   assert.match(
     inlineStyle,
-    /@media \(prefers-reduced-motion: reduce\)[\s\S]*?\.attention-toast\s*\{[\s\S]*?animation:\s*none/,
-    "attention toast must drop its entrance animation under reduced motion",
+    /@media \(prefers-reduced-motion: reduce\)[\s\S]*?\.toast-alerts__item\s*\{[\s\S]*?animation:\s*none/,
+    "alerts toast must drop its entrance animation under reduced motion",
   );
 });
 
 test("FR-040 refinement: error toasts persist, stack newest-on-top, share a fixed width", () => {
-  // Error toasts must stay until the operator dismisses them (no auto-hide),
-  // while quieter flavors still auto-hide.
+  // SPEC #3206: the FR-040 contract is preserved through the shared alerts
+  // stack. Error stays until dismissed (timeoutMs 0 = sticky); quieter flavors
+  // auto-hide via timeoutMs.
   assert.match(
     appSource,
-    /if\s*\(\s*flavor\s*!==\s*"error"\s*\)\s*\{[\s\S]*?setTimeout/,
-    "only non-error flavors may arm the auto-hide timer",
+    /flavor\s*===\s*"error"\s*\?\s*0\s*:/,
+    "error flavor must be sticky (timeoutMs 0)",
   );
-  // Newest toast on top: the renderer prepends into the stack.
-  assert.match(
-    appSource,
-    /attentionToastStack\(\)\.prepend\(toast\)/,
-    "new toasts must prepend so the freshest sits on top",
-  );
-  // Closing collapses the toast so the rest of the stack settles down.
-  assert.match(appSource, /function dismissAttentionToast/);
-  assert.match(appSource, /dataset\.leaving\s*=\s*"true"/);
+  // Newest toast on top + collapse-on-close are owned by the shared region.
+  assert.match(appSource, /newestOnTop:\s*true/, "alerts stack puts the freshest on top");
+  assert.match(appSource, /animateDismiss:\s*true/, "alerts stack collapses on close");
   // Fixed width (not content-sized) so toasts line up.
   assert.match(
     inlineStyle,
-    /\.attention-toast\s*\{[^}]*width:\s*min\(\s*360px/,
-    "attention toasts must use a fixed width",
+    /\.toast-alerts\s*\{[^}]*width:\s*min\(\s*360px/,
+    "alerts toasts must use a fixed width",
   );
   // The leaving state collapses height to let the stack settle.
   assert.match(
     inlineStyle,
-    /\.attention-toast\[data-leaving="true"\]\s*\{[^}]*max-height:\s*0/,
+    /\.toast-alerts__item\[data-leaving="true"\]\s*\{[^}]*max-height:\s*0/,
     "leaving toasts must collapse their height",
   );
 });
