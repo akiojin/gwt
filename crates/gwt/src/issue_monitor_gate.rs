@@ -80,7 +80,7 @@ fn heading_text(line: &str) -> Option<String> {
 
 /// Deterministically classify the acceptance criteria in an Issue body.
 ///
-/// The required block format is a heading from [`ACCEPTANCE_HEADINGS`] followed
+/// The required block format is a heading from `ACCEPTANCE_HEADINGS` followed
 /// by checklist items of the form `- [ ] AC-<id>: <text>` (optionally trailing
 /// `(visual)`). Parsing stops at the next heading. No agent is invoked; this is
 /// coarse machine-checkability only.
