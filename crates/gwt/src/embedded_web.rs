@@ -181,6 +181,9 @@ root_js_modules! {
     // notification stack. app.js imports this at module top level, so the asset
     // MUST be registered or the ES module load fails and the splash hangs.
     "autonomous-notifications.js" => "createAutonomousNotifications",
+    // SPEC #3206 — shared floating-toast primitive imported by
+    // autonomous-notifications.js (and later the bottom-right alerts trio).
+    "toast-host.js" => "createToastStack",
     // SPEC-3064 Phase 3 (E6a) — File Tree window surface (tree state +
     // worktree picker + text/hex viewer + window mount) extracted from
     // app.js.

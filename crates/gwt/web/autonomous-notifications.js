@@ -8,14 +8,9 @@
 // is dismissible; the retained count is capped so the DOM never grows
 // unboundedly during a long unattended run.
 
+import { createToastStack } from "./toast-host.js";
+
 const DEFAULT_MAX_RETAINED = 50;
-
-const LEVELS = new Set(["info", "success", "warn", "error"]);
-
-function normalizeLevel(value) {
-  const level = typeof value === "string" ? value.toLowerCase() : "";
-  return LEVELS.has(level) ? level : "info";
-}
 
 const STYLE = `
   .autonomous-notifications {
@@ -89,101 +84,39 @@ export function createAutonomousNotifications({
   if (!document) {
     throw new Error("createAutonomousNotifications requires a document");
   }
-  let region = null;
-  let list = null;
-  let dropped = 0;
+  // SPEC #3206: the autonomous side-stack is the `log` region of the shared
+  // toast-host primitive. This wrapper keeps the SPEC #3200 public contract
+  // (title formatting with the issue number, the autonomous CSS, the
+  // persistent scrollable cap) while the mount/cap/dismiss mechanics live in
+  // the shared primitive.
+  const stack = createToastStack({
+    document,
+    className: "autonomous-notifications",
+    styleText: STYLE,
+    styleMarker: "data-autonomous-notifications",
+    ariaRole: "log",
+    ariaLive: "polite",
+    ariaLabel: "Autonomous Issue Monitor notifications",
+    maxRetained,
+    newestOnTop: true,
+    levels: ["info", "success", "warn", "error"],
+    defaultLevel: "info",
+  });
 
-  function ensureStyle(root) {
-    const owner = root.ownerDocument || document;
-    const head = owner.head || owner.body || root;
-    if (head.querySelector?.("style[data-autonomous-notifications]")) {
-      return;
-    }
-    const style = owner.createElement("style");
-    style.setAttribute("data-autonomous-notifications", "true");
-    style.textContent = STYLE;
-    head.appendChild(style);
-  }
-
-  function mount(parent) {
-    if (!parent) {
-      return null;
-    }
-    ensureStyle(parent);
-    region = document.createElement("aside");
-    region.className = "autonomous-notifications";
-    region.setAttribute("role", "log");
-    region.setAttribute("aria-live", "polite");
-    region.setAttribute("aria-label", "Autonomous Issue Monitor notifications");
-    list = document.createElement("div");
-    list.className = "autonomous-notifications__list";
-    region.appendChild(list);
-    parent.appendChild(region);
-    return region;
-  }
-
-  function enforceCap() {
-    while (list.children.length > maxRetained) {
-      list.removeChild(list.lastChild);
-      dropped += 1;
-    }
-  }
-
-  /**
-   * Append a notice to the top of the stack. Returns the created element, or
-   * null when not mounted.
-   */
-  function push(notice) {
-    if (!list) {
-      return null;
-    }
-    const level = normalizeLevel(notice?.level);
-    const issue = notice?.issueNumber ? ` #${notice.issueNumber}` : "";
-    const title = `${notice?.title || "Autonomous Issue Monitor"}${issue}`;
-
-    const item = document.createElement("div");
-    item.className = "autonomous-notifications__item";
-    item.dataset.level = level;
-
-    const titleEl = document.createElement("div");
-    titleEl.className = "autonomous-notifications__title";
-    titleEl.textContent = title;
-
-    const dismiss = document.createElement("button");
-    dismiss.type = "button";
-    dismiss.className = "autonomous-notifications__dismiss";
-    dismiss.setAttribute("aria-label", "Dismiss notification");
-    dismiss.textContent = "×";
-    dismiss.addEventListener("click", () => {
-      item.remove();
-    });
-
-    const message = document.createElement("div");
-    message.className = "autonomous-notifications__message";
-    message.textContent = notice?.message || "";
-
-    item.appendChild(titleEl);
-    item.appendChild(dismiss);
-    item.appendChild(message);
-
-    list.insertBefore(item, list.firstChild);
-    enforceCap();
-    return item;
-  }
-
-  function count() {
-    return list ? list.children.length : 0;
-  }
-
-  function droppedCount() {
-    return dropped;
-  }
-
-  function clear() {
-    if (list) {
-      list.replaceChildren();
-    }
-  }
-
-  return Object.freeze({ mount, push, count, droppedCount, clear, styleText: () => STYLE });
+  return Object.freeze({
+    mount: stack.mount,
+    push: (notice) => {
+      const issue = notice?.issueNumber ? ` #${notice.issueNumber}` : "";
+      return stack.push({
+        level: notice?.level,
+        title: `${notice?.title || "Autonomous Issue Monitor"}${issue}`,
+        message: notice?.message || "",
+        dismissible: true,
+      });
+    },
+    count: stack.count,
+    droppedCount: stack.droppedCount,
+    clear: stack.clear,
+    styleText: () => STYLE,
+  });
 }
