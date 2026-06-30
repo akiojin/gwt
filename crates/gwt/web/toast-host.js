@@ -48,6 +48,8 @@ export function createToastStack({
   newestOnTop = true,
   levels,
   defaultLevel = "info",
+  animateDismiss = false,
+  dismissMs = 320,
 } = {}) {
   if (!document) {
     throw new Error("createToastStack requires a document");
@@ -56,9 +58,30 @@ export function createToastStack({
     throw new Error("createToastStack requires a className");
   }
   const normalizeLevel = makeLevelNormalizer(levels, defaultLevel);
+  const setTimer = (fn, ms) => {
+    const view = document.defaultView;
+    const host = view && typeof view.setTimeout === "function" ? view : globalThis;
+    return host.setTimeout(fn, ms);
+  };
   let region = null;
   let list = null;
   let dropped = 0;
+
+  // Remove an item, optionally with a collapse+fade so the rest of the stack
+  // settles smoothly (alerts region). A fallback timer guarantees removal even
+  // when the transition is skipped (reduced-motion / detached node).
+  function removeItem(item) {
+    if (!item || item.dataset.leaving === "true") {
+      return;
+    }
+    if (!animateDismiss) {
+      item.remove();
+      return;
+    }
+    item.dataset.leaving = "true";
+    item.addEventListener("transitionend", () => item.remove(), { once: true });
+    setTimer(() => item.remove(), dismissMs);
+  }
 
   function ensureStyle(root) {
     if (!styleText) {
@@ -117,9 +140,43 @@ export function createToastStack({
     if (!list) {
       return null;
     }
+
+    // Dedup / replace: a notice with an `id` supersedes the prior item carrying
+    // that id (completion/board singletons, attention per-window).
+    if (notice?.id != null) {
+      const idStr = String(notice.id);
+      for (const child of [...list.children]) {
+        if (child.dataset.toastId === idStr) {
+          child.remove();
+        }
+      }
+    }
+
     const item = document.createElement("div");
     item.className = `${className}__item`;
     item.dataset.level = normalizeLevel(notice?.level);
+    if (notice?.id != null) {
+      item.dataset.toastId = String(notice.id);
+    }
+
+    // Whole-card activation (jump-to-window / jump-to-project / jump-to-entry):
+    // the item becomes a keyboard-operable button that runs the handler then
+    // dismisses itself.
+    if (typeof notice?.onActivate === "function") {
+      item.setAttribute("role", "button");
+      item.setAttribute("tabindex", "0");
+      const activate = () => {
+        notice.onActivate();
+        removeItem(item);
+      };
+      item.addEventListener("click", activate);
+      item.addEventListener("keydown", (event) => {
+        if (event.key === "Enter" || event.key === " ") {
+          event.preventDefault();
+          activate();
+        }
+      });
+    }
 
     const titleEl = document.createElement("div");
     titleEl.className = `${className}__title`;
@@ -132,8 +189,9 @@ export function createToastStack({
       dismiss.className = `${className}__dismiss`;
       dismiss.setAttribute("aria-label", "Dismiss notification");
       dismiss.textContent = "×";
-      dismiss.addEventListener("click", () => {
-        item.remove();
+      dismiss.addEventListener("click", (event) => {
+        event.stopPropagation();
+        removeItem(item);
       });
       item.appendChild(dismiss);
     }
@@ -150,6 +208,16 @@ export function createToastStack({
     } else {
       list.appendChild(item);
     }
+
+    // Auto-dismiss after `timeoutMs`; absent / 0 keeps the toast sticky.
+    if (notice?.timeoutMs > 0) {
+      setTimer(() => {
+        if (item.isConnected) {
+          removeItem(item);
+        }
+      }, notice.timeoutMs);
+    }
+
     enforceCap();
     return item;
   }
