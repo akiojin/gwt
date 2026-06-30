@@ -242,7 +242,13 @@ fn spawn_issue_monitor_worker(scope: RuntimeScope, hub: BroadcastHub, shutdown: 
                                 publish_issue_monitor_payloads(&hub, &mut monitor);
                                 if should_scan {
                                     let gui_connected = issue_monitor_gui_connected(&hub);
-                                    monitor = scan_issue_monitor_once(scope.clone(), monitor, gui_connected).await;
+                                    monitor = scan_and_persist_issue_monitor(
+                                        scope.clone(),
+                                        monitor,
+                                        gui_connected,
+                                        &prefs_path,
+                                    )
+                                    .await;
                                     publish_issue_monitor_payloads(&hub, &mut monitor);
                                 }
                             }
@@ -254,7 +260,13 @@ fn spawn_issue_monitor_worker(scope: RuntimeScope, hub: BroadcastHub, shutdown: 
                 }
                 _ = interval.tick() => {
                     let gui_connected = issue_monitor_gui_connected(&hub);
-                    monitor = scan_issue_monitor_once(scope.clone(), monitor, gui_connected).await;
+                    monitor = scan_and_persist_issue_monitor(
+                        scope.clone(),
+                        monitor,
+                        gui_connected,
+                        &prefs_path,
+                    )
+                    .await;
                     publish_issue_monitor_payloads(&hub, &mut monitor);
                 }
             }
@@ -495,6 +507,24 @@ async fn scan_issue_monitor_once(
         );
         monitor
     })
+}
+
+/// Scan once, then persist the resulting state. The persist step is the SPEC
+/// #3200 review follow-up fix: a periodic (interval-tick) scan runs
+/// `reconcile_issue_monitor_merges` + `advance_autonomous_in_flight`, which can
+/// `record_merged` / escalate to `NeedsHuman` without any control frame. Without
+/// saving prefs after the scan, those transitions were lost on a daemon restart
+/// and already-completed work was re-launched. Both worker loop arms route their
+/// scan through here so no scan-driven transition can skip persistence.
+async fn scan_and_persist_issue_monitor(
+    scope: RuntimeScope,
+    monitor: crate::IssueMonitorState,
+    gui_connected: bool,
+    prefs_path: &Path,
+) -> crate::IssueMonitorState {
+    let monitor = scan_issue_monitor_once(scope, monitor, gui_connected).await;
+    let _ = crate::save_issue_monitor_prefs(prefs_path, &monitor.prefs());
+    monitor
 }
 
 /// SPEC #3200 Option A: a per-process secret the daemon uses to sign autonomous
@@ -1252,6 +1282,68 @@ mod tests {
     }
 
     #[test]
+    fn issue_monitor_launch_failed_control_routes_inflight_autonomous_issue_through_retry() {
+        // SPEC #3200 (review follow-up): when the independent review agent fails
+        // to spawn, the daemon receives a `launch_failed` control. For an
+        // in-flight autonomous issue this must route through the autonomous
+        // retry machinery (attempt counted, re-queued) instead of marking the
+        // inbox `LaunchFailed` and stranding the record in `Reviewing` forever.
+        let mut monitor = crate::IssueMonitorState::new(crate::IssueMonitorConfig {
+            enabled: true,
+            ..crate::IssueMonitorConfig::default()
+        });
+        monitor.set_autonomous_mode(true);
+        monitor.set_gui_connected(true);
+        monitor.record_claimed(
+            crate::IssueMonitorIssue {
+                number: 42,
+                title: "Issue 42".to_string(),
+                labels: Vec::new(),
+                state: crate::IssueMonitorIssueState::Open,
+                body: None,
+                url: None,
+            },
+            "claim-a",
+        );
+        monitor.next_launch_request().expect("launch request");
+        monitor.complete_active_launch(42, "tab-1::agent-1");
+        monitor.set_autonomous_phase(42, crate::AutonomousPhase::Implementing);
+        monitor.begin_review(42, 99, "abc123"); // Implementing → Reviewing
+        assert!(monitor.is_autonomous_in_flight(42));
+
+        let payload = crate::runtime_daemon_events::issue_monitor_payload(
+            "control",
+            serde_json::json!({
+                "launch_failed": {
+                    "issue_number": 42,
+                    "message": "Independent review could not start",
+                }
+            }),
+            std::process::id() + 1,
+        );
+        let control = decode_issue_monitor_control(payload).expect("control");
+
+        let should_scan = apply_issue_monitor_control(&mut monitor, control);
+
+        assert!(should_scan);
+        assert_eq!(
+            monitor.autonomous_record(42).map(|r| r.phase),
+            Some(crate::AutonomousPhase::Idle),
+            "routed back to Idle for retry, not stranded in Reviewing"
+        );
+        assert_eq!(
+            monitor.attempt_count(42),
+            1,
+            "the failed attempt is counted"
+        );
+        assert_eq!(
+            monitor.inbox_item(42).map(|item| item.state),
+            Some(crate::MonitorInboxState::Queued),
+            "re-queued for automatic relaunch"
+        );
+    }
+
+    #[test]
     fn issue_monitor_agent_failed_control_uses_issue_number_hint_when_window_is_unmapped() {
         let mut monitor = crate::IssueMonitorState::new(crate::IssueMonitorConfig {
             enabled: true,
@@ -1352,6 +1444,32 @@ mod tests {
         assert_eq!(
             error,
             "Git origin remote is not a GitHub URL: https://example.com/owner/repo.git"
+        );
+    }
+
+    #[tokio::test]
+    async fn scan_and_persist_issue_monitor_writes_scan_transitions_to_prefs() {
+        // SPEC #3200 (review follow-up): a periodic (interval-tick) scan can
+        // complete a merge / escalate without any control frame. The worker must
+        // persist prefs after every scan so a daemon restart never loses that
+        // completion and re-launches already-finished work. This asserts the
+        // scan→persist seam actually writes the merged state to the prefs file.
+        let temp = TempDir::new().expect("tempdir");
+        init_git_repo(temp.path());
+        let scope = sample_scope(&temp);
+        let prefs_path = temp.path().join("issue-monitor-prefs.json");
+
+        let mut monitor = crate::IssueMonitorState::new(crate::IssueMonitorConfig::default());
+        monitor.record_merged(42); // a scan-driven transition that must survive restart
+        assert!(!prefs_path.exists(), "prefs not written before the scan");
+
+        let _monitor =
+            super::scan_and_persist_issue_monitor(scope, monitor, false, &prefs_path).await;
+
+        let persisted = crate::load_issue_monitor_prefs(&prefs_path).expect("prefs written");
+        assert!(
+            persisted.merged_issues.contains(&42),
+            "scan-driven merge completion is persisted, so a restart will not re-launch it"
         );
     }
 

@@ -1262,16 +1262,31 @@ impl IssueMonitorState {
     pub fn autonomous_in_flight_issues(&self) -> Vec<u64> {
         self.autonomous_records
             .values()
-            .filter(|record| {
-                matches!(
-                    record.phase,
-                    AutonomousPhase::Implementing
-                        | AutonomousPhase::Reviewing
-                        | AutonomousPhase::Delivering
-                )
-            })
+            .filter(|record| Self::is_in_flight_phase(record.phase))
             .map(|record| record.issue_number)
             .collect()
+    }
+
+    fn is_in_flight_phase(phase: AutonomousPhase) -> bool {
+        matches!(
+            phase,
+            AutonomousPhase::Implementing
+                | AutonomousPhase::Reviewing
+                | AutonomousPhase::Delivering
+        )
+    }
+
+    /// SPEC #3200 (review follow-up): true when `issue_number` has an autonomous
+    /// record actively in flight (`Implementing` / `Reviewing` / `Delivering`).
+    /// A launch/agent failure for such an issue must be routed through the
+    /// autonomous retry/backoff/escalation machinery rather than the plain
+    /// human-gated launch-failed path, or the record strands in a non-`Idle`
+    /// phase forever (e.g. `Reviewing` after a failed review-agent spawn, where
+    /// the daemon waits for a verdict that will never arrive).
+    pub fn is_autonomous_in_flight(&self, issue_number: u64) -> bool {
+        self.autonomous_records
+            .get(&issue_number)
+            .is_some_and(|record| Self::is_in_flight_phase(record.phase))
     }
 
     /// SPEC #3200: transition Implementing→Reviewing once the implementation
@@ -1877,6 +1892,18 @@ impl IssueMonitorState {
         state: MonitorInboxState,
     ) {
         let message = message.into();
+        // SPEC #3200 (review follow-up): a failure for an in-flight autonomous
+        // issue (e.g. the independent review agent could not spawn, leaving the
+        // record in `Reviewing`) must funnel through the autonomous
+        // retry/backoff/escalation machinery — otherwise the record strands in a
+        // non-`Idle` phase forever and the daemon waits for a verdict that will
+        // never arrive. The plain human-gated `LaunchFailed`/`AgentFailed` path
+        // below is preserved for every non-autonomous issue.
+        if self.autonomous_mode && self.is_autonomous_in_flight(issue_number) {
+            let now = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+            self.record_autonomous_failure(issue_number, FailureClass::Transient, message, &now);
+            return;
+        }
         self.active_launches
             .retain(|active| *active != issue_number);
         // #3165 error-window lifecycle: retain the stale agent window id so an
@@ -2991,6 +3018,92 @@ mod tests {
         monitor.record_merged(7);
         assert!(monitor.autonomous_record(7).is_none());
         assert!(monitor.autonomous_in_flight_issues().is_empty());
+    }
+
+    #[test]
+    fn launch_failure_routes_inflight_autonomous_issue_through_retry() {
+        // SPEC #3200 (review follow-up): a launch/agent failure for an in-flight
+        // autonomous issue — e.g. the independent review agent could not spawn —
+        // must funnel through the autonomous retry machinery (count an attempt,
+        // schedule backoff, re-queue) instead of stranding the record in
+        // `Reviewing` forever, waiting for a verdict that will never arrive.
+        let mut monitor = autonomous_state();
+        scan_issue_monitor_candidates(&mut monitor, &[issue(7)], "2026-06-30T00:00:00Z");
+        monitor.complete_active_launch(7, "tab-1::agent-7");
+        monitor.set_autonomous_phase(7, AutonomousPhase::Implementing);
+        monitor.begin_review(7, 99, "abc123"); // Implementing → Reviewing
+        assert_eq!(
+            monitor.autonomous_record(7).map(|r| r.phase),
+            Some(AutonomousPhase::Reviewing)
+        );
+        assert!(monitor.is_autonomous_in_flight(7));
+
+        monitor.record_launch_failed(7, "Independent review could not start");
+
+        let record = monitor.autonomous_record(7).expect("record retained");
+        assert_eq!(
+            record.phase,
+            AutonomousPhase::Idle,
+            "routed back to Idle for retry, not stranded in Reviewing"
+        );
+        assert_eq!(monitor.attempt_count(7), 1, "the failed attempt is counted");
+        assert!(
+            record.retry_not_before.is_some(),
+            "a retry backoff is scheduled"
+        );
+        assert_eq!(
+            monitor.inbox_item(7).map(|item| item.state),
+            Some(MonitorInboxState::Queued),
+            "re-queued for automatic relaunch (not parked in LaunchFailed)"
+        );
+    }
+
+    #[test]
+    fn launch_failure_at_cap_escalates_inflight_autonomous_issue_to_needs_human() {
+        // SPEC #3200 (review follow-up): once the in-flight autonomous issue's
+        // attempts are exhausted, a further launch failure escalates to
+        // NeedsHuman through the same routing rather than silently retrying.
+        let mut monitor = autonomous_state();
+        monitor.autonomous_tuning.max_attempts = 1;
+        scan_issue_monitor_candidates(&mut monitor, &[issue(7)], "2026-06-30T00:00:00Z");
+        monitor.complete_active_launch(7, "tab-1::agent-7");
+        monitor.set_autonomous_phase(7, AutonomousPhase::Implementing);
+        monitor.begin_review(7, 99, "abc123");
+
+        monitor.record_launch_failed(7, "review spawn failed at cap");
+
+        assert_eq!(
+            monitor.autonomous_record(7).map(|r| r.phase),
+            Some(AutonomousPhase::NeedsHuman),
+            "attempts exhausted ⇒ escalated, not retried"
+        );
+        assert_eq!(
+            monitor.inbox_item(7).map(|item| item.state),
+            Some(MonitorInboxState::NeedsHuman)
+        );
+    }
+
+    #[test]
+    fn launch_failure_for_non_autonomous_issue_keeps_plain_failed_state() {
+        // Non-regression: with no in-flight autonomous record, the launch failure
+        // stays on the human-gated LaunchFailed path (SPEC #3165), untouched by
+        // the autonomous routing.
+        let mut monitor = autonomous_state(); // mode on, but no record for #7
+        scan_issue_monitor_candidates(&mut monitor, &[issue(7)], "2026-06-30T00:00:00Z");
+        assert!(!monitor.is_autonomous_in_flight(7));
+
+        monitor.record_launch_failed(7, "binary missing");
+
+        assert_eq!(
+            monitor.inbox_item(7).map(|item| item.state),
+            Some(MonitorInboxState::LaunchFailed),
+            "plain launch-failed path is preserved when no autonomous attempt is in flight"
+        );
+        assert_eq!(
+            monitor.attempt_count(7),
+            0,
+            "no autonomous attempt is counted"
+        );
     }
 
     #[test]
