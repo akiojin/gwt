@@ -1142,9 +1142,21 @@ impl AppRuntime {
             );
         }
         let window_id = window_id.to_string();
-        self.local_issue_monitor_events_for(None, |monitor| {
-            monitor.complete_active_launch(issue_number, window_id)
-        })
+        // #3165 error-window lifecycle (default mode): when an issue relaunches
+        // after a failure, close the stale agent window from the prior attempt so
+        // it is replaced rather than left on the canvas. Guard against closing the
+        // freshly launched window if it happens to reuse the same id.
+        let mut stale_window: Option<String> = None;
+        let mut events = self.local_issue_monitor_events_for(None, |monitor| {
+            stale_window = monitor
+                .take_failed_window(issue_number)
+                .filter(|stale| *stale != window_id);
+            monitor.complete_active_launch(issue_number, window_id.clone());
+        });
+        if let Some(stale) = stale_window {
+            events.extend(self.close_window_events(&stale));
+        }
+        events
     }
 
     pub(crate) fn issue_monitor_agent_failed_events(
@@ -1179,6 +1191,74 @@ impl AppRuntime {
             );
         }
         self.local_issue_monitor_agent_failed_events(window_id, message, issue_number_hint)
+    }
+
+    /// SPEC #3200 T-045/FR-025: a monitored autonomous agent showed liveness
+    /// (a runtime status change). Best-effort refresh of the daemon's
+    /// stuck-detection window for the mapped issue. No-op for non-monitor windows.
+    pub(crate) fn issue_monitor_heartbeat(&mut self, window_id: &str) {
+        let Some(issue_number) = self
+            .pending_launch_feedback_contexts
+            .get(window_id)
+            .and_then(|context| context.issue_monitor_issue_number)
+        else {
+            return;
+        };
+        let now = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+        if let Err(error) = self.publish_issue_monitor_control(serde_json::json!({
+            "heartbeat": { "issue_number": issue_number, "at": now },
+        })) {
+            tracing::debug!(
+                error = %error,
+                window_id,
+                "issue monitor heartbeat daemon publish failed (non-fatal)"
+            );
+        }
+    }
+
+    /// One or more agent windows were closed (single window close or whole
+    /// project tab close). For any window that was an Issue Monitor launched
+    /// window, return its Issue to pending (`Queued`) and free the active slot —
+    /// never a fabricated completion. Cheaply gated so non-monitor window
+    /// closes do not trigger a scan.
+    pub(crate) fn issue_monitor_windows_closed_events(
+        &mut self,
+        window_ids: &[String],
+    ) -> Vec<OutboundEvent> {
+        let monitor_windows: Vec<String> = {
+            let Some(project_root) = self.active_project_root() else {
+                return Vec::new();
+            };
+            let prefs_path = gwt::issue_monitor_prefs_path_for_repo_path(project_root);
+            let prefs = gwt::load_issue_monitor_prefs(&prefs_path).unwrap_or_default();
+            let monitor =
+                gwt::IssueMonitorState::with_prefs(gwt::IssueMonitorConfig::default(), prefs);
+            window_ids
+                .iter()
+                .filter(|window_id| monitor.launched_window_issue(window_id).is_some())
+                .cloned()
+                .collect()
+        };
+        if monitor_windows.is_empty() {
+            return Vec::new();
+        }
+        for window_id in &monitor_windows {
+            if let Err(error) = self.publish_issue_monitor_control(serde_json::json!({
+                "window_closed": { "window_id": window_id },
+            })) {
+                tracing::debug!(
+                    error = %error,
+                    window_id = %window_id,
+                    "issue monitor window-closed daemon publish failed"
+                );
+            }
+        }
+        let requeue_windows = monitor_windows;
+        self.local_issue_monitor_events_for(None, move |monitor| {
+            for window_id in &requeue_windows {
+                monitor.requeue_window(window_id);
+            }
+        })
     }
 
     fn local_issue_monitor_events(
@@ -1219,6 +1299,10 @@ impl AppRuntime {
                 ) {
                     Ok(issues) => {
                         gwt::scan_issue_monitor_candidates(&mut monitor, &issues, &now);
+                        gwt::issue_monitor_worker::reconcile_issue_monitor_merges(
+                            &mut monitor,
+                            &project_root,
+                        );
                         if monitor.config.enabled {
                             monitor.set_gui_connected(true);
                             let launch_profile_ready = self
@@ -1390,12 +1474,23 @@ impl AppRuntime {
             self.pending_launch_feedback_contexts.remove(window_id);
         }
 
+        // #3165/#3200 error-window lifecycle: an autonomous (two-stage opt-in)
+        // failure auto-closes its stale agent window so the bounded retry
+        // relaunches into a clean canvas. A default failure keeps the window on
+        // the canvas for human inspection (closed later on explicit Launch Now).
+        let autoclose_failed_window = issue_number
+            .map(|number| monitor.should_autoclose_failed_window(number))
+            .unwrap_or(false);
+
         let mut events = self.issue_monitor_snapshot_events_for(None, monitor);
         events.push(OutboundEvent::broadcast(BackendEvent::IssueMonitorToast {
             level: "error".to_string(),
             message: message.to_string(),
             issue_number,
         }));
+        if autoclose_failed_window {
+            events.extend(self.close_window_events(window_id));
+        }
         events
     }
 
@@ -1914,6 +2009,24 @@ impl AppRuntime {
                         );
                         self.local_issue_monitor_events(&client_id, |monitor| {
                             monitor.set_enabled(enabled)
+                        })
+                    }
+                }
+            }
+            FrontendEvent::SetIssueMonitorAutonomousMode { enabled } => {
+                match self.publish_issue_monitor_control(
+                    serde_json::json!({ "autonomous_mode": enabled }),
+                ) {
+                    Ok(()) => self.local_issue_monitor_events(&client_id, |monitor| {
+                        monitor.set_autonomous_mode(enabled)
+                    }),
+                    Err(error) => {
+                        tracing::debug!(
+                            error = %error,
+                            "issue monitor autonomous-mode daemon publish failed; using local fallback"
+                        );
+                        self.local_issue_monitor_events(&client_id, |monitor| {
+                            monitor.set_autonomous_mode(enabled)
                         })
                     }
                 }

@@ -152,6 +152,13 @@ fn parse(input: &str) -> Result<ParsedEnvelope, CliParseError> {
             number: required_u64(params, "number")?,
             body: required_string(params, "body")?,
         }),
+        "issue.monitor.review_verdict" | "issue.monitor.review-verdict" => {
+            CliCommand::Issue(IssueCommand::MonitorReviewVerdict {
+                issue_number: required_u64(params, "issue_number")?,
+                reviewed_sha: required_string(params, "reviewed_sha")?,
+                verdict_raw: required_string(params, "verdict_raw")?,
+            })
+        }
         "pr.current" => CliCommand::Pr(PrCommand::Current),
         "pr.create" => CliCommand::Pr(PrCommand::CreateBody {
             base: required_string(params, "base")?,
@@ -1105,6 +1112,36 @@ mod tests {
             CliParseError::MissingFlag(flag) => assert_eq!(flag, "workspace_id"),
             other => panic!("unexpected error: {other:?}"),
         }
+    }
+
+    #[test]
+    fn issue_monitor_review_verdict_parses() {
+        // SPEC #3200 Option A: the review agent's verdict-report op.
+        let cmd = ok(
+            "issue.monitor.review_verdict",
+            json!({
+                "issue_number": 42,
+                "reviewed_sha": "abc123",
+                "verdict_raw": "{\"schema\":\"gwt-autonomous-review/v1\"}",
+            }),
+        );
+        match cmd {
+            CliCommand::Issue(IssueCommand::MonitorReviewVerdict {
+                issue_number,
+                reviewed_sha,
+                verdict_raw,
+            }) => {
+                assert_eq!(issue_number, 42);
+                assert_eq!(reviewed_sha, "abc123");
+                assert!(verdict_raw.contains("gwt-autonomous-review"));
+            }
+            other => panic!("unexpected command: {other:?}"),
+        }
+        // Missing the reviewed SHA is rejected.
+        assert!(matches!(
+            err("issue.monitor.review_verdict", json!({"issue_number": 42})),
+            CliParseError::MissingFlag(_)
+        ));
     }
 
     #[test]

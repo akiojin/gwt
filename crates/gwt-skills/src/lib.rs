@@ -2167,6 +2167,40 @@ mod tests {
     }
 
     #[test]
+    fn gwt_manage_pr_documents_drive_to_merge_delivery() {
+        let workspace_root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let claude =
+            std::fs::read_to_string(workspace_root.join(".claude/skills/gwt-manage-pr/SKILL.md"))
+                .expect("read .claude gwt-manage-pr SKILL.md");
+        let codex =
+            std::fs::read_to_string(workspace_root.join(".codex/skills/gwt-manage-pr/SKILL.md"))
+                .expect("read .codex gwt-manage-pr SKILL.md");
+        // Managed skill parity: the Codex mirror must match the canonical
+        // `.claude` source byte-for-byte (assets.rs include_dir! + verbatim
+        // distribution).
+        assert_eq!(
+            claude, codex,
+            ".claude and .codex gwt-manage-pr SKILL.md must stay in parity"
+        );
+        // SPEC #3197: gwt-manage-pr must document the drive-to-merge delivery
+        // loop (auto-merge + CI/review fix loop + watch until merged), gated by
+        // the Ready PR Gate.
+        for required in [
+            "Deliver",
+            "drive to merge",
+            "gh pr merge --auto",
+            "merged_at",
+            "Ready PR Gate",
+            "Loop Safety Guard",
+        ] {
+            assert!(
+                claude.contains(required),
+                "gwt-manage-pr SKILL.md must document drive-to-merge phrase: {required}"
+            );
+        }
+    }
+
+    #[test]
     fn build_spec_does_not_treat_draft_pr_as_completion() {
         let workspace_root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
         for relative in [

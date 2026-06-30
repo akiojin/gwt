@@ -525,13 +525,18 @@ impl AppRuntime {
                     .collect::<Vec<_>>()
             })
             .unwrap_or_default();
-        for window_id in window_ids {
-            self.clear_agent_window_startup_restore(&window_id);
-            self.stop_window_runtime(&window_id);
-            self.remove_window_state_tracking(&window_id);
-            self.window_lookup.remove(&window_id);
-            self.profile_selections.remove(&window_id);
+        for window_id in &window_ids {
+            self.clear_agent_window_startup_restore(window_id);
+            self.stop_window_runtime(window_id);
+            self.remove_window_state_tracking(window_id);
+            self.window_lookup.remove(window_id);
+            self.profile_selections.remove(window_id);
         }
+
+        // Return any Issue Monitor launched windows to pending before the tab is
+        // removed, while the closing project is still the active root. Closing a
+        // project pauses (does not complete) its in-flight work.
+        let issue_monitor_events = self.issue_monitor_windows_closed_events(&window_ids);
 
         self.tabs.remove(index);
         if self.tabs.is_empty() {
@@ -557,6 +562,7 @@ impl AppRuntime {
         if wizard_closed {
             events.push(self.launch_wizard_state_broadcast(None));
         }
+        events.extend(issue_monitor_events);
         events
     }
 }

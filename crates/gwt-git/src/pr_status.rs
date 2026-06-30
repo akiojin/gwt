@@ -279,6 +279,69 @@ pub fn parse_pr_titles_by_branch(json: &str) -> Result<std::collections::HashMap
         .collect())
 }
 
+/// Branches (PR head refs) whose PR has merged, fetched in ONE `gh pr list`
+/// call. A transient failure returns an `Err` (the caller keeps work as
+/// launched) rather than an empty set, so closing the active slot only happens
+/// on a positive merge signal.
+pub fn fetch_merged_pr_branches(repo_path: &Path) -> Result<std::collections::BTreeSet<String>> {
+    fetch_merged_pr_branches_with(repo_path, run_gh_command)
+}
+
+fn fetch_merged_pr_branches_with<F>(
+    repo_path: &Path,
+    mut run_gh: F,
+) -> Result<std::collections::BTreeSet<String>>
+where
+    F: FnMut(&Path, &[&str]) -> Result<GhCliOutput>,
+{
+    let output = run_gh(
+        repo_path,
+        &[
+            "pr",
+            "list",
+            "--json",
+            "headRefName,state",
+            "--state",
+            "merged",
+            "--limit",
+            "999",
+        ],
+    )?;
+    if !output.success {
+        return Err(GwtError::Git(format!(
+            "gh pr list merged: {}",
+            output.stderr.trim()
+        )));
+    }
+    parse_merged_pr_branches(&output.stdout)
+}
+
+/// Parse `gh pr list --json headRefName,state` into the set of branches whose
+/// PR state is `MERGED`.
+pub fn parse_merged_pr_branches(json: &str) -> Result<std::collections::BTreeSet<String>> {
+    let arr: Vec<serde_json::Value> =
+        serde_json::from_str(json).map_err(|e| GwtError::Other(format!("gh pr list JSON: {e}")))?;
+    let mut branches = std::collections::BTreeSet::new();
+    for value in &arr {
+        let merged = value
+            .get("state")
+            .and_then(serde_json::Value::as_str)
+            .is_some_and(|state| state.eq_ignore_ascii_case("merged"));
+        if !merged {
+            continue;
+        }
+        if let Some(branch) = value
+            .get("headRefName")
+            .and_then(serde_json::Value::as_str)
+            .map(str::trim)
+            .filter(|name| !name.is_empty())
+        {
+            branches.insert(branch.to_string());
+        }
+    }
+    Ok(branches)
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct GhCliOutput {
     success: bool,
@@ -534,6 +597,222 @@ pub fn parse_pr_check_report_json(json: &str) -> Result<PrCheckReport> {
     })
 }
 
+// ---------------------------------------------------------------------------
+// SPEC #3200 — gate-input adapters for the autonomous strong gate.
+//
+// These feed the PURE gate functions (classify_ci_rollup / build_review_prompt /
+// evaluate_autonomous_gate). They are FAIL-CLOSED: a missing PR, a gh failure,
+// or unparseable output yields `None`/empty so the gate treats the input as
+// unavailable rather than as a pass.
+// ---------------------------------------------------------------------------
+
+/// Parse `gh pr list --head <branch> --json number` into the open PR number for
+/// that work branch. Returns the highest number when several exist (the most
+/// recent reopen). `None` when the array is empty or unparseable.
+pub fn parse_open_pr_number(json: &str) -> Option<u64> {
+    let arr: Vec<serde_json::Value> = serde_json::from_str(json).ok()?;
+    arr.iter()
+        .filter_map(|value| value.get("number").and_then(serde_json::Value::as_u64))
+        .max()
+}
+
+/// Parse `gh pr view <n> --json headRefOid` into the PR head SHA. `None` when
+/// absent/empty/unparseable.
+pub fn parse_pr_head_sha(json: &str) -> Option<String> {
+    let value: serde_json::Value = serde_json::from_str(json).ok()?;
+    value
+        .get("headRefOid")
+        .and_then(serde_json::Value::as_str)
+        .filter(|sha| !sha.trim().is_empty())
+        .map(str::to_string)
+}
+
+/// Extract the `statusCheckRollup` array (as a JSON string) from a
+/// `gh pr view <n> --json statusCheckRollup` body, ready to hand to
+/// `classify_ci_rollup`. A missing/null rollup becomes `"[]"` (which the
+/// classifier treats as no checks → vacuous → fail-closed).
+pub fn extract_status_check_rollup(json: &str) -> String {
+    let parsed: Option<serde_json::Value> = serde_json::from_str(json).ok();
+    match parsed
+        .as_ref()
+        .and_then(|value| value.get("statusCheckRollup"))
+    {
+        Some(rollup) if rollup.is_array() => rollup.to_string(),
+        _ => "[]".to_string(),
+    }
+}
+
+/// Find the open PR number for a work `branch` (fail-closed `Option`).
+pub fn fetch_open_pr_number_for_branch(repo_path: &Path, branch: &str) -> Option<u64> {
+    fetch_open_pr_number_for_branch_with(repo_path, branch, run_gh_command)
+}
+
+fn fetch_open_pr_number_for_branch_with<F>(
+    repo_path: &Path,
+    branch: &str,
+    mut run_gh: F,
+) -> Option<u64>
+where
+    F: FnMut(&Path, &[&str]) -> Result<GhCliOutput>,
+{
+    let output = run_gh(
+        repo_path,
+        &[
+            "pr", "list", "--head", branch, "--state", "open", "--json", "number",
+        ],
+    )
+    .ok()?;
+    if !output.success {
+        return None;
+    }
+    parse_open_pr_number(&output.stdout)
+}
+
+/// Fetch a PR's head SHA — the SHA the gate binds the review/merge to
+/// (fail-closed `Option`).
+pub fn fetch_pr_head_sha(repo_path: &Path, number: u64) -> Option<String> {
+    fetch_pr_head_sha_with(repo_path, number, run_gh_command)
+}
+
+fn fetch_pr_head_sha_with<F>(repo_path: &Path, number: u64, mut run_gh: F) -> Option<String>
+where
+    F: FnMut(&Path, &[&str]) -> Result<GhCliOutput>,
+{
+    let number = number.to_string();
+    let output = run_gh(repo_path, &["pr", "view", &number, "--json", "headRefOid"]).ok()?;
+    if !output.success {
+        return None;
+    }
+    parse_pr_head_sha(&output.stdout)
+}
+
+/// Fetch a PR's `statusCheckRollup` array JSON (fail-closed: `"[]"` on any
+/// failure so the gate treats CI as vacuous, never a pass).
+pub fn fetch_pr_status_check_rollup(repo_path: &Path, number: u64) -> String {
+    fetch_pr_status_check_rollup_with(repo_path, number, run_gh_command)
+}
+
+fn fetch_pr_status_check_rollup_with<F>(repo_path: &Path, number: u64, mut run_gh: F) -> String
+where
+    F: FnMut(&Path, &[&str]) -> Result<GhCliOutput>,
+{
+    let number = number.to_string();
+    match run_gh(
+        repo_path,
+        &["pr", "view", &number, "--json", "statusCheckRollup"],
+    ) {
+        Ok(output) if output.success => extract_status_check_rollup(&output.stdout),
+        _ => "[]".to_string(),
+    }
+}
+
+/// Fetch a PR's unified diff for the independent review agent. Capped to
+/// `max_bytes` (truncated with a marker) so a huge diff never blows the prompt.
+/// `None` on any gh failure (the review then runs without a diff and, being
+/// adversarial + fail-closed, will reject).
+pub fn fetch_pr_diff(repo_path: &Path, number: u64, max_bytes: usize) -> Option<String> {
+    fetch_pr_diff_with(repo_path, number, max_bytes, run_gh_command)
+}
+
+fn fetch_pr_diff_with<F>(
+    repo_path: &Path,
+    number: u64,
+    max_bytes: usize,
+    mut run_gh: F,
+) -> Option<String>
+where
+    F: FnMut(&Path, &[&str]) -> Result<GhCliOutput>,
+{
+    let number = number.to_string();
+    let output = run_gh(repo_path, &["pr", "diff", &number]).ok()?;
+    if !output.success {
+        return None;
+    }
+    Some(truncate_diff(&output.stdout, max_bytes))
+}
+
+fn truncate_diff(diff: &str, max_bytes: usize) -> String {
+    if diff.len() <= max_bytes {
+        return diff.to_string();
+    }
+    // Truncate on a char boundary to keep valid UTF-8.
+    let mut end = max_bytes;
+    while end > 0 && !diff.is_char_boundary(end) {
+        end -= 1;
+    }
+    format!(
+        "{}\n... [diff truncated at {max_bytes} bytes] ...",
+        &diff[..end]
+    )
+}
+
+/// SPEC #3200: arm auto-merge for an autonomous PR. This is the IRREVERSIBLE
+/// action — callers MUST have run the strong gate first. Uses GitHub's native
+/// `--auto` so the merge only proceeds once branch-protection's required checks
+/// pass (a second, GitHub-enforced layer behind our gate). Returns `false` on
+/// any gh failure (fail-closed: never report a merge armed when it was not).
+pub fn merge_pr_auto(repo_path: &Path, number: u64) -> bool {
+    merge_pr_auto_with(repo_path, number, run_gh_command)
+}
+
+fn merge_pr_auto_with<F>(repo_path: &Path, number: u64, mut run_gh: F) -> bool
+where
+    F: FnMut(&Path, &[&str]) -> Result<GhCliOutput>,
+{
+    let number = number.to_string();
+    matches!(
+        run_gh(repo_path, &["pr", "merge", &number, "--auto", "--squash"]),
+        Ok(output) if output.success
+    )
+}
+
+/// Disarm a previously-armed auto-merge (SPEC #3200 FR-024: HEAD advanced past
+/// the reviewed SHA ⇒ revoke). Fail-closed `bool`.
+pub fn disable_pr_auto_merge(repo_path: &Path, number: u64) -> bool {
+    disable_pr_auto_merge_with(repo_path, number, run_gh_command)
+}
+
+fn disable_pr_auto_merge_with<F>(repo_path: &Path, number: u64, mut run_gh: F) -> bool
+where
+    F: FnMut(&Path, &[&str]) -> Result<GhCliOutput>,
+{
+    let number = number.to_string();
+    matches!(
+        run_gh(repo_path, &["pr", "merge", &number, "--disable-auto"]),
+        Ok(output) if output.success
+    )
+}
+
+/// Parse `gh pr view <n> --json mergeCommit` into the merge commit SHA. Used for
+/// the SPEC #3200 layer-4 check (merged SHA must equal the reviewed SHA). `None`
+/// until the PR has actually merged.
+pub fn parse_pr_merge_commit_sha(json: &str) -> Option<String> {
+    let value: serde_json::Value = serde_json::from_str(json).ok()?;
+    value
+        .get("mergeCommit")
+        .and_then(|mc| mc.get("oid"))
+        .and_then(serde_json::Value::as_str)
+        .filter(|sha| !sha.trim().is_empty())
+        .map(str::to_string)
+}
+
+/// Fetch a merged PR's merge-commit SHA (fail-closed `Option`).
+pub fn fetch_pr_merge_commit_sha(repo_path: &Path, number: u64) -> Option<String> {
+    fetch_pr_merge_commit_sha_with(repo_path, number, run_gh_command)
+}
+
+fn fetch_pr_merge_commit_sha_with<F>(repo_path: &Path, number: u64, mut run_gh: F) -> Option<String>
+where
+    F: FnMut(&Path, &[&str]) -> Result<GhCliOutput>,
+{
+    let number = number.to_string();
+    let output = run_gh(repo_path, &["pr", "view", &number, "--json", "mergeCommit"]).ok()?;
+    if !output.success {
+        return None;
+    }
+    parse_pr_merge_commit_sha(&output.stdout)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -558,6 +837,24 @@ mod tests {
         );
         // Empty titles are skipped.
         assert!(!map.contains_key("work/c"));
+    }
+
+    #[test]
+    fn parse_merged_pr_branches_collects_only_merged_head_refs() {
+        let json = r#"[
+            {"headRefName": "work/a", "state": "MERGED"},
+            {"headRefName": "work/b", "state": "OPEN"},
+            {"headRefName": "work/c", "state": "merged"},
+            {"headRefName": "", "state": "MERGED"}
+        ]"#;
+        let branches = parse_merged_pr_branches(json).unwrap();
+        assert!(branches.contains("work/a"));
+        assert!(
+            branches.contains("work/c"),
+            "state match is case-insensitive"
+        );
+        assert!(!branches.contains("work/b"), "open PRs are excluded");
+        assert_eq!(branches.len(), 2, "empty head refs are skipped");
     }
 
     #[test]
@@ -947,5 +1244,167 @@ mod tests {
         assert_eq!(PrState::Open.to_string(), "OPEN");
         assert_eq!(PrState::Closed.to_string(), "CLOSED");
         assert_eq!(PrState::Merged.to_string(), "MERGED");
+    }
+
+    // --- SPEC #3200 gate-input adapters ---
+
+    #[test]
+    fn parse_open_pr_number_returns_highest_and_handles_empty() {
+        assert_eq!(
+            parse_open_pr_number(r#"[{"number":12},{"number":34}]"#),
+            Some(34),
+            "most recent (highest) open PR",
+        );
+        assert_eq!(parse_open_pr_number("[]"), None, "no open PR");
+        assert_eq!(parse_open_pr_number("not json"), None, "unparseable → none");
+    }
+
+    #[test]
+    fn parse_pr_head_sha_extracts_or_fails_closed() {
+        assert_eq!(
+            parse_pr_head_sha(r#"{"headRefOid":"abc123"}"#),
+            Some("abc123".to_string()),
+        );
+        assert_eq!(parse_pr_head_sha(r#"{"headRefOid":""}"#), None, "empty SHA");
+        assert_eq!(parse_pr_head_sha("{}"), None, "missing field");
+        assert_eq!(parse_pr_head_sha("nope"), None, "unparseable");
+    }
+
+    #[test]
+    fn extract_status_check_rollup_returns_array_or_empty() {
+        let body = r#"{"statusCheckRollup":[{"name":"build","status":"COMPLETED","conclusion":"SUCCESS"}]}"#;
+        let rollup = extract_status_check_rollup(body);
+        assert!(rollup.contains("\"build\""));
+        assert!(rollup.starts_with('['));
+        // null / missing / unparseable → "[]" (fail-closed → vacuous).
+        assert_eq!(
+            extract_status_check_rollup(r#"{"statusCheckRollup":null}"#),
+            "[]"
+        );
+        assert_eq!(extract_status_check_rollup("{}"), "[]");
+        assert_eq!(extract_status_check_rollup("nope"), "[]");
+    }
+
+    #[test]
+    fn fetch_open_pr_number_for_branch_with_parses_and_fails_closed() {
+        let repo = Path::new("/tmp/repo");
+        let found = fetch_open_pr_number_for_branch_with(repo, "work/issue-42", |_p, args| {
+            assert_eq!(args[0], "pr");
+            assert!(args.contains(&"work/issue-42"));
+            Ok(GhCliOutput {
+                success: true,
+                stdout: r#"[{"number":7}]"#.to_string(),
+                stderr: String::new(),
+            })
+        });
+        assert_eq!(found, Some(7));
+
+        let failed = fetch_open_pr_number_for_branch_with(repo, "b", |_p, _args| {
+            Ok(GhCliOutput {
+                success: false,
+                stdout: String::new(),
+                stderr: "boom".to_string(),
+            })
+        });
+        assert_eq!(failed, None, "gh failure → fail-closed None");
+    }
+
+    #[test]
+    fn fetch_pr_status_check_rollup_with_fails_closed_to_empty_array() {
+        let repo = Path::new("/tmp/repo");
+        let ok = fetch_pr_status_check_rollup_with(repo, 7, |_p, _args| {
+            Ok(GhCliOutput {
+                success: true,
+                stdout: r#"{"statusCheckRollup":[{"name":"ci","state":"SUCCESS"}]}"#.to_string(),
+                stderr: String::new(),
+            })
+        });
+        assert!(ok.contains("\"ci\""));
+        let failed = fetch_pr_status_check_rollup_with(repo, 7, |_p, _args| {
+            Err(GwtError::Git("nope".to_string()))
+        });
+        assert_eq!(failed, "[]", "any failure → vacuous, never a pass");
+    }
+
+    #[test]
+    fn merge_pr_auto_with_arms_and_fails_closed() {
+        let repo = Path::new("/tmp/repo");
+        let armed = merge_pr_auto_with(repo, 7, |_p, args| {
+            assert_eq!(args, ["pr", "merge", "7", "--auto", "--squash"]);
+            Ok(GhCliOutput {
+                success: true,
+                stdout: String::new(),
+                stderr: String::new(),
+            })
+        });
+        assert!(armed);
+        let failed = merge_pr_auto_with(repo, 7, |_p, _a| {
+            Ok(GhCliOutput {
+                success: false,
+                stdout: String::new(),
+                stderr: "nope".to_string(),
+            })
+        });
+        assert!(!failed, "gh failure ⇒ not armed (fail-closed)");
+        let errored = merge_pr_auto_with(repo, 7, |_p, _a| Err(GwtError::Git("x".to_string())));
+        assert!(!errored);
+    }
+
+    #[test]
+    fn disable_pr_auto_merge_with_disarms() {
+        let repo = Path::new("/tmp/repo");
+        let ok = disable_pr_auto_merge_with(repo, 7, |_p, args| {
+            assert_eq!(args, ["pr", "merge", "7", "--disable-auto"]);
+            Ok(GhCliOutput {
+                success: true,
+                stdout: String::new(),
+                stderr: String::new(),
+            })
+        });
+        assert!(ok);
+    }
+
+    #[test]
+    fn parse_pr_merge_commit_sha_extracts_or_fails_closed() {
+        assert_eq!(
+            parse_pr_merge_commit_sha(r#"{"mergeCommit":{"oid":"deadbeef"}}"#),
+            Some("deadbeef".to_string()),
+        );
+        assert_eq!(
+            parse_pr_merge_commit_sha(r#"{"mergeCommit":null}"#),
+            None,
+            "not merged yet"
+        );
+        assert_eq!(parse_pr_merge_commit_sha("{}"), None);
+        assert_eq!(parse_pr_merge_commit_sha("nope"), None);
+    }
+
+    #[test]
+    fn fetch_pr_diff_with_truncates_and_fails_closed() {
+        let repo = Path::new("/tmp/repo");
+        let big = "x".repeat(5000);
+        let diff = fetch_pr_diff_with(repo, 7, 100, {
+            let big = big.clone();
+            move |_p, args| {
+                assert_eq!(args, ["pr", "diff", "7"]);
+                Ok(GhCliOutput {
+                    success: true,
+                    stdout: big.clone(),
+                    stderr: String::new(),
+                })
+            }
+        })
+        .expect("diff present");
+        assert!(diff.contains("diff truncated"));
+        assert!(diff.len() < 5000);
+
+        let failed = fetch_pr_diff_with(repo, 7, 100, |_p, _a| {
+            Ok(GhCliOutput {
+                success: false,
+                stdout: String::new(),
+                stderr: "no pr".to_string(),
+            })
+        });
+        assert_eq!(failed, None, "gh failure → None");
     }
 }
