@@ -313,7 +313,9 @@ pub fn advance_autonomous_in_flight(
                             "autonomous gate PASS — arming auto-merge"
                         );
                         monitor.begin_delivering(issue_number);
-                        if !gwt_git::pr_status::merge_pr_auto(repo_path, pr) {
+                        // Bind the arm to the reviewed head SHA so GitHub refuses
+                        // to merge if the head advanced past what the gate reviewed.
+                        if !gwt_git::pr_status::merge_pr_auto(repo_path, pr, &inputs.reviewed_sha) {
                             tracing::warn!(issue = issue_number, pr, "auto-merge arm failed");
                         }
                     }

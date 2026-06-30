@@ -751,17 +751,39 @@ fn truncate_diff(diff: &str, max_bytes: usize) -> String {
 /// `--auto` so the merge only proceeds once branch-protection's required checks
 /// pass (a second, GitHub-enforced layer behind our gate). Returns `false` on
 /// any gh failure (fail-closed: never report a merge armed when it was not).
-pub fn merge_pr_auto(repo_path: &Path, number: u64) -> bool {
-    merge_pr_auto_with(repo_path, number, run_gh_command)
+///
+/// `reviewed_head_sha` binds the arm to the exact head the gate reviewed via
+/// `--match-head-commit`: if the PR head advances between review and merge,
+/// GitHub REFUSES to merge the unreviewed commit. This is prevention at the
+/// merge boundary (vs the post-merge layer-4 detection), closing the
+/// review→merge TOCTOU window.
+pub fn merge_pr_auto(repo_path: &Path, number: u64, reviewed_head_sha: &str) -> bool {
+    merge_pr_auto_with(repo_path, number, reviewed_head_sha, run_gh_command)
 }
 
-fn merge_pr_auto_with<F>(repo_path: &Path, number: u64, mut run_gh: F) -> bool
+fn merge_pr_auto_with<F>(
+    repo_path: &Path,
+    number: u64,
+    reviewed_head_sha: &str,
+    mut run_gh: F,
+) -> bool
 where
     F: FnMut(&Path, &[&str]) -> Result<GhCliOutput>,
 {
     let number = number.to_string();
     matches!(
-        run_gh(repo_path, &["pr", "merge", &number, "--auto", "--squash"]),
+        run_gh(
+            repo_path,
+            &[
+                "pr",
+                "merge",
+                &number,
+                "--auto",
+                "--squash",
+                "--match-head-commit",
+                reviewed_head_sha,
+            ],
+        ),
         Ok(output) if output.success
     )
 }
@@ -1327,10 +1349,23 @@ mod tests {
     }
 
     #[test]
-    fn merge_pr_auto_with_arms_and_fails_closed() {
+    fn merge_pr_auto_with_arms_bound_to_head_sha_and_fails_closed() {
         let repo = Path::new("/tmp/repo");
-        let armed = merge_pr_auto_with(repo, 7, |_p, args| {
-            assert_eq!(args, ["pr", "merge", "7", "--auto", "--squash"]);
+        let armed = merge_pr_auto_with(repo, 7, "abc123", |_p, args| {
+            // The arm MUST bind to the reviewed head SHA via --match-head-commit
+            // so a head that advanced past review cannot merge unreviewed.
+            assert_eq!(
+                args,
+                [
+                    "pr",
+                    "merge",
+                    "7",
+                    "--auto",
+                    "--squash",
+                    "--match-head-commit",
+                    "abc123",
+                ]
+            );
             Ok(GhCliOutput {
                 success: true,
                 stdout: String::new(),
@@ -1338,7 +1373,7 @@ mod tests {
             })
         });
         assert!(armed);
-        let failed = merge_pr_auto_with(repo, 7, |_p, _a| {
+        let failed = merge_pr_auto_with(repo, 7, "abc123", |_p, _a| {
             Ok(GhCliOutput {
                 success: false,
                 stdout: String::new(),
@@ -1346,7 +1381,9 @@ mod tests {
             })
         });
         assert!(!failed, "gh failure ⇒ not armed (fail-closed)");
-        let errored = merge_pr_auto_with(repo, 7, |_p, _a| Err(GwtError::Git("x".to_string())));
+        let errored = merge_pr_auto_with(repo, 7, "abc123", |_p, _a| {
+            Err(GwtError::Git("x".to_string()))
+        });
         assert!(!errored);
     }
 
