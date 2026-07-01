@@ -724,14 +724,41 @@ pub fn load_issue_monitor_prefs(path: &Path) -> io::Result<IssueMonitorPrefs> {
         .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))
 }
 
+/// Per-process-unique scratch path for the atomic prefs write, placed in the
+/// same directory as `path` (so the final `rename` stays on one filesystem and
+/// is atomic). The daemon (`gwtd`) and GUI (`gwt`) processes both write this same
+/// prefs file; a fixed `*.json.tmp` name let their concurrent writes open and
+/// truncate the SAME scratch file and interleave into torn JSON, which
+/// `load_issue_monitor_prefs` then silently reset to default (adversarial
+/// review). Scoping the scratch name to `{pid}-{uuid}` gives every writer its own
+/// file. Mirrors the gwt-core atomic-write convention.
+fn unique_prefs_tmp_path(path: &Path) -> std::path::PathBuf {
+    let parent = match path.parent() {
+        Some(parent) if !parent.as_os_str().is_empty() => parent.to_path_buf(),
+        _ => std::path::PathBuf::from("."),
+    };
+    let file_name = path
+        .file_name()
+        .and_then(|value| value.to_str())
+        .unwrap_or("issue-monitor.json");
+    parent.join(format!(
+        ".{}.tmp-{}-{}",
+        file_name,
+        std::process::id(),
+        uuid::Uuid::new_v4()
+    ))
+}
+
 pub fn save_issue_monitor_prefs(path: &Path, prefs: &IssueMonitorPrefs) -> io::Result<()> {
     if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent)?;
+        if !parent.as_os_str().is_empty() {
+            fs::create_dir_all(parent)?;
+        }
     }
     let content = serde_json::to_string_pretty(prefs).map_err(io::Error::other)?;
-    let tmp = path.with_extension("json.tmp");
+    let tmp = unique_prefs_tmp_path(path);
     fs::write(&tmp, content.as_bytes())?;
-    fs::rename(tmp, path)
+    fs::rename(&tmp, path)
 }
 
 pub fn issue_monitor_prefs_path_for_repo_path(repo_path: &Path) -> std::path::PathBuf {
@@ -958,10 +985,13 @@ impl IssueMonitorState {
     }
 
     /// SPEC #3200 T-044/T-035/FR-013: launched autonomous issues whose agent has
-    /// shown no liveness for longer than `stuck_timeout_secs`. Issues already in
-    /// a pipeline-in-flight phase (`Reviewing`/`Delivering`, governed by the
-    /// merge-watch timeout) and terminal phases are excluded. Issues with no
-    /// heartbeat yet are conservatively NOT judged stuck (no liveness data).
+    /// shown no liveness for longer than `stuck_timeout_secs`. Pipeline-in-flight
+    /// phases are excluded because they self-heal without a liveness signal:
+    /// `Reviewing` is resumed on a daemon restart (see
+    /// [`resume_inflight_reviews_after_restart`](Self::resume_inflight_reviews_after_restart)),
+    /// and `Delivering` re-polls the persisted PR for its merge commit. Terminal
+    /// phases are excluded too. Issues with no heartbeat yet are conservatively
+    /// NOT judged stuck (no liveness data).
     pub fn stuck_autonomous_issues(&self, now: &str) -> Vec<u64> {
         let timeout = self.autonomous_tuning.stuck_timeout_secs as i64;
         self.autonomous_records
@@ -1006,6 +1036,39 @@ impl IssueMonitorState {
                 (issue_number, outcome)
             })
             .collect()
+    }
+
+    /// SPEC #3200 (review follow-up): restore self-healing for a `Reviewing`
+    /// record whose review-agent dispatch was lost across a daemon restart.
+    ///
+    /// The review-agent spawn request (`pending_review_dispatches`) is NOT
+    /// persisted, but the record's phase IS. A record reloaded in `Reviewing`
+    /// therefore waits forever for a verdict that no agent will produce (the
+    /// review agent was never re-spawned) — `advance_autonomous_in_flight`'s
+    /// `Reviewing` branch only waits, and the `Implementing` branch (which
+    /// re-detects the open PR and re-issues `begin_review` + the review dispatch)
+    /// is never reached. Resetting the phase to `Implementing` restores exactly
+    /// the pre-persist self-healing (a restart used to revert the in-memory
+    /// phase): the next scan rebuilds the launch plan, re-detects the PR, and
+    /// re-dispatches the review, binding to the current head SHA.
+    ///
+    /// `Delivering` is intentionally left untouched: its watch loop polls the
+    /// persisted `pr_number` for the merge commit, so it self-heals across a
+    /// restart on its own — and its GitHub auto-merge is already armed, so
+    /// re-driving it would double-work and could invalidate the armed merge.
+    ///
+    /// Idempotent and safe to call once right after loading persisted prefs; it
+    /// only touches records already parked in `Reviewing`.
+    pub fn resume_inflight_reviews_after_restart(&mut self) -> Vec<u64> {
+        let mut resumed = Vec::new();
+        for record in self.autonomous_records.values_mut() {
+            if record.phase == AutonomousPhase::Reviewing {
+                record.phase = AutonomousPhase::Implementing;
+                record.review_passed = None;
+                resumed.push(record.issue_number);
+            }
+        }
+        resumed
     }
 
     /// SPEC #3200 FR-027: escalate an issue to the terminal `NeedsHuman` state —
@@ -2327,6 +2390,61 @@ mod tests {
     }
 
     #[test]
+    fn prefs_tmp_path_is_process_unique_not_a_shared_fixed_name() {
+        // adversarial review (shared *.json.tmp race): the daemon and GUI both
+        // write this prefs file, so the atomic-write scratch path must be unique
+        // per writer — never the old fixed `*.json.tmp` that concurrent writers
+        // could truncate into torn JSON.
+        let path = std::path::Path::new("/x/y/issue-monitor.json");
+        let a = super::unique_prefs_tmp_path(path);
+        let b = super::unique_prefs_tmp_path(path);
+        assert_ne!(a, b, "each write gets a distinct scratch path (uuid)");
+        assert_ne!(
+            a,
+            path.with_extension("json.tmp"),
+            "not the old shared fixed name"
+        );
+        assert!(
+            a.to_string_lossy()
+                .contains(&std::process::id().to_string()),
+            "scratch path is scoped to the writing process: {}",
+            a.display()
+        );
+        assert_eq!(
+            a.parent(),
+            path.parent(),
+            "scratch stays in the target's dir so the rename is atomic"
+        );
+    }
+
+    #[test]
+    fn save_issue_monitor_prefs_round_trips_and_leaves_no_scratch_file() {
+        // The unique-scratch atomic write still round-trips and cleans up (the
+        // rename consumes the temp), leaving only the target file.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("issue-monitor.json");
+        let prefs = IssueMonitorPrefs {
+            merged_issues: vec![7, 9],
+            ..IssueMonitorPrefs::default()
+        };
+        save_issue_monitor_prefs(&path, &prefs).expect("save");
+
+        let loaded = load_issue_monitor_prefs(&path).expect("load");
+        assert_eq!(loaded.merged_issues, vec![7, 9]);
+
+        let leftovers: Vec<_> = std::fs::read_dir(dir.path())
+            .expect("read_dir")
+            .filter_map(Result::ok)
+            .map(|entry| entry.file_name().to_string_lossy().into_owned())
+            .filter(|name| name != "issue-monitor.json")
+            .collect();
+        assert!(
+            leftovers.is_empty(),
+            "no scratch file left behind: {leftovers:?}"
+        );
+    }
+
+    #[test]
     fn autonomous_phase_defaults_idle() {
         // SPEC #3200 T-022: an issue with no autonomous record reports no record,
         // and a freshly created record starts Idle.
@@ -2984,6 +3102,77 @@ mod tests {
         assert!(recovered.is_empty(), "off ⇒ no recovery");
         assert_eq!(monitor.active_count(), 1, "slot untouched when mode off");
         assert_eq!(monitor.attempt_count(42), 0, "no attempt recorded when off");
+    }
+
+    #[test]
+    fn resume_after_restart_reverts_reviewing_to_implementing_for_redispatch() {
+        // review follow-up: a record persisted mid-review reloads in `Reviewing`,
+        // but its (non-persisted) review dispatch is gone, so it would wait forever
+        // for a verdict. Resetting it to `Implementing` lets the next scan re-detect
+        // the PR and re-issue the review — restoring the pre-persist self-healing.
+        // The record is round-tripped through prefs to model an actual restart.
+        let mut monitor = autonomous_state();
+        monitor.set_autonomous_phase(7, AutonomousPhase::Implementing);
+        monitor.begin_review(7, 99, "abc123"); // → Reviewing, verdict pending
+        let restored_prefs = monitor.prefs();
+
+        let mut restarted =
+            IssueMonitorState::with_prefs(IssueMonitorConfig::default(), restored_prefs);
+        assert_eq!(
+            restarted.autonomous_record(7).map(|r| r.phase),
+            Some(AutonomousPhase::Reviewing),
+            "reloads in Reviewing (the strand)"
+        );
+
+        let resumed = restarted.resume_inflight_reviews_after_restart();
+
+        assert_eq!(resumed, vec![7], "the stranded Reviewing record is resumed");
+        let record = restarted.autonomous_record(7).expect("record retained");
+        assert_eq!(
+            record.phase,
+            AutonomousPhase::Implementing,
+            "reset to Implementing so the next scan re-detects the PR + re-dispatches"
+        );
+        assert_eq!(
+            record.review_passed, None,
+            "verdict cleared for the re-review"
+        );
+        // Still counted in-flight (holds its slot); no attempt is spent on a restart.
+        assert_eq!(restarted.autonomous_in_flight_issues(), vec![7]);
+        assert_eq!(
+            restarted.attempt_count(7),
+            0,
+            "a restart is not a failed attempt"
+        );
+    }
+
+    #[test]
+    fn resume_after_restart_leaves_delivering_and_other_phases_untouched() {
+        // Delivering self-heals on its own (its watch polls the persisted pr_number
+        // for the merge commit) and has an armed GitHub auto-merge, so it must NOT
+        // be re-driven. Idle/Implementing/terminal phases are also left alone.
+        let mut monitor = autonomous_state();
+        monitor.set_autonomous_phase(1, AutonomousPhase::Delivering);
+        monitor.set_autonomous_phase(2, AutonomousPhase::Implementing);
+        monitor.set_autonomous_phase(3, AutonomousPhase::NeedsHuman);
+        monitor.set_autonomous_phase(4, AutonomousPhase::Idle);
+
+        let resumed = monitor.resume_inflight_reviews_after_restart();
+
+        assert!(resumed.is_empty(), "no Reviewing records ⇒ nothing resumed");
+        assert_eq!(
+            monitor.autonomous_record(1).map(|r| r.phase),
+            Some(AutonomousPhase::Delivering),
+            "Delivering is left to its own merge-watch self-heal"
+        );
+        assert_eq!(
+            monitor.autonomous_record(2).map(|r| r.phase),
+            Some(AutonomousPhase::Implementing)
+        );
+        assert_eq!(
+            monitor.autonomous_record(3).map(|r| r.phase),
+            Some(AutonomousPhase::NeedsHuman)
+        );
     }
 
     #[test]
