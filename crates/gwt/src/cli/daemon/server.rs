@@ -495,18 +495,38 @@ async fn scan_issue_monitor_once(
     monitor: crate::IssueMonitorState,
     gui_connected: bool,
 ) -> crate::IssueMonitorState {
+    // Keep a copy of the prior state so a `spawn_blocking` panic preserves it
+    // instead of collapsing to a fresh default (see `scan_join_failure_fallback`).
+    let preserved = monitor.clone();
     tokio::task::spawn_blocking(move || {
         scan_issue_monitor_once_blocking(scope, monitor, gui_connected)
     })
     .await
     .unwrap_or_else(|error| {
-        let mut monitor = crate::IssueMonitorState::new(crate::IssueMonitorConfig::default());
-        monitor.record_scan_error(
+        scan_join_failure_fallback(
+            preserved,
+            error.to_string(),
             chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
-            format!("issue monitor worker join failed: {error}"),
-        );
-        monitor
+        )
     })
+}
+
+/// Fallback state for a `scan_issue_monitor_once` `JoinError` (the scan task
+/// panicked). It preserves the prior in-memory state — the `enabled` flag,
+/// `merged_issues`, autonomous records — and only records the scan error.
+///
+/// Returning a fresh `IssueMonitorState::new(default)` here (the previous
+/// behavior) would let `scan_and_persist_issue_monitor` overwrite good prefs on
+/// disk with empty/default state on a transient scan panic, losing merge
+/// completion and re-launching finished work — and would also reset the GUI's
+/// view (codex P2 review, #3209).
+fn scan_join_failure_fallback(
+    mut preserved: crate::IssueMonitorState,
+    error: String,
+    now: String,
+) -> crate::IssueMonitorState {
+    preserved.record_scan_error(now, format!("issue monitor worker join failed: {error}"));
+    preserved
 }
 
 /// Scan once, then persist the resulting state. The persist step is the SPEC
@@ -1470,6 +1490,44 @@ mod tests {
         assert!(
             persisted.merged_issues.contains(&42),
             "scan-driven merge completion is persisted, so a restart will not re-launch it"
+        );
+    }
+
+    #[test]
+    fn scan_join_failure_fallback_preserves_prior_state_so_persist_is_safe() {
+        // codex P2 (#3209): a scan-task panic (`JoinError`) must NOT collapse to a
+        // fresh `IssueMonitorState::new(default)`. `scan_and_persist` saves the
+        // returned state, so a fresh default would overwrite good prefs with
+        // `enabled=false` / empty merged_issues / empty autonomous records on a
+        // transient panic — losing completion and re-launching finished work. The
+        // fallback preserves the prior state and only records the scan error.
+        let mut monitor = crate::IssueMonitorState::new(crate::IssueMonitorConfig {
+            enabled: true,
+            ..crate::IssueMonitorConfig::default()
+        });
+        monitor.record_merged(42);
+
+        let out = super::scan_join_failure_fallback(
+            monitor,
+            "task panicked".to_string(),
+            "2026-06-30T00:00:00Z".to_string(),
+        );
+
+        assert!(
+            out.config.enabled,
+            "enabled flag preserved across a scan panic"
+        );
+        assert!(
+            out.prefs().merged_issues.contains(&42),
+            "merge completion preserved (not wiped to an empty default)"
+        );
+        let error = out
+            .status_view()
+            .last_error
+            .expect("the scan error is recorded");
+        assert!(
+            error.contains("join failed"),
+            "records the join failure: {error}"
         );
     }
 
