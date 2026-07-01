@@ -228,8 +228,11 @@ fn spawn_issue_monitor_worker(scope: RuntimeScope, hub: BroadcastHub, shutdown: 
         // SPEC #3200 (review follow-up): a record persisted mid-review reloads in
         // `Reviewing`, but its review-agent dispatch (not persisted) is gone.
         // Reset such records to `Implementing` so the first scan re-detects the PR
-        // and re-issues the review — restoring the pre-persist self-healing.
-        let resumed = monitor.resume_inflight_reviews_after_restart();
+        // and re-issues the review — restoring the pre-persist self-healing. The
+        // `now` stamp refreshes last_heartbeat so the reset record is not wrongly
+        // reclaimed by stuck detection (which runs before the re-dispatch).
+        let resume_now = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+        let resumed = monitor.resume_inflight_reviews_after_restart(&resume_now);
         if !resumed.is_empty() {
             tracing::info!(
                 issues = ?resumed,
