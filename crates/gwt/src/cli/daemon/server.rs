@@ -225,6 +225,17 @@ fn spawn_issue_monitor_worker(scope: RuntimeScope, hub: BroadcastHub, shutdown: 
         let prefs = crate::load_issue_monitor_prefs(&prefs_path).unwrap_or_default();
         let mut monitor =
             crate::IssueMonitorState::with_prefs(crate::IssueMonitorConfig::default(), prefs);
+        // SPEC #3200 (review follow-up): a record persisted mid-review reloads in
+        // `Reviewing`, but its review-agent dispatch (not persisted) is gone.
+        // Reset such records to `Implementing` so the first scan re-detects the PR
+        // and re-issues the review — restoring the pre-persist self-healing.
+        let resumed = monitor.resume_inflight_reviews_after_restart();
+        if !resumed.is_empty() {
+            tracing::info!(
+                issues = ?resumed,
+                "issue monitor: resumed in-flight reviews after restart (Reviewing → Implementing)"
+            );
+        }
         publish_issue_monitor_payloads(&hub, &mut monitor);
         let mut interval =
             tokio::time::interval(Duration::from_secs(monitor.config.poll_interval_secs));
@@ -238,7 +249,7 @@ fn spawn_issue_monitor_worker(scope: RuntimeScope, hub: BroadcastHub, shutdown: 
                         Ok(DaemonFrame::Event { payload, .. }) => {
                             if let Some(control) = decode_issue_monitor_control(payload) {
                                 let should_scan = apply_issue_monitor_control(&mut monitor, control);
-                                let _ = crate::save_issue_monitor_prefs(&prefs_path, &monitor.prefs());
+                                persist_daemon_issue_monitor_state(&prefs_path, &monitor);
                                 publish_issue_monitor_payloads(&hub, &mut monitor);
                                 if should_scan {
                                     let gui_connected = issue_monitor_gui_connected(&hub);
@@ -543,8 +554,31 @@ async fn scan_and_persist_issue_monitor(
     prefs_path: &Path,
 ) -> crate::IssueMonitorState {
     let monitor = scan_issue_monitor_once(scope, monitor, gui_connected).await;
-    let _ = crate::save_issue_monitor_prefs(prefs_path, &monitor.prefs());
+    persist_daemon_issue_monitor_state(prefs_path, &monitor);
     monitor
+}
+
+/// Persist the daemon's issue-monitor state WITHOUT clobbering GUI-owned config.
+///
+/// The daemon loads prefs once at startup and thereafter only learns config
+/// changes it has a control frame for (`enabled` / `max_active_agents` /
+/// `priority_order` / `autonomous_mode`). `launch_profile` and
+/// `autonomous_tuning` have NO control channel — the GUI process edits them
+/// directly on disk — so the daemon's in-memory copy is authoritative-but-stale
+/// for those two fields. Writing the whole `monitor.prefs()` would overwrite a
+/// newer GUI launch-profile / tuning with the stale startup value, silently
+/// reverting the user's Issue Monitor configuration (adversarial review:
+/// launch_profile clobber). We therefore reload the on-disk prefs and preserve
+/// those two GUI-owned fields, persisting everything else (daemon-owned runtime
+/// state + control-synced config) from memory. If the reload fails, we fall back
+/// to the in-memory values rather than lose the daemon's runtime state.
+fn persist_daemon_issue_monitor_state(prefs_path: &Path, monitor: &crate::IssueMonitorState) {
+    let mut prefs = monitor.prefs();
+    if let Ok(on_disk) = crate::load_issue_monitor_prefs(prefs_path) {
+        prefs.launch_profile = on_disk.launch_profile;
+        prefs.autonomous_tuning = on_disk.autonomous_tuning;
+    }
+    let _ = crate::save_issue_monitor_prefs(prefs_path, &prefs);
 }
 
 /// SPEC #3200 Option A: a per-process secret the daemon uses to sign autonomous
@@ -1528,6 +1562,65 @@ mod tests {
         assert!(
             error.contains("join failed"),
             "records the join failure: {error}"
+        );
+    }
+
+    #[test]
+    fn persist_daemon_state_preserves_gui_owned_launch_profile_and_tuning() {
+        // adversarial review (launch_profile clobber): launch_profile and
+        // autonomous_tuning have no daemon control channel, so the daemon's
+        // stale-since-startup in-memory copy must NOT overwrite the GUI's newer
+        // on-disk values. Only daemon-owned runtime state (merged_issues,
+        // autonomous_records, ...) is persisted from memory.
+        let temp = TempDir::new().expect("tempdir");
+        let prefs_path = temp.path().join("issue-monitor.json");
+
+        // The GUI wrote a launch_profile + custom tuning straight to disk.
+        let on_disk = crate::IssueMonitorPrefs {
+            launch_profile: Some(crate::IssueMonitorLaunchProfile {
+                agent_id: "claude".to_string(),
+                model: None,
+                reasoning: None,
+                version: None,
+                session_mode: Default::default(),
+                skip_permissions: false,
+                codex_fast_mode: false,
+                runtime_target: Default::default(),
+                docker_service: None,
+                docker_lifecycle_intent: Default::default(),
+                windows_shell: None,
+            }),
+            autonomous_tuning: crate::issue_monitor::AutonomousTuning {
+                max_attempts: 9,
+                ..crate::issue_monitor::AutonomousTuning::default()
+            },
+            ..crate::IssueMonitorPrefs::default()
+        };
+        crate::save_issue_monitor_prefs(&prefs_path, &on_disk).expect("seed disk");
+
+        // The daemon's in-memory monitor has NO launch_profile (stale startup)
+        // but has a daemon-owned merge completion to persist.
+        let mut monitor = crate::IssueMonitorState::new(crate::IssueMonitorConfig::default());
+        monitor.record_merged(42);
+        assert!(
+            monitor.prefs().launch_profile.is_none(),
+            "daemon has no profile"
+        );
+
+        super::persist_daemon_issue_monitor_state(&prefs_path, &monitor);
+
+        let persisted = crate::load_issue_monitor_prefs(&prefs_path).expect("reload");
+        assert!(
+            persisted.launch_profile.is_some(),
+            "GUI launch_profile preserved (not clobbered by the daemon's stale None)"
+        );
+        assert_eq!(
+            persisted.autonomous_tuning.max_attempts, 9,
+            "GUI autonomous_tuning preserved"
+        );
+        assert!(
+            persisted.merged_issues.contains(&42),
+            "daemon-owned merge completion is still persisted from memory"
         );
     }
 
