@@ -1057,14 +1057,26 @@ impl IssueMonitorState {
     /// restart on its own — and its GitHub auto-merge is already armed, so
     /// re-driving it would double-work and could invalidate the armed merge.
     ///
+    /// The resumed record's `last_heartbeat` is refreshed to `now`: a restart is
+    /// not a failed attempt, but the reset to `Implementing` makes the record
+    /// eligible for stuck/idle detection (`stuck_autonomous_issues` covers
+    /// `Idle | Implementing`), which runs BEFORE the re-dispatch on the next scan.
+    /// Without the refresh, a persisted stale `last_heartbeat` (e.g. a review that
+    /// ran longer than `stuck_timeout_secs` before the restart) would trip
+    /// `recover_stuck_autonomous` and wrongly count a failed attempt / backoff
+    /// (or escalate to `NeedsHuman` at the cap) before the review is even
+    /// re-issued. The fresh stamp gives the resumed record a full window to reach
+    /// `Reviewing` again.
+    ///
     /// Idempotent and safe to call once right after loading persisted prefs; it
     /// only touches records already parked in `Reviewing`.
-    pub fn resume_inflight_reviews_after_restart(&mut self) -> Vec<u64> {
+    pub fn resume_inflight_reviews_after_restart(&mut self, now: &str) -> Vec<u64> {
         let mut resumed = Vec::new();
         for record in self.autonomous_records.values_mut() {
             if record.phase == AutonomousPhase::Reviewing {
                 record.phase = AutonomousPhase::Implementing;
                 record.review_passed = None;
+                record.last_heartbeat = Some(now.to_string());
                 resumed.push(record.issue_number);
             }
         }
@@ -3124,7 +3136,7 @@ mod tests {
             "reloads in Reviewing (the strand)"
         );
 
-        let resumed = restarted.resume_inflight_reviews_after_restart();
+        let resumed = restarted.resume_inflight_reviews_after_restart("2026-06-29T00:00:00Z");
 
         assert_eq!(resumed, vec![7], "the stranded Reviewing record is resumed");
         let record = restarted.autonomous_record(7).expect("record retained");
@@ -3157,7 +3169,7 @@ mod tests {
         monitor.set_autonomous_phase(3, AutonomousPhase::NeedsHuman);
         monitor.set_autonomous_phase(4, AutonomousPhase::Idle);
 
-        let resumed = monitor.resume_inflight_reviews_after_restart();
+        let resumed = monitor.resume_inflight_reviews_after_restart("2026-06-29T00:00:00Z");
 
         assert!(resumed.is_empty(), "no Reviewing records ⇒ nothing resumed");
         assert_eq!(
@@ -3172,6 +3184,41 @@ mod tests {
         assert_eq!(
             monitor.autonomous_record(3).map(|r| r.phase),
             Some(AutonomousPhase::NeedsHuman)
+        );
+    }
+
+    #[test]
+    fn resume_after_restart_refreshes_heartbeat_so_stuck_recovery_does_not_fail_it() {
+        // review follow-up (codex #3210): on restart the persisted active slot and
+        // a STALE last_heartbeat are restored. Resetting Reviewing → Implementing
+        // makes the record eligible for stuck/idle detection, which runs BEFORE the
+        // re-dispatch on the next scan. Without refreshing the heartbeat, a review
+        // that ran longer than stuck_timeout_secs before the restart would be
+        // wrongly counted as a failed attempt. The refresh must prevent that.
+        let mut monitor = launched_monitor(42, "tab-1::agent-1");
+        monitor.set_autonomous_mode(true);
+        monitor.set_autonomous_phase(42, AutonomousPhase::Implementing);
+        monitor.begin_review(42, 99, "abc123"); // → Reviewing (holds the active slot)
+        monitor.record_autonomous_heartbeat(42, "2026-06-29T00:00:00Z"); // stale pre-restart
+
+        // Resume, then run stuck recovery in the same scan order as the daemon.
+        let resumed = monitor.resume_inflight_reviews_after_restart("2026-06-29T05:00:00Z");
+        assert_eq!(resumed, vec![42]);
+        let recovered = monitor.recover_stuck_autonomous("2026-06-29T05:00:00Z");
+
+        assert!(
+            recovered.is_empty(),
+            "the resumed record's fresh heartbeat keeps it out of stuck recovery"
+        );
+        assert_eq!(
+            monitor.autonomous_record(42).map(|r| r.phase),
+            Some(AutonomousPhase::Implementing),
+            "still Implementing, ready for the next scan to re-dispatch review"
+        );
+        assert_eq!(
+            monitor.attempt_count(42),
+            0,
+            "a restart is not counted as a failed attempt"
         );
     }
 
