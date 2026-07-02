@@ -129,6 +129,29 @@ pub fn load_open_issue_monitor_candidates_for_repo_path(
     }
 }
 
+/// Issue #3225: GitHub-derived completion probe for the claim loop — "does
+/// this issue have a linked PR that is already MERGED?". Uses the issue's
+/// timeline (cross-referenced / connected PRs), so it catches fixes merged via
+/// ANY branch, not just the monitor's own `work/issue-N`. Fails open (false)
+/// on errors so a transient gh failure never blocks real work.
+pub fn issue_completed_by_merged_pr(owner: &str, repo: &str, issue_number: u64) -> bool {
+    match crate::cli::issue::fetch_linked_prs_via_gh(
+        owner,
+        repo,
+        gwt_github::IssueNumber(issue_number),
+    ) {
+        Ok(prs) => prs.iter().any(|pr| pr.state.eq_ignore_ascii_case("merged")),
+        Err(error) => {
+            tracing::debug!(
+                issue = issue_number,
+                error = %error,
+                "issue monitor completion probe failed (fail-open)"
+            );
+            false
+        }
+    }
+}
+
 /// Mark any active launched Issue whose work branch has a merged PR as
 /// `Merged`, freeing the active slot. Skips the network call when nothing is
 /// launched, and leaves work launched when the PR query fails (so a transient
@@ -659,6 +682,56 @@ mod tests {
             online.iter().any(|payload| payload.event == "toast"
                 && payload.payload.get("issue_number").and_then(|v| v.as_u64()) == Some(42)),
             "queued notice surfaces once a GUI connects"
+        );
+    }
+
+    #[test]
+    fn claim_skips_and_marks_issues_already_completed_by_a_merged_pr() {
+        // Issue #3225: an issue whose fix is already merged (a linked PR in
+        // MERGED state) must not be re-launched by a fresh monitor — the
+        // completion signal must come from GitHub, not instance-local prefs.
+        // The claim loop probes right before claiming; positives are recorded
+        // Merged (persisted) and the slot goes to the next queued candidate.
+        let mut monitor = IssueMonitorState::new(crate::IssueMonitorConfig {
+            enabled: true,
+            max_active: 1,
+            ..crate::IssueMonitorConfig::default()
+        });
+        monitor.set_gui_connected(true);
+        crate::scan_issue_monitor_candidates(
+            &mut monitor,
+            &[issue(42), issue(43)],
+            "2026-07-02T00:00:00Z",
+        );
+        let client = FakeIssueClient::new();
+        client.seed(github_issue(42));
+        client.seed(github_issue(43));
+
+        // #42 is already completed by a merged PR; #43 is genuinely open work.
+        let launches = monitor.claim_next_launch_requests_with_probe(
+            &client,
+            "host:1",
+            "2026-07-02T00:00:10Z",
+            1,
+            |issue_number| issue_number == 42,
+        );
+
+        assert_eq!(
+            launches.iter().map(|l| l.issue_number).collect::<Vec<_>>(),
+            vec![43],
+            "the completed issue is skipped; the slot goes to real work"
+        );
+        assert_eq!(
+            monitor.inbox_item(42).map(|item| item.state),
+            Some(crate::MonitorInboxState::Merged),
+            "completed issue is recorded Merged (persisted, never relaunched)"
+        );
+        assert!(monitor.prefs().merged_issues.contains(&42));
+        // Idempotent on later scans: stays Merged, never re-queued.
+        crate::scan_issue_monitor_candidates(&mut monitor, &[issue(42)], "2026-07-02T00:01:00Z");
+        assert_eq!(
+            monitor.inbox_item(42).map(|item| item.state),
+            Some(crate::MonitorInboxState::Merged)
         );
     }
 
