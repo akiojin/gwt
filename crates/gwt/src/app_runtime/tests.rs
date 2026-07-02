@@ -596,6 +596,7 @@ fn workspace_work_agent_view_attaches_session_history() {
         agent_id: Some("codex".to_string()),
         display_name: Some("Codex".to_string()),
         updated_at: chrono::Utc::now(),
+        attached_by: None,
     };
     let view = super::workspace_work_agent_view_from_ref(&agent_ref, &index, Path::new("/"));
 
@@ -18873,6 +18874,7 @@ fn agent_view_borrows_identity_from_ledger_when_record_has_none() {
         agent_id: None,
         display_name: None,
         updated_at: chrono::Utc::now(),
+        attached_by: None,
     };
     let view = super::workspace_work_agent_view_from_ref(&agent_ref, &index, Path::new("/"));
     assert_eq!(view.display_name.as_deref(), Some("Claude Code"));
@@ -19139,6 +19141,7 @@ fn agent_view_synthesizes_latest_conversation_when_history_is_empty() {
         agent_id: Some("claude".to_string()),
         display_name: Some("Claude Code".to_string()),
         updated_at: chrono::Utc::now(),
+        attached_by: None,
     };
 
     let view = super::workspace_work_agent_view_from_ref(&agent_ref, &index, temp.path());
@@ -19176,6 +19179,7 @@ fn agent_view_marks_session_history_only_when_worktree_and_branch_are_missing() 
         agent_id: Some("claude".to_string()),
         display_name: Some("Claude Code".to_string()),
         updated_at: chrono::Utc::now(),
+        attached_by: None,
     };
 
     let view = super::workspace_work_agent_view_from_ref(&agent_ref, &index, &repo);
@@ -19212,6 +19216,7 @@ fn agent_view_keeps_session_resumable_when_missing_worktree_branch_exists() {
         agent_id: Some("claude".to_string()),
         display_name: Some("Claude Code".to_string()),
         updated_at: chrono::Utc::now(),
+        attached_by: None,
     };
 
     let view = super::workspace_work_agent_view_from_ref(&agent_ref, &index, &repo);
