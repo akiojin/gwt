@@ -7,7 +7,7 @@ description: "Use when the user wants to create, inspect, update, or unblock a p
 
 ## Overview
 
-Single skill for the full PR lifecycle: create, check status, and fix blockers. Auto-detects the appropriate mode from current branch PR state, or accepts an explicit mode from the user.
+Single skill for the full PR lifecycle: create, check status, fix blockers, and deliver (drive to merge). Auto-detects the appropriate mode from current branch PR state, or accepts an explicit mode from the user. Deliver mode is opt-in only and is never auto-detected.
 
 Use the current user's language for decision summaries, blocker reports, and
 next-step guidance returned from this workflow.
@@ -21,9 +21,10 @@ reply/resolve.
 ## Final Report Contract
 
 Every final user-facing report from this workflow MUST state whether a PR was
-created, updated, fixed, or left unchanged. When a PR was created, pushed to,
-or fixed, include a `PR Update Summary` derived from the actual diff, commit
-range, and PR body. Do not invent changes from intent alone.
+created, updated, fixed, delivered (driven to merge), or left unchanged. When a
+PR was created, pushed to, fixed, or delivered, include a `PR Update Summary`
+derived from the actual diff, commit range, and PR body. Do not invent changes
+from intent alone.
 
 `PR Update Summary` must include:
 
@@ -42,7 +43,7 @@ Final report shape:
 
 ```text
 ## PR Result
-- Action: Created | Updated | Fixed | Checked | Delivered | Merged | No Action
+- Action: Created | Updated | Fixed | Delivered | Checked | No Action
 - PR: #<number> <url> | None
 - Branches: <base> <- <head>
 
@@ -77,10 +78,12 @@ On invocation, run Shared Preflight, then route:
    - "check status" / "PR status" / "is it merged?" → **check** mode
    - "fix CI" / "fix the PR" / "resolve blockers" → **fix** mode
    - "create PR" / "open PR" → **create** mode (with smart skip if open PR exists)
-   - "deliver" / "drive to merge" / "merge it" / "watch until merged" →
-     **deliver** mode (only when the Ready PR Gate is already satisfied)
+   - "deliver" / "drive to merge" / "merge it" / "land the PR" / "ship it" /
+     "watch until merged" → **deliver** mode (opt-in only; Ready PR Gate must
+     already be satisfied)
 3. **Auto-detect** (no explicit mode) — use the commit-count-first
-   decision from Preflight Step 7:
+   decision from Preflight Step 7. Auto-detect never selects **deliver**;
+   enabling auto-merge requires an explicit user request:
    - open PR + `mergeable: CONFLICTING|DIRTY|BEHIND` → **fix**
    - `N > 0` + no open PR → **create**
    - `N > 0` + open PR + clean merge state → **create** (push-only + post-push fix)
@@ -384,78 +387,93 @@ Re-run inspection with `--mode all`. Loop until exit code 0.
 
 Same CI check fails 3 consecutive iterations --> report to user, ask continue/abort/change approach.
 
-## Mode: Deliver (drive to merge)
+## Mode: Deliver (drive-to-merge)
 
-Deliver mode takes a Ready PR all the way to a merged state: it enables
-auto-merge, then loops the Fix inspection so CI failures and reviewer
-feedback are resolved as they arrive, and watches until the PR's
-`merged_at` is set. Deliver invents nothing new — it composes the existing
-Fix flow into a loop and adds auto-merge plus merge-watch.
+Detailed logic in `references/deliver-flow.md`.
 
-**Hard precondition — Ready PR Gate (mandatory).** Deliver runs only on a PR
-that already satisfies the [Ready PR Gate](#ready-pr-gate-and-pre-pr-verification-mandatory):
-`gwt-verify --mode pre-pr` returned `Overall: PASS`, `User Verification
-Result` is `confirmed` or `n/a`, and no known blockers remain. **Never enable
-auto-merge and never run the deliver loop on a Draft PR or a `pending` /
-unconfirmed verification.** If the gate is not satisfied, stop and report —
-do not deliver.
+Deliver mode drives a verified, Ready PR all the way to a merged state: enable
+GitHub auto-merge, then run the existing Fix loop against every blocker (CI /
+reviews / threads / conflicts) and poll until `merged_at` is set. Deliver
+**composes** Fix mode — it does not reimplement blocker resolution.
 
-### Enable auto-merge
+### Opt-in only (never auto-routed)
 
-With the gate satisfied and an open Ready PR present, request repository
-auto-merge so the PR merges automatically once required checks and reviews
-pass:
+Deliver mode is opt-in only: it is entered **only** when the user explicitly
+asks to deliver / drive to merge / merge / land / ship the PR. The Mode
+Auto-Detection matrix never selects Deliver on its own, because enabling
+auto-merge is an outward-facing, hard-to-reverse action — once armed, GitHub
+merges the PR the
+moment required checks go green. If no open PR exists, Deliver first falls back
+to Create (Ready PR Gate applies) and then drives the newly created PR.
 
-```bash
-gh pr merge --auto <number>   # repo's configured merge method
-```
+### Hard PR Gate (mandatory before enabling auto-merge)
 
-Auto-merge is a request, not an immediate merge: GitHub merges only after all
-required checks are green and required reviews are satisfied. The deliver loop
-keeps the PR moving toward that state.
+Do **not** enable auto-merge until the Ready PR Gate passes for the PR scope.
+Deliver applies a stricter gate than Create/Fix because auto-merge removes the
+last human checkpoint:
 
-### Deliver loop
+- `gwt-verify --mode pre-pr` returns `Overall: PASS`
+- `User Verification Result` is `confirmed` or `n/a` (not `pending`,
+  `rejected(<reason>)`, or `skipped(<reason>)` — a skip is enough to *create* a
+  PR but not to merge unattended)
+- the PR is a releaseable slice with no known blockers, and is not a Draft
 
-Repeat until the PR reports `merged_at != null` (merged) or a blocker needs a
-human decision:
+If verification is `pending`, do **not** run `gh pr merge --auto`. Stop and
+route the failure for repair (back to the TDD loop, `gwt-verify`, or
+`gwt-discussion`). Never downgrade a `pending` result to `skipped` to pass the
+gate.
 
-1. **Inspect** with `--mode all` (Fix-mode inspection): CI checks, merge
-   state, reviewer comments, unresolved threads, change requests.
-2. **Resolve every BLOCKING item via the existing Fix flow** — Deliver reuses
-   Fix, there is nothing to re-implement:
-   - `CI-FAILURE` → diagnose from logs, fix, push.
-   - `CHANGE-REQUEST` / `REVIEW-COMMENT` / `UNRESOLVED-THREAD` → make the
-     requested change, reply to the reviewer / thread, resolve the thread.
-   - `CONFLICT` / `BRANCH-BEHIND` → rebase / update-branch against base, push.
-3. **Poll** CI at 30s intervals until checks complete; after any fix push,
-   re-poll for the new CI run.
-4. **Retry transient CI failures** (flaky infra, `crates.io` HTTP2 framing,
-   runner cancellation) by re-running the failed job, up to 3 attempts per job
-   before treating it as a real failure.
-5. **Confirm merge:** when checks are green and reviews satisfied, GitHub
-   auto-merge merges the PR; read `merged_at` to confirm completion.
+### Core invariant: arm only a clear, gated snapshot
+
+Auto-merge may be armed **only** when the PR is fully clear (no blocking CI, no
+conflict/BEHIND, no unresolved thread, no open CHANGES_REQUESTED) **and** the
+Hard PR Gate is satisfied. Before **any** code-changing push, **disable**
+auto-merge first (`gh pr merge --disable-auto <number>`); after the push,
+**re-run the Hard PR Gate** and only then **re-arm**. This makes GitHub merge
+only a snapshot that passed verification, and inherits the skill's rule that
+every code-changing re-push needs a fresh `gwt-verify --mode pre-pr` PASS — it
+does not override it.
+
+### Drive-to-merge loop
+
+1. Preflight + Hard PR Gate (above). Resolve the PR with `pr.current` or the
+   user-supplied number; read state with `pr.view` (`[MERGED]` bracket plus
+   `mergeable:` / `merge_state:` / `ci:` / `review:` lines).
+2. Inspect with Fix `--mode all` and resolve **every** BLOCKING item through
+   the existing Fix Implementation / Comment Response flow — before arming.
+   Re-gate per the Core invariant on each code-changing push.
+3. Select a merge method allowed by the repository (`gh repo view --json
+   ...,viewerDefaultMergeMethod`); never hardcode `--squash`.
+4. Arm auto-merge **only on a clear snapshot**: `gh pr merge --auto --merge
+   <number>` (transport exception — there is no `pr.merge` JSON operation;
+   `gh pr merge` is allowed). `--auto` waits only for required checks; on repos
+   that do not enforce conversation-resolution/approval branch protection,
+   prefer poll-then-merge (`gh pr merge --merge <number>` after re-reading
+   `pr.view` CLEAN) over `--auto`.
+5. Poll `pr.view` ~30s. On any **new** blocker (BEHIND, new failing check, new
+   thread/CHANGES_REQUESTED): `gh pr merge --disable-auto`, resolve, re-gate,
+   **re-arm**. Re-run only **infrastructure-transient** CI failures with
+   `gh run rerun <run-id> --failed` (max 3); a test/build timeout or compile/
+   test failure is code, not transient — fix it. The poll is bounded (~20 polls
+   / ~10 min) then hands off via `board.post`.
+6. Continue until `pr.view` shows `[MERGED]` (GitHub `merged_at` set), then
+   report `Delivered`. "Auto-merge enabled" is not "merged."
 
 ### Loop Safety Guard
 
-The same blocker (same CI check or same review thread) failing 3 consecutive
-iterations → stop and report to the user with continue / abort / change-approach
-options. Never loop silently forever.
+The same blocker (same CI check name, same unresolved thread, same conflict)
+surviving 3 consecutive drive iterations → stop, report what was tried each
+iteration, and ask the user **continue** / **abort** / **change approach**. Do
+not loop indefinitely; the merged-state poll is bounded and hands off via
+`board.post` (`params.kind:"blocked"`) when CI stays pending.
 
 ### Optional: arm a completion goal (SPEC-3050)
 
-When the user approves autonomous continuation, arm a runtime goal whose end
-state is "this PR is merged (`merged_at` set)" so monitoring survives turn
-boundaries: Claude Code injects `/goal` via JSON operation `pane.send`; Codex
-calls `create_goal`. On goal-start failure, print the assembled `/goal` line
-and continue — never block the report.
-
-### Terminal report
-
-- **Merged**: report `Action: Merged`, the PR number, the merge commit, and
-  that the deliver loop completed.
-- **Blocked**: report `Action: Delivered` with the unresolved blocker and the
-  decision the user must make; auto-merge stays enabled so the PR still merges
-  once the blocker clears.
+Driving to merge can span CI runs longer than one turn. Optionally arm a "PR
+merged" completion goal so monitoring survives turn boundaries, using the same
+goal-start contract as `/release` step 5.4 (Codex `create_goal`; Claude Code
+`pane.send` of `/goal <condition>`). Arming the goal is best effort and never
+replaces the in-loop `pr.view` poll.
 
 ## Diagnosis Report Anti-Patterns
 
@@ -499,4 +517,5 @@ paths when running this workflow.
 - `references/create-flow.md` -- PR creation workflow details
 - `references/check-flow.md` -- PR status checking details
 - `references/fix-flow.md` -- CI/conflict/review fix details
+- `references/deliver-flow.md` -- drive-to-merge (auto-merge + Fix loop + merged watch) details
 - `references/pr-body-template.md` -- PR body template

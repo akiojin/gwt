@@ -132,6 +132,16 @@ pub struct IssueMonitorPrefs {
     pub launch_profile: Option<IssueMonitorLaunchProfile>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub launched_issues: Vec<IssueMonitorLaunchedIssue>,
+    /// Issue #3222: claims whose agent window is not bound yet (`Launching`).
+    /// Persisted so an in-flight claim survives the per-handler prefs
+    /// roundtrip — otherwise a rescan re-claims the same issue (same-owner
+    /// renewal) and spawns a duplicate window past `max_active`.
+    #[serde(
+        default,
+        skip_serializing_if = "Vec::is_empty",
+        deserialize_with = "deserialize_launching_issues"
+    )]
+    pub launching_issues: Vec<IssueMonitorLaunchingIssue>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub failed_issues: Vec<IssueMonitorFailedIssue>,
     /// Issues whose work PR merged. Persisted so completed work is not
@@ -160,6 +170,7 @@ impl Default for IssueMonitorPrefs {
             priority_order: Vec::new(),
             launch_profile: None,
             launched_issues: Vec::new(),
+            launching_issues: Vec::new(),
             failed_issues: Vec::new(),
             merged_issues: Vec::new(),
             autonomous_mode: false,
@@ -173,6 +184,44 @@ impl Default for IssueMonitorPrefs {
 pub struct IssueMonitorLaunchedIssue {
     pub issue_number: u64,
     pub window_id: String,
+}
+
+/// #3223 follow-up: one claimed-but-unbound launch with its claim anchor.
+/// `claimed_at` lets a restored claim EXPIRE after `claim_ttl_secs` instead of
+/// holding a max-active slot forever when the process died before the ACK.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct IssueMonitorLaunchingIssue {
+    pub issue_number: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub claimed_at: Option<String>,
+}
+
+/// Backward-compat: the first shipped shape was a bare id array. A parse
+/// failure here would `unwrap_or_default()` into a full prefs wipe, so both
+/// shapes must deserialize.
+fn deserialize_launching_issues<'de, D>(
+    deserializer: D,
+) -> Result<Vec<IssueMonitorLaunchingIssue>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum Compat {
+        Bare(u64),
+        Full(IssueMonitorLaunchingIssue),
+    }
+    let entries = Vec::<Compat>::deserialize(deserializer)?;
+    Ok(entries
+        .into_iter()
+        .map(|entry| match entry {
+            Compat::Bare(issue_number) => IssueMonitorLaunchingIssue {
+                issue_number,
+                claimed_at: None,
+            },
+            Compat::Full(full) => full,
+        })
+        .collect())
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -450,6 +499,14 @@ pub struct IssueMonitorState {
     /// SPEC #3200 Option A: review-agent spawn requests produced by the
     /// orchestration loop, drained by the daemon→GUI payload builder.
     pending_review_dispatches: VecDeque<AutonomousReviewDispatch>,
+    /// SPEC #3200 FR-034 (T-111): operator notices produced by autonomous
+    /// lifecycle transitions (merged / needs-human / retry / auto-merge armed).
+    /// Drained into `toast` payloads by the daemon→GUI payload builder; retained
+    /// (bounded) while no GUI is connected so unattended events surface on the
+    /// next connect.
+    pending_autonomous_notices: VecDeque<AutonomousNotice>,
+    /// #3223 follow-up: claim anchors for unbound launches (issue → RFC3339).
+    launching_claimed_at: BTreeMap<u64, String>,
 }
 
 pub fn is_auto_improve_candidate(issue: &IssueMonitorIssue, config: &IssueMonitorConfig) -> bool {
@@ -637,6 +694,21 @@ pub struct AutonomousReviewDispatch {
     pub linked_issue_kind: LinkedIssueKind,
 }
 
+/// SPEC #3200 FR-034 (T-111): one operator notice for an unattended autonomous
+/// lifecycle transition. Surfaced to the GUI as an `issue_monitor_toast`
+/// (transient surface toast + persistent scrollable notification stack).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AutonomousNotice {
+    /// Toast level: `info` | `warn` | `error` | `done`.
+    pub level: String,
+    pub issue_number: u64,
+    pub message: String,
+}
+
+/// Bound for [`IssueMonitorState::pending_autonomous_notices`]: unattended
+/// operation with no GUI connected must not grow the queue without limit.
+const AUTONOMOUS_NOTICE_CAP: usize = 100;
+
 /// SPEC #3200 T-042: how an autonomous attempt's failure should be routed.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FailureClass {
@@ -724,14 +796,41 @@ pub fn load_issue_monitor_prefs(path: &Path) -> io::Result<IssueMonitorPrefs> {
         .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))
 }
 
+/// Per-process-unique scratch path for the atomic prefs write, placed in the
+/// same directory as `path` (so the final `rename` stays on one filesystem and
+/// is atomic). The daemon (`gwtd`) and GUI (`gwt`) processes both write this same
+/// prefs file; a fixed `*.json.tmp` name let their concurrent writes open and
+/// truncate the SAME scratch file and interleave into torn JSON, which
+/// `load_issue_monitor_prefs` then silently reset to default (adversarial
+/// review). Scoping the scratch name to `{pid}-{uuid}` gives every writer its own
+/// file. Mirrors the gwt-core atomic-write convention.
+fn unique_prefs_tmp_path(path: &Path) -> std::path::PathBuf {
+    let parent = match path.parent() {
+        Some(parent) if !parent.as_os_str().is_empty() => parent.to_path_buf(),
+        _ => std::path::PathBuf::from("."),
+    };
+    let file_name = path
+        .file_name()
+        .and_then(|value| value.to_str())
+        .unwrap_or("issue-monitor.json");
+    parent.join(format!(
+        ".{}.tmp-{}-{}",
+        file_name,
+        std::process::id(),
+        uuid::Uuid::new_v4()
+    ))
+}
+
 pub fn save_issue_monitor_prefs(path: &Path, prefs: &IssueMonitorPrefs) -> io::Result<()> {
     if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent)?;
+        if !parent.as_os_str().is_empty() {
+            fs::create_dir_all(parent)?;
+        }
     }
     let content = serde_json::to_string_pretty(prefs).map_err(io::Error::other)?;
-    let tmp = path.with_extension("json.tmp");
+    let tmp = unique_prefs_tmp_path(path);
     fs::write(&tmp, content.as_bytes())?;
-    fs::rename(tmp, path)
+    fs::rename(&tmp, path)
 }
 
 pub fn issue_monitor_prefs_path_for_repo_path(repo_path: &Path) -> std::path::PathBuf {
@@ -762,6 +861,8 @@ impl IssueMonitorState {
             queue: VecDeque::new(),
             pending_launches: VecDeque::new(),
             pending_review_dispatches: VecDeque::new(),
+            pending_autonomous_notices: VecDeque::new(),
+            launching_claimed_at: BTreeMap::new(),
         }
     }
 
@@ -780,6 +881,18 @@ impl IssueMonitorState {
                 .insert(launched.issue_number, launched.window_id);
             if !state.active_launches.contains(&launched.issue_number) {
                 state.active_launches.push(launched.issue_number);
+            }
+        }
+        // Issue #3222: restore claimed-but-unbound launches so a reload (every
+        // GUI handler) still sees the in-flight claim and cannot re-claim it.
+        for entry in prefs.launching_issues {
+            if !state.active_launches.contains(&entry.issue_number) {
+                state.active_launches.push(entry.issue_number);
+            }
+            if let Some(claimed_at) = entry.claimed_at {
+                state
+                    .launching_claimed_at
+                    .insert(entry.issue_number, claimed_at);
             }
         }
         for failed in prefs.failed_issues {
@@ -814,6 +927,15 @@ impl IssueMonitorState {
                 .map(|(issue_number, window_id)| IssueMonitorLaunchedIssue {
                     issue_number: *issue_number,
                     window_id: window_id.clone(),
+                })
+                .collect(),
+            launching_issues: self
+                .active_launches
+                .iter()
+                .filter(|issue_number| !self.launched_windows.contains_key(issue_number))
+                .map(|issue_number| IssueMonitorLaunchingIssue {
+                    issue_number: *issue_number,
+                    claimed_at: self.launching_claimed_at.get(issue_number).cloned(),
                 })
                 .collect(),
             failed_issues: self
@@ -917,6 +1039,13 @@ impl IssueMonitorState {
                 self.autonomous_tuning.retry_backoff_base_secs,
                 self.autonomous_tuning.retry_backoff_cap_secs,
             );
+            // FR-034: surface the transient retry (attempt + reason) so an
+            // unattended failure loop is visible to the operator.
+            self.push_autonomous_notice(
+                "warn",
+                issue_number,
+                format!("Issue #{issue_number} attempt {attempt}/{max} failed (retry scheduled): {message}"),
+            );
             self.clear_active_tracking(issue_number);
             self.set_autonomous_phase(issue_number, AutonomousPhase::Idle);
             self.set_active_launch_id(issue_number, None);
@@ -958,10 +1087,13 @@ impl IssueMonitorState {
     }
 
     /// SPEC #3200 T-044/T-035/FR-013: launched autonomous issues whose agent has
-    /// shown no liveness for longer than `stuck_timeout_secs`. Issues already in
-    /// a pipeline-in-flight phase (`Reviewing`/`Delivering`, governed by the
-    /// merge-watch timeout) and terminal phases are excluded. Issues with no
-    /// heartbeat yet are conservatively NOT judged stuck (no liveness data).
+    /// shown no liveness for longer than `stuck_timeout_secs`. Pipeline-in-flight
+    /// phases are excluded because they self-heal without a liveness signal:
+    /// `Reviewing` is resumed on a daemon restart (see
+    /// [`resume_inflight_reviews_after_restart`](Self::resume_inflight_reviews_after_restart)),
+    /// and `Delivering` re-polls the persisted PR for its merge commit. Terminal
+    /// phases are excluded too. Issues with no heartbeat yet are conservatively
+    /// NOT judged stuck (no liveness data).
     pub fn stuck_autonomous_issues(&self, now: &str) -> Vec<u64> {
         let timeout = self.autonomous_tuning.stuck_timeout_secs as i64;
         self.autonomous_records
@@ -1008,11 +1140,62 @@ impl IssueMonitorState {
             .collect()
     }
 
+    /// SPEC #3200 (review follow-up): restore self-healing for a `Reviewing`
+    /// record whose review-agent dispatch was lost across a daemon restart.
+    ///
+    /// The review-agent spawn request (`pending_review_dispatches`) is NOT
+    /// persisted, but the record's phase IS. A record reloaded in `Reviewing`
+    /// therefore waits forever for a verdict that no agent will produce (the
+    /// review agent was never re-spawned) — `advance_autonomous_in_flight`'s
+    /// `Reviewing` branch only waits, and the `Implementing` branch (which
+    /// re-detects the open PR and re-issues `begin_review` + the review dispatch)
+    /// is never reached. Resetting the phase to `Implementing` restores exactly
+    /// the pre-persist self-healing (a restart used to revert the in-memory
+    /// phase): the next scan rebuilds the launch plan, re-detects the PR, and
+    /// re-dispatches the review, binding to the current head SHA.
+    ///
+    /// `Delivering` is intentionally left untouched: its watch loop polls the
+    /// persisted `pr_number` for the merge commit, so it self-heals across a
+    /// restart on its own — and its GitHub auto-merge is already armed, so
+    /// re-driving it would double-work and could invalidate the armed merge.
+    ///
+    /// The resumed record's `last_heartbeat` is refreshed to `now`: a restart is
+    /// not a failed attempt, but the reset to `Implementing` makes the record
+    /// eligible for stuck/idle detection (`stuck_autonomous_issues` covers
+    /// `Idle | Implementing`), which runs BEFORE the re-dispatch on the next scan.
+    /// Without the refresh, a persisted stale `last_heartbeat` (e.g. a review that
+    /// ran longer than `stuck_timeout_secs` before the restart) would trip
+    /// `recover_stuck_autonomous` and wrongly count a failed attempt / backoff
+    /// (or escalate to `NeedsHuman` at the cap) before the review is even
+    /// re-issued. The fresh stamp gives the resumed record a full window to reach
+    /// `Reviewing` again.
+    ///
+    /// Idempotent and safe to call once right after loading persisted prefs; it
+    /// only touches records already parked in `Reviewing`.
+    pub fn resume_inflight_reviews_after_restart(&mut self, now: &str) -> Vec<u64> {
+        let mut resumed = Vec::new();
+        for record in self.autonomous_records.values_mut() {
+            if record.phase == AutonomousPhase::Reviewing {
+                record.phase = AutonomousPhase::Implementing;
+                record.review_passed = None;
+                record.last_heartbeat = Some(now.to_string());
+                resumed.push(record.issue_number);
+            }
+        }
+        resumed
+    }
+
     /// SPEC #3200 FR-027: escalate an issue to the terminal `NeedsHuman` state —
     /// frees the slot, records the reason, marks the autonomous phase, and never
     /// auto-relaunches. Reused by the strong-gate path when review rejects.
     pub fn escalate_to_needs_human(&mut self, issue_number: u64, reason: impl Into<String>) {
         let reason = reason.into();
+        // FR-034: an unattended escalation is exactly what the operator must see.
+        self.push_autonomous_notice(
+            "error",
+            issue_number,
+            format!("Issue #{issue_number} needs human: {reason}"),
+        );
         self.clear_active_tracking(issue_number);
         self.queue.retain(|queued| *queued != issue_number);
         self.set_autonomous_phase(issue_number, AutonomousPhase::NeedsHuman);
@@ -1073,6 +1256,91 @@ impl IssueMonitorState {
 
     pub fn has_launch_profile(&self) -> bool {
         self.launch_profile.is_some()
+    }
+
+    /// Issue #3222: refresh the GUI-owned prefs fields (`launch_profile`,
+    /// `autonomous_tuning`) from a freshly-loaded on-disk snapshot. The daemon
+    /// loads prefs once at startup and has no control frame for these fields, so
+    /// without this refresh a profile the GUI saves later stays invisible
+    /// (`has_launch_profile()==false` ⇒ active cap 0 ⇒ the daemon never refills
+    /// slots and cannot act as the single launch driver).
+    pub fn refresh_gui_owned_prefs(&mut self, disk: &IssueMonitorPrefs) {
+        self.launch_profile = disk.launch_profile.clone();
+        self.autonomous_tuning = disk.autonomous_tuning.clone();
+    }
+
+    /// #3223 follow-up (codex P1): absorb the OTHER process's in-flight launch
+    /// accounting from disk. The GUI and the daemon both claim launches; the
+    /// daemon only refreshed profile/tuning, so GUI-written `launching`/
+    /// `launched` entries were invisible to it — it saw free slots (over-cap
+    /// claims) and its next persist dropped the GUI's in-flight claims.
+    /// Union-merge: entries already known in memory win; removals propagate via
+    /// the existing control frames (Launched / LaunchFailed / WindowClosed).
+    pub fn merge_inflight_launches_from_disk(&mut self, disk: &IssueMonitorPrefs) {
+        for launched in &disk.launched_issues {
+            if launched.window_id.is_empty() {
+                continue;
+            }
+            self.launched_windows
+                .entry(launched.issue_number)
+                .or_insert_with(|| launched.window_id.clone());
+            if !self.active_launches.contains(&launched.issue_number) {
+                self.active_launches.push(launched.issue_number);
+            }
+        }
+        for entry in &disk.launching_issues {
+            if !self.active_launches.contains(&entry.issue_number) {
+                self.active_launches.push(entry.issue_number);
+                if let Some(claimed_at) = &entry.claimed_at {
+                    self.launching_claimed_at
+                        .insert(entry.issue_number, claimed_at.clone());
+                }
+            }
+        }
+    }
+
+    /// #3223 follow-up (codex P2 / coderabbit): release claimed-but-unbound
+    /// launches whose claim anchor is older than `claim_ttl_secs`. A crash
+    /// between the claim-save and the launch ACK would otherwise hold a
+    /// max-active slot forever. Entries restored without an anchor (legacy
+    /// bare-id shape) are stamped `now` so their clock starts here. Released
+    /// issues return to `Queued` and re-enter the queue so the next scan can
+    /// relaunch them (mirroring the expired GitHub claim, which lapses after
+    /// the same TTL).
+    pub fn expire_stale_unbound_launches(&mut self, now: &str) -> Vec<u64> {
+        let ttl = self.config.claim_ttl_secs as i64;
+        let unbound: Vec<u64> = self
+            .active_launches
+            .iter()
+            .filter(|issue_number| !self.launched_windows.contains_key(issue_number))
+            .copied()
+            .collect();
+        let mut expired = Vec::new();
+        for issue_number in unbound {
+            match self.launching_claimed_at.get(&issue_number) {
+                Some(claimed_at) => {
+                    let stale =
+                        rfc3339_elapsed_secs(claimed_at, now).is_some_and(|elapsed| elapsed >= ttl);
+                    if stale {
+                        self.active_launches
+                            .retain(|active| *active != issue_number);
+                        self.launching_claimed_at.remove(&issue_number);
+                        self.set_inbox_state(issue_number, MonitorInboxState::Queued);
+                        if !self.queue.contains(&issue_number) {
+                            self.queue.push_back(issue_number);
+                            self.apply_priority_order_to_queue();
+                        }
+                        expired.push(issue_number);
+                    }
+                }
+                None => {
+                    // Legacy entry without an anchor: start its clock now.
+                    self.launching_claimed_at
+                        .insert(issue_number, now.to_string());
+                }
+            }
+        }
+        expired
     }
 
     pub fn status_view(&self) -> IssueMonitorStatusView {
@@ -1262,16 +1530,31 @@ impl IssueMonitorState {
     pub fn autonomous_in_flight_issues(&self) -> Vec<u64> {
         self.autonomous_records
             .values()
-            .filter(|record| {
-                matches!(
-                    record.phase,
-                    AutonomousPhase::Implementing
-                        | AutonomousPhase::Reviewing
-                        | AutonomousPhase::Delivering
-                )
-            })
+            .filter(|record| Self::is_in_flight_phase(record.phase))
             .map(|record| record.issue_number)
             .collect()
+    }
+
+    fn is_in_flight_phase(phase: AutonomousPhase) -> bool {
+        matches!(
+            phase,
+            AutonomousPhase::Implementing
+                | AutonomousPhase::Reviewing
+                | AutonomousPhase::Delivering
+        )
+    }
+
+    /// SPEC #3200 (review follow-up): true when `issue_number` has an autonomous
+    /// record actively in flight (`Implementing` / `Reviewing` / `Delivering`).
+    /// A launch/agent failure for such an issue must be routed through the
+    /// autonomous retry/backoff/escalation machinery rather than the plain
+    /// human-gated launch-failed path, or the record strands in a non-`Idle`
+    /// phase forever (e.g. `Reviewing` after a failed review-agent spawn, where
+    /// the daemon waits for a verdict that will never arrive).
+    pub fn is_autonomous_in_flight(&self, issue_number: u64) -> bool {
+        self.autonomous_records
+            .get(&issue_number)
+            .is_some_and(|record| Self::is_in_flight_phase(record.phase))
     }
 
     /// SPEC #3200: transition Implementing→Reviewing once the implementation
@@ -1331,6 +1614,18 @@ impl IssueMonitorState {
     /// (the auto-merge is being armed).
     pub fn begin_delivering(&mut self, issue_number: u64) {
         self.set_autonomous_phase(issue_number, AutonomousPhase::Delivering);
+    }
+
+    /// SPEC #3200 FR-034 (codex #3217 review): announce a SUCCESSFUL auto-merge
+    /// arm. Called by the worker only after `gh pr merge --auto` actually
+    /// succeeded — never before — so the operator toast cannot claim an arm
+    /// that failed (the merge helper's fail-closed contract).
+    pub fn record_auto_merge_armed(&mut self, issue_number: u64) {
+        self.push_autonomous_notice(
+            "info",
+            issue_number,
+            format!("Issue #{issue_number} gate passed — auto-merge armed"),
+        );
     }
 
     /// SPEC #3200 FR-009..FR-016: assemble the strong-gate inputs for an issue
@@ -1455,6 +1750,10 @@ impl IssueMonitorState {
                 .unwrap_or(MonitorInboxState::AgentFailed)
         } else if launched_window_id.is_some() {
             MonitorInboxState::Launched
+        } else if self.active_launches.contains(&issue_number) {
+            // Issue #3222: a claimed launch whose window is not bound yet stays
+            // visibly in-flight; the queue-push guard below then skips it.
+            MonitorInboxState::Launching
         } else {
             match existing.as_ref().map(|item| item.state) {
                 // A reopened Issue previously marked Released/Merged (but no
@@ -1563,7 +1862,7 @@ impl IssueMonitorState {
         });
     }
 
-    pub fn next_launch_request(&mut self) -> Option<IssueMonitorLaunchRequest> {
+    pub fn next_launch_request(&mut self, now: &str) -> Option<IssueMonitorLaunchRequest> {
         let max_active = self.config.max_active.max(1);
         if !self.gui_connected || self.active_launches.len() >= max_active {
             return None;
@@ -1572,6 +1871,10 @@ impl IssueMonitorState {
         if !self.active_launches.contains(&issue_number) {
             self.active_launches.push(issue_number);
         }
+        // #3223 follow-up: anchor the claim so a restored-but-never-acked
+        // launch can expire after claim_ttl_secs instead of leaking the slot.
+        self.launching_claimed_at
+            .insert(issue_number, now.to_string());
         let linked_issue_kind = if let Some(item) = self
             .inbox
             .iter_mut()
@@ -1639,7 +1942,7 @@ impl IssueMonitorState {
             match acquire_claim(client, IssueNumber(issue.number), claim, now) {
                 Ok(ClaimAcquireOutcome::Acquired(claim)) => {
                     self.record_claimed(issue, claim.claim_id);
-                    if let Some(request) = self.next_launch_request() {
+                    if let Some(request) = self.next_launch_request(now) {
                         self.pending_launches.push_back(request.clone());
                         launches.push(request);
                     }
@@ -1680,8 +1983,117 @@ impl IssueMonitorState {
         self.pending_review_dispatches.drain(..).collect()
     }
 
+    /// SPEC #3200 FR-034 (T-111): queue an operator notice for an unattended
+    /// autonomous transition. Fail-closed: a no-op unless autonomous mode is on,
+    /// so the default-OFF human-gated flow (#3165) emits nothing extra. Bounded:
+    /// oldest notices are dropped past [`AUTONOMOUS_NOTICE_CAP`] so a
+    /// disconnected-GUI window never grows the queue without limit.
+    fn push_autonomous_notice(
+        &mut self,
+        level: &str,
+        issue_number: u64,
+        message: impl Into<String>,
+    ) {
+        if !self.autonomous_mode {
+            return;
+        }
+        while self.pending_autonomous_notices.len() >= AUTONOMOUS_NOTICE_CAP {
+            self.pending_autonomous_notices.pop_front();
+        }
+        self.pending_autonomous_notices.push_back(AutonomousNotice {
+            level: level.to_string(),
+            issue_number,
+            message: message.into(),
+        });
+    }
+
+    /// Drain queued autonomous operator notices for emission as `toast`
+    /// payloads. Call only when a GUI is connected so unattended-window notices
+    /// are retained until someone can see them.
+    pub fn take_autonomous_notices(&mut self) -> Vec<AutonomousNotice> {
+        self.pending_autonomous_notices.drain(..).collect()
+    }
+
+    /// Queue an operator notice that must surface even though autonomous mode is
+    /// already OFF — the kill-switch disarm results. Bypasses the fail-closed
+    /// mode gate deliberately: these notices are feedback ABOUT turning the mode
+    /// off, so gating them on the mode would silence exactly the events the
+    /// operator just asked for.
+    fn push_kill_switch_notice(&mut self, level: &str, issue_number: u64, message: String) {
+        while self.pending_autonomous_notices.len() >= AUTONOMOUS_NOTICE_CAP {
+            self.pending_autonomous_notices.pop_front();
+        }
+        self.pending_autonomous_notices.push_back(AutonomousNotice {
+            level: level.to_string(),
+            issue_number,
+            message,
+        });
+    }
+
+    /// SPEC #3200 kill switch (codex #3217/#3219 review): with autonomous mode
+    /// OFF, every record still in `Delivering` has an armed GitHub auto-merge
+    /// that must be ACTIVELY cancelled (`gh pr merge --disable-auto`), not just
+    /// abandoned locally. Returns the `(issue_number, pr_number)` pairs to
+    /// disarm WITHOUT mutating any record: a record leaves `Delivering` only
+    /// after the disarm actually SUCCEEDS
+    /// ([`record_kill_switch_disarm_result`](Self::record_kill_switch_disarm_result)),
+    /// so a transient `gh` failure keeps it targeted and the next scan retries.
+    /// A failed disarm must never strand a live armed auto-merge behind a
+    /// NeedsHuman screen. No-op while the mode is ON.
+    pub fn kill_switch_disarm_targets(&self) -> Vec<(u64, u64)> {
+        if self.autonomous_mode {
+            return Vec::new();
+        }
+        self.autonomous_records
+            .values()
+            .filter(|record| record.phase == AutonomousPhase::Delivering)
+            .filter_map(|record| record.pr_number.map(|pr| (record.issue_number, pr)))
+            .collect()
+    }
+
+    /// Record the outcome of a kill-switch auto-merge disarm attempt.
+    ///
+    /// - **Success**: the delivery is halted for good — escalate to `NeedsHuman`
+    ///   (visible, never silently resumed) and emit a warn notice.
+    /// - **Failure**: emit an error notice but LEAVE the record in `Delivering`
+    ///   so [`kill_switch_disarm_targets`](Self::kill_switch_disarm_targets)
+    ///   returns it again and the next scan retries the disarm (codex #3219: a
+    ///   failed disarm must stay retryable while the remote auto-merge is live).
+    ///
+    /// Notices are ungated: the mode is OFF by definition here, and these are
+    /// the operator's feedback for turning it off.
+    pub fn record_kill_switch_disarm_result(
+        &mut self,
+        issue_number: u64,
+        pr_number: u64,
+        disarmed: bool,
+    ) {
+        if disarmed {
+            self.escalate_to_needs_human(
+                issue_number,
+                "autonomous mode disabled — delivery halted; auto-merge disarmed",
+            );
+            self.push_kill_switch_notice(
+                "warn",
+                issue_number,
+                format!(
+                    "Issue #{issue_number}: auto-merge on PR #{pr_number} disarmed (kill switch)"
+                ),
+            );
+        } else {
+            self.push_kill_switch_notice(
+                "error",
+                issue_number,
+                format!(
+                    "Issue #{issue_number}: failed to disarm auto-merge on PR #{pr_number} — still armed on GitHub; will retry next scan"
+                ),
+            );
+        }
+    }
+
     pub fn complete_active_launch(&mut self, issue_number: u64, window_id: impl Into<String>) {
         let window_id = window_id.into();
+        self.launching_claimed_at.remove(&issue_number);
         if !self.active_launches.contains(&issue_number) {
             self.active_launches.push(issue_number);
         }
@@ -1770,6 +2182,7 @@ impl IssueMonitorState {
     fn clear_active_tracking(&mut self, issue_number: u64) {
         self.active_launches
             .retain(|active| *active != issue_number);
+        self.launching_claimed_at.remove(&issue_number);
         self.launched_windows.remove(&issue_number);
         self.launched_branches.remove(&issue_number);
         // #3165 error-window lifecycle: terminal transitions (merged / released /
@@ -1798,6 +2211,15 @@ impl IssueMonitorState {
     /// completed work is not auto-relaunched while the Issue stays open until
     /// release).
     pub fn record_merged(&mut self, issue_number: u64) {
+        // FR-034: notify the operator when an issue that went through the
+        // autonomous loop completes (checked BEFORE the record is cleared).
+        if self.autonomous_records.contains_key(&issue_number) {
+            self.push_autonomous_notice(
+                "done",
+                issue_number,
+                format!("Issue #{issue_number} merged autonomously"),
+            );
+        }
         self.clear_active_tracking(issue_number);
         self.queue.retain(|queued| *queued != issue_number);
         self.merged_issues.insert(issue_number);
@@ -1877,6 +2299,18 @@ impl IssueMonitorState {
         state: MonitorInboxState,
     ) {
         let message = message.into();
+        // SPEC #3200 (review follow-up): a failure for an in-flight autonomous
+        // issue (e.g. the independent review agent could not spawn, leaving the
+        // record in `Reviewing`) must funnel through the autonomous
+        // retry/backoff/escalation machinery — otherwise the record strands in a
+        // non-`Idle` phase forever and the daemon waits for a verdict that will
+        // never arrive. The plain human-gated `LaunchFailed`/`AgentFailed` path
+        // below is preserved for every non-autonomous issue.
+        if self.autonomous_mode && self.is_autonomous_in_flight(issue_number) {
+            let now = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+            self.record_autonomous_failure(issue_number, FailureClass::Transient, message, &now);
+            return;
+        }
         self.active_launches
             .retain(|active| *active != issue_number);
         // #3165 error-window lifecycle: retain the stale agent window id so an
@@ -2046,7 +2480,9 @@ mod tests {
             Some("tab-1::agent-1")
         );
         assert!(
-            monitor.next_launch_request().is_none(),
+            monitor
+                .next_launch_request("2026-07-02T00:00:00Z")
+                .is_none(),
             "max_active=1 must keep the next queued issue waiting while launched work is active"
         );
     }
@@ -2057,6 +2493,197 @@ mod tests {
         monitor.complete_active_launch(number, window_id);
         assert_eq!(monitor.active_count(), 1);
         monitor
+    }
+
+    #[test]
+    fn launching_claims_survive_prefs_roundtrip_and_are_not_reclaimed() {
+        // Issue #3222: a claimed-but-not-yet-acked launch (Launching, no window
+        // yet) must survive the prefs roundtrip. The GUI rebuilds the monitor
+        // from disk on every handler call, so an unpersisted claim was invisible
+        // to the next handler / the launch ACK's rescan, which re-claimed the
+        // same issue (same-owner renewal) and spawned a DUPLICATE agent window
+        // (observed live: Max 5 ⇒ 10 windows).
+        let mut monitor = IssueMonitorState::new(IssueMonitorConfig::default());
+        scan_issue_monitor_candidates(&mut monitor, &[issue(42)], "2026-07-02T00:00:00Z");
+        monitor.set_gui_connected(true);
+        let request = monitor
+            .next_launch_request("2026-07-02T00:00:00Z")
+            .expect("claimed for launch");
+        assert_eq!(request.issue_number, 42);
+        assert_eq!(monitor.active_count(), 1, "claim holds an active slot");
+
+        // Reload from prefs (what every GUI handler does).
+        let mut restored =
+            IssueMonitorState::with_prefs(IssueMonitorConfig::default(), monitor.prefs());
+        restored.set_gui_connected(true);
+        assert_eq!(
+            restored.active_count(),
+            1,
+            "in-flight Launching claim survives the roundtrip"
+        );
+        // A rescan must not re-queue the in-flight issue…
+        scan_issue_monitor_candidates(&mut restored, &[issue(42)], "2026-07-02T00:00:30Z");
+        assert_eq!(
+            restored.inbox_item(42).map(|item| item.state),
+            Some(MonitorInboxState::Launching),
+            "rescan shows the in-flight claim as Launching, not Queued"
+        );
+        assert_eq!(restored.queue_len(), 0, "not re-queued");
+        // …and must not hand out a second launch request for it.
+        assert!(
+            restored
+                .next_launch_request("2026-07-02T00:00:00Z")
+                .is_none(),
+            "no duplicate launch request for an in-flight claim"
+        );
+    }
+
+    #[test]
+    fn launching_prefs_accept_legacy_bare_ids_and_timestamped_entries() {
+        // #3223 follow-up (codex P2): the launching entries gained a
+        // `claimed_at` anchor. Files written by the first shipped shape (bare
+        // ids) must still parse — a parse failure would `unwrap_or_default()`
+        // into a FULL prefs wipe.
+        let legacy = r#"{"enabled":true,"max_active_agents":2,"priority_order":[],"launching_issues":[42,43]}"#;
+        let prefs: IssueMonitorPrefs = serde_json::from_str(legacy).expect("legacy parses");
+        assert_eq!(
+            prefs
+                .launching_issues
+                .iter()
+                .map(|entry| entry.issue_number)
+                .collect::<Vec<_>>(),
+            vec![42, 43]
+        );
+        let timed = r#"{"enabled":true,"max_active_agents":2,"priority_order":[],"launching_issues":[{"issue_number":7,"claimed_at":"2026-07-02T00:00:00Z"}]}"#;
+        let prefs: IssueMonitorPrefs = serde_json::from_str(timed).expect("timed parses");
+        assert_eq!(prefs.launching_issues[0].issue_number, 7);
+        assert_eq!(
+            prefs.launching_issues[0].claimed_at.as_deref(),
+            Some("2026-07-02T00:00:00Z")
+        );
+    }
+
+    #[test]
+    fn stale_unbound_launching_claims_expire_after_claim_ttl() {
+        // #3223 follow-up (codex P2 / coderabbit): a crash between the
+        // claim-save and the launch ACK leaves a restored `Launching` claim
+        // with no window. Without an expiry it holds a max-active slot
+        // forever. After claim_ttl_secs it must be released so the next scan
+        // can re-queue and relaunch the issue.
+        let mut monitor = IssueMonitorState::new(IssueMonitorConfig::default());
+        scan_issue_monitor_candidates(&mut monitor, &[issue(42)], "2026-07-02T00:00:00Z");
+        monitor.set_gui_connected(true);
+        assert!(monitor
+            .next_launch_request("2026-07-02T00:00:00Z")
+            .is_some());
+        assert_eq!(monitor.active_count(), 1);
+
+        // Restart (roundtrip) mid-launch: claim restored, still unbound.
+        let mut restored =
+            IssueMonitorState::with_prefs(IssueMonitorConfig::default(), monitor.prefs());
+        restored.set_gui_connected(true);
+        assert_eq!(restored.active_count(), 1);
+
+        // Before the TTL: retained.
+        let expired = restored.expire_stale_unbound_launches("2026-07-02T00:10:00Z");
+        assert!(expired.is_empty(), "not expired before claim_ttl_secs");
+        assert_eq!(restored.active_count(), 1);
+
+        // After the TTL (default 1800s): released and re-queueable.
+        let expired = restored.expire_stale_unbound_launches("2026-07-02T00:31:00Z");
+        assert_eq!(expired, vec![42], "stale unbound claim expires");
+        assert_eq!(restored.active_count(), 0, "slot released");
+        scan_issue_monitor_candidates(&mut restored, &[issue(42)], "2026-07-02T00:31:10Z");
+        assert!(
+            restored
+                .next_launch_request("2026-07-02T00:31:20Z")
+                .is_some(),
+            "the issue is claimable again after expiry"
+        );
+        // Bound launches never expire this way.
+        monitor.complete_active_launch(42, "tab-1::agent-1");
+        assert!(monitor
+            .expire_stale_unbound_launches("2026-07-03T00:00:00Z")
+            .is_empty());
+    }
+
+    #[test]
+    fn merge_inflight_launches_from_disk_unifies_cross_process_accounting() {
+        // #3223 follow-up (codex P1): the daemon only refreshed profile/tuning
+        // from disk, so GUI-written launching/launched claims were invisible —
+        // the daemon saw free slots (over-cap claims) and its next persist
+        // dropped the GUI's in-flight entries. The merge must absorb both.
+        let mut daemon = IssueMonitorState::with_prefs(
+            IssueMonitorConfig {
+                enabled: true,
+                max_active: 2,
+                ..IssueMonitorConfig::default()
+            },
+            IssueMonitorPrefs {
+                enabled: true,
+                max_active_agents: 2,
+                ..IssueMonitorPrefs::default()
+            },
+        );
+        let disk = IssueMonitorPrefs {
+            launching_issues: vec![IssueMonitorLaunchingIssue {
+                issue_number: 42,
+                claimed_at: Some("2026-07-02T00:00:00Z".to_string()),
+            }],
+            launched_issues: vec![IssueMonitorLaunchedIssue {
+                issue_number: 43,
+                window_id: "tab-1::agent-2".to_string(),
+            }],
+            ..IssueMonitorPrefs::default()
+        };
+        daemon.merge_inflight_launches_from_disk(&disk);
+        assert_eq!(daemon.active_count(), 2, "both in-flight claims absorbed");
+        assert!(daemon.launched_window_issue("tab-1::agent-2").is_some());
+        // The daemon persist now round-trips them instead of dropping them.
+        let prefs = daemon.prefs();
+        assert!(prefs
+            .launching_issues
+            .iter()
+            .any(|entry| entry.issue_number == 42
+                && entry.claimed_at.as_deref() == Some("2026-07-02T00:00:00Z")));
+        assert!(prefs
+            .launched_issues
+            .iter()
+            .any(|entry| entry.issue_number == 43));
+    }
+
+    #[test]
+    fn refresh_gui_owned_prefs_updates_profile_and_tuning_from_disk() {
+        // Issue #3222: the daemon loads prefs once at startup, so a launch
+        // profile the GUI saves later stays invisible (has_launch_profile=false
+        // ⇒ cap 0 ⇒ the daemon never refills slots and the GUI's re-entrant
+        // scan became the de-facto driver). The scan must refresh GUI-owned
+        // fields from disk.
+        let mut monitor = IssueMonitorState::new(IssueMonitorConfig::default());
+        assert!(!monitor.has_launch_profile());
+        let disk = IssueMonitorPrefs {
+            launch_profile: Some(IssueMonitorLaunchProfile {
+                agent_id: "claude".to_string(),
+                model: None,
+                reasoning: None,
+                version: None,
+                session_mode: Default::default(),
+                skip_permissions: false,
+                codex_fast_mode: false,
+                runtime_target: Default::default(),
+                docker_service: None,
+                docker_lifecycle_intent: Default::default(),
+                windows_shell: None,
+            }),
+            autonomous_tuning: AutonomousTuning {
+                max_attempts: 9,
+                ..AutonomousTuning::default()
+            },
+            ..IssueMonitorPrefs::default()
+        };
+        monitor.refresh_gui_owned_prefs(&disk);
+        assert!(monitor.has_launch_profile(), "profile refreshed from disk");
+        assert_eq!(monitor.autonomous_tuning.max_attempts, 9);
     }
 
     #[test]
@@ -2297,6 +2924,61 @@ mod tests {
             "restored monitor must not re-launch already-merged work"
         );
         assert_eq!(restored.queue_len(), 0);
+    }
+
+    #[test]
+    fn prefs_tmp_path_is_process_unique_not_a_shared_fixed_name() {
+        // adversarial review (shared *.json.tmp race): the daemon and GUI both
+        // write this prefs file, so the atomic-write scratch path must be unique
+        // per writer — never the old fixed `*.json.tmp` that concurrent writers
+        // could truncate into torn JSON.
+        let path = std::path::Path::new("/x/y/issue-monitor.json");
+        let a = super::unique_prefs_tmp_path(path);
+        let b = super::unique_prefs_tmp_path(path);
+        assert_ne!(a, b, "each write gets a distinct scratch path (uuid)");
+        assert_ne!(
+            a,
+            path.with_extension("json.tmp"),
+            "not the old shared fixed name"
+        );
+        assert!(
+            a.to_string_lossy()
+                .contains(&std::process::id().to_string()),
+            "scratch path is scoped to the writing process: {}",
+            a.display()
+        );
+        assert_eq!(
+            a.parent(),
+            path.parent(),
+            "scratch stays in the target's dir so the rename is atomic"
+        );
+    }
+
+    #[test]
+    fn save_issue_monitor_prefs_round_trips_and_leaves_no_scratch_file() {
+        // The unique-scratch atomic write still round-trips and cleans up (the
+        // rename consumes the temp), leaving only the target file.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("issue-monitor.json");
+        let prefs = IssueMonitorPrefs {
+            merged_issues: vec![7, 9],
+            ..IssueMonitorPrefs::default()
+        };
+        save_issue_monitor_prefs(&path, &prefs).expect("save");
+
+        let loaded = load_issue_monitor_prefs(&path).expect("load");
+        assert_eq!(loaded.merged_issues, vec![7, 9]);
+
+        let leftovers: Vec<_> = std::fs::read_dir(dir.path())
+            .expect("read_dir")
+            .filter_map(Result::ok)
+            .map(|entry| entry.file_name().to_string_lossy().into_owned())
+            .filter(|name| name != "issue-monitor.json")
+            .collect();
+        assert!(
+            leftovers.is_empty(),
+            "no scratch file left behind: {leftovers:?}"
+        );
     }
 
     #[test]
@@ -2960,6 +3642,270 @@ mod tests {
     }
 
     #[test]
+    fn resume_after_restart_reverts_reviewing_to_implementing_for_redispatch() {
+        // review follow-up: a record persisted mid-review reloads in `Reviewing`,
+        // but its (non-persisted) review dispatch is gone, so it would wait forever
+        // for a verdict. Resetting it to `Implementing` lets the next scan re-detect
+        // the PR and re-issue the review — restoring the pre-persist self-healing.
+        // The record is round-tripped through prefs to model an actual restart.
+        let mut monitor = autonomous_state();
+        monitor.set_autonomous_phase(7, AutonomousPhase::Implementing);
+        monitor.begin_review(7, 99, "abc123"); // → Reviewing, verdict pending
+        let restored_prefs = monitor.prefs();
+
+        let mut restarted =
+            IssueMonitorState::with_prefs(IssueMonitorConfig::default(), restored_prefs);
+        assert_eq!(
+            restarted.autonomous_record(7).map(|r| r.phase),
+            Some(AutonomousPhase::Reviewing),
+            "reloads in Reviewing (the strand)"
+        );
+
+        let resumed = restarted.resume_inflight_reviews_after_restart("2026-06-29T00:00:00Z");
+
+        assert_eq!(resumed, vec![7], "the stranded Reviewing record is resumed");
+        let record = restarted.autonomous_record(7).expect("record retained");
+        assert_eq!(
+            record.phase,
+            AutonomousPhase::Implementing,
+            "reset to Implementing so the next scan re-detects the PR + re-dispatches"
+        );
+        assert_eq!(
+            record.review_passed, None,
+            "verdict cleared for the re-review"
+        );
+        // Still counted in-flight (holds its slot); no attempt is spent on a restart.
+        assert_eq!(restarted.autonomous_in_flight_issues(), vec![7]);
+        assert_eq!(
+            restarted.attempt_count(7),
+            0,
+            "a restart is not a failed attempt"
+        );
+    }
+
+    #[test]
+    fn resume_after_restart_leaves_delivering_and_other_phases_untouched() {
+        // Delivering self-heals on its own (its watch polls the persisted pr_number
+        // for the merge commit) and has an armed GitHub auto-merge, so it must NOT
+        // be re-driven. Idle/Implementing/terminal phases are also left alone.
+        let mut monitor = autonomous_state();
+        monitor.set_autonomous_phase(1, AutonomousPhase::Delivering);
+        monitor.set_autonomous_phase(2, AutonomousPhase::Implementing);
+        monitor.set_autonomous_phase(3, AutonomousPhase::NeedsHuman);
+        monitor.set_autonomous_phase(4, AutonomousPhase::Idle);
+
+        let resumed = monitor.resume_inflight_reviews_after_restart("2026-06-29T00:00:00Z");
+
+        assert!(resumed.is_empty(), "no Reviewing records ⇒ nothing resumed");
+        assert_eq!(
+            monitor.autonomous_record(1).map(|r| r.phase),
+            Some(AutonomousPhase::Delivering),
+            "Delivering is left to its own merge-watch self-heal"
+        );
+        assert_eq!(
+            monitor.autonomous_record(2).map(|r| r.phase),
+            Some(AutonomousPhase::Implementing)
+        );
+        assert_eq!(
+            monitor.autonomous_record(3).map(|r| r.phase),
+            Some(AutonomousPhase::NeedsHuman)
+        );
+    }
+
+    #[test]
+    fn autonomous_transitions_emit_notices_for_the_operator() {
+        // SPEC #3200 FR-034 (T-109/T-111, Sc 24): unattended autonomous lifecycle
+        // transitions must surface operator notices — merged, needs-human, and
+        // transient retry — so fully-unattended operation is observable. The
+        // notices queue is drained by the daemon worker into `toast` payloads.
+        let mut monitor = autonomous_state();
+        scan_issue_monitor_candidates(&mut monitor, &[issue(7)], "2026-07-02T00:00:00Z");
+        monitor.complete_active_launch(7, "tab-1::agent-7");
+        monitor.set_autonomous_phase(7, AutonomousPhase::Implementing);
+
+        // Transient retry → warn notice naming the attempt.
+        monitor.record_autonomous_failure(
+            7,
+            FailureClass::Transient,
+            "review spawn blip",
+            "2026-07-02T00:10:00Z",
+        );
+        // Gate pass → Delivering; the info notice fires only once the arm
+        // actually SUCCEEDS (codex #3217: no success toast for a failed arm).
+        monitor.set_autonomous_phase(7, AutonomousPhase::Reviewing);
+        monitor.begin_delivering(7);
+        monitor.record_auto_merge_armed(7);
+        // Merge completion → done notice.
+        monitor.record_merged(7);
+        // A second issue escalates → error notice.
+        scan_issue_monitor_candidates(&mut monitor, &[issue(8)], "2026-07-02T00:20:00Z");
+        monitor.record_attempt(8);
+        monitor.escalate_to_needs_human(8, "review rejected");
+
+        let notices = monitor.take_autonomous_notices();
+        let summary: Vec<(String, u64)> = notices
+            .iter()
+            .map(|notice| (notice.level.clone(), notice.issue_number))
+            .collect();
+        assert!(
+            summary.contains(&("warn".to_string(), 7)),
+            "transient retry emits a warn notice: {summary:?}"
+        );
+        assert!(
+            summary.contains(&("info".to_string(), 7)),
+            "auto-merge arming emits an info notice: {summary:?}"
+        );
+        assert!(
+            summary.contains(&("done".to_string(), 7)),
+            "merge completion emits a done notice: {summary:?}"
+        );
+        assert!(
+            summary.contains(&("error".to_string(), 8)),
+            "needs-human escalation emits an error notice: {summary:?}"
+        );
+        let retry = notices
+            .iter()
+            .find(|notice| notice.level == "warn")
+            .expect("retry notice");
+        assert!(
+            retry.message.contains("review spawn blip"),
+            "retry notice carries the failure reason: {}",
+            retry.message
+        );
+        // Drained: a second take returns nothing.
+        assert!(monitor.take_autonomous_notices().is_empty());
+    }
+
+    #[test]
+    fn default_off_transitions_emit_no_autonomous_notices() {
+        // FR-004 non-regression: with autonomous_mode OFF (default), the human-
+        // gated #3165 flow emits no autonomous notices — merges and failures are
+        // already visible via inbox state without extra toasts.
+        let mut monitor = launched_monitor(42, "tab-1::agent-1");
+        monitor.record_merged(42);
+        assert!(
+            monitor.take_autonomous_notices().is_empty(),
+            "default-OFF merge emits no autonomous notice"
+        );
+    }
+
+    #[test]
+    fn kill_switch_retries_failed_disarms_until_success() {
+        // codex #3217/#3219 review: turning autonomous mode OFF must actively
+        // disarm GitHub auto-merges armed by the monitor — and a FAILED disarm
+        // must stay retryable. A record leaves Delivering only after the disarm
+        // succeeds; otherwise the armed auto-merge would stay live on GitHub
+        // behind a NeedsHuman screen with nothing retrying it.
+        let mut monitor = autonomous_state();
+        scan_issue_monitor_candidates(&mut monitor, &[issue(7)], "2026-07-02T00:00:00Z");
+        monitor.set_autonomous_phase(7, AutonomousPhase::Implementing);
+        monitor.begin_review(7, 99, "abc123");
+        monitor.begin_delivering(7);
+
+        // Mode ON ⇒ no targets (deliveries are still owned by the loop).
+        assert!(monitor.kill_switch_disarm_targets().is_empty());
+
+        monitor.set_autonomous_mode(false);
+        assert_eq!(
+            monitor.kill_switch_disarm_targets(),
+            vec![(7, 99)],
+            "delivering PR targeted for disarm"
+        );
+
+        // FAILED disarm: error notice, record STAYS Delivering ⇒ re-targeted.
+        monitor.record_kill_switch_disarm_result(7, 99, false);
+        assert_eq!(
+            monitor.autonomous_record(7).map(|r| r.phase),
+            Some(AutonomousPhase::Delivering),
+            "failed disarm keeps the record in Delivering for retry"
+        );
+        assert_eq!(
+            monitor.kill_switch_disarm_targets(),
+            vec![(7, 99)],
+            "next scan retries the disarm"
+        );
+
+        // SUCCESSFUL disarm: escalates to NeedsHuman (visible, never silently
+        // resumed) and stops being targeted.
+        monitor.record_kill_switch_disarm_result(7, 99, true);
+        assert_eq!(
+            monitor.autonomous_record(7).map(|r| r.phase),
+            Some(AutonomousPhase::NeedsHuman)
+        );
+        assert_eq!(
+            monitor.inbox_item(7).map(|item| item.state),
+            Some(MonitorInboxState::NeedsHuman)
+        );
+        assert!(monitor.kill_switch_disarm_targets().is_empty());
+
+        // Both outcomes surfaced even though the mode is OFF (ungated notices).
+        let notices = monitor.take_autonomous_notices();
+        assert!(notices
+            .iter()
+            .any(|n| n.level == "error" && n.message.contains("retry next scan")));
+        assert!(notices
+            .iter()
+            .any(|n| n.level == "warn" && n.message.contains("disarmed")));
+    }
+
+    #[test]
+    fn autonomous_notices_queue_is_bounded() {
+        // Unattended operation with a disconnected GUI must not grow the queue
+        // without limit: oldest notices are dropped past the cap.
+        let mut monitor = autonomous_state();
+        for n in 0..200u64 {
+            monitor.record_attempt(n);
+            monitor.escalate_to_needs_human(n, "boom");
+        }
+        let notices = monitor.take_autonomous_notices();
+        assert!(
+            notices.len() <= 100,
+            "queue bounded to 100, got {}",
+            notices.len()
+        );
+        assert_eq!(
+            notices.last().map(|notice| notice.issue_number),
+            Some(199),
+            "newest notice retained when the cap drops oldest"
+        );
+    }
+
+    #[test]
+    fn resume_after_restart_refreshes_heartbeat_so_stuck_recovery_does_not_fail_it() {
+        // review follow-up (codex #3210): on restart the persisted active slot and
+        // a STALE last_heartbeat are restored. Resetting Reviewing → Implementing
+        // makes the record eligible for stuck/idle detection, which runs BEFORE the
+        // re-dispatch on the next scan. Without refreshing the heartbeat, a review
+        // that ran longer than stuck_timeout_secs before the restart would be
+        // wrongly counted as a failed attempt. The refresh must prevent that.
+        let mut monitor = launched_monitor(42, "tab-1::agent-1");
+        monitor.set_autonomous_mode(true);
+        monitor.set_autonomous_phase(42, AutonomousPhase::Implementing);
+        monitor.begin_review(42, 99, "abc123"); // → Reviewing (holds the active slot)
+        monitor.record_autonomous_heartbeat(42, "2026-06-29T00:00:00Z"); // stale pre-restart
+
+        // Resume, then run stuck recovery in the same scan order as the daemon.
+        let resumed = monitor.resume_inflight_reviews_after_restart("2026-06-29T05:00:00Z");
+        assert_eq!(resumed, vec![42]);
+        let recovered = monitor.recover_stuck_autonomous("2026-06-29T05:00:00Z");
+
+        assert!(
+            recovered.is_empty(),
+            "the resumed record's fresh heartbeat keeps it out of stuck recovery"
+        );
+        assert_eq!(
+            monitor.autonomous_record(42).map(|r| r.phase),
+            Some(AutonomousPhase::Implementing),
+            "still Implementing, ready for the next scan to re-dispatch review"
+        );
+        assert_eq!(
+            monitor.attempt_count(42),
+            0,
+            "a restart is not counted as a failed attempt"
+        );
+    }
+
+    #[test]
     fn autonomous_loop_transitions_track_pr_sha_and_verdict() {
         // SPEC #3200: Implementing → Reviewing (bind PR + reviewed SHA) →
         // verdict recorded → Delivering. autonomous_in_flight_issues tracks it.
@@ -2991,6 +3937,92 @@ mod tests {
         monitor.record_merged(7);
         assert!(monitor.autonomous_record(7).is_none());
         assert!(monitor.autonomous_in_flight_issues().is_empty());
+    }
+
+    #[test]
+    fn launch_failure_routes_inflight_autonomous_issue_through_retry() {
+        // SPEC #3200 (review follow-up): a launch/agent failure for an in-flight
+        // autonomous issue — e.g. the independent review agent could not spawn —
+        // must funnel through the autonomous retry machinery (count an attempt,
+        // schedule backoff, re-queue) instead of stranding the record in
+        // `Reviewing` forever, waiting for a verdict that will never arrive.
+        let mut monitor = autonomous_state();
+        scan_issue_monitor_candidates(&mut monitor, &[issue(7)], "2026-06-30T00:00:00Z");
+        monitor.complete_active_launch(7, "tab-1::agent-7");
+        monitor.set_autonomous_phase(7, AutonomousPhase::Implementing);
+        monitor.begin_review(7, 99, "abc123"); // Implementing → Reviewing
+        assert_eq!(
+            monitor.autonomous_record(7).map(|r| r.phase),
+            Some(AutonomousPhase::Reviewing)
+        );
+        assert!(monitor.is_autonomous_in_flight(7));
+
+        monitor.record_launch_failed(7, "Independent review could not start");
+
+        let record = monitor.autonomous_record(7).expect("record retained");
+        assert_eq!(
+            record.phase,
+            AutonomousPhase::Idle,
+            "routed back to Idle for retry, not stranded in Reviewing"
+        );
+        assert_eq!(monitor.attempt_count(7), 1, "the failed attempt is counted");
+        assert!(
+            record.retry_not_before.is_some(),
+            "a retry backoff is scheduled"
+        );
+        assert_eq!(
+            monitor.inbox_item(7).map(|item| item.state),
+            Some(MonitorInboxState::Queued),
+            "re-queued for automatic relaunch (not parked in LaunchFailed)"
+        );
+    }
+
+    #[test]
+    fn launch_failure_at_cap_escalates_inflight_autonomous_issue_to_needs_human() {
+        // SPEC #3200 (review follow-up): once the in-flight autonomous issue's
+        // attempts are exhausted, a further launch failure escalates to
+        // NeedsHuman through the same routing rather than silently retrying.
+        let mut monitor = autonomous_state();
+        monitor.autonomous_tuning.max_attempts = 1;
+        scan_issue_monitor_candidates(&mut monitor, &[issue(7)], "2026-06-30T00:00:00Z");
+        monitor.complete_active_launch(7, "tab-1::agent-7");
+        monitor.set_autonomous_phase(7, AutonomousPhase::Implementing);
+        monitor.begin_review(7, 99, "abc123");
+
+        monitor.record_launch_failed(7, "review spawn failed at cap");
+
+        assert_eq!(
+            monitor.autonomous_record(7).map(|r| r.phase),
+            Some(AutonomousPhase::NeedsHuman),
+            "attempts exhausted ⇒ escalated, not retried"
+        );
+        assert_eq!(
+            monitor.inbox_item(7).map(|item| item.state),
+            Some(MonitorInboxState::NeedsHuman)
+        );
+    }
+
+    #[test]
+    fn launch_failure_for_non_autonomous_issue_keeps_plain_failed_state() {
+        // Non-regression: with no in-flight autonomous record, the launch failure
+        // stays on the human-gated LaunchFailed path (SPEC #3165), untouched by
+        // the autonomous routing.
+        let mut monitor = autonomous_state(); // mode on, but no record for #7
+        scan_issue_monitor_candidates(&mut monitor, &[issue(7)], "2026-06-30T00:00:00Z");
+        assert!(!monitor.is_autonomous_in_flight(7));
+
+        monitor.record_launch_failed(7, "binary missing");
+
+        assert_eq!(
+            monitor.inbox_item(7).map(|item| item.state),
+            Some(MonitorInboxState::LaunchFailed),
+            "plain launch-failed path is preserved when no autonomous attempt is in flight"
+        );
+        assert_eq!(
+            monitor.attempt_count(7),
+            0,
+            "no autonomous attempt is counted"
+        );
     }
 
     #[test]

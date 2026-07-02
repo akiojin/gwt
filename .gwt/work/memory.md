@@ -7506,3 +7506,30 @@ Type: environment
 Context: SPEC #3206 P2 検証で、gwt-fresh-home 隔離 HOME から Playwright E2E と cargo test を実行したら両方 tooling 欠落で失敗した(chromium headless shell 不在 / rustup default 未設定)。素の npx playwright install は最新 playwright 用 browser build (v1228) を入れてしまい、scripts/run-visual-tests.sh が pin する 1.49.1 が要求する v1148 と合わず解決しなかった。
 Learning: fresh HOME では ~/Library/Caches/ms-playwright と rustup default が空。browser install は必ず pinned deps の binary (${TMPDIR}/gwt-playwright-<ver>/node_modules/.bin/playwright install chromium) で行う。cargo は rustup default stable を一度実行すれば直る(toolchain 自体は installed)。
 Future Action: 隔離環境で Executable doesn't exist ... ms-playwright/chromium_headless_shell-<N> を見たら要求 build 番号 <N> を確認し、pinned playwright binary で install する。rustup could not choose a version は rustup default stable。
+
+## 2026-07-02 — Start Work は lazy／branch-per-work は生産Work用・intake は既存worktree再利用
+
+Type: decision
+Context: ユーザー提起「Issue Monitor があれば Start Work のブランチ作成は不要、Issue登録だけなら専用ブランチ起動で良い」を gwt-discussion で検証(SPEC #2359 Workモデル / #3165 Issue Monitor)。
+Learning: (1)前提が事実と異なる: Start Work はクリック時点でブランチ名を予約するだけで git ref を作らず(reserve_start_work_branch_name_for_project, start_work_test.rs:153 'must not create refs')、ブランチ+worktree の物理作成はエージェント起動直前の resolve_launch_worktree(launch_runtime.rs:141/162)。Issue Monitor も同じ lazy materialization を再利用(launch.rs:1467)。『Start Workが先にブランチを作る』は誤解で、両者は同一機構の別トリガー。(2)Start Work は Issue Monitor で代替不可: 非Issue作業(ad-hoc/任意ブランチ種別/既存リモートブランチ継続US-83/Shell)の汎用入口、Issue linkage は optional。(3)正しい論点は『gwt の Work は branch束縛1種類だが、生産Work(コード→branch/worktree/PR必須)と非生産intake Work(register-issue/discussion/spec/arch-review→Issue+.gwt notesのみ)の2種類ある』。(4)『専用ブランチ共有』案は git制約(1ブランチ=1worktree)とセッション隔離(GWT_SESSION_ID+per-worktree .gwt state+managed hooks)に当たり素朴には成立しない。実現するなら ephemeral worktree か直列化が要る。
+Future Action: branch-per-work コアモデルは生産Workに load-bearing なので維持。intake/discussion は新Work種別を作らず既存worktree再利用で回す(No Action)。将来 intake worktree増殖が定量的に痛くなった場合のみ『ephemeral intake Work kind』を SPEC化(セッション隔離のworktree非依存化が前提技術課題)。'Start Workは事前にブランチを作る'誤解を繰り返さない。
+## 2026-07-02 — session 共有 dedup は identity 照合必須 (Workspace 行 silent drop)
+
+Type: bug-fix
+Context: PR #3205 (work/issue-3197) が Workspace 一覧から消え再開不能になった (Issue #3213)。works.json で別 branch の Work (issue-3184) に session の迷子 ref (agent_id 空) が誤付与され、active_work_already_present の session 一致 dedup が branch/worktree identity を確認せず正規所有者の行を silent drop していた。ローカル branch が存在すると remote Start Work stub 経路 (ResumeExisting) からも除外されるため表示経路がゼロになる。
+Learning: session id 共有による dedup/merge は、両側が git identity (branch/worktree) を持ち食い違う場合には適用してはならない。identity-conflict gate (active_work_agent_matches_workspace_row_identity と同パターン) を必ず併用する。view 層の dedup は「汚染済み永続データでも正しく表示できる」ことを基準に設計する (データ修復より view 耐性)。
+Future Action: session ベースの照合・dedup を追加/変更する際は、(1) 別 branch の Work が同一 session を共有する corrupted works.json ケースのテストを必ず書く、(2) drop 側に他の表示経路が残るか (remote stub 等) を確認する。上流の session 誤付与 hardening と journal compaction の診断痕跡保持は未解決 (Issue #3213 Follow-up 参照)。
+
+## 2026-06-29 — managed-skill 新規ファイルは .git/info/exclude で silent に無視される
+
+Type: project
+Context: Issue #3197 で gwt-manage-pr の managed skill に新規 reference file (references/deliver-flow.md) を追加した際、git status に出ず commit され損ねかけた。
+Learning: gwt-managed worktree では `.git/info/exclude` に `.claude/skills/gwt-*` と `.codex/skills/gwt-*` の除外 entry があり、新規 managed-skill ファイルは untracked にすら現れず silent に無視される。既存ファイル(SKILL.md 等)は既に tracked なので modification は M で見えるが、NEW ファイルは git add -f しないと commit されない。commit され損ねると include_dir! 埋め込み元と CI checkout に file が無く、新 test と parity test が CI で fail する。
+Future Action: managed skill (.claude/skills/gwt-*, .codex/skills/gwt-*) に新規ファイルを追加したら必ず `git check-ignore -v <path>` で除外を確認し `git add -f` で明示 stage する。commit 後 `git show --stat HEAD` で新規ファイルが含まれることを確認する。
+
+## 2026-07-02 — PR #3205 救出: 並行実装 conflict の解消と PTY flaky の切り分け
+
+Type: project
+Context: PR #3205 (Deliver mode) が放置中に develop へ簡易版 Deliver (443656db6) が別経路で merge され、SKILL.md 双子が conflict した。また Test (Rust, Linux) が client_pane_snapshot_repair_replies_with_snapshots_for_known_panes_only の PtyCreationFailed (ENOENT) で 2 run 連続失敗した。
+Learning: (1) 同一 skill への並行実装は「後勝ち」ではなく安全性の superset 側 (disarm-before-push 不変条件・merge method 自動選択・deliver-flow.md reference 付き) を本文採用し、trigger 文言は union で統合する。両実装の doc テストが lib.rs に併存するため、解消後は双方のテストを通すこと。(2) PTY spawn ENOENT は develop でも test_spawn_with_env 等で既出の infra flaky 系で、ローカル (macOS) full suite PASS + develop 直近 CI green なら transient 分類で再走してよい。
+Future Action: gwt-manage-pr SKILL.md を編集する際は .claude/.codex の byte parity と gwt-skills の manage_pr doc テスト群 (gwt_manage_pr_documents_drive_to_merge_delivery / manage_pr_documents_deliver_drive_to_merge_mode) を必ずローカルで実行する。PTY 系 CI flaky が同一テストで 3 run 連続したら infra ではなくコードとして調査に切り替える。

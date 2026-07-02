@@ -44,6 +44,20 @@ pub fn issue_monitor_daemon_payloads(
                 payload: serde_json::to_value(&dispatch).expect("review dispatch serializes"),
             });
         }
+        // SPEC #3200 FR-034 (T-111): surface unattended autonomous lifecycle
+        // transitions (merged / needs-human / retry / auto-merge armed) as
+        // toasts. Drained only while a GUI is connected so notices queued during
+        // a fully-unattended window still reach the operator on the next connect.
+        for notice in monitor.take_autonomous_notices() {
+            payloads.push(IssueMonitorDaemonPayload {
+                event: "toast".to_string(),
+                payload: serde_json::json!({
+                    "level": notice.level,
+                    "message": notice.message,
+                    "issue_number": notice.issue_number,
+                }),
+            });
+        }
     }
 
     payloads.extend([
@@ -313,8 +327,20 @@ pub fn advance_autonomous_in_flight(
                             "autonomous gate PASS — arming auto-merge"
                         );
                         monitor.begin_delivering(issue_number);
-                        if !gwt_git::pr_status::merge_pr_auto(repo_path, pr) {
+                        // Bind the arm to the reviewed head SHA so GitHub refuses
+                        // to merge if the head advanced past what the gate reviewed.
+                        // codex #3217 review: announce the arm ONLY on success —
+                        // a failed arm must not leave a success toast while the
+                        // record would otherwise sit in Delivering with nothing
+                        // armed. Fail closed: escalate so the operator acts.
+                        if gwt_git::pr_status::merge_pr_auto(repo_path, pr, &inputs.reviewed_sha) {
+                            monitor.record_auto_merge_armed(issue_number);
+                        } else {
                             tracing::warn!(issue = issue_number, pr, "auto-merge arm failed");
+                            monitor.escalate_to_needs_human(
+                                issue_number,
+                                "auto-merge arming failed after gate pass — arm manually or relaunch",
+                            );
                         }
                     }
                     crate::issue_monitor_gate::GateAction::WaitForCi => {}
@@ -556,6 +582,84 @@ mod tests {
             updated_at: UpdatedAt::new("t1"),
             comments: vec![],
         }
+    }
+
+    #[test]
+    fn payloads_surface_autonomous_notices_as_toasts_when_gui_is_connected() {
+        // SPEC #3200 FR-034 (T-111): daemon-side autonomous transitions queue
+        // operator notices; the worker drains them into `toast` payloads so the
+        // GUI's issue_monitor_toast pipe (surface toast + persistent autonomous
+        // notification stack) receives them.
+        let mut monitor = IssueMonitorState::with_prefs(
+            IssueMonitorConfig {
+                enabled: true,
+                ..IssueMonitorConfig::default()
+            },
+            crate::IssueMonitorPrefs {
+                autonomous_mode: true,
+                ..crate::IssueMonitorPrefs::default()
+            },
+        );
+        monitor.set_gui_connected(true);
+        monitor.record_attempt(42);
+        monitor.escalate_to_needs_human(42, "review rejected");
+
+        let payloads = issue_monitor_daemon_payloads(&mut monitor, true);
+
+        let toast = payloads
+            .iter()
+            .find(|payload| {
+                payload.event == "toast"
+                    && payload.payload.get("issue_number").and_then(|v| v.as_u64()) == Some(42)
+            })
+            .expect("autonomous notice surfaces as a toast payload");
+        assert_eq!(
+            toast.payload.get("level").and_then(|v| v.as_str()),
+            Some("error")
+        );
+        assert!(toast
+            .payload
+            .get("message")
+            .and_then(|v| v.as_str())
+            .is_some_and(|message| message.contains("review rejected")));
+        // Drained: a second pass emits no duplicate.
+        let again = issue_monitor_daemon_payloads(&mut monitor, true);
+        assert!(!again.iter().any(|payload| {
+            payload.event == "toast"
+                && payload.payload.get("issue_number").and_then(|v| v.as_u64()) == Some(42)
+        }));
+    }
+
+    #[test]
+    fn payloads_retain_autonomous_notices_while_no_gui_is_connected() {
+        // Fully-unattended window: with no GUI connected the notices stay queued
+        // (bounded) instead of being dropped, and surface on the next connect.
+        let mut monitor = IssueMonitorState::with_prefs(
+            IssueMonitorConfig {
+                enabled: true,
+                ..IssueMonitorConfig::default()
+            },
+            crate::IssueMonitorPrefs {
+                autonomous_mode: true,
+                ..crate::IssueMonitorPrefs::default()
+            },
+        );
+        monitor.record_attempt(42);
+        monitor.escalate_to_needs_human(42, "boom");
+
+        let offline = issue_monitor_daemon_payloads(&mut monitor, false);
+        assert!(
+            !offline.iter().any(|payload| payload.event == "toast"
+                && payload.payload.get("issue_number").and_then(|v| v.as_u64()) == Some(42)),
+            "no toast emitted while the GUI is disconnected"
+        );
+
+        let online = issue_monitor_daemon_payloads(&mut monitor, true);
+        assert!(
+            online.iter().any(|payload| payload.event == "toast"
+                && payload.payload.get("issue_number").and_then(|v| v.as_u64()) == Some(42)),
+            "queued notice surfaces once a GUI connects"
+        );
     }
 
     #[test]
