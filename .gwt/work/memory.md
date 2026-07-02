@@ -7526,3 +7526,10 @@ Type: workflow
 Context: gwt-fix-issue #3213 で調査したところ、修正は既に PR #3215（view 層）/ PR #3218（store 層）として merge 済みだった。完了後に Issue close を試みたが、gwtd には issue.close operation が存在せず（issue.view/comments/linked_prs/create/comment のみ）、direct `gh issue close` は managed hook で block される。
 Learning: gwt-fix-issue の完了記録は closure comment（issue.comment）が正本で、Issue の close 自体は agent からは実行できない。issue.view の直後に issue.linked_prs を確認すると、他 session で merge 済みの修正を早期検出でき、重複実装を防げる。
 Future Action: gwt-fix-issue では issue.view の直後に issue.linked_prs を必ず確認し、MERGED PR があれば「検証 + closure comment + close 推奨」の経路に切り替える。close はユーザーに依頼する。
+
+## 2026-07-02 — merge 済みでも closure record が無い OPEN Issue は再 dispatch される
+
+Type: agent-workflow
+Context: Issue #3213 は PR #3215 で修正 merge 済み・bug memory 記録済みだったが、closure comment 未投稿のまま OPEN で残ったため、別セッション（work/issue-3213）に同じ Issue が再 dispatch された。Board 上も同 Issue の started エントリが 2 セッション分並んだ。
+Learning: gwt-fix-issue の完了は「merge + memory 記録」ではなく「issue.comment での closure comment（6 フィールド）投稿」まで。closure record が無い OPEN Issue は Issue Monitor / ユーザーから未着手に見え、重複 dispatch・二重実装のリスクになる。再 dispatch を受けた側は、実装前に issue.linked_prs → git merge-base --is-ancestor <fix-commit> HEAD → regression test 実行で「既修正」を確定でき、二重実装を避けられる。
+Future Action: (1) direct-fix を merge したセッションは同一セッション内で closure comment まで投稿する。(2) Issue 起点の作業を受けたら、コードを書く前に必ず linked PR の merge 状態と HEAD への ancestor 判定を確認する。
