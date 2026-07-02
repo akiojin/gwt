@@ -20803,3 +20803,252 @@ fn is_identifier_like_title_classifies_shapes() {
     assert!(!super::is_identifier_like_title("SPEC-3075"));
     assert!(!super::is_identifier_like_title("develop"));
 }
+
+// ---------------------------------------------------------------------------
+// SPEC-3214 Phase 2 — Quick issue (T-010 / T-014 / T-016)
+// ---------------------------------------------------------------------------
+
+/// Stub client whose `create_issue` fails with a specific GitHub reason.
+struct PermissionDeniedIssueClient;
+
+impl gwt_github::IssueClient for PermissionDeniedIssueClient {
+    fn fetch(
+        &self,
+        number: IssueNumber,
+        _since: Option<&UpdatedAt>,
+    ) -> Result<gwt_github::FetchResult, gwt_github::ApiError> {
+        Err(gwt_github::ApiError::NotFound(number))
+    }
+    fn patch_body(
+        &self,
+        number: IssueNumber,
+        _new_body: &str,
+    ) -> Result<IssueSnapshot, gwt_github::ApiError> {
+        Err(gwt_github::ApiError::NotFound(number))
+    }
+    fn patch_title(
+        &self,
+        number: IssueNumber,
+        _new_title: &str,
+    ) -> Result<IssueSnapshot, gwt_github::ApiError> {
+        Err(gwt_github::ApiError::NotFound(number))
+    }
+    fn patch_comment(
+        &self,
+        comment_id: CommentId,
+        _new_body: &str,
+    ) -> Result<CommentSnapshot, gwt_github::ApiError> {
+        Err(gwt_github::ApiError::CommentNotFound(comment_id))
+    }
+    fn create_comment(
+        &self,
+        number: IssueNumber,
+        _body: &str,
+    ) -> Result<CommentSnapshot, gwt_github::ApiError> {
+        Err(gwt_github::ApiError::NotFound(number))
+    }
+    fn create_issue(
+        &self,
+        _title: &str,
+        _body: &str,
+        _labels: &[String],
+    ) -> Result<IssueSnapshot, gwt_github::ApiError> {
+        Err(gwt_github::ApiError::PermissionDenied {
+            message: "Issues are disabled for this repo".to_string(),
+        })
+    }
+    fn set_labels(
+        &self,
+        number: IssueNumber,
+        _labels: &[String],
+    ) -> Result<IssueSnapshot, gwt_github::ApiError> {
+        Err(gwt_github::ApiError::NotFound(number))
+    }
+    fn set_state(
+        &self,
+        number: IssueNumber,
+        _state: IssueState,
+    ) -> Result<IssueSnapshot, gwt_github::ApiError> {
+        Err(gwt_github::ApiError::NotFound(number))
+    }
+    fn list_spec_issues(
+        &self,
+        _filter: &gwt_github::SpecListFilter,
+    ) -> Result<Vec<gwt_github::SpecSummary>, gwt_github::ApiError> {
+        Ok(Vec::new())
+    }
+}
+
+fn quick_issue_toasts(events: &[OutboundEvent]) -> Vec<(String, String)> {
+    events
+        .iter()
+        .filter_map(|event| match &event.event {
+            BackendEvent::IssueMonitorToast { level, message, .. } => {
+                Some((level.clone(), message.clone()))
+            }
+            _ => None,
+        })
+        .collect()
+}
+
+/// SPEC-3214 T-010 / FR-004: a one-line title registers an `investigation`
+/// Issue through the injected client and reports success.
+#[test]
+fn quick_register_issue_creates_investigation_issue_with_success_toast() {
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedEnvVar::set("HOME", temp.path());
+    let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+    let repo = temp.path().join("repo");
+    fs::create_dir_all(&repo).expect("create repo");
+    let tab = sample_project_tab("tab-1", "Repo", repo.clone(), ProjectKind::Git, &[]);
+    let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+    let client = gwt_github::FakeIssueClient::new();
+
+    let events = runtime.quick_register_issue_events_with_client(
+        "client-1",
+        "Investigate flaky PTY spawn on CI",
+        false,
+        &client,
+    );
+
+    let toasts = quick_issue_toasts(&events);
+    assert!(
+        toasts
+            .iter()
+            .any(|(level, message)| level == "info" && message.contains('#')),
+        "success toast with the issue number is required, got: {toasts:?}"
+    );
+    let created = toasts
+        .iter()
+        .find_map(|(_, message)| {
+            message
+                .split('#')
+                .nth(1)
+                .and_then(|rest| rest.split_whitespace().next())
+                .and_then(|number| number.trim_matches(':').parse::<u64>().ok())
+        })
+        .expect("toast must carry the created issue number");
+    use gwt_github::IssueClient as _;
+    let fetched = client
+        .fetch(IssueNumber(created), None)
+        .expect("created issue must exist in the client");
+    let snapshot = match fetched {
+        gwt_github::FetchResult::Updated(snapshot) => snapshot,
+        gwt_github::FetchResult::NotModified => panic!("expected fresh snapshot"),
+    };
+    assert_eq!(snapshot.title, "Investigate flaky PTY spawn on CI");
+    assert!(
+        snapshot.labels.iter().any(|label| label == "investigation"),
+        "quick issue must carry the investigation label, got: {:?}",
+        snapshot.labels
+    );
+}
+
+/// SPEC-3214 T-016 / FR-011: the failure toast carries the specific GitHub
+/// reason — never a generic message.
+#[test]
+fn quick_register_issue_surfaces_permission_denied_reason() {
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedEnvVar::set("HOME", temp.path());
+    let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+    let repo = temp.path().join("repo");
+    fs::create_dir_all(&repo).expect("create repo");
+    let tab = sample_project_tab("tab-1", "Repo", repo.clone(), ProjectKind::Git, &[]);
+    let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+
+    let events = runtime.quick_register_issue_events_with_client(
+        "client-1",
+        "Investigate registry failure",
+        false,
+        &PermissionDeniedIssueClient,
+    );
+
+    let toasts = quick_issue_toasts(&events);
+    let (level, message) = toasts.first().expect("failure toast is required");
+    assert_eq!(level, "error");
+    assert!(
+        message.contains("Issues are disabled for this repo"),
+        "the GitHub reason must be preserved verbatim, got: {message}"
+    );
+}
+
+/// SPEC-3214 T-010: an empty title is rejected without hitting the client.
+#[test]
+fn quick_register_issue_rejects_empty_title() {
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedEnvVar::set("HOME", temp.path());
+    let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+    let repo = temp.path().join("repo");
+    fs::create_dir_all(&repo).expect("create repo");
+    let tab = sample_project_tab("tab-1", "Repo", repo.clone(), ProjectKind::Git, &[]);
+    let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+    let client = gwt_github::FakeIssueClient::new();
+
+    let events = runtime.quick_register_issue_events_with_client("client-1", "   ", false, &client);
+
+    let toasts = quick_issue_toasts(&events);
+    assert_eq!(toasts.len(), 1);
+    assert_eq!(toasts[0].0, "error");
+}
+
+/// SPEC-3214 T-014 / FR-005/FR-006: `launch: true` hands the fresh issue to
+/// the existing Issue Monitor claim→launch pipeline by prioritizing it in the
+/// monitor queue (persisted in prefs). No new execution path is created — the
+/// launch itself is the monitor's claim/auto-launch flow.
+#[test]
+fn quick_register_issue_with_launch_prioritizes_monitor_queue() {
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedEnvVar::set("HOME", temp.path());
+    let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+    let repo = temp.path().join("repo");
+    fs::create_dir_all(&repo).expect("create repo");
+    let tab = sample_project_tab("tab-1", "Repo", repo.clone(), ProjectKind::Git, &[]);
+    let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+    let client = gwt_github::FakeIssueClient::new();
+
+    let events = runtime.quick_register_issue_events_with_client(
+        "client-1",
+        "Register and launch immediately",
+        true,
+        &client,
+    );
+
+    let toasts = quick_issue_toasts(&events);
+    let created = toasts
+        .iter()
+        .find_map(|(_, message)| {
+            message
+                .split('#')
+                .nth(1)
+                .and_then(|rest| rest.split_whitespace().next())
+                .and_then(|number| number.trim_matches(':').parse::<u64>().ok())
+        })
+        .expect("toast must carry the created issue number");
+
+    let prefs_path = gwt::issue_monitor_prefs_path_for_repo_path(&repo);
+    let prefs = gwt::load_issue_monitor_prefs(&prefs_path).expect("monitor prefs must persist");
+    assert_eq!(
+        prefs.priority_order.first().copied(),
+        Some(created),
+        "the fresh issue must be first in the monitor launch priority order"
+    );
+    // The handler must refresh the monitor snapshot (inbox 反映).
+    assert!(
+        events
+            .iter()
+            .any(|event| matches!(event.event, BackendEvent::IssueMonitorStatus { .. })),
+        "monitor snapshot refresh is part of the launch handoff"
+    );
+}

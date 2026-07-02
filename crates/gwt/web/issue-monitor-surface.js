@@ -153,6 +153,40 @@ export function createIssueMonitorSurface({ document, send, focusWindow }) {
         font-size: var(--type-xs);
         padding: 0 var(--space-2);
       }
+      /* SPEC-3214 FR-004: Quick issue — one-line registration row. */
+      .issue-monitor-card__quick-issue {
+        display: flex;
+        align-items: center;
+        gap: var(--space-2);
+        padding: var(--space-2) var(--space-3);
+        border-bottom: 1px solid var(--color-border);
+        background: var(--color-surface);
+      }
+      .issue-monitor-card__quick-issue-input {
+        flex: 1;
+        min-width: 0;
+        height: 30px;
+        border: 1px solid var(--color-border-strong);
+        border-radius: var(--radius-md);
+        background: var(--color-surface-elevated);
+        color: var(--color-text);
+        font-family: var(--font-body);
+        font-size: var(--type-xs);
+        padding: 0 var(--space-2);
+      }
+      .issue-monitor-card__quick-issue-input::placeholder {
+        color: var(--color-text-muted);
+      }
+      .issue-monitor-card__quick-issue-input:focus-visible,
+      .issue-monitor-card__quick-issue-launch:focus-visible {
+        outline: 2px solid var(--color-focus-ring);
+        outline-offset: 2px;
+      }
+      .issue-monitor-card__quick-issue .wizard-button {
+        height: 30px;
+        padding: 0 var(--space-2);
+        white-space: nowrap;
+      }
       .issue-monitor-card__detail {
         color: var(--color-text-muted);
         font-family: var(--font-mono);
@@ -517,12 +551,46 @@ export function createIssueMonitorSurface({ document, send, focusWindow }) {
     toolbar.appendChild(summary);
     toolbar.appendChild(toolbarActions);
 
+    // SPEC-3214 FR-004/FR-005: Quick issue — register a one-line
+    // `investigation` issue; the ⚡ button also hands it to the monitor's
+    // claim→launch pipeline.
+    const quickIssue = element("div", "issue-monitor-card__quick-issue");
+    const quickIssueInput = element("input", "issue-monitor-card__quick-issue-input");
+    quickIssueInput.type = "text";
+    quickIssueInput.setAttribute("placeholder", "Quick issue title…");
+    quickIssueInput.setAttribute("aria-label", "Quick issue title");
+    const quickIssueLaunch = element(
+      "button",
+      "wizard-button issue-monitor-card__quick-issue-launch",
+      "⚡ Register & Launch",
+    );
+    quickIssueLaunch.type = "button";
+    const submitQuickIssue = (launch) => {
+      const title = String(quickIssueInput.value || "").trim();
+      if (!title) {
+        return;
+      }
+      sendMonitorEvent({ kind: "quick_register_issue", title, launch });
+      quickIssueInput.value = "";
+    };
+    quickIssueInput.addEventListener("keydown", (event) => {
+      if (event.key !== "Enter") {
+        return;
+      }
+      event.preventDefault?.();
+      submitQuickIssue(false);
+    });
+    quickIssueLaunch.addEventListener("click", () => submitQuickIssue(true));
+    quickIssue.appendChild(quickIssueInput);
+    quickIssue.appendChild(quickIssueLaunch);
+
     const errorText = element("div", "issue-monitor-card__error");
     const inboxRoot = element("div", "issue-monitor-card__inbox");
     inboxRoot.setAttribute("role", "list");
     const toastRoot = element("div", "issue-monitor-card__toast");
 
     root.appendChild(toolbar);
+    root.appendChild(quickIssue);
     root.appendChild(errorText);
     root.appendChild(inboxRoot);
     root.appendChild(toastRoot);

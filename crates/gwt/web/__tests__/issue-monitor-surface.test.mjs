@@ -500,3 +500,67 @@ test("the detail modal Focus action is present but disabled for a non-launched i
     "modal stays open when Focus is disabled",
   );
 });
+
+// SPEC-3214 T-012 — Quick issue toolbar input (FR-004/FR-005).
+test("Quick issue input registers on Enter and clears itself", () => {
+  const { document, sent } = makeFixture();
+  const input = document.querySelector(".issue-monitor-card__quick-issue-input");
+  assert.ok(input, "Quick issue input must render in the toolbar");
+  assert.equal(
+    input.getAttribute("placeholder"),
+    "Quick issue title…",
+    "input needs a discoverable placeholder",
+  );
+
+  input.value = "Investigate flaky PTY spawn";
+  const View = document.defaultView;
+  const enter = new View.Event("keydown", { bubbles: true });
+  enter.key = "Enter";
+  input.dispatchEvent(enter);
+
+  const registered = sent.filter((event) => event.kind === "quick_register_issue");
+  assert.equal(registered.length, 1, "Enter must send quick_register_issue");
+  assert.equal(registered[0].title, "Investigate flaky PTY spawn");
+  assert.equal(registered[0].launch, false, "Enter registers without launching");
+  assert.equal(input.value, "", "input clears after registration");
+});
+
+test("Quick issue Register & Launch button sends launch:true", () => {
+  const { document, sent } = makeFixture();
+  const input = document.querySelector(".issue-monitor-card__quick-issue-input");
+  const launchButton = document.querySelector(".issue-monitor-card__quick-issue-launch");
+  assert.ok(launchButton, "Register & Launch button must render next to the input");
+  assert.match(
+    launchButton.textContent,
+    /Register & Launch/,
+    "button label must state the register+launch shortcut",
+  );
+
+  input.value = "  Register and launch this  ";
+  launchButton.click();
+
+  const registered = sent.filter((event) => event.kind === "quick_register_issue");
+  assert.equal(registered.length, 1, "the launch button must send quick_register_issue");
+  assert.equal(registered[0].title, "Register and launch this", "title is trimmed");
+  assert.equal(registered[0].launch, true, "the launch button registers with launch:true");
+  assert.equal(input.value, "", "input clears after registration");
+});
+
+test("Quick issue submission with an empty title sends nothing", () => {
+  const { document, sent } = makeFixture();
+  const input = document.querySelector(".issue-monitor-card__quick-issue-input");
+  const launchButton = document.querySelector(".issue-monitor-card__quick-issue-launch");
+
+  input.value = "   ";
+  const View = document.defaultView;
+  const enter = new View.Event("keydown", { bubbles: true });
+  enter.key = "Enter";
+  input.dispatchEvent(enter);
+  launchButton.click();
+
+  assert.equal(
+    sent.filter((event) => event.kind === "quick_register_issue").length,
+    0,
+    "empty titles must never be submitted",
+  );
+});

@@ -396,6 +396,24 @@ pub struct ProjectOpenTarget {
 /// scan, bounding both the git calls and the AI prompt size for large repos.
 const AI_SUMMARY_BRANCH_CAP: usize = 40;
 
+/// SPEC-3214 FR-004: label a Quick issue carries so the Issue Monitor and
+/// triage flows can recognize intake-registered investigations.
+const QUICK_ISSUE_LABEL: &str = "investigation";
+
+/// SPEC-3214 FR-004: minimal body for a one-line Quick issue. The title is
+/// the content; the body only records the provenance.
+const QUICK_ISSUE_BODY: &str = "Registered via gwt Quick issue intake.";
+
+/// Toast helper for the Quick issue flow (shares the Issue Monitor toast
+/// channel; unification tracked by SPEC #3206).
+fn quick_issue_toast(level: &str, message: impl Into<String>) -> OutboundEvent {
+    OutboundEvent::broadcast(BackendEvent::IssueMonitorToast {
+        level: level.to_string(),
+        message: message.into(),
+        issue_number: None,
+    })
+}
+
 /// SPEC-3075 FR-006: a tip commit subject that carries no real purpose — merge
 /// commits and release-version bumps. These are the cases the AI polish targets
 /// (it reads the underlying feature commits instead).
@@ -1277,6 +1295,108 @@ impl AppRuntime {
         self.local_issue_monitor_events_for(Some(client_id), apply)
     }
 
+    /// SPEC-3214 FR-004: Quick issue registration from the Issue Monitor
+    /// toolbar. Resolves the GitHub client for the active project, then
+    /// delegates to [`Self::quick_register_issue_events_with_client`].
+    fn quick_register_issue_events(
+        &mut self,
+        client_id: &str,
+        title: &str,
+        launch: bool,
+    ) -> Vec<OutboundEvent> {
+        if title.trim().is_empty() {
+            return vec![quick_issue_toast("error", "Issue title is empty.")];
+        }
+        let Some(project_root) = self.active_project_root().map(Path::to_path_buf) else {
+            return vec![quick_issue_toast("error", "No active project is selected.")];
+        };
+        let (owner, repo) =
+            match gwt::issue_monitor_worker::github_remote_owner_and_repo(&project_root) {
+                Ok(pair) => pair,
+                Err(error) => {
+                    return vec![quick_issue_toast(
+                        "error",
+                        format!(
+                            "Issue registration failed: {error}. \
+                             Fallback: create the issue manually with `gh issue create`."
+                        ),
+                    )];
+                }
+            };
+        match gwt_github::client::http::HttpIssueClient::from_gh_auth(&owner, &repo) {
+            Ok(client) => {
+                self.quick_register_issue_events_with_client(client_id, title, launch, &client)
+            }
+            Err(error) => vec![quick_issue_toast(
+                "error",
+                format!(
+                    "GitHub authentication unavailable: {error}. \
+                     Fallback: run `gh auth login`, then retry."
+                ),
+            )],
+        }
+    }
+
+    /// SPEC-3214 FR-004/FR-005/FR-011 core: create the `investigation` issue
+    /// through `client` and, for `launch: true`, hand it to the existing
+    /// Issue Monitor claim→launch pipeline by prioritizing it in the monitor
+    /// queue. No new execution path exists here (FR-006): the launch itself
+    /// is the monitor scan/claim/auto-launch flow.
+    pub(crate) fn quick_register_issue_events_with_client<C: gwt_github::IssueClient>(
+        &mut self,
+        client_id: &str,
+        title: &str,
+        launch: bool,
+        client: &C,
+    ) -> Vec<OutboundEvent> {
+        let title = title.trim();
+        if title.is_empty() {
+            return vec![quick_issue_toast("error", "Issue title is empty.")];
+        }
+        let snapshot =
+            match client.create_issue(title, QUICK_ISSUE_BODY, &[QUICK_ISSUE_LABEL.to_string()]) {
+                Ok(snapshot) => snapshot,
+                Err(error) => {
+                    // FR-011: the specific reason (permission, rate limit, …) is
+                    // preserved verbatim — never rounded to a generic message.
+                    return vec![quick_issue_toast(
+                        "error",
+                        format!(
+                            "Issue registration failed: {error}. \
+                         Fallback: create the issue manually with `gh issue create`."
+                        ),
+                    )];
+                }
+            };
+        let issue_number = snapshot.number.0;
+        let mut events = vec![quick_issue_toast(
+            "info",
+            format!("Issue #{issue_number} registered: {title}"),
+        )];
+        if launch {
+            // FR-005: prioritize the fresh issue in the monitor queue and run
+            // the existing scan→claim→launch pass. The priority order is
+            // applied before the scan and persisted, so the claim loop picks
+            // this issue first once it appears as a candidate.
+            events.extend(self.local_issue_monitor_events(client_id, |monitor| {
+                let mut order = vec![issue_number];
+                order.extend(
+                    monitor
+                        .prefs()
+                        .priority_order
+                        .into_iter()
+                        .filter(|number| *number != issue_number),
+                );
+                monitor.set_priority_order(order);
+            }));
+        } else {
+            // Inbox 反映: refresh the monitor snapshot so the new issue shows
+            // up as a candidate right away.
+            events.extend(self.local_issue_monitor_events(client_id, |_| {}));
+        }
+        events
+    }
+
     fn local_issue_monitor_events_for(
         &mut self,
         client_id: Option<&str>,
@@ -2077,6 +2197,9 @@ impl AppRuntime {
                 }
             }
             FrontendEvent::ListIssueMonitor => self.local_issue_monitor_events(&client_id, |_| {}),
+            FrontendEvent::QuickRegisterIssue { title, launch } => {
+                self.quick_register_issue_events(&client_id, &title, launch)
+            }
             FrontendEvent::IssueMonitorLaunchNow {
                 issue_number,
                 linked_issue_kind,

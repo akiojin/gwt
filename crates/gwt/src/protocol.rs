@@ -632,6 +632,14 @@ pub enum FrontendEvent {
         issue_numbers: Vec<u64>,
     },
     ListIssueMonitor,
+    /// SPEC-3214 FR-004/FR-005: register a one-line `investigation` Issue from
+    /// the Quick issue toolbar. `launch: true` additionally hands the fresh
+    /// issue to the existing Issue Monitor claim→launch pipeline.
+    QuickRegisterIssue {
+        title: String,
+        #[serde(default)]
+        launch: bool,
+    },
     IssueMonitorLaunchNow {
         issue_number: u64,
         #[serde(default)]
