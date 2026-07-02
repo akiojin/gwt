@@ -60,11 +60,7 @@ pub struct LinkedPrSummary {
     pub title: String,
     pub state: String,
     pub url: String,
-    /// Issue #3226 review: whether merging this PR closes the issue
-    /// (GraphQL `willCloseTarget`; manually connected PRs count as closing).
-    /// The completion probe must only trust MERGED PRs with this set — a
-    /// merged PR that merely REFERENCES the issue must not mark it done.
-    #[serde(default)]
+    #[serde(default)] // closes-the-issue flag; gates the completion probe (#3226)
     pub will_close_target: bool,
 }
 
