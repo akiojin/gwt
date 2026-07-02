@@ -7519,3 +7519,17 @@ Type: project
 Context: PR #3205 (Deliver mode) が放置中に develop へ簡易版 Deliver (443656db6) が別経路で merge され、SKILL.md 双子が conflict した。また Test (Rust, Linux) が client_pane_snapshot_repair_replies_with_snapshots_for_known_panes_only の PtyCreationFailed (ENOENT) で 2 run 連続失敗した。
 Learning: (1) 同一 skill への並行実装は「後勝ち」ではなく安全性の superset 側 (disarm-before-push 不変条件・merge method 自動選択・deliver-flow.md reference 付き) を本文採用し、trigger 文言は union で統合する。両実装の doc テストが lib.rs に併存するため、解消後は双方のテストを通すこと。(2) PTY spawn ENOENT は develop でも test_spawn_with_env 等で既出の infra flaky 系で、ローカル (macOS) full suite PASS + develop 直近 CI green なら transient 分類で再走してよい。
 Future Action: gwt-manage-pr SKILL.md を編集する際は .claude/.codex の byte parity と gwt-skills の manage_pr doc テスト群 (gwt_manage_pr_documents_drive_to_merge_delivery / manage_pr_documents_deliver_drive_to_merge_mode) を必ずローカルで実行する。PTY 系 CI flaky が同一テストで 3 run 連続したら infra ではなくコードとして調査に切り替える。
+
+## 2026-07-02 — gwt-fix-issue は着手前に linked PR の merge ancestry を確認する
+
+Type: workflow
+Context: gwt-fix-issue #3216 で Start Work session が起動されたが、fix は別 branch の PR #3218 で既に develop へ merge 済みだった（duplicate intake）。
+Learning: gwt-fix-issue の調査 gate では issue.linked_prs を最初に確認し、MERGED PR があれば `git merge-base --is-ancestor <merge-commit> HEAD` で現 checkout への取り込みを確認する。取り込み済みなら再実装せず、受け入れ観点のテストを post-merge で再実行して closure comment を投稿するのが正しい完了経路。gwtd には issue.close operation が無いので close はユーザーに委ねる。
+Future Action: Issue 起点の作業は着手前に linked PR の state と merge ancestry を必ず確認する。
+
+## 2026-07-02 — gwt-fix-issue: linked PR merge 済みなら再実装せず検証+closure に切替
+
+Type: workflow
+Context: gwt-fix-issue #3216 起動時、fix は既に別 session の PR #3218 として merge 済みで、Issue だけが closure comment 未投稿のまま OPEN だった（PR が Refs # を使い Fixes/Closes # でなかったため auto-close されず）。
+Learning: gwt-fix-issue は調査 gate の最初に issue.linked_prs を確認する。merged PR が既にある場合は再実装ではなく「merged fix が受け入れ観点を満たすかの検証 + closure」に切り替える。また gwtd には issue.close operation が無いため、closure comment は issue.comment（正規経路）で投稿し、close 自体のみ gh issue close を使う。
+Future Action: Issue 起点の作業では linked PR の状態確認を実装判断より先に行う。fix commit の PR には Refs でなく Closes #N を使うと Issue の閉じ忘れを防げる。
