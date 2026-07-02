@@ -70,6 +70,28 @@ fn issue_monitor_auto_launch_geometry(index: usize) -> WindowGeometry {
     }
 }
 
+/// SPEC #3200 Option A: build the independent-review agent's prompt from a
+/// dispatch — the adversarial review prompt (criteria + diff as untrusted data,
+/// bound to the reviewed SHA) plus the instruction to report the verdict back to
+/// the Issue Monitor daemon via the `ReviewVerdict` control for this exact SHA.
+fn build_review_dispatch_prompt(dispatch: &gwt::AutonomousReviewDispatch) -> String {
+    let base = gwt::issue_monitor_review::build_review_prompt(
+        &dispatch.required_criteria,
+        &dispatch.reviewed_sha,
+        &dispatch.diff,
+    );
+    format!(
+        "{base}\n\nAfter producing the verdict JSON, report it to the Issue Monitor \
+         daemon by running the gwtd JSON operation `issue.monitor.review_verdict` \
+         with params {{\"issue_number\": {issue}, \"reviewed_sha\": \"{sha}\", \
+         \"verdict_raw\": <the verdict JSON as a string>}}. The daemon re-judges the \
+         verdict against the launch-time criteria; a verdict for any other SHA is \
+         rejected.",
+        issue = dispatch.issue_number,
+        sha = dispatch.reviewed_sha,
+    )
+}
+
 use super::{
     build_shell_process_launch, combined_window_id, detect_wizard_docker_context_and_status,
     knowledge_error_event, knowledge_kind_for_preset, linked_issue_workspace_context,
@@ -1589,7 +1611,7 @@ impl AppRuntime {
         issue_number: u64,
         linked_issue_kind: gwt::LinkedIssueKind,
     ) -> Vec<OutboundEvent> {
-        match self.silent_issue_monitor_launch_events(issue_number, linked_issue_kind) {
+        match self.silent_issue_monitor_launch_events(issue_number, linked_issue_kind, None, None) {
             Ok(Some(events)) => events,
             Ok(None) => {
                 if self.launch_wizard.is_some() {
@@ -1617,10 +1639,63 @@ impl AppRuntime {
         }
     }
 
+    /// SPEC #3200 Option A: handle a daemon `review_dispatch` — prepare the
+    /// independent-review prompt (bound to the reviewed SHA, with the criteria +
+    /// diff as untrusted data) and surface a notification that review was
+    /// dispatched. Spawning the review agent in an isolated worktree on a
+    /// different model, and bridging its verdict back via the `ReviewVerdict`
+    /// control, is the live-integration step verified against a real PR.
+    pub(crate) fn auto_dispatch_issue_monitor_review_events(
+        &mut self,
+        dispatch: gwt::AutonomousReviewDispatch,
+    ) -> Vec<OutboundEvent> {
+        let prompt = build_review_dispatch_prompt(&dispatch);
+        tracing::info!(
+            issue = dispatch.issue_number,
+            pr = dispatch.pr_number,
+            reviewed_sha = %dispatch.reviewed_sha,
+            prompt_bytes = prompt.len(),
+            "autonomous independent-review dispatch"
+        );
+        // Spawn a FRESH-session review agent in the implementation work-branch
+        // worktree (idle by review time); it reviews the diff embedded in its
+        // prompt and reports the verdict via the gwtd issue.monitor.review_verdict
+        // op. skip_permissions is forced on the autonomous path so review runs
+        // unattended.
+        // SPEC #3200 FR-015: the configured review model (if any) is forced for
+        // the review agent so it differs from the implementer's.
+        let review_model =
+            gwt::load_issue_monitor_prefs(&gwt::issue_monitor_prefs_path_for_repo_path(
+                self.active_project_root()
+                    .unwrap_or(std::path::Path::new(".")),
+            ))
+            .ok()
+            .and_then(|prefs| prefs.autonomous_tuning.review_model);
+        match self.silent_issue_monitor_launch_events(
+            dispatch.issue_number,
+            dispatch.linked_issue_kind,
+            Some(prompt),
+            review_model,
+        ) {
+            Ok(Some(events)) => events,
+            Ok(None) => vec![OutboundEvent::broadcast(BackendEvent::IssueMonitorToast {
+                level: "warn".to_string(),
+                message: format!(
+                    "Independent review for #{} could not start (launch settings unavailable)",
+                    dispatch.issue_number
+                ),
+                issue_number: Some(dispatch.issue_number),
+            })],
+            Err(error) => self.issue_monitor_launch_failed_events(dispatch.issue_number, &error),
+        }
+    }
+
     fn silent_issue_monitor_launch_events(
         &mut self,
         issue_number: u64,
         linked_issue_kind: gwt::LinkedIssueKind,
+        review_prompt: Option<String>,
+        review_model: Option<String>,
     ) -> Result<Option<Vec<OutboundEvent>>, String> {
         let Some(tab_id) = self.active_tab_id.clone() else {
             return Err("Open a project before launching monitored Issue work".to_string());
@@ -1643,7 +1718,35 @@ impl AppRuntime {
         if previous_profiles.preferred_profile().is_none() {
             return Ok(None);
         }
+        // SPEC #3200 FR-015: for the independent review, force a different model
+        // than the implementer's (when configured) so the verdict is not a
+        // self-grade. `None` keeps the saved model (still a fresh session).
+        let implementer_model = previous_profiles
+            .preferred_profile()
+            .and_then(|profile| profile.model.clone());
+        let review_model_override = gwt::issue_monitor::resolve_review_model(
+            implementer_model.as_deref(),
+            review_model.as_deref(),
+        );
         let launch_profiles = previous_profiles.clone();
+
+        // FR-022: an Issue whose agent window was previously closed without a
+        // merge keeps a resumable session. Re-engage by resuming that session
+        // (continuing the conversation) instead of launching a fresh agent.
+        // SPEC #3200 Option A: the independent review must be a FRESH session
+        // (no shared context with the implementation agent), so the review path
+        // skips resume and always launches a new agent.
+        let target_branch = knowledge_launch_target_branch_name(linked_issue_kind, issue_number);
+        if review_prompt.is_none() {
+            if let Some(events) = self.silent_issue_monitor_resume_events(
+                &tab_id,
+                &project_root,
+                &target_branch,
+                issue_number,
+            )? {
+                return Ok(Some(events));
+            }
+        }
 
         let mut session = self.build_knowledge_launch_wizard_session(
             &tab_id,
@@ -1653,21 +1756,39 @@ impl AppRuntime {
             linked_issue_kind,
             previous_profiles,
         );
+        let initial_prompt = review_prompt
+            .clone()
+            .unwrap_or_else(|| gwt::issue_monitor_launch_prompt(linked_issue_kind, issue_number));
         session
             .wizard
             .apply(gwt::LaunchWizardAction::SetInitialPrompt {
-                value: gwt::issue_monitor_launch_prompt(linked_issue_kind, issue_number),
+                value: initial_prompt,
             });
         session
             .wizard
             .apply(gwt::LaunchWizardAction::UseStartMethod {
                 method: gwt::LaunchWizardStartMethodKind::StartWithLastSettings,
             });
-        let launch_request = self.resolve_silent_issue_monitor_launch_request(
+        let mut launch_request = self.resolve_silent_issue_monitor_launch_request(
             &mut session,
             &project_root,
             launch_profiles,
         )?;
+        // SPEC #3200 T-040/FR-006: in unattended autonomous mode the
+        // monitor-launched implementation agent must not stall on a permission
+        // prompt. Default OFF leaves the SPEC #3165 human-gated launch untouched.
+        let autonomous_mode = gwt::load_issue_monitor_prefs(
+            &gwt::issue_monitor_prefs_path_for_repo_path(&project_root),
+        )
+        .map(|prefs| prefs.autonomous_mode)
+        .unwrap_or(false);
+        launch_request.force_skip_permissions_for_autonomous(autonomous_mode);
+        // SPEC #3200 FR-015: apply the distinct review model for the review agent.
+        if let (Some(model), LaunchWizardLaunchRequest::Agent(config)) =
+            (&review_model_override, &mut launch_request)
+        {
+            config.model = Some(model.clone());
+        }
         let launch_index = self
             .tab(&session.tab_id)
             .map(|tab| {
@@ -1698,9 +1819,80 @@ impl AppRuntime {
                 return Err("Issue Monitor automatic launch requires an agent target".to_string());
             }
         };
+        let message = if review_prompt.is_some() {
+            "Issue Monitor independent review launched".to_string()
+        } else {
+            "Issue Monitor launch requested".to_string()
+        };
         events.push(OutboundEvent::broadcast(BackendEvent::IssueMonitorToast {
             level: "info".to_string(),
-            message: "Issue Monitor launch requested".to_string(),
+            message,
+            issue_number: Some(issue_number),
+        }));
+        Ok(Some(events))
+    }
+
+    /// FR-022: resume an existing agent session for `target_branch` when one is
+    /// available, instead of launching a fresh agent. Returns `Ok(None)` when no
+    /// resumable session exists so the caller falls back to a fresh launch.
+    fn silent_issue_monitor_resume_events(
+        &mut self,
+        tab_id: &str,
+        project_root: &Path,
+        target_branch: &str,
+        issue_number: u64,
+    ) -> Result<Option<Vec<OutboundEvent>>, String> {
+        let Some(session) = self.latest_resumable_branch_session(project_root, target_branch)
+        else {
+            return Ok(None);
+        };
+        if !session_exact_resume_materializable(project_root, &session) {
+            return Ok(None);
+        }
+        let mut config = super::launch_config_from_persisted_session(&session);
+        if !session.worktree_path.as_path().exists() {
+            config.working_dir = None;
+        }
+        if config.session_mode != gwt_agent::SessionMode::Resume {
+            return Ok(None);
+        }
+        let resume_context_root = if session.worktree_path.as_path().exists() {
+            session.worktree_path.as_path()
+        } else {
+            project_root
+        };
+        let workspace_resume_context = Some(workspace_resume_context_for_work_item(
+            resume_context_root,
+            Some(session.branch.as_str()),
+            resume_context_root,
+        ));
+        let launch_index = self
+            .tab(tab_id)
+            .map(|tab| {
+                tab.workspace
+                    .persisted()
+                    .windows
+                    .iter()
+                    .filter(|window| window.preset == WindowPreset::Agent)
+                    .count()
+            })
+            .unwrap_or(0);
+        let geometry = issue_monitor_auto_launch_geometry(launch_index);
+        let feedback = LaunchFeedbackContext {
+            client_id: "__issue_monitor__".to_string(),
+            title: "Issue Monitor".to_string(),
+            issue_monitor_issue_number: Some(issue_number),
+        };
+        let mut events = self.spawn_agent_window_with_feedback_at_geometry(
+            tab_id,
+            config,
+            geometry,
+            workspace_resume_context,
+            feedback,
+        )?;
+        events.push(OutboundEvent::broadcast(BackendEvent::IssueMonitorToast {
+            level: "info".to_string(),
+            message: "Issue Monitor resumed existing session".to_string(),
             issue_number: Some(issue_number),
         }));
         Ok(Some(events))
@@ -2407,5 +2599,35 @@ impl AppRuntime {
             // Cache refresh preserves picker candidates set at first hydration.
             open_branch_candidates: Vec::new(),
         });
+    }
+}
+
+#[cfg(test)]
+mod review_dispatch_tests {
+    use super::build_review_dispatch_prompt;
+
+    #[test]
+    fn review_dispatch_prompt_is_adversarial_sha_bound_and_reports_back() {
+        let dispatch = gwt::AutonomousReviewDispatch {
+            issue_number: 42,
+            pr_number: 99,
+            reviewed_sha: "abc123".to_string(),
+            required_criteria: vec!["AC-1".to_string()],
+            diff: "diff --git a/x b/x".to_string(),
+            linked_issue_kind: gwt::LinkedIssueKind::Spec,
+        };
+        let prompt = build_review_dispatch_prompt(&dispatch);
+        assert!(
+            prompt.contains("REFUTE"),
+            "adversarial framing carried through"
+        );
+        assert!(prompt.contains("UNTRUSTED DATA"), "injection framing");
+        assert!(prompt.contains("AC-1"), "required criterion");
+        assert!(prompt.contains("abc123"), "bound to the reviewed SHA");
+        assert!(
+            prompt.contains("issue.monitor.review_verdict"),
+            "instructs verdict report-back via the gwtd op"
+        );
+        assert!(prompt.contains("42"), "names the issue");
     }
 }

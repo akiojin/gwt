@@ -225,6 +225,20 @@ fn spawn_issue_monitor_worker(scope: RuntimeScope, hub: BroadcastHub, shutdown: 
         let prefs = crate::load_issue_monitor_prefs(&prefs_path).unwrap_or_default();
         let mut monitor =
             crate::IssueMonitorState::with_prefs(crate::IssueMonitorConfig::default(), prefs);
+        // SPEC #3200 (review follow-up): a record persisted mid-review reloads in
+        // `Reviewing`, but its review-agent dispatch (not persisted) is gone.
+        // Reset such records to `Implementing` so the first scan re-detects the PR
+        // and re-issues the review — restoring the pre-persist self-healing. The
+        // `now` stamp refreshes last_heartbeat so the reset record is not wrongly
+        // reclaimed by stuck detection (which runs before the re-dispatch).
+        let resume_now = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+        let resumed = monitor.resume_inflight_reviews_after_restart(&resume_now);
+        if !resumed.is_empty() {
+            tracing::info!(
+                issues = ?resumed,
+                "issue monitor: resumed in-flight reviews after restart (Reviewing → Implementing)"
+            );
+        }
         publish_issue_monitor_payloads(&hub, &mut monitor);
         let mut interval =
             tokio::time::interval(Duration::from_secs(monitor.config.poll_interval_secs));
@@ -238,11 +252,17 @@ fn spawn_issue_monitor_worker(scope: RuntimeScope, hub: BroadcastHub, shutdown: 
                         Ok(DaemonFrame::Event { payload, .. }) => {
                             if let Some(control) = decode_issue_monitor_control(payload) {
                                 let should_scan = apply_issue_monitor_control(&mut monitor, control);
-                                let _ = crate::save_issue_monitor_prefs(&prefs_path, &monitor.prefs());
+                                persist_daemon_issue_monitor_state(&prefs_path, &monitor);
                                 publish_issue_monitor_payloads(&hub, &mut monitor);
                                 if should_scan {
                                     let gui_connected = issue_monitor_gui_connected(&hub);
-                                    monitor = scan_issue_monitor_once(scope.clone(), monitor, gui_connected).await;
+                                    monitor = scan_and_persist_issue_monitor(
+                                        scope.clone(),
+                                        monitor,
+                                        gui_connected,
+                                        &prefs_path,
+                                    )
+                                    .await;
                                     publish_issue_monitor_payloads(&hub, &mut monitor);
                                 }
                             }
@@ -254,7 +274,13 @@ fn spawn_issue_monitor_worker(scope: RuntimeScope, hub: BroadcastHub, shutdown: 
                 }
                 _ = interval.tick() => {
                     let gui_connected = issue_monitor_gui_connected(&hub);
-                    monitor = scan_issue_monitor_once(scope.clone(), monitor, gui_connected).await;
+                    monitor = scan_and_persist_issue_monitor(
+                        scope.clone(),
+                        monitor,
+                        gui_connected,
+                        &prefs_path,
+                    )
+                    .await;
                     publish_issue_monitor_payloads(&hub, &mut monitor);
                 }
             }
@@ -265,6 +291,21 @@ fn spawn_issue_monitor_worker(scope: RuntimeScope, hub: BroadcastHub, shutdown: 
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum IssueMonitorControl {
     Enabled(bool),
+    /// SPEC #3200 T-046/FR-024: arm/disarm the unattended autonomous mode kill
+    /// switch. Disarming stops new autonomous candidates on the next scan.
+    AutonomousMode(bool),
+    /// SPEC #3200 FR-015: a review agent reported its verdict for a reviewed SHA.
+    ReviewVerdict {
+        issue_number: u64,
+        reviewed_sha: String,
+        verdict_raw: String,
+    },
+    /// SPEC #3200 T-045/FR-025: a monitored autonomous agent showed liveness;
+    /// refresh the stuck-detection window for the issue.
+    Heartbeat {
+        issue_number: u64,
+        at: String,
+    },
     MaxActiveAgents(usize),
     PriorityOrder(Vec<u64>),
     Launched {
@@ -280,6 +321,9 @@ enum IssueMonitorControl {
         window_id: String,
         message: String,
     },
+    WindowClosed {
+        window_id: String,
+    },
 }
 
 fn apply_issue_monitor_control(
@@ -290,6 +334,23 @@ fn apply_issue_monitor_control(
         IssueMonitorControl::Enabled(enabled) => {
             monitor.set_enabled(enabled);
             true
+        }
+        IssueMonitorControl::AutonomousMode(enabled) => {
+            monitor.set_autonomous_mode(enabled);
+            true
+        }
+        IssueMonitorControl::ReviewVerdict {
+            issue_number,
+            reviewed_sha,
+            verdict_raw,
+        } => {
+            // The daemon (trusted) judges the raw verdict; agents cannot self-pass.
+            monitor.apply_review_verdict(issue_number, &reviewed_sha, &verdict_raw);
+            true
+        }
+        IssueMonitorControl::Heartbeat { issue_number, at } => {
+            monitor.record_autonomous_heartbeat(issue_number, &at);
+            false
         }
         IssueMonitorControl::MaxActiveAgents(max_active_agents) => {
             monitor.set_max_active_agents(max_active_agents);
@@ -325,6 +386,10 @@ fn apply_issue_monitor_control(
             }
             true
         }
+        IssueMonitorControl::WindowClosed { window_id } => {
+            monitor.requeue_window(&window_id);
+            true
+        }
     }
 }
 
@@ -341,6 +406,37 @@ fn decode_issue_monitor_control(payload: serde_json::Value) -> Option<IssueMonit
             let payload = event.get("payload")?;
             if let Some(enabled) = payload.get("enabled").and_then(serde_json::Value::as_bool) {
                 return Some(IssueMonitorControl::Enabled(enabled));
+            }
+            if let Some(autonomous_mode) = payload
+                .get("autonomous_mode")
+                .and_then(serde_json::Value::as_bool)
+            {
+                return Some(IssueMonitorControl::AutonomousMode(autonomous_mode));
+            }
+            if let Some(heartbeat) = payload.get("heartbeat") {
+                let issue_number = heartbeat.get("issue_number")?.as_u64()?;
+                let at = heartbeat
+                    .get("at")
+                    .and_then(serde_json::Value::as_str)?
+                    .to_string();
+                return Some(IssueMonitorControl::Heartbeat { issue_number, at });
+            }
+            if let Some(review_verdict) = payload.get("review_verdict") {
+                let issue_number = review_verdict.get("issue_number")?.as_u64()?;
+                let reviewed_sha = review_verdict
+                    .get("reviewed_sha")
+                    .and_then(serde_json::Value::as_str)?
+                    .to_string();
+                let verdict_raw = review_verdict
+                    .get("verdict_raw")
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or("")
+                    .to_string();
+                return Some(IssueMonitorControl::ReviewVerdict {
+                    issue_number,
+                    reviewed_sha,
+                    verdict_raw,
+                });
             }
             if let Some(max_active_agents) = payload
                 .get("max_active_agents")
@@ -393,6 +489,10 @@ fn decode_issue_monitor_control(payload: serde_json::Value) -> Option<IssueMonit
                     window_id,
                 });
             }
+            if let Some(window_closed) = payload.get("window_closed") {
+                let window_id = window_closed.get("window_id")?.as_str()?.to_string();
+                return Some(IssueMonitorControl::WindowClosed { window_id });
+            }
             let issue_numbers = payload.get("priority_order")?.as_array()?;
             let issue_numbers = issue_numbers
                 .iter()
@@ -409,18 +509,89 @@ async fn scan_issue_monitor_once(
     monitor: crate::IssueMonitorState,
     gui_connected: bool,
 ) -> crate::IssueMonitorState {
+    // Keep a copy of the prior state so a `spawn_blocking` panic preserves it
+    // instead of collapsing to a fresh default (see `scan_join_failure_fallback`).
+    let preserved = monitor.clone();
     tokio::task::spawn_blocking(move || {
         scan_issue_monitor_once_blocking(scope, monitor, gui_connected)
     })
     .await
     .unwrap_or_else(|error| {
-        let mut monitor = crate::IssueMonitorState::new(crate::IssueMonitorConfig::default());
-        monitor.record_scan_error(
+        scan_join_failure_fallback(
+            preserved,
+            error.to_string(),
             chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
-            format!("issue monitor worker join failed: {error}"),
-        );
-        monitor
+        )
     })
+}
+
+/// Fallback state for a `scan_issue_monitor_once` `JoinError` (the scan task
+/// panicked). It preserves the prior in-memory state — the `enabled` flag,
+/// `merged_issues`, autonomous records — and only records the scan error.
+///
+/// Returning a fresh `IssueMonitorState::new(default)` here (the previous
+/// behavior) would let `scan_and_persist_issue_monitor` overwrite good prefs on
+/// disk with empty/default state on a transient scan panic, losing merge
+/// completion and re-launching finished work — and would also reset the GUI's
+/// view (codex P2 review, #3209).
+fn scan_join_failure_fallback(
+    mut preserved: crate::IssueMonitorState,
+    error: String,
+    now: String,
+) -> crate::IssueMonitorState {
+    preserved.record_scan_error(now, format!("issue monitor worker join failed: {error}"));
+    preserved
+}
+
+/// Scan once, then persist the resulting state. The persist step is the SPEC
+/// #3200 review follow-up fix: a periodic (interval-tick) scan runs
+/// `reconcile_issue_monitor_merges` + `advance_autonomous_in_flight`, which can
+/// `record_merged` / escalate to `NeedsHuman` without any control frame. Without
+/// saving prefs after the scan, those transitions were lost on a daemon restart
+/// and already-completed work was re-launched. Both worker loop arms route their
+/// scan through here so no scan-driven transition can skip persistence.
+async fn scan_and_persist_issue_monitor(
+    scope: RuntimeScope,
+    monitor: crate::IssueMonitorState,
+    gui_connected: bool,
+    prefs_path: &Path,
+) -> crate::IssueMonitorState {
+    let monitor = scan_issue_monitor_once(scope, monitor, gui_connected).await;
+    persist_daemon_issue_monitor_state(prefs_path, &monitor);
+    monitor
+}
+
+/// Persist the daemon's issue-monitor state WITHOUT clobbering GUI-owned config.
+///
+/// The daemon loads prefs once at startup and thereafter only learns config
+/// changes it has a control frame for (`enabled` / `max_active_agents` /
+/// `priority_order` / `autonomous_mode`). `launch_profile` and
+/// `autonomous_tuning` have NO control channel — the GUI process edits them
+/// directly on disk — so the daemon's in-memory copy is authoritative-but-stale
+/// for those two fields. Writing the whole `monitor.prefs()` would overwrite a
+/// newer GUI launch-profile / tuning with the stale startup value, silently
+/// reverting the user's Issue Monitor configuration (adversarial review:
+/// launch_profile clobber). We therefore reload the on-disk prefs and preserve
+/// those two GUI-owned fields, persisting everything else (daemon-owned runtime
+/// state + control-synced config) from memory. If the reload fails, we fall back
+/// to the in-memory values rather than lose the daemon's runtime state.
+fn persist_daemon_issue_monitor_state(prefs_path: &Path, monitor: &crate::IssueMonitorState) {
+    let mut prefs = monitor.prefs();
+    if let Ok(on_disk) = crate::load_issue_monitor_prefs(prefs_path) {
+        prefs.launch_profile = on_disk.launch_profile;
+        prefs.autonomous_tuning = on_disk.autonomous_tuning;
+    }
+    let _ = crate::save_issue_monitor_prefs(prefs_path, &prefs);
+}
+
+/// SPEC #3200 Option A: a per-process secret the daemon uses to sign autonomous
+/// merge-authorization audit tokens. Agents never see it, so they cannot forge a
+/// daemon authorization. Stable for the daemon's lifetime.
+fn daemon_run_secret() -> &'static [u8] {
+    static SECRET: std::sync::OnceLock<Vec<u8>> = std::sync::OnceLock::new();
+    SECRET
+        .get_or_init(|| uuid::Uuid::new_v4().as_bytes().to_vec())
+        .as_slice()
 }
 
 fn scan_issue_monitor_once_blocking(
@@ -450,6 +621,29 @@ fn scan_issue_monitor_once_blocking(
     };
     let monitor_owner = format!("{}:{}", whoami::username(), std::process::id());
     crate::scan_issue_monitor_candidates(&mut monitor, &issues, &now);
+    crate::issue_monitor_worker::reconcile_issue_monitor_merges(&mut monitor, &scope.project_root);
+    // SPEC #3200 T-041/T-044: autonomous pre-launch eligibility gate + stuck-slot
+    // recovery. Both are no-ops unless autonomous mode is on (default OFF keeps
+    // the SPEC #3165 human-gated flow unchanged).
+    crate::issue_monitor_worker::apply_autonomous_eligibility(
+        &mut monitor,
+        &issues,
+        &format!("{owner}/{repo}"),
+        &scope.project_root,
+        &now,
+    );
+    monitor.recover_stuck_autonomous(&now);
+    // SPEC #3200 Option A: advance in-flight autonomous issues through the loop
+    // (PR detect → review → gate → merge → watch). No-op unless autonomous mode
+    // is on; default OFF keeps the SPEC #3165 flow unchanged.
+    crate::issue_monitor_worker::advance_autonomous_in_flight(
+        &mut monitor,
+        &issues,
+        &format!("{owner}/{repo}"),
+        &scope.project_root,
+        daemon_run_secret(),
+        &now,
+    );
     if monitor.config.enabled && gui_connected {
         let active_cap = if monitor.has_launch_profile() {
             monitor.config.max_active.max(1)
@@ -906,6 +1100,113 @@ mod tests {
     }
 
     #[test]
+    fn issue_monitor_autonomous_mode_control_toggles_kill_switch() {
+        // SPEC #3200 T-046/FR-024: the autonomous_mode control arms/disarms the
+        // kill switch, observable in the status view, and requests a rescan.
+        let mut monitor = crate::IssueMonitorState::new(crate::IssueMonitorConfig {
+            enabled: true,
+            ..crate::IssueMonitorConfig::default()
+        });
+        assert!(!monitor.autonomous_mode());
+
+        let arm =
+            decode_issue_monitor_control(crate::runtime_daemon_events::issue_monitor_payload(
+                "control",
+                serde_json::json!({ "autonomous_mode": true }),
+                std::process::id() + 1,
+            ))
+            .expect("arm control decodes");
+        assert!(
+            apply_issue_monitor_control(&mut monitor, arm),
+            "rescan requested"
+        );
+        assert!(monitor.autonomous_mode(), "kill switch armed");
+        assert!(monitor.status_view().autonomous_mode);
+
+        let disarm =
+            decode_issue_monitor_control(crate::runtime_daemon_events::issue_monitor_payload(
+                "control",
+                serde_json::json!({ "autonomous_mode": false }),
+                std::process::id() + 1,
+            ))
+            .expect("disarm control decodes");
+        apply_issue_monitor_control(&mut monitor, disarm);
+        assert!(!monitor.autonomous_mode(), "kill switch disarmed");
+    }
+
+    #[test]
+    fn issue_monitor_review_verdict_control_records_daemon_judged_outcome() {
+        // SPEC #3200 FR-015: a review agent's raw verdict is decoded and judged
+        // by the daemon (SHA-bound), setting review_passed on the record.
+        let mut monitor = crate::IssueMonitorState::with_prefs(
+            crate::IssueMonitorConfig::default(),
+            crate::IssueMonitorPrefs {
+                autonomous_mode: true,
+                ..crate::IssueMonitorPrefs::default()
+            },
+        );
+        monitor.capture_acceptance_snapshot(
+            42,
+            crate::issue_monitor_gate::classify_acceptance_criteria(
+                "## Acceptance Criteria\n- [ ] AC-1: x\n",
+            )
+            .snapshot(),
+        );
+        monitor.begin_review(42, 99, "abc123");
+
+        let verdict = r#"{"schema":"gwt-autonomous-review/v1","overall":"pass","criteria":[{"id":"AC-1","verdict":"pass"}]}"#;
+        let payload = crate::runtime_daemon_events::issue_monitor_payload(
+            "control",
+            serde_json::json!({
+                "review_verdict": {
+                    "issue_number": 42,
+                    "reviewed_sha": "abc123",
+                    "verdict_raw": verdict,
+                }
+            }),
+            std::process::id() + 1,
+        );
+        let control = decode_issue_monitor_control(payload).expect("review verdict decodes");
+        apply_issue_monitor_control(&mut monitor, control);
+
+        assert_eq!(
+            monitor.autonomous_record(42).and_then(|r| r.review_passed),
+            Some(true),
+            "daemon judged the verdict pass",
+        );
+    }
+
+    #[test]
+    fn issue_monitor_heartbeat_control_refreshes_liveness() {
+        // SPEC #3200 T-045: a heartbeat control refreshes the stuck-detection
+        // window for the issue.
+        let mut monitor = crate::IssueMonitorState::with_prefs(
+            crate::IssueMonitorConfig::default(),
+            crate::IssueMonitorPrefs {
+                autonomous_mode: true,
+                ..crate::IssueMonitorPrefs::default()
+            },
+        );
+        monitor.set_autonomous_phase(42, crate::AutonomousPhase::Implementing);
+        let payload = crate::runtime_daemon_events::issue_monitor_payload(
+            "control",
+            serde_json::json!({
+                "heartbeat": { "issue_number": 42, "at": "2026-06-29T00:05:00Z" }
+            }),
+            std::process::id() + 1,
+        );
+        let control = decode_issue_monitor_control(payload).expect("heartbeat decodes");
+        apply_issue_monitor_control(&mut monitor, control);
+        assert_eq!(
+            monitor
+                .autonomous_record(42)
+                .and_then(|r| r.last_heartbeat.clone())
+                .as_deref(),
+            Some("2026-06-29T00:05:00Z"),
+        );
+    }
+
+    #[test]
     fn issue_monitor_launch_failed_control_marks_active_item_failed() {
         let mut monitor = crate::IssueMonitorState::new(crate::IssueMonitorConfig {
             enabled: true,
@@ -1038,6 +1339,68 @@ mod tests {
     }
 
     #[test]
+    fn issue_monitor_launch_failed_control_routes_inflight_autonomous_issue_through_retry() {
+        // SPEC #3200 (review follow-up): when the independent review agent fails
+        // to spawn, the daemon receives a `launch_failed` control. For an
+        // in-flight autonomous issue this must route through the autonomous
+        // retry machinery (attempt counted, re-queued) instead of marking the
+        // inbox `LaunchFailed` and stranding the record in `Reviewing` forever.
+        let mut monitor = crate::IssueMonitorState::new(crate::IssueMonitorConfig {
+            enabled: true,
+            ..crate::IssueMonitorConfig::default()
+        });
+        monitor.set_autonomous_mode(true);
+        monitor.set_gui_connected(true);
+        monitor.record_claimed(
+            crate::IssueMonitorIssue {
+                number: 42,
+                title: "Issue 42".to_string(),
+                labels: Vec::new(),
+                state: crate::IssueMonitorIssueState::Open,
+                body: None,
+                url: None,
+            },
+            "claim-a",
+        );
+        monitor.next_launch_request().expect("launch request");
+        monitor.complete_active_launch(42, "tab-1::agent-1");
+        monitor.set_autonomous_phase(42, crate::AutonomousPhase::Implementing);
+        monitor.begin_review(42, 99, "abc123"); // Implementing → Reviewing
+        assert!(monitor.is_autonomous_in_flight(42));
+
+        let payload = crate::runtime_daemon_events::issue_monitor_payload(
+            "control",
+            serde_json::json!({
+                "launch_failed": {
+                    "issue_number": 42,
+                    "message": "Independent review could not start",
+                }
+            }),
+            std::process::id() + 1,
+        );
+        let control = decode_issue_monitor_control(payload).expect("control");
+
+        let should_scan = apply_issue_monitor_control(&mut monitor, control);
+
+        assert!(should_scan);
+        assert_eq!(
+            monitor.autonomous_record(42).map(|r| r.phase),
+            Some(crate::AutonomousPhase::Idle),
+            "routed back to Idle for retry, not stranded in Reviewing"
+        );
+        assert_eq!(
+            monitor.attempt_count(42),
+            1,
+            "the failed attempt is counted"
+        );
+        assert_eq!(
+            monitor.inbox_item(42).map(|item| item.state),
+            Some(crate::MonitorInboxState::Queued),
+            "re-queued for automatic relaunch"
+        );
+    }
+
+    #[test]
     fn issue_monitor_agent_failed_control_uses_issue_number_hint_when_window_is_unmapped() {
         let mut monitor = crate::IssueMonitorState::new(crate::IssueMonitorConfig {
             enabled: true,
@@ -1138,6 +1501,129 @@ mod tests {
         assert_eq!(
             error,
             "Git origin remote is not a GitHub URL: https://example.com/owner/repo.git"
+        );
+    }
+
+    #[tokio::test]
+    async fn scan_and_persist_issue_monitor_writes_scan_transitions_to_prefs() {
+        // SPEC #3200 (review follow-up): a periodic (interval-tick) scan can
+        // complete a merge / escalate without any control frame. The worker must
+        // persist prefs after every scan so a daemon restart never loses that
+        // completion and re-launches already-finished work. This asserts the
+        // scan→persist seam actually writes the merged state to the prefs file.
+        let temp = TempDir::new().expect("tempdir");
+        init_git_repo(temp.path());
+        let scope = sample_scope(&temp);
+        let prefs_path = temp.path().join("issue-monitor-prefs.json");
+
+        let mut monitor = crate::IssueMonitorState::new(crate::IssueMonitorConfig::default());
+        monitor.record_merged(42); // a scan-driven transition that must survive restart
+        assert!(!prefs_path.exists(), "prefs not written before the scan");
+
+        let _monitor =
+            super::scan_and_persist_issue_monitor(scope, monitor, false, &prefs_path).await;
+
+        let persisted = crate::load_issue_monitor_prefs(&prefs_path).expect("prefs written");
+        assert!(
+            persisted.merged_issues.contains(&42),
+            "scan-driven merge completion is persisted, so a restart will not re-launch it"
+        );
+    }
+
+    #[test]
+    fn scan_join_failure_fallback_preserves_prior_state_so_persist_is_safe() {
+        // codex P2 (#3209): a scan-task panic (`JoinError`) must NOT collapse to a
+        // fresh `IssueMonitorState::new(default)`. `scan_and_persist` saves the
+        // returned state, so a fresh default would overwrite good prefs with
+        // `enabled=false` / empty merged_issues / empty autonomous records on a
+        // transient panic — losing completion and re-launching finished work. The
+        // fallback preserves the prior state and only records the scan error.
+        let mut monitor = crate::IssueMonitorState::new(crate::IssueMonitorConfig {
+            enabled: true,
+            ..crate::IssueMonitorConfig::default()
+        });
+        monitor.record_merged(42);
+
+        let out = super::scan_join_failure_fallback(
+            monitor,
+            "task panicked".to_string(),
+            "2026-06-30T00:00:00Z".to_string(),
+        );
+
+        assert!(
+            out.config.enabled,
+            "enabled flag preserved across a scan panic"
+        );
+        assert!(
+            out.prefs().merged_issues.contains(&42),
+            "merge completion preserved (not wiped to an empty default)"
+        );
+        let error = out
+            .status_view()
+            .last_error
+            .expect("the scan error is recorded");
+        assert!(
+            error.contains("join failed"),
+            "records the join failure: {error}"
+        );
+    }
+
+    #[test]
+    fn persist_daemon_state_preserves_gui_owned_launch_profile_and_tuning() {
+        // adversarial review (launch_profile clobber): launch_profile and
+        // autonomous_tuning have no daemon control channel, so the daemon's
+        // stale-since-startup in-memory copy must NOT overwrite the GUI's newer
+        // on-disk values. Only daemon-owned runtime state (merged_issues,
+        // autonomous_records, ...) is persisted from memory.
+        let temp = TempDir::new().expect("tempdir");
+        let prefs_path = temp.path().join("issue-monitor.json");
+
+        // The GUI wrote a launch_profile + custom tuning straight to disk.
+        let on_disk = crate::IssueMonitorPrefs {
+            launch_profile: Some(crate::IssueMonitorLaunchProfile {
+                agent_id: "claude".to_string(),
+                model: None,
+                reasoning: None,
+                version: None,
+                session_mode: Default::default(),
+                skip_permissions: false,
+                codex_fast_mode: false,
+                runtime_target: Default::default(),
+                docker_service: None,
+                docker_lifecycle_intent: Default::default(),
+                windows_shell: None,
+            }),
+            autonomous_tuning: crate::issue_monitor::AutonomousTuning {
+                max_attempts: 9,
+                ..crate::issue_monitor::AutonomousTuning::default()
+            },
+            ..crate::IssueMonitorPrefs::default()
+        };
+        crate::save_issue_monitor_prefs(&prefs_path, &on_disk).expect("seed disk");
+
+        // The daemon's in-memory monitor has NO launch_profile (stale startup)
+        // but has a daemon-owned merge completion to persist.
+        let mut monitor = crate::IssueMonitorState::new(crate::IssueMonitorConfig::default());
+        monitor.record_merged(42);
+        assert!(
+            monitor.prefs().launch_profile.is_none(),
+            "daemon has no profile"
+        );
+
+        super::persist_daemon_issue_monitor_state(&prefs_path, &monitor);
+
+        let persisted = crate::load_issue_monitor_prefs(&prefs_path).expect("reload");
+        assert!(
+            persisted.launch_profile.is_some(),
+            "GUI launch_profile preserved (not clobbered by the daemon's stale None)"
+        );
+        assert_eq!(
+            persisted.autonomous_tuning.max_attempts, 9,
+            "GUI autonomous_tuning preserved"
+        );
+        assert!(
+            persisted.merged_issues.contains(&42),
+            "daemon-owned merge completion is still persisted from memory"
         );
     }
 

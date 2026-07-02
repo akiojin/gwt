@@ -332,6 +332,9 @@ fn agent_runtime_failure_marks_launched_issue_failed_and_persists_error() {
         vec![IssueMonitorFailedIssue {
             issue_number: 42,
             message: "Stop-block hit an error".to_string(),
+            // #3165 error-window lifecycle: the failed agent window id is
+            // retained so an explicit Launch Now can close the stale window.
+            window_id: Some("tab::agent-42".to_string()),
         }]
     );
 

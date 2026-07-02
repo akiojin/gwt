@@ -244,9 +244,13 @@ fn refresh_managed_gwt_assets_reports_the_failed_step() {
     let error = refresh_managed_gwt_assets_for_worktree(&file_path)
         .expect_err("refresh should fail for a file path");
 
+    // A non-directory worktree (here a file, in practice a worktree whose
+    // branch/worktree creation failed) is now caught up front with a clear,
+    // attributed error instead of a misleading downstream skill/distribute error.
+    assert_eq!(error.kind(), std::io::ErrorKind::NotFound);
     assert!(error
         .to_string()
-        .contains("failed to distribute gwt managed assets"));
+        .contains("worktree is not a ready directory"));
 }
 
 #[test]

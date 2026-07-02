@@ -78,7 +78,9 @@ On invocation, run Shared Preflight, then route:
    - "check status" / "PR status" / "is it merged?" → **check** mode
    - "fix CI" / "fix the PR" / "resolve blockers" → **fix** mode
    - "create PR" / "open PR" → **create** mode (with smart skip if open PR exists)
-   - "deliver" / "drive to merge" / "merge it" / "land the PR" / "ship it" → **deliver** mode (opt-in only)
+   - "deliver" / "drive to merge" / "merge it" / "land the PR" / "ship it" /
+     "watch until merged" → **deliver** mode (opt-in only; Ready PR Gate must
+     already be satisfied)
 3. **Auto-detect** (no explicit mode) — use the commit-count-first
    decision from Preflight Step 7. Auto-detect never selects **deliver**;
    enabling auto-merge requires an explicit user request:
