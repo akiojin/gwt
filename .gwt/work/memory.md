@@ -7472,3 +7472,10 @@ Type: failure-pattern
 Context: During PR #3193 pre-PR visual verification, the Issue Bridge auto-refresh Playwright fixture fired a 60000ms interval callback via a fixed 50ms timeout. In the full suite, initial knowledge load sometimes still held the busy flag, so the auto-refresh request was dropped and the test timed out although single-test runs passed.
 Learning: Timer-shortening fixtures are flaky when the production callback can legally no-op while state is busy. Tests should expose a deterministic trigger and call it after asserting the state that makes the callback meaningful.
 Future Action: For Playwright fixtures that validate periodic behavior, capture interval callbacks and trigger them explicitly after the initial render/load assertions instead of relying on arbitrary short timeouts.
+
+## 2026-06-29 — managed-skill 新規ファイルは .git/info/exclude で silent に無視される
+
+Type: project
+Context: Issue #3197 で gwt-manage-pr の managed skill に新規 reference file (references/deliver-flow.md) を追加した際、git status に出ず commit され損ねかけた。
+Learning: gwt-managed worktree では `.git/info/exclude` に `.claude/skills/gwt-*` と `.codex/skills/gwt-*` の除外 entry があり、新規 managed-skill ファイルは untracked にすら現れず silent に無視される。既存ファイル(SKILL.md 等)は既に tracked なので modification は M で見えるが、NEW ファイルは git add -f しないと commit されない。commit され損ねると include_dir! 埋め込み元と CI checkout に file が無く、新 test と parity test が CI で fail する。
+Future Action: managed skill (.claude/skills/gwt-*, .codex/skills/gwt-*) に新規ファイルを追加したら必ず `git check-ignore -v <path>` で除外を確認し `git add -f` で明示 stage する。commit 後 `git show --stat HEAD` で新規ファイルが含まれることを確認する。
