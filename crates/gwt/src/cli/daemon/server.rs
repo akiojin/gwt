@@ -609,7 +609,14 @@ fn scan_issue_monitor_once_blocking(
         &crate::issue_monitor_prefs_path_for_repo_path(&scope.project_root),
     ) {
         monitor.refresh_gui_owned_prefs(&disk);
+        // #3223 follow-up (codex P1): absorb the GUI process's in-flight
+        // launching/launched claims so max-active accounting is unified and the
+        // daemon's persist cannot drop them.
+        monitor.merge_inflight_launches_from_disk(&disk);
     }
+    // #3223 follow-up (codex P2): expire claimed-but-never-acked launches past
+    // claim_ttl_secs so a crashed launch cannot hold a slot forever.
+    monitor.expire_stale_unbound_launches(&now);
     let (owner, repo) =
         match crate::issue_monitor_worker::github_remote_owner_and_repo(&scope.project_root) {
             Ok(owner_repo) => owner_repo,
@@ -1251,7 +1258,9 @@ mod tests {
             },
             "claim-a",
         );
-        monitor.next_launch_request().expect("launch request");
+        monitor
+            .next_launch_request("2026-07-02T00:00:00Z")
+            .expect("launch request");
         let payload = crate::runtime_daemon_events::issue_monitor_payload(
             "control",
             serde_json::json!({
@@ -1292,7 +1301,9 @@ mod tests {
             },
             "claim-a",
         );
-        monitor.next_launch_request().expect("launch request");
+        monitor
+            .next_launch_request("2026-07-02T00:00:00Z")
+            .expect("launch request");
         let payload = crate::runtime_daemon_events::issue_monitor_payload(
             "control",
             serde_json::json!({
@@ -1333,7 +1344,9 @@ mod tests {
             },
             "claim-a",
         );
-        monitor.next_launch_request().expect("launch request");
+        monitor
+            .next_launch_request("2026-07-02T00:00:00Z")
+            .expect("launch request");
         monitor.complete_active_launch(42, "tab-1::agent-1");
         let payload = crate::runtime_daemon_events::issue_monitor_payload(
             "control",
@@ -1389,7 +1402,9 @@ mod tests {
             },
             "claim-a",
         );
-        monitor.next_launch_request().expect("launch request");
+        monitor
+            .next_launch_request("2026-07-02T00:00:00Z")
+            .expect("launch request");
         monitor.complete_active_launch(42, "tab-1::agent-1");
         monitor.set_autonomous_phase(42, crate::AutonomousPhase::Implementing);
         monitor.begin_review(42, 99, "abc123"); // Implementing → Reviewing
@@ -1445,7 +1460,9 @@ mod tests {
             },
             "claim-a",
         );
-        monitor.next_launch_request().expect("launch request");
+        monitor
+            .next_launch_request("2026-07-02T00:00:00Z")
+            .expect("launch request");
         let payload = crate::runtime_daemon_events::issue_monitor_payload(
             "control",
             serde_json::json!({
