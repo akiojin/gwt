@@ -267,6 +267,49 @@ PowerShell 7 を選択できます。Docker 起動では引き続きコンテナ
 選択がない場合、`Ctrl+C` は実行中のターミナルプロセス向けの割り込みのままです。
 Linux では `Ctrl+Shift+C` でも現在の選択をコピーできます。
 
+## Issue Monitor
+
+Issue Monitor はプロジェクトの open な GitHub Issue を監視し、エージェント作業に
+変換します。既定（human-gated）モードでは候補を inbox に取り込み、Issue ごとに
+`Launch` を押すと、gwt が起動時に `work/issue-N`（または `feature/spec-N`）の
+ブランチ/worktree を作成し、その Issue をプロンプトとしてエージェントを開始
+します。起動失敗はエラーとともに inbox に残り、`Launch now` で明示的に再試行
+できます。
+
+### Autonomous モード（opt-in）
+
+Autonomous モードはループ全体を無人で実行します: 適格 Issue → 自動起動 → 実装 →
+独立レビュー → 強い自動ゲート → 自動マージ。**既定では無効**で、**二段階の
+opt-in** が必要です:
+
+1. Issue Monitor ツールバーの `Autonomous` トグルを有効化（プロジェクト単位）。
+2. 自律処理したい各 Issue に `auto-merge` ラベルを付与。
+
+さらに、機械検証可能な受け入れ基準（本文の `## Acceptance Criteria`
+チェックリスト）があり、ベースブランチの protection ルールが検証可能で、
+上限つきの試行回数を使い切っていない Issue だけが適格になります。それ以外は
+従来どおり human-gated のまま扱われます。
+
+安全モデル（要約）: マージ判断を実装エージェント自身には決して委ねません。
+独立レビューエージェント（fresh session。`review model` 設定で実装側と別の
+モデルを強制可能）が受け入れ基準に対して diff をレビューし、強いゲートが
+branch protection・必須 CI チェック・レビュー済みコミット SHA を再検証します。
+auto-merge はそのレビュー済み SHA に束縛して arm されるため、以後 head が
+進むと GitHub 側がマージを拒否し、マージ後にも「マージされたものがレビュー
+されたものと同一か」の同一性検証を行います。失敗は上限つき指数バックオフで
+再試行し、terminal な失敗や試行上限到達は可視の `NeedsHuman` 状態に
+エスカレーションして自動再起動しません。`Autonomous` トグルは kill switch と
+して機能し、無効化時は GitHub 側の pending auto-merge も能動的に解除します。
+
+無人運転中のライフサイクルイベント（マージ完了・再試行予約・ゲート通過・
+NeedsHuman エスカレーション）はトーストとして表示され、永続的なスクロール可能
+通知スタックに蓄積されるため、離席中のイベントも失われません。
+
+調整可能な上限（試行回数・stuck/idle タイムアウト・再試行バックオフ・レビュー
+モデル）はプロジェクト単位で永続化されます。要件全体と脅威モデルは SPEC
+[#3200](https://github.com/akiojin/gwt/issues/3200)、human-gated の基礎は SPEC
+[#3165](https://github.com/akiojin/gwt/issues/3165) を参照してください。
+
 ## Knowledge、Search、Managed Skills
 
 gwt は project knowledge を Agent workspace の近くに置きます。

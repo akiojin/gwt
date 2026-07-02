@@ -7493,6 +7493,12 @@ Context: During PR #3193 pre-PR visual verification, the Issue Bridge auto-refre
 Learning: Timer-shortening fixtures are flaky when the production callback can legally no-op while state is busy. Tests should expose a deterministic trigger and call it after asserting the state that makes the callback meaningful.
 Future Action: For Playwright fixtures that validate periodic behavior, capture interval callbacks and trigger them explicitly after the initial render/load assertions instead of relying on arbitrary short timeouts.
 
+## 2026-07-02 — Start Work は lazy／branch-per-work は生産Work用・intake は既存worktree再利用
+
+Type: decision
+Context: ユーザー提起「Issue Monitor があれば Start Work のブランチ作成は不要、Issue登録だけなら専用ブランチ起動で良い」を gwt-discussion で検証(SPEC #2359 Workモデル / #3165 Issue Monitor)。
+Learning: (1)前提が事実と異なる: Start Work はクリック時点でブランチ名を予約するだけで git ref を作らず(reserve_start_work_branch_name_for_project, start_work_test.rs:153 'must not create refs')、ブランチ+worktree の物理作成はエージェント起動直前の resolve_launch_worktree(launch_runtime.rs:141/162)。Issue Monitor も同じ lazy materialization を再利用(launch.rs:1467)。『Start Workが先にブランチを作る』は誤解で、両者は同一機構の別トリガー。(2)Start Work は Issue Monitor で代替不可: 非Issue作業(ad-hoc/任意ブランチ種別/既存リモートブランチ継続US-83/Shell)の汎用入口、Issue linkage は optional。(3)正しい論点は『gwt の Work は branch束縛1種類だが、生産Work(コード→branch/worktree/PR必須)と非生産intake Work(register-issue/discussion/spec/arch-review→Issue+.gwt notesのみ)の2種類ある』。(4)『専用ブランチ共有』案は git制約(1ブランチ=1worktree)とセッション隔離(GWT_SESSION_ID+per-worktree .gwt state+managed hooks)に当たり素朴には成立しない。実現するなら ephemeral worktree か直列化が要る。
+Future Action: branch-per-work コアモデルは生産Workに load-bearing なので維持。intake/discussion は新Work種別を作らず既存worktree再利用で回す(No Action)。将来 intake worktree増殖が定量的に痛くなった場合のみ『ephemeral intake Work kind』を SPEC化(セッション隔離のworktree非依存化が前提技術課題)。'Start Workは事前にブランチを作る'誤解を繰り返さない。
 ## 2026-07-02 — session 共有 dedup は identity 照合必須 (Workspace 行 silent drop)
 
 Type: bug-fix

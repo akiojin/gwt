@@ -450,6 +450,12 @@ pub struct IssueMonitorState {
     /// SPEC #3200 Option A: review-agent spawn requests produced by the
     /// orchestration loop, drained by the daemon→GUI payload builder.
     pending_review_dispatches: VecDeque<AutonomousReviewDispatch>,
+    /// SPEC #3200 FR-034 (T-111): operator notices produced by autonomous
+    /// lifecycle transitions (merged / needs-human / retry / auto-merge armed).
+    /// Drained into `toast` payloads by the daemon→GUI payload builder; retained
+    /// (bounded) while no GUI is connected so unattended events surface on the
+    /// next connect.
+    pending_autonomous_notices: VecDeque<AutonomousNotice>,
 }
 
 pub fn is_auto_improve_candidate(issue: &IssueMonitorIssue, config: &IssueMonitorConfig) -> bool {
@@ -637,6 +643,21 @@ pub struct AutonomousReviewDispatch {
     pub linked_issue_kind: LinkedIssueKind,
 }
 
+/// SPEC #3200 FR-034 (T-111): one operator notice for an unattended autonomous
+/// lifecycle transition. Surfaced to the GUI as an `issue_monitor_toast`
+/// (transient surface toast + persistent scrollable notification stack).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AutonomousNotice {
+    /// Toast level: `info` | `warn` | `error` | `done`.
+    pub level: String,
+    pub issue_number: u64,
+    pub message: String,
+}
+
+/// Bound for [`IssueMonitorState::pending_autonomous_notices`]: unattended
+/// operation with no GUI connected must not grow the queue without limit.
+const AUTONOMOUS_NOTICE_CAP: usize = 100;
+
 /// SPEC #3200 T-042: how an autonomous attempt's failure should be routed.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FailureClass {
@@ -789,6 +810,7 @@ impl IssueMonitorState {
             queue: VecDeque::new(),
             pending_launches: VecDeque::new(),
             pending_review_dispatches: VecDeque::new(),
+            pending_autonomous_notices: VecDeque::new(),
         }
     }
 
@@ -944,6 +966,13 @@ impl IssueMonitorState {
                 self.autonomous_tuning.retry_backoff_base_secs,
                 self.autonomous_tuning.retry_backoff_cap_secs,
             );
+            // FR-034: surface the transient retry (attempt + reason) so an
+            // unattended failure loop is visible to the operator.
+            self.push_autonomous_notice(
+                "warn",
+                issue_number,
+                format!("Issue #{issue_number} attempt {attempt}/{max} failed (retry scheduled): {message}"),
+            );
             self.clear_active_tracking(issue_number);
             self.set_autonomous_phase(issue_number, AutonomousPhase::Idle);
             self.set_active_launch_id(issue_number, None);
@@ -1088,6 +1117,12 @@ impl IssueMonitorState {
     /// auto-relaunches. Reused by the strong-gate path when review rejects.
     pub fn escalate_to_needs_human(&mut self, issue_number: u64, reason: impl Into<String>) {
         let reason = reason.into();
+        // FR-034: an unattended escalation is exactly what the operator must see.
+        self.push_autonomous_notice(
+            "error",
+            issue_number,
+            format!("Issue #{issue_number} needs human: {reason}"),
+        );
         self.clear_active_tracking(issue_number);
         self.queue.retain(|queued| *queued != issue_number);
         self.set_autonomous_phase(issue_number, AutonomousPhase::NeedsHuman);
@@ -1421,6 +1456,12 @@ impl IssueMonitorState {
     /// (the auto-merge is being armed).
     pub fn begin_delivering(&mut self, issue_number: u64) {
         self.set_autonomous_phase(issue_number, AutonomousPhase::Delivering);
+        // FR-034: the gate passing (auto-merge armed) is a key unattended event.
+        self.push_autonomous_notice(
+            "info",
+            issue_number,
+            format!("Issue #{issue_number} gate passed — auto-merge armed"),
+        );
     }
 
     /// SPEC #3200 FR-009..FR-016: assemble the strong-gate inputs for an issue
@@ -1770,6 +1811,37 @@ impl IssueMonitorState {
         self.pending_review_dispatches.drain(..).collect()
     }
 
+    /// SPEC #3200 FR-034 (T-111): queue an operator notice for an unattended
+    /// autonomous transition. Fail-closed: a no-op unless autonomous mode is on,
+    /// so the default-OFF human-gated flow (#3165) emits nothing extra. Bounded:
+    /// oldest notices are dropped past [`AUTONOMOUS_NOTICE_CAP`] so a
+    /// disconnected-GUI window never grows the queue without limit.
+    fn push_autonomous_notice(
+        &mut self,
+        level: &str,
+        issue_number: u64,
+        message: impl Into<String>,
+    ) {
+        if !self.autonomous_mode {
+            return;
+        }
+        while self.pending_autonomous_notices.len() >= AUTONOMOUS_NOTICE_CAP {
+            self.pending_autonomous_notices.pop_front();
+        }
+        self.pending_autonomous_notices.push_back(AutonomousNotice {
+            level: level.to_string(),
+            issue_number,
+            message: message.into(),
+        });
+    }
+
+    /// Drain queued autonomous operator notices for emission as `toast`
+    /// payloads. Call only when a GUI is connected so unattended-window notices
+    /// are retained until someone can see them.
+    pub fn take_autonomous_notices(&mut self) -> Vec<AutonomousNotice> {
+        self.pending_autonomous_notices.drain(..).collect()
+    }
+
     pub fn complete_active_launch(&mut self, issue_number: u64, window_id: impl Into<String>) {
         let window_id = window_id.into();
         if !self.active_launches.contains(&issue_number) {
@@ -1888,6 +1960,15 @@ impl IssueMonitorState {
     /// completed work is not auto-relaunched while the Issue stays open until
     /// release).
     pub fn record_merged(&mut self, issue_number: u64) {
+        // FR-034: notify the operator when an issue that went through the
+        // autonomous loop completes (checked BEFORE the record is cleared).
+        if self.autonomous_records.contains_key(&issue_number) {
+            self.push_autonomous_notice(
+                "done",
+                issue_number,
+                format!("Issue #{issue_number} merged autonomously"),
+            );
+        }
         self.clear_active_tracking(issue_number);
         self.queue.retain(|queued| *queued != issue_number);
         self.merged_issues.insert(issue_number);
@@ -3184,6 +3265,103 @@ mod tests {
         assert_eq!(
             monitor.autonomous_record(3).map(|r| r.phase),
             Some(AutonomousPhase::NeedsHuman)
+        );
+    }
+
+    #[test]
+    fn autonomous_transitions_emit_notices_for_the_operator() {
+        // SPEC #3200 FR-034 (T-109/T-111, Sc 24): unattended autonomous lifecycle
+        // transitions must surface operator notices — merged, needs-human, and
+        // transient retry — so fully-unattended operation is observable. The
+        // notices queue is drained by the daemon worker into `toast` payloads.
+        let mut monitor = autonomous_state();
+        scan_issue_monitor_candidates(&mut monitor, &[issue(7)], "2026-07-02T00:00:00Z");
+        monitor.complete_active_launch(7, "tab-1::agent-7");
+        monitor.set_autonomous_phase(7, AutonomousPhase::Implementing);
+
+        // Transient retry → warn notice naming the attempt.
+        monitor.record_autonomous_failure(
+            7,
+            FailureClass::Transient,
+            "review spawn blip",
+            "2026-07-02T00:10:00Z",
+        );
+        // Gate pass → Delivering (auto-merge armed) → info notice.
+        monitor.set_autonomous_phase(7, AutonomousPhase::Reviewing);
+        monitor.begin_delivering(7);
+        // Merge completion → done notice.
+        monitor.record_merged(7);
+        // A second issue escalates → error notice.
+        scan_issue_monitor_candidates(&mut monitor, &[issue(8)], "2026-07-02T00:20:00Z");
+        monitor.record_attempt(8);
+        monitor.escalate_to_needs_human(8, "review rejected");
+
+        let notices = monitor.take_autonomous_notices();
+        let summary: Vec<(String, u64)> = notices
+            .iter()
+            .map(|notice| (notice.level.clone(), notice.issue_number))
+            .collect();
+        assert!(
+            summary.contains(&("warn".to_string(), 7)),
+            "transient retry emits a warn notice: {summary:?}"
+        );
+        assert!(
+            summary.contains(&("info".to_string(), 7)),
+            "auto-merge arming emits an info notice: {summary:?}"
+        );
+        assert!(
+            summary.contains(&("done".to_string(), 7)),
+            "merge completion emits a done notice: {summary:?}"
+        );
+        assert!(
+            summary.contains(&("error".to_string(), 8)),
+            "needs-human escalation emits an error notice: {summary:?}"
+        );
+        let retry = notices
+            .iter()
+            .find(|notice| notice.level == "warn")
+            .expect("retry notice");
+        assert!(
+            retry.message.contains("review spawn blip"),
+            "retry notice carries the failure reason: {}",
+            retry.message
+        );
+        // Drained: a second take returns nothing.
+        assert!(monitor.take_autonomous_notices().is_empty());
+    }
+
+    #[test]
+    fn default_off_transitions_emit_no_autonomous_notices() {
+        // FR-004 non-regression: with autonomous_mode OFF (default), the human-
+        // gated #3165 flow emits no autonomous notices — merges and failures are
+        // already visible via inbox state without extra toasts.
+        let mut monitor = launched_monitor(42, "tab-1::agent-1");
+        monitor.record_merged(42);
+        assert!(
+            monitor.take_autonomous_notices().is_empty(),
+            "default-OFF merge emits no autonomous notice"
+        );
+    }
+
+    #[test]
+    fn autonomous_notices_queue_is_bounded() {
+        // Unattended operation with a disconnected GUI must not grow the queue
+        // without limit: oldest notices are dropped past the cap.
+        let mut monitor = autonomous_state();
+        for n in 0..200u64 {
+            monitor.record_attempt(n);
+            monitor.escalate_to_needs_human(n, "boom");
+        }
+        let notices = monitor.take_autonomous_notices();
+        assert!(
+            notices.len() <= 100,
+            "queue bounded to 100, got {}",
+            notices.len()
+        );
+        assert_eq!(
+            notices.last().map(|notice| notice.issue_number),
+            Some(199),
+            "newest notice retained when the cap drops oldest"
         );
     }
 
