@@ -7519,3 +7519,10 @@ Type: project
 Context: PR #3205 (Deliver mode) が放置中に develop へ簡易版 Deliver (443656db6) が別経路で merge され、SKILL.md 双子が conflict した。また Test (Rust, Linux) が client_pane_snapshot_repair_replies_with_snapshots_for_known_panes_only の PtyCreationFailed (ENOENT) で 2 run 連続失敗した。
 Learning: (1) 同一 skill への並行実装は「後勝ち」ではなく安全性の superset 側 (disarm-before-push 不変条件・merge method 自動選択・deliver-flow.md reference 付き) を本文採用し、trigger 文言は union で統合する。両実装の doc テストが lib.rs に併存するため、解消後は双方のテストを通すこと。(2) PTY spawn ENOENT は develop でも test_spawn_with_env 等で既出の infra flaky 系で、ローカル (macOS) full suite PASS + develop 直近 CI green なら transient 分類で再走してよい。
 Future Action: gwt-manage-pr SKILL.md を編集する際は .claude/.codex の byte parity と gwt-skills の manage_pr doc テスト群 (gwt_manage_pr_documents_drive_to_merge_delivery / manage_pr_documents_deliver_drive_to_merge_mode) を必ずローカルで実行する。PTY 系 CI flaky が同一テストで 3 run 連続したら infra ではなくコードとして調査に切り替える。
+
+## 2026-07-02 — portable-pty は cwd 未指定で $HOME に無検査 chdir する (PTY テスト flaky の根本原因)
+
+Type: bug-fix
+Context: CI の Test (Rust, Linux) で client_pane_snapshot_repair テストが PtyCreationFailed(ENOENT) で断続失敗 (2026-07-02 に branch 横断 3 run、Issue #3220)。portable-pty 0.9.0 の as_command() は cwd 未指定時に process cwd ではなく $HOME を子プロセス cwd に使い、存在チェックなしで chdir する。HOME を tempdir に差し替えるテスト (ScopedEnvVar) と env lock を取らない PTY テストが並走し、glibc の thread-unsafe な environ 読み取りと合わさって ENOENT になっていた。
+Learning: (1) テスト内の PTY/子プロセス spawn は cwd を明示し ambient env (HOME/TMPDIR/$SHELL) に依存させない。(2) 同一テストが CI で 3 run 落ちたら infra flaky 扱いをやめてコードとして調査する (今回この基準で根本原因に到達)。(3) ENOENT の spawn 失敗は「コマンドが無い」ではなく「chdir 先が無い」ことがある — portable-pty の HOME fallback は要注意。
+Future Action: Pane::new / SpawnConfig をテストで使う際は test_pane_cwd() 相当 (unix は /、Windows は temp_dir) を必ず渡す。新しい PTY 系 flaky が出たら gwt-terminal の test_spawn_with_env も同族か確認する。
