@@ -7493,6 +7493,13 @@ Context: During PR #3193 pre-PR visual verification, the Issue Bridge auto-refre
 Learning: Timer-shortening fixtures are flaky when the production callback can legally no-op while state is busy. Tests should expose a deterministic trigger and call it after asserting the state that makes the callback meaningful.
 Future Action: For Playwright fixtures that validate periodic behavior, capture interval callbacks and trigger them explicitly after the initial render/load assertions instead of relying on arbitrary short timeouts.
 
+## 2026-07-02 — session 共有 dedup は identity 照合必須 (Workspace 行 silent drop)
+
+Type: bug-fix
+Context: PR #3205 (work/issue-3197) が Workspace 一覧から消え再開不能になった (Issue #3213)。works.json で別 branch の Work (issue-3184) に session の迷子 ref (agent_id 空) が誤付与され、active_work_already_present の session 一致 dedup が branch/worktree identity を確認せず正規所有者の行を silent drop していた。ローカル branch が存在すると remote Start Work stub 経路 (ResumeExisting) からも除外されるため表示経路がゼロになる。
+Learning: session id 共有による dedup/merge は、両側が git identity (branch/worktree) を持ち食い違う場合には適用してはならない。identity-conflict gate (active_work_agent_matches_workspace_row_identity と同パターン) を必ず併用する。view 層の dedup は「汚染済み永続データでも正しく表示できる」ことを基準に設計する (データ修復より view 耐性)。
+Future Action: session ベースの照合・dedup を追加/変更する際は、(1) 別 branch の Work が同一 session を共有する corrupted works.json ケースのテストを必ず書く、(2) drop 側に他の表示経路が残るか (remote stub 等) を確認する。上流の session 誤付与 hardening と journal compaction の診断痕跡保持は未解決 (Issue #3213 Follow-up 参照)。
+
 ## 2026-06-29 — managed-skill 新規ファイルは .git/info/exclude で silent に無視される
 
 Type: project
