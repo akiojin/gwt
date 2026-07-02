@@ -1579,6 +1579,7 @@ pub(super) fn attach_registry_sessions_to_active_works(
                 agent_id: Some(session.agent_id.command().to_string()),
                 display_name: Some(session.display_name.clone()),
                 updated_at: session.last_activity_at,
+                attached_by: None,
             };
             let history_view =
                 workspace_work_agent_view_from_ref(&agent_ref, session_index, project_root);

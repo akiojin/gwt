@@ -1786,6 +1786,8 @@ fn synthesize_workspace_work_item_from_legacy(
                 agent_id: Some(agent.agent_id.clone()),
                 display_name: Some(agent.display_name.clone()),
                 updated_at: agent.updated_at,
+                // Synthesized from the projection, not from a work event.
+                attached_by: None,
             }));
         if let Some(details) = projection.git_details.as_ref() {
             item.execution_containers
@@ -1830,6 +1832,8 @@ fn synthesize_workspace_work_item_from_legacy(
                     agent_id: None,
                     display_name: entry.agent_title_summary.clone(),
                     updated_at: entry.updated_at,
+                    // Synthesized from a legacy journal entry, not a work event.
+                    attached_by: None,
                 });
             }
         }
