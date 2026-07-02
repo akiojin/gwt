@@ -55,12 +55,7 @@ ignore = [
     # part of the shipped runtime attack surface. wayland-scanner 0.31.x
     # pins quick-xml ^0.39, so the fixed 0.41 cannot be forced from here.
     { id = "RUSTSEC-2026-0194", reason = "quick-xml quadratic duplicate-attr scan; only via wayland-scanner build-time codegen on trusted local protocol XML; blocked on wayland-rs adopting quick-xml >=0.41" },
-    # TEMPORARY: the quick-xml NsReader unbounded-namespace-allocation
-    # advisory has not been assigned a RUSTSEC id yet (shows as
-    # RUSTSEC-0000-0000). Replace this entry with the real id once the
-    # advisory-db assigns one. Same wayland-scanner build-time-only
-    # exposure rationale as RUSTSEC-2026-0194 above.
-    { id = "RUSTSEC-0000-0000", reason = "quick-xml NsReader unbounded namespace allocation (id not yet assigned); same wayland-scanner build-time-only exposure on trusted local protocol XML; blocked on wayland-rs adopting quick-xml >=0.41" },
+    { id = "RUSTSEC-2026-0195", reason = "quick-xml NsReader unbounded namespace allocation; same wayland-scanner build-time-only exposure on trusted local protocol XML; blocked on wayland-rs adopting quick-xml >=0.41" },
 ]
 
 [sources]
