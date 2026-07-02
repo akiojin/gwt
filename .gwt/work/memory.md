@@ -7492,3 +7492,17 @@ Type: failure-pattern
 Context: During PR #3193 pre-PR visual verification, the Issue Bridge auto-refresh Playwright fixture fired a 60000ms interval callback via a fixed 50ms timeout. In the full suite, initial knowledge load sometimes still held the busy flag, so the auto-refresh request was dropped and the test timed out although single-test runs passed.
 Learning: Timer-shortening fixtures are flaky when the production callback can legally no-op while state is busy. Tests should expose a deterministic trigger and call it after asserting the state that makes the callback meaningful.
 Future Action: For Playwright fixtures that validate periodic behavior, capture interval callbacks and trigger them explicitly after the initial render/load assertions instead of relying on arbitrary short timeouts.
+
+## 2026-07-02 — 同一 worktree への build-spec 二重起動 race の検知と協調解消
+
+Type: agent workflow correction
+Context: SPEC #3206 Phase 2 (feature/spec-3206) で gwt-build-spec が同一 worktree に約2分差で二重起動された。Board preflight 時点では相手 session は started エントリのみ（claim 無し）で working tree もクリーンだったため続行したところ、相手の編集が自分の Read とテスト実行の間に着地し、RED のはずの contract test が最初から GREEN になった。
+Learning: 同一 branch の started エントリは claim が無くても『生きた並行 writer』であり得る。Board claim preflight だけでは不十分。RED を書いたテストが初回から PASS するのは並行編集の強いシグナルで、即座に git status / git diff / 対象ファイル mtime を確認すべき。.gwt/skill-state/build-spec.json は session 間で共有され、後発の build.start が先発の state を上書きする。
+Future Action: gwt-build-spec 開始時、同一 branch に他 session の started エントリがある場合は (1) git status の予期しない dirty、(2) 対象ファイルの mtime、(3) .gwt/skill-state/build-spec.json の active 状態を確認し、生きた writer の証拠があれば編集前に Board で調整する。衝突検知後は、実装を持っている側に完了を委ね、自分は重複変更を revert して commit を監視する（二重 commit / 二重 PR を構造的に回避）。
+
+## 2026-07-02 — fresh HOME では Playwright browser を pinned binary で install / rustup default 必須
+
+Type: environment
+Context: SPEC #3206 P2 検証で、gwt-fresh-home 隔離 HOME から Playwright E2E と cargo test を実行したら両方 tooling 欠落で失敗した(chromium headless shell 不在 / rustup default 未設定)。素の npx playwright install は最新 playwright 用 browser build (v1228) を入れてしまい、scripts/run-visual-tests.sh が pin する 1.49.1 が要求する v1148 と合わず解決しなかった。
+Learning: fresh HOME では ~/Library/Caches/ms-playwright と rustup default が空。browser install は必ず pinned deps の binary (${TMPDIR}/gwt-playwright-<ver>/node_modules/.bin/playwright install chromium) で行う。cargo は rustup default stable を一度実行すれば直る(toolchain 自体は installed)。
+Future Action: 隔離環境で Executable doesn't exist ... ms-playwright/chromium_headless_shell-<N> を見たら要求 build 番号 <N> を確認し、pinned playwright binary で install する。rustup could not choose a version は rustup default stable。
