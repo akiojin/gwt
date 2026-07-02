@@ -18,7 +18,7 @@ pub mod gwtd_resolver;
 pub mod hook;
 pub mod improvement;
 pub(crate) mod index;
-mod issue;
+pub(crate) mod issue;
 mod issue_spec;
 mod json_envelope;
 pub(crate) mod memory;

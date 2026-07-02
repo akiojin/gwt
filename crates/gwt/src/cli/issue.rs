@@ -420,7 +420,7 @@ pub(super) fn write_linked_prs_cache(
     write_atomic(&linked_prs_cache_path(cache_root, number), &bytes).map_err(io_as_api_error)
 }
 
-pub(super) fn fetch_linked_prs_via_gh(
+pub(crate) fn fetch_linked_prs_via_gh(
     owner: &str,
     repo: &str,
     number: IssueNumber,

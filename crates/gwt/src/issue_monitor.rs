@@ -1913,6 +1913,25 @@ impl IssueMonitorState {
         now: &str,
         active_cap: usize,
     ) -> Vec<IssueMonitorLaunchRequest> {
+        self.claim_next_launch_requests_with_probe(client, owner, now, active_cap, |_| false)
+    }
+
+    /// Issue #3225: claim queued candidates, skipping issues whose fix is
+    /// already completed. `completed_probe` answers "does this issue have a
+    /// merged linked PR?" from GitHub — the instance-local `merged_issues`
+    /// memory is not enough because a fresh monitor (new machine / isolated
+    /// HOME / wiped prefs) would otherwise re-launch already-finished work
+    /// that stays open until release. Positives are recorded `Merged`
+    /// (persisted) and the slot goes to the next queued candidate. The probe
+    /// fails open: an error/false keeps the issue launchable.
+    pub fn claim_next_launch_requests_with_probe<C: IssueClient>(
+        &mut self,
+        client: &C,
+        owner: &str,
+        now: &str,
+        active_cap: usize,
+        completed_probe: impl Fn(u64) -> bool,
+    ) -> Vec<IssueMonitorLaunchRequest> {
         let mut launches = Vec::new();
         let max_active = self.config.max_active.max(1).min(active_cap);
         if max_active == 0 {
@@ -1926,6 +1945,14 @@ impl IssueMonitorState {
                 self.queue.pop_front();
                 continue;
             };
+            if completed_probe(issue.number) {
+                tracing::info!(
+                    issue = issue.number,
+                    "issue monitor: skipping candidate — a linked PR is already merged"
+                );
+                self.record_merged(issue.number);
+                continue;
+            }
             let kind = issue_monitor_linked_issue_kind(&issue);
             let branch_name = knowledge_launch_target_branch_name(kind, issue.number);
             let claim = ClaimComment {
