@@ -299,26 +299,20 @@ criteria (an `## Acceptance Criteria` checklist in the body), the base
 branch's protection rules are verifiable, and its bounded attempt budget is
 not exhausted. Anything else stays on the human-gated path unchanged.
 
-Safety model (summary): the merge decision never belongs to the implementing
-agent. An independent review agent (fresh session; optionally a different
-model via the `review model` setting) reviews the diff against the acceptance
-criteria; a strong gate then re-verifies branch protection, the required CI
-checks, and the reviewed commit SHA. Auto-merge is armed bound to that exact
-reviewed SHA, so GitHub refuses the merge if the head moves afterwards, and a
-post-merge identity check verifies what merged is what was reviewed. Failures
-retry with bounded exponential backoff; terminal failures and exhausted
-budgets escalate to a visible `NeedsHuman` state and never auto-relaunch. The
-`Autonomous` toggle acts as a kill switch, and disarming actively cancels the
-pending GitHub auto-merge.
+Safety model in one line: the merge decision never belongs to the
+implementing agent — an independent review plus a strong automated gate must
+pass first, failures escalate to a visible `NeedsHuman` state, and the
+`Autonomous` toggle is a kill switch that actively cancels any auto-merge the
+monitor armed. The full gate design and threat model live in SPEC
+[#3200](https://github.com/akiojin/gwt/issues/3200).
 
 Unattended lifecycle events (merge completed, retry scheduled, gate passed,
 needs-human escalations) surface as toasts and accumulate in a persistent,
 scrollable notification stack so nothing is lost while you are away.
 
 Tunable bounds (attempt cap, stuck/idle timeout, retry backoff, review model)
-persist per project. Full requirements and the threat model live in SPEC
-[#3200](https://github.com/akiojin/gwt/issues/3200); the human-gated baseline
-is SPEC [#3165](https://github.com/akiojin/gwt/issues/3165).
+persist per project. The human-gated baseline is SPEC
+[#3165](https://github.com/akiojin/gwt/issues/3165).
 
 ## Knowledge, Search, and Managed Skills
 

@@ -329,8 +329,18 @@ pub fn advance_autonomous_in_flight(
                         monitor.begin_delivering(issue_number);
                         // Bind the arm to the reviewed head SHA so GitHub refuses
                         // to merge if the head advanced past what the gate reviewed.
-                        if !gwt_git::pr_status::merge_pr_auto(repo_path, pr, &inputs.reviewed_sha) {
+                        // codex #3217 review: announce the arm ONLY on success —
+                        // a failed arm must not leave a success toast while the
+                        // record would otherwise sit in Delivering with nothing
+                        // armed. Fail closed: escalate so the operator acts.
+                        if gwt_git::pr_status::merge_pr_auto(repo_path, pr, &inputs.reviewed_sha) {
+                            monitor.record_auto_merge_armed(issue_number);
+                        } else {
                             tracing::warn!(issue = issue_number, pr, "auto-merge arm failed");
+                            monitor.escalate_to_needs_human(
+                                issue_number,
+                                "auto-merge arming failed after gate pass — arm manually or relaunch",
+                            );
                         }
                     }
                     crate::issue_monitor_gate::GateAction::WaitForCi => {}
