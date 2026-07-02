@@ -140,7 +140,12 @@ pub fn issue_completed_by_merged_pr(owner: &str, repo: &str, issue_number: u64) 
         repo,
         gwt_github::IssueNumber(issue_number),
     ) {
-        Ok(prs) => prs.iter().any(|pr| pr.state.eq_ignore_ascii_case("merged")),
+        // codex #3226 review: only a PR that actually CLOSES the issue counts
+        // — a merged PR that merely references it (Refs #N / partial work)
+        // must not mark the issue done.
+        Ok(prs) => prs
+            .iter()
+            .any(|pr| pr.will_close_target && pr.state.eq_ignore_ascii_case("merged")),
         Err(error) => {
             tracing::debug!(
                 issue = issue_number,

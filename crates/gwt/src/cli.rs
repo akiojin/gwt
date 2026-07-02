@@ -60,6 +60,12 @@ pub struct LinkedPrSummary {
     pub title: String,
     pub state: String,
     pub url: String,
+    /// Issue #3226 review: whether merging this PR closes the issue
+    /// (GraphQL `willCloseTarget`; manually connected PRs count as closing).
+    /// The completion probe must only trust MERGED PRs with this set — a
+    /// merged PR that merely REFERENCES the issue must not mark it done.
+    #[serde(default)]
+    pub will_close_target: bool,
 }
 
 /// Compact PR check entry used by `pr.checks`.
@@ -811,6 +817,7 @@ mod tests {
                 title: "Enforce coverage".to_string(),
                 state: "OPEN".to_string(),
                 url: pr.url.clone(),
+                will_close_target: true,
             }],
         );
         crate::cli::pr::render_pr(&mut out, &pr);
@@ -878,6 +885,7 @@ mod tests {
             title: "Hook coverage".to_string(),
             state: "MERGED".to_string(),
             url: "https://github.com/akiojin/gwt/pull/9".to_string(),
+            will_close_target: true,
         }];
 
         assert!(
