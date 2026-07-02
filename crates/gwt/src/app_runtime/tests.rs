@@ -1946,6 +1946,19 @@ fn sample_runtime(
     sample_runtime_with_events(temp_root, tabs, active_tab_id).0
 }
 
+/// portable-pty falls back to `$HOME` as the child's cwd when no cwd is given
+/// and `chdir`s to it unchecked. Tests mutate HOME concurrently (and glibc
+/// env access is not thread-safe), so test pane spawns pin an always-existing
+/// cwd that needs no environment lookup — otherwise a pane test racing an
+/// env-mutating test dies with `PtyCreationFailed(ENOENT)` (Issue #3220).
+fn test_pane_cwd() -> Option<PathBuf> {
+    if cfg!(windows) {
+        Some(std::env::temp_dir())
+    } else {
+        Some(PathBuf::from("/"))
+    }
+}
+
 fn long_running_test_pane(id: &str) -> Pane {
     let (command, args) = if cfg!(windows) {
         (
@@ -1963,7 +1976,16 @@ fn long_running_test_pane(id: &str) -> Pane {
             vec!["-lc".to_string(), "sleep 30".to_string()],
         )
     };
-    Pane::new(id.to_string(), command, args, 80, 24, HashMap::new(), None).expect("test pane")
+    Pane::new(
+        id.to_string(),
+        command,
+        args,
+        80,
+        24,
+        HashMap::new(),
+        test_pane_cwd(),
+    )
+    .expect("test pane")
 }
 
 fn insert_test_pane_runtime(runtime: &mut AppRuntime, window_id: &str) {
@@ -2763,7 +2785,7 @@ fn app_runtime_frontend_ready_replays_terminal_snapshot_only_to_requesting_clien
         80,
         24,
         HashMap::new(),
-        None,
+        test_pane_cwd(),
     )
     .expect("pane");
     pane.process_bytes(b"hello from frontend ready\n");
@@ -2827,7 +2849,7 @@ fn app_runtime_frontend_ready_replays_terminal_snapshot_with_sgr_attributes() {
         80,
         24,
         HashMap::new(),
-        None,
+        test_pane_cwd(),
     )
     .expect("pane");
     // Write red foreground + bold "ALERT" then reset, then default-color text.
@@ -2907,7 +2929,7 @@ fn app_runtime_frontend_ready_replays_terminal_snapshot_with_scrollback_history(
         80,
         6,
         HashMap::new(),
-        None,
+        test_pane_cwd(),
     )
     .expect("pane");
     for line in 1..=18 {
@@ -2974,7 +2996,7 @@ fn app_runtime_dock_window_tab_resizes_group_runtimes() {
             80,
             24,
             HashMap::new(),
-            None,
+            test_pane_cwd(),
         )
         .expect("pane");
         runtime.runtimes.insert(
@@ -10917,7 +10939,7 @@ fn app_runtime_status_thread_reports_process_exit_without_reader_eof() {
             80,
             24,
             HashMap::new(),
-            None,
+            test_pane_cwd(),
         )
         .expect("pane"),
     ));
