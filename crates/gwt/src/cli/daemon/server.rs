@@ -600,6 +600,16 @@ fn scan_issue_monitor_once_blocking(
     gui_connected: bool,
 ) -> crate::IssueMonitorState {
     let now = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+    // Issue #3222: refresh the GUI-owned prefs fields (launch profile / tuning)
+    // from disk. They have no control frame — the GUI writes them straight to
+    // the prefs file — so without this the daemon keeps its stale startup view
+    // (`has_launch_profile()==false` ⇒ active cap 0) and can never act as the
+    // launch driver, leaving refills to the GUI's racy re-entrant scans.
+    if let Ok(disk) = crate::load_issue_monitor_prefs(
+        &crate::issue_monitor_prefs_path_for_repo_path(&scope.project_root),
+    ) {
+        monitor.refresh_gui_owned_prefs(&disk);
+    }
     let (owner, repo) =
         match crate::issue_monitor_worker::github_remote_owner_and_repo(&scope.project_root) {
             Ok(owner_repo) => owner_repo,

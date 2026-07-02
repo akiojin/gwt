@@ -132,6 +132,12 @@ pub struct IssueMonitorPrefs {
     pub launch_profile: Option<IssueMonitorLaunchProfile>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub launched_issues: Vec<IssueMonitorLaunchedIssue>,
+    /// Issue #3222: claims whose agent window is not bound yet (`Launching`).
+    /// Persisted so an in-flight claim survives the per-handler prefs
+    /// roundtrip — otherwise a rescan re-claims the same issue (same-owner
+    /// renewal) and spawns a duplicate window past `max_active`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub launching_issues: Vec<u64>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub failed_issues: Vec<IssueMonitorFailedIssue>,
     /// Issues whose work PR merged. Persisted so completed work is not
@@ -160,6 +166,7 @@ impl Default for IssueMonitorPrefs {
             priority_order: Vec::new(),
             launch_profile: None,
             launched_issues: Vec::new(),
+            launching_issues: Vec::new(),
             failed_issues: Vec::new(),
             merged_issues: Vec::new(),
             autonomous_mode: false,
@@ -831,6 +838,13 @@ impl IssueMonitorState {
                 state.active_launches.push(launched.issue_number);
             }
         }
+        // Issue #3222: restore claimed-but-unbound launches so a reload (every
+        // GUI handler) still sees the in-flight claim and cannot re-claim it.
+        for issue_number in prefs.launching_issues {
+            if !state.active_launches.contains(&issue_number) {
+                state.active_launches.push(issue_number);
+            }
+        }
         for failed in prefs.failed_issues {
             if failed.message.trim().is_empty() {
                 continue;
@@ -864,6 +878,12 @@ impl IssueMonitorState {
                     issue_number: *issue_number,
                     window_id: window_id.clone(),
                 })
+                .collect(),
+            launching_issues: self
+                .active_launches
+                .iter()
+                .filter(|issue_number| !self.launched_windows.contains_key(issue_number))
+                .copied()
                 .collect(),
             failed_issues: self
                 .failed_issues
@@ -1183,6 +1203,17 @@ impl IssueMonitorState {
 
     pub fn has_launch_profile(&self) -> bool {
         self.launch_profile.is_some()
+    }
+
+    /// Issue #3222: refresh the GUI-owned prefs fields (`launch_profile`,
+    /// `autonomous_tuning`) from a freshly-loaded on-disk snapshot. The daemon
+    /// loads prefs once at startup and has no control frame for these fields, so
+    /// without this refresh a profile the GUI saves later stays invisible
+    /// (`has_launch_profile()==false` ⇒ active cap 0 ⇒ the daemon never refills
+    /// slots and cannot act as the single launch driver).
+    pub fn refresh_gui_owned_prefs(&mut self, disk: &IssueMonitorPrefs) {
+        self.launch_profile = disk.launch_profile.clone();
+        self.autonomous_tuning = disk.autonomous_tuning.clone();
     }
 
     pub fn status_view(&self) -> IssueMonitorStatusView {
@@ -1592,6 +1623,10 @@ impl IssueMonitorState {
                 .unwrap_or(MonitorInboxState::AgentFailed)
         } else if launched_window_id.is_some() {
             MonitorInboxState::Launched
+        } else if self.active_launches.contains(&issue_number) {
+            // Issue #3222: a claimed launch whose window is not bound yet stays
+            // visibly in-flight; the queue-push guard below then skips it.
+            MonitorInboxState::Launching
         } else {
             match existing.as_ref().map(|item| item.state) {
                 // A reopened Issue previously marked Released/Merged (but no
@@ -2323,6 +2358,79 @@ mod tests {
         monitor.complete_active_launch(number, window_id);
         assert_eq!(monitor.active_count(), 1);
         monitor
+    }
+
+    #[test]
+    fn launching_claims_survive_prefs_roundtrip_and_are_not_reclaimed() {
+        // Issue #3222: a claimed-but-not-yet-acked launch (Launching, no window
+        // yet) must survive the prefs roundtrip. The GUI rebuilds the monitor
+        // from disk on every handler call, so an unpersisted claim was invisible
+        // to the next handler / the launch ACK's rescan, which re-claimed the
+        // same issue (same-owner renewal) and spawned a DUPLICATE agent window
+        // (observed live: Max 5 ⇒ 10 windows).
+        let mut monitor = IssueMonitorState::new(IssueMonitorConfig::default());
+        scan_issue_monitor_candidates(&mut monitor, &[issue(42)], "2026-07-02T00:00:00Z");
+        monitor.set_gui_connected(true);
+        let request = monitor.next_launch_request().expect("claimed for launch");
+        assert_eq!(request.issue_number, 42);
+        assert_eq!(monitor.active_count(), 1, "claim holds an active slot");
+
+        // Reload from prefs (what every GUI handler does).
+        let mut restored =
+            IssueMonitorState::with_prefs(IssueMonitorConfig::default(), monitor.prefs());
+        restored.set_gui_connected(true);
+        assert_eq!(
+            restored.active_count(),
+            1,
+            "in-flight Launching claim survives the roundtrip"
+        );
+        // A rescan must not re-queue the in-flight issue…
+        scan_issue_monitor_candidates(&mut restored, &[issue(42)], "2026-07-02T00:00:30Z");
+        assert_eq!(
+            restored.inbox_item(42).map(|item| item.state),
+            Some(MonitorInboxState::Launching),
+            "rescan shows the in-flight claim as Launching, not Queued"
+        );
+        assert_eq!(restored.queue_len(), 0, "not re-queued");
+        // …and must not hand out a second launch request for it.
+        assert!(
+            restored.next_launch_request().is_none(),
+            "no duplicate launch request for an in-flight claim"
+        );
+    }
+
+    #[test]
+    fn refresh_gui_owned_prefs_updates_profile_and_tuning_from_disk() {
+        // Issue #3222: the daemon loads prefs once at startup, so a launch
+        // profile the GUI saves later stays invisible (has_launch_profile=false
+        // ⇒ cap 0 ⇒ the daemon never refills slots and the GUI's re-entrant
+        // scan became the de-facto driver). The scan must refresh GUI-owned
+        // fields from disk.
+        let mut monitor = IssueMonitorState::new(IssueMonitorConfig::default());
+        assert!(!monitor.has_launch_profile());
+        let disk = IssueMonitorPrefs {
+            launch_profile: Some(IssueMonitorLaunchProfile {
+                agent_id: "claude".to_string(),
+                model: None,
+                reasoning: None,
+                version: None,
+                session_mode: Default::default(),
+                skip_permissions: false,
+                codex_fast_mode: false,
+                runtime_target: Default::default(),
+                docker_service: None,
+                docker_lifecycle_intent: Default::default(),
+                windows_shell: None,
+            }),
+            autonomous_tuning: AutonomousTuning {
+                max_attempts: 9,
+                ..AutonomousTuning::default()
+            },
+            ..IssueMonitorPrefs::default()
+        };
+        monitor.refresh_gui_owned_prefs(&disk);
+        assert!(monitor.has_launch_profile(), "profile refreshed from disk");
+        assert_eq!(monitor.autonomous_tuning.max_attempts, 9);
     }
 
     #[test]
