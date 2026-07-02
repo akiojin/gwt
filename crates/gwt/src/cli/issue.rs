@@ -433,6 +433,7 @@ query($owner: String!, $repo: String!, $number: Int!) {
         nodes {
           __typename
           ... on CrossReferencedEvent {
+            willCloseTarget
             source {
               __typename
               ... on PullRequest {
@@ -490,6 +491,15 @@ query($owner: String!, $repo: String!, $number: Int!) {
 
     let value: serde_json::Value = serde_json::from_str(&output.stdout)
         .map_err(|err| io::Error::new(io::ErrorKind::InvalidData, err.to_string()))?;
+    Ok(parse_linked_pr_nodes(&value))
+}
+
+/// Parse the issue-timeline GraphQL response into linked-PR summaries.
+/// `will_close_target` comes from `CrossReferencedEvent.willCloseTarget`;
+/// `ConnectedEvent` (a manually linked PR) closes the issue on merge, so it
+/// counts as closing. Duplicate PR numbers OR-merge the closing flag so a PR
+/// seen as both a plain reference and a closing link keeps `true`.
+pub(crate) fn parse_linked_pr_nodes(value: &serde_json::Value) -> Vec<LinkedPrSummary> {
     let nodes = value
         .get("data")
         .and_then(|v| v.get("repository"))
@@ -500,17 +510,22 @@ query($owner: String!, $repo: String!, $number: Int!) {
         .cloned()
         .unwrap_or_default();
 
-    let mut seen = std::collections::BTreeSet::new();
-    let mut out = Vec::new();
+    let mut index: std::collections::BTreeMap<u64, usize> = std::collections::BTreeMap::new();
+    let mut out: Vec<LinkedPrSummary> = Vec::new();
     for node in nodes {
         let typename = node
             .get("__typename")
             .and_then(|v| v.as_str())
             .unwrap_or_default();
-        let pr = match typename {
-            "CrossReferencedEvent" => node.get("source"),
-            "ConnectedEvent" => node.get("subject"),
-            _ => None,
+        let (pr, will_close_target) = match typename {
+            "CrossReferencedEvent" => (
+                node.get("source"),
+                node.get("willCloseTarget")
+                    .and_then(serde_json::Value::as_bool)
+                    .unwrap_or(false),
+            ),
+            "ConnectedEvent" => (node.get("subject"), true),
+            _ => (None, false),
         };
         let Some(pr) = pr else { continue };
         if pr.get("__typename").and_then(|v| v.as_str()) != Some("PullRequest") {
@@ -519,11 +534,14 @@ query($owner: String!, $repo: String!, $number: Int!) {
         let Some(pr_number) = pr.get("number").and_then(serde_json::Value::as_u64) else {
             continue;
         };
-        if !seen.insert(pr_number) {
+        if let Some(existing) = index.get(&pr_number) {
+            out[*existing].will_close_target |= will_close_target;
             continue;
         }
+        index.insert(pr_number, out.len());
         out.push(LinkedPrSummary {
             number: pr_number,
+            will_close_target,
             title: pr
                 .get("title")
                 .and_then(|v| v.as_str())
@@ -541,7 +559,7 @@ query($owner: String!, $repo: String!, $number: Int!) {
                 .to_string(),
         });
     }
-    Ok(out)
+    out
 }
 
 #[cfg(test)]
@@ -553,6 +571,46 @@ mod tests {
 
     fn s(value: &str) -> String {
         value.to_string()
+    }
+
+    #[test]
+    fn parse_linked_pr_nodes_tracks_will_close_target() {
+        // codex #3226 review: the completion probe must distinguish PRs that
+        // actually CLOSE the issue from mere cross-references.
+        let value = serde_json::json!({"data":{"repository":{"issue":{"timelineItems":{"nodes":[
+            {"__typename":"CrossReferencedEvent","willCloseTarget":true,
+             "source":{"__typename":"PullRequest","number":10,"title":"closes it","state":"MERGED","url":"u10"}},
+            {"__typename":"CrossReferencedEvent","willCloseTarget":false,
+             "source":{"__typename":"PullRequest","number":11,"title":"refs only","state":"MERGED","url":"u11"}},
+            {"__typename":"ConnectedEvent",
+             "subject":{"__typename":"PullRequest","number":12,"title":"manually linked","state":"OPEN","url":"u12"}}
+        ]}}}}});
+        let prs = parse_linked_pr_nodes(&value);
+        let get = |n: u64| prs.iter().find(|pr| pr.number == n).expect("pr");
+        assert!(get(10).will_close_target, "closing cross-reference");
+        assert!(!get(11).will_close_target, "plain reference must NOT close");
+        assert!(
+            get(12).will_close_target,
+            "manually connected PR closes on merge"
+        );
+    }
+
+    #[test]
+    fn parse_linked_pr_nodes_or_merges_duplicate_pr_flags() {
+        // The same PR seen first as a plain reference and later as a closing
+        // link must keep will_close_target=true.
+        let value = serde_json::json!({"data":{"repository":{"issue":{"timelineItems":{"nodes":[
+            {"__typename":"CrossReferencedEvent","willCloseTarget":false,
+             "source":{"__typename":"PullRequest","number":10,"title":"t","state":"MERGED","url":"u"}},
+            {"__typename":"CrossReferencedEvent","willCloseTarget":true,
+             "source":{"__typename":"PullRequest","number":10,"title":"t","state":"MERGED","url":"u"}}
+        ]}}}}});
+        let prs = parse_linked_pr_nodes(&value);
+        assert_eq!(prs.len(), 1);
+        assert!(
+            prs[0].will_close_target,
+            "closing flag OR-merges across events"
+        );
     }
 
     #[test]
@@ -643,6 +701,7 @@ mod tests {
                 title: "Enforce coverage".to_string(),
                 state: "OPEN".to_string(),
                 url: "https://github.com/akiojin/gwt/pull/128".to_string(),
+                will_close_target: true,
             }],
         );
         let linked =
