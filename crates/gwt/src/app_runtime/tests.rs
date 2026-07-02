@@ -7424,6 +7424,152 @@ fn app_runtime_active_work_projection_merges_live_and_paused_work_rows() {
     assert_eq!(paused.active_agents, 0);
 }
 
+fn history_agent_ref_view(
+    session_id: &str,
+    agent_id: Option<&str>,
+    updated_at: &str,
+) -> gwt::WorkspaceHistoryAgentView {
+    gwt::WorkspaceHistoryAgentView {
+        session_id: session_id.to_string(),
+        agent_id: agent_id.map(str::to_string),
+        display_name: agent_id.map(str::to_string),
+        updated_at: updated_at.to_string(),
+        sessions: Vec::new(),
+    }
+}
+
+fn history_work_view(
+    id: &str,
+    branch: &str,
+    worktree: &str,
+    agents: Vec<gwt::WorkspaceHistoryAgentView>,
+) -> gwt::WorkspaceHistoryView {
+    gwt::WorkspaceHistoryView {
+        id: id.to_string(),
+        title: branch.to_string(),
+        intent: None,
+        summary: None,
+        progress_summary: None,
+        status_category: "active".to_string(),
+        owner: None,
+        created_at: "2026-06-29T07:45:56Z".to_string(),
+        updated_at: "2026-06-30T08:45:48Z".to_string(),
+        completed_at: None,
+        agents,
+        execution_containers: vec![gwt::WorkspaceExecutionContainerView {
+            branch: Some(branch.to_string()),
+            worktree_path: Some(worktree.to_string()),
+            pr_number: None,
+            pr_url: None,
+            pr_state: None,
+        }],
+        board_refs: Vec::new(),
+        related_workspace_ids: Vec::new(),
+        events: Vec::new(),
+    }
+}
+
+/// Issue #3213 regression (PR #3205 orphaned): a stray agent ref that shares a
+/// session id with ANOTHER branch's Work must not swallow that Work's row.
+/// Reproduces the affected project's works.json: the issue-3184 item carried a
+/// mis-attributed (empty-identity) ref to issue-3197's session, and the
+/// issue-3197 row — the session's legitimate owner — vanished from the
+/// Workspace list with no remaining surface to resume it from.
+#[test]
+fn app_runtime_paused_work_row_survives_stray_shared_session_on_other_branch() {
+    let temp = tempdir().expect("tempdir");
+    let repo = temp.path().join("repo");
+    fs::create_dir_all(&repo).expect("create repo");
+    let projection =
+        gwt_core::workspace_projection::WorkspaceProjection::default_for_project(&repo);
+    let works = vec![
+        history_work_view(
+            "work-work-issue-3184-9431c779",
+            "work/issue-3184",
+            "/home/user/gwt/work/issue-3184",
+            vec![
+                history_agent_ref_view(
+                    "810665c4-2e03-46b3-879b-7eec0064d038",
+                    Some("Claude Code"),
+                    "2026-06-29T07:46:15Z",
+                ),
+                // The stray ref: recorded under issue-3184 with an empty
+                // identity, but the session belongs to issue-3197.
+                history_agent_ref_view(
+                    "0fe1b919-09dd-47e5-8976-76f4478aa907",
+                    None,
+                    "2026-06-29T08:24:29Z",
+                ),
+            ],
+        ),
+        history_work_view(
+            "work-work-issue-3197-00504508",
+            "work/issue-3197",
+            "/home/user/gwt/work/issue-3197",
+            vec![history_agent_ref_view(
+                "0fe1b919-09dd-47e5-8976-76f4478aa907",
+                Some("Claude Code"),
+                "2026-06-29T07:45:56Z",
+            )],
+        ),
+    ];
+
+    let view =
+        super::active_work_projection_from_saved_with_journal(projection, Vec::new(), works, None);
+
+    assert_eq!(
+        view.active_works.len(),
+        2,
+        "both branch rows must surface despite the shared session id"
+    );
+    let issue_3197 = view
+        .active_works
+        .iter()
+        .find(|work| work.id == "work-work-issue-3197-00504508")
+        .expect("work/issue-3197 row must not be swallowed by the stray session ref");
+    assert_eq!(issue_3197.branch.as_deref(), Some("work/issue-3197"));
+    assert_eq!(issue_3197.lifecycle_state, "paused");
+}
+
+/// FR-350 contract guard for the #3213 fix: a live Work synthesized without
+/// git_details (no branch / worktree on the row) still dedupes the
+/// session-sharing history item — the original purpose of the session-id
+/// fallback in `active_work_already_present`.
+#[test]
+fn app_runtime_paused_work_dedups_by_session_when_live_row_has_no_git_identity() {
+    let temp = tempdir().expect("tempdir");
+    let repo = temp.path().join("repo");
+    fs::create_dir_all(&repo).expect("create repo");
+    let mut projection =
+        gwt_core::workspace_projection::WorkspaceProjection::default_for_project(&repo);
+    projection.agents.push({
+        let mut agent = workspace_agent_summary_for_test("session-shared", Some("work-x"));
+        agent.branch = None;
+        agent.worktree_path = None;
+        agent
+    });
+    // The history row carries a full git identity and the same session.
+    let works = vec![history_work_view(
+        "work-work-other-0000abcd",
+        "work/other",
+        "/home/user/gwt/work/other",
+        vec![history_agent_ref_view(
+            "session-shared",
+            Some("Claude Code"),
+            "2026-06-29T07:45:56Z",
+        )],
+    )];
+
+    let view =
+        super::active_work_projection_from_saved_with_journal(projection, Vec::new(), works, None);
+
+    assert_eq!(
+        view.active_works.len(),
+        1,
+        "identity-less live row + session-sharing history must stay one row"
+    );
+}
+
 #[test]
 fn app_runtime_active_work_projection_resolves_branch_known_unassigned_agents_as_work() {
     let _env_guard = env_test_lock().lock().expect("env lock");
