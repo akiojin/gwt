@@ -136,8 +136,12 @@ pub struct IssueMonitorPrefs {
     /// Persisted so an in-flight claim survives the per-handler prefs
     /// roundtrip — otherwise a rescan re-claims the same issue (same-owner
     /// renewal) and spawns a duplicate window past `max_active`.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub launching_issues: Vec<u64>,
+    #[serde(
+        default,
+        skip_serializing_if = "Vec::is_empty",
+        deserialize_with = "deserialize_launching_issues"
+    )]
+    pub launching_issues: Vec<IssueMonitorLaunchingIssue>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub failed_issues: Vec<IssueMonitorFailedIssue>,
     /// Issues whose work PR merged. Persisted so completed work is not
@@ -180,6 +184,44 @@ impl Default for IssueMonitorPrefs {
 pub struct IssueMonitorLaunchedIssue {
     pub issue_number: u64,
     pub window_id: String,
+}
+
+/// #3223 follow-up: one claimed-but-unbound launch with its claim anchor.
+/// `claimed_at` lets a restored claim EXPIRE after `claim_ttl_secs` instead of
+/// holding a max-active slot forever when the process died before the ACK.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct IssueMonitorLaunchingIssue {
+    pub issue_number: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub claimed_at: Option<String>,
+}
+
+/// Backward-compat: the first shipped shape was a bare id array. A parse
+/// failure here would `unwrap_or_default()` into a full prefs wipe, so both
+/// shapes must deserialize.
+fn deserialize_launching_issues<'de, D>(
+    deserializer: D,
+) -> Result<Vec<IssueMonitorLaunchingIssue>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum Compat {
+        Bare(u64),
+        Full(IssueMonitorLaunchingIssue),
+    }
+    let entries = Vec::<Compat>::deserialize(deserializer)?;
+    Ok(entries
+        .into_iter()
+        .map(|entry| match entry {
+            Compat::Bare(issue_number) => IssueMonitorLaunchingIssue {
+                issue_number,
+                claimed_at: None,
+            },
+            Compat::Full(full) => full,
+        })
+        .collect())
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -463,6 +505,8 @@ pub struct IssueMonitorState {
     /// (bounded) while no GUI is connected so unattended events surface on the
     /// next connect.
     pending_autonomous_notices: VecDeque<AutonomousNotice>,
+    /// #3223 follow-up: claim anchors for unbound launches (issue → RFC3339).
+    launching_claimed_at: BTreeMap<u64, String>,
 }
 
 pub fn is_auto_improve_candidate(issue: &IssueMonitorIssue, config: &IssueMonitorConfig) -> bool {
@@ -818,6 +862,7 @@ impl IssueMonitorState {
             pending_launches: VecDeque::new(),
             pending_review_dispatches: VecDeque::new(),
             pending_autonomous_notices: VecDeque::new(),
+            launching_claimed_at: BTreeMap::new(),
         }
     }
 
@@ -840,9 +885,14 @@ impl IssueMonitorState {
         }
         // Issue #3222: restore claimed-but-unbound launches so a reload (every
         // GUI handler) still sees the in-flight claim and cannot re-claim it.
-        for issue_number in prefs.launching_issues {
-            if !state.active_launches.contains(&issue_number) {
-                state.active_launches.push(issue_number);
+        for entry in prefs.launching_issues {
+            if !state.active_launches.contains(&entry.issue_number) {
+                state.active_launches.push(entry.issue_number);
+            }
+            if let Some(claimed_at) = entry.claimed_at {
+                state
+                    .launching_claimed_at
+                    .insert(entry.issue_number, claimed_at);
             }
         }
         for failed in prefs.failed_issues {
@@ -883,7 +933,10 @@ impl IssueMonitorState {
                 .active_launches
                 .iter()
                 .filter(|issue_number| !self.launched_windows.contains_key(issue_number))
-                .copied()
+                .map(|issue_number| IssueMonitorLaunchingIssue {
+                    issue_number: *issue_number,
+                    claimed_at: self.launching_claimed_at.get(issue_number).cloned(),
+                })
                 .collect(),
             failed_issues: self
                 .failed_issues
@@ -1214,6 +1267,80 @@ impl IssueMonitorState {
     pub fn refresh_gui_owned_prefs(&mut self, disk: &IssueMonitorPrefs) {
         self.launch_profile = disk.launch_profile.clone();
         self.autonomous_tuning = disk.autonomous_tuning.clone();
+    }
+
+    /// #3223 follow-up (codex P1): absorb the OTHER process's in-flight launch
+    /// accounting from disk. The GUI and the daemon both claim launches; the
+    /// daemon only refreshed profile/tuning, so GUI-written `launching`/
+    /// `launched` entries were invisible to it — it saw free slots (over-cap
+    /// claims) and its next persist dropped the GUI's in-flight claims.
+    /// Union-merge: entries already known in memory win; removals propagate via
+    /// the existing control frames (Launched / LaunchFailed / WindowClosed).
+    pub fn merge_inflight_launches_from_disk(&mut self, disk: &IssueMonitorPrefs) {
+        for launched in &disk.launched_issues {
+            if launched.window_id.is_empty() {
+                continue;
+            }
+            self.launched_windows
+                .entry(launched.issue_number)
+                .or_insert_with(|| launched.window_id.clone());
+            if !self.active_launches.contains(&launched.issue_number) {
+                self.active_launches.push(launched.issue_number);
+            }
+        }
+        for entry in &disk.launching_issues {
+            if !self.active_launches.contains(&entry.issue_number) {
+                self.active_launches.push(entry.issue_number);
+                if let Some(claimed_at) = &entry.claimed_at {
+                    self.launching_claimed_at
+                        .insert(entry.issue_number, claimed_at.clone());
+                }
+            }
+        }
+    }
+
+    /// #3223 follow-up (codex P2 / coderabbit): release claimed-but-unbound
+    /// launches whose claim anchor is older than `claim_ttl_secs`. A crash
+    /// between the claim-save and the launch ACK would otherwise hold a
+    /// max-active slot forever. Entries restored without an anchor (legacy
+    /// bare-id shape) are stamped `now` so their clock starts here. Released
+    /// issues return to `Queued` and re-enter the queue so the next scan can
+    /// relaunch them (mirroring the expired GitHub claim, which lapses after
+    /// the same TTL).
+    pub fn expire_stale_unbound_launches(&mut self, now: &str) -> Vec<u64> {
+        let ttl = self.config.claim_ttl_secs as i64;
+        let unbound: Vec<u64> = self
+            .active_launches
+            .iter()
+            .filter(|issue_number| !self.launched_windows.contains_key(issue_number))
+            .copied()
+            .collect();
+        let mut expired = Vec::new();
+        for issue_number in unbound {
+            match self.launching_claimed_at.get(&issue_number) {
+                Some(claimed_at) => {
+                    let stale =
+                        rfc3339_elapsed_secs(claimed_at, now).is_some_and(|elapsed| elapsed >= ttl);
+                    if stale {
+                        self.active_launches
+                            .retain(|active| *active != issue_number);
+                        self.launching_claimed_at.remove(&issue_number);
+                        self.set_inbox_state(issue_number, MonitorInboxState::Queued);
+                        if !self.queue.contains(&issue_number) {
+                            self.queue.push_back(issue_number);
+                            self.apply_priority_order_to_queue();
+                        }
+                        expired.push(issue_number);
+                    }
+                }
+                None => {
+                    // Legacy entry without an anchor: start its clock now.
+                    self.launching_claimed_at
+                        .insert(issue_number, now.to_string());
+                }
+            }
+        }
+        expired
     }
 
     pub fn status_view(&self) -> IssueMonitorStatusView {
@@ -1735,7 +1862,7 @@ impl IssueMonitorState {
         });
     }
 
-    pub fn next_launch_request(&mut self) -> Option<IssueMonitorLaunchRequest> {
+    pub fn next_launch_request(&mut self, now: &str) -> Option<IssueMonitorLaunchRequest> {
         let max_active = self.config.max_active.max(1);
         if !self.gui_connected || self.active_launches.len() >= max_active {
             return None;
@@ -1744,6 +1871,10 @@ impl IssueMonitorState {
         if !self.active_launches.contains(&issue_number) {
             self.active_launches.push(issue_number);
         }
+        // #3223 follow-up: anchor the claim so a restored-but-never-acked
+        // launch can expire after claim_ttl_secs instead of leaking the slot.
+        self.launching_claimed_at
+            .insert(issue_number, now.to_string());
         let linked_issue_kind = if let Some(item) = self
             .inbox
             .iter_mut()
@@ -1811,7 +1942,7 @@ impl IssueMonitorState {
             match acquire_claim(client, IssueNumber(issue.number), claim, now) {
                 Ok(ClaimAcquireOutcome::Acquired(claim)) => {
                     self.record_claimed(issue, claim.claim_id);
-                    if let Some(request) = self.next_launch_request() {
+                    if let Some(request) = self.next_launch_request(now) {
                         self.pending_launches.push_back(request.clone());
                         launches.push(request);
                     }
@@ -1962,6 +2093,7 @@ impl IssueMonitorState {
 
     pub fn complete_active_launch(&mut self, issue_number: u64, window_id: impl Into<String>) {
         let window_id = window_id.into();
+        self.launching_claimed_at.remove(&issue_number);
         if !self.active_launches.contains(&issue_number) {
             self.active_launches.push(issue_number);
         }
@@ -2050,6 +2182,7 @@ impl IssueMonitorState {
     fn clear_active_tracking(&mut self, issue_number: u64) {
         self.active_launches
             .retain(|active| *active != issue_number);
+        self.launching_claimed_at.remove(&issue_number);
         self.launched_windows.remove(&issue_number);
         self.launched_branches.remove(&issue_number);
         // #3165 error-window lifecycle: terminal transitions (merged / released /
@@ -2347,7 +2480,9 @@ mod tests {
             Some("tab-1::agent-1")
         );
         assert!(
-            monitor.next_launch_request().is_none(),
+            monitor
+                .next_launch_request("2026-07-02T00:00:00Z")
+                .is_none(),
             "max_active=1 must keep the next queued issue waiting while launched work is active"
         );
     }
@@ -2371,7 +2506,9 @@ mod tests {
         let mut monitor = IssueMonitorState::new(IssueMonitorConfig::default());
         scan_issue_monitor_candidates(&mut monitor, &[issue(42)], "2026-07-02T00:00:00Z");
         monitor.set_gui_connected(true);
-        let request = monitor.next_launch_request().expect("claimed for launch");
+        let request = monitor
+            .next_launch_request("2026-07-02T00:00:00Z")
+            .expect("claimed for launch");
         assert_eq!(request.issue_number, 42);
         assert_eq!(monitor.active_count(), 1, "claim holds an active slot");
 
@@ -2394,9 +2531,125 @@ mod tests {
         assert_eq!(restored.queue_len(), 0, "not re-queued");
         // …and must not hand out a second launch request for it.
         assert!(
-            restored.next_launch_request().is_none(),
+            restored
+                .next_launch_request("2026-07-02T00:00:00Z")
+                .is_none(),
             "no duplicate launch request for an in-flight claim"
         );
+    }
+
+    #[test]
+    fn launching_prefs_accept_legacy_bare_ids_and_timestamped_entries() {
+        // #3223 follow-up (codex P2): the launching entries gained a
+        // `claimed_at` anchor. Files written by the first shipped shape (bare
+        // ids) must still parse — a parse failure would `unwrap_or_default()`
+        // into a FULL prefs wipe.
+        let legacy = r#"{"enabled":true,"max_active_agents":2,"priority_order":[],"launching_issues":[42,43]}"#;
+        let prefs: IssueMonitorPrefs = serde_json::from_str(legacy).expect("legacy parses");
+        assert_eq!(
+            prefs
+                .launching_issues
+                .iter()
+                .map(|entry| entry.issue_number)
+                .collect::<Vec<_>>(),
+            vec![42, 43]
+        );
+        let timed = r#"{"enabled":true,"max_active_agents":2,"priority_order":[],"launching_issues":[{"issue_number":7,"claimed_at":"2026-07-02T00:00:00Z"}]}"#;
+        let prefs: IssueMonitorPrefs = serde_json::from_str(timed).expect("timed parses");
+        assert_eq!(prefs.launching_issues[0].issue_number, 7);
+        assert_eq!(
+            prefs.launching_issues[0].claimed_at.as_deref(),
+            Some("2026-07-02T00:00:00Z")
+        );
+    }
+
+    #[test]
+    fn stale_unbound_launching_claims_expire_after_claim_ttl() {
+        // #3223 follow-up (codex P2 / coderabbit): a crash between the
+        // claim-save and the launch ACK leaves a restored `Launching` claim
+        // with no window. Without an expiry it holds a max-active slot
+        // forever. After claim_ttl_secs it must be released so the next scan
+        // can re-queue and relaunch the issue.
+        let mut monitor = IssueMonitorState::new(IssueMonitorConfig::default());
+        scan_issue_monitor_candidates(&mut monitor, &[issue(42)], "2026-07-02T00:00:00Z");
+        monitor.set_gui_connected(true);
+        assert!(monitor
+            .next_launch_request("2026-07-02T00:00:00Z")
+            .is_some());
+        assert_eq!(monitor.active_count(), 1);
+
+        // Restart (roundtrip) mid-launch: claim restored, still unbound.
+        let mut restored =
+            IssueMonitorState::with_prefs(IssueMonitorConfig::default(), monitor.prefs());
+        restored.set_gui_connected(true);
+        assert_eq!(restored.active_count(), 1);
+
+        // Before the TTL: retained.
+        let expired = restored.expire_stale_unbound_launches("2026-07-02T00:10:00Z");
+        assert!(expired.is_empty(), "not expired before claim_ttl_secs");
+        assert_eq!(restored.active_count(), 1);
+
+        // After the TTL (default 1800s): released and re-queueable.
+        let expired = restored.expire_stale_unbound_launches("2026-07-02T00:31:00Z");
+        assert_eq!(expired, vec![42], "stale unbound claim expires");
+        assert_eq!(restored.active_count(), 0, "slot released");
+        scan_issue_monitor_candidates(&mut restored, &[issue(42)], "2026-07-02T00:31:10Z");
+        assert!(
+            restored
+                .next_launch_request("2026-07-02T00:31:20Z")
+                .is_some(),
+            "the issue is claimable again after expiry"
+        );
+        // Bound launches never expire this way.
+        monitor.complete_active_launch(42, "tab-1::agent-1");
+        assert!(monitor
+            .expire_stale_unbound_launches("2026-07-03T00:00:00Z")
+            .is_empty());
+    }
+
+    #[test]
+    fn merge_inflight_launches_from_disk_unifies_cross_process_accounting() {
+        // #3223 follow-up (codex P1): the daemon only refreshed profile/tuning
+        // from disk, so GUI-written launching/launched claims were invisible —
+        // the daemon saw free slots (over-cap claims) and its next persist
+        // dropped the GUI's in-flight entries. The merge must absorb both.
+        let mut daemon = IssueMonitorState::with_prefs(
+            IssueMonitorConfig {
+                enabled: true,
+                max_active: 2,
+                ..IssueMonitorConfig::default()
+            },
+            IssueMonitorPrefs {
+                enabled: true,
+                max_active_agents: 2,
+                ..IssueMonitorPrefs::default()
+            },
+        );
+        let disk = IssueMonitorPrefs {
+            launching_issues: vec![IssueMonitorLaunchingIssue {
+                issue_number: 42,
+                claimed_at: Some("2026-07-02T00:00:00Z".to_string()),
+            }],
+            launched_issues: vec![IssueMonitorLaunchedIssue {
+                issue_number: 43,
+                window_id: "tab-1::agent-2".to_string(),
+            }],
+            ..IssueMonitorPrefs::default()
+        };
+        daemon.merge_inflight_launches_from_disk(&disk);
+        assert_eq!(daemon.active_count(), 2, "both in-flight claims absorbed");
+        assert!(daemon.launched_window_issue("tab-1::agent-2").is_some());
+        // The daemon persist now round-trips them instead of dropping them.
+        let prefs = daemon.prefs();
+        assert!(prefs
+            .launching_issues
+            .iter()
+            .any(|entry| entry.issue_number == 42
+                && entry.claimed_at.as_deref() == Some("2026-07-02T00:00:00Z")));
+        assert!(prefs
+            .launched_issues
+            .iter()
+            .any(|entry| entry.issue_number == 43));
     }
 
     #[test]

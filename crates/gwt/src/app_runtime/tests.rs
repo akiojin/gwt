@@ -20626,7 +20626,10 @@ fn issue_monitor_launch_succeeded_ack_is_non_scanning_and_persists() {
     let prefs_path = gwt::issue_monitor_prefs_path_for_repo_path(&repo);
     let prefs = gwt::IssueMonitorPrefs {
         enabled: true,
-        launching_issues: vec![42],
+        launching_issues: vec![gwt::IssueMonitorLaunchingIssue {
+            issue_number: 42,
+            claimed_at: None,
+        }],
         ..gwt::IssueMonitorPrefs::default()
     };
     gwt::save_issue_monitor_prefs(&prefs_path, &prefs).expect("seed prefs");

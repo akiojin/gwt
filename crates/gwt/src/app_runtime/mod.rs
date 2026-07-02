@@ -1317,6 +1317,9 @@ impl AppRuntime {
         let mut monitor =
             gwt::IssueMonitorState::with_prefs(gwt::IssueMonitorConfig::default(), prefs);
         apply(&mut monitor);
+        // #3223 follow-up: release claimed-but-never-acked launches whose claim
+        // anchor exceeded claim_ttl_secs so a crash cannot leak a slot forever.
+        monitor.expire_stale_unbound_launches(&now);
         let _ = gwt::save_issue_monitor_prefs(&prefs_path, &monitor.prefs());
         let mut launch_requests = Vec::new();
         let mut settings_required_request = None;
