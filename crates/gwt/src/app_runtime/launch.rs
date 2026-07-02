@@ -768,6 +768,7 @@ impl AppRuntime {
                         agent_id: agent_id.to_string(),
                         branch_name,
                         display_name,
+                        is_ephemeral: gwt_git::worktree::is_intake_worktree_path(&worktree_path),
                         worktree_path: worktree_path.clone(),
                         agent_project_root,
                         runtime_target,
@@ -1842,6 +1843,13 @@ impl AppRuntime {
         let Some(session) = self.active_agent_sessions.remove(window_id) else {
             return;
         };
+        if session.is_ephemeral {
+            // SPEC-3214 FR-002: the disposable intake worktree is cleaned up
+            // once the PTY is confirmed gone (drained from the runtime status
+            // path), never synchronously before the process died.
+            self.pending_ephemeral_worktree_cleanups
+                .insert(session.window_id.clone(), session.worktree_path.clone());
+        }
         if let Some(project_root) = self
             .tab(&session.tab_id)
             .map(|tab| tab.project_root.clone())
@@ -1849,7 +1857,11 @@ impl AppRuntime {
             // SPEC-2359 Phase W-12 Slice 5a (FR-350): persist a Paused marker
             // before clearing the agent from the live projection so the Work is
             // retained on the Work surface until the user explicitly closes it.
-            self.persist_paused_work_for_stopped_session(&project_root, &session);
+            // SPEC-3214 FR-003: ephemeral intake sessions are the exception —
+            // they must leave no Paused Work behind.
+            if !session.is_ephemeral {
+                self.persist_paused_work_for_stopped_session(&project_root, &session);
+            }
             if let Err(error) = gwt_core::workspace_projection::mark_workspace_agent_stopped(
                 &project_root,
                 &session.session_id,
@@ -1870,6 +1882,52 @@ impl AppRuntime {
             gwt_agent::AgentStatus::Stopped,
         );
         self.launch_wizard_cache.mark_stopped(&session.session_id);
+    }
+
+    /// SPEC-3214 FR-002: destroy intake worktrees of stopped ephemeral
+    /// sessions. Runs from the runtime status path, after the PTY process is
+    /// known to be gone. A clean worktree is removed; a dirty one is retained
+    /// and surfaced to the user (no silent data destruction).
+    pub(crate) fn take_ephemeral_worktree_cleanup_events(&mut self) -> Vec<OutboundEvent> {
+        if self.pending_ephemeral_worktree_cleanups.is_empty() {
+            return Vec::new();
+        }
+        let pending: Vec<(String, PathBuf)> =
+            self.pending_ephemeral_worktree_cleanups.drain().collect();
+        let mut events = Vec::new();
+        for (window_id, worktree_path) in pending {
+            match cleanup_ephemeral_worktree(&worktree_path) {
+                Ok(EphemeralWorktreeCleanup::Removed)
+                | Ok(EphemeralWorktreeCleanup::AlreadyGone) => {}
+                Ok(EphemeralWorktreeCleanup::RetainedDirty) => {
+                    events.push(OutboundEvent::broadcast(BackendEvent::IssueMonitorToast {
+                        level: "warn".to_string(),
+                        message: format!(
+                            "Intake worktree retained (uncommitted changes): {}",
+                            worktree_path.display()
+                        ),
+                        issue_number: None,
+                    }));
+                }
+                Err(error) => {
+                    tracing::warn!(
+                        window_id = %window_id,
+                        worktree_path = %worktree_path.display(),
+                        error = %error,
+                        "intake worktree cleanup failed"
+                    );
+                    events.push(OutboundEvent::broadcast(BackendEvent::IssueMonitorToast {
+                        level: "warn".to_string(),
+                        message: format!(
+                            "Intake worktree cleanup failed: {error} ({})",
+                            worktree_path.display()
+                        ),
+                        issue_number: None,
+                    }));
+                }
+            }
+        }
+        events
     }
 
     /// SPEC-2359 Phase W-12 Slice 5a (FR-350): record a Pause work event for a
@@ -2046,6 +2104,107 @@ impl AppRuntime {
             ),
         }
     }
+}
+
+/// Outcome of one intake-worktree cleanup attempt (SPEC-3214 FR-002).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum EphemeralWorktreeCleanup {
+    /// The worktree was clean and has been removed.
+    Removed,
+    /// The worktree carries uncommitted changes and was retained.
+    RetainedDirty,
+    /// The path no longer exists (already cleaned up elsewhere).
+    AlreadyGone,
+}
+
+/// Remove the intake worktree at `worktree_path` when it is clean; retain it
+/// when dirty. Refuses to touch paths outside the `.intake-*` naming
+/// convention as a guard against destroying a real branch worktree.
+pub(crate) fn cleanup_ephemeral_worktree(
+    worktree_path: &Path,
+) -> Result<EphemeralWorktreeCleanup, String> {
+    if !worktree_path.exists() {
+        return Ok(EphemeralWorktreeCleanup::AlreadyGone);
+    }
+    if !gwt_git::worktree::is_intake_worktree_path(worktree_path) {
+        return Err(format!(
+            "refusing to remove non-intake worktree: {}",
+            worktree_path.display()
+        ));
+    }
+    let dirty = !gwt_git::diff::get_status(worktree_path)
+        .map_err(|err| format!("status check failed: {err}"))?
+        .is_empty();
+    if dirty {
+        return Ok(EphemeralWorktreeCleanup::RetainedDirty);
+    }
+    let main_repo_path = gwt_git::worktree::main_worktree_root(worktree_path)
+        .map_err(|err| format!("main worktree root: {err}"))?;
+    // The daemon endpoint file is keyed by worktree hash and would otherwise
+    // linger as an orphan; compute it while the path still exists.
+    remove_intake_daemon_endpoints(worktree_path);
+    let manager = gwt_git::WorktreeManager::new(&main_repo_path);
+    manager
+        .remove_force(worktree_path)
+        .map_err(|err| format!("worktree remove: {err}"))?;
+    let _ = manager.prune();
+    Ok(EphemeralWorktreeCleanup::Removed)
+}
+
+/// Best-effort removal of the per-worktree daemon endpoint files for both
+/// runtime targets. Missing files and hash failures are ignored — a stale
+/// endpoint only costs one failed probe at the next bootstrap.
+fn remove_intake_daemon_endpoints(worktree_path: &Path) {
+    let gwt_home = gwt_core::paths::gwt_home();
+    for target in [
+        gwt_core::daemon::RuntimeTarget::Host,
+        gwt_core::daemon::RuntimeTarget::Docker,
+    ] {
+        if let Ok(scope) = gwt_core::daemon::RuntimeScope::from_project_root(worktree_path, target)
+        {
+            let _ = std::fs::remove_file(scope.endpoint_path(&gwt_home));
+        }
+    }
+}
+
+/// SPEC-3214 T-006: startup GC for crash-orphaned intake worktrees. Removes
+/// clean `.intake-*` worktrees that no live session references; dirty ones
+/// are retained (FR-002). Returns how many worktrees were removed.
+pub(crate) fn prune_orphan_intake_worktrees(
+    project_root: &Path,
+    live_worktree_paths: &[PathBuf],
+) -> usize {
+    let Ok(main_repo_path) = gwt_git::worktree::main_worktree_root(project_root) else {
+        return 0;
+    };
+    let manager = gwt_git::WorktreeManager::new(&main_repo_path);
+    let Ok(worktrees) = manager.list() else {
+        return 0;
+    };
+    let mut removed = 0;
+    for entry in worktrees {
+        if !gwt_git::worktree::is_intake_worktree_path(&entry.path) {
+            continue;
+        }
+        if live_worktree_paths
+            .iter()
+            .any(|live| crate::same_worktree_path(live, &entry.path))
+        {
+            continue;
+        }
+        match cleanup_ephemeral_worktree(&entry.path) {
+            Ok(EphemeralWorktreeCleanup::Removed) => removed += 1,
+            Ok(_) => {}
+            Err(error) => {
+                tracing::warn!(
+                    worktree_path = %entry.path.display(),
+                    error = %error,
+                    "orphan intake worktree prune failed"
+                );
+            }
+        }
+    }
+    removed
 }
 
 #[cfg(test)]

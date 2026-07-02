@@ -618,6 +618,7 @@ fn workspace_work_agent_view_attaches_session_history() {
 
 fn sample_active_agent_session(tab_id: &str, window_id: &str) -> ActiveAgentSession {
     ActiveAgentSession {
+        is_ephemeral: false,
         window_id: window_id.to_string(),
         session_id: "session-1".to_string(),
         agent_id: "codex".to_string(),
@@ -1058,6 +1059,7 @@ fn image_paste_event_saves_file_under_worktree() {
     runtime.active_agent_sessions.insert(
         window_id.clone(),
         ActiveAgentSession {
+            is_ephemeral: false,
             window_id: window_id.clone(),
             session_id: "session-1".to_string(),
             agent_id: "codex".to_string(),
@@ -1136,6 +1138,7 @@ fn uploaded_image_paste_event_saves_file_under_drop_files() {
     runtime.active_agent_sessions.insert(
         window_id.clone(),
         ActiveAgentSession {
+            is_ephemeral: false,
             window_id: window_id.clone(),
             session_id: "session-1".to_string(),
             agent_id: "codex".to_string(),
@@ -1465,6 +1468,7 @@ fn file_attachment_event_saves_inline_file_under_worktree() {
     runtime.active_agent_sessions.insert(
         window_id.clone(),
         ActiveAgentSession {
+            is_ephemeral: false,
             window_id: window_id.clone(),
             session_id: "session-1".to_string(),
             agent_id: "codex".to_string(),
@@ -1528,6 +1532,7 @@ fn file_attachment_event_saves_native_path_under_drop_files() {
     runtime.active_agent_sessions.insert(
         window_id.clone(),
         ActiveAgentSession {
+            is_ephemeral: false,
             window_id: window_id.clone(),
             session_id: "session-1".to_string(),
             agent_id: "codex".to_string(),
@@ -1606,6 +1611,7 @@ fn file_attachment_event_saves_uploaded_file_under_drop_files() {
     runtime.active_agent_sessions.insert(
         window_id.clone(),
         ActiveAgentSession {
+            is_ephemeral: false,
             window_id: window_id.clone(),
             session_id: "session-1".to_string(),
             agent_id: "codex".to_string(),
@@ -1671,6 +1677,7 @@ fn file_attachment_operation_dispatches_failed_progress_without_prompt_on_stage_
     runtime.active_agent_sessions.insert(
         window_id.clone(),
         ActiveAgentSession {
+            is_ephemeral: false,
             window_id: window_id.clone(),
             session_id: "session-1".to_string(),
             agent_id: "codex".to_string(),
@@ -1803,6 +1810,7 @@ fn file_attachment_event_saves_prepared_files_incrementally() {
     runtime.active_agent_sessions.insert(
         window_id.clone(),
         ActiveAgentSession {
+            is_ephemeral: false,
             window_id: window_id.clone(),
             session_id: "session-1".to_string(),
             agent_id: "codex".to_string(),
@@ -2065,6 +2073,7 @@ fn sample_runtime_with_events(
         usage_refresh: None,
         image_paste_sequence: std::sync::atomic::AtomicU64::new(0),
         agent_launch_stage_counter: std::sync::atomic::AtomicU64::new(1),
+        pending_ephemeral_worktree_cleanups: HashMap::new(),
     };
     runtime.rebuild_window_lookup();
     runtime.seed_window_pty_statuses();
@@ -3514,6 +3523,7 @@ fn app_runtime_frontend_ready_replays_active_work_projection_separately_from_wor
     runtime.active_agent_sessions.insert(
         "tab-1::agent-1".to_string(),
         ActiveAgentSession {
+            is_ephemeral: false,
             window_id: "tab-1::agent-1".to_string(),
             session_id: "session-1".to_string(),
             agent_id: "codex".to_string(),
@@ -4245,6 +4255,7 @@ fn app_runtime_workspace_add_agent_opens_branch_launch_without_branches_window()
     runtime.active_agent_sessions.insert(
         "tab-1::agent-1".to_string(),
         ActiveAgentSession {
+            is_ephemeral: false,
             window_id: "tab-1::agent-1".to_string(),
             session_id: "session-1".to_string(),
             agent_id: "codex".to_string(),
@@ -4315,6 +4326,7 @@ fn app_runtime_live_sessions_report_composed_idle_runtime_status() {
     runtime.active_agent_sessions.insert(
         window_id.clone(),
         ActiveAgentSession {
+            is_ephemeral: false,
             window_id: window_id.clone(),
             session_id: "session-1".to_string(),
             agent_id: "codex".to_string(),
@@ -4348,6 +4360,7 @@ fn app_runtime_live_sessions_report_idle_after_launch_before_first_hook() {
     runtime.active_agent_sessions.insert(
         window_id.clone(),
         ActiveAgentSession {
+            is_ephemeral: false,
             window_id: window_id.clone(),
             session_id: "session-1".to_string(),
             agent_id: "codex".to_string(),
@@ -4389,6 +4402,7 @@ fn app_runtime_workspace_state_reports_idle_for_launched_agent_without_hook_stat
     runtime.active_agent_sessions.insert(
         window_id.clone(),
         ActiveAgentSession {
+            is_ephemeral: false,
             window_id: window_id.clone(),
             session_id: "session-1".to_string(),
             agent_id: "codex".to_string(),
@@ -6929,6 +6943,166 @@ fn app_runtime_active_work_projection_retains_stopped_agent_work_as_paused() {
     assert_eq!(paused.branch.as_deref(), Some("work/paused"));
 }
 
+/// SPEC-3214 T-005 fixture: a real git repo plus a detached `.intake`
+/// worktree, ready to attach to an ephemeral agent session.
+fn intake_worktree_fixture(temp: &Path) -> (PathBuf, PathBuf) {
+    let repo = temp.join("repo");
+    fs::create_dir_all(&repo).expect("create repo");
+    run_git(&repo, &["init"]);
+    run_git(&repo, &["config", "user.email", "gwt@example.invalid"]);
+    run_git(&repo, &["config", "user.name", "gwt"]);
+    run_git(&repo, &["commit", "--allow-empty", "-m", "seed"]);
+    let intake = temp.join(".intake");
+    gwt_git::WorktreeManager::new(&repo)
+        .create_detached("HEAD", &intake)
+        .expect("create intake worktree");
+    (repo, intake)
+}
+
+fn ephemeral_intake_session(tab_id: &str, window_id: &str, intake: &Path) -> ActiveAgentSession {
+    let mut session = sample_active_agent_session(tab_id, window_id);
+    session.session_id = "session-intake".to_string();
+    session.branch_name = String::new();
+    session.worktree_path = intake.to_path_buf();
+    session.agent_project_root = intake.display().to_string();
+    session.is_ephemeral = true;
+    session
+}
+
+/// SPEC-3214 T-005 / FR-002: when an ephemeral intake session stops with a
+/// clean worktree, the worktree is destroyed and no Paused Work survives.
+#[test]
+fn ephemeral_session_stop_removes_clean_intake_worktree_without_paused_work() {
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedEnvVar::set("HOME", temp.path());
+    let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+    let (repo, intake) = intake_worktree_fixture(temp.path());
+
+    let tab = sample_project_tab("tab-1", "Repo", repo.clone(), ProjectKind::Git, &[]);
+    let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+    runtime.active_agent_sessions.insert(
+        "tab-1::agent-intake".to_string(),
+        ephemeral_intake_session("tab-1", "tab-1::agent-intake", &intake),
+    );
+
+    let events = runtime.handle_runtime_status(
+        "tab-1::agent-intake".to_string(),
+        WindowProcessStatus::Stopped,
+        None,
+    );
+
+    assert!(
+        !intake.exists(),
+        "clean intake worktree must be removed after the session stops"
+    );
+    let worktrees = gwt_git::WorktreeManager::new(&repo)
+        .list()
+        .expect("list worktrees");
+    assert!(
+        !worktrees
+            .iter()
+            .any(|entry| gwt_git::worktree::is_intake_worktree_path(&entry.path)),
+        "git must not retain an intake worktree entry"
+    );
+    let works = gwt_core::workspace_projection::load_workspace_work_items(&repo)
+        .ok()
+        .flatten();
+    assert!(
+        works
+            .map(|projection| {
+                !projection
+                    .work_items
+                    .iter()
+                    .any(|item| item.id == "work-session-session-intake")
+            })
+            .unwrap_or(true),
+        "ephemeral session must not persist a Paused Work (FR-003)"
+    );
+    assert!(
+        !events
+            .iter()
+            .any(|event| matches!(event.event, BackendEvent::IssueMonitorToast { .. })),
+        "clean cleanup must not raise a retention notice"
+    );
+}
+
+/// SPEC-3214 T-005 / FR-002: a dirty intake worktree is retained (no silent
+/// data destruction) and the user is notified.
+#[test]
+fn ephemeral_session_stop_keeps_dirty_intake_worktree_with_notice() {
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedEnvVar::set("HOME", temp.path());
+    let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+    let (repo, intake) = intake_worktree_fixture(temp.path());
+    fs::write(intake.join("scratch-note.md"), "uncommitted\n").expect("write dirty file");
+
+    let tab = sample_project_tab("tab-1", "Repo", repo.clone(), ProjectKind::Git, &[]);
+    let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+    runtime.active_agent_sessions.insert(
+        "tab-1::agent-intake".to_string(),
+        ephemeral_intake_session("tab-1", "tab-1::agent-intake", &intake),
+    );
+
+    let events = runtime.handle_runtime_status(
+        "tab-1::agent-intake".to_string(),
+        WindowProcessStatus::Stopped,
+        None,
+    );
+
+    assert!(
+        intake.exists(),
+        "dirty intake worktree must be retained (FR-002: no silent destruction)"
+    );
+    assert!(
+        intake.join("scratch-note.md").exists(),
+        "uncommitted intake data must survive the stop"
+    );
+    let notice = events.iter().find_map(|event| match &event.event {
+        BackendEvent::IssueMonitorToast { level, message, .. } => {
+            Some((level.clone(), message.clone()))
+        }
+        _ => None,
+    });
+    let (level, message) = notice.expect("dirty retention must surface a notice event");
+    assert_eq!(level, "warn");
+    assert!(
+        message.contains(&intake.display().to_string()),
+        "notice must name the retained worktree path, got: {message}"
+    );
+}
+
+/// SPEC-3214 T-006: crash orphans — intake worktrees with no live session —
+/// are pruned at startup when clean and retained when dirty.
+#[test]
+fn prune_orphan_intake_worktrees_removes_clean_and_keeps_dirty() {
+    let temp = tempdir().expect("tempdir");
+    let (repo, clean_intake) = intake_worktree_fixture(temp.path());
+    let dirty_intake = temp.path().join(".intake-2");
+    gwt_git::WorktreeManager::new(&repo)
+        .create_detached("HEAD", &dirty_intake)
+        .expect("create second intake worktree");
+    fs::write(dirty_intake.join("keep-me.md"), "dirty\n").expect("write dirty file");
+    // A live session still owns a third intake worktree: it must survive.
+    let live_intake = temp.path().join(".intake-3");
+    gwt_git::WorktreeManager::new(&repo)
+        .create_detached("HEAD", &live_intake)
+        .expect("create live intake worktree");
+
+    let removed =
+        super::launch::prune_orphan_intake_worktrees(&repo, std::slice::from_ref(&live_intake));
+
+    assert_eq!(removed, 1, "exactly the clean orphan must be pruned");
+    assert!(!clean_intake.exists(), "clean orphan must be removed");
+    assert!(dirty_intake.exists(), "dirty orphan must be retained");
+    assert!(live_intake.exists(), "live intake worktree must survive GC");
+}
+
 // #3065: a stopped session's Pause record must not inherit the repo-shared
 // projection's owner/title — those belong to whatever Work last wrote the
 // projection. Owner/summary come from the session's own Work item (matched
@@ -8186,6 +8360,7 @@ fn app_runtime_active_work_projection_filters_stale_agent_when_window_id_is_reus
     runtime.active_agent_sessions.insert(
         window_id.to_string(),
         ActiveAgentSession {
+            is_ephemeral: false,
             window_id: window_id.to_string(),
             session_id: "live-session".to_string(),
             agent_id: "codex".to_string(),
@@ -9027,6 +9202,7 @@ fn app_runtime_open_launch_wizard_shows_only_latest_resume_and_focus_methods() {
         runtime.active_agent_sessions.insert(
             agent_window_id.clone(),
             ActiveAgentSession {
+                is_ephemeral: false,
                 window_id: agent_window_id,
                 session_id: session.to_string(),
                 agent_id: "codex".to_string(),
@@ -9743,6 +9919,7 @@ fn app_runtime_close_agent_window_clears_startup_restore_eligibility() {
     runtime.active_agent_sessions.insert(
         window_id.clone(),
         ActiveAgentSession {
+            is_ephemeral: false,
             window_id: window_id.clone(),
             session_id: session.id.clone(),
             agent_id: "codex".to_string(),
@@ -10564,6 +10741,7 @@ fn app_runtime_active_work_projection_hides_cleanup_candidate_for_live_agent_bra
     runtime.active_agent_sessions.insert(
         window_id.clone(),
         ActiveAgentSession {
+            is_ephemeral: false,
             window_id,
             session_id: "session-1".to_string(),
             agent_id: "codex".to_string(),
@@ -10621,6 +10799,7 @@ fn app_runtime_active_work_projection_hides_row_cleanup_candidate_for_live_agent
     runtime.active_agent_sessions.insert(
         window_id.clone(),
         ActiveAgentSession {
+            is_ephemeral: false,
             window_id,
             session_id: "session-live-cleanup".to_string(),
             agent_id: "codex".to_string(),
@@ -10743,6 +10922,7 @@ fn app_runtime_row_cleanup_candidate_hides_grouped_live_agent_branch() {
     runtime.active_agent_sessions.insert(
         window_id.clone(),
         ActiveAgentSession {
+            is_ephemeral: false,
             window_id,
             session_id: "session-grouped-cleanup".to_string(),
             agent_id: "codex".to_string(),
@@ -10852,6 +11032,7 @@ fn app_runtime_stopped_agent_cleans_saved_projection_and_broadcasts_active_work_
     let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
     let window_id = combined_window_id("tab-1", "codex-1");
     let session = ActiveAgentSession {
+        is_ephemeral: false,
         window_id: window_id.clone(),
         session_id: "session-1".to_string(),
         agent_id: "codex".to_string(),
@@ -12076,6 +12257,7 @@ fn app_runtime_open_board_origin_agent_focuses_live_origin_session_window() {
     runtime.active_agent_sessions.insert(
         agent_window_id.clone(),
         ActiveAgentSession {
+            is_ephemeral: false,
             window_id: agent_window_id.clone(),
             session_id: "session-origin".to_string(),
             agent_id: "codex".to_string(),
@@ -14215,6 +14397,7 @@ fn app_runtime_active_work_projection_preserves_blocked_agent_board_state() {
     );
     let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
     let session = ActiveAgentSession {
+        is_ephemeral: false,
         window_id: "tab-1::agent-1".to_string(),
         session_id: "session-1".to_string(),
         agent_id: "codex".to_string(),
@@ -14346,6 +14529,7 @@ fn app_runtime_active_work_projection_recovers_blocked_agent_after_status_milest
     );
     let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
     let session = ActiveAgentSession {
+        is_ephemeral: false,
         window_id: "tab-1::agent-1".to_string(),
         session_id: "session-1".to_string(),
         agent_id: "codex".to_string(),
@@ -14424,6 +14608,7 @@ fn app_runtime_active_work_projection_keeps_blocked_agent_after_next_milestone()
     );
     let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
     let session = ActiveAgentSession {
+        is_ephemeral: false,
         window_id: "tab-1::agent-1".to_string(),
         session_id: "session-1".to_string(),
         agent_id: "codex".to_string(),
@@ -15641,6 +15826,7 @@ fn app_runtime_board_milestone_updates_same_session_agent_window_detail_only() {
     runtime.active_agent_sessions.insert(
         first_window_id.clone(),
         ActiveAgentSession {
+            is_ephemeral: false,
             window_id: first_window_id.clone(),
             session_id: "session-1".to_string(),
             agent_id: "codex".to_string(),
@@ -15655,6 +15841,7 @@ fn app_runtime_board_milestone_updates_same_session_agent_window_detail_only() {
     runtime.active_agent_sessions.insert(
         second_window_id,
         ActiveAgentSession {
+            is_ephemeral: false,
             window_id: combined_window_id("tab-1", "agent-2"),
             session_id: "session-2".to_string(),
             agent_id: "claude".to_string(),
@@ -15756,6 +15943,7 @@ fn app_runtime_board_milestone_broadcasts_workspace_state_for_focus_sync() {
     runtime.active_agent_sessions.insert(
         window_id.clone(),
         ActiveAgentSession {
+            is_ephemeral: false,
             window_id: window_id.clone(),
             session_id: "session-1".to_string(),
             agent_id: "codex".to_string(),
@@ -15915,6 +16103,7 @@ fn app_runtime_board_milestone_skips_workspace_state_on_identical_resync() {
     runtime.active_agent_sessions.insert(
         window_id.clone(),
         ActiveAgentSession {
+            is_ephemeral: false,
             window_id: window_id.clone(),
             session_id: "session-1".to_string(),
             agent_id: "codex".to_string(),
@@ -16004,6 +16193,7 @@ fn app_runtime_board_milestone_ignores_legacy_title_summary_for_window_title() {
     runtime.active_agent_sessions.insert(
         window_id.clone(),
         ActiveAgentSession {
+            is_ephemeral: false,
             window_id: window_id.clone(),
             session_id: "session-1".to_string(),
             agent_id: "codex".to_string(),
@@ -16096,6 +16286,7 @@ fn app_runtime_board_milestone_without_title_summary_keeps_existing_agent_window
     runtime.active_agent_sessions.insert(
         window_id.clone(),
         ActiveAgentSession {
+            is_ephemeral: false,
             window_id: window_id.clone(),
             session_id: "session-1".to_string(),
             agent_id: "codex".to_string(),
@@ -16173,6 +16364,7 @@ fn app_runtime_workspace_projection_change_updates_agent_window_title_summary() 
     runtime.active_agent_sessions.insert(
         window_id.clone(),
         ActiveAgentSession {
+            is_ephemeral: false,
             window_id: window_id.clone(),
             session_id: "session-1".to_string(),
             agent_id: "codex".to_string(),
@@ -16259,6 +16451,7 @@ fn apply_title_sync_setup_tab_and_runtime(
     runtime.active_agent_sessions.insert(
         window_id.clone(),
         ActiveAgentSession {
+            is_ephemeral: false,
             window_id: window_id.clone(),
             session_id: "session-1".to_string(),
             agent_id: "codex".to_string(),
@@ -16887,6 +17080,7 @@ fn sync_agent_window_titles_worktree_fallback_refuses_when_multiple_sessions_mat
     runtime.active_agent_sessions.insert(
         "tab-1::agent-2".to_string(),
         ActiveAgentSession {
+            is_ephemeral: false,
             window_id: "tab-1::agent-2".to_string(),
             session_id: "session-2".to_string(),
             agent_id: "codex".to_string(),
@@ -19874,6 +20068,7 @@ fn stop_window_runtime_records_paused_work_off_the_event_loop() {
     runtime.active_agent_sessions.insert(
         window_id.clone(),
         ActiveAgentSession {
+            is_ephemeral: false,
             window_id: window_id.clone(),
             session_id: "session-paused-offloop".to_string(),
             agent_id: "codex".to_string(),
@@ -20355,6 +20550,7 @@ fn mark_cleanup_candidates_sets_blocked_reason_for_live_agent_and_process() {
     .into_iter()
     .collect();
     let session = ActiveAgentSession {
+        is_ephemeral: false,
         window_id: "window-live-agent".to_string(),
         session_id: "session-live-agent".to_string(),
         agent_id: "codex".to_string(),

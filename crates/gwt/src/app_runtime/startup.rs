@@ -143,6 +143,38 @@ impl AppRuntime {
 
         self.queue_startup_auto_resume_sessions();
 
+        // SPEC-3214 T-006: reclaim crash-orphaned `.intake-*` worktrees. Live
+        // sessions do not exist yet at bootstrap, but queued auto-resume
+        // sessions own their worktrees — keep those. Runs on a background
+        // thread (git worktree list + status are IO).
+        {
+            let live_worktrees: Vec<std::path::PathBuf> = self
+                .pending_startup_auto_resume_sessions
+                .iter()
+                .map(|pending| pending.session.worktree_path.clone())
+                .collect();
+            let project_roots: Vec<std::path::PathBuf> = self
+                .tabs
+                .iter()
+                .map(|tab| tab.project_root.clone())
+                .collect();
+            self.blocking_tasks.spawn(move || {
+                for project_root in project_roots {
+                    let removed = super::launch::prune_orphan_intake_worktrees(
+                        &project_root,
+                        &live_worktrees,
+                    );
+                    if removed > 0 {
+                        tracing::info!(
+                            project_root = %project_root.display(),
+                            removed,
+                            "pruned orphan intake worktrees at startup"
+                        );
+                    }
+                }
+            });
+        }
+
         let windows = self
             .tabs
             .iter()

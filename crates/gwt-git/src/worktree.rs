@@ -14,6 +14,24 @@ use serde::{Deserialize, Serialize};
 const REMOTE_DELETE_TIMEOUT: Duration = Duration::from_secs(120);
 const PROCESS_POLL_INTERVAL: Duration = Duration::from_millis(25);
 
+/// Directory-name prefix for disposable intake worktrees (SPEC-3214).
+///
+/// Intake worktrees are detached-HEAD checkouts named `.intake`, `.intake-2`,
+/// … so crash orphans can be recognized and pruned by name.
+pub const INTAKE_WORKTREE_PREFIX: &str = ".intake";
+
+/// Whether `path` names an intake worktree per the `.intake-*` convention.
+pub fn is_intake_worktree_path(path: &Path) -> bool {
+    path.file_name()
+        .and_then(|name| name.to_str())
+        .is_some_and(|name| {
+            name == INTAKE_WORKTREE_PREFIX
+                || name
+                    .strip_prefix(INTAKE_WORKTREE_PREFIX)
+                    .is_some_and(|rest| rest.starts_with('-'))
+        })
+}
+
 /// Information about a single worktree.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct WorktreeInfo {
@@ -207,6 +225,33 @@ impl WorktreeManager {
             Some(&self.repo_path),
         )
         .map_err(|e| GwtError::Git(format!("worktree add: {e}")))?;
+
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+            return Err(GwtError::Git(stderr));
+        }
+
+        Ok(())
+    }
+
+    /// Create a disposable worktree at `path` checked out at `base_ref` with a
+    /// detached HEAD (SPEC-3214 FR-001). No named branch is created, so the
+    /// worktree never appears in `git branch` and produces no branch-derived
+    /// Work identity.
+    pub fn create_detached(&self, base_ref: &str, path: &Path) -> Result<()> {
+        if path.exists() {
+            return Err(GwtError::Git(format!(
+                "worktree path already exists: {}",
+                path.display()
+            )));
+        }
+
+        let path_arg = path_arg_for_git(path);
+        let output = gwt_core::process::run_git_logged(
+            &["worktree", "add", "--detach", path_arg.as_str(), base_ref],
+            Some(&self.repo_path),
+        )
+        .map_err(|e| GwtError::Git(format!("worktree add --detach: {e}")))?;
 
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr).to_string();
@@ -1277,6 +1322,81 @@ prunable gitdir file points to non-existent location
         assert_eq!(
             String::from_utf8_lossy(&branch_output.stdout).trim(),
             "feature/materialized"
+        );
+    }
+
+    fn list_local_branches(repo_path: &Path) -> Vec<String> {
+        let output = gwt_core::process::run_git_logged(
+            &["branch", "--list", "--format=%(refname:short)"],
+            Some(repo_path),
+        )
+        .expect("git branch --list");
+        assert!(output.status.success(), "git branch --list failed");
+        String::from_utf8_lossy(&output.stdout)
+            .lines()
+            .map(str::to_string)
+            .collect()
+    }
+
+    #[test]
+    fn create_detached_creates_branchless_worktree() {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo_path = tmp.path().join("repo");
+        std::fs::create_dir_all(&repo_path).unwrap();
+        init_git_repo(&repo_path);
+        git_commit_allow_empty(&repo_path, "initial commit");
+        git_checkout_new_branch(&repo_path, "develop");
+
+        let manager = WorktreeManager::new(&repo_path);
+        let branches_before = list_local_branches(&repo_path);
+
+        let worktree_path = tmp.path().join(".intake-test");
+        manager.create_detached("develop", &worktree_path).unwrap();
+
+        assert!(worktree_path.exists());
+        assert_eq!(list_local_branches(&repo_path), branches_before);
+
+        let canonical = std::fs::canonicalize(&worktree_path).unwrap();
+        let worktrees = manager.list().unwrap();
+        let entry = worktrees
+            .iter()
+            .find(|w| comparable_path(&w.path) == comparable_path(&canonical))
+            .expect("detached worktree entry present in list()");
+        assert!(
+            entry.branch.is_none(),
+            "detached worktree must have branch: None, got {:?}",
+            entry.branch
+        );
+    }
+
+    #[test]
+    fn is_intake_worktree_path_matches_only_intake_naming_convention() {
+        assert!(is_intake_worktree_path(Path::new("/tmp/repo/.intake")));
+        assert!(is_intake_worktree_path(Path::new("/tmp/repo/.intake-2")));
+        assert!(is_intake_worktree_path(Path::new(".intake-15")));
+        assert!(!is_intake_worktree_path(Path::new("/tmp/repo/.intakes")));
+        assert!(!is_intake_worktree_path(Path::new("/tmp/repo/intake")));
+        assert!(!is_intake_worktree_path(Path::new(
+            "/tmp/repo/work/issue-1"
+        )));
+    }
+
+    #[test]
+    fn create_detached_rejects_existing_path() {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo_path = tmp.path().join("repo");
+        std::fs::create_dir_all(&repo_path).unwrap();
+        init_git_repo(&repo_path);
+        git_commit_allow_empty(&repo_path, "initial commit");
+
+        let manager = WorktreeManager::new(&repo_path);
+        let worktree_path = tmp.path().join(".intake-occupied");
+        std::fs::create_dir_all(&worktree_path).unwrap();
+
+        let err = manager.create_detached("HEAD", &worktree_path).unwrap_err();
+        assert!(
+            err.to_string().contains("already exists"),
+            "expected already-exists error, got: {err}"
         );
     }
 

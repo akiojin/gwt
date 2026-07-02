@@ -181,6 +181,10 @@ pub struct ActiveAgentSession {
     pub(crate) agent_project_root: String,
     pub(crate) runtime_target: gwt_agent::LaunchRuntimeTarget,
     pub(crate) tab_id: String,
+    /// SPEC-3214: the session runs in a disposable `.intake-*` detached
+    /// worktree. On stop it persists no Paused Work (FR-003) and its
+    /// worktree is cleaned up (FR-002).
+    pub(crate) is_ephemeral: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -585,6 +589,9 @@ pub struct AppRuntime {
     /// launch stage banners (formerly the `AGENT_LAUNCH_STAGE_COUNTER`
     /// module static).
     pub(crate) agent_launch_stage_counter: std::sync::atomic::AtomicU64,
+    /// SPEC-3214 FR-002: intake worktrees of stopped ephemeral sessions,
+    /// awaiting cleanup after the PTY is gone (window_id → worktree path).
+    pub(crate) pending_ephemeral_worktree_cleanups: HashMap<String, PathBuf>,
 }
 
 impl ProjectTabRuntime {
@@ -692,6 +699,7 @@ impl AppRuntime {
             usage_refresh: None,
             image_paste_sequence: std::sync::atomic::AtomicU64::new(0),
             agent_launch_stage_counter: std::sync::atomic::AtomicU64::new(1),
+            pending_ephemeral_worktree_cleanups: HashMap::new(),
         };
         app.rebuild_window_lookup();
         app.seed_window_pty_statuses();

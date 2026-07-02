@@ -405,6 +405,13 @@ pub struct LaunchConfig {
     pub docker_lifecycle_intent: DockerLifecycleIntent,
     pub linked_issue_number: Option<u64>,
     pub windows_shell: Option<crate::WindowsShellKind>,
+    /// SPEC-3214 FR-001: launch into a disposable detached-HEAD intake
+    /// worktree instead of a named-branch worktree. Invariant: an ephemeral
+    /// launch never creates a named branch or a branch-derived Work identity.
+    pub is_ephemeral: bool,
+    /// Committish the ephemeral worktree checks out (e.g. `origin/develop`).
+    /// `None` falls back to the repository `HEAD`.
+    pub ephemeral_base_ref: Option<String>,
 }
 
 /// Permission mode for agent launch.
@@ -790,6 +797,8 @@ impl AgentLaunchBuilder {
             docker_lifecycle_intent: self.docker_lifecycle_intent,
             linked_issue_number: self.linked_issue_number,
             windows_shell: self.windows_shell,
+            is_ephemeral: false,
+            ephemeral_base_ref: None,
         }
     }
 

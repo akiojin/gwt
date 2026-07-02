@@ -2356,6 +2356,7 @@ mod tests {
 
     fn sample_active_agent_session(tab_id: &str, window_id: &str) -> ActiveAgentSession {
         ActiveAgentSession {
+            is_ephemeral: false,
             window_id: window_id.to_string(),
             session_id: "session-1".to_string(),
             agent_id: "codex".to_string(),
@@ -2466,6 +2467,7 @@ mod tests {
             usage_refresh: None,
             image_paste_sequence: std::sync::atomic::AtomicU64::new(0),
             agent_launch_stage_counter: std::sync::atomic::AtomicU64::new(1),
+            pending_ephemeral_worktree_cleanups: HashMap::new(),
         };
         runtime.rebuild_window_lookup();
         runtime.seed_window_pty_statuses();
