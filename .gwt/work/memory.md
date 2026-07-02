@@ -7519,3 +7519,17 @@ Type: project
 Context: PR #3205 (Deliver mode) が放置中に develop へ簡易版 Deliver (443656db6) が別経路で merge され、SKILL.md 双子が conflict した。また Test (Rust, Linux) が client_pane_snapshot_repair_replies_with_snapshots_for_known_panes_only の PtyCreationFailed (ENOENT) で 2 run 連続失敗した。
 Learning: (1) 同一 skill への並行実装は「後勝ち」ではなく安全性の superset 側 (disarm-before-push 不変条件・merge method 自動選択・deliver-flow.md reference 付き) を本文採用し、trigger 文言は union で統合する。両実装の doc テストが lib.rs に併存するため、解消後は双方のテストを通すこと。(2) PTY spawn ENOENT は develop でも test_spawn_with_env 等で既出の infra flaky 系で、ローカル (macOS) full suite PASS + develop 直近 CI green なら transient 分類で再走してよい。
 Future Action: gwt-manage-pr SKILL.md を編集する際は .claude/.codex の byte parity と gwt-skills の manage_pr doc テスト群 (gwt_manage_pr_documents_drive_to_merge_delivery / manage_pr_documents_deliver_drive_to_merge_mode) を必ずローカルで実行する。PTY 系 CI flaky が同一テストで 3 run 連続したら infra ではなくコードとして調査に切り替える。
+
+## 2026-07-02 — PTY テストの cwd は必ず明示する（portable-pty の $HOME 無検査 chdir）
+
+Type: prevention
+Context: Issue #3220: CI Test (Rust, Linux) で app_runtime の PTY テストが PtyCreationFailed(ENOENT) で断続的に失敗。portable-pty 0.9.0 は cwd 未指定 spawn で process cwd ではなく $HOME を子プロセス cwd に使い、存在チェックなしで chdir する。ScopedEnvVar で HOME を tempdir に差し替えるテストと env lock を取らない PTY テストが並走すると、glibc の thread-unsafe な environ 読み取りで deleted-tempdir を掴み ENOENT になる（macOS では再現せず）。
+Learning: cwd 未指定の PTY spawn は ambient env（$HOME）依存であり、テストプロセス内の HOME 変異と並走した瞬間に壊れる。テスト側で env lock を増やすより、spawn を env 非依存にする方が根本的で単純。
+Future Action: テストで Pane::new / PTY spawn する場合は cwd を必ず明示する。crates/gwt/src/app_runtime/tests.rs の test_pane_cwd()（unix は /、Windows は std::env::temp_dir()）を使い、cwd None を新規に書かない。同種 flaky（PtyCreationFailed ENOENT）を見たら HOME 変異テストとの並走を疑う。
+
+## 2026-07-02 — 修正が別 PR に同乗した Issue は closing keyword か即時クローズで塞ぐ（monitor 再起動防止）
+
+Type: prevention
+Context: Issue #3220 の修正 (b63a42cf0) は work/20260702-0241 の PR #3218 に同乗して develop へ merge されたが、コミットが `Refs #3220`（closing keyword ではない）だったため Issue が OPEN のまま残り、Issue Monitor が work/issue-3220 の冗長な修正セッションを起動した。起動後の調査で fix が merge 済みと判明し、実装ゼロで closure comment のみ投稿して終了した。
+Learning: 修正が別ブランチの PR に同乗する場合、`Refs #N` では GitHub の auto-close が効かず、OPEN のままの Issue を Issue Monitor が拾って多重起動する。work/issue-N worktree に起動されたら、実装前に `issue.linked_prs` と `git branch -r --contains <fix commit>` で fix の merge 状態を必ず確認する。
+Future Action: (1) fix commit を他 PR に同乗させるときは PR 本文か commit footer に `Fixes #N` / `Closes #N` を使うか、merge 直後に closure comment + クローズまで行う。(2) issue 起点セッションの最初の調査項目に「fix が既に merge 済みか」を含める。gwtd に issue.close operation は無いので、クローズは PR の closing keyword か user 操作に頼る。
