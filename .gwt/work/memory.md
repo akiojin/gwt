@@ -7519,3 +7519,10 @@ Type: project
 Context: PR #3205 (Deliver mode) が放置中に develop へ簡易版 Deliver (443656db6) が別経路で merge され、SKILL.md 双子が conflict した。また Test (Rust, Linux) が client_pane_snapshot_repair_replies_with_snapshots_for_known_panes_only の PtyCreationFailed (ENOENT) で 2 run 連続失敗した。
 Learning: (1) 同一 skill への並行実装は「後勝ち」ではなく安全性の superset 側 (disarm-before-push 不変条件・merge method 自動選択・deliver-flow.md reference 付き) を本文採用し、trigger 文言は union で統合する。両実装の doc テストが lib.rs に併存するため、解消後は双方のテストを通すこと。(2) PTY spawn ENOENT は develop でも test_spawn_with_env 等で既出の infra flaky 系で、ローカル (macOS) full suite PASS + develop 直近 CI green なら transient 分類で再走してよい。
 Future Action: gwt-manage-pr SKILL.md を編集する際は .claude/.codex の byte parity と gwt-skills の manage_pr doc テスト群 (gwt_manage_pr_documents_drive_to_merge_delivery / manage_pr_documents_deliver_drive_to_merge_mode) を必ずローカルで実行する。PTY 系 CI flaky が同一テストで 3 run 連続したら infra ではなくコードとして調査に切り替える。
+
+## 2026-07-02 — gwt-fix-issue: linked PRs 先行確認と issue.close 不在
+
+Type: workflow
+Context: gwt-fix-issue #3213 で調査したところ、修正は既に PR #3215（view 層）/ PR #3218（store 層）として merge 済みだった。完了後に Issue close を試みたが、gwtd には issue.close operation が存在せず（issue.view/comments/linked_prs/create/comment のみ）、direct `gh issue close` は managed hook で block される。
+Learning: gwt-fix-issue の完了記録は closure comment（issue.comment）が正本で、Issue の close 自体は agent からは実行できない。issue.view の直後に issue.linked_prs を確認すると、他 session で merge 済みの修正を早期検出でき、重複実装を防げる。
+Future Action: gwt-fix-issue では issue.view の直後に issue.linked_prs を必ず確認し、MERGED PR があれば「検証 + closure comment + close 推奨」の経路に切り替える。close はユーザーに依頼する。
