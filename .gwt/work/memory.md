@@ -7499,3 +7499,10 @@ Type: project
 Context: Issue #3197 で gwt-manage-pr の managed skill に新規 reference file (references/deliver-flow.md) を追加した際、git status に出ず commit され損ねかけた。
 Learning: gwt-managed worktree では `.git/info/exclude` に `.claude/skills/gwt-*` と `.codex/skills/gwt-*` の除外 entry があり、新規 managed-skill ファイルは untracked にすら現れず silent に無視される。既存ファイル(SKILL.md 等)は既に tracked なので modification は M で見えるが、NEW ファイルは git add -f しないと commit されない。commit され損ねると include_dir! 埋め込み元と CI checkout に file が無く、新 test と parity test が CI で fail する。
 Future Action: managed skill (.claude/skills/gwt-*, .codex/skills/gwt-*) に新規ファイルを追加したら必ず `git check-ignore -v <path>` で除外を確認し `git add -f` で明示 stage する。commit 後 `git show --stat HEAD` で新規ファイルが含まれることを確認する。
+
+## 2026-07-02 — PR #3205 救出: 並行実装 conflict の解消と PTY flaky の切り分け
+
+Type: project
+Context: PR #3205 (Deliver mode) が放置中に develop へ簡易版 Deliver (443656db6) が別経路で merge され、SKILL.md 双子が conflict した。また Test (Rust, Linux) が client_pane_snapshot_repair_replies_with_snapshots_for_known_panes_only の PtyCreationFailed (ENOENT) で 2 run 連続失敗した。
+Learning: (1) 同一 skill への並行実装は「後勝ち」ではなく安全性の superset 側 (disarm-before-push 不変条件・merge method 自動選択・deliver-flow.md reference 付き) を本文採用し、trigger 文言は union で統合する。両実装の doc テストが lib.rs に併存するため、解消後は双方のテストを通すこと。(2) PTY spawn ENOENT は develop でも test_spawn_with_env 等で既出の infra flaky 系で、ローカル (macOS) full suite PASS + develop 直近 CI green なら transient 分類で再走してよい。
+Future Action: gwt-manage-pr SKILL.md を編集する際は .claude/.codex の byte parity と gwt-skills の manage_pr doc テスト群 (gwt_manage_pr_documents_drive_to_merge_delivery / manage_pr_documents_deliver_drive_to_merge_mode) を必ずローカルで実行する。PTY 系 CI flaky が同一テストで 3 run 連続したら infra ではなくコードとして調査に切り替える。
