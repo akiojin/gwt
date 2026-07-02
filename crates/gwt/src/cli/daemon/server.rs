@@ -633,6 +633,21 @@ fn scan_issue_monitor_once_blocking(
         &now,
     );
     monitor.recover_stuck_autonomous(&now);
+    // SPEC #3200 kill switch (codex #3217 review): with autonomous mode OFF, any
+    // record still Delivering has a live GitHub auto-merge that must be ACTIVELY
+    // cancelled — abandoning it locally would let the old PR merge later while
+    // nobody is watching. Runs AFTER reconcile so a PR that already merged was
+    // recorded as merged instead of pointlessly disarmed. No-op while mode is ON.
+    for (issue_number, pr_number) in monitor.take_kill_switch_disarms() {
+        let disarmed = gwt_git::pr_status::disable_pr_auto_merge(&scope.project_root, pr_number);
+        tracing::info!(
+            issue = issue_number,
+            pr = pr_number,
+            disarmed,
+            "kill switch: auto-merge disarm attempted"
+        );
+        monitor.record_kill_switch_disarm_result(issue_number, pr_number, disarmed);
+    }
     // SPEC #3200 Option A: advance in-flight autonomous issues through the loop
     // (PR detect → review → gate → merge → watch). No-op unless autonomous mode
     // is on; default OFF keeps the SPEC #3165 flow unchanged.
