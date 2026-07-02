@@ -606,6 +606,16 @@ impl ProjectTabRuntime {
     }
 }
 
+/// Issue #3222: whether a local Issue Monitor pass may claim + launch, or must
+/// only observe (scan for a fresh snapshot without side effects). ACK and
+/// window-close handling runs `Observe`; user-driven refresh/config flows run
+/// `ClaimAndLaunch`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum IssueMonitorScanPolicy {
+    ClaimAndLaunch,
+    Observe,
+}
+
 impl AppRuntime {
     pub(crate) fn new(
         proxy: EventLoopProxy<UserEvent>,
@@ -1147,12 +1157,16 @@ impl AppRuntime {
         // it is replaced rather than left on the canvas. Guard against closing the
         // freshly launched window if it happens to reuse the same id.
         let mut stale_window: Option<String> = None;
-        let mut events = self.local_issue_monitor_events_for(None, |monitor| {
-            stale_window = monitor
-                .take_failed_window(issue_number)
-                .filter(|stale| *stale != window_id);
-            monitor.complete_active_launch(issue_number, window_id.clone());
-        });
+        let mut events = self.local_issue_monitor_events_with_policy(
+            None,
+            IssueMonitorScanPolicy::Observe,
+            |monitor| {
+                stale_window = monitor
+                    .take_failed_window(issue_number)
+                    .filter(|stale| *stale != window_id);
+                monitor.complete_active_launch(issue_number, window_id.clone());
+            },
+        );
         if let Some(stale) = stale_window {
             events.extend(self.close_window_events(&stale));
         }
@@ -1254,11 +1268,15 @@ impl AppRuntime {
             }
         }
         let requeue_windows = monitor_windows;
-        self.local_issue_monitor_events_for(None, move |monitor| {
-            for window_id in &requeue_windows {
-                monitor.requeue_window(window_id);
-            }
-        })
+        self.local_issue_monitor_events_with_policy(
+            None,
+            IssueMonitorScanPolicy::Observe,
+            move |monitor| {
+                for window_id in &requeue_windows {
+                    monitor.requeue_window(window_id);
+                }
+            },
+        )
     }
 
     fn local_issue_monitor_events(
@@ -1272,6 +1290,19 @@ impl AppRuntime {
     fn local_issue_monitor_events_for(
         &mut self,
         client_id: Option<&str>,
+        apply: impl FnOnce(&mut gwt::IssueMonitorState),
+    ) -> Vec<OutboundEvent> {
+        self.local_issue_monitor_events_with_policy(
+            client_id,
+            IssueMonitorScanPolicy::ClaimAndLaunch,
+            apply,
+        )
+    }
+
+    fn local_issue_monitor_events_with_policy(
+        &mut self,
+        client_id: Option<&str>,
+        policy: IssueMonitorScanPolicy,
         apply: impl FnOnce(&mut gwt::IssueMonitorState),
     ) -> Vec<OutboundEvent> {
         let now = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
@@ -1305,6 +1336,15 @@ impl AppRuntime {
                         );
                         if monitor.config.enabled {
                             monitor.set_gui_connected(true);
+                        }
+                        // Issue #3222: ACK / window-close flows scan for a fresh
+                        // snapshot (inbox rows for the UI) but must NEVER claim
+                        // or launch — re-entrant claiming on a disk snapshot
+                        // that cannot see other in-flight claims is what
+                        // spawned duplicate windows past max_active.
+                        if monitor.config.enabled
+                            && matches!(policy, IssueMonitorScanPolicy::ClaimAndLaunch)
+                        {
                             let launch_profile_ready = self
                                 .issue_monitor_previous_profiles(&project_root)
                                 .preferred_profile()
@@ -1386,6 +1426,11 @@ impl AppRuntime {
             }
             launch_events.extend(request_events);
         }
+        // Issue #3222: persist the claim-side state (Launching without a bound
+        // window yet, plus any recorded launch failures) so the next handler /
+        // the async launch ACK sees the in-flight claims and cannot re-claim
+        // them into duplicate windows.
+        let _ = gwt::save_issue_monitor_prefs(&prefs_path, &monitor.prefs());
         let mut events = launch_events;
         events.extend(self.issue_monitor_snapshot_events_for(client_id, monitor));
         events

@@ -20607,3 +20607,111 @@ fn is_identifier_like_title_classifies_shapes() {
     assert!(!super::is_identifier_like_title("SPEC-3075"));
     assert!(!super::is_identifier_like_title("develop"));
 }
+
+#[test]
+fn issue_monitor_launch_succeeded_ack_is_non_scanning_and_persists() {
+    // Issue #3222: the launch-success ACK used to re-enter the full
+    // scan+claim flow on a fresh disk snapshot that could not see other
+    // in-flight claims, re-claiming them (same-owner renewal) and spawning
+    // duplicate windows past max_active. The ACK must only bind the window and
+    // persist; scanning for a fresh snapshot is allowed, claiming is not.
+    let temp = tempfile::TempDir::new().expect("tempdir");
+    // Thread-local override: never mutate process-global HOME in parallel tests.
+    let _home = gwt_core::test_support::ScopedGwtHome::set(temp.path());
+    let repo = temp.path().join("repo");
+    std::fs::create_dir_all(&repo).expect("create repo");
+    init_repo(&repo);
+
+    // Seed an in-flight claim (Launching, no window bound yet) on disk.
+    let prefs_path = gwt::issue_monitor_prefs_path_for_repo_path(&repo);
+    let prefs = gwt::IssueMonitorPrefs {
+        enabled: true,
+        launching_issues: vec![42],
+        ..gwt::IssueMonitorPrefs::default()
+    };
+    gwt::save_issue_monitor_prefs(&prefs_path, &prefs).expect("seed prefs");
+
+    let tab = sample_project_tab("tab-1", "Repo", repo.clone(), ProjectKind::Git, &[]);
+    let (mut runtime, _recorded) =
+        sample_runtime_with_events(temp.path(), vec![tab], Some("tab-1"));
+
+    let events = runtime.issue_monitor_launch_succeeded_events(42, "tab-1::agent-1");
+
+    // The ACK may scan for a fresh snapshot, but must NOT claim/launch: no
+    // settings-required wizard, no "launch requested" toast.
+    for event in &events {
+        assert!(
+            !matches!(event.event, BackendEvent::LaunchWizardState { .. }),
+            "ACK must not open the launch wizard (settings-required prompt)"
+        );
+        if let BackendEvent::IssueMonitorToast { message, .. } = &event.event {
+            assert!(
+                !message.contains("launch requested"),
+                "ACK must not trigger launches: {message}"
+            );
+        }
+    }
+    let persisted = gwt::load_issue_monitor_prefs(&prefs_path).expect("reload");
+    assert!(
+        persisted
+            .launched_issues
+            .iter()
+            .any(|entry| entry.issue_number == 42 && entry.window_id == "tab-1::agent-1"),
+        "the ACK binds and persists the window: {:?}",
+        persisted.launched_issues
+    );
+    assert!(
+        persisted.launching_issues.is_empty(),
+        "the in-flight marker is consumed by the bind"
+    );
+}
+
+#[test]
+fn issue_monitor_windows_closed_requeue_is_non_scanning() {
+    // Issue #3222 (same re-entrancy class): closing a monitor window requeues
+    // + persists and may rescan for the snapshot, but must not claim/launch.
+    let temp = tempfile::TempDir::new().expect("tempdir");
+    // Thread-local override: never mutate process-global HOME in parallel tests.
+    let _home = gwt_core::test_support::ScopedGwtHome::set(temp.path());
+    let repo = temp.path().join("repo");
+    std::fs::create_dir_all(&repo).expect("create repo");
+    init_repo(&repo);
+
+    let prefs_path = gwt::issue_monitor_prefs_path_for_repo_path(&repo);
+    let prefs = gwt::IssueMonitorPrefs {
+        enabled: true,
+        launched_issues: vec![gwt::IssueMonitorLaunchedIssue {
+            issue_number: 42,
+            window_id: "tab-1::agent-1".to_string(),
+        }],
+        ..gwt::IssueMonitorPrefs::default()
+    };
+    gwt::save_issue_monitor_prefs(&prefs_path, &prefs).expect("seed prefs");
+
+    let tab = sample_project_tab("tab-1", "Repo", repo.clone(), ProjectKind::Git, &[]);
+    let (mut runtime, _recorded) =
+        sample_runtime_with_events(temp.path(), vec![tab], Some("tab-1"));
+
+    let events = runtime.issue_monitor_windows_closed_events(&["tab-1::agent-1".to_string()]);
+
+    // Close may scan for a fresh snapshot, but must NOT claim/launch — a
+    // re-claim here could instantly respawn the just-closed window or
+    // duplicate other in-flight launches.
+    for event in &events {
+        assert!(
+            !matches!(event.event, BackendEvent::LaunchWizardState { .. }),
+            "window close must not open the launch wizard"
+        );
+        if let BackendEvent::IssueMonitorToast { message, .. } = &event.event {
+            assert!(
+                !message.contains("launch requested"),
+                "window close must not trigger launches: {message}"
+            );
+        }
+    }
+    let persisted = gwt::load_issue_monitor_prefs(&prefs_path).expect("reload");
+    assert!(
+        persisted.launched_issues.is_empty(),
+        "closed window is released from the launched set"
+    );
+}
