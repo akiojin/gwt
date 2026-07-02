@@ -247,3 +247,151 @@ fn default_off_never_enters_the_autonomous_loop() {
     assert!(monitor.autonomous_record(42).is_none());
     assert!(monitor.autonomous_in_flight_issues().is_empty());
 }
+
+#[test]
+fn fr_family_decision_boundaries_are_observable() {
+    // SPEC #3200 T-104 / FR-033 testability audit: every autonomous decision
+    // boundary must be observable from the outside — via a state transition, an
+    // inbox surface, a returned verification value, or an operator notice. One
+    // assertion block per FR family; if a future refactor makes a boundary
+    // silent, this audit goes RED.
+    let mut monitor = autonomous_monitor();
+    let issue = auto_issue(42);
+
+    // FR-001/FR-003 (two-stage opt-in): the eligibility DECISION is a returned
+    // value, and a non-candidate leaves no autonomous state behind.
+    let mut plain = auto_issue(43);
+    plain.labels.clear(); // no auto-merge label ⇒ human gate
+    let ineligible =
+        monitor.prepare_autonomous_candidate(&plain, &verified(), "2026-07-02T00:00:00Z");
+    assert!(matches!(ineligible, EligibilityDecision::HumanGate(_)));
+    assert!(monitor.autonomous_record(43).is_none());
+
+    // FR-006/FR-014 (eligibility + acceptance snapshot): eligibility is a
+    // returned value; the captured snapshot + Implementing phase are state.
+    gwt::scan_issue_monitor_candidates(
+        &mut monitor,
+        std::slice::from_ref(&issue),
+        "2026-07-02T00:00:00Z",
+    );
+    let eligible =
+        monitor.prepare_autonomous_candidate(&issue, &verified(), "2026-07-02T00:00:00Z");
+    assert_eq!(eligible, EligibilityDecision::Eligible);
+    let record = monitor.autonomous_record(42).expect("record created");
+    assert_eq!(record.phase, AutonomousPhase::Implementing);
+    assert!(record.acceptance_snapshot.is_some(), "snapshot observable");
+
+    // FR-026 (attempt counter) + FR-022/FR-024/FR-029 (transient retry/backoff):
+    // the failure outcome is a returned value; the counter, the backoff window,
+    // and a warn notice are all observable.
+    let outcome = monitor.record_autonomous_failure(
+        42,
+        gwt::FailureClass::Transient,
+        "transient blip",
+        "2026-07-02T00:10:00Z",
+    );
+    assert!(matches!(
+        outcome,
+        gwt::issue_monitor::AutonomousFailureOutcome::Retry { attempt: 1 }
+    ));
+    assert_eq!(monitor.attempt_count(42), 1);
+    assert!(!monitor.retry_ready(42, "2026-07-02T00:10:01Z"));
+
+    // FR-013/FR-025 (stuck/idle detection): the stuck set is a queryable value
+    // anchored on the heartbeat.
+    monitor.prepare_autonomous_candidate(&issue, &verified(), "2026-07-02T02:00:00Z");
+    monitor.complete_active_launch(42, "tab-1::agent-42");
+    monitor.record_autonomous_heartbeat(42, "2026-07-02T02:00:00Z");
+    assert!(
+        monitor
+            .stuck_autonomous_issues("2026-07-02T09:00:00Z")
+            .contains(&42),
+        "stale heartbeat is observable as stuck"
+    );
+
+    // FR-009..FR-016 (strong gate): the gate decision and route are returned
+    // values bound to the reviewed SHA.
+    monitor.begin_review(42, 99, SHA);
+    monitor.record_review_verdict(42, true);
+    let inputs = monitor
+        .autonomous_gate_inputs(42, verified(), pass_rollup(), SHA, BODY)
+        .expect("gate ready");
+    assert_eq!(evaluate_autonomous_gate(&inputs), GateDecision::Pass);
+    assert_eq!(route_autonomous_gate(&inputs), GateAction::Deliver);
+
+    // FR-032/FR-033 (status protocol): mode + per-issue phase/attempts are on
+    // the status view.
+    let status = monitor.status_view();
+    assert!(status.autonomous_mode);
+    let summary = status
+        .autonomous_issues
+        .iter()
+        .find(|entry| entry.issue_number == 42)
+        .expect("per-issue autonomous summary observable");
+    assert_eq!(summary.attempts, 1);
+
+    // FR-017/FR-018 (delivery + layer-4) + FR-034 (notices): arming, the
+    // SHA-identity check, and completion are observable; the operator notices
+    // for retry / arming / completion are queued for the GUI.
+    monitor.begin_delivering(42);
+    assert_eq!(
+        monitor.autonomous_record(42).unwrap().phase,
+        AutonomousPhase::Delivering
+    );
+    assert!(merged_sha_matches_reviewed(SHA, SHA));
+    monitor.record_merged(42);
+    assert_eq!(
+        monitor.inbox_item(42).map(|i| i.state),
+        Some(MonitorInboxState::Merged)
+    );
+    let notice_levels: Vec<String> = monitor
+        .take_autonomous_notices()
+        .into_iter()
+        .map(|notice| notice.level)
+        .collect();
+    for expected in ["warn", "info", "done"] {
+        assert!(
+            notice_levels.iter().any(|level| level == expected),
+            "operator notice `{expected}` observable: {notice_levels:?}"
+        );
+    }
+
+    // FR-027 (NeedsHuman escalation): terminal failure is observable via the
+    // inbox state, the status view, and an error notice.
+    let mut escalated = autonomous_monitor();
+    let issue2 = auto_issue(44);
+    gwt::scan_issue_monitor_candidates(
+        &mut escalated,
+        std::slice::from_ref(&issue2),
+        "2026-07-02T00:00:00Z",
+    );
+    escalated.prepare_autonomous_candidate(&issue2, &verified(), "2026-07-02T00:00:00Z");
+    let terminal = escalated.record_autonomous_failure(
+        44,
+        gwt::FailureClass::Terminal,
+        "review rejected",
+        "2026-07-02T00:30:00Z",
+    );
+    assert!(matches!(
+        terminal,
+        gwt::issue_monitor::AutonomousFailureOutcome::Escalated(_)
+    ));
+    assert_eq!(
+        escalated.inbox_item(44).map(|i| i.state),
+        Some(MonitorInboxState::NeedsHuman)
+    );
+    let status = escalated.status_view();
+    assert!(status
+        .autonomous_issues
+        .iter()
+        .any(|entry| entry.issue_number == 44 && entry.needs_human));
+    assert!(escalated
+        .take_autonomous_notices()
+        .iter()
+        .any(|notice| notice.level == "error" && notice.issue_number == 44));
+
+    // FR-002 (kill switch observability): flipping the mode off is visible on
+    // the status view.
+    escalated.set_autonomous_mode(false);
+    assert!(!escalated.status_view().autonomous_mode);
+}
