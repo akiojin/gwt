@@ -334,6 +334,7 @@ fn fr_family_decision_boundaries_are_observable() {
     // SHA-identity check, and completion are observable; the operator notices
     // for retry / arming / completion are queued for the GUI.
     monitor.begin_delivering(42);
+    monitor.record_auto_merge_armed(42); // arm succeeded ⇒ info notice
     assert_eq!(
         monitor.autonomous_record(42).unwrap().phase,
         AutonomousPhase::Delivering

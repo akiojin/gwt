@@ -1456,7 +1456,13 @@ impl IssueMonitorState {
     /// (the auto-merge is being armed).
     pub fn begin_delivering(&mut self, issue_number: u64) {
         self.set_autonomous_phase(issue_number, AutonomousPhase::Delivering);
-        // FR-034: the gate passing (auto-merge armed) is a key unattended event.
+    }
+
+    /// SPEC #3200 FR-034 (codex #3217 review): announce a SUCCESSFUL auto-merge
+    /// arm. Called by the worker only after `gh pr merge --auto` actually
+    /// succeeded — never before — so the operator toast cannot claim an arm
+    /// that failed (the merge helper's fail-closed contract).
+    pub fn record_auto_merge_armed(&mut self, issue_number: u64) {
         self.push_autonomous_notice(
             "info",
             issue_number,
@@ -1840,6 +1846,79 @@ impl IssueMonitorState {
     /// are retained until someone can see them.
     pub fn take_autonomous_notices(&mut self) -> Vec<AutonomousNotice> {
         self.pending_autonomous_notices.drain(..).collect()
+    }
+
+    /// Queue an operator notice that must surface even though autonomous mode is
+    /// already OFF — the kill-switch disarm results. Bypasses the fail-closed
+    /// mode gate deliberately: these notices are feedback ABOUT turning the mode
+    /// off, so gating them on the mode would silence exactly the events the
+    /// operator just asked for.
+    fn push_kill_switch_notice(&mut self, level: &str, issue_number: u64, message: String) {
+        while self.pending_autonomous_notices.len() >= AUTONOMOUS_NOTICE_CAP {
+            self.pending_autonomous_notices.pop_front();
+        }
+        self.pending_autonomous_notices.push_back(AutonomousNotice {
+            level: level.to_string(),
+            issue_number,
+            message,
+        });
+    }
+
+    /// SPEC #3200 kill switch (codex #3217 review): with autonomous mode OFF,
+    /// drain every record still in `Delivering` — each has an armed GitHub
+    /// auto-merge that must be ACTIVELY cancelled (`gh pr merge --disable-auto`),
+    /// not just abandoned locally. Returns `(issue_number, pr_number)` pairs for
+    /// the caller (the daemon scan, which owns the repo path) to disarm; each
+    /// drained record is escalated to `NeedsHuman` so the halted delivery stays
+    /// visible and is never silently resumed. No-op while the mode is ON.
+    pub fn take_kill_switch_disarms(&mut self) -> Vec<(u64, u64)> {
+        if self.autonomous_mode {
+            return Vec::new();
+        }
+        let delivering: Vec<(u64, Option<u64>)> = self
+            .autonomous_records
+            .values()
+            .filter(|record| record.phase == AutonomousPhase::Delivering)
+            .map(|record| (record.issue_number, record.pr_number))
+            .collect();
+        let mut disarms = Vec::new();
+        for (issue_number, pr_number) in delivering {
+            self.escalate_to_needs_human(
+                issue_number,
+                "autonomous mode disabled — delivery halted; auto-merge disarm requested",
+            );
+            if let Some(pr) = pr_number {
+                disarms.push((issue_number, pr));
+            }
+        }
+        disarms
+    }
+
+    /// Record the outcome of a kill-switch auto-merge disarm attempt as an
+    /// operator notice (ungated: the mode is OFF by definition here).
+    pub fn record_kill_switch_disarm_result(
+        &mut self,
+        issue_number: u64,
+        pr_number: u64,
+        disarmed: bool,
+    ) {
+        if disarmed {
+            self.push_kill_switch_notice(
+                "warn",
+                issue_number,
+                format!(
+                    "Issue #{issue_number}: auto-merge on PR #{pr_number} disarmed (kill switch)"
+                ),
+            );
+        } else {
+            self.push_kill_switch_notice(
+                "error",
+                issue_number,
+                format!(
+                    "Issue #{issue_number}: failed to disarm auto-merge on PR #{pr_number} — verify on GitHub manually"
+                ),
+            );
+        }
     }
 
     pub fn complete_active_launch(&mut self, issue_number: u64, window_id: impl Into<String>) {
@@ -3286,9 +3365,11 @@ mod tests {
             "review spawn blip",
             "2026-07-02T00:10:00Z",
         );
-        // Gate pass → Delivering (auto-merge armed) → info notice.
+        // Gate pass → Delivering; the info notice fires only once the arm
+        // actually SUCCEEDS (codex #3217: no success toast for a failed arm).
         monitor.set_autonomous_phase(7, AutonomousPhase::Reviewing);
         monitor.begin_delivering(7);
+        monitor.record_auto_merge_armed(7);
         // Merge completion → done notice.
         monitor.record_merged(7);
         // A second issue escalates → error notice.
@@ -3341,6 +3422,53 @@ mod tests {
             monitor.take_autonomous_notices().is_empty(),
             "default-OFF merge emits no autonomous notice"
         );
+    }
+
+    #[test]
+    fn kill_switch_drains_delivering_records_for_active_disarm() {
+        // codex #3217 review: turning autonomous mode OFF must actively disarm
+        // GitHub auto-merges armed by the monitor — abandoning a Delivering
+        // record locally would let the old PR merge later unwatched. The drain
+        // returns (issue, pr) pairs for the daemon to `--disable-auto`, and each
+        // halted delivery escalates to NeedsHuman (visible, never auto-resumed).
+        let mut monitor = autonomous_state();
+        scan_issue_monitor_candidates(&mut monitor, &[issue(7)], "2026-07-02T00:00:00Z");
+        monitor.set_autonomous_phase(7, AutonomousPhase::Implementing);
+        monitor.begin_review(7, 99, "abc123");
+        monitor.begin_delivering(7);
+
+        // Mode ON ⇒ no drain (deliveries are still owned by the loop).
+        assert!(monitor.take_kill_switch_disarms().is_empty());
+
+        monitor.set_autonomous_mode(false);
+        let disarms = monitor.take_kill_switch_disarms();
+        assert_eq!(
+            disarms,
+            vec![(7, 99)],
+            "delivering PR handed over for disarm"
+        );
+        assert_eq!(
+            monitor.autonomous_record(7).map(|r| r.phase),
+            Some(AutonomousPhase::NeedsHuman),
+            "halted delivery escalates instead of silently resuming later"
+        );
+        assert_eq!(
+            monitor.inbox_item(7).map(|item| item.state),
+            Some(MonitorInboxState::NeedsHuman)
+        );
+        // Idempotent: a second pass finds nothing.
+        assert!(monitor.take_kill_switch_disarms().is_empty());
+
+        // The disarm RESULT surfaces even though the mode is OFF (ungated).
+        monitor.record_kill_switch_disarm_result(7, 99, true);
+        monitor.record_kill_switch_disarm_result(7, 99, false);
+        let notices = monitor.take_autonomous_notices();
+        assert!(notices
+            .iter()
+            .any(|n| n.level == "warn" && n.message.contains("disarmed")));
+        assert!(notices
+            .iter()
+            .any(|n| n.level == "error" && n.message.contains("manually")));
     }
 
     #[test]
