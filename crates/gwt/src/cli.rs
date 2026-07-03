@@ -18,7 +18,7 @@ pub mod gwtd_resolver;
 pub mod hook;
 pub mod improvement;
 pub(crate) mod index;
-mod issue;
+pub(crate) mod issue;
 mod issue_spec;
 mod json_envelope;
 pub(crate) mod memory;
@@ -31,6 +31,7 @@ pub(crate) mod search;
 mod skill_state_runtime;
 #[cfg(test)]
 mod test_support;
+mod title_summary_guard;
 pub mod tray;
 pub mod update;
 mod workspace;
@@ -52,6 +53,7 @@ pub use improvement::ImprovementCommand;
 pub use index::{IndexCommand, IndexScope};
 pub use memory::MemoryCommand;
 pub use search::SearchCommand;
+pub(crate) use title_summary_guard::validate_title_summary_work_name;
 
 /// Compact linked PR summary used by `issue.linked_prs`.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -60,6 +62,8 @@ pub struct LinkedPrSummary {
     pub title: String,
     pub state: String,
     pub url: String,
+    #[serde(default)] // closes-the-issue flag; gates the completion probe (#3226)
+    pub will_close_target: bool,
 }
 
 /// Compact PR check entry used by `pr.checks`.
@@ -343,93 +347,6 @@ impl std::fmt::Display for CliParseError {
 }
 
 impl std::error::Error for CliParseError {}
-
-const TITLE_SUMMARY_WORK_NAME_REASON: &str =
-    "purpose must be a work name, not a status/result; keep completion, progress, or blocker state in params.status, params.current_focus, params.summary, or Board body";
-
-fn validate_title_summary_work_name(flag: &'static str, value: &str) -> Result<(), CliParseError> {
-    let trimmed = value.trim();
-    if trimmed.is_empty() || title_summary_has_status_marker(trimmed) {
-        return Err(CliParseError::InvalidValue {
-            flag,
-            reason: TITLE_SUMMARY_WORK_NAME_REASON,
-        });
-    }
-    Ok(())
-}
-
-fn title_summary_has_status_marker(value: &str) -> bool {
-    let normalized = trim_title_status_punctuation(value);
-    let lower = normalized.to_ascii_lowercase();
-    let english_status_suffixes = [
-        "blocked",
-        "complete",
-        "completed",
-        "done",
-        "finished",
-        "fixed",
-        "implemented",
-        "in progress",
-        "verified",
-        "wip",
-    ];
-    if english_status_suffixes
-        .iter()
-        .any(|suffix| lower == *suffix || lower.ends_with(&format!(" {suffix}")))
-    {
-        return true;
-    }
-
-    let japanese_status_suffixes = [
-        "完了",
-        "完了済み",
-        "完了しました",
-        "対応済み",
-        "実装済み",
-        "修正済み",
-        "検証済み",
-        "作業中",
-        "進行中",
-        "対応中",
-        "実装中",
-        "修正中",
-        "検証中",
-        "レビュー中",
-        "ブロック中",
-    ];
-    japanese_status_suffixes
-        .iter()
-        .any(|suffix| normalized == *suffix || normalized.ends_with(suffix))
-}
-
-fn trim_title_status_punctuation(value: &str) -> &str {
-    value.trim().trim_end_matches(|ch: char| {
-        ch.is_whitespace()
-            || matches!(
-                ch,
-                '.' | '。'
-                    | '．'
-                    | '!'
-                    | '！'
-                    | '?'
-                    | '？'
-                    | ','
-                    | '、'
-                    | ';'
-                    | '；'
-                    | ':'
-                    | '：'
-                    | ')'
-                    | '）'
-                    | ']'
-                    | '】'
-                    | '"'
-                    | '\''
-                    | '」'
-                    | '』'
-            )
-    })
-}
 
 /// Determine whether the given argv (starting at the program name) should be
 /// handled as a CLI invocation. Returns `true` when argv[1..] begins with
@@ -811,6 +728,7 @@ mod tests {
                 title: "Enforce coverage".to_string(),
                 state: "OPEN".to_string(),
                 url: pr.url.clone(),
+                will_close_target: true,
             }],
         );
         crate::cli::pr::render_pr(&mut out, &pr);
@@ -878,6 +796,7 @@ mod tests {
             title: "Hook coverage".to_string(),
             state: "MERGED".to_string(),
             url: "https://github.com/akiojin/gwt/pull/9".to_string(),
+            will_close_target: true,
         }];
 
         assert!(

@@ -687,11 +687,18 @@ fn scan_issue_monitor_once_blocking(
         if monitor.active_count() < active_cap {
             match HttpIssueClient::from_gh_auth(&owner, &repo) {
                 Ok(client) => {
-                    monitor.claim_next_launch_requests_with_active_cap(
+                    monitor.claim_next_launch_requests_with_probe(
                         &client,
                         &monitor_owner,
                         &now,
                         active_cap,
+                        |issue_number| {
+                            crate::issue_monitor_worker::issue_completed_by_merged_pr(
+                                &owner,
+                                &repo,
+                                issue_number,
+                            )
+                        },
                     );
                 }
                 Err(error) => {

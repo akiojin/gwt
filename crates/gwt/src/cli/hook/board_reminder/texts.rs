@@ -388,6 +388,7 @@ pub(super) fn title_summary_required_reminder(lang: &str) -> &'static str {
 - title-summary には「何の作業か（作業の目的）」を書きます。状態や結果ではありません。\n\
 - 入力された生プロンプトをそのままコピーしないでください。\n\
 - 目的がまだ固まっていない場合でも、それっぽい暫定の目的を今すぐ設定し、目的が定まったら同じ title-summary を更新します（応答を遅らせないでください）。\n\
+- `browser check`・検証・マージ・サーバー起動 のような一時的な activity 名は title にしません。activity は `current_focus` に書き、既に purpose がある場合はそれを保持します。\n\
 - 例: `エージェントタイトル目的化`。不可: `…完了`、`…中`、生プロンプトのコピー。\n\
 \n\
 完了/進行中/ブロック中などの状態は `status`、`current_focus`、`summary`、または Board `body` に分けてください。設定が済むまで毎ターンこの指示を再掲します。\n\
@@ -406,6 +407,7 @@ Rules:\n\
 - title-summary = the purpose of the work, not its status or result.\n\
 - Do not copy the raw prompt into the title.\n\
 - Even if the purpose is not settled yet, set a plausible provisional purpose now and update the same title-summary once it is confirmed (do not delay your response for it).\n\
+- Never use a transient activity phase (`browser check`, verification, merging, server startup) as the purpose; put the activity in `current_focus` and keep the existing purpose if one is already set.\n\
 - Good: `Agent title purpose`. Bad: `... complete`, `... in progress`, a copy of the raw prompt.\n\
 \n\
 Keep completion/progress/blocker state in `status`, `current_focus`, `summary`, or Board `body`. This instruction repeats every turn until the title is set.\n\
