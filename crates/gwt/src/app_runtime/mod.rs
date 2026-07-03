@@ -1376,11 +1376,18 @@ impl AppRuntime {
                                 ) {
                                     Ok(client) => {
                                         launch_requests = monitor
-                                            .claim_next_launch_requests_with_active_cap(
+                                            .claim_next_launch_requests_with_probe(
                                                 &client,
                                                 &monitor_owner,
                                                 &now,
                                                 active_cap,
+                                                |issue_number| {
+                                                    gwt::issue_monitor_worker::issue_completed_by_merged_pr(
+                                                        &owner,
+                                                        &repo,
+                                                        issue_number,
+                                                    )
+                                                },
                                             );
                                     }
                                     Err(error) => {

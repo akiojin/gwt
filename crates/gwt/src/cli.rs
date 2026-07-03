@@ -18,7 +18,7 @@ pub mod gwtd_resolver;
 pub mod hook;
 pub mod improvement;
 pub(crate) mod index;
-mod issue;
+pub(crate) mod issue;
 mod issue_spec;
 mod json_envelope;
 pub(crate) mod memory;
@@ -60,6 +60,8 @@ pub struct LinkedPrSummary {
     pub title: String,
     pub state: String,
     pub url: String,
+    #[serde(default)] // closes-the-issue flag; gates the completion probe (#3226)
+    pub will_close_target: bool,
 }
 
 /// Compact PR check entry used by `pr.checks`.
@@ -811,6 +813,7 @@ mod tests {
                 title: "Enforce coverage".to_string(),
                 state: "OPEN".to_string(),
                 url: pr.url.clone(),
+                will_close_target: true,
             }],
         );
         crate::cli::pr::render_pr(&mut out, &pr);
@@ -878,6 +881,7 @@ mod tests {
             title: "Hook coverage".to_string(),
             state: "MERGED".to_string(),
             url: "https://github.com/akiojin/gwt/pull/9".to_string(),
+            will_close_target: true,
         }];
 
         assert!(
