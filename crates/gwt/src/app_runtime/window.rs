@@ -421,6 +421,7 @@ impl AppRuntime {
         if let Some(event) = self.active_work_projection_broadcast_for_active_tab() {
             events.push(event);
         }
+        events.extend(self.issue_monitor_windows_closed_events(&[id.to_string()]));
         events
     }
 

@@ -80,7 +80,9 @@ fn monitor_maps_gwt_spec_label_to_spec_launch_kind() {
     monitor.set_gui_connected(true);
     monitor.record_claimed(issue(3165, &["gwt-spec"]), "claim-spec");
 
-    let launch = monitor.next_launch_request().expect("spec launch request");
+    let launch = monitor
+        .next_launch_request("2026-07-02T00:00:00Z")
+        .expect("spec launch request");
 
     assert_eq!(launch.issue_number, 3165);
     assert_eq!(launch.linked_issue_kind, LinkedIssueKind::Spec);
@@ -108,7 +110,9 @@ fn claimed_issue_waits_in_queue_until_gui_is_connected() {
     monitor.record_claimed(issue(42, &["auto-improve"]), "claim-a");
 
     assert_eq!(monitor.queue_len(), 1);
-    assert!(monitor.next_launch_request().is_none());
+    assert!(monitor
+        .next_launch_request("2026-07-02T00:00:00Z")
+        .is_none());
     assert_eq!(
         monitor.inbox_item(42).expect("inbox item").state,
         MonitorInboxState::Queued
@@ -125,7 +129,9 @@ fn monitor_runs_one_active_launch_and_keeps_remaining_items_queued() {
     monitor.record_claimed(issue(42, &["auto-improve"]), "claim-a");
     monitor.record_claimed(issue(43, &["auto-improve"]), "claim-b");
 
-    let first = monitor.next_launch_request().expect("first launch");
+    let first = monitor
+        .next_launch_request("2026-07-02T00:00:00Z")
+        .expect("first launch");
     assert_eq!(first.issue_number, 42);
     assert_eq!(first.branch_name, "work/issue-42");
     assert_eq!(
@@ -133,7 +139,9 @@ fn monitor_runs_one_active_launch_and_keeps_remaining_items_queued() {
         "$gwt-fix-issue #42"
     );
     assert_eq!(monitor.queue_len(), 1);
-    assert!(monitor.next_launch_request().is_none());
+    assert!(monitor
+        .next_launch_request("2026-07-02T00:00:00Z")
+        .is_none());
 
     monitor.complete_active_launch(42, "tab::agent-42");
     assert_eq!(monitor.active_count(), 1);
@@ -142,12 +150,16 @@ fn monitor_runs_one_active_launch_and_keeps_remaining_items_queued() {
         MonitorInboxState::Launched
     );
     assert!(
-        monitor.next_launch_request().is_none(),
+        monitor
+            .next_launch_request("2026-07-02T00:00:00Z")
+            .is_none(),
         "launched work still consumes the configured active capacity"
     );
 
     monitor.set_max_active_agents(2);
-    let second = monitor.next_launch_request().expect("second launch");
+    let second = monitor
+        .next_launch_request("2026-07-02T00:00:00Z")
+        .expect("second launch");
     assert_eq!(second.issue_number, 43);
     assert_eq!(second.branch_name, "work/issue-43");
 }
@@ -164,14 +176,20 @@ fn monitor_allows_active_launches_up_to_configured_max() {
     monitor.record_claimed(issue(43, &["enhancement"]), "claim-b");
     monitor.record_claimed(issue(44, &["question"]), "claim-c");
 
-    let first = monitor.next_launch_request().expect("first launch");
-    let second = monitor.next_launch_request().expect("second launch");
+    let first = monitor
+        .next_launch_request("2026-07-02T00:00:00Z")
+        .expect("first launch");
+    let second = monitor
+        .next_launch_request("2026-07-02T00:00:00Z")
+        .expect("second launch");
 
     assert_eq!(first.issue_number, 42);
     assert_eq!(second.issue_number, 43);
     assert_eq!(monitor.active_count(), 2);
     assert_eq!(monitor.queue_len(), 1);
-    assert!(monitor.next_launch_request().is_none());
+    assert!(monitor
+        .next_launch_request("2026-07-02T00:00:00Z")
+        .is_none());
 }
 
 #[test]
@@ -184,22 +202,26 @@ fn monitor_reorders_queued_issues_without_preempting_active_launches() {
     monitor.record_claimed(issue(42, &["bug"]), "claim-a");
     monitor.record_claimed(issue(43, &["enhancement"]), "claim-b");
     monitor.record_claimed(issue(44, &["question"]), "claim-c");
-    let active = monitor.next_launch_request().expect("active launch");
+    let active = monitor
+        .next_launch_request("2026-07-02T00:00:00Z")
+        .expect("active launch");
     assert_eq!(active.issue_number, 42);
 
     monitor.reorder_queued_issues(&[44, 43, 42]);
 
-    let next = monitor.next_launch_request();
+    let next = monitor.next_launch_request("2026-07-02T00:00:00Z");
     assert!(next.is_none(), "active launch should not be preempted");
     monitor.complete_active_launch(42, "tab::agent-42");
     assert!(
-        monitor.next_launch_request().is_none(),
+        monitor
+            .next_launch_request("2026-07-02T00:00:00Z")
+            .is_none(),
         "launched work should not free the active slot until capacity changes or the work stops"
     );
     monitor.set_max_active_agents(2);
     assert_eq!(
         monitor
-            .next_launch_request()
+            .next_launch_request("2026-07-02T00:00:00Z")
             .expect("next launch")
             .issue_number,
         44
@@ -248,7 +270,9 @@ fn claimed_active_launch_stays_launching_when_scan_refreshes_claim() {
     });
     monitor.set_gui_connected(true);
     monitor.record_claimed(issue(42, &["auto-improve"]), "claim-a");
-    let first = monitor.next_launch_request().expect("launch request");
+    let first = monitor
+        .next_launch_request("2026-07-02T00:00:00Z")
+        .expect("launch request");
     assert_eq!(first.issue_number, 42);
 
     monitor.record_claimed(issue(42, &["auto-improve"]), "claim-a-refresh");
@@ -268,7 +292,9 @@ fn failed_launch_marks_inbox_failed_and_clears_active_launch() {
     });
     monitor.set_gui_connected(true);
     monitor.record_claimed(issue(42, &["auto-improve"]), "claim-a");
-    let first = monitor.next_launch_request().expect("launch request");
+    let first = monitor
+        .next_launch_request("2026-07-02T00:00:00Z")
+        .expect("launch request");
     assert_eq!(first.issue_number, 42);
 
     monitor.record_launch_auth_required("2026-06-23T10:02:00Z");
@@ -305,7 +331,9 @@ fn agent_runtime_failure_marks_launched_issue_failed_and_persists_error() {
     monitor.set_gui_connected(true);
     monitor.record_claimed(issue(42, &["auto-improve"]), "claim-a");
     monitor.record_claimed(issue(43, &["bug"]), "claim-b");
-    let first = monitor.next_launch_request().expect("launch request");
+    let first = monitor
+        .next_launch_request("2026-07-02T00:00:00Z")
+        .expect("launch request");
     assert_eq!(first.issue_number, 42);
     monitor.complete_active_launch(42, "tab::agent-42");
 
@@ -332,6 +360,9 @@ fn agent_runtime_failure_marks_launched_issue_failed_and_persists_error() {
         vec![IssueMonitorFailedIssue {
             issue_number: 42,
             message: "Stop-block hit an error".to_string(),
+            // #3165 error-window lifecycle: the failed agent window id is
+            // retained so an explicit Launch Now can close the stale window.
+            window_id: Some("tab::agent-42".to_string()),
         }]
     );
 
@@ -361,7 +392,9 @@ fn agent_runtime_failure_matches_raw_and_combined_window_ids() {
     });
     monitor.set_gui_connected(true);
     monitor.record_claimed(issue(42, &["auto-improve"]), "claim-a");
-    monitor.next_launch_request().expect("launch request");
+    monitor
+        .next_launch_request("2026-07-02T00:00:00Z")
+        .expect("launch request");
     monitor.complete_active_launch(42, "tab-1::agent-42");
 
     let failed_issue = monitor.record_agent_window_failed("agent-42", "Stop-block hit an error");
@@ -387,17 +420,21 @@ fn max_active_increase_allows_more_queued_launches_without_rescan() {
     monitor.record_claimed(issue(43, &["auto-improve"]), "claim-b");
     monitor.record_claimed(issue(44, &["auto-improve"]), "claim-c");
 
-    let first = monitor.next_launch_request().expect("first launch");
+    let first = monitor
+        .next_launch_request("2026-07-02T00:00:00Z")
+        .expect("first launch");
     assert_eq!(first.issue_number, 42);
-    assert!(monitor.next_launch_request().is_none());
+    assert!(monitor
+        .next_launch_request("2026-07-02T00:00:00Z")
+        .is_none());
 
     monitor.set_max_active_agents(3);
 
     let second = monitor
-        .next_launch_request()
+        .next_launch_request("2026-07-02T00:00:00Z")
         .expect("second launch after max increase");
     let third = monitor
-        .next_launch_request()
+        .next_launch_request("2026-07-02T00:00:00Z")
         .expect("third launch after max increase");
     assert_eq!(second.issue_number, 43);
     assert_eq!(third.issue_number, 44);

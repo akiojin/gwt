@@ -621,6 +621,10 @@ pub enum FrontendEvent {
     SetIssueMonitorEnabled {
         enabled: bool,
     },
+    /// SPEC #3200 T-047/FR-024: arm/disarm unattended autonomous mode.
+    SetIssueMonitorAutonomousMode {
+        enabled: bool,
+    },
     SetIssueMonitorMaxActiveAgents {
         max_active_agents: usize,
     },

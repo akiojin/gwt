@@ -48,6 +48,14 @@ ignore = [
     # the gtk3-rs / wry stack on Linux. Same exit path. Also tracked
     # as Dependabot alert #29.
     { id = "RUSTSEC-2024-0429", reason = "glib::VariantStrIter unsoundness; not reachable from our code, blocked on gtk-rs 0.20+ (also tracked as Dependabot #29)" },
+    # quick-xml O(N^2) duplicate-attribute check (CPU-exhaustion DoS on
+    # untrusted XML). We reach quick-xml only through wayland-scanner, a
+    # BUILD-TIME code generator that parses trusted, repo-pinned Wayland
+    # protocol XML on Linux — never attacker-controlled input, and never
+    # part of the shipped runtime attack surface. wayland-scanner 0.31.x
+    # pins quick-xml ^0.39, so the fixed 0.41 cannot be forced from here.
+    { id = "RUSTSEC-2026-0194", reason = "quick-xml quadratic duplicate-attr scan; only via wayland-scanner build-time codegen on trusted local protocol XML; blocked on wayland-rs adopting quick-xml >=0.41" },
+    { id = "RUSTSEC-2026-0195", reason = "quick-xml NsReader unbounded namespace allocation; same wayland-scanner build-time-only exposure on trusted local protocol XML; blocked on wayland-rs adopting quick-xml >=0.41" },
 ]
 
 [sources]

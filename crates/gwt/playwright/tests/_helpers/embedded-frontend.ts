@@ -19,6 +19,10 @@ const ROOT_MODULES = new Set([
   "agent-kanban-surface.js",
   // SPEC-2013 2026-06-16 amendment — quiet Agent completion notices.
   "agent-completion-notifications.js",
+  // SPEC #3200 Phase 5 — autonomous Issue Monitor toast stack.
+  "autonomous-notifications.js",
+  // SPEC #3206 — shared floating-toast primitive (autonomous log region).
+  "toast-host.js",
   // SPEC-3064 Phase 3 (E6c) — Board & Logs window surface.
   "board-logs-surface.js",
   "board-surface.js",

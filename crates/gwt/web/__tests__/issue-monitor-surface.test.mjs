@@ -9,12 +9,18 @@ import { createIssueMonitorSurface } from "../issue-monitor-surface.js";
 function makeFixture() {
   const { document } = parseHTML("<!doctype html><html><head></head><body></body></html>");
   const sent = [];
+  const focused = [];
   const surface = createIssueMonitorSurface({
     document,
     send: (event) => sent.push(event),
+    focusWindow: (windowId) => focused.push(windowId),
   });
   surface.mount(document.body);
-  return { document, sent, surface };
+  return { document, sent, focused, surface };
+}
+
+function launched(number, windowId, labels = []) {
+  return { ...issue(number, "launched", labels), launched_window_id: windowId };
 }
 
 function issue(number, state = "queued", labels = []) {
@@ -84,7 +90,7 @@ test("Issue Monitor exposes Start/Stop while keeping queued issue controls visib
   assert.equal(down.getAttribute("aria-label"), "Move down");
 
   const configure = rows[0].querySelector('[data-action="configure-issue"]');
-  assert.equal(configure.textContent, "Configure");
+  assert.equal(configure.getAttribute("aria-label"), "Configure");
   configure.click();
   assert.deepEqual(sent.at(-1), {
     kind: "issue_monitor_configure_issue",
@@ -93,7 +99,7 @@ test("Issue Monitor exposes Start/Stop while keeping queued issue controls visib
   });
 
   const launchNow = rows[0].querySelector('[data-action="launch-now"]');
-  assert.equal(launchNow.textContent, "Launch now");
+  assert.equal(launchNow.getAttribute("aria-label"), "Launch now");
   launchNow.click();
   assert.deepEqual(sent.at(-1), {
     kind: "issue_monitor_launch_now",
@@ -128,7 +134,7 @@ test("Issue Monitor arrows reorder visible queued rows and Detail opens a modal"
   });
 
   const detailButton = rows[1].querySelector('[data-action="open-detail"]');
-  assert.equal(detailButton.textContent, "Detail");
+  assert.equal(detailButton.getAttribute("aria-label"), "Detail");
   detailButton.click();
 
   const modal = document.getElementById("issue-monitor-detail-modal");
@@ -182,10 +188,9 @@ test("Issue Monitor follows the Workspace window hierarchy", () => {
   const detail = rows[0].querySelector('[data-action="open-detail"]');
   const configure = rows[0].querySelector('[data-action="configure-issue"]');
   const launchNow = rows[0].querySelector('[data-action="launch-now"]');
-  assert.ok(detail.classList.contains("wizard-button"));
-  assert.ok(detail.classList.contains("is-compact"));
-  assert.ok(configure.classList.contains("wizard-button"));
-  assert.ok(launchNow.classList.contains("wizard-button"));
+  assert.ok(detail.classList.contains("icon-button"));
+  assert.ok(configure.classList.contains("icon-button"));
+  assert.ok(launchNow.classList.contains("icon-button"));
 
   const moveUp = rows[0].querySelector('[data-action="move-up"]');
   const moveDown = rows[0].querySelector('[data-action="move-down"]');
@@ -195,8 +200,43 @@ test("Issue Monitor follows the Workspace window hierarchy", () => {
   const css = document.getElementById("issue-monitor-surface-style").textContent;
   assert.doesNotMatch(css, /\.issue-monitor-card__button\b/);
   assert.match(css, /\.issue-monitor-card__toolbar\s*{/);
-  assert.match(css, /\.issue-monitor-card__row-button\s*{[^}]*background: transparent/s);
   assert.match(css, /\.issue-monitor-card__item\s*{[^}]*border-left: 2px solid transparent/s);
+});
+
+test("toolbar action buttons share one uniform sizing rule so they cannot diverge", () => {
+  // SPEC #3200 regression: the Autonomous button lacked a sizing override and
+  // rendered at the 36px base `.wizard-button` height — 6px taller than the
+  // 30px Start toggle and the 30px Max-active input beside it. A single
+  // container-scoped rule now sizes every toolbar wizard-button uniformly, so a
+  // future toolbar button can never reintroduce the mismatch.
+  const { document } = makeFixture();
+
+  const actions = document.querySelector(".issue-monitor-card__toolbar-actions");
+  assert.ok(actions, "toolbar actions container exists");
+  const toggle = actions.querySelector(".issue-monitor-card__toggle");
+  const autonomous = actions.querySelector(".issue-monitor-card__autonomous");
+  assert.ok(toggle, "Start/Stop toggle lives in the toolbar actions");
+  assert.ok(autonomous, "Autonomous toggle lives in the toolbar actions");
+  assert.ok(toggle.classList.contains("wizard-button"));
+  assert.ok(autonomous.classList.contains("wizard-button"));
+
+  const css = document.getElementById("issue-monitor-surface-style").textContent;
+  const sizing = css.match(
+    /\.issue-monitor-card__toolbar-actions\s+\.wizard-button\s*{([^}]*)}/,
+  );
+  assert.ok(sizing, "a container-scoped toolbar button sizing rule exists");
+  assert.match(sizing[1], /height:\s*30px/, "toolbar buttons are 30px tall");
+  assert.match(sizing[1], /padding:\s*0 var\(--space-2\)/);
+
+  // No per-button height override may reintroduce the divergence.
+  const autonomousRule = css.match(/\.issue-monitor-card__autonomous\s*{([^}]*)}/);
+  if (autonomousRule) {
+    assert.doesNotMatch(autonomousRule[1], /height:/);
+  }
+  const toggleRule = css.match(/\.issue-monitor-card__toggle\s*{([^}]*)}/);
+  if (toggleRule) {
+    assert.doesNotMatch(toggleRule[1], /height:/);
+  }
 });
 
 test("Issue Monitor renders claim authentication blockage as an error", () => {
@@ -323,4 +363,140 @@ test("Issue Monitor renders agent runtime failures in the row and detail modal",
   assert.match(modal.textContent, /Agent failed/);
   assert.match(modal.textContent, /Stop-block hit an error/);
   assert.match(modal.textContent, /\$gwt-build-spec SPEC-3164/);
+});
+
+test("autonomous toggle sends the control and reflects status", () => {
+  // SPEC #3200 T-047/FR-024: an Autonomous toggle arms/disarms unattended mode.
+  const { document, sent, surface } = makeFixture();
+  const button = document.querySelector(".issue-monitor-card__autonomous");
+  assert.ok(button, "autonomous toggle is rendered");
+  assert.equal(button.textContent, "Autonomous: OFF");
+
+  button.click();
+  const control = sent.find((e) => e.kind === "set_issue_monitor_autonomous_mode");
+  assert.ok(control, "clicking sends the autonomous-mode control");
+  assert.equal(control.enabled, true);
+  assert.equal(button.textContent, "Autonomous: ON", "optimistic ON");
+
+  // Backend status echo keeps it ON and exposes the indicator.
+  surface.applyStatus({ enabled: true, autonomous_mode: true });
+  assert.equal(button.dataset.enabled, "true");
+  assert.match(
+    document.querySelector(".issue-monitor-card__detail").textContent,
+    /Autonomous ON/,
+  );
+});
+
+test("per-issue NeedsHuman / phase / attempts surface from autonomous_issues", () => {
+  // SPEC #3200 T-090/FR-033: the autonomous lifecycle is visible per issue.
+  const { document, surface } = makeFixture();
+  surface.applyStatus({
+    enabled: true,
+    autonomous_mode: true,
+    autonomous_issues: [
+      { issue_number: 3164, phase: "needs_human", attempts: 3, needs_human: true },
+      { issue_number: 3165, phase: "reviewing", attempts: 1, needs_human: false },
+    ],
+  });
+  surface.applyInbox([issue(3164, "needs_human", ["auto-merge"]), issue(3165, "launched", ["auto-merge"])]);
+
+  const rows = document.querySelectorAll(".issue-monitor-card__item");
+  const meta3164 = rows[0].querySelector(".issue-monitor-card__autonomous-meta");
+  assert.ok(meta3164, "issue 3164 has an autonomous meta line");
+  assert.equal(meta3164.dataset.needsHuman, "true");
+  assert.match(meta3164.textContent, /Needs human/);
+  assert.match(meta3164.textContent, /Attempts 3/);
+
+  const meta3165 = rows[1].querySelector(".issue-monitor-card__autonomous-meta");
+  assert.equal(meta3165.dataset.needsHuman, "false");
+  assert.match(meta3165.textContent, /Phase reviewing/);
+
+  // The detail line shows the needs-human count.
+  assert.match(
+    document.querySelector(".issue-monitor-card__detail").textContent,
+    /1 need human/,
+  );
+});
+
+test("every issue row shows a Focus button, enabled only when a launched window exists", () => {
+  // #3165 enhancement: a launched issue can be brought back into view via its
+  // live agent window. UX ruling: the Focus affordance is ALWAYS present and is
+  // merely disabled when there is no window — never shown/hidden by state, which
+  // is harder to read (consistent with the ↑/↓ disabled pattern).
+  const { document, focused, surface } = makeFixture();
+  surface.applyInbox([
+    launched(42, "tab-1::agent-42"),
+    issue(43, "queued"),
+    { ...issue(44, "launching"), launched_window_id: null },
+    { ...issue(45, "agent_failed"), error_message: "boom" },
+  ]);
+
+  const rows = [...document.querySelectorAll(".issue-monitor-card__item")];
+  for (const row of rows) {
+    assert.ok(
+      row.querySelector('[data-action="focus-window"]'),
+      "every row renders a Focus button (disabled, never hidden)",
+    );
+  }
+  const launchedFocus = rows[0].querySelector('[data-action="focus-window"]');
+  assert.equal(launchedFocus.getAttribute("aria-label"), "Focus the launched agent window");
+  assert.ok(launchedFocus.classList.contains("issue-monitor-card__icon-button"));
+  assert.equal(launchedFocus.disabled, false, "launched row Focus is enabled");
+  assert.equal(
+    rows[1].querySelector('[data-action="focus-window"]').disabled,
+    true,
+    "queued row Focus is disabled",
+  );
+  assert.equal(
+    rows[2].querySelector('[data-action="focus-window"]').disabled,
+    true,
+    "launching row (no window yet) Focus is disabled",
+  );
+  assert.equal(
+    rows[3].querySelector('[data-action="focus-window"]').disabled,
+    true,
+    "failed row Focus is disabled",
+  );
+
+  launchedFocus.click();
+  assert.deepEqual(focused, ["tab-1::agent-42"]);
+});
+
+test("the detail modal Focus action is enabled for a launched issue and focuses it", () => {
+  const { document, focused, surface } = makeFixture();
+  surface.applyInbox([launched(42, "tab-1::agent-42")]);
+
+  document.querySelector('[data-action="open-detail"]').click();
+  const modal = document.getElementById("issue-monitor-detail-modal");
+  assert.ok(modal, "detail modal opens for a launched issue");
+  const focusButton = modal.querySelector('.modal-footer [data-action="focus-window"]');
+  assert.ok(focusButton, "detail modal footer has a Focus window button");
+  assert.equal(focusButton.disabled, false, "launched modal Focus is enabled");
+
+  focusButton.click();
+  assert.deepEqual(focused, ["tab-1::agent-42"]);
+  assert.equal(
+    document.getElementById("issue-monitor-detail-modal"),
+    null,
+    "focusing from the modal closes it",
+  );
+});
+
+test("the detail modal Focus action is present but disabled for a non-launched issue", () => {
+  const { document, focused, surface } = makeFixture();
+  surface.applyInbox([issue(42, "queued")]);
+
+  document.querySelector('[data-action="open-detail"]').click();
+  const modal = document.getElementById("issue-monitor-detail-modal");
+  assert.ok(modal);
+  const focusButton = modal.querySelector('[data-action="focus-window"]');
+  assert.ok(focusButton, "Focus action present even when not launched");
+  assert.equal(focusButton.disabled, true, "non-launched modal Focus is disabled");
+
+  focusButton.click();
+  assert.deepEqual(focused, [], "clicking a disabled Focus does nothing");
+  assert.ok(
+    document.getElementById("issue-monitor-detail-modal"),
+    "modal stays open when Focus is disabled",
+  );
 });

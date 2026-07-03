@@ -97,6 +97,12 @@ impl AppRuntime {
             }
         }
 
+        // SPEC #3200 T-045/FR-025: a running agent on a monitored autonomous
+        // issue is a liveness signal — refresh its stuck-detection window.
+        if is_agent_window && matches!(status, WindowProcessStatus::Running) {
+            self.issue_monitor_heartbeat(&id);
+        }
+
         let keep_active_agent_session_for_recovery =
             self.should_keep_active_agent_session_for_recoverable_pty_error(&id, status);
         if matches!(status, WindowProcessStatus::Error) {

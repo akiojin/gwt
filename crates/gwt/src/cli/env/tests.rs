@@ -284,6 +284,7 @@ fn test_env_records_io_and_pr_side_effects() {
             title: "Coverage".to_string(),
             state: "OPEN".to_string(),
             url: "https://example.test/pr/128".to_string(),
+            will_close_target: true,
         }],
     );
     assert_eq!(

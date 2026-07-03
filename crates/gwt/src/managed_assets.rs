@@ -73,6 +73,22 @@ fn materialize_managed_gwt_assets_for_targets(
     targets: &[ManagedAssetTarget],
     codex_hook_discovery_mode: CodexHookDiscoveryMode,
 ) -> io::Result<()> {
+    // Fail fast with a clear, attributed error when the worktree was not
+    // properly created (e.g. branch/worktree materialization failed). Without
+    // this guard, distribution would silently `create_dir_all` a phantom tree
+    // and the failure would surface much later as a misleading
+    // "failed to generate Claude coordination skill: No such file or directory"
+    // — attributing a worktree-setup failure to the skill writer.
+    if !worktree.is_dir() {
+        return Err(io::Error::new(
+            io::ErrorKind::NotFound,
+            format!(
+                "gwt managed assets: worktree is not a ready directory \
+                 (branch/worktree creation likely failed): {}",
+                worktree.display()
+            ),
+        ));
+    }
     distribute_to_worktree_for_targets(worktree, targets).map_err(|error| {
         io::Error::other(format!("failed to distribute gwt managed assets: {error}"))
     })?;
@@ -353,6 +369,30 @@ mod tests {
     };
 
     static ENV_MUTEX: Mutex<()> = Mutex::new(());
+
+    #[test]
+    fn materialize_into_missing_worktree_fails_with_clear_attribution() {
+        // #fix: when the launch's worktree was never created (branch/worktree
+        // materialization failed), managed-asset materialization must fail fast
+        // with a clear, attributed error — NOT the misleading downstream
+        // "failed to generate Claude coordination skill: No such file or
+        // directory" that points at the skill writer instead of the worktree.
+        let missing = std::env::temp_dir()
+            .join(format!("gwt-missing-worktree-{}", std::process::id()))
+            .join("issue-3206");
+        let err = super::refresh_managed_gwt_assets_for_worktree(&missing)
+            .expect_err("a missing worktree must error");
+        assert_eq!(err.kind(), std::io::ErrorKind::NotFound);
+        let msg = err.to_string();
+        assert!(
+            msg.contains("worktree is not a ready directory"),
+            "error must attribute to the worktree, got: {msg}"
+        );
+        assert!(
+            msg.contains("issue-3206"),
+            "error must name the failing worktree path, got: {msg}"
+        );
+    }
 
     #[test]
     fn bunx_temp_current_exe_prefers_stable_path_gwtd() {
