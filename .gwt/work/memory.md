@@ -7533,3 +7533,10 @@ Type: design lesson
 Context: SPEC #3075/#2359 が purpose=安定した作業目的と定義し、reminder/guidance/stale-detection (PR #2819) まで整備済みだったのに、agent は browser-check 中に purpose へ activity 名 (Headless browser check) を書き、titlebar が BROWSER CHECK になった (Issue #3184)。
 Learning: (1) LLM 向け text 指示は field semantics の enforcement にならない。全書き込み経路が集約される choke point (cli/title_summary_guard.rs の validate_title_summary_work_name) に validation を置き、拒否メッセージ自体に正しい代替 (current_focus へ) を書くと self-correcting になる。(2) denylist heuristic は adversarial review workflow で bypass 側 (JA suffix/全角/後置修飾) と over-block 側 (Fix browser check) の両面を検証してから確定する。動詞先頭 exempt / gerund 先頭 reject / 前置詞修飾 reject / head-final JA suffix が有効だった。(3) cli.rs には cli_file_size_test の 1000 行予算があり、新しい validation family は cli/ submodule に切り出す。
 Future Action: 新しい field semantics 契約を導入するときは、guidance 追加だけで完了とせず、canonical write path の validator + 既存値保持の dispatch レベル regression test + 実バイナリでの拒否デモまでを 1 セットにする。
+
+## 2026-07-03 — gwtd pr.edit の read:org 失敗は PR #3231 で解消（pr.ready / pr.draft 新設）
+
+Type: lesson
+Context: Issue #3201: gwtd pr.edit は gh pr edit の read:org prefetch で常に失敗し（2026-06-12 memory 参照）、Draft→Ready 昇格 operation も存在しなかったため、エージェントが PR ライフサイクルを sanctioned surface で完結できなかった
+Learning: PR #3231 で解消: pr.edit は REST（PATCH /pulls・POST /issues/labels）化され read:org 無し token でも成功する（本マシンで live smoke 済み）。pr.ready / pr.draft operations が新設され、gh pr ready / gh pr ready --undo は hook でブロックされ gwtd へ誘導される。2026-06-12 の『PR 本文の事後修正はこの環境では不可』は本修正後の gwtd では成立しない。pr.edit の add_labels は存在しないラベルを fail-closed で拒否し、title/body/add_labels 全省略は parse エラーになる
+Future Action: PR 本文更新・Draft→Ready 昇格は gwtd JSON operations pr.edit / pr.ready を正規経路として使う。旧 gwtd（未更新の GWT.app 同梱版）では pr.edit が引き続き失敗するため、失敗したらビルド済み target/debug/gwtd か更新版を使う

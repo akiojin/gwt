@@ -261,6 +261,16 @@ pub fn create_pr_via_gh(
         .map_err(|err| io::Error::other(err.to_string()))
 }
 
+/// Edit a PR's title / body / labels via the REST API rather than `gh pr edit`.
+///
+/// `gh pr edit` prefetches repository + assignee metadata whose query touches an
+/// org-scoped `login` field, so it fails with
+/// `The 'login' field requires one of the following scopes: ['read:org']` when
+/// the token lacks `read:org` — even though `gh pr create` succeeds with the
+/// same token (Issue #3201). Routing title/body through
+/// `PATCH /repos/{owner}/{repo}/pulls/{number}` and additive labels through
+/// `POST /repos/{owner}/{repo}/issues/{number}/labels` only requires the `repo`
+/// scope, keeping `pr.edit` scope-symmetric with `pr.create`.
 pub fn edit_pr_via_gh(
     repo_slug: &str,
     repo_path: &std::path::Path,
@@ -269,24 +279,190 @@ pub fn edit_pr_via_gh(
     body: Option<&str>,
     add_labels: &[String],
 ) -> io::Result<PrStatus> {
-    let mut args = vec!["pr".to_string(), "edit".to_string(), number.to_string()];
-    if let Some(title) = title {
-        args.push("--title".to_string());
-        args.push(title.to_string());
-    }
-    if let Some(body) = body {
-        args.push("--body".to_string());
-        args.push(body.to_string());
-    }
+    // Fail closed on unknown labels before any mutation: the REST labels
+    // endpoint silently auto-creates missing labels, unlike the old
+    // `gh pr edit --add-label` which rejected typos before applying anything.
     for label in add_labels {
-        args.push("--add-label".to_string());
-        args.push(label.clone());
+        let endpoint = format!("repos/{repo_slug}/labels/{}", encode_path_segment(label));
+        let output = run_gh_in(
+            "gh pr edit label-check",
+            Some(repo_path),
+            ["api", endpoint.as_str()],
+        )?;
+        if !output.success() {
+            return Err(io::Error::other(format!(
+                "gh pr edit: label '{label}' lookup failed: {}",
+                output.stderr.trim()
+            )));
+        }
     }
 
-    let output = run_gh_in("gh pr edit", Some(repo_path), &args)?;
+    if title.is_some() || body.is_some() {
+        let endpoint = format!("repos/{repo_slug}/pulls/{number}");
+        let mut args = vec![
+            "api".to_string(),
+            "--method".to_string(),
+            "PATCH".to_string(),
+            endpoint,
+        ];
+        if let Some(title) = title {
+            args.push("-f".to_string());
+            args.push(format!("title={title}"));
+        }
+        if let Some(body) = body {
+            args.push("-f".to_string());
+            args.push(format!("body={body}"));
+        }
+        let output = run_gh_in("gh pr edit", Some(repo_path), &args)?;
+        if !output.success() {
+            return Err(io::Error::other(format!(
+                "gh pr edit: {}",
+                output.stderr.trim()
+            )));
+        }
+    }
+
+    if !add_labels.is_empty() {
+        let endpoint = format!("repos/{repo_slug}/issues/{number}/labels");
+        let mut args = vec![
+            "api".to_string(),
+            "--method".to_string(),
+            "POST".to_string(),
+            endpoint,
+        ];
+        for label in add_labels {
+            args.push("-f".to_string());
+            args.push(format!("labels[]={label}"));
+        }
+        let output = run_gh_in("gh pr edit add-label", Some(repo_path), &args)?;
+        if !output.success() {
+            return Err(io::Error::other(format!(
+                "gh pr edit: {}",
+                output.stderr.trim()
+            )));
+        }
+    }
+
+    gwt_git::pr_status::fetch_pr_status(repo_slug, number)
+        .map_err(|err| io::Error::other(err.to_string()))
+}
+
+/// Percent-encode a single URL path segment (RFC 3986 unreserved set kept
+/// as-is) so label names with spaces or symbols stay one segment.
+fn encode_path_segment(segment: &str) -> String {
+    let mut encoded = String::with_capacity(segment.len());
+    for byte in segment.bytes() {
+        match byte {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'.' | b'_' | b'~' => {
+                encoded.push(byte as char);
+            }
+            other => {
+                encoded.push_str(&format!("%{other:02X}"));
+            }
+        }
+    }
+    encoded
+}
+
+/// Resolve a PR's GraphQL node id via the REST API (`repo` scope only).
+///
+/// The `markPullRequestReadyForReview` / `convertPullRequestToDraft` mutations
+/// require the PR node id; fetching it through
+/// `GET /repos/{owner}/{repo}/pulls/{number}` avoids any `read:org` dependency.
+fn fetch_pr_node_id_via_gh(
+    repo_slug: &str,
+    repo_path: &std::path::Path,
+    number: u64,
+) -> io::Result<String> {
+    let endpoint = format!("repos/{repo_slug}/pulls/{number}");
+    let output = run_gh_in(
+        "gh api pr node-id",
+        Some(repo_path),
+        ["api", endpoint.as_str()],
+    )?;
     if !output.success() {
         return Err(io::Error::other(format!(
-            "gh pr edit: {}",
+            "gh api {endpoint}: {}",
+            output.stderr.trim()
+        )));
+    }
+    let value: serde_json::Value = serde_json::from_str(&output.stdout)
+        .map_err(|err| io::Error::new(io::ErrorKind::InvalidData, err.to_string()))?;
+    value
+        .get("node_id")
+        .and_then(|v| v.as_str())
+        .map(ToOwned::to_owned)
+        .ok_or_else(|| io::Error::other(format!("gh api {endpoint}: missing node_id")))
+}
+
+/// Promote a Draft PR to Ready-for-review through the GraphQL mutation
+/// `markPullRequestReadyForReview` (Issue #3201). Only the `repo` scope is
+/// required, so agents can complete the Draft→Ready step entirely through the
+/// sanctioned `pr.ready` operation.
+pub fn mark_pr_ready_via_gh(
+    repo_slug: &str,
+    repo_path: &std::path::Path,
+    number: u64,
+) -> io::Result<PrStatus> {
+    let node_id = fetch_pr_node_id_via_gh(repo_slug, repo_path, number)?;
+    let mutation = r#"
+mutation($id: ID!) {
+  markPullRequestReadyForReview(input: { pullRequestId: $id }) {
+    pullRequest { number isDraft }
+  }
+}
+"#;
+    let output = run_gh(
+        "gh api graphql markPullRequestReadyForReview",
+        [
+            "api",
+            "graphql",
+            "-f",
+            &format!("query={mutation}"),
+            "-f",
+            &format!("id={node_id}"),
+        ],
+    )?;
+    if !output.success() {
+        return Err(io::Error::other(format!(
+            "gh api graphql markPullRequestReadyForReview: {}",
+            output.stderr.trim()
+        )));
+    }
+    gwt_git::pr_status::fetch_pr_status(repo_slug, number)
+        .map_err(|err| io::Error::other(err.to_string()))
+}
+
+/// Convert a Ready PR back to Draft through the GraphQL mutation
+/// `convertPullRequestToDraft` (Issue #3201) — the symmetric counterpart to
+/// [`mark_pr_ready_via_gh`]. Only the `repo` scope is required.
+pub fn convert_pr_to_draft_via_gh(
+    repo_slug: &str,
+    repo_path: &std::path::Path,
+    number: u64,
+) -> io::Result<PrStatus> {
+    let node_id = fetch_pr_node_id_via_gh(repo_slug, repo_path, number)?;
+    let mutation = r#"
+mutation($id: ID!) {
+  convertPullRequestToDraft(input: { pullRequestId: $id }) {
+    pullRequest { number isDraft }
+  }
+}
+"#;
+    let output = run_gh(
+        "gh api graphql convertPullRequestToDraft",
+        [
+            "api",
+            "graphql",
+            "-f",
+            &format!("query={mutation}"),
+            "-f",
+            &format!("id={node_id}"),
+        ],
+    )?;
+    if !output.success() {
+        return Err(io::Error::other(format!(
+            "gh api graphql convertPullRequestToDraft: {}",
             output.stderr.trim()
         )));
     }
