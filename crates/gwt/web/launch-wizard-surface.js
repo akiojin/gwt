@@ -673,11 +673,13 @@ export function createLaunchWizardSurface({
         renderLaunchWizard();
       }
 
-      function openStartWorkPendingWizard() {
+      // SPEC-3214 T-042: the standalone existing-branch picker keeps the
+      // pending-wizard UX the removed Start Work entry used to provide.
+      function openExistingBranchPendingWizard() {
         openLaunchPendingWizard({
-          title: "Start Work",
-          meta: "Plan Agent launch",
-          message: "Preparing Plan Agent...",
+          title: "Open existing branch",
+          meta: "Branch picker",
+          message: "Fetching remote branches...",
         });
       }
 
@@ -1146,7 +1148,25 @@ export function createLaunchWizardSurface({
         const openBranchCandidates = Array.isArray(launchWizard.open_branch_candidates)
           ? launchWizard.open_branch_candidates
           : [];
-        if (showStartMethods && openBranchCandidates.length > 0) {
+        // SPEC-3214 FR-010: the standalone picker mode always renders this
+        // section — it IS the surface — including a fetching placeholder
+        // while the candidate refresh is still running.
+        const isExistingBranchMode = launchWizard.mode === "existing_branch";
+        if (isExistingBranchMode && openBranchCandidates.length === 0) {
+          const branchPickerSection = createLaunchSection(
+            "Open an existing branch",
+            "Continue on a remote branch instead of creating a new work branch.",
+          );
+          branchPickerSection.appendChild(
+            createNode(
+              "div",
+              "start-method-summary",
+              "Fetching remote branches...",
+            ),
+          );
+          panel.appendChild(branchPickerSection);
+        }
+        if ((showStartMethods || isExistingBranchMode) && openBranchCandidates.length > 0) {
           const branchPickerSection = createLaunchSection(
             "Open an existing branch",
             "Continue on a remote branch instead of creating a new work branch.",
@@ -1825,7 +1845,7 @@ export function createLaunchWizardSurface({
         syncWizardDraftState,
         flushWizardBranchDraft,
         renderLaunchWizard,
-        openStartWorkPendingWizard,
+        openExistingBranchPendingWizard,
         openLaunchAgentPendingWizard,
         applyLaunchWizardStateEvent,
         applyLaunchWizardOpenErrorEvent,

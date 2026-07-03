@@ -31,6 +31,7 @@ impl LaunchWizardState {
             title: match self.wizard_mode {
                 LaunchWizardMode::StartWork => "Start Work".to_string(),
                 LaunchWizardMode::Intake => "Intake session".to_string(),
+                LaunchWizardMode::ExistingBranch => "Open existing branch".to_string(),
                 _ => "Launch Agent".to_string(),
             },
             mode: self.wizard_mode,
@@ -139,6 +140,12 @@ impl LaunchWizardState {
     }
 
     fn start_methods_view(&self) -> Vec<LaunchWizardStartMethodView> {
+        // SPEC-3214 FR-010: the standalone existing-branch picker offers no
+        // start method until the user has selected a branch — there is no
+        // reserved work/* branch that a launch could fall back to.
+        if self.wizard_mode == LaunchWizardMode::ExistingBranch && self.branch_name.is_empty() {
+            return Vec::new();
+        }
         let has_previous_settings = self.has_previous_start_settings();
         let latest_session = self.latest_quick_start_entry().map(|(_, entry)| entry);
         let latest_live = self.latest_running_session().map(|(_, session)| session);

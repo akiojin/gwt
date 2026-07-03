@@ -561,7 +561,10 @@ pub enum FrontendEvent {
         id: String,
         issue_number: u64,
     },
-    OpenStartWork,
+    /// SPEC-3214 FR-010: open the existing-branch picker directly (US-83
+    /// SelectExistingBranch) — the standalone successor of the removed
+    /// Start Work entry (FR-009).
+    OpenExistingBranch,
     OpenStartWorkInAgentKanban {
         board_id: String,
         lane_id: AgentKanbanLane,
@@ -3297,14 +3300,29 @@ mod tests {
     }
 
     #[test]
-    fn frontend_event_accepts_global_open_start_work_command() {
+    fn frontend_event_accepts_global_open_existing_branch_command() {
+        // SPEC-3214 T-042 (FR-010): the existing-branch picker is a global
+        // command of its own now that the Start Work entry is removed.
         let event: FrontendEvent =
-            serde_json::from_value(serde_json::json!({ "kind": "open_start_work" }))
-                .expect("deserialize open_start_work");
+            serde_json::from_value(serde_json::json!({ "kind": "open_existing_branch" }))
+                .expect("deserialize open_existing_branch");
 
         assert!(
-            matches!(event, FrontendEvent::OpenStartWork),
-            "Start Work must be a global command, not a Branches window event"
+            matches!(event, FrontendEvent::OpenExistingBranch),
+            "Open existing branch must be a global command"
+        );
+    }
+
+    #[test]
+    fn frontend_event_rejects_removed_open_start_work_command() {
+        // SPEC-3214 T-044 (FR-009): the Start Work entry event no longer
+        // exists on the protocol.
+        assert!(
+            serde_json::from_value::<FrontendEvent>(
+                serde_json::json!({ "kind": "open_start_work" })
+            )
+            .is_err(),
+            "open_start_work must be rejected after the Start Work removal"
         );
     }
 

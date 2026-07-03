@@ -45,10 +45,13 @@ test("rail commands: [data-cmd] item click が op:command を dispatch する", 
     fixture.document.addEventListener("op:command", (event) => {
       received.push(event.detail?.id);
     });
-    const startWork = fixture.document.querySelector('.op-rail__item[data-cmd="start-work"]');
-    assert.ok(startWork, "expected Start Work rail item");
-    startWork.dispatchEvent(new fixture.window.Event("click", { bubbles: true }));
-    assert.deepEqual(received, ["start-work"]);
+    // SPEC-3214 (FR-009): the launch entry is Intake session, not Start Work.
+    const intakeSession = fixture.document.querySelector(
+      '.op-rail__item[data-cmd="intake-session"]',
+    );
+    assert.ok(intakeSession, "expected Intake session rail item");
+    intakeSession.dispatchEvent(new fixture.window.Event("click", { bubbles: true }));
+    assert.deepEqual(received, ["intake-session"]);
   } finally {
     fixture.dispose();
   }

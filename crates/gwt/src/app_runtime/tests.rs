@@ -4549,7 +4549,7 @@ fn app_runtime_window_list_enumerates_all_project_tabs() {
 }
 
 #[test]
-fn app_runtime_open_start_work_defers_remote_develop_preparation_until_launch() {
+fn app_runtime_open_existing_branch_opens_picker_without_git_mutation() {
     let _env_guard = env_test_lock().lock().expect("env lock");
     let temp = tempdir().expect("tempdir");
     let _home = ScopedEnvVar::set("HOME", temp.path());
@@ -4588,7 +4588,7 @@ fn app_runtime_open_start_work_defers_remote_develop_preparation_until_launch() 
     let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
 
     let events =
-        runtime.handle_frontend_event("client-1".to_string(), FrontendEvent::OpenStartWork);
+        runtime.handle_frontend_event("client-1".to_string(), FrontendEvent::OpenExistingBranch);
 
     assert!(matches!(
         events.first().map(|event| &event.event),
@@ -4597,14 +4597,20 @@ fn app_runtime_open_start_work_defers_remote_develop_preparation_until_launch() 
     let view = runtime
         .launch_wizard
         .as_ref()
-        .expect("start work wizard")
+        .expect("existing branch wizard")
         .wizard
         .view();
-    assert_eq!(view.mode, gwt::LaunchWizardMode::StartWork);
-    assert_eq!(view.title, "Start Work");
+    assert_eq!(view.mode, gwt::LaunchWizardMode::ExistingBranch);
+    assert_eq!(view.title, "Open existing branch");
     assert!(!view.show_branch_controls);
-    assert_eq!(view.selected_branch_name, "origin/develop");
-    assert!(view.branch_name.starts_with("work/"));
+    // SPEC-3214 T-042 (FR-010): the picker opens standalone — no work/*
+    // branch name is reserved and no start method is offered until the user
+    // picks a branch.
+    assert!(view.branch_name.is_empty(), "no reserved branch name");
+    assert!(
+        view.start_methods.is_empty(),
+        "start methods stay hidden until a branch is selected"
+    );
 
     let develop = gwt_core::process::hidden_command("git")
         .args([
@@ -4618,7 +4624,7 @@ fn app_runtime_open_start_work_defers_remote_develop_preparation_until_launch() 
         .expect("check origin/develop");
     assert!(
         !develop.success(),
-        "opening Start Work must not fetch or restore origin/develop before the user launches"
+        "opening the picker must not fetch or restore origin/develop before the user launches"
     );
 
     let refs = gwt_core::process::hidden_command("git")
@@ -4633,7 +4639,7 @@ fn app_runtime_open_start_work_defers_remote_develop_preparation_until_launch() 
     assert!(refs.status.success(), "git for-each-ref failed");
     assert!(
         refs.stdout.is_empty(),
-        "opening Start Work must not create branch refs"
+        "opening the picker must not create branch refs"
     );
 
     let cancel_events = runtime.handle_frontend_event(
@@ -4659,12 +4665,12 @@ fn app_runtime_open_start_work_defers_remote_develop_preparation_until_launch() 
     assert!(refs_after_cancel.status.success());
     assert!(
         refs_after_cancel.stdout.is_empty(),
-        "cancelling Start Work must not create branch refs"
+        "cancelling the picker must not create branch refs"
     );
 }
 
 #[test]
-fn app_runtime_open_start_work_failure_surfaces_launch_wizard_open_error() {
+fn app_runtime_open_existing_branch_failure_surfaces_launch_wizard_open_error() {
     let temp = tempdir().expect("tempdir");
     let repo = temp.path().join("repo");
     fs::create_dir_all(&repo).expect("create repo");
@@ -4672,13 +4678,13 @@ fn app_runtime_open_start_work_failure_surfaces_launch_wizard_open_error() {
         "tab-1",
         "Repo",
         repo,
-        ProjectKind::Git,
+        ProjectKind::NonRepo,
         &[WindowPreset::Board],
     );
     let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
 
     let events =
-        runtime.handle_frontend_event("client-1".to_string(), FrontendEvent::OpenStartWork);
+        runtime.handle_frontend_event("client-1".to_string(), FrontendEvent::OpenExistingBranch);
 
     assert!(runtime.launch_wizard.is_none());
     assert!(matches!(
@@ -4688,7 +4694,7 @@ fn app_runtime_open_start_work_failure_surfaces_launch_wizard_open_error() {
     assert!(matches!(
         events.first().map(|event| &event.event),
         Some(BackendEvent::LaunchWizardOpenError { title, message })
-            if title == "Start Work" && !message.is_empty()
+            if title == "Open existing branch" && !message.is_empty()
     ));
 }
 
@@ -6967,6 +6973,90 @@ fn ephemeral_intake_session(tab_id: &str, window_id: &str, intake: &Path) -> Act
     session.agent_project_root = intake.display().to_string();
     session.is_ephemeral = true;
     session
+}
+
+/// SPEC-3214 T-051 / acceptance scenario 2: the full intake lifecycle leaves
+/// no residue. Launch materialization creates a detached `.intake-*` worktree
+/// (visible in `git worktree list`, `branch: None`), stopping the session
+/// removes it, and `git branch` is byte-identical before and after — zero
+/// named branches were ever created.
+#[test]
+fn intake_lifecycle_leaves_no_worktree_or_branch_residue() {
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedEnvVar::set("HOME", temp.path());
+    let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+    let repo = temp.path().join("repo");
+    fs::create_dir_all(&repo).expect("create repo");
+    run_git(&repo, &["init"]);
+    run_git(&repo, &["config", "user.email", "gwt@example.invalid"]);
+    run_git(&repo, &["config", "user.name", "gwt"]);
+    run_git(&repo, &["commit", "--allow-empty", "-m", "seed"]);
+    let branches_before = {
+        let output = gwt_core::process::hidden_command("git")
+            .args(["branch", "--list"])
+            .current_dir(&repo)
+            .output()
+            .expect("list branches before");
+        String::from_utf8_lossy(&output.stdout).to_string()
+    };
+
+    // Launch: the ephemeral resolve path (the same one `spawn_agent_window`
+    // calls through `resolve_launch_worktree`) materializes the worktree.
+    let mut config = gwt_agent::AgentLaunchBuilder::new(gwt_agent::AgentId::ClaudeCode).build();
+    config.is_ephemeral = true;
+    crate::launch_runtime::resolve_launch_worktree(&repo, &mut config)
+        .expect("resolve ephemeral launch worktree");
+    let intake = config.working_dir.clone().expect("intake working dir");
+    let listed = gwt_git::WorktreeManager::new(&repo)
+        .list()
+        .expect("list worktrees");
+    let intake_entry = listed
+        .iter()
+        .find(|entry| gwt_git::worktree::is_intake_worktree_path(&entry.path))
+        .expect("intake worktree listed");
+    assert!(
+        intake_entry.branch.is_none(),
+        "the intake worktree must be detached (no named branch)"
+    );
+
+    // Stop: the runtime-status hook destroys the clean worktree.
+    let tab = sample_project_tab("tab-1", "Repo", repo.clone(), ProjectKind::Git, &[]);
+    let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+    runtime.active_agent_sessions.insert(
+        "tab-1::agent-intake".to_string(),
+        ephemeral_intake_session("tab-1", "tab-1::agent-intake", &intake),
+    );
+    runtime.handle_runtime_status(
+        "tab-1::agent-intake".to_string(),
+        WindowProcessStatus::Stopped,
+        None,
+    );
+
+    assert!(!intake.exists(), "the intake worktree must be destroyed");
+    let listed = gwt_git::WorktreeManager::new(&repo)
+        .list()
+        .expect("list worktrees after stop");
+    assert!(
+        !listed
+            .iter()
+            .any(|entry| gwt_git::worktree::is_intake_worktree_path(&entry.path)),
+        "git worktree list must not retain an intake entry"
+    );
+    let branches_after = {
+        let output = gwt_core::process::hidden_command("git")
+            .args(["branch", "--list"])
+            .current_dir(&repo)
+            .output()
+            .expect("list branches after");
+        String::from_utf8_lossy(&output.stdout).to_string()
+    };
+    assert_eq!(
+        branches_before, branches_after,
+        "the intake lifecycle must not create or delete any named branch"
+    );
 }
 
 /// SPEC-3214 T-005 / FR-002: when an ephemeral intake session stops with a
@@ -17551,12 +17641,11 @@ fn handle_migration_error_clears_pending_and_broadcasts_recovery_label() {
 }
 
 #[test]
-fn open_start_work_refuses_while_migration_pending() {
-    // SPEC-1934 US-7 / FR-034: Workspace Start Work must not run on a tab
-    // whose Normal → Nested Bare+Worktree migration is still pending.
-    // Without this gate, the launch path tries to fetch
-    // `origin/work/<branch>` on a single-branch refspec and dies with
-    // `fatal: invalid reference: origin/work/<branch>`.
+fn open_existing_branch_refuses_while_migration_pending() {
+    // SPEC-1934 US-7 / FR-034 (carried into SPEC-3214 FR-010): launch entry
+    // points must not run on a tab whose Normal → Nested Bare+Worktree
+    // migration is still pending — the launch path would die on the
+    // single-branch refspec.
     let temp = tempdir().expect("tempdir");
     let project = temp.path().join("project");
     fs::create_dir_all(&project).expect("project dir");
@@ -17564,7 +17653,7 @@ fn open_start_work_refuses_while_migration_pending() {
     let tab = migration_pending_tab("tab-1", project);
     let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
 
-    let events = runtime.open_start_work("client-1");
+    let events = runtime.open_existing_branch("client-1");
 
     assert!(
         events.iter().any(|event| matches!(
@@ -17572,10 +17661,10 @@ fn open_start_work_refuses_while_migration_pending() {
             OutboundEvent {
                 target: DispatchTarget::Client(_),
                 event: BackendEvent::LaunchWizardOpenError { title, message },
-            } if title == "Start Work"
-                && message == "Complete the project migration before starting work"
+            } if title == "Open existing branch"
+                && message == "Complete the project migration before opening a branch"
         )),
-        "Start Work on a migration_pending tab must surface a clear error: {events:?}"
+        "Open existing branch on a migration_pending tab must surface a clear error: {events:?}"
     );
 }
 

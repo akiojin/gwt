@@ -2818,26 +2818,39 @@ fn embedded_web_launch_wizard_actions_flow_through_named_transport() {
 }
 
 #[test]
-fn embedded_web_start_work_mode_hides_branch_controls_in_shared_wizard_renderer() {
+fn embedded_web_launch_entry_commands_replace_start_work() {
     let html = frontend_bundle_source();
 
+    // SPEC-3214 FR-009 (T-040/T-044): the Start Work entry is fully removed
+    // from the served frontend.
     assert!(
-        html.contains(r#"case "start-work":"#) && html.contains(r#"kind: "open_start_work""#),
-        "expected Start Work to use a global command instead of a Branches window action",
+        !html.contains(r#"case "start-work":"#) && !html.contains(r#"kind: "open_start_work""#),
+        "expected the served frontend to drop the Start Work command and event",
+    );
+    assert!(
+        html.contains(r#"case "intake-session":"#) && html.contains(r#"kind: "open_intake""#),
+        "expected the served frontend to wire the Intake session command",
+    );
+    // SPEC-3214 FR-010 (T-042): the existing-branch picker is a standalone
+    // global command with its own pending-wizard chrome.
+    assert!(
+        html.contains(r#"case "open-existing-branch":"#)
+            && html.contains(r#"kind: "open_existing_branch""#),
+        "expected the served frontend to wire the Open existing branch command",
     );
     assert!(
         html.contains("launchWizard.show_branch_controls !== false")
-            && html.contains("Plan Agent launch"),
-        "expected Start Work wizard mode to suppress branch controls and use Plan Agent meta copy",
+            && html.contains("Branch picker"),
+        "expected the picker wizard mode to suppress branch controls and use picker meta copy",
     );
     assert!(
         !html.contains("isStartWorkMode")
             && !html.contains(r#"wizardModal.classList.toggle("is-drawer""#),
-        "expected Start Work wizard mode to share the centered Launch Wizard modal",
+        "expected the picker wizard mode to share the centered Launch Wizard modal",
     );
     assert!(
         html.contains("launchWizard.show_agent_settings") && html.contains("\"Agent\""),
-        "expected Start Work to keep the existing Agent settings renderer available",
+        "expected the picker flow to keep the existing Agent settings renderer available",
     );
 }
 

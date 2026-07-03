@@ -59,6 +59,10 @@ pub enum LaunchWizardMode {
     /// SPEC-3214 FR-001: disposable branch-free intake session on an
     /// ephemeral detached worktree.
     Intake,
+    /// SPEC-3214 FR-010: standalone existing-branch picker (US-83
+    /// SelectExistingBranch) that continues on a remote branch without
+    /// minting a new work/* branch.
+    ExistingBranch,
 }
 
 pub fn knowledge_launch_target_branch_name(kind: LinkedIssueKind, number: u64) -> String {

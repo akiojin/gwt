@@ -238,6 +238,33 @@ impl LaunchWizardState {
         state
     }
 
+    /// SPEC-3214 FR-010: open the wizard as a standalone existing-branch
+    /// picker. No work/* branch is reserved; `SelectExistingBranch` flips the
+    /// state into the normal continue-on-branch launch (US-83 mechanics).
+    pub fn open_existing_branch_with_previous_profiles(
+        context: LaunchWizardContext,
+        agent_options: Vec<AgentOption>,
+        quick_start_entries: Vec<QuickStartEntry>,
+        previous_profiles: LaunchWizardPreviousProfiles,
+    ) -> Self {
+        let mut state = Self::new_with(
+            context,
+            agent_options,
+            quick_start_entries,
+            previous_profiles,
+            false,
+        );
+        state.wizard_mode = LaunchWizardMode::ExistingBranch;
+        state.step = LaunchWizardStep::LaunchTarget;
+        state.launch_path = LaunchWizardLaunchPath::ManualSetup;
+        state.selected = step_default_selection(state.step, &state);
+        state.is_new_branch = false;
+        state.base_branch_name = None;
+        state.branch_name = String::new();
+        state.context.normalized_branch_name = String::new();
+        state
+    }
+
     pub fn open_loading(context: LaunchWizardContext, agent_options: Vec<AgentOption>) -> Self {
         Self::new_with(
             context,

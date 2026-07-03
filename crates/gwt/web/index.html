@@ -113,10 +113,13 @@
              symbols; hover flyouts carry the label + real shortcut. -->
         <aside class="op-rail" id="op-rail" aria-label="Command rail">
           <div class="op-rail__group" role="group" aria-label="Navigate">
-            <button class="op-rail__item" type="button" data-cmd="start-work" aria-label="Start Work" title="Start Work">
+            <!-- SPEC-3214 FR-009: the launch entry is the branch-free
+                 intake session; producing work is launched by the Issue
+                 Monitor. -->
+            <button class="op-rail__item" type="button" data-cmd="intake-session" aria-label="Intake session" title="Intake session">
               <span class="op-rail__icon" aria-hidden="true">▶</span>
               <span class="op-rail__flyout" aria-hidden="true">
-                <span class="op-rail__flyout-label">Start Work</span>
+                <span class="op-rail__flyout-label">Intake session</span>
               </span>
             </button>
             <!-- FR-392 (SPEC-2359 W-15): surface entry points say "Workspace"
@@ -249,11 +252,23 @@
             <p class="canvas-empty-state__kicker"><span aria-hidden="true">▸</span> OPERATOR READY</p>
             <h2 class="canvas-empty-state__title">No windows on canvas</h2>
             <p class="canvas-empty-state__copy">
-              Start work on a branch, or add a surface window.
+              Register a quick issue for the Issue Monitor, curate in an
+              intake session, or open a surface window.
             </p>
+            <!-- SPEC-3214 FR-009 (T-041): the Start Work call to action is
+                 replaced by the autonomous-era entry points. -->
             <div class="canvas-empty-state__actions">
-              <button class="wizard-button primary" id="canvas-empty-start-work" type="button">
-                Start Work
+              <button class="wizard-button primary" id="canvas-empty-quick-issue" type="button">
+                Quick issue
+              </button>
+              <button class="wizard-button" id="canvas-empty-intake-session" type="button">
+                Intake session
+              </button>
+              <button class="wizard-button" id="canvas-empty-shell" type="button">
+                Shell
+              </button>
+              <button class="wizard-button" id="canvas-empty-open-branch" type="button">
+                Open existing branch
               </button>
               <button class="wizard-button" id="canvas-empty-add-window" type="button">
                 Add window

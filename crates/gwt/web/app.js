@@ -4270,7 +4270,7 @@
         syncWizardDraftState,
         flushWizardBranchDraft,
         renderLaunchWizard,
-        openStartWorkPendingWizard,
+        openExistingBranchPendingWizard,
         openLaunchAgentPendingWizard,
         applyLaunchWizardStateEvent,
         applyLaunchWizardOpenErrorEvent,
@@ -6258,13 +6258,22 @@
       });
 
       // SPEC-3038 AS-4.5: empty-canvas call to action mirrors the rail items.
-      document
-        .getElementById("canvas-empty-start-work")
-        ?.addEventListener("click", () => {
+      // SPEC-3214 FR-009 (T-041): the entries are the autonomous-era launch
+      // points — Quick issue (Issue Monitor), Intake session, Shell, and the
+      // standalone existing-branch picker.
+      const emptyStateCommands = [
+        ["canvas-empty-quick-issue", "open-issue-monitor"],
+        ["canvas-empty-intake-session", "intake-session"],
+        ["canvas-empty-shell", "spawn-shell"],
+        ["canvas-empty-open-branch", "open-existing-branch"],
+      ];
+      for (const [buttonId, commandId] of emptyStateCommands) {
+        document.getElementById(buttonId)?.addEventListener("click", () => {
           document.dispatchEvent(
-            new CustomEvent("op:command", { detail: { id: "start-work" } }),
+            new CustomEvent("op:command", { detail: { id: commandId } }),
           );
         });
+      }
       document
         .getElementById("canvas-empty-add-window")
         ?.addEventListener("click", () => {
@@ -6543,11 +6552,11 @@
           case "spawn-shell":
             focusOrSpawnPreset("shell");
             return;
-          case "start-work":
-          case "spawn-agent":
-            openStartWorkPendingWizard();
+          case "open-existing-branch":
+            // SPEC-3214 FR-010: standalone existing-branch picker (US-83).
+            openExistingBranchPendingWizard();
             frontendUnits.socketTransport.send({
-              kind: "open_start_work",
+              kind: "open_existing_branch",
             });
             return;
           case "intake-session":

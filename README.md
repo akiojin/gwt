@@ -229,12 +229,17 @@ the named-pipe path lands.
    project.
 2. Use `Board`, `Issue`, `SPEC`, and Knowledge search surfaces to understand
    the current work, related owners, and prior decisions.
-3. Choose `Start Work` from the Project Bar or Command Palette when the task is
-   still work-shaped rather than branch-shaped.
-4. Launch an `Agent` from Start Work, or launch directly from an Issue/SPEC
-   detail when the owner is already known.
-5. Let gwt materialize the backing `work/YYYYMMDD-HHMM[-n]` branch/worktree
-   only when launch is confirmed.
+3. Register new work as an Issue in seconds with `Quick issue` on the Issue
+   Monitor (optionally `Register & Launch` to hand it straight to the
+   monitor), or start an `Intake session` from the Command Rail / Command
+   Palette for branch-free curation, discussion, and SPEC shaping on a
+   disposable worktree.
+4. Let the Issue Monitor launch producing work: it materializes the backing
+   `work/issue-N` branch/worktree at launch time. To continue an existing
+   remote branch instead, use `Open existing branch` from the Command Palette
+   or the empty-canvas actions.
+5. For ad-hoc manual work on an already-open worktree, spawn a `Shell`
+   window.
 6. Use the shared Board for status, claims, next steps, blockers, handoffs,
    and decisions while agents run. To mirror those Board posts into Slack or
    Teams, configure a remote Board provider first; see
@@ -244,8 +249,8 @@ the named-pipe path lands.
 
 Common windows include:
 
-- `Agent` — live coding-agent process windows created through Start Work or
-  Launch Agent
+- `Agent` — live coding-agent process windows created through Issue Monitor
+  launches, Intake sessions, or Launch Agent
 - `Board` — shared user/agent timeline for reasoning and coordination
 - `Issue` and `SPEC` — cache-backed Knowledge Bridge windows with semantic
   search, detail panes, and Launch Agent handoff
@@ -615,8 +620,8 @@ falls back to system colors so accessibility is preserved.
 | `⌘?` | Toggle the Hotkey Overlay (cheat sheet) |
 | `Esc` | Close any open palette / overlay / drawer / dropdown |
 
-The Command Rail on the left edge is always visible: Start Work and Workspace
-at the top, window operations (Tile / Stack / Align / window list / Add) in the
+The Command Rail on the left edge is always visible: Intake session and
+Workspace at the top, window operations (Tile / Stack / Align / window list / Add) in the
 middle, and the Command Palette at the bottom. Board and Logs are not rail
 items; reach them via the Add Window preset menu, the command palette, or the
 `⌘B` / `⌘L` hotkeys. Hovering a rail item reveals its label and real shortcut. Closing a

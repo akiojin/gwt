@@ -60,6 +60,25 @@ fn start_work_open_error(client_id: &str, message: impl Into<String>) -> Vec<Out
     vec![launch_wizard_open_error(client_id, "Start Work", message)]
 }
 
+/// SPEC-3214 FR-001: intake open failures carry their own wizard title.
+fn intake_open_error(client_id: &str, message: impl Into<String>) -> Vec<OutboundEvent> {
+    vec![launch_wizard_open_error(
+        client_id,
+        "Intake session",
+        message,
+    )]
+}
+
+/// SPEC-3214 FR-010: existing-branch picker open failures carry their own
+/// wizard title.
+fn existing_branch_open_error(client_id: &str, message: impl Into<String>) -> Vec<OutboundEvent> {
+    vec![launch_wizard_open_error(
+        client_id,
+        "Open existing branch",
+        message,
+    )]
+}
+
 fn issue_monitor_auto_launch_geometry(index: usize) -> WindowGeometry {
     let offset = ((index % 8) as f64) * 24.0;
     WindowGeometry {
@@ -423,32 +442,38 @@ impl AppRuntime {
         }
     }
 
-    pub(crate) fn open_start_work(&mut self, client_id: &str) -> Vec<OutboundEvent> {
+    /// SPEC-3214 FR-010 (T-043): open the standalone existing-branch picker
+    /// (US-83 SelectExistingBranch) — the successor of the removed Start Work
+    /// entry (FR-009). No work/* branch name is reserved at open time.
+    pub(crate) fn open_existing_branch(&mut self, client_id: &str) -> Vec<OutboundEvent> {
         let Some(tab_id) = self.active_tab_id.clone() else {
-            return start_work_open_error(client_id, "Open a project before starting work");
+            return existing_branch_open_error(client_id, "Open a project before opening a branch");
         };
         let Some(tab) = self.tab(&tab_id) else {
-            return start_work_open_error(client_id, "Project tab not found");
+            return existing_branch_open_error(client_id, "Project tab not found");
         };
         if tab.kind != gwt::ProjectKind::Git {
-            return start_work_open_error(client_id, "Start Work requires a Git project");
+            return existing_branch_open_error(
+                client_id,
+                "Open existing branch requires a Git project",
+            );
         }
-        // SPEC-1934 US-7 / FR-034: refuse Start Work on a project whose
+        // SPEC-1934 US-7 / FR-034: refuse launching on a project whose
         // Nested Bare+Worktree migration has not completed. Without this
         // gate, `git fetch origin --prune` on a single-branch refspec leaves
-        // the new `work/*` branch unsynchronized and the launch path dies
-        // with `fatal: invalid reference: origin/work/<branch>`.
+        // the branch unsynchronized and the launch path dies with
+        // `fatal: invalid reference`.
         if tab.migration_pending {
-            return start_work_open_error(
+            return existing_branch_open_error(
                 client_id,
-                "Complete the project migration before starting work",
+                "Complete the project migration before opening a branch",
             );
         }
 
         let project_root = tab.project_root.clone();
-        match self.open_start_work_for_project(&tab_id, &project_root) {
+        match self.open_existing_branch_for_project(&tab_id, &project_root) {
             Ok(()) => vec![self.launch_wizard_state_outbound()],
-            Err(error) => start_work_open_error(client_id, error),
+            Err(error) => existing_branch_open_error(client_id, error),
         }
     }
 
@@ -458,19 +483,19 @@ impl AppRuntime {
     /// submits the launch.
     pub(crate) fn open_intake(&mut self, client_id: &str) -> Vec<OutboundEvent> {
         let Some(tab_id) = self.active_tab_id.clone() else {
-            return start_work_open_error(
+            return intake_open_error(
                 client_id,
                 "Open a project before starting an intake session",
             );
         };
         let Some(tab) = self.tab(&tab_id) else {
-            return start_work_open_error(client_id, "Project tab not found");
+            return intake_open_error(client_id, "Project tab not found");
         };
         if tab.kind != gwt::ProjectKind::Git {
-            return start_work_open_error(client_id, "Intake session requires a Git project");
+            return intake_open_error(client_id, "Intake session requires a Git project");
         }
         if tab.migration_pending {
-            return start_work_open_error(
+            return intake_open_error(
                 client_id,
                 "Complete the project migration before starting an intake session",
             );
@@ -1383,10 +1408,22 @@ impl AppRuntime {
             issue_monitor_launch_issue_number: None,
         });
 
-        // SPEC-2359 US-83 / FR-444 + FR-445: populate the "open existing branch"
-        // picker off the UI thread. Fetch origin first so a teammate's freshly
-        // pushed branch appears even when the Branches tab was never opened, then
-        // push the candidates into the live wizard via a typed event.
+        self.spawn_branch_candidates_refresh(tab_id, project_root, wizard_id);
+
+        Ok(())
+    }
+
+    /// SPEC-2359 US-83 / FR-444 + FR-445: populate the "open existing branch"
+    /// picker off the UI thread. Fetch origin first so a teammate's freshly
+    /// pushed branch appears even when the Branches tab was never opened, then
+    /// push the candidates into the live wizard via a typed event. Shared by
+    /// the Start Work fallback wizard and the standalone picker (SPEC-3214).
+    fn spawn_branch_candidates_refresh(
+        &self,
+        tab_id: &str,
+        project_root: &Path,
+        wizard_id: String,
+    ) {
         let proxy = self.proxy.clone();
         let candidates_root = project_root.to_path_buf();
         let active_session_branches = self.active_session_branches_for_tab(tab_id);
@@ -1410,6 +1447,56 @@ impl AppRuntime {
                 candidates,
             });
         });
+    }
+
+    /// SPEC-3214 FR-010 (T-043): open the Launch Wizard as the standalone
+    /// existing-branch picker. Unlike the Start Work flow no work/* branch
+    /// name is reserved — the user picks an eligible remote branch and the
+    /// launch continues on it (US-83 mechanics unchanged).
+    pub(crate) fn open_existing_branch_for_project(
+        &mut self,
+        tab_id: &str,
+        project_root: &Path,
+    ) -> Result<(), String> {
+        let previous_profiles = self.launch_wizard_cache.agent_preferences();
+        let agent_options = self.launch_wizard_cache.agent_options();
+        let wizard_id = Uuid::new_v4().to_string();
+        let mut wizard = LaunchWizardState::open_existing_branch_with_previous_profiles(
+            LaunchWizardContext {
+                selected_branch: synthetic_branch_entry(
+                    gwt::start_work::START_WORK_BASE_BRANCH_CANDIDATES[0],
+                ),
+                normalized_branch_name: String::new(),
+                worktree_path: None,
+                quick_start_root: project_root.to_path_buf(),
+                live_sessions: Vec::new(),
+                docker_context: None,
+                docker_service_status: gwt_docker::ComposeServiceStatus::NotFound,
+                linked_issue_number: None,
+                linked_issue_kind: None,
+                ultracode_supported: self.launch_wizard_cache.claude_ultracode_supported(),
+                claude_workflows_enabled: self.launch_wizard_cache.claude_workflows_enabled(),
+            },
+            agent_options,
+            Vec::new(),
+            previous_profiles,
+        );
+        wizard.set_hermes_provider_choices(gwt_skills::hermes_provider_choices_global());
+        wizard.set_hermes_needs_setup(!gwt_skills::hermes_is_configured_global());
+        wizard.set_opencode_needs_setup(!gwt_skills::opencode_is_configured_global());
+        wizard.mark_runtime_context_unresolved();
+        self.launch_wizard = Some(LaunchWizardSession {
+            tab_id: tab_id.to_string(),
+            wizard_id: wizard_id.clone(),
+            wizard,
+            workspace_resume_context: None,
+            agent_kanban_target: None,
+            auto_submit_after_runtime_resolution: None,
+            issue_monitor_profile_save: None,
+            issue_monitor_launch_issue_number: None,
+        });
+
+        self.spawn_branch_candidates_refresh(tab_id, project_root, wizard_id);
 
         Ok(())
     }

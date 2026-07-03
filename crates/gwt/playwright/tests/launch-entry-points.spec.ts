@@ -1,26 +1,24 @@
-/* Issue #3192 — clicking the left-rail "Start Work" button must open the
- * Launch Wizard pending modal ("Preparing Plan Agent...").
+/* SPEC-3214 T-050 (FR-009/FR-010) — the Start Work entry points are removed
+ * and the autonomous-era launch entries take their place:
  *
- * Regression of commit 1fdbe25c0 ("fix: show launch materialization
- * progress"): renderLaunchWizard() dereferenced `launchWizard` before the
- * opening/error early-returns, so the Start Work pending state (launchWizard
- * === null, launchWizardOpening set) threw a TypeError and the modal never
- * received its `.open` class. The crash is synchronous inside the click
- * handler, so it also blocked the `open_start_work` WS send — the button
- * silently did nothing.
+ *   - the operator rail exposes Intake session (no Start Work item)
+ *   - the empty-canvas call to action offers Quick issue / Intake session /
+ *     Shell / Open existing branch
+ *   - clicking Open existing branch renders the client-side pending wizard
+ *     ("Fetching remote branches...") before any backend round-trip
  *
  * This spec boots the embedded frontend with a deterministic WebSocket stub
- * (no live gwt process), clicks the rail button, and asserts the pending
- * modal opens without a page error. It needs no backend round-trip because
- * the pending modal is rendered client-side before any send.
+ * (no live gwt process). The pending modal is rendered client-side before the
+ * `open_existing_branch` WS send, so no backend round-trip is required.
+ * (The pending-render-before-send contract itself was pinned by Issue #3192.)
  */
 import { expect, test } from "@playwright/test";
 import { APP_URL, installEmbeddedRoutes } from "./_helpers/embedded-frontend";
 
-test.describe("Start Work launch-pending modal", () => {
+test.describe("launch entry points (SPEC-3214)", () => {
   test.use({ viewport: { width: 1440, height: 900 } });
 
-  test("clicking Start Work opens the Preparing Plan Agent modal", async ({
+  test("rail and empty canvas expose the intake-era entries without Start Work", async ({
     page,
   }) => {
     const pageErrors: string[] = [];
@@ -31,27 +29,35 @@ test.describe("Start Work launch-pending modal", () => {
     await page.goto(APP_URL);
 
     // App boots to an open git project; the operator rail is interactive.
-    const startWork = page.locator('.op-rail [data-cmd="start-work"]');
-    await expect(startWork).toBeVisible({ timeout: 10_000 });
+    const intakeSession = page.locator('.op-rail [data-cmd="intake-session"]');
+    await expect(intakeSession).toBeVisible({ timeout: 10_000 });
+    await expect(page.locator('.op-rail [data-cmd="start-work"]')).toHaveCount(0);
 
-    await startWork.click();
+    // The empty canvas offers the autonomous-era call to action.
+    const empty = page.locator("#canvas-empty-state");
+    await expect(empty).toBeVisible();
+    await expect(empty.locator("#canvas-empty-start-work")).toHaveCount(0);
+    for (const id of [
+      "canvas-empty-quick-issue",
+      "canvas-empty-intake-session",
+      "canvas-empty-shell",
+      "canvas-empty-open-branch",
+      "canvas-empty-add-window",
+    ]) {
+      await expect(empty.locator(`#${id}`)).toBeVisible();
+    }
 
+    // Open existing branch renders the pending wizard client-side.
+    await empty.locator("#canvas-empty-open-branch").click();
     const wizard = page.locator("#wizard-modal");
-    // The `.open` class is added at the end of renderLaunchWizard(); the
-    // regression threw before reaching it.
     await expect(wizard).toHaveClass(/\bopen\b/, { timeout: 10_000 });
     await expect(wizard.locator(".launch-pending-note")).toHaveText(
-      "Preparing Plan Agent...",
+      "Fetching remote branches...",
     );
 
-    // Pin the exact regression: no null dereference of the wizard view model.
-    const wizardErrors = pageErrors.filter((message) =>
-      message.includes("launch_materialization_pending"),
+    expect(pageErrors, `unexpected page error(s): ${pageErrors.join("\n")}`).toEqual(
+      [],
     );
-    expect(
-      wizardErrors,
-      `unexpected wizard page error(s): ${pageErrors.join("\n")}`,
-    ).toEqual([]);
   });
 });
 
@@ -111,8 +117,8 @@ async function installOpenProjectBackend(page: any): Promise<void> {
         if (message && message.kind === "frontend_ready") {
           this.emit(workspaceState);
         }
-        // open_start_work and other sends are intentionally ignored: the
-        // pending modal is rendered client-side before this point.
+        // open_existing_branch and other sends are intentionally ignored:
+        // the pending modal is rendered client-side before this point.
       }
 
       close() {
