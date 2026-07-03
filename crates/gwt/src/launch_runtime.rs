@@ -171,16 +171,112 @@ pub fn resolve_launch_worktree_request(
     Ok(())
 }
 
+/// Resolve a working directory for an ephemeral intake launch (SPEC-3214
+/// T-004): materialize a detached `.intake-*` worktree at `base_ref` and set
+/// `working_dir`. Unlike [`resolve_launch_worktree_request`] this never creates
+/// a branch — the intake worktree hosts a short-lived session and is removed
+/// when the session ends. `working_dir` already set is a no-op (idempotent /
+/// reuse). Collisions with existing worktrees are avoided by suffixing.
+pub fn resolve_ephemeral_launch_worktree(
+    repo_path: &Path,
+    base_ref: Option<&str>,
+    working_dir: &mut Option<PathBuf>,
+    env_vars: &mut HashMap<String, String>,
+) -> Result<(), String> {
+    if working_dir.is_some() {
+        return Ok(());
+    }
+
+    let main_repo_path =
+        gwt_git::worktree::main_worktree_root(repo_path).map_err(|err| err.to_string())?;
+    let manager = gwt_git::WorktreeManager::new(&main_repo_path);
+    let worktrees = manager.list().map_err(|err| err.to_string())?;
+
+    let layout_root = main_repo_path.parent().unwrap_or(main_repo_path.as_path());
+    let preferred_path = layout_root.join(INTAKE_WORKTREE_PREFIX);
+    let worktree_path = first_available_worktree_path(&preferred_path, &worktrees)
+        .ok_or_else(|| "failed to resolve available intake worktree path".to_string())?;
+
+    // Default to HEAD: `git worktree add --detach <path> HEAD` always resolves
+    // in a repo with commits. Callers (Phase 3 intake launch) pass an explicit
+    // base ref such as `origin/develop` when they need a specific base.
+    let base_ref = base_ref.unwrap_or("HEAD");
+    manager
+        .create_detached(base_ref, &worktree_path)
+        .map_err(|err| err.to_string())?;
+
+    set_worktree_launch_path(working_dir, env_vars, &worktree_path);
+    Ok(())
+}
+
 fn is_start_work_branch_name(branch_name: &str) -> bool {
     branch_name
         .strip_prefix("work/")
         .is_some_and(|name| !name.is_empty())
 }
 
+/// Reap orphaned ephemeral intake worktrees at startup (SPEC-3214 T-006).
+///
+/// A crash between an intake launch and its session-end cleanup leaves a
+/// detached `.intake-*` worktree behind. On startup no intake session is live,
+/// so every `.intake-*` worktree is an orphan: remove the clean ones and keep
+/// the dirty ones (uncommitted work is never destroyed). Bounded by
+/// `max_removals` so a pathological pile-up cannot stall startup. Returns the
+/// number removed. Never errors — best-effort recovery.
+pub fn prune_orphan_intake_worktrees(repo_path: &Path, max_removals: usize) -> usize {
+    let Ok(main_repo_path) = gwt_git::worktree::main_worktree_root(repo_path) else {
+        return 0;
+    };
+    let manager = gwt_git::WorktreeManager::new(&main_repo_path);
+    let Ok(worktrees) = manager.list() else {
+        return 0;
+    };
+
+    let mut removed = 0;
+    for worktree in worktrees {
+        if removed >= max_removals {
+            break;
+        }
+        if !is_ephemeral_intake_worktree(&worktree.path) {
+            continue;
+        }
+        match manager.ephemeral_worktree_has_local_work(&worktree.path) {
+            Ok(false) => {
+                if manager.remove_force(&worktree.path).is_ok() {
+                    removed += 1;
+                }
+            }
+            // Has local work or unknown → keep it (fail closed).
+            _ => {
+                tracing::warn!(
+                    worktree_path = %worktree.path.display(),
+                    "keeping orphaned intake worktree with local work (changes, ignored files, or commits)"
+                );
+            }
+        }
+    }
+    if removed > 0 {
+        let _ = manager.prune();
+    }
+    removed
+}
+
 pub fn resolve_launch_worktree(
     repo_path: &Path,
     config: &mut gwt_agent::LaunchConfig,
 ) -> Result<(), String> {
+    // SPEC-3214: an ephemeral intake launch resolves a detached throwaway
+    // worktree instead of creating/reusing a branch worktree.
+    if config.is_ephemeral {
+        resolve_ephemeral_launch_worktree(
+            repo_path,
+            config.ephemeral_base_ref.as_deref(),
+            &mut config.working_dir,
+            &mut config.env_vars,
+        )?;
+        normalize_launch_config_working_dir(config);
+        return Ok(());
+    }
     let mut base_branch = config.base_branch.clone();
     resolve_launch_worktree_request(
         repo_path,

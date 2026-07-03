@@ -376,6 +376,24 @@ pub fn usable_worktree_entry(worktree: &gwt_git::WorktreeInfo) -> bool {
     !worktree.prunable && worktree.path.exists()
 }
 
+/// SPEC-3214: filename stem for ephemeral intake worktrees. Placed as a
+/// sibling of the main worktree (`<layout_root>/.intake`, suffixed on
+/// collision) so it is easy to recognize and prune.
+pub const INTAKE_WORKTREE_PREFIX: &str = ".intake";
+
+/// Whether `path` is an ephemeral intake worktree created by
+/// [`crate::launch_runtime::resolve_ephemeral_launch_worktree`] — i.e. its
+/// file name is `.intake` or `.intake-<n>`. Session-end cleanup and orphan
+/// pruning key off this so they never touch a real branch worktree.
+pub fn is_ephemeral_intake_worktree(path: &Path) -> bool {
+    path.file_name()
+        .and_then(|name| name.to_str())
+        .is_some_and(|name| {
+            name == INTAKE_WORKTREE_PREFIX
+                || name.starts_with(&format!("{INTAKE_WORKTREE_PREFIX}-"))
+        })
+}
+
 pub fn first_available_worktree_path(
     preferred_path: &Path,
     worktrees: &[gwt_git::WorktreeInfo],

@@ -92,13 +92,13 @@ use embedded_server::{ClientHub, EmbeddedServer};
 pub(crate) use launch_runtime::{
     apply_host_package_runner_fallback_checked, apply_windows_host_shell_wrapper,
     build_shell_process_launch, ensure_docker_launch_runtime_ready, install_launch_gwt_bin_env,
-    resolve_launch_worktree, resolve_shell_launch_worktree,
+    prune_orphan_intake_worktrees, resolve_launch_worktree, resolve_shell_launch_worktree,
 };
 #[cfg(test)]
 pub(crate) use launch_runtime::{
     apply_host_package_runner_fallback_with_probe, command_matches_runner,
     install_launch_gwt_bin_env_with_lookup, probe_host_package_runner_with_timeout,
-    resolve_launch_worktree_request,
+    resolve_ephemeral_launch_worktree, resolve_launch_worktree_request,
 };
 #[cfg(test)]
 pub(crate) use runtime_support::{
@@ -109,11 +109,12 @@ pub(crate) use runtime_support::{
     attach_parent_console_for_cli, close_window_from_workspace, combined_window_id,
     current_git_branch, dedupe_recent_projects, fallback_project_target,
     first_available_worktree_path, front_door_route, geometry_to_pty_size,
-    knowledge_kind_for_preset, local_branch_exists, normalize_active_tab_id, normalize_branch_name,
-    normalize_recent_project_path, normalize_recent_projects, origin_remote_ref,
-    prune_missing_recent_projects, resolve_launch_spec_with_fallback, resolve_project_target,
-    run_cli, same_worktree_path, should_auto_close_agent_window, should_auto_start_restored_window,
-    synthetic_branch_entry, usable_worktree_path_for_branch, worktrees_have_stale_branch_entry,
+    is_ephemeral_intake_worktree, knowledge_kind_for_preset, local_branch_exists,
+    normalize_active_tab_id, normalize_branch_name, normalize_recent_project_path,
+    normalize_recent_projects, origin_remote_ref, prune_missing_recent_projects,
+    resolve_launch_spec_with_fallback, resolve_project_target, run_cli, same_worktree_path,
+    should_auto_close_agent_window, should_auto_start_restored_window, synthetic_branch_entry,
+    usable_worktree_path_for_branch, worktrees_have_stale_branch_entry, INTAKE_WORKTREE_PREFIX,
 };
 pub(crate) use update_front_door::{apply_update_state_and_exit, spawn_startup_update_check};
 #[cfg(test)]
@@ -5755,6 +5756,107 @@ mod tests {
             .expect("tokio runtime")
             .block_on(super::health_handler());
         assert_eq!(health, "ok");
+    }
+
+    #[test]
+    fn prune_orphan_intake_worktrees_removes_clean_keeps_dirty_and_is_bounded() {
+        // SPEC-3214 T-006: on startup, `.intake-*` worktrees left by a crash
+        // are reaped — clean ones removed, dirty ones kept, capped per run.
+        let temp = tempdir().expect("tempdir");
+        let repo = temp.path().join("repo");
+        init_git_clone_with_origin(&repo);
+        let manager = gwt_git::WorktreeManager::new(&repo);
+
+        let clean_a = temp.path().join(".intake-a");
+        let clean_b = temp.path().join(".intake-b");
+        let dirty = temp.path().join(".intake-dirty");
+        for path in [&clean_a, &clean_b, &dirty] {
+            manager
+                .create_detached("HEAD", path)
+                .expect("intake worktree");
+        }
+        fs::write(dirty.join("wip.txt"), "unsaved").expect("dirty file");
+
+        let removed = super::prune_orphan_intake_worktrees(&repo, 10);
+        assert_eq!(removed, 2, "both clean intake worktrees pruned");
+        assert!(
+            !clean_a.exists() && !clean_b.exists(),
+            "clean intake pruned"
+        );
+        assert!(
+            dirty.exists() && dirty.join("wip.txt").exists(),
+            "dirty intake kept — never destroy uncommitted work"
+        );
+
+        // Bounded: a second batch of clean intakes is capped at the limit.
+        let clean_c = temp.path().join(".intake-c");
+        let clean_d = temp.path().join(".intake-d");
+        for path in [&clean_c, &clean_d] {
+            manager
+                .create_detached("HEAD", path)
+                .expect("intake worktree");
+        }
+        let removed_bounded = super::prune_orphan_intake_worktrees(&repo, 1);
+        assert_eq!(removed_bounded, 1, "prune is bounded per run");
+    }
+
+    #[test]
+    fn resolve_ephemeral_launch_worktree_creates_detached_intake_worktree() {
+        // SPEC-3214 T-003: an ephemeral intake launch materializes a detached
+        // `.intake-*` worktree (no branch) and sets working_dir; the existing
+        // branch-based launch path is untouched.
+        let temp = tempdir().expect("tempdir");
+        let repo = temp.path().join("repo");
+        init_git_clone_with_origin(&repo);
+
+        let mut working_dir = None;
+        let mut env_vars = HashMap::new();
+        super::resolve_ephemeral_launch_worktree(
+            &repo,
+            Some("develop"),
+            &mut working_dir,
+            &mut env_vars,
+        )
+        .expect("ephemeral intake worktree resolves");
+
+        let intake_dir = working_dir.expect("intake working_dir set");
+        assert!(intake_dir.exists(), "intake worktree materialized");
+        assert!(
+            intake_dir
+                .file_name()
+                .and_then(|name| name.to_str())
+                .is_some_and(|name| name.starts_with(".intake")),
+            "intake worktree uses the .intake-* layout: {}",
+            intake_dir.display()
+        );
+        assert!(env_vars
+            .get("GWT_PROJECT_ROOT")
+            .is_some_and(|value| super::same_worktree_path(Path::new(value), &intake_dir)));
+
+        // Detached HEAD: no current branch.
+        let current =
+            gwt_core::process::run_git_logged(&["branch", "--show-current"], Some(&intake_dir))
+                .expect("git branch --show-current");
+        assert!(
+            String::from_utf8_lossy(&current.stdout).trim().is_empty(),
+            "intake worktree is detached (branchless)"
+        );
+
+        // A second concurrent intake launch avoids the occupied path.
+        let mut second_dir = None;
+        let mut second_env = HashMap::new();
+        super::resolve_ephemeral_launch_worktree(
+            &repo,
+            Some("develop"),
+            &mut second_dir,
+            &mut second_env,
+        )
+        .expect("second ephemeral intake worktree resolves");
+        let second_dir = second_dir.expect("second intake working_dir");
+        assert_ne!(
+            second_dir, intake_dir,
+            "collision avoided for concurrent intake"
+        );
     }
 
     #[test]

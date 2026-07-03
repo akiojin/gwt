@@ -405,6 +405,14 @@ pub struct LaunchConfig {
     pub docker_lifecycle_intent: DockerLifecycleIntent,
     pub linked_issue_number: Option<u64>,
     pub windows_shell: Option<crate::WindowsShellKind>,
+    /// SPEC-3214: this launch runs in an ephemeral, detached intake worktree
+    /// that is removed when the session ends. `true` routes worktree
+    /// resolution through the detached-worktree path instead of creating a
+    /// branch.
+    pub is_ephemeral: bool,
+    /// Base committish for the ephemeral intake worktree (e.g. `origin/develop`).
+    /// `None` defaults to `HEAD`. Only meaningful when `is_ephemeral` is set.
+    pub ephemeral_base_ref: Option<String>,
 }
 
 /// Permission mode for agent launch.
@@ -461,6 +469,8 @@ pub struct AgentLaunchBuilder {
     docker_lifecycle_intent: DockerLifecycleIntent,
     linked_issue_number: Option<u64>,
     windows_shell: Option<crate::WindowsShellKind>,
+    is_ephemeral: bool,
+    ephemeral_base_ref: Option<String>,
 }
 
 impl AgentLaunchBuilder {
@@ -494,7 +504,17 @@ impl AgentLaunchBuilder {
             docker_lifecycle_intent: DockerLifecycleIntent::Connect,
             linked_issue_number: None,
             windows_shell: None,
+            is_ephemeral: false,
+            ephemeral_base_ref: None,
         }
+    }
+
+    /// SPEC-3214: mark this launch as an ephemeral intake session that runs in
+    /// a detached, throwaway worktree based on `base_ref` (`None` → `HEAD`).
+    pub fn ephemeral(mut self, base_ref: Option<String>) -> Self {
+        self.is_ephemeral = true;
+        self.ephemeral_base_ref = base_ref;
+        self
     }
 
     pub fn custom_agent(mut self, agent: CustomCodingAgent) -> Self {
@@ -790,6 +810,8 @@ impl AgentLaunchBuilder {
             docker_lifecycle_intent: self.docker_lifecycle_intent,
             linked_issue_number: self.linked_issue_number,
             windows_shell: self.windows_shell,
+            is_ephemeral: self.is_ephemeral,
+            ephemeral_base_ref: self.ephemeral_base_ref,
         }
     }
 

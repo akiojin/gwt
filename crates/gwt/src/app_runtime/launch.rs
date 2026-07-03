@@ -33,8 +33,8 @@ use super::{
     apply_docker_runtime_to_launch_config, apply_host_package_runner_fallback_checked,
     apply_windows_host_shell_wrapper, combined_window_id, detect_shell_program,
     finalize_docker_agent_launch_config, geometry_to_pty_size, install_launch_gwt_bin_env,
-    launch_output_mirror, mark_auto_resume_source_completed, normalize_branch_name,
-    refresh_managed_gwt_assets_for_agent_with_codex_hook_discovery_mode,
+    is_ephemeral_intake_worktree, launch_output_mirror, mark_auto_resume_source_completed,
+    normalize_branch_name, refresh_managed_gwt_assets_for_agent_with_codex_hook_discovery_mode,
     resolve_docker_launch_plan, resolve_launch_spec_with_fallback, resolve_launch_worktree,
     save_resumed_workspace_projection, save_start_work_workspace_projection, ActiveAgentSession,
     AgentKanbanLaunchTarget, AppEventProxy, AppRuntime, BackendEvent, HookForwardTarget,
@@ -1842,6 +1842,21 @@ impl AppRuntime {
         let Some(session) = self.active_agent_sessions.remove(window_id) else {
             return;
         };
+        // SPEC-3214 (FR-002 / T-005 / T-007): an ephemeral intake session runs
+        // in a throwaway detached `.intake-*` worktree and produces NO Work
+        // identity. On session end, remove the worktree when clean; keep it
+        // when dirty so uncommitted work is never lost. Skip the Paused-Work /
+        // projection persistence entirely.
+        if is_ephemeral_intake_worktree(&session.worktree_path) {
+            self.finalize_ephemeral_intake_worktree(&session);
+            let _ = gwt_agent::persist_session_status(
+                &self.sessions_dir,
+                &session.session_id,
+                gwt_agent::AgentStatus::Stopped,
+            );
+            self.launch_wizard_cache.mark_stopped(&session.session_id);
+            return;
+        }
         if let Some(project_root) = self
             .tab(&session.tab_id)
             .map(|tab| tab.project_root.clone())
@@ -1870,6 +1885,48 @@ impl AppRuntime {
             gwt_agent::AgentStatus::Stopped,
         );
         self.launch_wizard_cache.mark_stopped(&session.session_id);
+    }
+
+    /// SPEC-3214 (FR-002): tear down an ephemeral intake worktree when its
+    /// session ends. A clean worktree is force-removed; a dirty one is kept and
+    /// logged so uncommitted work is never destroyed (the user-facing retention
+    /// notice ships with the intake UI in a later phase).
+    fn finalize_ephemeral_intake_worktree(&self, session: &ActiveAgentSession) {
+        let worktree_path = session.worktree_path.as_path();
+        let main_repo_path = self
+            .tab(&session.tab_id)
+            .map(|tab| tab.project_root.clone())
+            .and_then(|root| gwt_git::worktree::main_worktree_root(&root).ok())
+            .unwrap_or_else(|| worktree_path.to_path_buf());
+        let manager = gwt_git::WorktreeManager::new(&main_repo_path);
+
+        match manager.ephemeral_worktree_has_local_work(worktree_path) {
+            Ok(true) => {
+                tracing::warn!(
+                    worktree_path = %worktree_path.display(),
+                    "ephemeral intake worktree has local work (changes, ignored files, or commits); keeping it so nothing is lost"
+                );
+                return;
+            }
+            Ok(false) => {}
+            Err(error) => {
+                // Fail closed: if we cannot prove the worktree is empty, keep it.
+                tracing::warn!(
+                    worktree_path = %worktree_path.display(),
+                    error = %error,
+                    "could not determine intake worktree cleanliness; keeping it"
+                );
+                return;
+            }
+        }
+
+        if let Err(error) = manager.remove_force(worktree_path) {
+            tracing::warn!(
+                worktree_path = %worktree_path.display(),
+                error = %error,
+                "failed to remove clean ephemeral intake worktree"
+            );
+        }
     }
 
     /// SPEC-2359 Phase W-12 Slice 5a (FR-350): record a Pause work event for a
