@@ -941,23 +941,28 @@ fn path_arg_for_git(path: &Path) -> String {
 
 /// Parse `git worktree list --porcelain` output into `WorktreeInfo` entries.
 /// SPEC-3214: paths that a `git status --ignored` line may report which are
-/// safe to destroy when reaping an ephemeral intake worktree — gwt-materialized
-/// managed assets (written into every worktree at launch) and OS cruft.
-/// Everything else (a gitignored `tasks/todo.md`, `.env`, `.gwt/draft/…`, any
-/// tracked change) is treated as the user's local work and keeps the worktree.
+/// safe to destroy when reaping an ephemeral intake worktree. These are ONLY
+/// gwt's own materialized managed assets — the exact patterns gwt writes into
+/// every worktree's `.git/info/exclude` (see `gwt-skills` `git_exclude.rs`:
+/// `.claude/skills/gwt-*`, `.claude/commands/gwt-*`, `.claude/settings.local.json`,
+/// `.codex/skills/gwt-*`) — plus OS cruft. Everything else is the user's local
+/// work and keeps the worktree: a gitignored `tasks/todo.md` / `.env`, anything
+/// under `.gwt/`, a user-authored `.claude/skills/<custom>` or a
+/// `.claude/settings.json` edit (codex #3235 review), and any tracked change.
 fn is_disposable_worktree_entry(entry: &str) -> bool {
     let entry = entry.trim().trim_matches('"');
     let entry = entry.strip_prefix("./").unwrap_or(entry);
-    const MANAGED_PREFIXES: &[&str] = &[".claude/", ".codex/"];
-    if entry == ".claude" || entry == ".codex" {
-        return true;
-    }
-    if MANAGED_PREFIXES
-        .iter()
-        .any(|prefix| entry.starts_with(prefix))
+
+    // gwt-managed skill / command dirs are prefixed `gwt-`; git may report the
+    // collapsed dir (`.claude/skills/gwt-coordination/`) or individual files.
+    if entry.starts_with(".claude/skills/gwt-")
+        || entry.starts_with(".claude/commands/gwt-")
+        || entry.starts_with(".codex/skills/gwt-")
+        || entry == ".claude/settings.local.json"
     {
         return true;
     }
+
     entry == ".DS_Store" || entry.ends_with("/.DS_Store")
 }
 
@@ -1478,9 +1483,10 @@ prunable gitdir file points to non-existent location
         let repo_path = tmp.path().join("repo");
         std::fs::create_dir_all(&repo_path).unwrap();
         init_git_repo(&repo_path);
+        // Mirror gwt's managed-asset exclude patterns (git_exclude.rs).
         std::fs::write(
             repo_path.join(".gitignore"),
-            "tasks/\n.env\n.claude/settings.local.json\n",
+            "tasks/\n.env\n.claude/skills/gwt-*\n.claude/commands/gwt-*\n.claude/settings.local.json\n.codex/skills/gwt-*\n",
         )
         .unwrap();
         gwt_core::process::run_git_logged(&["add", "-A"], Some(&repo_path)).unwrap();
@@ -1497,14 +1503,55 @@ prunable gitdir file points to non-existent location
             "a pristine intake worktree has no local work"
         );
 
-        // 2. Only gwt-managed materialized assets present → still discardable.
-        std::fs::create_dir_all(fresh.join(".claude")).unwrap();
+        // 2. Only gwt-materialized managed assets present → still discardable.
+        std::fs::create_dir_all(fresh.join(".claude/skills/gwt-coordination")).unwrap();
+        std::fs::write(
+            fresh.join(".claude/skills/gwt-coordination/SKILL.md"),
+            "managed",
+        )
+        .unwrap();
+        std::fs::create_dir_all(fresh.join(".claude/commands")).unwrap();
+        std::fs::write(fresh.join(".claude/commands/gwt-x.md"), "managed").unwrap();
         std::fs::write(fresh.join(".claude/settings.local.json"), "{}").unwrap();
-        std::fs::create_dir_all(fresh.join(".codex/skills")).unwrap();
-        std::fs::write(fresh.join(".codex/skills/x.md"), "managed").unwrap();
+        std::fs::create_dir_all(fresh.join(".codex/skills/gwt-coordination")).unwrap();
+        std::fs::write(
+            fresh.join(".codex/skills/gwt-coordination/SKILL.md"),
+            "managed",
+        )
+        .unwrap();
         assert!(
             !manager.ephemeral_worktree_has_local_work(&fresh).unwrap(),
-            "gwt-materialized .claude/.codex assets are not user work"
+            "gwt-materialized managed assets are not user work"
+        );
+
+        // 2b. USER content under .claude/.codex (codex #3235 P1) → keep.
+        let user_claude = tmp.path().join(".intake-userclaude");
+        manager.create_detached("develop", &user_claude).unwrap();
+        std::fs::create_dir_all(user_claude.join(".claude/skills/my-custom")).unwrap();
+        std::fs::write(
+            user_claude.join(".claude/skills/my-custom/SKILL.md"),
+            "the user's own skill",
+        )
+        .unwrap();
+        assert!(
+            manager
+                .ephemeral_worktree_has_local_work(&user_claude)
+                .unwrap(),
+            "a user-authored skill under .claude is local work, not a gwt-managed asset"
+        );
+        let user_settings = tmp.path().join(".intake-usersettings");
+        manager.create_detached("develop", &user_settings).unwrap();
+        std::fs::create_dir_all(user_settings.join(".claude")).unwrap();
+        std::fs::write(
+            user_settings.join(".claude/settings.json"),
+            "{\"edited\":true}",
+        )
+        .unwrap();
+        assert!(
+            manager
+                .ephemeral_worktree_has_local_work(&user_settings)
+                .unwrap(),
+            "a user .claude/settings.json edit must not be treated as disposable"
         );
 
         // 3. A gitignored agent-authored file (tasks/todo.md) → keep.
