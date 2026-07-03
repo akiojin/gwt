@@ -133,6 +133,12 @@ pub enum PrCommand {
     View {
         number: u64,
     },
+    Ready {
+        number: u64,
+    },
+    Draft {
+        number: u64,
+    },
     Comment {
         number: u64,
         file: String,

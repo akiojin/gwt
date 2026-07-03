@@ -173,9 +173,23 @@ fn is_blocked_issue_subcommand(subcommand: Option<&str>) -> bool {
 }
 
 fn is_blocked_pr_subcommand(subcommand: Option<&str>) -> bool {
+    // "draft" does not exist as a gh subcommand (the real reverse of
+    // `gh pr ready` is `gh pr ready --undo`, already covered by "ready");
+    // it is intercepted anyway so an agent guessing it by symmetry with the
+    // `pr.draft` JSON operation gets redirected instead of a gh usage error.
     matches!(
         subcommand,
-        Some("view" | "create" | "edit" | "comment" | "checks" | "reviews" | "review-threads")
+        Some(
+            "view"
+                | "create"
+                | "edit"
+                | "ready"
+                | "draft"
+                | "comment"
+                | "checks"
+                | "reviews"
+                | "review-threads"
+        )
     )
 }
 
@@ -191,7 +205,7 @@ fn github_workflow_block_decision(command: &str) -> HookOutput {
 Recommended alternatives:\n\
 - read: JSON operations `issue.view`, `issue.comments`, `issue.linked_prs`\n\
 - write: JSON operations `issue.create`, `issue.comment`\n\
-- PR workflow: JSON operations `pr.current`, `pr.view`, `pr.comment`, `pr.checks`\n\
+- PR workflow: JSON operations `pr.current`, `pr.view`, `pr.create`, `pr.edit`, `pr.ready`, `pr.draft`, `pr.comment`, `pr.checks`\n\
 - PR reviews: JSON operations `pr.reviews`, `pr.review_threads`, `pr.review_threads.reply_and_resolve`\n\
 - Actions logs: JSON operations `actions.logs`, `actions.job_logs`\n\
 - discovery: `gwt-search`, `~/.gwt/cache/issues/<repo-hash>/`\n\n\

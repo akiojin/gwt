@@ -51,6 +51,8 @@ pub struct TestEnv {
     pub pr_checks: HashMap<u64, PrChecksSummary>,
     pub pr_current_call_count: usize,
     pub pr_view_call_log: Vec<u64>,
+    pub pr_ready_call_log: Vec<u64>,
+    pub pr_draft_call_log: Vec<u64>,
     pub pr_reviews_call_log: Vec<u64>,
     pub pr_review_threads_call_log: Vec<u64>,
     pub pr_reply_and_resolve_call_log: Vec<(u64, String)>,
@@ -87,6 +89,8 @@ impl TestEnv {
             pr_checks: HashMap::new(),
             pr_current_call_count: 0,
             pr_view_call_log: Vec::new(),
+            pr_ready_call_log: Vec::new(),
+            pr_draft_call_log: Vec::new(),
             pr_reviews_call_log: Vec::new(),
             pr_review_threads_call_log: Vec::new(),
             pr_reply_and_resolve_call_log: Vec::new(),
@@ -239,6 +243,20 @@ impl CliEnv for TestEnv {
     }
     fn fetch_pr(&mut self, number: u64) -> io::Result<PrStatus> {
         self.pr_view_call_log.push(number);
+        self.prs
+            .get(&number)
+            .cloned()
+            .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, format!("no pr: {number}")))
+    }
+    fn mark_pr_ready(&mut self, number: u64) -> io::Result<PrStatus> {
+        self.pr_ready_call_log.push(number);
+        self.prs
+            .get(&number)
+            .cloned()
+            .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, format!("no pr: {number}")))
+    }
+    fn convert_pr_to_draft(&mut self, number: u64) -> io::Result<PrStatus> {
+        self.pr_draft_call_log.push(number);
         self.prs
             .get(&number)
             .cloned()
