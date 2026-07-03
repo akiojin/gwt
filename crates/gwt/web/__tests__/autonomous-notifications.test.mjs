@@ -1,6 +1,7 @@
 // SPEC #3200 FR-034 / FR-035 — autonomous notification side-stack contract.
 
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import { test } from "node:test";
 import { parseHTML } from "linkedom";
 
@@ -84,4 +85,24 @@ test("styles use Operator tokens, never raw hex/rgb", () => {
   assert.doesNotMatch(style, /#[0-9a-fA-F]{3,8}\b/, "no raw hex colors");
   assert.doesNotMatch(style, /\brgba?\(/, "no raw rgb/rgba colors");
   assert.match(style, /var\(--color-/, "uses color tokens");
+});
+
+test("SPEC #3206 P2: every token the log-region style references is defined", () => {
+  // A var() pointing at a token that exists nowhere silently falls back (or
+  // no-ops), so the style sheet must only reference tokens that tokens.css /
+  // typography.css actually define.
+  const stylesDir = new URL("../styles/", import.meta.url);
+  const defined = new Set();
+  for (const file of ["tokens.css", "typography.css"]) {
+    const source = readFileSync(new URL(file, stylesDir), "utf8");
+    for (const m of source.matchAll(/(--[a-z0-9-]+)\s*:/g)) {
+      defined.add(m[1]);
+    }
+  }
+  const style = createAutonomousNotifications({
+    document: parseHTML("<!doctype html>").document,
+  }).styleText();
+  for (const m of style.matchAll(/var\(\s*(--[a-z0-9-]+)/g)) {
+    assert.ok(defined.has(m[1]), `log region references undefined token ${m[1]}`);
+  }
 });

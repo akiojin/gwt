@@ -7493,6 +7493,20 @@ Context: During PR #3193 pre-PR visual verification, the Issue Bridge auto-refre
 Learning: Timer-shortening fixtures are flaky when the production callback can legally no-op while state is busy. Tests should expose a deterministic trigger and call it after asserting the state that makes the callback meaningful.
 Future Action: For Playwright fixtures that validate periodic behavior, capture interval callbacks and trigger them explicitly after the initial render/load assertions instead of relying on arbitrary short timeouts.
 
+## 2026-07-02 — 同一 worktree への build-spec 二重起動 race の検知と協調解消
+
+Type: agent workflow correction
+Context: SPEC #3206 Phase 2 (feature/spec-3206) で gwt-build-spec が同一 worktree に約2分差で二重起動された。Board preflight 時点では相手 session は started エントリのみ（claim 無し）で working tree もクリーンだったため続行したところ、相手の編集が自分の Read とテスト実行の間に着地し、RED のはずの contract test が最初から GREEN になった。
+Learning: 同一 branch の started エントリは claim が無くても『生きた並行 writer』であり得る。Board claim preflight だけでは不十分。RED を書いたテストが初回から PASS するのは並行編集の強いシグナルで、即座に git status / git diff / 対象ファイル mtime を確認すべき。.gwt/skill-state/build-spec.json は session 間で共有され、後発の build.start が先発の state を上書きする。
+Future Action: gwt-build-spec 開始時、同一 branch に他 session の started エントリがある場合は (1) git status の予期しない dirty、(2) 対象ファイルの mtime、(3) .gwt/skill-state/build-spec.json の active 状態を確認し、生きた writer の証拠があれば編集前に Board で調整する。衝突検知後は、実装を持っている側に完了を委ね、自分は重複変更を revert して commit を監視する（二重 commit / 二重 PR を構造的に回避）。
+
+## 2026-07-02 — fresh HOME では Playwright browser を pinned binary で install / rustup default 必須
+
+Type: environment
+Context: SPEC #3206 P2 検証で、gwt-fresh-home 隔離 HOME から Playwright E2E と cargo test を実行したら両方 tooling 欠落で失敗した(chromium headless shell 不在 / rustup default 未設定)。素の npx playwright install は最新 playwright 用 browser build (v1228) を入れてしまい、scripts/run-visual-tests.sh が pin する 1.49.1 が要求する v1148 と合わず解決しなかった。
+Learning: fresh HOME では ~/Library/Caches/ms-playwright と rustup default が空。browser install は必ず pinned deps の binary (${TMPDIR}/gwt-playwright-<ver>/node_modules/.bin/playwright install chromium) で行う。cargo は rustup default stable を一度実行すれば直る(toolchain 自体は installed)。
+Future Action: 隔離環境で Executable doesn't exist ... ms-playwright/chromium_headless_shell-<N> を見たら要求 build 番号 <N> を確認し、pinned playwright binary で install する。rustup could not choose a version は rustup default stable。
+
 ## 2026-07-02 — Start Work は lazy／branch-per-work は生産Work用・intake は既存worktree再利用
 
 Type: decision
@@ -7520,6 +7534,13 @@ Context: PR #3205 (Deliver mode) が放置中に develop へ簡易版 Deliver (4
 Learning: (1) 同一 skill への並行実装は「後勝ち」ではなく安全性の superset 側 (disarm-before-push 不変条件・merge method 自動選択・deliver-flow.md reference 付き) を本文採用し、trigger 文言は union で統合する。両実装の doc テストが lib.rs に併存するため、解消後は双方のテストを通すこと。(2) PTY spawn ENOENT は develop でも test_spawn_with_env 等で既出の infra flaky 系で、ローカル (macOS) full suite PASS + develop 直近 CI green なら transient 分類で再走してよい。
 Future Action: gwt-manage-pr SKILL.md を編集する際は .claude/.codex の byte parity と gwt-skills の manage_pr doc テスト群 (gwt_manage_pr_documents_drive_to_merge_delivery / manage_pr_documents_deliver_drive_to_merge_mode) を必ずローカルで実行する。PTY 系 CI flaky が同一テストで 3 run 連続したら infra ではなくコードとして調査に切り替える。
 
+## 2026-07-02 — 通知 UI の視覚検証は __gwt_test_inject で実経路発火できる
+
+Type: technique
+Context: SPEC #3206 の browser-check 視覚検証で、attention/completion/board-mention トーストは agent 実起動や離席 gating が前提で手動再現が重かった。
+Learning: app.js の `__gwt_test_inject` CustomEvent listener は payload をそのまま `receive()`（WebSocket frame と同一経路）へ流すため、devtools console から synthetic `workspace_state`（kill-switch.spec.ts の agentWindow fixture 形が最小形）+ `window_state`（waiting=warn/error=sticky/exited=done）+ `issue_monitor_toast` を dispatch すると、controller → 共有 alerts スタック / log region まで本番コードパスで描画できる。表示は page-scoped でリロードで戻る。issue_monitor_* を inject すると以後の live 同種イベントは page 内で drop される点に注意。
+Future Action: 通知/トースト系 UI の browser-check では、実 agent を起動せず __gwt_test_inject console snippet を用意してユーザーに渡す。snippet は先に Playwright MCP で同一 URL に対して動作確認してから共有する。
+
 ## 2026-07-03 — sandbox 内起動サーバーはユーザーの Chrome から接続不可 / claude-in-chrome は接続先マシンを先に確認
 
 Type: workflow-correction
@@ -7540,3 +7561,10 @@ Type: lesson
 Context: Issue #3201: gwtd pr.edit は gh pr edit の read:org prefetch で常に失敗し（2026-06-12 memory 参照）、Draft→Ready 昇格 operation も存在しなかったため、エージェントが PR ライフサイクルを sanctioned surface で完結できなかった
 Learning: PR #3231 で解消: pr.edit は REST（PATCH /pulls・POST /issues/labels）化され read:org 無し token でも成功する（本マシンで live smoke 済み）。pr.ready / pr.draft operations が新設され、gh pr ready / gh pr ready --undo は hook でブロックされ gwtd へ誘導される。2026-06-12 の『PR 本文の事後修正はこの環境では不可』は本修正後の gwtd では成立しない。pr.edit の add_labels は存在しないラベルを fail-closed で拒否し、title/body/add_labels 全省略は parse エラーになる
 Future Action: PR 本文更新・Draft→Ready 昇格は gwtd JSON operations pr.edit / pr.ready を正規経路として使う。旧 gwtd（未更新の GWT.app 同梱版）では pr.edit が引き続き失敗するため、失敗したらビルド済み target/debug/gwtd か更新版を使う
+
+## 2026-07-03 — conflict 解消は閉じマーカーまで含めて除去し grep で全マーカー不在を検証する
+
+Type: failure-pattern
+Context: SPEC #3206 PR 作成時、.gwt/work/memory.md の merge conflict を Edit tool で解消した際、old_string に開始マーカーと '=======' だけ含め、develop 側ブロック末尾の閉じマーカー '>>>>>>> origin/develop' を含め忘れた。stray marker が commit/push され、次の merge で HEAD 側がマーカー 1 行だけという見かけ上おかしな conflict として表面化した。
+Learning: conflict 解消を Edit tool で行う場合、<<<<<<< / ======= / >>>>>>> の 3 マーカーが 1 hunk 分すべて old_string に含まれているかを確認する。解消後は必ず grep -n '^<<<<<<<\|^=======$\|^>>>>>>>' <file> で全マーカー不在を検証してから git add する。今回は次 merge の conflict で偶然発覚したが、conflict しなければ stray marker が PR diff に残ったまま merge されていた。
+Future Action: merge conflict 解消の直後に、対象ファイル全体への conflict-marker grep を必ず 1 回実行する（部分表示の Read だけで判断しない）。

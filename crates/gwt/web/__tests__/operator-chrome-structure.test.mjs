@@ -3309,6 +3309,32 @@ test("FR-040 refinement: error toasts persist, stack newest-on-top, share a fixe
   );
 });
 
+test("SPEC #3206 P2: alerts toast CSS only references defined Operator tokens", () => {
+  // An undefined token in var() silently resolves to nothing (the legacy
+  // attention block shipped `var(--shadow-3)`, which is defined nowhere, so
+  // the alerts cards rendered with no elevation shadow at all). Every token
+  // the .toast-alerts family references must exist in tokens.css /
+  // typography.css (or be a custom property app.css itself defines).
+  const tokensCss = readFileSync(resolve(here, "../styles/tokens.css"), "utf8");
+  const typographyCss = readFileSync(resolve(here, "../styles/typography.css"), "utf8");
+  const defined = new Set();
+  for (const source of [tokensCss, typographyCss, inlineStyle]) {
+    for (const m of source.matchAll(/(--[a-z0-9-]+)\s*:/g)) {
+      defined.add(m[1]);
+    }
+  }
+  const blocks = inlineStyle.match(/\.toast-alerts[^{}]*\{[^}]*\}/g) ?? [];
+  assert.ok(blocks.length >= 5, "expected the .toast-alerts rule family in app.css");
+  for (const block of blocks) {
+    for (const m of block.matchAll(/var\(\s*(--[a-z0-9-]+)/g)) {
+      assert.ok(
+        defined.has(m[1]),
+        `.toast-alerts references undefined token ${m[1]}: ${block.trim().split("\n")[0]}`,
+      );
+    }
+  }
+});
+
 test("Work surface lifecycle badge styles every agent-session state (SPEC-2359 W-12 FR-351)", () => {
   const css = readFileSync(resolve(here, "../styles/components.css"), "utf8");
   // Slice 3 retires the sidebar `op-agent-card` states; the Work surface now

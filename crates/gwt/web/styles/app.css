@@ -4012,7 +4012,7 @@ body {
   right: var(--space-4);
   bottom: var(--space-4);
   z-index: 1001;
-  width: min(360px, calc(100vw - 36px));
+  width: min(360px, calc(100vw - var(--space-8)));
   pointer-events: none;
 }
 .toast-alerts__list {
@@ -4036,7 +4036,7 @@ body {
   border-radius: var(--radius-md);
   color: var(--color-text);
   background: var(--color-surface-elevated);
-  box-shadow: var(--shadow-3);
+  box-shadow: var(--shadow-2);
   font-family: var(--font-body);
   font-size: var(--type-sm);
   text-align: left;
@@ -4068,14 +4068,15 @@ body {
 }
 .toast-alerts__item[data-leaving="true"] {
   max-height: 0;
-  margin-top: -8px;
+  /* Cancels the stack gap (--space-2) so the remaining toasts settle flush. */
+  margin-top: calc(-1 * var(--space-2));
   padding-top: 0;
   padding-bottom: 0;
   opacity: 0;
   pointer-events: none;
 }
 .toast-alerts__title {
-  font-weight: var(--font-weight-strong, 700);
+  font-weight: 700;
   color: var(--color-text-strong);
 }
 .toast-alerts__message {
