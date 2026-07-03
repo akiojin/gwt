@@ -1540,7 +1540,16 @@ impl AppRuntime {
             install_launch_gwt_bin_env(&mut config.env_vars, config.runtime_target)?;
             apply_windows_host_shell_wrapper(&mut config)?;
 
-            let branch_name = config.branch.clone().unwrap_or_else(|| "work".to_string());
+            // SPEC-3214: an ephemeral intake session has no branch by design —
+            // label it "intake" instead of the legacy fake "work" so the
+            // session record never reads like a named-branch launch.
+            let branch_name = config.branch.clone().unwrap_or_else(|| {
+                if config.is_ephemeral {
+                    "intake".to_string()
+                } else {
+                    "work".to_string()
+                }
+            });
 
             let agent_id = config.agent_id.clone();
             let mut session =

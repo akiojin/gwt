@@ -56,6 +56,9 @@ pub enum LaunchWizardMode {
     Branch,
     StartWork,
     Knowledge,
+    /// SPEC-3214 FR-001: disposable branch-free intake session on an
+    /// ephemeral detached worktree.
+    Intake,
 }
 
 pub fn knowledge_launch_target_branch_name(kind: LinkedIssueKind, number: u64) -> String {

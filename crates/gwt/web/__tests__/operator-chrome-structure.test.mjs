@@ -251,6 +251,20 @@ test("project bar and command palette expose Start Work outside the Branches sur
   );
 });
 
+// SPEC-3214 T-020 — the Intake session entry point (FR-001 UI).
+test("command palette exposes Intake session and app wires open_intake", () => {
+  assert.match(
+    operatorShellSource,
+    /id:\s*"intake-session"[\s\S]+label:\s*"Intake session"/,
+    "expected Command Palette registry to include Intake session",
+  );
+  assert.match(
+    appSource,
+    /case\s+"intake-session":[\s\S]+kind:\s*"open_intake"/,
+    "expected Intake session command to send the global open_intake event",
+  );
+});
+
 test("frontend handles active work projection as status-strip telemetry", () => {
   assert.match(
     appSource,

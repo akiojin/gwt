@@ -6550,6 +6550,13 @@
               kind: "open_start_work",
             });
             return;
+          case "intake-session":
+            // SPEC-3214 FR-001: branch-free intake session on an ephemeral
+            // detached worktree.
+            frontendUnits.socketTransport.send({
+              kind: "open_intake",
+            });
+            return;
           case "stop-all-windows":
             requestStopAllWindows();
             return;

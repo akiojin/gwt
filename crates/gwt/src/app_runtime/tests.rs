@@ -21067,3 +21067,66 @@ fn quick_register_issue_with_launch_prioritizes_monitor_queue() {
         "monitor snapshot refresh is part of the launch handoff"
     );
 }
+
+// ---------------------------------------------------------------------------
+// SPEC-3214 Phase 3 — intake session 起動導線 (T-020)
+// ---------------------------------------------------------------------------
+
+/// SPEC-3214 T-020 / FR-001 UI: `open_intake` opens the Launch Wizard in
+/// Intake mode whose launch config is ephemeral (no branch, no worktree yet)
+/// and creates no git refs at open time.
+#[test]
+fn open_intake_builds_ephemeral_launch_wizard() {
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedEnvVar::set("HOME", temp.path());
+    let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+    let repo = temp.path().join("repo");
+    fs::create_dir_all(&repo).expect("create repo");
+    run_git(&repo, &["init"]);
+    run_git(&repo, &["config", "user.email", "gwt@example.invalid"]);
+    run_git(&repo, &["config", "user.name", "gwt"]);
+    run_git(&repo, &["commit", "--allow-empty", "-m", "seed"]);
+    let tab = sample_project_tab("tab-1", "Repo", repo.clone(), ProjectKind::Git, &[]);
+    let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+
+    let events = runtime.handle_frontend_event("client-1".to_string(), FrontendEvent::OpenIntake);
+
+    assert!(
+        matches!(
+            events.first().map(|event| &event.event),
+            Some(BackendEvent::LaunchWizardState { wizard: Some(_) })
+        ),
+        "open_intake must publish an open wizard state"
+    );
+    let session = runtime.launch_wizard.as_ref().expect("intake wizard");
+    let view = session.wizard.view();
+    assert_eq!(view.mode, gwt::LaunchWizardMode::Intake);
+    assert!(
+        !view.show_branch_controls,
+        "intake sessions must not expose branch controls"
+    );
+
+    let config = session
+        .wizard
+        .build_launch_config()
+        .expect("intake launch config");
+    assert!(config.is_ephemeral);
+    assert!(config.branch.is_none());
+    assert!(config.base_branch.is_none());
+    assert!(config.working_dir.is_none());
+
+    // Opening the wizard must not create any refs or worktrees.
+    let refs = gwt_core::process::hidden_command("git")
+        .args(["for-each-ref", "refs/heads"])
+        .current_dir(&repo)
+        .output()
+        .expect("list refs");
+    let refs_text = String::from_utf8_lossy(&refs.stdout).to_string();
+    assert!(
+        !refs_text.contains("intake"),
+        "open_intake must not create branch refs, got: {refs_text}"
+    );
+}

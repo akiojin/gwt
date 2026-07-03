@@ -435,6 +435,7 @@ pub(super) fn frontend_user_action_log(event: &FrontendEvent) -> Option<Frontend
             })
         }
         FrontendEvent::OpenStartWork => FrontendUserActionLog::new("open_start_work", "launch"),
+        FrontendEvent::OpenIntake => FrontendUserActionLog::new("open_intake", "launch"),
         FrontendEvent::OpenStartWorkInAgentKanban { board_id, lane_id } => {
             FrontendUserActionLog::new("open_start_work_in_agent_kanban", "launch")
                 .window(board_id)

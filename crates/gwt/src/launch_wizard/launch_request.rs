@@ -169,6 +169,17 @@ impl LaunchWizardState {
         if let Some(reasoning_level) = self.reasoning_level_for_launch() {
             config.reasoning_level = Some(reasoning_level.to_string());
         }
+        if self.wizard_mode == LaunchWizardMode::Intake {
+            // SPEC-3214 FR-001: intake launches are branch-free and get a
+            // disposable detached worktree from the launch runtime. Clearing
+            // branch/base/working_dir here is the invariant guard — no wizard
+            // state may leak a named branch into an intake launch.
+            config.is_ephemeral = true;
+            config.ephemeral_base_ref = None;
+            config.branch = None;
+            config.base_branch = None;
+            config.working_dir = None;
+        }
         Ok(config)
     }
 
@@ -989,6 +1000,36 @@ mod tests {
         assert!(
             state.error.is_some(),
             "a protected base branch must be rejected on the continue-on-branch path"
+        );
+    }
+
+    /// SPEC-3214 T-020 / FR-001: the Intake wizard mode builds an ephemeral
+    /// launch — no branch, no base branch, no pre-resolved working dir — so
+    /// the launch runtime materializes a disposable `.intake-*` detached
+    /// worktree instead of a named-branch worktree.
+    #[test]
+    fn open_intake_hides_branch_controls_and_builds_ephemeral_config() {
+        let state = LaunchWizardState::open_intake_with_previous_profiles(
+            context(branch("develop"), "develop"),
+            sample_agent_options(),
+            Vec::new(),
+            LaunchWizardPreviousProfiles::default(),
+        );
+
+        let view = state.view();
+        assert_eq!(view.mode, LaunchWizardMode::Intake);
+        assert!(
+            !view.show_branch_controls,
+            "intake sessions have no branch to pick"
+        );
+
+        let config = state.build_launch_config().expect("intake launch config");
+        assert!(config.is_ephemeral, "intake launches must be ephemeral");
+        assert!(config.branch.is_none(), "no named branch may be involved");
+        assert!(config.base_branch.is_none());
+        assert!(
+            config.working_dir.is_none(),
+            "the ephemeral worktree is materialized at launch time"
         );
     }
 

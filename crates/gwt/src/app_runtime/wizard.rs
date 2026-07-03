@@ -452,6 +452,71 @@ impl AppRuntime {
         }
     }
 
+    /// SPEC-3214 FR-001 (T-021): open the Launch Wizard in Intake mode. No
+    /// branch is reserved and no git ref is touched at open time — the
+    /// ephemeral `.intake-*` worktree is materialized only when the user
+    /// submits the launch.
+    pub(crate) fn open_intake(&mut self, client_id: &str) -> Vec<OutboundEvent> {
+        let Some(tab_id) = self.active_tab_id.clone() else {
+            return start_work_open_error(
+                client_id,
+                "Open a project before starting an intake session",
+            );
+        };
+        let Some(tab) = self.tab(&tab_id) else {
+            return start_work_open_error(client_id, "Project tab not found");
+        };
+        if tab.kind != gwt::ProjectKind::Git {
+            return start_work_open_error(client_id, "Intake session requires a Git project");
+        }
+        if tab.migration_pending {
+            return start_work_open_error(
+                client_id,
+                "Complete the project migration before starting an intake session",
+            );
+        }
+
+        let project_root = tab.project_root.clone();
+        let previous_profiles = self.launch_wizard_cache.agent_preferences();
+        let agent_options = self.launch_wizard_cache.agent_options();
+        let wizard_id = Uuid::new_v4().to_string();
+        let mut wizard = LaunchWizardState::open_intake_with_previous_profiles(
+            LaunchWizardContext {
+                selected_branch: synthetic_branch_entry(
+                    gwt::start_work::START_WORK_BASE_BRANCH_CANDIDATES[0],
+                ),
+                normalized_branch_name: String::new(),
+                worktree_path: None,
+                quick_start_root: project_root,
+                live_sessions: Vec::new(),
+                docker_context: None,
+                docker_service_status: gwt_docker::ComposeServiceStatus::NotFound,
+                linked_issue_number: None,
+                linked_issue_kind: None,
+                ultracode_supported: self.launch_wizard_cache.claude_ultracode_supported(),
+                claude_workflows_enabled: self.launch_wizard_cache.claude_workflows_enabled(),
+            },
+            agent_options,
+            Vec::new(),
+            previous_profiles,
+        );
+        wizard.set_hermes_provider_choices(gwt_skills::hermes_provider_choices_global());
+        wizard.set_hermes_needs_setup(!gwt_skills::hermes_is_configured_global());
+        wizard.set_opencode_needs_setup(!gwt_skills::opencode_is_configured_global());
+        wizard.mark_runtime_context_unresolved();
+        self.launch_wizard = Some(LaunchWizardSession {
+            tab_id,
+            wizard_id,
+            wizard,
+            workspace_resume_context: None,
+            agent_kanban_target: None,
+            auto_submit_after_runtime_resolution: None,
+            issue_monitor_profile_save: None,
+            issue_monitor_launch_issue_number: None,
+        });
+        vec![self.launch_wizard_state_outbound()]
+    }
+
     pub(crate) fn open_start_work_in_agent_kanban(
         &mut self,
         client_id: &str,

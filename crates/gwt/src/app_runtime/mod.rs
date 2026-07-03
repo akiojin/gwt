@@ -2088,6 +2088,7 @@ impl AppRuntime {
                 self.open_issue_launch_wizard_events(&client_id, &id, issue_number)
             }
             FrontendEvent::OpenStartWork => self.open_start_work(&client_id),
+            FrontendEvent::OpenIntake => self.open_intake(&client_id),
             FrontendEvent::OpenStartWorkInAgentKanban { board_id, lane_id } => {
                 self.open_start_work_in_agent_kanban(&client_id, &board_id, lane_id)
             }

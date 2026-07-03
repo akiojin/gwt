@@ -28,10 +28,10 @@ impl LaunchWizardState {
         let show_hermes_options = show_manual_setup && self.current_agent_supports_hermes_options();
         let show_opencode_options = show_manual_setup && self.current_agent_is_opencode();
         LaunchWizardView {
-            title: if self.wizard_mode == LaunchWizardMode::StartWork {
-                "Start Work".to_string()
-            } else {
-                "Launch Agent".to_string()
+            title: match self.wizard_mode {
+                LaunchWizardMode::StartWork => "Start Work".to_string(),
+                LaunchWizardMode::Intake => "Intake session".to_string(),
+                _ => "Launch Agent".to_string(),
             },
             mode: self.wizard_mode,
             branch_name: self.branch_name.clone(),
