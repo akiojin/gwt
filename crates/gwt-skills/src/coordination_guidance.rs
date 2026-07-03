@@ -144,15 +144,23 @@ There is no standalone `gwt-search` executable.
 
 The tracked `.gwt/work/` directory is the persistent Work core
 (SPEC-2359 W-15, FR-383). When you commit your work, include the
-changed tracked files under `.gwt/work/` (`events.jsonl`, `memory.md`,
-`discussions.md`) in the regular commit so they reach the base branch
-through the PR:
+changed tracked files under `.gwt/work/` (`events.jsonl`) in the
+regular commit so they reach the base branch through the PR:
 
 - `.gwt/work/events.jsonl` is an append-only log joined across branches
   via the `merge=union` gitattribute. Never hand-edit, truncate, or
   revert it
 - Do not commit it separately from the work it describes; ride the
   normal work commit
+
+Project memory and discussion notes are machine-local scratch
+(SPEC-3214 FR-007/FR-008). `memory.add` and the discussion operations
+write `~/.gwt/projects/<repo-hash>/work-notes/{memory.md,discussions.md}`,
+shared by every worktree of the repository. Do not commit them — a
+legacy repo-local `.gwt/work/{memory.md,discussions.md}` is only a read
+fallback that is imported into the home file once. Durable team-shared
+learnings and decisions belong to GitHub (Issue / `gwt-spec` Issue),
+not to the local notes.
 
 ## Language
 
@@ -290,13 +298,22 @@ binary の `search` JSON operation で実行します:
 
 追跡対象の `.gwt/work/` ディレクトリは Work の永続コアです
 （SPEC-2359 W-15, FR-383）。作業を commit する際は、`.gwt/work/` 配下の
-追跡ファイル（`events.jsonl`、`memory.md`、`discussions.md`）の変更を
-通常の commit に含め、PR 経由で base branch に届けます:
+追跡ファイル（`events.jsonl`）の変更を通常の commit に含め、PR 経由で
+base branch に届けます:
 
 - `.gwt/work/events.jsonl` は append-only ログで、`merge=union`
   gitattribute により branch を跨いで結合されます。手編集・切詰め・
   revert をしないでください
 - 作業内容と切り離して単独 commit にせず、通常の作業 commit に乗せます
+
+プロジェクト memory と discussion notes はマシンローカルの scratch です
+（SPEC-3214 FR-007/FR-008）。`memory.add` と discussion 系 operation は
+`~/.gwt/projects/<repo-hash>/work-notes/{memory.md,discussions.md}` に
+書き込み、同一 repository の全 worktree で共有されます。これらを commit
+しないでください — legacy な repo-local `.gwt/work/{memory.md,discussions.md}`
+は読み取り fallback のみで、初回書き込み時に home 側へ import されます。
+チーム共有すべき durable な学び・決定は GitHub（Issue / `gwt-spec` Issue）
+に反映します。
 
 ## Language
 

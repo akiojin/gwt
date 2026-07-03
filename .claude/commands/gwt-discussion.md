@@ -24,7 +24,7 @@ mid-implementation investigation.
 5. After each answer, update `Discussion TODO`, `Coverage Checks`, `Exit Blockers`, `Question Ledger`, and `Depth Gate`, then re-rank unresolved high-impact unknowns and ask the next highest-impact question before exiting.
 6. Do not leave Plan Mode until `Action Delta` and `Action Bundle` are ready, `Depth Gate: complete` or `Depth Gate: deferred(<reason>)` is recorded, and `Evidence Gate: complete` is backed by implementation proof, SPEC/Issue proof, gap-check proof, official docs proof when applicable, and external research proof when needed.
 7. When autonomous follow-up should start after approval, record the Action Bundle goal condition with JSON operation `discuss.goal_pending` so the next approval turn can start `/goal` and then mark `discuss.goal_started`, `discuss.goal_failed`, or `discuss.goal_skipped`.
-8. If managed hooks surface an unfinished discussion prompt, use `.gwt/work/discussions.md` as the source of truth. The legacy `.gwt/discussion.md` is read fallback only. Then choose `Resume discussion`, `Park proposal`, or `Dismiss for now`.
+8. If managed hooks surface an unfinished discussion prompt, use the machine-local work-notes discussion log (`~/.gwt/projects/<repo-hash>/work-notes/discussions.md`) as the source of truth. The repo-local `.gwt/work/discussions.md` and legacy `.gwt/discussion.md` are read fallbacks only. Then choose `Resume discussion`, `Park proposal`, or `Dismiss for now`.
 
 ## Examples
 

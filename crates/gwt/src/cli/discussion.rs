@@ -163,48 +163,37 @@ pub fn run<E: CliEnv>(
     }
 }
 
-/// Moves a legacy `tasks/discussions.md` into the repo-local
-/// `.gwt/work/discussions.md` location when the new file does not yet exist.
-/// Idempotent — returns `Ok(true)` only when a move happened.
+/// Imports legacy discussion sources (repo-local `.gwt/work/discussions.md`,
+/// `tasks/discussions.md`) into the machine-local home work-notes file when
+/// it does not yet exist. Idempotent — returns `Ok(true)` only when an
+/// import happened.
 ///
-/// SPEC-2359 Phase W-12: the discussion log moved out of the untracked
-/// `tasks/` directory into the git-tracked `.gwt/work/` directory.
+/// SPEC-3214 (FR-007): the discussion log moved out of the git-tracked
+/// repo-local `.gwt/work/` directory into the branch-independent home
+/// scratch (`~/.gwt/projects/<repo-hash>/work-notes/`).
 pub fn migrate_legacy_discussions_file(repo_root: &Path) -> std::io::Result<bool> {
-    let new_path = gwt_core::paths::gwt_repo_local_discussions_path(repo_root);
-    if new_path.exists() {
-        return Ok(false);
-    }
-    let legacy = repo_root.join("tasks").join("discussions.md");
-    if !legacy.exists() {
-        return Ok(false);
-    }
-    if let Some(parent) = new_path.parent() {
-        fs::create_dir_all(parent)?;
-    }
-    fs::rename(&legacy, &new_path)?;
-    Ok(true)
+    crate::work_notes::migrate_discussions_into_home(repo_root)
 }
 
 fn update_discussion_entry(
     repo_root: &Path,
     update: &DiscussionUpdateCommand,
 ) -> std::io::Result<PathBuf> {
-    migrate_legacy_discussions_file(repo_root)?;
-    let path = gwt_core::paths::gwt_repo_local_discussions_path(repo_root);
-    if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent)?;
-    }
-    ensure_discussions_file(&path)?;
+    let path = gwt_core::paths::gwt_work_notes_discussions_path(repo_root);
+    crate::work_notes::with_work_notes_lock(repo_root, || {
+        crate::work_notes::migrate_discussions_into_home(repo_root)?;
+        ensure_discussions_file(&path)?;
 
-    let mut content = fs::read_to_string(&path)?;
-    let date = update
-        .date
-        .clone()
-        .unwrap_or_else(|| Local::now().format("%Y-%m-%d").to_string());
-    let heading = format!("## {date} — {}", update.title);
-    let entry = format_discussion_entry(&date, update);
-    content = replace_or_append_section(&content, &heading, &entry);
-    fs::write(&path, content)?;
+        let mut content = fs::read_to_string(&path)?;
+        let date = update
+            .date
+            .clone()
+            .unwrap_or_else(|| Local::now().format("%Y-%m-%d").to_string());
+        let heading = format!("## {date} — {}", update.title);
+        let entry = format_discussion_entry(&date, update);
+        content = replace_or_append_section(&content, &heading, &entry);
+        fs::write(&path, content)
+    })?;
     Ok(path)
 }
 

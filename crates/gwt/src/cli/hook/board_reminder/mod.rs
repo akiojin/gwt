@@ -427,7 +427,10 @@ fn append_progress_summary_context(
 }
 
 fn memory_source_present(worktree_path: &Path) -> bool {
-    worktree_path.join(".gwt/work/memory.md").is_file()
+    // SPEC-3214 (FR-007): the canonical memory log is the machine-local home
+    // work-notes file; the repo-local and tasks/ files are legacy fallbacks.
+    gwt_core::paths::gwt_work_notes_memory_path(worktree_path).is_file()
+        || worktree_path.join(".gwt/work/memory.md").is_file()
         || worktree_path.join("tasks/memory.md").is_file()
         || worktree_path.join("tasks/lessons.md").is_file()
 }
@@ -819,7 +822,7 @@ mod tests {
         };
         assert!(text.contains("Memory Reminder"));
         assert!(text.contains("memory.add"));
-        assert!(text.contains(".gwt/work/memory.md"));
+        assert!(text.contains("work-notes/memory.md"));
         assert!(text.contains("Future Action"));
     }
 
@@ -840,7 +843,7 @@ mod tests {
         };
         assert!(text.contains("Memory Reminder"));
         assert!(text.contains("memory.add"));
-        assert!(text.contains(".gwt/work/memory.md"));
+        assert!(text.contains("work-notes/memory.md"));
     }
 
     #[test]
