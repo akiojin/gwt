@@ -246,7 +246,10 @@ pub fn prune_orphan_intake_worktrees(repo_path: &Path, max_removals: usize) -> u
         if worktree.branch.is_some() {
             continue;
         }
-        match manager.ephemeral_worktree_has_local_work(&worktree.path) {
+        let worktree_path = worktree.path.clone();
+        match manager.ephemeral_worktree_has_local_work_with(&worktree.path, |entry| {
+            intake_hook_config_is_disposable(&worktree_path, entry)
+        }) {
             Ok(false) => {
                 if manager.remove_force(&worktree.path).is_ok() {
                     removed += 1;

@@ -109,12 +109,13 @@ pub(crate) use runtime_support::{
     attach_parent_console_for_cli, close_window_from_workspace, combined_window_id,
     current_git_branch, dedupe_recent_projects, fallback_project_target,
     first_available_worktree_path, front_door_route, geometry_to_pty_size,
-    is_ephemeral_intake_worktree, knowledge_kind_for_preset, local_branch_exists,
-    normalize_active_tab_id, normalize_branch_name, normalize_recent_project_path,
-    normalize_recent_projects, origin_remote_ref, prune_missing_recent_projects,
-    resolve_launch_spec_with_fallback, resolve_project_target, run_cli, same_worktree_path,
-    should_auto_close_agent_window, should_auto_start_restored_window, synthetic_branch_entry,
-    usable_worktree_path_for_branch, worktrees_have_stale_branch_entry, INTAKE_WORKTREE_PREFIX,
+    intake_hook_config_is_disposable, is_ephemeral_intake_worktree, knowledge_kind_for_preset,
+    local_branch_exists, normalize_active_tab_id, normalize_branch_name,
+    normalize_recent_project_path, normalize_recent_projects, origin_remote_ref,
+    prune_missing_recent_projects, resolve_launch_spec_with_fallback, resolve_project_target,
+    run_cli, same_worktree_path, should_auto_close_agent_window, should_auto_start_restored_window,
+    synthetic_branch_entry, usable_worktree_path_for_branch, worktrees_have_stale_branch_entry,
+    INTAKE_WORKTREE_PREFIX,
 };
 pub(crate) use update_front_door::{apply_update_state_and_exit, spawn_startup_update_check};
 #[cfg(test)]
@@ -5784,8 +5785,23 @@ mod tests {
             .create_from_base("HEAD", "feature/keep", &branch_named)
             .expect("branch worktree");
 
+        // A clean intake whose ONLY content is a gwt-generated hook config must
+        // still reap (codex #3237): launched intakes materialize managed hooks.
+        let generated_hook = temp.path().join(".intake-hook");
+        manager
+            .create_detached("HEAD", &generated_hook)
+            .expect("intake worktree");
+        gwt_skills::generate_settings_local(&generated_hook).expect("generate hook config");
+
         let removed = super::prune_orphan_intake_worktrees(&repo, 10);
-        assert_eq!(removed, 2, "both clean detached intake worktrees pruned");
+        assert_eq!(
+            removed, 3,
+            "clean detached intakes reap, including one with only a generated hook config"
+        );
+        assert!(
+            !generated_hook.exists(),
+            "an intake with only a gwt-generated hook config is reaped (codex #3237)"
+        );
         assert!(
             !clean_a.exists() && !clean_b.exists(),
             "clean intake pruned"

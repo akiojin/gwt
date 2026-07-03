@@ -394,6 +394,19 @@ pub fn is_ephemeral_intake_worktree(path: &Path) -> bool {
         })
 }
 
+/// SPEC-3214 (codex #3237): whether a worktree-relative status `entry` is a
+/// gwt MERGED hook config (`.claude/settings.local.json` / `.codex/hooks.json`)
+/// that currently holds ONLY gwt-generated content, and so is safe to reap
+/// along with an ephemeral intake worktree. A user edit (an extra key or a
+/// non-managed hook) makes it non-disposable. Bridges `gwt-git`'s teardown
+/// probe (which cannot depend on `gwt-skills`) to the managed-hook semantics.
+pub fn intake_hook_config_is_disposable(worktree: &Path, entry: &str) -> bool {
+    if entry != ".claude/settings.local.json" && entry != ".codex/hooks.json" {
+        return false;
+    }
+    !gwt_skills::managed_hook_config_has_user_content(&worktree.join(entry))
+}
+
 pub fn first_available_worktree_path(
     preferred_path: &Path,
     worktrees: &[gwt_git::WorktreeInfo],

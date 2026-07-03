@@ -33,8 +33,9 @@ use super::{
     apply_docker_runtime_to_launch_config, apply_host_package_runner_fallback_checked,
     apply_windows_host_shell_wrapper, combined_window_id, detect_shell_program,
     finalize_docker_agent_launch_config, geometry_to_pty_size, install_launch_gwt_bin_env,
-    is_ephemeral_intake_worktree, launch_output_mirror, mark_auto_resume_source_completed,
-    normalize_branch_name, refresh_managed_gwt_assets_for_agent_with_codex_hook_discovery_mode,
+    intake_hook_config_is_disposable, is_ephemeral_intake_worktree, launch_output_mirror,
+    mark_auto_resume_source_completed, normalize_branch_name,
+    refresh_managed_gwt_assets_for_agent_with_codex_hook_discovery_mode,
     resolve_docker_launch_plan, resolve_launch_spec_with_fallback, resolve_launch_worktree,
     same_worktree_path, save_resumed_workspace_projection, save_start_work_workspace_projection,
     ActiveAgentSession, AgentKanbanLaunchTarget, AppEventProxy, AppRuntime, BackendEvent,
@@ -1928,7 +1929,9 @@ impl AppRuntime {
             .unwrap_or_else(|| worktree_path.to_path_buf());
         let manager = gwt_git::WorktreeManager::new(&main_repo_path);
 
-        match manager.ephemeral_worktree_has_local_work(worktree_path) {
+        match manager.ephemeral_worktree_has_local_work_with(worktree_path, |entry| {
+            intake_hook_config_is_disposable(worktree_path, entry)
+        }) {
             Ok(true) => {
                 tracing::warn!(
                     worktree_path = %worktree_path.display(),
