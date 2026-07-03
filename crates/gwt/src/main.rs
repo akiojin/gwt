@@ -5777,8 +5777,15 @@ mod tests {
         }
         fs::write(dirty.join("wip.txt"), "unsaved").expect("dirty file");
 
+        // A real BRANCH worktree that happens to be named `.intake-*` must be
+        // left alone by the reaper (codex #3236 P2).
+        let branch_named = temp.path().join(".intake-branch");
+        manager
+            .create_from_base("HEAD", "feature/keep", &branch_named)
+            .expect("branch worktree");
+
         let removed = super::prune_orphan_intake_worktrees(&repo, 10);
-        assert_eq!(removed, 2, "both clean intake worktrees pruned");
+        assert_eq!(removed, 2, "both clean detached intake worktrees pruned");
         assert!(
             !clean_a.exists() && !clean_b.exists(),
             "clean intake pruned"
@@ -5786,6 +5793,10 @@ mod tests {
         assert!(
             dirty.exists() && dirty.join("wip.txt").exists(),
             "dirty intake kept — never destroy uncommitted work"
+        );
+        assert!(
+            branch_named.exists(),
+            "a real branch worktree named .intake-* is never reaped"
         );
 
         // Bounded: a second batch of clean intakes is capped at the limit.

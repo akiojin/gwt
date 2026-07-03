@@ -240,6 +240,12 @@ pub fn prune_orphan_intake_worktrees(repo_path: &Path, max_removals: usize) -> u
         if !is_ephemeral_intake_worktree(&worktree.path) {
             continue;
         }
+        // codex #3236 P2: only reap the branchless intake worktrees this feature
+        // creates — a real branch worktree a user happens to name `.intake-*`
+        // has a branch and must be left alone (mirrors is_ephemeral_intake_session).
+        if worktree.branch.is_some() {
+            continue;
+        }
         match manager.ephemeral_worktree_has_local_work(&worktree.path) {
             Ok(false) => {
                 if manager.remove_force(&worktree.path).is_ok() {
