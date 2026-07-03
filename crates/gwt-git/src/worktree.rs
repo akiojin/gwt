@@ -942,13 +942,23 @@ fn path_arg_for_git(path: &Path) -> String {
 /// Parse `git worktree list --porcelain` output into `WorktreeInfo` entries.
 /// SPEC-3214: paths that a `git status --ignored` line may report which are
 /// safe to destroy when reaping an ephemeral intake worktree. These are ONLY
-/// gwt's own materialized managed assets — the exact patterns gwt writes into
-/// every worktree's `.git/info/exclude` (see `gwt-skills` `git_exclude.rs`:
-/// `.claude/skills/gwt-*`, `.claude/commands/gwt-*`, `.claude/settings.local.json`,
-/// `.codex/skills/gwt-*`) — plus OS cruft. Everything else is the user's local
-/// work and keeps the worktree: a gitignored `tasks/todo.md` / `.env`, anything
-/// under `.gwt/`, a user-authored `.claude/skills/<custom>` or a
-/// `.claude/settings.json` edit (codex #3235 review), and any tracked change.
+/// gwt's own PURE materialized managed assets — the regenerated, user-free
+/// skill/command dirs gwt writes into every worktree (`.claude/skills/gwt-*`,
+/// `.claude/commands/gwt-*`, `.codex/skills/gwt-*`) — plus OS cruft.
+///
+/// Deliberately NOT disposable: `.claude/settings.local.json` and
+/// `.codex/hooks.json` are MERGED files — gwt preserves user hooks and unrelated
+/// top-level settings in them (see `gwt-skills` `settings_local.rs`), so a user
+/// edit could live there and must never be destroyed (codex #3236). Everything
+/// else is the user's local work and keeps the worktree: a gitignored
+/// `tasks/todo.md` / `.env`, anything under `.gwt/`, a user-authored
+/// `.claude/skills/<custom>` or `.claude/settings.json`, and any tracked change.
+///
+/// NB: because launched intake worktrees legitimately receive these merged
+/// files (the intake agent needs gwt's managed hooks), such worktrees are kept
+/// rather than reaped. Reaping launched intakes precisely (regenerate-and-diff
+/// the managed portion) is handled with the Phase 3 intake-launch lifecycle;
+/// keeping is the data-safe interim.
 fn is_disposable_worktree_entry(entry: &str) -> bool {
     let entry = entry.trim().trim_matches('"');
     let entry = entry.strip_prefix("./").unwrap_or(entry);
@@ -958,7 +968,6 @@ fn is_disposable_worktree_entry(entry: &str) -> bool {
     if entry.starts_with(".claude/skills/gwt-")
         || entry.starts_with(".claude/commands/gwt-")
         || entry.starts_with(".codex/skills/gwt-")
-        || entry == ".claude/settings.local.json"
     {
         return true;
     }
@@ -1503,7 +1512,8 @@ prunable gitdir file points to non-existent location
             "a pristine intake worktree has no local work"
         );
 
-        // 2. Only gwt-materialized managed assets present → still discardable.
+        // 2. Only gwt-materialized PURE managed skill/command dirs present →
+        //    still discardable (these hold no user content).
         std::fs::create_dir_all(fresh.join(".claude/skills/gwt-coordination")).unwrap();
         std::fs::write(
             fresh.join(".claude/skills/gwt-coordination/SKILL.md"),
@@ -1512,7 +1522,6 @@ prunable gitdir file points to non-existent location
         .unwrap();
         std::fs::create_dir_all(fresh.join(".claude/commands")).unwrap();
         std::fs::write(fresh.join(".claude/commands/gwt-x.md"), "managed").unwrap();
-        std::fs::write(fresh.join(".claude/settings.local.json"), "{}").unwrap();
         std::fs::create_dir_all(fresh.join(".codex/skills/gwt-coordination")).unwrap();
         std::fs::write(
             fresh.join(".codex/skills/gwt-coordination/SKILL.md"),
@@ -1521,7 +1530,23 @@ prunable gitdir file points to non-existent location
         .unwrap();
         assert!(
             !manager.ephemeral_worktree_has_local_work(&fresh).unwrap(),
-            "gwt-materialized managed assets are not user work"
+            "gwt-materialized pure managed skill/command dirs are not user work"
+        );
+
+        // 2a. `.claude/settings.local.json` is a MERGED file (gwt preserves user
+        // hooks and unrelated settings), so it must be kept — a user edit there
+        // must never be destroyed (codex #3236 P1).
+        let merged_settings = tmp.path().join(".intake-settings");
+        manager
+            .create_detached("develop", &merged_settings)
+            .unwrap();
+        std::fs::create_dir_all(merged_settings.join(".claude")).unwrap();
+        std::fs::write(merged_settings.join(".claude/settings.local.json"), "{}").unwrap();
+        assert!(
+            manager
+                .ephemeral_worktree_has_local_work(&merged_settings)
+                .unwrap(),
+            ".claude/settings.local.json is a merged file that may hold user hooks; keep it"
         );
 
         // 2b. USER content under .claude/.codex (codex #3235 P1) → keep.
