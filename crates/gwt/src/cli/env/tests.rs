@@ -93,6 +93,37 @@ match args.as_slice() {
         println!("[{{\"id\":42,\"state\":\"APPROVED\",\"body\":\"Looks good\",\"submitted_at\":\"2026-04-20T02:00:00Z\",\"user\":{{\"login\":\"reviewer\"}}}}]");
         ExitCode::SUCCESS
     }
+    [api, endpoint] if api == "api" && endpoint == "repos/akiojin/gwt/pulls/12" => {
+        println!("{{\"number\":12,\"node_id\":\"PR_node_12\",\"draft\":true}}");
+        ExitCode::SUCCESS
+    }
+    [api, endpoint] if api == "api" && endpoint.starts_with("repos/akiojin/gwt/labels/") => {
+        if endpoint.ends_with("/tested") {
+            println!("{{\"name\":\"tested\",\"color\":\"aabbcc\"}}");
+            ExitCode::SUCCESS
+        } else {
+            eprintln!("gh: Not Found (HTTP 404)");
+            ExitCode::FAILURE
+        }
+    }
+    [api, method_flag, method, endpoint, ..]
+        if api == "api"
+            && method_flag == "--method"
+            && method == "PATCH"
+            && endpoint.contains("/pulls/") =>
+    {
+        println!("{{\"number\":12}}");
+        ExitCode::SUCCESS
+    }
+    [api, method_flag, method, endpoint, ..]
+        if api == "api"
+            && method_flag == "--method"
+            && method == "POST"
+            && endpoint.contains("/labels") =>
+    {
+        println!("[]");
+        ExitCode::SUCCESS
+    }
     [api, endpoint] if api == "api" && endpoint == "/repos/akiojin/gwt/actions/jobs/91/logs" => {
         print!("job log 91");
         ExitCode::SUCCESS
@@ -113,6 +144,10 @@ match args.as_slice() {
 {"id":"thread-1","isResolved":false,"isOutdated":false,"path":"src/lib.rs","line":10,"comments":{"nodes":[{"id":"comment-1","body":"done","createdAt":"2026-04-20T00:00:00Z","updatedAt":"2026-04-20T00:00:00Z","author":{"login":"reviewer"}}]}}
 ]}}}}}"#
             );
+        } else if joined.contains("markPullRequestReadyForReview") {
+            println!("{{\"data\":{{\"markPullRequestReadyForReview\":{{\"pullRequest\":{{\"number\":12,\"isDraft\":false}}}}}}}}");
+        } else if joined.contains("convertPullRequestToDraft") {
+            println!("{{\"data\":{{\"convertPullRequestToDraft\":{{\"pullRequest\":{{\"number\":12,\"isDraft\":true}}}}}}}}");
         } else if joined.contains("addPullRequestReviewThreadReply") {
             println!("{{\"data\":{{\"addPullRequestReviewThreadReply\":{{\"comment\":{{\"id\":\"reply-1\"}}}}}}}}");
         } else if joined.contains("resolveReviewThread") {
@@ -689,6 +724,12 @@ fn default_cli_env_routes_gh_backed_methods_and_internal_dispatch() {
             .edit_pr(12, Some("Edited"), Some("Updated"), &["tested".to_string()])
             .expect("edit pr");
         assert_eq!(edited.number, 12);
+
+        let readied = env.mark_pr_ready(12).expect("mark pr ready");
+        assert_eq!(readied.number, 12);
+
+        let drafted = env.convert_pr_to_draft(12).expect("convert pr to draft");
+        assert_eq!(drafted.number, 12);
 
         let fetched = env.fetch_pr(12).expect("fetch pr");
         assert_eq!(fetched.number, 12);

@@ -126,6 +126,40 @@ fn main() -> ExitCode {
             println!("[{{\"id\":42,\"state\":\"APPROVED\",\"body\":\"Looks good\",\"submitted_at\":\"2026-04-20T02:00:00Z\",\"user\":{{\"login\":\"reviewer\"}}}}]");
             return ExitCode::SUCCESS;
         }
+        [api, endpoint] if api == "api" && endpoint == "repos/akiojin/gwt/pulls/12" => {
+            // PR node id lookup for pr.ready / pr.draft (read:org-free REST GET).
+            println!("{{\"number\":12,\"node_id\":\"PR_node_12\",\"draft\":true}}");
+            return ExitCode::SUCCESS;
+        }
+        [api, endpoint] if api == "api" && endpoint.starts_with("repos/akiojin/gwt/labels/") => {
+            // pr.edit fail-closed label existence check: only "tested" exists.
+            if endpoint.ends_with("/tested") {
+                println!("{{\"name\":\"tested\",\"color\":\"aabbcc\"}}");
+                return ExitCode::SUCCESS;
+            }
+            eprintln!("gh: Not Found (HTTP 404)");
+            return ExitCode::FAILURE;
+        }
+        [api, method_flag, method, endpoint, ..]
+            if api == "api"
+                && method_flag == "--method"
+                && method == "PATCH"
+                && endpoint.contains("/pulls/") =>
+        {
+            // pr.edit title/body via REST PATCH (replaces `gh pr edit`).
+            println!("{{\"number\":12}}");
+            return ExitCode::SUCCESS;
+        }
+        [api, method_flag, method, endpoint, ..]
+            if api == "api"
+                && method_flag == "--method"
+                && method == "POST"
+                && endpoint.contains("/labels") =>
+        {
+            // pr.edit additive labels via REST POST.
+            println!("[]");
+            return ExitCode::SUCCESS;
+        }
         [api, endpoint] if api == "api" && endpoint == "/repos/akiojin/gwt/actions/jobs/91/logs" => {
             if mode == "job-log-zip" {
                 print!("PKZIP");
@@ -156,6 +190,14 @@ fn main() -> ExitCode {
                     .flatten()
                     .is_some();
                 println!("{}", review_threads_json(resolved_after_fail));
+                return ExitCode::SUCCESS;
+            }
+            if joined.contains("markPullRequestReadyForReview") {
+                println!("{{\"data\":{{\"markPullRequestReadyForReview\":{{\"pullRequest\":{{\"number\":12,\"isDraft\":false}}}}}}}}");
+                return ExitCode::SUCCESS;
+            }
+            if joined.contains("convertPullRequestToDraft") {
+                println!("{{\"data\":{{\"convertPullRequestToDraft\":{{\"pullRequest\":{{\"number\":12,\"isDraft\":true}}}}}}}}");
                 return ExitCode::SUCCESS;
             }
             if joined.contains("addPullRequestReviewThreadReply") {

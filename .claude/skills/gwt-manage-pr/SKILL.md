@@ -227,7 +227,11 @@ Create mode is entered from the Preflight 2×2 matrix when `N > 0`.
   `params.head`, `params.title`, `params.body`, optional `params.labels`, and
   `params.draft`.
 - Update: JSON operation `pr.edit` with `params.number`, optional
-  `params.title`, optional `params.body`, and optional `params.add_labels`.
+  `params.title`, optional `params.body`, and optional `params.add_labels`
+  (at least one of them is required).
+- Promote / demote: JSON operation `pr.ready` with `params.number` marks a
+  Draft PR Ready for review — only after the Ready PR Gate passes.
+  `pr.draft` converts a Ready PR back to Draft.
 - Transport note: the current implementation may still call GitHub REST / `gh`
   internally, but agent-facing workflow should stay on gwtd JSON operations.
 

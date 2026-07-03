@@ -127,8 +127,8 @@ Only once Step 3 leaves the PR fully clear (no blocking CI, no conflict/BEHIND,
 no unresolved thread, no open CHANGES_REQUESTED) and the only thing left is
 required checks still running, arm auto-merge with the selected method
 (transport exception: there is no `pr.merge` JSON operation, and `gh pr merge`
-is an allowed command — only `gh pr view/create/edit/comment/checks/reviews/
-review-threads` are blocked):
+is an allowed command — only `gh pr view/create/edit/ready/draft/comment/
+checks/reviews/review-threads` are blocked):
 
 ```bash
 gh pr merge --auto --merge <number>   # method from Step 4
@@ -276,14 +276,16 @@ Report using the skill's Final Report Contract. When the PR reached the
 ## Command surface (allowed vs blocked)
 
 - **Allowed bash**: `gh pr merge` (`--auto`, `--disable-auto`, and direct),
-  `gh pr ready`, `gh repo view`, `gh run list`, `gh run rerun`,
+  `gh repo view`, `gh run list`, `gh run rerun`,
   `gh release view`.
 - **Blocked bash** (use the JSON operation instead): `gh pr view` ->
-  `pr.view`; `gh pr checks` -> `pr.checks`; `gh pr comment` -> `pr.comment`;
+  `pr.view`; `gh pr ready` -> `pr.ready`; `gh pr ready --undo` -> `pr.draft`;
+  `gh pr checks` -> `pr.checks`; `gh pr comment` -> `pr.comment`;
   `gh pr review-threads` -> `pr.review_threads`; `gh run view` ->
   `actions.logs` / `actions.job_logs`.
-- There is **no** `pr.merge` or `pr.ready` JSON operation; auto-merge
-  enable/disable is the documented `gh pr merge` transport exception.
+- There is **no** `pr.merge` JSON operation; auto-merge enable/disable is the
+  documented `gh pr merge` transport exception. Draft <-> Ready transitions go
+  through the JSON operations `pr.ready` / `pr.draft` (Issue #3201).
 
 ## Anti-patterns (prohibited)
 
