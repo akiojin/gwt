@@ -7472,3 +7472,10 @@ Type: failure-pattern
 Context: During PR #3193 pre-PR visual verification, the Issue Bridge auto-refresh Playwright fixture fired a 60000ms interval callback via a fixed 50ms timeout. In the full suite, initial knowledge load sometimes still held the busy flag, so the auto-refresh request was dropped and the test timed out although single-test runs passed.
 Learning: Timer-shortening fixtures are flaky when the production callback can legally no-op while state is busy. Tests should expose a deterministic trigger and call it after asserting the state that makes the callback meaningful.
 Future Action: For Playwright fixtures that validate periodic behavior, capture interval callbacks and trigger them explicitly after the initial render/load assertions instead of relying on arbitrary short timeouts.
+
+## 2026-07-03 — field semantics は guidance でなく書き込み choke point の validator で守る (Issue #3184 purpose/title)
+
+Type: design lesson
+Context: SPEC #3075/#2359 が purpose=安定した作業目的と定義し、reminder/guidance/stale-detection (PR #2819) まで整備済みだったのに、agent は browser-check 中に purpose へ activity 名 (Headless browser check) を書き、titlebar が BROWSER CHECK になった (Issue #3184)。
+Learning: (1) LLM 向け text 指示は field semantics の enforcement にならない。全書き込み経路が集約される choke point (cli/title_summary_guard.rs の validate_title_summary_work_name) に validation を置き、拒否メッセージ自体に正しい代替 (current_focus へ) を書くと self-correcting になる。(2) denylist heuristic は adversarial review workflow で bypass 側 (JA suffix/全角/後置修飾) と over-block 側 (Fix browser check) の両面を検証してから確定する。動詞先頭 exempt / gerund 先頭 reject / 前置詞修飾 reject / head-final JA suffix が有効だった。(3) cli.rs には cli_file_size_test の 1000 行予算があり、新しい validation family は cli/ submodule に切り出す。
+Future Action: 新しい field semantics 契約を導入するときは、guidance 追加だけで完了とせず、canonical write path の validator + 既存値保持の dispatch レベル regression test + 実バイナリでの拒否デモまでを 1 セットにする。
