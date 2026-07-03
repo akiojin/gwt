@@ -6929,6 +6929,106 @@ fn app_runtime_active_work_projection_retains_stopped_agent_work_as_paused() {
     assert_eq!(paused.branch.as_deref(), Some("work/paused"));
 }
 
+// SPEC-3214 T-005/T-007: an ephemeral intake session leaves NO Work identity
+// and its throwaway `.intake-*` worktree is removed when it ends (clean), while
+// a dirty intake worktree is kept so no in-progress work is lost.
+#[test]
+fn ephemeral_intake_session_stop_removes_clean_worktree_and_emits_no_paused_work() {
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedEnvVar::set("HOME", temp.path());
+    let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+    let repo = temp.path().join("repo");
+    fs::create_dir_all(&repo).expect("create repo");
+    init_repo(&repo);
+    run_git(&repo, &["config", "user.email", "test@example.com"]);
+    run_git(&repo, &["config", "user.name", "Test User"]);
+    run_git(&repo, &["commit", "--allow-empty", "-m", "init"]);
+
+    let intake = temp.path().join(".intake-clean");
+    gwt_git::WorktreeManager::new(&repo)
+        .create_detached("HEAD", &intake)
+        .expect("intake worktree");
+    assert!(intake.exists());
+
+    let tab = sample_project_tab("tab-1", "Repo", repo.clone(), ProjectKind::Git, &[]);
+    let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+    let mut session = sample_active_agent_session("tab-1", "tab-1::intake");
+    session.session_id = "session-intake".to_string();
+    session.branch_name = String::new();
+    session.worktree_path = intake.clone();
+    session.window_id = "tab-1::intake".to_string();
+    runtime
+        .active_agent_sessions
+        .insert("tab-1::intake".to_string(), session);
+
+    runtime.mark_agent_session_stopped("tab-1::intake");
+
+    assert!(!runtime.active_agent_sessions.contains_key("tab-1::intake"));
+    assert!(
+        !intake.exists(),
+        "clean intake worktree is removed when the session ends"
+    );
+    let active_work_count = runtime
+        .active_work_projection_for_tab("tab-1", &runtime.tabs[0])
+        .map(|view| view.active_works.len())
+        .unwrap_or(0);
+    assert_eq!(
+        active_work_count, 0,
+        "an ephemeral intake session emits no Work identity (paused or otherwise)"
+    );
+    let recorded = gwt_core::workspace_projection::load_workspace_work_items(&repo)
+        .ok()
+        .flatten();
+    assert!(
+        recorded.is_none_or(|projection| projection.work_items.is_empty()),
+        "no Work event is recorded for an ephemeral intake session"
+    );
+}
+
+#[test]
+fn ephemeral_intake_session_stop_keeps_dirty_worktree() {
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedEnvVar::set("HOME", temp.path());
+    let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+    let repo = temp.path().join("repo");
+    fs::create_dir_all(&repo).expect("create repo");
+    init_repo(&repo);
+    run_git(&repo, &["config", "user.email", "test@example.com"]);
+    run_git(&repo, &["config", "user.name", "Test User"]);
+    run_git(&repo, &["commit", "--allow-empty", "-m", "init"]);
+
+    let intake = temp.path().join(".intake-dirty");
+    gwt_git::WorktreeManager::new(&repo)
+        .create_detached("HEAD", &intake)
+        .expect("intake worktree");
+    // Uncommitted work must not be destroyed.
+    fs::write(intake.join("wip.txt"), "unsaved intake work").expect("write wip");
+
+    let tab = sample_project_tab("tab-1", "Repo", repo.clone(), ProjectKind::Git, &[]);
+    let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+    let mut session = sample_active_agent_session("tab-1", "tab-1::intake");
+    session.session_id = "session-intake-dirty".to_string();
+    session.branch_name = String::new();
+    session.worktree_path = intake.clone();
+    session.window_id = "tab-1::intake".to_string();
+    runtime
+        .active_agent_sessions
+        .insert("tab-1::intake".to_string(), session);
+
+    runtime.mark_agent_session_stopped("tab-1::intake");
+
+    assert!(
+        intake.exists() && intake.join("wip.txt").exists(),
+        "a dirty intake worktree is kept so uncommitted work is never lost"
+    );
+}
+
 // #3065: a stopped session's Pause record must not inherit the repo-shared
 // projection's owner/title — those belong to whatever Work last wrote the
 // projection. Owner/summary come from the session's own Work item (matched
