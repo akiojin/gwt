@@ -36,10 +36,10 @@ use super::{
     is_ephemeral_intake_worktree, launch_output_mirror, mark_auto_resume_source_completed,
     normalize_branch_name, refresh_managed_gwt_assets_for_agent_with_codex_hook_discovery_mode,
     resolve_docker_launch_plan, resolve_launch_spec_with_fallback, resolve_launch_worktree,
-    save_resumed_workspace_projection, save_start_work_workspace_projection, ActiveAgentSession,
-    AgentKanbanLaunchTarget, AppEventProxy, AppRuntime, BackendEvent, HookForwardTarget,
-    LaunchFeedbackContext, LiveSessionEntry, OutboundEvent, Pane, UserEvent, WindowGeometry,
-    WindowPreset, WindowProcessStatus, WindowRuntime, WorkspaceResumeContext,
+    same_worktree_path, save_resumed_workspace_projection, save_start_work_workspace_projection,
+    ActiveAgentSession, AgentKanbanLaunchTarget, AppEventProxy, AppRuntime, BackendEvent,
+    HookForwardTarget, LaunchFeedbackContext, LiveSessionEntry, OutboundEvent, Pane, UserEvent,
+    WindowGeometry, WindowPreset, WindowProcessStatus, WindowRuntime, WorkspaceResumeContext,
 };
 
 #[derive(Debug, Clone)]
@@ -1847,7 +1847,7 @@ impl AppRuntime {
         // identity. On session end, remove the worktree when clean; keep it
         // when dirty so uncommitted work is never lost. Skip the Paused-Work /
         // projection persistence entirely.
-        if is_ephemeral_intake_worktree(&session.worktree_path) {
+        if self.is_ephemeral_intake_session(&session) {
             self.finalize_ephemeral_intake_worktree(&session);
             let _ = gwt_agent::persist_session_status(
                 &self.sessions_dir,
@@ -1885,6 +1885,34 @@ impl AppRuntime {
             gwt_agent::AgentStatus::Stopped,
         );
         self.launch_wizard_cache.mark_stopped(&session.session_id);
+    }
+
+    /// SPEC-3214 (codex #3235 review): whether a stopped session is an
+    /// ephemeral intake session. The `.intake-*` basename alone is not enough —
+    /// a normal branch worktree a user happens to name `.intake-*` must keep its
+    /// Paused-Work / resume behavior. The definitive signal is that the intake
+    /// worktree is DETACHED (branchless), which only `create_detached` produces.
+    /// A worktree that is already gone is treated as ephemeral (it was reaped).
+    fn is_ephemeral_intake_session(&self, session: &ActiveAgentSession) -> bool {
+        if !is_ephemeral_intake_worktree(&session.worktree_path) {
+            return false;
+        }
+        let Some(main_repo_path) = self
+            .tab(&session.tab_id)
+            .map(|tab| tab.project_root.clone())
+            .and_then(|root| gwt_git::worktree::main_worktree_root(&root).ok())
+        else {
+            return !session.worktree_path.exists();
+        };
+        match gwt_git::WorktreeManager::new(&main_repo_path).list() {
+            Ok(worktrees) => worktrees
+                .iter()
+                .find(|info| same_worktree_path(&info.path, &session.worktree_path))
+                // On a branch → a real worktree, not intake. Detached → intake.
+                .is_none_or(|info| info.branch.is_none()),
+            // Cannot enumerate: fall back to "gone means it was ephemeral".
+            Err(_) => !session.worktree_path.exists(),
+        }
     }
 
     /// SPEC-3214 (FR-002): tear down an ephemeral intake worktree when its

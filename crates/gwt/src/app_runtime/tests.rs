@@ -7029,6 +7029,58 @@ fn ephemeral_intake_session_stop_keeps_dirty_worktree() {
     );
 }
 
+// SPEC-3214 (codex #3235 review): a NORMAL branch worktree that a user happens
+// to name `.intake-*` must NOT be misclassified as an ephemeral intake session
+// — it keeps its worktree and its Paused-Work behavior. Classification requires
+// the worktree to be branchless (detached), not just `.intake-*`-named.
+#[test]
+fn branch_worktree_named_intake_is_not_treated_as_ephemeral() {
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedEnvVar::set("HOME", temp.path());
+    let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+    let repo = temp.path().join("repo");
+    fs::create_dir_all(&repo).expect("create repo");
+    init_repo(&repo);
+    run_git(&repo, &["config", "user.email", "test@example.com"]);
+    run_git(&repo, &["config", "user.name", "Test User"]);
+    run_git(&repo, &["commit", "--allow-empty", "-m", "init"]);
+
+    // A real BRANCH worktree that merely happens to be named `.intake-real`.
+    let branch_wt = temp.path().join(".intake-real");
+    gwt_git::WorktreeManager::new(&repo)
+        .create_from_base("HEAD", "feature/real", &branch_wt)
+        .expect("branch worktree");
+    assert!(branch_wt.exists());
+
+    let tab = sample_project_tab("tab-1", "Repo", repo.clone(), ProjectKind::Git, &[]);
+    let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+    let mut session = sample_active_agent_session("tab-1", "tab-1::real");
+    session.session_id = "session-real".to_string();
+    session.branch_name = "feature/real".to_string();
+    session.worktree_path = branch_wt.clone();
+    session.window_id = "tab-1::real".to_string();
+    runtime
+        .active_agent_sessions
+        .insert("tab-1::real".to_string(), session);
+
+    runtime.mark_agent_session_stopped("tab-1::real");
+
+    assert!(
+        branch_wt.exists(),
+        "a real branch worktree named .intake-* must not be removed as ephemeral"
+    );
+    let works = gwt_core::workspace_projection::load_workspace_work_items(&repo)
+        .ok()
+        .flatten();
+    assert!(
+        works.is_some_and(|projection| !projection.work_items.is_empty()),
+        "a real branch session still records a Paused Work"
+    );
+}
+
 // #3065: a stopped session's Pause record must not inherit the repo-shared
 // projection's owner/title — those belong to whatever Work last wrote the
 // projection. Owner/summary come from the session's own Work item (matched
