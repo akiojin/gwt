@@ -583,24 +583,40 @@ pub(crate) fn parse_linked_pr_nodes(
 pub(crate) fn body_closes_issue(body: &str, issue_number: u64) -> bool {
     let needle = format!("#{issue_number}");
     let lower = body.to_lowercase();
+    let bytes = lower.as_bytes();
     for keyword in [
         "close", "closes", "closed", "fix", "fixes", "fixed", "resolve", "resolves", "resolved",
     ] {
         let mut start = 0;
         while let Some(pos) = lower[start..].find(keyword) {
-            let after = start + pos + keyword.len();
+            let begin = start + pos;
+            let after = begin + keyword.len();
+            start = after;
+            // #3228 review: the keyword must stand alone. Without a leading
+            // word boundary, `prefix #42` / `hotfix #42` (fix) and
+            // `disclosed #42` / `enclosed #42` (closed) would count as
+            // closing intent. A trailing boundary is required too so `close`
+            // does not fire inside `closedown #42`-style words (the exact
+            // keywords `closes`/`closed` match via their own entries).
+            let leading_ok = begin == 0 || !bytes[begin - 1].is_ascii_alphanumeric();
+            let trailing_ok = !bytes
+                .get(after)
+                .copied()
+                .is_some_and(|next| next.is_ascii_alphanumeric());
+            if !leading_ok || !trailing_ok {
+                continue;
+            }
             let rest = lower[after..].trim_start_matches([':', ' ', '\t']);
             if rest.starts_with(&needle) {
                 let tail = &rest[needle.len()..];
-                if tail
+                let digit_follows = tail
                     .chars()
                     .next()
-                    .is_none_or(|next| !next.is_ascii_digit())
-                {
+                    .is_some_and(|next| next.is_ascii_digit());
+                if !digit_follows {
                     return true;
                 }
             }
-            start = after;
         }
     }
     false
@@ -655,6 +671,39 @@ mod tests {
             !get(14).will_close_target,
             "closing keyword for a DIFFERENT issue does not count"
         );
+    }
+
+    #[test]
+    fn body_closes_issue_requires_word_boundaries() {
+        // codex/coderabbit #3228 review: `find(keyword)` matched substrings
+        // inside longer words, so `prefix #42` (fix), `disclosed #42` /
+        // `enclosed #42` (closed), `hotfix #42` (fix) all counted as closing.
+        for negative in [
+            "prefix #42",
+            "hotfix #42",
+            "disclosed #42",
+            "enclosed #42",
+            "unfixed #42",
+        ] {
+            assert!(
+                !body_closes_issue(negative, 42),
+                "substring keyword must not close: {negative}"
+            );
+        }
+        for positive in [
+            "Closes #42",
+            "fixes #42",
+            "Fixed: #42",
+            "resolve #42",
+            "- Fix #42 in the parser",
+        ] {
+            assert!(
+                body_closes_issue(positive, 42),
+                "standalone keyword closes: {positive}"
+            );
+        }
+        // Trailing-digit boundary is preserved.
+        assert!(!body_closes_issue("Closes #421", 42));
     }
 
     #[test]
