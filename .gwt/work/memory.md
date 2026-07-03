@@ -7561,3 +7561,10 @@ Type: lesson
 Context: Issue #3201: gwtd pr.edit は gh pr edit の read:org prefetch で常に失敗し（2026-06-12 memory 参照）、Draft→Ready 昇格 operation も存在しなかったため、エージェントが PR ライフサイクルを sanctioned surface で完結できなかった
 Learning: PR #3231 で解消: pr.edit は REST（PATCH /pulls・POST /issues/labels）化され read:org 無し token でも成功する（本マシンで live smoke 済み）。pr.ready / pr.draft operations が新設され、gh pr ready / gh pr ready --undo は hook でブロックされ gwtd へ誘導される。2026-06-12 の『PR 本文の事後修正はこの環境では不可』は本修正後の gwtd では成立しない。pr.edit の add_labels は存在しないラベルを fail-closed で拒否し、title/body/add_labels 全省略は parse エラーになる
 Future Action: PR 本文更新・Draft→Ready 昇格は gwtd JSON operations pr.edit / pr.ready を正規経路として使う。旧 gwtd（未更新の GWT.app 同梱版）では pr.edit が引き続き失敗するため、失敗したらビルド済み target/debug/gwtd か更新版を使う
+
+## 2026-07-03 — conflict 解消は閉じマーカーまで含めて除去し grep で全マーカー不在を検証する
+
+Type: failure-pattern
+Context: SPEC #3206 PR 作成時、.gwt/work/memory.md の merge conflict を Edit tool で解消した際、old_string に開始マーカーと '=======' だけ含め、develop 側ブロック末尾の閉じマーカー '>>>>>>> origin/develop' を含め忘れた。stray marker が commit/push され、次の merge で HEAD 側がマーカー 1 行だけという見かけ上おかしな conflict として表面化した。
+Learning: conflict 解消を Edit tool で行う場合、<<<<<<< / ======= / >>>>>>> の 3 マーカーが 1 hunk 分すべて old_string に含まれているかを確認する。解消後は必ず grep -n '^<<<<<<<\|^=======$\|^>>>>>>>' <file> で全マーカー不在を検証してから git add する。今回は次 merge の conflict で偶然発覚したが、conflict しなければ stray marker が PR diff に残ったまま merge されていた。
+Future Action: merge conflict 解消の直後に、対象ファイル全体への conflict-marker grep を必ず 1 回実行する（部分表示の Read だけで判断しない）。
