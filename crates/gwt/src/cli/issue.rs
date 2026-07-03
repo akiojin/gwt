@@ -441,6 +441,7 @@ query($owner: String!, $repo: String!, $number: Int!) {
                 title
                 state
                 url
+                body
               }
             }
           }
@@ -452,6 +453,7 @@ query($owner: String!, $repo: String!, $number: Int!) {
                 title
                 state
                 url
+                body
               }
             }
           }
@@ -491,7 +493,7 @@ query($owner: String!, $repo: String!, $number: Int!) {
 
     let value: serde_json::Value = serde_json::from_str(&output.stdout)
         .map_err(|err| io::Error::new(io::ErrorKind::InvalidData, err.to_string()))?;
-    Ok(parse_linked_pr_nodes(&value))
+    Ok(parse_linked_pr_nodes(&value, number.0))
 }
 
 /// Parse the issue-timeline GraphQL response into linked-PR summaries.
@@ -499,7 +501,10 @@ query($owner: String!, $repo: String!, $number: Int!) {
 /// `ConnectedEvent` (a manually linked PR) closes the issue on merge, so it
 /// counts as closing. Duplicate PR numbers OR-merge the closing flag so a PR
 /// seen as both a plain reference and a closing link keeps `true`.
-pub(crate) fn parse_linked_pr_nodes(value: &serde_json::Value) -> Vec<LinkedPrSummary> {
+pub(crate) fn parse_linked_pr_nodes(
+    value: &serde_json::Value,
+    issue_number: u64,
+) -> Vec<LinkedPrSummary> {
     let nodes = value
         .get("data")
         .and_then(|v| v.get("repository"))
@@ -517,7 +522,7 @@ pub(crate) fn parse_linked_pr_nodes(value: &serde_json::Value) -> Vec<LinkedPrSu
             .get("__typename")
             .and_then(|v| v.as_str())
             .unwrap_or_default();
-        let (pr, will_close_target) = match typename {
+        let (pr, mut will_close_target) = match typename {
             "CrossReferencedEvent" => (
                 node.get("source"),
                 node.get("willCloseTarget")
@@ -528,6 +533,16 @@ pub(crate) fn parse_linked_pr_nodes(value: &serde_json::Value) -> Vec<LinkedPrSu
             _ => (None, false),
         };
         let Some(pr) = pr else { continue };
+        // gwt merges fixes into develop (not the default branch), so GitHub
+        // reports willCloseTarget=false for every real fix PR (measured on
+        // #3222/#3213). The closing INTENT therefore also comes from closing
+        // keywords in the PR body targeting THIS issue (`Closes #N` — the gwt
+        // PR-body contract).
+        if !will_close_target {
+            if let Some(body) = pr.get("body").and_then(|v| v.as_str()) {
+                will_close_target = body_closes_issue(body, issue_number);
+            }
+        }
         if pr.get("__typename").and_then(|v| v.as_str()) != Some("PullRequest") {
             continue;
         }
@@ -562,6 +577,35 @@ pub(crate) fn parse_linked_pr_nodes(value: &serde_json::Value) -> Vec<LinkedPrSu
     out
 }
 
+/// GitHub closing keywords (close/closes/closed, fix/fixes/fixed,
+/// resolve/resolves/resolved) followed by `#<issue_number>`, matched
+/// case-insensitively anywhere in the PR body.
+pub(crate) fn body_closes_issue(body: &str, issue_number: u64) -> bool {
+    let needle = format!("#{issue_number}");
+    let lower = body.to_lowercase();
+    for keyword in [
+        "close", "closes", "closed", "fix", "fixes", "fixed", "resolve", "resolves", "resolved",
+    ] {
+        let mut start = 0;
+        while let Some(pos) = lower[start..].find(keyword) {
+            let after = start + pos + keyword.len();
+            let rest = lower[after..].trim_start_matches([':', ' ', '\t']);
+            if rest.starts_with(&needle) {
+                let tail = &rest[needle.len()..];
+                if tail
+                    .chars()
+                    .next()
+                    .is_none_or(|next| !next.is_ascii_digit())
+                {
+                    return true;
+                }
+            }
+            start = after;
+        }
+    }
+    false
+}
+
 #[cfg(test)]
 mod tests {
     use gwt_github::client::{IssueSnapshot, IssueState, UpdatedAt};
@@ -575,23 +619,41 @@ mod tests {
 
     #[test]
     fn parse_linked_pr_nodes_tracks_will_close_target() {
-        // codex #3226 review: the completion probe must distinguish PRs that
-        // actually CLOSE the issue from mere cross-references.
+        // codex #3226/#3227 review: the completion probe must distinguish PRs
+        // that CLOSE the issue from mere cross-references. Measured reality:
+        // in gwt's develop-based flow GitHub reports willCloseTarget=false for
+        // every PR (auto-close only applies to the default branch), so the
+        // closing INTENT must also be derived from closing keywords in the PR
+        // body (`Closes #N` — the gwt PR-body contract).
         let value = serde_json::json!({"data":{"repository":{"issue":{"timelineItems":{"nodes":[
             {"__typename":"CrossReferencedEvent","willCloseTarget":true,
-             "source":{"__typename":"PullRequest","number":10,"title":"closes it","state":"MERGED","url":"u10"}},
+             "source":{"__typename":"PullRequest","number":10,"title":"closes it","state":"MERGED","url":"u10","body":""}},
             {"__typename":"CrossReferencedEvent","willCloseTarget":false,
-             "source":{"__typename":"PullRequest","number":11,"title":"refs only","state":"MERGED","url":"u11"}},
+             "source":{"__typename":"PullRequest","number":11,"title":"refs only","state":"MERGED","url":"u11","body":"Related to #42 (no closing keyword)"}},
             {"__typename":"ConnectedEvent",
-             "subject":{"__typename":"PullRequest","number":12,"title":"manually linked","state":"OPEN","url":"u12"}}
+             "subject":{"__typename":"PullRequest","number":12,"title":"manually linked","state":"OPEN","url":"u12","body":""}},
+            {"__typename":"CrossReferencedEvent","willCloseTarget":false,
+             "source":{"__typename":"PullRequest","number":13,"title":"develop-based fix","state":"MERGED","url":"u13",
+                       "body":"## Closing Issues\n\nCloses #42"}},
+            {"__typename":"CrossReferencedEvent","willCloseTarget":false,
+             "source":{"__typename":"PullRequest","number":14,"title":"closes another","state":"MERGED","url":"u14",
+                       "body":"Fixes #43"}}
         ]}}}}});
-        let prs = parse_linked_pr_nodes(&value);
+        let prs = parse_linked_pr_nodes(&value, 42);
         let get = |n: u64| prs.iter().find(|pr| pr.number == n).expect("pr");
-        assert!(get(10).will_close_target, "closing cross-reference");
+        assert!(get(10).will_close_target, "GraphQL willCloseTarget");
         assert!(!get(11).will_close_target, "plain reference must NOT close");
         assert!(
             get(12).will_close_target,
             "manually connected PR closes on merge"
+        );
+        assert!(
+            get(13).will_close_target,
+            "body closing keyword for THIS issue counts (develop-based flow)"
+        );
+        assert!(
+            !get(14).will_close_target,
+            "closing keyword for a DIFFERENT issue does not count"
         );
     }
 
@@ -605,7 +667,7 @@ mod tests {
             {"__typename":"CrossReferencedEvent","willCloseTarget":true,
              "source":{"__typename":"PullRequest","number":10,"title":"t","state":"MERGED","url":"u"}}
         ]}}}}});
-        let prs = parse_linked_pr_nodes(&value);
+        let prs = parse_linked_pr_nodes(&value, 42);
         assert_eq!(prs.len(), 1);
         assert!(
             prs[0].will_close_target,
