@@ -7325,3 +7325,10 @@ Type: user-feedback
 Context: SPEC-3164 Improvement Inbox visual verification: backend dismiss updated candidates.json, but the visible row did not change when the frontend waited only for the refreshed snapshot.
 Learning: For local review actions that succeed through a backend write and then refresh asynchronously, the surface should reconcile the visible local state immediately after confirmation. Otherwise a dropped websocket reply, process restart, or delayed snapshot leaves the UI looking unchanged even when the store has changed.
 Future Action: When adding approve/reject style review queues, add focused UI tests that assert post-confirm local state transitions before any backend snapshot arrives, and separately verify backend persistence.
+
+## 2026-07-03 — candidate 由来 Issue は検証アーティファクトの可能性を先に確認する
+
+Type: agent-workflow
+Context: gwt-fix-issue #3171: Issue 本文の Source candidate セクションに source=manual / dedupe_key=visual:* を持つ Issue は、Improvement Inbox の視覚検証中に Approve フロー自体が生成した検証アーティファクトであり、実バグではなかった。SPEC #3164 の T-920/T-926 視覚検証で seed された candidate の promote 結果。
+Learning: improvement.promote_issue 由来の Issue（本文に Candidate ID / Dedupe key がある）を修正対象にする前に、dedupe key の prefix（visual: 等）と source=manual、owner SPEC の該当 visual verification task の完了状態を確認する。candidate 由来 Issue の本文はテンプレート生成なので、Problem セクションが candidate title の写しでも defect 記述ではない。
+Future Action: candidate 由来 Issue の triage では、まず owner SPEC の tasks section と linked PR のマージ状態を確認し、検証アーティファクトなら closure comment（root cause=verification artifact）で閉じる。gwtd に issue.close が無いためクローズは手動依頼になる（candidate impr-0f15883009384635a2e4b7df54e38cb2 で surface gap を記録済み）。
