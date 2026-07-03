@@ -7568,3 +7568,10 @@ Type: failure-pattern
 Context: SPEC #3206 PR 作成時、.gwt/work/memory.md の merge conflict を Edit tool で解消した際、old_string に開始マーカーと '=======' だけ含め、develop 側ブロック末尾の閉じマーカー '>>>>>>> origin/develop' を含め忘れた。stray marker が commit/push され、次の merge で HEAD 側がマーカー 1 行だけという見かけ上おかしな conflict として表面化した。
 Learning: conflict 解消を Edit tool で行う場合、<<<<<<< / ======= / >>>>>>> の 3 マーカーが 1 hunk 分すべて old_string に含まれているかを確認する。解消後は必ず grep -n '^<<<<<<<\|^=======$\|^>>>>>>>' <file> で全マーカー不在を検証してから git add する。今回は次 merge の conflict で偶然発覚したが、conflict しなければ stray marker が PR diff に残ったまま merge されていた。
 Future Action: merge conflict 解消の直後に、対象ファイル全体への conflict-marker grep を必ず 1 回実行する（部分表示の Read だけで判断しない）。
+
+## 2026-07-02 — Issue Monitor 多重起動: per-call 再構築 + ACK 再入 + 未永続 claim の合成罠
+
+Type: bug-fix
+Context: Issue #3222: Max=5 で同一 issue が 2〜3 回 spawn（window 10/追跡 5）。fresh 実機ログで再現機序を確定し PR #3223/#3224 で修正。
+Learning: (1)状態機械を handler ごとに disk から再構築する設計では、in-flight（claim 済み・ACK 前）を persist しない限り並行 handler に不可視になり、同一 owner の claim が renewal 扱いで再取得され side effect（spawn）が重複する。(2)非同期 ACK が同じ scan+claim フローに再入する構造は、ACK 連鎖が事実上の driver になり重複を増幅する。ACK/close は Observe（scan 可・claim/launch 禁止）に分離する。(3)refill の駆動源は単一 owner（daemon）に置き、他 process の in-flight は scan 冒頭で disk から union-merge して会計を統合する。(4)persist する in-flight claim には必ず TTL anchor（claimed_at + claim_ttl_secs 失効）を付け、crash 由来の slot 永久リークを防ぐ。(5)schema 進化時は untagged 互換 deserializer を用意（parse 失敗→unwrap_or_default は全 prefs 消失）。(6)テスト注意: crates/gwt/src/app_runtime/tests.rs は bin ターゲット（cargo test -p gwt --bin gwt）であり --lib では走らない。HOME 依存テストは process-global env でなく gwt_core::test_support::ScopedGwtHome（thread-local）を使う。
+Future Action: Issue Monitor に新しい launch/ACK 経路を足すときは (a) claim の即 persist、(b) ACK 経路の Observe 維持、(c) daemon 単一 driver、(d) TTL anchor の4点を必ず守る。app_runtime のテストは --bin gwt で回し、HOME は ScopedGwtHome を使う。
