@@ -1036,6 +1036,61 @@ mod tests {
         }
     }
 
+    /// Issue #3184: `workspace.update params.purpose` is the write path behind
+    /// the Agent titlebar; transient helper-workflow activity labels must be
+    /// rejected so browser-check-style phases cannot replace a work purpose.
+    #[test]
+    fn workspace_update_rejects_transient_activity_purpose() {
+        for label in [
+            "browser check",
+            "browser-check",
+            "Headless browser check",
+            "browser check for issue 3184",
+            "ｂｒｏｗｓｅｒ ｃｈｅｃｋ",
+            "verification",
+            "merging",
+            "server startup",
+            "ブラウザ確認",
+            "ヘッドレスブラウザ確認",
+            "検証",
+        ] {
+            match err(
+                "workspace.update",
+                json!({"agent_session": "s", "purpose": label}),
+            ) {
+                CliParseError::InvalidValue { flag, reason } => {
+                    assert_eq!(flag, "params.purpose", "{label}");
+                    assert!(reason.contains("transient activity"), "{label}: {reason}");
+                    assert!(reason.contains("current_focus"), "{label}: {reason}");
+                }
+                other => panic!("unexpected error for {label}: {other:?}"),
+            }
+        }
+    }
+
+    /// Issue #3184: real work names that mention an activity domain without
+    /// being a bare activity label stay valid purposes.
+    #[test]
+    fn workspace_update_accepts_work_purpose_mentioning_activity_domain() {
+        for label in [
+            "browser-check purpose overwrite guard",
+            "Fix browser check",
+            "Issue #3184 title guard",
+            "release verification pipeline",
+        ] {
+            let command = ok(
+                "workspace.update",
+                json!({"agent_session": "s", "purpose": label}),
+            );
+            match command {
+                CliCommand::Workspace(WorkspaceCommand::Update { title_summary, .. }) => {
+                    assert_eq!(title_summary.as_deref(), Some(label));
+                }
+                other => panic!("unexpected command for {label}: {other:?}"),
+            }
+        }
+    }
+
     #[test]
     fn workspace_update_rejects_title_summary_key() {
         match err(

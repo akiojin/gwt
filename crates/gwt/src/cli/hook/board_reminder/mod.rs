@@ -765,6 +765,21 @@ mod tests {
         assert!(!en_text.contains("--title-summary"), "{en_text}");
     }
 
+    /// Issue #3184: the required reminder is what pushes agents to write a
+    /// title every turn until one is set; it must explicitly forbid transient
+    /// activity phases (browser check etc.) as the purpose, in both languages.
+    #[test]
+    fn title_summary_required_reminder_forbids_transient_activity_labels() {
+        let ja_text = texts::title_summary_required_reminder("ja");
+        assert!(ja_text.contains("browser check"), "{ja_text}");
+        assert!(ja_text.contains("current_focus"), "{ja_text}");
+
+        let en_text = texts::title_summary_required_reminder("en");
+        assert!(en_text.contains("browser check"), "{en_text}");
+        assert!(en_text.contains("transient activity"), "{en_text}");
+        assert!(en_text.contains("current_focus"), "{en_text}");
+    }
+
     /// SPEC-2359 Phase W-11 (US-58 / FR-347): the title-required reminder must
     /// fire even when there is no board reminder this turn (Silent), so a fresh
     /// agent's first UserPromptSubmit always carries the instruction.
