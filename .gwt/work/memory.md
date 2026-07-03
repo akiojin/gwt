@@ -7332,3 +7332,10 @@ Type: agent-workflow
 Context: gwt-fix-issue #3171: Issue 本文の Source candidate セクションに source=manual / dedupe_key=visual:* を持つ Issue は、Improvement Inbox の視覚検証中に Approve フロー自体が生成した検証アーティファクトであり、実バグではなかった。SPEC #3164 の T-920/T-926 視覚検証で seed された candidate の promote 結果。
 Learning: improvement.promote_issue 由来の Issue（本文に Candidate ID / Dedupe key がある）を修正対象にする前に、dedupe key の prefix（visual: 等）と source=manual、owner SPEC の該当 visual verification task の完了状態を確認する。candidate 由来 Issue の本文はテンプレート生成なので、Problem セクションが candidate title の写しでも defect 記述ではない。
 Future Action: candidate 由来 Issue の triage では、まず owner SPEC の tasks section と linked PR のマージ状態を確認し、検証アーティファクトなら closure comment（root cause=verification artifact）で閉じる。gwtd に issue.close が無いためクローズは手動依頼になる（candidate impr-0f15883009384635a2e4b7df54e38cb2 で surface gap を記録済み）。
+
+## 2026-07-03 — self-improvement Stop hook は installed gwtd が v9.63 未満だと argv 拒否で失敗する
+
+Type: agent-workflow
+Context: work/issue-3171 の Stop で 'gwtd hook: legacy argv invocation is disabled' が発生。repo の direct hook 設定は 'gwtd hook gwt-self-improvement-stop'（argv 例外、v9.63.0 で追加）を前提とするが、GWT_BIN_PATH の installed gwtd が 9.61.0 だったため拒否された。
+Learning: この Stop hook エラーは repo config と installed runtime のバージョンスキューが原因で、コード側の regression ではない。チェックの実体は branch-local target/debug/gwtd で同じ invocation を実行すれば代替検証できる（exit 0 = block なし）。
+Future Action: 同じ Stop feedback を見たら installed gwtd の --version を確認し、v9.63 未満なら GWT.app の更新で解消と案内する。恒久策は candidate impr-f9866a9ce4564e4ba4ea3ead64fac2d5（hook command の graceful degradation）として Inbox に登録済み。
