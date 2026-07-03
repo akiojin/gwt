@@ -547,6 +547,46 @@ test.describe.serial("Issue Monitor live backend", () => {
       )
       .toBe(JSON.stringify([{ kind: "set_issue_monitor_enabled", enabled: true }]));
   });
+
+  test("autonomous events accumulate in a scrollable, dismissible side-toast stack", async ({
+    page,
+  }) => {
+    // SPEC #3200 FR-034/FR-035: each Issue Monitor toast surfaces as a persistent
+    // side notification; many accumulate in a scrollable stack (newest on top),
+    // and each is dismissible.
+    const region = page.locator(".autonomous-notifications");
+    await expect(region).toHaveAttribute("role", "log");
+
+    await page.evaluate(() => {
+      for (let i = 1; i <= 6; i += 1) {
+        window.dispatchEvent(
+          new CustomEvent("__gwt_test_inject", {
+            detail: {
+              kind: "issue_monitor_toast",
+              level: i % 2 === 0 ? "error" : "info",
+              issue_number: 3200 + i,
+              message: `autonomous event ${i}`,
+            },
+          }),
+        );
+      }
+    });
+
+    const items = region.locator(".autonomous-notifications__item");
+    await expect(items).toHaveCount(6);
+    // Newest on top.
+    await expect(items.first()).toContainText("#3206");
+    await expect(items.first()).toContainText("autonomous event 6");
+
+    // The list is height-bounded and scrolls rather than growing unboundedly.
+    const list = region.locator(".autonomous-notifications__list");
+    const overflowY = await list.evaluate((el) => getComputedStyle(el).overflowY);
+    expect(overflowY).toBe("auto");
+
+    // Dismiss the newest notice.
+    await items.first().getByRole("button", { name: "Dismiss notification" }).click();
+    await expect(items).toHaveCount(5);
+  });
 });
 
 async function clearBackendLaunchWizard(page: Page): Promise<void> {

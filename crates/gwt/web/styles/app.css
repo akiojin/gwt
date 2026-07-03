@@ -4003,158 +4003,111 @@ body {
   background: color-mix(in oklab, var(--color-state-active) 18%, var(--color-surface));
 }
 
-.board-mention-toast {
+/* SPEC #3206 — unified bottom-right alerts toast stack. Replaces the three
+   hand-offset systems (board-mention / agent-completion / attention) with one
+   self-arranging managed stack; severity is carried by data-level, and the
+   whole card is clickable (role=button) for the jump-to action. */
+.toast-alerts {
   position: fixed;
-  right: 18px;
-  bottom: 18px;
-  z-index: 1000;
-  max-width: min(420px, calc(100vw - 36px));
-  min-height: 38px;
-  padding: 10px 12px;
-  border: 1px solid var(--color-focus-ring);
-  border-radius: var(--radius-md);
-  color: var(--color-text);
-  background: var(--color-surface-elevated);
-  box-shadow: var(--shadow-3);
-  font-family: var(--font-body);
-  font-size: var(--type-sm);
-  text-align: left;
-  cursor: pointer;
-}
-
-.agent-completion-toast {
-  position: fixed;
-  right: 18px;
-  bottom: 66px;
-  z-index: 1000;
-  display: grid;
-  gap: 2px;
-  max-width: min(420px, calc(100vw - 36px));
-  min-height: 44px;
-  padding: 10px 12px;
-  border: 1px solid var(--color-border-strong);
-  border-radius: var(--radius-md);
-  color: var(--color-text);
-  background: var(--color-surface-elevated);
-  box-shadow: var(--shadow-3);
-  font-family: var(--font-body);
-  font-size: var(--type-sm);
-  text-align: left;
-  cursor: pointer;
-}
-
-.agent-completion-toast__title {
-  font-weight: 700;
-  color: var(--color-text-strong);
-}
-
-.agent-completion-toast__body {
-  color: var(--color-text-muted);
-}
-
-/* SPEC-2356 Anshin Addendum (FR-040): in-app attention toasts. They stack in a
-   fixed bottom-right column above the completion toast slot, each carrying a
-   left accent rim keyed to its flavor (needs_input amber / error red / done
-   muted). */
-.attention-toast-stack {
-  position: fixed;
-  right: 18px;
-  bottom: 122px;
+  right: var(--space-4);
+  bottom: var(--space-4);
   z-index: 1001;
+  width: min(360px, calc(100vw - 36px));
+  pointer-events: none;
+}
+.toast-alerts__list {
   display: flex;
   flex-direction: column;
   align-items: flex-end;
-  gap: 8px;
+  gap: var(--space-2);
   pointer-events: none;
 }
-
-.attention-toast {
+.toast-alerts__item {
   display: grid;
   grid-template-columns: 1fr auto;
-  align-items: stretch;
-  gap: 4px;
-  /* FR-040 refinement: a fixed width so every toast lines up regardless of how
-     long its copy is (no more ragged, content-sized toasts). */
-  width: min(360px, calc(100vw - 36px));
+  align-items: start;
+  gap: var(--space-1) var(--space-2);
+  width: 100%;
   max-height: 200px;
   overflow: hidden;
+  padding: var(--space-2) var(--space-3);
   border: 1px solid var(--color-border-strong);
-  border-left: 3px solid var(--color-state-needs-input);
+  border-left: 3px solid var(--color-border-strong);
   border-radius: var(--radius-md);
+  color: var(--color-text);
   background: var(--color-surface-elevated);
   box-shadow: var(--shadow-3);
+  font-family: var(--font-body);
+  font-size: var(--type-sm);
+  text-align: left;
   pointer-events: auto;
-  animation: attention-toast-in var(--motion-medium) var(--motion-curve);
-  /* FR-040 refinement: collapse + fade on close so the rest of the stack
-     settles down smoothly instead of snapping. */
+  animation: toast-alerts-in var(--motion-medium) var(--motion-curve);
   transition:
     max-height var(--motion-medium) var(--motion-curve),
     opacity var(--motion-medium) var(--motion-curve),
     margin-top var(--motion-medium) var(--motion-curve);
 }
-
-.attention-toast[data-leaving="true"] {
-  max-height: 0;
-  opacity: 0;
-  margin-top: -8px;
-  pointer-events: none;
+.toast-alerts__item[role="button"] {
+  cursor: pointer;
 }
-
-.attention-toast[data-flavor="error"] {
+.toast-alerts__item:focus-visible {
+  outline: 2px solid var(--color-focus-ring);
+  outline-offset: 2px;
+}
+.toast-alerts__item[data-level="info"] {
+  border-left-color: var(--color-focus-ring);
+}
+.toast-alerts__item[data-level="warn"] {
+  border-left-color: var(--color-state-needs-input);
+}
+.toast-alerts__item[data-level="error"] {
   border-left-color: var(--color-state-blocked);
 }
-
-.attention-toast[data-flavor="done"] {
+.toast-alerts__item[data-level="done"] {
   border-left-color: var(--color-state-done);
 }
-
-.attention-toast__jump {
-  display: grid;
-  gap: 2px;
-  min-height: 44px;
-  padding: 10px 12px;
-  border: 0;
-  background: transparent;
-  color: var(--color-text);
-  font-family: var(--font-body);
-  font-size: var(--type-sm);
-  text-align: left;
-  cursor: pointer;
+.toast-alerts__item[data-leaving="true"] {
+  max-height: 0;
+  margin-top: -8px;
+  padding-top: 0;
+  padding-bottom: 0;
+  opacity: 0;
+  pointer-events: none;
 }
-
-.attention-toast__title {
-  font-weight: 700;
+.toast-alerts__title {
+  font-weight: var(--font-weight-strong, 700);
   color: var(--color-text-strong);
 }
-
-.attention-toast__body {
+.toast-alerts__message {
+  grid-column: 1 / -1;
   color: var(--color-text-muted);
 }
-
-.attention-toast__dismiss {
-  align-self: stretch;
-  width: 32px;
+.toast-alerts__dismiss {
+  align-self: start;
+  width: var(--space-5);
   border: 0;
-  border-left: 1px solid var(--color-border);
   background: transparent;
   color: var(--color-text-muted);
-  font-size: 16px;
+  font-size: var(--type-md);
   line-height: 1;
   cursor: pointer;
+  pointer-events: auto;
 }
-
-.attention-toast__dismiss:hover {
+.toast-alerts__dismiss:hover {
   color: var(--color-text-strong);
-  background: color-mix(in oklab, var(--color-text-strong) 8%, transparent);
 }
-
-@keyframes attention-toast-in {
-  from { opacity: 0; transform: translateY(6px); }
-  to { opacity: 1; transform: translateY(0); }
+@keyframes toast-alerts-in {
+  from {
+    opacity: 0;
+    transform: translateY(6px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
 }
-
 @media (prefers-reduced-motion: reduce) {
-  .attention-toast {
+  .toast-alerts__item {
     animation: none;
     transition: none;
   }

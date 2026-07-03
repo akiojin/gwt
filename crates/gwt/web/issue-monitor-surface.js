@@ -1,6 +1,14 @@
 // SPEC-3165 — Issue auto-improve monitor window surface.
 // Owns the monitor window body, inbox rows, and transient monitor toasts.
-export function createIssueMonitorSurface({ document, send }) {
+export function createIssueMonitorSurface({ document, send, focusWindow }) {
+  // Focus a launched agent window by id. Defaults to the raw `focus_window`
+  // socket event (the daemon raises z-order + switches tab + re-broadcasts), so
+  // the surface still works when no richer host callback is injected. app.js
+  // passes a version that also centers the viewport.
+  const focusAgentWindow =
+    typeof focusWindow === "function"
+      ? focusWindow
+      : (windowId) => sendMonitorEvent({ kind: "focus_window", id: windowId });
   let status = {
     enabled: false,
     state: "disabled",
@@ -35,6 +43,18 @@ export function createIssueMonitorSurface({ document, send }) {
     } catch (error) {
       console.warn("issue monitor send failed", error);
     }
+  }
+
+  // Compact icon button for a row action. The glyph keeps the row narrow; the
+  // label is exposed both as the hover tooltip (title) and to assistive tech
+  // (aria-label), so meaning is never hidden.
+  function iconAction(glyph, label, action) {
+    const button = element("button", "icon-button issue-monitor-card__icon-button", glyph);
+    button.type = "button";
+    button.dataset.action = action;
+    button.setAttribute("aria-label", label);
+    button.title = label;
+    return button;
   }
 
   function ensureStyles() {
@@ -85,20 +105,23 @@ export function createIssueMonitorSurface({ document, send }) {
         text-transform: uppercase;
       }
       .issue-monitor-card__toggle:focus-visible,
-      .issue-monitor-card__row-button:focus-visible,
       .issue-monitor-card__icon-button:focus-visible,
       .issue-monitor-card__number:focus-visible,
       .issue-monitor-detail-modal__close:focus-visible {
         outline: 2px solid var(--color-focus-ring);
         outline-offset: 2px;
       }
-      .issue-monitor-card__row-button:disabled,
       .issue-monitor-card__icon-button:disabled {
         color: var(--color-text-disabled);
         cursor: not-allowed;
         opacity: 0.65;
       }
-      .issue-monitor-card__toggle {
+      /* Size every toolbar action button uniformly (Start/Stop + Autonomous)
+         so they align with the 30px Max-active input beside them. The
+         container scope (specificity 0,2,0) outranks both the base
+         .wizard-button (36px) and any single-class override, so a new toolbar
+         button can never reintroduce the height mismatch. */
+      .issue-monitor-card__toolbar-actions .wizard-button {
         height: 30px;
         min-width: var(--space-16);
         padding: 0 var(--space-2);
@@ -205,6 +228,10 @@ export function createIssueMonitorSurface({ document, send }) {
       .issue-monitor-card__item[data-state="agent_failed"] {
         border-left-color: var(--color-state-blocked);
       }
+      .issue-monitor-card__item[data-state="merged"],
+      .issue-monitor-card__item[data-state="released"] {
+        border-left-color: var(--color-state-done);
+      }
       .issue-monitor-card__status-dot {
         align-self: center;
         width: 7px;
@@ -225,6 +252,10 @@ export function createIssueMonitorSurface({ document, send }) {
       }
       .issue-monitor-card__item[data-state="agent_failed"] .issue-monitor-card__status-dot {
         background: var(--color-state-blocked);
+      }
+      .issue-monitor-card__item[data-state="merged"] .issue-monitor-card__status-dot,
+      .issue-monitor-card__item[data-state="released"] .issue-monitor-card__status-dot {
+        background: var(--color-state-done);
       }
       .issue-monitor-card__issue {
         min-width: 0;
@@ -267,6 +298,10 @@ export function createIssueMonitorSurface({ document, send }) {
       .issue-monitor-card__state-badge[data-state="agent_failed"] {
         color: var(--color-state-blocked);
       }
+      .issue-monitor-card__state-badge[data-state="merged"],
+      .issue-monitor-card__state-badge[data-state="released"] {
+        color: var(--color-state-done);
+      }
       .issue-monitor-card__issue-meta {
         margin-top: var(--space-1);
         color: var(--color-text-muted);
@@ -294,26 +329,6 @@ export function createIssueMonitorSurface({ document, send }) {
       .issue-monitor-card__item:hover .issue-monitor-card__actions,
       .issue-monitor-card__item:focus-within .issue-monitor-card__actions {
         opacity: 1;
-      }
-      .issue-monitor-card__row-button {
-        height: 28px;
-        padding: 0 8px;
-        border: 1px solid var(--color-border-strong);
-        border-radius: var(--radius-md);
-        background: transparent;
-        color: var(--color-text);
-        cursor: pointer;
-        font-family: var(--font-mono);
-        font-size: var(--type-xs);
-        font-weight: 600;
-        letter-spacing: var(--tracking-mono);
-        line-height: 1;
-        text-transform: uppercase;
-        white-space: nowrap;
-      }
-      .issue-monitor-card__row-button:hover {
-        background: var(--color-surface-elevated);
-        color: var(--color-text-strong);
       }
       .issue-monitor-card__icon-button {
         display: inline-grid;
@@ -344,6 +359,18 @@ export function createIssueMonitorSurface({ document, send }) {
       .issue-monitor-card__toast[data-level="error"] {
         background: color-mix(in oklab, var(--color-state-blocked) 22%, var(--color-surface-elevated));
         color: var(--color-text);
+      }
+      .issue-monitor-card__autonomous[data-enabled="true"] {
+        border-color: var(--color-state-active);
+      }
+      .issue-monitor-card__autonomous-meta {
+        margin-top: var(--space-1);
+        font-size: var(--font-size-sm, 0.85em);
+        color: var(--color-text-muted);
+      }
+      .issue-monitor-card__autonomous-meta[data-needs-human="true"] {
+        color: var(--color-state-needs-input);
+        font-weight: var(--font-weight-strong, 600);
       }
       .issue-monitor-detail-modal {
         z-index: 2200;
@@ -388,8 +415,16 @@ export function createIssueMonitorSurface({ document, send }) {
       .issue-monitor-detail-modal__body {
         display: grid;
         gap: var(--space-2);
+        flex: 1;
+        min-height: 0;
         overflow: auto;
         padding-top: var(--space-3);
+      }
+      .issue-monitor-detail-modal__footer {
+        flex: none;
+        margin-top: 0;
+        padding-top: var(--space-3);
+        border-top: 1px solid var(--color-border);
       }
       .issue-monitor-detail-modal__field {
         display: grid;
@@ -460,6 +495,25 @@ export function createIssueMonitorSurface({ document, send }) {
       });
     });
     toolbarActions.appendChild(toggleButton);
+
+    // SPEC #3200 T-047/FR-024: two-stage opt-in — arm/disarm unattended
+    // autonomous mode (the per-issue `auto-merge` label is the second stage).
+    const autonomousButton = element(
+      "button",
+      "wizard-button issue-monitor-card__autonomous",
+      "Autonomous: OFF",
+    );
+    autonomousButton.type = "button";
+    autonomousButton.addEventListener("click", () => {
+      const nextAutonomous = !Boolean(status.autonomous_mode);
+      status = { ...status, autonomous_mode: nextAutonomous };
+      renderStatus();
+      sendMonitorEvent({
+        kind: "set_issue_monitor_autonomous_mode",
+        enabled: nextAutonomous,
+      });
+    });
+    toolbarActions.appendChild(autonomousButton);
     toolbar.appendChild(summary);
     toolbar.appendChild(toolbarActions);
 
@@ -479,6 +533,7 @@ export function createIssueMonitorSurface({ document, send }) {
       detailText,
       maxActiveInput,
       toggleButton,
+      autonomousButton,
       errorText,
       settingsText,
       inboxRoot,
@@ -498,6 +553,10 @@ export function createIssueMonitorSurface({ document, send }) {
         return "Launching";
       case "launched":
         return "Launched";
+      case "merged":
+        return "Merged";
+      case "released":
+        return "Released";
       case "launch_failed":
         return "Launch failed";
       case "agent_failed":
@@ -644,6 +703,24 @@ export function createIssueMonitorSurface({ document, send }) {
 
     panel.appendChild(header);
     panel.appendChild(body);
+
+    // The detail view always offers Focus; it is disabled until the issue has a
+    // live agent window (consistent with the row affordance — never hidden).
+    const footer = element("div", "modal-footer issue-monitor-detail-modal__footer");
+    const focusButton = element("button", "wizard-button primary", "Focus window");
+    focusButton.type = "button";
+    focusButton.dataset.action = "focus-window";
+    focusButton.disabled = !item.launched_window_id;
+    focusButton.addEventListener("click", () => {
+      if (!item.launched_window_id) {
+        return;
+      }
+      focusAgentWindow(item.launched_window_id);
+      closeDetailModal();
+    });
+    footer.appendChild(focusButton);
+    panel.appendChild(footer);
+
     overlay.appendChild(panel);
     document.body.appendChild(overlay);
 
@@ -694,6 +771,32 @@ export function createIssueMonitorSurface({ document, send }) {
         ),
       );
       issue.appendChild(title);
+      // SPEC #3200 T-090/FR-033: surface the per-issue autonomous lifecycle
+      // (NeedsHuman escalation, phase, attempt count) when autonomous mode is on.
+      const autonomousEntry = (status.autonomous_issues || []).find(
+        (entry) => entry && entry.issue_number === number,
+      );
+      if (autonomousEntry) {
+        const autoParts = [];
+        if (autonomousEntry.needs_human) {
+          autoParts.push("⚠ Needs human");
+        }
+        if (autonomousEntry.phase && autonomousEntry.phase !== "idle") {
+          autoParts.push(`Phase ${autonomousEntry.phase}`);
+        }
+        if (autonomousEntry.attempts) {
+          autoParts.push(`Attempts ${autonomousEntry.attempts}`);
+        }
+        if (autoParts.length) {
+          const autoMeta = element(
+            "div",
+            "issue-monitor-card__autonomous-meta",
+            autoParts.join(" | "),
+          );
+          autoMeta.dataset.needsHuman = autonomousEntry.needs_human ? "true" : "false";
+          issue.appendChild(autoMeta);
+        }
+      }
       const metaParts = [];
       if (item.blocked_by_owner) {
         metaParts.push(`Owner ${item.blocked_by_owner}`);
@@ -724,42 +827,35 @@ export function createIssueMonitorSurface({ document, send }) {
 
       const actions = element("div", "issue-monitor-card__actions");
       if (number) {
-        const detailsButton = element(
-          "button",
-          "wizard-button is-compact issue-monitor-card__row-button",
-          "Detail",
-        );
-        detailsButton.type = "button";
-        detailsButton.dataset.action = "open-detail";
+        const detailsButton = iconAction("ℹ", "Detail", "open-detail");
         detailsButton.addEventListener("click", () => openDetails(number));
         actions.appendChild(detailsButton);
 
-        const upButton = element("button", "icon-button issue-monitor-card__icon-button", "↑");
-        upButton.type = "button";
-        upButton.dataset.action = "move-up";
-        upButton.setAttribute("aria-label", "Move up");
-        upButton.title = "Move up";
+        // A launched issue has a live agent window — Focus brings it to the
+        // front. The button is ALWAYS present and merely disabled when there is
+        // no window, so the row layout is stable and state is read at a glance
+        // (never shown/hidden). Only `launched` rows carry a window id.
+        const focusButton = iconAction("◎", "Focus the launched agent window", "focus-window");
+        focusButton.disabled = !item.launched_window_id;
+        focusButton.addEventListener("click", () => {
+          if (item.launched_window_id) {
+            focusAgentWindow(item.launched_window_id);
+          }
+        });
+        actions.appendChild(focusButton);
+
+        const upButton = iconAction("↑", "Move up", "move-up");
         upButton.disabled = index === 0 || item.state !== "queued";
         upButton.addEventListener("click", () => moveIssue(number, -1));
         actions.appendChild(upButton);
 
-        const downButton = element("button", "icon-button issue-monitor-card__icon-button", "↓");
-        downButton.type = "button";
-        downButton.dataset.action = "move-down";
-        downButton.setAttribute("aria-label", "Move down");
-        downButton.title = "Move down";
+        const downButton = iconAction("↓", "Move down", "move-down");
         downButton.disabled = index === inboxItems.length - 1 || item.state !== "queued";
         downButton.addEventListener("click", () => moveIssue(number, 1));
         actions.appendChild(downButton);
       }
       if (number && ["queued", "launch_failed", "agent_failed"].includes(item.state || "queued")) {
-        const configureButton = element(
-          "button",
-          "wizard-button is-compact issue-monitor-card__row-button",
-          "Configure",
-        );
-        configureButton.type = "button";
-        configureButton.dataset.action = "configure-issue";
+        const configureButton = iconAction("⚙", "Configure", "configure-issue");
         configureButton.addEventListener("click", () => {
           sendMonitorEvent({
             kind: "issue_monitor_configure_issue",
@@ -769,13 +865,7 @@ export function createIssueMonitorSurface({ document, send }) {
         });
         actions.appendChild(configureButton);
 
-        const launchButton = element(
-          "button",
-          "wizard-button is-compact issue-monitor-card__row-button",
-          "Launch now",
-        );
-        launchButton.type = "button";
-        launchButton.dataset.action = "launch-now";
+        const launchButton = iconAction("▶", "Launch now", "launch-now");
         launchButton.addEventListener("click", () => {
           sendMonitorEvent({
             kind: "issue_monitor_launch_now",
@@ -794,13 +884,19 @@ export function createIssueMonitorSurface({ document, send }) {
     if (!mounted) {
       return;
     }
-    const { toggleButton, stateText, detailText, errorText, maxActiveInput, settingsText } = mounted;
+    const { toggleButton, autonomousButton, stateText, detailText, errorText, maxActiveInput, settingsText } = mounted;
     const enabled = Boolean(status.enabled);
     toggleButton.dataset.enabled = enabled ? "true" : "false";
     toggleButton.textContent = enabled ? "Stop" : "Start";
     toggleButton.className = enabled
       ? "wizard-button issue-monitor-card__toggle"
       : "wizard-button primary issue-monitor-card__toggle";
+    const autonomous = Boolean(status.autonomous_mode);
+    autonomousButton.dataset.enabled = autonomous ? "true" : "false";
+    autonomousButton.textContent = autonomous ? "Autonomous: ON" : "Autonomous: OFF";
+    autonomousButton.className = autonomous
+      ? "wizard-button primary issue-monitor-card__autonomous"
+      : "wizard-button issue-monitor-card__autonomous";
     const stateLabel = String(status.state || (enabled ? "idle" : "disabled"));
     stateText.textContent = statusStateText(stateLabel);
     const maxActive = Math.max(1, Number(status.max_active_agents || 1));
@@ -817,6 +913,12 @@ export function createIssueMonitorSurface({ document, send }) {
     }
     if (status.last_scan_at) {
       details.push(`Scan ${status.last_scan_at}`);
+    }
+    if (autonomous) {
+      const needsHuman = (status.autonomous_issues || []).filter(
+        (entry) => entry && entry.needs_human,
+      ).length;
+      details.push(needsHuman > 0 ? `Autonomous (${needsHuman} need human)` : "Autonomous ON");
     }
     detailText.textContent = details.join(" | ");
     const sourceLabel = launchSettingsSourceLabel(status.launch_profile_source);

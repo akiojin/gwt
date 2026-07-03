@@ -267,6 +267,43 @@ PowerShell 7 を選択できます。Docker 起動では引き続きコンテナ
 選択がない場合、`Ctrl+C` は実行中のターミナルプロセス向けの割り込みのままです。
 Linux では `Ctrl+Shift+C` でも現在の選択をコピーできます。
 
+## Issue Monitor
+
+Issue Monitor はプロジェクトの open な GitHub Issue を監視し、エージェント作業に
+変換します。既定（human-gated）モードでは候補を inbox に取り込み、Issue ごとに
+`Launch` を押すと、gwt が起動時に `work/issue-N`（または `feature/spec-N`）の
+ブランチ/worktree を作成し、その Issue をプロンプトとしてエージェントを開始
+します。起動失敗はエラーとともに inbox に残り、`Launch now` で明示的に再試行
+できます。
+
+### Autonomous モード（opt-in）
+
+Autonomous モードはループ全体を無人で実行します: 適格 Issue → 自動起動 → 実装 →
+独立レビュー → 強い自動ゲート → 自動マージ。**既定では無効**で、**二段階の
+opt-in** が必要です:
+
+1. Issue Monitor ツールバーの `Autonomous` トグルを有効化（プロジェクト単位）。
+2. 自律処理したい各 Issue に `auto-merge` ラベルを付与。
+
+さらに、機械検証可能な受け入れ基準（本文の `## Acceptance Criteria`
+チェックリスト）があり、ベースブランチの protection ルールが検証可能で、
+上限つきの試行回数を使い切っていない Issue だけが適格になります。それ以外は
+従来どおり human-gated のまま扱われます。
+
+安全モデルを一行で: マージ判断を実装エージェント自身には決して委ねません —
+独立レビューと強い自動ゲートの通過が必須で、失敗は可視の `NeedsHuman` 状態に
+エスカレーションし、`Autonomous` トグルは monitor が arm した auto-merge を
+能動的に解除する kill switch として機能します。ゲート設計と脅威モデルの全体は
+SPEC [#3200](https://github.com/akiojin/gwt/issues/3200) を参照してください。
+
+無人運転中のライフサイクルイベント（マージ完了・再試行予約・ゲート通過・
+NeedsHuman エスカレーション）はトーストとして表示され、永続的なスクロール可能
+通知スタックに蓄積されるため、離席中のイベントも失われません。
+
+調整可能な上限（試行回数・stuck/idle タイムアウト・再試行バックオフ・レビュー
+モデル）はプロジェクト単位で永続化されます。human-gated の基礎は SPEC
+[#3165](https://github.com/akiojin/gwt/issues/3165) を参照してください。
+
 ## Knowledge、Search、Managed Skills
 
 gwt は project knowledge を Agent workspace の近くに置きます。

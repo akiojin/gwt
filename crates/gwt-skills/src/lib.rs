@@ -2167,6 +2167,40 @@ mod tests {
     }
 
     #[test]
+    fn gwt_manage_pr_documents_drive_to_merge_delivery() {
+        let workspace_root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let claude =
+            std::fs::read_to_string(workspace_root.join(".claude/skills/gwt-manage-pr/SKILL.md"))
+                .expect("read .claude gwt-manage-pr SKILL.md");
+        let codex =
+            std::fs::read_to_string(workspace_root.join(".codex/skills/gwt-manage-pr/SKILL.md"))
+                .expect("read .codex gwt-manage-pr SKILL.md");
+        // Managed skill parity: the Codex mirror must match the canonical
+        // `.claude` source byte-for-byte (assets.rs include_dir! + verbatim
+        // distribution).
+        assert_eq!(
+            claude, codex,
+            ".claude and .codex gwt-manage-pr SKILL.md must stay in parity"
+        );
+        // SPEC #3197: gwt-manage-pr must document the drive-to-merge delivery
+        // loop (auto-merge + CI/review fix loop + watch until merged), gated by
+        // the Ready PR Gate.
+        for required in [
+            "Deliver",
+            "drive to merge",
+            "gh pr merge --auto",
+            "merged_at",
+            "Ready PR Gate",
+            "Loop Safety Guard",
+        ] {
+            assert!(
+                claude.contains(required),
+                "gwt-manage-pr SKILL.md must document drive-to-merge phrase: {required}"
+            );
+        }
+    }
+
+    #[test]
     fn build_spec_does_not_treat_draft_pr_as_completion() {
         let workspace_root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
         for relative in [
@@ -2208,6 +2242,113 @@ mod tests {
                 assert!(
                     content.contains(required),
                     "{relative} must expose PR readiness fields: {required}"
+                );
+            }
+        }
+    }
+
+    // Issue #3197: gwt-manage-pr gains a Deliver (drive-to-merge) capability.
+    // The skill must document an opt-in mode that, after the Ready PR Gate
+    // passes, enables auto-merge, composes the existing Fix loop against every
+    // blocker, classifies transient CI failures for re-run, and watches until
+    // `merged_at` is set. A pending verification must never enable auto-merge.
+    #[test]
+    fn manage_pr_documents_deliver_drive_to_merge_mode() {
+        let workspace_root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
+
+        for relative in [
+            ".claude/skills/gwt-manage-pr/SKILL.md",
+            ".codex/skills/gwt-manage-pr/SKILL.md",
+        ] {
+            let content = std::fs::read_to_string(workspace_root.join(relative))
+                .unwrap_or_else(|err| panic!("failed to read {relative}: {err}"));
+
+            // The Deliver mode must be a first-class documented mode that points
+            // at its detailed reference flow.
+            assert!(
+                content.contains("## Mode: Deliver"),
+                "{relative} must document a `## Mode: Deliver` section"
+            );
+            assert!(
+                content.contains("references/deliver-flow.md"),
+                "{relative} must reference references/deliver-flow.md"
+            );
+
+            // Scope the remaining assertions to the Deliver section so they
+            // describe Deliver behaviour rather than Fix/Create reuse.
+            let start = content
+                .find("## Mode: Deliver")
+                .unwrap_or_else(|| panic!("{relative} missing Deliver section start"));
+            let window = &content[start..];
+            let end = window[1..]
+                .find("\n## ")
+                .map(|idx| idx + 1)
+                .unwrap_or(window.len());
+            let deliver = &window[..end];
+
+            for required in [
+                "drive-to-merge",
+                "gh pr merge --auto",
+                "merged_at",
+                "Loop Safety Guard",
+                // Re-gate invariant: never keep auto-merge armed across a
+                // code-changing push.
+                "--disable-auto",
+                "re-arm",
+            ] {
+                assert!(
+                    deliver.contains(required),
+                    "{relative} Mode: Deliver section must document: {required}"
+                );
+            }
+            // Deliver is opt-in only — auto-detection must never enable
+            // auto-merge on its own.
+            assert!(
+                deliver.contains("opt-in") && deliver.contains("never auto-routed"),
+                "{relative} Mode: Deliver must state it is opt-in only and never auto-routed"
+            );
+            // Hard gate: pending verification must not enable auto-merge.
+            assert!(
+                deliver.contains("pending")
+                    && deliver.contains("confirmed")
+                    && deliver.contains("n/a"),
+                "{relative} Mode: Deliver must gate auto-merge on confirmed/n-a and forbid pending"
+            );
+        }
+
+        for relative in [
+            ".claude/skills/gwt-manage-pr/references/deliver-flow.md",
+            ".codex/skills/gwt-manage-pr/references/deliver-flow.md",
+        ] {
+            let content = std::fs::read_to_string(workspace_root.join(relative))
+                .unwrap_or_else(|err| panic!("failed to read {relative}: {err}"));
+            for required in [
+                // Composes the existing Fix flow rather than reimplementing it.
+                "fix-flow.md",
+                // Hard PR gate before enabling auto-merge.
+                "Ready PR Gate",
+                "pending",
+                // Auto-merge enablement via the allowed gh command.
+                "gh pr merge --auto",
+                // Project-agnostic merge-method selection (no hardcoded method).
+                "viewerDefaultMergeMethod",
+                // Merged-state watch surface and completion signal.
+                "pr.view",
+                "merged_at",
+                // Transient CI classification + bounded re-run, like /release.
+                "transient",
+                "gh run rerun",
+                // Bounded drive loop.
+                "Loop Safety Guard",
+                // Safety invariant: auto-merge must never stay armed across a
+                // code-changing push. Disable, re-gate, and re-arm per push so
+                // GitHub only ever merges a verified, gated snapshot.
+                "gh pr merge --disable-auto",
+                "re-arm",
+            ] {
+                assert!(
+                    content.contains(required),
+                    "{relative} must document drive-to-merge detail: {required}"
                 );
             }
         }

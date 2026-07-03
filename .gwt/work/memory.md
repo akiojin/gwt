@@ -7459,6 +7459,26 @@ Context: Docker起動エラーが TTY 前面に被さる回帰 (SPEC-2014 US-36 
 Learning: test rename + assert.equal('false')->assert.match(error) のような『契約の反転』は新規ケース追加と違い regression を隠す。TTY 前面 overlay は .terminal-overlay.visible 1 箇所(app.js shouldShowOverlay)のみで Docker 固有ではなく全 error window で発火する。error は overlay 無しでも inline TTY text(launch_error_terminal_output_event) / status chip tooltip / attention toast / Console docker tab / Logs Process facet の 5 面で可視。
 Future Action: contract test の assertion が『追加』ではなく『反転』している diff は regression の赤信号として扱う。完了済み FR を touch する大型 feature commit では guard test が意味を保っているか必ず確認する。前面 overlay を復活させる変更は SPEC-2014 US-36 違反。
 
+## 2026-06-26 — spawn_logged_blocking の per-call runtime build が fd 逼迫で握り潰されると無関係なエラー文言になる
+
+Type: lesson
+Context: Issue Monitor が有効な GitHub origin でも「GitHub origin remote is unavailable」を毎回・全プロジェクトで誤表示する報告 (Issue #3190) を調査した。github_remote_owner_and_repo は spawn_logged_blocking 経由で git remote get-url origin を実行し、結果を Option に潰していた。
+Learning: gwt_core::process_console::spawn_logged_blocking は呼び出しごとに tokio::runtime::Builder::new_current_thread().enable_all().build() で新しいランタイムを生成し、I/O ドライバ用の fd (kqueue/epoll) を確保する。エージェント PTY 多数で fd が逼迫すると build() が失敗し、呼び出し側が .ok()? で握り潰すと、本当の原因 (プロセス起動失敗) が origin 解決失敗の文言にすり替わる。さらに spawn 失敗 / git 非ゼロ終了 / 非GitHub URL を 1 メッセージに潰すと診断不能になる。
+Future Action: process spawn を Option に潰さず、spawn 失敗 (io::Error)・非ゼロ終了 (stderr/exit code)・パース失敗を別々のエラーとして surface する。FR-039 を守りつつ fd コストを抑えるため spawn_logged_blocking はプロセス共有ランタイムを再利用する (SHARED OnceLock、fallback あり)。失敗種別の分類は純粋関数に切り出して単体テストする。
+
+## 2026-06-28 — Issue Monitor の launched lifecycle: 成功終端が無く max_active で起動が止まる
+
+Type: lesson
+Context: SPEC #3165。Issue Monitor が Launched 後にマージ完了・ウィンドウクローズしても解除されず、2件目以降が起動されない不具合を修正した。
+Learning: active_launches は record_failed_issue(失敗時)でしか減らず成功・完了の終端遷移が無い。起動ゲートが active_count<max_active のため最初の Issue が完了/クローズしてもスロット解放されず monitor が停止する。close_window_events/close_project_tab_events は monitor へ通知せず、prefs.launched_issues が active を Launched 復元するため再起動後も stale。gwt は Issue クローズをリリースに集約するため PR マージ≠Issue クローズで完了検知は PR マージで行う。auto-launch(silent_issue_monitor_launch_events)は常に fresh 起動で latest_resumable_branch_session を使わず resume しない。
+Future Action: 完了は実完了のみ終端化(Merged=develop マージ/Released=Issue クローズ)。未完で閉じたら偽 Closed を作らず pending(Queued)に戻し session を resume 対象にする。close/merge を requeue_window/record_merged で配線、PR マージ検知(fetch_merged_pr_branches)は取得失敗時 Launched 維持で false merge を避ける。状態遷移は純粋メソッドで単体テスト。
+
+## 2026-06-28 — 完全自走エージェント＝人間ゲートを消すのではなく強い自動ゲートに置換する
+
+Type: decision
+Context: Issue Monitor を「完全に自走して Issue を解決し merge まで」する autonomous mode の設計議論（新 SPEC）。現状は配管はあるが人間ゲート必須で完全自走ではない。
+Learning: 完全自走は人間の視認/承認ゲートを消すことではなく、強い自動ゲートに置換することで達成する。CI green+テスト pass だけでは不十分: 実装エージェントがコードとテストの両方を書くと「自分の宿題を自分で採点」になり、要件誤解のまま通るテストで壊れた修正が merge され得る。だから独立レビューエージェント（実装したのと別の model/agent が Issue の受け入れ基準に adversarial 検証）を必須化する。発動は二段 opt-in（project 設定 autonomous_mode + Issue ラベル）で blast radius を制御し default OFF で既存挙動を保つ。無人で実際に回すには skip_permissions 適用・max-retry/needs-human エスカレーション・transient リトライ・stuck 検知も併せて必要。
+Future Action: autonomous/unattended な agent loop を設計するときは『人間ゲートを何の自動ゲートで置換するか』を最初に決める。最低でも CI+テスト+独立レビュー(別 model)を必須化し、自己採点を避ける。opt-in 二段・default OFF・ループ上限(needs-human)・stuck 回収をセットで入れる。gwt では FR-015(no bypass)を opt-in 条件付きで明示的に relax する条項を SPEC に書く。
 ## 2026-06-27 — Browser-check isolated HOME can hide Rust toolchains
 
 Type: failure-pattern
@@ -7472,6 +7492,40 @@ Type: failure-pattern
 Context: During PR #3193 pre-PR visual verification, the Issue Bridge auto-refresh Playwright fixture fired a 60000ms interval callback via a fixed 50ms timeout. In the full suite, initial knowledge load sometimes still held the busy flag, so the auto-refresh request was dropped and the test timed out although single-test runs passed.
 Learning: Timer-shortening fixtures are flaky when the production callback can legally no-op while state is busy. Tests should expose a deterministic trigger and call it after asserting the state that makes the callback meaningful.
 Future Action: For Playwright fixtures that validate periodic behavior, capture interval callbacks and trigger them explicitly after the initial render/load assertions instead of relying on arbitrary short timeouts.
+
+## 2026-07-02 — Start Work は lazy／branch-per-work は生産Work用・intake は既存worktree再利用
+
+Type: decision
+Context: ユーザー提起「Issue Monitor があれば Start Work のブランチ作成は不要、Issue登録だけなら専用ブランチ起動で良い」を gwt-discussion で検証(SPEC #2359 Workモデル / #3165 Issue Monitor)。
+Learning: (1)前提が事実と異なる: Start Work はクリック時点でブランチ名を予約するだけで git ref を作らず(reserve_start_work_branch_name_for_project, start_work_test.rs:153 'must not create refs')、ブランチ+worktree の物理作成はエージェント起動直前の resolve_launch_worktree(launch_runtime.rs:141/162)。Issue Monitor も同じ lazy materialization を再利用(launch.rs:1467)。『Start Workが先にブランチを作る』は誤解で、両者は同一機構の別トリガー。(2)Start Work は Issue Monitor で代替不可: 非Issue作業(ad-hoc/任意ブランチ種別/既存リモートブランチ継続US-83/Shell)の汎用入口、Issue linkage は optional。(3)正しい論点は『gwt の Work は branch束縛1種類だが、生産Work(コード→branch/worktree/PR必須)と非生産intake Work(register-issue/discussion/spec/arch-review→Issue+.gwt notesのみ)の2種類ある』。(4)『専用ブランチ共有』案は git制約(1ブランチ=1worktree)とセッション隔離(GWT_SESSION_ID+per-worktree .gwt state+managed hooks)に当たり素朴には成立しない。実現するなら ephemeral worktree か直列化が要る。
+Future Action: branch-per-work コアモデルは生産Workに load-bearing なので維持。intake/discussion は新Work種別を作らず既存worktree再利用で回す(No Action)。将来 intake worktree増殖が定量的に痛くなった場合のみ『ephemeral intake Work kind』を SPEC化(セッション隔離のworktree非依存化が前提技術課題)。'Start Workは事前にブランチを作る'誤解を繰り返さない。
+## 2026-07-02 — session 共有 dedup は identity 照合必須 (Workspace 行 silent drop)
+
+Type: bug-fix
+Context: PR #3205 (work/issue-3197) が Workspace 一覧から消え再開不能になった (Issue #3213)。works.json で別 branch の Work (issue-3184) に session の迷子 ref (agent_id 空) が誤付与され、active_work_already_present の session 一致 dedup が branch/worktree identity を確認せず正規所有者の行を silent drop していた。ローカル branch が存在すると remote Start Work stub 経路 (ResumeExisting) からも除外されるため表示経路がゼロになる。
+Learning: session id 共有による dedup/merge は、両側が git identity (branch/worktree) を持ち食い違う場合には適用してはならない。identity-conflict gate (active_work_agent_matches_workspace_row_identity と同パターン) を必ず併用する。view 層の dedup は「汚染済み永続データでも正しく表示できる」ことを基準に設計する (データ修復より view 耐性)。
+Future Action: session ベースの照合・dedup を追加/変更する際は、(1) 別 branch の Work が同一 session を共有する corrupted works.json ケースのテストを必ず書く、(2) drop 側に他の表示経路が残るか (remote stub 等) を確認する。上流の session 誤付与 hardening と journal compaction の診断痕跡保持は未解決 (Issue #3213 Follow-up 参照)。
+
+## 2026-06-29 — managed-skill 新規ファイルは .git/info/exclude で silent に無視される
+
+Type: project
+Context: Issue #3197 で gwt-manage-pr の managed skill に新規 reference file (references/deliver-flow.md) を追加した際、git status に出ず commit され損ねかけた。
+Learning: gwt-managed worktree では `.git/info/exclude` に `.claude/skills/gwt-*` と `.codex/skills/gwt-*` の除外 entry があり、新規 managed-skill ファイルは untracked にすら現れず silent に無視される。既存ファイル(SKILL.md 等)は既に tracked なので modification は M で見えるが、NEW ファイルは git add -f しないと commit されない。commit され損ねると include_dir! 埋め込み元と CI checkout に file が無く、新 test と parity test が CI で fail する。
+Future Action: managed skill (.claude/skills/gwt-*, .codex/skills/gwt-*) に新規ファイルを追加したら必ず `git check-ignore -v <path>` で除外を確認し `git add -f` で明示 stage する。commit 後 `git show --stat HEAD` で新規ファイルが含まれることを確認する。
+
+## 2026-07-02 — PR #3205 救出: 並行実装 conflict の解消と PTY flaky の切り分け
+
+Type: project
+Context: PR #3205 (Deliver mode) が放置中に develop へ簡易版 Deliver (443656db6) が別経路で merge され、SKILL.md 双子が conflict した。また Test (Rust, Linux) が client_pane_snapshot_repair_replies_with_snapshots_for_known_panes_only の PtyCreationFailed (ENOENT) で 2 run 連続失敗した。
+Learning: (1) 同一 skill への並行実装は「後勝ち」ではなく安全性の superset 側 (disarm-before-push 不変条件・merge method 自動選択・deliver-flow.md reference 付き) を本文採用し、trigger 文言は union で統合する。両実装の doc テストが lib.rs に併存するため、解消後は双方のテストを通すこと。(2) PTY spawn ENOENT は develop でも test_spawn_with_env 等で既出の infra flaky 系で、ローカル (macOS) full suite PASS + develop 直近 CI green なら transient 分類で再走してよい。
+Future Action: gwt-manage-pr SKILL.md を編集する際は .claude/.codex の byte parity と gwt-skills の manage_pr doc テスト群 (gwt_manage_pr_documents_drive_to_merge_delivery / manage_pr_documents_deliver_drive_to_merge_mode) を必ずローカルで実行する。PTY 系 CI flaky が同一テストで 3 run 連続したら infra ではなくコードとして調査に切り替える。
+
+## 2026-07-03 — sandbox 内起動サーバーはユーザーの Chrome から接続不可 / claude-in-chrome は接続先マシンを先に確認
+
+Type: workflow-correction
+Context: minimap zoom-sync の browser-check で、Bash (sandbox) から起動した fresh gwt が curl では 200 なのに Chrome では ERR_CONNECTION_REFUSED になった。原因は 2 層: (1) sandbox 内で spawn したプロセスの listener が実 loopback に公開されない場合がある、(2) claude-in-chrome の接続先ブラウザがそもそも別マシン (Windows, isLocal:false) で、この Mac の 127.0.0.1 に原理的に到達できない。
+Learning: サーバー起動 + 他プロセス (ブラウザ) からの接続が要る検証では、spawn を dangerouslyDisableSandbox で行い、拡張ベースの自己確認をする前に list_connected_browsers で isLocal を確認する。curl 200 は「自分の sandbox から見える」ことしか証明しない。
+Future Action: browser-check でサーバーを起動する際は sandbox 外で spawn し、claude-in-chrome での自己確認は isLocal:true のブラウザがある場合のみ計画する。リモートブラウザしか無い場合は curl + Playwright 検証で代替し、視覚確認はユーザーのローカルブラウザに依頼する。
 
 ## 2026-07-03 — field semantics は guidance でなく書き込み choke point の validator で守る (Issue #3184 purpose/title)
 

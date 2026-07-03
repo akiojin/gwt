@@ -1497,7 +1497,15 @@ impl AppRuntime {
                 &config.agent_id,
                 codex_hook_discovery_mode,
             )
-            .map_err(|error| error.to_string())?;
+            .map_err(|error| {
+                // Attribute managed-asset failures to the worktree so the
+                // operator sees which worktree's setup failed, not a bare
+                // skill-writer error.
+                format!(
+                    "managed asset setup failed for worktree {}: {error}",
+                    worktree_path.display()
+                )
+            })?;
             let codex_home = config.env_vars.get("CODEX_HOME").map(PathBuf::from);
             if let Some(report) = maybe_register_codex_managed_hook_trust_for_launch(
                 &profile_config_path,

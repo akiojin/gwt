@@ -276,6 +276,44 @@ On Windows, `Ctrl+C` copies the current terminal selection and clears it; if no
 selection exists, `Ctrl+C` stays mapped to the running terminal process. On
 Linux, `Ctrl+Shift+C` also copies the current terminal selection.
 
+## Issue Monitor
+
+The Issue Monitor watches the project's open GitHub Issues and turns them into
+agent work. In the default (human-gated) mode it scans candidates into an
+inbox, and you press `Launch` per issue: gwt then creates the
+`work/issue-N` (or `feature/spec-N`) branch/worktree at launch time and starts
+the agent with the issue as its prompt. Failed launches stay visible in the
+inbox with the error, and `Launch now` retries explicitly.
+
+### Autonomous mode (opt-in)
+
+Autonomous mode runs the whole loop unattended: eligible issue → auto-launch →
+implementation → independent review → strong automated gate → auto-merge. It
+is **off by default** and requires a **two-stage opt-in**:
+
+1. Enable the `Autonomous` toggle in the Issue Monitor toolbar (per project).
+2. Label each issue you want handled autonomously with `auto-merge`.
+
+An issue additionally qualifies only when it has machine-checkable acceptance
+criteria (an `## Acceptance Criteria` checklist in the body), the base
+branch's protection rules are verifiable, and its bounded attempt budget is
+not exhausted. Anything else stays on the human-gated path unchanged.
+
+Safety model in one line: the merge decision never belongs to the
+implementing agent — an independent review plus a strong automated gate must
+pass first, failures escalate to a visible `NeedsHuman` state, and the
+`Autonomous` toggle is a kill switch that actively cancels any auto-merge the
+monitor armed. The full gate design and threat model live in SPEC
+[#3200](https://github.com/akiojin/gwt/issues/3200).
+
+Unattended lifecycle events (merge completed, retry scheduled, gate passed,
+needs-human escalations) surface as toasts and accumulate in a persistent,
+scrollable notification stack so nothing is lost while you are away.
+
+Tunable bounds (attempt cap, stuck/idle timeout, retry backoff, review model)
+persist per project. The human-gated baseline is SPEC
+[#3165](https://github.com/akiojin/gwt/issues/3165).
+
 ## Knowledge, Search, and Managed Skills
 
 gwt keeps project knowledge close to the agent workspace:
