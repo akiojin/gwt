@@ -266,6 +266,20 @@ impl WorktreeManager {
     /// cruft (`.DS_Store`) are treated as disposable, so a normal intake
     /// worktree still reaps. Fail-closed callers keep the worktree on `Err`.
     pub fn ephemeral_worktree_has_local_work(&self, path: &Path) -> Result<bool> {
+        self.ephemeral_worktree_has_local_work_with(path, |_| false)
+    }
+
+    /// [`Self::ephemeral_worktree_has_local_work`] with a caller-supplied
+    /// `extra_disposable` predicate over worktree-relative status entries.
+    /// Higher layers use it to also discard gwt's MERGED hook configs
+    /// (`.claude/settings.local.json`, `.codex/hooks.json`) when they contain
+    /// only gwt-generated content — a decision that needs `gwt-skills`, which
+    /// this crate cannot depend on (codex #3237).
+    pub fn ephemeral_worktree_has_local_work_with<F: Fn(&str) -> bool>(
+        &self,
+        path: &Path,
+        extra_disposable: F,
+    ) -> Result<bool> {
         // Tracked changes, untracked files, and ignored files in one pass.
         let output = gwt_core::process::run_git_logged(
             &[
@@ -290,7 +304,7 @@ impl WorktreeManager {
             // is `old -> new`; the new path after the arrow is what matters).
             let entry = &line[3..];
             let entry = entry.rsplit(" -> ").next().unwrap_or(entry);
-            if !is_disposable_worktree_entry(entry) {
+            if !is_disposable_worktree_entry(entry) && !extra_disposable(entry) {
                 return Ok(true);
             }
         }
