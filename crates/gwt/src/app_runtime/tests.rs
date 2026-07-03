@@ -11768,36 +11768,51 @@ fn app_runtime_stop_all_runtimes_kills_every_pane_before_join_waits() {
         },
     );
 
+    let started = Instant::now();
     let stop_thread = thread::spawn(move || {
         runtime.stop_runtimes_in_shutdown_order(vec![blocker_id, observed_id]);
     });
 
-    let deadline = Instant::now() + Duration::from_millis(400);
-    let mut observed_exited = false;
+    // Wait generously for the observed pane to die and record WHEN it died.
+    // The per-pane kill cost is load-dependent (ProcessGroup::terminate holds
+    // a fixed 100ms SIGTERM→SIGKILL grace and `child.kill()` varies with
+    // system load), so an absolute wall-clock deadline here is flaky. The
+    // contract under test is ordering, which is asserted below.
+    let deadline = started + Duration::from_secs(5);
+    let mut observed_death: Option<Duration> = None;
     while Instant::now() < deadline {
-        observed_exited = observed_pane_for_assertion
+        let exited = observed_pane_for_assertion
             .lock()
             .expect("observed pane")
             .pty()
             .try_wait()
             .expect("observed try_wait")
             .is_some();
-        if observed_exited {
+        if exited {
+            observed_death = Some(started.elapsed());
             break;
         }
-        thread::sleep(Duration::from_millis(25));
+        thread::sleep(Duration::from_millis(10));
     }
-    if !observed_exited {
+    if observed_death.is_none() {
         let _ = observed_pane_for_assertion
             .lock()
             .expect("observed pane cleanup")
             .kill();
     }
     stop_thread.join().expect("stop thread");
+    let stop_done = started.elapsed();
 
+    let observed_death = observed_death.expect("shutdown must kill the observed pane, not leak it");
+    // Ordering contract, load-robust: when shutdown kills every pane before
+    // waiting for join handles, the observed pane dies before the blocker's
+    // capped join wait (500ms recv_timeout) even begins, so its death precedes
+    // stop completion by at least that cap. In the interleaved (wrong) order
+    // the observed pane only dies in the final milliseconds of the stop call.
     assert!(
-        observed_exited,
-        "shutdown must kill all panes before waiting for any runtime join handle"
+        stop_done - observed_death >= Duration::from_millis(300),
+        "shutdown must kill all panes before waiting for any runtime join handle \
+         (observed pane died at {observed_death:?}, stop finished at {stop_done:?})"
     );
 }
 
