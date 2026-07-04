@@ -500,3 +500,44 @@ test("the detail modal Focus action is present but disabled for a non-launched i
     "modal stays open when Focus is disabled",
   );
 });
+
+test("Quick issue input registers via Enter and launches via the ⚡ button", () => {
+  const { document, sent, surface } = makeFixture();
+
+  const input = document.querySelector(".issue-monitor-card__quick-input");
+  assert.ok(input, "Quick issue input is present in the toolbar");
+
+  const pressEnter = (target) => {
+    const event = new document.defaultView.Event("keydown", { bubbles: true });
+    event.key = "Enter";
+    target.dispatchEvent(event);
+  };
+
+  // Enter registers without launching.
+  input.value = "  Investigate flaky login  ";
+  pressEnter(input);
+  assert.deepEqual(sent.at(-1), {
+    kind: "quick_register_issue",
+    title: "Investigate flaky login",
+    launch: false,
+  });
+  assert.equal(input.value, "", "the input clears after registering");
+
+  // The ⚡ button registers AND launches.
+  const launchButton = document.querySelector(".issue-monitor-card__quick-launch");
+  assert.ok(launchButton, "Register & Launch button is present");
+  input.value = "Broken export";
+  launchButton.click();
+  assert.deepEqual(sent.at(-1), {
+    kind: "quick_register_issue",
+    title: "Broken export",
+    launch: true,
+  });
+
+  // A blank title sends nothing.
+  const before = sent.length;
+  input.value = "   ";
+  pressEnter(input);
+  launchButton.click();
+  assert.equal(sent.length, before, "a blank title never sends a quick_register_issue event");
+});
