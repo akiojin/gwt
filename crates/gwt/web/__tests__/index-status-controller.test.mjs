@@ -194,13 +194,41 @@ test("Index result Open uses target numbers for Issue and SPEC hits", () => {
   );
 });
 
-test("Index search tab does not trigger full health refresh on mount", () => {
-  const refreshCallCount = (
-    indexSurfaceSource.match(/requestFullIndexStatusRefresh\(\);/g) || []
-  ).length;
-  assert.equal(
-    refreshCallCount,
-    2,
-    "full index status refresh must stay limited to Health tab activation and manual refresh",
+test("Index search tab refreshes missing health once per project root", () => {
+  assert.ok(
+    indexSurfaceSource.includes("function ensureIndexStatusRefresh(state, status)") &&
+      indexSurfaceSource.includes("state.statusRefreshProjectRoot !== activeProjectRoot") &&
+      indexSurfaceSource.includes("state.statusRefreshProjectRoot = activeProjectRoot;") &&
+      indexSurfaceSource.includes("requestFullIndexStatusRefresh();"),
+    "Search mount should request a full status refresh when the active project has no health payload yet",
+  );
+  assert.ok(
+    indexSurfaceSource.includes("state.statusRefreshProjectRoot = \"\";"),
+    "Search refresh guard should reset when project context disappears or a status payload arrives",
+  );
+});
+
+test("Index search tab renders abnormal-first health summary without repair controls", () => {
+  assert.ok(
+    indexSurfaceSource.includes("function renderIndexSearchHealthSummary(") &&
+      indexSurfaceSource.includes('data-role="index-search-health-summary"'),
+    "Search tab should render a dedicated health summary near the search controls",
+  );
+  assert.ok(
+    indexSurfaceSource.includes("index-search-health-inline") &&
+      indexSurfaceSource.includes("open-index-health") &&
+      indexSurfaceSource.includes("requestFullIndexStatusRefresh();"),
+    "degraded Search health should stay inline and provide a Health tab action",
+  );
+  assert.ok(
+    indexSurfaceSource.includes("buildIndexHealthSummary(") &&
+      indexSurfaceSource.includes("readyCount") &&
+      indexSurfaceSource.includes("degradedScopes"),
+    "Search health summary should be built from ready/degraded scope counts",
+  );
+  assert.ok(
+    !indexSurfaceSource.includes('data-action="open-project"') &&
+      !indexSurfaceSource.includes("Open Project"),
+    "Index window empty states must not offer an Open Project action",
   );
 });

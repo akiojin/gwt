@@ -420,6 +420,44 @@ body {
   color: var(--color-text-muted);
   font-size: var(--type-xs);
 }
+.settings-index-summary {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
+  gap: 8px;
+  margin: 0 0 10px;
+}
+.settings-index-summary-card {
+  min-width: 0;
+  display: grid;
+  gap: 4px;
+  padding: 10px;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-sm);
+  background: var(--color-surface-elevated);
+}
+.settings-index-summary-card[data-health-kind="ready"] {
+  background: color-mix(in oklab, var(--color-state-active) 8%, var(--color-surface-elevated));
+}
+.settings-index-summary-card[data-health-kind="degraded"] {
+  background: color-mix(in oklab, var(--color-state-blocked) 10%, var(--color-surface-elevated));
+}
+.settings-index-summary-label,
+.settings-index-summary-detail {
+  color: var(--color-text-muted);
+  font-size: var(--type-xs);
+}
+.settings-index-summary-detail {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.settings-index-empty {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+.settings-index-refresh,
 .settings-index-rebuild,
 .settings-index-rebuild-all {
   margin-top: 6px;
@@ -430,6 +468,9 @@ body {
   background: var(--color-surface-elevated);
   color: var(--color-text);
   cursor: pointer;
+}
+.settings-index-refresh {
+  margin-top: 0;
 }
 .settings-index-rebuild-all {
   margin-left: 8px;
@@ -2227,6 +2268,10 @@ body {
   display: none;
 }
 
+.index-health-table {
+  padding: 12px;
+}
+
 .index-health-title {
   color: var(--color-text-strong);
   font-weight: 700;
@@ -2334,6 +2379,59 @@ body {
 
 .index-search-status[data-kind="error"] {
   color: var(--color-state-blocked);
+}
+
+.index-search-health-summary {
+  padding: 8px 12px;
+  border-bottom: 1px solid var(--color-border);
+  background: var(--color-surface);
+}
+
+.index-search-health-inline {
+  min-height: 30px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  padding: 6px 8px;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-sm);
+  background: var(--color-surface-elevated);
+  color: var(--color-text-muted);
+  font-size: var(--type-xs);
+}
+
+.index-search-health-summary.is-ready .index-search-health-inline {
+  border-color: color-mix(in oklab, var(--color-state-active) 40%, var(--color-border));
+  background: color-mix(in oklab, var(--color-state-active) 8%, var(--color-surface-elevated));
+}
+
+.index-search-health-summary.is-degraded .index-search-health-inline {
+  border-color: color-mix(in oklab, var(--color-state-blocked) 44%, var(--color-border));
+  background: color-mix(in oklab, var(--color-state-blocked) 10%, var(--color-surface-elevated));
+}
+
+.index-search-health-inline strong {
+  color: var(--color-text-strong);
+}
+
+.index-search-health-scopes {
+  min-width: 0;
+  flex: 1 1 180px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.index-health-cta {
+  margin-left: auto;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-sm);
+  padding: 4px 8px;
+  background: var(--color-surface);
+  color: var(--color-text);
+  font-size: var(--type-xs);
+  cursor: pointer;
 }
 
 .index-search-layout {
