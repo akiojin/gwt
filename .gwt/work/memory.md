@@ -7589,3 +7589,10 @@ Type: decision
 Context: SPEC-3214 で「Issue Monitor toolbar に 1 行 bare 登録（Quick issue）を足す価値」をユーザーが問い、gwt-discussion（2026-07-04）で撤回を決定。実装済みだった Phase 2a backend(#3240 merged)/2b frontend(#3242 Draft) を #3243 で撤去。
 Learning: bare-title の即登録 UI は (1) body 空・investigation ラベルだけで文脈が薄く agent が手掛かり無しで始まる、(2) gwt-register-issue の品質経路（重複検索・plain/SPEC 判定・整形 body）を迂回する、(3) SPEC が『intake session から』の機能・Start Work 代替と規定するのに監視の制御面（Issue Monitor toolbar = Start/Stop/Max/Autonomous）へ埋め込むと概念が混線する、(4) Phase 5 で Start Work を canvas/palette から撤去した後、toolbar のみだと canvas/palette の新規作業入口が消える。結論: intake（Issue 登録）は intake session の agent が gwt-register-issue で curated 登録し、Issue 化しない緊急/使い捨ては既存 Shell 起動で行う。everything-is-a-curated-issue。ad-hoc の deferred-decision（当初 Quick issue 一本化）も intake session 一本化へ反転。
 Future Action: 『登録を秒速化する軽量 UI』を足したくなったら、まず品質経路（重複検索・整形）を迂回しないか、既存の curated 登録（intake session + gwt-register-issue）と二重化しないか、置き場所が概念的に正しい surface か（制御面に intake 入口を埋めない）を確認する。速さのために品質を落とす bare 登録は避ける。
+
+## 2026-07-04 — 作業ワークフローは 2 レーン(Curate/Execute)に再整理 — SPEC-3245
+
+Type: decision
+Context: gwt-discussion(2026-07-04): Intake/Start Work/Workspace の分け方が不明瞭・ワークフロー再整理要求。開始入口 6 系統 + 名詞 4 概念(Workspace/Work/Session/Intake)の重複名 + Start Work 撤去中/Intake 追加中の移行状態が混乱の元と判明。
+Learning: gwt の作業モデルを 2 レーンに再定義: (1) Curate(Intake)=branchless ephemeral 使い捨て、目的は『何をやるか決める・登録する』、成果は GitHub Issue/SPEC、Workspace/Work を生成しない。(2) Execute(Workspace)=branch 永続、SPEC-2359 の Workspace(branch)/Work(launch)/Session(会話) をそのまま流用、生成は Issue Monitor(自動) か Open Workspace(既存 branch)。開始入口は {Intake / Open Workspace / Shell} + Issue Monitor(背景モード) に統廃合し Start Work 撤去、Resume は Workspace アクションへ降格。SPEC-3245 は入口/ラベル/フレーミング層のみ担当し、Workspace/Work/Session データモデル(SPEC-2359)は不変。SPEC-3214 の intake ephemeral worktree 基盤(Phase 1-2)を Curate 入口として吸収。
+Future Action: 新しい『開始』導線や作業概念を足すときは、Curate(決める・登録・branchless) か Execute(作業する・branch) のどちらのレーンかを先に確定し、入口をレーンに 1:1 対応させる。名詞は Workspace/Work/Session/Intake の 4 概念に閉じ、重複名(Start Work 系)を作らない。命名変更は 2026-06-12 用語 ruling のプロセス(ユーザー承認)に従う。
