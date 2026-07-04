@@ -19,12 +19,91 @@ function formatTimestamp(value) {
   return value;
 }
 
-function emptyMessage(doc) {
-  const note = doc.createElement("p");
-  note.className = "settings-help";
+function scopeLabel(scope, worktreeHash, worktrees) {
+  if (!worktreeHash) return scope;
+  const meta = worktrees?.[worktreeHash] || {};
+  return `${scope} · ${meta.branch || meta.path || worktreeHash}`;
+}
+
+function healthViewReady(view) {
+  return Boolean(view && view.healthy === true && !view.repair_required);
+}
+
+function healthViewDegraded(view) {
+  return Boolean(view && !healthViewReady(view));
+}
+
+export function buildIndexHealthSummary(status) {
+  const summary = {
+    available: Boolean(status),
+    state: String(status?.state || "unknown"),
+    detail: String(status?.detail || "").trim(),
+    readyCount: 0,
+    degradedCount: 0,
+    totalCount: 0,
+    degradedScopes: [],
+  };
+  if (!status) return summary;
+
+  const scopes = status.scopes || {};
+  const worktrees = status.worktrees || {};
+  for (const scope of REPO_SHARED_SCOPES) {
+    const view = scopes[scope] || null;
+    if (!view) continue;
+    summary.totalCount += 1;
+    if (healthViewReady(view)) {
+      summary.readyCount += 1;
+    } else if (healthViewDegraded(view)) {
+      summary.degradedCount += 1;
+      summary.degradedScopes.push({
+        label: scopeLabel(scope, "", worktrees),
+        reason: view.reason || summary.state,
+      });
+    }
+  }
+
+  for (const scope of PER_WORKTREE_SCOPES) {
+    const perScope = scopes[scope] || {};
+    const hashes = Object.keys(perScope).sort();
+    for (const worktreeHash of hashes) {
+      const view = perScope[worktreeHash] || null;
+      if (!view) continue;
+      summary.totalCount += 1;
+      if (healthViewReady(view)) {
+        summary.readyCount += 1;
+      } else if (healthViewDegraded(view)) {
+        summary.degradedCount += 1;
+        summary.degradedScopes.push({
+          label: scopeLabel(scope, worktreeHash, worktrees),
+          reason: view.reason || summary.state,
+        });
+      }
+    }
+  }
+  return summary;
+}
+
+function emptyMessage(doc, projectRoot, send) {
+  const note = doc.createElement("div");
+  note.className = "settings-help settings-index-empty";
   note.dataset.role = "index-settings-empty";
-  note.textContent =
-    "Project index status is not available yet. Open a project and wait for the bootstrap to complete.";
+  const title = doc.createElement("strong");
+  title.textContent = "Status unavailable.";
+  note.appendChild(title);
+  note.appendChild(doc.createTextNode(projectRoot ? " " : " Select a project."));
+  if (projectRoot) {
+    const refresh = doc.createElement("button");
+    refresh.type = "button";
+    refresh.className = "settings-index-refresh";
+    refresh.dataset.action = "refresh-index-status";
+    refresh.textContent = "Refresh status";
+    refresh.addEventListener("click", () => {
+      if (typeof send === "function") {
+        send({ kind: "refresh_index_status", project_root: projectRoot });
+      }
+    });
+    note.appendChild(refresh);
+  }
   return note;
 }
 
@@ -103,6 +182,60 @@ function appendRebuildAllScopeButton(doc, headerCell, scope, send, projectRoot) 
   headerCell.appendChild(button);
 }
 
+function renderIndexHealthSummaryCards(doc, summary) {
+  const wrap = doc.createElement("div");
+  wrap.className = "settings-index-summary";
+  wrap.dataset.role = "index-health-summary";
+
+  const stateCard = doc.createElement("div");
+  stateCard.className = "settings-index-summary-card";
+  stateCard.dataset.healthKind = summary.degradedCount > 0 ? "degraded" : "ready";
+  const stateLabel = doc.createElement("span");
+  stateLabel.className = "settings-index-summary-label";
+  stateLabel.textContent = "State";
+  const stateValue = doc.createElement("strong");
+  stateValue.textContent = summary.state;
+  stateCard.appendChild(stateLabel);
+  stateCard.appendChild(stateValue);
+  wrap.appendChild(stateCard);
+
+  const readyCard = doc.createElement("div");
+  readyCard.className = "settings-index-summary-card";
+  readyCard.dataset.healthKind = "ready";
+  readyCard.appendChild(cardLabel(doc, "Ready"));
+  readyCard.appendChild(cardValue(doc, `${summary.readyCount} ready`));
+  wrap.appendChild(readyCard);
+
+  const degradedCard = doc.createElement("div");
+  degradedCard.className = "settings-index-summary-card";
+  degradedCard.dataset.healthKind = summary.degradedCount > 0 ? "degraded" : "ready";
+  degradedCard.appendChild(cardLabel(doc, "Degraded"));
+  degradedCard.appendChild(cardValue(doc, `${summary.degradedCount} degraded`));
+  const degradedList = summary.degradedScopes.map((scope) => scope.label).join(", ");
+  if (degradedList) {
+    const detail = doc.createElement("span");
+    detail.className = "settings-index-summary-detail";
+    detail.textContent = degradedList;
+    degradedCard.appendChild(detail);
+  }
+  wrap.appendChild(degradedCard);
+
+  return wrap;
+}
+
+function cardLabel(doc, text) {
+  const label = doc.createElement("span");
+  label.className = "settings-index-summary-label";
+  label.textContent = text;
+  return label;
+}
+
+function cardValue(doc, text) {
+  const value = doc.createElement("strong");
+  value.textContent = text;
+  return value;
+}
+
 export function renderIndexSettingsPanel(options) {
   const { panel, status, projectRoot, send, document: doc } = options;
   const ownerDoc = doc || (panel && panel.ownerDocument) || globalThis.document;
@@ -110,12 +243,12 @@ export function renderIndexSettingsPanel(options) {
   clear(panel);
 
   if (!projectRoot) {
-    panel.appendChild(emptyMessage(ownerDoc));
+    panel.appendChild(emptyMessage(ownerDoc, "", send));
     return;
   }
 
   if (!status) {
-    panel.appendChild(emptyMessage(ownerDoc));
+    panel.appendChild(emptyMessage(ownerDoc, projectRoot, send));
     return;
   }
 
@@ -136,6 +269,9 @@ export function renderIndexSettingsPanel(options) {
     panel.appendChild(statusMessage(ownerDoc, status));
     return;
   }
+
+  const summary = buildIndexHealthSummary(status);
+  panel.appendChild(renderIndexHealthSummaryCards(ownerDoc, summary));
 
   const heading = ownerDoc.createElement("h3");
   heading.className = "settings-section-heading";
