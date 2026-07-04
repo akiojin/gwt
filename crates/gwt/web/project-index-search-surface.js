@@ -6,7 +6,10 @@
 // project_index_search_results / project_index_search_error /
 // refresh_index_status) are unchanged; the moved code keeps its original
 // app.js indentation.
-import { renderIndexSettingsPanel } from "/index-settings-panel.js";
+import {
+  buildIndexHealthSummary,
+  renderIndexSettingsPanel,
+} from "/index-settings-panel.js";
 
 // deps:
 // - send(message): forward a frontend event over the WebSocket bridge.
@@ -99,6 +102,7 @@ export function createProjectIndexSearchSurface({
             suggestions: [],
             selectedResultIndex: -1,
             error: "",
+            statusRefreshProjectRoot: "",
           });
         }
         return indexSearchStateMap.get(windowId);
@@ -131,6 +135,25 @@ export function createProjectIndexSearchSurface({
       function activeIndexStatus() {
         const activeProjectRoot = activeProjectTab()?.project_root || "";
         return (activeProjectRoot && indexStatusByProjectRoot.get(activeProjectRoot)) || null;
+      }
+
+      function ensureIndexStatusRefresh(state, status) {
+        const activeProjectRoot = activeProjectTab()?.project_root || "";
+        if (!activeProjectRoot) {
+          state.statusRefreshProjectRoot = "";
+          return false;
+        }
+        if (status) {
+          if (state.statusRefreshProjectRoot === activeProjectRoot) {
+            state.statusRefreshProjectRoot = "";
+          }
+          return false;
+        }
+        if (state.statusRefreshProjectRoot !== activeProjectRoot) {
+          state.statusRefreshProjectRoot = activeProjectRoot;
+          requestFullIndexStatusRefresh();
+        }
+        return true;
       }
 
       function indexWorktreeEntries(status) {
@@ -276,6 +299,7 @@ export function createProjectIndexSearchSurface({
         );
         if (!root) return;
         const status = activeIndexStatus();
+        const statusRefreshPending = ensureIndexStatusRefresh(state, status);
         const searchPanel = root.querySelector("[data-index-panel='search']");
         const healthPanel = root.querySelector("[data-index-panel='health']");
         const healthTable = root.querySelector(".index-health-table");
@@ -291,7 +315,7 @@ export function createProjectIndexSearchSurface({
         if (healthPanel) {
           healthPanel.hidden = state.activeTab !== "health";
         }
-        renderProjectIndexSearchControls(root, state, status);
+        renderProjectIndexSearchControls(root, state, status, statusRefreshPending);
         renderProjectIndexSearchResults(root, state);
         if (healthTable) {
           renderIndexSettingsPanel({
@@ -303,7 +327,8 @@ export function createProjectIndexSearchSurface({
         }
       }
 
-      function renderProjectIndexSearchControls(root, state, status) {
+      function renderProjectIndexSearchControls(root, state, status, statusRefreshPending = false) {
+        renderIndexSearchHealthSummary(root, status, statusRefreshPending);
         const scopes = root.querySelector(".index-scope-list");
         if (scopes) {
           clearChildren(scopes);
@@ -379,6 +404,58 @@ export function createProjectIndexSearchSurface({
           }
           statusNode.dataset.kind = state.error ? "error" : "";
         }
+      }
+
+      function renderIndexSearchHealthSummary(root, status, statusRefreshPending = false) {
+        const summaryNode = root.querySelector("[data-role='index-search-health-summary']");
+        if (!summaryNode) return;
+        clearChildren(summaryNode);
+        const summary = buildIndexHealthSummary(status);
+        const { readyCount, degradedScopes } = summary;
+        summaryNode.classList.toggle("is-degraded", degradedScopes.length > 0);
+        summaryNode.classList.toggle("is-unavailable", !summary.available);
+        summaryNode.classList.toggle("is-refreshing", !summary.available && statusRefreshPending);
+        summaryNode.classList.toggle("is-ready", summary.available && degradedScopes.length === 0);
+
+        const inline = makeEl("div", { className: "index-search-health-inline" });
+        inline.appendChild(makeEl("strong", {
+          text: summary.available
+            ? `${readyCount} ready`
+            : statusRefreshPending
+              ? "Refreshing status"
+              : "Status unavailable",
+        }));
+        if (!summary.available) {
+          inline.appendChild(makeEl("span", {
+            text: statusRefreshPending
+              ? "Health will update automatically."
+              : "Open Health to refresh status.",
+          }));
+          inline.appendChild(makeEl("button", {
+            className: "index-health-cta",
+            attrs: { type: "button", "data-action": "open-index-health" },
+            text: "Health",
+          }));
+          summaryNode.appendChild(inline);
+          return;
+        }
+        if (degradedScopes.length === 0) {
+          inline.appendChild(makeEl("span", { text: `${summary.totalCount} scopes indexed` }));
+          summaryNode.appendChild(inline);
+          return;
+        }
+
+        inline.appendChild(makeEl("span", { text: `${summary.degradedCount} degraded` }));
+        inline.appendChild(makeEl("span", {
+          className: "index-search-health-scopes",
+          text: degradedScopes.map((scope) => scope.label).join(", "),
+        }));
+        inline.appendChild(makeEl("button", {
+          className: "index-health-cta",
+          attrs: { type: "button", "data-action": "open-index-health" },
+          text: "Health",
+        }));
+        summaryNode.appendChild(inline);
       }
 
       function renderProjectIndexSearchResults(root, state) {
@@ -611,6 +688,7 @@ export function createProjectIndexSearchSurface({
                     </label>
                   </div>
                 </div>
+                <div class="index-search-health-summary" data-role="index-search-health-summary"></div>
                 <div class="index-search-status"></div>
                 <div class="index-search-layout workspace-split">
                   <div class="index-result-list workspace-scroll"></div>
@@ -697,6 +775,15 @@ export function createProjectIndexSearchSurface({
               renderProjectIndexSearch(windowData.id);
             });
           }
+          body
+            .querySelector("[data-role='index-search-health-summary']")
+            .addEventListener("click", (event) => {
+              if (!event.target.closest("[data-action=\"open-index-health\"]")) return;
+              event.stopPropagation();
+              state.activeTab = "health";
+              requestFullIndexStatusRefresh();
+              renderProjectIndexSearch(windowData.id);
+            });
           body
             .querySelector("[data-action='refresh-index-status']")
             .addEventListener("click", (event) => {

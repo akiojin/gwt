@@ -264,3 +264,33 @@ Open Questions:
 
 Next:
 ユーザーに確認する: A) 既存 branch Launch Wizard の表示確認を採用して PR gate に進む、B) Start Work 認証失敗を別 Issue/SPEC scope として扱う、C) Antigravity 実起動まで current branch で追加確認する。
+
+## 2026-07-04 — Index window UI improvement follow-up
+
+Status: promoted
+Topics: gwt-discussion, index-window, ui-ux, project-index, spec-1939
+Related SPECs: #1939
+Related Works:
+Promoted To: SPEC #1939 follow-up amendment / plan/tasks update
+
+Summary:
+添付画像では dedicated Index window の Search/Health surface が機能はあるものの、空状態・scope状態・Health未取得状態の情報設計が薄く、巨大な余白と一文の説明だけで次の操作や現在のindex状態が読み取りにくい。現行実装は SPEC-1939 Phase 15 の `project-index-search-surface.js` / `index-settings-panel.js` / Index CSS に集中しており、backend protocolを変えずにUI密度、状態サマリ、空状態、Health tableの読みやすさを改善できる。方針は Search と Health の両方を整理し、A案 Unified Operator Workbench をベースにする。空状態/未取得状態は簡潔な状態 + 次アクション、SearchタブにはAbnormal-firstのHealth概要のみ常時表示し、Rebuild詳細はHealthタブに残す。No project/status unavailable時はIndex window内にOpen Project導線を追加せず、repair_required/error時もSearchを止めずにInline警告 + Health CTAに留める。Healthタブはsummary cardsをtable上部に追加し、tableは詳細/RebuildのSOTとして維持する。Health unavailableの空状態にはRefresh CTAを置く。検証は自動テスト + fresh browser-checkのユーザー視覚確認を必須にする。
+
+Decisions:
+- OwnerはSPEC-1939 Phase 15 follow-upとする。
+- 改善主眼はSearchとHealthの両方を整理する。
+- A案 Unified Operator Workbench をベースにする。
+- 空状態と未取得状態は簡潔な状態 + 次アクションに留め、チュートリアル文や長い使い方案内は避ける。
+- SearchタブにもHealth summaryを常時表示するが、Rebuild詳細操作はHealthタブに残す。
+- SearchタブのHealth summaryはAbnormal-firstにし、ready scopeを全部並べず、ready countとwarning/errorだけを表示する。
+- repair_required/error時もSearchは続行可能にし、Inline警告 + HealthタブCTAを出す。
+- Healthタブにはsummary cardsを追加し、既存tableは詳細とRebuild操作として維持する。
+- Health unavailable空状態にはRefresh CTAを置く。
+- No project/status unavailable時はIndex内にOpen Project導線を追加しない。
+- 実装時の検証はfrontend unit/source contract、Playwright index-status、fresh browser-check user visual confirmationを必須にする。
+
+Open Questions:
+
+
+Next:
+Action Bundle: Update Spec + Update Plan + Resume Build。SPEC #1939 のspec/plan/tasksにIndex window UI polish follow-upを追加し、gwt-build-specでTDD実装へ渡す。
