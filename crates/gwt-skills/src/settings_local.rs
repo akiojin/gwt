@@ -226,10 +226,16 @@ fn find_ancestor_git_entry(base_dir: &Path) -> Option<(PathBuf, PathBuf)> {
 /// `hooks`, containing only managed entries. This lets an ephemeral intake
 /// worktree reap even though its launch materialized the hook config, while a
 /// user edit (an extra key or a non-managed hook) keeps it. Fails closed
-/// (returns `true`) on any read/parse ambiguity so nothing is destroyed.
+/// (returns `true`) on any non-absent read/parse ambiguity so nothing is
+/// destroyed; only a genuinely absent file returns `false` (nothing to lose).
 pub fn managed_hook_config_has_user_content(path: &Path) -> bool {
-    let Ok(content) = fs::read_to_string(path) else {
-        return false; // absent/unreadable: nothing to preserve here.
+    let content = match fs::read_to_string(path) {
+        Ok(content) => content,
+        // Absent: nothing to preserve here.
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return false,
+        // Present but unreadable (invalid UTF-8 from a manual edit, a transient
+        // permission error, …): fail closed — keep it.
+        Err(_) => return true,
     };
     if content.trim().is_empty() {
         return false;
@@ -794,6 +800,13 @@ mod tests {
         // Absent → nothing to preserve.
         std::fs::remove_file(&settings).unwrap();
         assert!(!managed_hook_config_has_user_content(&settings));
+
+        // Present but unreadable (a directory at the path) → fail closed (keep).
+        std::fs::create_dir_all(&settings).unwrap();
+        assert!(
+            managed_hook_config_has_user_content(&settings),
+            "a present-but-unreadable config fails closed (kept), unlike an absent one"
+        );
     }
 
     fn commands_for_event<'a>(value: &'a Value, event: &str) -> Vec<&'a str> {

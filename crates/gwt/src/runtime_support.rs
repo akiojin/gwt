@@ -404,7 +404,14 @@ pub fn intake_hook_config_is_disposable(worktree: &Path, entry: &str) -> bool {
     if entry != ".claude/settings.local.json" && entry != ".codex/hooks.json" {
         return false;
     }
-    !gwt_skills::managed_hook_config_has_user_content(&worktree.join(entry))
+    let path = worktree.join(entry);
+    // A status line for a path that no longer exists is a tracked DELETION —
+    // a real change (codex #3238). Keep it: only a present, purely-generated
+    // config is disposable.
+    if !path.exists() {
+        return false;
+    }
+    !gwt_skills::managed_hook_config_has_user_content(&path)
 }
 
 pub fn first_available_worktree_path(
@@ -826,10 +833,45 @@ pub fn parse_github_remote_url(url: &str) -> Option<(String, String)> {
 mod tests {
     use std::path::PathBuf;
 
-    use super::{front_door_route, FrontDoorRoute};
+    use super::{front_door_route, intake_hook_config_is_disposable, FrontDoorRoute};
 
     fn argv(parts: &[&str]) -> Vec<String> {
         parts.iter().map(std::string::ToString::to_string).collect()
+    }
+
+    #[test]
+    fn intake_hook_config_disposable_only_for_present_generated_configs() {
+        let dir = tempfile::tempdir().unwrap();
+        let worktree = dir.path();
+
+        // Unrelated path → never handled here.
+        assert!(!intake_hook_config_is_disposable(worktree, "tasks/todo.md"));
+
+        // A reported hook path that does not exist = a tracked deletion → keep
+        // (codex #3238), never treat as disposable.
+        assert!(!intake_hook_config_is_disposable(
+            worktree,
+            ".claude/settings.local.json"
+        ));
+
+        // A present, purely gwt-generated hook config → disposable.
+        std::fs::create_dir_all(worktree.join(".claude")).unwrap();
+        gwt_skills::generate_settings_local(worktree).unwrap();
+        assert!(intake_hook_config_is_disposable(
+            worktree,
+            ".claude/settings.local.json"
+        ));
+
+        // A user edit to it → keep.
+        std::fs::write(
+            worktree.join(".claude/settings.local.json"),
+            "{\"permissions\":{\"allow\":[\"*\"]}}",
+        )
+        .unwrap();
+        assert!(!intake_hook_config_is_disposable(
+            worktree,
+            ".claude/settings.local.json"
+        ));
     }
 
     #[test]
