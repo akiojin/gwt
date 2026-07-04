@@ -253,6 +253,7 @@ impl AppRuntime {
                 linked_issue_kind,
                 ultracode_supported: self.launch_wizard_cache.claude_ultracode_supported(),
                 claude_workflows_enabled: self.launch_wizard_cache.claude_workflows_enabled(),
+                ephemeral_base_ref: None,
             },
             agent_options,
             quick_start_entries,
@@ -357,6 +358,7 @@ impl AppRuntime {
                 linked_issue_kind: Some(linked_issue_kind),
                 ultracode_supported: self.launch_wizard_cache.claude_ultracode_supported(),
                 claude_workflows_enabled: self.launch_wizard_cache.claude_workflows_enabled(),
+                ephemeral_base_ref: None,
             },
             base_branch_name,
             agent_options,
@@ -450,6 +452,54 @@ impl AppRuntime {
             Ok(()) => vec![self.launch_wizard_state_outbound()],
             Err(error) => start_work_open_error(client_id, error),
         }
+    }
+
+    /// SPEC-3214 Phase 3: open the Launch Wizard for an **intake session** — the
+    /// agent/profile picker is reused, but the resulting launch is ephemeral
+    /// (detached `.intake-*` worktree on the base ref, no branch). This is the
+    /// primary "start new work" entry that replaces Start Work.
+    pub(crate) fn open_intake_session(&mut self, client_id: &str) -> Vec<OutboundEvent> {
+        let Some(tab_id) = self.active_tab_id.clone() else {
+            return start_work_open_error(
+                client_id,
+                "Open a project before starting an intake session",
+            );
+        };
+        let Some(tab) = self.tab(&tab_id) else {
+            return start_work_open_error(client_id, "Project tab not found");
+        };
+        if tab.kind != gwt::ProjectKind::Git {
+            return start_work_open_error(client_id, "An intake session requires a Git project");
+        }
+        if tab.migration_pending {
+            return start_work_open_error(
+                client_id,
+                "Complete the project migration before starting an intake session",
+            );
+        }
+
+        let project_root = tab.project_root.clone();
+        match self.open_intake_session_for_project(&tab_id, &project_root) {
+            Ok(()) => vec![self.launch_wizard_state_outbound()],
+            Err(error) => start_work_open_error(client_id, error),
+        }
+    }
+
+    fn open_intake_session_for_project(
+        &mut self,
+        tab_id: &str,
+        project_root: &Path,
+    ) -> Result<(), String> {
+        // Reuse the Start Work wizard opener (agent/profile picker + quick-start
+        // branch fetch), then convert it to an ephemeral intake: clear the
+        // reserved branch and flag the context so `build_launch_config` yields a
+        // detached, branchless launch on the base ref.
+        self.open_start_work_for_project(tab_id, project_root)?;
+        let base_ref = gwt::start_work::START_WORK_BASE_BRANCH_CANDIDATES[0].to_string();
+        if let Some(session) = self.launch_wizard.as_mut() {
+            session.wizard.mark_as_ephemeral_intake(base_ref);
+        }
+        Ok(())
     }
 
     pub(crate) fn open_start_work_in_agent_kanban(
@@ -1297,6 +1347,7 @@ impl AppRuntime {
                 linked_issue_kind: None,
                 ultracode_supported: self.launch_wizard_cache.claude_ultracode_supported(),
                 claude_workflows_enabled: self.launch_wizard_cache.claude_workflows_enabled(),
+                ephemeral_base_ref: None,
             },
             base_branch,
             agent_options,

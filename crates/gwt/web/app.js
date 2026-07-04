@@ -6550,6 +6550,13 @@
               kind: "open_start_work",
             });
             return;
+          case "intake-session":
+            // SPEC-3214 Phase 3: ephemeral intake session (branchless).
+            openStartWorkPendingWizard();
+            frontendUnits.socketTransport.send({
+              kind: "open_intake_session",
+            });
+            return;
           case "stop-all-windows":
             requestStopAllWindows();
             return;

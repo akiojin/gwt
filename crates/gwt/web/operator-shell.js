@@ -1172,6 +1172,7 @@ function createActionRegistry(doc) {
     { id: "open-logs", label: "Focus Logs surface", hint: "⌘L", group: "Navigate", handler: dispatch("open-logs") },
     { id: "open-help", label: "Show hotkey reference", hint: "⌘?", group: "Navigate", handler: dispatch("open-help") },
     { id: "start-work", label: "Start Work", hint: "Project", group: "Workflow", handler: dispatch("start-work") },
+    { id: "intake-session", label: "Intake session", hint: "New work", group: "Workflow", handler: dispatch("intake-session") },
     { id: "spawn-shell", label: "Spawn shell window", group: "Spawn", handler: dispatch("spawn-shell") },
     { id: "spawn-agent", label: "Start Work", group: "Spawn", handler: dispatch("start-work") },
     { id: "open-branches", label: "Open Work", group: "Spawn", handler: dispatch("open-branches") },

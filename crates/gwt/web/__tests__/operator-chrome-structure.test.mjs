@@ -251,6 +251,21 @@ test("project bar and command palette expose Start Work outside the Branches sur
   );
 });
 
+// SPEC-3214 Phase 3: the command palette exposes an "Intake session" entry that
+// sends open_intake_session (the ephemeral, branchless new-work entry).
+test("command palette exposes Intake session wired to open_intake_session", () => {
+  assert.match(
+    operatorShellSource,
+    /id:\s*"intake-session"[\s\S]+label:\s*"Intake session"/,
+    "expected Command Palette registry to include Intake session",
+  );
+  assert.match(
+    appSource,
+    /case\s+"intake-session":[\s\S]+kind:\s*"open_intake_session"/,
+    "expected Intake session command to send open_intake_session",
+  );
+});
+
 test("frontend handles active work projection as status-strip telemetry", () => {
   assert.match(
     appSource,

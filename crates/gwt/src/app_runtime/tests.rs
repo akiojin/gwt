@@ -2323,6 +2323,7 @@ fn sample_launch_wizard_session(tab_id: &str, project_root: &Path) -> LaunchWiza
                 linked_issue_kind: None,
                 ultracode_supported: false,
                 claude_workflows_enabled: false,
+                ephemeral_base_ref: None,
             },
             Vec::new(),
         ),
@@ -2477,6 +2478,7 @@ fn sample_no_agent_launch_wizard_session(tab_id: &str, project_root: &Path) -> L
                 linked_issue_kind: None,
                 ultracode_supported: false,
                 claude_workflows_enabled: false,
+                ephemeral_base_ref: None,
             },
             Vec::new(),
             Vec::new(),
@@ -2517,6 +2519,7 @@ fn sample_start_work_confirm_session(tab_id: &str, project_root: &Path) -> Launc
             linked_issue_kind: None,
             ultracode_supported: false,
             claude_workflows_enabled: false,
+            ephemeral_base_ref: None,
         },
         base_branch,
         sample_agent_options(),
@@ -2588,6 +2591,7 @@ fn sample_ready_agent_launch_wizard_session(
                 linked_issue_kind: None,
                 ultracode_supported: false,
                 claude_workflows_enabled: false,
+                ephemeral_base_ref: None,
             },
             sample_agent_options(),
             Vec::new(),
@@ -17491,6 +17495,46 @@ fn handle_migration_error_clears_pending_and_broadcasts_recovery_label() {
             event: BackendEvent::MigrationError { tab_id, recovery, phase, .. },
         } if tab_id == "tab-1" && recovery == "rolled_back" && phase == "bareify"
     )));
+}
+
+// SPEC-3214 Phase 3: OpenIntakeSession opens the Launch Wizard flagged as an
+// ephemeral intake — the resulting launch will be branchless / detached.
+#[test]
+fn open_intake_session_opens_ephemeral_branchless_wizard() {
+    let temp = tempdir().expect("tempdir");
+    let repo = temp.path().join("repo");
+    fs::create_dir_all(&repo).expect("create repo");
+    init_repo(&repo);
+    run_git(&repo, &["config", "user.email", "test@example.com"]);
+    run_git(&repo, &["config", "user.name", "Test User"]);
+    run_git(&repo, &["commit", "--allow-empty", "-m", "init"]);
+
+    let tab = sample_project_tab("tab-1", "Repo", repo.clone(), ProjectKind::Git, &[]);
+    let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+
+    let events =
+        runtime.handle_frontend_event("client-1".to_string(), FrontendEvent::OpenIntakeSession);
+    assert!(
+        !events
+            .iter()
+            .any(|event| matches!(event.event, BackendEvent::LaunchWizardOpenError { .. })),
+        "intake session opens without error: {events:?}"
+    );
+
+    let wizard = &runtime
+        .launch_wizard
+        .as_ref()
+        .expect("intake wizard")
+        .wizard;
+    assert_eq!(
+        wizard.context.ephemeral_base_ref.as_deref(),
+        Some(gwt::start_work::START_WORK_BASE_BRANCH_CANDIDATES[0]),
+        "intake wizard is flagged ephemeral on the base ref"
+    );
+    assert!(
+        wizard.context.normalized_branch_name.is_empty(),
+        "intake wizard reserves no branch"
+    );
 }
 
 #[test]

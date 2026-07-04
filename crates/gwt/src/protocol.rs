@@ -562,6 +562,10 @@ pub enum FrontendEvent {
         issue_number: u64,
     },
     OpenStartWork,
+    /// SPEC-3214 Phase 3: open the Launch Wizard for an ephemeral intake
+    /// session (branchless, detached worktree). The primary "start new work"
+    /// entry replacing Start Work.
+    OpenIntakeSession,
     OpenStartWorkInAgentKanban {
         board_id: String,
         lane_id: AgentKanbanLane,
