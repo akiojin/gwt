@@ -1309,6 +1309,11 @@ impl AppRuntime {
             )]
         };
 
+        // codex #3240: reject a blank title before any project / GitHub-auth
+        // resolution so a mistap never triggers a network round-trip.
+        if title.trim().is_empty() {
+            return error_toast("Issue title is required".to_string());
+        }
         let Some(project_root) = self.active_project_root().map(Path::to_path_buf) else {
             return error_toast("No active project".to_string());
         };
@@ -1335,8 +1340,14 @@ impl AppRuntime {
         )];
 
         if let Some(issue_number) = outcome.issue_number {
-            // Refresh the inbox so the freshly registered issue is visible.
-            events.extend(self.local_issue_monitor_events(client_id, |_| {}));
+            // Refresh the inbox so the freshly registered issue is visible, but
+            // OBSERVE-only: registering must never itself claim/launch (codex
+            // #3240). A launch happens solely through the explicit handoff below.
+            events.extend(self.local_issue_monitor_events_with_policy(
+                Some(client_id),
+                IssueMonitorScanPolicy::Observe,
+                |_| {},
+            ));
             if launch {
                 // A Quick issue carries the `investigation` label, so it is a
                 // plain Issue (never a SPEC) for launch purposes.

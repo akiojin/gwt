@@ -7061,6 +7061,40 @@ fn quick_register_issue_without_active_project_replies_with_error_toast() {
     );
 }
 
+// SPEC-3214 (codex #3240): a blank Quick issue title is rejected BEFORE any
+// project / GitHub-auth resolution, so a mistap never hits the network.
+#[test]
+fn quick_register_issue_rejects_blank_title_before_touching_github() {
+    let temp = tempdir().expect("tempdir");
+    let repo = temp.path().join("repo");
+    fs::create_dir_all(&repo).expect("create repo");
+    init_repo(&repo);
+    let tab = sample_project_tab("tab-1", "Repo", repo.clone(), ProjectKind::Git, &[]);
+    let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+
+    let events = runtime.handle_frontend_event(
+        "client-1".to_string(),
+        FrontendEvent::QuickRegisterIssue {
+            title: "   ".to_string(),
+            launch: false,
+        },
+    );
+
+    let toast = events
+        .iter()
+        .find_map(|event| match &event.event {
+            BackendEvent::IssueMonitorToast { level, message, .. } => Some((level, message)),
+            _ => None,
+        })
+        .expect("blank title emits a toast");
+    assert_eq!(toast.0, "error");
+    assert!(
+        toast.1.contains("title is required"),
+        "the blank-title reason precedes any auth error: {}",
+        toast.1
+    );
+}
+
 // SPEC-3214 (codex #3235 review): a NORMAL branch worktree that a user happens
 // to name `.intake-*` must NOT be misclassified as an ephemeral intake session
 // — it keeps its worktree and its Paused-Work behavior. Classification requires
