@@ -561,10 +561,9 @@ pub enum FrontendEvent {
         id: String,
         issue_number: u64,
     },
-    OpenStartWork,
-    /// SPEC-3214 Phase 3: open the Launch Wizard for an ephemeral intake
-    /// session (branchless, detached worktree). The primary "start new work"
-    /// entry replacing Start Work.
+    /// SPEC-3245 Phase 3 / SPEC-3214: open the Launch Wizard for an ephemeral
+    /// intake session (branchless, detached worktree). The primary "start new
+    /// work" entry that replaces the removed Start Work.
     OpenIntakeSession,
     OpenStartWorkInAgentKanban {
         board_id: String,
@@ -3289,15 +3288,17 @@ mod tests {
         );
     }
 
+    // SPEC-3245 Phase 3: Start Work is removed; the global "start new work"
+    // command is the ephemeral Intake session.
     #[test]
-    fn frontend_event_accepts_global_open_start_work_command() {
+    fn frontend_event_accepts_global_open_intake_session_command() {
         let event: FrontendEvent =
-            serde_json::from_value(serde_json::json!({ "kind": "open_start_work" }))
-                .expect("deserialize open_start_work");
+            serde_json::from_value(serde_json::json!({ "kind": "open_intake_session" }))
+                .expect("deserialize open_intake_session");
 
         assert!(
-            matches!(event, FrontendEvent::OpenStartWork),
-            "Start Work must be a global command, not a Branches window event"
+            matches!(event, FrontendEvent::OpenIntakeSession),
+            "Intake session must be a global command, not a Branches window event"
         );
     }
 

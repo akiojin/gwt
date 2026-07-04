@@ -4539,122 +4539,7 @@ fn app_runtime_window_list_enumerates_all_project_tabs() {
 }
 
 #[test]
-fn app_runtime_open_start_work_defers_remote_develop_preparation_until_launch() {
-    let _env_guard = env_test_lock().lock().expect("env lock");
-    let temp = tempdir().expect("tempdir");
-    let _home = ScopedEnvVar::set("HOME", temp.path());
-    let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
-    let repo = temp.path().join("repo");
-    let origin = init_git_clone_with_origin(&repo);
-    run_git(&repo, &["checkout", "-qb", "main"]);
-    run_git(&repo, &["push", "origin", "main"]);
-    run_git(&origin, &["symbolic-ref", "HEAD", "refs/heads/main"]);
-    run_git(&repo, &["checkout", "develop"]);
-    run_git(&repo, &["remote", "set-head", "origin", "-a"]);
-    run_git(&origin, &["branch", "-D", "develop"]);
-    run_git(&repo, &["update-ref", "-d", "refs/remotes/origin/develop"]);
-    let develop_before_open = gwt_core::process::hidden_command("git")
-        .args([
-            "show-ref",
-            "--verify",
-            "--quiet",
-            "refs/remotes/origin/develop",
-        ])
-        .current_dir(&repo)
-        .status()
-        .expect("check origin/develop before open");
-    assert!(
-        !develop_before_open.success(),
-        "fixture must start without origin/develop"
-    );
-
-    let tab = sample_project_tab(
-        "tab-1",
-        "Repo",
-        repo.clone(),
-        ProjectKind::Git,
-        &[WindowPreset::Board],
-    );
-    let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
-
-    let events =
-        runtime.handle_frontend_event("client-1".to_string(), FrontendEvent::OpenStartWork);
-
-    assert!(matches!(
-        events.first().map(|event| &event.event),
-        Some(BackendEvent::LaunchWizardState { wizard: Some(_) })
-    ));
-    let view = runtime
-        .launch_wizard
-        .as_ref()
-        .expect("start work wizard")
-        .wizard
-        .view();
-    assert_eq!(view.mode, gwt::LaunchWizardMode::StartWork);
-    assert_eq!(view.title, "Start Work");
-    assert!(!view.show_branch_controls);
-    assert_eq!(view.selected_branch_name, "origin/develop");
-    assert!(view.branch_name.starts_with("work/"));
-
-    let develop = gwt_core::process::hidden_command("git")
-        .args([
-            "show-ref",
-            "--verify",
-            "--quiet",
-            "refs/remotes/origin/develop",
-        ])
-        .current_dir(&repo)
-        .status()
-        .expect("check origin/develop");
-    assert!(
-        !develop.success(),
-        "opening Start Work must not fetch or restore origin/develop before the user launches"
-    );
-
-    let refs = gwt_core::process::hidden_command("git")
-        .args([
-            "for-each-ref",
-            "refs/heads/work",
-            "refs/remotes/origin/work",
-        ])
-        .current_dir(&repo)
-        .output()
-        .expect("list work refs");
-    assert!(refs.status.success(), "git for-each-ref failed");
-    assert!(
-        refs.stdout.is_empty(),
-        "opening Start Work must not create branch refs"
-    );
-
-    let cancel_events = runtime.handle_frontend_event(
-        "client-1".to_string(),
-        FrontendEvent::LaunchWizardAction {
-            action: LaunchWizardAction::Cancel,
-            bounds: None,
-        },
-    );
-    assert!(matches!(
-        cancel_events.first().map(|event| &event.event),
-        Some(BackendEvent::LaunchWizardState { wizard: None })
-    ));
-    let refs_after_cancel = gwt_core::process::hidden_command("git")
-        .args([
-            "for-each-ref",
-            "refs/heads/work",
-            "refs/remotes/origin/work",
-        ])
-        .current_dir(&repo)
-        .output()
-        .expect("list work refs after cancel");
-    assert!(refs_after_cancel.status.success());
-    assert!(
-        refs_after_cancel.stdout.is_empty(),
-        "cancelling Start Work must not create branch refs"
-    );
-}
-
-#[test]
-fn app_runtime_open_start_work_failure_surfaces_launch_wizard_open_error() {
+fn app_runtime_open_intake_session_failure_surfaces_launch_wizard_open_error() {
     let temp = tempdir().expect("tempdir");
     let repo = temp.path().join("repo");
     fs::create_dir_all(&repo).expect("create repo");
@@ -4668,7 +4553,7 @@ fn app_runtime_open_start_work_failure_surfaces_launch_wizard_open_error() {
     let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
 
     let events =
-        runtime.handle_frontend_event("client-1".to_string(), FrontendEvent::OpenStartWork);
+        runtime.handle_frontend_event("client-1".to_string(), FrontendEvent::OpenIntakeSession);
 
     assert!(runtime.launch_wizard.is_none());
     assert!(matches!(
@@ -17538,7 +17423,7 @@ fn open_intake_session_opens_ephemeral_branchless_wizard() {
 }
 
 #[test]
-fn open_start_work_refuses_while_migration_pending() {
+fn open_intake_session_refuses_while_migration_pending() {
     // SPEC-1934 US-7 / FR-034: Workspace Start Work must not run on a tab
     // whose Normal → Nested Bare+Worktree migration is still pending.
     // Without this gate, the launch path tries to fetch
@@ -17551,16 +17436,15 @@ fn open_start_work_refuses_while_migration_pending() {
     let tab = migration_pending_tab("tab-1", project);
     let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
 
-    let events = runtime.open_start_work("client-1");
+    let events = runtime.open_intake_session("client-1");
 
     assert!(
         events.iter().any(|event| matches!(
             event,
             OutboundEvent {
                 target: DispatchTarget::Client(_),
-                event: BackendEvent::LaunchWizardOpenError { title, message },
-            } if title == "Start Work"
-                && message == "Complete the project migration before starting work"
+                event: BackendEvent::LaunchWizardOpenError { message, .. },
+            } if message == "Complete the project migration before starting an intake session"
         )),
         "Start Work on a migration_pending tab must surface a clear error: {events:?}"
     );

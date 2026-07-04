@@ -425,35 +425,6 @@ impl AppRuntime {
         }
     }
 
-    pub(crate) fn open_start_work(&mut self, client_id: &str) -> Vec<OutboundEvent> {
-        let Some(tab_id) = self.active_tab_id.clone() else {
-            return start_work_open_error(client_id, "Open a project before starting work");
-        };
-        let Some(tab) = self.tab(&tab_id) else {
-            return start_work_open_error(client_id, "Project tab not found");
-        };
-        if tab.kind != gwt::ProjectKind::Git {
-            return start_work_open_error(client_id, "Start Work requires a Git project");
-        }
-        // SPEC-1934 US-7 / FR-034: refuse Start Work on a project whose
-        // Nested Bare+Worktree migration has not completed. Without this
-        // gate, `git fetch origin --prune` on a single-branch refspec leaves
-        // the new `work/*` branch unsynchronized and the launch path dies
-        // with `fatal: invalid reference: origin/work/<branch>`.
-        if tab.migration_pending {
-            return start_work_open_error(
-                client_id,
-                "Complete the project migration before starting work",
-            );
-        }
-
-        let project_root = tab.project_root.clone();
-        match self.open_start_work_for_project(&tab_id, &project_root) {
-            Ok(()) => vec![self.launch_wizard_state_outbound()],
-            Err(error) => start_work_open_error(client_id, error),
-        }
-    }
-
     /// SPEC-3214 Phase 3: open the Launch Wizard for an **intake session** — the
     /// agent/profile picker is reused, but the resulting launch is ephemeral
     /// (detached `.intake-*` worktree on the base ref, no branch). This is the
