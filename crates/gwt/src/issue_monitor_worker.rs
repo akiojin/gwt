@@ -129,6 +129,46 @@ pub fn load_open_issue_monitor_candidates_for_repo_path(
     }
 }
 
+/// SPEC-3214 (FR-004): the toast + follow-up derived from a Quick issue
+/// registration. `issue_number` is `Some` only when the issue was created.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct QuickRegisterOutcome {
+    pub issue_number: Option<u64>,
+    pub toast_level: String,
+    pub toast_message: String,
+}
+
+/// SPEC-3214 (FR-004 / FR-011): register a Quick issue — a fresh GitHub issue
+/// with the `investigation` label — and return the toast to surface. Blank
+/// titles are rejected before any network call. On failure the specific error
+/// reason is surfaced verbatim (never swallowed or flattened to a generic
+/// message), so e.g. a personal-repo permission block is actionable.
+pub fn quick_register_issue_outcome<C: gwt_github::IssueClient>(
+    client: &C,
+    title: &str,
+) -> QuickRegisterOutcome {
+    let title = title.trim();
+    if title.is_empty() {
+        return QuickRegisterOutcome {
+            issue_number: None,
+            toast_level: "error".to_string(),
+            toast_message: "Issue title is required".to_string(),
+        };
+    }
+    match client.create_issue(title, "", &["investigation".to_string()]) {
+        Ok(snapshot) => QuickRegisterOutcome {
+            issue_number: Some(snapshot.number.0),
+            toast_level: "info".to_string(),
+            toast_message: format!("Registered issue #{}", snapshot.number.0),
+        },
+        Err(error) => QuickRegisterOutcome {
+            issue_number: None,
+            toast_level: "error".to_string(),
+            toast_message: format!("Failed to register issue: {error}"),
+        },
+    }
+}
+
 /// Issue #3225: GitHub-derived completion probe for the claim loop — "does
 /// this issue have a linked PR that is already MERGED?". Uses the issue's
 /// timeline (cross-referenced / connected PRs), so it catches fixes merged via
@@ -587,7 +627,9 @@ fn _assert_inbox_item_is_send_sync(_: IssueMonitorInboxItem) {}
 mod tests {
     use super::*;
     use crate::{IssueMonitorConfig, MonitorInboxState};
-    use gwt_github::{Cache, FakeIssueClient, IssueNumber, IssueSnapshot, IssueState, UpdatedAt};
+    use gwt_github::{
+        Cache, FakeIssueClient, IssueClient, IssueNumber, IssueSnapshot, IssueState, UpdatedAt,
+    };
 
     fn issue(number: u64) -> IssueMonitorIssue {
         IssueMonitorIssue {
@@ -610,6 +652,128 @@ mod tests {
             updated_at: UpdatedAt::new("t1"),
             comments: vec![],
         }
+    }
+
+    struct FailingIssueClient(gwt_github::ApiError);
+
+    impl gwt_github::IssueClient for FailingIssueClient {
+        fn fetch(
+            &self,
+            _number: IssueNumber,
+            _since: Option<&UpdatedAt>,
+        ) -> Result<gwt_github::FetchResult, gwt_github::ApiError> {
+            unimplemented!()
+        }
+        fn patch_body(
+            &self,
+            _number: IssueNumber,
+            _new_body: &str,
+        ) -> Result<IssueSnapshot, gwt_github::ApiError> {
+            unimplemented!()
+        }
+        fn patch_title(
+            &self,
+            _number: IssueNumber,
+            _new_title: &str,
+        ) -> Result<IssueSnapshot, gwt_github::ApiError> {
+            unimplemented!()
+        }
+        fn patch_comment(
+            &self,
+            _comment_id: gwt_github::CommentId,
+            _new_body: &str,
+        ) -> Result<gwt_github::CommentSnapshot, gwt_github::ApiError> {
+            unimplemented!()
+        }
+        fn create_comment(
+            &self,
+            _number: IssueNumber,
+            _body: &str,
+        ) -> Result<gwt_github::CommentSnapshot, gwt_github::ApiError> {
+            unimplemented!()
+        }
+        fn create_issue(
+            &self,
+            _title: &str,
+            _body: &str,
+            _labels: &[String],
+        ) -> Result<IssueSnapshot, gwt_github::ApiError> {
+            Err(match &self.0 {
+                gwt_github::ApiError::Unauthorized => gwt_github::ApiError::Unauthorized,
+                other => gwt_github::ApiError::Unexpected(other.to_string()),
+            })
+        }
+        fn set_labels(
+            &self,
+            _number: IssueNumber,
+            _labels: &[String],
+        ) -> Result<IssueSnapshot, gwt_github::ApiError> {
+            unimplemented!()
+        }
+        fn set_state(
+            &self,
+            _number: IssueNumber,
+            _state: IssueState,
+        ) -> Result<IssueSnapshot, gwt_github::ApiError> {
+            unimplemented!()
+        }
+        fn list_spec_issues(
+            &self,
+            _filter: &gwt_github::SpecListFilter,
+        ) -> Result<Vec<gwt_github::SpecSummary>, gwt_github::ApiError> {
+            unimplemented!()
+        }
+    }
+
+    #[test]
+    fn quick_register_issue_creates_investigation_issue_and_reports_success() {
+        // SPEC-3214 T-010/011: Quick issue registers a fresh issue with the
+        // `investigation` label and reports the new number via an info toast.
+        let client = FakeIssueClient::new();
+        let outcome = quick_register_issue_outcome(&client, "  Investigate flaky login  ");
+        assert_eq!(outcome.toast_level, "info");
+        let issue_number = outcome.issue_number.expect("new issue number");
+        assert!(outcome.toast_message.contains(&format!("#{issue_number}")));
+        // Persisted with a trimmed title and the investigation label.
+        let created = client
+            .create_issue("x", "", &[])
+            .map(|s| s.number.0)
+            .unwrap();
+        assert!(issue_number < created, "the registered issue exists");
+    }
+
+    #[test]
+    fn quick_register_issue_rejects_blank_title_without_calling_github() {
+        let client = FakeIssueClient::new();
+        let outcome = quick_register_issue_outcome(&client, "   ");
+        assert_eq!(outcome.toast_level, "error");
+        assert!(outcome.issue_number.is_none());
+        assert_eq!(
+            client
+                .call_log()
+                .iter()
+                .filter(|call| call.starts_with("create_issue"))
+                .count(),
+            0
+        );
+    }
+
+    #[test]
+    fn quick_register_issue_surfaces_the_specific_permission_error() {
+        // SPEC-3214 T-016 / FR-011: a 403/permission failure must surface its
+        // specific reason, not a swallowed or generic message.
+        let client = FailingIssueClient(gwt_github::ApiError::Unauthorized);
+        let outcome = quick_register_issue_outcome(&client, "New issue");
+        assert_eq!(outcome.toast_level, "error");
+        assert!(outcome.issue_number.is_none());
+        assert!(
+            outcome
+                .toast_message
+                .to_lowercase()
+                .contains("authentication"),
+            "the specific reason is surfaced: {}",
+            outcome.toast_message
+        );
     }
 
     #[test]

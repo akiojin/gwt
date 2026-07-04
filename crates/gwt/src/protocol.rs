@@ -631,6 +631,14 @@ pub enum FrontendEvent {
     ReorderIssueMonitorIssues {
         issue_numbers: Vec<u64>,
     },
+    /// SPEC-3214 (FR-004/005): register a fresh `investigation` GitHub issue
+    /// from the Issue Monitor toolbar. `launch` also hands it to the existing
+    /// human-gated launch path so an agent starts on it immediately.
+    QuickRegisterIssue {
+        title: String,
+        #[serde(default)]
+        launch: bool,
+    },
     ListIssueMonitor,
     IssueMonitorLaunchNow {
         issue_number: u64,

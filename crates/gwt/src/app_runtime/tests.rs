@@ -7029,6 +7029,38 @@ fn ephemeral_intake_session_stop_keeps_dirty_worktree() {
     );
 }
 
+// SPEC-3214 (FR-004): QuickRegisterIssue routes to the Quick issue handler,
+// which surfaces its outcome as a toast. Without an active project it fails
+// fast with an error toast instead of panicking or silently no-op'ing.
+#[test]
+fn quick_register_issue_without_active_project_replies_with_error_toast() {
+    let temp = tempdir().expect("tempdir");
+    let mut runtime = sample_runtime(temp.path(), vec![], None);
+
+    // Also locks the wire contract (kind + snake_case tag, default launch).
+    let event: FrontendEvent = serde_json::from_value(serde_json::json!({
+        "kind": "quick_register_issue",
+        "title": "Investigate flaky login",
+    }))
+    .expect("deserialize quick_register_issue event");
+
+    let events = runtime.handle_frontend_event("client-1".to_string(), event);
+
+    let toast = events
+        .iter()
+        .find_map(|event| match &event.event {
+            BackendEvent::IssueMonitorToast { level, message, .. } => Some((level, message)),
+            _ => None,
+        })
+        .expect("quick register emits a toast");
+    assert_eq!(toast.0, "error");
+    assert!(
+        toast.1.contains("No active project"),
+        "toast surfaces the reason: {}",
+        toast.1
+    );
+}
+
 // SPEC-3214 (codex #3235 review): a NORMAL branch worktree that a user happens
 // to name `.intake-*` must NOT be misclassified as an ephemeral intake session
 // — it keeps its worktree and its Paused-Work behavior. Classification requires

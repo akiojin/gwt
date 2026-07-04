@@ -1287,6 +1287,68 @@ impl AppRuntime {
         self.local_issue_monitor_events_for(Some(client_id), apply)
     }
 
+    /// SPEC-3214 (FR-004/005/011): register a Quick issue (a fresh
+    /// `investigation` GitHub issue) and surface the outcome as a toast. On
+    /// success the Issue Monitor inbox is refreshed so the new issue appears;
+    /// with `launch` it is handed to the existing human-gated launch path
+    /// (`auto_launch_issue_monitor_request_events`) — no new execution path.
+    pub(crate) fn quick_register_issue_events(
+        &mut self,
+        client_id: &str,
+        title: &str,
+        launch: bool,
+    ) -> Vec<OutboundEvent> {
+        let error_toast = |message: String| {
+            vec![OutboundEvent::reply(
+                client_id.to_string(),
+                BackendEvent::IssueMonitorToast {
+                    level: "error".to_string(),
+                    message,
+                    issue_number: None,
+                },
+            )]
+        };
+
+        let Some(project_root) = self.active_project_root().map(Path::to_path_buf) else {
+            return error_toast("No active project".to_string());
+        };
+        let (owner, repo) =
+            match gwt::issue_monitor_worker::github_remote_owner_and_repo(&project_root) {
+                Ok(pair) => pair,
+                Err(error) => return error_toast(error.to_string()),
+            };
+        let client = match gwt_github::client::http::HttpIssueClient::from_gh_auth(&owner, &repo) {
+            Ok(client) => client,
+            Err(error) => {
+                return error_toast(format!("GitHub authentication unavailable: {error}"))
+            }
+        };
+
+        let outcome = gwt::issue_monitor_worker::quick_register_issue_outcome(&client, title);
+        let mut events = vec![OutboundEvent::reply(
+            client_id.to_string(),
+            BackendEvent::IssueMonitorToast {
+                level: outcome.toast_level,
+                message: outcome.toast_message,
+                issue_number: outcome.issue_number,
+            },
+        )];
+
+        if let Some(issue_number) = outcome.issue_number {
+            // Refresh the inbox so the freshly registered issue is visible.
+            events.extend(self.local_issue_monitor_events(client_id, |_| {}));
+            if launch {
+                // A Quick issue carries the `investigation` label, so it is a
+                // plain Issue (never a SPEC) for launch purposes.
+                events.extend(self.auto_launch_issue_monitor_request_events(
+                    issue_number,
+                    gwt::LinkedIssueKind::Issue,
+                ));
+            }
+        }
+        events
+    }
+
     fn local_issue_monitor_events_for(
         &mut self,
         client_id: Option<&str>,
@@ -2122,6 +2184,9 @@ impl AppRuntime {
                         })
                     }
                 }
+            }
+            FrontendEvent::QuickRegisterIssue { title, launch } => {
+                self.quick_register_issue_events(&client_id, &title, launch)
             }
             FrontendEvent::ListIssueMonitor => self.local_issue_monitor_events(&client_id, |_| {}),
             FrontendEvent::IssueMonitorLaunchNow {
