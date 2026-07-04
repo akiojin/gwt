@@ -229,12 +229,16 @@ the named-pipe path lands.
    project.
 2. Use `Board`, `Issue`, `SPEC`, and Knowledge search surfaces to understand
    the current work, related owners, and prior decisions.
-3. Choose `Start Work` from the Project Bar or Command Palette when the task is
-   still work-shaped rather than branch-shaped.
-4. Launch an `Agent` from Start Work, or launch directly from an Issue/SPEC
-   detail when the owner is already known.
+3. In the **Curate** lane, choose `Intake` from the Command Rail or Command
+   Palette to shape new work: a branchless, throwaway session that discusses,
+   plans, and registers a GitHub Issue or SPEC. Intake never creates a branch.
+4. In the **Execute** lane, run the registered work: `Open Workspace` launches
+   an `Agent` on an existing branch, the background `Issue Monitor` picks up
+   registered Issues automatically, or launch directly from an Issue/SPEC detail
+   when the owner is already known.
 5. Let gwt materialize the backing `work/YYYYMMDD-HHMM[-n]` branch/worktree
-   only when launch is confirmed.
+   only when an Execute launch is confirmed (Intake sessions stay branchless and
+   ephemeral).
 6. Use the shared Board for status, claims, next steps, blockers, handoffs,
    and decisions while agents run. To mirror those Board posts into Slack or
    Teams, configure a remote Board provider first; see
@@ -244,8 +248,8 @@ the named-pipe path lands.
 
 Common windows include:
 
-- `Agent` — live coding-agent process windows created through Start Work or
-  Launch Agent
+- `Agent` — live coding-agent process windows created through Intake, Open
+  Workspace, the Issue Monitor, or Launch Agent
 - `Board` — shared user/agent timeline for reasoning and coordination
 - `Issue` and `SPEC` — cache-backed Knowledge Bridge windows with semantic
   search, detail panes, and Launch Agent handoff
@@ -615,9 +619,9 @@ falls back to system colors so accessibility is preserved.
 | `⌘?` | Toggle the Hotkey Overlay (cheat sheet) |
 | `Esc` | Close any open palette / overlay / drawer / dropdown |
 
-The Command Rail on the left edge is always visible: Start Work and Workspace
-at the top, window operations (Tile / Stack / Align / window list / Add) in the
-middle, and the Command Palette at the bottom. Board and Logs are not rail
+The Command Rail on the left edge is always visible: Intake (Curate lane) and
+Open Workspace (Execute lane) at the top, window operations (Tile / Stack /
+Align / window list / Add) in the middle, and the Command Palette at the bottom. Board and Logs are not rail
 items; reach them via the Add Window preset menu, the command palette, or the
 `⌘B` / `⌘L` hotkeys. Hovering a rail item reveals its label and real shortcut. Closing a
 window (titlebar × or tab ×) always asks for confirmation so a stray click
