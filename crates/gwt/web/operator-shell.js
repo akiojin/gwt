@@ -1171,7 +1171,7 @@ function createActionRegistry(doc) {
     { id: "open-git", label: "Focus Work", hint: "⌘G", group: "Navigate", handler: dispatch("open-git") },
     { id: "open-logs", label: "Focus Logs surface", hint: "⌘L", group: "Navigate", handler: dispatch("open-logs") },
     { id: "open-help", label: "Show hotkey reference", hint: "⌘?", group: "Navigate", handler: dispatch("open-help") },
-    { id: "intake-session", label: "Intake session", hint: "Curate · new work", group: "Workflow", handler: dispatch("intake-session") },
+    { id: "intake-session", label: "Intake", hint: "Curate · new work", group: "Workflow", handler: dispatch("intake-session") },
     { id: "spawn-shell", label: "Spawn shell window", group: "Spawn", handler: dispatch("spawn-shell") },
     { id: "open-branches", label: "Open Workspace", hint: "Execute · existing branch", group: "Spawn", handler: dispatch("open-branches") },
     { id: "open-files", label: "Open File Tree", group: "Spawn", handler: dispatch("open-files") },

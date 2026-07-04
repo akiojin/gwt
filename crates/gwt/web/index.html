@@ -113,13 +113,14 @@
              symbols; hover flyouts carry the label + real shortcut. -->
         <aside class="op-rail" id="op-rail" aria-label="Command rail">
           <div class="op-rail__group" role="group" aria-label="Navigate">
-            <!-- SPEC-3245 Phase 3: the primary "start new work" rail action is the
-                 Curate lane (Intake) — a branchless, throwaway session that
-                 registers Issues. Start Work is removed. -->
-            <button class="op-rail__item" type="button" data-cmd="intake-session" aria-label="Intake session" title="Intake session">
+            <!-- SPEC-3245 Phase 3/4: the primary "start new work" rail action is the
+                 Curate lane, labeled "Intake" (the "session" suffix is dropped to
+                 avoid colliding with the Session domain term) — a branchless,
+                 throwaway session that registers Issues. Start Work is removed. -->
+            <button class="op-rail__item" type="button" data-cmd="intake-session" aria-label="Intake" title="Intake">
               <span class="op-rail__icon" aria-hidden="true">▶</span>
               <span class="op-rail__flyout" aria-hidden="true">
-                <span class="op-rail__flyout-label">Intake session</span>
+                <span class="op-rail__flyout-label">Intake</span>
               </span>
             </button>
             <!-- FR-392 (SPEC-2359 W-15): surface entry points say "Workspace"
@@ -252,11 +253,11 @@
             <p class="canvas-empty-state__kicker"><span aria-hidden="true">▸</span> OPERATOR READY</p>
             <h2 class="canvas-empty-state__title">No windows on canvas</h2>
             <p class="canvas-empty-state__copy">
-              Start an intake session to register work, open an existing Workspace, or add a surface window.
+              Start Intake to curate and register work, open an existing Workspace, or add a surface window.
             </p>
             <div class="canvas-empty-state__actions">
               <button class="wizard-button primary" id="canvas-empty-intake" type="button">
-                Intake session
+                Intake
               </button>
               <button class="wizard-button" id="canvas-empty-open-workspace" type="button">
                 Open Workspace

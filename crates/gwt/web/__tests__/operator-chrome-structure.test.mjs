@@ -263,13 +263,15 @@ test("command rail and palette drop Start Work in favor of the 2-lane entries", 
   assert.match(operatorShellSource, /id:\s*"open-branches"/, "Open Workspace entry present");
 });
 
-// SPEC-3214 Phase 3: the command palette exposes an "Intake session" entry that
-// sends open_intake_session (the ephemeral, branchless new-work entry).
-test("command palette exposes Intake session wired to open_intake_session", () => {
+// SPEC-3214 Phase 3 / SPEC-3245 Phase 4: the command palette exposes an
+// "Intake" entry (the "session" suffix is dropped to avoid colliding with the
+// Session domain term) that sends open_intake_session (the ephemeral,
+// branchless new-work entry).
+test("command palette exposes Intake wired to open_intake_session", () => {
   assert.match(
     operatorShellSource,
-    /id:\s*"intake-session"[\s\S]+label:\s*"Intake session"/,
-    "expected Command Palette registry to include Intake session",
+    /id:\s*"intake-session"[\s\S]+label:\s*"Intake"/,
+    "expected Command Palette registry to include the Intake entry",
   );
   assert.match(
     appSource,
