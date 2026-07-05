@@ -1499,6 +1499,15 @@ impl AppRuntime {
             // materializes curation-framed guidance without Work-state
             // instructions.
             let session_kind = gwt_skills::SessionKind::from_is_ephemeral(config.is_ephemeral);
+            // SPEC-3248 (hooks v2 P0): materialize the lane file — the
+            // deterministic source of truth hooks read via the lane registry —
+            // from the authoritative launch-time lane (is_ephemeral). Best
+            // effort: a write failure must not block the launch, and hooks fall
+            // back to the execution default when the file is absent.
+            let _ = gwt_skills::write_lane_file(
+                &worktree_path,
+                gwt_skills::LaneRegistry::for_session_kind(session_kind),
+            );
             refresh_managed_gwt_assets_for_agent_with_codex_hook_discovery_mode(
                 &worktree_path,
                 &config.agent_id,

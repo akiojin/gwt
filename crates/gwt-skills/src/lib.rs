@@ -7,6 +7,7 @@ pub mod coordination_guidance;
 pub mod distribute;
 pub mod git_exclude;
 pub mod hooks;
+pub mod lane;
 pub mod provider_hooks;
 pub mod registry;
 pub mod session_kind;
@@ -35,6 +36,11 @@ pub use git_exclude::{update_git_exclude, update_git_exclude_for_targets};
 pub use hooks::{
     backup_hooks, detect_corruption, is_gwt_managed, merge_hooks, merge_hooks_safe,
     restore_from_backup, Hook, HooksConfig, HooksError,
+};
+pub use lane::{
+    lane_file_path, read_lane_profile, write_lane_file, GuidanceVariant, LanePolicyFlags,
+    LaneProfile, LaneRegistry, EXECUTION_PROFILE, INTAKE_PROFILE, LANE_FILE_RELATIVE,
+    LANE_FILE_VERSION,
 };
 pub use provider_hooks::{
     generate_hermes_hooks, generate_openclaw_hooks, generate_opencode_hooks, hermes_is_configured,
