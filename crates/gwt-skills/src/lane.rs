@@ -88,7 +88,8 @@ pub const INTAKE_PROFILE: LaneProfile = LaneProfile {
     policy_flags: LanePolicyFlags {
         emit_work_state_reminders: false,
         self_improvement_stop: false,
-        block_production_code_edits: false,
+        // SPEC-3248 P4: intake registers Issues/SPECs, it does not edit code.
+        block_production_code_edits: true,
         // SPEC-3248 P4: nudge to register curated work before Stop.
         completion_gate: true,
         // SPEC-3248 P4: intake opens with a curation SessionStart 导线.
@@ -274,7 +275,7 @@ mod tests {
                 policy_flags: LanePolicyFlags {
                     emit_work_state_reminders: false,
                     self_improvement_stop: false,
-                    block_production_code_edits: false,
+                    block_production_code_edits: true,
                     completion_gate: true,
                     sessionstart_onboarding: true,
                     reduced_skill_set: false,
