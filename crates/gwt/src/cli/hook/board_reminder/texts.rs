@@ -327,6 +327,28 @@ pub(super) fn lane_onboarding(
     }
 }
 
+/// Intake completion nudge shown on Stop (SPEC-3248 P4, FR-011). A soft,
+/// non-blocking reminder — an intake session may legitimately end in no-action,
+/// so this promotes registration without forcing it.
+pub(super) fn intake_completion_reminder(language: &str) -> &'static str {
+    match reminder_language(language) {
+        ReminderLanguage::Ja => INTAKE_COMPLETION_REMINDER_JA,
+        ReminderLanguage::En => INTAKE_COMPLETION_REMINDER,
+    }
+}
+
+pub(super) const INTAKE_COMPLETION_REMINDER: &str = "# Intake completion\n\n\
+Before stopping this intake session: register the work you curated \
+(`gwt-register-issue` for a plain Issue, or `gwt-discussion` → `gwt-register-spec` \
+for a SPEC), or state explicitly that no action is needed. Intake produces \
+Issues/SPECs — do not stop with curated-but-unregistered work.";
+
+pub(super) const INTAKE_COMPLETION_REMINDER_JA: &str = "# Intake 完了\n\n\
+この intake セッションを停止する前に、curate した作業を登録してください\
+（plain Issue は `gwt-register-issue`、SPEC は `gwt-discussion` → `gwt-register-spec`）。\
+不要なら「対応不要」と明示してください。intake は Issue/SPEC を生成する役割です — \
+curate したのに未登録のまま停止しないでください。";
+
 pub(super) const INTAKE_ONBOARDING: &str = "# Intake (Curate) session\n\n\
 This is a branchless, ephemeral **intake** session: you curate and register \
 work, you do not implement it. Produce GitHub Issues / SPECs, not code.\n\n\

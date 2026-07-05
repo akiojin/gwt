@@ -622,7 +622,28 @@ pub fn compute_plan(
         plan.output = prepend_lane_onboarding(plan.output, lane, &language);
     }
 
+    // SPEC-3248 (hooks v2 P4): a lane with the completion gate gets a soft,
+    // non-blocking Stop nudge to register the work it curated. It never blocks
+    // Stop — an intake session may legitimately end in no-action.
+    if intent_event == IntentBoundaryEvent::Stop && lane.policy_flags.completion_gate {
+        plan.output = append_intake_completion_reminder(plan.output, &language);
+    }
+
     Ok(Some(plan))
+}
+
+/// Append the intake completion nudge to a Stop output (SPEC-3248 P4). Stop
+/// emits `SystemMessage` (Claude Code rejects `hookSpecificOutput` on Stop), so
+/// this stays a user-facing reminder and never a `StopBlock`.
+fn append_intake_completion_reminder(output: HookOutput, language: &str) -> HookOutput {
+    let reminder = texts::intake_completion_reminder(language);
+    match output {
+        HookOutput::SystemMessage(text) => {
+            HookOutput::system_message(format!("{text}\n\n{reminder}"))
+        }
+        HookOutput::Silent => HookOutput::system_message(reminder.to_string()),
+        other => other,
+    }
 }
 
 /// Prepend a lane-specific SessionStart onboarding block (SPEC-3248 FR-011).
@@ -1431,6 +1452,49 @@ mod tests {
         assert!(
             !exec_text.contains("gwt-register-issue"),
             "execution SessionStart must not carry the intake onboarding: {exec_text}"
+        );
+    }
+
+    /// SPEC-3248 P4 (FR-011): an intake lane gets a soft, non-blocking Stop
+    /// nudge to register curated work; execution does not. Must be a
+    /// SystemMessage (not a StopBlock) so it never forces continuation.
+    #[test]
+    fn intake_stop_appends_completion_reminder_without_blocking() {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let home = tempfile::tempdir().expect("home");
+        let _home = ScopedEnvVar::set("HOME", home.path());
+        let _userprofile = ScopedEnvVar::set("USERPROFILE", home.path());
+        let repo = home.path().join("repo");
+        std::fs::create_dir_all(&repo).expect("repo");
+        let session = make_session(&repo, "work/intake", "Codex");
+
+        let _intake = ScopedEnvVar::set(gwt_skills::GWT_SESSION_KIND_ENV, "intake");
+        let intake = compute_plan("Stop", &session, Utc::now())
+            .expect("compute plan")
+            .expect("plan");
+        // Non-blocking: a SystemMessage, never a StopBlock.
+        let HookOutput::SystemMessage(text) = &intake.output else {
+            panic!("intake Stop completion nudge must be a SystemMessage: {intake:?}");
+        };
+        assert!(
+            text.contains("gwt-register-issue") || text.contains("gwt-register-spec"),
+            "intake Stop must nudge registration: {text}"
+        );
+
+        let _exec = ScopedEnvVar::set(gwt_skills::GWT_SESSION_KIND_ENV, "execution");
+        let exec = compute_plan("Stop", &session, Utc::now())
+            .expect("compute plan")
+            .expect("plan");
+        let exec_text = match &exec.output {
+            HookOutput::SystemMessage(text) => text.as_str(),
+            HookOutput::Silent => "",
+            other => panic!("unexpected execution Stop output: {other:?}"),
+        };
+        assert!(
+            !exec_text.contains("Intake 完了") && !exec_text.contains("Intake completion"),
+            "execution Stop must not carry the intake completion nudge: {exec_text}"
         );
     }
 
