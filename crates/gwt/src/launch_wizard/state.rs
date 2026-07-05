@@ -319,6 +319,19 @@ impl LaunchWizardState {
             .min(self.current_options().len().saturating_sub(1));
     }
 
+    /// SPEC-3214 Phase 3: convert this wizard into an ephemeral intake session.
+    /// The agent/profile picker is unchanged, but the launch becomes branchless
+    /// and detached on `base_ref` — build_launch_config then yields
+    /// `is_ephemeral=true` with no branch.
+    pub fn mark_as_ephemeral_intake(&mut self, base_ref: impl Into<String>) {
+        self.context.ephemeral_base_ref = Some(base_ref.into());
+        self.context.normalized_branch_name = String::new();
+        self.context.worktree_path = None;
+        self.branch_name = String::new();
+        self.is_new_branch = false;
+        self.base_branch_name = None;
+    }
+
     pub fn mark_runtime_context_unresolved(&mut self) {
         self.runtime_context_resolved = false;
         self.runtime_resolution_pending = false;

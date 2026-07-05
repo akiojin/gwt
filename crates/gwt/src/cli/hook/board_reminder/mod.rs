@@ -532,6 +532,12 @@ pub fn compute_plan(
 
     let self_match_keys = build_self_match_keys(session);
     let language = resolve_narrative_language();
+    // SPEC-3247 FR-003 / AS-4: intake (Curate) sessions own no Work, so the
+    // Work-state reminders (title purpose, progress summary) must not fire.
+    // Board-read injection and the memory reminder still apply — an intake
+    // session still coordinates and records lessons. Absent/unknown signal
+    // defaults to Execution, preserving the current behavior (FR-004).
+    let session_is_intake = gwt_skills::SessionKind::from_env().is_intake();
 
     let mut plan = plan_reminder(ReminderInputs {
         event: intent_event,
@@ -546,13 +552,18 @@ pub fn compute_plan(
         self_workspace_id,
     });
 
-    plan.output = append_title_summary_required_context(
-        plan.output,
-        intent_event,
-        agent_title_summary_missing(session)?,
-        &language,
-    );
+    if !session_is_intake {
+        plan.output = append_title_summary_required_context(
+            plan.output,
+            intent_event,
+            agent_title_summary_missing(session)?,
+            &language,
+        );
+    }
 
+    // The stale/progress reminder state is still advanced for intake to keep a
+    // single, uniform compute path (no divergent intake state machine); only
+    // the Work-state *text* injection is suppressed by the guards below.
     let project_state_root = crate::agent_project_state::canonical_project_state_root_for_session(
         session,
         &session.worktree_path,
@@ -566,7 +577,10 @@ pub fn compute_plan(
         &plan.next_reminders,
     );
     plan.next_reminders = updated_state;
-    plan.output = append_title_summary_stale_context(plan.output, intent_event, stale, &language);
+    if !session_is_intake {
+        plan.output =
+            append_title_summary_stale_context(plan.output, intent_event, stale, &language);
+    }
     let (progress_missing, progress_stale, progress_state) = compute_progress_summary_state(
         intent_event,
         projection_for_stale.as_ref(),
@@ -574,13 +588,15 @@ pub fn compute_plan(
         &plan.next_reminders,
     );
     plan.next_reminders = progress_state;
-    plan.output = append_progress_summary_context(
-        plan.output,
-        intent_event,
-        progress_missing,
-        progress_stale,
-        &language,
-    );
+    if !session_is_intake {
+        plan.output = append_progress_summary_context(
+            plan.output,
+            intent_event,
+            progress_missing,
+            progress_stale,
+            &language,
+        );
+    }
     let memory_present = memory_source_present(&session.worktree_path);
     let (memory_suppress, memory_state) =
         compute_memory_reminder_state(intent_event, memory_present, &plan.next_reminders, now);
@@ -1334,6 +1350,89 @@ mod tests {
         assert!(!text.contains("old post before last inject"));
         assert!(text.contains("brand new post"));
         assert_eq!(plan.next_reminders.last_injected_at, Some(now));
+    }
+
+    /// SPEC-3247 FR-003 / AS-4: an intake (Curate) session must not receive the
+    /// producing-work Work reminders (title-summary AND progress-summary) — it
+    /// owns no Work. The same setup in an execution session (default signal)
+    /// still injects both. The shared Board-coordination reminder and the
+    /// memory reminder survive in intake, so intake is not silenced wholesale.
+    #[test]
+    fn intake_session_suppresses_title_summary_work_reminder() {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let home = tempfile::tempdir().expect("home");
+        let _home = ScopedEnvVar::set("HOME", home.path());
+        let _userprofile = ScopedEnvVar::set("USERPROFILE", home.path());
+        let repo = home.path().join("repo");
+        std::fs::create_dir_all(repo.join(".gwt/work")).expect("repo work dir");
+        // Memory source present so the memory reminder is in play for intake too.
+        std::fs::write(repo.join(".gwt/work/memory.md"), "# Memory\n").expect("memory");
+        let session = make_session(&repo, "work/intake", "Codex");
+        // Agent present with an empty title and no progress summary -> execution
+        // would inject BOTH the title reminder and the progress-missing reminder.
+        save_projection(
+            &repo,
+            vec![WorkspaceAgentSummary {
+                title_summary: None,
+                current_focus: Some("Curate the backlog".to_string()),
+                ..workspace_agent(
+                    &session.id,
+                    Some("workspace-current"),
+                    WorkspaceAgentAffiliationStatus::Assigned,
+                )
+            }],
+        );
+
+        // Language-independent expected markers: the exact reminder texts that
+        // the append functions inject.
+        let language = resolve_narrative_language();
+        let title_reminder = texts::title_summary_required_reminder(&language);
+        let progress_reminder = texts::progress_summary_reminder(&language, false, false);
+
+        // Execution (signal unset -> default Execution): both Work reminders fire.
+        let _clear = ScopedEnvVar::unset(gwt_skills::GWT_SESSION_KIND_ENV);
+        let exec = compute_plan("UserPromptSubmit", &session, Utc::now())
+            .expect("compute plan")
+            .expect("plan");
+        let exec_text = additional_context(&exec.output);
+        assert!(
+            exec_text.contains(title_reminder),
+            "execution session must still receive the title-summary Work reminder"
+        );
+        assert!(
+            exec_text.contains(progress_reminder),
+            "execution session must still receive the progress-summary Work reminder"
+        );
+
+        // Intake: both producing-work reminders are suppressed, but the shared
+        // Board reminder and the memory reminder survive.
+        let _intake = ScopedEnvVar::set(gwt_skills::GWT_SESSION_KIND_ENV, "intake");
+        let intake = compute_plan("UserPromptSubmit", &session, Utc::now())
+            .expect("compute plan")
+            .expect("plan");
+        let intake_text = match &intake.output {
+            HookOutput::HookSpecificAdditionalContext { text, .. } => text.as_str(),
+            HookOutput::Silent => "",
+            other => panic!("unexpected intake output: {other:?}"),
+        };
+        assert!(
+            !intake_text.contains(title_reminder),
+            "intake session must not receive the producing-work title reminder: {intake_text}"
+        );
+        assert!(
+            !intake_text.contains(progress_reminder),
+            "intake session must not receive the producing-work progress reminder: {intake_text}"
+        );
+        assert!(
+            intake_text.contains("Board Post Reminder"),
+            "intake session must still receive the shared Board coordination reminder: {intake_text}"
+        );
+        assert!(
+            intake_text.contains("Memory Reminder"),
+            "intake session must still receive the memory reminder: {intake_text}"
+        );
     }
 
     #[test]

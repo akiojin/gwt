@@ -9,6 +9,7 @@ pub mod git_exclude;
 pub mod hooks;
 pub mod provider_hooks;
 pub mod registry;
+pub mod session_kind;
 pub mod settings_local;
 pub mod validate;
 
@@ -41,6 +42,7 @@ pub use provider_hooks::{
     hermes_source_home, opencode_is_configured, opencode_is_configured_global,
 };
 pub use registry::{EmbeddedSkill, RegistryError, SkillRegistry};
+pub use session_kind::{SessionKind, GWT_SESSION_KIND_ENV};
 pub use settings_local::{
     generate_codex_hooks, generate_codex_hooks_for_mode, generate_settings_local,
     managed_hook_config_has_user_content, CodexHookDiscoveryMode,

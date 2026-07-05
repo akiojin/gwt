@@ -2817,27 +2817,34 @@ fn embedded_web_launch_wizard_actions_flow_through_named_transport() {
     );
 }
 
+// SPEC-3245 Phase 3: Start Work is removed; the Intake session command is the
+// global entry that drives the shared wizard renderer.
 #[test]
-fn embedded_web_start_work_mode_hides_branch_controls_in_shared_wizard_renderer() {
+fn embedded_web_intake_session_uses_shared_wizard_renderer() {
     let html = frontend_bundle_source();
 
     assert!(
-        html.contains(r#"case "start-work":"#) && html.contains(r#"kind: "open_start_work""#),
-        "expected Start Work to use a global command instead of a Branches window action",
+        html.contains(r#"case "intake-session":"#)
+            && html.contains(r#"kind: "open_intake_session""#),
+        "expected Intake session to use a global command instead of a Branches window action",
+    );
+    assert!(
+        !html.contains(r#"case "start-work":"#) && !html.contains(r#"kind: "open_start_work""#),
+        "Start Work command wiring must be removed",
     );
     assert!(
         html.contains("launchWizard.show_branch_controls !== false")
             && html.contains("Plan Agent launch"),
-        "expected Start Work wizard mode to suppress branch controls and use Plan Agent meta copy",
+        "expected the wizard renderer to suppress branch controls and use Plan Agent meta copy",
     );
     assert!(
         !html.contains("isStartWorkMode")
             && !html.contains(r#"wizardModal.classList.toggle("is-drawer""#),
-        "expected Start Work wizard mode to share the centered Launch Wizard modal",
+        "expected the wizard mode to share the centered Launch Wizard modal",
     );
     assert!(
         html.contains("launchWizard.show_agent_settings") && html.contains("\"Agent\""),
-        "expected Start Work to keep the existing Agent settings renderer available",
+        "expected the existing Agent settings renderer to stay available",
     );
 }
 

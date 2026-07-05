@@ -6259,10 +6259,17 @@
 
       // SPEC-3038 AS-4.5: empty-canvas call to action mirrors the rail items.
       document
-        .getElementById("canvas-empty-start-work")
+        .getElementById("canvas-empty-intake")
         ?.addEventListener("click", () => {
           document.dispatchEvent(
-            new CustomEvent("op:command", { detail: { id: "start-work" } }),
+            new CustomEvent("op:command", { detail: { id: "intake-session" } }),
+          );
+        });
+      document
+        .getElementById("canvas-empty-open-workspace")
+        ?.addEventListener("click", () => {
+          document.dispatchEvent(
+            new CustomEvent("op:command", { detail: { id: "open-branches" } }),
           );
         });
       document
@@ -6543,11 +6550,11 @@
           case "spawn-shell":
             focusOrSpawnPreset("shell");
             return;
-          case "start-work":
-          case "spawn-agent":
+          case "intake-session":
+            // SPEC-3214 Phase 3: ephemeral intake session (branchless).
             openStartWorkPendingWizard();
             frontendUnits.socketTransport.send({
-              kind: "open_start_work",
+              kind: "open_intake_session",
             });
             return;
           case "stop-all-windows":

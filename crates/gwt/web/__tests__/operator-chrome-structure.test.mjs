@@ -235,19 +235,48 @@ test("SPEC-3038 Command Rail retires the legacy sidebar entirely", () => {
   }
 });
 
-test("project bar and command palette expose Start Work outside the Branches surface", () => {
-  const projectBarAction = document.querySelector('.op-rail .op-rail__item[data-cmd="start-work"]');
-  assert.ok(projectBarAction, "expected the Command Rail to expose a Start Work action");
-  assert.match(projectBarAction.textContent, /Start Work/);
+// SPEC-3245 Phase 3: Start Work is removed from the command rail and palette;
+// the 2-lane entries (Intake / Open Workspace) replace it.
+test("command rail and palette drop Start Work in favor of the 2-lane entries", () => {
+  assert.equal(
+    document.querySelector('.op-rail .op-rail__item[data-cmd="start-work"]'),
+    null,
+    "the Command Rail must not expose a Start Work action",
+  );
+  assert.doesNotMatch(
+    operatorShellSource,
+    /id:\s*"start-work"/,
+    "Command Palette registry must not include start-work",
+  );
+  assert.doesNotMatch(
+    operatorShellSource,
+    /id:\s*"spawn-agent"/,
+    "Command Palette registry must not include the spawn-agent alias of Start Work",
+  );
+  assert.doesNotMatch(
+    appSource,
+    /case\s+"start-work":/,
+    "app.js must not route a start-work command",
+  );
+  // The replacements exist.
+  assert.match(operatorShellSource, /id:\s*"intake-session"/, "Intake entry present");
+  assert.match(operatorShellSource, /id:\s*"open-branches"/, "Open Workspace entry present");
+});
+
+// SPEC-3214 Phase 3 / SPEC-3245 Phase 4: the command palette exposes an
+// "Intake" entry (the "session" suffix is dropped to avoid colliding with the
+// Session domain term) that sends open_intake_session (the ephemeral,
+// branchless new-work entry).
+test("command palette exposes Intake wired to open_intake_session", () => {
   assert.match(
     operatorShellSource,
-    /id:\s*"start-work"[\s\S]+label:\s*"Start Work"/,
-    "expected Command Palette registry to include Start Work",
+    /id:\s*"intake-session"[\s\S]+label:\s*"Intake"/,
+    "expected Command Palette registry to include the Intake entry",
   );
   assert.match(
     appSource,
-    /case\s+"start-work":[\s\S]+kind:\s*"open_start_work"/,
-    "expected Start Work command to send the global open_start_work event",
+    /case\s+"intake-session":[\s\S]+kind:\s*"open_intake_session"/,
+    "expected Intake session command to send open_intake_session",
   );
 });
 
@@ -1510,9 +1539,20 @@ test("empty canvas shows a first-window call to action (SPEC-3038 AS-4.5)", () =
     empty.hasAttribute("hidden"),
     "empty state ships hidden until the workspace reports zero windows",
   );
-  assert.ok(
+  // SPEC-3245 Phase 3: the empty state offers the 2-lane entries (Curate =
+  // Intake, Execute = Open Workspace) + Add window — Start Work is removed.
+  assert.equal(
     empty.querySelector("#canvas-empty-start-work"),
-    "expected a Start Work action",
+    null,
+    "Start Work action must be removed (SPEC-3245)",
+  );
+  assert.ok(
+    empty.querySelector("#canvas-empty-intake"),
+    "expected an Intake (Curate) action",
+  );
+  assert.ok(
+    empty.querySelector("#canvas-empty-open-workspace"),
+    "expected an Open Workspace (Execute) action",
   );
   assert.ok(
     empty.querySelector("#canvas-empty-add-window"),
@@ -1523,7 +1563,9 @@ test("empty canvas shows a first-window call to action (SPEC-3038 AS-4.5)", () =
     /function\s+updateCanvasEmptyState\(\)[\s\S]{0,300}?windowMap\.size/,
     "app.js must toggle the empty state from the live window count",
   );
-  assert.match(appSource, /canvas-empty-start-work/, "Start Work action must be wired");
+  assert.doesNotMatch(appSource, /canvas-empty-start-work/, "Start Work wiring must be removed");
+  assert.match(appSource, /canvas-empty-intake/, "Intake action must be wired");
+  assert.match(appSource, /canvas-empty-open-workspace/, "Open Workspace action must be wired");
   assert.match(appSource, /canvas-empty-add-window/, "Add window action must be wired");
 });
 
@@ -3647,15 +3689,17 @@ function cssBlockContaining(css, selector) {
 
 // === merged from origin/develop: SPEC-1939/2014 perf + Launch Wizard coverage ===
 
-test("Start Work command opens a pending wizard before backend state arrives", () => {
+// SPEC-3245 Phase 3: the Intake session command reuses the pending-wizard
+// mechanism (formerly Start Work) to keep the modal open before backend state.
+test("Intake session command opens a pending wizard before backend state arrives", () => {
   const commandCase = appSource.match(
-    /case\s+"start-work":[\s\S]*?case\s+"theme-cycle"/,
+    /case\s+"intake-session":[\s\S]*?case\s+"theme-cycle"/,
   );
-  assert.ok(commandCase, "expected Start Work command case");
+  assert.ok(commandCase, "expected Intake session command case");
   assert.match(
     commandCase[0],
-    /openStartWorkPendingWizard\(\)[\s\S]*?kind:\s*"open_start_work"/,
-    "expected Start Work to render a local pending wizard before sending open_start_work",
+    /openStartWorkPendingWizard\(\)[\s\S]*?kind:\s*"open_intake_session"/,
+    "expected Intake session to render a local pending wizard before sending open_intake_session",
   );
   assert.match(
     launchWizardSource,
