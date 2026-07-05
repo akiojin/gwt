@@ -94,7 +94,8 @@ pub const INTAKE_PROFILE: LaneProfile = LaneProfile {
         completion_gate: true,
         // SPEC-3248 P4: intake opens with a curation SessionStart 导线.
         sessionstart_onboarding: true,
-        reduced_skill_set: false,
+        // SPEC-3248 P4: intake surfaces only curation skills.
+        reduced_skill_set: true,
     },
 };
 
@@ -278,7 +279,7 @@ mod tests {
                     block_production_code_edits: true,
                     completion_gate: true,
                     sessionstart_onboarding: true,
-                    reduced_skill_set: false,
+                    reduced_skill_set: true,
                 },
             }
         );

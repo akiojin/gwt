@@ -58,6 +58,52 @@ fn session_kind_selects_intake_or_execution_coordination_guidance() {
     );
 }
 
+/// SPEC-3248 P4 (FR-011): materializing with `SessionKind::Intake` applies the
+/// reduced (curation) skill set — implementation skills are dropped, curation
+/// skills stay; execution keeps the full set.
+#[test]
+fn intake_materialize_applies_reduced_skill_set() {
+    fn materialize(kind: SessionKind) -> tempfile::TempDir {
+        let dir = tempdir().expect("tempdir");
+        run_git(dir.path(), &["init", "-q"]);
+        let _env_guard = env_lock();
+        let cli_bin = dir.path().join("bin/gwtd");
+        std::fs::create_dir_all(cli_bin.parent().expect("bin parent")).expect("create bin dir");
+        std::fs::write(&cli_bin, "#!/bin/sh\n").expect("write cli bin");
+        let _cli_bin_guard = ScopedEnvVar::set("GWT_HOOK_BIN", &cli_bin);
+        refresh_managed_gwt_assets_for_agent_with_codex_hook_discovery_mode(
+            dir.path(),
+            &AgentId::ClaudeCode,
+            CodexHookDiscoveryMode::WorkspaceHome,
+            kind,
+        )
+        .expect("materialize managed assets");
+        dir
+    }
+
+    let intake = materialize(SessionKind::Intake);
+    assert!(
+        !intake.path().join(".claude/skills/gwt-build-spec").exists(),
+        "intake must drop the implementation skill gwt-build-spec"
+    );
+    assert!(
+        intake
+            .path()
+            .join(".claude/skills/gwt-register-issue/SKILL.md")
+            .exists(),
+        "intake must keep curation skills"
+    );
+
+    let execution = materialize(SessionKind::Execution);
+    assert!(
+        execution
+            .path()
+            .join(".claude/skills/gwt-build-spec/SKILL.md")
+            .exists(),
+        "execution must keep the full skill set"
+    );
+}
+
 #[test]
 fn refresh_managed_gwt_assets_materializes_skills_commands_hooks_and_excludes() {
     let dir = tempdir().expect("tempdir");
