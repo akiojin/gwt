@@ -173,6 +173,23 @@ pub fn read_lane_profile(worktree: &Path) -> &'static LaneProfile {
     }
 }
 
+/// Resolve the lane profile for a worktree at hook time.
+///
+/// The lane file is the source of truth; when it is present it wins
+/// (deterministic, env-independent). For worktrees materialized before hooks v2
+/// (no lane file yet) this falls back to the `GWT_SESSION_KIND` env fast-path,
+/// so the transition period keeps SPEC-3247 behavior. Both paths default to
+/// execution, so an unknown or absent signal never changes producing-work
+/// behavior (FR-009 backward compatibility).
+#[must_use]
+pub fn resolve_lane_for_worktree(worktree: &Path) -> &'static LaneProfile {
+    if lane_file_path(worktree).exists() {
+        read_lane_profile(worktree)
+    } else {
+        LaneRegistry::for_session_kind(SessionKind::from_env())
+    }
+}
+
 /// Extract the `"lane"` string from the lane file body without pulling in a
 /// JSON dependency for such a tiny schema. Returns `None` on any shape it does
 /// not recognize (→ caller falls back to the default profile).
@@ -189,7 +206,17 @@ fn parse_lane_id(text: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::{Mutex, OnceLock};
     use tempfile::TempDir;
+
+    /// Serialize the one test that mutates the process-global
+    /// `GWT_SESSION_KIND` env so parallel test threads cannot race on it.
+    fn env_lock() -> std::sync::MutexGuard<'static, ()> {
+        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+        LOCK.get_or_init(|| Mutex::new(()))
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
 
     #[test]
     fn resolve_maps_known_lanes_and_defaults_execution() {
@@ -278,6 +305,23 @@ mod tests {
         assert_eq!(read_lane_profile(dir.path()), &EXECUTION_PROFILE);
         std::fs::write(lane_file_path(dir.path()), "{\"lane\":\"review\"}").expect("write unknown");
         assert_eq!(read_lane_profile(dir.path()), &EXECUTION_PROFILE);
+    }
+
+    #[test]
+    fn resolve_lane_prefers_lane_file_then_env_then_execution() {
+        let _guard = env_lock();
+        let dir = TempDir::new().expect("tempdir");
+        // No lane file, no env → execution.
+        std::env::remove_var(crate::GWT_SESSION_KIND_ENV);
+        assert_eq!(resolve_lane_for_worktree(dir.path()), &EXECUTION_PROFILE);
+        // No lane file, env=intake → env fast-path (transition worktrees).
+        std::env::set_var(crate::GWT_SESSION_KIND_ENV, "intake");
+        assert_eq!(resolve_lane_for_worktree(dir.path()), &INTAKE_PROFILE);
+        // Lane file present wins over env (source of truth): file=execution
+        // beats env=intake.
+        write_lane_file(dir.path(), &EXECUTION_PROFILE).expect("write lane file");
+        assert_eq!(resolve_lane_for_worktree(dir.path()), &EXECUTION_PROFILE);
+        std::env::remove_var(crate::GWT_SESSION_KIND_ENV);
     }
 
     #[test]

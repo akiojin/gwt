@@ -532,12 +532,18 @@ pub fn compute_plan(
 
     let self_match_keys = build_self_match_keys(session);
     let language = resolve_narrative_language();
-    // SPEC-3247 FR-003 / AS-4: intake (Curate) sessions own no Work, so the
-    // Work-state reminders (title purpose, progress summary) must not fire.
-    // Board-read injection and the memory reminder still apply — an intake
-    // session still coordinates and records lessons. Absent/unknown signal
-    // defaults to Execution, preserving the current behavior (FR-004).
-    let session_is_intake = gwt_skills::SessionKind::from_env().is_intake();
+    // SPEC-3248 (hooks v2 P3): the Work-state reminders (title purpose,
+    // progress summary) fire only when the resolved lane profile asks for them.
+    // Board-read injection and the memory reminder still apply — a lane that
+    // owns no Work (intake) still coordinates and records lessons. Resolved
+    // from the worktree lane file (source of truth), falling back to the env
+    // fast-path and then execution (FR-009). Replaces the SPEC-3247 ad-hoc
+    // `SessionKind::from_env()` branch.
+    let emit_work_state_reminders =
+        super::context::HookContext::for_worktree(&session.worktree_path)
+            .lane
+            .policy_flags
+            .emit_work_state_reminders;
 
     let mut plan = plan_reminder(ReminderInputs {
         event: intent_event,
@@ -552,7 +558,7 @@ pub fn compute_plan(
         self_workspace_id,
     });
 
-    if !session_is_intake {
+    if emit_work_state_reminders {
         plan.output = append_title_summary_required_context(
             plan.output,
             intent_event,
@@ -577,7 +583,7 @@ pub fn compute_plan(
         &plan.next_reminders,
     );
     plan.next_reminders = updated_state;
-    if !session_is_intake {
+    if emit_work_state_reminders {
         plan.output =
             append_title_summary_stale_context(plan.output, intent_event, stale, &language);
     }
@@ -588,7 +594,7 @@ pub fn compute_plan(
         &plan.next_reminders,
     );
     plan.next_reminders = progress_state;
-    if !session_is_intake {
+    if emit_work_state_reminders {
         plan.output = append_progress_summary_context(
             plan.output,
             intent_event,

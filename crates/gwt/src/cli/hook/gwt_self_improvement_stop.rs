@@ -9,26 +9,31 @@ use std::{path::Path, process::Command};
 use super::{envelope::stop_hook_active_from, HookOutput};
 
 pub fn handle_with_input(worktree_root: &Path, input: &str) -> HookOutput {
-    evaluate(
-        worktree_root,
-        stop_hook_active_from(input),
-        gwt_skills::SessionKind::from_env().is_intake(),
-    )
+    // SPEC-3248 (hooks v2 P3): whether this Stop gate fires is a lane policy,
+    // resolved from the worktree lane file (source of truth) via the shared
+    // HookContext. A lane whose profile disables `self_improvement_stop`
+    // (intake today) suppresses the gate. Replaces the SPEC-3247 ad-hoc
+    // `SessionKind::from_env().is_intake()` branch.
+    let suppress = !super::context::HookContext::for_worktree(worktree_root)
+        .lane
+        .policy_flags
+        .self_improvement_stop;
+    evaluate(worktree_root, stop_hook_active_from(input), suppress)
 }
 
 /// Decide the self-improvement Stop block.
 ///
-/// SPEC-3247 FR-003 / AS-4: this is a producing-work Stop gate. An intake
-/// (Curate) session owns no Work and must never be forced to handle
-/// improvement candidates before stopping, so `session_is_intake` short-
-/// circuits to [`HookOutput::Silent`] alongside the existing `stop_hook_active`
-/// / non-gwt-repo guards.
+/// SPEC-3247 FR-003 / AS-4 → SPEC-3248 (hooks v2): this is a producing-work Stop
+/// gate. A lane whose profile disables `self_improvement_stop` (intake today)
+/// must never be forced to handle improvement candidates before stopping, so
+/// `suppressed_by_lane` short-circuits to [`HookOutput::Silent`] alongside the
+/// existing `stop_hook_active` / non-gwt-repo guards.
 pub fn evaluate(
     worktree_root: &Path,
     stop_hook_active: bool,
-    session_is_intake: bool,
+    suppressed_by_lane: bool,
 ) -> HookOutput {
-    if stop_hook_active || session_is_intake || !is_gwt_repository(worktree_root) {
+    if stop_hook_active || suppressed_by_lane || !is_gwt_repository(worktree_root) {
         return HookOutput::Silent;
     }
 

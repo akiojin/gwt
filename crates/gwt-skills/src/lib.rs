@@ -38,9 +38,9 @@ pub use hooks::{
     restore_from_backup, Hook, HooksConfig, HooksError,
 };
 pub use lane::{
-    lane_file_path, read_lane_profile, write_lane_file, GuidanceVariant, LanePolicyFlags,
-    LaneProfile, LaneRegistry, EXECUTION_PROFILE, INTAKE_PROFILE, LANE_FILE_RELATIVE,
-    LANE_FILE_VERSION,
+    lane_file_path, read_lane_profile, resolve_lane_for_worktree, write_lane_file, GuidanceVariant,
+    LanePolicyFlags, LaneProfile, LaneRegistry, EXECUTION_PROFILE, INTAKE_PROFILE,
+    LANE_FILE_RELATIVE, LANE_FILE_VERSION,
 };
 pub use provider_hooks::{
     generate_hermes_hooks, generate_openclaw_hooks, generate_opencode_hooks, hermes_is_configured,

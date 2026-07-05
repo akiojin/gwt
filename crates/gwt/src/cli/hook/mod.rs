@@ -17,6 +17,7 @@ pub mod block_file_ops;
 pub mod block_git_branch_ops;
 pub mod block_git_dir_override;
 pub mod board_reminder;
+pub mod context;
 pub mod coordination_event;
 pub mod diagnostics;
 pub mod envelope;
