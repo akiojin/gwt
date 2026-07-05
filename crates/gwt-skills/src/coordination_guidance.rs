@@ -12,6 +12,7 @@
 
 use std::{io, path::Path};
 
+use crate::session_kind::SessionKind;
 use crate::settings_local::write_text_atomically;
 
 /// Skill identifier (matches the `.claude/skills/<name>/` directory
@@ -181,8 +182,8 @@ technical identifiers in English.
 
 /// Localized Board / Work operational guidance body (Japanese).
 ///
-/// This is kept as a translation aid only. `render_skill_md()` intentionally
-/// emits `SKILL_BODY_EN` because skill definitions are authored in English.
+/// This is kept as a translation aid only. The rendered skill body is derived
+/// from `SKILL_BODY_EN` because skill definitions are authored in English.
 pub const SKILL_BODY_JA: &str = r#"# gwt Coordination
 
 You are operating in a gwt-managed worktree. The Board (coordination
@@ -323,17 +324,94 @@ English のまま。
     JSON
 "#;
 
-/// Render the full SKILL.md content (frontmatter + managed markers +
-/// body) for a target worktree. Idempotent and pure.
-pub fn render_skill_md() -> String {
+/// Curate-lane replacement for the producing-work `## Work (current state)`
+/// section. An intake session is branchless and ephemeral and owns no Work,
+/// so it is never told to run `workspace.update` (SPEC-3247 FR-002). Ends with
+/// a blank line so it slots in ahead of `## Git environment`.
+const INTAKE_WORK_SECTION_EN: &str = r#"## Work (intake sessions produce no Work)
+
+This is a Curate-lane **intake** session: branchless and ephemeral. It owns no
+Work, so there is no Work state to maintain. Do not run `workspace.update` —
+the ephemeral worktree is discarded when the session ends, and Work state
+belongs to Execute-lane sessions.
+
+Coordinate through curation, not Work updates:
+
+- Register Issues/SPECs, discuss, and plan through the `gwt-*` skills
+  (`gwt-register-issue`, `gwt-discussion`, `gwt-plan-spec`, `gwt-search`).
+- Use the Board (above) to share status, claim scope, and hand off. Board
+  posts are how an intake session externalizes state — not `workspace.update`.
+- Leave implementation, verification, and PRs to Execute-lane sessions, opened
+  from a Workspace or picked up by the Issue Monitor.
+
+"#;
+
+/// Render the full SKILL.md content (frontmatter + managed markers + body) for
+/// a target worktree and [`SessionKind`]. Idempotent and pure.
+///
+/// - [`SessionKind::Execution`] emits the canonical producing-work body
+///   ([`SKILL_BODY_EN`]) unchanged.
+/// - [`SessionKind::Intake`] swaps the `## Work (current state)` section for a
+///   curation-framed one and drops the trailing `workspace.update` example, so
+///   an intake session is never asked to maintain Work state.
+pub fn render_skill_md(kind: SessionKind) -> String {
     format!(
         "---\nname: {name}\ndescription: {description}\n---\n\n{begin}\n\n{body}\n{end}\n",
         name = SKILL_NAME,
         description = SKILL_DESCRIPTION,
         begin = MANAGED_BEGIN,
-        body = SKILL_BODY_EN,
+        body = render_body(kind),
         end = MANAGED_END,
     )
+}
+
+/// Assemble the lane-specific guidance body. For [`SessionKind::Execution`]
+/// this is [`SKILL_BODY_EN`] verbatim; for [`SessionKind::Intake`] the Work
+/// section and the trailing `workspace.update` example are removed.
+fn render_body(kind: SessionKind) -> String {
+    match kind {
+        SessionKind::Execution => SKILL_BODY_EN.to_string(),
+        SessionKind::Intake => intake_body(),
+    }
+}
+
+fn intake_body() -> String {
+    let work_start = SKILL_BODY_EN
+        .find("## Work (current state)")
+        .expect("execution guidance must contain the Work (current state) section");
+    let git_start = SKILL_BODY_EN
+        .find("## Git environment")
+        .expect("execution guidance must contain the Git environment section");
+    debug_assert!(
+        work_start < git_start,
+        "Work section must precede Git environment section"
+    );
+    let mut body = String::with_capacity(SKILL_BODY_EN.len());
+    body.push_str(&SKILL_BODY_EN[..work_start]);
+    body.push_str(INTAKE_WORK_SECTION_EN);
+    body.push_str(&SKILL_BODY_EN[git_start..]);
+    // After swapping the Work section, the only remaining
+    // `"operation":"workspace.update"` JSON reference is the trailing example
+    // (INTAKE_WORK_SECTION_EN names workspace.update only in backtick prose, not
+    // the JSON operation string). Guard that invariant so a future edit that
+    // reintroduces a workspace.update example earlier in the body — which would
+    // make the position-based truncation over-delete — trips in debug builds.
+    debug_assert_eq!(
+        body.matches("\"operation\":\"workspace.update\"").count(),
+        1,
+        "intake body must have exactly one workspace.update JSON reference (the trailing example) before truncation"
+    );
+    // Drop that trailing example so an intake session never sees a Work-state
+    // example (SPEC-3247 FR-002).
+    if let Some(op_pos) = body.find("\"operation\":\"workspace.update\"") {
+        if let Some(fence) = body[..op_pos].rfind("    gwtd <<'JSON'") {
+            body.truncate(fence);
+            let trimmed_len = body.trim_end().len();
+            body.truncate(trimmed_len);
+            body.push('\n');
+        }
+    }
+    body
 }
 
 /// Materialize the gwt-coordination SKILL.md under both `.claude/skills/`
@@ -346,29 +424,35 @@ pub fn render_skill_md() -> String {
 /// - Idempotent: subsequent calls produce byte-identical files.
 /// - User-edited content is overwritten by design — this is a gwt-managed
 ///   asset.
-pub fn generate_coordination_guidance(worktree: &Path) -> io::Result<()> {
-    generate_coordination_guidance_for_claude(worktree)?;
-    generate_coordination_guidance_for_codex(worktree)?;
+pub fn generate_coordination_guidance(worktree: &Path, kind: SessionKind) -> io::Result<()> {
+    generate_coordination_guidance_for_claude(worktree, kind)?;
+    generate_coordination_guidance_for_codex(worktree, kind)?;
     Ok(())
 }
 
 /// Materialize the gwt-coordination SKILL.md under `.claude/skills/` only.
 /// Used by the orchestrator when the target set includes `ClaudeCode` but
-/// may exclude `Codex`.
-pub fn generate_coordination_guidance_for_claude(worktree: &Path) -> io::Result<()> {
-    write_skill_md(&worktree.join(".claude").join("skills"))
+/// may exclude `Codex`. The [`SessionKind`] selects the lane-specific body.
+pub fn generate_coordination_guidance_for_claude(
+    worktree: &Path,
+    kind: SessionKind,
+) -> io::Result<()> {
+    write_skill_md(&worktree.join(".claude").join("skills"), kind)
 }
 
 /// Materialize the gwt-coordination SKILL.md under `.codex/skills/` only.
 /// Used by the orchestrator when the target set includes `Codex` but may
-/// exclude `ClaudeCode`.
-pub fn generate_coordination_guidance_for_codex(worktree: &Path) -> io::Result<()> {
-    write_skill_md(&worktree.join(".codex").join("skills"))
+/// exclude `ClaudeCode`. The [`SessionKind`] selects the lane-specific body.
+pub fn generate_coordination_guidance_for_codex(
+    worktree: &Path,
+    kind: SessionKind,
+) -> io::Result<()> {
+    write_skill_md(&worktree.join(".codex").join("skills"), kind)
 }
 
-fn write_skill_md(skills_root: &Path) -> io::Result<()> {
+fn write_skill_md(skills_root: &Path, kind: SessionKind) -> io::Result<()> {
     let path = skills_root.join(SKILL_NAME).join("SKILL.md");
-    write_text_atomically(&path, &render_skill_md())
+    write_text_atomically(&path, &render_skill_md(kind))
 }
 
 #[cfg(test)]
@@ -413,7 +497,7 @@ mod tests {
 
     #[test]
     fn render_skill_md_contains_required_canonical_phrases() {
-        let rendered = render_skill_md();
+        let rendered = render_skill_md(SessionKind::Execution);
         for phrase in required_phrases() {
             assert!(
                 rendered.contains(phrase),
@@ -424,8 +508,74 @@ mod tests {
     }
 
     #[test]
+    fn intake_guidance_omits_work_state_instructions_execution_keeps_them() {
+        // SPEC-3247 FR-002 / AS-2 / AS-3: the intake (Curate) variant must not
+        // instruct or exemplify `workspace.update` (an intake session owns no
+        // Work), while the execution variant keeps the full producing-work
+        // Work-state guidance unchanged.
+        let intake = render_skill_md(SessionKind::Intake);
+        let execution = render_skill_md(SessionKind::Execution);
+
+        // Execution keeps the Work-state section and workspace.update.
+        assert!(
+            execution.contains("## Work (current state)"),
+            "execution guidance must keep the producing-work Work section"
+        );
+        assert!(
+            execution.contains("\"operation\":\"workspace.update\""),
+            "execution guidance must keep the workspace.update instruction"
+        );
+
+        // Intake drops the workspace.update *instruction* and example (the
+        // JSON operation) and the producing-work Work section. It may still
+        // name workspace.update in prose to forbid it, which is intentional.
+        assert!(
+            !intake.contains("\"operation\":\"workspace.update\""),
+            "intake guidance must not instruct or exemplify workspace.update"
+        );
+        assert!(
+            !intake.contains("## Work (current state)"),
+            "intake guidance must not carry the producing-work Work section"
+        );
+        assert!(
+            intake.contains("intake sessions produce no Work"),
+            "intake guidance must state that intake produces no Work"
+        );
+        assert!(
+            intake.contains("Do not run `workspace.update`"),
+            "intake guidance should explicitly forbid workspace.update"
+        );
+        assert!(
+            intake.contains("gwt-register-issue"),
+            "intake guidance must point at the curation skills"
+        );
+
+        // Shared contract stays intact in both lanes (Board audience, branch
+        // prohibition), so intake is not a stripped-down guidance. Assert the
+        // downstream sections that follow the Work section all survive, so an
+        // over-truncation regression in intake_body() would be caught here.
+        for shared in [
+            "## Board (coordination history)",
+            "git worktree add/remove",
+            "Do not post tool-level updates",
+            "## Git environment",
+            "## Skills",
+            "\"operation\":\"search\"",
+            "## Persisted Work files",
+            "## Language",
+            "## Examples",
+            "kind\":\"handoff\"",
+        ] {
+            assert!(
+                intake.contains(shared),
+                "intake guidance must keep shared contract phrase: {shared}"
+            );
+        }
+    }
+
+    #[test]
     fn render_skill_md_uses_json_envelope_for_work_identity_examples() {
-        let rendered = render_skill_md();
+        let rendered = render_skill_md(SessionKind::Execution);
         assert!(
             rendered.contains("gwtd <<'JSON'"),
             "Work update examples must use the JSON envelope entrypoint"
@@ -460,7 +610,7 @@ mod tests {
 
     #[test]
     fn render_skill_md_uses_english_canonical_body() {
-        let rendered = render_skill_md();
+        let rendered = render_skill_md(SessionKind::Execution);
         assert!(
             rendered.contains("When you cross a reasoning milestone"),
             "generated SKILL.md must use English canonical prose"
@@ -473,7 +623,7 @@ mod tests {
 
     #[test]
     fn render_skill_md_documents_broadcast_param_contract() {
-        let rendered = render_skill_md();
+        let rendered = render_skill_md(SessionKind::Execution);
         assert!(
             rendered.contains("params.broadcast:true"),
             "generated SKILL.md must document the explicit repo-wide broadcast parameter"
@@ -490,7 +640,7 @@ mod tests {
 
     #[test]
     fn render_skill_md_starts_with_yaml_frontmatter() {
-        let rendered = render_skill_md();
+        let rendered = render_skill_md(SessionKind::Execution);
         assert!(
             rendered.starts_with("---\n"),
             "SKILL.md must start with YAML frontmatter delimiter (---\\n)"
@@ -511,7 +661,7 @@ mod tests {
 
     #[test]
     fn render_skill_md_wraps_body_in_managed_markers() {
-        let rendered = render_skill_md();
+        let rendered = render_skill_md(SessionKind::Execution);
         let begin_idx = rendered
             .find(MANAGED_BEGIN)
             .expect("managed begin marker missing");
@@ -527,7 +677,7 @@ mod tests {
     #[test]
     fn generate_writes_skill_md_to_claude_and_codex_paths() {
         let tmp = TempDir::new().unwrap();
-        generate_coordination_guidance(tmp.path()).unwrap();
+        generate_coordination_guidance(tmp.path(), SessionKind::Execution).unwrap();
 
         let claude = tmp
             .path()
@@ -561,7 +711,7 @@ mod tests {
     #[test]
     fn generate_for_claude_only_does_not_touch_codex_path() {
         let tmp = TempDir::new().unwrap();
-        generate_coordination_guidance_for_claude(tmp.path()).unwrap();
+        generate_coordination_guidance_for_claude(tmp.path(), SessionKind::Execution).unwrap();
 
         assert!(
             tmp.path()
@@ -584,7 +734,7 @@ mod tests {
     #[test]
     fn generate_for_codex_only_does_not_touch_claude_path() {
         let tmp = TempDir::new().unwrap();
-        generate_coordination_guidance_for_codex(tmp.path()).unwrap();
+        generate_coordination_guidance_for_codex(tmp.path(), SessionKind::Execution).unwrap();
 
         assert!(
             tmp.path()
@@ -607,7 +757,7 @@ mod tests {
     #[test]
     fn generate_is_idempotent() {
         let tmp = TempDir::new().unwrap();
-        generate_coordination_guidance(tmp.path()).unwrap();
+        generate_coordination_guidance(tmp.path(), SessionKind::Execution).unwrap();
         let first = std::fs::read_to_string(
             tmp.path()
                 .join(".claude/skills")
@@ -616,7 +766,7 @@ mod tests {
         )
         .unwrap();
 
-        generate_coordination_guidance(tmp.path()).unwrap();
+        generate_coordination_guidance(tmp.path(), SessionKind::Execution).unwrap();
         let second = std::fs::read_to_string(
             tmp.path()
                 .join(".claude/skills")
@@ -642,7 +792,7 @@ mod tests {
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
         std::fs::write(&path, "stale content from prior version\n").unwrap();
 
-        generate_coordination_guidance(tmp.path()).unwrap();
+        generate_coordination_guidance(tmp.path(), SessionKind::Execution).unwrap();
         let after = std::fs::read_to_string(&path).unwrap();
 
         assert!(
@@ -693,7 +843,7 @@ mod tests {
 
     #[test]
     fn rendered_skill_md_propagates_activity_rule_to_emitted_file() {
-        let rendered = render_skill_md();
+        let rendered = render_skill_md(SessionKind::Execution);
         for phrase in [
             "PR check in progress",
             "verifying tests",
@@ -702,7 +852,7 @@ mod tests {
         ] {
             assert!(
                 rendered.contains(phrase),
-                "render_skill_md() must propagate activity Bad example / rule: {phrase}"
+                "render_skill_md(SessionKind::Execution) must propagate activity Bad example / rule: {phrase}"
             );
         }
     }
@@ -710,7 +860,7 @@ mod tests {
     #[test]
     fn generate_writes_byte_identical_skill_md_with_activity_rule_to_both_targets() {
         let tmp = TempDir::new().unwrap();
-        generate_coordination_guidance(tmp.path()).unwrap();
+        generate_coordination_guidance(tmp.path(), SessionKind::Execution).unwrap();
 
         let claude = tmp
             .path()
@@ -768,7 +918,7 @@ mod tests {
         // name must be "Work", not "Workspace". The public gwtd argv
         // subcommand has since been replaced by JSON envelopes, so generated
         // guidance must not reintroduce the legacy CLI form.
-        let rendered = render_skill_md();
+        let rendered = render_skill_md(SessionKind::Execution);
         assert!(
             rendered.contains("## Work (current state)"),
             "current-state section heading must use the Work concept name"

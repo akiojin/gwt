@@ -1493,10 +1493,17 @@ impl AppRuntime {
             .with_project_root(&worktree_path)
             .apply_to_parts(&mut config.env_vars, &mut config.remove_env);
             let codex_hook_discovery_mode = codex_hook_discovery_mode_for_launch_config(&config);
+            // SPEC-3247 FR-002: select lane-specific coordination guidance from
+            // the launch's ephemeral intake flag (same source as the
+            // GWT_SESSION_KIND env export in prepare.rs), so an intake session
+            // materializes curation-framed guidance without Work-state
+            // instructions.
+            let session_kind = gwt_skills::SessionKind::from_is_ephemeral(config.is_ephemeral);
             refresh_managed_gwt_assets_for_agent_with_codex_hook_discovery_mode(
                 &worktree_path,
                 &config.agent_id,
                 codex_hook_discovery_mode,
+                session_kind,
             )
             .map_err(|error| {
                 // Attribute managed-asset failures to the worktree so the
@@ -1573,6 +1580,20 @@ impl AppRuntime {
             config.env_vars.insert(
                 gwt_agent::GWT_SESSION_ID_ENV.to_string(),
                 session_id.clone(),
+            );
+            // SPEC-3247 FR-001: export the session-kind signal into the spawned
+            // agent's env HERE, in the production spawn path (the `prepare.rs`
+            // helper is an alternate path with no production callers). Derived
+            // from the same `config.is_ephemeral` as the materialization
+            // guidance kind above, so the runtime signal and the materialized
+            // guidance never disagree. Absent/unknown decodes to Execution
+            // downstream (FR-004).
+            let session_kind_env = gwt_skills::SessionKind::from_is_ephemeral(config.is_ephemeral)
+                .as_env_str()
+                .to_string();
+            config.env_vars.insert(
+                gwt_skills::GWT_SESSION_KIND_ENV.to_string(),
+                session_kind_env,
             );
             config.env_vars.insert(
                 gwt_agent::GWT_SESSION_RUNTIME_PATH_ENV.to_string(),

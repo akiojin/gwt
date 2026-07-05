@@ -208,6 +208,17 @@ where
     config
         .env_vars
         .insert(GWT_SESSION_ID_ENV.to_string(), session.id.clone());
+    // SPEC-3247 FR-001: export the session-kind signal so managed hooks and
+    // coordination guidance can adapt to the Curate (intake) vs Execute
+    // (execution) lane. Derived from the ephemeral intake flag (SPEC-3214);
+    // absent/unknown is treated as Execution downstream (FR-004).
+    let session_kind_env = gwt_skills::SessionKind::from_is_ephemeral(config.is_ephemeral)
+        .as_env_str()
+        .to_string();
+    config.env_vars.insert(
+        gwt_skills::GWT_SESSION_KIND_ENV.to_string(),
+        session_kind_env,
+    );
     config.env_vars.insert(
         GWT_SESSION_RUNTIME_PATH_ENV.to_string(),
         runtime_path.display().to_string(),
@@ -1849,6 +1860,51 @@ mod tests {
             Some("npx"),
         );
         assert_eq!(prepared.session.branch, "feature/demo");
+    }
+
+    #[test]
+    fn prepare_agent_launch_exports_session_kind_from_ephemeral_flag() {
+        // SPEC-3247 FR-001 / AS-1: the launch env carries GWT_SESSION_KIND,
+        // derived from LaunchConfig.is_ephemeral (intake for ephemeral,
+        // execution otherwise), so hooks/guidance can branch on the lane.
+        fn prepared_session_kind(is_ephemeral: bool) -> String {
+            let temp = tempdir().expect("tempdir");
+            let worktree = temp.path().join("repo-feature");
+            let sessions_dir = temp.path().join(".gwt").join("sessions");
+            fs::create_dir_all(&worktree).expect("create worktree");
+
+            let mut config = sample_versioned_launch_config(&worktree);
+            config.is_ephemeral = is_ephemeral;
+            let mut probe_host_runner =
+                |_command: &str,
+                 _args: Vec<String>,
+                 _env: &HashMap<String, String>,
+                 _remove_env: &[String],
+                 _cwd: Option<PathBuf>| false;
+            let lookup_gwt_bin = |_command: &str| Some(PathBuf::from("/usr/local/bin/gwtd"));
+            let prepared = prepare_agent_launch_with(
+                &worktree,
+                &sessions_dir,
+                config,
+                None,
+                |_path| Ok(()),
+                PrepareLaunchDeps {
+                    current_exe: Path::new("/usr/local/bin/gwt"),
+                    probe_host_runner: &mut probe_host_runner,
+                    lookup_gwt_bin: &lookup_gwt_bin,
+                },
+            )
+            .expect("prepare launch");
+            prepared
+                .process_launch
+                .env
+                .get(gwt_skills::GWT_SESSION_KIND_ENV)
+                .cloned()
+                .unwrap_or_default()
+        }
+
+        assert_eq!(prepared_session_kind(true), "intake");
+        assert_eq!(prepared_session_kind(false), "execution");
     }
 
     #[test]

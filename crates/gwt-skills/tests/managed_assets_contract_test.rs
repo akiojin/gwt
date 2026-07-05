@@ -14,6 +14,7 @@ use std::process::Command;
 use gwt_skills::coordination_guidance::{generate_coordination_guidance, render_skill_md};
 use gwt_skills::distribute::distribute_to_worktree;
 use gwt_skills::git_exclude::update_git_exclude;
+use gwt_skills::SessionKind;
 
 /// Create a real (empty) git repository so asset distribution and
 /// `.git/info/exclude` resolution behave as they do in a gwt worktree.
@@ -152,7 +153,7 @@ fn distribute_to_worktree_prunes_stale_managed_skills() {
 fn generate_coordination_guidance_writes_skill_for_claude_and_codex() {
     let dir = tempfile::tempdir().expect("tempdir");
 
-    generate_coordination_guidance(dir.path()).expect("generate guidance");
+    generate_coordination_guidance(dir.path(), SessionKind::Execution).expect("generate guidance");
 
     for skill_md in [
         dir.path().join(".claude/skills/gwt-coordination/SKILL.md"),
@@ -170,7 +171,7 @@ fn generate_coordination_guidance_writes_skill_for_claude_and_codex() {
 
 #[test]
 fn render_skill_md_embeds_frontmatter_name_and_description() {
-    let md = render_skill_md();
+    let md = render_skill_md(SessionKind::Execution);
     assert!(md.starts_with("---\n"), "must start with YAML frontmatter");
     assert!(md.contains("name: gwt-coordination"));
     assert!(md.contains("\"operation\":\"board.post\""));

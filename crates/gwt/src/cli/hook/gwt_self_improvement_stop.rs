@@ -9,11 +9,26 @@ use std::{path::Path, process::Command};
 use super::{envelope::stop_hook_active_from, HookOutput};
 
 pub fn handle_with_input(worktree_root: &Path, input: &str) -> HookOutput {
-    evaluate(worktree_root, stop_hook_active_from(input))
+    evaluate(
+        worktree_root,
+        stop_hook_active_from(input),
+        gwt_skills::SessionKind::from_env().is_intake(),
+    )
 }
 
-pub fn evaluate(worktree_root: &Path, stop_hook_active: bool) -> HookOutput {
-    if stop_hook_active || !is_gwt_repository(worktree_root) {
+/// Decide the self-improvement Stop block.
+///
+/// SPEC-3247 FR-003 / AS-4: this is a producing-work Stop gate. An intake
+/// (Curate) session owns no Work and must never be forced to handle
+/// improvement candidates before stopping, so `session_is_intake` short-
+/// circuits to [`HookOutput::Silent`] alongside the existing `stop_hook_active`
+/// / non-gwt-repo guards.
+pub fn evaluate(
+    worktree_root: &Path,
+    stop_hook_active: bool,
+    session_is_intake: bool,
+) -> HookOutput {
+    if stop_hook_active || session_is_intake || !is_gwt_repository(worktree_root) {
         return HookOutput::Silent;
     }
 
