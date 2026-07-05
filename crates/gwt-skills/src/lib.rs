@@ -7,6 +7,7 @@ pub mod coordination_guidance;
 pub mod distribute;
 pub mod git_exclude;
 pub mod hooks;
+pub mod lane;
 pub mod provider_hooks;
 pub mod registry;
 pub mod session_kind;
@@ -28,13 +29,19 @@ pub use coordination_guidance::{
     generate_coordination_guidance_for_codex,
 };
 pub use distribute::{
-    distribute_to_worktree, distribute_to_worktree_for_targets, prune_stale_gwt_assets,
-    prune_stale_gwt_assets_for_targets, DistributeReport, ManagedAssetTarget,
+    apply_reduced_skill_set, distribute_to_worktree, distribute_to_worktree_for_targets,
+    prune_stale_gwt_assets, prune_stale_gwt_assets_for_targets, DistributeReport,
+    ManagedAssetTarget, CURATION_EXCLUDED_SKILLS,
 };
 pub use git_exclude::{update_git_exclude, update_git_exclude_for_targets};
 pub use hooks::{
     backup_hooks, detect_corruption, is_gwt_managed, merge_hooks, merge_hooks_safe,
     restore_from_backup, Hook, HooksConfig, HooksError,
+};
+pub use lane::{
+    lane_file_path, read_lane_profile, resolve_lane_for_worktree, write_lane_file, GuidanceVariant,
+    LanePolicyFlags, LaneProfile, LaneRegistry, EXECUTION_PROFILE, INTAKE_PROFILE,
+    LANE_FILE_RELATIVE, LANE_FILE_VERSION,
 };
 pub use provider_hooks::{
     generate_hermes_hooks, generate_openclaw_hooks, generate_opencode_hooks, hermes_is_configured,

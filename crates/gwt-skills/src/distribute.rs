@@ -121,6 +121,43 @@ pub fn distribute_to_worktree_for_targets(
     Ok(report)
 }
 
+/// Implementation-skill basenames a reduced (curation) skill set omits. An
+/// intake lane registers Issues/SPECs and does not implement, so it should not
+/// surface the build / verify / PR skills. Curation skills (register-issue,
+/// discussion, plan-spec, search, arch-review, register-spec, …) and the
+/// always-present gwt-coordination guidance stay.
+pub const CURATION_EXCLUDED_SKILLS: &[&str] = &[
+    "gwt-build-spec",
+    "gwt-verify",
+    "gwt-manage-pr",
+    "gwt-fix-issue",
+];
+
+/// Apply a reduced (curation) skill set to a worktree by removing the
+/// implementation skills/commands (SPEC-3248 P4, FR-011). Runs after
+/// distribution as a post-pass, so the write/prune materialization core is
+/// untouched. Idempotent: missing paths are ignored. Only gwt-managed
+/// (gitignored) assets are removed; a re-materialize restores the full set for
+/// a non-reduced lane.
+pub fn apply_reduced_skill_set(worktree: &Path) -> io::Result<usize> {
+    let mut removed = 0usize;
+    for name in CURATION_EXCLUDED_SKILLS {
+        for skills_root in [".claude/skills", ".codex/skills", ".gwt/hermes/skills"] {
+            let dir = worktree.join(skills_root).join(name);
+            if dir.is_dir() {
+                fs::remove_dir_all(&dir)?;
+                removed += 1;
+            }
+        }
+        let command = worktree.join(".claude/commands").join(format!("{name}.md"));
+        if command.is_file() {
+            fs::remove_file(&command)?;
+            removed += 1;
+        }
+    }
+    Ok(removed)
+}
+
 /// Remove stale gwt-managed asset paths from the target worktree without
 /// materializing the current bundle.
 pub fn prune_stale_gwt_assets(worktree: &Path) -> io::Result<usize> {
@@ -541,6 +578,52 @@ mod tests {
                 .exists(),
             "gwt-* skill must still be materialized for ClaudeCode target"
         );
+    }
+
+    #[test]
+    fn apply_reduced_skill_set_removes_implementation_skills_keeps_curation() {
+        let dir = tempfile::tempdir().unwrap();
+        distribute_to_worktree_for_targets(
+            dir.path(),
+            &[ManagedAssetTarget::ClaudeCode, ManagedAssetTarget::Codex],
+        )
+        .unwrap();
+
+        // Sanity: implementation + curation skills both present after full
+        // distribution.
+        assert!(dir
+            .path()
+            .join(".claude/skills/gwt-build-spec/SKILL.md")
+            .exists());
+        assert!(dir
+            .path()
+            .join(".claude/skills/gwt-register-issue/SKILL.md")
+            .exists());
+
+        let removed = apply_reduced_skill_set(dir.path()).unwrap();
+        assert!(removed > 0, "reduced skill set must remove something");
+
+        // Implementation skills + their commands are gone (Claude + Codex).
+        for excluded in CURATION_EXCLUDED_SKILLS {
+            assert!(
+                !dir.path().join(".claude/skills").join(excluded).exists(),
+                "intake must drop implementation skill {excluded} (claude)"
+            );
+            assert!(
+                !dir.path().join(".codex/skills").join(excluded).exists(),
+                "intake must drop implementation skill {excluded} (codex)"
+            );
+        }
+        // Curation skills survive.
+        assert!(
+            dir.path()
+                .join(".claude/skills/gwt-register-issue/SKILL.md")
+                .exists(),
+            "intake must keep curation skills"
+        );
+
+        // Idempotent: a second application removes nothing.
+        assert_eq!(apply_reduced_skill_set(dir.path()).unwrap(), 0);
     }
 
     #[test]

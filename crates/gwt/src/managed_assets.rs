@@ -120,6 +120,17 @@ fn materialize_managed_gwt_assets_for_targets(
     distribute_to_worktree_for_targets(worktree, targets).map_err(|error| {
         io::Error::other(format!("failed to distribute gwt managed assets: {error}"))
     })?;
+    // SPEC-3248 P4 (FR-011): a lane with a reduced skill set (intake) omits the
+    // implementation skills/commands. Applied as a post-pass so the
+    // distribution core is untouched; a non-reduced lane keeps the full set.
+    if gwt_skills::LaneRegistry::for_session_kind(session_kind)
+        .policy_flags
+        .reduced_skill_set
+    {
+        gwt_skills::apply_reduced_skill_set(worktree).map_err(|error| {
+            io::Error::other(format!("failed to apply reduced skill set: {error}"))
+        })?;
+    }
     if targets.is_empty() {
         return Ok(());
     }
