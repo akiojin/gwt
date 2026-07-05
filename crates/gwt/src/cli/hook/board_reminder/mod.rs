@@ -539,11 +539,8 @@ pub fn compute_plan(
     // from the worktree lane file (source of truth), falling back to the env
     // fast-path and then execution (FR-009). Replaces the SPEC-3247 ad-hoc
     // `SessionKind::from_env()` branch.
-    let emit_work_state_reminders =
-        super::context::HookContext::for_worktree(&session.worktree_path)
-            .lane
-            .policy_flags
-            .emit_work_state_reminders;
+    let lane = super::context::HookContext::for_worktree(&session.worktree_path).lane;
+    let emit_work_state_reminders = lane.policy_flags.emit_work_state_reminders;
 
     let mut plan = plan_reminder(ReminderInputs {
         event: intent_event,
@@ -615,7 +612,40 @@ pub fn compute_plan(
         &language,
     );
 
+    // SPEC-3248 (hooks v2 P4): a lane whose profile enables SessionStart
+    // onboarding gets a lane-framed 导线 prepended on SessionStart, so an
+    // intake session opens with the curation workflow (register / discuss /
+    // plan) instead of the producing-work default.
+    if intent_event == IntentBoundaryEvent::SessionStart
+        && lane.policy_flags.sessionstart_onboarding
+    {
+        plan.output = prepend_lane_onboarding(plan.output, lane, &language);
+    }
+
     Ok(Some(plan))
+}
+
+/// Prepend a lane-specific SessionStart onboarding block (SPEC-3248 FR-011).
+/// Only lanes whose `guidance_variant` is `Curation` currently carry a distinct
+/// 导线; other lanes return the output unchanged.
+fn prepend_lane_onboarding(
+    output: HookOutput,
+    lane: &gwt_skills::LaneProfile,
+    language: &str,
+) -> HookOutput {
+    let Some(onboarding) = texts::lane_onboarding(lane, language) else {
+        return output;
+    };
+    match output {
+        HookOutput::HookSpecificAdditionalContext { event, text } => {
+            HookOutput::hook_specific_additional_context(event, format!("{onboarding}\n\n{text}"))
+        }
+        HookOutput::Silent => HookOutput::hook_specific_additional_context(
+            IntentBoundaryEvent::SessionStart,
+            onboarding.to_string(),
+        ),
+        other => other,
+    }
 }
 
 /// Resolve the narrative-output language from the global gwt config
@@ -1363,6 +1393,47 @@ mod tests {
     /// owns no Work. The same setup in an execution session (default signal)
     /// still injects both. The shared Board-coordination reminder and the
     /// memory reminder survive in intake, so intake is not silenced wholesale.
+    /// SPEC-3248 P4 (FR-011): an intake lane opens SessionStart with the
+    /// curation 导线; execution does not.
+    #[test]
+    fn intake_sessionstart_prepends_curation_onboarding() {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let home = tempfile::tempdir().expect("home");
+        let _home = ScopedEnvVar::set("HOME", home.path());
+        let _userprofile = ScopedEnvVar::set("USERPROFILE", home.path());
+        let repo = home.path().join("repo");
+        std::fs::create_dir_all(&repo).expect("repo");
+        let session = make_session(&repo, "work/intake", "Codex");
+
+        // Intake (env fast-path, no lane file in the temp repo).
+        let _intake = ScopedEnvVar::set(gwt_skills::GWT_SESSION_KIND_ENV, "intake");
+        let intake = compute_plan("SessionStart", &session, Utc::now())
+            .expect("compute plan")
+            .expect("plan");
+        let intake_text = additional_context(&intake.output);
+        assert!(
+            intake_text.contains("Intake") && intake_text.contains("gwt-register-issue"),
+            "intake SessionStart must prepend the curation onboarding: {intake_text}"
+        );
+
+        // Execution: no onboarding.
+        let _exec = ScopedEnvVar::set(gwt_skills::GWT_SESSION_KIND_ENV, "execution");
+        let exec = compute_plan("SessionStart", &session, Utc::now())
+            .expect("compute plan")
+            .expect("plan");
+        let exec_text = match &exec.output {
+            HookOutput::HookSpecificAdditionalContext { text, .. } => text.as_str(),
+            HookOutput::Silent => "",
+            other => panic!("unexpected execution output: {other:?}"),
+        };
+        assert!(
+            !exec_text.contains("gwt-register-issue"),
+            "execution SessionStart must not carry the intake onboarding: {exec_text}"
+        );
+    }
+
     #[test]
     fn intake_session_suppresses_title_summary_work_reminder() {
         let _env_lock = crate::env_test_lock()

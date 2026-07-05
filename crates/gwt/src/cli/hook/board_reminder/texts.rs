@@ -311,6 +311,39 @@ pub(super) fn user_prompt_reminder(lang: ReminderLanguage, short: bool) -> &'sta
     }
 }
 
+/// Lane-specific SessionStart onboarding (SPEC-3248 FR-011). Curation lanes
+/// (intake) open with the register / discuss / plan 导线; producing-work lanes
+/// have no distinct onboarding (they keep the default reminder flow).
+pub(super) fn lane_onboarding(
+    lane: &gwt_skills::LaneProfile,
+    language: &str,
+) -> Option<&'static str> {
+    match lane.guidance_variant {
+        gwt_skills::GuidanceVariant::Curation => Some(match reminder_language(language) {
+            ReminderLanguage::Ja => INTAKE_ONBOARDING_JA,
+            ReminderLanguage::En => INTAKE_ONBOARDING,
+        }),
+        gwt_skills::GuidanceVariant::ProducingWork => None,
+    }
+}
+
+pub(super) const INTAKE_ONBOARDING: &str = "# Intake (Curate) session\n\n\
+This is a branchless, ephemeral **intake** session: you curate and register \
+work, you do not implement it. Produce GitHub Issues / SPECs, not code.\n\n\
+- Search first, then register: `gwt-search` → `gwt-register-issue` (plain Issue \
+vs SPEC) or `gwt-discussion` (shape a SPEC) → `gwt-plan-spec`.\n\
+- Coordinate through the Board; you own no Work state (no `workspace.update`).\n\
+- Leave implementation, verification, and PRs to Execute-lane sessions (opened \
+from a Workspace or the Issue Monitor).\n";
+
+pub(super) const INTAKE_ONBOARDING_JA: &str = "# Intake (Curate) セッション\n\n\
+これは branchless で使い捨ての **intake** セッションです。作業を curate・登録し、\
+実装はしません。コードではなく GitHub Issue / SPEC を生成します。\n\n\
+- まず検索、次に登録: `gwt-search` → `gwt-register-issue`（plain Issue か SPEC か）\
+または `gwt-discussion`（SPEC を形にする）→ `gwt-plan-spec`。\n\
+- 協調は Board 経由。Work state は持ちません（`workspace.update` 不要）。\n\
+- 実装・検証・PR は Execute レーンのセッション（Workspace か Issue Monitor 起動）に任せます。\n";
+
 pub(super) fn stop_reminder(lang: ReminderLanguage, short: bool) -> &'static str {
     match (lang, short) {
         (ReminderLanguage::Ja, true) => STOP_REMINDER_SHORT_JA,

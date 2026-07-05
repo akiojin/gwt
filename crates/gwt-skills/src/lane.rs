@@ -90,7 +90,8 @@ pub const INTAKE_PROFILE: LaneProfile = LaneProfile {
         self_improvement_stop: false,
         block_production_code_edits: false,
         completion_gate: false,
-        sessionstart_onboarding: false,
+        // SPEC-3248 P4: intake opens with a curation SessionStart 导线.
+        sessionstart_onboarding: true,
         reduced_skill_set: false,
     },
 };
@@ -274,7 +275,7 @@ mod tests {
                     self_improvement_stop: false,
                     block_production_code_edits: false,
                     completion_gate: false,
-                    sessionstart_onboarding: false,
+                    sessionstart_onboarding: true,
                     reduced_skill_set: false,
                 },
             }
