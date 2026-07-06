@@ -54,6 +54,15 @@ fn event(tool_name: &str, tool_input: serde_json::Value) -> HookEvent {
     .expect("valid hook event")
 }
 
+fn json_envelope_command(operation: &str, params: serde_json::Value) -> String {
+    let body = json!({
+        "schema_version": 1,
+        "operation": operation,
+        "params": params,
+    });
+    format!("gwtd <<'JSON'\n{}\nJSON", body)
+}
+
 fn evaluate(event: &HookEvent, context: workflow_policy::WorkflowContext) -> Option<HookOutput> {
     match workflow_policy::evaluate_with_context(event, Path::new(&root()), &context)
         .expect("evaluation should succeed")
@@ -747,6 +756,95 @@ fn allows_git_push_without_owner() {
         decision.is_none(),
         "git push is a transport operation and must not be gated by owner"
     );
+}
+
+#[test]
+fn allows_harmless_echo_without_owner() {
+    let event = event("Bash", json!({ "command": "echo test" }));
+    let decision = evaluate(&event, workflow_policy::WorkflowContext::unknown());
+    assert!(
+        decision.is_none(),
+        "harmless shell output should not be treated as implementation work"
+    );
+}
+
+#[test]
+fn allows_json_envelope_discovery_and_linking_without_owner() {
+    for (operation, params) in [
+        ("issue.view", json!({ "number": 3253 })),
+        ("issue.comments", json!({ "number": 3253 })),
+        ("issue.linked_prs", json!({ "number": 3253 })),
+        ("issue.spec.read", json!({ "number": 1935 })),
+        (
+            "issue.spec.section",
+            json!({ "number": 1935, "section": "spec" }),
+        ),
+        ("issue.spec.list", json!({ "state": "open" })),
+        (
+            "issue.create",
+            json!({ "title": "bug", "body": "body", "labels": ["bug"] }),
+        ),
+        (
+            "issue.spec.create",
+            json!({ "title": "SPEC: test", "body": "body" }),
+        ),
+        (
+            "issue.spec.edit",
+            json!({ "number": 1935, "section": "plan", "body": "plan" }),
+        ),
+        ("pr.current", json!({})),
+        ("pr.view", json!({ "number": 1 })),
+        ("pr.checks", json!({ "number": 1 })),
+        ("search", json!({ "query": "workflow policy owner" })),
+        (
+            "workspace.update",
+            json!({ "current_focus": "checking owner" }),
+        ),
+        (
+            "board.post",
+            json!({ "kind": "status", "body": "checking owner" }),
+        ),
+        ("pane.list", json!({})),
+        ("pane.read", json!({ "id": "pane-1" })),
+    ] {
+        let event = event(
+            "Bash",
+            json!({ "command": json_envelope_command(operation, params) }),
+        );
+        let decision = evaluate(&event, workflow_policy::WorkflowContext::unknown());
+        assert!(
+            decision.is_none(),
+            "{operation} JSON envelope should not be gated by owner"
+        );
+    }
+}
+
+#[test]
+fn blocks_chained_json_envelope_plus_mutation_without_owner() {
+    let command = format!(
+        "{}\n&& git add . && git commit -m 'fix: hidden mutation'",
+        json_envelope_command("issue.view", json!({ "number": 3253 }))
+    );
+    let event = event("Bash", json!({ "command": command }));
+    let decision = evaluate(&event, workflow_policy::WorkflowContext::unknown())
+        .expect("chained implementation mutation must still be blocked");
+    assert!(decision
+        .permission_decision_reason()
+        .contains("Owner Issue/SPEC"));
+}
+
+#[test]
+fn blocks_json_envelope_redirect_without_owner() {
+    let command = format!(
+        "{} > output.json",
+        json_envelope_command("issue.view", json!({ "number": 3253 }))
+    );
+    let event = event("Bash", json!({ "command": command }));
+    let decision = evaluate(&event, workflow_policy::WorkflowContext::unknown())
+        .expect("redirected JSON envelope output mutates the worktree");
+    assert!(decision
+        .permission_decision_reason()
+        .contains("Owner Issue/SPEC"));
 }
 
 #[test]

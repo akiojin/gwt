@@ -490,6 +490,12 @@ fn command_segments_are_ownerless_safe(command: &str, worktree_root: &Path) -> b
     if command_segments_are_goal_safe(command) {
         return true;
     }
+    if has_shell_output_redirection(command) {
+        return false;
+    }
+    if is_standalone_json_envelope_command(command) {
+        return true;
+    }
     let segments = super::segments::split_command_segments(command);
     !segments.is_empty()
         && segments
@@ -566,6 +572,7 @@ fn command_requires_spec_plan_tasks(command: &str) -> bool {
         transcript_path: None,
         cwd: None,
     }) || command_segments_are_goal_safe(command)
+        || is_standalone_json_envelope_command(command)
         || command_segments_are_transport_only(command)
         || command_segments_are_verification_only(command)
     {
@@ -618,6 +625,9 @@ fn is_mutating_work_event(event: &HookEvent) -> bool {
             event.command().is_some()
                 && !is_read_only_exploration_event(event)
                 && !is_goal_start_or_bookkeeping_event(event)
+                && !event
+                    .command()
+                    .is_some_and(is_standalone_json_envelope_command)
         }
         _ => false,
     }
@@ -754,24 +764,72 @@ fn is_workspace_identity_update_json_segment(segment: &str) -> bool {
 }
 
 fn is_json_envelope_operation(command: &str, allowed_operations: &[&str]) -> bool {
+    json_envelope_operation(command)
+        .as_deref()
+        .is_some_and(|operation| allowed_operations.contains(&operation))
+}
+
+fn is_standalone_json_envelope_command(command: &str) -> bool {
+    json_envelope_operation(command).is_some()
+}
+
+fn is_read_only_json_envelope_command(command: &str) -> bool {
+    json_envelope_operation(command)
+        .as_deref()
+        .is_some_and(is_read_only_json_envelope_operation)
+}
+
+fn json_envelope_operation(command: &str) -> Option<String> {
     let segments = super::segments::split_command_segments(command);
     if segments.len() != 1
         || !segments
             .first()
             .is_some_and(|segment| is_gwtd_only_segment(segment))
     {
-        return false;
+        return None;
     }
-    let Some(json) = extract_json_object(command) else {
-        return false;
-    };
-    let Ok(value) = serde_json::from_str::<serde_json::Value>(json) else {
-        return false;
-    };
+    let json = extract_json_object(command)?;
+    let value = serde_json::from_str::<serde_json::Value>(json).ok()?;
     value
         .get("operation")
         .and_then(|value| value.as_str())
-        .is_some_and(|operation| allowed_operations.contains(&operation))
+        .map(ToOwned::to_owned)
+}
+
+fn is_read_only_json_envelope_operation(operation: &str) -> bool {
+    matches!(
+        operation,
+        "workspace.candidates"
+            | "workspace.projection_list"
+            | "workspace.projection-list"
+            | "board.show"
+            | "board.config.show"
+            | "board.config-show"
+            | "improvement.list"
+            | "issue.view"
+            | "issue.comments"
+            | "issue.linked_prs"
+            | "issue.linked-prs"
+            | "issue.spec.read"
+            | "issue.spec.section"
+            | "issue.spec.list"
+            | "pr.current"
+            | "pr.view"
+            | "pr.checks"
+            | "pr.reviews"
+            | "pr.review_threads"
+            | "pr.review-threads"
+            | "actions.logs"
+            | "actions.job_logs"
+            | "actions.job-logs"
+            | "index.status"
+            | "diagnostics.cpu"
+            | "daemon.status"
+            | "hook.health"
+            | "pane.list"
+            | "pane.read"
+            | "search"
+    )
 }
 
 fn extract_json_object(segment: &str) -> Option<&str> {
@@ -787,11 +845,18 @@ fn is_read_only_exploration_event(event: &HookEvent) -> bool {
     let Some(command) = event.command() else {
         return false;
     };
-    if command.contains('>') || command.contains(" tee ") || command.contains("|tee ") {
+    if has_shell_output_redirection(command) {
         return false;
+    }
+    if is_read_only_json_envelope_command(command) {
+        return true;
     }
     let segments = super::segments::split_command_segments(command);
     !segments.is_empty() && segments.iter().all(|segment| is_read_only_segment(segment))
+}
+
+fn has_shell_output_redirection(command: &str) -> bool {
+    command.contains('>') || command.contains(" tee ") || command.contains("|tee ")
 }
 
 fn is_read_only_segment(segment: &str) -> bool {
@@ -800,8 +865,9 @@ fn is_read_only_segment(segment: &str) -> bool {
         return true;
     };
     match command_name.as_str() {
-        "awk" | "cat" | "date" | "false" | "grep" | "head" | "jq" | "ls" | "nl" | "printenv"
-        | "pwd" | "rg" | "tail" | "test" | "true" | "wc" | "which" | "[" => true,
+        "awk" | "cat" | "date" | "echo" | "false" | "grep" | "head" | "jq" | "ls" | "nl"
+        | "printf" | "printenv" | "pwd" | "rg" | "tail" | "test" | "true" | "wc" | "which"
+        | "[" => true,
         "find" => !tokens
             .iter()
             .any(|token| matches!(*token, "-delete" | "-exec" | "-execdir" | "-ok" | "-okdir")),
@@ -842,6 +908,7 @@ fn is_read_only_command_token(token: &str) -> bool {
         "awk"
             | "cat"
             | "date"
+            | "echo"
             | "false"
             | "find"
             | "grep"
@@ -849,6 +916,7 @@ fn is_read_only_command_token(token: &str) -> bool {
             | "jq"
             | "ls"
             | "nl"
+            | "printf"
             | "printenv"
             | "pwd"
             | "rg"
@@ -1378,6 +1446,23 @@ Coverage requirements.
             tool_name: Some("Bash".to_string()),
             tool_input: Some(serde_json::json!({
                 "command": "rg -n title_summary crates/gwt/src"
+            })),
+            transcript_path: None,
+            cwd: None,
+        };
+
+        assert_eq!(
+            evaluate_title_summary_guard(&event, true).expect("guard output"),
+            HookOutput::Silent
+        );
+    }
+
+    #[test]
+    fn title_summary_guard_allows_json_envelope_read_before_identity_is_set() {
+        let event = HookEvent {
+            tool_name: Some("Bash".to_string()),
+            tool_input: Some(serde_json::json!({
+                "command": "gwtd <<'JSON'\n{\"schema_version\":1,\"operation\":\"issue.view\",\"params\":{\"number\":3253}}\nJSON"
             })),
             transcript_path: None,
             cwd: None,
