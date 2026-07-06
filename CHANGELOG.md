@@ -1,6 +1,21 @@
 # Changelog
 
 All notable changes to this project will be documented in this file.
+## [9.65.1] - 2026-07-06
+
+### Bug Fixes
+
+- Allow ownerless workflow policy control commands
+
+### Miscellaneous Tasks
+
+- **work:** Record issue 3021 completion
+- **work:** Record issue 3021 pr preflight
+
+### Testing
+
+- **docker:** Stabilize fake docker timeout assertions
+
 ## [9.65.0] - 2026-07-06
 
 ### Bug Fixes
