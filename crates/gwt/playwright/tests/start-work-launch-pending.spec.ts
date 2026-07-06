@@ -6,7 +6,7 @@
  * opening/error early-returns, so the Start Work pending state (launchWizard
  * === null, launchWizardOpening set) threw a TypeError and the modal never
  * received its `.open` class. The crash is synchronous inside the click
- * handler, so it also blocked the `open_start_work` WS send — the button
+ * handler, so it also blocked the `open_intake_session` WS send — the button
  * silently did nothing.
  *
  * This spec boots the embedded frontend with a deterministic WebSocket stub
@@ -31,7 +31,7 @@ test.describe("Start Work launch-pending modal", () => {
     await page.goto(APP_URL);
 
     // App boots to an open git project; the operator rail is interactive.
-    const startWork = page.locator('.op-rail [data-cmd="start-work"]');
+    const startWork = page.locator('.op-rail [data-cmd="intake-session"]');
     await expect(startWork).toBeVisible({ timeout: 10_000 });
 
     await startWork.click();
@@ -111,7 +111,7 @@ async function installOpenProjectBackend(page: any): Promise<void> {
         if (message && message.kind === "frontend_ready") {
           this.emit(workspaceState);
         }
-        // open_start_work and other sends are intentionally ignored: the
+        // open_intake_session and other sends are intentionally ignored: the
         // pending modal is rendered client-side before this point.
       }
 

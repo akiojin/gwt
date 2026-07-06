@@ -596,6 +596,7 @@ fn workspace_work_agent_view_attaches_session_history() {
         agent_id: Some("codex".to_string()),
         display_name: Some("Codex".to_string()),
         updated_at: chrono::Utc::now(),
+        attached_by: None,
     };
     let view = super::workspace_work_agent_view_from_ref(&agent_ref, &index, Path::new("/"));
 
@@ -1945,6 +1946,19 @@ fn sample_runtime(
     sample_runtime_with_events(temp_root, tabs, active_tab_id).0
 }
 
+/// portable-pty falls back to `$HOME` as the child's cwd when no cwd is given
+/// and `chdir`s to it unchecked. Tests mutate HOME concurrently (and glibc
+/// env access is not thread-safe), so test pane spawns pin an always-existing
+/// cwd that needs no environment lookup — otherwise a pane test racing an
+/// env-mutating test dies with `PtyCreationFailed(ENOENT)` (Issue #3220).
+fn test_pane_cwd() -> Option<PathBuf> {
+    if cfg!(windows) {
+        Some(std::env::temp_dir())
+    } else {
+        Some(PathBuf::from("/"))
+    }
+}
+
 fn long_running_test_pane(id: &str) -> Pane {
     let (command, args) = if cfg!(windows) {
         (
@@ -1962,7 +1976,16 @@ fn long_running_test_pane(id: &str) -> Pane {
             vec!["-lc".to_string(), "sleep 30".to_string()],
         )
     };
-    Pane::new(id.to_string(), command, args, 80, 24, HashMap::new(), None).expect("test pane")
+    Pane::new(
+        id.to_string(),
+        command,
+        args,
+        80,
+        24,
+        HashMap::new(),
+        test_pane_cwd(),
+    )
+    .expect("test pane")
 }
 
 fn insert_test_pane_runtime(runtime: &mut AppRuntime, window_id: &str) {
@@ -2300,6 +2323,7 @@ fn sample_launch_wizard_session(tab_id: &str, project_root: &Path) -> LaunchWiza
                 linked_issue_kind: None,
                 ultracode_supported: false,
                 claude_workflows_enabled: false,
+                ephemeral_base_ref: None,
             },
             Vec::new(),
         ),
@@ -2454,6 +2478,7 @@ fn sample_no_agent_launch_wizard_session(tab_id: &str, project_root: &Path) -> L
                 linked_issue_kind: None,
                 ultracode_supported: false,
                 claude_workflows_enabled: false,
+                ephemeral_base_ref: None,
             },
             Vec::new(),
             Vec::new(),
@@ -2494,6 +2519,7 @@ fn sample_start_work_confirm_session(tab_id: &str, project_root: &Path) -> Launc
             linked_issue_kind: None,
             ultracode_supported: false,
             claude_workflows_enabled: false,
+            ephemeral_base_ref: None,
         },
         base_branch,
         sample_agent_options(),
@@ -2565,6 +2591,7 @@ fn sample_ready_agent_launch_wizard_session(
                 linked_issue_kind: None,
                 ultracode_supported: false,
                 claude_workflows_enabled: false,
+                ephemeral_base_ref: None,
             },
             sample_agent_options(),
             Vec::new(),
@@ -2762,7 +2789,7 @@ fn app_runtime_frontend_ready_replays_terminal_snapshot_only_to_requesting_clien
         80,
         24,
         HashMap::new(),
-        None,
+        test_pane_cwd(),
     )
     .expect("pane");
     pane.process_bytes(b"hello from frontend ready\n");
@@ -2826,7 +2853,7 @@ fn app_runtime_frontend_ready_replays_terminal_snapshot_with_sgr_attributes() {
         80,
         24,
         HashMap::new(),
-        None,
+        test_pane_cwd(),
     )
     .expect("pane");
     // Write red foreground + bold "ALERT" then reset, then default-color text.
@@ -2906,7 +2933,7 @@ fn app_runtime_frontend_ready_replays_terminal_snapshot_with_scrollback_history(
         80,
         6,
         HashMap::new(),
-        None,
+        test_pane_cwd(),
     )
     .expect("pane");
     for line in 1..=18 {
@@ -2973,7 +3000,7 @@ fn app_runtime_dock_window_tab_resizes_group_runtimes() {
             80,
             24,
             HashMap::new(),
-            None,
+            test_pane_cwd(),
         )
         .expect("pane");
         runtime.runtimes.insert(
@@ -4512,122 +4539,7 @@ fn app_runtime_window_list_enumerates_all_project_tabs() {
 }
 
 #[test]
-fn app_runtime_open_start_work_defers_remote_develop_preparation_until_launch() {
-    let _env_guard = env_test_lock().lock().expect("env lock");
-    let temp = tempdir().expect("tempdir");
-    let _home = ScopedEnvVar::set("HOME", temp.path());
-    let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
-    let repo = temp.path().join("repo");
-    let origin = init_git_clone_with_origin(&repo);
-    run_git(&repo, &["checkout", "-qb", "main"]);
-    run_git(&repo, &["push", "origin", "main"]);
-    run_git(&origin, &["symbolic-ref", "HEAD", "refs/heads/main"]);
-    run_git(&repo, &["checkout", "develop"]);
-    run_git(&repo, &["remote", "set-head", "origin", "-a"]);
-    run_git(&origin, &["branch", "-D", "develop"]);
-    run_git(&repo, &["update-ref", "-d", "refs/remotes/origin/develop"]);
-    let develop_before_open = gwt_core::process::hidden_command("git")
-        .args([
-            "show-ref",
-            "--verify",
-            "--quiet",
-            "refs/remotes/origin/develop",
-        ])
-        .current_dir(&repo)
-        .status()
-        .expect("check origin/develop before open");
-    assert!(
-        !develop_before_open.success(),
-        "fixture must start without origin/develop"
-    );
-
-    let tab = sample_project_tab(
-        "tab-1",
-        "Repo",
-        repo.clone(),
-        ProjectKind::Git,
-        &[WindowPreset::Board],
-    );
-    let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
-
-    let events =
-        runtime.handle_frontend_event("client-1".to_string(), FrontendEvent::OpenStartWork);
-
-    assert!(matches!(
-        events.first().map(|event| &event.event),
-        Some(BackendEvent::LaunchWizardState { wizard: Some(_) })
-    ));
-    let view = runtime
-        .launch_wizard
-        .as_ref()
-        .expect("start work wizard")
-        .wizard
-        .view();
-    assert_eq!(view.mode, gwt::LaunchWizardMode::StartWork);
-    assert_eq!(view.title, "Start Work");
-    assert!(!view.show_branch_controls);
-    assert_eq!(view.selected_branch_name, "origin/develop");
-    assert!(view.branch_name.starts_with("work/"));
-
-    let develop = gwt_core::process::hidden_command("git")
-        .args([
-            "show-ref",
-            "--verify",
-            "--quiet",
-            "refs/remotes/origin/develop",
-        ])
-        .current_dir(&repo)
-        .status()
-        .expect("check origin/develop");
-    assert!(
-        !develop.success(),
-        "opening Start Work must not fetch or restore origin/develop before the user launches"
-    );
-
-    let refs = gwt_core::process::hidden_command("git")
-        .args([
-            "for-each-ref",
-            "refs/heads/work",
-            "refs/remotes/origin/work",
-        ])
-        .current_dir(&repo)
-        .output()
-        .expect("list work refs");
-    assert!(refs.status.success(), "git for-each-ref failed");
-    assert!(
-        refs.stdout.is_empty(),
-        "opening Start Work must not create branch refs"
-    );
-
-    let cancel_events = runtime.handle_frontend_event(
-        "client-1".to_string(),
-        FrontendEvent::LaunchWizardAction {
-            action: LaunchWizardAction::Cancel,
-            bounds: None,
-        },
-    );
-    assert!(matches!(
-        cancel_events.first().map(|event| &event.event),
-        Some(BackendEvent::LaunchWizardState { wizard: None })
-    ));
-    let refs_after_cancel = gwt_core::process::hidden_command("git")
-        .args([
-            "for-each-ref",
-            "refs/heads/work",
-            "refs/remotes/origin/work",
-        ])
-        .current_dir(&repo)
-        .output()
-        .expect("list work refs after cancel");
-    assert!(refs_after_cancel.status.success());
-    assert!(
-        refs_after_cancel.stdout.is_empty(),
-        "cancelling Start Work must not create branch refs"
-    );
-}
-
-#[test]
-fn app_runtime_open_start_work_failure_surfaces_launch_wizard_open_error() {
+fn app_runtime_open_intake_session_failure_surfaces_launch_wizard_open_error() {
     let temp = tempdir().expect("tempdir");
     let repo = temp.path().join("repo");
     fs::create_dir_all(&repo).expect("create repo");
@@ -4641,7 +4553,7 @@ fn app_runtime_open_start_work_failure_surfaces_launch_wizard_open_error() {
     let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
 
     let events =
-        runtime.handle_frontend_event("client-1".to_string(), FrontendEvent::OpenStartWork);
+        runtime.handle_frontend_event("client-1".to_string(), FrontendEvent::OpenIntakeSession);
 
     assert!(runtime.launch_wizard.is_none());
     assert!(matches!(
@@ -5490,6 +5402,129 @@ fn app_runtime_issue_monitor_launch_complete_marks_issue_launched_and_keeps_acti
 }
 
 #[test]
+fn app_runtime_closing_issue_monitor_window_returns_issue_to_pending() {
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedEnvVar::set("HOME", temp.path());
+    let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+    let repo = temp.path().join("repo");
+    fs::create_dir_all(&repo).expect("create repo");
+    init_repo(&repo);
+    Cache::new(issue_cache_root(&repo))
+        .write_snapshot(&sample_issue_snapshot(
+            42,
+            "Issue Monitor close returns to pending",
+            &["bug"],
+            "Issue body",
+            "2026-06-23T00:00:00Z",
+        ))
+        .expect("write issue cache");
+    gwt::save_issue_monitor_prefs(
+        &gwt::issue_monitor_prefs_path_for_repo_path(&repo),
+        &gwt::IssueMonitorPrefs {
+            enabled: true,
+            max_active_agents: 1,
+            ..gwt::IssueMonitorPrefs::default()
+        },
+    )
+    .expect("save issue monitor prefs");
+    let tab = sample_project_tab_with_window_at(
+        "tab-1",
+        "agent-1",
+        repo.clone(),
+        WindowPreset::Agent,
+        WindowProcessStatus::Running,
+    );
+    let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+    let window_id = combined_window_id("tab-1", "agent-1");
+    runtime.pending_launch_feedback_contexts.insert(
+        window_id.clone(),
+        LaunchFeedbackContext {
+            client_id: "__issue_monitor__".to_string(),
+            title: "Issue Monitor".to_string(),
+            issue_monitor_issue_number: Some(42),
+        },
+    );
+    let (command, args) = if cfg!(windows) {
+        (
+            "cmd".to_string(),
+            vec![
+                "/d".to_string(),
+                "/s".to_string(),
+                "/c".to_string(),
+                "exit /b 0".to_string(),
+            ],
+        )
+    } else {
+        (
+            "/bin/sh".to_string(),
+            vec!["-lc".to_string(), "exit 0".to_string()],
+        )
+    };
+    let _ = runtime.handle_launch_complete(
+        window_id.clone(),
+        Ok((
+            ProcessLaunch {
+                command,
+                args,
+                env: HashMap::new(),
+                remove_env: Vec::new(),
+                cwd: Some(repo.clone()),
+            },
+            "session-issue-42".to_string(),
+            "work/issue-42".to_string(),
+            "Codex".to_string(),
+            repo.clone(),
+            gwt_agent::AgentId::Codex,
+            Some(42),
+            Some("origin/develop".to_string()),
+            gwt_agent::LaunchRuntimeTarget::Host,
+            repo.display().to_string(),
+        )),
+    );
+
+    // Closing the launched window must free the active slot and return the
+    // (unmerged) Issue to pending — never a fabricated completion state.
+    let events = runtime.close_window_events(&window_id);
+    let status = events
+        .iter()
+        .find_map(|event| match &event.event {
+            BackendEvent::IssueMonitorStatus { status } => Some(status),
+            _ => None,
+        })
+        .expect("issue monitor status after close");
+    assert_eq!(
+        status.active_count, 0,
+        "closing the launched window frees the active slot"
+    );
+    let inbox = events
+        .iter()
+        .find_map(|event| match &event.event {
+            BackendEvent::IssueMonitorInbox { items } => Some(items),
+            _ => None,
+        })
+        .expect("issue monitor inbox after close");
+    let item = inbox
+        .iter()
+        .find(|item| item.issue.number == 42)
+        .expect("issue row after close");
+    assert_eq!(
+        item.state,
+        gwt::MonitorInboxState::Queued,
+        "an unmerged close returns the Issue to pending"
+    );
+
+    let prefs = gwt::load_issue_monitor_prefs(&gwt::issue_monitor_prefs_path_for_repo_path(&repo))
+        .expect("load issue monitor prefs");
+    assert!(
+        prefs.launched_issues.is_empty(),
+        "closed window is no longer persisted as an active launch"
+    );
+}
+
+#[test]
 fn app_runtime_runtime_error_marks_issue_monitor_launched_issue_failed() {
     let _env_lock = env_test_lock()
         .lock()
@@ -5590,6 +5625,9 @@ fn app_runtime_runtime_error_marks_issue_monitor_launched_issue_failed() {
         vec![gwt::IssueMonitorFailedIssue {
             issue_number: 42,
             message: "Stop-block hit an error".to_string(),
+            // #3165 error-window lifecycle: the failed agent window id is
+            // retained so an explicit Launch Now can close the stale window.
+            window_id: Some(window_id.clone()),
         }]
     );
 }
@@ -6780,6 +6818,158 @@ fn app_runtime_active_work_projection_retains_stopped_agent_work_as_paused() {
     assert_eq!(paused.branch.as_deref(), Some("work/paused"));
 }
 
+// SPEC-3214 T-005/T-007: an ephemeral intake session leaves NO Work identity
+// and its throwaway `.intake-*` worktree is removed when it ends (clean), while
+// a dirty intake worktree is kept so no in-progress work is lost.
+#[test]
+fn ephemeral_intake_session_stop_removes_clean_worktree_and_emits_no_paused_work() {
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedEnvVar::set("HOME", temp.path());
+    let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+    let repo = temp.path().join("repo");
+    fs::create_dir_all(&repo).expect("create repo");
+    init_repo(&repo);
+    run_git(&repo, &["config", "user.email", "test@example.com"]);
+    run_git(&repo, &["config", "user.name", "Test User"]);
+    run_git(&repo, &["commit", "--allow-empty", "-m", "init"]);
+
+    let intake = temp.path().join(".intake-clean");
+    gwt_git::WorktreeManager::new(&repo)
+        .create_detached("HEAD", &intake)
+        .expect("intake worktree");
+    assert!(intake.exists());
+
+    let tab = sample_project_tab("tab-1", "Repo", repo.clone(), ProjectKind::Git, &[]);
+    let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+    let mut session = sample_active_agent_session("tab-1", "tab-1::intake");
+    session.session_id = "session-intake".to_string();
+    session.branch_name = String::new();
+    session.worktree_path = intake.clone();
+    session.window_id = "tab-1::intake".to_string();
+    runtime
+        .active_agent_sessions
+        .insert("tab-1::intake".to_string(), session);
+
+    runtime.mark_agent_session_stopped("tab-1::intake");
+
+    assert!(!runtime.active_agent_sessions.contains_key("tab-1::intake"));
+    assert!(
+        !intake.exists(),
+        "clean intake worktree is removed when the session ends"
+    );
+    let active_work_count = runtime
+        .active_work_projection_for_tab("tab-1", &runtime.tabs[0])
+        .map(|view| view.active_works.len())
+        .unwrap_or(0);
+    assert_eq!(
+        active_work_count, 0,
+        "an ephemeral intake session emits no Work identity (paused or otherwise)"
+    );
+    let recorded = gwt_core::workspace_projection::load_workspace_work_items(&repo)
+        .ok()
+        .flatten();
+    assert!(
+        recorded.is_none_or(|projection| projection.work_items.is_empty()),
+        "no Work event is recorded for an ephemeral intake session"
+    );
+}
+
+#[test]
+fn ephemeral_intake_session_stop_keeps_dirty_worktree() {
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedEnvVar::set("HOME", temp.path());
+    let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+    let repo = temp.path().join("repo");
+    fs::create_dir_all(&repo).expect("create repo");
+    init_repo(&repo);
+    run_git(&repo, &["config", "user.email", "test@example.com"]);
+    run_git(&repo, &["config", "user.name", "Test User"]);
+    run_git(&repo, &["commit", "--allow-empty", "-m", "init"]);
+
+    let intake = temp.path().join(".intake-dirty");
+    gwt_git::WorktreeManager::new(&repo)
+        .create_detached("HEAD", &intake)
+        .expect("intake worktree");
+    // Uncommitted work must not be destroyed.
+    fs::write(intake.join("wip.txt"), "unsaved intake work").expect("write wip");
+
+    let tab = sample_project_tab("tab-1", "Repo", repo.clone(), ProjectKind::Git, &[]);
+    let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+    let mut session = sample_active_agent_session("tab-1", "tab-1::intake");
+    session.session_id = "session-intake-dirty".to_string();
+    session.branch_name = String::new();
+    session.worktree_path = intake.clone();
+    session.window_id = "tab-1::intake".to_string();
+    runtime
+        .active_agent_sessions
+        .insert("tab-1::intake".to_string(), session);
+
+    runtime.mark_agent_session_stopped("tab-1::intake");
+
+    assert!(
+        intake.exists() && intake.join("wip.txt").exists(),
+        "a dirty intake worktree is kept so uncommitted work is never lost"
+    );
+}
+
+// SPEC-3214 (codex #3235 review): a NORMAL branch worktree that a user happens
+// to name `.intake-*` must NOT be misclassified as an ephemeral intake session
+// — it keeps its worktree and its Paused-Work behavior. Classification requires
+// the worktree to be branchless (detached), not just `.intake-*`-named.
+#[test]
+fn branch_worktree_named_intake_is_not_treated_as_ephemeral() {
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedEnvVar::set("HOME", temp.path());
+    let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+    let repo = temp.path().join("repo");
+    fs::create_dir_all(&repo).expect("create repo");
+    init_repo(&repo);
+    run_git(&repo, &["config", "user.email", "test@example.com"]);
+    run_git(&repo, &["config", "user.name", "Test User"]);
+    run_git(&repo, &["commit", "--allow-empty", "-m", "init"]);
+
+    // A real BRANCH worktree that merely happens to be named `.intake-real`.
+    let branch_wt = temp.path().join(".intake-real");
+    gwt_git::WorktreeManager::new(&repo)
+        .create_from_base("HEAD", "feature/real", &branch_wt)
+        .expect("branch worktree");
+    assert!(branch_wt.exists());
+
+    let tab = sample_project_tab("tab-1", "Repo", repo.clone(), ProjectKind::Git, &[]);
+    let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+    let mut session = sample_active_agent_session("tab-1", "tab-1::real");
+    session.session_id = "session-real".to_string();
+    session.branch_name = "feature/real".to_string();
+    session.worktree_path = branch_wt.clone();
+    session.window_id = "tab-1::real".to_string();
+    runtime
+        .active_agent_sessions
+        .insert("tab-1::real".to_string(), session);
+
+    runtime.mark_agent_session_stopped("tab-1::real");
+
+    assert!(
+        branch_wt.exists(),
+        "a real branch worktree named .intake-* must not be removed as ephemeral"
+    );
+    let works = gwt_core::workspace_projection::load_workspace_work_items(&repo)
+        .ok()
+        .flatten();
+    assert!(
+        works.is_some_and(|projection| !projection.work_items.is_empty()),
+        "a real branch session still records a Paused Work"
+    );
+}
+
 // #3065: a stopped session's Pause record must not inherit the repo-shared
 // projection's owner/title — those belong to whatever Work last wrote the
 // projection. Owner/summary come from the session's own Work item (matched
@@ -7296,6 +7486,152 @@ fn app_runtime_active_work_projection_merges_live_and_paused_work_rows() {
         .expect("paused Work row");
     assert_eq!(paused.lifecycle_state, "paused");
     assert_eq!(paused.active_agents, 0);
+}
+
+fn history_agent_ref_view(
+    session_id: &str,
+    agent_id: Option<&str>,
+    updated_at: &str,
+) -> gwt::WorkspaceHistoryAgentView {
+    gwt::WorkspaceHistoryAgentView {
+        session_id: session_id.to_string(),
+        agent_id: agent_id.map(str::to_string),
+        display_name: agent_id.map(str::to_string),
+        updated_at: updated_at.to_string(),
+        sessions: Vec::new(),
+    }
+}
+
+fn history_work_view(
+    id: &str,
+    branch: &str,
+    worktree: &str,
+    agents: Vec<gwt::WorkspaceHistoryAgentView>,
+) -> gwt::WorkspaceHistoryView {
+    gwt::WorkspaceHistoryView {
+        id: id.to_string(),
+        title: branch.to_string(),
+        intent: None,
+        summary: None,
+        progress_summary: None,
+        status_category: "active".to_string(),
+        owner: None,
+        created_at: "2026-06-29T07:45:56Z".to_string(),
+        updated_at: "2026-06-30T08:45:48Z".to_string(),
+        completed_at: None,
+        agents,
+        execution_containers: vec![gwt::WorkspaceExecutionContainerView {
+            branch: Some(branch.to_string()),
+            worktree_path: Some(worktree.to_string()),
+            pr_number: None,
+            pr_url: None,
+            pr_state: None,
+        }],
+        board_refs: Vec::new(),
+        related_workspace_ids: Vec::new(),
+        events: Vec::new(),
+    }
+}
+
+/// Issue #3213 regression (PR #3205 orphaned): a stray agent ref that shares a
+/// session id with ANOTHER branch's Work must not swallow that Work's row.
+/// Reproduces the affected project's works.json: the issue-3184 item carried a
+/// mis-attributed (empty-identity) ref to issue-3197's session, and the
+/// issue-3197 row — the session's legitimate owner — vanished from the
+/// Workspace list with no remaining surface to resume it from.
+#[test]
+fn app_runtime_paused_work_row_survives_stray_shared_session_on_other_branch() {
+    let temp = tempdir().expect("tempdir");
+    let repo = temp.path().join("repo");
+    fs::create_dir_all(&repo).expect("create repo");
+    let projection =
+        gwt_core::workspace_projection::WorkspaceProjection::default_for_project(&repo);
+    let works = vec![
+        history_work_view(
+            "work-work-issue-3184-9431c779",
+            "work/issue-3184",
+            "/home/user/gwt/work/issue-3184",
+            vec![
+                history_agent_ref_view(
+                    "810665c4-2e03-46b3-879b-7eec0064d038",
+                    Some("Claude Code"),
+                    "2026-06-29T07:46:15Z",
+                ),
+                // The stray ref: recorded under issue-3184 with an empty
+                // identity, but the session belongs to issue-3197.
+                history_agent_ref_view(
+                    "0fe1b919-09dd-47e5-8976-76f4478aa907",
+                    None,
+                    "2026-06-29T08:24:29Z",
+                ),
+            ],
+        ),
+        history_work_view(
+            "work-work-issue-3197-00504508",
+            "work/issue-3197",
+            "/home/user/gwt/work/issue-3197",
+            vec![history_agent_ref_view(
+                "0fe1b919-09dd-47e5-8976-76f4478aa907",
+                Some("Claude Code"),
+                "2026-06-29T07:45:56Z",
+            )],
+        ),
+    ];
+
+    let view =
+        super::active_work_projection_from_saved_with_journal(projection, Vec::new(), works, None);
+
+    assert_eq!(
+        view.active_works.len(),
+        2,
+        "both branch rows must surface despite the shared session id"
+    );
+    let issue_3197 = view
+        .active_works
+        .iter()
+        .find(|work| work.id == "work-work-issue-3197-00504508")
+        .expect("work/issue-3197 row must not be swallowed by the stray session ref");
+    assert_eq!(issue_3197.branch.as_deref(), Some("work/issue-3197"));
+    assert_eq!(issue_3197.lifecycle_state, "paused");
+}
+
+/// FR-350 contract guard for the #3213 fix: a live Work synthesized without
+/// git_details (no branch / worktree on the row) still dedupes the
+/// session-sharing history item — the original purpose of the session-id
+/// fallback in `active_work_already_present`.
+#[test]
+fn app_runtime_paused_work_dedups_by_session_when_live_row_has_no_git_identity() {
+    let temp = tempdir().expect("tempdir");
+    let repo = temp.path().join("repo");
+    fs::create_dir_all(&repo).expect("create repo");
+    let mut projection =
+        gwt_core::workspace_projection::WorkspaceProjection::default_for_project(&repo);
+    projection.agents.push({
+        let mut agent = workspace_agent_summary_for_test("session-shared", Some("work-x"));
+        agent.branch = None;
+        agent.worktree_path = None;
+        agent
+    });
+    // The history row carries a full git identity and the same session.
+    let works = vec![history_work_view(
+        "work-work-other-0000abcd",
+        "work/other",
+        "/home/user/gwt/work/other",
+        vec![history_agent_ref_view(
+            "session-shared",
+            Some("Claude Code"),
+            "2026-06-29T07:45:56Z",
+        )],
+    )];
+
+    let view =
+        super::active_work_projection_from_saved_with_journal(projection, Vec::new(), works, None);
+
+    assert_eq!(
+        view.active_works.len(),
+        1,
+        "identity-less live row + session-sharing history must stay one row"
+    );
 }
 
 #[test]
@@ -10644,7 +10980,7 @@ fn app_runtime_status_thread_reports_process_exit_without_reader_eof() {
             80,
             24,
             HashMap::new(),
-            None,
+            test_pane_cwd(),
         )
         .expect("pane"),
     ));
@@ -17046,8 +17382,48 @@ fn handle_migration_error_clears_pending_and_broadcasts_recovery_label() {
     )));
 }
 
+// SPEC-3214 Phase 3: OpenIntakeSession opens the Launch Wizard flagged as an
+// ephemeral intake — the resulting launch will be branchless / detached.
 #[test]
-fn open_start_work_refuses_while_migration_pending() {
+fn open_intake_session_opens_ephemeral_branchless_wizard() {
+    let temp = tempdir().expect("tempdir");
+    let repo = temp.path().join("repo");
+    fs::create_dir_all(&repo).expect("create repo");
+    init_repo(&repo);
+    run_git(&repo, &["config", "user.email", "test@example.com"]);
+    run_git(&repo, &["config", "user.name", "Test User"]);
+    run_git(&repo, &["commit", "--allow-empty", "-m", "init"]);
+
+    let tab = sample_project_tab("tab-1", "Repo", repo.clone(), ProjectKind::Git, &[]);
+    let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+
+    let events =
+        runtime.handle_frontend_event("client-1".to_string(), FrontendEvent::OpenIntakeSession);
+    assert!(
+        !events
+            .iter()
+            .any(|event| matches!(event.event, BackendEvent::LaunchWizardOpenError { .. })),
+        "intake session opens without error: {events:?}"
+    );
+
+    let wizard = &runtime
+        .launch_wizard
+        .as_ref()
+        .expect("intake wizard")
+        .wizard;
+    assert_eq!(
+        wizard.context.ephemeral_base_ref.as_deref(),
+        Some(gwt::start_work::START_WORK_BASE_BRANCH_CANDIDATES[0]),
+        "intake wizard is flagged ephemeral on the base ref"
+    );
+    assert!(
+        wizard.context.normalized_branch_name.is_empty(),
+        "intake wizard reserves no branch"
+    );
+}
+
+#[test]
+fn open_intake_session_refuses_while_migration_pending() {
     // SPEC-1934 US-7 / FR-034: Workspace Start Work must not run on a tab
     // whose Normal → Nested Bare+Worktree migration is still pending.
     // Without this gate, the launch path tries to fetch
@@ -17060,16 +17436,15 @@ fn open_start_work_refuses_while_migration_pending() {
     let tab = migration_pending_tab("tab-1", project);
     let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
 
-    let events = runtime.open_start_work("client-1");
+    let events = runtime.open_intake_session("client-1");
 
     assert!(
         events.iter().any(|event| matches!(
             event,
             OutboundEvent {
                 target: DispatchTarget::Client(_),
-                event: BackendEvent::LaunchWizardOpenError { title, message },
-            } if title == "Start Work"
-                && message == "Complete the project migration before starting work"
+                event: BackendEvent::LaunchWizardOpenError { message, .. },
+            } if message == "Complete the project migration before starting an intake session"
         )),
         "Start Work on a migration_pending tab must surface a clear error: {events:?}"
     );
@@ -18601,6 +18976,7 @@ fn agent_view_borrows_identity_from_ledger_when_record_has_none() {
         agent_id: None,
         display_name: None,
         updated_at: chrono::Utc::now(),
+        attached_by: None,
     };
     let view = super::workspace_work_agent_view_from_ref(&agent_ref, &index, Path::new("/"));
     assert_eq!(view.display_name.as_deref(), Some("Claude Code"));
@@ -18867,6 +19243,7 @@ fn agent_view_synthesizes_latest_conversation_when_history_is_empty() {
         agent_id: Some("claude".to_string()),
         display_name: Some("Claude Code".to_string()),
         updated_at: chrono::Utc::now(),
+        attached_by: None,
     };
 
     let view = super::workspace_work_agent_view_from_ref(&agent_ref, &index, temp.path());
@@ -18904,6 +19281,7 @@ fn agent_view_marks_session_history_only_when_worktree_and_branch_are_missing() 
         agent_id: Some("claude".to_string()),
         display_name: Some("Claude Code".to_string()),
         updated_at: chrono::Utc::now(),
+        attached_by: None,
     };
 
     let view = super::workspace_work_agent_view_from_ref(&agent_ref, &index, &repo);
@@ -18940,6 +19318,7 @@ fn agent_view_keeps_session_resumable_when_missing_worktree_branch_exists() {
         agent_id: Some("claude".to_string()),
         display_name: Some("Claude Code".to_string()),
         updated_at: chrono::Utc::now(),
+        attached_by: None,
     };
 
     let view = super::workspace_work_agent_view_from_ref(&agent_ref, &index, &repo);
@@ -20307,4 +20686,115 @@ fn is_identifier_like_title_classifies_shapes() {
     ));
     assert!(!super::is_identifier_like_title("SPEC-3075"));
     assert!(!super::is_identifier_like_title("develop"));
+}
+
+#[test]
+fn issue_monitor_launch_succeeded_ack_is_non_scanning_and_persists() {
+    // Issue #3222: the launch-success ACK used to re-enter the full
+    // scan+claim flow on a fresh disk snapshot that could not see other
+    // in-flight claims, re-claiming them (same-owner renewal) and spawning
+    // duplicate windows past max_active. The ACK must only bind the window and
+    // persist; scanning for a fresh snapshot is allowed, claiming is not.
+    let temp = tempfile::TempDir::new().expect("tempdir");
+    // Thread-local override: never mutate process-global HOME in parallel tests.
+    let _home = gwt_core::test_support::ScopedGwtHome::set(temp.path());
+    let repo = temp.path().join("repo");
+    std::fs::create_dir_all(&repo).expect("create repo");
+    init_repo(&repo);
+
+    // Seed an in-flight claim (Launching, no window bound yet) on disk.
+    let prefs_path = gwt::issue_monitor_prefs_path_for_repo_path(&repo);
+    let prefs = gwt::IssueMonitorPrefs {
+        enabled: true,
+        launching_issues: vec![gwt::IssueMonitorLaunchingIssue {
+            issue_number: 42,
+            claimed_at: None,
+        }],
+        ..gwt::IssueMonitorPrefs::default()
+    };
+    gwt::save_issue_monitor_prefs(&prefs_path, &prefs).expect("seed prefs");
+
+    let tab = sample_project_tab("tab-1", "Repo", repo.clone(), ProjectKind::Git, &[]);
+    let (mut runtime, _recorded) =
+        sample_runtime_with_events(temp.path(), vec![tab], Some("tab-1"));
+
+    let events = runtime.issue_monitor_launch_succeeded_events(42, "tab-1::agent-1");
+
+    // The ACK may scan for a fresh snapshot, but must NOT claim/launch: no
+    // settings-required wizard, no "launch requested" toast.
+    for event in &events {
+        assert!(
+            !matches!(event.event, BackendEvent::LaunchWizardState { .. }),
+            "ACK must not open the launch wizard (settings-required prompt)"
+        );
+        if let BackendEvent::IssueMonitorToast { message, .. } = &event.event {
+            assert!(
+                !message.contains("launch requested"),
+                "ACK must not trigger launches: {message}"
+            );
+        }
+    }
+    let persisted = gwt::load_issue_monitor_prefs(&prefs_path).expect("reload");
+    assert!(
+        persisted
+            .launched_issues
+            .iter()
+            .any(|entry| entry.issue_number == 42 && entry.window_id == "tab-1::agent-1"),
+        "the ACK binds and persists the window: {:?}",
+        persisted.launched_issues
+    );
+    assert!(
+        persisted.launching_issues.is_empty(),
+        "the in-flight marker is consumed by the bind"
+    );
+}
+
+#[test]
+fn issue_monitor_windows_closed_requeue_is_non_scanning() {
+    // Issue #3222 (same re-entrancy class): closing a monitor window requeues
+    // + persists and may rescan for the snapshot, but must not claim/launch.
+    let temp = tempfile::TempDir::new().expect("tempdir");
+    // Thread-local override: never mutate process-global HOME in parallel tests.
+    let _home = gwt_core::test_support::ScopedGwtHome::set(temp.path());
+    let repo = temp.path().join("repo");
+    std::fs::create_dir_all(&repo).expect("create repo");
+    init_repo(&repo);
+
+    let prefs_path = gwt::issue_monitor_prefs_path_for_repo_path(&repo);
+    let prefs = gwt::IssueMonitorPrefs {
+        enabled: true,
+        launched_issues: vec![gwt::IssueMonitorLaunchedIssue {
+            issue_number: 42,
+            window_id: "tab-1::agent-1".to_string(),
+        }],
+        ..gwt::IssueMonitorPrefs::default()
+    };
+    gwt::save_issue_monitor_prefs(&prefs_path, &prefs).expect("seed prefs");
+
+    let tab = sample_project_tab("tab-1", "Repo", repo.clone(), ProjectKind::Git, &[]);
+    let (mut runtime, _recorded) =
+        sample_runtime_with_events(temp.path(), vec![tab], Some("tab-1"));
+
+    let events = runtime.issue_monitor_windows_closed_events(&["tab-1::agent-1".to_string()]);
+
+    // Close may scan for a fresh snapshot, but must NOT claim/launch — a
+    // re-claim here could instantly respawn the just-closed window or
+    // duplicate other in-flight launches.
+    for event in &events {
+        assert!(
+            !matches!(event.event, BackendEvent::LaunchWizardState { .. }),
+            "window close must not open the launch wizard"
+        );
+        if let BackendEvent::IssueMonitorToast { message, .. } = &event.event {
+            assert!(
+                !message.contains("launch requested"),
+                "window close must not trigger launches: {message}"
+            );
+        }
+    }
+    let persisted = gwt::load_issue_monitor_prefs(&prefs_path).expect("reload");
+    assert!(
+        persisted.launched_issues.is_empty(),
+        "closed window is released from the launched set"
+    );
 }

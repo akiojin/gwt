@@ -37,6 +37,27 @@ pub fn issue_monitor_daemon_payloads(
                 }),
             });
         }
+        // SPEC #3200 Option A: surface review-agent spawn requests to the GUI.
+        for dispatch in monitor.take_pending_review_dispatches() {
+            payloads.push(IssueMonitorDaemonPayload {
+                event: "review_dispatch".to_string(),
+                payload: serde_json::to_value(&dispatch).expect("review dispatch serializes"),
+            });
+        }
+        // SPEC #3200 FR-034 (T-111): surface unattended autonomous lifecycle
+        // transitions (merged / needs-human / retry / auto-merge armed) as
+        // toasts. Drained only while a GUI is connected so notices queued during
+        // a fully-unattended window still reach the operator on the next connect.
+        for notice in monitor.take_autonomous_notices() {
+            payloads.push(IssueMonitorDaemonPayload {
+                event: "toast".to_string(),
+                payload: serde_json::json!({
+                    "level": notice.level,
+                    "message": notice.message,
+                    "issue_number": notice.issue_number,
+                }),
+            });
+        }
     }
 
     payloads.extend([
@@ -104,6 +125,298 @@ pub fn load_open_issue_monitor_candidates_for_repo_path(
                 }
             }
             Err(live_error)
+        }
+    }
+}
+
+/// Issue #3225: GitHub-derived completion probe for the claim loop — "does
+/// this issue have a linked PR that is already MERGED?". Uses the issue's
+/// timeline (cross-referenced / connected PRs), so it catches fixes merged via
+/// ANY branch, not just the monitor's own `work/issue-N`. Fails open (false)
+/// on errors so a transient gh failure never blocks real work.
+pub fn issue_completed_by_merged_pr(owner: &str, repo: &str, issue_number: u64) -> bool {
+    match crate::cli::issue::fetch_linked_prs_via_gh(
+        owner,
+        repo,
+        gwt_github::IssueNumber(issue_number),
+    ) {
+        // codex #3226 review: only a PR that actually CLOSES the issue counts
+        // — a merged PR that merely references it (Refs #N / partial work)
+        // must not mark the issue done.
+        Ok(prs) => prs
+            .iter()
+            .any(|pr| pr.will_close_target && pr.state.eq_ignore_ascii_case("merged")),
+        Err(error) => {
+            tracing::debug!(
+                issue = issue_number,
+                error = %error,
+                "issue monitor completion probe failed (fail-open)"
+            );
+            false
+        }
+    }
+}
+
+/// Mark any active launched Issue whose work branch has a merged PR as
+/// `Merged`, freeing the active slot. Skips the network call when nothing is
+/// launched, and leaves work launched when the PR query fails (so a transient
+/// error never closes the slot on a false signal).
+pub fn reconcile_issue_monitor_merges(monitor: &mut IssueMonitorState, repo_path: &Path) {
+    if monitor.active_launched_branches().is_empty() {
+        return;
+    }
+    match gwt_git::pr_status::fetch_merged_pr_branches(repo_path) {
+        Ok(merged_branches) => {
+            let merged = monitor.reconcile_merged_branches(&merged_branches);
+            if !merged.is_empty() {
+                tracing::info!(
+                    issues = ?merged,
+                    "issue monitor marked merged work and freed active slots"
+                );
+            }
+        }
+        Err(error) => {
+            tracing::debug!(
+                error = %error,
+                "issue monitor merge reconciliation skipped (PR query failed)"
+            );
+        }
+    }
+}
+
+/// Parse `git symbolic-ref --short refs/remotes/origin/HEAD` output (e.g.
+/// `origin/main`) into the bare default branch name. Fail-closed to `main`.
+pub fn parse_default_base_branch(symbolic_ref_stdout: &str) -> String {
+    let trimmed = symbolic_ref_stdout.trim();
+    let name = trimmed.strip_prefix("origin/").unwrap_or(trimmed);
+    if name.is_empty() {
+        "main".to_string()
+    } else {
+        name.to_string()
+    }
+}
+
+/// Resolve the repo's default base branch (the branch autonomous PRs merge
+/// into) via `origin/HEAD`. Fail-closed to `main` on any failure.
+pub fn resolve_default_base_branch(repo_path: &Path) -> String {
+    let hub = gwt_core::process_console::global();
+    let output = gwt_core::process_console::spawn_logged_blocking(
+        &hub,
+        gwt_core::process_console::ProcessKind::Git,
+        "git",
+        &["symbolic-ref", "--short", "refs/remotes/origin/HEAD"],
+        gwt_core::process_console::SpawnOptions::new("git symbolic-ref origin/HEAD")
+            .current_dir(repo_path),
+    );
+    match output {
+        Ok(output) if output.success() => parse_default_base_branch(&output.stdout),
+        _ => "main".to_string(),
+    }
+}
+
+/// SPEC #3200 T-041: apply the pre-launch autonomous eligibility gate to every
+/// two-stage candidate before the scan claims/launches them. For each candidate
+/// it fetches the base-branch protection and runs
+/// [`IssueMonitorState::prepare_autonomous_candidate`], which escalates
+/// ineligible issues to `NeedsHuman` (removing them from the launch queue) and
+/// captures the acceptance snapshot + `Implementing` phase for eligible ones.
+/// A no-op unless autonomous mode is on (default OFF preserves SPEC #3165).
+pub fn apply_autonomous_eligibility(
+    monitor: &mut IssueMonitorState,
+    issues: &[IssueMonitorIssue],
+    repo_slug: &str,
+    repo_path: &Path,
+    now: &str,
+) {
+    if !monitor.autonomous_mode() {
+        return;
+    }
+    // Only fetch branch protection for candidates whose transient-retry backoff
+    // window has elapsed (retry_ready) — a backed-off issue is skipped this scan
+    // without a network call (SPEC #3200 T-043/FR-029).
+    let candidates: Vec<&IssueMonitorIssue> = issues
+        .iter()
+        .filter(|issue| monitor.is_autonomous_two_stage_candidate(issue))
+        .filter(|issue| monitor.retry_ready(issue.number, now))
+        .collect();
+    if candidates.is_empty() {
+        return;
+    }
+    let base_branch = resolve_default_base_branch(repo_path);
+    let protection = gwt_git::branch_protection::fetch_branch_protection(repo_slug, &base_branch);
+    for issue in candidates {
+        let _ = monitor.prepare_autonomous_candidate(issue, &protection, now);
+    }
+}
+
+/// SPEC #3200 Option A (daemon-direct + token): advance every in-flight
+/// autonomous issue one step through the loop, using freshly-fetched signals.
+///
+/// - **Implementing** → detect the implementation agent's open PR; on discovery
+///   bind it (`begin_review`) and emit a `review_dispatch` so the GUI spawns the
+///   independent review agent.
+/// - **Reviewing** → once the verdict has arrived, assemble the strong-gate
+///   inputs and route: `Deliver` arms the auto-merge (after minting an audit
+///   token); `Remediate` re-queues (bounded); `Escalate` → NeedsHuman; `WaitForCi`
+///   waits.
+/// - **Delivering** → watch for the merge; on merge verify `merged_sha ==
+///   reviewed_sha` (TOCTOU layer-4) before completing, else escalate.
+///
+/// No-op unless autonomous mode is on. Review-dispatch requests are queued on the
+/// monitor ([`IssueMonitorState::take_pending_review_dispatches`]) for the GUI to
+/// spawn the review agents.
+pub fn advance_autonomous_in_flight(
+    monitor: &mut IssueMonitorState,
+    issues: &[IssueMonitorIssue],
+    repo_slug: &str,
+    repo_path: &Path,
+    daemon_secret: &[u8],
+    now: &str,
+) {
+    if !monitor.autonomous_mode() {
+        return;
+    }
+    let base_branch = resolve_default_base_branch(repo_path);
+    for issue_number in monitor.autonomous_in_flight_issues() {
+        let Some(record) = monitor.autonomous_record(issue_number).cloned() else {
+            continue;
+        };
+        match record.phase {
+            crate::AutonomousPhase::Implementing => {
+                let Some(branch) = monitor
+                    .inbox_item(issue_number)
+                    .and_then(|item| item.launch_plan.as_ref())
+                    .map(|plan| plan.branch_name.clone())
+                else {
+                    continue;
+                };
+                if let Some(pr) =
+                    gwt_git::pr_status::fetch_open_pr_number_for_branch(repo_path, &branch)
+                {
+                    if let Some(sha) = gwt_git::pr_status::fetch_pr_head_sha(repo_path, pr) {
+                        monitor.begin_review(issue_number, pr, &sha);
+                        let criteria = issues
+                            .iter()
+                            .find(|issue| issue.number == issue_number)
+                            .and_then(|issue| issue.body.clone())
+                            .map(|body| {
+                                crate::issue_monitor_gate::classify_acceptance_criteria(&body).ids
+                            })
+                            .unwrap_or_default();
+                        let diff = gwt_git::pr_status::fetch_pr_diff(repo_path, pr, 200_000)
+                            .unwrap_or_default();
+                        let linked_issue_kind = issues
+                            .iter()
+                            .find(|issue| issue.number == issue_number)
+                            .map(crate::issue_monitor::issue_monitor_linked_issue_kind)
+                            .unwrap_or_default();
+                        monitor.push_review_dispatch(crate::AutonomousReviewDispatch {
+                            issue_number,
+                            pr_number: pr,
+                            reviewed_sha: sha,
+                            required_criteria: criteria,
+                            diff,
+                            linked_issue_kind,
+                        });
+                    }
+                }
+            }
+            crate::AutonomousPhase::Reviewing => {
+                let Some(pr) = record.pr_number else { continue };
+                let protection =
+                    gwt_git::branch_protection::fetch_branch_protection(repo_slug, &base_branch);
+                let rollup = gwt_git::pr_status::fetch_pr_status_check_rollup(repo_path, pr);
+                let head = gwt_git::pr_status::fetch_pr_head_sha(repo_path, pr).unwrap_or_default();
+                let body = issues
+                    .iter()
+                    .find(|issue| issue.number == issue_number)
+                    .and_then(|issue| issue.body.clone())
+                    .unwrap_or_default();
+                let Some(inputs) =
+                    monitor.autonomous_gate_inputs(issue_number, protection, &rollup, &head, &body)
+                else {
+                    continue; // verdict not back yet → wait
+                };
+                match crate::issue_monitor_gate::route_autonomous_gate(&inputs) {
+                    crate::issue_monitor_gate::GateAction::Deliver => {
+                        // Audit: a daemon-signed authorization record bound to the
+                        // reviewed SHA (control-plane proof the gate authorized it).
+                        let token = crate::issue_monitor_authz::sign_merge_authorization(
+                            daemon_secret,
+                            issue_number,
+                            &inputs.reviewed_sha,
+                            &base_branch,
+                        );
+                        tracing::info!(
+                            issue = issue_number,
+                            pr,
+                            reviewed_sha = %inputs.reviewed_sha,
+                            token = %token,
+                            "autonomous gate PASS — arming auto-merge"
+                        );
+                        monitor.begin_delivering(issue_number);
+                        // Bind the arm to the reviewed head SHA so GitHub refuses
+                        // to merge if the head advanced past what the gate reviewed.
+                        // codex #3217 review: announce the arm ONLY on success —
+                        // a failed arm must not leave a success toast while the
+                        // record would otherwise sit in Delivering with nothing
+                        // armed. Fail closed: escalate so the operator acts.
+                        if gwt_git::pr_status::merge_pr_auto(repo_path, pr, &inputs.reviewed_sha) {
+                            monitor.record_auto_merge_armed(issue_number);
+                        } else {
+                            tracing::warn!(issue = issue_number, pr, "auto-merge arm failed");
+                            monitor.escalate_to_needs_human(
+                                issue_number,
+                                "auto-merge arming failed after gate pass — arm manually or relaunch",
+                            );
+                        }
+                    }
+                    crate::issue_monitor_gate::GateAction::WaitForCi => {}
+                    crate::issue_monitor_gate::GateAction::Remediate(reason) => {
+                        monitor.record_autonomous_failure(
+                            issue_number,
+                            crate::FailureClass::Transient,
+                            reason,
+                            now,
+                        );
+                    }
+                    crate::issue_monitor_gate::GateAction::Escalate(reason) => {
+                        monitor.escalate_to_needs_human(issue_number, reason);
+                    }
+                }
+            }
+            crate::AutonomousPhase::Delivering => {
+                let Some(pr) = record.pr_number else { continue };
+                // Merge completion is detected by the presence of a merge commit.
+                // The layer-4 identity check then compares the reviewed SHA to the
+                // PR's HEAD SHA (`headRefOid`) — NOT the merge commit oid: a squash
+                // / merge-commit produces a NEW oid, while `headRefOid` is the head
+                // tip that was actually merged (== reviewed SHA when HEAD did not
+                // advance). Live-verified against real GitHub (SPEC #3200 layer-4).
+                if gwt_git::pr_status::fetch_pr_merge_commit_sha(repo_path, pr).is_some() {
+                    let reviewed = record.reviewed_sha.clone().unwrap_or_default();
+                    let merged_head =
+                        gwt_git::pr_status::fetch_pr_head_sha(repo_path, pr).unwrap_or_default();
+                    if crate::issue_monitor_authz::merged_sha_matches_reviewed(
+                        &reviewed,
+                        &merged_head,
+                    ) {
+                        monitor.record_merged(issue_number);
+                    } else {
+                        tracing::error!(
+                            issue = issue_number,
+                            reviewed_sha = %reviewed,
+                            merged_head = %merged_head,
+                            "SECURITY: merged head SHA != reviewed SHA — escalating"
+                        );
+                        monitor.escalate_to_needs_human(
+                            issue_number,
+                            "merged head SHA does not match the reviewed SHA",
+                        );
+                    }
+                }
+            }
+            _ => {}
         }
     }
 }
@@ -297,6 +610,134 @@ mod tests {
             updated_at: UpdatedAt::new("t1"),
             comments: vec![],
         }
+    }
+
+    #[test]
+    fn payloads_surface_autonomous_notices_as_toasts_when_gui_is_connected() {
+        // SPEC #3200 FR-034 (T-111): daemon-side autonomous transitions queue
+        // operator notices; the worker drains them into `toast` payloads so the
+        // GUI's issue_monitor_toast pipe (surface toast + persistent autonomous
+        // notification stack) receives them.
+        let mut monitor = IssueMonitorState::with_prefs(
+            IssueMonitorConfig {
+                enabled: true,
+                ..IssueMonitorConfig::default()
+            },
+            crate::IssueMonitorPrefs {
+                autonomous_mode: true,
+                ..crate::IssueMonitorPrefs::default()
+            },
+        );
+        monitor.set_gui_connected(true);
+        monitor.record_attempt(42);
+        monitor.escalate_to_needs_human(42, "review rejected");
+
+        let payloads = issue_monitor_daemon_payloads(&mut monitor, true);
+
+        let toast = payloads
+            .iter()
+            .find(|payload| {
+                payload.event == "toast"
+                    && payload.payload.get("issue_number").and_then(|v| v.as_u64()) == Some(42)
+            })
+            .expect("autonomous notice surfaces as a toast payload");
+        assert_eq!(
+            toast.payload.get("level").and_then(|v| v.as_str()),
+            Some("error")
+        );
+        assert!(toast
+            .payload
+            .get("message")
+            .and_then(|v| v.as_str())
+            .is_some_and(|message| message.contains("review rejected")));
+        // Drained: a second pass emits no duplicate.
+        let again = issue_monitor_daemon_payloads(&mut monitor, true);
+        assert!(!again.iter().any(|payload| {
+            payload.event == "toast"
+                && payload.payload.get("issue_number").and_then(|v| v.as_u64()) == Some(42)
+        }));
+    }
+
+    #[test]
+    fn payloads_retain_autonomous_notices_while_no_gui_is_connected() {
+        // Fully-unattended window: with no GUI connected the notices stay queued
+        // (bounded) instead of being dropped, and surface on the next connect.
+        let mut monitor = IssueMonitorState::with_prefs(
+            IssueMonitorConfig {
+                enabled: true,
+                ..IssueMonitorConfig::default()
+            },
+            crate::IssueMonitorPrefs {
+                autonomous_mode: true,
+                ..crate::IssueMonitorPrefs::default()
+            },
+        );
+        monitor.record_attempt(42);
+        monitor.escalate_to_needs_human(42, "boom");
+
+        let offline = issue_monitor_daemon_payloads(&mut monitor, false);
+        assert!(
+            !offline.iter().any(|payload| payload.event == "toast"
+                && payload.payload.get("issue_number").and_then(|v| v.as_u64()) == Some(42)),
+            "no toast emitted while the GUI is disconnected"
+        );
+
+        let online = issue_monitor_daemon_payloads(&mut monitor, true);
+        assert!(
+            online.iter().any(|payload| payload.event == "toast"
+                && payload.payload.get("issue_number").and_then(|v| v.as_u64()) == Some(42)),
+            "queued notice surfaces once a GUI connects"
+        );
+    }
+
+    #[test]
+    fn claim_skips_and_marks_issues_already_completed_by_a_merged_pr() {
+        // Issue #3225: an issue whose fix is already merged (a linked PR in
+        // MERGED state) must not be re-launched by a fresh monitor — the
+        // completion signal must come from GitHub, not instance-local prefs.
+        // The claim loop probes right before claiming; positives are recorded
+        // Merged (persisted) and the slot goes to the next queued candidate.
+        let mut monitor = IssueMonitorState::new(crate::IssueMonitorConfig {
+            enabled: true,
+            max_active: 1,
+            ..crate::IssueMonitorConfig::default()
+        });
+        monitor.set_gui_connected(true);
+        crate::scan_issue_monitor_candidates(
+            &mut monitor,
+            &[issue(42), issue(43)],
+            "2026-07-02T00:00:00Z",
+        );
+        let client = FakeIssueClient::new();
+        client.seed(github_issue(42));
+        client.seed(github_issue(43));
+
+        // #42 is already completed by a merged PR; #43 is genuinely open work.
+        let launches = monitor.claim_next_launch_requests_with_probe(
+            &client,
+            "host:1",
+            "2026-07-02T00:00:10Z",
+            1,
+            |issue_number| issue_number == 42,
+        );
+
+        assert_eq!(
+            launches.iter().map(|l| l.issue_number).collect::<Vec<_>>(),
+            vec![43],
+            "the completed issue is skipped; the slot goes to real work"
+        );
+        assert_eq!(
+            monitor.inbox_item(42).map(|item| item.state),
+            Some(crate::MonitorInboxState::Merged),
+            "completed issue is recorded Merged (persisted, never relaunched)"
+        );
+        assert!(monitor.prefs().merged_issues.contains(&42));
+        // Idempotent on later scans: stays Merged, never re-queued.
+        crate::scan_issue_monitor_candidates(&mut monitor, &[issue(42)], "2026-07-02T00:01:00Z");
+        assert_eq!(
+            monitor.inbox_item(42).map(|item| item.state),
+            Some(crate::MonitorInboxState::Merged)
+        );
     }
 
     #[test]
@@ -514,5 +955,80 @@ mod tests {
             error.to_string(),
             "GitHub origin remote URL is invalid: https://github.com/owner"
         );
+    }
+
+    #[test]
+    fn apply_autonomous_eligibility_is_noop_when_mode_off() {
+        // SPEC #3200 FR-001: default autonomous_mode OFF ⇒ no autonomous state is
+        // created and (crucially) no branch-protection network call is made. The
+        // early return runs before any gh invocation, so this test exercises the
+        // gate without touching the network.
+        use crate::{
+            IssueMonitorConfig, IssueMonitorIssue, IssueMonitorIssueState, IssueMonitorState,
+        };
+        let mut monitor = IssueMonitorState::new(IssueMonitorConfig::default());
+        let issues = vec![IssueMonitorIssue {
+            number: 50,
+            title: "t".to_string(),
+            labels: vec!["auto-merge".to_string()],
+            state: IssueMonitorIssueState::Open,
+            body: Some("## Acceptance Criteria\n- [ ] AC-1: x\n".to_string()),
+            url: None,
+        }];
+        apply_autonomous_eligibility(
+            &mut monitor,
+            &issues,
+            "owner/repo",
+            std::path::Path::new("/tmp/repo"),
+            "2026-06-29T00:00:00Z",
+        );
+        assert!(
+            monitor.autonomous_record(50).is_none(),
+            "off ⇒ no autonomous state created, no network call",
+        );
+    }
+
+    #[test]
+    fn advance_autonomous_in_flight_is_noop_when_mode_off() {
+        // Default OFF ⇒ no phase advancement, no network call, no merge.
+        use crate::{
+            AutonomousPhase, IssueMonitorConfig, IssueMonitorIssue, IssueMonitorIssueState,
+            IssueMonitorState,
+        };
+        let mut monitor = IssueMonitorState::new(IssueMonitorConfig::default());
+        monitor.set_autonomous_phase(50, AutonomousPhase::Reviewing); // would otherwise act
+        let issues = vec![IssueMonitorIssue {
+            number: 50,
+            title: "t".to_string(),
+            labels: vec!["auto-merge".to_string()],
+            state: IssueMonitorIssueState::Open,
+            body: None,
+            url: None,
+        }];
+        advance_autonomous_in_flight(
+            &mut monitor,
+            &issues,
+            "owner/repo",
+            std::path::Path::new("/tmp/repo"),
+            b"secret",
+            "2026-06-29T00:00:00Z",
+        );
+        assert_eq!(
+            monitor.autonomous_record(50).map(|r| r.phase),
+            Some(AutonomousPhase::Reviewing),
+            "off ⇒ phase unchanged, no network/merge",
+        );
+        assert!(monitor.take_pending_review_dispatches().is_empty());
+    }
+
+    #[test]
+    fn parse_default_base_branch_strips_origin_prefix_and_fails_closed() {
+        assert_eq!(parse_default_base_branch("origin/main\n"), "main");
+        assert_eq!(parse_default_base_branch("origin/develop"), "develop");
+        // A bare name with no origin/ prefix is taken as-is.
+        assert_eq!(parse_default_base_branch("trunk"), "trunk");
+        // Empty / unresolved ⇒ fail-closed to main.
+        assert_eq!(parse_default_base_branch(""), "main");
+        assert_eq!(parse_default_base_branch("origin/"), "main");
     }
 }

@@ -235,19 +235,48 @@ test("SPEC-3038 Command Rail retires the legacy sidebar entirely", () => {
   }
 });
 
-test("project bar and command palette expose Start Work outside the Branches surface", () => {
-  const projectBarAction = document.querySelector('.op-rail .op-rail__item[data-cmd="start-work"]');
-  assert.ok(projectBarAction, "expected the Command Rail to expose a Start Work action");
-  assert.match(projectBarAction.textContent, /Start Work/);
+// SPEC-3245 Phase 3: Start Work is removed from the command rail and palette;
+// the 2-lane entries (Intake / Open Workspace) replace it.
+test("command rail and palette drop Start Work in favor of the 2-lane entries", () => {
+  assert.equal(
+    document.querySelector('.op-rail .op-rail__item[data-cmd="start-work"]'),
+    null,
+    "the Command Rail must not expose a Start Work action",
+  );
+  assert.doesNotMatch(
+    operatorShellSource,
+    /id:\s*"start-work"/,
+    "Command Palette registry must not include start-work",
+  );
+  assert.doesNotMatch(
+    operatorShellSource,
+    /id:\s*"spawn-agent"/,
+    "Command Palette registry must not include the spawn-agent alias of Start Work",
+  );
+  assert.doesNotMatch(
+    appSource,
+    /case\s+"start-work":/,
+    "app.js must not route a start-work command",
+  );
+  // The replacements exist.
+  assert.match(operatorShellSource, /id:\s*"intake-session"/, "Intake entry present");
+  assert.match(operatorShellSource, /id:\s*"open-branches"/, "Open Workspace entry present");
+});
+
+// SPEC-3214 Phase 3 / SPEC-3245 Phase 4: the command palette exposes an
+// "Intake" entry (the "session" suffix is dropped to avoid colliding with the
+// Session domain term) that sends open_intake_session (the ephemeral,
+// branchless new-work entry).
+test("command palette exposes Intake wired to open_intake_session", () => {
   assert.match(
     operatorShellSource,
-    /id:\s*"start-work"[\s\S]+label:\s*"Start Work"/,
-    "expected Command Palette registry to include Start Work",
+    /id:\s*"intake-session"[\s\S]+label:\s*"Intake"/,
+    "expected Command Palette registry to include the Intake entry",
   );
   assert.match(
     appSource,
-    /case\s+"start-work":[\s\S]+kind:\s*"open_start_work"/,
-    "expected Start Work command to send the global open_start_work event",
+    /case\s+"intake-session":[\s\S]+kind:\s*"open_intake_session"/,
+    "expected Intake session command to send open_intake_session",
   );
 });
 
@@ -1510,9 +1539,20 @@ test("empty canvas shows a first-window call to action (SPEC-3038 AS-4.5)", () =
     empty.hasAttribute("hidden"),
     "empty state ships hidden until the workspace reports zero windows",
   );
-  assert.ok(
+  // SPEC-3245 Phase 3: the empty state offers the 2-lane entries (Curate =
+  // Intake, Execute = Open Workspace) + Add window — Start Work is removed.
+  assert.equal(
     empty.querySelector("#canvas-empty-start-work"),
-    "expected a Start Work action",
+    null,
+    "Start Work action must be removed (SPEC-3245)",
+  );
+  assert.ok(
+    empty.querySelector("#canvas-empty-intake"),
+    "expected an Intake (Curate) action",
+  );
+  assert.ok(
+    empty.querySelector("#canvas-empty-open-workspace"),
+    "expected an Open Workspace (Execute) action",
   );
   assert.ok(
     empty.querySelector("#canvas-empty-add-window"),
@@ -1523,7 +1563,9 @@ test("empty canvas shows a first-window call to action (SPEC-3038 AS-4.5)", () =
     /function\s+updateCanvasEmptyState\(\)[\s\S]{0,300}?windowMap\.size/,
     "app.js must toggle the empty state from the live window count",
   );
-  assert.match(appSource, /canvas-empty-start-work/, "Start Work action must be wired");
+  assert.doesNotMatch(appSource, /canvas-empty-start-work/, "Start Work wiring must be removed");
+  assert.match(appSource, /canvas-empty-intake/, "Intake action must be wired");
+  assert.match(appSource, /canvas-empty-open-workspace/, "Open Workspace action must be wired");
   assert.match(appSource, /canvas-empty-add-window/, "Add window action must be wired");
 });
 
@@ -3273,43 +3315,66 @@ test("FR-040 (安心): in-app attention toasts are wired with click-to-jump", ()
   assert.match(appSource, /agentAttentionToaster\.handleRuntimeState/);
   assert.match(appSource, /function showAttentionToast/);
   assert.match(appSource, /frameWindow\(notice\.windowId\)/);
-  assert.match(inlineStyle, /\.attention-toast\s*\{/);
+  // SPEC #3206: attention now renders through the shared bottom-right alerts
+  // stack (.toast-alerts*), not its own .attention-toast block.
+  assert.match(inlineStyle, /\.toast-alerts__item\s*\{/);
   assert.match(
     inlineStyle,
-    /@media \(prefers-reduced-motion: reduce\)[\s\S]*?\.attention-toast\s*\{[\s\S]*?animation:\s*none/,
-    "attention toast must drop its entrance animation under reduced motion",
+    /@media \(prefers-reduced-motion: reduce\)[\s\S]*?\.toast-alerts__item\s*\{[\s\S]*?animation:\s*none/,
+    "alerts toast must drop its entrance animation under reduced motion",
   );
 });
 
 test("FR-040 refinement: error toasts persist, stack newest-on-top, share a fixed width", () => {
-  // Error toasts must stay until the operator dismisses them (no auto-hide),
-  // while quieter flavors still auto-hide.
+  // SPEC #3206: the FR-040 contract is preserved through the shared alerts
+  // stack. Error stays until dismissed (timeoutMs 0 = sticky); quieter flavors
+  // auto-hide via timeoutMs.
   assert.match(
     appSource,
-    /if\s*\(\s*flavor\s*!==\s*"error"\s*\)\s*\{[\s\S]*?setTimeout/,
-    "only non-error flavors may arm the auto-hide timer",
+    /flavor\s*===\s*"error"\s*\?\s*0\s*:/,
+    "error flavor must be sticky (timeoutMs 0)",
   );
-  // Newest toast on top: the renderer prepends into the stack.
-  assert.match(
-    appSource,
-    /attentionToastStack\(\)\.prepend\(toast\)/,
-    "new toasts must prepend so the freshest sits on top",
-  );
-  // Closing collapses the toast so the rest of the stack settles down.
-  assert.match(appSource, /function dismissAttentionToast/);
-  assert.match(appSource, /dataset\.leaving\s*=\s*"true"/);
+  // Newest toast on top + collapse-on-close are owned by the shared region.
+  assert.match(appSource, /newestOnTop:\s*true/, "alerts stack puts the freshest on top");
+  assert.match(appSource, /animateDismiss:\s*true/, "alerts stack collapses on close");
   // Fixed width (not content-sized) so toasts line up.
   assert.match(
     inlineStyle,
-    /\.attention-toast\s*\{[^}]*width:\s*min\(\s*360px/,
-    "attention toasts must use a fixed width",
+    /\.toast-alerts\s*\{[^}]*width:\s*min\(\s*360px/,
+    "alerts toasts must use a fixed width",
   );
   // The leaving state collapses height to let the stack settle.
   assert.match(
     inlineStyle,
-    /\.attention-toast\[data-leaving="true"\]\s*\{[^}]*max-height:\s*0/,
+    /\.toast-alerts__item\[data-leaving="true"\]\s*\{[^}]*max-height:\s*0/,
     "leaving toasts must collapse their height",
   );
+});
+
+test("SPEC #3206 P2: alerts toast CSS only references defined Operator tokens", () => {
+  // An undefined token in var() silently resolves to nothing (the legacy
+  // attention block shipped `var(--shadow-3)`, which is defined nowhere, so
+  // the alerts cards rendered with no elevation shadow at all). Every token
+  // the .toast-alerts family references must exist in tokens.css /
+  // typography.css (or be a custom property app.css itself defines).
+  const tokensCss = readFileSync(resolve(here, "../styles/tokens.css"), "utf8");
+  const typographyCss = readFileSync(resolve(here, "../styles/typography.css"), "utf8");
+  const defined = new Set();
+  for (const source of [tokensCss, typographyCss, inlineStyle]) {
+    for (const m of source.matchAll(/(--[a-z0-9-]+)\s*:/g)) {
+      defined.add(m[1]);
+    }
+  }
+  const blocks = inlineStyle.match(/\.toast-alerts[^{}]*\{[^}]*\}/g) ?? [];
+  assert.ok(blocks.length >= 5, "expected the .toast-alerts rule family in app.css");
+  for (const block of blocks) {
+    for (const m of block.matchAll(/var\(\s*(--[a-z0-9-]+)/g)) {
+      assert.ok(
+        defined.has(m[1]),
+        `.toast-alerts references undefined token ${m[1]}: ${block.trim().split("\n")[0]}`,
+      );
+    }
+  }
 });
 
 test("Work surface lifecycle badge styles every agent-session state (SPEC-2359 W-12 FR-351)", () => {
@@ -3624,15 +3689,17 @@ function cssBlockContaining(css, selector) {
 
 // === merged from origin/develop: SPEC-1939/2014 perf + Launch Wizard coverage ===
 
-test("Start Work command opens a pending wizard before backend state arrives", () => {
+// SPEC-3245 Phase 3: the Intake session command reuses the pending-wizard
+// mechanism (formerly Start Work) to keep the modal open before backend state.
+test("Intake session command opens a pending wizard before backend state arrives", () => {
   const commandCase = appSource.match(
-    /case\s+"start-work":[\s\S]*?case\s+"theme-cycle"/,
+    /case\s+"intake-session":[\s\S]*?case\s+"theme-cycle"/,
   );
-  assert.ok(commandCase, "expected Start Work command case");
+  assert.ok(commandCase, "expected Intake session command case");
   assert.match(
     commandCase[0],
-    /openStartWorkPendingWizard\(\)[\s\S]*?kind:\s*"open_start_work"/,
-    "expected Start Work to render a local pending wizard before sending open_start_work",
+    /openStartWorkPendingWizard\(\)[\s\S]*?kind:\s*"open_intake_session"/,
+    "expected Intake session to render a local pending wizard before sending open_intake_session",
   );
   assert.match(
     launchWizardSource,

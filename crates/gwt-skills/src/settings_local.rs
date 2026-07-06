@@ -216,6 +216,44 @@ fn find_ancestor_git_entry(base_dir: &Path) -> Option<(PathBuf, PathBuf)> {
     None
 }
 
+/// SPEC-3214 (codex #3237): whether a gwt-managed merged hook config
+/// (`.claude/settings.local.json` or `.codex/hooks.json`) at `path` holds any
+/// USER content, as opposed to being a pristine gwt-generated file.
+///
+/// gwt regenerates these files by merging its own hooks (tagged with the
+/// `GWT_MANAGED_HOOK` runtime marker) with any user hooks and preserving unrelated
+/// top-level keys. A freshly generated file therefore has exactly one key,
+/// `hooks`, containing only managed entries. This lets an ephemeral intake
+/// worktree reap even though its launch materialized the hook config, while a
+/// user edit (an extra key or a non-managed hook) keeps it. Fails closed
+/// (returns `true`) on any non-absent read/parse ambiguity so nothing is
+/// destroyed; only a genuinely absent file returns `false` (nothing to lose).
+pub fn managed_hook_config_has_user_content(path: &Path) -> bool {
+    let content = match fs::read_to_string(path) {
+        Ok(content) => content,
+        // Absent: nothing to preserve here.
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return false,
+        // Present but unreadable (invalid UTF-8 from a manual edit, a transient
+        // permission error, …): fail closed — keep it.
+        Err(_) => return true,
+    };
+    if content.trim().is_empty() {
+        return false;
+    }
+    let root = match serde_json::from_str::<Value>(&content) {
+        Ok(Value::Object(map)) => map,
+        // Non-object or malformed JSON is not something gwt writes — treat as
+        // a user edit and keep it.
+        _ => return true,
+    };
+    // Any top-level key other than the managed `hooks` key is user content.
+    if root.keys().any(|key| key != "hooks") {
+        return true;
+    }
+    // Any non-managed hook within `hooks` is user content.
+    !existing_user_hooks(root.get("hooks")).is_empty()
+}
+
 fn read_existing_settings(path: &Path) -> io::Result<Map<String, Value>> {
     if !path.exists() {
         return Ok(Map::new());
@@ -709,6 +747,67 @@ mod tests {
     };
 
     use super::*;
+
+    #[test]
+    fn managed_hook_config_has_user_content_distinguishes_generated_from_edited() {
+        let dir = tempfile::tempdir().unwrap();
+        let settings = dir.path().join(".claude/settings.local.json");
+
+        // A pristine gwt-generated file has only managed hooks → no user content.
+        generate_settings_local(dir.path()).unwrap();
+        assert!(
+            !managed_hook_config_has_user_content(&settings),
+            "a freshly gwt-generated hook config holds no user content"
+        );
+
+        // A user hook added under `hooks` → user content.
+        let mut root = read_existing_settings(&settings).unwrap();
+        let hooks = root
+            .entry("hooks".to_string())
+            .or_insert_with(|| Value::Object(Map::new()));
+        if let Value::Object(events) = hooks {
+            events.insert(
+                "PreToolUse".to_string(),
+                serde_json::json!([{ "hooks": [{ "type": "command", "command": "echo user" }] }]),
+            );
+        }
+        write_settings_atomically(&settings, &Value::Object(root)).unwrap();
+        assert!(
+            managed_hook_config_has_user_content(&settings),
+            "a user-authored hook is user content"
+        );
+
+        // An unrelated top-level key gwt does not manage → user content.
+        generate_settings_local(dir.path()).unwrap();
+        let mut root = read_existing_settings(&settings).unwrap();
+        root.insert(
+            "permissions".to_string(),
+            serde_json::json!({"allow": ["*"]}),
+        );
+        write_settings_atomically(&settings, &Value::Object(root)).unwrap();
+        assert!(
+            managed_hook_config_has_user_content(&settings),
+            "an unrelated top-level user setting is user content"
+        );
+
+        // Malformed JSON → fail closed (keep).
+        std::fs::write(&settings, "{ not json").unwrap();
+        assert!(
+            managed_hook_config_has_user_content(&settings),
+            "malformed config fails closed (treated as user content)"
+        );
+
+        // Absent → nothing to preserve.
+        std::fs::remove_file(&settings).unwrap();
+        assert!(!managed_hook_config_has_user_content(&settings));
+
+        // Present but unreadable (a directory at the path) → fail closed (keep).
+        std::fs::create_dir_all(&settings).unwrap();
+        assert!(
+            managed_hook_config_has_user_content(&settings),
+            "a present-but-unreadable config fails closed (kept), unlike an absent one"
+        );
+    }
 
     fn commands_for_event<'a>(value: &'a Value, event: &str) -> Vec<&'a str> {
         value["hooks"][event]

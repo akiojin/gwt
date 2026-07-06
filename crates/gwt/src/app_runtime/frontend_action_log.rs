@@ -427,7 +427,9 @@ pub(super) fn frontend_user_action_log(event: &FrontendEvent) -> Option<Frontend
                 .window(id)
                 .target(issue_number.to_string())
         }
-        FrontendEvent::OpenStartWork => FrontendUserActionLog::new("open_start_work", "launch"),
+        FrontendEvent::OpenIntakeSession => {
+            FrontendUserActionLog::new("open_intake_session", "launch")
+        }
         FrontendEvent::OpenStartWorkInAgentKanban { board_id, lane_id } => {
             FrontendUserActionLog::new("open_start_work_in_agent_kanban", "launch")
                 .window(board_id)
@@ -651,6 +653,10 @@ pub(super) fn frontend_user_action_log(event: &FrontendEvent) -> Option<Frontend
         }
         FrontendEvent::SetIssueMonitorEnabled { enabled } => {
             FrontendUserActionLog::new("set_issue_monitor_enabled", "issue_monitor")
+                .mode(if *enabled { "on" } else { "off" })
+        }
+        FrontendEvent::SetIssueMonitorAutonomousMode { enabled } => {
+            FrontendUserActionLog::new("set_issue_monitor_autonomous_mode", "issue_monitor")
                 .mode(if *enabled { "on" } else { "off" })
         }
         FrontendEvent::SetIssueMonitorMaxActiveAgents { max_active_agents } => {

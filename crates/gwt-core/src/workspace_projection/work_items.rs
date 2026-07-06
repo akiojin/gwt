@@ -48,6 +48,12 @@ pub struct WorkAgentRef {
     #[serde(default)]
     pub display_name: Option<String>,
     pub updated_at: DateTime<Utc>,
+    /// Issue #3216: kind of the event that first attached this session, kept
+    /// on the ref so mis-attribution stays diagnosable from works.json alone
+    /// after the work-events journal is compacted. `None` for legacy refs and
+    /// synthesized (non-event) attach paths.
+    #[serde(default)]
+    pub attached_by: Option<WorkEventKind>,
 }
 
 /// Reference from a Work item to the branch / worktree / PR it executed in.
@@ -276,6 +282,27 @@ impl WorkItemsProjection {
             self.work_items.len() - 1
         });
 
+        // Issue #3216: FR-348 gives "1 agent session : 1 Work". When an event
+        // would attach a session that another Work already owns AND the two
+        // Works carry conflicting git identities, the pairing is a
+        // mis-attribution (the event's work_item_id and session were assembled
+        // from divergent sources, e.g. the repo-shared current projection vs
+        // the live session). The attach is refused below; the event itself
+        // stays recorded for diagnosis.
+        let stray_session_attach = event
+            .agent_session_id
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .is_some_and(|session_id| {
+                work_session_attach_conflicts(
+                    &self.work_items,
+                    index,
+                    session_id,
+                    event.execution_container.as_ref(),
+                )
+            });
+
         let item = &mut self.work_items[index];
         // SPEC-2359 Phase W-16 (FR-403): a Backfill event is a synthetic
         // materialization marker, not activity. Applied to an existing item
@@ -352,12 +379,22 @@ impl WorkItemsProjection {
                 agent.agent_id = event.agent_id.clone().or(agent.agent_id.clone());
                 agent.display_name = event.display_name.clone().or(agent.display_name.clone());
                 agent.updated_at = event.updated_at;
+            } else if stray_session_attach {
+                tracing::warn!(
+                    target: "gwt::workspace_projection",
+                    work_item_id = %event.work_item_id,
+                    session_id = %session_id,
+                    event_kind = ?event.kind,
+                    "refused stray session attach: session already bound to a Work \
+                     with a conflicting git identity (Issue #3216)"
+                );
             } else {
                 item.agents.push(WorkAgentRef {
                     session_id,
                     agent_id: event.agent_id.clone(),
                     display_name: event.display_name.clone(),
                     updated_at: event.updated_at,
+                    attached_by: Some(event.kind),
                 });
             }
         }
@@ -433,6 +470,75 @@ fn push_unique(values: &mut Vec<String>, value: String) {
     if !values.iter().any(|existing| existing == &value) {
         values.push(value);
     }
+}
+
+/// Issue #3216: true when `session_id` is already bound to a *different* Work
+/// item whose git identity conflicts with the target item's identity (the
+/// target's recorded containers plus the incoming event's container). Mirrors
+/// the view-layer identity-conflict gate: a match on either dimension clears
+/// the conflict, and a side without any identity never conflicts.
+fn work_session_attach_conflicts(
+    work_items: &[WorkItem],
+    target_index: usize,
+    session_id: &str,
+    event_container: Option<&WorkspaceExecutionContainerRef>,
+) -> bool {
+    let target_containers = work_items[target_index]
+        .execution_containers
+        .iter()
+        .chain(event_container)
+        .collect::<Vec<_>>();
+    work_items.iter().enumerate().any(|(index, other)| {
+        index != target_index
+            && other
+                .agents
+                .iter()
+                .any(|agent| agent.session_id == session_id)
+            && work_container_identities_conflict(&other.execution_containers, &target_containers)
+    })
+}
+
+fn work_container_identities_conflict(
+    owner_containers: &[WorkspaceExecutionContainerRef],
+    target_containers: &[&WorkspaceExecutionContainerRef],
+) -> bool {
+    let owner_branches = owner_containers
+        .iter()
+        .filter_map(|container| normalized_work_branch(container.branch.as_deref()))
+        .collect::<Vec<_>>();
+    let target_branches = target_containers
+        .iter()
+        .filter_map(|container| normalized_work_branch(container.branch.as_deref()))
+        .collect::<Vec<_>>();
+    let owner_worktrees = owner_containers
+        .iter()
+        .filter_map(|container| container.worktree_path.as_deref())
+        .collect::<Vec<_>>();
+    let target_worktrees = target_containers
+        .iter()
+        .filter_map(|container| container.worktree_path.as_deref())
+        .collect::<Vec<_>>();
+
+    let branch_matches = owner_branches
+        .iter()
+        .any(|left| target_branches.iter().any(|right| left == right));
+    let worktree_matches = owner_worktrees
+        .iter()
+        .any(|left| target_worktrees.iter().any(|right| left == right));
+    if branch_matches || worktree_matches {
+        return false;
+    }
+    let branch_conflicts = !owner_branches.is_empty() && !target_branches.is_empty();
+    let worktree_conflicts = !owner_worktrees.is_empty() && !target_worktrees.is_empty();
+    branch_conflicts || worktree_conflicts
+}
+
+fn normalized_work_branch(branch: Option<&str>) -> Option<String> {
+    let value = branch?.trim();
+    if value.is_empty() {
+        return None;
+    }
+    Some(value.strip_prefix("origin/").unwrap_or(value).to_string())
 }
 
 const DERIVED_PROGRESS_SUMMARY_MAX_ITEMS: usize = 6;
@@ -814,5 +920,131 @@ mod tests {
             "first Done timestamp must be preserved on idempotent Done re-apply"
         );
         assert_eq!(item.updated_at, t2, "updated_at should still advance");
+    }
+
+    fn container_for_test(branch: &str, worktree: &str) -> WorkspaceExecutionContainerRef {
+        WorkspaceExecutionContainerRef {
+            branch: Some(branch.to_string()),
+            worktree_path: Some(PathBuf::from(worktree)),
+            pr_number: None,
+            pr_url: None,
+            pr_state: None,
+        }
+    }
+
+    /// Issue #3216: reproduce the works.json corruption behind Issue #3213 —
+    /// a session bound to one branch's Work must not be attached to another
+    /// Work whose branch identity conflicts (FR-348: 1 session : 1 Work).
+    #[test]
+    fn apply_event_rejects_stray_session_attach_to_conflicting_branch_item() {
+        let t0 = Utc.with_ymd_and_hms(2026, 6, 29, 7, 45, 56).unwrap();
+        let t1 = Utc.with_ymd_and_hms(2026, 6, 29, 8, 24, 29).unwrap();
+        let mut projection = WorkItemsProjection::empty(t0);
+
+        let mut owner_start = WorkEvent::new(WorkEventKind::Start, "work-work-issue-3197", t0);
+        owner_start.agent_session_id = Some("session-owner".to_string());
+        owner_start.execution_container = Some(container_for_test(
+            "work/issue-3197",
+            "/repo/work/issue-3197",
+        ));
+        projection.apply_event(owner_start);
+
+        let mut other_start = WorkEvent::new(WorkEventKind::Start, "work-work-issue-3184", t0);
+        other_start.agent_session_id = Some("session-other".to_string());
+        other_start.execution_container = Some(container_for_test(
+            "work/issue-3184",
+            "/repo/work/issue-3184",
+        ));
+        projection.apply_event(other_start);
+
+        // The stray event: the owner's session arrives on the OTHER branch's
+        // item (mis-attributed work_item_id / session pairing).
+        let mut stray = WorkEvent::new(WorkEventKind::Update, "work-work-issue-3184", t1);
+        stray.agent_session_id = Some("session-owner".to_string());
+        projection.apply_event(stray);
+
+        let other = projection
+            .work_items
+            .iter()
+            .find(|item| item.id == "work-work-issue-3184")
+            .expect("other item");
+        assert!(
+            !other
+                .agents
+                .iter()
+                .any(|agent| agent.session_id == "session-owner"),
+            "conflicting-branch item must not gain the stray session ref"
+        );
+        // The suspect event itself stays recorded for diagnosis.
+        assert_eq!(other.events.len(), 2);
+    }
+
+    /// Issue #3216 contract guard: the attach guard fires only on a genuine
+    /// identity conflict. Same-branch duplicates and identity-less items keep
+    /// the historical attach behavior.
+    #[test]
+    fn apply_event_allows_session_attach_without_identity_conflict() {
+        let t0 = Utc.with_ymd_and_hms(2026, 6, 29, 7, 45, 56).unwrap();
+        let mut projection = WorkItemsProjection::empty(t0);
+
+        let mut owner_start = WorkEvent::new(WorkEventKind::Start, "work-owner", t0);
+        owner_start.agent_session_id = Some("session-shared".to_string());
+        owner_start.execution_container = Some(container_for_test("work/same", "/repo/work/same"));
+        projection.apply_event(owner_start);
+
+        // Same-branch duplicate item (resume / backfill shape): attach allowed.
+        let mut same_branch = WorkEvent::new(WorkEventKind::Resume, "work-duplicate", t0);
+        same_branch.agent_session_id = Some("session-shared".to_string());
+        same_branch.execution_container = Some(container_for_test("work/same", "/repo/work/same"));
+        projection.apply_event(same_branch);
+
+        // Identity-less item (synthesized live Work without git_details):
+        // attach allowed.
+        let mut identity_less = WorkEvent::new(WorkEventKind::Update, "work-session-abc", t0);
+        identity_less.agent_session_id = Some("session-shared".to_string());
+        projection.apply_event(identity_less);
+
+        for id in ["work-duplicate", "work-session-abc"] {
+            let item = projection
+                .work_items
+                .iter()
+                .find(|item| item.id == id)
+                .expect("item");
+            assert!(
+                item.agents
+                    .iter()
+                    .any(|agent| agent.session_id == "session-shared"),
+                "{id} must keep the historical session attach behavior"
+            );
+        }
+    }
+
+    /// Issue #3216: attach provenance survives journal compaction by living on
+    /// the WorkAgentRef itself.
+    #[test]
+    fn apply_event_records_attach_provenance_kind() {
+        let t0 = Utc.with_ymd_and_hms(2026, 6, 29, 7, 45, 56).unwrap();
+        let mut projection = WorkItemsProjection::empty(t0);
+
+        let mut start = WorkEvent::new(WorkEventKind::Start, "work-provenance", t0);
+        start.agent_session_id = Some("session-1".to_string());
+        projection.apply_event(start);
+
+        let item = projection
+            .work_items
+            .iter()
+            .find(|item| item.id == "work-provenance")
+            .expect("item");
+        assert_eq!(item.agents[0].attached_by, Some(WorkEventKind::Start));
+    }
+
+    /// Issue #3216: existing works.json (no `attached_by`) must keep
+    /// deserializing.
+    #[test]
+    fn work_agent_ref_deserializes_without_attached_by() {
+        let json = r#"{"session_id":"s","updated_at":"2026-06-29T07:45:56Z"}"#;
+        let agent: WorkAgentRef = serde_json::from_str(json).expect("deserialize legacy ref");
+        assert_eq!(agent.attached_by, None);
+        assert_eq!(agent.session_id, "s");
     }
 }

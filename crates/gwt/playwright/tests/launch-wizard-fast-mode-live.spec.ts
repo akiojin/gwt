@@ -34,7 +34,7 @@ test.describe.serial("Launch Wizard Claude Code Fast mode (live backend)", () =>
   test("Claude Code Fast mode stays on after runtime context resolution", async ({
     page,
   }) => {
-    await sendLiveGwtEvent(page, { kind: "open_start_work" });
+    await sendLiveGwtEvent(page, { kind: "open_intake_session" });
 
     const wizard = page.locator("#wizard-modal");
     await expect(wizard).toBeVisible();

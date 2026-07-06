@@ -214,7 +214,7 @@ pub(super) const CLAUDE_SONNET_REASONING_OPTIONS: [ReasoningDisplayOption; 4] = 
     ReasoningDisplayOption {
         label: "High",
         stored_value: "high",
-        description: "Deeper reasoning for complex work (Sonnet 4.6 default)",
+        description: "Deeper reasoning for complex work (Sonnet's default under Auto)",
         is_default: false,
     },
 ];
@@ -1649,7 +1649,7 @@ mod tests {
     #[test]
     fn claude_sonnet_reasoning_default_is_auto() {
         // Auto delegates the default effort to Claude Code itself
-        // (`high` on Sonnet 4.6 per the model-config docs).
+        // (`high` on Sonnet's current release, per the model-config docs).
         let default = super::CLAUDE_SONNET_REASONING_OPTIONS
             .iter()
             .find(|option| option.is_default)

@@ -1,15 +1,19 @@
 import { expect, test } from "@playwright/test";
 import { APP_URL, installEmbeddedRoutes } from "./_helpers/embedded-frontend";
 
-// SPEC-2008 camera-focus / FR-094 — Fleet Minimap (centered-radar model).
+// SPEC-2008 camera-focus / FR-094 (2026-07-03 再改訂) — Fleet Minimap
+// (zoom-synced centered radar).
 //
 // The always-on minimap (`#fleet-minimap`) mirrors the canvas frame of
 // reference: the camera viewport is FIXED at the minimap centre and the world
 // (window cells, inside `.fleet-minimap__world`) MOVES under it as the camera
-// pans — like `#canvas-stage`. The cyan `.fleet-minimap__camera` frame stays
-// centred; its size reflects the canvas zoom. The minimap has its own zoom
-// (`.fleet-minimap__zoom-button`). Clicking a cell flies the LOCAL camera to
-// that window (frameWindow), translating the world layer and marking the cell
+// pans — like `#canvas-stage`. The radar scale is DERIVED from the live
+// viewport, so it tracks the canvas zoom: the cyan `.fleet-minimap__camera`
+// frame keeps a CONSTANT px size (a fixed fraction of the minimap) and is
+// always visible, while the cells rescale with the canvas zoom. The radar
+// zoom buttons (`.fleet-minimap__zoom-button`) adjust that fraction (frame
+// and cells scale together). Clicking a cell flies the LOCAL camera to that
+// window (frameWindow), translating the world layer and marking the cell
 // `.is-focused`. The fixture centres the camera on the fleet so both windows
 // are visible in the radar.
 test.describe("Fleet Minimap centered radar", () => {
@@ -88,6 +92,49 @@ test.describe("Fleet Minimap centered radar", () => {
       return dx < 2 && dy < 2;
     });
     expect(centered).toBe(true);
+  });
+
+  test("canvas zoom rescales the cells while the camera frame keeps its size", async ({
+    page,
+  }) => {
+    await installEmbeddedRoutes(page);
+    await installMinimapBackend(page);
+    await page.goto(APP_URL);
+
+    const minimap = page.locator("#fleet-minimap");
+    await expect(minimap).toBeVisible({ timeout: 10_000 });
+    const cameraFrame = minimap.locator(".fleet-minimap__camera");
+    await expect(cameraFrame).toBeVisible();
+    const cell = minimap.locator('.fleet-minimap__cell[data-window-id="agent-1"]');
+    await expect(cell).toHaveCount(1);
+
+    const frameWidthBefore = await cameraFrame.evaluate((el) => parseFloat(el.style.width));
+    const cellWidthBefore = await cell.evaluate((el) => parseFloat(el.style.width));
+
+    // Zoom the CANVAS out via the status-strip control (×0.9 per click).
+    for (let i = 0; i < 3; i += 1) {
+      await page.locator("#zoom-out-button").click();
+    }
+
+    // The cells shrink with the canvas zoom (the minimap mirrors the display)…
+    await expect
+      .poll(() => cell.evaluate((el) => parseFloat(el.style.width)))
+      .toBeLessThan(cellWidthBefore);
+
+    // …while the camera frame keeps a constant px size and stays inside the
+    // minimap (FR-094 再改訂: the frame is a fixed fraction of the minimap, so
+    // it can never be clipped into invisibility again).
+    const frameWidthAfter = await cameraFrame.evaluate((el) => parseFloat(el.style.width));
+    expect(Math.abs(frameWidthAfter - frameWidthBefore)).toBeLessThan(0.01);
+    const fits = await page.evaluate(() => {
+      const map = document.getElementById("fleet-minimap");
+      const frame = map?.querySelector(".fleet-minimap__camera");
+      if (!map || !frame) return false;
+      const m = map.getBoundingClientRect();
+      const f = frame.getBoundingClientRect();
+      return f.width <= m.width && f.height <= m.height;
+    });
+    expect(fits).toBe(true);
   });
 
   test("radar zoom controls rescale the cells", async ({ page }) => {

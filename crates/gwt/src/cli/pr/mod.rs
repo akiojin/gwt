@@ -14,12 +14,13 @@ mod gh;
 
 #[allow(unused_imports)]
 pub(super) use gh::{
-    comment_on_pr_via_gh, create_pr_via_gh, edit_or_create_repo_guard, edit_pr_via_gh,
-    extract_pr_url, fetch_current_pr_via_gh, fetch_pr_checks_via_gh,
+    comment_on_pr_via_gh, convert_pr_to_draft_via_gh, create_pr_via_gh, edit_or_create_repo_guard,
+    edit_pr_via_gh, extract_pr_url, fetch_current_pr_via_gh, fetch_pr_checks_via_gh,
     fetch_pr_review_thread_state_via_gh, fetch_pr_review_threads_via_gh, fetch_pr_reviews_via_gh,
-    parse_available_fields, parse_pr_checks_items_json, parse_pr_checks_items_response,
-    parse_pr_number_from_url, reply_and_resolve_pr_review_threads_via_gh,
-    review_thread_has_comment_body, should_reply_to_review_thread, should_resolve_review_thread,
+    mark_pr_ready_via_gh, parse_available_fields, parse_pr_checks_items_json,
+    parse_pr_checks_items_response, parse_pr_number_from_url,
+    reply_and_resolve_pr_review_threads_via_gh, review_thread_has_comment_body,
+    should_reply_to_review_thread, should_resolve_review_thread,
 };
 
 use gwt_git::PrStatus;
@@ -40,6 +41,16 @@ pub(super) fn parse(args: &[String]) -> Result<PrCommand, CliParseError> {
             let number = super::parse_required_number(it.next())?;
             super::ensure_no_remaining_args(it)?;
             Ok(PrCommand::View { number })
+        }
+        Some("ready") => {
+            let number = super::parse_required_number(it.next())?;
+            super::ensure_no_remaining_args(it)?;
+            Ok(PrCommand::Ready { number })
+        }
+        Some("draft") => {
+            let number = super::parse_required_number(it.next())?;
+            super::ensure_no_remaining_args(it)?;
+            Ok(PrCommand::Draft { number })
         }
         Some("comment") => {
             let number = super::parse_required_number(it.next())?;
@@ -161,6 +172,24 @@ pub(super) fn run<E: CliEnv>(
         }
         PrCommand::View { number } => {
             let pr = env.fetch_pr(number).map_err(super::io_as_api_error)?;
+            render_pr(out, &pr);
+            0
+        }
+        PrCommand::Ready { number } => {
+            // Takes an explicit PR number like view/edit/checks, so it must not
+            // sync workspace PR metadata (that path is reserved for current/create
+            // where the PR is provably the workspace's own). Draft↔Ready also does
+            // not change pr.state (OPEN→OPEN), so there is no metadata to refresh.
+            let pr = env.mark_pr_ready(number).map_err(super::io_as_api_error)?;
+            out.push_str(&format!("marked pull request #{number} ready for review\n"));
+            render_pr(out, &pr);
+            0
+        }
+        PrCommand::Draft { number } => {
+            let pr = env
+                .convert_pr_to_draft(number)
+                .map_err(super::io_as_api_error)?;
+            out.push_str(&format!("converted pull request #{number} to draft\n"));
             render_pr(out, &pr);
             0
         }
@@ -547,6 +576,32 @@ mod tests {
     }
 
     #[test]
+    fn pr_family_ready_and_draft_dispatch_through_env() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let mut env = crate::cli::TestEnv::new(tmp.path().to_path_buf());
+        env.seed_pr(7, seeded_pr());
+
+        let mut out = String::new();
+        let code = run(&mut env, PrCommand::Ready { number: 7 }, &mut out).expect("run pr ready");
+        assert_eq!(code, 0);
+        assert!(
+            out.contains("marked pull request #7 ready for review"),
+            "unexpected ready output: {out}"
+        );
+        assert!(out.contains("#7 [OPEN] CLI family split"));
+        assert_eq!(env.pr_ready_call_log, vec![7]);
+
+        let mut out = String::new();
+        let code = run(&mut env, PrCommand::Draft { number: 7 }, &mut out).expect("run pr draft");
+        assert_eq!(code, 0);
+        assert!(
+            out.contains("converted pull request #7 to draft"),
+            "unexpected draft output: {out}"
+        );
+        assert_eq!(env.pr_draft_call_log, vec![7]);
+    }
+
+    #[test]
     fn pr_family_current_persists_workspace_pr_metadata() {
         let _env_lock = crate::env_test_lock()
             .lock()
@@ -845,6 +900,31 @@ mod tests {
             )
             .expect("edit pr");
             assert_eq!(edited.number, 12);
+
+            // Unknown labels must fail closed before any mutation: the REST
+            // labels endpoint would otherwise silently auto-create the label,
+            // unlike the old `gh pr edit --add-label` which rejected typos.
+            let missing_label = edit_pr_via_gh(
+                "akiojin/gwt",
+                repo_path,
+                12,
+                Some("Edited"),
+                None,
+                &["no-such-label".to_string()],
+            )
+            .expect_err("unknown label must fail closed");
+            assert!(
+                missing_label.to_string().contains("no-such-label"),
+                "unexpected error: {missing_label}"
+            );
+
+            let readied =
+                mark_pr_ready_via_gh("akiojin/gwt", repo_path, 12).expect("mark pr ready");
+            assert_eq!(readied.number, 12);
+
+            let drafted =
+                convert_pr_to_draft_via_gh("akiojin/gwt", repo_path, 12).expect("convert pr draft");
+            assert_eq!(drafted.number, 12);
 
             comment_on_pr_via_gh(repo_path, 12, "done").expect("comment");
 

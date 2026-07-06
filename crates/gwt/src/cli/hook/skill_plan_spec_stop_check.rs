@@ -20,9 +20,8 @@ use std::{
 };
 
 use gwt_agent::GWT_SESSION_ID_ENV;
-use gwt_core::skill_state;
 
-use super::{envelope::stop_hook_active_from, HookError, HookOutput};
+use super::{HookError, HookOutput};
 
 pub const SKILL_NAME: &str = "plan-spec";
 pub const SKILL_DISPLAY: &str = "gwt-plan-spec";
@@ -40,62 +39,16 @@ pub fn handle_with_input(
     input: &str,
     current_session_id: Option<&str>,
 ) -> HookOutput {
-    decide(
+    // SPEC-3248 hooks v2 P2: the shared decision now lives in the neutral
+    // `state_file_stop_check` module (build-spec / register-spec delegate to
+    // the same body by design, not by reaching into this module's internals).
+    super::state_file_stop_check::decide(
         worktree,
         input,
         current_session_id,
         SKILL_NAME,
         SKILL_DISPLAY,
     )
-}
-
-/// Shared decision logic between plan-spec and build-spec handlers.
-pub(crate) fn decide(
-    worktree: &Path,
-    input: &str,
-    current_session_id: Option<&str>,
-    skill_name: &str,
-    skill_display: &str,
-) -> HookOutput {
-    if stop_hook_active_from(input) {
-        return HookOutput::Silent;
-    }
-    let Ok(Some(state)) = skill_state::load(worktree, skill_name) else {
-        return HookOutput::Silent;
-    };
-    if !state.active {
-        return HookOutput::Silent;
-    }
-    if let Some(current) = current_session_id {
-        if current != state.session_id {
-            return HookOutput::Silent;
-        }
-    }
-
-    let phase_clause = state
-        .phase
-        .as_deref()
-        .map(|p| format!(" (phase: {p})"))
-        .unwrap_or_default();
-    let spec_clause = state
-        .owner_spec
-        .map(|n| format!("SPEC-{n}"))
-        .unwrap_or_else(|| "the current owner".to_string());
-    let action_prefix = action_prefix_for(skill_name);
-
-    HookOutput::stop_block(format!(
-        "{skill_display} for {spec_clause} is still active{phase_clause}.\n\
-         Continue the {skill_display} workflow, or run JSON operation `{action_prefix}.complete` with `params.spec:<n>` when the artifacts are ready, \
-         or JSON operation `{action_prefix}.abort` with `params.spec:<n>` and `params.reason` to abandon.",
-    ))
-}
-
-fn action_prefix_for(skill_name: &str) -> &'static str {
-    match skill_name {
-        "plan-spec" => "plan",
-        "build-spec" => "build",
-        _ => "<skill>",
-    }
 }
 
 #[cfg(test)]
@@ -197,7 +150,7 @@ mod tests {
     #[test]
     fn silent_when_state_file_json_is_malformed() {
         let dir = tempfile::tempdir().unwrap();
-        let path = skill_state::state_path(dir.path(), SKILL_NAME);
+        let path = gwt_core::skill_state::state_path(dir.path(), SKILL_NAME);
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
         std::fs::write(&path, "{broken").unwrap();
         assert_eq!(

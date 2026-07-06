@@ -1366,6 +1366,61 @@ mod tests {
         assert!(message.contains("status"), "{message}");
     }
 
+    /// Issue #3184: transient helper-workflow phases (browser-check,
+    /// verification, merging, server startup) must never become the Agent
+    /// title, even via the legacy `--title-summary` flag path.
+    #[test]
+    fn parse_workspace_update_rejects_transient_activity_title_summary() {
+        for label in [
+            "browser check",
+            "Browser-Check",
+            "Headless browser check",
+            "Browser check (fresh instance)",
+            "verification",
+            "merging",
+            "server startup",
+            "ブラウザチェック",
+            "ヘッドレスブラウザチェック",
+            "動作確認",
+        ] {
+            let err = parse(&[
+                s("update"),
+                s("--agent-session"),
+                s("session-1"),
+                s("--title-summary"),
+                s(label),
+            ])
+            .expect_err("title-summary must stay the work purpose, not a transient activity");
+
+            let message = err.to_string();
+            assert!(message.contains("--title-summary"), "{label}: {message}");
+            assert!(message.contains("transient activity"), "{label}: {message}");
+            assert!(message.contains("current_focus"), "{label}: {message}");
+        }
+    }
+
+    /// Issue #3184: work names that merely mention the activity domain stay
+    /// valid — only bare activity labels are rejected.
+    #[test]
+    fn parse_workspace_update_accepts_work_name_mentioning_activity_domain() {
+        for label in [
+            "browser-check purpose overwrite guard",
+            "Fix browser check",
+            "Issue #3184 title guard",
+            "release verification pipeline",
+            "E2E testing harness",
+        ] {
+            parse(&[
+                s("update"),
+                s("--agent-session"),
+                s("session-1"),
+                s("--title-summary"),
+                s(label),
+            ])
+            .unwrap_or_else(|err| panic!("{label} should stay a valid work name: {err}"));
+        }
+    }
+
     #[test]
     fn parse_workspace_create_accepts_assignment_fields() {
         let parsed = parse(&[
@@ -1623,6 +1678,68 @@ mod tests {
         assert!(
             !gwt_core::paths::gwt_repo_local_work_events_path(&project_root).exists(),
             "agent workspace update must not write the repo-local Work event to the Project State root"
+        );
+    }
+
+    /// Issue #3184 regression: when a stable purpose is already set, a
+    /// `workspace.update` that tries to replace it with a transient activity
+    /// label (`browser check` etc.) must be rejected end-to-end and the
+    /// projection — the source of the Agent titlebar `dynamic_title` — must
+    /// keep the original purpose.
+    #[test]
+    fn workspace_update_keeps_existing_purpose_when_transient_activity_rejected() {
+        let _guard = env_guard();
+        let gwt_home = tempfile::tempdir().expect("gwt home");
+        let _home = ScopedHome::set(gwt_home.path());
+        let _session =
+            crate::cli::test_support::ScopedEnvVar::unset(gwt_agent::session::GWT_SESSION_ID_ENV);
+        let temp = tempfile::tempdir().expect("tempdir");
+        let project_root = temp.path().join("workspace-home");
+        let worktree = project_root.join("work").join("20260629-0915");
+        std::fs::create_dir_all(&worktree).expect("worktree");
+        write_session_with_project_state_root("session-1", &worktree, &project_root);
+
+        let mut canonical = WorkspaceProjection::default_for_project(&project_root);
+        let mut agent = assigned_agent_with_window("session-1", "project::agent-1", &worktree);
+        agent.title_summary = Some("UI surface audit".to_string());
+        canonical.agents.push(agent);
+        save_workspace_projection(&project_root, &canonical).expect("save canonical projection");
+
+        let mut env = TestEnv::new(worktree.clone());
+        env.stdin = serde_json::json!({
+            "schema_version": 1,
+            "operation": "workspace.update",
+            "params": {
+                "agent_session": "session-1",
+                "purpose": "Headless browser check",
+                "current_focus": "Headless server open for user browser check",
+            }
+        })
+        .to_string();
+
+        let code = crate::cli::env::dispatch(&mut env, &["gwtd".to_string()]);
+
+        assert_ne!(
+            code,
+            0,
+            "transient activity purpose must be rejected: {}",
+            String::from_utf8_lossy(&env.stderr)
+        );
+        let stderr = String::from_utf8_lossy(&env.stderr);
+        assert!(stderr.contains("transient activity"), "{stderr}");
+
+        let saved = load_workspace_projection(&project_root)
+            .expect("load canonical projection")
+            .expect("canonical projection");
+        let agent = saved
+            .agents
+            .iter()
+            .find(|agent| agent.session_id == "session-1")
+            .expect("canonical agent");
+        assert_eq!(
+            agent.title_summary.as_deref(),
+            Some("UI surface audit"),
+            "existing purpose must be preserved when a transient activity write is rejected"
         );
     }
 

@@ -92,13 +92,13 @@ use embedded_server::{ClientHub, EmbeddedServer};
 pub(crate) use launch_runtime::{
     apply_host_package_runner_fallback_checked, apply_windows_host_shell_wrapper,
     build_shell_process_launch, ensure_docker_launch_runtime_ready, install_launch_gwt_bin_env,
-    resolve_launch_worktree, resolve_shell_launch_worktree,
+    prune_orphan_intake_worktrees, resolve_launch_worktree, resolve_shell_launch_worktree,
 };
 #[cfg(test)]
 pub(crate) use launch_runtime::{
     apply_host_package_runner_fallback_with_probe, command_matches_runner,
     install_launch_gwt_bin_env_with_lookup, probe_host_package_runner_with_timeout,
-    resolve_launch_worktree_request,
+    resolve_ephemeral_launch_worktree, resolve_launch_worktree_request,
 };
 #[cfg(test)]
 pub(crate) use runtime_support::{
@@ -109,11 +109,13 @@ pub(crate) use runtime_support::{
     attach_parent_console_for_cli, close_window_from_workspace, combined_window_id,
     current_git_branch, dedupe_recent_projects, fallback_project_target,
     first_available_worktree_path, front_door_route, geometry_to_pty_size,
-    knowledge_kind_for_preset, local_branch_exists, normalize_active_tab_id, normalize_branch_name,
+    intake_hook_config_is_disposable, is_ephemeral_intake_worktree, knowledge_kind_for_preset,
+    local_branch_exists, normalize_active_tab_id, normalize_branch_name,
     normalize_recent_project_path, normalize_recent_projects, origin_remote_ref,
     prune_missing_recent_projects, resolve_launch_spec_with_fallback, resolve_project_target,
     run_cli, same_worktree_path, should_auto_close_agent_window, should_auto_start_restored_window,
     synthetic_branch_entry, usable_worktree_path_for_branch, worktrees_have_stale_branch_entry,
+    INTAKE_WORKTREE_PREFIX,
 };
 pub(crate) use update_front_door::{apply_update_state_and_exit, spawn_startup_update_check};
 #[cfg(test)]
@@ -923,6 +925,12 @@ fn issue_monitor_daemon_user_event(event: serde_json::Value) -> Option<UserEvent
                 linked_issue_kind,
             })
         }
+        "review_dispatch" => {
+            // SPEC #3200 Option A: the daemon asks the GUI to spawn an independent
+            // review agent for a PR-ready autonomous issue.
+            let dispatch: gwt::AutonomousReviewDispatch = serde_json::from_value(payload).ok()?;
+            Some(UserEvent::IssueMonitorReviewDispatch { dispatch })
+        }
         _ => None,
     }
 }
@@ -1051,6 +1059,11 @@ enum UserEvent {
     IssueMonitorLaunchRequest {
         issue_number: u64,
         linked_issue_kind: gwt::LinkedIssueKind,
+    },
+    /// SPEC #3200 Option A: spawn an independent review agent for a PR-ready
+    /// autonomous issue (daemon → GUI).
+    IssueMonitorReviewDispatch {
+        dispatch: gwt::AutonomousReviewDispatch,
     },
     LaunchProgress {
         window_id: String,
@@ -1353,6 +1366,8 @@ mod tests {
             last_error: None,
             launch_profile_source: gwt::IssueMonitorLaunchProfileSource::Default,
             launch_profile_summary: "configure to override".to_string(),
+            autonomous_mode: false,
+            autonomous_issues: Vec::new(),
         };
         let status_payload = gwt::runtime_daemon_events::issue_monitor_payload(
             "status",
@@ -2488,6 +2503,7 @@ mod tests {
                     linked_issue_kind: None,
                     ultracode_supported: false,
                     claude_workflows_enabled: false,
+                    ephemeral_base_ref: None,
                 },
                 Vec::new(),
             ),
@@ -2604,6 +2620,7 @@ mod tests {
                     linked_issue_kind: None,
                     ultracode_supported: false,
                     claude_workflows_enabled: false,
+                    ephemeral_base_ref: None,
                 },
                 sample_wizard_agent_options(),
                 vec![sample_wizard_quick_start_entry(live_window_id)],
@@ -4480,6 +4497,7 @@ mod tests {
                     linked_issue_kind: None,
                     ultracode_supported: false,
                     claude_workflows_enabled: false,
+                    ephemeral_base_ref: None,
                 },
                 sample_wizard_stale_agent_options(),
                 Vec::new(),
@@ -5742,6 +5760,133 @@ mod tests {
             .expect("tokio runtime")
             .block_on(super::health_handler());
         assert_eq!(health, "ok");
+    }
+
+    #[test]
+    fn prune_orphan_intake_worktrees_removes_clean_keeps_dirty_and_is_bounded() {
+        // SPEC-3214 T-006: on startup, `.intake-*` worktrees left by a crash
+        // are reaped — clean ones removed, dirty ones kept, capped per run.
+        let temp = tempdir().expect("tempdir");
+        let repo = temp.path().join("repo");
+        init_git_clone_with_origin(&repo);
+        let manager = gwt_git::WorktreeManager::new(&repo);
+
+        let clean_a = temp.path().join(".intake-a");
+        let clean_b = temp.path().join(".intake-b");
+        let dirty = temp.path().join(".intake-dirty");
+        for path in [&clean_a, &clean_b, &dirty] {
+            manager
+                .create_detached("HEAD", path)
+                .expect("intake worktree");
+        }
+        fs::write(dirty.join("wip.txt"), "unsaved").expect("dirty file");
+
+        // A real BRANCH worktree that happens to be named `.intake-*` must be
+        // left alone by the reaper (codex #3236 P2).
+        let branch_named = temp.path().join(".intake-branch");
+        manager
+            .create_from_base("HEAD", "feature/keep", &branch_named)
+            .expect("branch worktree");
+
+        // A clean intake whose ONLY content is a gwt-generated hook config must
+        // still reap (codex #3237): launched intakes materialize managed hooks.
+        let generated_hook = temp.path().join(".intake-hook");
+        manager
+            .create_detached("HEAD", &generated_hook)
+            .expect("intake worktree");
+        gwt_skills::generate_settings_local(&generated_hook).expect("generate hook config");
+
+        let removed = super::prune_orphan_intake_worktrees(&repo, 10);
+        assert_eq!(
+            removed, 3,
+            "clean detached intakes reap, including one with only a generated hook config"
+        );
+        assert!(
+            !generated_hook.exists(),
+            "an intake with only a gwt-generated hook config is reaped (codex #3237)"
+        );
+        assert!(
+            !clean_a.exists() && !clean_b.exists(),
+            "clean intake pruned"
+        );
+        assert!(
+            dirty.exists() && dirty.join("wip.txt").exists(),
+            "dirty intake kept — never destroy uncommitted work"
+        );
+        assert!(
+            branch_named.exists(),
+            "a real branch worktree named .intake-* is never reaped"
+        );
+
+        // Bounded: a second batch of clean intakes is capped at the limit.
+        let clean_c = temp.path().join(".intake-c");
+        let clean_d = temp.path().join(".intake-d");
+        for path in [&clean_c, &clean_d] {
+            manager
+                .create_detached("HEAD", path)
+                .expect("intake worktree");
+        }
+        let removed_bounded = super::prune_orphan_intake_worktrees(&repo, 1);
+        assert_eq!(removed_bounded, 1, "prune is bounded per run");
+    }
+
+    #[test]
+    fn resolve_ephemeral_launch_worktree_creates_detached_intake_worktree() {
+        // SPEC-3214 T-003: an ephemeral intake launch materializes a detached
+        // `.intake-*` worktree (no branch) and sets working_dir; the existing
+        // branch-based launch path is untouched.
+        let temp = tempdir().expect("tempdir");
+        let repo = temp.path().join("repo");
+        init_git_clone_with_origin(&repo);
+
+        let mut working_dir = None;
+        let mut env_vars = HashMap::new();
+        super::resolve_ephemeral_launch_worktree(
+            &repo,
+            Some("develop"),
+            &mut working_dir,
+            &mut env_vars,
+        )
+        .expect("ephemeral intake worktree resolves");
+
+        let intake_dir = working_dir.expect("intake working_dir set");
+        assert!(intake_dir.exists(), "intake worktree materialized");
+        assert!(
+            intake_dir
+                .file_name()
+                .and_then(|name| name.to_str())
+                .is_some_and(|name| name.starts_with(".intake")),
+            "intake worktree uses the .intake-* layout: {}",
+            intake_dir.display()
+        );
+        assert!(env_vars
+            .get("GWT_PROJECT_ROOT")
+            .is_some_and(|value| super::same_worktree_path(Path::new(value), &intake_dir)));
+
+        // Detached HEAD: no current branch.
+        let current =
+            gwt_core::process::run_git_logged(&["branch", "--show-current"], Some(&intake_dir))
+                .expect("git branch --show-current");
+        assert!(
+            String::from_utf8_lossy(&current.stdout).trim().is_empty(),
+            "intake worktree is detached (branchless)"
+        );
+
+        // A second concurrent intake launch avoids the occupied path.
+        let mut second_dir = None;
+        let mut second_env = HashMap::new();
+        super::resolve_ephemeral_launch_worktree(
+            &repo,
+            Some("develop"),
+            &mut second_dir,
+            &mut second_env,
+        )
+        .expect("second ephemeral intake worktree resolves");
+        let second_dir = second_dir.expect("second intake working_dir");
+        assert_ne!(
+            second_dir, intake_dir,
+            "collision avoided for concurrent intake"
+        );
     }
 
     #[test]
@@ -7353,6 +7498,10 @@ fn main() -> std::io::Result<()> {
             }) => {
                 let events =
                     app.auto_launch_issue_monitor_request_events(issue_number, linked_issue_kind);
+                clients.dispatch(events);
+            }
+            Event::UserEvent(UserEvent::IssueMonitorReviewDispatch { dispatch }) => {
+                let events = app.auto_dispatch_issue_monitor_review_events(dispatch);
                 clients.dispatch(events);
             }
             Event::UserEvent(UserEvent::LaunchProgress { window_id, message }) => {
