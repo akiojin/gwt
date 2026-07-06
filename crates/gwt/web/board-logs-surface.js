@@ -46,6 +46,7 @@ export function createBoardLogsSurface({
   createKnowledgeMarkdownBody,
   windowMap,
   focusWindowLocally,
+  pushAlertToast,
   sendWindowFocus,
   focusOrSpawnPreset,
   activeWorkspace,
@@ -892,28 +893,22 @@ export function createBoardLogsSurface({
         });
       }
 
+      // SPEC #3206 — board-mention notice rendered through the shared alerts
+      // stack (singleton via id, 8s auto-dismiss, whole-card jumps to the entry).
       function showBoardMentionNotification(entry, windowId) {
-        if (!entry?.id) return;
-        let toast = document.getElementById("board-mention-toast");
-        if (!toast) {
-          toast = document.createElement("button");
-          toast.id = "board-mention-toast";
-          toast.className = "board-mention-toast";
-          toast.type = "button";
-          document.body.appendChild(toast);
-        }
-        toast.textContent = `Board reply for you - ${boardEntryPreview(entry)}`;
-        toast.onclick = () => {
-          const state = ensureBoardState(windowId);
-          applyBoardMentionNotificationFocus(state, entry.id);
-          focusBoardEntry(entry.id);
-          toast.remove();
-        };
-        setTimeout(() => {
-          if (document.getElementById("board-mention-toast") === toast) {
-            toast.remove();
-          }
-        }, 8000);
+        if (!entry?.id || typeof pushAlertToast !== "function") return;
+        pushAlertToast({
+          id: "board-mention",
+          level: "info",
+          title: `Board reply for you - ${boardEntryPreview(entry)}`,
+          dismissible: false,
+          timeoutMs: 8000,
+          onActivate: () => {
+            const state = ensureBoardState(windowId);
+            applyBoardMentionNotificationFocus(state, entry.id);
+            focusBoardEntry(entry.id);
+          },
+        });
       }
 
       function handleBoardHookEvent(event) {

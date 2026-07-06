@@ -303,6 +303,22 @@ impl CliEnv for DefaultCliEnv {
         gwt_git::pr_status::fetch_pr_status(&format!("{}/{}", self.owner, self.repo), number)
             .map_err(|err| io::Error::other(err.to_string()))
     }
+    fn mark_pr_ready(&mut self, number: u64) -> io::Result<PrStatus> {
+        crate::cli::pr::edit_or_create_repo_guard(&self.owner, &self.repo)?;
+        crate::cli::pr::mark_pr_ready_via_gh(
+            &format!("{}/{}", self.owner, self.repo),
+            &self.repo_path,
+            number,
+        )
+    }
+    fn convert_pr_to_draft(&mut self, number: u64) -> io::Result<PrStatus> {
+        crate::cli::pr::edit_or_create_repo_guard(&self.owner, &self.repo)?;
+        crate::cli::pr::convert_pr_to_draft_via_gh(
+            &format!("{}/{}", self.owner, self.repo),
+            &self.repo_path,
+            number,
+        )
+    }
     fn comment_on_pr(&mut self, number: u64, body: &str) -> io::Result<()> {
         crate::cli::pr::comment_on_pr_via_gh(&self.repo_path, number, body)
     }

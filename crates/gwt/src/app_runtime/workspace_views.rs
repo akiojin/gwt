@@ -874,6 +874,11 @@ fn append_paused_work_items(
 /// when they share a branch / worktree identity. Used to dedupe Paused rows so a
 /// resumed Work and the launch-recorded history row do not duplicate the live
 /// Active row.
+///
+/// Issue #3213: a shared agent session id never collapses two Works whose git
+/// identities conflict — a stray session ref recorded under another branch's
+/// Work must not swallow the real owner's row (mirrors
+/// `active_work_agent_matches_workspace_row_identity`).
 fn active_work_already_present(
     active_works: &[gwt::ActiveWorkItemView],
     work: &gwt::WorkspaceHistoryView,
@@ -882,32 +887,59 @@ fn active_work_already_present(
         if existing.id == work.id {
             return true;
         }
+        let existing_branch = existing
+            .branch
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(normalize_branch_name);
+        let existing_worktree = existing
+            .worktree_path
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty());
+        let container_branches = work
+            .execution_containers
+            .iter()
+            .filter_map(|container| container.branch.as_deref())
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(normalize_branch_name)
+            .collect::<Vec<_>>();
+        let container_worktrees = work
+            .execution_containers
+            .iter()
+            .filter_map(|container| container.worktree_path.as_deref())
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .collect::<Vec<_>>();
+        let branch_matches = existing_branch.as_deref().is_some_and(|left| {
+            container_branches
+                .iter()
+                .any(|right| left == right.as_str())
+        });
+        let worktree_matches = existing_worktree.is_some_and(|left| {
+            container_worktrees
+                .iter()
+                .any(|right| Path::new(left) == Path::new(right))
+        });
+        if branch_matches || worktree_matches {
+            return true;
+        }
+        let branch_conflicts = existing_branch.is_some() && !container_branches.is_empty();
+        let worktree_conflicts = existing_worktree.is_some() && !container_worktrees.is_empty();
+        if branch_conflicts || worktree_conflicts {
+            return false;
+        }
         // A live Work synthesized without git_details carries no execution
-        // container, so also dedupe by shared agent session id (the launch /
+        // container, so dedupe by shared agent session id (the launch /
         // synthesized history row and the live row reference the same session).
-        let session_matches = existing.agents.iter().any(|live_agent| {
+        existing.agents.iter().any(|live_agent| {
             !live_agent.session_id.trim().is_empty()
                 && work
                     .agents
                     .iter()
                     .any(|history_agent| history_agent.session_id == live_agent.session_id)
-        });
-        if session_matches {
-            return true;
-        }
-        work.execution_containers.iter().any(|container| {
-            let branch_matches = existing
-                .branch
-                .as_deref()
-                .map(normalize_branch_name)
-                .zip(container.branch.as_deref().map(normalize_branch_name))
-                .is_some_and(|(left, right)| left == right);
-            let worktree_matches = existing
-                .worktree_path
-                .as_deref()
-                .zip(container.worktree_path.as_deref())
-                .is_some_and(|(left, right)| Path::new(left) == Path::new(right));
-            branch_matches || worktree_matches
         })
     })
 }
@@ -1547,6 +1579,7 @@ pub(super) fn attach_registry_sessions_to_active_works(
                 agent_id: Some(session.agent_id.command().to_string()),
                 display_name: Some(session.display_name.clone()),
                 updated_at: session.last_activity_at,
+                attached_by: None,
             };
             let history_view =
                 workspace_work_agent_view_from_ref(&agent_ref, session_index, project_root);

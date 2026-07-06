@@ -190,6 +190,104 @@ test.describe("Project Index status surface", () => {
     });
   });
 
+  test("Index window Search summarizes degraded health and keeps search controls usable", async ({
+    page,
+  }) => {
+    await installEmbeddedRoutes(page);
+    await installIndexStatusBackend(page, {
+      state: "repair_required",
+      scopes: {
+        issues: {
+          healthy: true,
+          repair_required: false,
+          document_count: 12,
+          reason: "ready",
+        },
+        specs: {
+          healthy: false,
+          repair_required: true,
+          document_count: 5,
+          reason: "count_mismatch",
+        },
+        files: {
+          wtAhash: {
+            healthy: false,
+            repair_required: true,
+            document_count: 0,
+            reason: "manifest_missing",
+          },
+        },
+      },
+      worktrees: {
+        wtAhash: { branch: "develop", path: "/abs/wtA" },
+      },
+    });
+
+    await page.goto(APP_URL);
+    const { root, panel } = await openIndexSearchPanel(page);
+
+    const summary = panel.locator("[data-role='index-search-health-summary']");
+    await expect(summary).toBeVisible({ timeout: 10_000 });
+    await expect(summary).toContainText("1 ready");
+    await expect(summary).toContainText("2 degraded");
+    await expect(summary).toContainText("specs");
+    await expect(summary).toContainText("files · develop");
+    await expect(panel.locator(".settings-index-rebuild")).toHaveCount(0);
+
+    await root.locator(".index-search-input").fill("workspace lifecycle");
+    await expect(root.locator(".index-run-button")).toBeEnabled();
+    await expect(panel.locator(".index-scope-button[data-scope='specs']")).toBeEnabled();
+
+    await summary.locator("[data-action='open-index-health']").click();
+    await expect(root.locator("[data-index-panel='health']")).toBeVisible();
+
+    const refreshes = await readRefreshIndexStatusSends(page);
+    expect(refreshes.at(-1)).toMatchObject({
+      kind: "refresh_index_status",
+      project_root: "/fixture",
+    });
+  });
+
+  test("Index window Search refreshes missing health before showing unavailable status", async ({
+    page,
+  }) => {
+    await installEmbeddedRoutes(page);
+    await installIndexStatusBackend(page, {
+      state: "ready",
+      scopes: {
+        issues: {
+          healthy: true,
+          repair_required: false,
+          document_count: 12,
+          reason: "ready",
+        },
+      },
+      worktrees: {},
+    }, { emitInitialStatus: false, deferRefreshStatus: true });
+
+    await page.goto(APP_URL);
+    const { panel } = await openIndexSearchPanel(page);
+
+    const summary = panel.locator("[data-role='index-search-health-summary']");
+    await expect(summary).toBeVisible({ timeout: 10_000 });
+    await expect(summary).toContainText("Refreshing status");
+
+    await expect.poll(async () => {
+      const refreshes = await readRefreshIndexStatusSends(page);
+      return refreshes.length;
+    }).toBeGreaterThan(0);
+
+    const refreshes = await readRefreshIndexStatusSends(page);
+    expect(refreshes.at(-1)).toMatchObject({
+      kind: "refresh_index_status",
+      project_root: "/fixture",
+    });
+    await page.evaluate(() => {
+      window.__gwtFixtureWebSocket.flushRefreshStatus();
+    });
+    await expect(summary).toContainText("1 ready", { timeout: 10_000 });
+  });
+
   test("Index window Health scope-row Rebuild all dispatches without worktree_hash", async ({ page }) => {
     await installEmbeddedRoutes(page);
     await installIndexStatusBackend(page, {
@@ -534,8 +632,8 @@ async function readRefreshIndexStatusSends(page) {
   });
 }
 
-async function installIndexStatusBackend(page, indexStatus) {
-  await page.addInitScript((indexStatusPayload) => {
+async function installIndexStatusBackend(page, indexStatus, options = {}) {
+  await page.addInitScript(({ indexStatusPayload, optionsPayload }) => {
     const projectRoot = "/fixture";
     const baseTabState = {
       id: "tab-1",
@@ -601,7 +699,17 @@ async function installIndexStatusBackend(page, indexStatus) {
         }
         if (message.kind === "frontend_ready") {
           this.emit(workspaceState);
-          this.emit(projectIndexStatus);
+          if (optionsPayload.emitInitialStatus !== false) {
+            this.emit(projectIndexStatus);
+          }
+          return;
+        }
+        if (message.kind === "refresh_index_status") {
+          if (optionsPayload.deferRefreshStatus) {
+            this.pendingRefreshStatus = projectIndexStatus;
+          } else {
+            this.emit(projectIndexStatus);
+          }
           return;
         }
         // SPEC-1939 T-IDX-106/Phase 15: simulate the backend create_window
@@ -648,6 +756,13 @@ async function installIndexStatusBackend(page, indexStatus) {
           );
         }, 0);
       }
+
+      flushRefreshStatus() {
+        if (!this.pendingRefreshStatus) return;
+        const payload = this.pendingRefreshStatus;
+        this.pendingRefreshStatus = null;
+        this.emit(payload);
+      }
     }
 
     Object.defineProperty(window, "WebSocket", {
@@ -675,5 +790,5 @@ async function installIndexStatusBackend(page, indexStatus) {
       configurable: true,
       value: FixtureWebSocketWithTracking,
     });
-  }, indexStatus);
+  }, { indexStatusPayload: indexStatus, optionsPayload: options });
 }

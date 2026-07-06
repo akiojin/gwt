@@ -270,6 +270,148 @@ test("centered-radar: setZoom rescales the cells (radar zoom)", () => {
   assert.ok(Math.abs(leftAfter) > Math.abs(leftBefore), "zooming in spreads world positions out");
 });
 
+test("zoom-sync (FR-094 再改訂): canvas zoom keeps the camera frame constant and scales the cells", () => {
+  // The radar scale is DERIVED from visibleBounds on every update, so the
+  // minimap is a true miniature of the main display: zooming the canvas
+  // rescales the cells while the centred camera frame keeps a constant px
+  // size (a fixed fraction of the minimap).
+  const { container } = setupDom();
+  const windows = [windowAt("w-1", 0, 0), windowAt("w-2", 400, 300)];
+  let visibleBounds = { x: 0, y: 0, width: 200, height: 120 }; // canvas zoom 1
+  const { minimap } = makeMinimap(container, windows, {
+    getVisibleBounds: () => visibleBounds,
+  });
+
+  minimap.renderCells();
+  const frame = container.querySelector(".fleet-minimap__camera");
+  const cell = container.querySelector('[data-window-id="w-1"]');
+  const frameWidth = parseFloat(frame.style.width);
+  const frameHeight = parseFloat(frame.style.height);
+  const cellWidth = parseFloat(cell.style.width);
+
+  // Zoom OUT to 0.5: the visible world doubles.
+  visibleBounds = { x: -100, y: -60, width: 400, height: 240 };
+  minimap.update();
+  assert.ok(
+    Math.abs(parseFloat(frame.style.width) - frameWidth) < 0.001,
+    "camera frame width is zoom-invariant",
+  );
+  assert.ok(
+    Math.abs(parseFloat(frame.style.height) - frameHeight) < 0.001,
+    "camera frame height is zoom-invariant",
+  );
+  assert.ok(
+    Math.abs(parseFloat(cell.style.width) - cellWidth / 2) < 0.001,
+    "zooming the canvas out shrinks the cells proportionally",
+  );
+
+  // Zoom IN to 2: the visible world halves.
+  visibleBounds = { x: 50, y: 30, width: 100, height: 60 };
+  minimap.update();
+  assert.ok(
+    Math.abs(parseFloat(frame.style.width) - frameWidth) < 0.001,
+    "camera frame width stays constant on zoom-in",
+  );
+  assert.ok(
+    Math.abs(parseFloat(cell.style.width) - cellWidth * 2) < 0.001,
+    "zooming the canvas in enlarges the cells proportionally",
+  );
+});
+
+test("zoom-sync (FR-094 再改訂): the camera frame always fits inside the minimap", () => {
+  // Regression for the seed-once trap: the radar scale used to be seeded from
+  // the FIRST populated paint (often a single window) and never re-fit, so a
+  // grown fleet + a large viewport made the camera frame bigger than the
+  // minimap itself — clipped into invisibility by overflow:hidden.
+  const { container } = setupDom();
+  const windows = [windowAt("w-1", 0, 0)];
+  const visibleBounds = { x: 0, y: 0, width: 1570, height: 910 }; // zoom 1, large canvas
+  const { minimap } = makeMinimap(container, windows, {
+    getVisibleBounds: () => visibleBounds,
+  });
+
+  // First populated paint with ONE window (the old code seeded its scale here).
+  minimap.renderCells();
+
+  // The fleet grows afterwards.
+  windows.push(
+    windowAt("w-2", 600, 0),
+    windowAt("w-3", 1200, 0),
+    windowAt("w-4", 0, 500),
+    windowAt("w-5", 600, 500),
+    windowAt("w-6", 1200, 500),
+  );
+  minimap.renderCells();
+
+  const frame = container.querySelector(".fleet-minimap__camera");
+  assert.equal(frame.hidden, false, "camera frame stays visible");
+  assert.ok(
+    parseFloat(frame.style.width) <= 200,
+    `camera frame width (${frame.style.width}) fits the 200px container`,
+  );
+  assert.ok(
+    parseFloat(frame.style.height) <= 120,
+    `camera frame height (${frame.style.height}) fits the 120px container`,
+  );
+  assert.ok(
+    parseFloat(frame.style.left) >= 0 && parseFloat(frame.style.top) >= 0,
+    "camera frame is not clipped out of the container",
+  );
+});
+
+test("zoom-sync (FR-094 再改訂): setZoom scales frame and cells together, clamped", () => {
+  // The +/− buttons and wheel adjust the frame fraction: both the camera
+  // frame and the cells scale by the same factor (the mirror relationship is
+  // preserved), and the fraction clamps so the frame never outgrows the
+  // minimap.
+  const { container } = setupDom();
+  const windows = [windowAt("w-1", 0, 0), windowAt("w-2", 400, 300)];
+  const { minimap } = makeMinimap(container, windows);
+
+  minimap.renderCells();
+  const frame = container.querySelector(".fleet-minimap__camera");
+  const cell = container.querySelector('[data-window-id="w-1"]');
+  const ratioBefore = parseFloat(frame.style.width) / parseFloat(cell.style.width);
+
+  minimap.setZoom(1.25);
+  const ratioAfter = parseFloat(frame.style.width) / parseFloat(cell.style.width);
+  assert.ok(
+    Math.abs(ratioAfter - ratioBefore) < 0.001,
+    "frame/cell ratio is preserved across radar zoom",
+  );
+
+  // Extreme zoom-in clamps: the frame never exceeds the container.
+  for (let i = 0; i < 20; i += 1) minimap.setZoom(1.25);
+  assert.ok(
+    parseFloat(frame.style.width) <= 200 && parseFloat(frame.style.height) <= 120,
+    "radar zoom-in clamps so the frame still fits the minimap",
+  );
+});
+
+test("zoom-sync (FR-094 再改訂): wheel over the minimap adjusts the radar like the buttons", () => {
+  // The wheel listener is the third acceptance trigger next to the +/−
+  // buttons: wheel-up zooms the radar in (cells and frame grow together).
+  const { container } = setupDom();
+  const windows = [windowAt("w-1", 0, 0), windowAt("w-2", 400, 300)];
+  const { minimap } = makeMinimap(container, windows);
+
+  minimap.renderCells();
+  const cell = container.querySelector('[data-window-id="w-1"]');
+  const widthBefore = parseFloat(cell.style.width);
+
+  const wheelUp = new container.ownerDocument.defaultView.Event("wheel", {
+    cancelable: true,
+  });
+  Object.defineProperty(wheelUp, "deltaY", { value: -120 });
+  container.dispatchEvent(wheelUp);
+
+  assert.ok(
+    parseFloat(cell.style.width) > widthBefore,
+    "wheel-up over the minimap zooms the radar in",
+  );
+  assert.equal(wheelUp.defaultPrevented, true, "the wheel event does not scroll the page");
+});
+
 test("the camera frame hides when there are no framable windows", () => {
   const { container } = setupDom();
   const windows = [];

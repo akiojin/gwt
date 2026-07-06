@@ -33,10 +33,16 @@ develop に bump コミットだけが残ることがある（GitHub Actions が
 ## フロー概要
 
 ```
-develop (バージョン更新・CHANGELOG更新) → main (PR)
-                                            ↓
-                                  GitHub Release assets (自動)
+[完了ゴール arm] → develop (バージョン更新・CHANGELOG更新) → main (Release PR)
+                                                              ↓ merge
+                                              release.yml (タグ・Release・5プラットフォームビルド)
+                                                              ↓ 監視・エラー検知・transient 再実行
+                                              GitHub Release 公開 (draft=false / assets 付き) = 完了
 ```
+
+リリースは **PR 作成では完了しない**。`release.yml` が完走し GitHub Release が assets 付きで
+公開されて初めて完了する。エージェントは完了ゴール（ステップ 5.4）を arm し、マージ後の
+`release.yml` を監視（ステップ 13）してエラーを検知・復旧してから完了報告する。
 
 ## 前提条件
 
@@ -192,6 +198,50 @@ AskUserQuestion のオプション（minor / patch の場合）:
 > 「リリースを中断しました。」
 
 **判定**: ユーザーが「マイナーバージョンに変更してリリースする」を選択した場合、`NEW_VERSION` を MINOR + 1 に再計算して続行。
+
+#### 5.4 リリース完了ゴールの設定（承認後・必須）
+
+> 🚨 **リリースは「PR 作成」では完了しない。`release.yml` が完走し GitHub Release が
+> assets 付きで公開（`draft=false`）されて初めて完了である。** PR 作成後にエージェントが
+> ターンを終えると、マージ後の `release.yml` 失敗（例: crates.io download の transient
+> 失敗）を誰も検知できない。これを防ぐため、ユーザー承認の直後・ファイル更新の前に、
+> **Codex / Claude Code いずれの runtime でも必ず「リリース完了ゴール」を arm する**。
+
+ゴール条件（`{NEW_VERSION}` を確定値に置換して使う）:
+
+```text
+v{NEW_VERSION} のリリースを完了する: Release PR が main に merge され、release.yml の
+全ジョブが success になり、GitHub Release v{NEW_VERSION} が draft=false かつ全プラット
+フォーム asset 添付で公開されるまで。release.yml の transient な失敗（crates.io download /
+curl / HTTP2 framing / registry update / runner provisioning など）は失敗ジョブを再実行
+して復旧する。非 transient な失敗（compile error / test 失敗 / clippy / signing など）は
+ユーザーに報告して停止する。最大 60 分または 30 ターンで打ち切る。
+```
+
+runtime 別の arm 方法（`gwt-discussion` SKILL の goal-start 契約と同じ）:
+
+- **Codex**（goals 有効。gwt は `--enable goals` で Codex を起動）: `create_goal` を呼び、
+  上記条件を objective として渡す。goals tool 契約によりモデル自身が Goal を開始できる。
+- **Claude Code**（v2.1.139 以降）: 組込 `/goal` はエージェントが自己 invoke できない。
+  代わりに自分の pane へ queue する。`GWT_BIN` をステップ 10 の `resolve_gwt_bin` で解決し、
+  JSON operation `pane.send` で `/goal <条件>` を注入する（現ターン終了時に自動送信。
+  `pane.send` は self-only で `GWT_SESSION_ID` の pane のみを対象にする）:
+
+  ```bash
+  GWT_BIN="$(resolve_gwt_bin)" || exit $?
+  CONDITION="v{NEW_VERSION} のリリースを完了する: release.yml 全ジョブ success かつ GitHub Release v{NEW_VERSION} が draft=false で assets 付き公開まで。transient build 失敗は再実行で復旧、非 transient 失敗はユーザー報告で停止。最大 60 分 / 30 ターンで打ち切り。"
+  python3 - "$CONDITION" <<'PY' | "$GWT_BIN"
+  import json, sys
+  print(json.dumps({"schema_version":1,"operation":"pane.send","params":{"text":"/goal "+sys.argv[1]}}))
+  PY
+  ```
+
+- **ゴールを arm できない場合**（古い Claude Code、trust dialog 未承認、goals 無効、
+  `pane.send` 失敗）は、失敗理由を明示し、上記 `/goal <条件>` 行をそのまま出力して
+  ユーザーが手動実行できるようにする。その上でフローは継続する（ゴール開始失敗は
+  リリース手順を止めない）。ゴールを arm できなかった場合でも、**ステップ 13 の
+  マージ後監視は省略せず必ず実行する**（ゴールは「停止しない」担保であって、監視自体の
+  代替ではない）。
 
 ### 6. ファイル更新
 
@@ -409,20 +459,112 @@ done
 - コメント本文にはバージョン番号（`v{NEW_VERSION}`）と Release PR 番号を含める
 - `|| true` により、個別の Issue へのコメント失敗（既にクローズ済み等）でもリリースフロー全体を中断しない
 
-### 12. 完了メッセージ
+### 12. PR 作成完了メッセージ（まだ完了ではない）
 
-> 「リリース準備が完了しました。」
+> 「Release PR を作成しました。」
 > 「バージョン: v{NEW_VERSION}」
 > 「PR URL: {PR URL}」
-> 「PRがマージされると、GitHub Release assets の公開が自動実行されます。」
+> 「これから PR の merge と release.yml の完走を監視し、GitHub Release が assets 付きで
+> 公開されるまで見届けます。」
+>
+> 🚨 **ここで「リリース完了」と報告して終了してはならない。** ステップ 5.4 で arm した
+> ゴールに従い、ステップ 13 のマージ後監視を必ず実行する。release.yml が完走し GitHub
+> Release が公開されるまでリリースは完了していない。
+
+### 13. マージ後リリースの監視・エラー検知・完了確認（必須）
+
+> 🚨 **このステップを省略しない。** 過去にこのステップが無かったため、PR 作成後に
+> エージェントがターンを終え、マージ後の `release.yml` ビルド失敗（crates.io download の
+> transient エラー）が長時間検知されなかった事例がある。リリースは `release.yml` が完走し
+> GitHub Release が公開されて初めて完了する。
+
+#### 利用できるコマンド面（gwt の surface 制約）
+
+- `gh release view`（`gh release`）は **ブロック対象外**。リリース公開の確定シグナルに使う。
+- `gh run list` / `gh run rerun <run-id> --failed` は利用可能（status 取得・再実行）。
+- `gh run view` は managed hook によりブロックされることがある。**依存しない**。
+- ログ精査は gwt 推奨の JSON operation `actions.logs`（`params.run_id`）/
+  `actions.job_logs`（`params.job_id`）を使う。**`actions.logs` は run 完了後のみ取得可能**
+  （in-progress では "still in progress" を返す）。
+- PR の merge 状態は JSON operation `pr.view` / `pr.checks`。
+
+#### 13.1 PR が main に merge されるまで監視
+
+`pr.view` をポーリングし、Release PR が `[MERGED]` になるまで待つ（auto-merge 有効なら
+必須 CI 通過後に自動マージされる。CodeRabbit など非必須 check は pending でもブロックしない）。
+
+- PR 側 CI が **非 transient** で fail し merge できない場合は、原因を特定して報告し停止する。
+- BEHIND（base が先行）でも auto-merge は通常マージするため、それ自体は失敗ではない。
+
+#### 13.2 release.yml run の特定と完走待ち
+
+merge 後、main の `release.yml` run を特定する:
+
+```bash
+gh run list --workflow release.yml --branch main --limit 5 --repo akiojin/gwt
+```
+
+最新の該当 run の `run_id` と status を取得し、`completed` になるまでポーリングする
+（クロスコンパイルは 5 プラットフォームで 10〜20 分かかる）。
+
+#### 13.3 失敗時のエラー分類（transient vs 非 transient）
+
+run が `completed` かつ `failure` の場合、`actions.logs`（run 完了後に取得可）で
+失敗ジョブのログを取得し、原因を分類する:
+
+- **transient / インフラ起因 → 自動で再実行**: 以下のシグナルは crates.io やランナー側の
+  一過性障害であり、コードの問題ではない。失敗ジョブを再実行する。
+  - `unable to update registry`, `download of .* failed`, `curl failed`,
+    `Error in the HTTP2 framing layer`, `Connection reset`, `timed out`,
+    `TLS connect error`, `429` / `rate limit`, `503`, runner provisioning 失敗 など
+
+  ```bash
+  gh run rerun <run-id> --failed --repo akiojin/gwt
+  ```
+
+  再実行後は 13.2 に戻って完走を待つ。再実行は **最大 3 回** まで。3 回連続で同じ
+  transient 失敗なら、状況をユーザーに報告して判断を仰ぐ。
+
+- **非 transient → 停止して報告**: 以下はコード／設定の問題であり、再実行では直らない。
+  失敗ジョブ・該当ログ抜粋・推定原因をユーザーに報告して停止する。**盲目的に再実行しない**。
+  - `error[E####]` などの Rust compile error、test 失敗（`FAILED` / `panicked`）、
+    `clippy` 警告、署名／keychain エラー、必須 secret 欠落、lint エラー など
+
+#### 13.4 リリース公開の確定確認
+
+`release.yml` の全ジョブが success になったら、GitHub Release が実際に公開されたことを確認する:
+
+```bash
+gh release view v{NEW_VERSION} --repo akiojin/gwt --json isDraft,assets,publishedAt
+```
+
+- `isDraft=false` かつ `publishedAt` が設定済み、かつ `assets` に全プラットフォームの
+  成果物（各 OS のバイナリ／インストーラ）が揃っていることを確認する。
+- まだ `isDraft=true` / assets 不足なら、`release.yml` のアップロードジョブ完了を待って再確認する。
+
+#### 13.5 完了報告
+
+公開を確認できたら、初めて「リリース完了」を報告する:
+
+> 「リリースが完了しました。」
+> 「バージョン: v{NEW_VERSION}」
+> 「Release URL: `https://github.com/akiojin/gwt/releases/tag/v{NEW_VERSION}`」
+> 「公開済み assets: {asset 一覧}」
+> （transient 失敗を再実行した場合はその回数も報告する）
+
+ステップ 5.4 で arm したゴールは、この確定確認をもって満たされ自動的に解除される。
 
 ## マージ後の自動処理
 
 PRがmainにマージされると、`.github/workflows/release.yml` が以下を自動実行：
 
 1. Git タグを作成 (`v{NEW_VERSION}`)
-2. GitHub Release を作成
-3. クロスコンパイル済みバイナリをアップロード
+2. GitHub Release を作成（最初は draft）
+3. クロスコンパイル済みバイナリをアップロードし、Release を公開（draft 解除）
+
+> この自動処理は **失敗しうる**（特にビルド時の crates.io download の transient 失敗）。
+> エージェントはステップ 13 でこの run を必ず監視し、transient 失敗は再実行で復旧、
+> 非 transient 失敗はユーザーに報告すること。「自動だから完了」とみなして終了しない。
 
 ## トラブルシューティング
 
@@ -441,3 +583,17 @@ gh auth login
 ### push が拒否された場合
 
 ブランチ保護ルールを確認するか、管理者に連絡してください。
+
+### release.yml のビルドジョブが transient エラーで失敗した場合
+
+マージ後の `release.yml` ビルドで、crates.io からの依存ダウンロード失敗
+（`download of <crate> failed` / `curl failed` / `Error in the HTTP2 framing layer` /
+`unable to update registry`）が出ることがある。これは GitHub Actions ランナー↔crates.io
+間の一過性ネットワーク障害でコードの問題ではない。失敗ジョブを再実行すれば復旧する:
+
+```bash
+gh run rerun <run-id> --failed --repo akiojin/gwt
+```
+
+ステップ 13 はこの分類と再実行を自動で行う。3 回再実行しても同じ transient 失敗が続く
+場合のみユーザーに報告する。

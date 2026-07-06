@@ -81,7 +81,15 @@ pub(super) fn context(branch: BranchListEntry, normalized: &str) -> LaunchWizard
         linked_issue_kind: None,
         ultracode_supported: false,
         claude_workflows_enabled: false,
+        ephemeral_base_ref: None,
     }
+}
+
+pub(super) fn intake_context(base_ref: &str) -> LaunchWizardContext {
+    let mut ctx = context(branch(base_ref), base_ref);
+    ctx.normalized_branch_name = String::new();
+    ctx.ephemeral_base_ref = Some(base_ref.to_string());
+    ctx
 }
 
 pub(super) fn context_with_linked_issue(

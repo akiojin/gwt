@@ -376,6 +376,44 @@ pub fn usable_worktree_entry(worktree: &gwt_git::WorktreeInfo) -> bool {
     !worktree.prunable && worktree.path.exists()
 }
 
+/// SPEC-3214: filename stem for ephemeral intake worktrees. Placed as a
+/// sibling of the main worktree (`<layout_root>/.intake`, suffixed on
+/// collision) so it is easy to recognize and prune.
+pub const INTAKE_WORKTREE_PREFIX: &str = ".intake";
+
+/// Whether `path` is an ephemeral intake worktree created by
+/// [`crate::launch_runtime::resolve_ephemeral_launch_worktree`] — i.e. its
+/// file name is `.intake` or `.intake-<n>`. Session-end cleanup and orphan
+/// pruning key off this so they never touch a real branch worktree.
+pub fn is_ephemeral_intake_worktree(path: &Path) -> bool {
+    path.file_name()
+        .and_then(|name| name.to_str())
+        .is_some_and(|name| {
+            name == INTAKE_WORKTREE_PREFIX
+                || name.starts_with(&format!("{INTAKE_WORKTREE_PREFIX}-"))
+        })
+}
+
+/// SPEC-3214 (codex #3237): whether a worktree-relative status `entry` is a
+/// gwt MERGED hook config (`.claude/settings.local.json` / `.codex/hooks.json`)
+/// that currently holds ONLY gwt-generated content, and so is safe to reap
+/// along with an ephemeral intake worktree. A user edit (an extra key or a
+/// non-managed hook) makes it non-disposable. Bridges `gwt-git`'s teardown
+/// probe (which cannot depend on `gwt-skills`) to the managed-hook semantics.
+pub fn intake_hook_config_is_disposable(worktree: &Path, entry: &str) -> bool {
+    if entry != ".claude/settings.local.json" && entry != ".codex/hooks.json" {
+        return false;
+    }
+    let path = worktree.join(entry);
+    // A status line for a path that no longer exists is a tracked DELETION —
+    // a real change (codex #3238). Keep it: only a present, purely-generated
+    // config is disposable.
+    if !path.exists() {
+        return false;
+    }
+    !gwt_skills::managed_hook_config_has_user_content(&path)
+}
+
 pub fn first_available_worktree_path(
     preferred_path: &Path,
     worktrees: &[gwt_git::WorktreeInfo],
@@ -795,10 +833,45 @@ pub fn parse_github_remote_url(url: &str) -> Option<(String, String)> {
 mod tests {
     use std::path::PathBuf;
 
-    use super::{front_door_route, FrontDoorRoute};
+    use super::{front_door_route, intake_hook_config_is_disposable, FrontDoorRoute};
 
     fn argv(parts: &[&str]) -> Vec<String> {
         parts.iter().map(std::string::ToString::to_string).collect()
+    }
+
+    #[test]
+    fn intake_hook_config_disposable_only_for_present_generated_configs() {
+        let dir = tempfile::tempdir().unwrap();
+        let worktree = dir.path();
+
+        // Unrelated path → never handled here.
+        assert!(!intake_hook_config_is_disposable(worktree, "tasks/todo.md"));
+
+        // A reported hook path that does not exist = a tracked deletion → keep
+        // (codex #3238), never treat as disposable.
+        assert!(!intake_hook_config_is_disposable(
+            worktree,
+            ".claude/settings.local.json"
+        ));
+
+        // A present, purely gwt-generated hook config → disposable.
+        std::fs::create_dir_all(worktree.join(".claude")).unwrap();
+        gwt_skills::generate_settings_local(worktree).unwrap();
+        assert!(intake_hook_config_is_disposable(
+            worktree,
+            ".claude/settings.local.json"
+        ));
+
+        // A user edit to it → keep.
+        std::fs::write(
+            worktree.join(".claude/settings.local.json"),
+            "{\"permissions\":{\"allow\":[\"*\"]}}",
+        )
+        .unwrap();
+        assert!(!intake_hook_config_is_disposable(
+            worktree,
+            ".claude/settings.local.json"
+        ));
     }
 
     #[test]

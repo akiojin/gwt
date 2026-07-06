@@ -229,12 +229,16 @@ the named-pipe path lands.
    project.
 2. Use `Board`, `Issue`, `SPEC`, and Knowledge search surfaces to understand
    the current work, related owners, and prior decisions.
-3. Choose `Start Work` from the Project Bar or Command Palette when the task is
-   still work-shaped rather than branch-shaped.
-4. Launch an `Agent` from Start Work, or launch directly from an Issue/SPEC
-   detail when the owner is already known.
+3. In the **Curate** lane, choose `Intake` from the Command Rail or Command
+   Palette to shape new work: a branchless, throwaway session that discusses,
+   plans, and registers a GitHub Issue or SPEC. Intake never creates a branch.
+4. In the **Execute** lane, run the registered work: `Open Workspace` launches
+   an `Agent` on an existing branch, the background `Issue Monitor` picks up
+   registered Issues automatically, or launch directly from an Issue/SPEC detail
+   when the owner is already known.
 5. Let gwt materialize the backing `work/YYYYMMDD-HHMM[-n]` branch/worktree
-   only when launch is confirmed.
+   only when an Execute launch is confirmed (Intake sessions stay branchless and
+   ephemeral).
 6. Use the shared Board for status, claims, next steps, blockers, handoffs,
    and decisions while agents run. To mirror those Board posts into Slack or
    Teams, configure a remote Board provider first; see
@@ -244,8 +248,8 @@ the named-pipe path lands.
 
 Common windows include:
 
-- `Agent` — live coding-agent process windows created through Start Work or
-  Launch Agent
+- `Agent` — live coding-agent process windows created through Intake, Open
+  Workspace, the Issue Monitor, or Launch Agent
 - `Board` — shared user/agent timeline for reasoning and coordination
 - `Issue` and `SPEC` — cache-backed Knowledge Bridge windows with semantic
   search, detail panes, and Launch Agent handoff
@@ -275,6 +279,44 @@ In terminal windows, drag to select text and release the mouse button to copy.
 On Windows, `Ctrl+C` copies the current terminal selection and clears it; if no
 selection exists, `Ctrl+C` stays mapped to the running terminal process. On
 Linux, `Ctrl+Shift+C` also copies the current terminal selection.
+
+## Issue Monitor
+
+The Issue Monitor watches the project's open GitHub Issues and turns them into
+agent work. In the default (human-gated) mode it scans candidates into an
+inbox, and you press `Launch` per issue: gwt then creates the
+`work/issue-N` (or `feature/spec-N`) branch/worktree at launch time and starts
+the agent with the issue as its prompt. Failed launches stay visible in the
+inbox with the error, and `Launch now` retries explicitly.
+
+### Autonomous mode (opt-in)
+
+Autonomous mode runs the whole loop unattended: eligible issue → auto-launch →
+implementation → independent review → strong automated gate → auto-merge. It
+is **off by default** and requires a **two-stage opt-in**:
+
+1. Enable the `Autonomous` toggle in the Issue Monitor toolbar (per project).
+2. Label each issue you want handled autonomously with `auto-merge`.
+
+An issue additionally qualifies only when it has machine-checkable acceptance
+criteria (an `## Acceptance Criteria` checklist in the body), the base
+branch's protection rules are verifiable, and its bounded attempt budget is
+not exhausted. Anything else stays on the human-gated path unchanged.
+
+Safety model in one line: the merge decision never belongs to the
+implementing agent — an independent review plus a strong automated gate must
+pass first, failures escalate to a visible `NeedsHuman` state, and the
+`Autonomous` toggle is a kill switch that actively cancels any auto-merge the
+monitor armed. The full gate design and threat model live in SPEC
+[#3200](https://github.com/akiojin/gwt/issues/3200).
+
+Unattended lifecycle events (merge completed, retry scheduled, gate passed,
+needs-human escalations) surface as toasts and accumulate in a persistent,
+scrollable notification stack so nothing is lost while you are away.
+
+Tunable bounds (attempt cap, stuck/idle timeout, retry backoff, review model)
+persist per project. The human-gated baseline is SPEC
+[#3165](https://github.com/akiojin/gwt/issues/3165).
 
 ## Knowledge, Search, and Managed Skills
 
@@ -577,9 +619,9 @@ falls back to system colors so accessibility is preserved.
 | `⌘?` | Toggle the Hotkey Overlay (cheat sheet) |
 | `Esc` | Close any open palette / overlay / drawer / dropdown |
 
-The Command Rail on the left edge is always visible: Start Work and Workspace
-at the top, window operations (Tile / Stack / Align / window list / Add) in the
-middle, and the Command Palette at the bottom. Board and Logs are not rail
+The Command Rail on the left edge is always visible: Intake (Curate lane) and
+Open Workspace (Execute lane) at the top, window operations (Tile / Stack /
+Align / window list / Add) in the middle, and the Command Palette at the bottom. Board and Logs are not rail
 items; reach them via the Add Window preset menu, the command palette, or the
 `⌘B` / `⌘L` hotkeys. Hovering a rail item reveals its label and real shortcut. Closing a
 window (titlebar × or tab ×) always asks for confirmation so a stray click

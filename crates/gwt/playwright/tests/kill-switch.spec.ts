@@ -118,13 +118,16 @@ test.describe("Anshin Phase 1 kill-switch + attention", () => {
     // agent-2 enters waiting -> needs_input attention toast.
     await page.evaluate(() => window.__emit({ kind: "window_state", window_id: "agent-2", state: "waiting" }));
 
-    const toast = page.locator('#attention-toast-agent-2');
+    // SPEC #3206: attention renders in the shared alerts stack, deduped by
+    // window via data-toast-id; needs_input maps to the warn level; the whole
+    // card is the jump button (onActivate).
+    const toast = page.locator('.toast-alerts__item[data-toast-id="attention-agent-2"]');
     await expect(toast).toBeVisible();
-    await expect(toast).toHaveAttribute("data-flavor", "needs_input");
+    await expect(toast).toHaveAttribute("data-level", "warn");
 
     const stage = page.locator("#canvas-stage");
     const before = await stage.evaluate((el) => el.style.transform);
-    await toast.locator(".attention-toast__jump").click();
+    await toast.click();
     await page.waitForTimeout(500);
     await expect.poll(() => stage.evaluate((el) => el.style.transform)).not.toBe(before);
     await expect(toast).toHaveCount(0);

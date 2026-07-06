@@ -216,6 +216,133 @@ impl WorktreeManager {
         Ok(())
     }
 
+    /// Create an ephemeral worktree at `path` with a detached HEAD at
+    /// `base_ref` (SPEC-3214 T-002).
+    ///
+    /// Unlike [`create`](Self::create) / [`create_from_base`](Self::create_from_base)
+    /// this does not create or check out a branch: the intake worktree exists
+    /// only to host a short-lived agent session and is removed when that
+    /// session ends, so it must not leave a branch ref behind.
+    pub fn create_detached(&self, base_ref: &str, path: &Path) -> Result<()> {
+        if path.exists() {
+            return Err(GwtError::Git(format!(
+                "worktree path already exists: {}",
+                path.display()
+            )));
+        }
+
+        let path_arg = path_arg_for_git(path);
+        let output = gwt_core::process::run_git_logged(
+            &["worktree", "add", "--detach", path_arg.as_str(), base_ref],
+            Some(&self.repo_path),
+        )
+        .map_err(|e| GwtError::Git(format!("worktree add --detach: {e}")))?;
+
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+            return Err(GwtError::Git(stderr));
+        }
+
+        Ok(())
+    }
+
+    /// Whether the worktree at `path` has uncommitted changes (tracked or
+    /// untracked, excluding ignored files). SPEC-3214.
+    pub fn is_worktree_dirty(&self, path: &Path) -> Result<bool> {
+        Ok(!crate::diff::get_status(path)?.is_empty())
+    }
+
+    /// Whether an ephemeral intake worktree at `path` holds anything the user
+    /// could lose, so it must NOT be force-removed (SPEC-3214, hardened after
+    /// adversarial review). Stricter than [`Self::is_worktree_dirty`] — a bare
+    /// working-tree check would silently destroy:
+    ///
+    /// * gitignored files the agent wrote (e.g. `tasks/todo.md`, which
+    ///   AGENTS.md mandates, or a scratch `.env`), and
+    /// * commits made on the detached HEAD (they dangle and are gc'd once the
+    ///   worktree — and its HEAD reflog — is removed).
+    ///
+    /// Only gwt-materialized managed assets (`.claude` / `.codex`) and OS
+    /// cruft (`.DS_Store`) are treated as disposable, so a normal intake
+    /// worktree still reaps. Fail-closed callers keep the worktree on `Err`.
+    pub fn ephemeral_worktree_has_local_work(&self, path: &Path) -> Result<bool> {
+        self.ephemeral_worktree_has_local_work_with(path, |_| false)
+    }
+
+    /// [`Self::ephemeral_worktree_has_local_work`] with a caller-supplied
+    /// `extra_disposable` predicate over worktree-relative status entries.
+    /// Higher layers use it to also discard gwt's MERGED hook configs
+    /// (`.claude/settings.local.json`, `.codex/hooks.json`) when they contain
+    /// only gwt-generated content — a decision that needs `gwt-skills`, which
+    /// this crate cannot depend on (codex #3237).
+    pub fn ephemeral_worktree_has_local_work_with<F: Fn(&str) -> bool>(
+        &self,
+        path: &Path,
+        extra_disposable: F,
+    ) -> Result<bool> {
+        // Tracked changes, untracked files, and ignored files in one pass.
+        let output = gwt_core::process::run_git_logged(
+            &[
+                "status",
+                "--porcelain=v1",
+                "--ignored",
+                "--untracked-files=all",
+            ],
+            Some(path),
+        )
+        .map_err(|e| GwtError::Git(format!("status --ignored: {e}")))?;
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+            return Err(GwtError::Git(format!("status --ignored: {stderr}")));
+        }
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        for line in stdout.lines() {
+            if line.len() < 4 {
+                continue;
+            }
+            // Porcelain v1: two status columns, a space, then the path (a rename
+            // is `old -> new`; the new path after the arrow is what matters).
+            let entry = &line[3..];
+            let entry = entry.rsplit(" -> ").next().unwrap_or(entry);
+            if !is_disposable_worktree_entry(entry) && !extra_disposable(entry) {
+                return Ok(true);
+            }
+        }
+
+        // Commits made on the detached HEAD that no ref reaches would dangle if
+        // the worktree were removed. A pristine intake worktree's HEAD equals
+        // its base ref (reachable from a branch/remote/tag), so this is empty.
+        // NB: `--all` would include this worktree's own detached HEAD (git
+        // exposes per-worktree HEADs to `--all`), hiding the very commits we
+        // must detect — enumerate real refs explicitly instead.
+        let unreachable = gwt_core::process::run_git_logged(
+            &[
+                "rev-list",
+                "--max-count=1",
+                "HEAD",
+                "--not",
+                "--branches",
+                "--tags",
+                "--remotes",
+            ],
+            Some(path),
+        )
+        .map_err(|e| GwtError::Git(format!("rev-list HEAD --not refs: {e}")))?;
+        if unreachable.status.success() {
+            if !String::from_utf8_lossy(&unreachable.stdout)
+                .trim()
+                .is_empty()
+            {
+                return Ok(true);
+            }
+        } else {
+            // Cannot prove the HEAD is reachable — fail closed (keep).
+            return Ok(true);
+        }
+
+        Ok(false)
+    }
+
     /// Create a new worktree at `path`, creating `new_branch` from `base_branch`.
     pub fn create_from_base(&self, base_branch: &str, new_branch: &str, path: &Path) -> Result<()> {
         if path.exists() {
@@ -827,6 +954,41 @@ fn path_arg_for_git(path: &Path) -> String {
 }
 
 /// Parse `git worktree list --porcelain` output into `WorktreeInfo` entries.
+/// SPEC-3214: paths that a `git status --ignored` line may report which are
+/// safe to destroy when reaping an ephemeral intake worktree. These are ONLY
+/// gwt's own PURE materialized managed assets — the regenerated, user-free
+/// skill/command dirs gwt writes into every worktree (`.claude/skills/gwt-*`,
+/// `.claude/commands/gwt-*`, `.codex/skills/gwt-*`) — plus OS cruft.
+///
+/// Deliberately NOT disposable: `.claude/settings.local.json` and
+/// `.codex/hooks.json` are MERGED files — gwt preserves user hooks and unrelated
+/// top-level settings in them (see `gwt-skills` `settings_local.rs`), so a user
+/// edit could live there and must never be destroyed (codex #3236). Everything
+/// else is the user's local work and keeps the worktree: a gitignored
+/// `tasks/todo.md` / `.env`, anything under `.gwt/`, a user-authored
+/// `.claude/skills/<custom>` or `.claude/settings.json`, and any tracked change.
+///
+/// NB: because launched intake worktrees legitimately receive these merged
+/// files (the intake agent needs gwt's managed hooks), such worktrees are kept
+/// rather than reaped. Reaping launched intakes precisely (regenerate-and-diff
+/// the managed portion) is handled with the Phase 3 intake-launch lifecycle;
+/// keeping is the data-safe interim.
+fn is_disposable_worktree_entry(entry: &str) -> bool {
+    let entry = entry.trim().trim_matches('"');
+    let entry = entry.strip_prefix("./").unwrap_or(entry);
+
+    // gwt-managed skill / command dirs are prefixed `gwt-`; git may report the
+    // collapsed dir (`.claude/skills/gwt-coordination/`) or individual files.
+    if entry.starts_with(".claude/skills/gwt-")
+        || entry.starts_with(".claude/commands/gwt-")
+        || entry.starts_with(".codex/skills/gwt-")
+    {
+        return true;
+    }
+
+    entry == ".DS_Store" || entry.ends_with("/.DS_Store")
+}
+
 fn parse_porcelain_output(output: &str) -> Vec<WorktreeInfo> {
     let mut worktrees = Vec::new();
     let mut path: Option<PathBuf> = None;
@@ -1277,6 +1439,207 @@ prunable gitdir file points to non-existent location
         assert_eq!(
             String::from_utf8_lossy(&branch_output.stdout).trim(),
             "feature/materialized"
+        );
+    }
+
+    #[test]
+    fn create_detached_makes_branchless_worktree_without_new_branch() {
+        // SPEC-3214 T-001: an intake worktree checks out a base ref at a
+        // detached HEAD — no new branch is created (so `git branch` is
+        // unchanged) and `list()` reports the entry with `branch: None`.
+        let tmp = tempfile::tempdir().unwrap();
+        let repo_path = tmp.path().join("repo");
+        std::fs::create_dir_all(&repo_path).unwrap();
+        init_git_repo(&repo_path);
+        git_commit_allow_empty(&repo_path, "initial commit");
+        git_checkout_new_branch(&repo_path, "develop");
+
+        let manager = WorktreeManager::new(&repo_path);
+        let branches_before = gwt_core::process::run_git_logged(
+            &["branch", "--format=%(refname:short)"],
+            Some(&repo_path),
+        )
+        .expect("git branch");
+        let before = String::from_utf8_lossy(&branches_before.stdout).to_string();
+
+        let worktree_path = tmp.path().join(".intake-abc123");
+        manager.create_detached("develop", &worktree_path).unwrap();
+
+        assert!(worktree_path.exists(), "intake worktree materialized");
+        // HEAD is detached: `git branch --show-current` prints nothing.
+        let current =
+            gwt_core::process::run_git_logged(&["branch", "--show-current"], Some(&worktree_path))
+                .expect("git branch --show-current");
+        assert!(
+            String::from_utf8_lossy(&current.stdout).trim().is_empty(),
+            "detached worktree has no current branch"
+        );
+        // No new branch ref was created in the repo.
+        let branches_after = gwt_core::process::run_git_logged(
+            &["branch", "--format=%(refname:short)"],
+            Some(&repo_path),
+        )
+        .expect("git branch");
+        assert_eq!(
+            String::from_utf8_lossy(&branches_after.stdout),
+            before,
+            "no new branch is created by an intake worktree"
+        );
+        // list() reports the entry as branchless.
+        let listed = manager.list().expect("worktree list");
+        let entry = listed
+            .iter()
+            .find(|w| w.path.ends_with(".intake-abc123"))
+            .expect("intake worktree present in list");
+        assert!(entry.branch.is_none(), "intake worktree is branchless");
+    }
+
+    #[test]
+    fn ephemeral_worktree_has_local_work_guards_ignored_files_and_detached_commits() {
+        // SPEC-3214 (adversarial review): the teardown safety probe must keep a
+        // worktree that holds ANYTHING the user could lose — not just tracked
+        // working-tree changes. Specifically: gitignored files the agent wrote
+        // (e.g. tasks/todo.md, which AGENTS.md mandates) and commits made on the
+        // detached HEAD. Only gwt-materialized managed assets (.claude/.codex)
+        // are treated as disposable.
+        let tmp = tempfile::tempdir().unwrap();
+        let repo_path = tmp.path().join("repo");
+        std::fs::create_dir_all(&repo_path).unwrap();
+        init_git_repo(&repo_path);
+        // Mirror gwt's managed-asset exclude patterns (git_exclude.rs).
+        std::fs::write(
+            repo_path.join(".gitignore"),
+            "tasks/\n.env\n.claude/skills/gwt-*\n.claude/commands/gwt-*\n.claude/settings.local.json\n.codex/skills/gwt-*\n",
+        )
+        .unwrap();
+        gwt_core::process::run_git_logged(&["add", "-A"], Some(&repo_path)).unwrap();
+        git_commit_allow_empty(&repo_path, "seed with gitignore");
+        git_checkout_new_branch(&repo_path, "develop");
+
+        let manager = WorktreeManager::new(&repo_path);
+
+        // 1. Fresh detached intake worktree: nothing to lose → discardable.
+        let fresh = tmp.path().join(".intake-fresh");
+        manager.create_detached("develop", &fresh).unwrap();
+        assert!(
+            !manager.ephemeral_worktree_has_local_work(&fresh).unwrap(),
+            "a pristine intake worktree has no local work"
+        );
+
+        // 2. Only gwt-materialized PURE managed skill/command dirs present →
+        //    still discardable (these hold no user content).
+        std::fs::create_dir_all(fresh.join(".claude/skills/gwt-coordination")).unwrap();
+        std::fs::write(
+            fresh.join(".claude/skills/gwt-coordination/SKILL.md"),
+            "managed",
+        )
+        .unwrap();
+        std::fs::create_dir_all(fresh.join(".claude/commands")).unwrap();
+        std::fs::write(fresh.join(".claude/commands/gwt-x.md"), "managed").unwrap();
+        std::fs::create_dir_all(fresh.join(".codex/skills/gwt-coordination")).unwrap();
+        std::fs::write(
+            fresh.join(".codex/skills/gwt-coordination/SKILL.md"),
+            "managed",
+        )
+        .unwrap();
+        assert!(
+            !manager.ephemeral_worktree_has_local_work(&fresh).unwrap(),
+            "gwt-materialized pure managed skill/command dirs are not user work"
+        );
+
+        // 2a. `.claude/settings.local.json` is a MERGED file (gwt preserves user
+        // hooks and unrelated settings), so it must be kept — a user edit there
+        // must never be destroyed (codex #3236 P1).
+        let merged_settings = tmp.path().join(".intake-settings");
+        manager
+            .create_detached("develop", &merged_settings)
+            .unwrap();
+        std::fs::create_dir_all(merged_settings.join(".claude")).unwrap();
+        std::fs::write(merged_settings.join(".claude/settings.local.json"), "{}").unwrap();
+        assert!(
+            manager
+                .ephemeral_worktree_has_local_work(&merged_settings)
+                .unwrap(),
+            ".claude/settings.local.json is a merged file that may hold user hooks; keep it"
+        );
+
+        // 2b. USER content under .claude/.codex (codex #3235 P1) → keep.
+        let user_claude = tmp.path().join(".intake-userclaude");
+        manager.create_detached("develop", &user_claude).unwrap();
+        std::fs::create_dir_all(user_claude.join(".claude/skills/my-custom")).unwrap();
+        std::fs::write(
+            user_claude.join(".claude/skills/my-custom/SKILL.md"),
+            "the user's own skill",
+        )
+        .unwrap();
+        assert!(
+            manager
+                .ephemeral_worktree_has_local_work(&user_claude)
+                .unwrap(),
+            "a user-authored skill under .claude is local work, not a gwt-managed asset"
+        );
+        let user_settings = tmp.path().join(".intake-usersettings");
+        manager.create_detached("develop", &user_settings).unwrap();
+        std::fs::create_dir_all(user_settings.join(".claude")).unwrap();
+        std::fs::write(
+            user_settings.join(".claude/settings.json"),
+            "{\"edited\":true}",
+        )
+        .unwrap();
+        assert!(
+            manager
+                .ephemeral_worktree_has_local_work(&user_settings)
+                .unwrap(),
+            "a user .claude/settings.json edit must not be treated as disposable"
+        );
+
+        // 3. A gitignored agent-authored file (tasks/todo.md) → keep.
+        let ignored = tmp.path().join(".intake-ignored");
+        manager.create_detached("develop", &ignored).unwrap();
+        std::fs::create_dir_all(ignored.join("tasks")).unwrap();
+        std::fs::write(ignored.join("tasks/todo.md"), "the agent's working log").unwrap();
+        assert!(
+            manager.ephemeral_worktree_has_local_work(&ignored).unwrap(),
+            "a gitignored agent working log is local work that must not be destroyed"
+        );
+
+        // 4. A commit on the detached HEAD → keep (dangling-commit data loss).
+        let committed = tmp.path().join(".intake-committed");
+        manager.create_detached("develop", &committed).unwrap();
+        std::fs::write(committed.join("finding.txt"), "investigation result").unwrap();
+        gwt_core::process::run_git_logged(&["add", "-A"], Some(&committed)).unwrap();
+        gwt_core::process::run_git_logged(&["commit", "-m", "save"], Some(&committed)).unwrap();
+        assert!(
+            manager
+                .ephemeral_worktree_has_local_work(&committed)
+                .unwrap(),
+            "a commit on the detached intake HEAD must not become a dangling loss"
+        );
+    }
+
+    #[test]
+    fn is_worktree_dirty_reports_uncommitted_changes() {
+        // SPEC-3214 T-005: session-end cleanup keeps a dirty intake worktree
+        // and removes a clean one, so it needs an accurate dirty probe.
+        let tmp = tempfile::tempdir().unwrap();
+        let repo_path = tmp.path().join("repo");
+        std::fs::create_dir_all(&repo_path).unwrap();
+        init_git_repo(&repo_path);
+        git_commit_allow_empty(&repo_path, "initial commit");
+        git_checkout_new_branch(&repo_path, "develop");
+
+        let manager = WorktreeManager::new(&repo_path);
+        let worktree_path = tmp.path().join(".intake-dirty");
+        manager.create_detached("develop", &worktree_path).unwrap();
+
+        assert!(
+            !manager.is_worktree_dirty(&worktree_path).unwrap(),
+            "a freshly created intake worktree is clean"
+        );
+        std::fs::write(worktree_path.join("scratch.txt"), "wip").unwrap();
+        assert!(
+            manager.is_worktree_dirty(&worktree_path).unwrap(),
+            "an untracked file makes the worktree dirty"
         );
     }
 

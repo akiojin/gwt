@@ -21,12 +21,15 @@
 use std::path::Path;
 
 use super::{
-    combined_window_id, launch_config_from_persisted_session, same_worktree_path,
-    should_auto_start_restored_window, workspace_resume_context_for_work_item, AppRuntime,
-    HookForwardTarget, OutboundEvent, PendingStartupAutoResumeSession, WindowGeometry,
+    combined_window_id, launch_config_from_persisted_session, prune_orphan_intake_worktrees,
+    same_worktree_path, should_auto_start_restored_window, workspace_resume_context_for_work_item,
+    AppRuntime, HookForwardTarget, OutboundEvent, PendingStartupAutoResumeSession, WindowGeometry,
     WindowPreset, WindowProcessStatus, WorkspaceResumeContext,
 };
 
+/// SPEC-3214 T-006: per-repo cap on orphaned intake worktrees reaped per
+/// startup so a pathological pile-up cannot stall boot.
+const MAX_STARTUP_INTAKE_PRUNE: usize = 32;
 const STARTUP_AUTO_RESUME_STALE_AFTER_SECS: i64 = 24 * 60 * 60;
 const STARTUP_AUTO_RESUME_STACK_OFFSET_X: f64 = 28.0;
 const STARTUP_AUTO_RESUME_STACK_OFFSET_Y: f64 = 24.0;
@@ -139,6 +142,18 @@ impl AppRuntime {
             let _ = gwt_core::workspace_projection::reset_legacy_agent_identity_for_repo(
                 &tab.project_root,
             );
+            // SPEC-3214 T-006: reap ephemeral `.intake-*` worktrees orphaned by
+            // a crash (no intake session is live at startup). Clean ones are
+            // removed; dirty ones are kept. Bounded so a pile-up cannot stall
+            // startup.
+            let pruned = prune_orphan_intake_worktrees(&tab.project_root, MAX_STARTUP_INTAKE_PRUNE);
+            if pruned > 0 {
+                tracing::info!(
+                    project_root = %tab.project_root.display(),
+                    pruned,
+                    "reaped orphaned ephemeral intake worktrees on startup"
+                );
+            }
         }
 
         self.queue_startup_auto_resume_sessions();

@@ -96,6 +96,14 @@ pub enum IssueCommand {
         number: u64,
         body: String,
     },
+    /// SPEC #3200 Option A: an independent-review agent reports its verdict for a
+    /// reviewed SHA. Published to the Issue Monitor daemon control channel, where
+    /// the daemon (trusted) re-judges it against the launch-time criteria.
+    MonitorReviewVerdict {
+        issue_number: u64,
+        reviewed_sha: String,
+        verdict_raw: String,
+    },
 }
 
 /// SPEC-1942 command model for `pr.*` JSON operations.
@@ -131,6 +139,12 @@ pub enum PrCommand {
         add_labels: Vec<String>,
     },
     View {
+        number: u64,
+    },
+    Ready {
+        number: u64,
+    },
+    Draft {
         number: u64,
     },
     Comment {

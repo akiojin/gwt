@@ -33,7 +33,7 @@ test.describe.serial("Launch Wizard setting controls (live backend)", () => {
   test("Target is a segmented radiogroup that toggles agent settings", async ({
     page,
   }) => {
-    await sendLiveGwtEvent(page, { kind: "open_start_work" });
+    await sendLiveGwtEvent(page, { kind: "open_intake_session" });
     const wizard = page.locator("#wizard-modal");
     await expect(wizard).toBeVisible();
     await wizard.getByRole("button", { name: "Configure and start" }).click();
@@ -58,7 +58,7 @@ test.describe.serial("Launch Wizard setting controls (live backend)", () => {
   test("Reasoning renders as a slider with a separate Auto toggle", async ({
     page,
   }) => {
-    await sendLiveGwtEvent(page, { kind: "open_start_work" });
+    await sendLiveGwtEvent(page, { kind: "open_intake_session" });
     const wizard = page.locator("#wizard-modal");
     await expect(wizard).toBeVisible();
     await wizard.getByRole("button", { name: "Configure and start" }).click();

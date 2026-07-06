@@ -32,7 +32,41 @@ test("renderIndexSettingsPanel shows empty hint when no project root is selected
 
   const empty = ctx.panel.querySelector("[data-role='index-settings-empty']");
   assert.ok(empty, "expected the empty state placeholder");
+  assert.equal(
+    ctx.panel.querySelector("[data-action='refresh-index-status']"),
+    null,
+    "without a project root the empty state must not send refresh requests",
+  );
+  assert.doesNotMatch(empty.textContent, /Open Project/i);
   assert.equal(ctx.panel.querySelector("table"), null);
+});
+
+test("renderIndexSettingsPanel shows refresh action when status is unavailable for a project", () => {
+  const ctx = fixture();
+  renderIndexSettingsPanel({
+    panel: ctx.panel,
+    status: null,
+    projectRoot: "/abs/repo",
+    send: ctx.send,
+    document: ctx.document,
+  });
+
+  const empty = ctx.panel.querySelector("[data-role='index-settings-empty']");
+  assert.ok(empty, "expected the empty state placeholder");
+  assert.match(empty.textContent, /Status unavailable/);
+  assert.match(empty.textContent, /Refresh status/);
+  assert.doesNotMatch(empty.textContent, /Open Project/i);
+  assert.equal(ctx.panel.querySelector("table"), null);
+
+  const refresh = ctx.panel.querySelector("[data-action='refresh-index-status']");
+  assert.ok(refresh, "expected a project-scoped refresh action");
+  refresh.click();
+  assert.deepEqual(ctx.sent, [
+    {
+      kind: "refresh_index_status",
+      project_root: "/abs/repo",
+    },
+  ]);
 });
 
 test("renderIndexSettingsPanel distinguishes an empty status payload from unavailable status", () => {
@@ -106,6 +140,18 @@ test("renderIndexSettingsPanel renders one row per scope and one column per work
 
   const table = ctx.panel.querySelector("[data-role='index-settings-table']");
   assert.ok(table, "expected a health table");
+
+  const summary = ctx.panel.querySelector("[data-role='index-health-summary']");
+  assert.ok(summary, "expected summary cards before the health table");
+  assert.equal(
+    ctx.panel.firstElementChild,
+    summary,
+    "summary cards should appear before the detailed table",
+  );
+  assert.match(summary.textContent, /5 ready/);
+  assert.match(summary.textContent, /2 degraded/);
+  assert.match(summary.textContent, /specs/);
+  assert.match(summary.textContent, /files · feature\/x/);
 
   const headerCols = table.querySelectorAll("thead th[scope='col']");
   // 1 scope column + 2 worktree columns

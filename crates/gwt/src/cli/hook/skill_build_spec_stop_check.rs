@@ -32,7 +32,7 @@ pub fn handle_with_input(
     input: &str,
     current_session_id: Option<&str>,
 ) -> HookOutput {
-    super::skill_plan_spec_stop_check::decide(
+    super::state_file_stop_check::decide(
         worktree,
         input,
         current_session_id,

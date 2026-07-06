@@ -115,6 +115,10 @@ pub fn evaluate_with_context(
     if safety != HookOutput::Silent {
         return Ok(safety);
     }
+    let lane_code_edit = evaluate_lane_code_edit_guard(event, worktree_root)?;
+    if lane_code_edit != HookOutput::Silent {
+        return Ok(lane_code_edit);
+    }
     let title_summary = evaluate_title_summary_guard(event, context.title_summary_missing)?;
     if title_summary != HookOutput::Silent {
         return Ok(title_summary);
@@ -341,6 +345,57 @@ Start or link the work first through `gwt-register-issue`, `gwt-fix-issue`, or a
             ))
         }
     }
+}
+
+/// SPEC-3248 P4 (FR-011): a lane whose profile sets `block_production_code_edits`
+/// (intake today) may not edit production source. It registers Issues/SPECs and
+/// leaves implementation to Execute-lane sessions. Bookkeeping under `.gwt/` and
+/// `tasks/`, and documentation/guidance edits, stay allowed. Fail-open: if the
+/// target path cannot be determined, the edit is not blocked.
+fn evaluate_lane_code_edit_guard(
+    event: &HookEvent,
+    worktree_root: &Path,
+) -> Result<HookOutput, HookError> {
+    let lane = crate::cli::hook::context::HookContext::for_worktree(worktree_root).lane;
+    if !lane.policy_flags.block_production_code_edits || !is_mutating_work_event(event) {
+        return Ok(HookOutput::Silent);
+    }
+    let paths = event_target_paths(event);
+    if paths.is_empty()
+        || paths
+            .iter()
+            .all(|path| is_intake_editable_path(path, worktree_root))
+    {
+        return Ok(HookOutput::Silent);
+    }
+    Ok(HookOutput::pre_tool_use_permission(
+        "Intake (Curate) sessions do not edit production code",
+        "This is a Curate (intake) session: it registers Issues/SPECs and does not implement. \
+Editing production source is blocked here. Register the work \
+(`gwt-register-issue` for a plain Issue, or `gwt-discussion` → `gwt-register-spec` for a SPEC) \
+and let an Execute-lane session (Workspace / Issue Monitor) implement it. \
+Bookkeeping under `.gwt/` and `tasks/`, and documentation edits, are allowed.",
+    ))
+}
+
+/// Paths an intake session may still edit: gwt bookkeeping (`.gwt/`, `tasks/`)
+/// and documentation/guidance. Everything else inside the worktree is treated
+/// as production source and blocked.
+fn is_intake_editable_path(path: &str, worktree_root: &Path) -> bool {
+    if is_documentation_or_guidance_path(path, worktree_root) {
+        return true;
+    }
+    let candidate = Path::new(path);
+    let relative = candidate
+        .strip_prefix(worktree_root)
+        .unwrap_or(candidate)
+        .components()
+        .filter_map(|component| match component {
+            std::path::Component::Normal(part) => part.to_str(),
+            _ => None,
+        })
+        .next();
+    matches!(relative, Some(".gwt") | Some("tasks"))
 }
 
 fn requires_owner_for_mutating_work(event: &HookEvent, worktree_root: &Path) -> bool {
@@ -1173,6 +1228,44 @@ Coverage requirements.
         assert!(detail.contains(r#""purpose""#));
         assert!(detail.contains("work name"), "{detail}");
         assert!(detail.contains("which window is doing what"), "{detail}");
+    }
+
+    #[test]
+    fn lane_code_edit_guard_blocks_intake_production_edits_allows_bookkeeping() {
+        let repo = tempfile::tempdir().expect("repo");
+        let edit_event = |path: &std::path::Path| HookEvent {
+            tool_name: Some("Edit".to_string()),
+            tool_input: Some(serde_json::json!({ "file_path": path.to_str().unwrap() })),
+            transcript_path: None,
+            cwd: None,
+        };
+        let src = repo.path().join("crates/gwt/src/main.rs");
+        let bookkeeping = repo.path().join(".gwt/work/events.jsonl");
+
+        // Intake lane (from the lane file): block production source, allow the
+        // .gwt/ bookkeeping path.
+        gwt_skills::write_lane_file(repo.path(), &gwt_skills::INTAKE_PROFILE).expect("intake lane");
+        assert!(
+            matches!(
+                evaluate_lane_code_edit_guard(&edit_event(&src), repo.path()).expect("guard"),
+                HookOutput::PreToolUsePermission { .. }
+            ),
+            "intake must not edit production source"
+        );
+        assert_eq!(
+            evaluate_lane_code_edit_guard(&edit_event(&bookkeeping), repo.path()).expect("guard"),
+            HookOutput::Silent,
+            "intake may edit .gwt bookkeeping"
+        );
+
+        // Execution lane: no code-edit block.
+        gwt_skills::write_lane_file(repo.path(), &gwt_skills::EXECUTION_PROFILE)
+            .expect("execution lane");
+        assert_eq!(
+            evaluate_lane_code_edit_guard(&edit_event(&src), repo.path()).expect("guard"),
+            HookOutput::Silent,
+            "execution may edit production code"
+        );
     }
 
     #[test]

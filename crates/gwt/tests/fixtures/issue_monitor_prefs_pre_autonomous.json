@@ -1,0 +1,8 @@
+{
+  "enabled": true,
+  "max_active_agents": 1,
+  "priority_order": [101, 102],
+  "launched_issues": [],
+  "failed_issues": [],
+  "merged_issues": [42]
+}

@@ -316,7 +316,7 @@ fn current_darwin_major() -> u32 {
 /// Remove the legacy LaunchAgent plist left by older gwt versions so the
 /// SMAppService entry is the only one Background Task Management lists. Older
 /// builds dropped a raw plist that BTM attributes to the signing team name;
-/// dropping it prevents a stale "<developer name>" entry from lingering under
+/// dropping it prevents a stale `<developer name>` entry from lingering under
 /// "Allow in the Background".
 #[cfg(target_os = "macos")]
 fn remove_legacy_launch_agent() {

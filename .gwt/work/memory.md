@@ -7459,6 +7459,26 @@ Context: Docker起動エラーが TTY 前面に被さる回帰 (SPEC-2014 US-36 
 Learning: test rename + assert.equal('false')->assert.match(error) のような『契約の反転』は新規ケース追加と違い regression を隠す。TTY 前面 overlay は .terminal-overlay.visible 1 箇所(app.js shouldShowOverlay)のみで Docker 固有ではなく全 error window で発火する。error は overlay 無しでも inline TTY text(launch_error_terminal_output_event) / status chip tooltip / attention toast / Console docker tab / Logs Process facet の 5 面で可視。
 Future Action: contract test の assertion が『追加』ではなく『反転』している diff は regression の赤信号として扱う。完了済み FR を touch する大型 feature commit では guard test が意味を保っているか必ず確認する。前面 overlay を復活させる変更は SPEC-2014 US-36 違反。
 
+## 2026-06-26 — spawn_logged_blocking の per-call runtime build が fd 逼迫で握り潰されると無関係なエラー文言になる
+
+Type: lesson
+Context: Issue Monitor が有効な GitHub origin でも「GitHub origin remote is unavailable」を毎回・全プロジェクトで誤表示する報告 (Issue #3190) を調査した。github_remote_owner_and_repo は spawn_logged_blocking 経由で git remote get-url origin を実行し、結果を Option に潰していた。
+Learning: gwt_core::process_console::spawn_logged_blocking は呼び出しごとに tokio::runtime::Builder::new_current_thread().enable_all().build() で新しいランタイムを生成し、I/O ドライバ用の fd (kqueue/epoll) を確保する。エージェント PTY 多数で fd が逼迫すると build() が失敗し、呼び出し側が .ok()? で握り潰すと、本当の原因 (プロセス起動失敗) が origin 解決失敗の文言にすり替わる。さらに spawn 失敗 / git 非ゼロ終了 / 非GitHub URL を 1 メッセージに潰すと診断不能になる。
+Future Action: process spawn を Option に潰さず、spawn 失敗 (io::Error)・非ゼロ終了 (stderr/exit code)・パース失敗を別々のエラーとして surface する。FR-039 を守りつつ fd コストを抑えるため spawn_logged_blocking はプロセス共有ランタイムを再利用する (SHARED OnceLock、fallback あり)。失敗種別の分類は純粋関数に切り出して単体テストする。
+
+## 2026-06-28 — Issue Monitor の launched lifecycle: 成功終端が無く max_active で起動が止まる
+
+Type: lesson
+Context: SPEC #3165。Issue Monitor が Launched 後にマージ完了・ウィンドウクローズしても解除されず、2件目以降が起動されない不具合を修正した。
+Learning: active_launches は record_failed_issue(失敗時)でしか減らず成功・完了の終端遷移が無い。起動ゲートが active_count<max_active のため最初の Issue が完了/クローズしてもスロット解放されず monitor が停止する。close_window_events/close_project_tab_events は monitor へ通知せず、prefs.launched_issues が active を Launched 復元するため再起動後も stale。gwt は Issue クローズをリリースに集約するため PR マージ≠Issue クローズで完了検知は PR マージで行う。auto-launch(silent_issue_monitor_launch_events)は常に fresh 起動で latest_resumable_branch_session を使わず resume しない。
+Future Action: 完了は実完了のみ終端化(Merged=develop マージ/Released=Issue クローズ)。未完で閉じたら偽 Closed を作らず pending(Queued)に戻し session を resume 対象にする。close/merge を requeue_window/record_merged で配線、PR マージ検知(fetch_merged_pr_branches)は取得失敗時 Launched 維持で false merge を避ける。状態遷移は純粋メソッドで単体テスト。
+
+## 2026-06-28 — 完全自走エージェント＝人間ゲートを消すのではなく強い自動ゲートに置換する
+
+Type: decision
+Context: Issue Monitor を「完全に自走して Issue を解決し merge まで」する autonomous mode の設計議論（新 SPEC）。現状は配管はあるが人間ゲート必須で完全自走ではない。
+Learning: 完全自走は人間の視認/承認ゲートを消すことではなく、強い自動ゲートに置換することで達成する。CI green+テスト pass だけでは不十分: 実装エージェントがコードとテストの両方を書くと「自分の宿題を自分で採点」になり、要件誤解のまま通るテストで壊れた修正が merge され得る。だから独立レビューエージェント（実装したのと別の model/agent が Issue の受け入れ基準に adversarial 検証）を必須化する。発動は二段 opt-in（project 設定 autonomous_mode + Issue ラベル）で blast radius を制御し default OFF で既存挙動を保つ。無人で実際に回すには skip_permissions 適用・max-retry/needs-human エスカレーション・transient リトライ・stuck 検知も併せて必要。
+Future Action: autonomous/unattended な agent loop を設計するときは『人間ゲートを何の自動ゲートで置換するか』を最初に決める。最低でも CI+テスト+独立レビュー(別 model)を必須化し、自己採点を避ける。opt-in 二段・default OFF・ループ上限(needs-human)・stuck 回収をセットで入れる。gwt では FR-015(no bypass)を opt-in 条件付きで明示的に relax する条項を SPEC に書く。
 ## 2026-06-27 — Browser-check isolated HOME can hide Rust toolchains
 
 Type: failure-pattern
@@ -7472,3 +7492,121 @@ Type: failure-pattern
 Context: During PR #3193 pre-PR visual verification, the Issue Bridge auto-refresh Playwright fixture fired a 60000ms interval callback via a fixed 50ms timeout. In the full suite, initial knowledge load sometimes still held the busy flag, so the auto-refresh request was dropped and the test timed out although single-test runs passed.
 Learning: Timer-shortening fixtures are flaky when the production callback can legally no-op while state is busy. Tests should expose a deterministic trigger and call it after asserting the state that makes the callback meaningful.
 Future Action: For Playwright fixtures that validate periodic behavior, capture interval callbacks and trigger them explicitly after the initial render/load assertions instead of relying on arbitrary short timeouts.
+
+## 2026-06-26 — release develop push は pre-push hook で 2 分 timeout を超える
+
+Type: project
+Context: /release workflow step 8: git push origin develop が 2 分の tool timeout で hang する
+Learning: .husky/pre-push が full CI suite（cargo clippy + cargo fmt --check + cargo llvm-cov coverage --test-threads=1 + coverage threshold + markdownlint + skill frontmatter validation）を同期実行するため push 完了まで 5 分以上かかる。reject ではない（develop は enforce_admins:false で admin bypass push 許可）。
+Future Action: release の develop push は run_in_background:true で実行し timeout kill を避ける。完了後 git rev-parse origin/develop が local HEAD と一致し push 出力に 'develop -> develop' があることを確認する。
+
+## 2026-06-28 — release flow must monitor post-merge release.yml until published
+
+Type: project
+Context: /release フローが PR 作成（step 12）で『リリース準備完了』と宣言してターンを終え、マージ後の release.yml ビルド失敗（crates.io download の transient エラー: 'download of auto-launch failed' / 'curl failed' / 'Error in the HTTP2 framing layer'）を検知できなかった。v9.64.2 で Linux x86_64 ビルドのみ失敗し Release が draft のまま放置された。
+Learning: リリースは PR 作成では完了しない。release.yml が完走し GitHub Release が draft=false かつ全 asset 付きで公開されて初めて完了する。gwt surface 制約: gh run view はブロックされうるが gh run list / gh run rerun --failed / gh release view は利用可。actions.logs/actions.job_logs は run 完了後のみ取得可能。
+Future Action: /release は (1) 承認直後に完了ゴールを arm（Codex=create_goal / Claude Code=pane.send で /goal 注入）、(2) step 13 でマージ後 release.yml を監視し transient 失敗は gh run rerun --failed で最大3回復旧、非 transient はユーザー報告で停止、gh release view で draft=false + assets 確認後に初めて完了報告する。release.md / .codex/skills/release/SKILL.md に反映済み。
+
+## 2026-07-02 — 同一 worktree への build-spec 二重起動 race の検知と協調解消
+
+Type: agent workflow correction
+Context: SPEC #3206 Phase 2 (feature/spec-3206) で gwt-build-spec が同一 worktree に約2分差で二重起動された。Board preflight 時点では相手 session は started エントリのみ（claim 無し）で working tree もクリーンだったため続行したところ、相手の編集が自分の Read とテスト実行の間に着地し、RED のはずの contract test が最初から GREEN になった。
+Learning: 同一 branch の started エントリは claim が無くても『生きた並行 writer』であり得る。Board claim preflight だけでは不十分。RED を書いたテストが初回から PASS するのは並行編集の強いシグナルで、即座に git status / git diff / 対象ファイル mtime を確認すべき。.gwt/skill-state/build-spec.json は session 間で共有され、後発の build.start が先発の state を上書きする。
+Future Action: gwt-build-spec 開始時、同一 branch に他 session の started エントリがある場合は (1) git status の予期しない dirty、(2) 対象ファイルの mtime、(3) .gwt/skill-state/build-spec.json の active 状態を確認し、生きた writer の証拠があれば編集前に Board で調整する。衝突検知後は、実装を持っている側に完了を委ね、自分は重複変更を revert して commit を監視する（二重 commit / 二重 PR を構造的に回避）。
+
+## 2026-07-02 — fresh HOME では Playwright browser を pinned binary で install / rustup default 必須
+
+Type: environment
+Context: SPEC #3206 P2 検証で、gwt-fresh-home 隔離 HOME から Playwright E2E と cargo test を実行したら両方 tooling 欠落で失敗した(chromium headless shell 不在 / rustup default 未設定)。素の npx playwright install は最新 playwright 用 browser build (v1228) を入れてしまい、scripts/run-visual-tests.sh が pin する 1.49.1 が要求する v1148 と合わず解決しなかった。
+Learning: fresh HOME では ~/Library/Caches/ms-playwright と rustup default が空。browser install は必ず pinned deps の binary (${TMPDIR}/gwt-playwright-<ver>/node_modules/.bin/playwright install chromium) で行う。cargo は rustup default stable を一度実行すれば直る(toolchain 自体は installed)。
+Future Action: 隔離環境で Executable doesn't exist ... ms-playwright/chromium_headless_shell-<N> を見たら要求 build 番号 <N> を確認し、pinned playwright binary で install する。rustup could not choose a version は rustup default stable。
+
+## 2026-07-02 — Start Work は lazy／branch-per-work は生産Work用・intake は既存worktree再利用
+
+Type: decision
+Context: ユーザー提起「Issue Monitor があれば Start Work のブランチ作成は不要、Issue登録だけなら専用ブランチ起動で良い」を gwt-discussion で検証(SPEC #2359 Workモデル / #3165 Issue Monitor)。
+Learning: (1)前提が事実と異なる: Start Work はクリック時点でブランチ名を予約するだけで git ref を作らず(reserve_start_work_branch_name_for_project, start_work_test.rs:153 'must not create refs')、ブランチ+worktree の物理作成はエージェント起動直前の resolve_launch_worktree(launch_runtime.rs:141/162)。Issue Monitor も同じ lazy materialization を再利用(launch.rs:1467)。『Start Workが先にブランチを作る』は誤解で、両者は同一機構の別トリガー。(2)Start Work は Issue Monitor で代替不可: 非Issue作業(ad-hoc/任意ブランチ種別/既存リモートブランチ継続US-83/Shell)の汎用入口、Issue linkage は optional。(3)正しい論点は『gwt の Work は branch束縛1種類だが、生産Work(コード→branch/worktree/PR必須)と非生産intake Work(register-issue/discussion/spec/arch-review→Issue+.gwt notesのみ)の2種類ある』。(4)『専用ブランチ共有』案は git制約(1ブランチ=1worktree)とセッション隔離(GWT_SESSION_ID+per-worktree .gwt state+managed hooks)に当たり素朴には成立しない。実現するなら ephemeral worktree か直列化が要る。
+Future Action: branch-per-work コアモデルは生産Workに load-bearing なので維持。intake/discussion は新Work種別を作らず既存worktree再利用で回す(No Action)。将来 intake worktree増殖が定量的に痛くなった場合のみ『ephemeral intake Work kind』を SPEC化(セッション隔離のworktree非依存化が前提技術課題)。'Start Workは事前にブランチを作る'誤解を繰り返さない。
+## 2026-07-02 — session 共有 dedup は identity 照合必須 (Workspace 行 silent drop)
+
+Type: bug-fix
+Context: PR #3205 (work/issue-3197) が Workspace 一覧から消え再開不能になった (Issue #3213)。works.json で別 branch の Work (issue-3184) に session の迷子 ref (agent_id 空) が誤付与され、active_work_already_present の session 一致 dedup が branch/worktree identity を確認せず正規所有者の行を silent drop していた。ローカル branch が存在すると remote Start Work stub 経路 (ResumeExisting) からも除外されるため表示経路がゼロになる。
+Learning: session id 共有による dedup/merge は、両側が git identity (branch/worktree) を持ち食い違う場合には適用してはならない。identity-conflict gate (active_work_agent_matches_workspace_row_identity と同パターン) を必ず併用する。view 層の dedup は「汚染済み永続データでも正しく表示できる」ことを基準に設計する (データ修復より view 耐性)。
+Future Action: session ベースの照合・dedup を追加/変更する際は、(1) 別 branch の Work が同一 session を共有する corrupted works.json ケースのテストを必ず書く、(2) drop 側に他の表示経路が残るか (remote stub 等) を確認する。上流の session 誤付与 hardening と journal compaction の診断痕跡保持は未解決 (Issue #3213 Follow-up 参照)。
+
+## 2026-06-29 — managed-skill 新規ファイルは .git/info/exclude で silent に無視される
+
+Type: project
+Context: Issue #3197 で gwt-manage-pr の managed skill に新規 reference file (references/deliver-flow.md) を追加した際、git status に出ず commit され損ねかけた。
+Learning: gwt-managed worktree では `.git/info/exclude` に `.claude/skills/gwt-*` と `.codex/skills/gwt-*` の除外 entry があり、新規 managed-skill ファイルは untracked にすら現れず silent に無視される。既存ファイル(SKILL.md 等)は既に tracked なので modification は M で見えるが、NEW ファイルは git add -f しないと commit されない。commit され損ねると include_dir! 埋め込み元と CI checkout に file が無く、新 test と parity test が CI で fail する。
+Future Action: managed skill (.claude/skills/gwt-*, .codex/skills/gwt-*) に新規ファイルを追加したら必ず `git check-ignore -v <path>` で除外を確認し `git add -f` で明示 stage する。commit 後 `git show --stat HEAD` で新規ファイルが含まれることを確認する。
+
+## 2026-07-02 — PR #3205 救出: 並行実装 conflict の解消と PTY flaky の切り分け
+
+Type: project
+Context: PR #3205 (Deliver mode) が放置中に develop へ簡易版 Deliver (443656db6) が別経路で merge され、SKILL.md 双子が conflict した。また Test (Rust, Linux) が client_pane_snapshot_repair_replies_with_snapshots_for_known_panes_only の PtyCreationFailed (ENOENT) で 2 run 連続失敗した。
+Learning: (1) 同一 skill への並行実装は「後勝ち」ではなく安全性の superset 側 (disarm-before-push 不変条件・merge method 自動選択・deliver-flow.md reference 付き) を本文採用し、trigger 文言は union で統合する。両実装の doc テストが lib.rs に併存するため、解消後は双方のテストを通すこと。(2) PTY spawn ENOENT は develop でも test_spawn_with_env 等で既出の infra flaky 系で、ローカル (macOS) full suite PASS + develop 直近 CI green なら transient 分類で再走してよい。
+Future Action: gwt-manage-pr SKILL.md を編集する際は .claude/.codex の byte parity と gwt-skills の manage_pr doc テスト群 (gwt_manage_pr_documents_drive_to_merge_delivery / manage_pr_documents_deliver_drive_to_merge_mode) を必ずローカルで実行する。PTY 系 CI flaky が同一テストで 3 run 連続したら infra ではなくコードとして調査に切り替える。
+
+## 2026-07-02 — 通知 UI の視覚検証は __gwt_test_inject で実経路発火できる
+
+Type: technique
+Context: SPEC #3206 の browser-check 視覚検証で、attention/completion/board-mention トーストは agent 実起動や離席 gating が前提で手動再現が重かった。
+Learning: app.js の `__gwt_test_inject` CustomEvent listener は payload をそのまま `receive()`（WebSocket frame と同一経路）へ流すため、devtools console から synthetic `workspace_state`（kill-switch.spec.ts の agentWindow fixture 形が最小形）+ `window_state`（waiting=warn/error=sticky/exited=done）+ `issue_monitor_toast` を dispatch すると、controller → 共有 alerts スタック / log region まで本番コードパスで描画できる。表示は page-scoped でリロードで戻る。issue_monitor_* を inject すると以後の live 同種イベントは page 内で drop される点に注意。
+Future Action: 通知/トースト系 UI の browser-check では、実 agent を起動せず __gwt_test_inject console snippet を用意してユーザーに渡す。snippet は先に Playwright MCP で同一 URL に対して動作確認してから共有する。
+
+## 2026-07-03 — sandbox 内起動サーバーはユーザーの Chrome から接続不可 / claude-in-chrome は接続先マシンを先に確認
+
+Type: workflow-correction
+Context: minimap zoom-sync の browser-check で、Bash (sandbox) から起動した fresh gwt が curl では 200 なのに Chrome では ERR_CONNECTION_REFUSED になった。原因は 2 層: (1) sandbox 内で spawn したプロセスの listener が実 loopback に公開されない場合がある、(2) claude-in-chrome の接続先ブラウザがそもそも別マシン (Windows, isLocal:false) で、この Mac の 127.0.0.1 に原理的に到達できない。
+Learning: サーバー起動 + 他プロセス (ブラウザ) からの接続が要る検証では、spawn を dangerouslyDisableSandbox で行い、拡張ベースの自己確認をする前に list_connected_browsers で isLocal を確認する。curl 200 は「自分の sandbox から見える」ことしか証明しない。
+Future Action: browser-check でサーバーを起動する際は sandbox 外で spawn し、claude-in-chrome での自己確認は isLocal:true のブラウザがある場合のみ計画する。リモートブラウザしか無い場合は curl + Playwright 検証で代替し、視覚確認はユーザーのローカルブラウザに依頼する。
+
+## 2026-07-03 — field semantics は guidance でなく書き込み choke point の validator で守る (Issue #3184 purpose/title)
+
+Type: design lesson
+Context: SPEC #3075/#2359 が purpose=安定した作業目的と定義し、reminder/guidance/stale-detection (PR #2819) まで整備済みだったのに、agent は browser-check 中に purpose へ activity 名 (Headless browser check) を書き、titlebar が BROWSER CHECK になった (Issue #3184)。
+Learning: (1) LLM 向け text 指示は field semantics の enforcement にならない。全書き込み経路が集約される choke point (cli/title_summary_guard.rs の validate_title_summary_work_name) に validation を置き、拒否メッセージ自体に正しい代替 (current_focus へ) を書くと self-correcting になる。(2) denylist heuristic は adversarial review workflow で bypass 側 (JA suffix/全角/後置修飾) と over-block 側 (Fix browser check) の両面を検証してから確定する。動詞先頭 exempt / gerund 先頭 reject / 前置詞修飾 reject / head-final JA suffix が有効だった。(3) cli.rs には cli_file_size_test の 1000 行予算があり、新しい validation family は cli/ submodule に切り出す。
+Future Action: 新しい field semantics 契約を導入するときは、guidance 追加だけで完了とせず、canonical write path の validator + 既存値保持の dispatch レベル regression test + 実バイナリでの拒否デモまでを 1 セットにする。
+
+## 2026-07-03 — gwtd pr.edit の read:org 失敗は PR #3231 で解消（pr.ready / pr.draft 新設）
+
+Type: lesson
+Context: Issue #3201: gwtd pr.edit は gh pr edit の read:org prefetch で常に失敗し（2026-06-12 memory 参照）、Draft→Ready 昇格 operation も存在しなかったため、エージェントが PR ライフサイクルを sanctioned surface で完結できなかった
+Learning: PR #3231 で解消: pr.edit は REST（PATCH /pulls・POST /issues/labels）化され read:org 無し token でも成功する（本マシンで live smoke 済み）。pr.ready / pr.draft operations が新設され、gh pr ready / gh pr ready --undo は hook でブロックされ gwtd へ誘導される。2026-06-12 の『PR 本文の事後修正はこの環境では不可』は本修正後の gwtd では成立しない。pr.edit の add_labels は存在しないラベルを fail-closed で拒否し、title/body/add_labels 全省略は parse エラーになる
+Future Action: PR 本文更新・Draft→Ready 昇格は gwtd JSON operations pr.edit / pr.ready を正規経路として使う。旧 gwtd（未更新の GWT.app 同梱版）では pr.edit が引き続き失敗するため、失敗したらビルド済み target/debug/gwtd か更新版を使う
+
+## 2026-07-03 — conflict 解消は閉じマーカーまで含めて除去し grep で全マーカー不在を検証する
+
+Type: failure-pattern
+Context: SPEC #3206 PR 作成時、.gwt/work/memory.md の merge conflict を Edit tool で解消した際、old_string に開始マーカーと '=======' だけ含め、develop 側ブロック末尾の閉じマーカー '>>>>>>> origin/develop' を含め忘れた。stray marker が commit/push され、次の merge で HEAD 側がマーカー 1 行だけという見かけ上おかしな conflict として表面化した。
+Learning: conflict 解消を Edit tool で行う場合、<<<<<<< / ======= / >>>>>>> の 3 マーカーが 1 hunk 分すべて old_string に含まれているかを確認する。解消後は必ず grep -n '^<<<<<<<\|^=======$\|^>>>>>>>' <file> で全マーカー不在を検証してから git add する。今回は次 merge の conflict で偶然発覚したが、conflict しなければ stray marker が PR diff に残ったまま merge されていた。
+Future Action: merge conflict 解消の直後に、対象ファイル全体への conflict-marker grep を必ず 1 回実行する（部分表示の Read だけで判断しない）。
+
+## 2026-07-02 — Issue Monitor 多重起動: per-call 再構築 + ACK 再入 + 未永続 claim の合成罠
+
+Type: bug-fix
+Context: Issue #3222: Max=5 で同一 issue が 2〜3 回 spawn（window 10/追跡 5）。fresh 実機ログで再現機序を確定し PR #3223/#3224 で修正。
+Learning: (1)状態機械を handler ごとに disk から再構築する設計では、in-flight（claim 済み・ACK 前）を persist しない限り並行 handler に不可視になり、同一 owner の claim が renewal 扱いで再取得され side effect（spawn）が重複する。(2)非同期 ACK が同じ scan+claim フローに再入する構造は、ACK 連鎖が事実上の driver になり重複を増幅する。ACK/close は Observe（scan 可・claim/launch 禁止）に分離する。(3)refill の駆動源は単一 owner（daemon）に置き、他 process の in-flight は scan 冒頭で disk から union-merge して会計を統合する。(4)persist する in-flight claim には必ず TTL anchor（claimed_at + claim_ttl_secs 失効）を付け、crash 由来の slot 永久リークを防ぐ。(5)schema 進化時は untagged 互換 deserializer を用意（parse 失敗→unwrap_or_default は全 prefs 消失）。(6)テスト注意: crates/gwt/src/app_runtime/tests.rs は bin ターゲット（cargo test -p gwt --bin gwt）であり --lib では走らない。HOME 依存テストは process-global env でなく gwt_core::test_support::ScopedGwtHome（thread-local）を使う。
+Future Action: Issue Monitor に新しい launch/ACK 経路を足すときは (a) claim の即 persist、(b) ACK 経路の Observe 維持、(c) daemon 単一 driver、(d) TTL anchor の4点を必ず守る。app_runtime のテストは --bin gwt で回し、HOME は ScopedGwtHome を使う。
+
+## 2026-07-04 — Ephemeral worktree teardown のデータ安全判定は多段でしか成立しない
+
+Type: design-lesson
+Context: SPEC-3214 Phase 1（intake detached worktree）で、session 終了/起動時に throwaway worktree を reap する teardown 判定を実装。敵対的 review workflow + codex の連続レビュー（#3235-3239）で clean 判定の穴が5波にわたり露呈した。
+Learning: worktree を force-remove してよいかの『clean 判定』は git status --porcelain だけでは全く不十分で、以下を全て keep 側に含めないとデータ喪失する: (1) gitignore 対象の agent 生成物（AGENTS.md が書けと指示する tasks/todo.md、.env、.gwt/draft）→ git status --ignored が必要。(2) detached HEAD 上の commit → git rev-list HEAD --not --branches --tags --remotes（--all は worktree 自身の detached HEAD を含むので commit を隠す罠）。(3) gwt が全 worktree に materialize する managed asset のうち、PURE 生成物（.claude/skills/gwt-* 等）は disposable だが、MERGE されるファイル（.claude/settings.local.json / .codex/hooks.json は user hooks を保持）は『純生成物なら reap・user 内容ありなら keep』を GWT_MANAGED_HOOK マーカー＋existing_user_hooks で精密判定する必要がある。(4) 分類 signal は basename だけでは誤検出する（.intake-* 名の通常 branch worktree）ので『branchless=detached』を git で確認して確定する。(5) 存在しないパス（tracked deletion の D status）を disposable 扱いしない。read エラーは absent（NotFound のみ）と unreadable を区別し、unreadable は fail closed=keep。層をまたぐ判定（gwt-git は gwt-skills に依存不可）は predicate 注入（ephemeral_worktree_has_local_work_with）で解決する。
+Future Action: throwaway/ephemeral な作業ディレクトリを自動削除する機能を作るときは、最初から『何を失う可能性があるか』を gitignored 生成物・detached commit・merge されるツール設定・削除 status の4カテゴリで洗い出し、data safety を最上位不変条件（迷ったら keep）に据える。PR 前に敵対的 review workflow を回してデータ喪失パスを潰す。ephemeral worktree の分類は名前でなく git 状態（detached か）で確定する。
+
+## 2026-07-04 — intake 登録は curated（intake session + gwt-register-issue）に一本化、bare-title Quick issue は撤回
+
+Type: decision
+Context: SPEC-3214 で「Issue Monitor toolbar に 1 行 bare 登録（Quick issue）を足す価値」をユーザーが問い、gwt-discussion（2026-07-04）で撤回を決定。実装済みだった Phase 2a backend(#3240 merged)/2b frontend(#3242 Draft) を #3243 で撤去。
+Learning: bare-title の即登録 UI は (1) body 空・investigation ラベルだけで文脈が薄く agent が手掛かり無しで始まる、(2) gwt-register-issue の品質経路（重複検索・plain/SPEC 判定・整形 body）を迂回する、(3) SPEC が『intake session から』の機能・Start Work 代替と規定するのに監視の制御面（Issue Monitor toolbar = Start/Stop/Max/Autonomous）へ埋め込むと概念が混線する、(4) Phase 5 で Start Work を canvas/palette から撤去した後、toolbar のみだと canvas/palette の新規作業入口が消える。結論: intake（Issue 登録）は intake session の agent が gwt-register-issue で curated 登録し、Issue 化しない緊急/使い捨ては既存 Shell 起動で行う。everything-is-a-curated-issue。ad-hoc の deferred-decision（当初 Quick issue 一本化）も intake session 一本化へ反転。
+Future Action: 『登録を秒速化する軽量 UI』を足したくなったら、まず品質経路（重複検索・整形）を迂回しないか、既存の curated 登録（intake session + gwt-register-issue）と二重化しないか、置き場所が概念的に正しい surface か（制御面に intake 入口を埋めない）を確認する。速さのために品質を落とす bare 登録は避ける。
+
+## 2026-07-04 — 作業ワークフローは 2 レーン(Curate/Execute)に再整理 — SPEC-3245
+
+Type: decision
+Context: gwt-discussion(2026-07-04): Intake/Start Work/Workspace の分け方が不明瞭・ワークフロー再整理要求。開始入口 6 系統 + 名詞 4 概念(Workspace/Work/Session/Intake)の重複名 + Start Work 撤去中/Intake 追加中の移行状態が混乱の元と判明。
+Learning: gwt の作業モデルを 2 レーンに再定義: (1) Curate(Intake)=branchless ephemeral 使い捨て、目的は『何をやるか決める・登録する』、成果は GitHub Issue/SPEC、Workspace/Work を生成しない。(2) Execute(Workspace)=branch 永続、SPEC-2359 の Workspace(branch)/Work(launch)/Session(会話) をそのまま流用、生成は Issue Monitor(自動) か Open Workspace(既存 branch)。開始入口は {Intake / Open Workspace / Shell} + Issue Monitor(背景モード) に統廃合し Start Work 撤去、Resume は Workspace アクションへ降格。SPEC-3245 は入口/ラベル/フレーミング層のみ担当し、Workspace/Work/Session データモデル(SPEC-2359)は不変。SPEC-3214 の intake ephemeral worktree 基盤(Phase 1-2)を Curate 入口として吸収。
+Future Action: 新しい『開始』導線や作業概念を足すときは、Curate(決める・登録・branchless) か Execute(作業する・branch) のどちらのレーンかを先に確定し、入口をレーンに 1:1 対応させる。名詞は Workspace/Work/Session/Intake の 4 概念に閉じ、重複名(Start Work 系)を作らない。命名変更は 2026-06-12 用語 ruling のプロセス(ユーザー承認)に従う。

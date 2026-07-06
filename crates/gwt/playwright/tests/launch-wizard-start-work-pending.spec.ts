@@ -21,7 +21,7 @@ test.describe("Launch Wizard Start Work pending state", () => {
       timeout: 10_000,
     });
 
-    await page.locator('.op-rail__item[data-cmd="start-work"]').click();
+    await page.locator('.op-rail__item[data-cmd="intake-session"]').click();
 
     const wizard = page.locator("#wizard-modal");
     await expect(wizard).toHaveClass(/open/);
@@ -31,7 +31,7 @@ test.describe("Launch Wizard Start Work pending state", () => {
 
     await expect
       .poll(() => page.evaluate(() => (window as any).__sentKinds))
-      .toContain("open_start_work");
+      .toContain("open_intake_session");
     expect(pageErrors).toEqual([]);
   });
 });
