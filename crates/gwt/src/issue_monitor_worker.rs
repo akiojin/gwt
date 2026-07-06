@@ -468,9 +468,11 @@ impl std::error::Error for GitHubRemoteResolutionError {}
 pub fn github_remote_owner_and_repo(
     repo_path: &Path,
 ) -> Result<(String, String), GitHubRemoteResolutionError> {
+    let git_root = gwt_git::worktree::main_worktree_root(repo_path)
+        .unwrap_or_else(|_| repo_path.to_path_buf());
     let output = gwt_core::process::hidden_command("git")
         .args(["remote", "get-url", "origin"])
-        .current_dir(repo_path)
+        .current_dir(&git_root)
         .output()
         .map_err(|error| GitHubRemoteResolutionError::CommandSpawnFailed(error.to_string()))?;
     let stdout = String::from_utf8_lossy(&output.stdout);
@@ -811,6 +813,34 @@ mod tests {
                 ""
             )
             .expect("valid origin"),
+            ("owner".to_string(), "repo".to_string())
+        );
+    }
+
+    #[test]
+    fn github_remote_owner_and_repo_accepts_workspace_home_with_child_bare_repo() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let bare_repo_path = tmp.path().join("gwt.git");
+        let status = std::process::Command::new("git")
+            .args(["init", "--bare"])
+            .arg(&bare_repo_path)
+            .status()
+            .expect("git init --bare");
+        assert!(status.success(), "git init --bare failed");
+        let status = std::process::Command::new("git")
+            .args([
+                "remote",
+                "add",
+                "origin",
+                "https://github.com/owner/repo.git",
+            ])
+            .current_dir(&bare_repo_path)
+            .status()
+            .expect("git remote add origin");
+        assert!(status.success(), "git remote add origin failed");
+
+        assert_eq!(
+            github_remote_owner_and_repo(tmp.path()).expect("workspace home origin"),
             ("owner".to_string(), "repo".to_string())
         );
     }
