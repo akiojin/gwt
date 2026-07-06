@@ -7472,3 +7472,17 @@ Type: failure-pattern
 Context: During PR #3193 pre-PR visual verification, the Issue Bridge auto-refresh Playwright fixture fired a 60000ms interval callback via a fixed 50ms timeout. In the full suite, initial knowledge load sometimes still held the busy flag, so the auto-refresh request was dropped and the test timed out although single-test runs passed.
 Learning: Timer-shortening fixtures are flaky when the production callback can legally no-op while state is busy. Tests should expose a deterministic trigger and call it after asserting the state that makes the callback meaningful.
 Future Action: For Playwright fixtures that validate periodic behavior, capture interval callbacks and trigger them explicitly after the initial render/load assertions instead of relying on arbitrary short timeouts.
+
+## 2026-06-26 — release develop push は pre-push hook で 2 分 timeout を超える
+
+Type: project
+Context: /release workflow step 8: git push origin develop が 2 分の tool timeout で hang する
+Learning: .husky/pre-push が full CI suite（cargo clippy + cargo fmt --check + cargo llvm-cov coverage --test-threads=1 + coverage threshold + markdownlint + skill frontmatter validation）を同期実行するため push 完了まで 5 分以上かかる。reject ではない（develop は enforce_admins:false で admin bypass push 許可）。
+Future Action: release の develop push は run_in_background:true で実行し timeout kill を避ける。完了後 git rev-parse origin/develop が local HEAD と一致し push 出力に 'develop -> develop' があることを確認する。
+
+## 2026-06-28 — release flow must monitor post-merge release.yml until published
+
+Type: project
+Context: /release フローが PR 作成（step 12）で『リリース準備完了』と宣言してターンを終え、マージ後の release.yml ビルド失敗（crates.io download の transient エラー: 'download of auto-launch failed' / 'curl failed' / 'Error in the HTTP2 framing layer'）を検知できなかった。v9.64.2 で Linux x86_64 ビルドのみ失敗し Release が draft のまま放置された。
+Learning: リリースは PR 作成では完了しない。release.yml が完走し GitHub Release が draft=false かつ全 asset 付きで公開されて初めて完了する。gwt surface 制約: gh run view はブロックされうるが gh run list / gh run rerun --failed / gh release view は利用可。actions.logs/actions.job_logs は run 完了後のみ取得可能。
+Future Action: /release は (1) 承認直後に完了ゴールを arm（Codex=create_goal / Claude Code=pane.send で /goal 注入）、(2) step 13 でマージ後 release.yml を監視し transient 失敗は gh run rerun --failed で最大3回復旧、非 transient はユーザー報告で停止、gh release view で draft=false + assets 確認後に初めて完了報告する。release.md / .codex/skills/release/SKILL.md に反映済み。
