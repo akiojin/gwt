@@ -1,6 +1,157 @@
 # Changelog
 
 All notable changes to this project will be documented in this file.
+## [9.65.0] - 2026-07-06
+
+### Bug Fixes
+
+- **issue-monitor:** Origin解決失敗の種別化とper-call runtime生成の排除
+- **issue-monitor:** #3190 spawn 共有 runtime 変更を develop #3194 採用に伴い revert
+- **issue-monitor:** Adversarial review 指摘を修正（SPEC #3200）
+- **issue-monitor:** Live GitHub 検証で発見した branch-protection と layer-4 の実バグを修正（SPEC #3200）
+- **ui:** Register autonomous-notifications in Playwright embedded routes
+- **issue-monitor:** 失敗窓 id が terminal 遷移で orphan しないよう掃除
+- **toast:** 未定義 token 参照で消えていた alerts トーストの影を是正 (SPEC #3206 P2)
+- **launch:** Worktree 未準備時の managed-asset 失敗を明確に attribute する
+- **windows:** Guard all shim/exe resolution exits against native-binary placeholder stubs
+- **windows:** Share the placeholder pre-spawn net with the host-shell path
+- **issue-monitor:** Auto-merge を reviewed head SHA に束縛し review→merge TOCTOU を塞ぐ
+- **issue-monitor:** In-flight autonomous の launch 失敗を retry に route する
+- **issue-monitor:** Daemon scan 後に prefs を永続化し merge 完了の取りこぼしを防ぐ
+- **issue-monitor:** Scan panic 時にフォールバック状態を永続化しない
+- **issue-monitor:** 自律 daemon の persist/recovery を adversarial review 指摘で堅牢化
+- **deps:** Ammonia を 4.1.3 に更新し RUSTSEC-2026-0193 (mXSS) を解消
+- **issue-monitor:** Restart-resume 時に heartbeat を refresh し stuck 誤回収を防ぐ
+- **workspace:** 別ブランチ間の session 共有で Workspace 行が silent drop される問題を修正
+- **issue-monitor:** Armed 通知を arm 成功時のみ発行し kill switch の能動 disarm を実装
+- **issue-monitor:** Kill switch の disarm 失敗を次 scan で再試行する
+- **workspace:** Work event の session 誤付与を store 層で拒否し attach provenance を記録
+- **issue-monitor:** Max active 超過の多重起動を修正 (claim 永続化 + ACK 経路の claim 禁止)
+- **issue-monitor:** Launching claim に TTL を付与し daemon と会計を統合 (codex #3223)
+- **work:** Transient activity label による Agent purpose title の上書きを防止
+- **minimap:** Fleet Minimap の縮尺を canvas Zoom に完全連動化 (SPEC-2008 FR-094 再改訂)
+- **issue-monitor:** Merge 済み修正を持つ open issue の再 launch を GitHub 由来シグナルで防ぐ
+- **issue-monitor:** 完了 probe を「issue を close する merged PR」に限定 (codex #3226)
+- **issue-monitor:** 完了 probe に PR 本文の closing keyword 判定を追加 (codex #3227)
+- **issue-monitor:** Closing keyword 判定に word boundary を要求 (codex/coderabbit #3228)
+- **intake:** Ephemeral 判定の誤検出を修正 — user の .claude/.codex 内容と .intake 名の branch worktree を保護 (codex #3235)
+- **intake:** Merged hook 設定を保持し prune も branchless に限定 (codex #3236)
+- **intake:** 生成のみの merged hook 設定は reap し user 編集は保持する (codex #3237)
+- **intake:** Hook 設定の削除と読取エラーを keep 側に倒す (codex #3238)
+- **intake:** Quick issue の空タイトルを auth 前に検証し登録後 refresh を Observe に (codex #3240)
+- Improve index window health status
+
+### Documentation
+
+- Release flow にマージ後監視と完了ゴールを追加
+- **memory:** Release push timeout と post-merge監視の教訓を記録
+- Rustdoc の private intra-doc-link と unclosed HTML tag を解消
+- **readme:** Issue Monitor 節を追加（human-gated + autonomous）(T-107)
+- **readme:** 安全モデル段落を1行要約+SPEC リンクに縮約
+- **skills:** Gwt-manage-pr を pr.ready / pr.draft の sanctioned surface に追随
+- Describe the 2-lane Curate/Execute workflow in README (SPEC-3245 Phase 5)
+
+### Features
+
+- **issue-monitor:** Launched lifecycle に Merged/Released 状態と完了遷移を追加
+- **issue-monitor:** ウィンドウ/プロジェクトを閉じたら launched Issue を pending に戻す
+- **issue-monitor:** PR マージ検知で Merged 化し active スロットを解放する
+- **issue-monitor:** 再 engage 時に既存セッションを resume する
+- **skills:** Gwt-manage-pr に drive-to-merge（Deliver mode）を追加
+- **issue-monitor:** Autonomous mode の基盤型を追加（SPEC #3200 Phase 0/1）
+- **issue-monitor:** 独立レビュー verdict schema を injection-resistant・fail-closed で実装（SPEC #3200）
+- **issue-monitor:** Acceptance-criteria 分類器（pre-launch 決定論的）を実装（SPEC #3200）
+- **issue-monitor:** Branch protection 検証型と eligibility predicate を実装（SPEC #3200）
+- **issue-monitor:** Autonomous 状態レコードと attempt counter を実装（SPEC #3200）
+- **issue-monitor:** Autonomous 失敗の taxonomy と max-attempts エスカレーションを実装（SPEC #3200）
+- **issue-monitor:** Transient retry の bounded backoff scheduler を実装（SPEC #3200）
+- **issue-monitor:** Stuck/idle 検知と slot 回収を実装（SPEC #3200）
+- **issue-monitor:** Autonomous 状態の status view 可観測化と二段 opt-in 判定（SPEC #3200）
+- **issue-monitor:** Autonomous mode kill switch control を実装（SPEC #3200）
+- **issue-monitor:** Autonomous mode で silent launch に skip_permissions を強制（SPEC #3200）
+- **issue-monitor:** Strong automated gate orchestrator を実装（SPEC #3200）
+- **issue-monitor:** Branch protection の fail-closed fetch を実装（SPEC #3200）
+- **issue-monitor:** CI status rollup classifier を実装（SPEC #3200）
+- **issue-monitor:** 独立レビュー dispatch contract を実装（SPEC #3200）
+- **issue-monitor:** Gate 評価から monitor アクションへの routing を実装（SPEC #3200）
+- **issue-monitor:** Autonomous イベントのスクロール可能なサイドトースト通知（SPEC #3200）
+- **issue-monitor:** Control-plane merge 認可トークンを実装（SPEC #3200 T-091）
+- **issue-monitor:** 強いゲート用 gh gate-input adapter を実装（SPEC #3200 T-080拡張）
+- **issue-monitor:** Autonomous トグルと NeedsHuman/phase 表示を実装（SPEC #3200 T-047/T-090）
+- **issue-monitor:** Pre-launch autonomous 判定+状態 capture と merge clear（SPEC #3200 T-041）
+- **issue-monitor:** Daemon scan に autonomous eligibility gate と stuck 回収を配線（SPEC #3200 T-041/T-044）
+- **issue-monitor:** Autonomous merge 実行 primitive を実装（SPEC #3200 Option A）
+- **issue-monitor:** Autonomous loop の状態（PR/SHA/verdict）と phase 遷移を実装（SPEC #3200）
+- **issue-monitor:** 独立レビュー verdict の IPC 返却経路を実装（SPEC #3200 FR-015）
+- **issue-monitor:** Autonomous merge 実行ループを daemon に配線（SPEC #3200 Option A）
+- **issue-monitor:** GUI が review_dispatch を消費しレビュー prompt を準備（SPEC #3200 Option A）
+- **issue-monitor:** Verdict bridge を新 gwtd op で実装（SPEC #3200 Option A）
+- **issue-monitor:** 独立レビューエージェントを実 spawn（SPEC #3200 Option A 完結）
+- **issue-monitor:** Different-model レビューと heartbeat liveness を実装（SPEC #3200 FR-015/FR-025）
+- **issue-monitor:** Autonomous agent の real-time heartbeat を配線（SPEC #3200 T-045/FR-025）
+- **issue-monitor:** Focus launched agent window + compact icon row
+- **issue-monitor:** Autonomous 失敗時に stale agent 窓を自動 close
+- **issue-monitor:** Default モードで Launch Now 時に stale 失敗窓を close
+- **issue-monitor:** 自律遷移の operator 通知を daemon から発行 (FR-034)
+- **skills:** Gwt-manage-pr に Deliver(drive-to-merge) capability を追加
+- **cli:** Gwtd に pr.ready / pr.draft を追加し pr.edit を read:org 非依存化
+- **intake:** SPEC-3214 Phase 1 — ephemeral detached intake worktree の基盤
+- **intake:** SPEC-3214 Phase 2a — Quick issue 登録の backend handler
+- **intake:** SPEC-3214 Phase 2b — Issue Monitor に Quick issue 入力欄を追加
+- **intake:** SPEC-3214 Phase 3 — intake session 起動導線（ephemeral 起動）
+- **intake:** SPEC-3245 Phase 3 — Start Work を撤去し 2 レーン入口へ置換
+- **intake:** Rename Curate entry label to "Intake" (SPEC-3245 Phase 4)
+- **hooks:** Lane-aware managed hooks/guidance by session kind (SPEC-3247)
+- **hooks:** Lane registry + lane file foundation (SPEC-3248 P0)
+- **hooks:** Lane-specific SessionStart onboarding (SPEC-3248 P4)
+- **hooks:** Intake completion Stop nudge (SPEC-3248 P4)
+- **hooks:** Block intake production-code edits at PreToolUse (SPEC-3248 P4)
+- **hooks:** Reduced curation skill set for intake (SPEC-3248 P4)
+
+### Miscellaneous Tasks
+
+- **work:** Board events と memory ログを更新
+- Rustfmt autonomous real-gh smoke test
+- **work:** Board events と memory ログを更新
+- **work:** Memory ログを更新
+- **launch-wizard:** Sonnet の陳腐化したバージョン表記を除去
+- **work:** Board events ログを更新
+- **work:** Issue #3213 の再発防止 memory を記録
+- **work:** Coordination ログ（memory/events）の未コミット追記を記録
+- **work:** PR #3205 救出の経緯と PTY flaky 切り分けを memory に記録
+- **ci:** PTY flaky (client_pane_snapshot_repair) の CI 再走トリガー
+- **work:** SPEC #3206 検証 memory と board events を更新
+- **work:** Issue #3184 作業の Work イベントと memory 記録を追加
+- **work:** Board events ログを更新 (minimap zoom-sync discussion/decision)
+- **work:** Browser-check の sandbox/リモートブラウザ制約を memory に記録
+- **work:** Issue #3201 の memory 記録（pr.edit read:org 解消・pr.ready 新設）を追加
+- **work:** SPEC #3206 PR 作成と conflict-marker lesson の memory を記録
+- **work:** Issue Monitor 多重起動 root-cause lesson を memory に記録
+- **ci:** Re-trigger checks (docker.io レジストリ transient flake の再実行)
+- **work:** Quick issue 撤回の設計判断を memory に記録
+- **work:** 2 レーン workflow 再整理 (SPEC-3245) の設計判断を memory に記録
+- Record index window verification state
+
+### Refactor
+
+- **toast:** Autonomous 通知を共有 toast-host primitive に抽出 (SPEC #3206 P0)
+- **toast:** CreateToastStack に alerts region 機能を追加 (SPEC #3206 P1a)
+- **toast:** 右下3系統を共有 alerts region に統合し重なりを解消 (SPEC #3206 P1b)
+- **intake:** Quick issue backend を撤去し intake session 登録に一本化 (SPEC-3214)
+- **hooks:** HookContext + lane-aware migration (SPEC-3248 P1/P3)
+- **hooks:** Consolidate skill-state stop-checks into StateFileStopCheck (SPEC-3248 P2)
+
+### Testing
+
+- **issue-monitor:** Autonomous 通知 stack の Playwright visual contract（SPEC #3200）
+- **issue-monitor:** Autonomous merge loop の end-to-end 決定論検証（SPEC #3200 T-100）
+- **issue-monitor:** Autonomous merge loop を実 gh subprocess（mock）で end-to-end 実行検証（SPEC #3200 T-003/T-100）
+- **issue-monitor:** FR family ごとの観測可能性 audit を追加 (T-104)
+- **gui:** PTY テスト spawn の cwd を固定し HOME 変異 race による ENOENT flaky を解消
+- **cli:** Cli.rs のサイズ予算 (<1000 行) に収まるよう doc を圧縮
+- **intake:** SPEC-3245 Phase 3 — Playwright の Start Work driver を intake へ差替え
+- **intake:** Operator-rail の Start Work rail item 期待を Intake session に更新 (SPEC-3245 Phase 3)
+
 ## [9.64.2] - 2026-06-28
 
 ### Bug Fixes
