@@ -7610,3 +7610,10 @@ Type: decision
 Context: gwt-discussion(2026-07-04): Intake/Start Work/Workspace の分け方が不明瞭・ワークフロー再整理要求。開始入口 6 系統 + 名詞 4 概念(Workspace/Work/Session/Intake)の重複名 + Start Work 撤去中/Intake 追加中の移行状態が混乱の元と判明。
 Learning: gwt の作業モデルを 2 レーンに再定義: (1) Curate(Intake)=branchless ephemeral 使い捨て、目的は『何をやるか決める・登録する』、成果は GitHub Issue/SPEC、Workspace/Work を生成しない。(2) Execute(Workspace)=branch 永続、SPEC-2359 の Workspace(branch)/Work(launch)/Session(会話) をそのまま流用、生成は Issue Monitor(自動) か Open Workspace(既存 branch)。開始入口は {Intake / Open Workspace / Shell} + Issue Monitor(背景モード) に統廃合し Start Work 撤去、Resume は Workspace アクションへ降格。SPEC-3245 は入口/ラベル/フレーミング層のみ担当し、Workspace/Work/Session データモデル(SPEC-2359)は不変。SPEC-3214 の intake ephemeral worktree 基盤(Phase 1-2)を Curate 入口として吸収。
 Future Action: 新しい『開始』導線や作業概念を足すときは、Curate(決める・登録・branchless) か Execute(作業する・branch) のどちらのレーンかを先に確定し、入口をレーンに 1:1 対応させる。名詞は Workspace/Work/Session/Intake の 4 概念に閉じ、重複名(Start Work 系)を作らない。命名変更は 2026-06-12 用語 ruling のプロセス(ユーザー承認)に従う。
+
+## 2026-07-06 — gwt-docker fake command tests should assert ordered lines, not contiguous blocks
+
+Type: fix
+Context: Issue #3021 gwt-docker fake docker tests under parallel cargo test
+Learning: Fake docker invocation logs can receive lines from lingering or parallel Docker probes while a test-specific GWT_DOCKER_BIN is installed. Exact contiguous block matching can flake even when the expected invocation happened; assert ordered line subsequences for command arguments that must be present, and keep timeout contract tests away from tight real-time deadlines.
+Future Action: When stabilizing gwt-docker fake command tests, avoid narrow sleep-vs-timeout margins and do not require an invocation block to be contiguous if process-global Docker probes can interleave. Use crate-wide env locking plus positive signal or ordered subsequence checks.
