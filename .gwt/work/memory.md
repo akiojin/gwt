@@ -7617,3 +7617,10 @@ Type: fix
 Context: Issue #3021 gwt-docker fake docker tests under parallel cargo test
 Learning: Fake docker invocation logs can receive lines from lingering or parallel Docker probes while a test-specific GWT_DOCKER_BIN is installed. Exact contiguous block matching can flake even when the expected invocation happened; assert ordered line subsequences for command arguments that must be present, and keep timeout contract tests away from tight real-time deadlines.
 Future Action: When stabilizing gwt-docker fake command tests, avoid narrow sleep-vs-timeout margins and do not require an invocation block to be contiguous if process-global Docker probes can interleave. Use crate-wide env locking plus positive signal or ordered subsequence checks.
+
+## 2026-07-06 — workflow policy JSON envelope owner gate
+
+Type: workflow
+Context: Issue #3253: owner-unlinked workflow-policy blocked gwtd JSON envelope discovery/linking commands because heredoc command segmentation normalized them to a lone gwtd segment and the owner guard did not classify the envelope operation.
+Learning: Classify standalone gwtd JSON envelopes from the original command before segment allowlists, but run shell output redirection detection first so control-plane transport cannot mask worktree writes.
+Future Action: When changing hook workflow policies, add RED tests for both allowed standalone JSON envelope commands and adversarial variants such as chained shell mutation or output redirection.
