@@ -171,16 +171,111 @@ pub fn resolve_launch_worktree_request(
     Ok(())
 }
 
+/// Resolve a working directory for an ephemeral intake launch (SPEC-3214
+/// T-004): materialize a detached `.intake-*` worktree at `base_ref` and set
+/// `working_dir`. Unlike [`resolve_launch_worktree_request`] this never creates
+/// a branch — the intake worktree hosts a short-lived session and is removed
+/// when the session ends. `working_dir` already set is a no-op (idempotent /
+/// reuse). Collisions with existing worktrees are avoided by suffixing.
+pub fn resolve_ephemeral_launch_worktree(
+    repo_path: &Path,
+    base_ref: Option<&str>,
+    working_dir: &mut Option<PathBuf>,
+    env_vars: &mut HashMap<String, String>,
+) -> Result<(), String> {
+    if working_dir.is_some() {
+        return Ok(());
+    }
+
+    let main_repo_path =
+        gwt_git::worktree::main_worktree_root(repo_path).map_err(|err| err.to_string())?;
+    let manager = gwt_git::WorktreeManager::new(&main_repo_path);
+    let worktrees = manager.list().map_err(|err| err.to_string())?;
+
+    let layout_root = main_repo_path.parent().unwrap_or(main_repo_path.as_path());
+    let preferred_path = layout_root.join(INTAKE_WORKTREE_PREFIX);
+    let worktree_path = first_available_worktree_path(&preferred_path, &worktrees)
+        .ok_or_else(|| "failed to resolve available intake worktree path".to_string())?;
+
+    // Default to HEAD: `git worktree add --detach <path> HEAD` always resolves
+    // in a repo with commits. Callers (Phase 3 intake launch) pass an explicit
+    // base ref such as `origin/develop` when they need a specific base.
+    let base_ref = base_ref.unwrap_or("HEAD");
+    manager
+        .create_detached(base_ref, &worktree_path)
+        .map_err(|err| err.to_string())?;
+
+    set_worktree_launch_path(working_dir, env_vars, &worktree_path);
+    Ok(())
+}
+
 fn is_start_work_branch_name(branch_name: &str) -> bool {
     branch_name
         .strip_prefix("work/")
         .is_some_and(|name| !name.is_empty())
 }
 
+/// Reap orphaned ephemeral intake worktrees at startup (SPEC-3214 T-006).
+///
+/// A crash between an intake launch and its session-end cleanup leaves a
+/// detached `.intake-*` worktree behind. On startup no intake session is live,
+/// so every `.intake-*` worktree is an orphan: remove the clean ones and keep
+/// the dirty ones (uncommitted work is never destroyed). Bounded by
+/// `max_removals` so a pathological pile-up cannot stall startup. Returns the
+/// number removed. Never errors — best-effort recovery.
+pub fn prune_orphan_intake_worktrees(repo_path: &Path, max_removals: usize) -> usize {
+    let Ok(main_repo_path) = gwt_git::worktree::main_worktree_root(repo_path) else {
+        return 0;
+    };
+    let manager = gwt_git::WorktreeManager::new(&main_repo_path);
+    let Ok(worktrees) = manager.list() else {
+        return 0;
+    };
+
+    let mut removed = 0;
+    for worktree in worktrees {
+        if removed >= max_removals {
+            break;
+        }
+        if !is_ephemeral_intake_worktree(&worktree.path) {
+            continue;
+        }
+        // codex #3236 P2: only reap the branchless intake worktrees this feature
+        // creates — a real branch worktree a user happens to name `.intake-*`
+        // has a branch and must be left alone (mirrors is_ephemeral_intake_session).
+        if worktree.branch.is_some() {
+            continue;
+        }
+        let worktree_path = worktree.path.clone();
+        match manager.ephemeral_worktree_has_local_work_with(&worktree.path, |entry| {
+            intake_hook_config_is_disposable(&worktree_path, entry)
+        }) {
+            Ok(false) => {
+                if manager.remove_force(&worktree.path).is_ok() {
+                    removed += 1;
+                }
+            }
+            // Has local work or unknown → keep it (fail closed).
+            _ => {
+                tracing::warn!(
+                    worktree_path = %worktree.path.display(),
+                    "keeping orphaned intake worktree with local work (changes, ignored files, or commits)"
+                );
+            }
+        }
+    }
+    if removed > 0 {
+        let _ = manager.prune();
+    }
+    removed
+}
+
 pub fn resolve_launch_worktree(
     repo_path: &Path,
     config: &mut gwt_agent::LaunchConfig,
 ) -> Result<(), String> {
+    // SPEC-3214: an ephemeral intake launch resolves a detached throwaway
+    // worktree instead of creating/reusing a branch worktree.
     if config.is_ephemeral {
         resolve_ephemeral_launch_worktree(
             repo_path,
@@ -201,39 +296,6 @@ pub fn resolve_launch_worktree(
     )?;
     config.base_branch = base_branch;
     normalize_launch_config_working_dir(config);
-    Ok(())
-}
-
-/// Materialize a disposable detached-HEAD intake worktree (SPEC-3214 FR-001).
-///
-/// Creates a `.intake[-N]` sibling worktree of the main repository checked
-/// out at `base_ref` (repository `HEAD` when `None`) without creating any
-/// named branch. A pre-set `working_dir` wins, mirroring the named-branch
-/// resolution path.
-pub fn resolve_ephemeral_launch_worktree(
-    repo_path: &Path,
-    base_ref: Option<&str>,
-    working_dir: &mut Option<PathBuf>,
-    env_vars: &mut HashMap<String, String>,
-) -> Result<(), String> {
-    if working_dir.is_some() {
-        return Ok(());
-    }
-
-    let main_repo_path =
-        gwt_git::worktree::main_worktree_root(repo_path).map_err(|err| err.to_string())?;
-    let manager = gwt_git::WorktreeManager::new(&main_repo_path);
-    let worktrees = manager.list().map_err(|err| err.to_string())?;
-    let preferred_worktree_path = gwt_git::worktree::sibling_worktree_path(
-        &main_repo_path,
-        gwt_git::worktree::INTAKE_WORKTREE_PREFIX,
-    );
-    let worktree_path = first_available_worktree_path(&preferred_worktree_path, &worktrees)
-        .ok_or_else(|| "failed to resolve available intake worktree path".to_string())?;
-    manager
-        .create_detached(base_ref.unwrap_or("HEAD"), &worktree_path)
-        .map_err(|err| format!("failed to create intake worktree: {err}"))?;
-    set_worktree_launch_path(working_dir, env_vars, &worktree_path);
     Ok(())
 }
 
@@ -1669,108 +1731,6 @@ mod tests {
             env_vars.get("GWT_PROJECT_ROOT").map(String::as_str),
             Some(worktree.to_str().expect("utf8 worktree")),
         );
-    }
-
-    fn local_branches(repo: &Path) -> Vec<String> {
-        let output = gwt_core::process::hidden_command("git")
-            .args(["branch", "--list", "--format=%(refname:short)"])
-            .current_dir(repo)
-            .output()
-            .expect("git branch --list");
-        assert!(output.status.success(), "git branch --list failed");
-        String::from_utf8_lossy(&output.stdout)
-            .lines()
-            .map(str::to_string)
-            .collect()
-    }
-
-    #[test]
-    fn ephemeral_launch_creates_detached_intake_worktree_without_branches() {
-        let temp = tempdir().expect("tempdir");
-        let repo = temp.path().join("repo");
-        fs::create_dir_all(&repo).expect("create repo dir");
-        run_git(temp.path(), &["init", repo.to_str().unwrap()]);
-        run_git(&repo, &["config", "user.email", "gwt@example.invalid"]);
-        run_git(&repo, &["config", "user.name", "gwt"]);
-        run_git(&repo, &["commit", "--allow-empty", "-m", "seed"]);
-        let branches_before = local_branches(&repo);
-
-        let mut config = sample_versioned_launch_config();
-        config.working_dir = None;
-        config.branch = None;
-        config.is_ephemeral = true;
-        config.ephemeral_base_ref = None;
-
-        resolve_launch_worktree(&repo, &mut config).expect("resolve ephemeral launch worktree");
-
-        let worktree = config.working_dir.clone().expect("intake worktree path");
-        assert!(worktree.exists(), "intake worktree must be materialized");
-        let name = worktree
-            .file_name()
-            .and_then(|name| name.to_str())
-            .expect("intake worktree name");
-        assert!(
-            name.starts_with(gwt_git::worktree::INTAKE_WORKTREE_PREFIX),
-            "intake worktree name must use the intake prefix, got {name}"
-        );
-        assert_eq!(
-            config.env_vars.get("GWT_PROJECT_ROOT").map(String::as_str),
-            Some(worktree.to_str().expect("utf8 worktree")),
-        );
-
-        // Detached HEAD: symbolic-ref must fail inside the intake worktree.
-        assert!(
-            !git_status(&worktree, &["symbolic-ref", "--quiet", "HEAD"]),
-            "intake worktree must have a detached HEAD"
-        );
-        // FR-001: no named branch may be created.
-        assert_eq!(local_branches(&repo), branches_before);
-
-        // FR-012: a second ephemeral launch must not collide with the first.
-        let mut second = sample_versioned_launch_config();
-        second.working_dir = None;
-        second.branch = None;
-        second.is_ephemeral = true;
-        second.ephemeral_base_ref = None;
-        resolve_launch_worktree(&repo, &mut second).expect("resolve second ephemeral worktree");
-        let second_worktree = second.working_dir.expect("second intake worktree path");
-        assert!(second_worktree.exists());
-        assert_ne!(
-            second_worktree, worktree,
-            "parallel intake sessions must get distinct worktrees"
-        );
-        assert_eq!(local_branches(&repo), branches_before);
-    }
-
-    #[test]
-    fn ephemeral_launch_keeps_existing_working_dir() {
-        let temp = tempdir().expect("tempdir");
-        let repo = temp.path().join("repo");
-        fs::create_dir_all(&repo).expect("create repo dir");
-        run_git(temp.path(), &["init", repo.to_str().unwrap()]);
-        run_git(&repo, &["config", "user.email", "gwt@example.invalid"]);
-        run_git(&repo, &["config", "user.name", "gwt"]);
-        run_git(&repo, &["commit", "--allow-empty", "-m", "seed"]);
-
-        let mut config = sample_versioned_launch_config();
-        config.branch = None;
-        config.is_ephemeral = true;
-        let preset_dir = repo.clone();
-        config.working_dir = Some(preset_dir.clone());
-
-        resolve_launch_worktree(&repo, &mut config).expect("resolve ephemeral launch worktree");
-
-        assert_eq!(
-            config.working_dir.as_deref().map(comparable_path_string),
-            Some(comparable_path_string(&preset_dir)),
-            "an ephemeral launch with a working_dir must not create a new worktree"
-        );
-    }
-
-    fn comparable_path_string(path: &Path) -> String {
-        path.to_string_lossy()
-            .trim_start_matches(r"\\?\")
-            .replace('\\', "/")
     }
 
     #[test]

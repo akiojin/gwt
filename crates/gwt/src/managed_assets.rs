@@ -14,7 +14,7 @@ use gwt_skills::{
     generate_coordination_guidance_for_claude, generate_coordination_guidance_for_codex,
     generate_hermes_hooks, generate_openclaw_hooks, generate_opencode_hooks,
     generate_settings_local, update_git_exclude, update_git_exclude_for_targets,
-    CodexHookDiscoveryMode, ManagedAssetTarget,
+    CodexHookDiscoveryMode, ManagedAssetTarget, SessionKind,
 };
 
 pub fn refresh_managed_gwt_assets_for_worktree(worktree: &Path) -> io::Result<()> {
@@ -24,6 +24,7 @@ pub fn refresh_managed_gwt_assets_for_worktree(worktree: &Path) -> io::Result<()
         worktree,
         &ManagedAssetTarget::ALL,
         CodexHookDiscoveryMode::WorkspaceHome,
+        session_kind_for_worktree(worktree),
     )?;
     update_git_exclude(worktree).map_err(|error| {
         io::Error::other(format!("failed to update gwt managed excludes: {error}"))
@@ -36,6 +37,7 @@ pub fn refresh_managed_gwt_assets_for_agent(worktree: &Path, agent_id: &AgentId)
         worktree,
         agent_id,
         CodexHookDiscoveryMode::WorkspaceHome,
+        session_kind_for_worktree(worktree),
     )
 }
 
@@ -43,11 +45,17 @@ pub fn refresh_managed_gwt_assets_for_agent_with_codex_hook_discovery_mode(
     worktree: &Path,
     agent_id: &AgentId,
     codex_hook_discovery_mode: CodexHookDiscoveryMode,
+    session_kind: SessionKind,
 ) -> io::Result<()> {
     let targets = managed_targets_for_agent(agent_id)
         .into_iter()
         .collect::<Vec<_>>();
-    materialize_managed_gwt_assets_for_targets(worktree, &targets, codex_hook_discovery_mode)?;
+    materialize_managed_gwt_assets_for_targets(
+        worktree,
+        &targets,
+        codex_hook_discovery_mode,
+        session_kind,
+    )?;
     let exclude_targets = detect_existing_managed_asset_targets(worktree);
     update_git_exclude_for_targets(worktree, &exclude_targets).map_err(|error| {
         io::Error::other(format!("failed to update gwt managed excludes: {error}"))
@@ -61,6 +69,7 @@ pub fn refresh_existing_managed_gwt_assets_for_worktree(worktree: &Path) -> io::
         worktree,
         &targets,
         CodexHookDiscoveryMode::WorkspaceHome,
+        session_kind_for_worktree(worktree),
     )?;
     update_git_exclude_for_targets(worktree, &targets).map_err(|error| {
         io::Error::other(format!("failed to update gwt managed excludes: {error}"))
@@ -68,10 +77,29 @@ pub fn refresh_existing_managed_gwt_assets_for_worktree(worktree: &Path) -> io::
     Ok(())
 }
 
+/// Determine the [`SessionKind`] for a non-launch (re-)materialization
+/// (SPEC-3247 FR-002 / FR-004). The refreshers that use this run either
+/// (a) inside an agent process — hook-time re-materialization, where the agent
+/// inherited `GWT_SESSION_KIND` from its launch env — or (b) from the GUI /
+/// startup / tests, where no such signal exists. Reading the ambient signal
+/// therefore keeps an intake agent's guidance intake on re-materialization,
+/// while every other caller decodes to Execution and preserves the current
+/// producing-work behavior. (The launch path does NOT use this: it passes the
+/// kind from `config.is_ephemeral` directly, because the launching GUI process
+/// has no intake env of its own — the signal is written into the *child*.)
+///
+/// `worktree` is currently unused because the deterministic intake-worktree
+/// probe lives in a binary-only module; the ambient signal is the lib-visible
+/// source of truth and is authoritative for the hook-time case this guards.
+fn session_kind_for_worktree(_worktree: &Path) -> SessionKind {
+    SessionKind::from_env()
+}
+
 fn materialize_managed_gwt_assets_for_targets(
     worktree: &Path,
     targets: &[ManagedAssetTarget],
     codex_hook_discovery_mode: CodexHookDiscoveryMode,
+    session_kind: SessionKind,
 ) -> io::Result<()> {
     // Fail fast with a clear, attributed error when the worktree was not
     // properly created (e.g. branch/worktree materialization failed). Without
@@ -92,6 +120,17 @@ fn materialize_managed_gwt_assets_for_targets(
     distribute_to_worktree_for_targets(worktree, targets).map_err(|error| {
         io::Error::other(format!("failed to distribute gwt managed assets: {error}"))
     })?;
+    // SPEC-3248 P4 (FR-011): a lane with a reduced skill set (intake) omits the
+    // implementation skills/commands. Applied as a post-pass so the
+    // distribution core is untouched; a non-reduced lane keeps the full set.
+    if gwt_skills::LaneRegistry::for_session_kind(session_kind)
+        .policy_flags
+        .reduced_skill_set
+    {
+        gwt_skills::apply_reduced_skill_set(worktree).map_err(|error| {
+            io::Error::other(format!("failed to apply reduced skill set: {error}"))
+        })?;
+    }
     if targets.is_empty() {
         return Ok(());
     }
@@ -102,7 +141,7 @@ fn materialize_managed_gwt_assets_for_targets(
                 "failed to regenerate Claude hook settings: {error}"
             ))
         })?;
-        generate_coordination_guidance_for_claude(worktree).map_err(|error| {
+        generate_coordination_guidance_for_claude(worktree, session_kind).map_err(|error| {
             io::Error::other(format!(
                 "failed to generate Claude coordination skill: {error}"
             ))
@@ -112,7 +151,7 @@ fn materialize_managed_gwt_assets_for_targets(
         generate_codex_hooks_for_mode(worktree, codex_hook_discovery_mode).map_err(|error| {
             io::Error::other(format!("failed to regenerate Codex hook settings: {error}"))
         })?;
-        generate_coordination_guidance_for_codex(worktree).map_err(|error| {
+        generate_coordination_guidance_for_codex(worktree, session_kind).map_err(|error| {
             io::Error::other(format!(
                 "failed to generate Codex coordination skill: {error}"
             ))

@@ -88,6 +88,14 @@ impl<E: CliEnv> CliEnv for StdoutCaptureEnv<'_, E> {
         self.inner.fetch_pr(number)
     }
 
+    fn mark_pr_ready(&mut self, number: u64) -> io::Result<PrStatus> {
+        self.inner.mark_pr_ready(number)
+    }
+
+    fn convert_pr_to_draft(&mut self, number: u64) -> io::Result<PrStatus> {
+        self.inner.convert_pr_to_draft(number)
+    }
+
     fn comment_on_pr(&mut self, number: u64, body: &str) -> io::Result<()> {
         self.inner.comment_on_pr(number, body)
     }

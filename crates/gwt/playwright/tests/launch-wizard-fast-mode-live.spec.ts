@@ -2,7 +2,7 @@
  * SPEC-2014 2026-05-27 follow-up — Launch Wizard Fast mode live E2E.
  *
  * Runs against a real gwt browser-server backend and exercises the user-facing path
- * that regressed: Intake session -> Configure and start -> Claude Code -> Fast mode
+ * that regressed: Start Work -> Configure and start -> Claude Code -> Fast mode
  * -> runtime context resolution. The test stops before the final launch so it
  * does not create a branch or start a real Claude Code process.
  */
@@ -34,7 +34,7 @@ test.describe.serial("Launch Wizard Claude Code Fast mode (live backend)", () =>
   test("Claude Code Fast mode stays on after runtime context resolution", async ({
     page,
   }) => {
-    await sendLiveGwtEvent(page, { kind: "open_intake" });
+    await sendLiveGwtEvent(page, { kind: "open_intake_session" });
 
     const wizard = page.locator("#wizard-modal");
     await expect(wizard).toBeVisible();

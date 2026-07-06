@@ -131,6 +131,12 @@ an old browser tab.
 
 ## Guardrails
 
+- Never write `workspace.update params.purpose` (the Agent/window title) from
+  this skill. The title must keep the stable work purpose across this
+  verification phase; report this skill's activity (fresh server launch,
+  served URL, verification progress) through `params.current_focus` /
+  `params.status_text` or Board posts instead. `gwtd` rejects transient
+  activity labels such as `browser check` as a purpose (Issue #3184).
 - Do not claim manual verification passed until the user confirms the UI.
 - Do not leave the fresh gwt process running after the user is done.
 - If launch fails, report the last relevant startup log lines and fix the

@@ -5,11 +5,104 @@ use std::{
 
 use gwt::{
     refresh_existing_managed_gwt_assets_for_worktree, refresh_managed_gwt_assets_for_agent,
+    refresh_managed_gwt_assets_for_agent_with_codex_hook_discovery_mode,
     refresh_managed_gwt_assets_for_worktree,
 };
 use gwt_agent::AgentId;
+use gwt_skills::{CodexHookDiscoveryMode, SessionKind};
 use serde_json::Value;
 use tempfile::tempdir;
+
+/// SPEC-3247 AS-2 / AS-3 (delivery wiring): materializing managed assets with
+/// `SessionKind::Intake` writes a coordination SKILL.md that omits the
+/// `workspace.update` Work-state instruction and frames curation, while
+/// `SessionKind::Execution` keeps the producing-work instruction. This guards
+/// the boundary a regression to a hardcoded kind would otherwise pass silently.
+#[test]
+fn session_kind_selects_intake_or_execution_coordination_guidance() {
+    fn materialize_and_read(kind: SessionKind) -> String {
+        let dir = tempdir().expect("tempdir");
+        run_git(dir.path(), &["init", "-q"]);
+        let _env_guard = env_lock();
+        let cli_bin = dir.path().join("bin/gwtd");
+        std::fs::create_dir_all(cli_bin.parent().expect("bin parent")).expect("create bin dir");
+        std::fs::write(&cli_bin, "#!/bin/sh\n").expect("write cli bin");
+        let _cli_bin_guard = ScopedEnvVar::set("GWT_HOOK_BIN", &cli_bin);
+
+        refresh_managed_gwt_assets_for_agent_with_codex_hook_discovery_mode(
+            dir.path(),
+            &AgentId::ClaudeCode,
+            CodexHookDiscoveryMode::WorkspaceHome,
+            kind,
+        )
+        .expect("materialize managed assets");
+
+        std::fs::read_to_string(dir.path().join(".claude/skills/gwt-coordination/SKILL.md"))
+            .expect("read coordination SKILL.md")
+    }
+
+    let intake = materialize_and_read(SessionKind::Intake);
+    assert!(
+        !intake.contains(r#""operation":"workspace.update""#),
+        "intake materialized guidance must omit the workspace.update Work-state instruction"
+    );
+    assert!(
+        intake.contains("intake sessions produce no Work"),
+        "intake materialized guidance must frame curation"
+    );
+
+    let execution = materialize_and_read(SessionKind::Execution);
+    assert!(
+        execution.contains(r#""operation":"workspace.update""#),
+        "execution materialized guidance must keep the workspace.update Work-state instruction"
+    );
+}
+
+/// SPEC-3248 P4 (FR-011): materializing with `SessionKind::Intake` applies the
+/// reduced (curation) skill set — implementation skills are dropped, curation
+/// skills stay; execution keeps the full set.
+#[test]
+fn intake_materialize_applies_reduced_skill_set() {
+    fn materialize(kind: SessionKind) -> tempfile::TempDir {
+        let dir = tempdir().expect("tempdir");
+        run_git(dir.path(), &["init", "-q"]);
+        let _env_guard = env_lock();
+        let cli_bin = dir.path().join("bin/gwtd");
+        std::fs::create_dir_all(cli_bin.parent().expect("bin parent")).expect("create bin dir");
+        std::fs::write(&cli_bin, "#!/bin/sh\n").expect("write cli bin");
+        let _cli_bin_guard = ScopedEnvVar::set("GWT_HOOK_BIN", &cli_bin);
+        refresh_managed_gwt_assets_for_agent_with_codex_hook_discovery_mode(
+            dir.path(),
+            &AgentId::ClaudeCode,
+            CodexHookDiscoveryMode::WorkspaceHome,
+            kind,
+        )
+        .expect("materialize managed assets");
+        dir
+    }
+
+    let intake = materialize(SessionKind::Intake);
+    assert!(
+        !intake.path().join(".claude/skills/gwt-build-spec").exists(),
+        "intake must drop the implementation skill gwt-build-spec"
+    );
+    assert!(
+        intake
+            .path()
+            .join(".claude/skills/gwt-register-issue/SKILL.md")
+            .exists(),
+        "intake must keep curation skills"
+    );
+
+    let execution = materialize(SessionKind::Execution);
+    assert!(
+        execution
+            .path()
+            .join(".claude/skills/gwt-build-spec/SKILL.md")
+            .exists(),
+        "execution must keep the full skill set"
+    );
+}
 
 #[test]
 fn refresh_managed_gwt_assets_materializes_skills_commands_hooks_and_excludes() {

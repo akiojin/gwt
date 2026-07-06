@@ -1,12 +1,10 @@
 import { expect, test } from "@playwright/test";
 import { APP_URL, installEmbeddedRoutes } from "./_helpers/embedded-frontend";
 
-// SPEC-3214 T-042 (FR-010): the standalone existing-branch picker keeps the
-// local pending-wizard UX the removed Start Work entry used to provide.
-test.describe("Launch Wizard existing-branch picker pending state", () => {
+test.describe("Launch Wizard Start Work pending state", () => {
   test.use({ viewport: { width: 1440, height: 900 } });
 
-  test("Open existing branch opens the local pending wizard before backend state arrives", async ({
+  test("Start Work opens the local pending wizard before backend state arrives", async ({
     page,
   }) => {
     const pageErrors: string[] = [];
@@ -23,17 +21,17 @@ test.describe("Launch Wizard existing-branch picker pending state", () => {
       timeout: 10_000,
     });
 
-    await page.locator("#canvas-empty-open-branch").click();
+    await page.locator('.op-rail__item[data-cmd="intake-session"]').click();
 
     const wizard = page.locator("#wizard-modal");
     await expect(wizard).toHaveClass(/open/);
     await expect(wizard).not.toHaveAttribute("aria-hidden", "true");
-    await expect(wizard).toContainText("Fetching remote branches...");
+    await expect(wizard).toContainText("Preparing Plan Agent...");
     await expect(wizard.locator("#wizard-submit-button")).toBeHidden();
 
     await expect
       .poll(() => page.evaluate(() => (window as any).__sentKinds))
-      .toContain("open_existing_branch");
+      .toContain("open_intake_session");
     expect(pageErrors).toEqual([]);
   });
 });

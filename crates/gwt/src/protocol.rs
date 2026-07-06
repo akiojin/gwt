@@ -561,10 +561,10 @@ pub enum FrontendEvent {
         id: String,
         issue_number: u64,
     },
-    /// SPEC-3214 FR-010: open the existing-branch picker directly (US-83
-    /// SelectExistingBranch) — the standalone successor of the removed
-    /// Start Work entry (FR-009).
-    OpenExistingBranch,
+    /// SPEC-3245 Phase 3 / SPEC-3214: open the Launch Wizard for an ephemeral
+    /// intake session (branchless, detached worktree). The primary "start new
+    /// work" entry that replaces the removed Start Work.
+    OpenIntakeSession,
     OpenStartWorkInAgentKanban {
         board_id: String,
         lane_id: AgentKanbanLane,
@@ -635,17 +635,6 @@ pub enum FrontendEvent {
         issue_numbers: Vec<u64>,
     },
     ListIssueMonitor,
-    /// SPEC-3214 FR-001: open the Launch Wizard in Intake mode — a
-    /// branch-free session on an ephemeral detached worktree.
-    OpenIntake,
-    /// SPEC-3214 FR-004/FR-005: register a one-line `investigation` Issue from
-    /// the Quick issue toolbar. `launch: true` additionally hands the fresh
-    /// issue to the existing Issue Monitor claim→launch pipeline.
-    QuickRegisterIssue {
-        title: String,
-        #[serde(default)]
-        launch: bool,
-    },
     IssueMonitorLaunchNow {
         issue_number: u64,
         #[serde(default)]
@@ -3299,30 +3288,17 @@ mod tests {
         );
     }
 
+    // SPEC-3245 Phase 3: Start Work is removed; the global "start new work"
+    // command is the ephemeral Intake session.
     #[test]
-    fn frontend_event_accepts_global_open_existing_branch_command() {
-        // SPEC-3214 T-042 (FR-010): the existing-branch picker is a global
-        // command of its own now that the Start Work entry is removed.
+    fn frontend_event_accepts_global_open_intake_session_command() {
         let event: FrontendEvent =
-            serde_json::from_value(serde_json::json!({ "kind": "open_existing_branch" }))
-                .expect("deserialize open_existing_branch");
+            serde_json::from_value(serde_json::json!({ "kind": "open_intake_session" }))
+                .expect("deserialize open_intake_session");
 
         assert!(
-            matches!(event, FrontendEvent::OpenExistingBranch),
-            "Open existing branch must be a global command"
-        );
-    }
-
-    #[test]
-    fn frontend_event_rejects_removed_open_start_work_command() {
-        // SPEC-3214 T-044 (FR-009): the Start Work entry event no longer
-        // exists on the protocol.
-        assert!(
-            serde_json::from_value::<FrontendEvent>(
-                serde_json::json!({ "kind": "open_start_work" })
-            )
-            .is_err(),
-            "open_start_work must be rejected after the Start Work removal"
+            matches!(event, FrontendEvent::OpenIntakeSession),
+            "Intake session must be a global command, not a Branches window event"
         );
     }
 

@@ -627,7 +627,7 @@ dependencies = [
  "libc",
  "option-ext",
  "redox_users 0.5.2",
- "windows-sys 0.61.2",
+ "windows-sys 0.60.2",
 ]
 
 [[package]]
@@ -740,7 +740,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "39cab71617ae0d63f51a36d69f866391735b51691dbda63cf6f96d042b63efeb"
 dependencies = [
  "libc",
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -1243,7 +1243,7 @@ dependencies = [
 
 [[package]]
 name = "gwt"
-version = "9.64.2"
+version = "9.65.0"
 dependencies = [
  "ammonia",
  "auto-launch",
@@ -1300,7 +1300,7 @@ dependencies = [
 
 [[package]]
 name = "gwt-agent"
-version = "9.64.2"
+version = "9.65.0"
 dependencies = [
  "chrono",
  "dunce",
@@ -1327,7 +1327,7 @@ dependencies = [
 
 [[package]]
 name = "gwt-ai"
-version = "9.64.2"
+version = "9.65.0"
 dependencies = [
  "reqwest",
  "serde",
@@ -1337,7 +1337,7 @@ dependencies = [
 
 [[package]]
 name = "gwt-clipboard"
-version = "9.64.2"
+version = "9.65.0"
 dependencies = [
  "gwt-core",
  "tempfile",
@@ -1346,7 +1346,7 @@ dependencies = [
 
 [[package]]
 name = "gwt-config"
-version = "9.64.2"
+version = "9.65.0"
 dependencies = [
  "dirs 6.0.0",
  "serde",
@@ -1358,7 +1358,7 @@ dependencies = [
 
 [[package]]
 name = "gwt-core"
-version = "9.64.2"
+version = "9.65.0"
 dependencies = [
  "base64",
  "chrono",
@@ -1392,7 +1392,7 @@ dependencies = [
 
 [[package]]
 name = "gwt-docker"
-version = "9.64.2"
+version = "9.65.0"
 dependencies = [
  "gwt-core",
  "serde",
@@ -1405,7 +1405,7 @@ dependencies = [
 
 [[package]]
 name = "gwt-git"
-version = "9.64.2"
+version = "9.65.0"
 dependencies = [
  "chrono",
  "dirs 6.0.0",
@@ -1418,7 +1418,7 @@ dependencies = [
 
 [[package]]
 name = "gwt-github"
-version = "9.64.2"
+version = "9.65.0"
 dependencies = [
  "gwt-core",
  "regex",
@@ -1431,7 +1431,7 @@ dependencies = [
 
 [[package]]
 name = "gwt-skills"
-version = "9.64.2"
+version = "9.65.0"
 dependencies = [
  "chrono",
  "fs2",
@@ -1448,7 +1448,7 @@ dependencies = [
 
 [[package]]
 name = "gwt-terminal"
-version = "9.64.2"
+version = "9.65.0"
 dependencies = [
  "gwt-core",
  "libc",
@@ -1465,7 +1465,7 @@ dependencies = [
 
 [[package]]
 name = "gwt-voice"
-version = "9.64.2"
+version = "9.65.0"
 dependencies = [
  "gwt-core",
  "tempfile",
@@ -1773,9 +1773,9 @@ dependencies = [
 
 [[package]]
 name = "ignore"
-version = "0.4.26"
+version = "0.4.27"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b915661dd01db3f05050265b2477bcc6527b3792388e2749b41623cc592be67d"
+checksum = "fe112b004901c62c2faa11f4f75e9864e0cc5af8da71c9115d184a3aa888749f"
 dependencies = [
  "crossbeam-deque",
  "globset",
@@ -2232,7 +2232,7 @@ dependencies = [
  "once_cell",
  "png",
  "thiserror 2.0.18",
- "windows-sys 0.61.2",
+ "windows-sys 0.60.2",
 ]
 
 [[package]]
@@ -2343,7 +2343,7 @@ version = "0.50.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7957b9740744892f114936ab4a57b3f487491bbeafaf8083688b16841a4240e5"
 dependencies = [
- "windows-sys 0.61.2",
+ "windows-sys 0.60.2",
 ]
 
 [[package]]
@@ -2897,9 +2897,9 @@ checksum = "e0c5ccf5294c6ccd63a74f1565028353830a9c2f5eb0c682c355c471726a6e3f"
 
 [[package]]
 name = "quick-xml"
-version = "0.39.2"
+version = "0.39.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "958f21e8e7ceb5a1aa7fa87fab28e7c75976e0bfe7e23ff069e0a260f894067d"
+checksum = "cdcc8dd4e2f670d309a5f0e83fe36dfdc05af317008fea29144da1a2ac858e5e"
 dependencies = [
  "memchr",
 ]
@@ -3190,7 +3190,7 @@ dependencies = [
  "errno",
  "libc",
  "linux-raw-sys",
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -3480,7 +3480,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "3a766e1110788c36f4fa1c2b71b387a7815aa65f88ce0229841826633d93723e"
 dependencies = [
  "libc",
- "windows-sys 0.61.2",
+ "windows-sys 0.60.2",
 ]
 
 [[package]]
@@ -3671,7 +3671,7 @@ dependencies = [
  "getrandom 0.3.4",
  "once_cell",
  "rustix",
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -4089,7 +4089,7 @@ dependencies = [
  "once_cell",
  "png",
  "thiserror 2.0.18",
- "windows-sys 0.61.2",
+ "windows-sys 0.60.2",
 ]
 
 [[package]]
@@ -4521,7 +4521,7 @@ version = "0.1.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c2a7b1c03c876122aa43f3020e6c3c3ee5c05081c9a00739faf7503aeba10d22"
 dependencies = [
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]

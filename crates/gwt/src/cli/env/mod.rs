@@ -74,6 +74,8 @@ pub trait CliEnv {
         add_labels: &[String],
     ) -> io::Result<PrStatus>;
     fn fetch_pr(&mut self, number: u64) -> io::Result<PrStatus>;
+    fn mark_pr_ready(&mut self, number: u64) -> io::Result<PrStatus>;
+    fn convert_pr_to_draft(&mut self, number: u64) -> io::Result<PrStatus>;
     fn comment_on_pr(&mut self, number: u64, body: &str) -> io::Result<()>;
     fn fetch_pr_reviews(&mut self, number: u64) -> io::Result<Vec<PrReview>>;
     fn fetch_pr_review_threads(&mut self, number: u64) -> io::Result<Vec<PrReviewThread>>;

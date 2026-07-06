@@ -168,13 +168,31 @@ fn parse(input: &str) -> Result<ParsedEnvelope, CliParseError> {
             labels: optional_string_vec(params, "labels")?,
             draft: optional_bool(params, "draft")?.unwrap_or(false),
         }),
-        "pr.edit" => CliCommand::Pr(PrCommand::EditBody {
-            number: required_u64(params, "number")?,
-            title: optional_string(params, "title")?,
-            body: optional_string(params, "body")?,
-            add_labels: optional_string_vec(params, "add_labels")?,
-        }),
+        "pr.edit" => {
+            let number = required_u64(params, "number")?;
+            let title = optional_string(params, "title")?;
+            let body = optional_string(params, "body")?;
+            let add_labels = optional_string_vec(params, "add_labels")?;
+            // Reject nothing-to-update like the argv path's Usage guard; a
+            // silent no-op success would mask caller bugs (e.g. sending
+            // pr.create's "labels" key instead of "add_labels").
+            if title.is_none() && body.is_none() && add_labels.is_empty() {
+                return Err(CliParseError::MissingFlag("title|body|add_labels"));
+            }
+            CliCommand::Pr(PrCommand::EditBody {
+                number,
+                title,
+                body,
+                add_labels,
+            })
+        }
         "pr.view" => CliCommand::Pr(PrCommand::View {
+            number: required_u64(params, "number")?,
+        }),
+        "pr.ready" => CliCommand::Pr(PrCommand::Ready {
+            number: required_u64(params, "number")?,
+        }),
+        "pr.draft" => CliCommand::Pr(PrCommand::Draft {
             number: required_u64(params, "number")?,
         }),
         "pr.comment" => CliCommand::Pr(PrCommand::CommentBody {
@@ -1018,6 +1036,61 @@ mod tests {
         }
     }
 
+    /// Issue #3184: `workspace.update params.purpose` is the write path behind
+    /// the Agent titlebar; transient helper-workflow activity labels must be
+    /// rejected so browser-check-style phases cannot replace a work purpose.
+    #[test]
+    fn workspace_update_rejects_transient_activity_purpose() {
+        for label in [
+            "browser check",
+            "browser-check",
+            "Headless browser check",
+            "browser check for issue 3184",
+            "ｂｒｏｗｓｅｒ ｃｈｅｃｋ",
+            "verification",
+            "merging",
+            "server startup",
+            "ブラウザ確認",
+            "ヘッドレスブラウザ確認",
+            "検証",
+        ] {
+            match err(
+                "workspace.update",
+                json!({"agent_session": "s", "purpose": label}),
+            ) {
+                CliParseError::InvalidValue { flag, reason } => {
+                    assert_eq!(flag, "params.purpose", "{label}");
+                    assert!(reason.contains("transient activity"), "{label}: {reason}");
+                    assert!(reason.contains("current_focus"), "{label}: {reason}");
+                }
+                other => panic!("unexpected error for {label}: {other:?}"),
+            }
+        }
+    }
+
+    /// Issue #3184: real work names that mention an activity domain without
+    /// being a bare activity label stay valid purposes.
+    #[test]
+    fn workspace_update_accepts_work_purpose_mentioning_activity_domain() {
+        for label in [
+            "browser-check purpose overwrite guard",
+            "Fix browser check",
+            "Issue #3184 title guard",
+            "release verification pipeline",
+        ] {
+            let command = ok(
+                "workspace.update",
+                json!({"agent_session": "s", "purpose": label}),
+            );
+            match command {
+                CliCommand::Workspace(WorkspaceCommand::Update { title_summary, .. }) => {
+                    assert_eq!(title_summary.as_deref(), Some(label));
+                }
+                other => panic!("unexpected command for {label}: {other:?}"),
+            }
+        }
+    }
+
     #[test]
     fn workspace_update_rejects_title_summary_key() {
         match err(
@@ -1298,6 +1371,13 @@ mod tests {
             ),
             CliCommand::Pr(PrCommand::EditBody { .. })
         ));
+        // pr.edit with nothing to update is rejected at parse time, matching
+        // the argv path's Usage guard (a silent no-op success would mask caller
+        // bugs such as passing pr.create's "labels" key instead of "add_labels").
+        assert!(matches!(
+            err("pr.edit", json!({"number": 1})),
+            CliParseError::MissingFlag("title|body|add_labels")
+        ));
         for op in [
             "pr.view",
             "pr.checks",
@@ -1307,6 +1387,14 @@ mod tests {
         ] {
             assert!(matches!(ok(op, json!({"number": 9})), CliCommand::Pr(_)));
         }
+        assert!(matches!(
+            ok("pr.ready", json!({"number": 9})),
+            CliCommand::Pr(PrCommand::Ready { number: 9 })
+        ));
+        assert!(matches!(
+            ok("pr.draft", json!({"number": 9})),
+            CliCommand::Pr(PrCommand::Draft { number: 9 })
+        ));
         assert!(matches!(
             ok("pr.comment", json!({"number": 1, "body": "b"})),
             CliCommand::Pr(PrCommand::CommentBody { .. })

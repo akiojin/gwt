@@ -618,7 +618,6 @@ fn workspace_work_agent_view_attaches_session_history() {
 
 fn sample_active_agent_session(tab_id: &str, window_id: &str) -> ActiveAgentSession {
     ActiveAgentSession {
-        is_ephemeral: false,
         window_id: window_id.to_string(),
         session_id: "session-1".to_string(),
         agent_id: "codex".to_string(),
@@ -1059,7 +1058,6 @@ fn image_paste_event_saves_file_under_worktree() {
     runtime.active_agent_sessions.insert(
         window_id.clone(),
         ActiveAgentSession {
-            is_ephemeral: false,
             window_id: window_id.clone(),
             session_id: "session-1".to_string(),
             agent_id: "codex".to_string(),
@@ -1138,7 +1136,6 @@ fn uploaded_image_paste_event_saves_file_under_drop_files() {
     runtime.active_agent_sessions.insert(
         window_id.clone(),
         ActiveAgentSession {
-            is_ephemeral: false,
             window_id: window_id.clone(),
             session_id: "session-1".to_string(),
             agent_id: "codex".to_string(),
@@ -1468,7 +1465,6 @@ fn file_attachment_event_saves_inline_file_under_worktree() {
     runtime.active_agent_sessions.insert(
         window_id.clone(),
         ActiveAgentSession {
-            is_ephemeral: false,
             window_id: window_id.clone(),
             session_id: "session-1".to_string(),
             agent_id: "codex".to_string(),
@@ -1532,7 +1528,6 @@ fn file_attachment_event_saves_native_path_under_drop_files() {
     runtime.active_agent_sessions.insert(
         window_id.clone(),
         ActiveAgentSession {
-            is_ephemeral: false,
             window_id: window_id.clone(),
             session_id: "session-1".to_string(),
             agent_id: "codex".to_string(),
@@ -1611,7 +1606,6 @@ fn file_attachment_event_saves_uploaded_file_under_drop_files() {
     runtime.active_agent_sessions.insert(
         window_id.clone(),
         ActiveAgentSession {
-            is_ephemeral: false,
             window_id: window_id.clone(),
             session_id: "session-1".to_string(),
             agent_id: "codex".to_string(),
@@ -1677,7 +1671,6 @@ fn file_attachment_operation_dispatches_failed_progress_without_prompt_on_stage_
     runtime.active_agent_sessions.insert(
         window_id.clone(),
         ActiveAgentSession {
-            is_ephemeral: false,
             window_id: window_id.clone(),
             session_id: "session-1".to_string(),
             agent_id: "codex".to_string(),
@@ -1810,7 +1803,6 @@ fn file_attachment_event_saves_prepared_files_incrementally() {
     runtime.active_agent_sessions.insert(
         window_id.clone(),
         ActiveAgentSession {
-            is_ephemeral: false,
             window_id: window_id.clone(),
             session_id: "session-1".to_string(),
             agent_id: "codex".to_string(),
@@ -2073,7 +2065,6 @@ fn sample_runtime_with_events(
         usage_refresh: None,
         image_paste_sequence: std::sync::atomic::AtomicU64::new(0),
         agent_launch_stage_counter: std::sync::atomic::AtomicU64::new(1),
-        pending_ephemeral_worktree_cleanups: HashMap::new(),
     };
     runtime.rebuild_window_lookup();
     runtime.seed_window_pty_statuses();
@@ -2332,6 +2323,7 @@ fn sample_launch_wizard_session(tab_id: &str, project_root: &Path) -> LaunchWiza
                 linked_issue_kind: None,
                 ultracode_supported: false,
                 claude_workflows_enabled: false,
+                ephemeral_base_ref: None,
             },
             Vec::new(),
         ),
@@ -2486,6 +2478,7 @@ fn sample_no_agent_launch_wizard_session(tab_id: &str, project_root: &Path) -> L
                 linked_issue_kind: None,
                 ultracode_supported: false,
                 claude_workflows_enabled: false,
+                ephemeral_base_ref: None,
             },
             Vec::new(),
             Vec::new(),
@@ -2526,6 +2519,7 @@ fn sample_start_work_confirm_session(tab_id: &str, project_root: &Path) -> Launc
             linked_issue_kind: None,
             ultracode_supported: false,
             claude_workflows_enabled: false,
+            ephemeral_base_ref: None,
         },
         base_branch,
         sample_agent_options(),
@@ -2597,6 +2591,7 @@ fn sample_ready_agent_launch_wizard_session(
                 linked_issue_kind: None,
                 ultracode_supported: false,
                 claude_workflows_enabled: false,
+                ephemeral_base_ref: None,
             },
             sample_agent_options(),
             Vec::new(),
@@ -3523,7 +3518,6 @@ fn app_runtime_frontend_ready_replays_active_work_projection_separately_from_wor
     runtime.active_agent_sessions.insert(
         "tab-1::agent-1".to_string(),
         ActiveAgentSession {
-            is_ephemeral: false,
             window_id: "tab-1::agent-1".to_string(),
             session_id: "session-1".to_string(),
             agent_id: "codex".to_string(),
@@ -4255,7 +4249,6 @@ fn app_runtime_workspace_add_agent_opens_branch_launch_without_branches_window()
     runtime.active_agent_sessions.insert(
         "tab-1::agent-1".to_string(),
         ActiveAgentSession {
-            is_ephemeral: false,
             window_id: "tab-1::agent-1".to_string(),
             session_id: "session-1".to_string(),
             agent_id: "codex".to_string(),
@@ -4326,7 +4319,6 @@ fn app_runtime_live_sessions_report_composed_idle_runtime_status() {
     runtime.active_agent_sessions.insert(
         window_id.clone(),
         ActiveAgentSession {
-            is_ephemeral: false,
             window_id: window_id.clone(),
             session_id: "session-1".to_string(),
             agent_id: "codex".to_string(),
@@ -4360,7 +4352,6 @@ fn app_runtime_live_sessions_report_idle_after_launch_before_first_hook() {
     runtime.active_agent_sessions.insert(
         window_id.clone(),
         ActiveAgentSession {
-            is_ephemeral: false,
             window_id: window_id.clone(),
             session_id: "session-1".to_string(),
             agent_id: "codex".to_string(),
@@ -4402,7 +4393,6 @@ fn app_runtime_workspace_state_reports_idle_for_launched_agent_without_hook_stat
     runtime.active_agent_sessions.insert(
         window_id.clone(),
         ActiveAgentSession {
-            is_ephemeral: false,
             window_id: window_id.clone(),
             session_id: "session-1".to_string(),
             agent_id: "codex".to_string(),
@@ -4549,128 +4539,7 @@ fn app_runtime_window_list_enumerates_all_project_tabs() {
 }
 
 #[test]
-fn app_runtime_open_existing_branch_opens_picker_without_git_mutation() {
-    let _env_guard = env_test_lock().lock().expect("env lock");
-    let temp = tempdir().expect("tempdir");
-    let _home = ScopedEnvVar::set("HOME", temp.path());
-    let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
-    let repo = temp.path().join("repo");
-    let origin = init_git_clone_with_origin(&repo);
-    run_git(&repo, &["checkout", "-qb", "main"]);
-    run_git(&repo, &["push", "origin", "main"]);
-    run_git(&origin, &["symbolic-ref", "HEAD", "refs/heads/main"]);
-    run_git(&repo, &["checkout", "develop"]);
-    run_git(&repo, &["remote", "set-head", "origin", "-a"]);
-    run_git(&origin, &["branch", "-D", "develop"]);
-    run_git(&repo, &["update-ref", "-d", "refs/remotes/origin/develop"]);
-    let develop_before_open = gwt_core::process::hidden_command("git")
-        .args([
-            "show-ref",
-            "--verify",
-            "--quiet",
-            "refs/remotes/origin/develop",
-        ])
-        .current_dir(&repo)
-        .status()
-        .expect("check origin/develop before open");
-    assert!(
-        !develop_before_open.success(),
-        "fixture must start without origin/develop"
-    );
-
-    let tab = sample_project_tab(
-        "tab-1",
-        "Repo",
-        repo.clone(),
-        ProjectKind::Git,
-        &[WindowPreset::Board],
-    );
-    let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
-
-    let events =
-        runtime.handle_frontend_event("client-1".to_string(), FrontendEvent::OpenExistingBranch);
-
-    assert!(matches!(
-        events.first().map(|event| &event.event),
-        Some(BackendEvent::LaunchWizardState { wizard: Some(_) })
-    ));
-    let view = runtime
-        .launch_wizard
-        .as_ref()
-        .expect("existing branch wizard")
-        .wizard
-        .view();
-    assert_eq!(view.mode, gwt::LaunchWizardMode::ExistingBranch);
-    assert_eq!(view.title, "Open existing branch");
-    assert!(!view.show_branch_controls);
-    // SPEC-3214 T-042 (FR-010): the picker opens standalone — no work/*
-    // branch name is reserved and no start method is offered until the user
-    // picks a branch.
-    assert!(view.branch_name.is_empty(), "no reserved branch name");
-    assert!(
-        view.start_methods.is_empty(),
-        "start methods stay hidden until a branch is selected"
-    );
-
-    let develop = gwt_core::process::hidden_command("git")
-        .args([
-            "show-ref",
-            "--verify",
-            "--quiet",
-            "refs/remotes/origin/develop",
-        ])
-        .current_dir(&repo)
-        .status()
-        .expect("check origin/develop");
-    assert!(
-        !develop.success(),
-        "opening the picker must not fetch or restore origin/develop before the user launches"
-    );
-
-    let refs = gwt_core::process::hidden_command("git")
-        .args([
-            "for-each-ref",
-            "refs/heads/work",
-            "refs/remotes/origin/work",
-        ])
-        .current_dir(&repo)
-        .output()
-        .expect("list work refs");
-    assert!(refs.status.success(), "git for-each-ref failed");
-    assert!(
-        refs.stdout.is_empty(),
-        "opening the picker must not create branch refs"
-    );
-
-    let cancel_events = runtime.handle_frontend_event(
-        "client-1".to_string(),
-        FrontendEvent::LaunchWizardAction {
-            action: LaunchWizardAction::Cancel,
-            bounds: None,
-        },
-    );
-    assert!(matches!(
-        cancel_events.first().map(|event| &event.event),
-        Some(BackendEvent::LaunchWizardState { wizard: None })
-    ));
-    let refs_after_cancel = gwt_core::process::hidden_command("git")
-        .args([
-            "for-each-ref",
-            "refs/heads/work",
-            "refs/remotes/origin/work",
-        ])
-        .current_dir(&repo)
-        .output()
-        .expect("list work refs after cancel");
-    assert!(refs_after_cancel.status.success());
-    assert!(
-        refs_after_cancel.stdout.is_empty(),
-        "cancelling the picker must not create branch refs"
-    );
-}
-
-#[test]
-fn app_runtime_open_existing_branch_failure_surfaces_launch_wizard_open_error() {
+fn app_runtime_open_intake_session_failure_surfaces_launch_wizard_open_error() {
     let temp = tempdir().expect("tempdir");
     let repo = temp.path().join("repo");
     fs::create_dir_all(&repo).expect("create repo");
@@ -4678,13 +4547,13 @@ fn app_runtime_open_existing_branch_failure_surfaces_launch_wizard_open_error() 
         "tab-1",
         "Repo",
         repo,
-        ProjectKind::NonRepo,
+        ProjectKind::Git,
         &[WindowPreset::Board],
     );
     let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
 
     let events =
-        runtime.handle_frontend_event("client-1".to_string(), FrontendEvent::OpenExistingBranch);
+        runtime.handle_frontend_event("client-1".to_string(), FrontendEvent::OpenIntakeSession);
 
     assert!(runtime.launch_wizard.is_none());
     assert!(matches!(
@@ -4694,7 +4563,7 @@ fn app_runtime_open_existing_branch_failure_surfaces_launch_wizard_open_error() 
     assert!(matches!(
         events.first().map(|event| &event.event),
         Some(BackendEvent::LaunchWizardOpenError { title, message })
-            if title == "Open existing branch" && !message.is_empty()
+            if title == "Start Work" && !message.is_empty()
     ));
 }
 
@@ -6949,39 +6818,11 @@ fn app_runtime_active_work_projection_retains_stopped_agent_work_as_paused() {
     assert_eq!(paused.branch.as_deref(), Some("work/paused"));
 }
 
-/// SPEC-3214 T-005 fixture: a real git repo plus a detached `.intake`
-/// worktree, ready to attach to an ephemeral agent session.
-fn intake_worktree_fixture(temp: &Path) -> (PathBuf, PathBuf) {
-    let repo = temp.join("repo");
-    fs::create_dir_all(&repo).expect("create repo");
-    run_git(&repo, &["init"]);
-    run_git(&repo, &["config", "user.email", "gwt@example.invalid"]);
-    run_git(&repo, &["config", "user.name", "gwt"]);
-    run_git(&repo, &["commit", "--allow-empty", "-m", "seed"]);
-    let intake = temp.join(".intake");
-    gwt_git::WorktreeManager::new(&repo)
-        .create_detached("HEAD", &intake)
-        .expect("create intake worktree");
-    (repo, intake)
-}
-
-fn ephemeral_intake_session(tab_id: &str, window_id: &str, intake: &Path) -> ActiveAgentSession {
-    let mut session = sample_active_agent_session(tab_id, window_id);
-    session.session_id = "session-intake".to_string();
-    session.branch_name = String::new();
-    session.worktree_path = intake.to_path_buf();
-    session.agent_project_root = intake.display().to_string();
-    session.is_ephemeral = true;
-    session
-}
-
-/// SPEC-3214 T-051 / acceptance scenario 2: the full intake lifecycle leaves
-/// no residue. Launch materialization creates a detached `.intake-*` worktree
-/// (visible in `git worktree list`, `branch: None`), stopping the session
-/// removes it, and `git branch` is byte-identical before and after — zero
-/// named branches were ever created.
+// SPEC-3214 T-005/T-007: an ephemeral intake session leaves NO Work identity
+// and its throwaway `.intake-*` worktree is removed when it ends (clean), while
+// a dirty intake worktree is kept so no in-progress work is lost.
 #[test]
-fn intake_lifecycle_leaves_no_worktree_or_branch_residue() {
+fn ephemeral_intake_session_stop_removes_clean_worktree_and_emits_no_paused_work() {
     let _env_lock = env_test_lock()
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -6990,207 +6831,143 @@ fn intake_lifecycle_leaves_no_worktree_or_branch_residue() {
     let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
     let repo = temp.path().join("repo");
     fs::create_dir_all(&repo).expect("create repo");
-    run_git(&repo, &["init"]);
-    run_git(&repo, &["config", "user.email", "gwt@example.invalid"]);
-    run_git(&repo, &["config", "user.name", "gwt"]);
-    run_git(&repo, &["commit", "--allow-empty", "-m", "seed"]);
-    let branches_before = {
-        let output = gwt_core::process::hidden_command("git")
-            .args(["branch", "--list"])
-            .current_dir(&repo)
-            .output()
-            .expect("list branches before");
-        String::from_utf8_lossy(&output.stdout).to_string()
-    };
+    init_repo(&repo);
+    run_git(&repo, &["config", "user.email", "test@example.com"]);
+    run_git(&repo, &["config", "user.name", "Test User"]);
+    run_git(&repo, &["commit", "--allow-empty", "-m", "init"]);
 
-    // Launch: the ephemeral resolve path (the same one `spawn_agent_window`
-    // calls through `resolve_launch_worktree`) materializes the worktree.
-    let mut config = gwt_agent::AgentLaunchBuilder::new(gwt_agent::AgentId::ClaudeCode).build();
-    config.is_ephemeral = true;
-    crate::launch_runtime::resolve_launch_worktree(&repo, &mut config)
-        .expect("resolve ephemeral launch worktree");
-    let intake = config.working_dir.clone().expect("intake working dir");
-    let listed = gwt_git::WorktreeManager::new(&repo)
-        .list()
-        .expect("list worktrees");
-    let intake_entry = listed
-        .iter()
-        .find(|entry| gwt_git::worktree::is_intake_worktree_path(&entry.path))
-        .expect("intake worktree listed");
-    assert!(
-        intake_entry.branch.is_none(),
-        "the intake worktree must be detached (no named branch)"
-    );
+    let intake = temp.path().join(".intake-clean");
+    gwt_git::WorktreeManager::new(&repo)
+        .create_detached("HEAD", &intake)
+        .expect("intake worktree");
+    assert!(intake.exists());
 
-    // Stop: the runtime-status hook destroys the clean worktree.
     let tab = sample_project_tab("tab-1", "Repo", repo.clone(), ProjectKind::Git, &[]);
     let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
-    runtime.active_agent_sessions.insert(
-        "tab-1::agent-intake".to_string(),
-        ephemeral_intake_session("tab-1", "tab-1::agent-intake", &intake),
-    );
-    runtime.handle_runtime_status(
-        "tab-1::agent-intake".to_string(),
-        WindowProcessStatus::Stopped,
-        None,
-    );
+    let mut session = sample_active_agent_session("tab-1", "tab-1::intake");
+    session.session_id = "session-intake".to_string();
+    session.branch_name = String::new();
+    session.worktree_path = intake.clone();
+    session.window_id = "tab-1::intake".to_string();
+    runtime
+        .active_agent_sessions
+        .insert("tab-1::intake".to_string(), session);
 
-    assert!(!intake.exists(), "the intake worktree must be destroyed");
-    let listed = gwt_git::WorktreeManager::new(&repo)
-        .list()
-        .expect("list worktrees after stop");
+    runtime.mark_agent_session_stopped("tab-1::intake");
+
+    assert!(!runtime.active_agent_sessions.contains_key("tab-1::intake"));
     assert!(
-        !listed
-            .iter()
-            .any(|entry| gwt_git::worktree::is_intake_worktree_path(&entry.path)),
-        "git worktree list must not retain an intake entry"
+        !intake.exists(),
+        "clean intake worktree is removed when the session ends"
     );
-    let branches_after = {
-        let output = gwt_core::process::hidden_command("git")
-            .args(["branch", "--list"])
-            .current_dir(&repo)
-            .output()
-            .expect("list branches after");
-        String::from_utf8_lossy(&output.stdout).to_string()
-    };
+    let active_work_count = runtime
+        .active_work_projection_for_tab("tab-1", &runtime.tabs[0])
+        .map(|view| view.active_works.len())
+        .unwrap_or(0);
     assert_eq!(
-        branches_before, branches_after,
-        "the intake lifecycle must not create or delete any named branch"
+        active_work_count, 0,
+        "an ephemeral intake session emits no Work identity (paused or otherwise)"
+    );
+    let recorded = gwt_core::workspace_projection::load_workspace_work_items(&repo)
+        .ok()
+        .flatten();
+    assert!(
+        recorded.is_none_or(|projection| projection.work_items.is_empty()),
+        "no Work event is recorded for an ephemeral intake session"
     );
 }
 
-/// SPEC-3214 T-005 / FR-002: when an ephemeral intake session stops with a
-/// clean worktree, the worktree is destroyed and no Paused Work survives.
 #[test]
-fn ephemeral_session_stop_removes_clean_intake_worktree_without_paused_work() {
+fn ephemeral_intake_session_stop_keeps_dirty_worktree() {
     let _env_lock = env_test_lock()
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
     let temp = tempdir().expect("tempdir");
     let _home = ScopedEnvVar::set("HOME", temp.path());
     let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
-    let (repo, intake) = intake_worktree_fixture(temp.path());
+    let repo = temp.path().join("repo");
+    fs::create_dir_all(&repo).expect("create repo");
+    init_repo(&repo);
+    run_git(&repo, &["config", "user.email", "test@example.com"]);
+    run_git(&repo, &["config", "user.name", "Test User"]);
+    run_git(&repo, &["commit", "--allow-empty", "-m", "init"]);
+
+    let intake = temp.path().join(".intake-dirty");
+    gwt_git::WorktreeManager::new(&repo)
+        .create_detached("HEAD", &intake)
+        .expect("intake worktree");
+    // Uncommitted work must not be destroyed.
+    fs::write(intake.join("wip.txt"), "unsaved intake work").expect("write wip");
 
     let tab = sample_project_tab("tab-1", "Repo", repo.clone(), ProjectKind::Git, &[]);
     let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
-    runtime.active_agent_sessions.insert(
-        "tab-1::agent-intake".to_string(),
-        ephemeral_intake_session("tab-1", "tab-1::agent-intake", &intake),
-    );
+    let mut session = sample_active_agent_session("tab-1", "tab-1::intake");
+    session.session_id = "session-intake-dirty".to_string();
+    session.branch_name = String::new();
+    session.worktree_path = intake.clone();
+    session.window_id = "tab-1::intake".to_string();
+    runtime
+        .active_agent_sessions
+        .insert("tab-1::intake".to_string(), session);
 
-    let events = runtime.handle_runtime_status(
-        "tab-1::agent-intake".to_string(),
-        WindowProcessStatus::Stopped,
-        None,
-    );
+    runtime.mark_agent_session_stopped("tab-1::intake");
 
     assert!(
-        !intake.exists(),
-        "clean intake worktree must be removed after the session stops"
+        intake.exists() && intake.join("wip.txt").exists(),
+        "a dirty intake worktree is kept so uncommitted work is never lost"
     );
-    let worktrees = gwt_git::WorktreeManager::new(&repo)
-        .list()
-        .expect("list worktrees");
+}
+
+// SPEC-3214 (codex #3235 review): a NORMAL branch worktree that a user happens
+// to name `.intake-*` must NOT be misclassified as an ephemeral intake session
+// — it keeps its worktree and its Paused-Work behavior. Classification requires
+// the worktree to be branchless (detached), not just `.intake-*`-named.
+#[test]
+fn branch_worktree_named_intake_is_not_treated_as_ephemeral() {
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedEnvVar::set("HOME", temp.path());
+    let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+    let repo = temp.path().join("repo");
+    fs::create_dir_all(&repo).expect("create repo");
+    init_repo(&repo);
+    run_git(&repo, &["config", "user.email", "test@example.com"]);
+    run_git(&repo, &["config", "user.name", "Test User"]);
+    run_git(&repo, &["commit", "--allow-empty", "-m", "init"]);
+
+    // A real BRANCH worktree that merely happens to be named `.intake-real`.
+    let branch_wt = temp.path().join(".intake-real");
+    gwt_git::WorktreeManager::new(&repo)
+        .create_from_base("HEAD", "feature/real", &branch_wt)
+        .expect("branch worktree");
+    assert!(branch_wt.exists());
+
+    let tab = sample_project_tab("tab-1", "Repo", repo.clone(), ProjectKind::Git, &[]);
+    let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+    let mut session = sample_active_agent_session("tab-1", "tab-1::real");
+    session.session_id = "session-real".to_string();
+    session.branch_name = "feature/real".to_string();
+    session.worktree_path = branch_wt.clone();
+    session.window_id = "tab-1::real".to_string();
+    runtime
+        .active_agent_sessions
+        .insert("tab-1::real".to_string(), session);
+
+    runtime.mark_agent_session_stopped("tab-1::real");
+
     assert!(
-        !worktrees
-            .iter()
-            .any(|entry| gwt_git::worktree::is_intake_worktree_path(&entry.path)),
-        "git must not retain an intake worktree entry"
+        branch_wt.exists(),
+        "a real branch worktree named .intake-* must not be removed as ephemeral"
     );
     let works = gwt_core::workspace_projection::load_workspace_work_items(&repo)
         .ok()
         .flatten();
     assert!(
-        works
-            .map(|projection| {
-                !projection
-                    .work_items
-                    .iter()
-                    .any(|item| item.id == "work-session-session-intake")
-            })
-            .unwrap_or(true),
-        "ephemeral session must not persist a Paused Work (FR-003)"
+        works.is_some_and(|projection| !projection.work_items.is_empty()),
+        "a real branch session still records a Paused Work"
     );
-    assert!(
-        !events
-            .iter()
-            .any(|event| matches!(event.event, BackendEvent::IssueMonitorToast { .. })),
-        "clean cleanup must not raise a retention notice"
-    );
-}
-
-/// SPEC-3214 T-005 / FR-002: a dirty intake worktree is retained (no silent
-/// data destruction) and the user is notified.
-#[test]
-fn ephemeral_session_stop_keeps_dirty_intake_worktree_with_notice() {
-    let _env_lock = env_test_lock()
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
-    let temp = tempdir().expect("tempdir");
-    let _home = ScopedEnvVar::set("HOME", temp.path());
-    let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
-    let (repo, intake) = intake_worktree_fixture(temp.path());
-    fs::write(intake.join("scratch-note.md"), "uncommitted\n").expect("write dirty file");
-
-    let tab = sample_project_tab("tab-1", "Repo", repo.clone(), ProjectKind::Git, &[]);
-    let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
-    runtime.active_agent_sessions.insert(
-        "tab-1::agent-intake".to_string(),
-        ephemeral_intake_session("tab-1", "tab-1::agent-intake", &intake),
-    );
-
-    let events = runtime.handle_runtime_status(
-        "tab-1::agent-intake".to_string(),
-        WindowProcessStatus::Stopped,
-        None,
-    );
-
-    assert!(
-        intake.exists(),
-        "dirty intake worktree must be retained (FR-002: no silent destruction)"
-    );
-    assert!(
-        intake.join("scratch-note.md").exists(),
-        "uncommitted intake data must survive the stop"
-    );
-    let notice = events.iter().find_map(|event| match &event.event {
-        BackendEvent::IssueMonitorToast { level, message, .. } => {
-            Some((level.clone(), message.clone()))
-        }
-        _ => None,
-    });
-    let (level, message) = notice.expect("dirty retention must surface a notice event");
-    assert_eq!(level, "warn");
-    assert!(
-        message.contains(&intake.display().to_string()),
-        "notice must name the retained worktree path, got: {message}"
-    );
-}
-
-/// SPEC-3214 T-006: crash orphans — intake worktrees with no live session —
-/// are pruned at startup when clean and retained when dirty.
-#[test]
-fn prune_orphan_intake_worktrees_removes_clean_and_keeps_dirty() {
-    let temp = tempdir().expect("tempdir");
-    let (repo, clean_intake) = intake_worktree_fixture(temp.path());
-    let dirty_intake = temp.path().join(".intake-2");
-    gwt_git::WorktreeManager::new(&repo)
-        .create_detached("HEAD", &dirty_intake)
-        .expect("create second intake worktree");
-    fs::write(dirty_intake.join("keep-me.md"), "dirty\n").expect("write dirty file");
-    // A live session still owns a third intake worktree: it must survive.
-    let live_intake = temp.path().join(".intake-3");
-    gwt_git::WorktreeManager::new(&repo)
-        .create_detached("HEAD", &live_intake)
-        .expect("create live intake worktree");
-
-    let removed =
-        super::launch::prune_orphan_intake_worktrees(&repo, std::slice::from_ref(&live_intake));
-
-    assert_eq!(removed, 1, "exactly the clean orphan must be pruned");
-    assert!(!clean_intake.exists(), "clean orphan must be removed");
-    assert!(dirty_intake.exists(), "dirty orphan must be retained");
-    assert!(live_intake.exists(), "live intake worktree must survive GC");
 }
 
 // #3065: a stopped session's Pause record must not inherit the repo-shared
@@ -8450,7 +8227,6 @@ fn app_runtime_active_work_projection_filters_stale_agent_when_window_id_is_reus
     runtime.active_agent_sessions.insert(
         window_id.to_string(),
         ActiveAgentSession {
-            is_ephemeral: false,
             window_id: window_id.to_string(),
             session_id: "live-session".to_string(),
             agent_id: "codex".to_string(),
@@ -9292,7 +9068,6 @@ fn app_runtime_open_launch_wizard_shows_only_latest_resume_and_focus_methods() {
         runtime.active_agent_sessions.insert(
             agent_window_id.clone(),
             ActiveAgentSession {
-                is_ephemeral: false,
                 window_id: agent_window_id,
                 session_id: session.to_string(),
                 agent_id: "codex".to_string(),
@@ -10009,7 +9784,6 @@ fn app_runtime_close_agent_window_clears_startup_restore_eligibility() {
     runtime.active_agent_sessions.insert(
         window_id.clone(),
         ActiveAgentSession {
-            is_ephemeral: false,
             window_id: window_id.clone(),
             session_id: session.id.clone(),
             agent_id: "codex".to_string(),
@@ -10831,7 +10605,6 @@ fn app_runtime_active_work_projection_hides_cleanup_candidate_for_live_agent_bra
     runtime.active_agent_sessions.insert(
         window_id.clone(),
         ActiveAgentSession {
-            is_ephemeral: false,
             window_id,
             session_id: "session-1".to_string(),
             agent_id: "codex".to_string(),
@@ -10889,7 +10662,6 @@ fn app_runtime_active_work_projection_hides_row_cleanup_candidate_for_live_agent
     runtime.active_agent_sessions.insert(
         window_id.clone(),
         ActiveAgentSession {
-            is_ephemeral: false,
             window_id,
             session_id: "session-live-cleanup".to_string(),
             agent_id: "codex".to_string(),
@@ -11012,7 +10784,6 @@ fn app_runtime_row_cleanup_candidate_hides_grouped_live_agent_branch() {
     runtime.active_agent_sessions.insert(
         window_id.clone(),
         ActiveAgentSession {
-            is_ephemeral: false,
             window_id,
             session_id: "session-grouped-cleanup".to_string(),
             agent_id: "codex".to_string(),
@@ -11122,7 +10893,6 @@ fn app_runtime_stopped_agent_cleans_saved_projection_and_broadcasts_active_work_
     let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
     let window_id = combined_window_id("tab-1", "codex-1");
     let session = ActiveAgentSession {
-        is_ephemeral: false,
         window_id: window_id.clone(),
         session_id: "session-1".to_string(),
         agent_id: "codex".to_string(),
@@ -11858,51 +11628,36 @@ fn app_runtime_stop_all_runtimes_kills_every_pane_before_join_waits() {
         },
     );
 
-    let started = Instant::now();
     let stop_thread = thread::spawn(move || {
         runtime.stop_runtimes_in_shutdown_order(vec![blocker_id, observed_id]);
     });
 
-    // Wait generously for the observed pane to die and record WHEN it died.
-    // The per-pane kill cost is load-dependent (ProcessGroup::terminate holds
-    // a fixed 100ms SIGTERM→SIGKILL grace and `child.kill()` varies with
-    // system load), so an absolute wall-clock deadline here is flaky. The
-    // contract under test is ordering, which is asserted below.
-    let deadline = started + Duration::from_secs(5);
-    let mut observed_death: Option<Duration> = None;
+    let deadline = Instant::now() + Duration::from_millis(400);
+    let mut observed_exited = false;
     while Instant::now() < deadline {
-        let exited = observed_pane_for_assertion
+        observed_exited = observed_pane_for_assertion
             .lock()
             .expect("observed pane")
             .pty()
             .try_wait()
             .expect("observed try_wait")
             .is_some();
-        if exited {
-            observed_death = Some(started.elapsed());
+        if observed_exited {
             break;
         }
-        thread::sleep(Duration::from_millis(10));
+        thread::sleep(Duration::from_millis(25));
     }
-    if observed_death.is_none() {
+    if !observed_exited {
         let _ = observed_pane_for_assertion
             .lock()
             .expect("observed pane cleanup")
             .kill();
     }
     stop_thread.join().expect("stop thread");
-    let stop_done = started.elapsed();
 
-    let observed_death = observed_death.expect("shutdown must kill the observed pane, not leak it");
-    // Ordering contract, load-robust: when shutdown kills every pane before
-    // waiting for join handles, the observed pane dies before the blocker's
-    // capped join wait (500ms recv_timeout) even begins, so its death precedes
-    // stop completion by at least that cap. In the interleaved (wrong) order
-    // the observed pane only dies in the final milliseconds of the stop call.
     assert!(
-        stop_done - observed_death >= Duration::from_millis(300),
-        "shutdown must kill all panes before waiting for any runtime join handle \
-         (observed pane died at {observed_death:?}, stop finished at {stop_done:?})"
+        observed_exited,
+        "shutdown must kill all panes before waiting for any runtime join handle"
     );
 }
 
@@ -12362,7 +12117,6 @@ fn app_runtime_open_board_origin_agent_focuses_live_origin_session_window() {
     runtime.active_agent_sessions.insert(
         agent_window_id.clone(),
         ActiveAgentSession {
-            is_ephemeral: false,
             window_id: agent_window_id.clone(),
             session_id: "session-origin".to_string(),
             agent_id: "codex".to_string(),
@@ -14502,7 +14256,6 @@ fn app_runtime_active_work_projection_preserves_blocked_agent_board_state() {
     );
     let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
     let session = ActiveAgentSession {
-        is_ephemeral: false,
         window_id: "tab-1::agent-1".to_string(),
         session_id: "session-1".to_string(),
         agent_id: "codex".to_string(),
@@ -14634,7 +14387,6 @@ fn app_runtime_active_work_projection_recovers_blocked_agent_after_status_milest
     );
     let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
     let session = ActiveAgentSession {
-        is_ephemeral: false,
         window_id: "tab-1::agent-1".to_string(),
         session_id: "session-1".to_string(),
         agent_id: "codex".to_string(),
@@ -14713,7 +14465,6 @@ fn app_runtime_active_work_projection_keeps_blocked_agent_after_next_milestone()
     );
     let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
     let session = ActiveAgentSession {
-        is_ephemeral: false,
         window_id: "tab-1::agent-1".to_string(),
         session_id: "session-1".to_string(),
         agent_id: "codex".to_string(),
@@ -15931,7 +15682,6 @@ fn app_runtime_board_milestone_updates_same_session_agent_window_detail_only() {
     runtime.active_agent_sessions.insert(
         first_window_id.clone(),
         ActiveAgentSession {
-            is_ephemeral: false,
             window_id: first_window_id.clone(),
             session_id: "session-1".to_string(),
             agent_id: "codex".to_string(),
@@ -15946,7 +15696,6 @@ fn app_runtime_board_milestone_updates_same_session_agent_window_detail_only() {
     runtime.active_agent_sessions.insert(
         second_window_id,
         ActiveAgentSession {
-            is_ephemeral: false,
             window_id: combined_window_id("tab-1", "agent-2"),
             session_id: "session-2".to_string(),
             agent_id: "claude".to_string(),
@@ -16048,7 +15797,6 @@ fn app_runtime_board_milestone_broadcasts_workspace_state_for_focus_sync() {
     runtime.active_agent_sessions.insert(
         window_id.clone(),
         ActiveAgentSession {
-            is_ephemeral: false,
             window_id: window_id.clone(),
             session_id: "session-1".to_string(),
             agent_id: "codex".to_string(),
@@ -16208,7 +15956,6 @@ fn app_runtime_board_milestone_skips_workspace_state_on_identical_resync() {
     runtime.active_agent_sessions.insert(
         window_id.clone(),
         ActiveAgentSession {
-            is_ephemeral: false,
             window_id: window_id.clone(),
             session_id: "session-1".to_string(),
             agent_id: "codex".to_string(),
@@ -16298,7 +16045,6 @@ fn app_runtime_board_milestone_ignores_legacy_title_summary_for_window_title() {
     runtime.active_agent_sessions.insert(
         window_id.clone(),
         ActiveAgentSession {
-            is_ephemeral: false,
             window_id: window_id.clone(),
             session_id: "session-1".to_string(),
             agent_id: "codex".to_string(),
@@ -16391,7 +16137,6 @@ fn app_runtime_board_milestone_without_title_summary_keeps_existing_agent_window
     runtime.active_agent_sessions.insert(
         window_id.clone(),
         ActiveAgentSession {
-            is_ephemeral: false,
             window_id: window_id.clone(),
             session_id: "session-1".to_string(),
             agent_id: "codex".to_string(),
@@ -16469,7 +16214,6 @@ fn app_runtime_workspace_projection_change_updates_agent_window_title_summary() 
     runtime.active_agent_sessions.insert(
         window_id.clone(),
         ActiveAgentSession {
-            is_ephemeral: false,
             window_id: window_id.clone(),
             session_id: "session-1".to_string(),
             agent_id: "codex".to_string(),
@@ -16556,7 +16300,6 @@ fn apply_title_sync_setup_tab_and_runtime(
     runtime.active_agent_sessions.insert(
         window_id.clone(),
         ActiveAgentSession {
-            is_ephemeral: false,
             window_id: window_id.clone(),
             session_id: "session-1".to_string(),
             agent_id: "codex".to_string(),
@@ -17185,7 +16928,6 @@ fn sync_agent_window_titles_worktree_fallback_refuses_when_multiple_sessions_mat
     runtime.active_agent_sessions.insert(
         "tab-1::agent-2".to_string(),
         ActiveAgentSession {
-            is_ephemeral: false,
             window_id: "tab-1::agent-2".to_string(),
             session_id: "session-2".to_string(),
             agent_id: "codex".to_string(),
@@ -17640,12 +17382,53 @@ fn handle_migration_error_clears_pending_and_broadcasts_recovery_label() {
     )));
 }
 
+// SPEC-3214 Phase 3: OpenIntakeSession opens the Launch Wizard flagged as an
+// ephemeral intake — the resulting launch will be branchless / detached.
 #[test]
-fn open_existing_branch_refuses_while_migration_pending() {
-    // SPEC-1934 US-7 / FR-034 (carried into SPEC-3214 FR-010): launch entry
-    // points must not run on a tab whose Normal → Nested Bare+Worktree
-    // migration is still pending — the launch path would die on the
-    // single-branch refspec.
+fn open_intake_session_opens_ephemeral_branchless_wizard() {
+    let temp = tempdir().expect("tempdir");
+    let repo = temp.path().join("repo");
+    fs::create_dir_all(&repo).expect("create repo");
+    init_repo(&repo);
+    run_git(&repo, &["config", "user.email", "test@example.com"]);
+    run_git(&repo, &["config", "user.name", "Test User"]);
+    run_git(&repo, &["commit", "--allow-empty", "-m", "init"]);
+
+    let tab = sample_project_tab("tab-1", "Repo", repo.clone(), ProjectKind::Git, &[]);
+    let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+
+    let events =
+        runtime.handle_frontend_event("client-1".to_string(), FrontendEvent::OpenIntakeSession);
+    assert!(
+        !events
+            .iter()
+            .any(|event| matches!(event.event, BackendEvent::LaunchWizardOpenError { .. })),
+        "intake session opens without error: {events:?}"
+    );
+
+    let wizard = &runtime
+        .launch_wizard
+        .as_ref()
+        .expect("intake wizard")
+        .wizard;
+    assert_eq!(
+        wizard.context.ephemeral_base_ref.as_deref(),
+        Some(gwt::start_work::START_WORK_BASE_BRANCH_CANDIDATES[0]),
+        "intake wizard is flagged ephemeral on the base ref"
+    );
+    assert!(
+        wizard.context.normalized_branch_name.is_empty(),
+        "intake wizard reserves no branch"
+    );
+}
+
+#[test]
+fn open_intake_session_refuses_while_migration_pending() {
+    // SPEC-1934 US-7 / FR-034: Workspace Start Work must not run on a tab
+    // whose Normal → Nested Bare+Worktree migration is still pending.
+    // Without this gate, the launch path tries to fetch
+    // `origin/work/<branch>` on a single-branch refspec and dies with
+    // `fatal: invalid reference: origin/work/<branch>`.
     let temp = tempdir().expect("tempdir");
     let project = temp.path().join("project");
     fs::create_dir_all(&project).expect("project dir");
@@ -17653,18 +17436,17 @@ fn open_existing_branch_refuses_while_migration_pending() {
     let tab = migration_pending_tab("tab-1", project);
     let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
 
-    let events = runtime.open_existing_branch("client-1");
+    let events = runtime.open_intake_session("client-1");
 
     assert!(
         events.iter().any(|event| matches!(
             event,
             OutboundEvent {
                 target: DispatchTarget::Client(_),
-                event: BackendEvent::LaunchWizardOpenError { title, message },
-            } if title == "Open existing branch"
-                && message == "Complete the project migration before opening a branch"
+                event: BackendEvent::LaunchWizardOpenError { message, .. },
+            } if message == "Complete the project migration before starting an intake session"
         )),
-        "Open existing branch on a migration_pending tab must surface a clear error: {events:?}"
+        "Start Work on a migration_pending tab must surface a clear error: {events:?}"
     );
 }
 
@@ -20172,7 +19954,6 @@ fn stop_window_runtime_records_paused_work_off_the_event_loop() {
     runtime.active_agent_sessions.insert(
         window_id.clone(),
         ActiveAgentSession {
-            is_ephemeral: false,
             window_id: window_id.clone(),
             session_id: "session-paused-offloop".to_string(),
             agent_id: "codex".to_string(),
@@ -20654,7 +20435,6 @@ fn mark_cleanup_candidates_sets_blocked_reason_for_live_agent_and_process() {
     .into_iter()
     .collect();
     let session = ActiveAgentSession {
-        is_ephemeral: false,
         window_id: "window-live-agent".to_string(),
         session_id: "session-live-agent".to_string(),
         agent_id: "codex".to_string(),
@@ -20908,314 +20688,113 @@ fn is_identifier_like_title_classifies_shapes() {
     assert!(!super::is_identifier_like_title("develop"));
 }
 
-// ---------------------------------------------------------------------------
-// SPEC-3214 Phase 2 — Quick issue (T-010 / T-014 / T-016)
-// ---------------------------------------------------------------------------
-
-/// Stub client whose `create_issue` fails with a specific GitHub reason.
-struct PermissionDeniedIssueClient;
-
-impl gwt_github::IssueClient for PermissionDeniedIssueClient {
-    fn fetch(
-        &self,
-        number: IssueNumber,
-        _since: Option<&UpdatedAt>,
-    ) -> Result<gwt_github::FetchResult, gwt_github::ApiError> {
-        Err(gwt_github::ApiError::NotFound(number))
-    }
-    fn patch_body(
-        &self,
-        number: IssueNumber,
-        _new_body: &str,
-    ) -> Result<IssueSnapshot, gwt_github::ApiError> {
-        Err(gwt_github::ApiError::NotFound(number))
-    }
-    fn patch_title(
-        &self,
-        number: IssueNumber,
-        _new_title: &str,
-    ) -> Result<IssueSnapshot, gwt_github::ApiError> {
-        Err(gwt_github::ApiError::NotFound(number))
-    }
-    fn patch_comment(
-        &self,
-        comment_id: CommentId,
-        _new_body: &str,
-    ) -> Result<CommentSnapshot, gwt_github::ApiError> {
-        Err(gwt_github::ApiError::CommentNotFound(comment_id))
-    }
-    fn create_comment(
-        &self,
-        number: IssueNumber,
-        _body: &str,
-    ) -> Result<CommentSnapshot, gwt_github::ApiError> {
-        Err(gwt_github::ApiError::NotFound(number))
-    }
-    fn create_issue(
-        &self,
-        _title: &str,
-        _body: &str,
-        _labels: &[String],
-    ) -> Result<IssueSnapshot, gwt_github::ApiError> {
-        Err(gwt_github::ApiError::PermissionDenied {
-            message: "Issues are disabled for this repo".to_string(),
-        })
-    }
-    fn set_labels(
-        &self,
-        number: IssueNumber,
-        _labels: &[String],
-    ) -> Result<IssueSnapshot, gwt_github::ApiError> {
-        Err(gwt_github::ApiError::NotFound(number))
-    }
-    fn set_state(
-        &self,
-        number: IssueNumber,
-        _state: IssueState,
-    ) -> Result<IssueSnapshot, gwt_github::ApiError> {
-        Err(gwt_github::ApiError::NotFound(number))
-    }
-    fn list_spec_issues(
-        &self,
-        _filter: &gwt_github::SpecListFilter,
-    ) -> Result<Vec<gwt_github::SpecSummary>, gwt_github::ApiError> {
-        Ok(Vec::new())
-    }
-}
-
-fn quick_issue_toasts(events: &[OutboundEvent]) -> Vec<(String, String)> {
-    events
-        .iter()
-        .filter_map(|event| match &event.event {
-            BackendEvent::IssueMonitorToast { level, message, .. } => {
-                Some((level.clone(), message.clone()))
-            }
-            _ => None,
-        })
-        .collect()
-}
-
-/// SPEC-3214 T-010 / FR-004: a one-line title registers an `investigation`
-/// Issue through the injected client and reports success.
 #[test]
-fn quick_register_issue_creates_investigation_issue_with_success_toast() {
-    let _env_lock = env_test_lock()
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
-    let temp = tempdir().expect("tempdir");
-    let _home = ScopedEnvVar::set("HOME", temp.path());
-    let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+fn issue_monitor_launch_succeeded_ack_is_non_scanning_and_persists() {
+    // Issue #3222: the launch-success ACK used to re-enter the full
+    // scan+claim flow on a fresh disk snapshot that could not see other
+    // in-flight claims, re-claiming them (same-owner renewal) and spawning
+    // duplicate windows past max_active. The ACK must only bind the window and
+    // persist; scanning for a fresh snapshot is allowed, claiming is not.
+    let temp = tempfile::TempDir::new().expect("tempdir");
+    // Thread-local override: never mutate process-global HOME in parallel tests.
+    let _home = gwt_core::test_support::ScopedGwtHome::set(temp.path());
     let repo = temp.path().join("repo");
-    fs::create_dir_all(&repo).expect("create repo");
-    let tab = sample_project_tab("tab-1", "Repo", repo.clone(), ProjectKind::Git, &[]);
-    let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
-    let client = gwt_github::FakeIssueClient::new();
+    std::fs::create_dir_all(&repo).expect("create repo");
+    init_repo(&repo);
 
-    let events = runtime.quick_register_issue_events_with_client(
-        "client-1",
-        "Investigate flaky PTY spawn on CI",
-        false,
-        &client,
-    );
-
-    let toasts = quick_issue_toasts(&events);
-    assert!(
-        toasts
-            .iter()
-            .any(|(level, message)| level == "info" && message.contains('#')),
-        "success toast with the issue number is required, got: {toasts:?}"
-    );
-    let created = toasts
-        .iter()
-        .find_map(|(_, message)| {
-            message
-                .split('#')
-                .nth(1)
-                .and_then(|rest| rest.split_whitespace().next())
-                .and_then(|number| number.trim_matches(':').parse::<u64>().ok())
-        })
-        .expect("toast must carry the created issue number");
-    use gwt_github::IssueClient as _;
-    let fetched = client
-        .fetch(IssueNumber(created), None)
-        .expect("created issue must exist in the client");
-    let snapshot = match fetched {
-        gwt_github::FetchResult::Updated(snapshot) => snapshot,
-        gwt_github::FetchResult::NotModified => panic!("expected fresh snapshot"),
+    // Seed an in-flight claim (Launching, no window bound yet) on disk.
+    let prefs_path = gwt::issue_monitor_prefs_path_for_repo_path(&repo);
+    let prefs = gwt::IssueMonitorPrefs {
+        enabled: true,
+        launching_issues: vec![gwt::IssueMonitorLaunchingIssue {
+            issue_number: 42,
+            claimed_at: None,
+        }],
+        ..gwt::IssueMonitorPrefs::default()
     };
-    assert_eq!(snapshot.title, "Investigate flaky PTY spawn on CI");
+    gwt::save_issue_monitor_prefs(&prefs_path, &prefs).expect("seed prefs");
+
+    let tab = sample_project_tab("tab-1", "Repo", repo.clone(), ProjectKind::Git, &[]);
+    let (mut runtime, _recorded) =
+        sample_runtime_with_events(temp.path(), vec![tab], Some("tab-1"));
+
+    let events = runtime.issue_monitor_launch_succeeded_events(42, "tab-1::agent-1");
+
+    // The ACK may scan for a fresh snapshot, but must NOT claim/launch: no
+    // settings-required wizard, no "launch requested" toast.
+    for event in &events {
+        assert!(
+            !matches!(event.event, BackendEvent::LaunchWizardState { .. }),
+            "ACK must not open the launch wizard (settings-required prompt)"
+        );
+        if let BackendEvent::IssueMonitorToast { message, .. } = &event.event {
+            assert!(
+                !message.contains("launch requested"),
+                "ACK must not trigger launches: {message}"
+            );
+        }
+    }
+    let persisted = gwt::load_issue_monitor_prefs(&prefs_path).expect("reload");
     assert!(
-        snapshot.labels.iter().any(|label| label == "investigation"),
-        "quick issue must carry the investigation label, got: {:?}",
-        snapshot.labels
+        persisted
+            .launched_issues
+            .iter()
+            .any(|entry| entry.issue_number == 42 && entry.window_id == "tab-1::agent-1"),
+        "the ACK binds and persists the window: {:?}",
+        persisted.launched_issues
     );
-}
-
-/// SPEC-3214 T-016 / FR-011: the failure toast carries the specific GitHub
-/// reason — never a generic message.
-#[test]
-fn quick_register_issue_surfaces_permission_denied_reason() {
-    let _env_lock = env_test_lock()
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
-    let temp = tempdir().expect("tempdir");
-    let _home = ScopedEnvVar::set("HOME", temp.path());
-    let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
-    let repo = temp.path().join("repo");
-    fs::create_dir_all(&repo).expect("create repo");
-    let tab = sample_project_tab("tab-1", "Repo", repo.clone(), ProjectKind::Git, &[]);
-    let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
-
-    let events = runtime.quick_register_issue_events_with_client(
-        "client-1",
-        "Investigate registry failure",
-        false,
-        &PermissionDeniedIssueClient,
-    );
-
-    let toasts = quick_issue_toasts(&events);
-    let (level, message) = toasts.first().expect("failure toast is required");
-    assert_eq!(level, "error");
     assert!(
-        message.contains("Issues are disabled for this repo"),
-        "the GitHub reason must be preserved verbatim, got: {message}"
+        persisted.launching_issues.is_empty(),
+        "the in-flight marker is consumed by the bind"
     );
 }
 
-/// SPEC-3214 T-010: an empty title is rejected without hitting the client.
 #[test]
-fn quick_register_issue_rejects_empty_title() {
-    let _env_lock = env_test_lock()
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
-    let temp = tempdir().expect("tempdir");
-    let _home = ScopedEnvVar::set("HOME", temp.path());
-    let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+fn issue_monitor_windows_closed_requeue_is_non_scanning() {
+    // Issue #3222 (same re-entrancy class): closing a monitor window requeues
+    // + persists and may rescan for the snapshot, but must not claim/launch.
+    let temp = tempfile::TempDir::new().expect("tempdir");
+    // Thread-local override: never mutate process-global HOME in parallel tests.
+    let _home = gwt_core::test_support::ScopedGwtHome::set(temp.path());
     let repo = temp.path().join("repo");
-    fs::create_dir_all(&repo).expect("create repo");
-    let tab = sample_project_tab("tab-1", "Repo", repo.clone(), ProjectKind::Git, &[]);
-    let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
-    let client = gwt_github::FakeIssueClient::new();
-
-    let events = runtime.quick_register_issue_events_with_client("client-1", "   ", false, &client);
-
-    let toasts = quick_issue_toasts(&events);
-    assert_eq!(toasts.len(), 1);
-    assert_eq!(toasts[0].0, "error");
-}
-
-/// SPEC-3214 T-014 / FR-005/FR-006: `launch: true` hands the fresh issue to
-/// the existing Issue Monitor claim→launch pipeline by prioritizing it in the
-/// monitor queue (persisted in prefs). No new execution path is created — the
-/// launch itself is the monitor's claim/auto-launch flow.
-#[test]
-fn quick_register_issue_with_launch_prioritizes_monitor_queue() {
-    let _env_lock = env_test_lock()
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
-    let temp = tempdir().expect("tempdir");
-    let _home = ScopedEnvVar::set("HOME", temp.path());
-    let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
-    let repo = temp.path().join("repo");
-    fs::create_dir_all(&repo).expect("create repo");
-    let tab = sample_project_tab("tab-1", "Repo", repo.clone(), ProjectKind::Git, &[]);
-    let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
-    let client = gwt_github::FakeIssueClient::new();
-
-    let events = runtime.quick_register_issue_events_with_client(
-        "client-1",
-        "Register and launch immediately",
-        true,
-        &client,
-    );
-
-    let toasts = quick_issue_toasts(&events);
-    let created = toasts
-        .iter()
-        .find_map(|(_, message)| {
-            message
-                .split('#')
-                .nth(1)
-                .and_then(|rest| rest.split_whitespace().next())
-                .and_then(|number| number.trim_matches(':').parse::<u64>().ok())
-        })
-        .expect("toast must carry the created issue number");
+    std::fs::create_dir_all(&repo).expect("create repo");
+    init_repo(&repo);
 
     let prefs_path = gwt::issue_monitor_prefs_path_for_repo_path(&repo);
-    let prefs = gwt::load_issue_monitor_prefs(&prefs_path).expect("monitor prefs must persist");
-    assert_eq!(
-        prefs.priority_order.first().copied(),
-        Some(created),
-        "the fresh issue must be first in the monitor launch priority order"
-    );
-    // The handler must refresh the monitor snapshot (inbox 反映).
-    assert!(
-        events
-            .iter()
-            .any(|event| matches!(event.event, BackendEvent::IssueMonitorStatus { .. })),
-        "monitor snapshot refresh is part of the launch handoff"
-    );
-}
+    let prefs = gwt::IssueMonitorPrefs {
+        enabled: true,
+        launched_issues: vec![gwt::IssueMonitorLaunchedIssue {
+            issue_number: 42,
+            window_id: "tab-1::agent-1".to_string(),
+        }],
+        ..gwt::IssueMonitorPrefs::default()
+    };
+    gwt::save_issue_monitor_prefs(&prefs_path, &prefs).expect("seed prefs");
 
-// ---------------------------------------------------------------------------
-// SPEC-3214 Phase 3 — intake session 起動導線 (T-020)
-// ---------------------------------------------------------------------------
-
-/// SPEC-3214 T-020 / FR-001 UI: `open_intake` opens the Launch Wizard in
-/// Intake mode whose launch config is ephemeral (no branch, no worktree yet)
-/// and creates no git refs at open time.
-#[test]
-fn open_intake_builds_ephemeral_launch_wizard() {
-    let _env_lock = env_test_lock()
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
-    let temp = tempdir().expect("tempdir");
-    let _home = ScopedEnvVar::set("HOME", temp.path());
-    let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
-    let repo = temp.path().join("repo");
-    fs::create_dir_all(&repo).expect("create repo");
-    run_git(&repo, &["init"]);
-    run_git(&repo, &["config", "user.email", "gwt@example.invalid"]);
-    run_git(&repo, &["config", "user.name", "gwt"]);
-    run_git(&repo, &["commit", "--allow-empty", "-m", "seed"]);
     let tab = sample_project_tab("tab-1", "Repo", repo.clone(), ProjectKind::Git, &[]);
-    let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+    let (mut runtime, _recorded) =
+        sample_runtime_with_events(temp.path(), vec![tab], Some("tab-1"));
 
-    let events = runtime.handle_frontend_event("client-1".to_string(), FrontendEvent::OpenIntake);
+    let events = runtime.issue_monitor_windows_closed_events(&["tab-1::agent-1".to_string()]);
 
+    // Close may scan for a fresh snapshot, but must NOT claim/launch — a
+    // re-claim here could instantly respawn the just-closed window or
+    // duplicate other in-flight launches.
+    for event in &events {
+        assert!(
+            !matches!(event.event, BackendEvent::LaunchWizardState { .. }),
+            "window close must not open the launch wizard"
+        );
+        if let BackendEvent::IssueMonitorToast { message, .. } = &event.event {
+            assert!(
+                !message.contains("launch requested"),
+                "window close must not trigger launches: {message}"
+            );
+        }
+    }
+    let persisted = gwt::load_issue_monitor_prefs(&prefs_path).expect("reload");
     assert!(
-        matches!(
-            events.first().map(|event| &event.event),
-            Some(BackendEvent::LaunchWizardState { wizard: Some(_) })
-        ),
-        "open_intake must publish an open wizard state"
-    );
-    let session = runtime.launch_wizard.as_ref().expect("intake wizard");
-    let view = session.wizard.view();
-    assert_eq!(view.mode, gwt::LaunchWizardMode::Intake);
-    assert!(
-        !view.show_branch_controls,
-        "intake sessions must not expose branch controls"
-    );
-
-    let config = session
-        .wizard
-        .build_launch_config()
-        .expect("intake launch config");
-    assert!(config.is_ephemeral);
-    assert!(config.branch.is_none());
-    assert!(config.base_branch.is_none());
-    assert!(config.working_dir.is_none());
-
-    // Opening the wizard must not create any refs or worktrees.
-    let refs = gwt_core::process::hidden_command("git")
-        .args(["for-each-ref", "refs/heads"])
-        .current_dir(&repo)
-        .output()
-        .expect("list refs");
-    let refs_text = String::from_utf8_lossy(&refs.stdout).to_string();
-    assert!(
-        !refs_text.contains("intake"),
-        "open_intake must not create branch refs, got: {refs_text}"
+        persisted.launched_issues.is_empty(),
+        "closed window is released from the launched set"
     );
 }

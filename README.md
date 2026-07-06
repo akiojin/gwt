@@ -229,17 +229,16 @@ the named-pipe path lands.
    project.
 2. Use `Board`, `Issue`, `SPEC`, and Knowledge search surfaces to understand
    the current work, related owners, and prior decisions.
-3. Register new work as an Issue in seconds with `Quick issue` on the Issue
-   Monitor (optionally `Register & Launch` to hand it straight to the
-   monitor), or start an `Intake session` from the Command Rail / Command
-   Palette for branch-free curation, discussion, and SPEC shaping on a
-   disposable worktree.
-4. Let the Issue Monitor launch producing work: it materializes the backing
-   `work/issue-N` branch/worktree at launch time. To continue an existing
-   remote branch instead, use `Open existing branch` from the Command Palette
-   or the empty-canvas actions.
-5. For ad-hoc manual work on an already-open worktree, spawn a `Shell`
-   window.
+3. In the **Curate** lane, choose `Intake` from the Command Rail or Command
+   Palette to shape new work: a branchless, throwaway session that discusses,
+   plans, and registers a GitHub Issue or SPEC. Intake never creates a branch.
+4. In the **Execute** lane, run the registered work: `Open Workspace` launches
+   an `Agent` on an existing branch, the background `Issue Monitor` picks up
+   registered Issues automatically, or launch directly from an Issue/SPEC detail
+   when the owner is already known.
+5. Let gwt materialize the backing `work/YYYYMMDD-HHMM[-n]` branch/worktree
+   only when an Execute launch is confirmed (Intake sessions stay branchless and
+   ephemeral).
 6. Use the shared Board for status, claims, next steps, blockers, handoffs,
    and decisions while agents run. To mirror those Board posts into Slack or
    Teams, configure a remote Board provider first; see
@@ -249,8 +248,8 @@ the named-pipe path lands.
 
 Common windows include:
 
-- `Agent` — live coding-agent process windows created through Issue Monitor
-  launches, Intake sessions, or Launch Agent
+- `Agent` — live coding-agent process windows created through Intake, Open
+  Workspace, the Issue Monitor, or Launch Agent
 - `Board` — shared user/agent timeline for reasoning and coordination
 - `Issue` and `SPEC` — cache-backed Knowledge Bridge windows with semantic
   search, detail panes, and Launch Agent handoff
@@ -620,9 +619,9 @@ falls back to system colors so accessibility is preserved.
 | `⌘?` | Toggle the Hotkey Overlay (cheat sheet) |
 | `Esc` | Close any open palette / overlay / drawer / dropdown |
 
-The Command Rail on the left edge is always visible: Intake session and
-Workspace at the top, window operations (Tile / Stack / Align / window list / Add) in the
-middle, and the Command Palette at the bottom. Board and Logs are not rail
+The Command Rail on the left edge is always visible: Intake (Curate lane) and
+Open Workspace (Execute lane) at the top, window operations (Tile / Stack /
+Align / window list / Add) in the middle, and the Command Palette at the bottom. Board and Logs are not rail
 items; reach them via the Add Window preset menu, the command palette, or the
 `⌘B` / `⌘L` hotkeys. Hovering a rail item reveals its label and real shortcut. Closing a
 window (titlebar × or tab ×) always asks for confirmation so a stray click

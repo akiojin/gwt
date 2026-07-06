@@ -427,17 +427,9 @@ pub(super) fn frontend_user_action_log(event: &FrontendEvent) -> Option<Frontend
                 .window(id)
                 .target(issue_number.to_string())
         }
-        FrontendEvent::QuickRegisterIssue { launch, .. } => {
-            FrontendUserActionLog::new("quick_register_issue", "issue_monitor").mode(if *launch {
-                "register_and_launch"
-            } else {
-                "register"
-            })
+        FrontendEvent::OpenIntakeSession => {
+            FrontendUserActionLog::new("open_intake_session", "launch")
         }
-        FrontendEvent::OpenExistingBranch => {
-            FrontendUserActionLog::new("open_existing_branch", "launch")
-        }
-        FrontendEvent::OpenIntake => FrontendUserActionLog::new("open_intake", "launch"),
         FrontendEvent::OpenStartWorkInAgentKanban { board_id, lane_id } => {
             FrontendUserActionLog::new("open_start_work_in_agent_kanban", "launch")
                 .window(board_id)

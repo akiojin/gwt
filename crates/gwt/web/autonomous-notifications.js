@@ -51,7 +51,7 @@ const STYLE = `
     border-left-color: var(--color-state-blocked);
   }
   .autonomous-notifications__title {
-    font-weight: var(--font-weight-strong, 600);
+    font-weight: 600;
   }
   .autonomous-notifications__message {
     grid-column: 1 / -1;

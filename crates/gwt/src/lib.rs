@@ -96,8 +96,8 @@ pub use issue_monitor::{
     IssueMonitorConfig, IssueMonitorFailedIssue, IssueMonitorInboxItem, IssueMonitorIssue,
     IssueMonitorIssueState, IssueMonitorLaunchPlan, IssueMonitorLaunchProfile,
     IssueMonitorLaunchProfileSource, IssueMonitorLaunchRequest, IssueMonitorLaunchedIssue,
-    IssueMonitorPrefs, IssueMonitorScanSummary, IssueMonitorState, IssueMonitorStatusView,
-    MonitorInboxState,
+    IssueMonitorLaunchingIssue, IssueMonitorPrefs, IssueMonitorScanSummary, IssueMonitorState,
+    IssueMonitorStatusView, MonitorInboxState,
 };
 pub use knowledge_bridge::{
     load_knowledge_bridge, refresh_knowledge_bridge_cache, search_knowledge_bridge,

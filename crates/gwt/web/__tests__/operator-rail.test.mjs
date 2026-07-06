@@ -45,12 +45,15 @@ test("rail commands: [data-cmd] item click が op:command を dispatch する", 
     fixture.document.addEventListener("op:command", (event) => {
       received.push(event.detail?.id);
     });
-    // SPEC-3214 (FR-009): the launch entry is Intake session, not Start Work.
-    const intakeSession = fixture.document.querySelector(
-      '.op-rail__item[data-cmd="intake-session"]',
+    // SPEC-3245 Phase 3: the primary rail "start" action is the Intake session.
+    const intake = fixture.document.querySelector('.op-rail__item[data-cmd="intake-session"]');
+    assert.ok(intake, "expected Intake session rail item");
+    assert.equal(
+      fixture.document.querySelector('.op-rail__item[data-cmd="start-work"]'),
+      null,
+      "Start Work rail item must be removed",
     );
-    assert.ok(intakeSession, "expected Intake session rail item");
-    intakeSession.dispatchEvent(new fixture.window.Event("click", { bubbles: true }));
+    intake.dispatchEvent(new fixture.window.Event("click", { bubbles: true }));
     assert.deepEqual(received, ["intake-session"]);
   } finally {
     fixture.dispose();

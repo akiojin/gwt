@@ -129,13 +129,22 @@ fn gwt_self_improvement_stop_blocks_high_confidence_gwt_contract_violation_in_gw
         }),
     );
 
-    let output = gwt_self_improvement_stop::evaluate(repo.path(), false);
+    let output = gwt_self_improvement_stop::evaluate(repo.path(), false, false);
     let HookOutput::StopBlock { reason } = output else {
         panic!("expected StopBlock, got {output:?}");
     };
     assert!(reason.contains("impr-high"));
     assert!(reason.contains("improvement.promote_issue"));
     assert!(reason.contains("improvement.dismiss"));
+
+    // SPEC-3247 FR-003 / AS-4: the same high-confidence candidate in an intake
+    // (Curate) session must NOT block Stop — intake owns no Work and is not the
+    // producing-work self-improvement loop.
+    assert_eq!(
+        gwt_self_improvement_stop::evaluate(repo.path(), false, true),
+        HookOutput::Silent,
+        "intake sessions must not be forced to handle improvement candidates"
+    );
 }
 
 #[test]
@@ -186,7 +195,7 @@ fn gwt_self_improvement_stop_ignores_low_confidence_or_handled_candidates() {
     );
 
     assert_eq!(
-        gwt_self_improvement_stop::evaluate(repo.path(), false),
+        gwt_self_improvement_stop::evaluate(repo.path(), false, false),
         HookOutput::Silent
     );
 }
@@ -219,7 +228,7 @@ fn gwt_self_improvement_stop_is_noop_outside_gwt_repo() {
     );
 
     assert_eq!(
-        gwt_self_improvement_stop::evaluate(repo.path(), false),
+        gwt_self_improvement_stop::evaluate(repo.path(), false, false),
         HookOutput::Silent
     );
 }
@@ -252,7 +261,7 @@ fn gwt_self_improvement_stop_respects_stop_hook_active() {
     );
 
     assert_eq!(
-        gwt_self_improvement_stop::evaluate(repo.path(), true),
+        gwt_self_improvement_stop::evaluate(repo.path(), true, false),
         HookOutput::Silent
     );
 }

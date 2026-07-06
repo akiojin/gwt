@@ -4270,7 +4270,7 @@
         syncWizardDraftState,
         flushWizardBranchDraft,
         renderLaunchWizard,
-        openExistingBranchPendingWizard,
+        openStartWorkPendingWizard,
         openLaunchAgentPendingWizard,
         applyLaunchWizardStateEvent,
         applyLaunchWizardOpenErrorEvent,
@@ -6258,22 +6258,20 @@
       });
 
       // SPEC-3038 AS-4.5: empty-canvas call to action mirrors the rail items.
-      // SPEC-3214 FR-009 (T-041): the entries are the autonomous-era launch
-      // points — Quick issue (Issue Monitor), Intake session, Shell, and the
-      // standalone existing-branch picker.
-      const emptyStateCommands = [
-        ["canvas-empty-quick-issue", "open-issue-monitor"],
-        ["canvas-empty-intake-session", "intake-session"],
-        ["canvas-empty-shell", "spawn-shell"],
-        ["canvas-empty-open-branch", "open-existing-branch"],
-      ];
-      for (const [buttonId, commandId] of emptyStateCommands) {
-        document.getElementById(buttonId)?.addEventListener("click", () => {
+      document
+        .getElementById("canvas-empty-intake")
+        ?.addEventListener("click", () => {
           document.dispatchEvent(
-            new CustomEvent("op:command", { detail: { id: commandId } }),
+            new CustomEvent("op:command", { detail: { id: "intake-session" } }),
           );
         });
-      }
+      document
+        .getElementById("canvas-empty-open-workspace")
+        ?.addEventListener("click", () => {
+          document.dispatchEvent(
+            new CustomEvent("op:command", { detail: { id: "open-branches" } }),
+          );
+        });
       document
         .getElementById("canvas-empty-add-window")
         ?.addEventListener("click", () => {
@@ -6552,18 +6550,11 @@
           case "spawn-shell":
             focusOrSpawnPreset("shell");
             return;
-          case "open-existing-branch":
-            // SPEC-3214 FR-010: standalone existing-branch picker (US-83).
-            openExistingBranchPendingWizard();
-            frontendUnits.socketTransport.send({
-              kind: "open_existing_branch",
-            });
-            return;
           case "intake-session":
-            // SPEC-3214 FR-001: branch-free intake session on an ephemeral
-            // detached worktree.
+            // SPEC-3214 Phase 3: ephemeral intake session (branchless).
+            openStartWorkPendingWizard();
             frontendUnits.socketTransport.send({
-              kind: "open_intake",
+              kind: "open_intake_session",
             });
             return;
           case "stop-all-windows":

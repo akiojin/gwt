@@ -2817,40 +2817,34 @@ fn embedded_web_launch_wizard_actions_flow_through_named_transport() {
     );
 }
 
+// SPEC-3245 Phase 3: Start Work is removed; the Intake session command is the
+// global entry that drives the shared wizard renderer.
 #[test]
-fn embedded_web_launch_entry_commands_replace_start_work() {
+fn embedded_web_intake_session_uses_shared_wizard_renderer() {
     let html = frontend_bundle_source();
 
-    // SPEC-3214 FR-009 (T-040/T-044): the Start Work entry is fully removed
-    // from the served frontend.
+    assert!(
+        html.contains(r#"case "intake-session":"#)
+            && html.contains(r#"kind: "open_intake_session""#),
+        "expected Intake session to use a global command instead of a Branches window action",
+    );
     assert!(
         !html.contains(r#"case "start-work":"#) && !html.contains(r#"kind: "open_start_work""#),
-        "expected the served frontend to drop the Start Work command and event",
-    );
-    assert!(
-        html.contains(r#"case "intake-session":"#) && html.contains(r#"kind: "open_intake""#),
-        "expected the served frontend to wire the Intake session command",
-    );
-    // SPEC-3214 FR-010 (T-042): the existing-branch picker is a standalone
-    // global command with its own pending-wizard chrome.
-    assert!(
-        html.contains(r#"case "open-existing-branch":"#)
-            && html.contains(r#"kind: "open_existing_branch""#),
-        "expected the served frontend to wire the Open existing branch command",
+        "Start Work command wiring must be removed",
     );
     assert!(
         html.contains("launchWizard.show_branch_controls !== false")
-            && html.contains("Branch picker"),
-        "expected the picker wizard mode to suppress branch controls and use picker meta copy",
+            && html.contains("Plan Agent launch"),
+        "expected the wizard renderer to suppress branch controls and use Plan Agent meta copy",
     );
     assert!(
         !html.contains("isStartWorkMode")
             && !html.contains(r#"wizardModal.classList.toggle("is-drawer""#),
-        "expected the picker wizard mode to share the centered Launch Wizard modal",
+        "expected the wizard mode to share the centered Launch Wizard modal",
     );
     assert!(
         html.contains("launchWizard.show_agent_settings") && html.contains("\"Agent\""),
-        "expected the picker flow to keep the existing Agent settings renderer available",
+        "expected the existing Agent settings renderer to stay available",
     );
 }
 

@@ -235,10 +235,9 @@ test("SPEC-3038 Command Rail retires the legacy sidebar entirely", () => {
   }
 });
 
-// SPEC-3214 T-040 (FR-009): the Start Work entry points are fully removed.
-// Producing work is launched by the Issue Monitor; humans curate via Quick
-// issue and Intake session instead.
-test("Start Work entry points are removed from rail, palette, and app wiring", () => {
+// SPEC-3245 Phase 3: Start Work is removed from the command rail and palette;
+// the 2-lane entries (Intake / Open Workspace) replace it.
+test("command rail and palette drop Start Work in favor of the 2-lane entries", () => {
   assert.equal(
     document.querySelector('.op-rail .op-rail__item[data-cmd="start-work"]'),
     null,
@@ -247,60 +246,37 @@ test("Start Work entry points are removed from rail, palette, and app wiring", (
   assert.doesNotMatch(
     operatorShellSource,
     /id:\s*"start-work"/,
-    "the Command Palette registry must not include a start-work entry",
+    "Command Palette registry must not include start-work",
   );
   assert.doesNotMatch(
     operatorShellSource,
     /id:\s*"spawn-agent"/,
-    "the Command Palette registry must not include a spawn-agent entry",
+    "Command Palette registry must not include the spawn-agent alias of Start Work",
   );
   assert.doesNotMatch(
     appSource,
     /case\s+"start-work":/,
-    "app.js must not handle a start-work command",
+    "app.js must not route a start-work command",
   );
-  assert.doesNotMatch(
-    appSource,
-    /kind:\s*"open_start_work"/,
-    "app.js must not send the open_start_work event",
-  );
+  // The replacements exist.
+  assert.match(operatorShellSource, /id:\s*"intake-session"/, "Intake entry present");
+  assert.match(operatorShellSource, /id:\s*"open-branches"/, "Open Workspace entry present");
 });
 
-// SPEC-3214 T-040 (FR-009): the Command Rail leads with the intake entry.
-test("Command Rail exposes Intake session in place of Start Work", () => {
-  const railAction = document.querySelector(
-    '.op-rail .op-rail__item[data-cmd="intake-session"]',
-  );
-  assert.ok(railAction, "expected the Command Rail to expose an Intake session action");
-  assert.match(railAction.textContent, /Intake session/);
-});
-
-// SPEC-3214 T-042 (FR-010): the existing-branch picker gets its own palette
-// entry that opens the picker directly, without the Start Work wizard.
-test("command palette exposes Open existing branch and app wires open_existing_branch", () => {
+// SPEC-3214 Phase 3 / SPEC-3245 Phase 4: the command palette exposes an
+// "Intake" entry (the "session" suffix is dropped to avoid colliding with the
+// Session domain term) that sends open_intake_session (the ephemeral,
+// branchless new-work entry).
+test("command palette exposes Intake wired to open_intake_session", () => {
   assert.match(
     operatorShellSource,
-    /id:\s*"open-existing-branch"[\s\S]+label:\s*"Open existing branch"/,
-    "expected Command Palette registry to include Open existing branch",
+    /id:\s*"intake-session"[\s\S]+label:\s*"Intake"/,
+    "expected Command Palette registry to include the Intake entry",
   );
   assert.match(
     appSource,
-    /case\s+"open-existing-branch":[\s\S]+kind:\s*"open_existing_branch"/,
-    "expected Open existing branch command to send the global open_existing_branch event",
-  );
-});
-
-// SPEC-3214 T-020 — the Intake session entry point (FR-001 UI).
-test("command palette exposes Intake session and app wires open_intake", () => {
-  assert.match(
-    operatorShellSource,
-    /id:\s*"intake-session"[\s\S]+label:\s*"Intake session"/,
-    "expected Command Palette registry to include Intake session",
-  );
-  assert.match(
-    appSource,
-    /case\s+"intake-session":[\s\S]+kind:\s*"open_intake"/,
-    "expected Intake session command to send the global open_intake event",
+    /case\s+"intake-session":[\s\S]+kind:\s*"open_intake_session"/,
+    "expected Intake session command to send open_intake_session",
   );
 });
 
@@ -397,7 +373,7 @@ test("Sidebar retires the Active Works overview in favor of the Work surface (SP
 
 test("Command Rail groups items into Navigate / Windows / Agents / System (SPEC-3038 US-1)", () => {
   // SPEC-3038 US-1: the rail is the single always-visible home for navigation
-  // (Intake session / Work / Board / Logs), window operations (Tile / Stack /
+  // (Start Work / Work / Board / Logs), window operations (Tile / Stack /
   // Align / Windows / Add), and system actions (Palette / Update) — in that
   // order. Groups carry aria-labels instead of visual headings. SPEC-2356
   // Anshin (FR-042) inserts an Agents group (STOP ALL) before System.
@@ -1279,9 +1255,8 @@ test("Status Strip labels the WebSocket connection state as ONLINE/OFFLINE", () 
 });
 
 test("Command Rail keeps real shortcuts on its keyshortcut items (SPEC-3038 AS-1.2)", () => {
-  // After the 2026-06-20 Update the Navigate group is the launch entry +
-  // Workspace only (Intake session since SPEC-3214), so the Workspace rail
-  // item is the keyshortcut-bearing Navigate entry.
+  // After the 2026-06-20 Update the Navigate group is Start Work + Workspace
+  // only, so the Workspace rail item is the keyshortcut-bearing Navigate entry.
   const workspace = document.getElementById("op-workspace-overview-entry");
   assert.ok(workspace, "expected the Workspace rail item");
   assert.ok(
@@ -1337,8 +1312,8 @@ test("Command Rail retires the pseudo kbd badges (SPEC-3038 FR-012)", () => {
 
 test("Command Rail items are icon buttons with accessible names and flyout labels (SPEC-3038 AS-1.2/AS-1.3)", () => {
   const items = Array.from(document.querySelectorAll(".op-rail .op-rail__item"));
-  // Navigate 2 (Intake session + Workspace) + Windows 5 + System 1 = 8 after
-  // the 2026-06-20 Update removed Board / Logs from the rail.
+  // Navigate 2 (Start Work + Workspace) + Windows 5 + System 1 = 8 after the
+  // 2026-06-20 Update removed Board / Logs from the rail.
   assert.ok(items.length >= 8, `expected >=8 rail items, got ${items.length}`);
   for (const item of items) {
     assert.ok(
@@ -1557,33 +1532,27 @@ test("Status Strip spells out WORK and drops the cryptic T clock label (SPEC-303
   );
 });
 
-// SPEC-3214 T-040 (FR-009): the empty-canvas call to action offers the
-// autonomous-era entry points (Quick issue / Intake session / Shell / Open
-// existing branch) instead of Start Work.
-test("empty canvas shows the intake-era call to action (SPEC-3038 AS-4.5 / SPEC-3214)", () => {
+test("empty canvas shows a first-window call to action (SPEC-3038 AS-4.5)", () => {
   const empty = document.getElementById("canvas-empty-state");
   assert.ok(empty, "expected #canvas-empty-state");
   assert.ok(
     empty.hasAttribute("hidden"),
     "empty state ships hidden until the workspace reports zero windows",
   );
+  // SPEC-3245 Phase 3: the empty state offers the 2-lane entries (Curate =
+  // Intake, Execute = Open Workspace) + Add window — Start Work is removed.
   assert.equal(
     empty.querySelector("#canvas-empty-start-work"),
     null,
-    "the Start Work action must be removed",
+    "Start Work action must be removed (SPEC-3245)",
   );
   assert.ok(
-    empty.querySelector("#canvas-empty-quick-issue"),
-    "expected a Quick issue action",
+    empty.querySelector("#canvas-empty-intake"),
+    "expected an Intake (Curate) action",
   );
   assert.ok(
-    empty.querySelector("#canvas-empty-intake-session"),
-    "expected an Intake session action",
-  );
-  assert.ok(empty.querySelector("#canvas-empty-shell"), "expected a Shell action");
-  assert.ok(
-    empty.querySelector("#canvas-empty-open-branch"),
-    "expected an Open existing branch action",
+    empty.querySelector("#canvas-empty-open-workspace"),
+    "expected an Open Workspace (Execute) action",
   );
   assert.ok(
     empty.querySelector("#canvas-empty-add-window"),
@@ -1594,23 +1563,9 @@ test("empty canvas shows the intake-era call to action (SPEC-3038 AS-4.5 / SPEC-
     /function\s+updateCanvasEmptyState\(\)[\s\S]{0,300}?windowMap\.size/,
     "app.js must toggle the empty state from the live window count",
   );
-  assert.doesNotMatch(
-    appSource,
-    /canvas-empty-start-work/,
-    "the Start Work action must not be wired",
-  );
-  assert.match(appSource, /canvas-empty-quick-issue/, "Quick issue action must be wired");
-  assert.match(
-    appSource,
-    /canvas-empty-intake-session/,
-    "Intake session action must be wired",
-  );
-  assert.match(appSource, /canvas-empty-shell/, "Shell action must be wired");
-  assert.match(
-    appSource,
-    /canvas-empty-open-branch/,
-    "Open existing branch action must be wired",
-  );
+  assert.doesNotMatch(appSource, /canvas-empty-start-work/, "Start Work wiring must be removed");
+  assert.match(appSource, /canvas-empty-intake/, "Intake action must be wired");
+  assert.match(appSource, /canvas-empty-open-workspace/, "Open Workspace action must be wired");
   assert.match(appSource, /canvas-empty-add-window/, "Add window action must be wired");
 });
 
@@ -3396,6 +3351,32 @@ test("FR-040 refinement: error toasts persist, stack newest-on-top, share a fixe
   );
 });
 
+test("SPEC #3206 P2: alerts toast CSS only references defined Operator tokens", () => {
+  // An undefined token in var() silently resolves to nothing (the legacy
+  // attention block shipped `var(--shadow-3)`, which is defined nowhere, so
+  // the alerts cards rendered with no elevation shadow at all). Every token
+  // the .toast-alerts family references must exist in tokens.css /
+  // typography.css (or be a custom property app.css itself defines).
+  const tokensCss = readFileSync(resolve(here, "../styles/tokens.css"), "utf8");
+  const typographyCss = readFileSync(resolve(here, "../styles/typography.css"), "utf8");
+  const defined = new Set();
+  for (const source of [tokensCss, typographyCss, inlineStyle]) {
+    for (const m of source.matchAll(/(--[a-z0-9-]+)\s*:/g)) {
+      defined.add(m[1]);
+    }
+  }
+  const blocks = inlineStyle.match(/\.toast-alerts[^{}]*\{[^}]*\}/g) ?? [];
+  assert.ok(blocks.length >= 5, "expected the .toast-alerts rule family in app.css");
+  for (const block of blocks) {
+    for (const m of block.matchAll(/var\(\s*(--[a-z0-9-]+)/g)) {
+      assert.ok(
+        defined.has(m[1]),
+        `.toast-alerts references undefined token ${m[1]}: ${block.trim().split("\n")[0]}`,
+      );
+    }
+  }
+});
+
 test("Work surface lifecycle badge styles every agent-session state (SPEC-2359 W-12 FR-351)", () => {
   const css = readFileSync(resolve(here, "../styles/components.css"), "utf8");
   // Slice 3 retires the sidebar `op-agent-card` states; the Work surface now
@@ -3708,17 +3689,17 @@ function cssBlockContaining(css, selector) {
 
 // === merged from origin/develop: SPEC-1939/2014 perf + Launch Wizard coverage ===
 
-// SPEC-3214 T-042: the Open existing branch command keeps the pending-wizard
-// UX that Start Work used to provide before its removal (FR-009/FR-010).
-test("Open existing branch command opens a pending wizard before backend state arrives", () => {
+// SPEC-3245 Phase 3: the Intake session command reuses the pending-wizard
+// mechanism (formerly Start Work) to keep the modal open before backend state.
+test("Intake session command opens a pending wizard before backend state arrives", () => {
   const commandCase = appSource.match(
-    /case\s+"open-existing-branch":[\s\S]*?case\s+"theme-cycle"/,
+    /case\s+"intake-session":[\s\S]*?case\s+"theme-cycle"/,
   );
-  assert.ok(commandCase, "expected Open existing branch command case");
+  assert.ok(commandCase, "expected Intake session command case");
   assert.match(
     commandCase[0],
-    /openExistingBranchPendingWizard\(\)[\s\S]*?kind:\s*"open_existing_branch"/,
-    "expected Open existing branch to render a local pending wizard before sending open_existing_branch",
+    /openStartWorkPendingWizard\(\)[\s\S]*?kind:\s*"open_intake_session"/,
+    "expected Intake session to render a local pending wizard before sending open_intake_session",
   );
   assert.match(
     launchWizardSource,

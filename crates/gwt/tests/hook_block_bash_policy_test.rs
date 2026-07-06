@@ -63,6 +63,8 @@ fn blocks_workflow_focused_github_cli_commands() {
     block("gh issue comment 1942 --body \"done\"");
     block("gh pr view 1949");
     block("gh pr create --base main --head feature/x --title test --body body");
+    block("gh pr ready 1949");
+    block("gh pr draft 1949");
     block("gh pr checks 1949");
     block("gh run view 123456789");
     block("env GH_TOKEN=test gh issue view 1942");
@@ -104,6 +106,8 @@ fn github_workflow_block_message_points_to_canonical_gwt_surfaces() {
         "GitHub workflow CLI",
         "issue.view",
         "pr.view",
+        "pr.ready",
+        "pr.draft",
         "actions.logs",
         "gwt-search",
         "Blocked command: gh pr view 1949",
@@ -150,6 +154,11 @@ fn allows_non_workflow_github_cli_commands() {
     allow("gh release list");
     allow("gh api user");
     allow("gh api graphql -f query='query { viewer { login } }'");
+    // The gwt-manage-pr Deliver flow depends on `gh pr merge` staying allowed:
+    // it is the documented transport exception with no JSON operation.
+    allow("gh pr merge --auto 1949");
+    allow("gh pr merge --disable-auto 1949");
+    allow("gh pr merge 1949");
 }
 
 #[test]

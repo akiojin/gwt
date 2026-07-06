@@ -56,22 +56,29 @@ impl LaunchWizardState {
             (None, None) => {}
         }
 
-        if !self.is_new_branch {
-            if let Some(worktree_path) = &self.context.worktree_path {
-                builder = builder.working_dir(worktree_path.clone());
+        // SPEC-3214 Phase 3: an intake session launches an ephemeral, detached
+        // worktree on the base ref and creates NO branch — bypass all
+        // branch/worktree wiring below.
+        if let Some(base_ref) = &self.context.ephemeral_base_ref {
+            builder = builder.ephemeral(Some(base_ref.clone()));
+        } else {
+            if !self.is_new_branch {
+                if let Some(worktree_path) = &self.context.worktree_path {
+                    builder = builder.working_dir(worktree_path.clone());
+                }
             }
-        }
 
-        if !self.branch_name.is_empty() {
-            builder = builder.branch(self.branch_name.clone());
-        }
+            if !self.branch_name.is_empty() {
+                builder = builder.branch(self.branch_name.clone());
+            }
 
-        if self.is_new_branch {
-            builder = builder.base_branch(
-                self.base_branch_name
-                    .clone()
-                    .unwrap_or_else(|| DEFAULT_NEW_BRANCH_BASE_BRANCH.to_string()),
-            );
+            if self.is_new_branch {
+                builder = builder.base_branch(
+                    self.base_branch_name
+                        .clone()
+                        .unwrap_or_else(|| DEFAULT_NEW_BRANCH_BASE_BRANCH.to_string()),
+                );
+            }
         }
 
         if is_explicit_model_selection(&self.model) {
@@ -243,6 +250,28 @@ mod tests {
 
     use super::super::test_support::*;
     use super::*;
+
+    #[test]
+    fn build_launch_config_for_intake_is_ephemeral_and_branchless() {
+        // SPEC-3214 Phase 3: an intake session wizard produces an ephemeral,
+        // branchless LaunchConfig (detached `.intake-*` worktree on the base
+        // ref), never a named branch.
+        let mut state = LaunchWizardState::open_with(
+            intake_context("origin/develop"),
+            sample_agent_options(),
+            Vec::new(),
+        );
+        state.agent_id = "codex".to_string();
+
+        let config = state.build_launch_config().expect("intake launch config");
+        assert!(config.is_ephemeral, "intake launch is ephemeral");
+        assert_eq!(config.ephemeral_base_ref.as_deref(), Some("origin/develop"));
+        assert!(config.branch.is_none(), "intake launch creates no branch");
+        assert!(
+            config.base_branch.is_none(),
+            "intake launch reserves no base branch"
+        );
+    }
 
     #[test]
     fn build_launch_config_for_codex_resume_uses_resume_session_id() {

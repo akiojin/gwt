@@ -181,10 +181,6 @@ pub struct ActiveAgentSession {
     pub(crate) agent_project_root: String,
     pub(crate) runtime_target: gwt_agent::LaunchRuntimeTarget,
     pub(crate) tab_id: String,
-    /// SPEC-3214: the session runs in a disposable `.intake-*` detached
-    /// worktree. On stop it persists no Paused Work (FR-003) and its
-    /// worktree is cleaned up (FR-002).
-    pub(crate) is_ephemeral: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -396,24 +392,6 @@ pub struct ProjectOpenTarget {
 /// scan, bounding both the git calls and the AI prompt size for large repos.
 const AI_SUMMARY_BRANCH_CAP: usize = 40;
 
-/// SPEC-3214 FR-004: label a Quick issue carries so the Issue Monitor and
-/// triage flows can recognize intake-registered investigations.
-const QUICK_ISSUE_LABEL: &str = "investigation";
-
-/// SPEC-3214 FR-004: minimal body for a one-line Quick issue. The title is
-/// the content; the body only records the provenance.
-const QUICK_ISSUE_BODY: &str = "Registered via gwt Quick issue intake.";
-
-/// Toast helper for the Quick issue flow (shares the Issue Monitor toast
-/// channel; unification tracked by SPEC #3206).
-fn quick_issue_toast(level: &str, message: impl Into<String>) -> OutboundEvent {
-    OutboundEvent::broadcast(BackendEvent::IssueMonitorToast {
-        level: level.to_string(),
-        message: message.into(),
-        issue_number: None,
-    })
-}
-
 /// SPEC-3075 FR-006: a tip commit subject that carries no real purpose — merge
 /// commits and release-version bumps. These are the cases the AI polish targets
 /// (it reads the underlying feature commits instead).
@@ -607,9 +585,6 @@ pub struct AppRuntime {
     /// launch stage banners (formerly the `AGENT_LAUNCH_STAGE_COUNTER`
     /// module static).
     pub(crate) agent_launch_stage_counter: std::sync::atomic::AtomicU64,
-    /// SPEC-3214 FR-002: intake worktrees of stopped ephemeral sessions,
-    /// awaiting cleanup after the PTY is gone (window_id → worktree path).
-    pub(crate) pending_ephemeral_worktree_cleanups: HashMap<String, PathBuf>,
 }
 
 impl ProjectTabRuntime {
@@ -629,6 +604,16 @@ impl ProjectTabRuntime {
             main_worktree_root_cache: std::sync::Arc::new(std::sync::OnceLock::new()),
         }
     }
+}
+
+/// Issue #3222: whether a local Issue Monitor pass may claim + launch, or must
+/// only observe (scan for a fresh snapshot without side effects). ACK and
+/// window-close handling runs `Observe`; user-driven refresh/config flows run
+/// `ClaimAndLaunch`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum IssueMonitorScanPolicy {
+    ClaimAndLaunch,
+    Observe,
 }
 
 impl AppRuntime {
@@ -717,7 +702,6 @@ impl AppRuntime {
             usage_refresh: None,
             image_paste_sequence: std::sync::atomic::AtomicU64::new(0),
             agent_launch_stage_counter: std::sync::atomic::AtomicU64::new(1),
-            pending_ephemeral_worktree_cleanups: HashMap::new(),
         };
         app.rebuild_window_lookup();
         app.seed_window_pty_statuses();
@@ -1173,12 +1157,16 @@ impl AppRuntime {
         // it is replaced rather than left on the canvas. Guard against closing the
         // freshly launched window if it happens to reuse the same id.
         let mut stale_window: Option<String> = None;
-        let mut events = self.local_issue_monitor_events_for(None, |monitor| {
-            stale_window = monitor
-                .take_failed_window(issue_number)
-                .filter(|stale| *stale != window_id);
-            monitor.complete_active_launch(issue_number, window_id.clone());
-        });
+        let mut events = self.local_issue_monitor_events_with_policy(
+            None,
+            IssueMonitorScanPolicy::Observe,
+            |monitor| {
+                stale_window = monitor
+                    .take_failed_window(issue_number)
+                    .filter(|stale| *stale != window_id);
+                monitor.complete_active_launch(issue_number, window_id.clone());
+            },
+        );
         if let Some(stale) = stale_window {
             events.extend(self.close_window_events(&stale));
         }
@@ -1280,11 +1268,15 @@ impl AppRuntime {
             }
         }
         let requeue_windows = monitor_windows;
-        self.local_issue_monitor_events_for(None, move |monitor| {
-            for window_id in &requeue_windows {
-                monitor.requeue_window(window_id);
-            }
-        })
+        self.local_issue_monitor_events_with_policy(
+            None,
+            IssueMonitorScanPolicy::Observe,
+            move |monitor| {
+                for window_id in &requeue_windows {
+                    monitor.requeue_window(window_id);
+                }
+            },
+        )
     }
 
     fn local_issue_monitor_events(
@@ -1295,111 +1287,22 @@ impl AppRuntime {
         self.local_issue_monitor_events_for(Some(client_id), apply)
     }
 
-    /// SPEC-3214 FR-004: Quick issue registration from the Issue Monitor
-    /// toolbar. Resolves the GitHub client for the active project, then
-    /// delegates to [`Self::quick_register_issue_events_with_client`].
-    fn quick_register_issue_events(
-        &mut self,
-        client_id: &str,
-        title: &str,
-        launch: bool,
-    ) -> Vec<OutboundEvent> {
-        if title.trim().is_empty() {
-            return vec![quick_issue_toast("error", "Issue title is empty.")];
-        }
-        let Some(project_root) = self.active_project_root().map(Path::to_path_buf) else {
-            return vec![quick_issue_toast("error", "No active project is selected.")];
-        };
-        let (owner, repo) =
-            match gwt::issue_monitor_worker::github_remote_owner_and_repo(&project_root) {
-                Ok(pair) => pair,
-                Err(error) => {
-                    return vec![quick_issue_toast(
-                        "error",
-                        format!(
-                            "Issue registration failed: {error}. \
-                             Fallback: create the issue manually with `gh issue create`."
-                        ),
-                    )];
-                }
-            };
-        match gwt_github::client::http::HttpIssueClient::from_gh_auth(&owner, &repo) {
-            Ok(client) => {
-                self.quick_register_issue_events_with_client(client_id, title, launch, &client)
-            }
-            Err(error) => vec![quick_issue_toast(
-                "error",
-                format!(
-                    "GitHub authentication unavailable: {error}. \
-                     Fallback: run `gh auth login`, then retry."
-                ),
-            )],
-        }
-    }
-
-    /// SPEC-3214 FR-004/FR-005/FR-011 core: create the `investigation` issue
-    /// through `client` and, for `launch: true`, hand it to the existing
-    /// Issue Monitor claim→launch pipeline by prioritizing it in the monitor
-    /// queue. No new execution path exists here (FR-006): the launch itself
-    /// is the monitor scan/claim/auto-launch flow.
-    pub(crate) fn quick_register_issue_events_with_client<C: gwt_github::IssueClient>(
-        &mut self,
-        client_id: &str,
-        title: &str,
-        launch: bool,
-        client: &C,
-    ) -> Vec<OutboundEvent> {
-        let title = title.trim();
-        if title.is_empty() {
-            return vec![quick_issue_toast("error", "Issue title is empty.")];
-        }
-        let snapshot =
-            match client.create_issue(title, QUICK_ISSUE_BODY, &[QUICK_ISSUE_LABEL.to_string()]) {
-                Ok(snapshot) => snapshot,
-                Err(error) => {
-                    // FR-011: the specific reason (permission, rate limit, …) is
-                    // preserved verbatim — never rounded to a generic message.
-                    return vec![quick_issue_toast(
-                        "error",
-                        format!(
-                            "Issue registration failed: {error}. \
-                         Fallback: create the issue manually with `gh issue create`."
-                        ),
-                    )];
-                }
-            };
-        let issue_number = snapshot.number.0;
-        let mut events = vec![quick_issue_toast(
-            "info",
-            format!("Issue #{issue_number} registered: {title}"),
-        )];
-        if launch {
-            // FR-005: prioritize the fresh issue in the monitor queue and run
-            // the existing scan→claim→launch pass. The priority order is
-            // applied before the scan and persisted, so the claim loop picks
-            // this issue first once it appears as a candidate.
-            events.extend(self.local_issue_monitor_events(client_id, |monitor| {
-                let mut order = vec![issue_number];
-                order.extend(
-                    monitor
-                        .prefs()
-                        .priority_order
-                        .into_iter()
-                        .filter(|number| *number != issue_number),
-                );
-                monitor.set_priority_order(order);
-            }));
-        } else {
-            // Inbox 反映: refresh the monitor snapshot so the new issue shows
-            // up as a candidate right away.
-            events.extend(self.local_issue_monitor_events(client_id, |_| {}));
-        }
-        events
-    }
-
     fn local_issue_monitor_events_for(
         &mut self,
         client_id: Option<&str>,
+        apply: impl FnOnce(&mut gwt::IssueMonitorState),
+    ) -> Vec<OutboundEvent> {
+        self.local_issue_monitor_events_with_policy(
+            client_id,
+            IssueMonitorScanPolicy::ClaimAndLaunch,
+            apply,
+        )
+    }
+
+    fn local_issue_monitor_events_with_policy(
+        &mut self,
+        client_id: Option<&str>,
+        policy: IssueMonitorScanPolicy,
         apply: impl FnOnce(&mut gwt::IssueMonitorState),
     ) -> Vec<OutboundEvent> {
         let now = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
@@ -1414,6 +1317,9 @@ impl AppRuntime {
         let mut monitor =
             gwt::IssueMonitorState::with_prefs(gwt::IssueMonitorConfig::default(), prefs);
         apply(&mut monitor);
+        // #3223 follow-up: release claimed-but-never-acked launches whose claim
+        // anchor exceeded claim_ttl_secs so a crash cannot leak a slot forever.
+        monitor.expire_stale_unbound_launches(&now);
         let _ = gwt::save_issue_monitor_prefs(&prefs_path, &monitor.prefs());
         let mut launch_requests = Vec::new();
         let mut settings_required_request = None;
@@ -1433,6 +1339,15 @@ impl AppRuntime {
                         );
                         if monitor.config.enabled {
                             monitor.set_gui_connected(true);
+                        }
+                        // Issue #3222: ACK / window-close flows scan for a fresh
+                        // snapshot (inbox rows for the UI) but must NEVER claim
+                        // or launch — re-entrant claiming on a disk snapshot
+                        // that cannot see other in-flight claims is what
+                        // spawned duplicate windows past max_active.
+                        if monitor.config.enabled
+                            && matches!(policy, IssueMonitorScanPolicy::ClaimAndLaunch)
+                        {
                             let launch_profile_ready = self
                                 .issue_monitor_previous_profiles(&project_root)
                                 .preferred_profile()
@@ -1461,11 +1376,18 @@ impl AppRuntime {
                                 ) {
                                     Ok(client) => {
                                         launch_requests = monitor
-                                            .claim_next_launch_requests_with_active_cap(
+                                            .claim_next_launch_requests_with_probe(
                                                 &client,
                                                 &monitor_owner,
                                                 &now,
                                                 active_cap,
+                                                |issue_number| {
+                                                    gwt::issue_monitor_worker::issue_completed_by_merged_pr(
+                                                        &owner,
+                                                        &repo,
+                                                        issue_number,
+                                                    )
+                                                },
                                             );
                                     }
                                     Err(error) => {
@@ -1514,6 +1436,11 @@ impl AppRuntime {
             }
             launch_events.extend(request_events);
         }
+        // Issue #3222: persist the claim-side state (Launching without a bound
+        // window yet, plus any recorded launch failures) so the next handler /
+        // the async launch ACK sees the in-flight claims and cannot re-claim
+        // them into duplicate windows.
+        let _ = gwt::save_issue_monitor_prefs(&prefs_path, &monitor.prefs());
         let mut events = launch_events;
         events.extend(self.issue_monitor_snapshot_events_for(client_id, monitor));
         events
@@ -2087,8 +2014,7 @@ impl AppRuntime {
             FrontendEvent::OpenIssueLaunchWizard { id, issue_number } => {
                 self.open_issue_launch_wizard_events(&client_id, &id, issue_number)
             }
-            FrontendEvent::OpenExistingBranch => self.open_existing_branch(&client_id),
-            FrontendEvent::OpenIntake => self.open_intake(&client_id),
+            FrontendEvent::OpenIntakeSession => self.open_intake_session(&client_id),
             FrontendEvent::OpenStartWorkInAgentKanban { board_id, lane_id } => {
                 self.open_start_work_in_agent_kanban(&client_id, &board_id, lane_id)
             }
@@ -2198,9 +2124,6 @@ impl AppRuntime {
                 }
             }
             FrontendEvent::ListIssueMonitor => self.local_issue_monitor_events(&client_id, |_| {}),
-            FrontendEvent::QuickRegisterIssue { title, launch } => {
-                self.quick_register_issue_events(&client_id, &title, launch)
-            }
             FrontendEvent::IssueMonitorLaunchNow {
                 issue_number,
                 linked_issue_kind,
