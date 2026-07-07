@@ -1098,6 +1098,24 @@ mod tests {
         );
     }
 
+    fn invocation_lines_recorded(content: &str, expected: &str) -> bool {
+        let expected_lines = expected.lines().collect::<Vec<_>>();
+        if expected_lines.is_empty() {
+            return true;
+        }
+
+        let mut matched = 0;
+        for line in content.lines() {
+            if line == expected_lines[matched] {
+                matched += 1;
+                if matched == expected_lines.len() {
+                    return true;
+                }
+            }
+        }
+        false
+    }
+
     /// Issue #2349 follow-up: a lingering `docker info` availability probe
     /// (e.g. an abandoned timeout thread from another test) can execute the
     /// currently-installed fake docker and write into this test's log. The
@@ -1107,7 +1125,7 @@ mod tests {
     fn assert_invocation_recorded(path: &Path, expected: &str) {
         for _ in 0..50 {
             if let Ok(content) = fs::read_to_string(path) {
-                if content.contains(expected) {
+                if invocation_lines_recorded(&content, expected) {
                     return;
                 }
             }
@@ -1118,6 +1136,14 @@ mod tests {
             "expected invocation {expected:?} not recorded at {} within 500ms; log: {content:?}",
             path.display()
         );
+    }
+
+    #[test]
+    fn invocation_lines_recorded_allows_unrelated_probe_lines_between_args() {
+        let content = "compose\n-f\ncompose\n/tmp/docker-compose.yml\nversion\nexec\n-T\napp\n";
+        let expected = "compose\n-f\n/tmp/docker-compose.yml\nexec\n-T\napp\n";
+
+        assert!(invocation_lines_recorded(content, expected));
     }
 
     #[test]
@@ -1296,14 +1322,18 @@ mod tests {
             "services:\n  app:\n    image: nginx:latest\n",
         )
         .expect("compose");
-        let script = "#!/bin/sh\nif [ \"$1\" = \"compose\" ] && [ \"$4\" = \"up\" ]; then\n  sleep 0.1\n  exit 0\nfi\nexit 0\n";
+        let script = "#!/bin/sh\nif [ \"$1\" = \"compose\" ] && [ \"$4\" = \"up\" ]; then\n  sleep 0.05\n  exit 0\nfi\nexit 0\n";
 
         with_fake_docker(script, |_| {
             let previous_timeout = std::env::var_os("GWT_DOCKER_TIMEOUT_MS");
             let previous_compose_up_timeout = std::env::var_os("GWT_DOCKER_COMPOSE_UP_TIMEOUT_MS");
-            std::env::set_var("GWT_DOCKER_TIMEOUT_MS", "50");
-            std::env::set_var("GWT_DOCKER_COMPOSE_UP_TIMEOUT_MS", "500");
+            // Issue #3021: keep the fake command longer than the default
+            // timeout, while leaving broad margin under the compose-up timeout.
+            std::env::set_var("GWT_DOCKER_TIMEOUT_MS", "1");
+            std::env::set_var("GWT_DOCKER_COMPOSE_UP_TIMEOUT_MS", "30000");
 
+            let default_timeout = docker_timeout();
+            let compose_up_timeout = docker_compose_up_timeout();
             let result = compose_up(&compose_path, "app");
 
             match previous_timeout {
@@ -1315,6 +1345,8 @@ mod tests {
                 None => std::env::remove_var("GWT_DOCKER_COMPOSE_UP_TIMEOUT_MS"),
             }
 
+            assert_eq!(default_timeout, std::time::Duration::from_millis(1));
+            assert_eq!(compose_up_timeout, std::time::Duration::from_secs(30));
             result.expect("compose up should use compose-up timeout");
         });
     }
