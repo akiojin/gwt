@@ -254,6 +254,38 @@ fn refresh_managed_assets_for_codex_only_materializes_codex_assets() {
 }
 
 #[test]
+fn refresh_managed_assets_for_agent_self_heals_existing_mirror_targets() {
+    let dir = tempdir().expect("tempdir");
+    run_git(dir.path(), &["init", "-q"]);
+    let _env_guard = env_lock();
+    let cli_bin = dir.path().join("bin/gwtd");
+    std::fs::create_dir_all(cli_bin.parent().expect("bin parent")).expect("create bin dir");
+    std::fs::write(&cli_bin, "#!/bin/sh\n").expect("write cli bin");
+    let _cli_bin_guard = ScopedEnvVar::set("GWT_HOOK_BIN", &cli_bin);
+
+    let stale_codex_skill = dir.path().join(".codex/skills/gwt-manage-pr/SKILL.md");
+    std::fs::create_dir_all(stale_codex_skill.parent().expect("skill parent"))
+        .expect("create stale codex skill dir");
+    std::fs::write(&stale_codex_skill, "stale").expect("seed stale codex skill");
+
+    refresh_managed_gwt_assets_for_agent(dir.path(), &AgentId::ClaudeCode)
+        .expect("refresh Claude assets");
+
+    assert!(dir
+        .path()
+        .join(".claude/skills/gwt-manage-pr/references/deliver-flow.md")
+        .exists());
+    assert!(
+        dir.path()
+            .join(".codex/skills/gwt-manage-pr/references/deliver-flow.md")
+            .exists(),
+        "existing Codex managed surface must be self-healed during Claude launch refresh"
+    );
+    assert!(dir.path().join(".codex/hooks.json").exists());
+    assert!(!dir.path().join(".gwt/hermes/config.yaml").exists());
+}
+
+#[test]
 fn refresh_managed_assets_for_hermes_materializes_hermes_home_skills_only() {
     let dir = tempdir().expect("tempdir");
     run_git(dir.path(), &["init", "-q"]);

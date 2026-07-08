@@ -47,9 +47,7 @@ pub fn refresh_managed_gwt_assets_for_agent_with_codex_hook_discovery_mode(
     codex_hook_discovery_mode: CodexHookDiscoveryMode,
     session_kind: SessionKind,
 ) -> io::Result<()> {
-    let targets = managed_targets_for_agent(agent_id)
-        .into_iter()
-        .collect::<Vec<_>>();
+    let targets = refresh_targets_for_agent(worktree, agent_id);
     materialize_managed_gwt_assets_for_targets(
         worktree,
         &targets,
@@ -190,6 +188,17 @@ fn managed_targets_for_agent(agent_id: &AgentId) -> Option<ManagedAssetTarget> {
         AgentId::Hermes => Some(ManagedAssetTarget::Hermes),
         AgentId::Antigravity | AgentId::Gemini | AgentId::Copilot | AgentId::Custom(_) => None,
     }
+}
+
+fn refresh_targets_for_agent(worktree: &Path, agent_id: &AgentId) -> Vec<ManagedAssetTarget> {
+    let Some(primary) = managed_targets_for_agent(agent_id) else {
+        return Vec::new();
+    };
+    let mut targets = vec![primary];
+    for existing in detect_existing_managed_asset_targets(worktree) {
+        push_existing_target(&mut targets, true, existing);
+    }
+    targets
 }
 
 fn detect_existing_managed_asset_targets(worktree: &Path) -> Vec<ManagedAssetTarget> {
