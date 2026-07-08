@@ -261,6 +261,7 @@ After a successful start, run JSON operation `discuss.goal_started` with `params
 mod tests {
     use super::*;
     use crate::discussion_resume::PendingDiscussionGoal;
+    use gwt_agent::{AgentId, Session, GWT_SESSION_ID_ENV, GWT_SESSION_RUNTIME_PATH_ENV};
     use gwt_core::test_support::ScopedEnvVar;
 
     fn write_pending_goal(worktree: &Path) {
@@ -396,7 +397,21 @@ mod tests {
 
     #[test]
     fn stop_blocks_push_only_completion_claim_without_pr_evidence() {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let worktree = tempfile::tempdir().unwrap();
+        let sessions_dir = worktree.path().join(".gwt").join("sessions");
+        let mut session = Session::new(worktree.path(), "feature/demo", AgentId::Codex);
+        session.agent_session_id = Some("agent-123".to_string());
+        let session_id = session.id.clone();
+        session.save(&sessions_dir).unwrap();
+        let runtime_path = gwt_agent::runtime_state_path(&sessions_dir, &session_id);
+        let _session_id = ScopedEnvVar::set(GWT_SESSION_ID_ENV, &session_id);
+        let _runtime_path = ScopedEnvVar::set(GWT_SESSION_RUNTIME_PATH_ENV, &runtime_path);
+        let _forward_url = ScopedEnvVar::unset(gwt_agent::GWT_HOOK_FORWARD_URL_ENV);
+        let _forward_token = ScopedEnvVar::unset(gwt_agent::GWT_HOOK_FORWARD_TOKEN_ENV);
+        let _codex_thread_id = ScopedEnvVar::unset("CODEX_THREAD_ID");
         let transcript = worktree.path().join("transcript.jsonl");
         std::fs::write(
             &transcript,
@@ -405,11 +420,13 @@ mod tests {
         .unwrap();
         let input = serde_json::json!({
             "transcript_path": transcript,
+            "session_id": "agent-123",
             "stop_hook_active": false
         })
         .to_string();
 
-        let output = handle_with_input("Stop", &input, worktree.path(), None).expect("hook output");
+        let output = handle_with_input("Stop", &input, worktree.path(), Some(&session_id))
+            .expect("hook output");
 
         let HookOutput::StopBlock { reason } = output else {
             panic!("expected push-only completion StopBlock, got {output:?}");

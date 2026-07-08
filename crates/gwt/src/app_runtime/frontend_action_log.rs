@@ -670,6 +670,11 @@ pub(super) fn frontend_user_action_log(event: &FrontendEvent) -> Option<Frontend
         FrontendEvent::ListIssueMonitor => {
             FrontendUserActionLog::new("list_issue_monitor", "issue_monitor")
         }
+        FrontendEvent::QuickRegisterIssue { title, launch } => {
+            FrontendUserActionLog::new("quick_register_issue", "issue_monitor")
+                .mode(if *launch { "launch" } else { "register" })
+                .count(title.len())
+        }
         FrontendEvent::IssueMonitorLaunchNow { issue_number, .. } => {
             FrontendUserActionLog::new("issue_monitor_launch_now", "issue_monitor")
                 .target(issue_number.to_string())

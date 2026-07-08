@@ -1,8 +1,27 @@
 use gwt::gui_single_instance::{acquire_gui_instance_lock, gui_instance_lock_path};
+use gwt_core::test_support::{env_lock, ScopedEnvVar};
+use std::sync::MutexGuard;
 use tempfile::tempdir;
+
+const FORCE_NEW_INSTANCE_ENV: &str = "GWT_FORCE_NEW_INSTANCE";
+
+struct ForceEnvUnset {
+    _env: ScopedEnvVar,
+    _lock: MutexGuard<'static, ()>,
+}
+
+fn unset_force_new_instance() -> ForceEnvUnset {
+    let lock = env_lock().lock().expect("env lock");
+    let env = ScopedEnvVar::unset(FORCE_NEW_INSTANCE_ENV);
+    ForceEnvUnset {
+        _env: env,
+        _lock: lock,
+    }
+}
 
 #[test]
 fn gui_instance_lock_rejects_second_owner_for_same_worktree() {
+    let _force_env = unset_force_new_instance();
     let home = tempdir().expect("home");
     let project = tempdir().expect("project");
 
@@ -19,6 +38,7 @@ fn gui_instance_lock_rejects_second_owner_for_same_worktree() {
 
 #[test]
 fn gui_instance_lock_is_scoped_by_worktree_path() {
+    let _force_env = unset_force_new_instance();
     let home = tempdir().expect("home");
     let project_a = tempdir().expect("project-a");
     let project_b = tempdir().expect("project-b");
@@ -43,6 +63,7 @@ fn gui_instance_lock_is_scoped_by_worktree_path() {
 
 #[test]
 fn gui_instance_lock_released_on_drop_allows_reacquire() {
+    let _force_env = unset_force_new_instance();
     let home = tempdir().expect("home");
     let project = tempdir().expect("project");
 

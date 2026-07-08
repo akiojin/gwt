@@ -1583,6 +1583,35 @@ fn embedded_web_window_role_badges_identify_every_window_surface() {
 }
 
 #[test]
+fn embedded_web_window_lane_identity_module_is_registered_and_wired() {
+    let paths: Vec<&str> = root_js_module_assets()
+        .iter()
+        .map(|asset| asset.path)
+        .collect();
+    assert!(
+        paths.contains(&"/window-lane-identity.js"),
+        "window lane identity helper must be served as a root JS module"
+    );
+    let js = app_js();
+    let shell_js = project_shell_surface_js();
+    let styles = frontend_styles_bundle();
+    assert!(
+        js.contains("applyWindowLaneData(element, windowData)")
+            && js.contains("renderWindowLaneBadge"),
+        "app.js must put data-lane-kind and the titlebar lane badge on workspace windows"
+    );
+    assert!(
+        shell_js.contains("window-list-lane"),
+        "window list rows must render lane identity"
+    );
+    assert!(
+        styles.contains(".window-lane-badge")
+            && styles.contains(".fleet-minimap__cell[data-lane-symbol]::before"),
+        "titlebar/list/minimap lane badge styling must ship in embedded CSS"
+    );
+}
+
+#[test]
 fn embedded_web_apply_status_keeps_window_list_and_badges_in_sync() {
     let js = app_js();
     let apply_status = regex::Regex::new(

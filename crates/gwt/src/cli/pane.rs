@@ -15,6 +15,8 @@ use crate::{
 };
 
 #[cfg(test)]
+use crate::persistence::WindowLaneKind;
+#[cfg(test)]
 use crate::persistence::WindowPlacement;
 
 use super::{CliEnv, CliParseError, PaneCommand};
@@ -581,6 +583,7 @@ mod tests {
             persist: true,
             agent_id: agent_id.map(str::to_string),
             agent_color: None,
+            lane_kind: WindowLaneKind::Unknown,
             tab_group_id: None,
             tab_group_active: false,
             session_id: None,

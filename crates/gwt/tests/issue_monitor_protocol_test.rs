@@ -88,6 +88,16 @@ fn frontend_issue_monitor_events_use_snake_case_wire_shape() {
             max_active_agents: 3
         }
     ));
+
+    let event: FrontendEvent = serde_json::from_str(
+        r#"{"kind":"quick_register_issue","title":"Investigate Intake registration","launch":true}"#,
+    )
+    .expect("quick issue event");
+    assert!(matches!(
+        event,
+        FrontendEvent::QuickRegisterIssue { title, launch: true }
+            if title == "Investigate Intake registration"
+    ));
 }
 
 #[test]

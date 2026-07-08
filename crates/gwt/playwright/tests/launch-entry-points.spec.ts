@@ -3,7 +3,7 @@
  *
  * Regression of commit 1fdbe25c0 ("fix: show launch materialization
  * progress"): renderLaunchWizard() dereferenced `launchWizard` before the
- * opening/error early-returns, so the Start Work pending state (launchWizard
+ * opening/error early-returns, so the intake pending state (launchWizard
  * === null, launchWizardOpening set) threw a TypeError and the modal never
  * received its `.open` class. The crash is synchronous inside the click
  * handler, so it also blocked the `open_intake_session` WS send — the button

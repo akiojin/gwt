@@ -1491,7 +1491,7 @@ button.op-runtime-health-detail__process {
   position: fixed;
   inset: 0;
   background: var(--color-scrim);
-  z-index: 40;
+  z-index: 1200;
   opacity: 0;
   pointer-events: none;
   transition: opacity var(--motion-fast) var(--motion-curve);
@@ -5991,6 +5991,35 @@ button.workspace-board-ref:focus-visible {
 .fleet-minimap__cell.is-focused {
   border-color: var(--color-focus-ring);
   box-shadow: 0 0 0 1px var(--color-focus-ring);
+}
+
+.fleet-minimap__cell[data-lane-symbol]::before {
+  content: attr(data-lane-symbol);
+  position: absolute;
+  left: 2px;
+  bottom: 2px;
+  min-width: 8px;
+  height: 8px;
+  padding: 0 2px;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-pill);
+  background: var(--color-surface-elevated);
+  color: var(--color-text-strong);
+  font-family: var(--font-mono);
+  font-size: 7px;
+  font-weight: 700;
+  line-height: 8px;
+  text-align: center;
+}
+
+.fleet-minimap__cell[data-lane-kind="intake"]::before {
+  border-color: var(--color-state-needs-input);
+  color: var(--color-state-needs-input);
+}
+
+.fleet-minimap__cell[data-lane-kind="execution"]::before {
+  border-color: var(--color-state-active);
+  color: var(--color-state-active);
 }
 
 /* Living Telemetry dot — agent panes only. Color from the semantic state

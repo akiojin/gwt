@@ -78,6 +78,8 @@ const typographySource = readFileSync(resolve(here, "../styles/typography.css"),
 // /styles/app.css and is loaded via `<link rel="stylesheet">`. The grep
 // surface used by the CSS contract tests below remains stable.
 const inlineStyle = readFileSync(resolve(here, "../styles/app.css"), "utf8");
+const componentsStyle = readFileSync(resolve(here, "../styles/components.css"), "utf8");
+const frontendStyle = `${inlineStyle}\n${componentsStyle}`;
 
 function cssRemVar(source, name) {
   const match = source.match(new RegExp(`${name}:\\s*([0-9.]+)rem\\s*;`));
@@ -513,6 +515,49 @@ test("workspace windows expose role badges and hide panel runtime chips", () => 
     projectShellSurfaceSource,
     /window-list-role/,
     "expected window list rows to include a role badge",
+  );
+});
+
+test("workspace windows expose lane badges as a separate contract from agent color", () => {
+  assert.match(
+    appSource,
+    /from "\/window-lane-identity\.js"/,
+    "app.js must import lane identity helpers",
+  );
+  assert.match(
+    appSource,
+    /class="window-lane-badge"/,
+    "titlebar template must include a lane badge separate from the role badge",
+  );
+  assert.match(
+    appSource,
+    /applyWindowLaneData\(element,\s*windowData\)/,
+    "window root must carry data-lane-kind",
+  );
+  assert.match(
+    appSource,
+    /appendRenderKeyPart\(parts,\s*windowLaneKind\(windowData\)\)/,
+    "workspace window render keys must use the same lane normalization as the badge",
+  );
+  assert.match(
+    projectShellSurfaceSource,
+    /window-list-lane/,
+    "window list rows must include the same lane badge contract",
+  );
+  assert.match(
+    projectShellSurfaceSource,
+    /appendRenderKeyPart\(parts,\s*windowLaneKind\(entry\)\)/,
+    "window list render keys must use the same lane normalization as the badge",
+  );
+  assert.match(
+    inlineStyle,
+    /\.window-lane-badge\s*\{[\s\S]*border:\s*1px solid var\(--color-border/,
+    "lane badges must use Operator tokens, not raw colors",
+  );
+  assert.match(
+    frontendStyle,
+    /\.fleet-minimap__cell\[data-lane-symbol\]::before/,
+    "minimap cells must render a compact lane marker",
   );
 });
 

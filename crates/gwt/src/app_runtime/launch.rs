@@ -1924,7 +1924,7 @@ impl AppRuntime {
     /// Paused-Work / resume behavior. The definitive signal is that the intake
     /// worktree is DETACHED (branchless), which only `create_detached` produces.
     /// A worktree that is already gone is treated as ephemeral (it was reaped).
-    fn is_ephemeral_intake_session(&self, session: &ActiveAgentSession) -> bool {
+    pub(super) fn is_ephemeral_intake_session(&self, session: &ActiveAgentSession) -> bool {
         if !is_ephemeral_intake_worktree(&session.worktree_path) {
             return false;
         }

@@ -52,6 +52,8 @@ export function createFleetMinimap({
   // glance. Falls back to windowDisplayTitle for back-compat.
   cellTooltip,
   cellAgentColor,
+  cellLaneKind,
+  cellLaneBadge,
   cellTelemetryState,
 }) {
   if (!container) {
@@ -92,6 +94,7 @@ export function createFleetMinimap({
   // Cells are keyed by window id so unchanged windows keep their node across
   // renders (avoids losing hover/tooltip mid-interaction).
   const cellMap = new Map();
+  const laneMarkerMap = new Map();
   // The only persistent radar state: how much of the minimap the camera frame
   // occupies. The world→px scale itself is derived from the live viewport.
   let frameFraction = FRAME_FRACTION_DEFAULT;
@@ -143,10 +146,18 @@ export function createFleetMinimap({
       const cell = cellMap.get(windowData.id);
       if (!cell) continue;
       const geometry = windowData.geometry;
+      const width = Math.max(finiteOr(Number(geometry.width), 0) * scale, 2);
+      const height = Math.max(finiteOr(Number(geometry.height), 0) * scale, 2);
       cell.style.left = `${finiteOr(Number(geometry.x), 0) * scale}px`;
       cell.style.top = `${finiteOr(Number(geometry.y), 0) * scale}px`;
-      cell.style.width = `${Math.max(finiteOr(Number(geometry.width), 0) * scale, 2)}px`;
-      cell.style.height = `${Math.max(finiteOr(Number(geometry.height), 0) * scale, 2)}px`;
+      cell.style.width = `${width}px`;
+      cell.style.height = `${height}px`;
+      const laneSymbol = laneMarkerMap.get(windowData.id);
+      if (laneSymbol && width >= 12 && height >= 12) {
+        cell.dataset.laneSymbol = laneSymbol;
+      } else {
+        delete cell.dataset.laneSymbol;
+      }
     }
   }
 
@@ -160,6 +171,7 @@ export function createFleetMinimap({
       for (const [id, cell] of cellMap) {
         cell.remove();
         cellMap.delete(id);
+        laneMarkerMap.delete(id);
       }
       update();
       return;
@@ -189,10 +201,36 @@ export function createFleetMinimap({
         delete cell.dataset.telemetry;
       }
 
+      const laneKind =
+        typeof cellLaneKind === "function" ? cellLaneKind(windowData) : windowData?.lane_kind;
+      if (laneKind) {
+        cell.dataset.laneKind = laneKind;
+      } else {
+        delete cell.dataset.laneKind;
+      }
+      const laneBadge =
+        typeof cellLaneBadge === "function" ? cellLaneBadge(windowData) : null;
+      const hasKnownLaneBadge = Boolean(laneBadge?.kind && laneBadge.kind !== "unknown");
+      if (hasKnownLaneBadge && laneBadge?.symbol) {
+        laneMarkerMap.set(windowData.id, laneBadge.symbol);
+      } else {
+        laneMarkerMap.delete(windowData.id);
+        delete cell.dataset.laneSymbol;
+      }
+      if (hasKnownLaneBadge && laneBadge?.ariaLabel) {
+        cell.dataset.laneLabel = laneBadge.ariaLabel;
+      } else {
+        delete cell.dataset.laneLabel;
+      }
+
       cell.classList.toggle("is-focused", windowData.id === focusedId);
       const tooltip = resolveCellTooltip(windowData);
-      cell.setAttribute("aria-label", tooltip);
-      cell.title = tooltip;
+      const label =
+        hasKnownLaneBadge && laneBadge?.ariaLabel
+          ? `${tooltip} - ${laneBadge.ariaLabel}`
+          : tooltip;
+      cell.setAttribute("aria-label", label);
+      cell.title = label;
     }
 
     // Drop cells for windows that left the workspace.
@@ -200,6 +238,7 @@ export function createFleetMinimap({
       if (!liveIds.has(id)) {
         cell.remove();
         cellMap.delete(id);
+        laneMarkerMap.delete(id);
       }
     }
 

@@ -635,6 +635,11 @@ pub enum FrontendEvent {
         issue_numbers: Vec<u64>,
     },
     ListIssueMonitor,
+    QuickRegisterIssue {
+        title: String,
+        #[serde(default)]
+        launch: bool,
+    },
     IssueMonitorLaunchNow {
         issue_number: u64,
         #[serde(default)]

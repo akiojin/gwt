@@ -133,7 +133,7 @@ pub use persistence::{
     project_title_from_path, save_session_state, save_workspace_state, workspace_state_path,
     AgentKanbanLane, CanvasViewport, PersistedSessionState, PersistedSessionTabState,
     PersistedWindowCanvasState, PersistedWindowState, ProjectKind, RecentProjectEntry,
-    WindowGeometry, WindowPlacement, WindowProcessStatus, WindowState,
+    WindowGeometry, WindowLaneKind, WindowPlacement, WindowProcessStatus, WindowState,
 };
 pub use preset::{
     detect_shell_program, resolve_launch_spec, LaunchSpec, PresetResolveError, ShellProgram,
