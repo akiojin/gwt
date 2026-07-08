@@ -678,6 +678,9 @@ pub(super) fn frontend_user_action_log(event: &FrontendEvent) -> Option<Frontend
             FrontendUserActionLog::new("issue_monitor_configure_issue", "issue_monitor")
                 .target(issue_number.to_string())
         }
+        FrontendEvent::IssueMonitorConfigureProfile => {
+            FrontendUserActionLog::new("issue_monitor_configure_profile", "issue_monitor")
+        }
         // These events can contain high-volume, high-frequency, or sensitive
         // payloads. They are handled by more specific logs or diagnostics.
         FrontendEvent::StartupAutoResumeReady { .. }

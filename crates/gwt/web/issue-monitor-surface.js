@@ -492,7 +492,7 @@ export function createIssueMonitorSurface({ document, send, focusWindow }) {
     const settingsText = element(
       "div",
       "issue-monitor-card__settings",
-      "Agent settings Default: configure to override",
+      "Agent settings Missing saved profile: configure before auto start",
     );
     stateLine.appendChild(stateText);
     stateLine.appendChild(detailText);
@@ -500,6 +500,19 @@ export function createIssueMonitorSurface({ document, send, focusWindow }) {
     summary.appendChild(settingsText);
 
     const toolbarActions = element("div", "issue-monitor-card__toolbar-actions");
+    const agentSettingsButton = element(
+      "button",
+      "wizard-button issue-monitor-card__agent-settings",
+      "Agent settings",
+    );
+    agentSettingsButton.type = "button";
+    agentSettingsButton.addEventListener("click", () => {
+      sendMonitorEvent({
+        kind: "issue_monitor_configure_profile",
+      });
+    });
+    toolbarActions.appendChild(agentSettingsButton);
+
     const maxActiveLabel = element("label", "issue-monitor-card__max-active");
     maxActiveLabel.appendChild(element("span", null, "Max active"));
     const maxActiveInput = element("input", "issue-monitor-card__number");
@@ -522,7 +535,9 @@ export function createIssueMonitorSurface({ document, send, focusWindow }) {
     toggleButton.type = "button";
     toggleButton.addEventListener("click", () => {
       const nextEnabled = !Boolean(status.enabled);
-      applyOptimisticEnabled(nextEnabled);
+      if (!nextEnabled || status.launch_profile_source === "saved") {
+        applyOptimisticEnabled(nextEnabled);
+      }
       sendMonitorEvent({
         kind: "set_issue_monitor_enabled",
         enabled: nextEnabled,
@@ -923,7 +938,7 @@ export function createIssueMonitorSurface({ document, send, focusWindow }) {
         actions.appendChild(downButton);
       }
       if (number && ["queued", "launch_failed", "agent_failed"].includes(item.state || "queued")) {
-        const configureButton = iconAction("⚙", "Configure", "configure-issue");
+        const configureButton = iconAction("⚙", "Project Agent settings", "configure-issue");
         configureButton.addEventListener("click", () => {
           sendMonitorEvent({
             kind: "issue_monitor_configure_issue",
@@ -990,7 +1005,7 @@ export function createIssueMonitorSurface({ document, send, focusWindow }) {
     }
     detailText.textContent = details.join(" | ");
     const sourceLabel = launchSettingsSourceLabel(status.launch_profile_source);
-    const profileSummary = status.launch_profile_summary || "configure to override";
+    const profileSummary = status.launch_profile_summary || "configure before auto start";
     settingsText.textContent = `Agent settings ${sourceLabel}: ${profileSummary}`;
     const lastError = status.last_error || "";
     errorText.textContent = lastError;
@@ -1017,7 +1032,7 @@ export function createIssueMonitorSurface({ document, send, focusWindow }) {
       case "last_settings":
         return "Last settings";
       default:
-        return "Default";
+        return "Missing saved profile";
     }
   }
 
