@@ -1365,7 +1365,7 @@ mod tests {
             last_scan_at: Some("2026-06-23T10:00:00Z".to_string()),
             last_error: None,
             launch_profile_source: gwt::IssueMonitorLaunchProfileSource::Default,
-            launch_profile_summary: "configure to override".to_string(),
+            launch_profile_summary: "configure before auto start".to_string(),
             autonomous_mode: false,
             autonomous_issues: Vec::new(),
         };

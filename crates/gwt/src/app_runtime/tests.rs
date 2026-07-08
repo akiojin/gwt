@@ -2349,6 +2349,22 @@ fn sample_agent_options() -> Vec<gwt::AgentOption> {
     }]
 }
 
+fn sample_issue_monitor_launch_profile() -> gwt::IssueMonitorLaunchProfile {
+    gwt::IssueMonitorLaunchProfile {
+        agent_id: "claude".to_string(),
+        model: Some("gpt-5.5".to_string()),
+        reasoning: Some("high".to_string()),
+        version: Some("latest".to_string()),
+        session_mode: gwt_agent::SessionMode::Normal,
+        skip_permissions: true,
+        codex_fast_mode: true,
+        runtime_target: gwt_agent::LaunchRuntimeTarget::Host,
+        docker_service: None,
+        docker_lifecycle_intent: gwt_agent::DockerLifecycleIntent::Connect,
+        windows_shell: None,
+    }
+}
+
 fn run_git(repo: &Path, args: &[&str]) {
     let status = gwt_core::process::hidden_command("git")
         .args(args)
@@ -4542,6 +4558,26 @@ fn app_runtime_window_list_enumerates_all_project_tabs() {
 }
 
 #[test]
+fn app_runtime_open_intake_session_without_active_project_uses_intake_error_copy() {
+    let temp = tempdir().expect("tempdir");
+    let mut runtime = sample_runtime(temp.path(), Vec::new(), None);
+
+    let events =
+        runtime.handle_frontend_event("client-1".to_string(), FrontendEvent::OpenIntakeSession);
+
+    assert!(runtime.launch_wizard.is_none());
+    assert!(matches!(
+        events.first().map(|event| &event.target),
+        Some(DispatchTarget::Client(client_id)) if client_id == "client-1"
+    ));
+    assert!(matches!(
+        events.first().map(|event| &event.event),
+        Some(BackendEvent::LaunchWizardOpenError { title, message })
+            if title == "Intake" && message == "Open a project before starting an intake session"
+    ));
+}
+
+#[test]
 fn app_runtime_open_intake_session_failure_surfaces_launch_wizard_open_error() {
     let temp = tempdir().expect("tempdir");
     let repo = temp.path().join("repo");
@@ -4566,7 +4602,7 @@ fn app_runtime_open_intake_session_failure_surfaces_launch_wizard_open_error() {
     assert!(matches!(
         events.first().map(|event| &event.event),
         Some(BackendEvent::LaunchWizardOpenError { title, message })
-            if title == "Start Work" && !message.is_empty()
+            if title == "Intake" && !message.is_empty()
     ));
 }
 
@@ -13764,6 +13800,16 @@ fn frontend_user_action_logs_project_index_search_without_query_values() {
 }
 
 #[test]
+fn frontend_user_action_logs_issue_monitor_global_profile_configure() {
+    let log = super::frontend_user_action_log(&FrontendEvent::IssueMonitorConfigureProfile)
+        .expect("issue monitor configure profile user action log");
+
+    assert_eq!(log.action, "issue_monitor_configure_profile");
+    assert_eq!(log.surface, "issue_monitor");
+    assert_eq!(log.ui_target, "");
+}
+
+#[test]
 fn app_runtime_load_logs_replies_with_current_log_snapshot() {
     let temp = tempdir().expect("tempdir");
     let repo = temp.path().join("repo");
@@ -14614,33 +14660,26 @@ fn app_runtime_issue_monitor_enable_opens_single_settings_wizard_without_launch_
             BackendEvent::IssueMonitorStatus { status } => Some(status),
             _ => None,
         })
-        .expect("issue monitor status");
-    assert!(status.enabled);
-    assert_eq!(status.state, "settings_required");
-    assert_eq!(status.queue_len, 1);
-    assert_eq!(status.active_count, 0);
-    assert_eq!(status.total_candidates, 1);
-    assert_eq!(status.last_error.as_deref(), None);
-    assert_eq!(
-        status.launch_profile_source,
-        gwt::IssueMonitorLaunchProfileSource::Default
+        .expect("status resets optimistic enabled UI");
+    assert!(
+        !status.enabled,
+        "Start without saved profile must return monitor status to stopped"
     );
-
-    let inbox = events
-        .iter()
-        .find_map(|event| match &event.event {
-            BackendEvent::IssueMonitorInbox { items } => Some(items),
-            _ => None,
-        })
-        .expect("issue monitor inbox");
-    assert_eq!(inbox.len(), 1);
-    assert_eq!(inbox[0].issue.number, 3165);
-    assert_eq!(inbox[0].issue.title, "SPEC: Issue auto-improve monitor");
-    assert_eq!(inbox[0].state, gwt::MonitorInboxState::Queued);
+    assert!(
+        !events
+            .iter()
+            .any(|event| matches!(event.event, BackendEvent::IssueMonitorInbox { .. })),
+        "Start without saved profile must not publish cached inbox yet"
+    );
     assert!(
         runtime.launch_wizard.is_some(),
         "Start without launch settings should open one settings wizard"
     );
+    assert!(runtime
+        .launch_wizard
+        .as_ref()
+        .and_then(|session| session.issue_monitor_profile_save.as_ref())
+        .is_some_and(|context| context.issue_number.is_none()));
     assert!(
         events
             .iter()
@@ -14650,6 +14689,12 @@ fn app_runtime_issue_monitor_enable_opens_single_settings_wizard_without_launch_
     assert!(
         runtime.window_details.is_empty(),
         "settings-required Start must not spawn an agent window"
+    );
+    let prefs = gwt::load_issue_monitor_prefs(&gwt::issue_monitor_prefs_path_for_repo_path(&repo))
+        .unwrap_or_default();
+    assert!(
+        !prefs.enabled,
+        "Start without saved profile must not persist enabled state"
     );
 }
 
@@ -14665,6 +14710,14 @@ fn app_runtime_issue_monitor_enable_reports_missing_origin_detail() {
     let repo = temp.path().join("repo");
     fs::create_dir_all(&repo).expect("create repo");
     init_repo_without_origin(&repo);
+    gwt::save_issue_monitor_prefs(
+        &gwt::issue_monitor_prefs_path_for_repo_path(&repo),
+        &gwt::IssueMonitorPrefs {
+            launch_profile: Some(sample_issue_monitor_launch_profile()),
+            ..gwt::IssueMonitorPrefs::default()
+        },
+    )
+    .expect("save issue monitor prefs");
     let tab = sample_project_tab("tab-1", "Repo", repo, ProjectKind::Git, &[]);
     let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
 
@@ -15353,6 +15406,198 @@ fn app_runtime_issue_monitor_configure_saves_profile_without_launching() {
 }
 
 #[test]
+fn app_runtime_issue_monitor_configure_profile_saves_global_profile_without_launching() {
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedEnvVar::set("HOME", temp.path());
+    let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+
+    let repo = temp.path().join("repo");
+    fs::create_dir_all(&repo).expect("create repo");
+    init_repo(&repo);
+    let autonomous_tuning = gwt::issue_monitor::AutonomousTuning {
+        max_attempts: 9,
+        review_model: Some("gpt-5.5-review".to_string()),
+        ..gwt::issue_monitor::AutonomousTuning::default()
+    };
+    gwt::save_issue_monitor_prefs(
+        &gwt::issue_monitor_prefs_path_for_repo_path(&repo),
+        &gwt::IssueMonitorPrefs {
+            autonomous_tuning: autonomous_tuning.clone(),
+            ..gwt::IssueMonitorPrefs::default()
+        },
+    )
+    .expect("seed issue monitor prefs");
+    let tab = sample_project_tab("tab-1", "Repo", repo.clone(), ProjectKind::Git, &[]);
+    let (mut runtime, recorded_events) =
+        sample_runtime_with_events(temp.path(), vec![tab], Some("tab-1"));
+
+    let events = runtime.handle_frontend_event(
+        "client-1".to_string(),
+        FrontendEvent::IssueMonitorConfigureProfile,
+    );
+
+    assert!(events.iter().any(|event| {
+        matches!(
+            &event.event,
+            BackendEvent::IssueMonitorToast { message, issue_number, .. }
+                if message == "Issue Monitor settings opened" && issue_number.is_none()
+        )
+    }));
+    let view = events
+        .iter()
+        .find_map(|event| match &event.event {
+            BackendEvent::LaunchWizardState {
+                wizard: Some(wizard),
+            } => Some(wizard.as_ref()),
+            _ => None,
+        })
+        .expect("launch wizard view");
+    assert_eq!(view.title, "Configure Issue Monitor");
+    assert_eq!(view.linked_issue_number, None);
+    assert_eq!(view.primary_action_label, "Continue");
+    let save_context = runtime
+        .launch_wizard
+        .as_ref()
+        .expect("launch wizard")
+        .issue_monitor_profile_save
+        .as_ref()
+        .expect("profile save context");
+    assert_eq!(save_context.issue_number, None);
+    assert_eq!(
+        runtime
+            .launch_wizard
+            .as_ref()
+            .expect("launch wizard")
+            .wizard
+            .initial_prompt,
+        ""
+    );
+
+    runtime.handle_launch_wizard_action(
+        LaunchWizardAction::SetModel {
+            model: "gpt-5.5".to_string(),
+        },
+        None,
+    );
+    runtime.handle_launch_wizard_action(
+        LaunchWizardAction::SetReasoning {
+            reasoning: "high".to_string(),
+        },
+        None,
+    );
+    runtime.handle_launch_wizard_action(LaunchWizardAction::Submit, None);
+    wait_for_recorded_event(
+        "global issue monitor settings runtime resolution",
+        &recorded_events,
+        |events| {
+            events
+                .iter()
+                .any(|event| matches!(event, UserEvent::LaunchWizardRuntimeResolved { .. }))
+        },
+    );
+    let resolved_event = {
+        let mut events = recorded_events.lock().expect("event log");
+        events
+            .iter()
+            .position(|event| matches!(event, UserEvent::LaunchWizardRuntimeResolved { .. }))
+            .map(|index| events.remove(index))
+            .expect("runtime resolved event")
+    };
+    let UserEvent::LaunchWizardRuntimeResolved { wizard_id, result } = resolved_event else {
+        unreachable!("matched above")
+    };
+    runtime.handle_launch_wizard_runtime_resolved(wizard_id, *result);
+    let _confirm_events = runtime.handle_launch_wizard_action(LaunchWizardAction::Submit, None);
+    let saved_events = runtime.handle_launch_wizard_action(LaunchWizardAction::Submit, None);
+
+    assert!(saved_events.iter().any(|event| {
+        matches!(
+            &event.event,
+            BackendEvent::IssueMonitorToast { message, issue_number, .. }
+                if message == "Issue Monitor settings saved" && issue_number.is_none()
+        )
+    }));
+    assert!(runtime.launch_wizard.is_none());
+    assert!(
+        runtime.window_details.is_empty(),
+        "saving global Issue Monitor settings must not spawn an agent window"
+    );
+
+    let prefs = gwt::load_issue_monitor_prefs(&gwt::issue_monitor_prefs_path_for_repo_path(&repo))
+        .expect("load issue monitor prefs");
+    let profile = prefs.launch_profile.expect("saved launch profile");
+    assert_eq!(profile.agent_id, "codex");
+    assert_eq!(profile.model.as_deref(), Some("gpt-5.5"));
+    assert_eq!(profile.reasoning.as_deref(), Some("high"));
+    assert_eq!(
+        prefs.autonomous_tuning, autonomous_tuning,
+        "Agent settings save must not rewrite autonomous tuning fields"
+    );
+}
+
+#[test]
+fn app_runtime_issue_monitor_start_without_saved_profile_opens_global_settings_before_enable() {
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedEnvVar::set("HOME", temp.path());
+    let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+
+    let repo = temp.path().join("repo");
+    fs::create_dir_all(&repo).expect("create repo");
+    init_repo(&repo);
+    let sessions_dir = temp.path().join("sessions");
+    fs::create_dir_all(&sessions_dir).expect("create sessions dir");
+    let mut previous = gwt_agent::Session::new(&repo, "develop", gwt_agent::AgentId::Codex);
+    previous.model = Some("gpt-5.5".to_string());
+    previous.reasoning_level = Some("high".to_string());
+    previous.save(&sessions_dir).expect("save previous session");
+
+    let tab = sample_project_tab("tab-1", "Repo", repo.clone(), ProjectKind::Git, &[]);
+    let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+
+    let events = runtime.handle_frontend_event(
+        "client-1".to_string(),
+        FrontendEvent::SetIssueMonitorEnabled { enabled: true },
+    );
+
+    assert!(events.iter().any(|event| {
+        matches!(
+            &event.event,
+            BackendEvent::IssueMonitorToast { message, issue_number, .. }
+                if message == "Issue Monitor settings opened" && issue_number.is_none()
+        )
+    }));
+    assert!(runtime
+        .launch_wizard
+        .as_ref()
+        .and_then(|session| session.issue_monitor_profile_save.as_ref())
+        .is_some_and(|context| context.issue_number.is_none()));
+    let status = events
+        .iter()
+        .find_map(|event| match &event.event {
+            BackendEvent::IssueMonitorStatus { status } => Some(status),
+            _ => None,
+        })
+        .expect("status resets optimistic enabled UI");
+    assert!(!status.enabled);
+    assert!(
+        runtime.window_details.is_empty(),
+        "missing saved profile must not spawn an agent window"
+    );
+    let prefs = gwt::load_issue_monitor_prefs(&gwt::issue_monitor_prefs_path_for_repo_path(&repo))
+        .unwrap_or_default();
+    assert!(
+        !prefs.enabled,
+        "Start with only last settings must not publish or persist enabled state"
+    );
+}
+
+#[test]
 fn app_runtime_issue_monitor_auto_launch_prefers_saved_profile() {
     let _env_lock = env_test_lock()
         .lock()
@@ -15365,19 +15610,7 @@ fn app_runtime_issue_monitor_auto_launch_prefers_saved_profile() {
     fs::create_dir_all(&repo).expect("create repo");
     init_repo(&repo);
     let prefs = gwt::IssueMonitorPrefs {
-        launch_profile: Some(gwt::IssueMonitorLaunchProfile {
-            agent_id: "claude".to_string(),
-            model: Some("gpt-5.5".to_string()),
-            reasoning: Some("high".to_string()),
-            version: Some("latest".to_string()),
-            session_mode: gwt_agent::SessionMode::Normal,
-            skip_permissions: true,
-            codex_fast_mode: true,
-            runtime_target: gwt_agent::LaunchRuntimeTarget::Host,
-            docker_service: None,
-            docker_lifecycle_intent: gwt_agent::DockerLifecycleIntent::Connect,
-            windows_shell: None,
-        }),
+        launch_profile: Some(sample_issue_monitor_launch_profile()),
         ..Default::default()
     };
     gwt::save_issue_monitor_prefs(&gwt::issue_monitor_prefs_path_for_repo_path(&repo), &prefs)
@@ -17720,6 +17953,12 @@ fn open_intake_session_opens_ephemeral_branchless_wizard() {
         .as_ref()
         .expect("intake wizard")
         .wizard;
+    assert_eq!(wizard.view().mode, gwt::LaunchWizardMode::Intake);
+    assert_eq!(
+        wizard.view().title,
+        "Intake",
+        "hydrated intake wizard must not fall back to Start Work copy"
+    );
     assert_eq!(
         wizard.context.ephemeral_base_ref.as_deref(),
         Some(gwt::start_work::START_WORK_BASE_BRANCH_CANDIDATES[0]),

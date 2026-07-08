@@ -1394,7 +1394,7 @@ impl IssueMonitorState {
                 .map(LaunchWizardPreviousProfile::from)
                 .as_ref()
                 .map(issue_monitor_launch_profile_summary)
-                .unwrap_or_else(|| "configure to override".to_string()),
+                .unwrap_or_else(|| "configure before auto start".to_string()),
             autonomous_mode: self.autonomous_mode,
             autonomous_issues: self
                 .autonomous_records
@@ -3005,6 +3005,75 @@ mod tests {
         assert!(
             leftovers.is_empty(),
             "no scratch file left behind: {leftovers:?}"
+        );
+    }
+
+    #[test]
+    fn issue_monitor_launch_profile_round_trips_all_launch_fields() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("issue-monitor.json");
+        let config = gwt_agent::AgentLaunchBuilder::new(gwt_agent::AgentId::Codex)
+            .model("gpt-5.5")
+            .reasoning_level("high")
+            .version("0.121.0")
+            .session_mode(gwt_agent::SessionMode::Resume)
+            .skip_permissions(true)
+            .fast_mode(true)
+            .runtime_target(gwt_agent::LaunchRuntimeTarget::Docker)
+            .docker_service("app")
+            .docker_lifecycle_intent(gwt_agent::DockerLifecycleIntent::Restart)
+            .windows_shell(gwt_agent::WindowsShellKind::PowerShell7)
+            .build();
+        let prefs = IssueMonitorPrefs {
+            launch_profile: Some(IssueMonitorLaunchProfile::from(&config)),
+            ..IssueMonitorPrefs::default()
+        };
+
+        save_issue_monitor_prefs(&path, &prefs).expect("save");
+        let loaded = load_issue_monitor_prefs(&path).expect("load");
+        let profile = loaded.launch_profile.expect("launch profile");
+
+        assert_eq!(profile.agent_id, "codex");
+        assert_eq!(profile.model.as_deref(), Some("gpt-5.5"));
+        assert_eq!(profile.reasoning.as_deref(), Some("high"));
+        assert_eq!(profile.version.as_deref(), Some("0.121.0"));
+        assert_eq!(profile.session_mode, gwt_agent::SessionMode::Resume);
+        assert!(profile.skip_permissions);
+        assert!(profile.codex_fast_mode);
+        assert_eq!(
+            profile.runtime_target,
+            gwt_agent::LaunchRuntimeTarget::Docker
+        );
+        assert_eq!(profile.docker_service.as_deref(), Some("app"));
+        assert_eq!(
+            profile.docker_lifecycle_intent,
+            gwt_agent::DockerLifecycleIntent::Restart
+        );
+        assert_eq!(
+            profile.windows_shell,
+            Some(gwt_agent::WindowsShellKind::PowerShell7)
+        );
+
+        let previous = LaunchWizardPreviousProfile::from(profile);
+        assert_eq!(previous.agent_id, "codex");
+        assert_eq!(previous.model.as_deref(), Some("gpt-5.5"));
+        assert_eq!(previous.reasoning.as_deref(), Some("high"));
+        assert_eq!(previous.version.as_deref(), Some("0.121.0"));
+        assert_eq!(previous.session_mode, gwt_agent::SessionMode::Resume);
+        assert!(previous.skip_permissions);
+        assert!(previous.codex_fast_mode);
+        assert_eq!(
+            previous.runtime_target,
+            gwt_agent::LaunchRuntimeTarget::Docker
+        );
+        assert_eq!(previous.docker_service.as_deref(), Some("app"));
+        assert_eq!(
+            previous.docker_lifecycle_intent,
+            gwt_agent::DockerLifecycleIntent::Restart
+        );
+        assert_eq!(
+            previous.windows_shell,
+            Some(gwt_agent::WindowsShellKind::PowerShell7)
         );
     }
 

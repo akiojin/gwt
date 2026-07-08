@@ -256,8 +256,10 @@ fn embedded_web_issue_monitor_surface_exposes_priority_and_concurrency_controls(
         "Issue Monitor processing control must use Start/Stop labels"
     );
     assert!(
-        surface_js.contains("Configure"),
-        "Issue Monitor queue must let users configure queued Issue work before processing"
+        surface_js.contains("Agent settings")
+            && surface_js.contains("Project Agent settings")
+            && surface_js.contains("issue_monitor_configure_profile"),
+        "Issue Monitor queue must expose global Agent settings plus row shortcut configuration"
     );
     assert!(
         surface_js.contains("No queued issues"),

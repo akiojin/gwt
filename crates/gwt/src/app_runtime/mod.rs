@@ -351,7 +351,7 @@ pub struct LaunchWizardSession {
 #[derive(Debug, Clone)]
 pub struct IssueMonitorProfileSaveContext {
     pub(crate) client_id: ClientId,
-    pub(crate) issue_number: u64,
+    pub(crate) issue_number: Option<u64>,
 }
 
 #[derive(Debug, Clone)]
@@ -1526,10 +1526,7 @@ impl AppRuntime {
                         if monitor.config.enabled
                             && matches!(policy, IssueMonitorScanPolicy::ClaimAndLaunch)
                         {
-                            let launch_profile_ready = self
-                                .issue_monitor_previous_profiles(&project_root)
-                                .preferred_profile()
-                                .is_some();
+                            let launch_profile_ready = monitor.has_launch_profile();
                             let active_cap = if launch_profile_ready {
                                 monitor.config.max_active.max(1)
                             } else {
@@ -2230,6 +2227,44 @@ impl AppRuntime {
                 self.handle_launch_wizard_action_for_client(Some(&client_id), action, bounds)
             }
             FrontendEvent::SetIssueMonitorEnabled { enabled } => {
+                if enabled {
+                    let has_saved_profile = self
+                        .active_project_root()
+                        .map(|project_root| {
+                            let prefs_path =
+                                gwt::issue_monitor_prefs_path_for_repo_path(project_root);
+                            gwt::load_issue_monitor_prefs(&prefs_path)
+                                .ok()
+                                .and_then(|prefs| prefs.launch_profile)
+                                .is_some()
+                        })
+                        .unwrap_or(false);
+                    if !has_saved_profile {
+                        let project_root = self.active_project_root().map(Path::to_path_buf);
+                        let mut events =
+                            self.open_issue_monitor_configure_profile_wizard_events(&client_id);
+                        if let Some(project_root) = project_root {
+                            let prefs_path =
+                                gwt::issue_monitor_prefs_path_for_repo_path(&project_root);
+                            let prefs =
+                                gwt::load_issue_monitor_prefs(&prefs_path).unwrap_or_default();
+                            let monitor = gwt::IssueMonitorState::with_prefs(
+                                gwt::IssueMonitorConfig::default(),
+                                prefs,
+                            );
+                            let mut status = monitor.status_view();
+                            self.apply_issue_monitor_launch_profile_status(
+                                &mut status,
+                                Some(project_root.as_path()),
+                            );
+                            events.push(OutboundEvent::reply(
+                                client_id.clone(),
+                                BackendEvent::IssueMonitorStatus { status },
+                            ));
+                        }
+                        return events;
+                    }
+                }
                 match self.publish_issue_monitor_control(serde_json::json!({ "enabled": enabled }))
                 {
                     Ok(()) => self.local_issue_monitor_events(&client_id, |monitor| {
@@ -2321,6 +2356,9 @@ impl AppRuntime {
                 issue_number,
                 linked_issue_kind.unwrap_or(gwt::LinkedIssueKind::Issue),
             ),
+            FrontendEvent::IssueMonitorConfigureProfile => {
+                self.open_issue_monitor_configure_profile_wizard_events(&client_id)
+            }
             FrontendEvent::ApplyUpdate => self.apply_pending_update_events(&client_id),
             FrontendEvent::ApplyUpdateStart => self.apply_update_start_events(&client_id),
             FrontendEvent::ApplyUpdateToVersion { version } => {

@@ -4283,7 +4283,7 @@
         syncWizardDraftState,
         flushWizardBranchDraft,
         renderLaunchWizard,
-        openStartWorkPendingWizard,
+        openIntakePendingWizard,
         openLaunchAgentPendingWizard,
         applyLaunchWizardStateEvent,
         applyLaunchWizardOpenErrorEvent,
@@ -6571,7 +6571,7 @@
             return;
           case "intake-session":
             // SPEC-3214 Phase 3: ephemeral intake session (branchless).
-            openStartWorkPendingWizard();
+            openIntakePendingWizard();
             frontendUnits.socketTransport.send({
               kind: "open_intake_session",
             });

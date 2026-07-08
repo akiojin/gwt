@@ -1,10 +1,10 @@
 import { expect, test } from "@playwright/test";
 import { APP_URL, installEmbeddedRoutes } from "./_helpers/embedded-frontend";
 
-test.describe("Launch Wizard Intake session pending state", () => {
+test.describe("Launch Wizard Intake pending state", () => {
   test.use({ viewport: { width: 1440, height: 900 } });
 
-  test("Intake session opens the local pending wizard before backend state arrives", async ({
+  test("Intake opens the local pending wizard before backend state arrives", async ({
     page,
   }) => {
     const pageErrors: string[] = [];
@@ -26,6 +26,7 @@ test.describe("Launch Wizard Intake session pending state", () => {
     const wizard = page.locator("#wizard-modal");
     await expect(wizard).toHaveClass(/open/);
     await expect(wizard).not.toHaveAttribute("aria-hidden", "true");
+    await expect(wizard.locator("#wizard-title")).toHaveText("Intake");
     await expect(wizard).toContainText("Preparing Intake session...");
     await expect(wizard.locator("#wizard-submit-button")).toBeHidden();
 

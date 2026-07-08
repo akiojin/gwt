@@ -2322,6 +2322,11 @@ test("Launch wizard open errors render in wizard modal and close locally", () =>
     /wizardModal\.classList\.contains\("open"\)[\s\S]{0,700}?closeLaunchWizardLocal\(\)[\s\S]{0,500}?sendWizardAction\(\{\s*kind:\s*"cancel"/,
     "expected Esc/close to locally dismiss error-only wizard state before sending backend cancel",
   );
+  assert.match(
+    launchWizardSource,
+    /launchWizardOpenError\.title\s*===\s*"Intake"[\s\S]{0,80}?\?\s*"Curate session"/,
+    "expected Intake open errors to keep Intake/Curate copy instead of Plan Agent copy",
+  );
 });
 
 test("Launch wizard tombstone does not dismiss open-error modal state", () => {
@@ -3743,18 +3748,13 @@ test("Intake session command opens a pending wizard before backend state arrives
   assert.ok(commandCase, "expected Intake session command case");
   assert.match(
     commandCase[0],
-    /openStartWorkPendingWizard\(\)[\s\S]*?kind:\s*"open_intake_session"/,
+    /openIntakePendingWizard\(\)[\s\S]*?kind:\s*"open_intake_session"/,
     "expected Intake session to render a local pending wizard before sending open_intake_session",
   );
   assert.match(
     launchWizardSource,
-    /function\s+openStartWorkPendingWizard\(\)\s*\{[\s\S]*?openLaunchPendingWizard\(\{/,
-    "expected Launch Wizard surface to define the Intake pending wizard opener",
-  );
-  assert.match(
-    launchWizardSource,
-    /return\s*\{[\s\S]*openStartWorkPendingWizard/,
-    "expected Launch Wizard surface to export the Intake pending wizard opener",
+    /function\s+openIntakePendingWizard\(\)[\s\S]*?title:\s*"Intake"[\s\S]*?message:\s*"Preparing Intake session\.\.\."/,
+    "expected Intake pending wizard copy to avoid Start Work wording",
   );
   assert.match(
     launchWizardSource,
@@ -3765,6 +3765,39 @@ test("Intake session command opens a pending wizard before backend state arrives
     launchWizardSource,
     /if\s*\(!launchWizard\s*&&\s*!launchWizardOpenError\s*&&\s*!launchWizardOpening\)/,
     "renderLaunchWizard must keep the modal open for local pending Start Work state",
+  );
+});
+
+test("Hydrated Intake wizard uses Curate copy instead of direct Launch copy", () => {
+  assert.match(
+    launchWizardSource,
+    /const\s+isIntakeWizard\s*=\s*launchWizard\.mode\s*===\s*"intake"/,
+    "hydrated Intake wizard must derive copy from the backend mode",
+  );
+  assert.match(
+    launchWizardSource,
+    /isIntakeWizard[\s\S]{0,120}?"Curate session"/,
+    "hydrated Intake wizard meta must identify the Curate lane",
+  );
+  assert.match(
+    launchWizardSource,
+    /isIntakeWizard\s*\?\s*"Intake setup"\s*:\s*"Start methods"/,
+    "hydrated Intake wizard must not reuse the direct Launch start-method heading",
+  );
+  assert.match(
+    launchWizardSource,
+    /"Choose how to prepare this intake session\."/,
+    "hydrated Intake wizard must use Curate-oriented start-method copy",
+  );
+  assert.match(
+    launchWizardSource,
+    /"Other ways to prepare or resume this intake session\."/,
+    "hydrated Intake wizard must avoid direct Launch available-group copy",
+  );
+  assert.match(
+    launchWizardSource,
+    /isIntakeWizard\s*\?\s*"Optional — describe the work to turn into an Issue or SPEC\. You can skip this\."/,
+    "hydrated Intake wizard must not mention the Plan Agent in the Register an Issue prompt",
   );
 });
 
@@ -3808,7 +3841,7 @@ test("Agent Kanban Launch Agent action opens pending Launch Agent wizard with la
   );
 });
 
-test("Start Work pending wizard clears when backend state, error, or local close wins", () => {
+test("Launch pending wizard clears when backend state, error, or local close wins", () => {
   assert.match(
     launchWizardSource,
     /function\s+clearLaunchWizardOpening\(\)\s*\{[\s\S]{0,120}?launchWizardOpening\s*=\s*null/,

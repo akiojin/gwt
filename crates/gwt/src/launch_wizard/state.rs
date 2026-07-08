@@ -377,6 +377,7 @@ impl LaunchWizardState {
     /// and detached on `base_ref` — build_launch_config then yields
     /// `is_ephemeral=true` with no branch.
     pub fn mark_as_ephemeral_intake(&mut self, base_ref: impl Into<String>) {
+        self.wizard_mode = LaunchWizardMode::Intake;
         self.context.ephemeral_base_ref = Some(base_ref.into());
         self.context.normalized_branch_name = String::new();
         self.context.worktree_path = None;

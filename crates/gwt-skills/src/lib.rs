@@ -796,6 +796,12 @@ mod tests {
                 issue_skill.contains("gwt-build-spec") && issue_skill.contains("gwt-discussion"),
                 "expected visible build/discussion handoff guidance in {relative}"
             );
+            for required in ["push-only", "not completion", "gwt-manage-pr", "PR URL"] {
+                assert!(
+                    issue_skill.contains(required),
+                    "{relative} must prevent push-only false completion claims: {required}"
+                );
+            }
             assert!(
                 issue_skill.contains("current user's language"),
                 "expected language contract in {relative}"

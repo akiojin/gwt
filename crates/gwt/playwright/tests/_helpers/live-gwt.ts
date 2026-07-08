@@ -1,10 +1,82 @@
-import type { Page } from "@playwright/test";
+import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import type { Page, TestInfo } from "@playwright/test";
 
 type LiveGwtOptions = {
   enableTestBridge?: boolean;
   keepPresetModal?: boolean;
   suppressUpdateApplyStart?: boolean;
 };
+
+const LIVE_BACKEND_LOCK_STALE_MS = 5 * 60 * 1000;
+
+function liveBackendLockPath(base: string): string {
+  const key = base.replace(/[^a-zA-Z0-9._-]+/g, "_").slice(0, 96) || "default";
+  return join(tmpdir(), `gwt-live-playwright-${key}.lock`);
+}
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+async function removeStaleLiveBackendLock(path: string): Promise<boolean> {
+  try {
+    const content = await readFile(join(path, "owner.json"), "utf8");
+    const owner = JSON.parse(content) as { createdAt?: number };
+    if (owner.createdAt && Date.now() - owner.createdAt < LIVE_BACKEND_LOCK_STALE_MS) {
+      return false;
+    }
+  } catch {
+    return false;
+  }
+  await rm(path, { recursive: true, force: true });
+  return true;
+}
+
+export async function acquireLiveGwtBackendLock(
+  base: string,
+  testInfo: TestInfo,
+): Promise<() => Promise<void>> {
+  const lockPath = liveBackendLockPath(base);
+  const deadline = Date.now() + LIVE_BACKEND_LOCK_STALE_MS;
+  while (Date.now() < deadline) {
+    try {
+      await mkdir(lockPath);
+      await writeFile(
+        join(lockPath, "owner.json"),
+        JSON.stringify({
+          createdAt: Date.now(),
+          titlePath: testInfo.titlePath,
+          workerIndex: testInfo.workerIndex,
+        }),
+      );
+      return async () => {
+        await rm(lockPath, { recursive: true, force: true });
+      };
+    } catch (error) {
+      if ((error as { code?: string }).code !== "EEXIST") {
+        throw error;
+      }
+      await removeStaleLiveBackendLock(lockPath);
+      await sleep(250);
+    }
+  }
+  throw new Error(`Timed out waiting for live gwt backend lock: ${lockPath}`);
+}
+
+export async function withLiveGwtBackendLock<T>(
+  base: string,
+  testInfo: TestInfo,
+  run: () => Promise<T>,
+): Promise<T> {
+  const release = await acquireLiveGwtBackendLock(base, testInfo);
+  try {
+    return await run();
+  } finally {
+    await release();
+  }
+}
 
 export async function gotoLiveGwt(
   page: Page,

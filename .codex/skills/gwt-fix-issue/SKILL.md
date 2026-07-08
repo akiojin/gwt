@@ -88,14 +88,20 @@ fitting owner. Creating a new SPEC is the last resort, decided through
    `gwt-verify --mode pre-pr` and a recorded `User Verification Result`. Do not
    create or update a Ready PR until that result is `confirmed` (UI-affecting
    changes) or `n/a` (no user-visible surface). Never open a Ready PR on a
-   `pending` verification.
+   `pending` verification. For code-changing direct fixes, PR handoff is part
+   of completion: a commit hash, branch push, and closure comment are
+   push-only evidence, not completion. If no PR URL or PR number exists yet,
+   report `PR handoff pending` or `blocked(<reason>)` and keep working through
+   `gwt-manage-pr`; do not say the Issue is complete.
 6. **Close with a durable record.** On direct-fix completion, post the mandatory
    closure comment through JSON operation `issue.comment` following the bundled
    `references/closure-comment.md` (current runtime's `gwt-fix-issue` skill
    directory): root cause, changed files, commit/PR link, `gwt-verify` result,
    completion checklist, remaining work — after `gwt-verify` returns
-   `Overall: PASS`. When the work is handed off to the SPEC flow instead of
-   completed, `gwt-build-spec` owns closure; post a short handoff comment only.
+   `Overall: PASS` and `gwt-manage-pr` has produced a PR URL/number or an
+   explicit blocked handoff. When the work is handed off to the SPEC flow
+   instead of completed, `gwt-build-spec` owns closure; post a short handoff
+   comment only.
 7. Return the result in the current user's language.
 
 ## No Stop-block (short-lived skill)
