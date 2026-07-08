@@ -8,9 +8,9 @@
 use std::{path::Path, time::Instant};
 
 use super::{
-    board_reminder, diagnostics, skill_build_spec_stop_check, skill_discussion_stop_check,
-    skill_plan_spec_stop_check, skill_register_spec_stop_check, workflow_policy,
-    workspace_identity, HookError, HookOutput, IntentBoundaryEvent,
+    board_reminder, diagnostics, execution_completion_stop_check, skill_build_spec_stop_check,
+    skill_discussion_stop_check, skill_plan_spec_stop_check, skill_register_spec_stop_check,
+    workflow_policy, workspace_identity, HookError, HookOutput, IntentBoundaryEvent,
 };
 use crate::discussion_resume::{load_pending_goal, PendingDiscussionGoal};
 
@@ -160,6 +160,9 @@ fn handle_stop(
         }),
         run_value(event, "skill-register-spec-stop-check", || {
             skill_register_spec_stop_check::handle_with_input(worktree_root, input, current_session)
+        }),
+        run_value(event, "execution-completion-stop-check", || {
+            execution_completion_stop_check::handle_with_input(worktree_root, input)
         }),
     ] {
         if matches!(output, HookOutput::StopBlock { .. }) {
@@ -389,5 +392,30 @@ mod tests {
         };
         assert_eq!(event, IntentBoundaryEvent::SessionStart);
         assert!(text.contains("pending gwt-discussion Goal Start"), "{text}");
+    }
+
+    #[test]
+    fn stop_blocks_push_only_completion_claim_without_pr_evidence() {
+        let worktree = tempfile::tempdir().unwrap();
+        let transcript = worktree.path().join("transcript.jsonl");
+        std::fs::write(
+            &transcript,
+            r#"{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"完了しました。Issue #3233 は 3d827ffe2 として work/issue-3233 に push 済みです。Issue には closure comment も投稿しました。"}]}}"#,
+        )
+        .unwrap();
+        let input = serde_json::json!({
+            "transcript_path": transcript,
+            "stop_hook_active": false
+        })
+        .to_string();
+
+        let output = handle_with_input("Stop", &input, worktree.path(), None).expect("hook output");
+
+        let HookOutput::StopBlock { reason } = output else {
+            panic!("expected push-only completion StopBlock, got {output:?}");
+        };
+        assert!(reason.contains("PR"), "{reason}");
+        assert!(reason.contains("push-only"), "{reason}");
+        assert!(reason.contains("gwt-manage-pr"), "{reason}");
     }
 }
