@@ -552,6 +552,7 @@ pub struct AppRuntime {
     pub(crate) recoverable_agent_error_windows: HashSet<String>,
     pub(crate) hook_forward_target: Option<HookForwardTarget>,
     pub(crate) issue_link_cache_dir: PathBuf,
+    pub(crate) issue_client_factory: RuntimeIssueClientFactory,
     /// Cached update state so late-connecting WebView clients get the toast.
     pub(crate) pending_update: Option<gwt_core::update::UpdateState>,
     /// Shared PTY writer registry published to the WebSocket fast-path.
@@ -614,6 +615,45 @@ impl ProjectTabRuntime {
 enum IssueMonitorScanPolicy {
     ClaimAndLaunch,
     Observe,
+}
+
+pub(crate) type RuntimeIssueClient = Arc<dyn gwt_github::IssueClient>;
+pub(crate) type RuntimeIssueClientFactory =
+    Arc<dyn Fn(&str, &str) -> Result<RuntimeIssueClient, gwt_github::ApiError> + Send + Sync>;
+
+pub(crate) fn default_issue_client_factory() -> RuntimeIssueClientFactory {
+    Arc::new(|owner, repo| {
+        let client = gwt_github::client::http::HttpIssueClient::from_gh_auth(owner, repo)?;
+        Ok(Arc::new(client) as RuntimeIssueClient)
+    })
+}
+
+fn quick_issue_body(title: &str) -> String {
+    format!(
+        "## Summary\n\n{title}\n\n## Background\n\nRegistered from the legacy Quick issue compatibility path. Intake session plus gwt-register-issue remains the primary intake workflow.\n\n## Spec Status\n\nALIGNED - Compatibility guard preserves existing web bundle payloads until the withdrawn Quick issue toolbar is fully removed.\n\n## Related SPECs\n\n- SPEC-3214\n\n## Expected Outcome\n\nTriage and route this issue through the normal gwt workflow.\n\n## Notes\n\nCreated by the SPEC-3214 Quick issue compatibility guard.\n"
+    )
+}
+
+fn issue_registration_failure_message(error: &gwt_github::ApiError) -> String {
+    format!(
+        "Issue registration failed: {error}. Fallback: create the Issue manually on GitHub, then launch it from Issue Monitor or retry from an intake session after fixing access."
+    )
+}
+
+fn issue_monitor_issue_from_snapshot(
+    snapshot: &gwt_github::IssueSnapshot,
+) -> gwt::IssueMonitorIssue {
+    gwt::IssueMonitorIssue {
+        number: snapshot.number.0,
+        title: snapshot.title.clone(),
+        labels: snapshot.labels.clone(),
+        state: match snapshot.state {
+            gwt_github::IssueState::Closed => gwt::IssueMonitorIssueState::Closed,
+            gwt_github::IssueState::Open => gwt::IssueMonitorIssueState::Open,
+        },
+        body: (!snapshot.body.is_empty()).then(|| snapshot.body.clone()),
+        url: None,
+    }
 }
 
 impl AppRuntime {
@@ -693,6 +733,7 @@ impl AppRuntime {
             recoverable_agent_error_windows: HashSet::new(),
             hook_forward_target: None,
             issue_link_cache_dir: gwt_core::paths::gwt_cache_dir(),
+            issue_client_factory: default_issue_client_factory(),
             pending_update: None,
             pty_writers,
             attachment_uploads,
@@ -1297,6 +1338,143 @@ impl AppRuntime {
             IssueMonitorScanPolicy::ClaimAndLaunch,
             apply,
         )
+    }
+
+    fn quick_register_issue_events(
+        &mut self,
+        client_id: &str,
+        title: String,
+        launch: bool,
+    ) -> Vec<OutboundEvent> {
+        let title = title.trim().to_string();
+        if title.is_empty() {
+            return vec![OutboundEvent::reply(
+                client_id,
+                BackendEvent::IssueMonitorToast {
+                    level: "error".to_string(),
+                    message: "Issue title is required".to_string(),
+                    issue_number: None,
+                },
+            )];
+        }
+
+        let Some(project_root) = self.active_project_root().map(Path::to_path_buf) else {
+            return vec![OutboundEvent::reply(
+                client_id,
+                BackendEvent::IssueMonitorToast {
+                    level: "error".to_string(),
+                    message: "Open a project before registering an Issue".to_string(),
+                    issue_number: None,
+                },
+            )];
+        };
+        let (owner, repo) =
+            match gwt::issue_monitor_worker::github_remote_owner_and_repo(&project_root) {
+                Ok(value) => value,
+                Err(error) => {
+                    return vec![OutboundEvent::reply(
+                        client_id,
+                        BackendEvent::IssueMonitorToast {
+                            level: "error".to_string(),
+                            message: format!("GitHub origin remote is unavailable: {error}"),
+                            issue_number: None,
+                        },
+                    )];
+                }
+            };
+
+        let client = match (self.issue_client_factory)(&owner, &repo) {
+            Ok(client) => client,
+            Err(error) => {
+                return vec![OutboundEvent::reply(
+                    client_id,
+                    BackendEvent::IssueMonitorToast {
+                        level: "error".to_string(),
+                        message: issue_registration_failure_message(&error),
+                        issue_number: None,
+                    },
+                )];
+            }
+        };
+
+        let labels: Vec<String> = Vec::new();
+        let body = quick_issue_body(&title);
+        let snapshot = match client.create_issue(&title, &body, &labels) {
+            Ok(snapshot) => snapshot,
+            Err(error) => {
+                return vec![OutboundEvent::reply(
+                    client_id,
+                    BackendEvent::IssueMonitorToast {
+                        level: "error".to_string(),
+                        message: issue_registration_failure_message(&error),
+                        issue_number: None,
+                    },
+                )];
+            }
+        };
+
+        let cache_root = gwt::issue_cache::issue_cache_root_for_repo_path(&project_root)
+            .unwrap_or_else(|| gwt::issue_cache::issue_cache_root_for_repo_slug(&owner, &repo));
+        let mut events = Vec::new();
+        match gwt_github::Cache::new(cache_root.clone()).write_snapshot(&snapshot) {
+            Ok(()) => {}
+            Err(error) => events.push(OutboundEvent::reply(
+                client_id,
+                BackendEvent::IssueMonitorToast {
+                    level: "error".to_string(),
+                    message: format!(
+                        "Issue #{} registered, but local cache update failed: {error}",
+                        snapshot.number.0
+                    ),
+                    issue_number: Some(snapshot.number.0),
+                },
+            )),
+        }
+
+        events.push(OutboundEvent::reply(
+            client_id,
+            BackendEvent::IssueMonitorToast {
+                level: "info".to_string(),
+                message: "Issue registered".to_string(),
+                issue_number: Some(snapshot.number.0),
+            },
+        ));
+        events.extend(self.quick_issue_monitor_snapshot_events(
+            Some(client_id),
+            &project_root,
+            &cache_root,
+            &snapshot,
+        ));
+        if launch {
+            events.extend(self.open_issue_monitor_launch_wizard_events(
+                client_id,
+                snapshot.number.0,
+                gwt::LinkedIssueKind::Issue,
+            ));
+        }
+        events
+    }
+
+    fn quick_issue_monitor_snapshot_events(
+        &self,
+        client_id: Option<&str>,
+        project_root: &Path,
+        cache_root: &Path,
+        snapshot: &gwt_github::IssueSnapshot,
+    ) -> Vec<OutboundEvent> {
+        let now = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+        let prefs_path = gwt::issue_monitor_prefs_path_for_repo_path(project_root);
+        let prefs = gwt::load_issue_monitor_prefs(&prefs_path).unwrap_or_default();
+        let mut monitor =
+            gwt::IssueMonitorState::with_prefs(gwt::IssueMonitorConfig::default(), prefs);
+        let mut issues =
+            gwt::issue_monitor_worker::load_cached_issue_monitor_candidates(cache_root)
+                .unwrap_or_default();
+        if !issues.iter().any(|issue| issue.number == snapshot.number.0) {
+            issues.push(issue_monitor_issue_from_snapshot(snapshot));
+        }
+        gwt::scan_issue_monitor_candidates(&mut monitor, &issues, &now);
+        self.issue_monitor_snapshot_events_for(client_id, monitor)
     }
 
     fn local_issue_monitor_events_with_policy(
@@ -2124,6 +2302,9 @@ impl AppRuntime {
                 }
             }
             FrontendEvent::ListIssueMonitor => self.local_issue_monitor_events(&client_id, |_| {}),
+            FrontendEvent::QuickRegisterIssue { title, launch } => {
+                self.quick_register_issue_events(&client_id, title, launch)
+            }
             FrontendEvent::IssueMonitorLaunchNow {
                 issue_number,
                 linked_issue_kind,
@@ -2392,6 +2573,17 @@ impl AppRuntime {
                 .map(|mut window| {
                     let raw_id = window.id.clone();
                     window.id = combined_window_id(&tab.id, &raw_id);
+                    window.lane_kind = self
+                        .active_agent_sessions
+                        .get(&window.id)
+                        .map(|session| {
+                            if self.is_ephemeral_intake_session(session) {
+                                gwt::WindowLaneKind::Intake
+                            } else {
+                                gwt::WindowLaneKind::Execution
+                            }
+                        })
+                        .unwrap_or(gwt::WindowLaneKind::Unknown);
                     if let gwt::WindowPlacement::AgentKanban {
                         board_id,
                         lane_id,

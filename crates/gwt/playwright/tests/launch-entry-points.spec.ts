@@ -1,9 +1,9 @@
-/* Issue #3192 — clicking the left-rail "Start Work" button must open the
- * Launch Wizard pending modal ("Preparing Plan Agent...").
+/* Issue #3192 / SPEC-3214 — clicking the left-rail "Intake session" button
+ * must open the Launch Wizard pending modal ("Preparing Intake session...").
  *
  * Regression of commit 1fdbe25c0 ("fix: show launch materialization
  * progress"): renderLaunchWizard() dereferenced `launchWizard` before the
- * opening/error early-returns, so the Start Work pending state (launchWizard
+ * opening/error early-returns, so the intake pending state (launchWizard
  * === null, launchWizardOpening set) threw a TypeError and the modal never
  * received its `.open` class. The crash is synchronous inside the click
  * handler, so it also blocked the `open_intake_session` WS send — the button
@@ -17,10 +17,10 @@
 import { expect, test } from "@playwright/test";
 import { APP_URL, installEmbeddedRoutes } from "./_helpers/embedded-frontend";
 
-test.describe("Start Work launch-pending modal", () => {
+test.describe("Intake session launch-pending modal", () => {
   test.use({ viewport: { width: 1440, height: 900 } });
 
-  test("clicking Start Work opens the Preparing Plan Agent modal", async ({
+  test("clicking Intake session opens the Preparing Intake session modal", async ({
     page,
   }) => {
     const pageErrors: string[] = [];
@@ -31,17 +31,17 @@ test.describe("Start Work launch-pending modal", () => {
     await page.goto(APP_URL);
 
     // App boots to an open git project; the operator rail is interactive.
-    const startWork = page.locator('.op-rail [data-cmd="intake-session"]');
-    await expect(startWork).toBeVisible({ timeout: 10_000 });
+    const intakeSession = page.locator('.op-rail [data-cmd="intake-session"]');
+    await expect(intakeSession).toBeVisible({ timeout: 10_000 });
 
-    await startWork.click();
+    await intakeSession.click();
 
     const wizard = page.locator("#wizard-modal");
     // The `.open` class is added at the end of renderLaunchWizard(); the
     // regression threw before reaching it.
     await expect(wizard).toHaveClass(/\bopen\b/, { timeout: 10_000 });
     await expect(wizard.locator(".launch-pending-note")).toHaveText(
-      "Preparing Plan Agent...",
+      "Preparing Intake session...",
     );
 
     // Pin the exact regression: no null dereference of the wizard view model.

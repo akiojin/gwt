@@ -683,6 +683,17 @@ export function createLaunchWizardSurface({
         });
       }
 
+      // SPEC-3214 Phase 3: Intake replaced the old Start Work entry, but this
+      // opener keeps the local pending wizard path alive while the backend
+      // prepares the ephemeral branchless Plan Agent session.
+      function openStartWorkPendingWizard() {
+        openLaunchPendingWizard({
+          title: "Plan Agent launch",
+          meta: "Intake session",
+          message: "Preparing Intake session...",
+        });
+      }
+
       function openLaunchAgentPendingWizard() {
         openLaunchPendingWizard({
           title: "Launch Agent",
@@ -1846,6 +1857,7 @@ export function createLaunchWizardSurface({
         flushWizardBranchDraft,
         renderLaunchWizard,
         openExistingBranchPendingWizard,
+        openStartWorkPendingWizard,
         openLaunchAgentPendingWizard,
         applyLaunchWizardStateEvent,
         applyLaunchWizardOpenErrorEvent,

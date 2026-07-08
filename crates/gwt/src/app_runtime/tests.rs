@@ -31,7 +31,8 @@ use gwt_core::{
     repo_hash::detect_repo_hash,
 };
 use gwt_github::{
-    Cache, CommentId, CommentSnapshot, IssueNumber, IssueSnapshot, IssueState, UpdatedAt,
+    ApiError, Cache, CommentId, CommentSnapshot, FakeIssueClient, FetchResult, IssueClient,
+    IssueNumber, IssueSnapshot, IssueState, SpecListFilter, SpecSummary, UpdatedAt,
 };
 use gwt_terminal::Pane;
 use tracing::{field::Visit, Event, Level, Subscriber};
@@ -483,6 +484,7 @@ fn sample_window(
         dynamic_title_detail: None,
         agent_id: None,
         agent_color: None,
+        lane_kind: gwt::WindowLaneKind::Unknown,
         tab_group_id: None,
         tab_group_active: false,
         session_id: None,
@@ -2056,6 +2058,7 @@ fn sample_runtime_with_events(
         recoverable_agent_error_windows: HashSet::new(),
         hook_forward_target: None,
         issue_link_cache_dir: gwt_cache_dir(),
+        issue_client_factory: super::default_issue_client_factory(),
         pending_update: None,
         pty_writers,
         attachment_uploads: AttachmentUploadStore::new(temp_root.join("attachment-uploads")),
@@ -14741,6 +14744,210 @@ fn app_runtime_issue_monitor_reorder_persists_and_reorders_cached_inbox() {
 }
 
 #[test]
+fn app_runtime_quick_register_issue_creates_issue_cache_and_inbox_entry() {
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedEnvVar::set("HOME", temp.path());
+    let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+
+    let repo = temp.path().join("repo");
+    fs::create_dir_all(&repo).expect("create repo");
+    init_repo(&repo);
+
+    let fake_client = Arc::new(FakeIssueClient::new());
+    let tab = sample_project_tab("tab-1", "Repo", repo.clone(), ProjectKind::Git, &[]);
+    let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+    runtime.issue_client_factory = Arc::new({
+        let fake_client = Arc::clone(&fake_client);
+        move |_owner, _repo| {
+            let client: Arc<dyn IssueClient> = fake_client.clone();
+            Ok(client)
+        }
+    });
+
+    let events = runtime.handle_frontend_event(
+        "client-1".to_string(),
+        FrontendEvent::QuickRegisterIssue {
+            title: "Investigate Intake registration".to_string(),
+            launch: false,
+        },
+    );
+
+    assert_eq!(fake_client.call_log(), vec!["create_issue:#1"]);
+
+    let cached = Cache::new(issue_cache_root(&repo))
+        .load_entry(IssueNumber(1))
+        .expect("quick issue written to cache");
+    assert_eq!(cached.snapshot.title, "Investigate Intake registration");
+    assert!(cached.snapshot.labels.is_empty());
+    for heading in [
+        "## Summary",
+        "## Background",
+        "## Spec Status",
+        "## Related SPECs",
+        "## Expected Outcome",
+        "## Notes",
+    ] {
+        assert!(
+            cached.snapshot.body.contains(heading),
+            "quick issue body should contain {heading}: {}",
+            cached.snapshot.body
+        );
+    }
+    assert!(
+        cached.snapshot.body.contains("compatibility path")
+            && cached
+                .snapshot
+                .body
+                .contains("gwt-register-issue remains the primary intake workflow"),
+        "quick issue body must describe the withdrawn toolbar path as a compatibility guard: {}",
+        cached.snapshot.body
+    );
+
+    assert!(events.iter().any(|event| {
+        matches!(
+            &event.event,
+            BackendEvent::IssueMonitorToast { message, issue_number, .. }
+                if message == "Issue registered" && *issue_number == Some(1)
+        )
+    }));
+    let inbox = events
+        .iter()
+        .find_map(|event| match &event.event {
+            BackendEvent::IssueMonitorInbox { items } => Some(items),
+            _ => None,
+        })
+        .expect("issue monitor inbox");
+    let item = inbox
+        .iter()
+        .find(|item| item.issue.number == 1)
+        .expect("registered issue appears in monitor inbox");
+    assert_eq!(item.issue.title, "Investigate Intake registration");
+    assert_eq!(item.state, gwt::MonitorInboxState::Queued);
+}
+
+struct PermissionDeniedCreateIssueClient;
+
+impl IssueClient for PermissionDeniedCreateIssueClient {
+    fn fetch(
+        &self,
+        _number: IssueNumber,
+        _since: Option<&UpdatedAt>,
+    ) -> Result<FetchResult, ApiError> {
+        unreachable!("quick register only creates issues")
+    }
+
+    fn patch_body(&self, _number: IssueNumber, _new_body: &str) -> Result<IssueSnapshot, ApiError> {
+        unreachable!("quick register only creates issues")
+    }
+
+    fn patch_title(
+        &self,
+        _number: IssueNumber,
+        _new_title: &str,
+    ) -> Result<IssueSnapshot, ApiError> {
+        unreachable!("quick register only creates issues")
+    }
+
+    fn patch_comment(
+        &self,
+        _comment_id: CommentId,
+        _new_body: &str,
+    ) -> Result<CommentSnapshot, ApiError> {
+        unreachable!("quick register only creates issues")
+    }
+
+    fn create_comment(
+        &self,
+        _number: IssueNumber,
+        _body: &str,
+    ) -> Result<CommentSnapshot, ApiError> {
+        unreachable!("quick register only creates issues")
+    }
+
+    fn create_issue(
+        &self,
+        _title: &str,
+        _body: &str,
+        _labels: &[String],
+    ) -> Result<IssueSnapshot, ApiError> {
+        Err(ApiError::PermissionDenied {
+            message: "Issues are disabled for this repository".to_string(),
+        })
+    }
+
+    fn set_labels(
+        &self,
+        _number: IssueNumber,
+        _labels: &[String],
+    ) -> Result<IssueSnapshot, ApiError> {
+        unreachable!("quick register only creates issues")
+    }
+
+    fn set_state(
+        &self,
+        _number: IssueNumber,
+        _state: IssueState,
+    ) -> Result<IssueSnapshot, ApiError> {
+        unreachable!("quick register only creates issues")
+    }
+
+    fn list_spec_issues(&self, _filter: &SpecListFilter) -> Result<Vec<SpecSummary>, ApiError> {
+        unreachable!("quick register only creates issues")
+    }
+}
+
+#[test]
+fn app_runtime_quick_register_issue_permission_error_includes_reason_and_fallback() {
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedEnvVar::set("HOME", temp.path());
+    let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+
+    let repo = temp.path().join("repo");
+    fs::create_dir_all(&repo).expect("create repo");
+    init_repo(&repo);
+
+    let tab = sample_project_tab("tab-1", "Repo", repo.clone(), ProjectKind::Git, &[]);
+    let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+    runtime.issue_client_factory = Arc::new(|_owner, _repo| {
+        Ok(Arc::new(PermissionDeniedCreateIssueClient) as Arc<dyn IssueClient>)
+    });
+
+    let events = runtime.handle_frontend_event(
+        "client-1".to_string(),
+        FrontendEvent::QuickRegisterIssue {
+            title: "Investigate Intake registration".to_string(),
+            launch: false,
+        },
+    );
+
+    let message = events
+        .iter()
+        .find_map(|event| match &event.event {
+            BackendEvent::IssueMonitorToast {
+                level,
+                message,
+                issue_number: None,
+            } if level == "error" => Some(message.as_str()),
+            _ => None,
+        })
+        .expect("permission error toast");
+    assert!(
+        message.contains("Issues are disabled for this repository"),
+        "toast must preserve the GitHub-provided reason: {message}"
+    );
+    assert!(
+        message.contains("Fallback: create the Issue manually on GitHub"),
+        "toast must include the FR-011 fallback path: {message}"
+    );
+}
+
+#[test]
 fn app_runtime_issue_monitor_auto_launch_uses_start_with_last_settings() {
     let _env_lock = env_test_lock()
         .lock()
@@ -15498,6 +15705,108 @@ fn app_runtime_agent_window_initial_state_broadcast_includes_agent_id() {
 
     assert_eq!(agent_window.title, "Claude Code");
     assert_eq!(agent_window.agent_id.as_deref(), Some("claude"));
+}
+
+#[test]
+fn app_state_view_projects_agent_window_lane_kind_without_guessing_restored_windows() {
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    let repo = temp.path().join("repo");
+    fs::create_dir_all(&repo).expect("create repo");
+    init_repo(&repo);
+    run_git(&repo, &["config", "user.email", "test@example.com"]);
+    run_git(&repo, &["config", "user.name", "Test User"]);
+    run_git(&repo, &["commit", "--allow-empty", "-m", "init"]);
+
+    let mut tab_workspace = empty_workspace_state();
+    let mut intake = sample_window(
+        "agent-intake",
+        WindowPreset::Agent,
+        WindowProcessStatus::Running,
+    );
+    intake.title = "Codex".to_string();
+    intake.agent_id = Some("codex".to_string());
+    let mut execution = sample_window(
+        "agent-exec",
+        WindowPreset::Agent,
+        WindowProcessStatus::Running,
+    );
+    execution.title = "Codex".to_string();
+    execution.agent_id = Some("codex".to_string());
+    let mut restored = sample_window(
+        "agent-restored",
+        WindowPreset::Agent,
+        WindowProcessStatus::Running,
+    );
+    restored.title = "Codex".to_string();
+    restored.agent_id = Some("codex".to_string());
+    tab_workspace.windows.extend([intake, execution, restored]);
+    tab_workspace.next_z_index = 4;
+    let tab = ProjectTabRuntime {
+        id: "tab-1".to_string(),
+        title: "Repo".to_string(),
+        project_root: repo.clone(),
+        kind: ProjectKind::Git,
+        workspace: WindowCanvasState::from_persisted(tab_workspace),
+        migration_pending: false,
+        main_worktree_root_cache: std::sync::Arc::new(std::sync::OnceLock::new()),
+    };
+    let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+    let intake_id = combined_window_id("tab-1", "agent-intake");
+    let execution_id = combined_window_id("tab-1", "agent-exec");
+    let manager = gwt_git::WorktreeManager::new(&repo);
+    let intake_worktree = temp.path().join(".intake-lane");
+    manager
+        .create_detached("HEAD", &intake_worktree)
+        .expect("create detached intake worktree");
+    let execution_worktree = temp.path().join(".intake-real-lane");
+    manager
+        .create_from_base("HEAD", "feature/lane-real", &execution_worktree)
+        .expect("create branch worktree with intake-like basename");
+
+    let mut intake_session = sample_active_agent_session("tab-1", &intake_id);
+    intake_session.branch_name = "work".to_string();
+    intake_session.worktree_path = intake_worktree;
+    runtime
+        .active_agent_sessions
+        .insert(intake_id.clone(), intake_session);
+
+    let mut execution_session = sample_active_agent_session("tab-1", &execution_id);
+    execution_session.branch_name = "feature/lane-real".to_string();
+    execution_session.worktree_path = execution_worktree;
+    runtime
+        .active_agent_sessions
+        .insert(execution_id.clone(), execution_session);
+
+    let view = runtime.app_state_view();
+    let windows = &view
+        .tabs
+        .iter()
+        .find(|tab| tab.id == "tab-1")
+        .expect("tab")
+        .workspace
+        .windows;
+    let lane = |raw_id: &str| {
+        windows
+            .iter()
+            .find(|window| window.id == combined_window_id("tab-1", raw_id))
+            .map(|window| window.lane_kind)
+            .expect("projected window")
+    };
+
+    assert_eq!(lane("agent-intake"), gwt::WindowLaneKind::Intake);
+    assert_eq!(
+        lane("agent-exec"),
+        gwt::WindowLaneKind::Execution,
+        "a named branch worktree with an .intake-* basename must not be mislabeled as Intake",
+    );
+    assert_eq!(
+        lane("agent-restored"),
+        gwt::WindowLaneKind::Unknown,
+        "restored agent windows without an active lane signal must not be mislabeled as Execution",
+    );
 }
 
 #[test]
