@@ -796,6 +796,12 @@ mod tests {
                 issue_skill.contains("gwt-build-spec") && issue_skill.contains("gwt-discussion"),
                 "expected visible build/discussion handoff guidance in {relative}"
             );
+            for required in ["push-only", "not completion", "gwt-manage-pr", "PR URL"] {
+                assert!(
+                    issue_skill.contains(required),
+                    "{relative} must prevent push-only false completion claims: {required}"
+                );
+            }
             assert!(
                 issue_skill.contains("current user's language"),
                 "expected language contract in {relative}"
@@ -834,6 +840,7 @@ mod tests {
             );
             assert!(
                 discussion_skill.contains("### Discussion TODO")
+                    && discussion_skill.contains("work-notes/discussions.md")
                     && discussion_skill.contains(".gwt/work/discussions.md")
                     && discussion_skill.contains("legacy `.gwt/discussion.md`"),
                 "expected discussion skill to define canonical Discussion TODO state in {relative}"
@@ -972,7 +979,8 @@ mod tests {
                 "expected discussion command to describe the Plan Mode and depth-gate contract in {relative}"
             );
             assert!(
-                discussion_command.contains(".gwt/work/discussions.md")
+                discussion_command.contains("work-notes/discussions.md")
+                    && discussion_command.contains(".gwt/work/discussions.md")
                     && discussion_command.contains("legacy `.gwt/discussion.md`")
                     && discussion_command.contains("Resume discussion")
                     && discussion_command.contains("Park proposal")

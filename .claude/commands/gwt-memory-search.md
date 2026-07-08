@@ -1,5 +1,5 @@
 ---
-description: Semantic search over the project's `.gwt/work/memory.md` post-mortem entries
+description: Semantic search over the project's machine-local work-notes memory post-mortem entries
 author: akiojin
 allowed-tools: Read, Glob, Grep, Bash
 ---
@@ -7,7 +7,9 @@ allowed-tools: Read, Glob, Grep, Bash
 # Memory Search Command
 
 Run a vector-embedded semantic search over the post-mortem memory recorded
-at `.gwt/work/memory.md`. Use before starting work that resembles a past
+in the machine-local work-notes memory log
+(`~/.gwt/projects/<repo-hash>/work-notes/memory.md`; repo-local
+`.gwt/work/memory.md` is a read fallback). Use before starting work that resembles a past
 failure, when you want to reuse a previously-verified prevention strategy,
 or when you suspect the current bug has already been documented.
 

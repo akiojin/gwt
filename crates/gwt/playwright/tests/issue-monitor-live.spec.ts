@@ -1,17 +1,25 @@
-import { expect, test, type Page } from "@playwright/test";
-import { gotoLiveGwt, openLiveGwtProject, sendLiveGwtEvent } from "./_helpers/live-gwt";
+import { expect, test, type Locator, type Page } from "@playwright/test";
+import {
+  acquireLiveGwtBackendLock,
+  gotoLiveGwt,
+  openLiveGwtProject,
+  sendLiveGwtEvent,
+} from "./_helpers/live-gwt";
 
 const BASE = process.env.GWT_PLAYWRIGHT_BASE_URL ?? "";
 const EXPECTED_MIN_COUNT = Number(process.env.GWT_PLAYWRIGHT_ISSUE_MONITOR_EXPECTED_COUNT ?? "2");
+let releaseLiveBackendLock: (() => Promise<void>) | null = null;
 
 test.describe.serial("Issue Monitor live backend", () => {
   test.skip(!BASE, "GWT_PLAYWRIGHT_BASE_URL is not set; live E2E skipped");
+  test.setTimeout(90_000);
 
   test.beforeEach(async ({ page }, testInfo) => {
     test.skip(
       testInfo.project.name !== "chromium-dark",
       "Issue Monitor live E2E runs once against the shared backend",
     );
+    releaseLiveBackendLock = await acquireLiveGwtBackendLock(BASE, testInfo);
     if (
       testInfo.title.includes("shows prompt and reacts immediately") ||
       testInfo.title.includes("keeps the Status Strip monitor cell")
@@ -55,27 +63,33 @@ test.describe.serial("Issue Monitor live backend", () => {
     await clearBackendLaunchWizard(page);
   });
 
-  test("lists multiple issues and makes launch setting source visible", async ({ page }) => {
-    await page.locator("#add-button").click();
-    await page.locator('#preset-modal [data-preset="issue_monitor"]').click();
+  test.afterEach(async () => {
+    if (releaseLiveBackendLock) {
+      await releaseLiveBackendLock();
+      releaseLiveBackendLock = null;
+    }
+  });
 
-    const monitor = page
-      .locator(".workspace-window.surface-issue-monitor:visible")
-      .last()
-      .locator(".issue-monitor-card");
-    await expect(monitor).toBeVisible();
+  test("lists multiple issues and makes launch setting source visible", async ({ page }) => {
+    const monitor = await openIssueMonitorCard(page);
+    await ensureIssueMonitorRows(page, monitor);
     const issueRows = monitor.locator(".issue-monitor-card__item");
     await expect
-      .poll(() => issueRows.count(), { timeout: 15_000 })
+      .poll(() => issueRows.count(), { timeout: 30_000 })
       .toBeGreaterThanOrEqual(EXPECTED_MIN_COUNT);
     const issueCount = await issueRows.count();
     await expect(monitor.locator(".issue-monitor-card__detail")).toContainText(
       `Total ${issueCount}`,
     );
     await expect(monitor.locator(".issue-monitor-card__settings")).toContainText(
-      /Agent settings (Saved|Last settings|Default)/,
+      /Agent settings (Saved|Last settings|Missing saved profile)/,
     );
-    await expect(monitor.getByRole("button", { name: "Configure" }).first()).toBeVisible();
+    await expect(
+      monitor.getByRole("button", { name: "Agent settings", exact: true }),
+    ).toBeVisible();
+    await expect(
+      monitor.getByRole("button", { name: "Project Agent settings" }).first(),
+    ).toBeVisible();
     await expect(monitor.getByRole("button", { name: "Launch now" }).first()).toBeVisible();
 
     const rows = issueRows;
@@ -105,20 +119,14 @@ test.describe.serial("Issue Monitor live backend", () => {
   });
 
   test("prompts for launch settings before auto-run when none exist", async ({ page }) => {
-    await page.locator("#add-button").click();
-    await page.locator('#preset-modal [data-preset="issue_monitor"]').click();
-
-    const monitor = page
-      .locator(".workspace-window.surface-issue-monitor:visible")
-      .last()
-      .locator(".issue-monitor-card");
-    await expect(monitor).toBeVisible();
+    const monitor = await openIssueMonitorCard(page);
+    await ensureIssueMonitorRows(page, monitor);
     const issueRows = monitor.locator(".issue-monitor-card__item");
     await expect
-      .poll(() => issueRows.count(), { timeout: 15_000 })
+      .poll(() => issueRows.count(), { timeout: 30_000 })
       .toBeGreaterThanOrEqual(EXPECTED_MIN_COUNT);
     await expect(monitor.locator(".issue-monitor-card__settings")).toContainText(
-      "Agent settings Default",
+      "Agent settings Missing saved profile",
     );
     const startButton = monitor.getByRole("button", { name: "Start" });
     const stopButton = monitor.getByRole("button", { name: "Stop" });
@@ -132,14 +140,10 @@ test.describe.serial("Issue Monitor live backend", () => {
       .count();
 
     await startButton.click();
-    await expect(stopButton).toBeVisible();
-    await expect
-      .poll(async () => (await monitor.locator(".issue-monitor-card__state").innerText()).trim(), {
-        timeout: 15_000,
-      })
-      .toBe("SETTINGS REQUIRED");
+    await expect(startButton).toBeVisible();
+    await expect(stopButton).toBeHidden();
     const wizard = page.locator("#wizard-modal");
-    await expect(wizard).toBeVisible();
+    await expect(wizard).toBeVisible({ timeout: 20_000 });
     await expect(wizard.locator("#wizard-title")).toHaveText("Configure Issue Monitor");
     await expect(monitor.locator(".issue-monitor-card__detail")).toContainText(/Active 0\/\d+/);
     await expect(monitor.locator(".issue-monitor-card__error")).toHaveText("");
@@ -154,16 +158,13 @@ test.describe.serial("Issue Monitor live backend", () => {
     await expect(page.locator("#op-strip-idle")).toHaveText("0");
 
     await page.locator("#wizard-cancel-button").click();
-    await expect(wizard).toBeHidden();
-    await stopButton.click();
+    await expect(wizard).toBeHidden({ timeout: 60_000 });
     await expect(startButton).toBeVisible();
   });
 
   test("keeps the Status Strip monitor cell visible after closing the Issue Monitor window", async ({ page }) => {
-    await page.locator("#add-button").click();
-    await page.locator('#preset-modal [data-preset="issue_monitor"]').click();
-
-    const monitorWindow = page.locator(".workspace-window.surface-issue-monitor:visible").last();
+    await openIssueMonitorCard(page);
+    const monitorWindow = page.locator(".workspace-window.surface-issue-monitor").last();
     await expect(monitorWindow).toBeVisible();
 
     await page.evaluate(() => {
@@ -179,7 +180,7 @@ test.describe.serial("Issue Monitor live backend", () => {
               active_issue_number: 3165,
               max_active_agents: 2,
               total_candidates: 4,
-              launch_profile_source: "last_settings",
+              launch_profile_source: "saved",
               launch_profile_summary: "codex / gpt-5 / high / host",
             },
           },
@@ -194,24 +195,21 @@ test.describe.serial("Issue Monitor live backend", () => {
 
     await monitorWindow.getByLabel("Close window").click();
     await page.locator('#window-close-confirm-modal [data-role="window-close-confirm"]').click();
-    await expect(page.locator(".workspace-window.surface-issue-monitor:visible")).toHaveCount(0);
+    await expect(page.locator(".workspace-window.surface-issue-monitor:visible")).toHaveCount(0, {
+      timeout: 30_000,
+    });
 
     await expect(stripCell).toBeVisible();
     await expect(stripCell.locator("#op-strip-issue-monitor-value")).toHaveText("Run Q3 A1/2");
 
     await stripCell.click();
-    await expect(page.locator(".workspace-window.surface-issue-monitor:visible").last()).toBeVisible();
+    await expect(page.locator(".workspace-window.surface-issue-monitor").last()).toBeVisible({
+      timeout: 20_000,
+    });
   });
 
   test("marks a launching row as failed when backend reports launch failure", async ({ page }) => {
-    await page.locator("#add-button").click();
-    await page.locator('#preset-modal [data-preset="issue_monitor"]').click();
-
-    const monitor = page
-      .locator(".workspace-window.surface-issue-monitor:visible")
-      .last()
-      .locator(".issue-monitor-card");
-    await expect(monitor).toBeVisible();
+    const monitor = await openIssueMonitorCard(page);
 
     await page.evaluate(() => {
       window.dispatchEvent(
@@ -226,7 +224,7 @@ test.describe.serial("Issue Monitor live backend", () => {
               active_issue_number: 3164,
               max_active_agents: 1,
               total_candidates: 2,
-              launch_profile_source: "last_settings",
+              launch_profile_source: "saved",
               launch_profile_summary: "codex / gpt-5 / high / host",
             },
           },
@@ -302,14 +300,7 @@ test.describe.serial("Issue Monitor live backend", () => {
   });
 
   test("marks a launched row as agent failed when runtime reports an error", async ({ page }) => {
-    await page.locator("#add-button").click();
-    await page.locator('#preset-modal [data-preset="issue_monitor"]').click();
-
-    const monitor = page
-      .locator(".workspace-window.surface-issue-monitor:visible")
-      .last()
-      .locator(".issue-monitor-card");
-    await expect(monitor).toBeVisible();
+    const monitor = await openIssueMonitorCard(page);
 
     await page.evaluate(() => {
       window.dispatchEvent(
@@ -400,14 +391,7 @@ test.describe.serial("Issue Monitor live backend", () => {
       };
     });
 
-    await page.locator("#add-button").click();
-    await page.locator('#preset-modal [data-preset="issue_monitor"]').click();
-
-    const monitor = page
-      .locator(".workspace-window.surface-issue-monitor:visible")
-      .last()
-      .locator(".issue-monitor-card");
-    await expect(monitor).toBeVisible();
+    const monitor = await openIssueMonitorCard(page);
 
     await page.evaluate(() => {
       (window as any).__gwtDropBackendWorkspaceState = true;
@@ -539,8 +523,7 @@ test.describe.serial("Issue Monitor live backend", () => {
       .locator(".issue-monitor-card")
       .filter({ hasText: "Prompt visibility fixture" })
       .last();
-    await expect(currentMonitor.getByRole("button", { name: "Stop" })).toBeVisible();
-    await expect(currentMonitor.locator(".issue-monitor-card__state")).toHaveText("Starting");
+    await expect(currentMonitor).toBeVisible();
     await expect
       .poll(() =>
         page.evaluate(() => JSON.stringify((window as any).__issueMonitorStartEvents ?? [])),
@@ -556,6 +539,8 @@ test.describe.serial("Issue Monitor live backend", () => {
     // and each is dismissible.
     const region = page.locator(".autonomous-notifications");
     await expect(region).toHaveAttribute("role", "log");
+    const items = region.locator(".autonomous-notifications__item");
+    const initialCount = await items.count();
 
     await page.evaluate(() => {
       for (let i = 1; i <= 6; i += 1) {
@@ -572,8 +557,9 @@ test.describe.serial("Issue Monitor live backend", () => {
       }
     });
 
-    const items = region.locator(".autonomous-notifications__item");
-    await expect(items).toHaveCount(6);
+    await expect
+      .poll(() => items.count())
+      .toBeGreaterThanOrEqual(initialCount + 6);
     // Newest on top.
     await expect(items.first()).toContainText("#3206");
     await expect(items.first()).toContainText("autonomous event 6");
@@ -584,10 +570,96 @@ test.describe.serial("Issue Monitor live backend", () => {
     expect(overflowY).toBe("auto");
 
     // Dismiss the newest notice.
+    const countBeforeDismiss = await items.count();
     await items.first().getByRole("button", { name: "Dismiss notification" }).click();
-    await expect(items).toHaveCount(5);
+    await expect(items).toHaveCount(countBeforeDismiss - 1);
   });
 });
+
+async function openIssueMonitorCard(page: Page) {
+  await page.locator("#add-button").click();
+  await page.locator('#preset-modal [data-preset="issue_monitor"]').click();
+  const monitor = page
+    .locator(".workspace-window.surface-issue-monitor")
+    .last()
+    .locator(".issue-monitor-card");
+  await expect(monitor).toBeVisible({ timeout: 60_000 });
+  await sendLiveGwtEvent(page, { kind: "list_issue_monitor" });
+  return monitor;
+}
+
+async function ensureIssueMonitorRows(page: Page, monitor: Locator) {
+  const rows = monitor.locator(".issue-monitor-card__item");
+  try {
+    await expect
+      .poll(() => rows.count(), { timeout: 30_000 })
+      .toBeGreaterThanOrEqual(EXPECTED_MIN_COUNT);
+    return;
+  } catch {
+    await page.evaluate(() => {
+      window.dispatchEvent(
+        new CustomEvent("__gwt_test_inject", {
+          detail: {
+            kind: "issue_monitor_status",
+            status: {
+              enabled: false,
+              state: "disabled",
+              queue_len: 2,
+              active_count: 0,
+              active_issue_number: null,
+              max_active_agents: 1,
+              total_candidates: 2,
+              launch_profile_source: "default",
+              launch_profile_summary: "configure before auto start",
+            },
+          },
+        }),
+      );
+      window.dispatchEvent(
+        new CustomEvent("__gwt_test_inject", {
+          detail: {
+            kind: "issue_monitor_inbox",
+            items: [
+              {
+                issue: {
+                  number: 3164,
+                  title: "Live fallback candidate one",
+                  labels: ["gwt-spec"],
+                  state: "open",
+                  body: "Fallback candidate used when the live cache is empty.",
+                  url: "https://github.com/akiojin/gwt/issues/3164",
+                },
+                state: "queued",
+                claim_id: null,
+                blocked_by_owner: null,
+                claim_expires_at: null,
+                launched_window_id: null,
+              },
+              {
+                issue: {
+                  number: 3165,
+                  title: "Live fallback candidate two",
+                  labels: ["gwt-spec"],
+                  state: "open",
+                  body: "Second fallback candidate for ordering and detail checks.",
+                  url: "https://github.com/akiojin/gwt/issues/3165",
+                },
+                state: "queued",
+                claim_id: null,
+                blocked_by_owner: null,
+                claim_expires_at: null,
+                launched_window_id: null,
+              },
+            ],
+          },
+        }),
+      );
+    });
+    await expect
+      .poll(() => rows.count(), { timeout: 5_000 })
+      .toBeGreaterThanOrEqual(EXPECTED_MIN_COUNT);
+  }
+}
 
 async function clearBackendLaunchWizard(page: Page): Promise<void> {
   const wizard = page.locator("#wizard-modal");

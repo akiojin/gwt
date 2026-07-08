@@ -1990,6 +1990,14 @@ impl AppRuntime {
         }
     }
 
+    /// Compatibility hook for the runtime-status path. Current intake cleanup
+    /// runs synchronously in `mark_agent_session_stopped()` after classifying
+    /// the session by detached `.intake-*` worktree state, so there is no
+    /// deferred queue to drain here.
+    pub(crate) fn take_ephemeral_worktree_cleanup_events(&mut self) -> Vec<OutboundEvent> {
+        Vec::new()
+    }
+
     /// SPEC-2359 Phase W-12 Slice 5a (FR-350): record a Pause work event for a
     /// stopped agent session so the Work persists in the work history and keeps
     /// surfacing as Paused. The Work id is the session-derived canonical id

@@ -673,11 +673,21 @@ export function createLaunchWizardSurface({
         renderLaunchWizard();
       }
 
-      function openStartWorkPendingWizard() {
+      function openIntakePendingWizard() {
         openLaunchPendingWizard({
-          title: "Start Work",
-          meta: "Plan Agent launch",
-          message: "Preparing Plan Agent...",
+          title: "Intake",
+          meta: "Intake session",
+          message: "Preparing Intake session...",
+        });
+      }
+
+      // SPEC-3214 T-042: the standalone existing-branch picker keeps the
+      // pending-wizard UX the removed Start Work entry used to provide.
+      function openExistingBranchPendingWizard() {
+        openLaunchPendingWizard({
+          title: "Open existing branch",
+          meta: "Branch picker",
+          message: "Fetching remote branches...",
         });
       }
 
@@ -839,7 +849,9 @@ export function createLaunchWizardSurface({
             wizardTitle.textContent = launchWizardOpenError.title || "Launch Agent";
           }
           wizardMeta.textContent =
-            launchWizardOpenError.title === "Start Work"
+            launchWizardOpenError.title === "Intake"
+              ? "Curate session"
+              : launchWizardOpenError.title === "Start Work"
               ? "Plan Agent launch"
               : "Launch Agent";
           wizardBackButton.hidden = true;
@@ -866,13 +878,16 @@ export function createLaunchWizardSurface({
         );
         wizardCancelButton.textContent = "Cancel";
         if (wizardTitle) wizardTitle.textContent = launchWizard.title || "Launch Agent";
-        wizardMeta.textContent = launchWizard.show_branch_controls === false
-          ? "Plan Agent launch"
-          : `Selected branch · ${
-            displayBranchName(
-              launchWizard.selected_branch_name || launchWizard.branch_name || "Work",
-            )
-          }`;
+        const isIntakeWizard = launchWizard.mode === "intake";
+        wizardMeta.textContent = isIntakeWizard
+          ? "Curate session"
+          : launchWizard.show_branch_controls === false
+            ? "Plan Agent launch"
+            : `Selected branch · ${
+              displayBranchName(
+                launchWizard.selected_branch_name || launchWizard.branch_name || "Work",
+              )
+            }`;
         wizardSubmitButton.textContent = isLaunchSubmitPending
           ? "Launching..."
           : launchWizard.primary_action_label || (
@@ -967,12 +982,14 @@ export function createLaunchWizardSurface({
           );
         }
 
-        // SPEC-3165 — Start Work is now the Plan Agent entrypoint. The prompt
-        // is still skippable and still drives the duplicate-work advisory.
+        // SPEC-3165 — the prompt is still skippable and still drives the
+        // duplicate-work advisory; Intake keeps its Curate-facing copy.
         if (isStartWorkLaunch()) {
           const section = createLaunchSection(
             "Register an Issue",
-            "Optional — describe the work for the Plan Agent to turn into an Issue or SPEC. You can skip this.",
+            isIntakeWizard
+              ? "Optional — describe the work to turn into an Issue or SPEC. You can skip this."
+              : "Optional — describe the work for the Plan Agent to turn into an Issue or SPEC. You can skip this.",
           );
           const textarea = createNode("textarea", "launch-intake-input");
           textarea.placeholder = "e.g. register an issue for the login auth bug";
@@ -1019,8 +1036,10 @@ export function createLaunchWizardSurface({
 
         if (showStartMethods) {
           const section = createLaunchSection(
-            "Start methods",
-            "Pick the safest next step for this agent on the selected branch.",
+            isIntakeWizard ? "Intake setup" : "Start methods",
+            isIntakeWizard
+              ? "Choose how to prepare this intake session."
+              : "Pick the safest next step for this agent on the selected branch.",
           );
 
           const methodList = createNode("div", "start-method-list");
@@ -1033,12 +1052,16 @@ export function createLaunchWizardSurface({
             {
               id: "available",
               title: "Available",
-              copy: "Other ways to start or resume this agent.",
+              copy: isIntakeWizard
+                ? "Other ways to prepare or resume this intake session."
+                : "Other ways to start or resume this agent.",
             },
             {
               id: "unavailable",
               title: "Unavailable",
-              copy: "Requires saved settings, saved sessions, or a running agent.",
+              copy: isIntakeWizard
+                ? "Requires saved settings, saved sessions, or a running intake session."
+                : "Requires saved settings, saved sessions, or a running agent.",
             },
           ];
           const methodsByGroup = new Map(
@@ -1146,7 +1169,25 @@ export function createLaunchWizardSurface({
         const openBranchCandidates = Array.isArray(launchWizard.open_branch_candidates)
           ? launchWizard.open_branch_candidates
           : [];
-        if (showStartMethods && openBranchCandidates.length > 0) {
+        // SPEC-3214 FR-010: the standalone picker mode always renders this
+        // section — it IS the surface — including a fetching placeholder
+        // while the candidate refresh is still running.
+        const isExistingBranchMode = launchWizard.mode === "existing_branch";
+        if (isExistingBranchMode && openBranchCandidates.length === 0) {
+          const branchPickerSection = createLaunchSection(
+            "Open an existing branch",
+            "Continue on a remote branch instead of creating a new work branch.",
+          );
+          branchPickerSection.appendChild(
+            createNode(
+              "div",
+              "start-method-summary",
+              "Fetching remote branches...",
+            ),
+          );
+          panel.appendChild(branchPickerSection);
+        }
+        if ((showStartMethods || isExistingBranchMode) && openBranchCandidates.length > 0) {
           const branchPickerSection = createLaunchSection(
             "Open an existing branch",
             "Continue on a remote branch instead of creating a new work branch.",
@@ -1825,7 +1866,8 @@ export function createLaunchWizardSurface({
         syncWizardDraftState,
         flushWizardBranchDraft,
         renderLaunchWizard,
-        openStartWorkPendingWizard,
+        openIntakePendingWizard,
+        openExistingBranchPendingWizard,
         openLaunchAgentPendingWizard,
         applyLaunchWizardStateEvent,
         applyLaunchWizardOpenErrorEvent,

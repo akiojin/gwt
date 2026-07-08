@@ -210,6 +210,8 @@ fn prepare_agent_launch_composes_session_env_without_spawning() {
         working_dir: Some(worktree.clone()),
         branch: None,
         base_branch: None,
+        is_ephemeral: false,
+        ephemeral_base_ref: None,
         display_name: "Integration Fake Agent".to_string(),
         color: AgentColor::Green,
         model: None,
@@ -225,8 +227,6 @@ fn prepare_agent_launch_composes_session_env_without_spawning() {
         docker_lifecycle_intent: DockerLifecycleIntent::Connect,
         linked_issue_number: None,
         windows_shell: None,
-        is_ephemeral: false,
-        ephemeral_base_ref: None,
     };
 
     let mut refreshed_paths = Vec::new();

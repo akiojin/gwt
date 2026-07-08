@@ -60,6 +60,10 @@ fn start_work_open_error(client_id: &str, message: impl Into<String>) -> Vec<Out
     vec![launch_wizard_open_error(client_id, "Start Work", message)]
 }
 
+fn intake_open_error(client_id: &str, message: impl Into<String>) -> Vec<OutboundEvent> {
+    vec![launch_wizard_open_error(client_id, "Intake", message)]
+}
+
 fn issue_monitor_auto_launch_geometry(index: usize) -> WindowGeometry {
     let offset = ((index % 8) as f64) * 24.0;
     WindowGeometry {
@@ -431,19 +435,19 @@ impl AppRuntime {
     /// primary "start new work" entry that replaces Start Work.
     pub(crate) fn open_intake_session(&mut self, client_id: &str) -> Vec<OutboundEvent> {
         let Some(tab_id) = self.active_tab_id.clone() else {
-            return start_work_open_error(
+            return intake_open_error(
                 client_id,
                 "Open a project before starting an intake session",
             );
         };
         let Some(tab) = self.tab(&tab_id) else {
-            return start_work_open_error(client_id, "Project tab not found");
+            return intake_open_error(client_id, "Project tab not found");
         };
         if tab.kind != gwt::ProjectKind::Git {
-            return start_work_open_error(client_id, "An intake session requires a Git project");
+            return intake_open_error(client_id, "An intake session requires a Git project");
         }
         if tab.migration_pending {
-            return start_work_open_error(
+            return intake_open_error(
                 client_id,
                 "Complete the project migration before starting an intake session",
             );
@@ -452,7 +456,7 @@ impl AppRuntime {
         let project_root = tab.project_root.clone();
         match self.open_intake_session_for_project(&tab_id, &project_root) {
             Ok(()) => vec![self.launch_wizard_state_outbound()],
-            Err(error) => start_work_open_error(client_id, error),
+            Err(error) => intake_open_error(client_id, error),
         }
     }
 
@@ -1586,7 +1590,7 @@ impl AppRuntime {
         if let Some(session) = self.launch_wizard.as_mut() {
             session.issue_monitor_profile_save = Some(IssueMonitorProfileSaveContext {
                 client_id: client_id.to_string(),
-                issue_number,
+                issue_number: Some(issue_number),
             });
             session
                 .wizard
@@ -1608,6 +1612,116 @@ impl AppRuntime {
                 event
             })
             .collect()
+    }
+
+    pub(crate) fn open_issue_monitor_configure_profile_wizard_events(
+        &mut self,
+        client_id: &str,
+    ) -> Vec<OutboundEvent> {
+        let Some(tab_id) = self.active_tab_id.clone() else {
+            return vec![OutboundEvent::reply(
+                client_id,
+                BackendEvent::IssueMonitorToast {
+                    level: "error".to_string(),
+                    message: "Open a project before configuring Issue Monitor settings".to_string(),
+                    issue_number: None,
+                },
+            )];
+        };
+        let Some(tab) = self.tab(&tab_id) else {
+            return vec![OutboundEvent::reply(
+                client_id,
+                BackendEvent::IssueMonitorToast {
+                    level: "error".to_string(),
+                    message: "Project tab not found".to_string(),
+                    issue_number: None,
+                },
+            )];
+        };
+        if tab.kind != gwt::ProjectKind::Git {
+            return vec![OutboundEvent::reply(
+                client_id,
+                BackendEvent::IssueMonitorToast {
+                    level: "error".to_string(),
+                    message: "Issue Monitor settings require a Git project".to_string(),
+                    issue_number: None,
+                },
+            )];
+        }
+        if tab.migration_pending {
+            return vec![OutboundEvent::reply(
+                client_id,
+                BackendEvent::IssueMonitorToast {
+                    level: "error".to_string(),
+                    message:
+                        "Complete the project migration before configuring Issue Monitor settings"
+                            .to_string(),
+                    issue_number: None,
+                },
+            )];
+        }
+
+        let project_root = tab.project_root.clone();
+        let base_branch_name = gwt::start_work::START_WORK_BASE_BRANCH_CANDIDATES[0].to_string();
+        let previous_profiles = self.issue_monitor_previous_profiles(&project_root);
+        let quick_start_root = project_root;
+        let quick_start_entries = Vec::new();
+        let agent_options = self.launch_wizard_cache.agent_options();
+        let docker_context = None;
+        let docker_service_status = gwt_docker::ComposeServiceStatus::NotFound;
+        let wizard_id = Uuid::new_v4().to_string();
+        let mut wizard = LaunchWizardState::open_start_work_with_previous_profiles(
+            LaunchWizardContext {
+                selected_branch: synthetic_branch_entry(&base_branch_name),
+                normalized_branch_name: normalize_branch_name(&base_branch_name),
+                worktree_path: None,
+                quick_start_root,
+                live_sessions: Vec::new(),
+                docker_context,
+                docker_service_status,
+                linked_issue_number: None,
+                linked_issue_kind: None,
+                ultracode_supported: self.launch_wizard_cache.claude_ultracode_supported(),
+                claude_workflows_enabled: self.launch_wizard_cache.claude_workflows_enabled(),
+                ephemeral_base_ref: None,
+            },
+            base_branch_name,
+            agent_options,
+            quick_start_entries,
+            previous_profiles,
+        );
+        wizard.set_hermes_provider_choices(gwt_skills::hermes_provider_choices_global());
+        wizard.set_hermes_needs_setup(!gwt_skills::hermes_is_configured_global());
+        wizard.set_opencode_needs_setup(!gwt_skills::opencode_is_configured_global());
+        wizard.mark_runtime_context_unresolved();
+        wizard.apply(gwt::LaunchWizardAction::UseStartMethod {
+            method: gwt::LaunchWizardStartMethodKind::ConfigureAndStart,
+        });
+        self.launch_wizard = Some(LaunchWizardSession {
+            tab_id: tab_id.to_string(),
+            wizard_id,
+            wizard,
+            workspace_resume_context: None,
+            agent_kanban_target: None,
+            auto_submit_after_runtime_resolution: None,
+            issue_monitor_profile_save: Some(IssueMonitorProfileSaveContext {
+                client_id: client_id.to_string(),
+                issue_number: None,
+            }),
+            issue_monitor_launch_issue_number: None,
+        });
+
+        vec![
+            OutboundEvent::reply(
+                client_id,
+                BackendEvent::IssueMonitorToast {
+                    level: "info".to_string(),
+                    message: "Issue Monitor settings opened".to_string(),
+                    issue_number: None,
+                },
+            ),
+            self.launch_wizard_state_outbound(),
+        ]
     }
 
     pub(super) fn issue_monitor_previous_profiles(
@@ -2335,7 +2449,7 @@ impl AppRuntime {
                 BackendEvent::IssueMonitorToast {
                     level: "info".to_string(),
                     message: "Issue Monitor settings saved".to_string(),
-                    issue_number: Some(issue_number),
+                    issue_number,
                 },
             ),
         ];

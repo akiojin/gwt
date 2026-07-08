@@ -153,6 +153,40 @@ export function createIssueMonitorSurface({ document, send, focusWindow }) {
         font-size: var(--type-xs);
         padding: 0 var(--space-2);
       }
+      /* SPEC-3214 FR-004: Quick issue — one-line registration row. */
+      .issue-monitor-card__quick-issue {
+        display: flex;
+        align-items: center;
+        gap: var(--space-2);
+        padding: var(--space-2) var(--space-3);
+        border-bottom: 1px solid var(--color-border);
+        background: var(--color-surface);
+      }
+      .issue-monitor-card__quick-issue-input {
+        flex: 1;
+        min-width: 0;
+        height: 30px;
+        border: 1px solid var(--color-border-strong);
+        border-radius: var(--radius-md);
+        background: var(--color-surface-elevated);
+        color: var(--color-text);
+        font-family: var(--font-body);
+        font-size: var(--type-xs);
+        padding: 0 var(--space-2);
+      }
+      .issue-monitor-card__quick-issue-input::placeholder {
+        color: var(--color-text-muted);
+      }
+      .issue-monitor-card__quick-issue-input:focus-visible,
+      .issue-monitor-card__quick-issue-launch:focus-visible {
+        outline: 2px solid var(--color-focus-ring);
+        outline-offset: 2px;
+      }
+      .issue-monitor-card__quick-issue .wizard-button {
+        height: 30px;
+        padding: 0 var(--space-2);
+        white-space: nowrap;
+      }
       .issue-monitor-card__detail {
         color: var(--color-text-muted);
         font-family: var(--font-mono);
@@ -458,7 +492,7 @@ export function createIssueMonitorSurface({ document, send, focusWindow }) {
     const settingsText = element(
       "div",
       "issue-monitor-card__settings",
-      "Agent settings Default: configure to override",
+      "Agent settings Missing saved profile: configure before auto start",
     );
     stateLine.appendChild(stateText);
     stateLine.appendChild(detailText);
@@ -466,6 +500,19 @@ export function createIssueMonitorSurface({ document, send, focusWindow }) {
     summary.appendChild(settingsText);
 
     const toolbarActions = element("div", "issue-monitor-card__toolbar-actions");
+    const agentSettingsButton = element(
+      "button",
+      "wizard-button issue-monitor-card__agent-settings",
+      "Agent settings",
+    );
+    agentSettingsButton.type = "button";
+    agentSettingsButton.addEventListener("click", () => {
+      sendMonitorEvent({
+        kind: "issue_monitor_configure_profile",
+      });
+    });
+    toolbarActions.appendChild(agentSettingsButton);
+
     const maxActiveLabel = element("label", "issue-monitor-card__max-active");
     maxActiveLabel.appendChild(element("span", null, "Max active"));
     const maxActiveInput = element("input", "issue-monitor-card__number");
@@ -488,7 +535,9 @@ export function createIssueMonitorSurface({ document, send, focusWindow }) {
     toggleButton.type = "button";
     toggleButton.addEventListener("click", () => {
       const nextEnabled = !Boolean(status.enabled);
-      applyOptimisticEnabled(nextEnabled);
+      if (!nextEnabled || status.launch_profile_source === "saved") {
+        applyOptimisticEnabled(nextEnabled);
+      }
       sendMonitorEvent({
         kind: "set_issue_monitor_enabled",
         enabled: nextEnabled,
@@ -517,12 +566,46 @@ export function createIssueMonitorSurface({ document, send, focusWindow }) {
     toolbar.appendChild(summary);
     toolbar.appendChild(toolbarActions);
 
+    // SPEC-3214 FR-004/FR-005: Quick issue — register a one-line
+    // `investigation` issue; the ⚡ button also hands it to the monitor's
+    // claim→launch pipeline.
+    const quickIssue = element("div", "issue-monitor-card__quick-issue");
+    const quickIssueInput = element("input", "issue-monitor-card__quick-issue-input");
+    quickIssueInput.type = "text";
+    quickIssueInput.setAttribute("placeholder", "Quick issue title…");
+    quickIssueInput.setAttribute("aria-label", "Quick issue title");
+    const quickIssueLaunch = element(
+      "button",
+      "wizard-button issue-monitor-card__quick-issue-launch",
+      "⚡ Register & Launch",
+    );
+    quickIssueLaunch.type = "button";
+    const submitQuickIssue = (launch) => {
+      const title = String(quickIssueInput.value || "").trim();
+      if (!title) {
+        return;
+      }
+      sendMonitorEvent({ kind: "quick_register_issue", title, launch });
+      quickIssueInput.value = "";
+    };
+    quickIssueInput.addEventListener("keydown", (event) => {
+      if (event.key !== "Enter") {
+        return;
+      }
+      event.preventDefault?.();
+      submitQuickIssue(false);
+    });
+    quickIssueLaunch.addEventListener("click", () => submitQuickIssue(true));
+    quickIssue.appendChild(quickIssueInput);
+    quickIssue.appendChild(quickIssueLaunch);
+
     const errorText = element("div", "issue-monitor-card__error");
     const inboxRoot = element("div", "issue-monitor-card__inbox");
     inboxRoot.setAttribute("role", "list");
     const toastRoot = element("div", "issue-monitor-card__toast");
 
     root.appendChild(toolbar);
+    root.appendChild(quickIssue);
     root.appendChild(errorText);
     root.appendChild(inboxRoot);
     root.appendChild(toastRoot);
@@ -855,7 +938,7 @@ export function createIssueMonitorSurface({ document, send, focusWindow }) {
         actions.appendChild(downButton);
       }
       if (number && ["queued", "launch_failed", "agent_failed"].includes(item.state || "queued")) {
-        const configureButton = iconAction("⚙", "Configure", "configure-issue");
+        const configureButton = iconAction("⚙", "Project Agent settings", "configure-issue");
         configureButton.addEventListener("click", () => {
           sendMonitorEvent({
             kind: "issue_monitor_configure_issue",
@@ -922,7 +1005,7 @@ export function createIssueMonitorSurface({ document, send, focusWindow }) {
     }
     detailText.textContent = details.join(" | ");
     const sourceLabel = launchSettingsSourceLabel(status.launch_profile_source);
-    const profileSummary = status.launch_profile_summary || "configure to override";
+    const profileSummary = status.launch_profile_summary || "configure before auto start";
     settingsText.textContent = `Agent settings ${sourceLabel}: ${profileSummary}`;
     const lastError = status.last_error || "";
     errorText.textContent = lastError;
@@ -949,7 +1032,7 @@ export function createIssueMonitorSurface({ document, send, focusWindow }) {
       case "last_settings":
         return "Last settings";
       default:
-        return "Default";
+        return "Missing saved profile";
     }
   }
 

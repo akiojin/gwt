@@ -28,10 +28,11 @@ impl LaunchWizardState {
         let show_hermes_options = show_manual_setup && self.current_agent_supports_hermes_options();
         let show_opencode_options = show_manual_setup && self.current_agent_is_opencode();
         LaunchWizardView {
-            title: if self.wizard_mode == LaunchWizardMode::StartWork {
-                "Start Work".to_string()
-            } else {
-                "Launch Agent".to_string()
+            title: match self.wizard_mode {
+                LaunchWizardMode::StartWork => "Start Work".to_string(),
+                LaunchWizardMode::Intake => "Intake".to_string(),
+                LaunchWizardMode::ExistingBranch => "Open existing branch".to_string(),
+                _ => "Launch Agent".to_string(),
             },
             mode: self.wizard_mode,
             branch_name: self.branch_name.clone(),
@@ -139,6 +140,13 @@ impl LaunchWizardState {
     }
 
     fn start_methods_view(&self) -> Vec<LaunchWizardStartMethodView> {
+        // SPEC-3214 FR-010: the standalone existing-branch picker offers no
+        // start method until the user has selected a branch — there is no
+        // reserved work/* branch that a launch could fall back to.
+        if self.wizard_mode == LaunchWizardMode::ExistingBranch && self.branch_name.is_empty() {
+            return Vec::new();
+        }
+        let is_intake = self.wizard_mode == LaunchWizardMode::Intake;
         let has_previous_settings = self.has_previous_start_settings();
         let latest_session = self.latest_quick_start_entry().map(|(_, entry)| entry);
         let latest_live = self.latest_running_session().map(|(_, session)| session);
@@ -160,7 +168,12 @@ impl LaunchWizardState {
                 kind: LaunchWizardStartMethodKind::ConfigureAndStart
                     .value()
                     .to_string(),
-                label: "Configure and start".to_string(),
+                label: if is_intake {
+                    "Configure intake"
+                } else {
+                    "Configure and start"
+                }
+                .to_string(),
                 badge: "Settings".to_string(),
                 group: start_method_group(
                     LaunchWizardStartMethodKind::ConfigureAndStart,
@@ -168,7 +181,12 @@ impl LaunchWizardState {
                     recommended_method,
                 ),
                 recommended: recommended_method == LaunchWizardStartMethodKind::ConfigureAndStart,
-                summary: "Edit settings before launch".to_string(),
+                summary: if is_intake {
+                    "Edit intake settings before starting"
+                } else {
+                    "Edit settings before launch"
+                }
+                .to_string(),
                 detail: None,
                 enabled: true,
                 disabled_reason: None,
@@ -177,7 +195,12 @@ impl LaunchWizardState {
                 kind: LaunchWizardStartMethodKind::StartWithLastSettings
                     .value()
                     .to_string(),
-                label: "Start with last settings".to_string(),
+                label: if is_intake {
+                    "Use saved settings"
+                } else {
+                    "Start with last settings"
+                }
+                .to_string(),
                 badge: "New".to_string(),
                 group: start_method_group(
                     LaunchWizardStartMethodKind::StartWithLastSettings,
@@ -187,9 +210,17 @@ impl LaunchWizardState {
                 recommended: recommended_method
                     == LaunchWizardStartMethodKind::StartWithLastSettings,
                 summary: if has_previous_settings {
-                    "New session with saved settings"
+                    if is_intake {
+                        "New intake session with saved settings"
+                    } else {
+                        "New session with saved settings"
+                    }
                 } else {
-                    "Use saved launch settings"
+                    if is_intake {
+                        "Use saved intake settings"
+                    } else {
+                        "Use saved launch settings"
+                    }
                 }
                 .to_string(),
                 detail: None,
@@ -246,8 +277,20 @@ impl LaunchWizardState {
                     recommended_method,
                 ),
                 recommended: recommended_method == LaunchWizardStartMethodKind::OpenSessionPicker,
-                summary: "Choose a saved session".to_string(),
-                detail: Some("Opens the agent's session picker".to_string()),
+                summary: if is_intake {
+                    "Choose a saved intake session"
+                } else {
+                    "Choose a saved session"
+                }
+                .to_string(),
+                detail: Some(
+                    if is_intake {
+                        "Opens the intake session picker"
+                    } else {
+                        "Opens the agent's session picker"
+                    }
+                    .to_string(),
+                ),
                 enabled: true,
                 disabled_reason: None,
             });
@@ -256,7 +299,12 @@ impl LaunchWizardState {
             kind: LaunchWizardStartMethodKind::FocusRunningSession
                 .value()
                 .to_string(),
-            label: "Focus running session".to_string(),
+            label: if is_intake {
+                "Focus running intake"
+            } else {
+                "Focus running session"
+            }
+            .to_string(),
             badge: "Running".to_string(),
             group: start_method_group(
                 LaunchWizardStartMethodKind::FocusRunningSession,
@@ -266,7 +314,13 @@ impl LaunchWizardState {
             recommended: recommended_method == LaunchWizardStartMethodKind::FocusRunningSession,
             summary: latest_live
                 .map(|session| session.name.clone())
-                .unwrap_or_else(|| "Switch to running session".to_string()),
+                .unwrap_or_else(|| {
+                    if is_intake {
+                        "Switch to running intake session".to_string()
+                    } else {
+                        "Switch to running session".to_string()
+                    }
+                }),
             detail: latest_live.and_then(|session| {
                 session
                     .detail
@@ -383,7 +437,12 @@ impl LaunchWizardState {
     }
 
     fn launch_summary_view(&self) -> Vec<LaunchWizardSummaryView> {
-        let mut summary = if self.wizard_mode == LaunchWizardMode::StartWork {
+        let mut summary = if self.wizard_mode == LaunchWizardMode::Intake {
+            vec![LaunchWizardSummaryView {
+                label: "Session".to_string(),
+                value: "Ephemeral intake".to_string(),
+            }]
+        } else if self.wizard_mode == LaunchWizardMode::StartWork {
             vec![LaunchWizardSummaryView {
                 label: "Workspace".to_string(),
                 value: "Current project".to_string(),
@@ -535,6 +594,9 @@ impl LaunchWizardState {
             return "Preparing...".to_string();
         }
         if self.show_start_methods() {
+            if self.wizard_mode == LaunchWizardMode::Intake {
+                return "Choose intake method".to_string();
+            }
             return "Choose start method".to_string();
         }
         match self.launch_path {
@@ -652,7 +714,12 @@ impl LaunchWizardState {
             },
             LaunchWizardProgressStepView {
                 key: "start".to_string(),
-                label: "Start".to_string(),
+                label: if self.wizard_mode == LaunchWizardMode::Intake {
+                    "Begin"
+                } else {
+                    "Start"
+                }
+                .to_string(),
                 state: start_state.to_string(),
                 detail: self.launch_materialization_message.clone(),
             },
@@ -884,6 +951,70 @@ mod tests {
         assert_eq!(methods[4].kind, "focus_running_session");
         assert_eq!(methods[4].badge, "Running");
         assert!(methods.iter().all(|method| method.enabled));
+    }
+
+    #[test]
+    fn intake_view_uses_curate_copy_and_branchless_summary() {
+        let state = LaunchWizardState::open_intake_with_previous_profiles(
+            context(branch("origin/develop"), ""),
+            sample_agent_options(),
+            vec![quick_start_entry(
+                "session-newer",
+                "codex",
+                Some("native-newer"),
+                None,
+                gwt_agent::LaunchRuntimeTarget::Host,
+                None,
+            )],
+            Default::default(),
+        );
+
+        let view = state.view();
+
+        assert_eq!(view.mode, LaunchWizardMode::Intake);
+        assert_eq!(view.title, "Intake");
+        assert!(
+            !view
+                .launch_summary
+                .iter()
+                .any(|item| item.label == "Branch"),
+            "Intake summary must not expose a blank branch card"
+        );
+        assert!(
+            view.launch_summary
+                .iter()
+                .any(|item| item.label == "Session" && item.value == "Ephemeral intake"),
+            "Intake summary must identify the branchless curate session"
+        );
+        let configure = view
+            .start_methods
+            .iter()
+            .find(|method| method.kind == "configure_and_start")
+            .expect("configure intake method");
+        assert_eq!(configure.label, "Configure intake");
+        assert_eq!(configure.summary, "Edit intake settings before starting");
+        let saved = view
+            .start_methods
+            .iter()
+            .find(|method| method.kind == "start_with_last_settings")
+            .expect("saved intake settings method");
+        assert_eq!(saved.label, "Use saved settings");
+        let picker = view
+            .start_methods
+            .iter()
+            .find(|method| method.kind == "open_session_picker")
+            .expect("intake session picker method");
+        assert_eq!(picker.summary, "Choose a saved intake session");
+        assert_eq!(
+            picker.detail.as_deref(),
+            Some("Opens the intake session picker")
+        );
+        assert!(
+            view.progress_steps
+                .iter()
+                .any(|step| step.key == "start" && step.label == "Begin"),
+            "Intake progress rail must not show the direct Launch Start step"
+        );
     }
 
     #[test]

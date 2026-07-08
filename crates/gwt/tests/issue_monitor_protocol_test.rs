@@ -64,6 +64,11 @@ fn frontend_issue_monitor_events_use_snake_case_wire_shape() {
         }
     ));
 
+    let event: FrontendEvent =
+        serde_json::from_str(r#"{"kind":"issue_monitor_configure_profile"}"#)
+            .expect("configure profile event");
+    assert!(matches!(event, FrontendEvent::IssueMonitorConfigureProfile));
+
     let event: FrontendEvent = serde_json::from_str(
         r#"{"kind":"reorder_issue_monitor_issues","issue_numbers":[44,42,43]}"#,
     )

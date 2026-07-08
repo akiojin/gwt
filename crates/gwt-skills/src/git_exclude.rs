@@ -195,8 +195,10 @@ fn exclude_patterns_for_targets(targets: &[ManagedAssetTarget]) -> Vec<&'static 
     // project-local `.gwt/` holds gwt-managed files (project.toml,
     // discussion.md, agent homes). Exclude its contents broadly, but carve out
     // `.gwt/work/` so the tracked Work persistent core (`.gwt/work/events.jsonl`,
-    // `.gwt/work/memory.md`, `.gwt/work/discussions.md`) is committed with the
-    // repo (SPEC-2359 Phase W-12). `.gwt/*` excludes the children without
+    // `.gwt/work/board-remote-roots.jsonl`) is committed with the repo
+    // (SPEC-2359 Phase W-12). memory.md / discussions.md moved to the
+    // machine-local home work-notes dir (SPEC-3214); a legacy repo-local copy
+    // remains a read fallback. `.gwt/*` excludes the children without
     // excluding the `.gwt/` directory itself, so the later `!.gwt/work/`
     // negation can re-include the Work directory (re-inclusion is impossible
     // only when a parent directory is excluded).
