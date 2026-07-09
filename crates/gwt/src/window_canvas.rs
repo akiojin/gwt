@@ -1,7 +1,7 @@
 use crate::{
     persistence::{
         AgentKanbanLane, CanvasViewport, PersistedWindowCanvasState, PersistedWindowState,
-        WindowGeometry, WindowPlacement, WindowProcessStatus,
+        WindowGeometry, WindowLaneKind, WindowPlacement, WindowProcessStatus,
     },
     preset::WindowPreset,
     protocol::{ArrangeMode, FocusCycleDirection},
@@ -375,6 +375,7 @@ impl WindowCanvasState {
             dynamic_title_detail: None,
             agent_id: None,
             agent_color: None,
+            lane_kind: WindowLaneKind::Unknown,
             tab_group_id: None,
             tab_group_active: false,
             session_id: None,
@@ -1261,6 +1262,7 @@ mod tests {
                 dynamic_title_detail: None,
                 agent_id: None,
                 agent_color: None,
+                lane_kind: WindowLaneKind::Unknown,
                 tab_group_id: None,
                 tab_group_active: false,
                 session_id: None,

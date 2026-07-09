@@ -325,8 +325,15 @@ fn check_status(resp: &HttpResponse) -> Result<(), ApiError> {
             Err(ApiError::RateLimited { retry_after: None })
         }
         401 => Err(ApiError::Unauthorized),
-        403 => Err(ApiError::RateLimited { retry_after: None }),
-        404 => Err(ApiError::Unexpected("not found".into())),
+        // SPEC-3214 FR-011: keep the GitHub reason (e.g. personal repo
+        // restrictions) instead of flattening every 403 into RateLimited.
+        403 => Err(ApiError::PermissionDenied {
+            message: github_error_message(&resp.body),
+        }),
+        404 => Err(ApiError::Unexpected(format!(
+            "not found: {}",
+            github_error_message(&resp.body)
+        ))),
         422 if resp.body.contains("is too long") || resp.body.contains("body is too long") => {
             Err(ApiError::BodyTooLarge)
         }
@@ -336,6 +343,20 @@ fn check_status(resp: &HttpResponse) -> Result<(), ApiError> {
             resp.body
         ))),
     }
+}
+
+/// Extract the `message` field from a GitHub error body, falling back to the
+/// raw body so no reason is ever dropped.
+fn github_error_message(body: &str) -> String {
+    serde_json::from_str::<Value>(body)
+        .ok()
+        .and_then(|value| {
+            value
+                .get("message")
+                .and_then(Value::as_str)
+                .map(str::to_string)
+        })
+        .unwrap_or_else(|| body.to_string())
 }
 
 fn resolve_gh_token() -> Result<String, ApiError> {
@@ -721,5 +742,63 @@ impl<T: HttpTransport> IssueClient for HttpIssueClient<T> {
         }
 
         Ok(out)
+    }
+}
+
+#[cfg(test)]
+mod check_status_tests {
+    use super::{check_status, HttpResponse};
+    use crate::client::ApiError;
+
+    /// SPEC-3214 T-016 / FR-011: a non-rate-limit 403 must surface the
+    /// GitHub-provided reason (e.g. personal repo restrictions) instead of
+    /// being flattened into a rate-limit error.
+    #[test]
+    fn permission_denied_403_preserves_github_message() {
+        let resp = HttpResponse {
+            status: 403,
+            body: r#"{"message":"Issues are disabled for this repo","documentation_url":"https://docs.github.com"}"#.to_string(),
+        };
+        let error = check_status(&resp).expect_err("403 must be an error");
+        match error {
+            ApiError::PermissionDenied { message } => {
+                assert!(
+                    message.contains("Issues are disabled for this repo"),
+                    "GitHub reason must be preserved, got: {message}"
+                );
+            }
+            other => panic!("403 must map to PermissionDenied, got: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn rate_limited_403_still_maps_to_rate_limited() {
+        let resp = HttpResponse {
+            status: 403,
+            body: r#"{"message":"API rate limit exceeded for user"}"#.to_string(),
+        };
+        assert!(matches!(
+            check_status(&resp).expect_err("403 must be an error"),
+            ApiError::RateLimited { .. }
+        ));
+    }
+
+    /// SPEC-3214 R-7: 404 responses also keep the server message instead of a
+    /// bare "not found".
+    #[test]
+    fn not_found_404_preserves_github_message() {
+        let resp = HttpResponse {
+            status: 404,
+            body: r#"{"message":"Not Found: repository archived"}"#.to_string(),
+        };
+        match check_status(&resp).expect_err("404 must be an error") {
+            ApiError::Unexpected(message) => {
+                assert!(
+                    message.contains("repository archived"),
+                    "server message must be preserved, got: {message}"
+                );
+            }
+            other => panic!("404 must map to Unexpected with message, got: {other:?}"),
+        }
     }
 }

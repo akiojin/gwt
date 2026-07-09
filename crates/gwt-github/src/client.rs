@@ -121,6 +121,11 @@ pub enum ApiError {
     BodyTooLarge,
     #[error("rate limited (retry_after = {retry_after:?})")]
     RateLimited { retry_after: Option<u64> },
+    /// SPEC-3214 FR-011: non-rate-limit 403. Preserves the GitHub-provided
+    /// reason (e.g. "Issues are disabled for this repo") so callers can show
+    /// the specific cause instead of a generic failure.
+    #[error("permission denied: {message}")]
+    PermissionDenied { message: String },
     #[error("network error: {0}")]
     Network(String),
     #[error("authentication required")]

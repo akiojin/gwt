@@ -2190,18 +2190,35 @@ def _parse_memory_heading(heading: str) -> tuple[str, str]:
     return "", heading.strip()
 
 
+def _work_notes_source_path(project_root: str, repo_hash: str, file_name: str) -> Path:
+    """Resolve a work-notes source file with home-first fallback.
+
+    SPEC-3214 (FR-007): memory/discussions are machine-local scratch under
+    ``~/.gwt/projects/<repo-hash>/work-notes/``. The git-tracked repo-local
+    ``.gwt/work/`` file remains a read fallback for pre-migration repos.
+    """
+    home = Path(os.environ.get("HOME") or os.environ.get("USERPROFILE") or Path.home())
+    if repo_hash:
+        home_path = home / ".gwt" / "projects" / repo_hash / "work-notes" / file_name
+        if home_path.is_file():
+            return home_path
+    return Path(project_root) / ".gwt" / "work" / file_name
+
+
 def _load_memory_documents(
     project_root: str,
+    repo_hash: str = "",
 ) -> tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
-    """Load ``<project_root>/.gwt/work/memory.md`` and chunk it into memory units.
+    """Load the project memory log and chunk it into memory units.
 
+    The source is the machine-local home work-notes file when present,
+    otherwise the legacy repo-local ``.gwt/work/memory.md`` (SPEC-3214).
     Returns a tuple ``(memory, manifest_entries)`` where ``manifest_entries``
     contains at most one entry describing the source file's mtime/size.
     Missing file → both empty. Empty file → empty memory but a manifest
     entry so that the runner can still detect future content additions.
     """
-    root = Path(project_root)
-    source_path = root / ".gwt" / "work" / "memory.md"
+    source_path = _work_notes_source_path(project_root, repo_hash, "memory.md")
     if not source_path.is_file():
         return [], []
 
@@ -2216,7 +2233,9 @@ def _load_memory_documents(
         return [], []
     manifest_entries = [
         {
-            "path": ".gwt/work/memory.md",
+            # The manifest key switches to the absolute home path after the
+            # SPEC-3214 migration so the source change triggers one re-index.
+            "path": str(source_path),
             "mtime": int(stat.st_mtime),
             "size": int(stat.st_size),
         }
@@ -2305,7 +2324,7 @@ def action_index_memory_v2(
     """
     del worktree_hash  # repo-scoped scope does not consume the worktree hash
     db_path = resolve_db_path(repo_hash, None, "memory", db_root=db_root)
-    memories, new_entries = _load_memory_documents(project_root)
+    memories, new_entries = _load_memory_documents(project_root, repo_hash)
 
     emit_progress(
         {
@@ -2418,10 +2437,14 @@ def _parse_related_specs(value: str) -> List[str]:
 
 def _load_discussion_documents(
     project_root: str,
+    repo_hash: str = "",
 ) -> tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
-    """Load ``<project_root>/.gwt/work/discussions.md`` into discussion chunks."""
-    root = Path(project_root)
-    source_path = root / ".gwt" / "work" / "discussions.md"
+    """Load the discussion log into discussion chunks.
+
+    The source is the machine-local home work-notes file when present,
+    otherwise the legacy repo-local ``.gwt/work/discussions.md`` (SPEC-3214).
+    """
+    source_path = _work_notes_source_path(project_root, repo_hash, "discussions.md")
     if not source_path.is_file():
         return [], []
 
@@ -2436,7 +2459,9 @@ def _load_discussion_documents(
         return [], []
     manifest_entries = [
         {
-            "path": ".gwt/work/discussions.md",
+            # The manifest key switches to the absolute home path after the
+            # SPEC-3214 migration so the source change triggers one re-index.
+            "path": str(source_path),
             "mtime": int(stat.st_mtime),
             "size": int(stat.st_size),
         }
@@ -2532,7 +2557,7 @@ def action_index_discussions_v2(
     """Index ``.gwt/work/discussions.md`` into the repo-scoped discussions store."""
     del worktree_hash
     db_path = resolve_db_path(repo_hash, None, "discussions", db_root=db_root)
-    discussions, new_entries = _load_discussion_documents(project_root)
+    discussions, new_entries = _load_discussion_documents(project_root, repo_hash)
 
     emit_progress(
         {

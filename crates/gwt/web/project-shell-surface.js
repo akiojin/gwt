@@ -64,6 +64,12 @@ import {
 } from "/project-switcher.js";
 import { windowRuntimeLabel } from "/window-runtime-state.js";
 import { groupProjectWindowList } from "/window-list-model.js";
+import {
+  applyWindowLaneData,
+  shouldShowWindowLaneBadge,
+  windowLaneBadgeView,
+  windowLaneKind,
+} from "/window-lane-identity.js";
 
 export function createProjectShellSurface({
   send,
@@ -228,6 +234,8 @@ export function createProjectShellSurface({
           appendRenderKeyPart(parts, entry?.agent_id || "");
           appendRenderKeyPart(parts, "agent_color");
           appendRenderKeyPart(parts, entry?.agent_color || "");
+          appendRenderKeyPart(parts, "lane_kind");
+          appendRenderKeyPart(parts, windowLaneKind(entry));
           appendRenderKeyPart(parts, "status");
           appendRenderKeyPart(parts, entry?.status || "");
           appendRenderKeyPart(parts, "runtime_state");
@@ -542,6 +550,7 @@ export function createProjectShellSurface({
         if (entry.agent_color) {
           row.dataset.agentColor = entry.agent_color;
         }
+        applyWindowLaneData(row, entry);
         const geometryLabel = windowGeometryLabel(entry);
         const runtimeState = runtimeStateForWindow(entry);
         const runtimeLabel = windowRuntimeLabel(runtimeState);
@@ -554,6 +563,10 @@ export function createProjectShellSurface({
         const roleBadgeLabel = windowRoleBadgeLabel(entry);
         const roleBadge = roleBadgeLabel
           ? `<span class="window-role-badge window-list-role">${escapeHtml(roleBadgeLabel)}</span>`
+          : "";
+        const laneBadgeView = windowLaneBadgeView(entry);
+        const laneBadge = shouldShowWindowLaneBadge(entry)
+          ? `<span class="window-lane-badge window-list-lane" data-lane-kind="${escapeHtml(laneBadgeView.kind)}" data-lane-label="${escapeHtml(laneBadgeView.label)}" aria-label="${escapeHtml(laneBadgeView.ariaLabel)}" title="${escapeHtml(laneBadgeView.title)}">${escapeHtml(laneBadgeView.shortLabel)}</span>`
           : "";
         // FR-045 (anshin): surface the agent's live activity detail
         // (dynamic_title_detail) as a glanceable line when it differs from the
@@ -570,6 +583,7 @@ export function createProjectShellSurface({
             <div class="window-list-title">${escapeHtml(displayTitle)}</div>
             ${activityLine}
             <div class="window-list-meta">
+              ${laneBadge}
               ${roleBadge}
               <span class="window-list-geometry">${geometryLabel}</span>
             </div>

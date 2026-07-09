@@ -635,6 +635,11 @@ pub enum FrontendEvent {
         issue_numbers: Vec<u64>,
     },
     ListIssueMonitor,
+    QuickRegisterIssue {
+        title: String,
+        #[serde(default)]
+        launch: bool,
+    },
     IssueMonitorLaunchNow {
         issue_number: u64,
         #[serde(default)]
@@ -645,6 +650,7 @@ pub enum FrontendEvent {
         #[serde(default)]
         linked_issue_kind: Option<crate::LinkedIssueKind>,
     },
+    IssueMonitorConfigureProfile,
     /// Legacy Phase 14 entry point. Frontend now sends
     /// [`FrontendEvent::ApplyUpdateStart`] / [`FrontendEvent::ApplyUpdateRestartNow`]
     /// instead. Kept so older clients and unit tests that still drive

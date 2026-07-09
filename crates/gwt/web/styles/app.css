@@ -858,6 +858,48 @@ body {
   display: none;
 }
 
+.window-lane-badge {
+  display: inline-flex;
+  align-items: center;
+  flex-shrink: 0;
+  min-height: 20px;
+  padding: 2px 7px;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-pill);
+  background: var(--color-surface-elevated);
+  color: var(--color-text-strong);
+  font-family: var(--font-mono);
+  font-size: var(--type-xs);
+  font-weight: 700;
+  line-height: 1;
+  letter-spacing: 0;
+  white-space: nowrap;
+}
+
+.window-lane-badge[hidden] {
+  display: none;
+}
+
+.window-lane-badge[data-lane-kind="intake"] {
+  border-color: var(--color-state-needs-input);
+  background: color-mix(in oklab, var(--color-state-needs-input) 14%, var(--color-surface-elevated));
+}
+
+.window-lane-badge[data-lane-kind="execution"] {
+  border-color: var(--color-state-active);
+  background: color-mix(in oklab, var(--color-state-active) 14%, var(--color-surface-elevated));
+}
+
+.window-lane-badge[data-lane-kind="unknown"] {
+  border-color: var(--color-border-strong);
+  color: var(--color-text-muted);
+}
+
+.window-list-lane {
+  min-height: 18px;
+  padding-inline: 6px;
+}
+
 .window-list-role {
   min-height: 18px;
   padding-inline: 6px;

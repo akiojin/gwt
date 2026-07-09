@@ -473,6 +473,50 @@ fn projection_round_trips_through_json_file() {
     assert_eq!(loaded, expected);
 }
 
+/// SPEC-3214 T-007 / FR-003 contract: a detached (branch-less) intake
+/// worktree never produces a branch-derived Work identity. The reconcile
+/// decision step must drop `branch: None` sources, so an ephemeral intake
+/// session leaves no Work row behind (fixes the FR-381 branchless-drop
+/// behavior as SPEC-3214 acceptance).
+#[test]
+fn detached_intake_worktree_source_never_needs_backfill() {
+    use gwt_core::workspace_projection::{
+        worktree_sources_needing_backfill, WorkItemsProjection, WorktreeReconcileSource,
+    };
+
+    let temp = tempfile::tempdir().expect("tempdir");
+    let project_root = temp.path().join("repo");
+    let projection = WorkItemsProjection::empty(Utc.with_ymd_and_hms(2026, 7, 2, 0, 0, 0).unwrap());
+
+    let sources = vec![
+        WorktreeReconcileSource {
+            branch: None,
+            worktree_path: temp.path().join(".intake"),
+        },
+        WorktreeReconcileSource {
+            branch: Some("  ".to_string()),
+            worktree_path: temp.path().join(".intake-2"),
+        },
+        WorktreeReconcileSource {
+            branch: Some("work/issue-9".to_string()),
+            worktree_path: temp.path().join("work/issue-9"),
+        },
+    ];
+
+    let pending = worktree_sources_needing_backfill(&projection, &project_root, &sources);
+
+    assert_eq!(
+        pending.len(),
+        1,
+        "only the named-branch worktree may generate a Work identity"
+    );
+    assert_eq!(
+        pending[0].1.branch.as_deref(),
+        Some("work/issue-9"),
+        "the surviving source must be the named branch, not an intake worktree"
+    );
+}
+
 #[test]
 fn save_projection_is_atomic_and_cleans_temp_file() {
     let temp = tempfile::tempdir().expect("tempdir");
