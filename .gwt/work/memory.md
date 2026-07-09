@@ -7624,3 +7624,10 @@ Type: workflow
 Context: Issue #3253: owner-unlinked workflow-policy blocked gwtd JSON envelope discovery/linking commands because heredoc command segmentation normalized them to a lone gwtd segment and the owner guard did not classify the envelope operation.
 Learning: Classify standalone gwtd JSON envelopes from the original command before segment allowlists, but run shell output redirection detection first so control-plane transport cannot mask worktree writes.
 Future Action: When changing hook workflow policies, add RED tests for both allowed standalone JSON envelope commands and adversarial variants such as chained shell mutation or output redirection.
+
+## 2026-07-09 — owner guard 下では gwtd envelope は literal コマンド名でのみ通る（/release ブロックは #3267）
+
+Type: workflow-correction
+Context: v9.65.0 リリース完了確認で、owner 未リンク session の workflow-policy owner guard が gh release view / git ls-remote / git tag --contains / GWT_BIN 変数経由の gwtd heredoc envelope（issue.view 等 read-only 含む）をブロックした。
+Learning: json_envelope_operation は単一 segment かつ literal トークン gwtd のみ envelope 認識する（workflow_policy.rs）。同じ operation でも GWT_BIN 変数経由だとブロック、literal gwtd heredoc なら任意 operation が ownerless-safe で通る。gh は read-only 分類が一切なく、git の read-only 許可は cat-file/diff/log/ls-files/ls-tree/rev-parse/show/status/branch/config/remote のみ（fetch/pull/ls-remote/tag は不可）。WorkflowBypass::Release は型のみで production 設定経路が無い。
+Future Action: owner 未リンク session で gwtd を使う場合は必ず literal な gwtd 単一 heredoc で呼ぶ（release.md の resolve_gwt_bin GWT_BIN スタイルは hook に認識されない）。gh/git 監視系がブロックされたら Issue #3267 の解消状況を確認する。修正時は release.md の手順と classifier の整合も取る。
