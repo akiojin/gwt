@@ -978,9 +978,7 @@ impl LaunchWizardState {
         self.sync_selected_agent_options();
         self.apply_quick_start_runtime_selection(&entry);
         self.apply_saved_model(entry.model.as_deref());
-        if let Some(reasoning) = entry.reasoning.clone() {
-            self.apply_restored_reasoning(reasoning);
-        }
+        self.apply_restored_reasoning(entry.reasoning.clone());
         if let Some(version) = entry.version.clone() {
             self.version = version;
         }
@@ -1046,9 +1044,7 @@ impl LaunchWizardState {
             self.apply_quick_start_runtime_selection(&entry);
         }
         self.apply_saved_model(entry.model.as_deref());
-        if let Some(reasoning) = entry.reasoning {
-            self.apply_restored_reasoning(reasoning);
-        }
+        self.apply_restored_reasoning(entry.reasoning);
         if let Some(version) = entry.version {
             self.version = version;
         }
@@ -1109,9 +1105,7 @@ impl LaunchWizardState {
 
     fn apply_previous_agent_preferences(&mut self, profile: LaunchWizardPreviousProfile) {
         self.apply_saved_model(profile.model.as_deref());
-        if let Some(reasoning) = profile.reasoning.as_deref() {
-            self.apply_restored_reasoning(reasoning.to_string());
-        }
+        self.apply_restored_reasoning(profile.reasoning.clone());
         self.sync_reasoning_state();
         if let Some(version) = profile.version.as_deref() {
             if self
@@ -1351,11 +1345,21 @@ impl LaunchWizardState {
     /// Apply a reasoning value restored from a saved source (Quick Start
     /// entry, previous profile, hydration). Restored values count as explicit
     /// selections so later model changes preserve/clamp instead of resetting
-    /// to the model default; `sync_reasoning_state` normalizes them against
-    /// the current model (SPEC-1921 US-20 / FR-123).
-    fn apply_restored_reasoning(&mut self, reasoning: String) {
-        self.reasoning_explicit = !reasoning.is_empty();
-        self.reasoning = reasoning;
+    /// to the model default. A source without a recorded effort counts as
+    /// untouched: any stale explicit selection left in wizard memory is
+    /// demoted so the target model's default applies instead of leaking a
+    /// value the saved source never chose. `sync_reasoning_state` normalizes
+    /// either way (SPEC-1921 US-20 / FR-123, PR #3270 review follow-up).
+    fn apply_restored_reasoning(&mut self, reasoning: Option<String>) {
+        match reasoning {
+            Some(reasoning) if !reasoning.is_empty() => {
+                self.reasoning_explicit = true;
+                self.reasoning = reasoning;
+            }
+            _ => {
+                self.reasoning_explicit = false;
+            }
+        }
         self.sync_reasoning_state();
     }
 
@@ -2054,9 +2058,7 @@ impl LaunchWizardState {
 
         self.apply_quick_start_runtime_selection(&entry);
         self.apply_saved_model(entry.model.as_deref());
-        if let Some(reasoning) = entry.reasoning {
-            self.apply_restored_reasoning(reasoning);
-        }
+        self.apply_restored_reasoning(entry.reasoning);
         if let Some(version) = entry.version {
             self.version = version;
         }
@@ -2234,6 +2236,54 @@ mod tests {
 
         state.set_model("gpt-5.6-sol");
         assert_eq!(state.reasoning, "low");
+    }
+
+    // SPEC-1921 US-20 / FR-123 (PR #3270 review follow-up): a saved entry
+    // without a recorded effort counts as untouched, so a stale explicit
+    // selection left in wizard memory must not leak into the entry's launch —
+    // the target model's default applies instead of a clamped stale value.
+    #[test]
+    fn quick_start_entry_without_saved_reasoning_uses_model_default() {
+        let mut state = LaunchWizardState::open_with(
+            context(branch("feature/gui"), "feature/gui"),
+            sample_agent_options(),
+            vec![QuickStartEntry {
+                session_id: "gwt-session-1".to_string(),
+                agent_id: "codex".to_string(),
+                tool_label: "Codex".to_string(),
+                model: Some("gpt-5.4".to_string()),
+                reasoning: None,
+                version: Some("0.110.0".to_string()),
+                resume_session_id: None,
+                live_window_id: None,
+                skip_permissions: false,
+                codex_fast_mode: false,
+                runtime_target: gwt_agent::LaunchRuntimeTarget::Host,
+                docker_service: None,
+                docker_lifecycle_intent: gwt_agent::DockerLifecycleIntent::Connect,
+            }],
+        );
+        // Leave a stale explicit selection in wizard memory first.
+        state.set_agent_id("codex");
+        state.set_model("gpt-5.6-sol");
+        state.set_reasoning("ultra");
+
+        state.apply(LaunchWizardAction::ApplyQuickStart {
+            index: 0,
+            mode: QuickStartLaunchMode::StartNew,
+        });
+
+        assert_eq!(state.model, "gpt-5.4");
+        assert_eq!(state.reasoning, "medium");
+        match state.completion.as_ref() {
+            Some(LaunchWizardCompletion::Launch(config)) => match config.as_ref() {
+                LaunchWizardLaunchRequest::Agent(config) => {
+                    assert_eq!(config.reasoning_level.as_deref(), Some("medium"));
+                }
+                other => panic!("expected agent launch request, got {other:?}"),
+            },
+            other => panic!("expected launch completion, got {other:?}"),
+        }
     }
 
     // SPEC-1921 US-20 / FR-123 + SC-029: a stale Quick Start model/effort pair
