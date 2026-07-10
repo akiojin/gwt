@@ -60,6 +60,7 @@ impl LaunchWizardState {
             agent_drafts: HashMap::new(),
             model: String::new(),
             reasoning: String::new(),
+            reasoning_explicit: false,
             version: String::new(),
             mode: "normal".to_string(),
             resume_session_id: None,
@@ -684,6 +685,7 @@ impl LaunchWizardState {
             LaunchWizardStep::ReasoningLevel => {
                 if let Some(option) = self.current_reasoning_options().get(self.selected) {
                     self.reasoning = option.stored_value.to_string();
+                    self.reasoning_explicit = true;
                 }
             }
             LaunchWizardStep::RuntimeTarget => {
@@ -856,6 +858,9 @@ impl LaunchWizardState {
     }
 
     fn finish_launch_request(&mut self) {
+        // Final normalization guard (SPEC-1921 US-20 / SC-029): no launch
+        // request may carry a model/effort pair the model does not support.
+        self.sync_reasoning_state();
         match self.build_launch_request() {
             Ok(config) => {
                 self.completion = Some(if self.runtime_context_resolved {
@@ -974,7 +979,7 @@ impl LaunchWizardState {
         self.apply_quick_start_runtime_selection(&entry);
         self.apply_saved_model(entry.model.as_deref());
         if let Some(reasoning) = entry.reasoning.clone() {
-            self.reasoning = reasoning;
+            self.apply_restored_reasoning(reasoning);
         }
         if let Some(version) = entry.version.clone() {
             self.version = version;
@@ -1042,7 +1047,7 @@ impl LaunchWizardState {
         }
         self.apply_saved_model(entry.model.as_deref());
         if let Some(reasoning) = entry.reasoning {
-            self.reasoning = reasoning;
+            self.apply_restored_reasoning(reasoning);
         }
         if let Some(version) = entry.version {
             self.version = version;
@@ -1105,13 +1110,7 @@ impl LaunchWizardState {
     fn apply_previous_agent_preferences(&mut self, profile: LaunchWizardPreviousProfile) {
         self.apply_saved_model(profile.model.as_deref());
         if let Some(reasoning) = profile.reasoning.as_deref() {
-            if self
-                .current_reasoning_options()
-                .iter()
-                .any(|option| option.stored_value == reasoning)
-            {
-                self.reasoning = reasoning.to_string();
-            }
+            self.apply_restored_reasoning(reasoning.to_string());
         }
         self.sync_reasoning_state();
         if let Some(version) = profile.version.as_deref() {
@@ -1343,9 +1342,21 @@ impl LaunchWizardState {
             .any(|option| option.stored_value == reasoning)
         {
             self.reasoning = reasoning.to_string();
+            self.reasoning_explicit = true;
         } else {
             self.error = Some("Reasoning option is unavailable".to_string());
         }
+    }
+
+    /// Apply a reasoning value restored from a saved source (Quick Start
+    /// entry, previous profile, hydration). Restored values count as explicit
+    /// selections so later model changes preserve/clamp instead of resetting
+    /// to the model default; `sync_reasoning_state` normalizes them against
+    /// the current model (SPEC-1921 US-20 / FR-123).
+    fn apply_restored_reasoning(&mut self, reasoning: String) {
+        self.reasoning_explicit = !reasoning.is_empty();
+        self.reasoning = reasoning;
+        self.sync_reasoning_state();
     }
 
     pub(super) fn set_runtime_target(&mut self, target: gwt_agent::LaunchRuntimeTarget) {
@@ -1475,22 +1486,40 @@ impl LaunchWizardState {
         }
     }
 
+    /// Shared reasoning normalization (SPEC-1921 US-20 / FR-123). Every path
+    /// that changes the model or restores a saved selection funnels through
+    /// this helper, and `finish_launch_request` runs it as a final guard so an
+    /// invalid model/effort pair can never reach a launch request (SC-029).
     fn sync_reasoning_state(&mut self) {
         let options = self.current_reasoning_options();
         if options.is_empty() {
             self.reasoning.clear();
+            self.reasoning_explicit = false;
             return;
         }
-        if self.reasoning.is_empty()
-            || !options
-                .iter()
-                .any(|option| option.stored_value == self.reasoning)
-        {
-            self.reasoning = options
-                .iter()
-                .find(|option| option.is_default)
-                .map(|option| option.stored_value.to_string())
-                .unwrap_or_default();
+        let default_value = options
+            .iter()
+            .find(|option| option.is_default)
+            .or_else(|| options.first())
+            .map(|option| option.stored_value.to_string())
+            .unwrap_or_default();
+        let supported = options
+            .iter()
+            .any(|option| option.stored_value == self.reasoning);
+        if self.agent_is_codex() {
+            // An untouched stop follows the selected model's default; an
+            // explicit stop survives when supported and clamps to the model's
+            // highest stop when it is not.
+            if !self.reasoning_explicit || self.reasoning.is_empty() {
+                self.reasoning = default_value;
+            } else if !supported {
+                self.reasoning = options
+                    .last()
+                    .map(|option| option.stored_value.to_string())
+                    .unwrap_or_default();
+            }
+        } else if self.reasoning.is_empty() || !supported {
+            self.reasoning = default_value;
         }
     }
 
@@ -1846,6 +1875,7 @@ impl LaunchWizardState {
             AgentLaunchDraft {
                 model: self.model.clone(),
                 reasoning: self.reasoning.clone(),
+                reasoning_explicit: self.reasoning_explicit,
                 version: self.version.clone(),
                 mode: self.mode.clone(),
                 resume_session_id: self.resume_session_id.clone(),
@@ -1875,6 +1905,7 @@ impl LaunchWizardState {
     fn apply_agent_draft(&mut self, draft: AgentLaunchDraft) {
         self.model = draft.model;
         self.reasoning = draft.reasoning;
+        self.reasoning_explicit = draft.reasoning_explicit;
         self.version = draft.version;
         self.mode = draft.mode;
         self.resume_session_id = draft.resume_session_id;
@@ -1885,6 +1916,7 @@ impl LaunchWizardState {
     fn reset_agent_draft_defaults(&mut self) {
         self.model.clear();
         self.reasoning.clear();
+        self.reasoning_explicit = false;
         self.version.clear();
         self.mode = "normal".to_string();
         self.resume_session_id = None;
@@ -1918,7 +1950,7 @@ impl LaunchWizardState {
 
     pub(super) fn current_reasoning_options(&self) -> Vec<ReasoningDisplayOption> {
         if self.agent_is_codex() {
-            CODEX_REASONING_OPTIONS.to_vec()
+            codex_reasoning_options_for_model(&self.model)
         } else if self.effective_agent_id() == "claude"
             && is_claude_opus_tier_model(self.model.as_str())
         {
@@ -2023,7 +2055,7 @@ impl LaunchWizardState {
         self.apply_quick_start_runtime_selection(&entry);
         self.apply_saved_model(entry.model.as_deref());
         if let Some(reasoning) = entry.reasoning {
-            self.reasoning = reasoning;
+            self.apply_restored_reasoning(reasoning);
         }
         if let Some(version) = entry.version {
             self.version = version;
@@ -2128,6 +2160,166 @@ mod tests {
         );
 
         assert_eq!(state.step, LaunchWizardStep::QuickStart);
+    }
+
+    fn codex_manual_state() -> LaunchWizardState {
+        let mut state = LaunchWizardState::open_with(
+            context(branch("feature/gui"), "feature/gui"),
+            sample_agent_options(),
+            Vec::new(),
+        );
+        state.set_agent_id("codex");
+        state
+    }
+
+    // SPEC-1921 US-20 / FR-123: before any explicit choice the reasoning stop
+    // follows the selected model's default (Sol=Low, Spark=High, others=Medium).
+    #[test]
+    fn codex_initial_reasoning_follows_model_default() {
+        let mut state = codex_manual_state();
+        assert_eq!(state.model, "gpt-5.5");
+        assert_eq!(state.reasoning, "medium");
+
+        state.set_model("gpt-5.6-sol");
+        assert_eq!(state.reasoning, "low");
+        state.set_model("gpt-5.3-codex-spark");
+        assert_eq!(state.reasoning, "high");
+        state.set_model("gpt-5.6-terra");
+        assert_eq!(state.reasoning, "medium");
+    }
+
+    // SPEC-1921 US-20 / FR-123: an explicit choice survives model changes when
+    // supported and clamps to the target model's highest stop when it is not.
+    #[test]
+    fn codex_explicit_reasoning_preserved_or_clamped_on_model_change() {
+        let mut state = codex_manual_state();
+        state.set_model("gpt-5.6-sol");
+        state.set_reasoning("ultra");
+
+        state.set_model("gpt-5.6-luna");
+        assert_eq!(state.reasoning, "max");
+        state.set_model("gpt-5.4");
+        assert_eq!(state.reasoning, "xhigh");
+        state.set_model("gpt-5.6-terra");
+        assert_eq!(state.reasoning, "xhigh");
+    }
+
+    // SPEC-1921 US-20 / FR-123: switching agents and back restores the Codex
+    // draft including whether the reasoning stop was an explicit choice.
+    #[test]
+    fn codex_agent_draft_roundtrip_keeps_explicit_reasoning() {
+        let mut state = codex_manual_state();
+        state.set_model("gpt-5.6-sol");
+        state.set_reasoning("ultra");
+
+        state.set_agent_id("claude");
+        state.set_agent_id("codex");
+        assert_eq!(state.model, "gpt-5.6-sol");
+        assert_eq!(state.reasoning, "ultra");
+
+        state.set_model("gpt-5.4-mini");
+        assert_eq!(state.reasoning, "xhigh");
+    }
+
+    #[test]
+    fn codex_agent_draft_roundtrip_without_explicit_choice_follows_model_default() {
+        let mut state = codex_manual_state();
+        state.set_model("gpt-5.6-terra");
+        assert_eq!(state.reasoning, "medium");
+
+        state.set_agent_id("claude");
+        state.set_agent_id("codex");
+        assert_eq!(state.model, "gpt-5.6-terra");
+        assert_eq!(state.reasoning, "medium");
+
+        state.set_model("gpt-5.6-sol");
+        assert_eq!(state.reasoning, "low");
+    }
+
+    // SPEC-1921 US-20 / FR-123 + SC-029: a stale Quick Start model/effort pair
+    // is normalized before launch, so an unsupported saved stop clamps to the
+    // target model's highest stop instead of reaching the launch request.
+    #[test]
+    fn quick_start_with_unsupported_codex_reasoning_clamps_before_launch() {
+        let mut state = LaunchWizardState::open_with(
+            context(branch("feature/gui"), "feature/gui"),
+            sample_agent_options(),
+            vec![QuickStartEntry {
+                session_id: "gwt-session-1".to_string(),
+                agent_id: "codex".to_string(),
+                tool_label: "Codex".to_string(),
+                model: Some("gpt-5.4".to_string()),
+                reasoning: Some("ultra".to_string()),
+                version: Some("0.110.0".to_string()),
+                resume_session_id: None,
+                live_window_id: None,
+                skip_permissions: false,
+                codex_fast_mode: false,
+                runtime_target: gwt_agent::LaunchRuntimeTarget::Host,
+                docker_service: None,
+                docker_lifecycle_intent: gwt_agent::DockerLifecycleIntent::Connect,
+            }],
+        );
+
+        state.apply(LaunchWizardAction::ApplyQuickStart {
+            index: 0,
+            mode: QuickStartLaunchMode::StartNew,
+        });
+
+        assert_eq!(state.model, "gpt-5.4");
+        assert_eq!(state.reasoning, "xhigh");
+        match state.completion.as_ref() {
+            Some(LaunchWizardCompletion::Launch(config)) => match config.as_ref() {
+                LaunchWizardLaunchRequest::Agent(config) => {
+                    assert_eq!(config.reasoning_level.as_deref(), Some("xhigh"));
+                }
+                other => panic!("expected agent launch request, got {other:?}"),
+            },
+            other => panic!("expected launch completion, got {other:?}"),
+        }
+    }
+
+    // SPEC-1921 US-20 / FR-123 + SC-029: saved-profile restore uses the same
+    // normalization, so Start with last settings never launches an invalid
+    // model/effort pair.
+    #[test]
+    fn previous_profile_with_unsupported_codex_reasoning_clamps_before_launch() {
+        let previous = LaunchWizardPreviousProfile {
+            agent_id: "codex".to_string(),
+            model: Some("gpt-5.4".to_string()),
+            reasoning: Some("ultra".to_string()),
+            version: Some("0.110.0".to_string()),
+            session_mode: gwt_agent::SessionMode::Normal,
+            skip_permissions: false,
+            codex_fast_mode: false,
+            runtime_target: gwt_agent::LaunchRuntimeTarget::Host,
+            docker_service: None,
+            docker_lifecycle_intent: gwt_agent::DockerLifecycleIntent::Connect,
+            windows_shell: None,
+        };
+        let mut state = LaunchWizardState::open_start_work_with_previous_profile(
+            context(branch("origin/develop"), "work/20260710-0900"),
+            "origin/develop".to_string(),
+            sample_agent_options(),
+            Vec::new(),
+            Some(previous),
+        );
+
+        assert_eq!(state.reasoning, "xhigh");
+
+        state.apply(LaunchWizardAction::UseStartMethod {
+            method: LaunchWizardStartMethodKind::StartWithLastSettings,
+        });
+
+        match state.completion.as_ref() {
+            Some(LaunchWizardCompletion::Launch(config)) => match config.as_ref() {
+                LaunchWizardLaunchRequest::Agent(config) => {
+                    assert_eq!(config.reasoning_level.as_deref(), Some("xhigh"));
+                }
+                other => panic!("expected agent launch request, got {other:?}"),
+            },
+            other => panic!("expected launch completion, got {other:?}"),
+        }
     }
 
     #[test]

@@ -461,6 +461,10 @@ impl LaunchWizardPreviousProfiles {
 struct AgentLaunchDraft {
     model: String,
     reasoning: String,
+    /// SPEC-1921 US-20 / FR-123: whether `reasoning` was an explicit user or
+    /// restored selection (preserve/clamp on model change) rather than an
+    /// untouched model default (follow the target model's default).
+    reasoning_explicit: bool,
     version: String,
     mode: String,
     resume_session_id: Option<String>,
@@ -787,6 +791,10 @@ pub struct LaunchWizardState {
     agent_drafts: HashMap<String, AgentLaunchDraft>,
     pub model: String,
     pub reasoning: String,
+    /// SPEC-1921 US-20 / FR-123: distinguishes an untouched model-default
+    /// reasoning stop from an explicit user or restored selection so model
+    /// changes can pick the target default vs. preserve/clamp respectively.
+    reasoning_explicit: bool,
     pub version: String,
     pub mode: String,
     pub resume_session_id: Option<String>,
