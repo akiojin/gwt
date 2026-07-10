@@ -86,7 +86,10 @@ impl AppRuntime {
             self.deregister_pty_writer(&id);
             self.runtimes.remove(&id);
             self.window_details.remove(&id);
-            return Vec::new();
+            // SPEC-3214 FR-002: the status arrived after the window was torn
+            // down, so the PTY is gone — safe point to destroy any pending
+            // intake worktree.
+            return self.take_ephemeral_worktree_cleanup_events();
         };
         let is_agent_window = self.window_preset(&id) == Some(WindowPreset::Agent);
         if publish_to_daemon {
@@ -125,16 +128,19 @@ impl AppRuntime {
             self.clear_agent_window_startup_restore(&id);
             self.stop_window_runtime(&id);
             self.remove_window_state_tracking(&id);
+            // SPEC-3214 FR-002: `stop_window_runtime` above killed and joined
+            // the PTY, so a pending intake worktree can be destroyed now.
+            let cleanup_events = self.take_ephemeral_worktree_cleanup_events();
             if !close_window_from_workspace(
                 &mut self.tabs,
                 &mut self.window_lookup,
                 &mut self.window_details,
                 &id,
             ) {
-                return Vec::new();
+                return cleanup_events;
             }
             let _ = self.persist();
-            let mut events = Vec::new();
+            let mut events = cleanup_events;
             self.push_workspace_and_active_work_projection_broadcasts(&mut events);
             return events;
         }
@@ -154,7 +160,10 @@ impl AppRuntime {
         }
         let _ = self.persist();
 
-        let mut events = Vec::new();
+        // SPEC-3214 FR-002: a Stopped/Error status means the PTY process has
+        // exited — drain any intake worktree cleanup queued by the session
+        // stop above (or by an earlier explicit stop of this window).
+        let mut events = self.take_ephemeral_worktree_cleanup_events();
         if is_agent_window
             && composed_status == WindowProcessStatus::Error
             && !keep_active_agent_session_for_recovery
@@ -238,6 +247,9 @@ impl AppRuntime {
             self.clear_agent_window_startup_restore(&window_id);
             self.stop_window_runtime(&window_id);
             self.remove_window_state_tracking(&window_id);
+            // SPEC-3214 FR-002: PTY killed and joined above — safe to destroy
+            // a pending intake worktree.
+            events.extend(self.take_ephemeral_worktree_cleanup_events());
             if close_window_from_workspace(
                 &mut self.tabs,
                 &mut self.window_lookup,

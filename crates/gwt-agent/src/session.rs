@@ -99,6 +99,10 @@ pub struct Session {
     pub linked_issue_number: Option<u64>,
     #[serde(default)]
     pub workflow_bypass: Option<WorkflowBypass>,
+    /// When the bypass was armed. Consumers treat a bypass without a fresh
+    /// timestamp as expired so a forgotten disarm cannot outlive its release.
+    #[serde(default)]
+    pub workflow_bypass_armed_at: Option<DateTime<Utc>>,
     #[serde(default)]
     pub launch_command: String,
     #[serde(default)]
@@ -192,6 +196,7 @@ impl Session {
             docker_lifecycle_intent: DockerLifecycleIntent::Connect,
             linked_issue_number: None,
             workflow_bypass: None,
+            workflow_bypass_armed_at: None,
             launch_command: String::new(),
             launch_args: Vec::new(),
             restore_window_on_startup: false,

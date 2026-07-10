@@ -83,6 +83,9 @@ fn split_unquoted_control_operators(command: &str) -> Vec<&str> {
                     start = i;
                     continue;
                 }
+                // `>&` is a redirection (`2>&1`), not a control operator; keep
+                // it inside the segment so the redirection pass strips it.
+                b'&' if i > 0 && bytes[i - 1] == b'>' => {}
                 b';' | b'|' | b'&' => {
                     segments.push(&command[start..i]);
                     i += 1;

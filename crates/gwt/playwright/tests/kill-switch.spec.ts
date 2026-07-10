@@ -95,7 +95,11 @@ test.describe("Anshin Phase 1 kill-switch + attention", () => {
     const paletteInput = page.locator("#op-palette-input");
     await expect(paletteInput).toBeVisible();
     await paletteInput.fill("Send Input");
-    await page.locator("#op-palette-list .op-palette__row", { hasText: "Send Input" }).first().click();
+    const sendInputRow = page
+      .locator("#op-palette-list .op-palette__row", { hasText: "Send Input" })
+      .first();
+    await expect(sendInputRow).toBeVisible();
+    await page.keyboard.press("Enter");
 
     await expect
       .poll(() => page.evaluate(() => window.__sentKinds))

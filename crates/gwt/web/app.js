@@ -134,6 +134,13 @@
         presetSupportsWaitingStatus,
         windowRuntimeLabel,
       } from "/window-runtime-state.js";
+      import {
+        applyWindowLaneData,
+        renderWindowLaneBadge,
+        shouldShowWindowLaneBadge,
+        windowLaneBadgeView,
+        windowLaneKind,
+      } from "/window-lane-identity.js";
 
       // SPEC-2356 Operator Design System — boot the chrome shell as soon as the
       // module loads so the theme toggle, command palette, hotkey overlay,
@@ -510,6 +517,8 @@
           appendRenderKeyPart(parts, windowData?.agent_id || "");
           appendRenderKeyPart(parts, "agent_color");
           appendRenderKeyPart(parts, windowData?.agent_color || "");
+          appendRenderKeyPart(parts, "lane_kind");
+          appendRenderKeyPart(parts, windowLaneKind(windowData));
           appendRenderKeyPart(parts, "status");
           appendRenderKeyPart(parts, windowData?.status || "");
           appendRenderKeyPart(parts, "geometry");
@@ -577,6 +586,8 @@
         appendRenderKeyPart(parts, windowData.agent_id || "");
         appendRenderKeyPart(parts, "agent_color");
         appendRenderKeyPart(parts, windowData.agent_color || "");
+        appendRenderKeyPart(parts, "lane_kind");
+        appendRenderKeyPart(parts, windowLaneKind(windowData));
         appendRenderKeyPart(parts, "status");
         appendRenderKeyPart(parts, windowData.status || "");
         appendRenderKeyPart(parts, "runtime_state");
@@ -632,6 +643,8 @@
           appendRenderKeyPart(parts, tab.agent_id || "");
           appendRenderKeyPart(parts, "agent_color");
           appendRenderKeyPart(parts, tab.agent_color || "");
+          appendRenderKeyPart(parts, "lane_kind");
+          appendRenderKeyPart(parts, windowLaneKind(tab));
           appendRenderKeyPart(parts, "status");
           appendRenderKeyPart(parts, tab.status || "");
           appendRenderKeyPart(parts, "tab_group_id");
@@ -4270,7 +4283,7 @@
         syncWizardDraftState,
         flushWizardBranchDraft,
         renderLaunchWizard,
-        openStartWorkPendingWizard,
+        openIntakePendingWizard,
         openLaunchAgentPendingWizard,
         applyLaunchWizardStateEvent,
         applyLaunchWizardOpenErrorEvent,
@@ -4668,6 +4681,7 @@
             <div class="titlebar">
               <div class="title">
                 <span class="title-text"></span>
+                <span class="window-lane-badge"></span>
                 <span class="window-role-badge"></span>
                 <span class="status-chip running">
                   <span class="status-dot"></span>
@@ -4869,6 +4883,8 @@
         element.querySelector(".title-text").textContent = windowDisplayTitle(windowData);
         const titleText = element.querySelector(".title-text");
         titleText.title = windowTitleTooltip(windowData);
+        applyWindowLaneData(element, windowData);
+        renderWindowLaneBadge(element.querySelector(".window-lane-badge"), windowData);
         setWindowRoleBadge(element.querySelector(".window-role-badge"), windowData);
         renderWindowTabs(windowData, element);
         if (windowData.agent_color) {
@@ -6221,6 +6237,9 @@
         cellTooltip: windowActivityLabel,
         // windowData.agent_color already IS the data-agent-color value.
         cellAgentColor: (windowData) => windowData?.agent_color || "",
+        cellLaneKind: windowLaneKind,
+        cellLaneBadge: (windowData) =>
+          shouldShowWindowLaneBadge(windowData) ? windowLaneBadgeView(windowData) : null,
         // Only agent panes carry a Living Telemetry state; other surfaces
         // render a neutral cell with no telemetry dot.
         cellTelemetryState: (windowData) =>
@@ -6552,7 +6571,7 @@
             return;
           case "intake-session":
             // SPEC-3214 Phase 3: ephemeral intake session (branchless).
-            openStartWorkPendingWizard();
+            openIntakePendingWizard();
             frontendUnits.socketTransport.send({
               kind: "open_intake_session",
             });

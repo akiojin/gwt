@@ -64,8 +64,8 @@ test("Issue Monitor exposes Start/Stop while keeping queued issue controls visib
   const toggle = document.querySelector(".issue-monitor-card__toggle");
   assert.equal(toggle.textContent, "Start");
   toggle.click();
-  assert.equal(toggle.textContent, "Stop");
-  assert.equal(document.querySelector(".issue-monitor-card__state").textContent, "Starting");
+  assert.equal(toggle.textContent, "Start");
+  assert.equal(document.querySelector(".issue-monitor-card__state").textContent, "Stopped");
   assert.deepEqual(sent.at(-1), {
     kind: "set_issue_monitor_enabled",
     enabled: true,
@@ -77,6 +77,12 @@ test("Issue Monitor exposes Start/Stop while keeping queued issue controls visib
     document.querySelector(".issue-monitor-card__settings").textContent,
     /Agent settings Last settings: codex \/ gpt-5\.5 \/ high \/ host/,
   );
+  const agentSettings = document.querySelector(".issue-monitor-card__agent-settings");
+  assert.equal(agentSettings.textContent, "Agent settings");
+  agentSettings.click();
+  assert.deepEqual(sent.at(-1), {
+    kind: "issue_monitor_configure_profile",
+  });
   assert.equal(rows[0].querySelector(".issue-monitor-card__state-badge").textContent, "Queued");
   assert.match(rows[0].textContent, /Prompt: \$gwt-build-spec SPEC-42/);
   assert.match(rows[0].textContent, /Branch: feature\/spec-42/);
@@ -90,7 +96,7 @@ test("Issue Monitor exposes Start/Stop while keeping queued issue controls visib
   assert.equal(down.getAttribute("aria-label"), "Move down");
 
   const configure = rows[0].querySelector('[data-action="configure-issue"]');
-  assert.equal(configure.getAttribute("aria-label"), "Configure");
+  assert.equal(configure.getAttribute("aria-label"), "Project Agent settings");
   configure.click();
   assert.deepEqual(sent.at(-1), {
     kind: "issue_monitor_configure_issue",
@@ -271,7 +277,7 @@ test("Issue Monitor renders claim authentication blockage as an error", () => {
 });
 
 test("Issue Monitor shows when launch settings are required before auto-run", () => {
-  const { document, surface } = makeFixture();
+  const { document, sent, surface } = makeFixture();
   surface.applyStatus({
     enabled: true,
     state: "settings_required",
@@ -288,9 +294,27 @@ test("Issue Monitor shows when launch settings are required before auto-run", ()
   assert.match(document.querySelector(".issue-monitor-card__detail").textContent, /Active 0\/5/);
   assert.match(
     document.querySelector(".issue-monitor-card__settings").textContent,
-    /Agent settings Default: configure before auto start/,
+    /Agent settings Missing saved profile: configure before auto start/,
   );
   assert.match(document.querySelector(".issue-monitor-card__item").textContent, /Queued/);
+
+  surface.applyStatus({
+    enabled: false,
+    state: "disabled",
+    queue_len: 1,
+    active_count: 0,
+    max_active_agents: 5,
+    total_candidates: 1,
+    launch_profile_source: "default",
+    launch_profile_summary: "configure before auto start",
+  });
+  const start = document.querySelector(".issue-monitor-card__toggle");
+  start.click();
+  assert.equal(start.textContent, "Start");
+  assert.deepEqual(sent.at(-1), {
+    kind: "set_issue_monitor_enabled",
+    enabled: true,
+  });
 });
 
 test("Issue Monitor launch failure event marks the row and header as failed", () => {
@@ -498,5 +522,69 @@ test("the detail modal Focus action is present but disabled for a non-launched i
   assert.ok(
     document.getElementById("issue-monitor-detail-modal"),
     "modal stays open when Focus is disabled",
+  );
+});
+
+// SPEC-3214 T-012 — Quick issue toolbar input (FR-004/FR-005).
+test("Quick issue input registers on Enter and clears itself", () => {
+  const { document, sent } = makeFixture();
+  const input = document.querySelector(".issue-monitor-card__quick-issue-input");
+  assert.ok(input, "Quick issue input must render in the toolbar");
+  assert.equal(
+    input.getAttribute("placeholder"),
+    "Quick issue title…",
+    "input needs a discoverable placeholder",
+  );
+
+  input.value = "Investigate flaky PTY spawn";
+  const View = document.defaultView;
+  const enter = new View.Event("keydown", { bubbles: true });
+  enter.key = "Enter";
+  input.dispatchEvent(enter);
+
+  const registered = sent.filter((event) => event.kind === "quick_register_issue");
+  assert.equal(registered.length, 1, "Enter must send quick_register_issue");
+  assert.equal(registered[0].title, "Investigate flaky PTY spawn");
+  assert.equal(registered[0].launch, false, "Enter registers without launching");
+  assert.equal(input.value, "", "input clears after registration");
+});
+
+test("Quick issue Register & Launch button sends launch:true", () => {
+  const { document, sent } = makeFixture();
+  const input = document.querySelector(".issue-monitor-card__quick-issue-input");
+  const launchButton = document.querySelector(".issue-monitor-card__quick-issue-launch");
+  assert.ok(launchButton, "Register & Launch button must render next to the input");
+  assert.match(
+    launchButton.textContent,
+    /Register & Launch/,
+    "button label must state the register+launch shortcut",
+  );
+
+  input.value = "  Register and launch this  ";
+  launchButton.click();
+
+  const registered = sent.filter((event) => event.kind === "quick_register_issue");
+  assert.equal(registered.length, 1, "the launch button must send quick_register_issue");
+  assert.equal(registered[0].title, "Register and launch this", "title is trimmed");
+  assert.equal(registered[0].launch, true, "the launch button registers with launch:true");
+  assert.equal(input.value, "", "input clears after registration");
+});
+
+test("Quick issue submission with an empty title sends nothing", () => {
+  const { document, sent } = makeFixture();
+  const input = document.querySelector(".issue-monitor-card__quick-issue-input");
+  const launchButton = document.querySelector(".issue-monitor-card__quick-issue-launch");
+
+  input.value = "   ";
+  const View = document.defaultView;
+  const enter = new View.Event("keydown", { bubbles: true });
+  enter.key = "Enter";
+  input.dispatchEvent(enter);
+  launchButton.click();
+
+  assert.equal(
+    sent.filter((event) => event.kind === "quick_register_issue").length,
+    0,
+    "empty titles must never be submitted",
   );
 });

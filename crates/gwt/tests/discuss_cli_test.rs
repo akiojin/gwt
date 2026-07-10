@@ -4,8 +4,10 @@
 //!
 //! Audit gap (#3143): the discuss state transitions had no end-to-end test.
 //! These drive the real `gwtd` binary through the stdin JSON envelope against a
-//! canonical `.gwt/work/discussions.md` fixture and assert the on-disk
-//! `[active]` → `[parked]` / `[rejected]` rewrite and the Next Question clear.
+//! legacy repo-local `.gwt/work/discussions.md` fixture and assert that the
+//! `[active]` → `[parked]` / `[rejected]` rewrite and the Next Question clear
+//! land in the machine-local home work-notes file (SPEC-3214 FR-007) after the
+//! one-time import, leaving the git-tracked repo-local source untouched.
 
 use std::{
     fs,
@@ -40,8 +42,29 @@ fn fixture() -> Fixture {
     Fixture { home, project }
 }
 
-fn discussions_path(fixture: &Fixture) -> std::path::PathBuf {
+fn repo_local_discussions_path(fixture: &Fixture) -> std::path::PathBuf {
     fixture.project.path().join(".gwt/work/discussions.md")
+}
+
+/// SPEC-3214 (FR-007): mutations land in the home work-notes file
+/// (`<home>/.gwt/projects/<repo-hash>/work-notes/discussions.md`). The repo
+/// hash is computed by gwtd from its cwd, so discover the file by walking.
+fn discussions_path(fixture: &Fixture) -> std::path::PathBuf {
+    let projects = fixture.home.path().join(".gwt").join("projects");
+    let mut found = Vec::new();
+    if let Ok(entries) = fs::read_dir(&projects) {
+        for entry in entries.filter_map(Result::ok) {
+            let candidate = entry.path().join("work-notes").join("discussions.md");
+            if candidate.is_file() {
+                found.push(candidate);
+            }
+        }
+    }
+    assert!(
+        found.len() == 1,
+        "expected exactly one home work-notes discussions file, got {found:?}"
+    );
+    found.pop().expect("home discussions file")
 }
 
 fn read_discussions(fixture: &Fixture) -> String {
@@ -116,6 +139,12 @@ fn discuss_park_marks_proposal_parked() {
     assert!(
         !header.contains("[active]"),
         "parked proposal must no longer be [active], got: {header}"
+    );
+    // The git-tracked repo-local source stays untouched (read fallback only).
+    assert_eq!(
+        fs::read_to_string(repo_local_discussions_path(&fixture)).expect("repo-local"),
+        ACTIVE_DISCUSSION,
+        "repo-local discussions.md must not receive mutations"
     );
 }
 

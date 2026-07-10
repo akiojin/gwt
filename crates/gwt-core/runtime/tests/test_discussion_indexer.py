@@ -15,6 +15,7 @@ canonical shape:
 from __future__ import annotations
 
 import json
+import os
 import tempfile
 import unittest
 from pathlib import Path
@@ -71,7 +72,32 @@ class LoadDiscussionDocumentsTests(unittest.TestCase):
 
         self.assertEqual(len(discussions), 2)
         self.assertEqual(len(manifest), 1)
-        self.assertEqual(manifest[0]["path"], ".gwt/work/discussions.md")
+        self.assertEqual(manifest[0]["path"], str(root / ".gwt" / "work" / "discussions.md"))
+
+    def test_home_work_notes_file_wins_over_repo_local(self):
+        # SPEC-3214 (FR-007): the machine-local home work-notes file is the
+        # canonical source; the repo-local file is only a fallback.
+        root = self._write_discussions_file(SAMPLE_DISCUSSIONS)
+        with tempfile.TemporaryDirectory() as home:
+            notes_dir = Path(home) / ".gwt" / "projects" / "hash1234" / "work-notes"
+            notes_dir.mkdir(parents=True, exist_ok=True)
+            home_discussions = (
+                "# Discussions\n\n## 2026-07-03 — home-only discussion\n\n"
+                "Status: active\nTopics: intake\n\nSummary:\nhome body.\n"
+            )
+            (notes_dir / "discussions.md").write_text(home_discussions, encoding="utf-8")
+            previous_home = os.environ.get("HOME")
+            os.environ["HOME"] = home
+            try:
+                discussions, manifest = runner._load_discussion_documents(str(root), "hash1234")
+            finally:
+                if previous_home is None:
+                    os.environ.pop("HOME", None)
+                else:
+                    os.environ["HOME"] = previous_home
+        self.assertEqual(len(discussions), 1)
+        self.assertEqual(discussions[0]["title"], "home-only discussion")
+        self.assertEqual(manifest[0]["path"], str(notes_dir / "discussions.md"))
 
     def test_extracts_status_topics_and_related_specs(self):
         root = self._write_discussions_file(SAMPLE_DISCUSSIONS)
@@ -117,25 +143,33 @@ class BuildDiscussionRecordsTests(unittest.TestCase):
 
 class ActionIndexDiscussionsTests(unittest.TestCase):
     def test_full_mode_writes_manifest_and_chunks(self):
-        with tempfile.TemporaryDirectory() as wt, tempfile.TemporaryDirectory() as db_root_dir:
+        with tempfile.TemporaryDirectory() as wt, tempfile.TemporaryDirectory() as db_root_dir, tempfile.TemporaryDirectory() as home:
             root = Path(wt)
             work_dir = root / ".gwt" / "work"
             work_dir.mkdir(parents=True, exist_ok=True)
             (work_dir / "discussions.md").write_text(SAMPLE_DISCUSSIONS, encoding="utf-8")
             collection = _FakeCollection()
 
-            with mock.patch.object(
-                runner,
-                "_make_chroma_collection_repairing",
-                return_value=(_FakeClient(), collection),
-            ), mock.patch.object(runner, "_close_chroma_client"):
-                result = runner.action_index_discussions_v2(
-                    project_root=str(root),
-                    repo_hash="abc1234567890def",
-                    worktree_hash=None,
-                    mode="full",
-                    db_root=Path(db_root_dir),
-                )
+            previous_home = os.environ.get("HOME")
+            os.environ["HOME"] = home
+            try:
+                with mock.patch.object(
+                    runner,
+                    "_make_chroma_collection_repairing",
+                    return_value=(_FakeClient(), collection),
+                ), mock.patch.object(runner, "_close_chroma_client"):
+                    result = runner.action_index_discussions_v2(
+                        project_root=str(root),
+                        repo_hash="abc1234567890def",
+                        worktree_hash=None,
+                        mode="full",
+                        db_root=Path(db_root_dir),
+                    )
+            finally:
+                if previous_home is None:
+                    os.environ.pop("HOME", None)
+                else:
+                    os.environ["HOME"] = previous_home
 
             self.assertTrue(result.get("ok"), result)
             self.assertEqual(result["scope"], "discussions")
@@ -150,7 +184,7 @@ class ActionIndexDiscussionsTests(unittest.TestCase):
             manifest = json.loads(manifest_file.read_text(encoding="utf-8"))
             entries = manifest.get("entries") if isinstance(manifest, dict) else manifest
             self.assertEqual(len(entries), 1)
-            self.assertEqual(entries[0]["path"], ".gwt/work/discussions.md")
+            self.assertEqual(entries[0]["path"], str(work_dir / "discussions.md"))
 
 
 class _FakeClient:

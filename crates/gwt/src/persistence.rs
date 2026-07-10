@@ -93,6 +93,15 @@ impl WindowState {
     pub const Exited: Self = Self::Stopped;
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum WindowLaneKind {
+    Intake,
+    Execution,
+    #[default]
+    Unknown,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct PersistedWindowState {
     pub id: String,
@@ -124,6 +133,11 @@ pub struct PersistedWindowState {
     /// 読み書き両方向に漏らさない)。SPEC #2133 FR-008.
     #[serde(default, skip_deserializing, skip_serializing_if = "Option::is_none")]
     pub agent_color: Option<AgentColor>,
+    /// Wire/view-model lane identity for agent windows. This is computed for
+    /// frontend chrome and defaults to `unknown` for restored windows where no
+    /// live launch/session signal is available.
+    #[serde(default)]
+    pub lane_kind: WindowLaneKind,
     /// Canvas-local tab group id. Windows with the same group id render as
     /// tabs in one floating chrome; ungrouped windows keep legacy behavior.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -225,6 +239,7 @@ pub fn default_workspace_state() -> PersistedWindowCanvasState {
                 dynamic_title_detail: None,
                 agent_id: None,
                 agent_color: None,
+                lane_kind: WindowLaneKind::Unknown,
                 tab_group_id: None,
                 tab_group_active: false,
                 session_id: None,
@@ -249,6 +264,7 @@ pub fn default_workspace_state() -> PersistedWindowCanvasState {
                 dynamic_title_detail: None,
                 agent_id: None,
                 agent_color: None,
+                lane_kind: WindowLaneKind::Unknown,
                 tab_group_id: None,
                 tab_group_active: false,
                 session_id: None,
@@ -585,6 +601,7 @@ mod tests {
                     dynamic_title_detail: None,
                     agent_id: None,
                     agent_color: None,
+                    lane_kind: WindowLaneKind::Unknown,
                     tab_group_id: None,
                     tab_group_active: false,
                     session_id: None,
@@ -609,6 +626,7 @@ mod tests {
                     dynamic_title_detail: None,
                     agent_id: None,
                     agent_color: None,
+                    lane_kind: WindowLaneKind::Unknown,
                     tab_group_id: None,
                     tab_group_active: false,
                     session_id: None,
@@ -859,6 +877,7 @@ mod tests {
                 dynamic_title_detail: None,
                 agent_id: Some("claude".into()),
                 agent_color: None,
+                lane_kind: WindowLaneKind::Unknown,
                 tab_group_id: None,
                 tab_group_active: false,
                 session_id: Some("sess-1".into()),
@@ -948,6 +967,7 @@ mod tests {
             dynamic_title_detail: None,
             agent_id: Some("claude".into()),
             agent_color: Some(AgentColor::Yellow),
+            lane_kind: WindowLaneKind::Unknown,
             tab_group_id: None,
             tab_group_active: false,
             session_id: None,
@@ -1020,6 +1040,7 @@ mod tests {
                     dynamic_title_detail: None,
                     agent_id: None,
                     agent_color: None,
+                    lane_kind: WindowLaneKind::Unknown,
                     tab_group_id: None,
                     tab_group_active: false,
                     session_id: None,
@@ -1044,6 +1065,7 @@ mod tests {
                     dynamic_title_detail: None,
                     agent_id: None,
                     agent_color: None,
+                    lane_kind: WindowLaneKind::Unknown,
                     tab_group_id: None,
                     tab_group_active: false,
                     session_id: None,
@@ -1256,6 +1278,7 @@ mod tests {
                     dynamic_title_detail: None,
                     agent_id: None,
                     agent_color: None,
+                    lane_kind: WindowLaneKind::Unknown,
                     tab_group_id: None,
                     tab_group_active: false,
                     session_id: None,
@@ -1280,6 +1303,7 @@ mod tests {
                     dynamic_title_detail: None,
                     agent_id: None,
                     agent_color: None,
+                    lane_kind: WindowLaneKind::Unknown,
                     tab_group_id: None,
                     tab_group_active: false,
                     session_id: None,

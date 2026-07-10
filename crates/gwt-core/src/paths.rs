@@ -434,6 +434,62 @@ pub fn gwt_repo_local_discussions_path(repo_root: &Path) -> PathBuf {
     gwt_repo_local_work_dir(repo_root).join("discussions.md")
 }
 
+/// Return the machine-local work-notes directory for a repository
+/// (`~/.gwt/projects/<repo-hash>/work-notes/`).
+///
+/// SPEC-3214 (FR-007): project memory and discussion notes are machine-local
+/// scratch, stored branch-independently in the home project dir (the same
+/// placement convention as Board / Work state) and shared by every worktree
+/// of the repository. Durable team-shared outcomes belong to GitHub
+/// (Issue / `gwt-spec` Issue), not to these files.
+pub fn gwt_work_notes_dir(repo_path: &Path) -> PathBuf {
+    gwt_project_dir_for_repo_path(repo_path).join("work-notes")
+}
+
+/// Return the machine-local project memory path
+/// (`~/.gwt/projects/<repo-hash>/work-notes/memory.md`). See
+/// [`gwt_work_notes_dir`].
+pub fn gwt_work_notes_memory_path(repo_path: &Path) -> PathBuf {
+    gwt_work_notes_dir(repo_path).join("memory.md")
+}
+
+/// Return the machine-local discussion log path
+/// (`~/.gwt/projects/<repo-hash>/work-notes/discussions.md`). See
+/// [`gwt_work_notes_dir`].
+pub fn gwt_work_notes_discussions_path(repo_path: &Path) -> PathBuf {
+    gwt_work_notes_dir(repo_path).join("discussions.md")
+}
+
+/// Resolve the project memory path for READS: the machine-local home file
+/// when present, otherwise the legacy git-tracked repo-local file
+/// (`<repo_root>/.gwt/work/memory.md`) as a fallback, otherwise the (not yet
+/// created) home path. Writers always target the home path.
+pub fn resolve_work_notes_memory_read_path(repo_path: &Path) -> PathBuf {
+    resolve_work_notes_read_path(
+        gwt_work_notes_memory_path(repo_path),
+        gwt_repo_local_memory_path(repo_path),
+    )
+}
+
+/// Resolve the discussion log path for READS with the same home-first /
+/// repo-local-fallback order as [`resolve_work_notes_memory_read_path`].
+pub fn resolve_work_notes_discussions_read_path(repo_path: &Path) -> PathBuf {
+    resolve_work_notes_read_path(
+        gwt_work_notes_discussions_path(repo_path),
+        gwt_repo_local_discussions_path(repo_path),
+    )
+}
+
+fn resolve_work_notes_read_path(home_path: PathBuf, repo_local_path: PathBuf) -> PathBuf {
+    if home_path.exists() {
+        return home_path;
+    }
+    if repo_local_path.exists() {
+        return repo_local_path;
+    }
+    home_path
+}
+
 /// Return the repo-local remote-Board root-thread mapping path
 /// (`<repo_root>/.gwt/work/board-remote-roots.jsonl`).
 ///
@@ -1038,6 +1094,127 @@ mod tests {
         assert_eq!(
             comparable_path(&discussions),
             comparable_path(&root.join(".gwt").join("work").join("discussions.md"))
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // SPEC-3214 Phase 4 (T-030 / FR-007) — machine-local work-notes scratch
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn gwt_work_notes_paths_live_under_home_project_dir() {
+        let dir = tempfile::tempdir().unwrap();
+        let repo = dir.path().join("repo");
+        init_git_repo(&repo);
+
+        let notes_dir = gwt_work_notes_dir(&repo);
+        assert_eq!(
+            notes_dir,
+            gwt_project_dir_for_repo_path(&repo).join("work-notes"),
+            "work-notes must live in the branch-independent home project dir"
+        );
+        assert!(
+            notes_dir.starts_with(gwt_home()),
+            "work-notes must be machine-local (under ~/.gwt), got {}",
+            notes_dir.display()
+        );
+        assert_eq!(
+            gwt_work_notes_memory_path(&repo),
+            notes_dir.join("memory.md")
+        );
+        assert_eq!(
+            gwt_work_notes_discussions_path(&repo),
+            notes_dir.join("discussions.md")
+        );
+        // The legacy repo-local helpers stay distinct: they resolve into the
+        // working tree and remain read-fallback sources only.
+        assert_ne!(
+            comparable_path(&gwt_work_notes_memory_path(&repo)),
+            comparable_path(&gwt_repo_local_memory_path(&repo))
+        );
+    }
+
+    #[test]
+    fn work_notes_paths_are_shared_across_worktrees_of_the_same_repo() {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = tmp.path().join("gwt");
+        init_git_repo(&repo);
+        git_commit_allow_empty(&repo, "initial commit");
+        let mut remote = crate::process::hidden_command("git");
+        remote
+            .args([
+                "remote",
+                "add",
+                "origin",
+                "https://example.invalid/gwt-notes-sharing.git",
+            ])
+            .current_dir(&repo);
+        crate::process::scrub_git_env(&mut remote);
+        assert!(remote.output().expect("git remote add").status.success());
+
+        let linked = tmp.path().join("develop");
+        let mut cmd = crate::process::hidden_command("git");
+        cmd.args(["worktree", "add", "-b", "develop", linked.to_str().unwrap()])
+            .current_dir(&repo);
+        crate::process::scrub_git_env(&mut cmd);
+        let output = cmd.output().expect("git worktree add -b");
+        assert!(
+            output.status.success(),
+            "git worktree add failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+
+        // SPEC-3214 acceptance scenario 3: notes must be readable from any
+        // worktree of the same repository without a git merge, so the home
+        // path is keyed by the repo hash (origin URL), not the worktree.
+        assert_eq!(
+            gwt_work_notes_memory_path(&repo),
+            gwt_work_notes_memory_path(&linked)
+        );
+        assert_eq!(
+            gwt_work_notes_discussions_path(&repo),
+            gwt_work_notes_discussions_path(&linked)
+        );
+    }
+
+    #[test]
+    fn resolve_work_notes_read_paths_prefer_home_then_repo_local() {
+        let dir = tempfile::tempdir().unwrap();
+        let repo = dir.path().join("repo");
+        init_git_repo(&repo);
+
+        // Neither file exists → the canonical home path (a fresh writer
+        // target) is returned.
+        assert_eq!(
+            resolve_work_notes_memory_read_path(&repo),
+            gwt_work_notes_memory_path(&repo)
+        );
+
+        // Only the legacy repo-local file exists → fall back to it for reads.
+        let repo_local = gwt_repo_local_memory_path(&repo);
+        std::fs::create_dir_all(repo_local.parent().unwrap()).unwrap();
+        std::fs::write(&repo_local, "# Memory\n").unwrap();
+        assert_eq!(
+            comparable_path(&resolve_work_notes_memory_read_path(&repo)),
+            comparable_path(&repo_local)
+        );
+
+        // Home file exists → home wins even when the repo-local file remains.
+        let home_path = gwt_work_notes_memory_path(&repo);
+        std::fs::create_dir_all(home_path.parent().unwrap()).unwrap();
+        std::fs::write(&home_path, "# Memory\n").unwrap();
+        assert_eq!(resolve_work_notes_memory_read_path(&repo), home_path);
+
+        // Discussions follow the same resolution order.
+        assert_eq!(
+            resolve_work_notes_discussions_read_path(&repo),
+            gwt_work_notes_discussions_path(&repo)
+        );
+        let repo_local_discussions = gwt_repo_local_discussions_path(&repo);
+        std::fs::write(&repo_local_discussions, "# Discussions\n").unwrap();
+        assert_eq!(
+            comparable_path(&resolve_work_notes_discussions_read_path(&repo)),
+            comparable_path(&repo_local_discussions)
         );
     }
 

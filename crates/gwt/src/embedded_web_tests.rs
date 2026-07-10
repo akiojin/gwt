@@ -256,8 +256,10 @@ fn embedded_web_issue_monitor_surface_exposes_priority_and_concurrency_controls(
         "Issue Monitor processing control must use Start/Stop labels"
     );
     assert!(
-        surface_js.contains("Configure"),
-        "Issue Monitor queue must let users configure queued Issue work before processing"
+        surface_js.contains("Agent settings")
+            && surface_js.contains("Project Agent settings")
+            && surface_js.contains("issue_monitor_configure_profile"),
+        "Issue Monitor queue must expose global Agent settings plus row shortcut configuration"
     );
     assert!(
         surface_js.contains("No queued issues"),
@@ -1577,6 +1579,35 @@ fn embedded_web_window_role_badges_identify_every_window_surface() {
         js.contains("function shouldShowRuntimeStatus(windowData)")
             && js.contains("runtimeChip.hidden = !shouldShowRuntimeStatus(windowData)"),
         "expected non-terminal panels to hide runtime status chips",
+    );
+}
+
+#[test]
+fn embedded_web_window_lane_identity_module_is_registered_and_wired() {
+    let paths: Vec<&str> = root_js_module_assets()
+        .iter()
+        .map(|asset| asset.path)
+        .collect();
+    assert!(
+        paths.contains(&"/window-lane-identity.js"),
+        "window lane identity helper must be served as a root JS module"
+    );
+    let js = app_js();
+    let shell_js = project_shell_surface_js();
+    let styles = frontend_styles_bundle();
+    assert!(
+        js.contains("applyWindowLaneData(element, windowData)")
+            && js.contains("renderWindowLaneBadge"),
+        "app.js must put data-lane-kind and the titlebar lane badge on workspace windows"
+    );
+    assert!(
+        shell_js.contains("window-list-lane"),
+        "window list rows must render lane identity"
+    );
+    assert!(
+        styles.contains(".window-lane-badge")
+            && styles.contains(".fleet-minimap__cell[data-lane-symbol]::before"),
+        "titlebar/list/minimap lane badge styling must ship in embedded CSS"
     );
 }
 

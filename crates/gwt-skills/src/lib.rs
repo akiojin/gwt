@@ -796,6 +796,12 @@ mod tests {
                 issue_skill.contains("gwt-build-spec") && issue_skill.contains("gwt-discussion"),
                 "expected visible build/discussion handoff guidance in {relative}"
             );
+            for required in ["push-only", "not completion", "gwt-manage-pr", "PR URL"] {
+                assert!(
+                    issue_skill.contains(required),
+                    "{relative} must prevent push-only false completion claims: {required}"
+                );
+            }
             assert!(
                 issue_skill.contains("current user's language"),
                 "expected language contract in {relative}"
@@ -834,6 +840,7 @@ mod tests {
             );
             assert!(
                 discussion_skill.contains("### Discussion TODO")
+                    && discussion_skill.contains("work-notes/discussions.md")
                     && discussion_skill.contains(".gwt/work/discussions.md")
                     && discussion_skill.contains("legacy `.gwt/discussion.md`"),
                 "expected discussion skill to define canonical Discussion TODO state in {relative}"
@@ -972,7 +979,8 @@ mod tests {
                 "expected discussion command to describe the Plan Mode and depth-gate contract in {relative}"
             );
             assert!(
-                discussion_command.contains(".gwt/work/discussions.md")
+                discussion_command.contains("work-notes/discussions.md")
+                    && discussion_command.contains(".gwt/work/discussions.md")
                     && discussion_command.contains("legacy `.gwt/discussion.md`")
                     && discussion_command.contains("Resume discussion")
                     && discussion_command.contains("Park proposal")
@@ -1243,6 +1251,19 @@ mod tests {
         assert!(
             !release_command.contains("gh issue comment"),
             "unexpected direct gh issue comment guidance"
+        );
+        assert!(
+            release_command.contains("\"operation\":\"workflow.bypass\"")
+                && release_command.contains("\"mode\":\"release\"")
+                && release_command.contains("\"mode\":\"off\""),
+            "expected release command to arm and disarm the workflow.bypass owner-guard exemption (Issue #3267)"
+        );
+        let codex_release_skill = include_str!("../../../.codex/skills/release/SKILL.md");
+        assert!(
+            codex_release_skill.contains("workflow.bypass")
+                && codex_release_skill.contains("\"mode\":\"release\"")
+                && codex_release_skill.contains("\"mode\":\"off\""),
+            "expected codex release skill to mirror the workflow.bypass arm/disarm steps (Issue #3267)"
         );
 
         let pr_command = include_str!("../../../.claude/commands/gwt-manage-pr.md");

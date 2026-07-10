@@ -24,7 +24,9 @@ fn legacy_discussion_path(dir: &TempDir) -> std::path::PathBuf {
 }
 
 fn canonical_discussions_path(dir: &TempDir) -> std::path::PathBuf {
-    gwt_core::paths::gwt_repo_local_discussions_path(dir.path())
+    // SPEC-3214 (FR-007): discussion mutations canonicalize into the
+    // machine-local home work-notes file.
+    gwt_core::paths::gwt_work_notes_discussions_path(dir.path())
 }
 
 fn dispatch_json(env: &mut TestEnv, operation: &str, params: serde_json::Value) -> i32 {

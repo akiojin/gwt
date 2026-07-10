@@ -231,20 +231,21 @@ pub(super) const MEMORY_UPDATE_REMINDER: &str = "# Memory Reminder\n\
 \n\
 If this task produced a reusable lesson, decision, failure pattern, or agent workflow correction, \
 run a JSON envelope with operation `memory.add` \
-before declaring the work done. It writes `.gwt/work/memory.md` with `Type`, `Context`, `Learning`, and \
-`Future Action` fields. Legacy `tasks/memory.md` / `tasks/lessons.md` are only a compatibility fallback; prefer \
-`.gwt/work/memory.md` for new memory.\n";
+before declaring the work done. It writes the machine-local memory log \
+(`~/.gwt/projects/<repo-hash>/work-notes/memory.md`) with `Type`, `Context`, `Learning`, and \
+`Future Action` fields. Legacy `.gwt/work/memory.md` / `tasks/memory.md` / `tasks/lessons.md` are only a \
+compatibility fallback; new memory always lands in the home work-notes file.\n";
 
 pub(super) const MEMORY_UPDATE_REMINDER_JA: &str = "# Memory Reminder\n\
 \n\
 この作業で再利用できる lesson、decision、failure pattern、agent workflow correction が生まれた場合は、\
 完了宣言前に operation `memory.add` の JSON envelope \
 を実行してください。この command は `Type`、`Context`、`Learning`、`Future Action` 付きで \
-`.gwt/work/memory.md` に記録します。legacy `tasks/memory.md` / `tasks/lessons.md` は互換 fallback のみです。\n";
+マシンローカルの memory log（`~/.gwt/projects/<repo-hash>/work-notes/memory.md`）に記録します。legacy `.gwt/work/memory.md` / `tasks/memory.md` / `tasks/lessons.md` は互換 fallback のみです。\n";
 
-pub(super) const MEMORY_UPDATE_STOP_REMINDER: &str = "Memory Reminder (Stop): if this run produced a reusable lesson, decision, failure pattern, or agent workflow correction, prompt the agent to run a JSON envelope with operation `memory.add` before stopping. The command writes `.gwt/work/memory.md` with `Type`, `Context`, `Learning`, and `Future Action` fields.";
+pub(super) const MEMORY_UPDATE_STOP_REMINDER: &str = "Memory Reminder (Stop): if this run produced a reusable lesson, decision, failure pattern, or agent workflow correction, prompt the agent to run a JSON envelope with operation `memory.add` before stopping. The command writes the machine-local memory log (`~/.gwt/projects/<repo-hash>/work-notes/memory.md`) with `Type`, `Context`, `Learning`, and `Future Action` fields.";
 
-pub(super) const MEMORY_UPDATE_STOP_REMINDER_JA: &str = "Memory Reminder (Stop): この実行で再利用できる lesson、decision、failure pattern、agent workflow correction が生まれた場合は、停止前に operation `memory.add` の JSON envelope を実行するよう agent に促してください。この command は `Type`、`Context`、`Learning`、`Future Action` 付きで `.gwt/work/memory.md` に記録します。";
+pub(super) const MEMORY_UPDATE_STOP_REMINDER_JA: &str = "Memory Reminder (Stop): この実行で再利用できる lesson、decision、failure pattern、agent workflow correction が生まれた場合は、停止前に operation `memory.add` の JSON envelope を実行するよう agent に促してください。この command は `Type`、`Context`、`Learning`、`Future Action` 付きでマシンローカルの memory log（`~/.gwt/projects/<repo-hash>/work-notes/memory.md`）に記録します。";
 
 pub(super) const PROGRESS_SUMMARY_MISSING_REMINDER: &str = "# Progress Summary Reminder\n\
 \n\

@@ -1,6 +1,45 @@
 # Changelog
 
 All notable changes to this project will be documented in this file.
+## [9.66.0] - 2026-07-10
+
+### Bug Fixes
+
+- **issue-monitor:** Resolve origin from workspace home
+- **hooks:** Suppress build-spec stop gate in intake lane
+- Block push-only execution completion
+- **deps:** Update crossbeam epoch advisory
+- **hooks:** Owner guard の read-only 誤ブロック解消と bypass の TTL 失効 (#3267)
+
+### Documentation
+
+- **release:** /release に workflow.bypass の arm/disarm 手順を追加 (#3267)
+
+### Features
+
+- **intake:** Ephemeral detached worktree 基盤を追加 (SPEC-3214 Phase 1)
+- **intake:** Quick issue 登録+即 launch を Issue Monitor に追加 (SPEC-3214 Phase 2)
+- **intake:** Palette「Intake session」から ephemeral 起動導線を追加 (SPEC-3214 Phase 3)
+- **work-notes:** Memory/discussions をマシンローカル HOME scratch へ移行 (SPEC-3214 Phase 4)
+- **intake:** Start Work 入口を完全撤去し Open existing branch 独立導線を追加 (SPEC-3214 Phase 5)
+- Clarify intake and execution workflows
+- Refine intake and issue monitor settings
+- **cli:** Workflow.bypass operation で WorkflowBypass::Release を配線 (#3267)
+
+### Miscellaneous Tasks
+
+- **work:** Board events と memory ログを更新
+- **work:** Record SPEC-3214 PR blocker
+- **work:** Resume SPEC-3214 develop merge
+- **work:** Record SPEC-3214 merge completion
+- Update work status
+- Record visual confirmation
+
+### Testing
+
+- **app-runtime:** Shutdown 順序テストを負荷に頑健な順序契約 assert に書き換え
+- Align stop hook fixture with managed runtime
+
 ## [9.65.1] - 2026-07-06
 
 ### Bug Fixes

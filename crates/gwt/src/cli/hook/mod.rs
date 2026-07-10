@@ -22,6 +22,7 @@ pub mod coordination_event;
 pub mod diagnostics;
 pub mod envelope;
 pub mod event_dispatcher;
+pub mod execution_completion_stop_check;
 pub mod forward;
 pub mod gwt_self_improvement_stop;
 pub mod health;

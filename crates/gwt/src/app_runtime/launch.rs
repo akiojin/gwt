@@ -1924,7 +1924,7 @@ impl AppRuntime {
     /// Paused-Work / resume behavior. The definitive signal is that the intake
     /// worktree is DETACHED (branchless), which only `create_detached` produces.
     /// A worktree that is already gone is treated as ephemeral (it was reaped).
-    fn is_ephemeral_intake_session(&self, session: &ActiveAgentSession) -> bool {
+    pub(super) fn is_ephemeral_intake_session(&self, session: &ActiveAgentSession) -> bool {
         if !is_ephemeral_intake_worktree(&session.worktree_path) {
             return false;
         }
@@ -1988,6 +1988,14 @@ impl AppRuntime {
                 "failed to remove clean ephemeral intake worktree"
             );
         }
+    }
+
+    /// Compatibility hook for the runtime-status path. Current intake cleanup
+    /// runs synchronously in `mark_agent_session_stopped()` after classifying
+    /// the session by detached `.intake-*` worktree state, so there is no
+    /// deferred queue to drain here.
+    pub(crate) fn take_ephemeral_worktree_cleanup_events(&mut self) -> Vec<OutboundEvent> {
+        Vec::new()
     }
 
     /// SPEC-2359 Phase W-12 Slice 5a (FR-350): record a Pause work event for a

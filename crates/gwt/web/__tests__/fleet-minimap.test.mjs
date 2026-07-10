@@ -166,6 +166,87 @@ test("cells carry agent color and telemetry datasets only when present", () => {
   assert.equal(plainCell.dataset.telemetry, undefined, "non-agent cell omits telemetry");
 });
 
+test("cells carry lane identity separately from agent color", () => {
+  const { container } = setupDom();
+  const windows = [
+    windowAt("w-intake", 0, 0, 100, 80, {
+      agent_color: "cyan",
+      lane_kind: "intake",
+    }),
+    windowAt("w-exec", 300, 0, 100, 80, {
+      agent_color: "cyan",
+      lane_kind: "execution",
+    }),
+  ];
+  const { minimap } = makeMinimap(container, windows, {
+    cellLaneKind: (w) => w.lane_kind,
+    cellLaneBadge: (w) =>
+      w.lane_kind === "intake"
+        ? { kind: "intake", symbol: "I", ariaLabel: "Intake lane" }
+        : { kind: "execution", symbol: "E", ariaLabel: "Execution lane" },
+  });
+
+  minimap.renderCells();
+
+  const intake = container.querySelector('[data-window-id="w-intake"]');
+  const execution = container.querySelector('[data-window-id="w-exec"]');
+  assert.equal(intake.dataset.agentColor, "cyan");
+  assert.equal(execution.dataset.agentColor, "cyan");
+  assert.equal(intake.dataset.laneKind, "intake");
+  assert.equal(execution.dataset.laneKind, "execution");
+  assert.equal(intake.dataset.laneSymbol, "I");
+  assert.equal(execution.dataset.laneSymbol, "E");
+  assert.match(intake.getAttribute("aria-label"), /Intake lane/);
+  assert.match(execution.getAttribute("aria-label"), /Execution lane/);
+});
+
+test("lane marker is suppressed when the minimap cell is too small to contain it", () => {
+  const { container } = setupDom();
+  const windows = [
+    windowAt("w-intake", 0, 0, 100, 80, {
+      lane_kind: "intake",
+    }),
+  ];
+  const { minimap } = makeMinimap(container, windows, {
+    getVisibleBounds: () => ({ x: 0, y: 0, width: 3000, height: 1800 }),
+    cellLaneKind: (w) => w.lane_kind,
+    cellLaneBadge: () => ({ kind: "intake", symbol: "I", ariaLabel: "Intake lane" }),
+  });
+
+  minimap.renderCells();
+
+  const intake = container.querySelector('[data-window-id="w-intake"]');
+  assert.equal(intake.dataset.laneKind, "intake");
+  assert.equal(
+    intake.dataset.laneSymbol,
+    undefined,
+    "compact minimap cells must not render a marker that can overlap neighbors",
+  );
+  assert.match(intake.getAttribute("aria-label"), /Intake lane/);
+});
+
+test("unknown lane identity does not alter the minimap tooltip", () => {
+  const { container } = setupDom();
+  const windows = [
+    windowAt("w-agent", 0, 0, 100, 80, {
+      lane_kind: "unknown",
+    }),
+  ];
+  const { minimap } = makeMinimap(container, windows, {
+    cellLaneKind: (w) => w.lane_kind,
+    cellLaneBadge: () => ({ kind: "unknown", symbol: "?", ariaLabel: "Unknown lane" }),
+  });
+
+  minimap.renderCells();
+
+  const cell = container.querySelector('[data-window-id="w-agent"]');
+  assert.equal(cell.dataset.laneKind, "unknown");
+  assert.equal(cell.dataset.laneSymbol, undefined);
+  assert.equal(cell.dataset.laneLabel, undefined);
+  assert.equal(cell.title, "Title w-agent");
+  assert.equal(cell.getAttribute("aria-label"), "Title w-agent");
+});
+
 test("FR-039 (安心): a waiting telemetry surfaces as its own minimap dataset", () => {
   // The minimap dot color/pulse keys off data-telemetry, so the loud
   // waiting state must round-trip onto the cell rather than collapse.

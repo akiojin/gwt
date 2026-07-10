@@ -11,7 +11,11 @@
 //! - block implementation-state changes when a linked SPEC owner is known but
 //!   its plan/tasks sections are not ready
 
-use std::{collections::HashMap, io::Read, path::Path};
+use std::{
+    collections::HashMap,
+    io::Read,
+    path::{Path, PathBuf},
+};
 
 use gwt_agent::{
     session::{Session, GWT_SESSION_ID_ENV},
@@ -160,9 +164,28 @@ pub fn handle_with_input(input: &str) -> Result<HookOutput, HookError> {
     evaluate(&event, &root)
 }
 
+/// How long an armed workflow bypass stays effective. A `/release` run
+/// (including transient CI reruns) finishes well within this window; after it
+/// a forgotten disarm must not leave the owner guard permanently silent.
+const WORKFLOW_BYPASS_TTL_SECS: i64 = 6 * 60 * 60;
+
+/// A bypass counts only while its arm timestamp is fresh. Missing or stale
+/// `workflow_bypass_armed_at` fails closed.
+fn effective_workflow_bypass(
+    session: &Session,
+    now: chrono::DateTime<chrono::Utc>,
+) -> Option<WorkflowBypass> {
+    let bypass = session.workflow_bypass?;
+    let armed_at = session.workflow_bypass_armed_at?;
+    let age_secs = now.signed_duration_since(armed_at).num_seconds();
+    ((0..=WORKFLOW_BYPASS_TTL_SECS).contains(&age_secs)).then_some(bypass)
+}
+
 fn resolve_workflow_context(worktree_root: &Path) -> WorkflowContext {
     let session = load_session_from_env();
-    let bypass = session.as_ref().and_then(|s| s.workflow_bypass);
+    let bypass = session
+        .as_ref()
+        .and_then(|s| effective_workflow_bypass(s, chrono::Utc::now()));
 
     let Some(issue_number) = session
         .as_ref()
@@ -469,6 +492,9 @@ fn is_documentation_or_guidance_path(path: &str, worktree_root: &Path) -> bool {
     let path = path.trim_matches(|ch| ch == '\'' || ch == '"');
     let path = Path::new(path);
     let relative = if path.is_absolute() {
+        if is_plan_mode_plan_file(path) {
+            return true;
+        }
         let Ok(relative) = path.strip_prefix(worktree_root) else {
             return false;
         };
@@ -484,6 +510,20 @@ fn is_documentation_or_guidance_path(path: &str, worktree_root: &Path) -> bool {
         || normalized.starts_with("docs/")
         || normalized.starts_with("tasks/")
         || normalized.ends_with(".md")
+}
+
+/// Claude Code plan mode writes its plan to `~/.claude/plans/*.md` and that
+/// file is the only edit surface plan mode allows; treat it as documentation
+/// so ownerless sessions can still plan.
+fn is_plan_mode_plan_file(path: &Path) -> bool {
+    let Some(home) = std::env::var_os("HOME")
+        .or_else(|| std::env::var_os("USERPROFILE"))
+        .map(PathBuf::from)
+    else {
+        return false;
+    };
+    path.starts_with(home.join(".claude").join("plans"))
+        && path.extension().is_some_and(|ext| ext == "md")
 }
 
 fn command_segments_are_ownerless_safe(command: &str, worktree_root: &Path) -> bool {
@@ -833,7 +873,9 @@ fn is_read_only_json_envelope_operation(operation: &str) -> bool {
 }
 
 fn extract_json_object(segment: &str) -> Option<&str> {
-    let start = segment.find('{')?;
+    // Prefer the first `{"` so shell expansions like `${GWT_BIN}` before the
+    // heredoc body do not shift the extraction window off the JSON envelope.
+    let start = segment.find("{\"").or_else(|| segment.find('{'))?;
     let end = segment.rfind('}')?;
     (start <= end).then_some(&segment[start..=end])
 }
@@ -856,7 +898,22 @@ fn is_read_only_exploration_event(event: &HookEvent) -> bool {
 }
 
 fn has_shell_output_redirection(command: &str) -> bool {
-    command.contains('>') || command.contains(" tee ") || command.contains("|tee ")
+    // Stderr-to-devnull, stderr-merge, and stdout-discard forms do not write
+    // the worktree; strip them before looking for real output redirection.
+    const HARMLESS_REDIRECTS: &[&str] = &[
+        "2> /dev/null",
+        "2>/dev/null",
+        "2>&1",
+        "&> /dev/null",
+        "&>/dev/null",
+        "> /dev/null",
+        ">/dev/null",
+    ];
+    let mut stripped = command.to_string();
+    for pattern in HARMLESS_REDIRECTS {
+        stripped = stripped.replace(pattern, " ");
+    }
+    stripped.contains('>') || stripped.contains(" tee ") || stripped.contains("|tee ")
 }
 
 fn is_read_only_segment(segment: &str) -> bool {
@@ -865,9 +922,9 @@ fn is_read_only_segment(segment: &str) -> bool {
         return true;
     };
     match command_name.as_str() {
-        "awk" | "cat" | "date" | "echo" | "false" | "grep" | "head" | "jq" | "ls" | "nl"
-        | "printf" | "printenv" | "pwd" | "rg" | "tail" | "test" | "true" | "wc" | "which"
-        | "[" => true,
+        "awk" | "basename" | "cat" | "cut" | "date" | "dirname" | "echo" | "false" | "grep"
+        | "head" | "jq" | "ls" | "nl" | "printf" | "printenv" | "pwd" | "rg" | "sort" | "tail"
+        | "test" | "tr" | "true" | "uniq" | "wc" | "which" | "[" => true,
         "find" => !tokens
             .iter()
             .any(|token| matches!(*token, "-delete" | "-exec" | "-execdir" | "-ok" | "-okdir")),
@@ -878,10 +935,22 @@ fn is_read_only_segment(segment: &str) -> bool {
         "env" => tokens
             .get(1)
             .is_none_or(|token| is_read_only_command_token(token)),
+        "gh" => is_read_only_gh_tokens(&tokens[1..]),
         "git" => is_read_only_git_tokens(&tokens[1..]),
         "gwtd" => is_read_only_gwtd_tokens(&tokens[1..]),
         _ => false,
     }
+}
+
+/// Read-only `gh` queries used by release monitoring. Everything else stays
+/// owner-gated (`gh run rerun`, `gh release create`, ...); note that a
+/// separate block-bash policy independently restricts `gh pr` / `gh issue` /
+/// `gh run view` regardless of owner state.
+fn is_read_only_gh_tokens(tokens: &[&str]) -> bool {
+    matches!(
+        tokens,
+        ["release", "view" | "list", ..] | ["run", "list", ..]
+    )
 }
 
 fn segment_tokens(segment: &str) -> Vec<&str> {
@@ -942,6 +1011,12 @@ fn is_env_assignment(token: &str) -> bool {
 
 fn normalize_command_name(token: &str) -> String {
     let token = token.trim_matches(|ch| ch == '\'' || ch == '"');
+    // Skills resolve gwtd through `resolve_gwt_bin` and invoke it as
+    // `"$GWT_BIN"`; treat that documented convention as the gwtd command so
+    // envelope classification does not depend on the invocation spelling.
+    if matches!(token, "$GWT_BIN" | "${GWT_BIN}") {
+        return "gwtd".to_string();
+    }
     Path::new(token)
         .file_name()
         .and_then(|name| name.to_str())
@@ -951,12 +1026,12 @@ fn normalize_command_name(token: &str) -> String {
 
 fn is_read_only_git_tokens(tokens: &[&str]) -> bool {
     match tokens {
-        ["cat-file" | "diff" | "log" | "ls-files" | "ls-tree" | "rev-parse" | "show" | "status", ..] => {
-            true
-        }
+        ["cat-file" | "diff" | "log" | "ls-files" | "ls-remote" | "ls-tree" | "rev-list"
+        | "rev-parse" | "show" | "status", ..] => true,
         ["branch", rest @ ..] => is_read_only_git_branch_args(rest),
         ["config", rest @ ..] => is_read_only_git_config_args(rest),
         ["remote", rest @ ..] => is_read_only_git_remote_args(rest),
+        ["tag", rest @ ..] => is_read_only_git_tag_args(rest),
         _ => false,
     }
 }
@@ -1114,6 +1189,33 @@ fn is_read_only_git_config_args(args: &[&str]) -> bool {
 
 fn is_read_only_git_remote_args(args: &[&str]) -> bool {
     matches!(args, [] | ["-v" | "--verbose"] | ["show" | "get-url", ..])
+}
+
+/// `git tag` is read-only only in list/query form. Creation (`git tag v1`),
+/// deletion, and re-pointing must keep requiring an owner.
+fn is_read_only_git_tag_args(args: &[&str]) -> bool {
+    let mut saw_query_flag = false;
+    let mut saw_positional = false;
+    for arg in args {
+        if let Some(flag) = arg.strip_prefix("--") {
+            let name = flag.split_once('=').map_or(flag, |(name, _)| name);
+            match name {
+                "list" | "contains" | "no-contains" | "points-at" | "merged" | "no-merged"
+                | "sort" | "format" | "column" | "no-column" | "color" | "ignore-case"
+                | "omit-empty" => saw_query_flag = true,
+                _ => return false,
+            }
+        } else if let Some(flag) = arg.strip_prefix('-') {
+            match flag {
+                "l" | "i" => saw_query_flag = true,
+                _ if flag.starts_with('n') => saw_query_flag = true,
+                _ => return false,
+            }
+        } else {
+            saw_positional = true;
+        }
+    }
+    saw_query_flag || !saw_positional
 }
 
 fn is_read_only_gwtd_tokens(tokens: &[&str]) -> bool {
@@ -1908,6 +2010,7 @@ Coverage requirements.
         let mut session = Session::new(&repo, "feature/coverage", AgentId::Codex);
         session.linked_issue_number = Some(42);
         session.workflow_bypass = Some(WorkflowBypass::Chore);
+        session.workflow_bypass_armed_at = Some(chrono::Utc::now());
         session.save(&gwt_sessions_dir()).expect("save session");
         let _session_env = ScopedEnvVar::set(GWT_SESSION_ID_ENV, &session.id);
 
@@ -1941,5 +2044,50 @@ Coverage requirements.
         assert!(has_nonempty_section(&spec_body, "plan"));
         assert!(has_nonempty_section(&spec_body, "tasks"));
         assert!(!has_nonempty_section(&spec_body, "notes"));
+    }
+
+    #[test]
+    fn workflow_bypass_is_effective_only_within_ttl() {
+        let repo = tempfile::tempdir().expect("tempdir");
+        let mut session = Session::new(repo.path(), "develop", AgentId::ClaudeCode);
+        let now = chrono::Utc::now();
+
+        session.workflow_bypass = Some(WorkflowBypass::Release);
+        session.workflow_bypass_armed_at = Some(now - chrono::Duration::hours(1));
+        assert_eq!(
+            effective_workflow_bypass(&session, now),
+            Some(WorkflowBypass::Release),
+            "fresh arm must be effective"
+        );
+
+        session.workflow_bypass_armed_at =
+            Some(now - chrono::Duration::seconds(WORKFLOW_BYPASS_TTL_SECS + 1));
+        assert_eq!(
+            effective_workflow_bypass(&session, now),
+            None,
+            "stale arm must expire"
+        );
+
+        session.workflow_bypass_armed_at = None;
+        assert_eq!(
+            effective_workflow_bypass(&session, now),
+            None,
+            "bypass without an arm timestamp fails closed"
+        );
+
+        session.workflow_bypass_armed_at = Some(now + chrono::Duration::hours(1));
+        assert_eq!(
+            effective_workflow_bypass(&session, now),
+            None,
+            "future arm timestamps fail closed"
+        );
+
+        session.workflow_bypass = None;
+        session.workflow_bypass_armed_at = Some(now);
+        assert_eq!(
+            effective_workflow_bypass(&session, now),
+            None,
+            "timestamp without a bypass stays disarmed"
+        );
     }
 }

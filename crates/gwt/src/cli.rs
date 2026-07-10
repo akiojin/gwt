@@ -34,6 +34,7 @@ mod test_support;
 mod title_summary_guard;
 pub mod tray;
 pub mod update;
+mod workflow;
 mod workspace;
 
 use std::{
@@ -161,6 +162,7 @@ pub enum CliCommand {
     Update(UpdateCommand),
     Daemon(DaemonCommand),
     Workspace(WorkspaceCommand),
+    Workflow(WorkflowCommand),
     Pane(PaneCommand),
     /// SPEC #2920 FR-006: `gwt open` reads tray lock + opens browser.
     Open(open::OpenArgs),
@@ -292,6 +294,13 @@ pub type BuildCommand = SkillStateAction;
 
 /// SPEC-2784 command model for `register.*`. Same skill-state lifecycle.
 pub type RegisterCommand = SkillStateAction;
+/// Issue #3267: command model for the `workflow.bypass` JSON operation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WorkflowCommand {
+    /// `workflow.bypass` — arm or clear the self session's owner-guard bypass.
+    Bypass { mode: workflow::WorkflowBypassMode },
+}
+
 /// SPEC-1935 / Issue #2529: command model for `gwt-agent` pane inspection and lifecycle.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PaneCommand {
@@ -673,6 +682,7 @@ pub(crate) fn run_collect<E: CliEnv>(
         }
         CliCommand::Daemon(inner) => daemon::run(env, inner, &mut out)?,
         CliCommand::Workspace(inner) => workspace::run(env, inner, &mut out)?,
+        CliCommand::Workflow(inner) => workflow::run(env, inner, &mut out)?,
         CliCommand::Pane(inner) => pane::run(env, inner, &mut out)?,
         CliCommand::Open(args) => open::run(env, args, &mut out)?,
         CliCommand::Search(inner) => search::run(env, inner, &mut out)?,
