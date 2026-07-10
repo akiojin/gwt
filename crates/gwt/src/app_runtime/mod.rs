@@ -2979,18 +2979,60 @@ impl AppRuntime {
 
     pub(crate) fn seed_restored_window_details(&mut self) {
         self.window_details.clear();
+        // SPEC-1921 Phase 65 (T337): classify restored Agent-family
+        // placeholders before seeding details. An exact auto-resume candidate
+        // resumes as soon as the frontend canvas is ready, so labeling it with
+        // the generic paused message would flash a wrong state; an agent
+        // placeholder without an exact provider session id stays stopped and
+        // must explain why instead of implying a plain paused terminal.
+        let mut seeded = Vec::new();
         for tab in &self.tabs {
             for window in &tab.workspace.persisted().windows {
-                if window.preset.requires_process() && window.status == WindowProcessStatus::Stopped
+                if !(window.preset.requires_process()
+                    && window.status == WindowProcessStatus::Stopped)
                 {
-                    self.window_details.insert(
-                        combined_window_id(&tab.id, &window.id),
+                    continue;
+                }
+                let combined = combined_window_id(&tab.id, &window.id);
+                if crate::runtime_support::window_is_agent_pane(window) {
+                    if self.restored_window_is_exact_auto_resume_candidate(window) {
+                        continue;
+                    }
+                    seeded.push((
+                        combined,
+                        "Exact session restore is unavailable: no exact provider session id \
+                         is recorded for this agent window. It stays paused instead of \
+                         resuming a different conversation; launch a new agent session when \
+                         you want to continue."
+                            .to_string(),
+                    ));
+                } else {
+                    seeded.push((
+                        combined,
                         "Restored window is paused. Launch a new terminal when you want to start it."
                             .to_string(),
-                    );
+                    ));
                 }
             }
         }
+        self.window_details.extend(seeded);
+    }
+
+    /// True when a restored, stopped Agent-family placeholder is backed by a
+    /// persisted session that supports exact resume (real provider session id
+    /// and an existing worktree) — the same gate the startup auto-resume queue
+    /// applies to placeholder-backed sessions (SPEC-1921 Phase 65).
+    fn restored_window_is_exact_auto_resume_candidate(
+        &self,
+        window: &gwt::PersistedWindowState,
+    ) -> bool {
+        let Some(session_id) = window.session_id.as_deref() else {
+            return false;
+        };
+        let path = self.sessions_dir.join(format!("{session_id}.toml"));
+        gwt_agent::Session::load_and_migrate(&path).is_ok_and(|session| {
+            session.exact_resume_session_id().is_some() && session.worktree_path.exists()
+        })
     }
 
     /// Capture the current session + workspace state and hand it off to the

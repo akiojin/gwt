@@ -489,13 +489,18 @@ impl AppRuntime {
         session_id: &str,
     ) -> Option<WindowGeometry> {
         let tab = self.tab_mut(tab_id)?;
+        // SPEC-1921 Phase 65 (T337): stale placeholder removal must cover the
+        // full Agent-family preset set (`Agent`, `Claude`, `Codex`), not just
+        // the legacy `Agent` preset — otherwise a resumed Claude/Codex window
+        // spawns next to its surviving placeholder and loses the restored
+        // geometry.
         let stale = tab
             .workspace
             .persisted()
             .windows
             .iter()
             .find(|w| {
-                w.preset == WindowPreset::Agent
+                crate::runtime_support::window_is_agent_pane(w)
                     && w.status == WindowProcessStatus::Stopped
                     && w.session_id.as_deref() == Some(session_id)
             })
