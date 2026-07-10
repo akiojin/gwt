@@ -1252,6 +1252,19 @@ mod tests {
             !release_command.contains("gh issue comment"),
             "unexpected direct gh issue comment guidance"
         );
+        assert!(
+            release_command.contains("\"operation\":\"workflow.bypass\"")
+                && release_command.contains("\"mode\":\"release\"")
+                && release_command.contains("\"mode\":\"off\""),
+            "expected release command to arm and disarm the workflow.bypass owner-guard exemption (Issue #3267)"
+        );
+        let codex_release_skill = include_str!("../../../.codex/skills/release/SKILL.md");
+        assert!(
+            codex_release_skill.contains("workflow.bypass")
+                && codex_release_skill.contains("\"mode\":\"release\"")
+                && codex_release_skill.contains("\"mode\":\"off\""),
+            "expected codex release skill to mirror the workflow.bypass arm/disarm steps (Issue #3267)"
+        );
 
         let pr_command = include_str!("../../../.claude/commands/gwt-manage-pr.md");
         assert!(
