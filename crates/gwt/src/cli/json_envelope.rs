@@ -5,9 +5,10 @@ use serde_json::{Map, Value};
 use crate::protocol::{IndexSearchMatchMode, IndexSearchScope};
 
 use super::{
-    memory::MemoryAddCommand, ActionsCommand, CliCommand, CliEnv, CliParseError, DaemonCommand,
-    DiagnosticsCommand, HookCommand, ImprovementCommand, IndexCommand, IndexScope, IssueCommand,
-    MemoryCommand, PaneCommand, PrCommand, SearchCommand, SkillStateAction, WorkspaceCommand,
+    memory::MemoryAddCommand, workflow::WorkflowBypassMode, ActionsCommand, CliCommand, CliEnv,
+    CliParseError, DaemonCommand, DiagnosticsCommand, HookCommand, ImprovementCommand,
+    IndexCommand, IndexScope, IssueCommand, MemoryCommand, PaneCommand, PrCommand, SearchCommand,
+    SkillStateAction, WorkflowCommand, WorkspaceCommand,
 };
 use super::{BoardCommand, BoardPostCommand};
 
@@ -289,6 +290,14 @@ fn parse(input: &str) -> Result<ParsedEnvelope, CliParseError> {
         "pane.send" => CliCommand::Pane(PaneCommand::Send {
             id: optional_string(params, "id")?,
             text: required_string(params, "text")?,
+        }),
+        "workflow.bypass" => CliCommand::Workflow(WorkflowCommand::Bypass {
+            mode: WorkflowBypassMode::parse(&required_string(params, "mode")?).ok_or(
+                CliParseError::InvalidValue {
+                    flag: "mode",
+                    reason: "expected one of: release, chore, off",
+                },
+            )?,
         }),
         "search" => search(params)?,
         other => {
@@ -902,7 +911,8 @@ fn optional_json_array(
 mod tests {
     use super::{
         parse, ActionsCommand, CliCommand, CliParseError, DaemonCommand, HookCommand, IndexCommand,
-        IndexScope, IssueCommand, PaneCommand, PrCommand, SkillStateAction, WorkspaceCommand,
+        IndexScope, IssueCommand, PaneCommand, PrCommand, SkillStateAction, WorkflowBypassMode,
+        WorkflowCommand, WorkspaceCommand,
     };
     use crate::protocol::{IndexSearchMatchMode, IndexSearchScope};
     use serde_json::{json, Value};
@@ -1643,6 +1653,40 @@ mod tests {
         assert!(matches!(
             ok("build.start", json!({"spec": 1})),
             CliCommand::Build(SkillStateAction::Start { spec: 1 })
+        ));
+    }
+
+    #[test]
+    fn workflow_bypass_parses_all_modes() {
+        assert!(matches!(
+            ok("workflow.bypass", json!({"mode": "release"})),
+            CliCommand::Workflow(WorkflowCommand::Bypass {
+                mode: WorkflowBypassMode::Release
+            })
+        ));
+        assert!(matches!(
+            ok("workflow.bypass", json!({"mode": "chore"})),
+            CliCommand::Workflow(WorkflowCommand::Bypass {
+                mode: WorkflowBypassMode::Chore
+            })
+        ));
+        assert!(matches!(
+            ok("workflow.bypass", json!({"mode": "off"})),
+            CliCommand::Workflow(WorkflowCommand::Bypass {
+                mode: WorkflowBypassMode::Off
+            })
+        ));
+    }
+
+    #[test]
+    fn workflow_bypass_requires_valid_mode() {
+        assert!(matches!(
+            err("workflow.bypass", json!({})),
+            CliParseError::MissingFlag("mode")
+        ));
+        assert!(matches!(
+            err("workflow.bypass", json!({"mode": "Release"})),
+            CliParseError::InvalidValue { flag: "mode", .. }
         ));
     }
 

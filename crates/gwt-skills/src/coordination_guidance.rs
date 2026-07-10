@@ -519,7 +519,7 @@ mod tests {
             assert!(
                 rendered.contains(phrase),
                 "rendered SKILL.md is missing required canonical phrase: {phrase}\n\n--- rendered (first 4kB) ---\n{}",
-                &rendered.chars().take(4096).collect::<String>()
+                rendered.chars().take(4096).collect::<String>()
             );
         }
     }

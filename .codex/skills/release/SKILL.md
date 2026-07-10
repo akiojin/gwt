@@ -44,6 +44,17 @@ develop (バージョン更新・CHANGELOG更新) → main (PR)
 ### Main Steps
 
 1. Confirm the current branch is `develop`.
+1a. **Arm the release bypass (required, Issue #3267).** A release is ownerless
+    chore work, and the workflow-policy owner guard blocks its mutating steps
+    (`git fetch`/`git commit`/`cargo update`/`Cargo.toml` edits/`gh run rerun`)
+    when no owner Issue/SPEC is linked. Arm a session-scoped bypass with a
+    single heredoc using the **literal `gwtd` command name** (variable-style
+    invocations may not be recognized by older hooks):
+    `{"schema_version":1,"operation":"workflow.bypass","params":{"mode":"release"}}`.
+    The bypass auto-expires after 6 hours; re-arm if a long transient-recovery
+    loop outlives it. **Always disarm with `{"mode":"off"}` at completion and
+    on every abort path.** If the operation is unknown, the local gwtd is too
+    old — build `./target/debug/gwtd` or see Issue #3267.
 2. Fetch `origin/main`, `origin/develop`, and tags, then pull `origin/develop`.
 3. Identify the latest `v*` tag and confirm there are unreleased commits.
 4. Classify the next version from commits after the latest tag: breaking change -> major, `feat` -> minor, `fix` -> patch, otherwise patch. Do not use `git-cliff --bumped-version`.
@@ -55,3 +66,4 @@ develop (バージョン更新・CHANGELOG更新) → main (PR)
 9. Create or update the `develop -> main` Release PR and report the result. **A release is NOT complete at PR creation.**
 10. After the PR merges, poll `pr.view` until `[MERGED]`, then find the `release.yml` run (`gh run list --workflow release.yml --branch main`) and poll until it completes.
 11. **Monitor, detect errors, and confirm publication (required).** On `release.yml` failure, fetch logs via JSON operation `actions.logs` / `actions.job_logs` (available after the run completes) and classify: transient/infra failures (crates.io download, curl, HTTP2 framing, registry update, runner provisioning) → `gh run rerun <run-id> --failed` (max 3 retries); non-transient failures (compile/test/clippy/signing) → report and stop. Confirm completion with `gh release view v{VERSION} --json isDraft,assets,publishedAt` (`gh release` is not blocked): only report "release complete" once `isDraft=false` with all platform assets attached. See `.claude/commands/release.md` step 13 for the full procedure.
+12. Disarm the release bypass right after the completion report (and on abort): `{"schema_version":1,"operation":"workflow.bypass","params":{"mode":"off"}}`.
