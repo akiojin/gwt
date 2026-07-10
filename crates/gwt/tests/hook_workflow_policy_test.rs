@@ -1418,3 +1418,226 @@ fn completed_work_item_history_does_not_block_new_related_work() {
         );
     });
 }
+
+// ---- #3267: owner guard read-only misclassification fixes ----
+
+#[test]
+fn allows_gh_release_view_without_owner() {
+    let event = event(
+        "Bash",
+        json!({ "command": "gh release view v9.65.0 --repo akiojin/gwt --json isDraft,assets" }),
+    );
+    let decision = evaluate(&event, workflow_policy::WorkflowContext::unknown());
+    assert!(decision.is_none(), "gh release view is read-only");
+}
+
+#[test]
+fn allows_gh_release_list_without_owner() {
+    let event = event(
+        "Bash",
+        json!({ "command": "gh release list --repo akiojin/gwt --limit 1" }),
+    );
+    let decision = evaluate(&event, workflow_policy::WorkflowContext::unknown());
+    assert!(decision.is_none(), "gh release list is read-only");
+}
+
+#[test]
+fn allows_gh_run_list_without_owner() {
+    let event = event(
+        "Bash",
+        json!({ "command": "gh run list --workflow release.yml --branch main --limit 5 --repo akiojin/gwt" }),
+    );
+    let decision = evaluate(&event, workflow_policy::WorkflowContext::unknown());
+    assert!(decision.is_none(), "gh run list is read-only");
+}
+
+#[test]
+fn blocks_gh_run_rerun_without_owner() {
+    let event = event(
+        "Bash",
+        json!({ "command": "gh run rerun 123456 --failed --repo akiojin/gwt" }),
+    );
+    let decision = evaluate(&event, workflow_policy::WorkflowContext::unknown())
+        .expect("gh run rerun mutates CI state and needs an owner or bypass");
+    assert!(decision
+        .permission_decision_reason()
+        .contains("Owner Issue/SPEC"));
+}
+
+#[test]
+fn blocks_gh_release_create_without_owner() {
+    let event = event(
+        "Bash",
+        json!({ "command": "gh release create v9.99.0 --repo akiojin/gwt" }),
+    );
+    let decision = evaluate(&event, workflow_policy::WorkflowContext::unknown())
+        .expect("gh release create mutates release state");
+    assert!(decision
+        .permission_decision_reason()
+        .contains("Owner Issue/SPEC"));
+}
+
+#[test]
+fn allows_stderr_dev_null_redirect_in_read_only_command() {
+    for command in [
+        "ls /tmp/does-not-exist 2>/dev/null",
+        "grep -rn pattern src 2> /dev/null",
+        "git log --oneline -3 2>/dev/null",
+    ] {
+        let event = event("Bash", json!({ "command": command }));
+        let decision = evaluate(&event, workflow_policy::WorkflowContext::unknown());
+        assert!(
+            decision.is_none(),
+            "stderr-to-devnull must stay read-only: {command}"
+        );
+    }
+}
+
+#[test]
+fn allows_stderr_merge_redirect_in_read_only_command() {
+    let event = event(
+        "Bash",
+        json!({ "command": "git log --oneline -3 2>&1 | head -3" }),
+    );
+    let decision = evaluate(&event, workflow_policy::WorkflowContext::unknown());
+    assert!(decision.is_none(), "2>&1 does not write the worktree");
+}
+
+#[test]
+fn blocks_stdout_file_redirect_even_with_stderr_merge() {
+    let event = event(
+        "Bash",
+        json!({ "command": "git log --oneline > log.txt 2>&1" }),
+    );
+    let decision = evaluate(&event, workflow_policy::WorkflowContext::unknown())
+        .expect("stdout file redirect still mutates the worktree");
+    assert!(decision
+        .permission_decision_reason()
+        .contains("Owner Issue/SPEC"));
+}
+
+#[test]
+fn allows_git_ls_remote_without_owner() {
+    let event = event(
+        "Bash",
+        json!({ "command": "git ls-remote --tags origin v9.65.0" }),
+    );
+    let decision = evaluate(&event, workflow_policy::WorkflowContext::unknown());
+    assert!(decision.is_none(), "git ls-remote is read-only transport");
+}
+
+#[test]
+fn allows_git_rev_list_without_owner() {
+    let event = event(
+        "Bash",
+        json!({ "command": "git rev-list v9.64.2..HEAD --count" }),
+    );
+    let decision = evaluate(&event, workflow_policy::WorkflowContext::unknown());
+    assert!(decision.is_none(), "git rev-list is read-only");
+}
+
+#[test]
+fn allows_git_tag_queries_without_owner() {
+    for command in [
+        "git tag",
+        "git tag --list 'v[0-9]*' --sort=-version:refname",
+        "git tag -l 'v9.*'",
+        "git tag --contains 7723d167d",
+        "git tag --points-at HEAD",
+    ] {
+        let event = event("Bash", json!({ "command": command }));
+        let decision = evaluate(&event, workflow_policy::WorkflowContext::unknown());
+        assert!(
+            decision.is_none(),
+            "git tag query must stay read-only: {command}"
+        );
+    }
+}
+
+#[test]
+fn blocks_git_tag_mutations_without_owner() {
+    for command in [
+        "git tag v9.99.0",
+        "git tag -d v9.99.0",
+        "git tag -a v9.99.0 -m msg",
+        "git tag -f v9.99.0 HEAD",
+        "git tag --delete v9.99.0",
+    ] {
+        let event = event("Bash", json!({ "command": command }));
+        let decision = evaluate(&event, workflow_policy::WorkflowContext::unknown())
+            .unwrap_or_else(|| panic!("git tag mutation must be blocked: {command}"));
+        assert!(decision
+            .permission_decision_reason()
+            .contains("Owner Issue/SPEC"));
+    }
+}
+
+#[test]
+fn allows_gwt_bin_variable_json_envelope() {
+    for (variable, operation) in [
+        ("\"$GWT_BIN\"", "issue.view"),
+        ("$GWT_BIN", "pr.view"),
+        ("\"${GWT_BIN}\"", "issue.comment"),
+    ] {
+        let body = json!({
+            "schema_version": 1,
+            "operation": operation,
+            "params": { "number": 3267 },
+        });
+        let command = format!("{variable} <<'JSON'\n{body}\nJSON");
+        let event = event("Bash", json!({ "command": command }));
+        let decision = evaluate(&event, workflow_policy::WorkflowContext::unknown());
+        assert!(
+            decision.is_none(),
+            "GWT_BIN-style standalone envelope must match literal gwtd: {command}"
+        );
+    }
+}
+
+#[test]
+fn allows_sort_and_text_utils_without_owner() {
+    let event = event(
+        "Bash",
+        json!({ "command": "grep -o 'x' file.txt | sort -u | uniq -c | cut -d: -f1 | tr -d ' '" }),
+    );
+    let decision = evaluate(&event, workflow_policy::WorkflowContext::unknown());
+    assert!(decision.is_none(), "text utils are read-only");
+}
+
+#[test]
+fn allows_plan_file_write_under_home_claude_plans_without_owner() {
+    let _guard = env_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let home = tempfile::tempdir().expect("temp home");
+    let _home_env = gwt_core::test_support::ScopedEnvVar::set("HOME", home.path());
+    let plan_path = home.path().join(".claude/plans/3267-release.md");
+    let event = event(
+        "Write",
+        json!({ "file_path": plan_path.to_string_lossy(), "content": "# Plan" }),
+    );
+    let decision = evaluate(&event, workflow_policy::WorkflowContext::unknown());
+    assert!(
+        decision.is_none(),
+        "plan-mode plan files under ~/.claude/plans are documentation"
+    );
+}
+
+#[test]
+fn blocks_write_outside_worktree_non_plan_paths_without_owner() {
+    let _guard = env_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let home = tempfile::tempdir().expect("temp home");
+    let _home_env = gwt_core::test_support::ScopedEnvVar::set("HOME", home.path());
+    let outside = home.path().join("elsewhere/notes.rs");
+    let event = event(
+        "Write",
+        json!({ "file_path": outside.to_string_lossy(), "content": "fn x() {}" }),
+    );
+    let decision = evaluate(&event, workflow_policy::WorkflowContext::unknown())
+        .expect("non-plan writes outside the worktree still need an owner");
+    assert!(decision
+        .permission_decision_reason()
+        .contains("Owner Issue/SPEC"));
+}
