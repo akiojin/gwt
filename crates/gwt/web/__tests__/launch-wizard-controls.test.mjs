@@ -30,6 +30,28 @@ const CODEX_REASONING = [
   { value: "xhigh", label: "Extra high", description: "Maximum reasoning depth" },
 ];
 
+// SPEC-1921 US-20 / FR-122 — Codex reasoning ladders scale per model. The
+// backend sends 6 stops for gpt-5.6-sol / gpt-5.6-terra (low..ultra), 5 stops
+// for gpt-5.6-luna (low..max), and the existing 4 stops for gpt-5.5 / gpt-5.4 /
+// gpt-5.4-mini / gpt-5.3-codex-spark (low..xhigh). There is NO Auto row for
+// Codex — the whole ladder is ordinal, so no stop is lifted out of the slider.
+const CODEX_REASONING_6 = [
+  { value: "low", label: "Low", description: "Fast responses with lighter reasoning" },
+  { value: "medium", label: "Medium", description: "Balances speed and reasoning depth" },
+  { value: "high", label: "High", description: "Greater reasoning depth" },
+  { value: "xhigh", label: "Extra high", description: "Maximum reasoning depth" },
+  { value: "max", label: "Max", description: "Maximum reasoning depth for the hardest problems" },
+  { value: "ultra", label: "Ultra", description: "Maximum reasoning with automatic task delegation" },
+];
+
+const CODEX_REASONING_5 = [
+  { value: "low", label: "Low", description: "Fast responses with lighter reasoning" },
+  { value: "medium", label: "Medium", description: "Balances speed and reasoning depth" },
+  { value: "high", label: "High", description: "Greater reasoning depth" },
+  { value: "xhigh", label: "Extra high", description: "Maximum reasoning depth" },
+  { value: "max", label: "Max", description: "Maximum reasoning depth for the hardest problems" },
+];
+
 const CLAUDE_OPUS_REASONING = [
   { value: "auto", label: "Auto", description: "Let the model choose the effort" },
   { value: "low", label: "Low", description: "Fast responses for simple work" },
@@ -171,6 +193,40 @@ test("reasoningSliderModel marks Auto selection and parks slider at a sane fallb
   assert.equal(model.ordinalIndex, 2);
 });
 
+test("reasoningSliderModel maps the 6-stop Codex ladder low->ultra with no Auto lift-out", () => {
+  // SPEC-1921 US-20 / FR-122 / SC-030 — gpt-5.6-sol / gpt-5.6-terra send six
+  // ordinal Codex stops (low..ultra) and no Auto row, so the whole ladder stays
+  // on the ordinal scale and ultra is the top stop.
+  const model = reasoningSliderModel(CODEX_REASONING_6, "ultra");
+  assert.equal(model.hasAuto, false, "Codex has no Auto row");
+  assert.equal(model.stops.length, 6);
+  assert.deepEqual(
+    model.stops.map((stop) => stop.value),
+    ["low", "medium", "high", "xhigh", "max", "ultra"],
+    "six ordinal stops in ladder order",
+  );
+  assert.equal(model.ordinalIndex, 5, "ultra is the top stop");
+  assert.equal(model.isAuto, false);
+  assert.equal(model.activeValue, "ultra");
+  assert.equal(model.activeDescription, "Maximum reasoning with automatic task delegation");
+});
+
+test("reasoningSliderModel maps the 5-stop Codex ladder low->max", () => {
+  // SPEC-1921 US-20 / FR-122 / SC-030 — gpt-5.6-luna sends five ordinal stops
+  // (low..max) with no Auto row, topping out at max.
+  const model = reasoningSliderModel(CODEX_REASONING_5, "max");
+  assert.equal(model.hasAuto, false, "Codex has no Auto row");
+  assert.equal(model.stops.length, 5);
+  assert.deepEqual(
+    model.stops.map((stop) => stop.value),
+    ["low", "medium", "high", "xhigh", "max"],
+    "five ordinal stops in ladder order",
+  );
+  assert.equal(model.ordinalIndex, 4, "max is the top stop");
+  assert.equal(model.isAuto, false);
+  assert.equal(model.activeValue, "max");
+});
+
 // --- buildReasoningField ---------------------------------------------------
 
 test("buildReasoningField renders a snapped range over ordinal stops", () => {
@@ -251,6 +307,75 @@ test("buildReasoningField exposes an Auto toggle that suspends the slider for Cl
   changeChecked(doc, autoToggle, false);
   assert.equal(range.disabled, false, "disabling Auto re-enables the slider");
   assert.notEqual(sent.at(-1), "auto", "disabling Auto sends an ordinal stop value");
+});
+
+test("buildReasoningField renders the 6-stop Codex ladder and commits 'ultra' at the top", () => {
+  // SPEC-1921 US-20 / FR-122 / SC-030 — the data-driven slider scales to six
+  // Codex stops (low..ultra) with no Auto toggle; releasing on the top stop
+  // commits the backend stored value 'ultra'.
+  const doc = bootDom();
+  const sent = [];
+  const field = buildReasoningField(doc, {
+    label: "Reasoning",
+    options: CODEX_REASONING_6,
+    selectedValue: "low",
+    onChange: (v) => sent.push(v),
+  });
+  const range = field.querySelector('input[type="range"]');
+  assert.ok(range, "reasoning field must render a range slider");
+  assert.equal(range.getAttribute("max"), "5", "six stops -> max index 5");
+  assert.equal(field.querySelector("[data-reasoning-auto]"), null, "Codex has no Auto toggle");
+  const ticks = Array.from(field.querySelectorAll(".launch-range__tick")).map((t) => t.textContent.trim());
+  assert.deepEqual(ticks, ["Low", "Medium", "High", "Extra high", "Max", "Ultra"]);
+  assert.equal(ticks.at(-1), "Ultra", "Ultra renders as the top stop, above Max");
+
+  // Drag preview never commits (a commit would re-render and destroy the slider
+  // mid-drag); only release/keyboard-step commits, and it commits exactly once.
+  dispatchRange(doc, range, 5, "input");
+  assert.deepEqual(sent, [], "input (drag) previews locally without committing");
+  dispatchRange(doc, range, 5, "change");
+  assert.deepEqual(sent, ["ultra"], "committing the top stop commits stored value 'ultra'");
+});
+
+test("buildReasoningField renders the 5-stop Codex ladder and commits 'max' at the top", () => {
+  // SPEC-1921 US-20 / FR-122 / SC-030 — gpt-5.6-luna's five-stop ladder tops out
+  // at Max; releasing on the top stop commits the backend stored value 'max'.
+  const doc = bootDom();
+  const sent = [];
+  const field = buildReasoningField(doc, {
+    label: "Reasoning",
+    options: CODEX_REASONING_5,
+    selectedValue: "low",
+    onChange: (v) => sent.push(v),
+  });
+  const range = field.querySelector('input[type="range"]');
+  assert.equal(range.getAttribute("max"), "4", "five stops -> max index 4");
+  assert.equal(field.querySelector("[data-reasoning-auto]"), null, "Codex has no Auto toggle");
+  const ticks = Array.from(field.querySelectorAll(".launch-range__tick")).map((t) => t.textContent.trim());
+  assert.deepEqual(ticks, ["Low", "Medium", "High", "Extra high", "Max"]);
+  dispatchRange(doc, range, 4, "change");
+  assert.deepEqual(sent, ["max"], "committing the top stop commits stored value 'max'");
+});
+
+test("buildReasoningField commits 'xhigh' at the top of the 4-stop Codex ladder", () => {
+  // SPEC-1921 US-20 / FR-122 / SC-030 — gpt-5.5 / gpt-5.4 / gpt-5.4-mini /
+  // gpt-5.3-codex-spark keep the four-stop ladder that tops out at Extra high /
+  // stored value 'xhigh'.
+  const doc = bootDom();
+  const sent = [];
+  const field = buildReasoningField(doc, {
+    label: "Reasoning",
+    options: CODEX_REASONING,
+    selectedValue: "low",
+    onChange: (v) => sent.push(v),
+  });
+  const range = field.querySelector('input[type="range"]');
+  assert.equal(range.getAttribute("max"), "3", "four stops -> max index 3");
+  assert.equal(field.querySelector("[data-reasoning-auto]"), null, "Codex has no Auto toggle");
+  const ticks = Array.from(field.querySelectorAll(".launch-range__tick")).map((t) => t.textContent.trim());
+  assert.deepEqual(ticks, ["Low", "Medium", "High", "Extra high"]);
+  dispatchRange(doc, range, 3, "change");
+  assert.deepEqual(sent, ["xhigh"], "committing the top stop commits stored value 'xhigh'");
 });
 
 // --- buildSegmentedField ---------------------------------------------------
