@@ -12845,9 +12845,11 @@ fn app_runtime_load_knowledge_bridge_replies_with_cache_backed_issue_and_spec_vi
             refresh_enabled,
             ..
         } if *knowledge_kind == gwt::KnowledgeKind::Issue
-            && entries.len() == 1
-            && entries[0].number == 42
-            && entries[0].linked_branch_count == 1
+            && entries.len() == 2
+            && entries.iter().any(|entry| entry.number == 42
+                && entry.linked_branch_count == 1
+                && !entry.is_spec)
+            && entries.iter().any(|entry| entry.number == 1930 && entry.is_spec)
             && *selected_number == Some(42)
             && *refresh_enabled
     ));
@@ -12863,7 +12865,7 @@ fn app_runtime_load_knowledge_bridge_replies_with_cache_backed_issue_and_spec_vi
         "client-1",
         KnowledgeLoadRequest {
             id: &combined_window_id("tab-1", "spec-1"),
-            kind: gwt::KnowledgeKind::Spec,
+            kind: gwt::KnowledgeKind::Issue,
             request_id: None,
             selected_number: Some(1930),
             refresh: false,
@@ -12878,9 +12880,9 @@ fn app_runtime_load_knowledge_bridge_replies_with_cache_backed_issue_and_spec_vi
             selected_number,
             refresh_enabled,
             ..
-        } if *knowledge_kind == gwt::KnowledgeKind::Spec
-            && entries.len() == 1
-            && entries[0].number == 1930
+        } if *knowledge_kind == gwt::KnowledgeKind::Issue
+            && entries.len() == 2
+            && entries.iter().any(|entry| entry.number == 1930 && entry.is_spec)
             && *selected_number == Some(1930)
             && *refresh_enabled
     ));
@@ -15678,7 +15680,7 @@ fn app_runtime_issue_monitor_auto_launch_uses_last_settings_runtime_target() {
     assert_eq!(runtime_target, gwt_agent::LaunchRuntimeTarget::Host);
     assert_eq!(
         process.args.last().map(String::as_str),
-        Some("$gwt-build-spec SPEC-3165"),
+        Some("$gwt-execute #3165"),
         "Issue Monitor auto launch must pass the generated prompt to the agent"
     );
 }
@@ -15786,7 +15788,7 @@ fn app_runtime_issue_monitor_configure_saves_profile_without_launching() {
             .expect("launch wizard")
             .wizard
             .initial_prompt,
-        "$gwt-build-spec SPEC-3165"
+        "$gwt-execute #3165"
     );
 
     runtime.handle_launch_wizard_action(
@@ -16163,7 +16165,7 @@ fn app_runtime_issue_monitor_auto_launch_without_previous_settings_opens_wizard(
             .expect("launch wizard")
             .wizard
             .initial_prompt,
-        "$gwt-build-spec SPEC-3165"
+        "$gwt-execute #3165"
     );
 }
 

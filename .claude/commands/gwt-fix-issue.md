@@ -7,7 +7,7 @@ allowed-tools: Read, Glob, Grep, Bash
 Fix Issue Command
 =================
 
-Public task entrypoint for resolving an existing GitHub Issue.
+Transition alias for the unified Execute command.
 
 Usage
 -----
@@ -19,17 +19,17 @@ Usage
 Steps
 -----
 
-1. Load `.claude/skills/gwt-fix-issue/SKILL.md` and follow the workflow.
-2. Inspect the issue and decide direct-fix vs SPEC-needed.
-3. Continue through implementation unless the work clearly needs a SPEC first.
+1. Prefer `/gwt:gwt-execute #N` for all Issue-backed execution.
+2. Load `.claude/skills/gwt-execute/SKILL.md` and follow the workflow.
+3. Keep PR lifecycle work under `gwt-manage-pr`.
 
 Examples
 --------
 
 ```text
-/gwt:gwt-fix-issue #123
+/gwt:gwt-execute #123
 ```
 
 ```text
-/gwt:gwt-fix-issue https://github.com/akiojin/gwt/issues/123
+/gwt:gwt-execute https://github.com/akiojin/gwt/issues/123
 ```

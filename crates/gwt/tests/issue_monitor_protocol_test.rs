@@ -155,7 +155,7 @@ fn backend_issue_monitor_inbox_and_toast_are_serializable() {
         launch_plan: Some(IssueMonitorLaunchPlan {
             branch_name: "work/issue-42".to_string(),
             linked_issue_kind: gwt::LinkedIssueKind::Issue,
-            prompt: "$gwt-fix-issue #42".to_string(),
+            prompt: "$gwt-execute #42".to_string(),
         }),
         error_message: None,
     };
@@ -182,7 +182,7 @@ fn backend_issue_monitor_inbox_and_toast_are_serializable() {
     );
     assert_eq!(
         inbox["items"][0]["launch_plan"]["prompt"],
-        "$gwt-fix-issue #42"
+        "$gwt-execute #42"
     );
     assert_eq!(inbox["items"][0]["issue"]["body"], "Issue body");
     assert_eq!(

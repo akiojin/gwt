@@ -2406,14 +2406,14 @@ mod tests {
     }
 
     #[test]
-    fn branch_seed_uses_spec_kind_when_create_new_then_feature_prefix() {
+    fn branch_seed_uses_issue_suffix_for_spec_compat_kind_when_create_new_then_feature_prefix() {
         let mut state = LaunchWizardState::open_with(
             context_with_linked_issue(branch("develop"), "develop", LinkedIssueKind::Spec, 2014),
             sample_agent_options(),
             Vec::new(),
         );
         create_new_with_prefix(&mut state, "feature/");
-        assert_eq!(state.branch_name, "feature/spec-2014");
+        assert_eq!(state.branch_name, "feature/issue-2014");
     }
 
     #[test]
@@ -2456,13 +2456,13 @@ mod tests {
     }
 
     #[test]
-    fn branch_seed_omits_title_slug_for_spec_proposal_a() {
+    fn branch_seed_uses_issue_suffix_for_spec_compatibility_kind() {
         let ctx =
             context_with_linked_issue(branch("develop"), "develop", LinkedIssueKind::Spec, 2014);
         let suffix = ctx
             .linked_issue_branch_suffix()
             .expect("linked issue branch suffix");
-        assert_eq!(suffix, "spec-2014");
+        assert_eq!(suffix, "issue-2014");
     }
 
     #[test]
@@ -2838,13 +2838,13 @@ mod tests {
         let view = state.view();
 
         assert_eq!(view.mode, LaunchWizardMode::Knowledge);
-        assert_eq!(view.branch_name, "feature/spec-2014");
+        assert_eq!(view.branch_name, "work/issue-2014");
         assert_eq!(view.branch_mode, "create_new");
         assert!(!view.show_branch_controls);
         assert!(!view.show_linked_issue);
 
         let config = state.build_launch_config().expect("launch config");
-        assert_eq!(config.branch.as_deref(), Some("feature/spec-2014"));
+        assert_eq!(config.branch.as_deref(), Some("work/issue-2014"));
         assert_eq!(config.base_branch.as_deref(), Some("develop"));
         assert!(config.working_dir.is_none());
         assert_eq!(config.linked_issue_number, Some(2014));

@@ -347,7 +347,7 @@ fn evaluate_owner_guard(
             Ok(HookOutput::pre_tool_use_permission(
                 "Owner Issue/SPEC is required before implementation",
                 "This tool call changes mutating implementation work, but no owner Issue/SPEC is linked to the current agent session.\n\n\
-Start or link the work first through `gwt-register-issue`, `gwt-fix-issue`, or an approved SPEC plan. Read-only exploration, explicit goal/workspace/Board bookkeeping, verification commands, transport-only commands, docs/chore edits, and low-risk worktree-local `touch`/`rm` file operations remain allowed.",
+Start or link a Work Item first through `gwt-register-issue`, then execute it with `gwt-execute #N`. If the Work Item has the `gwt-spec` design-required tag and its plan/tasks are incomplete, run `gwt-plan-spec` before implementation. Read-only exploration, explicit goal/workspace/Board bookkeeping, verification commands, transport-only commands, docs/chore edits, and low-risk worktree-local `touch`/`rm` file operations remain allowed.",
             ))
         }
         WorkflowOwner::Issue(_) => Ok(HookOutput::Silent),
@@ -360,7 +360,7 @@ Start or link the work first through `gwt-register-issue`, `gwt-fix-issue`, or a
                 return Ok(HookOutput::Silent);
             }
             let detail = format!(
-                "SPEC #{number} is linked, but its cached `plan` and `tasks` sections are not both non-empty. Refresh the SPEC plan/tasks through `gwt-plan-spec` before changing implementation state."
+                "Work Item #{number} has the `gwt-spec` design-required tag, but its cached `plan` and `tasks` sections are not both non-empty. Run `gwt-plan-spec #{number}` before changing implementation state, then resume execution with `gwt-execute #{number}`."
             );
             Ok(HookOutput::pre_tool_use_permission(
                 "Owner SPEC needs plan and tasks before implementation",
@@ -395,8 +395,8 @@ fn evaluate_lane_code_edit_guard(
         "Intake (Curate) sessions do not edit production code",
         "This is a Curate (intake) session: it registers Issues/SPECs and does not implement. \
 Editing production source is blocked here. Register the work \
-(`gwt-register-issue` for a plain Issue, or `gwt-discussion` → `gwt-register-spec` for a SPEC) \
-and let an Execute-lane session (Workspace / Issue Monitor) implement it. \
+through `gwt-register-issue`, add design artifacts through `gwt-plan-spec` when the Work Item has the `gwt-spec` tag, \
+and let an Execute-lane session run `gwt-execute #N`. \
 Bookkeeping under `.gwt/` and `tasks/`, and documentation edits, are allowed.",
     ))
 }
@@ -1900,6 +1900,9 @@ Coverage requirements.
         };
         assert!(summary.contains("Owner Issue/SPEC"), "{summary}");
         assert!(detail.contains("mutating implementation work"), "{detail}");
+        assert!(detail.contains("gwt-execute"), "{detail}");
+        assert!(!detail.contains("gwt-fix-issue"), "{detail}");
+        assert!(!detail.contains("gwt-build-spec"), "{detail}");
     }
 
     #[test]
@@ -1923,8 +1926,11 @@ Coverage requirements.
         let HookOutput::PreToolUsePermission { detail, .. } = output else {
             panic!("expected SPEC plan/tasks guard");
         };
-        assert!(detail.contains("SPEC #1935"), "{detail}");
+        assert!(detail.contains("Work Item #1935"), "{detail}");
         assert!(detail.contains("`plan` and `tasks`"), "{detail}");
+        assert!(detail.contains("gwt-plan-spec"), "{detail}");
+        assert!(detail.contains("gwt-execute"), "{detail}");
+        assert!(!detail.contains("gwt-build-spec"), "{detail}");
 
         assert_eq!(
             evaluate_with_context(

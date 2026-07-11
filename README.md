@@ -227,15 +227,17 @@ the named-pipe path lands.
 
 1. Open a project directory, clone from GitHub, or restore the previous
    project.
-2. Use `Board`, `Issue`, `SPEC`, and Knowledge search surfaces to understand
+2. Use `Board`, `Issue`, and Knowledge search surfaces to understand
    the current work, related owners, and prior decisions.
 3. In the **Curate** lane, choose `Intake` from the Command Rail or Command
    Palette to shape new work: a branchless, throwaway session that discusses,
-   plans, and registers a GitHub Issue or SPEC. Intake never creates a branch.
+   plans, and registers a GitHub Issue. Work that needs design gets the
+   `gwt-spec` design-required label and SPEC artifacts on that Issue. Intake
+   never creates a branch.
 4. In the **Execute** lane, run the registered work: `Open Workspace` launches
    an `Agent` on an existing branch, the background `Issue Monitor` picks up
-   registered Issues automatically, or launch directly from an Issue/SPEC detail
-   when the owner is already known.
+   registered Issues automatically, or launch directly from an Issue detail
+   with the unified prompt form `gwt-execute #N` when the owner is already known.
 5. Let gwt materialize the backing `work/YYYYMMDD-HHMM[-n]` branch/worktree
    only when an Execute launch is confirmed (Intake sessions stay branchless and
    ephemeral).
@@ -251,8 +253,9 @@ Common windows include:
 - `Agent` — live coding-agent process windows created through Intake, Open
   Workspace, the Issue Monitor, or Launch Agent
 - `Board` — shared user/agent timeline for reasoning and coordination
-- `Issue` and `SPEC` — cache-backed Knowledge Bridge windows with semantic
-  search, detail panes, and Launch Agent handoff
+- `Issue` — cache-backed Work Item Knowledge Bridge with semantic search, detail
+  panes, design-required tags, and Launch Agent handoff. Legacy `SPEC` windows
+  open this same Work Item view.
 - `Logs` — project diagnostics and live log surface
 - `Profile` — environment/profile management
 - `File Tree` — live read-only repository tree
@@ -268,8 +271,8 @@ Common windows include:
 
 `Agent` is the live process window for coding-agent sessions. `Board` is the
 coordination surface agents use to expose status, decisions, handoffs, and
-requests. `Issue` and `SPEC` use the local cache and semantic index rather than
-rendering direct GitHub API responses in the frontend.
+requests. The Work Item Knowledge Bridge uses the local Issue cache and semantic
+index rather than rendering direct GitHub API responses in the frontend.
 
 On Windows Host launches, Launch Agent lets you choose Command Prompt, Windows
 PowerShell, or PowerShell 7. Docker launches continue to use the container
@@ -285,9 +288,9 @@ Linux, `Ctrl+Shift+C` also copies the current terminal selection.
 The Issue Monitor watches the project's open GitHub Issues and turns them into
 agent work. In the default (human-gated) mode it scans candidates into an
 inbox, and you press `Launch` per issue: gwt then creates the
-`work/issue-N` (or `feature/spec-N`) branch/worktree at launch time and starts
-the agent with the issue as its prompt. Failed launches stay visible in the
-inbox with the error, and `Launch now` retries explicitly.
+`work/issue-N` branch/worktree at launch time and starts the agent with
+`gwt-execute #N`. Failed launches stay visible in the inbox with the error, and
+`Launch now` retries explicitly.
 
 ### Autonomous mode (opt-in)
 
@@ -328,17 +331,21 @@ gwt keeps project knowledge close to the agent workspace:
 - `gwt-search` searches SPECs, Issues, source files, and docs through the shared
   ChromaDB runtime. Missing indexes are built on demand, and the desktop app can
   repair the managed Python search runtime when needed.
-- The Issue/SPEC Knowledge Bridge windows combine cache-backed list/detail views
-  with semantic ranking, exact-match priority, and match percentages.
+- The Work Item Knowledge Bridge combines cache-backed list/detail views for
+  plain and `gwt-spec` tagged Issues with semantic ranking, exact-match
+  priority, and match percentages.
 
 Bundled workflow skills are materialized into `.claude/skills`,
 `.claude/commands`, and `.codex/skills` for the active worktree. The public
 entrypoints are:
 
 - `gwt-discussion` — investigation-first discussion and design clarification
-- `gwt-register-issue` / `gwt-fix-issue` — issue intake and issue-driven fixes
+- `gwt-register-issue` — work intake; creates plain Issues or design-required
+  `gwt-spec` Issues
 - `gwt-plan-spec` — implementation planning for an approved SPEC
-- `gwt-build-spec` — TDD-oriented implementation from an approved task
+- `gwt-execute` — TDD-oriented implementation from `#N` or an approved task
+- `gwt-build-spec` / `gwt-fix-issue` — one-release transition aliases to
+  `gwt-execute`
 - `gwt-manage-pr` — PR create/check/fix lifecycle
 - `gwt-arch-review` — architecture review and improvement routing
 - `gwt-search` — unified semantic search
@@ -642,6 +649,8 @@ surface combination in both themes.
 ## SPEC and Runtime Quick Reference
 
 - SPEC source of truth: GitHub Issues labeled `gwt-spec`
+- Execute any Issue-backed Work Item with `gwt-execute #N`; design-required
+  Issues must have `plan` and `tasks` before implementation.
 - Local cache path:
   `~/.gwt/cache/issues/<repo-hash>/`
 - Managed agent integration files:

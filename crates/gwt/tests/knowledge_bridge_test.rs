@@ -31,7 +31,7 @@ fn sample_issue(
 }
 
 #[test]
-fn load_knowledge_bridge_filters_plain_issues_and_counts_linked_branches() {
+fn load_knowledge_bridge_returns_unified_work_items_and_counts_linked_branches() {
     let dir = tempdir().expect("tempdir");
     let repo_path = dir.path().join("repo");
     fs::create_dir_all(&repo_path).expect("create repo");
@@ -76,9 +76,17 @@ fn load_knowledge_bridge_filters_plain_issues_and_counts_linked_branches() {
         load_knowledge_bridge(&repo_path, KnowledgeKind::Issue, Some(42), false).expect("load");
 
     assert_eq!(loaded.kind, KnowledgeKind::Issue);
-    assert_eq!(loaded.entries.len(), 1);
+    assert_eq!(loaded.entries.len(), 2);
     assert_eq!(loaded.entries[0].number, 42);
+    assert!(!loaded.entries[0].is_spec);
     assert_eq!(loaded.entries[0].linked_branch_count, 1);
+    assert!(
+        loaded
+            .entries
+            .iter()
+            .any(|entry| entry.number == 2017 && entry.is_spec),
+        "Issue view must include gwt-spec tagged entries in the unified Work Item list"
+    );
     assert_eq!(loaded.selected_number, Some(42));
     assert_eq!(loaded.detail.launch_issue_number, Some(42));
     assert!(loaded

@@ -114,7 +114,7 @@ impl WindowPreset {
             Self::Logs => "Logs",
             Self::Issue => "Issue",
             Self::IssueMonitor => "Issue Monitor",
-            Self::Spec => "SPEC",
+            Self::Spec => "Issue",
             Self::Work => "Workspace",
             Self::Index => "Index",
             Self::Improvement => "Improvement Inbox",
@@ -137,9 +137,9 @@ impl WindowPreset {
             Self::Memo => "Removed legacy memo surface",
             Self::Profile => "Manage env profiles, overrides, and merged preview",
             Self::Logs => "Placeholder logs surface",
-            Self::Issue => "Placeholder issue surface",
+            Self::Issue => "Browse cached issues and launch agents",
             Self::IssueMonitor => "Watch labeled Issues and launch improvement agents",
-            Self::Spec => "Placeholder SPEC surface",
+            Self::Spec => "Browse cached issues and launch agents",
             Self::Work => "Workspace overview",
             Self::Index => "Search indexed project knowledge",
             Self::Improvement => "Review gwt improvement candidates",
@@ -514,7 +514,7 @@ mod tests {
         assert_eq!(WindowPreset::ALL.len(), 18);
         assert_eq!(WindowPreset::Issue.title(), "Issue");
         assert_eq!(WindowPreset::IssueMonitor.title(), "Issue Monitor");
-        assert_eq!(WindowPreset::Spec.title(), "SPEC");
+        assert_eq!(WindowPreset::Spec.title(), "Issue");
         assert_eq!(WindowPreset::AgentKanban.title(), "Agent Kanban");
         assert_eq!(WindowPreset::Work.title(), "Workspace");
         assert_eq!(WindowPreset::Index.title(), "Index");

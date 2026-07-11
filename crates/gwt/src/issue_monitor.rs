@@ -11,7 +11,10 @@ use gwt_github::{
     IssueClient, IssueNumber,
 };
 
-use crate::{knowledge_launch_target_branch_name, LaunchWizardPreviousProfile, LinkedIssueKind};
+use crate::{
+    has_gwt_spec_label, knowledge_launch_target_branch_name, LaunchWizardPreviousProfile,
+    LinkedIssueKind,
+};
 
 const GITHUB_AUTH_SETUP_MESSAGE: &str = concat!(
     "GitHub authentication is required before automatic Issue Monitor launches can claim Issues. ",
@@ -760,22 +763,15 @@ pub fn issue_has_auto_merge_label(issue: &IssueMonitorIssue) -> bool {
 }
 
 pub fn issue_monitor_linked_issue_kind(issue: &IssueMonitorIssue) -> LinkedIssueKind {
-    if issue
-        .labels
-        .iter()
-        .any(|label| label.eq_ignore_ascii_case("gwt-spec"))
-    {
+    if has_gwt_spec_label(&issue.labels) {
         LinkedIssueKind::Spec
     } else {
         LinkedIssueKind::Issue
     }
 }
 
-pub fn issue_monitor_launch_prompt(kind: LinkedIssueKind, number: u64) -> String {
-    match kind {
-        LinkedIssueKind::Spec => format!("$gwt-build-spec SPEC-{number}"),
-        LinkedIssueKind::Issue => format!("$gwt-fix-issue #{number}"),
-    }
+pub fn issue_monitor_launch_prompt(_kind: LinkedIssueKind, number: u64) -> String {
+    format!("$gwt-execute #{number}")
 }
 
 pub fn issue_monitor_launch_plan(issue: &IssueMonitorIssue) -> IssueMonitorLaunchPlan {
@@ -2446,6 +2442,22 @@ mod tests {
             body: None,
             url: None,
         }
+    }
+
+    #[test]
+    fn launch_plan_uses_unified_execute_prompt_and_work_issue_branch() {
+        let mut spec_issue = issue(3164);
+        spec_issue.labels.push("gwt-spec".to_string());
+        let spec_plan = issue_monitor_launch_plan(&spec_issue);
+
+        assert_eq!(spec_plan.branch_name, "work/issue-3164");
+        assert_eq!(spec_plan.prompt, "$gwt-execute #3164");
+        assert_eq!(spec_plan.linked_issue_kind, LinkedIssueKind::Spec);
+
+        let plain_plan = issue_monitor_launch_plan(&issue(42));
+        assert_eq!(plain_plan.branch_name, "work/issue-42");
+        assert_eq!(plain_plan.prompt, "$gwt-execute #42");
+        assert_eq!(plain_plan.linked_issue_kind, LinkedIssueKind::Issue);
     }
 
     #[test]

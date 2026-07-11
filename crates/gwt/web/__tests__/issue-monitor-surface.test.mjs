@@ -40,9 +40,9 @@ function issue(number, state = "queued", labels = []) {
     launched_window_id: null,
     error_message: null,
     launch_plan: {
-      branch_name: labels.includes("gwt-spec") ? `feature/spec-${number}` : `work/issue-${number}`,
+      branch_name: `work/issue-${number}`,
       linked_issue_kind: labels.includes("gwt-spec") ? "spec" : "issue",
-      prompt: labels.includes("gwt-spec") ? `$gwt-build-spec SPEC-${number}` : `$gwt-fix-issue #${number}`,
+      prompt: `$gwt-execute #${number}`,
     },
   };
 }
@@ -84,8 +84,8 @@ test("Issue Monitor exposes Start/Stop while keeping queued issue controls visib
     kind: "issue_monitor_configure_profile",
   });
   assert.equal(rows[0].querySelector(".issue-monitor-card__state-badge").textContent, "Queued");
-  assert.match(rows[0].textContent, /Prompt: \$gwt-build-spec SPEC-42/);
-  assert.match(rows[0].textContent, /Branch: feature\/spec-42/);
+  assert.match(rows[0].textContent, /Prompt: \$gwt-execute #42/);
+  assert.match(rows[0].textContent, /Branch: work\/issue-42/);
   assert.equal(rows[1].querySelector(".issue-monitor-card__state-badge").textContent, "Launching");
 
   const up = rows[0].querySelector('[data-action="move-up"]');
@@ -150,7 +150,7 @@ test("Issue Monitor arrows reorder visible queued rows and Detail opens a modal"
   assert.equal(modal.querySelector('[role="dialog"]').getAttribute("aria-modal"), "true");
   assert.ok(modal.querySelector('[role="dialog"]').classList.contains("modal-shell"));
   assert.match(modal.textContent, /#42 Issue 42/);
-  assert.match(modal.textContent, /\$gwt-fix-issue #42/);
+  assert.match(modal.textContent, /\$gwt-execute #42/);
   assert.match(modal.textContent, /work\/issue-42/);
   assert.match(modal.textContent, /Body for issue 42/);
   assert.match(
@@ -160,6 +160,23 @@ test("Issue Monitor arrows reorder visible queued rows and Detail opens a modal"
 
   modal.querySelector(".issue-monitor-detail-modal__close").click();
   assert.equal(document.getElementById("issue-monitor-detail-modal"), null);
+});
+
+test("Issue Monitor fallback uses unified work-item launch copy for gwt-spec labels", () => {
+  const { document, surface } = makeFixture();
+  const item = issue(3164, "queued", ["gwt-spec"]);
+  delete item.launch_plan;
+
+  surface.applyInbox([item]);
+
+  const row = document.querySelector(".issue-monitor-card__item");
+  assert.match(row.textContent, /Prompt: \$gwt-execute #3164/);
+  assert.match(row.textContent, /Branch: work\/issue-3164/);
+
+  row.querySelector('[data-action="open-detail"]').click();
+  const modal = document.getElementById("issue-monitor-detail-modal");
+  assert.match(modal.textContent, /\$gwt-execute #3164/);
+  assert.match(modal.textContent, /work\/issue-3164/);
 });
 
 test("Issue Monitor CSS composes Operator tokens instead of raw colors", () => {
@@ -386,7 +403,7 @@ test("Issue Monitor renders agent runtime failures in the row and detail modal",
   assert.ok(modal, "Detail should open for failed rows");
   assert.match(modal.textContent, /Agent failed/);
   assert.match(modal.textContent, /Stop-block hit an error/);
-  assert.match(modal.textContent, /\$gwt-build-spec SPEC-3164/);
+  assert.match(modal.textContent, /\$gwt-execute #3164/);
 });
 
 test("autonomous toggle sends the control and reflects status", () => {

@@ -4362,14 +4362,14 @@ mod tests {
         let spec_session = runtime.launch_wizard.as_ref().expect("launch wizard");
         let spec_view = spec_session.wizard.view();
         assert_eq!(spec_view.mode, gwt::LaunchWizardMode::Knowledge);
-        assert_eq!(spec_view.branch_name, "feature/spec-2014");
+        assert_eq!(spec_view.branch_name, "work/issue-2014");
         assert_eq!(spec_view.branch_mode, "create_new");
         assert!(!spec_view.show_branch_controls);
         let spec_config = spec_session
             .wizard
             .build_launch_config()
             .expect("spec launch config");
-        assert_eq!(spec_config.branch.as_deref(), Some("feature/spec-2014"));
+        assert_eq!(spec_config.branch.as_deref(), Some("work/issue-2014"));
         assert_eq!(spec_config.base_branch.as_deref(), Some("feature/demo"));
         assert!(spec_config.working_dir.is_none());
         assert_eq!(
@@ -5323,7 +5323,7 @@ mod tests {
         );
         assert_eq!(
             knowledge_kind_for_preset(WindowPreset::Spec),
-            Some(KnowledgeKind::Spec)
+            Some(KnowledgeKind::Issue)
         );
         assert_eq!(
             knowledge_kind_for_preset(WindowPreset::Pr),
@@ -6757,7 +6757,7 @@ mod tests {
         );
         assert_eq!(
             super::knowledge_kind_for_preset(WindowPreset::Spec),
-            Some(KnowledgeKind::Spec)
+            Some(KnowledgeKind::Issue)
         );
         assert_eq!(
             super::knowledge_kind_for_preset(WindowPreset::Pr),

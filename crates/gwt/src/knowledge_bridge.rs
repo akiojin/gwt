@@ -9,13 +9,15 @@ use pulldown_cmark::{html, Options, Parser};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use crate::issue_cache::{
-    issue_cache_root_for_repo_path, issue_cache_root_for_repo_path_or_detached,
-    sync_issue_cache_from_remote_if_stale_with_fingerprint,
-    sync_issue_cache_from_remote_with_fingerprint, ISSUE_CACHE_TTL,
+use crate::{
+    has_gwt_spec_label,
+    issue_cache::{
+        issue_cache_root_for_repo_path, issue_cache_root_for_repo_path_or_detached,
+        sync_issue_cache_from_remote_if_stale_with_fingerprint,
+        sync_issue_cache_from_remote_with_fingerprint, ISSUE_CACHE_TTL,
+    },
 };
 
-const SPEC_LABEL: &str = "gwt-spec";
 const KNOWLEDGE_SEARCH_RESULT_LIMIT: usize = 50;
 
 /// Canonical SPEC phase labels in lifecycle order.
@@ -54,7 +56,7 @@ pub fn extract_phase(labels: &[String]) -> ExtractedPhase {
     let mut is_spec = false;
 
     for label in labels {
-        if label == SPEC_LABEL {
+        if has_gwt_spec_label(std::slice::from_ref(label)) {
             is_spec = true;
             continue;
         }
@@ -321,8 +323,18 @@ pub fn load_knowledge_bridge(
     let entries = load_local_cache_entries_for_repo(repo_path)?;
     let linked_branches = load_linked_branches(repo_path);
     Ok(match kind {
-        KnowledgeKind::Issue => build_issue_view(entries, linked_branches, selected_number),
-        KnowledgeKind::Spec => build_spec_view(entries, linked_branches, selected_number),
+        KnowledgeKind::Issue => build_work_item_view(
+            KnowledgeKind::Issue,
+            entries,
+            linked_branches,
+            selected_number,
+        ),
+        KnowledgeKind::Spec => build_work_item_view(
+            KnowledgeKind::Spec,
+            entries,
+            linked_branches,
+            selected_number,
+        ),
         KnowledgeKind::Pr => disabled_pr_view(),
     })
 }
@@ -474,13 +486,7 @@ where
         .load_entry(gwt_github::IssueNumber(issue_number))
         .ok_or_else(|| format!("Issue #{issue_number} disappeared after cache update"))?;
     let linked_branches: HashMap<u64, Vec<String>> = HashMap::new();
-    Ok(
-        if refreshed.snapshot.labels.contains(&SPEC_LABEL.to_string()) {
-            spec_list_item(&refreshed, &linked_branches, None)
-        } else {
-            issue_list_item(&refreshed, &linked_branches, None)
-        },
-    )
+    Ok(work_item_list_item(&refreshed, &linked_branches, None))
 }
 
 pub(crate) fn search_knowledge_bridge_with_client<C: SemanticSearchClient + ?Sized>(
@@ -586,64 +592,31 @@ fn load_cache_entries(cache: &Cache) -> Result<Vec<CacheEntry>, String> {
     }
 }
 
-fn build_issue_view(
+fn build_work_item_view(
+    kind: KnowledgeKind,
     mut entries: Vec<CacheEntry>,
     linked_branches: HashMap<u64, Vec<String>>,
     selected_number: Option<u64>,
 ) -> KnowledgeBridgeView {
-    entries.retain(|entry| !is_spec_entry(entry));
     entries.sort_by(issue_entry_sort);
 
     let list_items = entries
         .iter()
-        .map(|entry| issue_list_item(entry, &linked_branches, None))
+        .map(|entry| work_item_list_item(entry, &linked_branches, None))
         .collect::<Vec<_>>();
     let selected_number = resolve_selected_number(&entries, selected_number);
     let detail = entries
         .iter()
         .find(|entry| Some(entry.snapshot.number.0) == selected_number)
-        .map(|entry| issue_detail_view(entry, linked_branches.get(&entry.snapshot.number.0)))
-        .unwrap_or_else(|| empty_detail("Issue Bridge", "No cached issues available."));
+        .map(|entry| work_item_detail_view(entry, &linked_branches))
+        .unwrap_or_else(|| empty_detail("Issue Bridge", "No cached work items available."));
 
     KnowledgeBridgeView {
-        kind: KnowledgeKind::Issue,
+        kind,
         entries: list_items,
         selected_number,
         empty_message: if selected_number.is_none() {
-            Some("No cached issues. Use Refresh to sync the cache.".to_string())
-        } else {
-            None
-        },
-        refresh_enabled: true,
-        detail,
-    }
-}
-
-fn build_spec_view(
-    mut entries: Vec<CacheEntry>,
-    linked_branches: HashMap<u64, Vec<String>>,
-    selected_number: Option<u64>,
-) -> KnowledgeBridgeView {
-    entries.retain(is_spec_entry);
-    entries.sort_by(issue_entry_sort);
-
-    let list_items = entries
-        .iter()
-        .map(|entry| spec_list_item(entry, &linked_branches, None))
-        .collect::<Vec<_>>();
-    let selected_number = resolve_selected_number(&entries, selected_number);
-    let detail = entries
-        .iter()
-        .find(|entry| Some(entry.snapshot.number.0) == selected_number)
-        .map(spec_detail_view)
-        .unwrap_or_else(|| empty_detail("SPEC Bridge", "No cached SPECs available."));
-
-    KnowledgeBridgeView {
-        kind: KnowledgeKind::Spec,
-        entries: list_items,
-        selected_number,
-        empty_message: if selected_number.is_none() {
-            Some("No cached SPECs. Use Refresh to sync the cache.".to_string())
+            Some("No cached work items. Use Refresh to sync the cache.".to_string())
         } else {
             None
         },
@@ -680,8 +653,7 @@ fn disabled_pr_view() -> KnowledgeBridgeView {
 
 fn non_repo_view(kind: KnowledgeKind) -> KnowledgeBridgeView {
     let title = match kind {
-        KnowledgeKind::Issue => "Issue Bridge",
-        KnowledgeKind::Spec => "SPEC Bridge",
+        KnowledgeKind::Issue | KnowledgeKind::Spec => "Issue Bridge",
         KnowledgeKind::Pr => "PR Bridge",
     };
     KnowledgeBridgeView {
@@ -745,8 +717,10 @@ fn sanitize_markdown_html(raw_html: &str) -> String {
 
 fn candidate_matches_kind(entry: &CacheEntry, kind: KnowledgeKind) -> bool {
     match kind {
-        KnowledgeKind::Issue => !is_spec_entry(entry),
-        KnowledgeKind::Spec => is_spec_entry(entry),
+        KnowledgeKind::Issue | KnowledgeKind::Spec => {
+            let _ = entry;
+            true
+        }
         KnowledgeKind::Pr => false,
     }
 }
@@ -758,9 +732,22 @@ fn list_item_for_kind(
     match_score: Option<u8>,
 ) -> KnowledgeListItem {
     match kind {
-        KnowledgeKind::Issue => issue_list_item(entry, linked_branches, match_score),
-        KnowledgeKind::Spec => spec_list_item(entry, linked_branches, match_score),
+        KnowledgeKind::Issue | KnowledgeKind::Spec => {
+            work_item_list_item(entry, linked_branches, match_score)
+        }
         KnowledgeKind::Pr => unreachable!("PR bridge has no list items"),
+    }
+}
+
+fn work_item_list_item(
+    entry: &CacheEntry,
+    linked_branches: &HashMap<u64, Vec<String>>,
+    match_score: Option<u8>,
+) -> KnowledgeListItem {
+    if is_spec_entry(entry) {
+        spec_list_item(entry, linked_branches, match_score)
+    } else {
+        issue_list_item(entry, linked_branches, match_score)
     }
 }
 
@@ -820,11 +807,19 @@ fn detail_for_kind(
     linked_branches: &HashMap<u64, Vec<String>>,
 ) -> KnowledgeDetailView {
     match kind {
-        KnowledgeKind::Issue => {
-            issue_detail_view(entry, linked_branches.get(&entry.snapshot.number.0))
-        }
-        KnowledgeKind::Spec => spec_detail_view(entry),
+        KnowledgeKind::Issue | KnowledgeKind::Spec => work_item_detail_view(entry, linked_branches),
         KnowledgeKind::Pr => disabled_pr_view().detail,
+    }
+}
+
+fn work_item_detail_view(
+    entry: &CacheEntry,
+    linked_branches: &HashMap<u64, Vec<String>>,
+) -> KnowledgeDetailView {
+    if is_spec_entry(entry) {
+        spec_detail_view(entry)
+    } else {
+        issue_detail_view(entry, linked_branches.get(&entry.snapshot.number.0))
     }
 }
 
@@ -854,8 +849,7 @@ fn distance_to_match_score(distance: f64) -> u8 {
 
 fn search_empty_title(kind: KnowledgeKind) -> &'static str {
     match kind {
-        KnowledgeKind::Issue => "Issue Search",
-        KnowledgeKind::Spec => "SPEC Search",
+        KnowledgeKind::Issue | KnowledgeKind::Spec => "Work Item Search",
         KnowledgeKind::Pr => "PR Bridge",
     }
 }
@@ -1023,11 +1017,7 @@ fn short_updated_at(updated_at: &str) -> String {
 }
 
 fn is_spec_entry(entry: &CacheEntry) -> bool {
-    entry
-        .snapshot
-        .labels
-        .iter()
-        .any(|label| label == SPEC_LABEL)
+    has_gwt_spec_label(&entry.snapshot.labels)
 }
 
 fn value_u64(value: &Value) -> Option<u64> {
@@ -1311,6 +1301,7 @@ Extra context.
             issue_view.empty_message.as_deref(),
             Some("Knowledge Bridge is available only for Git projects.")
         );
+        assert_eq!(issue_view.detail.title, "Issue Bridge");
 
         let pr_view =
             load_knowledge_bridge(dir.path(), KnowledgeKind::Pr, Some(12), false).expect("pr view");
@@ -1366,6 +1357,13 @@ Extra context.
             .iter()
             .find(|entry| entry.number == 11)
             .expect("issue entry");
+        assert!(
+            issue_view
+                .entries
+                .iter()
+                .any(|entry| entry.number == 22 && entry.is_spec),
+            "Issue view must be the unified Work Item list and include gwt-spec tagged Issues"
+        );
         assert_eq!(issue_entry.linked_branch_count, 2);
         assert_eq!(issue_view.selected_number, Some(11));
         assert_eq!(issue_view.detail.launch_issue_number, Some(11));
@@ -1420,6 +1418,16 @@ Extra context.
             .sections
             .iter()
             .any(|section| section.title == "notes"));
+
+        let unified_selected = load_knowledge_bridge(&repo, KnowledgeKind::Issue, Some(22), false)
+            .expect("unified work item bridge");
+        assert_eq!(unified_selected.selected_number, Some(22));
+        assert_eq!(unified_selected.detail.launch_issue_number, Some(22));
+        assert!(unified_selected
+            .detail
+            .sections
+            .iter()
+            .any(|section| section.title == "spec"));
     }
 
     #[test]
@@ -1525,7 +1533,7 @@ Extra context.
     }
 
     #[test]
-    fn semantic_issue_search_filters_specs_and_scores_open_and_closed_results() {
+    fn semantic_issue_search_returns_unified_work_items_and_scores_results() {
         let _env_lock = crate::env_test_lock()
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -1587,14 +1595,20 @@ Extra context.
         )
         .expect("search view");
 
-        assert_eq!(view.entries.len(), 2);
-        assert_eq!(view.entries[0].number, 12);
-        assert_eq!(view.entries[0].state, "closed");
-        assert_eq!(view.entries[0].match_score, Some(98));
-        assert_eq!(view.entries[1].number, 11);
-        assert_eq!(view.entries[1].state, "open");
-        assert_eq!(view.entries[1].match_score, Some(80));
-        assert_eq!(view.selected_number, Some(12));
+        assert_eq!(view.entries.len(), 3);
+        assert_eq!(view.entries[0].number, 22);
+        assert!(view.entries[0].is_spec);
+        assert_eq!(view.entries[0].state, "open");
+        assert_eq!(view.entries[0].match_score, Some(99));
+        assert_eq!(view.entries[1].number, 12);
+        assert!(!view.entries[1].is_spec);
+        assert_eq!(view.entries[1].state, "closed");
+        assert_eq!(view.entries[1].match_score, Some(98));
+        assert_eq!(view.entries[2].number, 11);
+        assert!(!view.entries[2].is_spec);
+        assert_eq!(view.entries[2].state, "open");
+        assert_eq!(view.entries[2].match_score, Some(80));
+        assert_eq!(view.selected_number, Some(22));
     }
 
     #[test]
@@ -1765,7 +1779,7 @@ Extra context.
     }
 
     #[test]
-    fn semantic_spec_search_prioritizes_exact_matches_and_removes_duplicates() {
+    fn semantic_spec_search_uses_unified_work_items_and_removes_duplicates() {
         let _env_lock = crate::env_test_lock()
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -1818,9 +1832,13 @@ Extra context.
         )
         .expect("search view");
 
-        assert_eq!(view.entries.len(), 1);
+        assert_eq!(view.entries.len(), 2);
         assert_eq!(view.entries[0].number, 22);
+        assert!(view.entries[0].is_spec);
         assert_eq!(view.entries[0].match_score, Some(100));
+        assert_eq!(view.entries[1].number, 11);
+        assert!(!view.entries[1].is_spec);
+        assert_eq!(view.entries[1].match_score, Some(99));
         assert_eq!(view.selected_number, Some(22));
     }
 
@@ -1865,6 +1883,14 @@ Extra context.
     #[test]
     fn extract_phase_detects_gwt_spec_label() {
         let extracted = extract_phase(&["gwt-spec".to_string(), "phase/planning".to_string()]);
+        assert_eq!(extracted.phase.as_deref(), Some("planning"));
+        assert!(!extracted.has_unknown_phase);
+        assert!(extracted.is_spec);
+    }
+
+    #[test]
+    fn extract_phase_detects_gwt_spec_label_case_insensitively() {
+        let extracted = extract_phase(&["GWT-SPEC".to_string(), "phase/planning".to_string()]);
         assert_eq!(extracted.phase.as_deref(), Some("planning"));
         assert!(!extracted.has_unknown_phase);
         assert!(extracted.is_spec);

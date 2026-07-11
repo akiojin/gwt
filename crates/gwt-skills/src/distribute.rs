@@ -127,6 +127,7 @@ pub fn distribute_to_worktree_for_targets(
 /// discussion, plan-spec, search, arch-review, register-spec, …) and the
 /// always-present gwt-coordination guidance stay.
 pub const CURATION_EXCLUDED_SKILLS: &[&str] = &[
+    "gwt-execute",
     "gwt-build-spec",
     "gwt-verify",
     "gwt-manage-pr",
@@ -597,6 +598,10 @@ mod tests {
             .exists());
         assert!(dir
             .path()
+            .join(".claude/skills/gwt-execute/SKILL.md")
+            .exists());
+        assert!(dir
+            .path()
             .join(".claude/skills/gwt-register-issue/SKILL.md")
             .exists());
 
@@ -614,6 +619,10 @@ mod tests {
                 "intake must drop implementation skill {excluded} (codex)"
             );
         }
+        assert!(
+            !dir.path().join(".claude/commands/gwt-execute.md").exists(),
+            "intake must drop implementation command gwt-execute"
+        );
         // Curation skills survive.
         assert!(
             dir.path()
