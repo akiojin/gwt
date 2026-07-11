@@ -73,12 +73,38 @@ test("Surface Deck — categories own the expected preset members", () => {
     "index",
     "issue",
     "pr",
-    "spec",
   ]);
   assert.deepEqual(presetsIn("config").sort(), ["profile", "settings"]);
 });
 
-test("Surface Deck — all 13 visible data-preset values are preserved", () => {
+test("Surface Deck — Issue remains the canonical entry and SPEC is not separate", () => {
+  const issue = modal.querySelector(
+    '.preset-section[data-category="knowledge"] .preset-button[data-preset="issue"]',
+  );
+  assert.ok(issue, "expected the unified knowledge card to use the issue preset");
+  assert.equal(
+    issue.querySelector("strong")?.textContent.trim(),
+    "Issue",
+    "the canonical card must keep the Issue label",
+  );
+  assert.match(
+    issue.querySelector(".preset-button__text span")?.textContent ?? "",
+    /Issue/i,
+    "the canonical card description must describe the Issue surface",
+  );
+  assert.equal(
+    modal.querySelector('.preset-button[data-preset="spec"]'),
+    null,
+    "legacy SPEC preset must not appear as a separate Add Window card",
+  );
+  const knowledgeText = modal
+    .querySelector('.preset-section[data-category="knowledge"]')
+    .textContent.replace(/\s+/g, " ");
+  assert.match(knowledgeText, /\bISSUE\b/i, "knowledge deck must keep Issue");
+  assert.doesNotMatch(knowledgeText, /\bSPEC\b/i, "knowledge deck must not show SPEC");
+});
+
+test("Surface Deck — all 12 visible data-preset values are preserved", () => {
   const presets = [...modal.querySelectorAll(".preset-button[data-preset]")].map(
     (btn) => btn.dataset.preset,
   );
@@ -90,7 +116,6 @@ test("Surface Deck — all 13 visible data-preset values are preserved", () => {
     "profile",
     "logs",
     "issue",
-    "spec",
     "work",
     "board",
     "improvement",
@@ -98,14 +123,21 @@ test("Surface Deck — all 13 visible data-preset values are preserved", () => {
     "console",
   ].sort();
   assert.deepEqual(presets.sort(), expected);
-  assert.equal(presets.length, 13, "expected exactly 13 preset buttons");
+  assert.equal(presets.length, 12, "expected exactly 12 preset buttons");
 });
 
 test("Surface Deck — no forbidden presets leak into the modal", () => {
-  for (const forbidden of ["shell", "claude", "codex", "branches", "agent_kanban"]) {
+  for (const forbidden of [
+    "shell",
+    "claude",
+    "codex",
+    "branches",
+    "agent_kanban",
+    "spec",
+  ]) {
     assert.equal(
-      modal.querySelector(`.preset-button[data-preset="${forbidden}"]`),
-      null,
+      modal.querySelector(`.preset-button[data-preset="${forbidden}"]`) !== null,
+      false,
       `forbidden preset '${forbidden}' must not appear in the modal`,
     );
   }
@@ -113,7 +145,7 @@ test("Surface Deck — no forbidden presets leak into the modal", () => {
 
 test("Surface Deck — every button carries icon glyph + strong label + description", () => {
   const buttons = [...modal.querySelectorAll(".preset-button")];
-  assert.equal(buttons.length, 13);
+  assert.equal(buttons.length, 12);
   for (const btn of buttons) {
     const preset = btn.dataset.preset;
     assert.ok(
@@ -155,7 +187,6 @@ test("Surface Deck — specific glyphs map to the right presets", () => {
     work: "◆",
     improvement: "◇",
     issue: "◍",
-    spec: "❡",
     pr: "⇄",
     index: "⌕",
     settings: "⚙",
@@ -392,13 +423,13 @@ test("Surface Deck JS — wires the roving keydown listener and clears state on 
 // Behavioral lock for the geometry direction-nearest roving math. linkedom does
 // no layout, so we replicate the exact scorer from app.js against synthetic rect
 // centers modeling the weighted deck (SURFACES 2-col with a fourth row, KNOWLEDGE 2-col
-// x 2-row, CONFIG 1-col x 2-row) and assert intuitive navigation. A future
+// x 2-row with one open slot, CONFIG 1-col x 2-row) and assert intuitive navigation. A future
 // scorer change that breaks cross-column / clamp behavior trips this test.
 test("Surface Deck behavioral — geometry roving picks the nearest tile in the pressed direction", () => {
   const buttons = [...modal.querySelectorAll(".preset-button")];
-  assert.equal(buttons.length, 13);
+  assert.equal(buttons.length, 12);
 
-  // center coords keyed by DOM order: SURFACES(0-6), KNOWLEDGE(7-10), CONFIG(11-12)
+  // center coords keyed by DOM order: SURFACES(0-6), KNOWLEDGE(7-9), CONFIG(10-11)
   const centers = [
     { x: 100, y: 100 }, // 0 file_tree   (SURFACES col1 row1)
     { x: 250, y: 100 }, // 1 logs        (SURFACES col2 row1)
@@ -408,11 +439,10 @@ test("Surface Deck behavioral — geometry roving picks the nearest tile in the 
     { x: 250, y: 260 }, // 5 monitor     (SURFACES col2 row3)
     { x: 100, y: 340 }, // 6 improvement (SURFACES col1 row4)
     { x: 450, y: 100 }, // 7 issue       (KNOWLEDGE col1 row1)
-    { x: 580, y: 100 }, // 8 spec        (KNOWLEDGE col2 row1)
-    { x: 450, y: 180 }, // 9 pr          (KNOWLEDGE col1 row2)
-    { x: 580, y: 180 }, // 10 index      (KNOWLEDGE col2 row2)
-    { x: 750, y: 100 }, // 11 settings   (CONFIG row1)
-    { x: 750, y: 180 }, // 12 profile    (CONFIG row2)
+    { x: 580, y: 100 }, // 8 pr          (KNOWLEDGE col2 row1)
+    { x: 450, y: 180 }, // 9 index       (KNOWLEDGE col1 row2)
+    { x: 750, y: 100 }, // 10 settings   (CONFIG row1)
+    { x: 750, y: 180 }, // 11 profile    (CONFIG row2)
   ];
 
   // Replica of app.js findGeometryNeighbor: direction half-plane filter +
@@ -457,13 +487,13 @@ test("Surface Deck behavioral — geometry roving picks the nearest tile in the 
   assert.equal(move(4, "ArrowDown"), 6, "Workspace → Improvement Inbox");
   // Cross-column to the next category at the same row.
   assert.equal(move(1, "ArrowRight"), 7, "Logs → Issue (jump to KNOWLEDGE)");
-  assert.equal(move(8, "ArrowRight"), 11, "SPEC → Settings (jump to CONFIG)");
+  assert.equal(move(8, "ArrowRight"), 10, "PR → Settings (jump to CONFIG)");
   // CONFIG single column.
-  assert.equal(move(11, "ArrowDown"), 12, "Settings → Profile");
-  assert.equal(move(12, "ArrowUp"), 11, "Profile → Settings");
+  assert.equal(move(10, "ArrowDown"), 11, "Settings → Profile");
+  assert.equal(move(11, "ArrowUp"), 10, "Profile → Settings");
   // Clamp at edges (no wrap).
   assert.equal(move(0, "ArrowLeft"), 0, "left edge clamps");
   assert.equal(move(0, "ArrowUp"), 0, "top edge clamps");
-  assert.equal(move(12, "ArrowDown"), 12, "bottom of CONFIG clamps");
-  assert.equal(move(11, "ArrowRight"), 11, "right edge clamps");
+  assert.equal(move(11, "ArrowDown"), 11, "bottom of CONFIG clamps");
+  assert.equal(move(10, "ArrowRight"), 10, "right edge clamps");
 });

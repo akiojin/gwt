@@ -819,7 +819,10 @@
       }
 
       function knowledgeKindForPreset(preset) {
-        if (preset === "issue" || preset === "spec" || preset === "pr") {
+        if (preset === "issue" || preset === "spec") {
+          return "issue";
+        }
+        if (preset === "pr") {
           return preset;
         }
         return null;
@@ -1388,7 +1391,7 @@
           agent_kanban: "Agent Kanban",
           issue: "Issue",
           issue_monitor: "Issue Monitor",
-          spec: "SPEC",
+          spec: "Issue",
           workspace: "Work",
           board: "Board",
           pr: "PR",
@@ -3855,21 +3858,13 @@
               ],
             };
           case "issue":
+          case "spec":
             return {
               heading: "Issue Bridge",
               rows: [
                 ["Cache", "repo-scoped"],
                 ["Refresh", "gwt-managed"],
                 ["Launch", "issue context"],
-              ],
-            };
-          case "spec":
-            return {
-              heading: "SPEC Bridge",
-              rows: [
-                ["Sections", "spec/plan/tasks"],
-                ["Refresh", "cache pull"],
-                ["Repair", "cache recovery"],
               ],
             };
           case "board":
@@ -6504,6 +6499,9 @@
       function normalizeSurfacePreset(preset) {
         if (preset === "branches" || preset === "workspace") {
           return "work";
+        }
+        if (preset === "spec") {
+          return "issue";
         }
         return preset;
       }

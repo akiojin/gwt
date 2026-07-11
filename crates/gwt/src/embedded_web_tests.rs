@@ -1566,7 +1566,6 @@ fn embedded_web_window_role_badges_identify_every_window_surface() {
         "Profile",
         "Logs",
         "Issue",
-        "SPEC",
         "Board",
         "PR",
     ] {
@@ -1575,6 +1574,10 @@ fn embedded_web_window_role_badges_identify_every_window_surface() {
             "expected presetRoleLabel to cover {label}",
         );
     }
+    assert!(
+        js.contains(r#"issue: "Issue""#) && js.contains(r#"spec: "Issue""#),
+        "expected legacy issue/spec presets to share the Issue role label",
+    );
     assert!(
         js.contains("function shouldShowRuntimeStatus(windowData)")
             && js.contains("runtimeChip.hidden = !shouldShowRuntimeStatus(windowData)"),
@@ -2155,6 +2158,11 @@ fn embedded_web_knowledge_bridge_surface_uses_cache_backed_contract() {
     assert!(
         !html.contains("gh issue") && !html.contains("gh pr"),
         "expected knowledge bridge guidance to avoid direct gh issue/pr commands",
+    );
+    assert!(
+        html.contains("if (preset === \"issue\" || preset === \"spec\")")
+            && html.contains("return \"issue\";"),
+        "expected legacy spec preset to open the unified Work Item issue view",
     );
 }
 

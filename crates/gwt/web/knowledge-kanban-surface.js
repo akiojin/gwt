@@ -1,4 +1,4 @@
-// SPEC-3064 Phase 3 (E6d) — Knowledge Bridge (Issue / SPEC / PR Kanban)
+// SPEC-3064 Phase 3 (E6d) — Knowledge Bridge (Work Item / PR Kanban)
 // window surface extracted from app.js. Owns the per-window knowledge
 // bridge state map (cache-backed entries, semantic search coalescing,
 // detail correlation, auto-refresh timer, kanban hide-done preference),
@@ -18,7 +18,7 @@
 //   app.js (the markdown body renderer is shared with the Board surface).
 // - windowMap / workspaceWindowById / getWorkspaceWindows: workspace window lookups.
 // - pendingIndexOpenTargetsByPreset: index-open handoff targets by preset.
-// - knowledgeKindForPreset(preset): issue/spec/pr kind mapping.
+// - knowledgeKindForPreset(preset): issue/pr kind mapping.
 // - focusWindowLocally(windowId) / sendWindowFocus(windowId): focus paths.
 // - focusOrSpawnPreset(preset): focus-or-spawn used by drawer actions.
 // - openIssueLaunchWizard(windowId, issueNumber): launch wizard entry.
@@ -562,9 +562,9 @@ export function createKnowledgeKanbanSurface({
       function knowledgeHeading(kind) {
         switch (kind) {
           case "issue":
-            return "Cached issues";
+            return "Cached work items";
           case "spec":
-            return "Cached SPECs";
+            return "Cached work items";
           case "pr":
             return "PR bridge";
           default:
@@ -575,9 +575,9 @@ export function createKnowledgeKanbanSurface({
       function knowledgeSearchPlaceholder(kind) {
         switch (kind) {
           case "issue":
-            return "Semantic search issues";
+            return "Semantic search work items";
           case "spec":
-            return "Semantic search cached SPECs";
+            return "Semantic search work items";
           case "pr":
             return "Search unavailable";
           default:
@@ -1420,14 +1420,14 @@ export function createKnowledgeKanbanSurface({
         } else if (state.loading && state.entries.length > 0) {
           status.classList.add("visible", "info");
           status.textContent = state.refreshing
-            ? "Refreshing cached issues"
-            : "Loading cache-backed issues";
+            ? "Refreshing cached work items"
+            : "Loading cache-backed work items";
         } else if (state.loading && state.entries.length === 0) {
           status.classList.add("visible", "info");
-          status.textContent = "Loading cache-backed issues";
+          status.textContent = "Loading cache-backed work items";
         } else if (state.entries.length === 0 && !state.searching) {
           status.classList.add("visible", "info");
-          status.textContent = state.emptyMessage || "No cached issues";
+          status.textContent = state.emptyMessage || "No cached work items";
         }
 
         list.innerHTML = "";
@@ -1437,7 +1437,7 @@ export function createKnowledgeKanbanSurface({
             ? ""
             : `${state.issueStateFilter || "open"} `;
           list.appendChild(
-            createNode("div", "knowledge-empty", `No ${filterLabel}issues`),
+            createNode("div", "knowledge-empty", `No ${filterLabel}work items`),
           );
         } else {
           for (const entry of visibleEntries) {
@@ -1649,13 +1649,13 @@ export function createKnowledgeKanbanSurface({
                     </div>
                   </div>
                   <div class="workspace-toolbar-actions">
-                    <button class="icon-button" data-action="refresh-knowledge" aria-label="Refresh cached issues">↻</button>
+                    <button class="icon-button" data-action="refresh-knowledge" aria-label="Refresh cached work items">↻</button>
                   </div>
                 </div>
                 <div class="knowledge-status"></div>
                 <div class="knowledge-split workspace-split issue-list-shell">
                   <div class="knowledge-list-pane">
-                    <div class="knowledge-list" role="list" aria-label="Cached issues"></div>
+                    <div class="knowledge-list" role="list" aria-label="Cached work items"></div>
                   </div>
                   <div class="knowledge-detail-pane"></div>
                 </div>

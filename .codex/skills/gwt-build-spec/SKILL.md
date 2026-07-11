@@ -5,6 +5,14 @@ description: "Use when implementation should proceed from an approved SPEC or ap
 
 # gwt-build-spec
 
+## Transition alias
+
+`gwt-build-spec` is a temporary alias for `gwt-execute`. If this skill is
+invoked with `SPEC-N`, continue as `$gwt-execute #N` and load
+the matching `gwt-execute/SKILL.md` asset from the active provider skill tree.
+Keep this file only for transition compatibility during the one-release alias
+window.
+
 Implement code using strict TDD (Red-Green-Refactor) methodology. Operates in two modes:
 
 - **SPEC mode**: driven by an existing SPEC directory with `tasks.md`, full progress tracking

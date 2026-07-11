@@ -543,6 +543,10 @@ mod tests {
             "missing gwt-plan-spec skill dir"
         );
         assert!(
+            dirs.contains(&"gwt-execute"),
+            "missing gwt-execute skill dir"
+        );
+        assert!(
             dirs.contains(&"gwt-build-spec"),
             "missing gwt-build-spec skill dir"
         );
@@ -602,6 +606,10 @@ mod tests {
         assert!(
             files.contains(&"gwt-plan-spec.md"),
             "missing gwt-plan-spec.md command"
+        );
+        assert!(
+            files.contains(&"gwt-execute.md"),
+            "missing gwt-execute.md command"
         );
         assert!(
             files.contains(&"gwt-build-spec.md"),
@@ -754,6 +762,22 @@ mod tests {
                     && issue_skill.contains("before creating anything"),
                 "expected duplicate-search-first guidance in {relative}"
             );
+            for required in [
+                "design-required tag",
+                "gwt-spec",
+                "issue.spec.create",
+                "issue.spec.edit",
+                "roundtrip",
+            ] {
+                assert!(
+                    issue_skill.contains(required),
+                    "expected unified registration guidance in {relative}: {required}"
+                );
+            }
+            assert!(
+                !issue_skill.contains("This skill does not create SPEC owners itself."),
+                "gwt-register-issue must own design-required registration instead of delegating creation away: {relative}"
+            );
             assert!(
                 issue_skill.contains("current user's language"),
                 "expected language contract in {relative}"
@@ -761,6 +785,19 @@ mod tests {
             assert!(
                 !issue_skill.contains("Load `.claude/skills/gwt-issue/SKILL.md`"),
                 "unexpected retired gwt-issue dependency in {relative}"
+            );
+        }
+
+        for relative in [
+            ".claude/skills/gwt-register-spec/SKILL.md",
+            ".codex/skills/gwt-register-spec/SKILL.md",
+        ] {
+            let register_spec = std::fs::read_to_string(workspace_root.join(relative))
+                .unwrap_or_else(|err| panic!("failed to read {relative}: {err}"));
+            assert!(
+                register_spec.contains("Transition alias")
+                    && register_spec.contains("gwt-register-issue"),
+                "expected gwt-register-spec to route through gwt-register-issue: {relative}"
             );
         }
 
@@ -809,6 +846,64 @@ mod tests {
             assert!(
                 !issue_skill.contains("Load `.claude/skills/gwt-issue/SKILL.md`"),
                 "unexpected retired gwt-issue dependency in {relative}"
+            );
+        }
+
+        for relative in [
+            ".claude/skills/gwt-execute/SKILL.md",
+            ".codex/skills/gwt-execute/SKILL.md",
+        ] {
+            let execute_skill = std::fs::read_to_string(workspace_root.join(relative))
+                .unwrap_or_else(|err| panic!("failed to read {relative}: {err}"));
+            for required in [
+                "design-gated mode",
+                "direct mode",
+                "standalone mode",
+                "gwt-plan-spec",
+                "gwt-verify --mode full",
+                "gwt-manage-pr",
+                "User Verification Result",
+                "current user's language",
+            ] {
+                assert!(
+                    execute_skill.contains(required),
+                    "expected gwt-execute guidance in {relative}: {required}"
+                );
+            }
+        }
+
+        let execute_command =
+            std::fs::read_to_string(workspace_root.join(".claude/commands/gwt-execute.md"))
+                .unwrap_or_else(|err| panic!("failed to read gwt-execute command: {err}"));
+        assert!(
+            execute_command.contains("/gwt:gwt-execute")
+                && execute_command.contains(".claude/skills/gwt-execute/SKILL.md"),
+            "expected gwt-execute command wrapper to load the canonical execute skill"
+        );
+
+        for relative in [
+            ".claude/skills/gwt-build-spec/SKILL.md",
+            ".codex/skills/gwt-build-spec/SKILL.md",
+            ".claude/skills/gwt-fix-issue/SKILL.md",
+            ".codex/skills/gwt-fix-issue/SKILL.md",
+        ] {
+            let alias_skill = std::fs::read_to_string(workspace_root.join(relative))
+                .unwrap_or_else(|err| panic!("failed to read {relative}: {err}"));
+            assert!(
+                alias_skill.contains("Transition alias") && alias_skill.contains("gwt-execute"),
+                "expected legacy execute skill to route through gwt-execute: {relative}"
+            );
+        }
+
+        for relative in [
+            ".claude/commands/gwt-build-spec.md",
+            ".claude/commands/gwt-fix-issue.md",
+        ] {
+            let alias_command = std::fs::read_to_string(workspace_root.join(relative))
+                .unwrap_or_else(|err| panic!("failed to read {relative}: {err}"));
+            assert!(
+                alias_command.contains("/gwt:gwt-execute"),
+                "expected legacy execute command to point users at gwt-execute: {relative}"
             );
         }
 
@@ -1345,12 +1440,16 @@ mod tests {
         let agents = std::fs::read_to_string(workspace_root.join("AGENTS.md"))
             .unwrap_or_else(|err| panic!("failed to read AGENTS.md: {err}"));
         assert!(
-            agents.contains("gwt-register-issue / gwt-fix-issue"),
-            "expected AGENTS workflow to start from the current issue entrypoints"
+            agents.contains("gwt-register-issue"),
+            "expected AGENTS workflow to start from the registration entrypoint"
         );
         assert!(
-            agents.contains("gwt-discussion → gwt-plan-spec → gwt-build-spec → gwt-manage-pr"),
-            "expected AGENTS workflow to document the current planning/build chain"
+            agents.contains("gwt-discussion → gwt-plan-spec → gwt-execute → gwt-manage-pr"),
+            "expected AGENTS workflow to document the current planning/execute chain"
+        );
+        assert!(
+            agents.contains("gwt-execute #N"),
+            "expected AGENTS workflow to document unified Issue execution"
         );
         assert!(
             agents.contains("gwt-arch-review"),

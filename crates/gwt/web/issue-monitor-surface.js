@@ -661,7 +661,7 @@ export function createIssueMonitorSurface({ document, send, focusWindow }) {
     if (!Number.isFinite(number)) {
       return "";
     }
-    return linkedIssueKind(item) === "spec" ? `feature/spec-${number}` : `work/issue-${number}`;
+    return `work/issue-${number}`;
   }
 
   function defaultLaunchPrompt(item) {
@@ -669,7 +669,7 @@ export function createIssueMonitorSurface({ document, send, focusWindow }) {
     if (!Number.isFinite(number)) {
       return "";
     }
-    return linkedIssueKind(item) === "spec" ? `$gwt-build-spec SPEC-${number}` : `$gwt-fix-issue #${number}`;
+    return `$gwt-execute #${number}`;
   }
 
   function launchPlan(item) {

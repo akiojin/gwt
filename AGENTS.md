@@ -111,8 +111,8 @@
 ##### Step 3: 既存 SPEC が見つからない場合のみ → 新規 SPEC を作成する
 
 - `gwt-discussion` を使って investigation-first で議論し、必要なら DDD ベースで SPEC 設計まで進める（調査 → ドメイン分析 → SPEC 登録/更新 → 仕様明確化）
-- SPEC 登録は **`gwt-register-spec` skill 経由** で行う（SPEC-2784）。gwt-discussion の Action Bundle で `Register Spec` を選択し、title + body file を渡せば、skill が validation → JSON operation `issue.spec.create` → `issue.spec.edit` → roundtrip 検証を安全に実行する。legacy create-body transport を直接使うと section マーカー漏れで空 SPEC が作成される（SPEC #2780 で発生、work-notes memory 参照）
-- GitHub Issue (`gwt-spec` label) として作成する `spec` section には最低限以下を含める（gwt-register-spec の validation が強制する 7 セクション）:
+- SPEC 登録は **`gwt-register-issue` の design-required 登録モード**で行う。gwt-discussion の Action Bundle で `Register Spec` を選択し、title + body file を渡せば、validation → JSON operation `issue.spec.create` → `issue.spec.edit` → roundtrip 検証を安全に実行する。`gwt-register-spec` は 1 release cycle の alias として残す。legacy create-body transport を直接使うと section マーカー漏れで空 SPEC が作成される（SPEC #2780 で発生、work-notes memory 参照）
+- GitHub Issue (`gwt-spec` label) として作成する `spec` section には最低限以下を含める（design-required 登録 validation が強制する 7 セクション）:
   - 背景 / ユビキタス言語
   - ユーザーシナリオと受け入れシナリオ
   - 機能要件（FR-\*）
@@ -124,14 +124,14 @@
 
 ##### 共通ルール
 
-- 通常の GitHub Issue から開始する場合は、`gwt-fix-issue` または `gwt-register-issue` により直接修正・既存SPEC更新・新規SPEC作成のどれかを決定する
+- 通常の GitHub Issue から開始する場合は、既存 Issue なら `gwt-execute #N`、新規 work intake なら `gwt-register-issue` により direct / design-required / standalone のどれかへ進める
 - 仕様策定時のユーザーインタビューでは以下を遵守する:
   - 表面的・ありきたりな質問を避け、技術実装・UX・トレードオフに踏み込んだ質問をする
   - 1回で終わらず、仕様が十分に詰まるまで継続的にインタビューする
 
 #### 2. TDD（テストファースト）
 
-- `gwt-build-spec` を使って TDD ベースで実装する（SPEC モードまたはスタンドアロンモード）。既存 Issue 起点の修正は `gwt-fix-issue` を優先する
+- `gwt-execute` を使って TDD ベースで実装する（design-gated / direct / standalone mode）。旧 `gwt-build-spec` / `gwt-fix-issue` は transition alias として扱う
 - 仕様の受け入れシナリオに基づき、**実装コードより先にテストコードを書く**
 - Rust: `crates/*/tests/` または `#[cfg(test)]` モジュール内にテストを追加
 - テストが RED（失敗）状態であることを確認してから実装に進む
@@ -307,12 +307,13 @@ Commands can be invoked as `/gwt:<command-name>`.
 
 | Skill | Command | Description |
 |-------|---------|-------------|
-| gwt-register-issue | `/gwt:gwt-register-issue` | Register new work from a bug report, enhancement idea, docs task, or rough request. Decides plain Issue vs SPEC after duplicate search. |
-| gwt-fix-issue | `/gwt:gwt-fix-issue` | Resolve an existing GitHub Issue by number or URL. Carries clear direct-fix work through implementation and routes to SPEC design only when needed. |
+| gwt-register-issue | `/gwt:gwt-register-issue` | Register new work from a bug report, enhancement idea, docs task, or rough request. Creates a plain Issue or a design-required `gwt-spec` Issue after duplicate search. |
+| gwt-execute | `/gwt:gwt-execute` | Execute an Issue-backed Work Item (`#N`) or approved standalone task through TDD, verification, and PR handoff. |
+| gwt-fix-issue | `/gwt:gwt-fix-issue` | Transition alias to `gwt-execute #N` for existing Issue prompts. |
 | gwt-discussion | `/gwt:gwt-discussion` | Investigate ideas, spec gaps, and implementation concerns. Updates `spec` / `plan` when discussion stabilizes and returns an action bundle for the next step. |
 | gwt-plan-spec | `/gwt:gwt-plan-spec` | Generate or refresh `plan` / `tasks` and related planning artifacts for a SPEC. |
-| gwt-build-spec | `/gwt:gwt-build-spec` | Implement an approved SPEC or approved standalone task with TDD, verification, and PR handoff. |
-| gwt-verify | `/gwt:gwt-verify` | Environment-aware verification. Classifies changed surfaces and runs the correct matrix (cargo for Rust crates, Bun/Node helpers for frontend JS, Playwright only for WebView/browser UI, release scripts only for release-system changes). Called from `gwt-build-spec` Phase 3 (`--mode full`) and `gwt-manage-pr` before PR create/update (`--mode pre-pr`). |
+| gwt-build-spec | `/gwt:gwt-build-spec` | Transition alias to `gwt-execute #N` for approved SPEC prompts. |
+| gwt-verify | `/gwt:gwt-verify` | Environment-aware verification. Classifies changed surfaces and runs the correct matrix (cargo for Rust crates, Bun/Node helpers for frontend JS, Playwright only for WebView/browser UI, release scripts only for release-system changes). Called from `gwt-execute` verify phase (`--mode full`) and `gwt-manage-pr` before PR create/update (`--mode pre-pr`). |
 | gwt-manage-pr | `/gwt:gwt-manage-pr` | Create, inspect, update, or unblock a PR through one visible PR lifecycle entrypoint. |
 | gwt-arch-review | `/gwt:gwt-arch-review` | Scan codebase architecture: domain boundaries (DDD), module depth (Ousterhout), testability, and agent-friendliness. Generates prioritized improvement report. Closes the feedback loop back to gwt-discussion. |
 
@@ -320,24 +321,24 @@ Commands can be invoked as `/gwt:<command-name>`.
 
 | Skill | Command | Description |
 |-------|---------|-------------|
-| gwt-search | `/gwt:gwt-search` | Unified semantic search over SPECs, GitHub Issues, project source files, and docs using ChromaDB. Uses JSON payload `scopes` filters and resolves `gwtd` through the managed skill contract. Mandatory preflight before gwt-discussion, gwt-register-issue, and gwt-fix-issue. |
+| gwt-search | `/gwt:gwt-search` | Unified semantic search over SPECs, GitHub Issues, project source files, and docs using ChromaDB. Uses JSON payload `scopes` filters and resolves `gwtd` through the managed skill contract. Mandatory preflight before gwt-discussion, gwt-register-issue, and visible owner routing decisions. |
 | gwt-agent | `/gwt:gwt-agent` | Unified agent pane management through JSON operations `pane.list`, `pane.read`, and `pane.close`. Auto-detects mode: no args → list panes; pane ID → read output; stop/close + pane ID → stop pane. Use Board for agent-to-agent communication. |
 
 ### Recommended Workflow
 
 ```text
-gwt-register-issue / gwt-fix-issue
+gwt-register-issue
           ↓
-     gwt-discussion → gwt-plan-spec → gwt-build-spec → gwt-manage-pr
+     gwt-discussion → gwt-plan-spec → gwt-execute → gwt-manage-pr
           ↑                                                |
           └────────────────── gwt-arch-review ─────────────┘
 ```
 
-1. **Register new work** → `gwt-register-issue` (plain Issue か SPEC かを決める)
-2. **Fix an existing Issue** → `gwt-fix-issue` (Issue 起点で直接修正か SPEC 化かを決める)
+1. **Register new work** → `gwt-register-issue` (plain Issue か `gwt-spec` design-required Issue かを決める)
+2. **Execute an existing Issue** → `gwt-execute #N` (Issue 起点で direct / design-gated / standalone を自動選択する)
 3. **Discuss and shape the work** → `gwt-discussion` (investigation → design clarification → action bundle)
 4. **Plan implementation** → `gwt-plan-spec` (SDD architecture → tasks)
-5. **Build with TDD** → `gwt-build-spec` (Red-Green-Refactor → verification via `gwt-verify`)
+5. **Build with TDD** → `gwt-execute` (Red-Green-Refactor → verification via `gwt-verify`)
 6. **Verify changes** → `gwt-verify` (surface→matrix selection; Playwright only for WebView/browser UI)
 7. **Manage PRs** → `gwt-manage-pr` (create, check, or fix; requires `gwt-verify --mode pre-pr` PASS)
 8. **Review architecture** → `gwt-arch-review` (analysis → improvement proposals)
