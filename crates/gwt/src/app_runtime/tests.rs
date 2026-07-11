@@ -237,6 +237,13 @@ fn init_repo(repo_path: &Path) {
     }
 }
 
+fn init_repo_with_initial_commit(repo_path: &Path) {
+    init_repo(repo_path);
+    run_git(repo_path, &["config", "user.name", "Test User"]);
+    run_git(repo_path, &["config", "user.email", "test@example.com"]);
+    run_git(repo_path, &["commit", "--allow-empty", "-m", "init"]);
+}
+
 fn init_repo_without_origin(repo_path: &Path) {
     let output = gwt_core::process::hidden_command("git")
         .args(["init", "-q"])
@@ -3114,7 +3121,7 @@ fn app_runtime_open_agent_kanban_launch_wizard_records_launch_target() {
     let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
     let repo = temp.path().join("repo");
     fs::create_dir_all(&repo).expect("create repo");
-    init_repo(&repo);
+    init_repo_with_initial_commit(&repo);
     let tab = sample_project_tab(
         "tab-1",
         "Repo",
@@ -15011,7 +15018,7 @@ fn app_runtime_issue_monitor_auto_launch_uses_start_with_last_settings() {
 
     let repo = temp.path().join("repo");
     fs::create_dir_all(&repo).expect("create repo");
-    init_repo(&repo);
+    init_repo_with_initial_commit(&repo);
     let sessions_dir = temp.path().join("sessions");
     fs::create_dir_all(&sessions_dir).expect("create sessions dir");
     let mut previous = gwt_agent::Session::new(&repo, "develop", gwt_agent::AgentId::Codex);
@@ -15284,7 +15291,7 @@ fn app_runtime_issue_monitor_configure_saves_profile_without_launching() {
 
     let repo = temp.path().join("repo");
     fs::create_dir_all(&repo).expect("create repo");
-    init_repo(&repo);
+    init_repo_with_initial_commit(&repo);
     let tab = sample_project_tab("tab-1", "Repo", repo.clone(), ProjectKind::Git, &[]);
     let (mut runtime, recorded_events) =
         sample_runtime_with_events(temp.path(), vec![tab], Some("tab-1"));
@@ -15608,7 +15615,7 @@ fn app_runtime_issue_monitor_auto_launch_prefers_saved_profile() {
 
     let repo = temp.path().join("repo");
     fs::create_dir_all(&repo).expect("create repo");
-    init_repo(&repo);
+    init_repo_with_initial_commit(&repo);
     let prefs = gwt::IssueMonitorPrefs {
         launch_profile: Some(sample_issue_monitor_launch_profile()),
         ..Default::default()
@@ -15671,7 +15678,7 @@ fn app_runtime_issue_monitor_auto_launch_without_previous_settings_opens_wizard(
 
     let repo = temp.path().join("repo");
     fs::create_dir_all(&repo).expect("create repo");
-    init_repo(&repo);
+    init_repo_with_initial_commit(&repo);
     let tab = sample_project_tab("tab-1", "Repo", repo, ProjectKind::Git, &[]);
     let (mut runtime, _recorded_events) =
         sample_runtime_with_events(temp.path(), vec![tab], Some("tab-1"));
@@ -15720,7 +15727,7 @@ fn app_runtime_issue_monitor_auto_launch_keeps_existing_settings_wizard() {
 
     let repo = temp.path().join("repo");
     fs::create_dir_all(&repo).expect("create repo");
-    init_repo(&repo);
+    init_repo_with_initial_commit(&repo);
     let tab = sample_project_tab("tab-1", "Repo", repo, ProjectKind::Git, &[]);
     let (mut runtime, _recorded_events) =
         sample_runtime_with_events(temp.path(), vec![tab], Some("tab-1"));
@@ -15765,7 +15772,7 @@ fn app_runtime_issue_monitor_launch_now_ignores_auto_max_active_setting() {
 
     let repo = temp.path().join("repo");
     fs::create_dir_all(&repo).expect("create repo");
-    init_repo(&repo);
+    init_repo_with_initial_commit(&repo);
     let prefs = gwt::IssueMonitorPrefs {
         enabled: true,
         max_active_agents: 1,
@@ -15811,7 +15818,7 @@ fn app_runtime_issue_monitor_launch_now_wires_launch_feedback_to_issue_row() {
 
     let repo = temp.path().join("repo");
     fs::create_dir_all(&repo).expect("create repo");
-    init_repo(&repo);
+    init_repo_with_initial_commit(&repo);
     let tab = sample_project_tab("tab-1", "Repo", repo, ProjectKind::Git, &[]);
     let (mut runtime, recorded_events) =
         sample_runtime_with_events(temp.path(), vec![tab], Some("tab-1"));
