@@ -18,6 +18,43 @@ use super::{
     OutboundEvent, WindowPreset, WindowProcessStatus,
 };
 
+/// Issue #3274: how many trailing non-empty screen lines survive into the
+/// persistent window detail when an agent process errors out.
+const AGENT_ERROR_TAIL_LINES: usize = 3;
+const AGENT_ERROR_TAIL_MAX_CHARS: usize = 240;
+/// Claude Code's exact-resume failure line. When a resumed conversation no
+/// longer exists in the agent's store, this is the only explanation the user
+/// ever gets — promote it to an explicit diagnostic (SPEC-1921 exact session
+/// restore amendment: stale provider ids keep a visible diagnostic).
+const EXACT_RESUME_FAILURE_SIGNATURE: &str = "No conversation found with session ID";
+
+/// Compose the persistent window detail for an errored agent process from the
+/// plain exit detail and the final screen tail. Pure so the classification is
+/// unit-testable without a PTY.
+fn compose_agent_error_detail(base: Option<String>, tail: Option<&str>) -> Option<String> {
+    let tail = tail.map(str::trim).filter(|tail| !tail.is_empty());
+    let Some(tail) = tail else {
+        return base;
+    };
+    let tail: String = if tail.chars().count() > AGENT_ERROR_TAIL_MAX_CHARS {
+        let mut truncated: String = tail.chars().take(AGENT_ERROR_TAIL_MAX_CHARS).collect();
+        truncated.push('…');
+        truncated
+    } else {
+        tail.to_string()
+    };
+    if tail.contains(EXACT_RESUME_FAILURE_SIGNATURE) {
+        return Some(format!(
+            "Exact session restore failed: {tail}. The agent no longer has this \
+             conversation; launch a new agent session when you want to continue."
+        ));
+    }
+    match base {
+        Some(base) if !base.is_empty() => Some(format!("{base} — last output: {tail}")),
+        _ => Some(format!("Agent exited — last output: {tail}")),
+    }
+}
+
 impl AppRuntime {
     pub(crate) fn handle_runtime_output(
         &mut self,
@@ -108,6 +145,20 @@ impl AppRuntime {
 
         let keep_active_agent_session_for_recovery =
             self.should_keep_active_agent_session_for_recoverable_pty_error(&id, status);
+        // Issue #3274: an errored agent runtime is torn down below, dropping
+        // its vt100 state — a client that reconnects later replays nothing and
+        // an empty Error window gives no clue why. Capture the final screen
+        // tail into the persistent detail before the state is gone; the raw
+        // output stays available in logs.
+        let detail = if matches!(status, WindowProcessStatus::Error)
+            && matches!(
+                self.window_preset(&id),
+                Some(WindowPreset::Agent | WindowPreset::Claude | WindowPreset::Codex)
+            ) {
+            compose_agent_error_detail(detail, self.final_screen_tail(&id).as_deref())
+        } else {
+            detail
+        };
         if matches!(status, WindowProcessStatus::Error) {
             self.window_hook_states.remove(&id);
         }
@@ -184,6 +235,23 @@ impl AppRuntime {
         }
         events.extend(Self::status_events(id, composed_status, detail));
         events
+    }
+
+    /// The trailing non-empty lines of a window's live vt100 screen, joined
+    /// into one detail-sized string. `None` when the window has no runtime
+    /// (already torn down) or the screen is blank (Issue #3274).
+    fn final_screen_tail(&self, id: &str) -> Option<String> {
+        let runtime = self.runtimes.get(id)?;
+        let pane = runtime.pane.lock().ok()?;
+        let contents = pane.screen().contents();
+        let lines: Vec<&str> = contents
+            .lines()
+            .map(str::trim)
+            .filter(|line| !line.is_empty())
+            .collect();
+        let start = lines.len().saturating_sub(AGENT_ERROR_TAIL_LINES);
+        let tail = lines[start..].join(" ");
+        (!tail.is_empty()).then_some(tail)
     }
 
     pub(crate) fn handle_runtime_hook_event(

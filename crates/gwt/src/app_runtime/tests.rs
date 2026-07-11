@@ -7897,6 +7897,148 @@ fn app_runtime_runtime_status_stopped_keeps_active_agent_window_for_diagnostics(
     assert!(!runtime.active_agent_sessions.contains_key(&window_id));
 }
 
+// Issue #3274 (SPEC-1921 exact session restore amendment): when a resumed
+// agent process exits because the provider no longer has the conversation,
+// the final screen output must survive into the persistent window detail.
+// The vt100 state is dropped together with the runtime on Error, so a client
+// that reconnects later would otherwise face an empty Error window with no
+// clue why exact session restore failed.
+#[test]
+fn app_runtime_agent_error_exit_promotes_exact_resume_failure_diagnostic() {
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedEnvVar::set("HOME", temp.path());
+    let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+    let tab = sample_project_tab_with_window(
+        "tab-1",
+        "agent-1",
+        WindowPreset::Agent,
+        WindowProcessStatus::Running,
+    );
+    let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+    let window_id = combined_window_id("tab-1", "agent-1");
+    insert_test_pane_runtime(&mut runtime, &window_id);
+    runtime
+        .runtimes
+        .get(&window_id)
+        .expect("runtime")
+        .pane
+        .lock()
+        .expect("pane")
+        .process_bytes(b"No conversation found with session ID: resume-target-1\r\n");
+
+    let _ = runtime.handle_runtime_status(
+        window_id.clone(),
+        WindowProcessStatus::Error,
+        Some("Process exited with status 1".to_string()),
+    );
+
+    let detail = runtime
+        .window_details
+        .get(&window_id)
+        .cloned()
+        .unwrap_or_default();
+    assert!(
+        detail.contains("Exact session restore failed"),
+        "exact-resume failure must be promoted to an explicit diagnostic, got: {detail}"
+    );
+    assert!(
+        detail.contains("resume-target-1"),
+        "diagnostic must carry the reported session id, got: {detail}"
+    );
+    assert!(
+        !runtime.runtimes.contains_key(&window_id),
+        "errored runtime is still torn down after the tail is captured"
+    );
+}
+
+// Issue #3274: any agent error exit keeps its last screen output in the
+// window detail so the failure reason survives reconnects, while non-agent
+// process windows keep the plain exit detail.
+#[test]
+fn app_runtime_agent_error_exit_keeps_last_output_in_window_detail() {
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedEnvVar::set("HOME", temp.path());
+    let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+    let mut persisted = empty_workspace_state();
+    persisted.windows.push(sample_window(
+        "agent-1",
+        WindowPreset::Agent,
+        WindowProcessStatus::Running,
+    ));
+    persisted.windows.push(sample_window(
+        "shell-1",
+        WindowPreset::Shell,
+        WindowProcessStatus::Running,
+    ));
+    persisted.next_z_index = 3;
+    let agent_tab = ProjectTabRuntime {
+        id: "tab-1".to_string(),
+        title: "Repo".to_string(),
+        project_root: temp.path().join("repo"),
+        kind: ProjectKind::Git,
+        workspace: WindowCanvasState::from_persisted(persisted),
+        migration_pending: false,
+        main_worktree_root_cache: std::sync::Arc::new(std::sync::OnceLock::new()),
+    };
+    let mut runtime = sample_runtime(temp.path(), vec![agent_tab], Some("tab-1"));
+    let agent_window_id = combined_window_id("tab-1", "agent-1");
+    let shell_window_id = combined_window_id("tab-1", "shell-1");
+    insert_test_pane_runtime(&mut runtime, &agent_window_id);
+    insert_test_pane_runtime(&mut runtime, &shell_window_id);
+    runtime
+        .runtimes
+        .get(&agent_window_id)
+        .expect("agent runtime")
+        .pane
+        .lock()
+        .expect("agent pane")
+        .process_bytes(b"unexpected fatal: config parse error\r\n");
+    runtime
+        .runtimes
+        .get(&shell_window_id)
+        .expect("shell runtime")
+        .pane
+        .lock()
+        .expect("shell pane")
+        .process_bytes(b"command not found: frobnicate\r\n");
+
+    let _ = runtime.handle_runtime_status(
+        agent_window_id.clone(),
+        WindowProcessStatus::Error,
+        Some("Process exited with status 1".to_string()),
+    );
+    let _ = runtime.handle_runtime_status(
+        shell_window_id.clone(),
+        WindowProcessStatus::Error,
+        Some("Process exited with status 1".to_string()),
+    );
+
+    let agent_detail = runtime
+        .window_details
+        .get(&agent_window_id)
+        .cloned()
+        .unwrap_or_default();
+    assert!(
+        agent_detail.contains("Process exited with status 1")
+            && agent_detail.contains("unexpected fatal: config parse error"),
+        "agent error detail must keep the last screen output, got: {agent_detail}"
+    );
+    assert_eq!(
+        runtime
+            .window_details
+            .get(&shell_window_id)
+            .map(String::as_str),
+        Some("Process exited with status 1"),
+        "non-agent windows keep the plain exit detail"
+    );
+}
+
 #[test]
 fn app_runtime_runtime_hook_running_recovers_active_agent_after_pty_error() {
     let _env_lock = env_test_lock()
