@@ -237,6 +237,13 @@ fn init_repo(repo_path: &Path) {
     }
 }
 
+fn init_repo_with_initial_commit(repo_path: &Path) {
+    init_repo(repo_path);
+    run_git(repo_path, &["config", "user.name", "Test User"]);
+    run_git(repo_path, &["config", "user.email", "test@example.com"]);
+    run_git(repo_path, &["commit", "--allow-empty", "-m", "init"]);
+}
+
 fn init_repo_without_origin(repo_path: &Path) {
     let output = gwt_core::process::hidden_command("git")
         .args(["init", "-q"])
@@ -3114,7 +3121,7 @@ fn app_runtime_open_agent_kanban_launch_wizard_records_launch_target() {
     let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
     let repo = temp.path().join("repo");
     fs::create_dir_all(&repo).expect("create repo");
-    init_repo(&repo);
+    init_repo_with_initial_commit(&repo);
     let tab = sample_project_tab(
         "tab-1",
         "Repo",
@@ -7890,6 +7897,148 @@ fn app_runtime_runtime_status_stopped_keeps_active_agent_window_for_diagnostics(
     assert!(!runtime.active_agent_sessions.contains_key(&window_id));
 }
 
+// Issue #3274 (SPEC-1921 exact session restore amendment): when a resumed
+// agent process exits because the provider no longer has the conversation,
+// the final screen output must survive into the persistent window detail.
+// The vt100 state is dropped together with the runtime on Error, so a client
+// that reconnects later would otherwise face an empty Error window with no
+// clue why exact session restore failed.
+#[test]
+fn app_runtime_agent_error_exit_promotes_exact_resume_failure_diagnostic() {
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedEnvVar::set("HOME", temp.path());
+    let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+    let tab = sample_project_tab_with_window(
+        "tab-1",
+        "agent-1",
+        WindowPreset::Agent,
+        WindowProcessStatus::Running,
+    );
+    let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+    let window_id = combined_window_id("tab-1", "agent-1");
+    insert_test_pane_runtime(&mut runtime, &window_id);
+    runtime
+        .runtimes
+        .get(&window_id)
+        .expect("runtime")
+        .pane
+        .lock()
+        .expect("pane")
+        .process_bytes(b"No conversation found with session ID: resume-target-1\r\n");
+
+    let _ = runtime.handle_runtime_status(
+        window_id.clone(),
+        WindowProcessStatus::Error,
+        Some("Process exited with status 1".to_string()),
+    );
+
+    let detail = runtime
+        .window_details
+        .get(&window_id)
+        .cloned()
+        .unwrap_or_default();
+    assert!(
+        detail.contains("Exact session restore failed"),
+        "exact-resume failure must be promoted to an explicit diagnostic, got: {detail}"
+    );
+    assert!(
+        detail.contains("resume-target-1"),
+        "diagnostic must carry the reported session id, got: {detail}"
+    );
+    assert!(
+        !runtime.runtimes.contains_key(&window_id),
+        "errored runtime is still torn down after the tail is captured"
+    );
+}
+
+// Issue #3274: any agent error exit keeps its last screen output in the
+// window detail so the failure reason survives reconnects, while non-agent
+// process windows keep the plain exit detail.
+#[test]
+fn app_runtime_agent_error_exit_keeps_last_output_in_window_detail() {
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedEnvVar::set("HOME", temp.path());
+    let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+    let mut persisted = empty_workspace_state();
+    persisted.windows.push(sample_window(
+        "agent-1",
+        WindowPreset::Agent,
+        WindowProcessStatus::Running,
+    ));
+    persisted.windows.push(sample_window(
+        "shell-1",
+        WindowPreset::Shell,
+        WindowProcessStatus::Running,
+    ));
+    persisted.next_z_index = 3;
+    let agent_tab = ProjectTabRuntime {
+        id: "tab-1".to_string(),
+        title: "Repo".to_string(),
+        project_root: temp.path().join("repo"),
+        kind: ProjectKind::Git,
+        workspace: WindowCanvasState::from_persisted(persisted),
+        migration_pending: false,
+        main_worktree_root_cache: std::sync::Arc::new(std::sync::OnceLock::new()),
+    };
+    let mut runtime = sample_runtime(temp.path(), vec![agent_tab], Some("tab-1"));
+    let agent_window_id = combined_window_id("tab-1", "agent-1");
+    let shell_window_id = combined_window_id("tab-1", "shell-1");
+    insert_test_pane_runtime(&mut runtime, &agent_window_id);
+    insert_test_pane_runtime(&mut runtime, &shell_window_id);
+    runtime
+        .runtimes
+        .get(&agent_window_id)
+        .expect("agent runtime")
+        .pane
+        .lock()
+        .expect("agent pane")
+        .process_bytes(b"unexpected fatal: config parse error\r\n");
+    runtime
+        .runtimes
+        .get(&shell_window_id)
+        .expect("shell runtime")
+        .pane
+        .lock()
+        .expect("shell pane")
+        .process_bytes(b"command not found: frobnicate\r\n");
+
+    let _ = runtime.handle_runtime_status(
+        agent_window_id.clone(),
+        WindowProcessStatus::Error,
+        Some("Process exited with status 1".to_string()),
+    );
+    let _ = runtime.handle_runtime_status(
+        shell_window_id.clone(),
+        WindowProcessStatus::Error,
+        Some("Process exited with status 1".to_string()),
+    );
+
+    let agent_detail = runtime
+        .window_details
+        .get(&agent_window_id)
+        .cloned()
+        .unwrap_or_default();
+    assert!(
+        agent_detail.contains("Process exited with status 1")
+            && agent_detail.contains("unexpected fatal: config parse error"),
+        "agent error detail must keep the last screen output, got: {agent_detail}"
+    );
+    assert_eq!(
+        runtime
+            .window_details
+            .get(&shell_window_id)
+            .map(String::as_str),
+        Some("Process exited with status 1"),
+        "non-agent windows keep the plain exit detail"
+    );
+}
+
 #[test]
 fn app_runtime_runtime_hook_running_recovers_active_agent_after_pty_error() {
     let _env_lock = env_test_lock()
@@ -9590,6 +9739,315 @@ fn open_project_restore_resumes_paused_agent_even_after_stopped_drift() {
         .pending_auto_resume_sources
         .values()
         .any(|source| source == "session-open-resume"));
+}
+
+// SPEC-1921 Phase 65 (T335): restored Agent-family windows with exact
+// provider session ids are startup auto-resumed and their stopped
+// placeholders are removed across the legacy `Agent`, `Claude`, and `Codex`
+// presets — the removal must not be limited to `WindowPreset::Agent`.
+#[test]
+fn app_runtime_startup_auto_resume_removes_stale_placeholders_across_agent_family_presets() {
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedEnvVar::set("HOME", temp.path());
+    let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+    let repo = temp.path().join("repo");
+    init_git_clone_with_origin(&repo);
+    let worktree = temp.path().join("worktrees").join("family-restore");
+    run_git(
+        &repo,
+        &[
+            "worktree",
+            "add",
+            "-b",
+            "work/family-restore",
+            worktree.to_str().expect("worktree path"),
+        ],
+    );
+
+    let mut persisted = empty_workspace_state();
+    let legacy_window = sample_window(
+        "agent-legacy",
+        WindowPreset::Agent,
+        WindowProcessStatus::Stopped,
+    );
+    let mut claude_window = sample_window(
+        "agent-claude",
+        WindowPreset::Claude,
+        WindowProcessStatus::Stopped,
+    );
+    claude_window.agent_id = Some("claude".to_string());
+    let mut codex_window = sample_window(
+        "agent-codex",
+        WindowPreset::Codex,
+        WindowProcessStatus::Stopped,
+    );
+    codex_window.agent_id = Some("codex".to_string());
+    let mut legacy_window = legacy_window;
+    legacy_window.session_id = Some("session-family-legacy".to_string());
+    claude_window.session_id = Some("session-family-claude".to_string());
+    codex_window.session_id = Some("session-family-codex".to_string());
+    persisted.windows.push(legacy_window);
+    persisted.windows.push(claude_window);
+    persisted.windows.push(codex_window);
+    persisted.next_z_index = 4;
+    let tab = ProjectTabRuntime {
+        id: "tab-family".to_string(),
+        title: "Family Restore".to_string(),
+        project_root: worktree.clone(),
+        kind: ProjectKind::Git,
+        workspace: WindowCanvasState::from_persisted(persisted),
+        migration_pending: false,
+        main_worktree_root_cache: std::sync::Arc::new(std::sync::OnceLock::new()),
+    };
+    let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-family"));
+
+    for (session_id, native_id, agent_id) in [
+        (
+            "session-family-legacy",
+            "native-family-legacy",
+            gwt_agent::AgentId::ClaudeCode,
+        ),
+        (
+            "session-family-claude",
+            "native-family-claude",
+            gwt_agent::AgentId::ClaudeCode,
+        ),
+        (
+            "session-family-codex",
+            "native-family-codex",
+            gwt_agent::AgentId::Codex,
+        ),
+    ] {
+        let mut session = gwt_agent::Session::new(&worktree, "work/family-restore", agent_id);
+        session.id = session_id.to_string();
+        session.agent_session_id = Some(native_id.to_string());
+        session.restore_window_on_startup = true;
+        session.record_hook_event("Stop");
+        session.record_completed_stop();
+        session
+            .save(&runtime.sessions_dir)
+            .expect("save resumable session");
+    }
+
+    runtime.bootstrap();
+    runtime.handle_frontend_event(
+        "client-1".to_string(),
+        FrontendEvent::StartupAutoResumeReady {
+            bounds: canvas_bounds(),
+        },
+    );
+
+    let agent_windows = runtime.tabs[0]
+        .workspace
+        .persisted()
+        .windows
+        .iter()
+        .filter(|window| crate::runtime_support::window_is_agent_pane(window))
+        .count();
+    assert_eq!(
+        agent_windows, 3,
+        "each Agent-family placeholder must be replaced by exactly one resumed window; \
+         a stale Claude/Codex placeholder must not survive next to its resumed window"
+    );
+    assert_eq!(runtime.pending_auto_resume_sources.len(), 3);
+    for source in [
+        "session-family-legacy",
+        "session-family-claude",
+        "session-family-codex",
+    ] {
+        assert!(
+            runtime
+                .pending_auto_resume_sources
+                .values()
+                .any(|value| value == source),
+            "resumed window must track source session {source}"
+        );
+    }
+}
+
+// SPEC-1921 Phase 65 (T336): a restored Agent-family window whose persisted
+// session has no exact provider session id must stay a stopped placeholder
+// with an explicit "exact session restore is unavailable" diagnostic — and
+// must never fall back to Continue / latest / new-session launches.
+#[test]
+fn app_runtime_startup_auto_resume_without_exact_id_keeps_placeholder_with_diagnostic() {
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedEnvVar::set("HOME", temp.path());
+    let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+    let repo = temp.path().join("repo");
+    init_git_clone_with_origin(&repo);
+    let worktree = temp.path().join("worktrees").join("no-exact-id");
+    run_git(
+        &repo,
+        &[
+            "worktree",
+            "add",
+            "-b",
+            "work/no-exact-id",
+            worktree.to_str().expect("worktree path"),
+        ],
+    );
+
+    let mut persisted = empty_workspace_state();
+    let mut codex_window = sample_window(
+        "agent-noid",
+        WindowPreset::Codex,
+        WindowProcessStatus::Stopped,
+    );
+    codex_window.agent_id = Some("codex".to_string());
+    codex_window.session_id = Some("session-no-exact-id".to_string());
+    persisted.windows.push(codex_window);
+    persisted.next_z_index = 2;
+    let tab = ProjectTabRuntime {
+        id: "tab-noid".to_string(),
+        title: "No Exact Id".to_string(),
+        project_root: worktree.clone(),
+        kind: ProjectKind::Git,
+        workspace: WindowCanvasState::from_persisted(persisted),
+        migration_pending: false,
+        main_worktree_root_cache: std::sync::Arc::new(std::sync::OnceLock::new()),
+    };
+    let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-noid"));
+
+    // The Codex placeholder session id is structurally unusable for exact
+    // resume, so this session has no exact provider id.
+    let mut session =
+        gwt_agent::Session::new(&worktree, "work/no-exact-id", gwt_agent::AgentId::Codex);
+    session.id = "session-no-exact-id".to_string();
+    session.agent_session_id = Some("agent-session".to_string());
+    session.restore_window_on_startup = true;
+    session.record_hook_event("Stop");
+    session.record_completed_stop();
+    session
+        .save(&runtime.sessions_dir)
+        .expect("save session without exact id");
+
+    runtime.seed_restored_window_details();
+    runtime.bootstrap();
+    runtime.handle_frontend_event(
+        "client-1".to_string(),
+        FrontendEvent::StartupAutoResumeReady {
+            bounds: canvas_bounds(),
+        },
+    );
+
+    let windows = runtime.tabs[0].workspace.persisted().windows.clone();
+    assert_eq!(windows.len(), 1, "no fallback window may be spawned");
+    assert_eq!(windows[0].id, "agent-noid");
+    assert_eq!(windows[0].status, WindowProcessStatus::Stopped);
+    assert!(
+        runtime.pending_auto_resume_sources.is_empty(),
+        "a session without an exact provider id must not auto-resume"
+    );
+    assert!(
+        runtime.runtimes.is_empty(),
+        "no Continue/latest/new-session process may be launched as a fallback"
+    );
+
+    let detail = runtime
+        .window_details
+        .get(&combined_window_id("tab-noid", "agent-noid"))
+        .cloned()
+        .unwrap_or_default();
+    assert!(
+        detail.contains("Exact session restore is unavailable"),
+        "placeholder must explain exact session restore is unavailable, got: {detail}"
+    );
+    assert!(
+        !detail.contains("Restored window is paused"),
+        "the generic paused message must be replaced by the exact-restore diagnostic"
+    );
+}
+
+// SPEC-1921 Phase 65 (T336/T337): an exact auto-resume candidate must not be
+// labeled with the generic paused-placeholder detail (it resumes as soon as
+// the canvas is ready), while non-agent process windows keep the generic
+// message.
+#[test]
+fn app_runtime_startup_auto_resume_candidate_skips_generic_paused_detail() {
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedEnvVar::set("HOME", temp.path());
+    let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+    let repo = temp.path().join("repo");
+    init_git_clone_with_origin(&repo);
+    let worktree = temp.path().join("worktrees").join("candidate-detail");
+    run_git(
+        &repo,
+        &[
+            "worktree",
+            "add",
+            "-b",
+            "work/candidate-detail",
+            worktree.to_str().expect("worktree path"),
+        ],
+    );
+
+    let mut persisted = empty_workspace_state();
+    let mut claude_window = sample_window(
+        "agent-candidate",
+        WindowPreset::Claude,
+        WindowProcessStatus::Stopped,
+    );
+    claude_window.agent_id = Some("claude".to_string());
+    claude_window.session_id = Some("session-candidate-detail".to_string());
+    persisted.windows.push(claude_window);
+    persisted.windows.push(sample_window(
+        "shell-1",
+        WindowPreset::Shell,
+        WindowProcessStatus::Stopped,
+    ));
+    persisted.next_z_index = 3;
+    let tab = ProjectTabRuntime {
+        id: "tab-candidate".to_string(),
+        title: "Candidate Detail".to_string(),
+        project_root: worktree.clone(),
+        kind: ProjectKind::Git,
+        workspace: WindowCanvasState::from_persisted(persisted),
+        migration_pending: false,
+        main_worktree_root_cache: std::sync::Arc::new(std::sync::OnceLock::new()),
+    };
+    let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-candidate"));
+
+    let mut session = gwt_agent::Session::new(
+        &worktree,
+        "work/candidate-detail",
+        gwt_agent::AgentId::ClaudeCode,
+    );
+    session.id = "session-candidate-detail".to_string();
+    session.agent_session_id = Some("native-candidate-detail".to_string());
+    session.restore_window_on_startup = true;
+    session.record_hook_event("Stop");
+    session.record_completed_stop();
+    session
+        .save(&runtime.sessions_dir)
+        .expect("save resumable session");
+
+    runtime.seed_restored_window_details();
+
+    assert!(
+        !runtime
+            .window_details
+            .contains_key(&combined_window_id("tab-candidate", "agent-candidate")),
+        "an exact auto-resume candidate must not carry the generic paused detail"
+    );
+    let shell_detail = runtime
+        .window_details
+        .get(&combined_window_id("tab-candidate", "shell-1"))
+        .cloned()
+        .unwrap_or_default();
+    assert!(
+        shell_detail.contains("Restored window is paused"),
+        "non-agent process windows keep the generic paused message, got: {shell_detail}"
+    );
 }
 
 #[test]
@@ -15013,7 +15471,7 @@ fn app_runtime_issue_monitor_auto_launch_uses_start_with_last_settings() {
 
     let repo = temp.path().join("repo");
     fs::create_dir_all(&repo).expect("create repo");
-    init_repo(&repo);
+    init_repo_with_initial_commit(&repo);
     let sessions_dir = temp.path().join("sessions");
     fs::create_dir_all(&sessions_dir).expect("create sessions dir");
     let mut previous = gwt_agent::Session::new(&repo, "develop", gwt_agent::AgentId::Codex);
@@ -15286,7 +15744,7 @@ fn app_runtime_issue_monitor_configure_saves_profile_without_launching() {
 
     let repo = temp.path().join("repo");
     fs::create_dir_all(&repo).expect("create repo");
-    init_repo(&repo);
+    init_repo_with_initial_commit(&repo);
     let tab = sample_project_tab("tab-1", "Repo", repo.clone(), ProjectKind::Git, &[]);
     let (mut runtime, recorded_events) =
         sample_runtime_with_events(temp.path(), vec![tab], Some("tab-1"));
@@ -15610,7 +16068,7 @@ fn app_runtime_issue_monitor_auto_launch_prefers_saved_profile() {
 
     let repo = temp.path().join("repo");
     fs::create_dir_all(&repo).expect("create repo");
-    init_repo(&repo);
+    init_repo_with_initial_commit(&repo);
     let prefs = gwt::IssueMonitorPrefs {
         launch_profile: Some(sample_issue_monitor_launch_profile()),
         ..Default::default()
@@ -15673,7 +16131,7 @@ fn app_runtime_issue_monitor_auto_launch_without_previous_settings_opens_wizard(
 
     let repo = temp.path().join("repo");
     fs::create_dir_all(&repo).expect("create repo");
-    init_repo(&repo);
+    init_repo_with_initial_commit(&repo);
     let tab = sample_project_tab("tab-1", "Repo", repo, ProjectKind::Git, &[]);
     let (mut runtime, _recorded_events) =
         sample_runtime_with_events(temp.path(), vec![tab], Some("tab-1"));
@@ -15722,7 +16180,7 @@ fn app_runtime_issue_monitor_auto_launch_keeps_existing_settings_wizard() {
 
     let repo = temp.path().join("repo");
     fs::create_dir_all(&repo).expect("create repo");
-    init_repo(&repo);
+    init_repo_with_initial_commit(&repo);
     let tab = sample_project_tab("tab-1", "Repo", repo, ProjectKind::Git, &[]);
     let (mut runtime, _recorded_events) =
         sample_runtime_with_events(temp.path(), vec![tab], Some("tab-1"));
@@ -15767,7 +16225,7 @@ fn app_runtime_issue_monitor_launch_now_ignores_auto_max_active_setting() {
 
     let repo = temp.path().join("repo");
     fs::create_dir_all(&repo).expect("create repo");
-    init_repo(&repo);
+    init_repo_with_initial_commit(&repo);
     let prefs = gwt::IssueMonitorPrefs {
         enabled: true,
         max_active_agents: 1,
@@ -15813,7 +16271,7 @@ fn app_runtime_issue_monitor_launch_now_wires_launch_feedback_to_issue_row() {
 
     let repo = temp.path().join("repo");
     fs::create_dir_all(&repo).expect("create repo");
-    init_repo(&repo);
+    init_repo_with_initial_commit(&repo);
     let tab = sample_project_tab("tab-1", "Repo", repo, ProjectKind::Git, &[]);
     let (mut runtime, recorded_events) =
         sample_runtime_with_events(temp.path(), vec![tab], Some("tab-1"));

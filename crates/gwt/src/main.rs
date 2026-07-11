@@ -3818,10 +3818,13 @@ mod tests {
             runtime.window_status(&window_id),
             Some(WindowProcessStatus::Exited)
         );
+        // SPEC-1921 Phase 65: an Agent-family placeholder without an exact
+        // provider session id is seeded with the exact-restore diagnostic
+        // instead of the generic paused message.
         assert!(runtime
             .window_details
             .get(&window_id)
-            .is_some_and(|detail| detail.contains("Restored window is paused")));
+            .is_some_and(|detail| detail.contains("Exact session restore is unavailable")));
 
         runtime.window_lookup.clear();
         runtime.register_window("tab-1", &raw_id);
