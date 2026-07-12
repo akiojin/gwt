@@ -8,6 +8,7 @@
 
 use gwt::cli::{dispatch, TestEnv};
 use gwt_core::skill_state::{self, SkillState};
+use gwt_core::test_support::{env_lock, ScopedEnvVar, ScopedGwtHome};
 use tempfile::TempDir;
 
 fn argv(parts: &[&str]) -> Vec<String> {
@@ -281,6 +282,136 @@ fn build_abort_records_reason_in_phase_field() {
         .as_deref()
         .unwrap_or("")
         .starts_with("aborted: "));
+}
+
+fn seed_session_work(repo: &std::path::Path, session_id: &str) {
+    gwt_core::workspace_projection::record_workspace_work_paused_event(
+        repo,
+        &format!("work-session-{session_id}"),
+        Some("Build lifecycle Work"),
+        None,
+        Some("SPEC-2359"),
+        &[],
+        None,
+        Some(session_id),
+        chrono::Utc::now(),
+    )
+    .expect("seed session Work");
+}
+
+#[test]
+fn build_complete_marks_current_session_work_done_idempotently() {
+    let _lock = env_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let (mut env, dir) = new_env();
+    let _home = ScopedGwtHome::set(dir.path().join("home"));
+    let _session = ScopedEnvVar::set(gwt_agent::GWT_SESSION_ID_ENV, "session-build-done");
+    seed_session_work(dir.path(), "session-build-done");
+
+    dispatch_json(&mut env, "build.start", serde_json::json!({"spec": 2359}));
+    assert_eq!(
+        dispatch_json(
+            &mut env,
+            "build.complete",
+            serde_json::json!({"spec": 2359})
+        ),
+        0
+    );
+    assert_eq!(
+        dispatch_json(
+            &mut env,
+            "build.complete",
+            serde_json::json!({"spec": 2359})
+        ),
+        0,
+        "retry remains successful"
+    );
+
+    let projection = gwt_core::workspace_projection::load_workspace_work_items(dir.path())
+        .expect("load Work items")
+        .expect("Work items");
+    let work = projection
+        .work_items
+        .iter()
+        .find(|item| item.id == "work-session-session-build-done")
+        .expect("current session Work");
+    assert_eq!(
+        work.status_category,
+        gwt_core::workspace_projection::WorkspaceStatusCategory::Done
+    );
+    assert_eq!(
+        work.events
+            .iter()
+            .filter(|event| { event.kind == gwt_core::workspace_projection::WorkEventKind::Done })
+            .count(),
+        1,
+        "build.complete retry must not duplicate Done"
+    );
+}
+
+#[test]
+fn build_abort_discards_only_current_session_work() {
+    let _lock = env_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let (mut env, dir) = new_env();
+    let _home = ScopedGwtHome::set(dir.path().join("home"));
+    let _session = ScopedEnvVar::set(gwt_agent::GWT_SESSION_ID_ENV, "session-build-abort");
+    seed_session_work(dir.path(), "session-build-abort");
+    seed_session_work(dir.path(), "session-other");
+
+    dispatch_json(&mut env, "build.start", serde_json::json!({"spec": 2359}));
+    assert_eq!(
+        dispatch_json(
+            &mut env,
+            "build.abort",
+            serde_json::json!({"spec": 2359, "reason": "cancelled"})
+        ),
+        0
+    );
+
+    let projection = gwt_core::workspace_projection::load_workspace_work_items(dir.path())
+        .expect("load Work items")
+        .expect("Work items");
+    let current = projection
+        .work_items
+        .iter()
+        .find(|item| item.id == "work-session-session-build-abort")
+        .expect("current Work");
+    assert!(current.discarded);
+    let other = projection
+        .work_items
+        .iter()
+        .find(|item| item.id == "work-session-session-other")
+        .expect("other Work");
+    assert!(!other.is_terminal(), "other Work must remain untouched");
+}
+
+#[test]
+fn build_complete_without_registered_work_is_successful_noop() {
+    let _lock = env_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let (mut env, dir) = new_env();
+    let _home = ScopedGwtHome::set(dir.path().join("home"));
+    let _session = ScopedEnvVar::set(gwt_agent::GWT_SESSION_ID_ENV, "standalone-session");
+
+    dispatch_json(&mut env, "build.start", serde_json::json!({"spec": 2359}));
+    assert_eq!(
+        dispatch_json(
+            &mut env,
+            "build.complete",
+            serde_json::json!({"spec": 2359})
+        ),
+        0
+    );
+    assert!(
+        gwt_core::workspace_projection::load_workspace_work_items(dir.path())
+            .expect("load Work items")
+            .is_none(),
+        "standalone completion must not invent a Work"
+    );
 }
 
 #[test]

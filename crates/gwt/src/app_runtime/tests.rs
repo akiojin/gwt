@@ -6672,6 +6672,19 @@ fn app_runtime_active_work_projection_separates_sessions_on_same_branch() {
         row.session_agent_total, 2,
         "hidden same-agent candidates stay counted for the session summary"
     );
+    assert_eq!(
+        row.works.len(),
+        2,
+        "both launch-scoped Works remain addressable"
+    );
+    assert!(row
+        .works
+        .iter()
+        .any(|work| work.id == "work-session-session-a"));
+    assert!(row
+        .works
+        .iter()
+        .any(|work| work.id == "work-session-session-b"));
     assert!(row.workspace_key.is_some());
 }
 
@@ -7321,12 +7334,11 @@ fn app_runtime_close_work_blocks_when_owning_agent_is_live() {
     );
 }
 
-/// SPEC-2359 Phase W-12 Slice 4 (FR-352): the worktree-only cleanup removes
-/// the actual worktree directory but retains the branch (branch / PR are
-/// preserved). Uses a real temp git repo + worktree to verify the
-/// `remove_force` side effect.
+/// SPEC-2359 W-21 (FR-463): Work close records lifecycle history only. The
+/// actual worktree and branch remain until the independent cleanup transport
+/// removes them.
 #[test]
-fn app_runtime_close_work_removes_worktree_only_and_retains_branch() {
+fn app_runtime_close_work_retains_worktree_and_branch() {
     let _env_lock = env_test_lock()
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -7400,18 +7412,26 @@ fn app_runtime_close_work_removes_worktree_only_and_retains_branch() {
     let tab = sample_project_tab("tab-1", "Repo", repo.clone(), ProjectKind::Git, &[]);
     let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
 
-    // No live agent session → cleanup path. Close (Done).
+    // No live agent session: close the Work without cleaning its materialization.
     let events = runtime.close_work("work-session-session-cleanup", "done");
     assert!(!events.is_empty());
 
     assert!(
-        !worktree_path.exists(),
-        "worktree-only cleanup must remove the worktree directory"
+        worktree_path.exists(),
+        "Work close must retain the worktree directory"
     );
     assert!(
         crate::runtime_support::local_branch_exists(&repo, "work/cleanup").unwrap_or(false),
         "worktree-only cleanup must retain the branch (branch / PR are preserved)"
     );
+    let works = gwt_core::workspace_projection::load_or_synthesize_workspace_work_items(&repo)
+        .expect("load Work history");
+    let closed = works
+        .work_items
+        .iter()
+        .find(|item| item.id == "work-session-session-cleanup")
+        .expect("closed Work remains in history");
+    assert!(closed.is_terminal());
 }
 
 /// SPEC-2359 Phase W-12 Slice 5a (FR-350): resuming a paused Work (a live
@@ -19621,6 +19641,7 @@ fn attach_registry_sessions_caps_total_agents_on_the_wire() {
         pr_state: None,
         board_refs: Vec::new(),
         agents,
+        works: Vec::new(),
         lifecycle_state: "paused".to_string(),
         closed_at: None,
         session_agent_total: 0,
@@ -19741,6 +19762,7 @@ fn attach_registry_sessions_keeps_latest_entry_per_agent_identity() {
                 "conv-l",
             ),
         ],
+        works: Vec::new(),
         lifecycle_state: "paused".to_string(),
         closed_at: None,
         session_agent_total: 0,
@@ -19850,6 +19872,7 @@ fn attach_registry_sessions_recomputes_agent_counters_after_identity_collapse() 
             ),
             agent_view("codex-blocked", "Codex", "blocked", "2026-06-09T00:00:00Z"),
         ],
+        works: Vec::new(),
         lifecycle_state: "active".to_string(),
         closed_at: None,
         session_agent_total: 0,
@@ -19933,6 +19956,7 @@ fn attach_registry_sessions_drops_ghost_agents_without_identity_or_sessions() {
             bare_agent("gwt-ghost", ""),
             bare_agent("gwt-named", "Claude Code"),
         ],
+        works: Vec::new(),
         lifecycle_state: "paused".to_string(),
         closed_at: None,
         session_agent_total: 0,
@@ -20065,6 +20089,7 @@ fn attach_registry_sessions_dedupes_agents_sharing_a_conversation() {
             // A different conversation must survive untouched.
             agent_view("gwt-other", "Codex", "2026-06-11T00:00:00Z", "conv-other"),
         ],
+        works: Vec::new(),
         lifecycle_state: "paused".to_string(),
         closed_at: None,
         session_agent_total: 0,
@@ -20198,6 +20223,7 @@ fn attach_registry_sessions_filters_agents_from_other_workspace_rows() {
                 "019ed018-c208-7183-bb6e-b08ba2ef4981",
             ),
         ],
+        works: Vec::new(),
         lifecycle_state: "paused".to_string(),
         closed_at: None,
         session_agent_total: 0,
@@ -20362,6 +20388,7 @@ fn active_works_are_sorted_by_latest_update_descending() {
         pr_state: None,
         board_refs: Vec::new(),
         agents: Vec::new(),
+        works: Vec::new(),
         lifecycle_state: "paused".to_string(),
         closed_at: None,
         session_agent_total: 0,
@@ -20438,6 +20465,7 @@ fn mark_merged_active_works_flags_cache_and_pr_state() {
         pr_state: pr_state.map(str::to_string),
         board_refs: Vec::new(),
         agents: Vec::new(),
+        works: Vec::new(),
         lifecycle_state: "paused".to_string(),
         closed_at: None,
         session_agent_total: 0,
@@ -20505,6 +20533,7 @@ fn dirty_worktree_pr_state_merged_does_not_flag_or_cleanup() {
         pr_state: Some("MERGED".to_string()),
         board_refs: Vec::new(),
         agents: Vec::new(),
+        works: Vec::new(),
         lifecycle_state: "paused".to_string(),
         closed_at: None,
         session_agent_total: 0,
@@ -21088,6 +21117,7 @@ fn assign_and_merge_workspace_groups_unifies_same_branch_rows() {
         branch: Option<&str>,
         updated_at: &str,
         agents: usize,
+        lifecycle: &str,
     ) -> gwt::ActiveWorkItemView {
         gwt::ActiveWorkItemView {
             id: id.to_string(),
@@ -21108,7 +21138,8 @@ fn assign_and_merge_workspace_groups_unifies_same_branch_rows() {
             pr_state: None,
             board_refs: Vec::new(),
             agents: Vec::new(),
-            lifecycle_state: "paused".to_string(),
+            works: Vec::new(),
+            lifecycle_state: lifecycle.to_string(),
             closed_at: None,
             session_agent_total: 1,
             merged_into_base: false,
@@ -21128,15 +21159,23 @@ fn assign_and_merge_workspace_groups_unifies_same_branch_rows() {
             "work-session-aaaa",
             Some("work/x"),
             "2026-06-11T10:00:00Z",
-            1,
+            0,
+            "paused",
         ),
         row(
             "work-session-bbbb",
             Some("origin/work/x"),
             "2026-06-12T10:00:00Z",
             2,
+            "active",
         ),
-        row("workspace-1748822400000", None, "2026-06-10T10:00:00Z", 0),
+        row(
+            "workspace-1748822400000",
+            None,
+            "2026-06-10T10:00:00Z",
+            0,
+            "paused",
+        ),
     ];
 
     super::assign_and_merge_workspace_groups(&mut works, &root);
@@ -21157,9 +21196,38 @@ fn assign_and_merge_workspace_groups_unifies_same_branch_rows() {
         group.id, "work-session-bbbb",
         "newest row is the representative"
     );
-    assert_eq!(group.active_agents, 3, "agent counts sum");
+    assert_eq!(group.active_agents, 2, "agent counts sum");
     assert_eq!(group.session_agent_total, 2, "session totals sum");
     assert!(group.workspace_key.is_some());
+    assert_eq!(
+        group.works.len(),
+        2,
+        "Workspace grouping must preserve both child Works"
+    );
+    assert_eq!(
+        group
+            .works
+            .iter()
+            .map(|work| work.id.as_str())
+            .collect::<std::collections::BTreeSet<_>>(),
+        std::collections::BTreeSet::from(["work-session-aaaa", "work-session-bbbb"]),
+        "each child Work keeps its stable identity"
+    );
+    let paused = group
+        .works
+        .iter()
+        .find(|work| work.id == "work-session-aaaa")
+        .expect("paused child Work");
+    assert_eq!(paused.lifecycle_state, "paused");
+    assert!(paused.manual_close_allowed);
+    assert_eq!(paused.close_blocked_reason, None);
+    let active = group
+        .works
+        .iter()
+        .find(|work| work.id == "work-session-bbbb")
+        .expect("active child Work");
+    assert!(!active.manual_close_allowed);
+    assert_eq!(active.close_blocked_reason.as_deref(), Some("live_agent"));
     let legacy = works
         .iter()
         .find(|work| work.id == "workspace-1748822400000")
@@ -21167,6 +21235,37 @@ fn assign_and_merge_workspace_groups_unifies_same_branch_rows() {
     assert_eq!(
         legacy.workspace_key.as_deref(),
         Some("workspace-1748822400000")
+    );
+}
+
+#[test]
+fn legacy_workspace_lifecycle_does_not_create_an_implicit_close_target() {
+    let legacy = serde_json::json!({
+        "id": "work-legacy-parent",
+        "title": "Legacy Workspace",
+        "status_category": "idle",
+        "status_text": "Paused",
+        "summary": null,
+        "owner": null,
+        "next_action": null,
+        "active_agents": 0,
+        "blocked_agents": 0,
+        "branch": "work/legacy",
+        "worktree_path": null,
+        "pr_number": null,
+        "pr_url": null,
+        "pr_state": null,
+        "board_refs": [],
+        "agents": [],
+        "lifecycle_state": "paused"
+    });
+
+    let workspace: gwt::ActiveWorkItemView =
+        serde_json::from_value(legacy).expect("deserialize legacy Workspace row");
+
+    assert!(
+        workspace.works.is_empty(),
+        "legacy parent lifecycle is display compatibility only and must not invent a child Work"
     );
 }
 
@@ -21196,6 +21295,7 @@ fn mark_remote_only_flags_fetched_branches_without_local_worktree() {
             pr_state: None,
             board_refs: Vec::new(),
             agents: Vec::new(),
+            works: Vec::new(),
             lifecycle_state: "paused".to_string(),
             closed_at: None,
             session_agent_total: 0,
@@ -21218,12 +21318,19 @@ fn mark_remote_only_flags_fetched_branches_without_local_worktree() {
         row("w-branchless", None, None),
     ];
 
+    super::assign_and_merge_workspace_groups(&mut works, Path::new("/repo"));
     super::mark_remote_only_active_works(&mut works, Some(&local));
 
     assert!(works[0].remote_only, "fetched-only branch is Remote");
     assert!(!works[1].remote_only, "locally checked-out branch is not");
     assert!(!works[2].remote_only, "rows with a worktree are not");
     assert!(!works[3].remote_only, "branchless rows are not");
+    assert_eq!(works[0].works.len(), 1);
+    assert!(!works[0].works[0].manual_close_allowed);
+    assert_eq!(
+        works[0].works[0].close_blocked_reason.as_deref(),
+        Some("remote_environment_unknown")
+    );
 }
 
 /// SPEC-2359 W16-4 (FR-391): merged ∧ stale rows classify as derived Done;
@@ -21258,6 +21365,7 @@ fn mark_merged_classifies_done_equivalent_for_stale_merged_rows() {
             pr_state: pr_state.map(str::to_string),
             board_refs: Vec::new(),
             agents: Vec::new(),
+            works: Vec::new(),
             lifecycle_state: lifecycle.to_string(),
             closed_at: None,
             session_agent_total: 0,
@@ -21333,6 +21441,7 @@ fn mark_cleanup_candidates_exposes_no_changes_reason_without_merged_badge() {
         pr_state: None,
         board_refs: Vec::new(),
         agents: Vec::new(),
+        works: Vec::new(),
         lifecycle_state: "paused".to_string(),
         closed_at: None,
         session_agent_total: 0,
@@ -21394,6 +21503,7 @@ fn mark_cleanup_candidates_sets_blocked_reason_for_live_agent_and_process() {
             pr_state: Some("MERGED".to_string()),
             board_refs: Vec::new(),
             agents: Vec::new(),
+            works: Vec::new(),
             lifecycle_state: "active".to_string(),
             closed_at: None,
             session_agent_total: 0,
@@ -21424,6 +21534,7 @@ fn mark_cleanup_candidates_sets_blocked_reason_for_live_agent_and_process() {
             pr_state: None,
             board_refs: Vec::new(),
             agents: Vec::new(),
+            works: Vec::new(),
             lifecycle_state: "paused".to_string(),
             closed_at: None,
             session_agent_total: 0,
@@ -21602,6 +21713,7 @@ fn apply_work_summary_external_sources_prefers_pr_then_ai_then_commit_subject() 
         pr_state: None,
         board_refs: vec![],
         agents: vec![],
+        works: Vec::new(),
         lifecycle_state: "paused".to_string(),
         closed_at: None,
         session_agent_total: 0,

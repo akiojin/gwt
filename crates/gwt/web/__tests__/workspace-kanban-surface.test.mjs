@@ -461,6 +461,8 @@ test("Workspace detail renders structured body sections without preformatted dum
   assert.deepEqual(sectionTitles, [
     "Progress Summary",
     "Current State",
+    "Branch",
+    "Worktree",
     "Agents & Sessions",
     "Linked Work",
     "Lifecycle",
@@ -932,7 +934,7 @@ test("Work surface renders a lifecycle_state badge on each Work row (SPEC-2359 W
   assert.equal(pausedBadge.dataset.lifecycle, "paused");
 });
 
-test("Work surface Done action sends close_work with close_kind done (SPEC-2359 W-12 FR-351)", () => {
+test("Paused child Work Done sends close_work for the child identity", () => {
   const fixture = createFixture();
   const sent = [];
   const surface = createSurface(fixture, {
@@ -942,11 +944,20 @@ test("Work surface Done action sends close_work with close_kind done (SPEC-2359 
     active_work_count: 1,
     active_works: [
       {
-        id: "work-active",
-        title: "Active Work",
-        status_category: "active",
-        lifecycle_state: "active",
+        id: "workspace-work-shared",
+        title: "Shared branch",
+        status_category: "idle",
+        lifecycle_state: "paused",
         agents: [],
+        works: [{
+          id: "work-paused",
+          title: "Paused Work",
+          status_category: "idle",
+          status_text: "Paused",
+          lifecycle_state: "paused",
+          manual_close_allowed: true,
+          agents: [],
+        }],
       },
     ],
   }, { send: (message) => sent.push(message) });
@@ -960,11 +971,11 @@ test("Work surface Done action sends close_work with close_kind done (SPEC-2359 
   assert.ok(doneButton, "expected a Done action on the selected Work detail");
   doneButton.click();
   assert.deepEqual(sent, [
-    { kind: "close_work", work_id: "work-active", close_kind: "done" },
+    { kind: "close_work", work_id: "work-paused", close_kind: "done" },
   ]);
 });
 
-test("Work surface Discard action sends close_work with close_kind discarded (SPEC-2359 W-12 FR-351)", () => {
+test("Paused child Work Discard sends close_work for the child identity", () => {
   const fixture = createFixture();
   const sent = [];
   const surface = createSurface(fixture, {
@@ -974,11 +985,20 @@ test("Work surface Discard action sends close_work with close_kind discarded (SP
     active_work_count: 1,
     active_works: [
       {
-        id: "work-active",
-        title: "Active Work",
-        status_category: "active",
-        lifecycle_state: "active",
+        id: "workspace-work-shared",
+        title: "Shared branch",
+        status_category: "idle",
+        lifecycle_state: "paused",
         agents: [],
+        works: [{
+          id: "work-paused",
+          title: "Paused Work",
+          status_category: "idle",
+          status_text: "Paused",
+          lifecycle_state: "paused",
+          manual_close_allowed: true,
+          agents: [],
+        }],
       },
     ],
   }, { send: (message) => sent.push(message) });
@@ -992,8 +1012,98 @@ test("Work surface Discard action sends close_work with close_kind discarded (SP
   assert.ok(discardButton, "expected a Discard action on the selected Work detail");
   discardButton.click();
   assert.deepEqual(sent, [
-    { kind: "close_work", work_id: "work-active", close_kind: "discarded" },
+    { kind: "close_work", work_id: "work-paused", close_kind: "discarded" },
   ]);
+});
+
+test("Workspace header is read-only and operations belong to target contexts", () => {
+  const fixture = createFixture();
+  const sent = [];
+  const cleanupCalls = [];
+  const surface = createSurface(
+    fixture,
+    {
+      id: "projection",
+      title: "projection",
+      status_category: "idle",
+      active_works: [{
+        id: "workspace-work-shared",
+        title: "Shared branch",
+        branch: "work/shared",
+        worktree_path: "/repo/work/shared",
+        status_category: "active",
+        lifecycle_state: "active",
+        cleanup_candidate: {
+          branch: "work/shared",
+          worktree_path: "/repo/work/shared",
+          reason: "no_changes",
+        },
+        agents: [],
+        works: [
+          {
+            id: "work-paused",
+            title: "Paused Work",
+            status_category: "idle",
+            status_text: "Paused",
+            lifecycle_state: "paused",
+            manual_close_allowed: true,
+            agents: [],
+          },
+          {
+            id: "work-live",
+            title: "Live Work",
+            status_category: "active",
+            status_text: "Running",
+            lifecycle_state: "active",
+            manual_close_allowed: false,
+            close_blocked_reason: "live_agent",
+            agents: [],
+          },
+        ],
+      }],
+      agents: [],
+    },
+    {
+      send: (message) => sent.push(message),
+      openWorkspaceCleanup: (candidate) => cleanupCalls.push(candidate),
+    },
+  );
+
+  surface.mount(fixture.body, fixture.windowData, {
+    focusWindowLocally() {},
+    sendFocus() {},
+  });
+
+  assert.equal(
+    fixture.body.querySelectorAll(".workspace-detail-header button").length,
+    0,
+    "Workspace header is read-only",
+  );
+  assert.ok(
+    fixture.body.querySelector('[data-section="branch-context"] [data-action="launch-workspace"]'),
+    "Launch belongs to branch context",
+  );
+  assert.ok(
+    fixture.body.querySelector('[data-section="worktree-context"] [data-action="cleanup-merged-workspace"]'),
+    "Clean Up belongs to worktree context",
+  );
+  const paused = fixture.body.querySelector('[data-work-id="work-paused"]');
+  assert.ok(paused.querySelector('[data-action="close-work-done"]'));
+  assert.ok(paused.querySelector('[data-action="close-work-discard"]'));
+  const live = fixture.body.querySelector('[data-work-id="work-live"]');
+  assert.equal(live.querySelector('[data-action="close-work-done"]').disabled, true);
+  assert.equal(live.querySelector('[data-action="close-work-discard"]').disabled, true);
+
+  paused.querySelector('[data-action="close-work-done"]').click();
+  assert.deepEqual(sent.at(-1), {
+    kind: "close_work",
+    work_id: "work-paused",
+    close_kind: "done",
+  });
+  fixture.body
+    .querySelector('[data-section="worktree-context"] [data-action="cleanup-merged-workspace"]')
+    .click();
+  assert.equal(cleanupCalls.length, 1);
 });
 
 function sampleProjection() {
@@ -1202,11 +1312,9 @@ test("sessionless Workspace offers a Launch control that opens the launch wizard
   assert.equal(sent[0].branch_name, "work/foo");
 });
 
-// Placement feedback (2026-06-11 user verification): the Launch Agent control
-// has one canonical home — the detail header actions — never an arbitrary
-// position after a variable-length Work list. A backfilled row whose title IS
-// the branch name must not repeat the same string as subtitle meta.
-test("Launch control lives in the detail header actions and duplicate branch meta is suppressed", () => {
+// W-21: Launch is a branch operation. A backfilled row whose title IS the
+// branch name must not repeat the same string as subtitle meta.
+test("Launch control lives in branch context and duplicate branch meta is suppressed", () => {
   const fixture = createFixture();
   const surface = createSurface(
     fixture,
@@ -1240,8 +1348,8 @@ test("Launch control lives in the detail header actions and duplicate branch met
   const launch = fixture.body.querySelector('[data-action="launch-workspace"]');
   assert.ok(launch, "Launch Agent control must exist");
   assert.ok(
-    launch.parentElement.classList.contains("workspace-detail-actions"),
-    "Launch Agent belongs to the detail header actions",
+    launch.closest('[data-section="branch-context"]'),
+    "Launch Agent belongs to branch context",
   );
 
   const row = fixture.body.querySelector(".workspace-overview-row[data-workspace-id]");
@@ -1671,14 +1779,12 @@ test("Workspace with existing Works still offers a Launch control", () => {
   assert.equal(sent.at(-1)?.kind, "open_launch_wizard");
   assert.equal(sent.at(-1)?.branch_name, "develop");
 
-  // Placement feedback (2026-06-11): one fixed home in the header actions —
-  // first action, before Done / Discard — and no floating row after the list.
-  const actions = fixture.body.querySelector(".workspace-detail-actions");
-  assert.ok(actions, "detail header actions container must exist");
+  const actions = fixture.body.querySelector('[data-section="branch-context"]');
+  assert.ok(actions, "branch context must exist");
   assert.equal(
-    actions.firstElementChild?.dataset?.action,
+    actions.querySelector('[data-action="launch-workspace"]')?.dataset?.action,
     "launch-workspace",
-    "Launch Agent is the first (primary) header action",
+    "Launch Agent is owned by branch context",
   );
   assert.equal(
     fixture.body.querySelectorAll('[data-action="launch-workspace"]').length,
@@ -1737,8 +1843,9 @@ test("merged Workspace detail offers Clean Up only from a backend cleanup candid
     sendFocus() {},
   });
 
-  const cleanup = [...fixture.body.querySelectorAll(".workspace-detail-actions button")]
-    .find((button) => button.textContent.trim() === "Clean Up");
+  const cleanup = fixture.body.querySelector(
+    '[data-section="worktree-context"] [data-action="cleanup-merged-workspace"]',
+  );
   assert.ok(cleanup, "merged Workspace must offer a Clean Up action");
   cleanup.click();
   assert.equal(cleanupCalls.length, 1);
@@ -2136,6 +2243,15 @@ test("remote-only Workspace shows the Remote badge and keeps the prefilled Launc
   const badge = fixture.body.querySelector(".workspace-overview-remote");
   assert.ok(badge, "Remote badge renders for remote-only rows");
   assert.equal(badge.textContent, "Remote");
+  assert.equal(
+    fixture.body.querySelectorAll(".workspace-overview-lifecycle").length,
+    0,
+    "remote environment absence must not be shown as a local Paused/Closed lifecycle",
+  );
+  assert.equal(
+    fixture.body.querySelector(".workspace-overview-row").dataset.attention,
+    "remote",
+  );
   assert.equal(sent.length, 0, "rendering generates no events (FR-381/FR-390)");
 
   const launch = fixture.body.querySelector('[data-action="launch-workspace"]');
@@ -2203,7 +2319,7 @@ test("eligible remote branches render as unified Workspace rows tagged Remote", 
 
   assert.deepEqual(
     rowIdsInList(fixture),
-    ["work-local", "remote-start:feature-foo", "remote-start:feature/bar"],
+    ["remote-start:feature-foo", "remote-start:feature/bar", "work-local"],
     "eligible remote branches join the list as rows; a duplicate of a real work is dropped",
   );
 
@@ -2219,8 +2335,8 @@ test("eligible remote branches render as unified Workspace rows tagged Remote", 
   );
   assert.equal(
     remoteRow.dataset.attention,
-    "paused",
-    "a startable remote branch sits in the Paused lane",
+    "remote",
+    "a startable remote branch stays Remote instead of guessing a local Paused state",
   );
   const tag = remoteRow.querySelector(".workspace-overview-remote");
   assert.ok(tag, "the row carries the shared Remote tag");

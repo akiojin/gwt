@@ -743,6 +743,7 @@ fn active_work_items_from_projection(
                 // SPEC-2359 Phase W-12 (FR-349): active_work_items groups live
                 // assigned agents, so the owning agent session is Running and
                 // not user-closed → Active.
+                works: Vec::new(),
                 lifecycle_state: work_active_lifecycle_state_wire(
                     gwt_core::workspace_projection::recompute_work_active_lifecycle(
                         gwt_core::workspace_projection::WorkAgentRuntime::Running,
@@ -848,6 +849,7 @@ fn append_paused_work_items(
                 .collect(),
             // No live agent session owns this Work and it is not user-closed →
             // WorkAgentRuntime::None resolves to Paused (FR-350).
+            works: Vec::new(),
             lifecycle_state: work_active_lifecycle_state_wire(
                 gwt_core::workspace_projection::recompute_work_active_lifecycle(
                     gwt_core::workspace_projection::WorkAgentRuntime::None,
@@ -1696,6 +1698,10 @@ pub(super) fn assign_and_merge_workspace_groups(
     project_root: &Path,
 ) {
     for work in active_works.iter_mut() {
+        if work.works.is_empty() {
+            let child = active_workspace_child_work(work);
+            work.works.push(child);
+        }
         let branch = work
             .branch
             .as_deref()
@@ -1723,6 +1729,11 @@ pub(super) fn assign_and_merge_workspace_groups(
                 let newer = work.updated_at > target.updated_at;
                 let mut agents = std::mem::take(&mut target.agents);
                 agents.extend(work.agents.iter().cloned());
+                let mut child_works = std::mem::take(&mut target.works);
+                child_works.extend(work.works.iter().cloned());
+                child_works.sort_by(|left, right| right.updated_at.cmp(&left.updated_at));
+                let mut seen_work_ids = HashSet::new();
+                child_works.retain(|child| seen_work_ids.insert(child.id.clone()));
                 let active_agents = target.active_agents + work.active_agents;
                 let blocked_agents = target.blocked_agents + work.blocked_agents;
                 let session_agent_total = target.session_agent_total + work.session_agent_total;
@@ -1749,6 +1760,7 @@ pub(super) fn assign_and_merge_workspace_groups(
                     }
                 }
                 target.agents = agents;
+                target.works = child_works;
                 target.active_agents = active_agents;
                 target.blocked_agents = blocked_agents;
                 target.session_agent_total = session_agent_total;
@@ -1765,6 +1777,28 @@ pub(super) fn assign_and_merge_workspace_groups(
         }
     }
     *active_works = merged;
+}
+
+fn active_workspace_child_work(work: &gwt::ActiveWorkItemView) -> gwt::ActiveWorkspaceWorkView {
+    let lifecycle_state = work.lifecycle_state.clone();
+    let manual_close_allowed = lifecycle_state == "paused" && work.active_agents == 0;
+    let close_blocked_reason = (!manual_close_allowed
+        && !matches!(lifecycle_state.as_str(), "done" | "discarded"))
+    .then(|| "live_agent".to_string());
+    gwt::ActiveWorkspaceWorkView {
+        id: work.id.clone(),
+        title: work.title.clone(),
+        work_summary: work.work_summary.clone(),
+        status_category: work.status_category.clone(),
+        status_text: work.status_text.clone(),
+        owner: work.owner.clone(),
+        lifecycle_state,
+        closed_at: work.closed_at.clone(),
+        manual_close_allowed,
+        close_blocked_reason,
+        agents: work.agents.clone(),
+        updated_at: work.updated_at.clone(),
+    }
 }
 
 fn merged_branch_fallback(agents: &[gwt::ActiveWorkAgentView]) -> Option<String> {
@@ -1797,6 +1831,12 @@ pub(super) fn mark_remote_only_active_works(
             .map(|branch| local_branches.is_some_and(|set| set.contains(&branch)));
         // Branchless rows are never "remote": there is nothing to fetch.
         work.remote_only = matches!(branch_local, Some(false));
+        if work.remote_only {
+            for child in &mut work.works {
+                child.manual_close_allowed = false;
+                child.close_blocked_reason = Some("remote_environment_unknown".to_string());
+            }
+        }
     }
 }
 
@@ -2488,6 +2528,7 @@ impl AppRuntime {
             agents: agents.clone(),
             // SPEC-2359 Phase W-12 (FR-349): synthesized from live sessions, so
             // the owning agent is Running and not user-closed → Active.
+            works: Vec::new(),
             lifecycle_state: work_active_lifecycle_state_wire(
                 gwt_core::workspace_projection::recompute_work_active_lifecycle(
                     gwt_core::workspace_projection::WorkAgentRuntime::Running,
