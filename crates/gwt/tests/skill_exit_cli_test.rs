@@ -351,6 +351,91 @@ fn build_complete_marks_current_session_work_done_idempotently() {
 }
 
 #[test]
+fn build_complete_retry_with_inactive_state_does_not_close_later_work() {
+    let _lock = env_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let (mut env, dir) = new_env();
+    let _home = ScopedGwtHome::set(dir.path().join("home"));
+    let _session = ScopedEnvVar::set(gwt_agent::GWT_SESSION_ID_ENV, "session-stale-retry");
+
+    dispatch_json(&mut env, "build.start", serde_json::json!({"spec": 2359}));
+    assert_eq!(
+        dispatch_json(
+            &mut env,
+            "build.complete",
+            serde_json::json!({"spec": 2359})
+        ),
+        0
+    );
+    seed_session_work(dir.path(), "session-stale-retry");
+
+    assert_eq!(
+        dispatch_json(
+            &mut env,
+            "build.complete",
+            serde_json::json!({"spec": 2359})
+        ),
+        0,
+        "stale completion retry remains successful"
+    );
+
+    let projection = gwt_core::workspace_projection::load_workspace_work_items(dir.path())
+        .expect("load Work items")
+        .expect("Work items");
+    let work = projection
+        .work_items
+        .iter()
+        .find(|item| item.id == "work-session-session-stale-retry")
+        .expect("later current Work");
+    assert!(
+        !work.is_terminal(),
+        "inactive build state must not close Work created after completion"
+    );
+}
+
+#[test]
+fn build_complete_from_another_session_does_not_close_current_work() {
+    let _lock = env_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let (mut env, dir) = new_env();
+    let _home = ScopedGwtHome::set(dir.path().join("home"));
+
+    {
+        let _owner_session =
+            ScopedEnvVar::set(gwt_agent::GWT_SESSION_ID_ENV, "session-build-owner");
+        dispatch_json(&mut env, "build.start", serde_json::json!({"spec": 2359}));
+    }
+    {
+        let _current_session =
+            ScopedEnvVar::set(gwt_agent::GWT_SESSION_ID_ENV, "session-build-observer");
+        seed_session_work(dir.path(), "session-build-observer");
+        assert_eq!(
+            dispatch_json(
+                &mut env,
+                "build.complete",
+                serde_json::json!({"spec": 2359})
+            ),
+            0
+        );
+    }
+
+    let projection = gwt_core::workspace_projection::load_workspace_work_items(dir.path())
+        .expect("load Work items")
+        .expect("Work items");
+    let work = projection
+        .work_items
+        .iter()
+        .find(|item| item.id == "work-session-session-build-observer")
+        .expect("observer Work");
+    assert!(
+        !work.is_terminal(),
+        "a build state owned by another session must not close this session's Work"
+    );
+}
+
+#[test]
 fn build_abort_discards_only_current_session_work() {
     let _lock = env_lock()
         .lock()

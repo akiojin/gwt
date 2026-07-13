@@ -927,18 +927,25 @@ export function createWorkspaceKanbanSurface({
       return;
     }
     const wrap = createNode("div", "workspace-detail-work-list");
+    let renderedAgentTotal = 0;
     for (const work of list) {
       const group = createNode("div", "workspace-detail-work-group");
       if (work?.id) group.dataset.workId = work.id;
       const agents = Array.isArray(work?.agents) ? work.agents : [];
-      const agent = agents[0] || work;
-      group.dataset.agentColor = agentColorKeyword(agent);
+      const displayedAgents = agents.length > 0 ? agents : [work];
+      const firstAgent = displayedAgents[0];
+      renderedAgentTotal += agents.length;
+      group.dataset.agentColor = agentColorKeyword(firstAgent);
       const head = createNode("div", "workspace-detail-work-head");
       head.appendChild(
         createNode(
           "div",
           "workspace-detail-work-heading",
-          work.work_summary || work.title || agent.display_name || agent.agent_id || "Work",
+          work.work_summary
+            || work.title
+            || firstAgent.display_name
+            || firstAgent.agent_id
+            || "Work",
         ),
       );
       if (!workspace?.remote_only) {
@@ -953,35 +960,34 @@ export function createWorkspaceKanbanSurface({
       appendWorkCloseActions(head, work);
       group.appendChild(head);
 
-      const sessions = Array.isArray(agent.sessions) ? agent.sessions : [];
-      if (sessions.length === 0) {
-        // No conversation recorded yet — still expose a Resume control on the
-        // placeholder row so a session-less Work stays launchable.
-        const empty = createNode(
-          "div",
-          "workspace-overview-empty workspace-detail-session-empty",
-          "No session yet",
-        );
-        const resumeBtn = renderWorkResumeButton(agent);
-        if (resumeBtn) {
-          empty.appendChild(resumeBtn);
-        }
-        group.appendChild(empty);
-      } else {
-        // User decision 2026-06-12: multiple Session rows per agent read as
-        // noise — render only the latest conversation (the active one, or the
-        // newest by order; the backend sorts oldest-first).
-        const latest =
-          sessions.find((session) => session && session.is_active) ||
-          sessions[sessions.length - 1];
-        group.appendChild(renderSessionRow(agent, latest));
-        // E1: when the visible Session is history-only (not resumable) on a
-        // non-running Work, no Resume appears — offer a "Start Fresh" control
-        // so the Work stays launchable. Distinct label so the user knows it
-        // starts a new conversation, not a resumed one.
-        const startFresh = renderStartFreshButton(agent, [latest]);
-        if (startFresh) {
-          group.appendChild(startFresh);
+      for (const agent of displayedAgents) {
+        const sessions = Array.isArray(agent.sessions) ? agent.sessions : [];
+        if (sessions.length === 0) {
+          // No conversation recorded yet — still expose a Resume control on
+          // the placeholder row so a session-less Work stays launchable.
+          const empty = createNode(
+            "div",
+            "workspace-overview-empty workspace-detail-session-empty",
+            "No session yet",
+          );
+          const resumeBtn = renderWorkResumeButton(agent);
+          if (resumeBtn) {
+            empty.appendChild(resumeBtn);
+          }
+          group.appendChild(empty);
+        } else {
+          // Multiple Session rows per agent read as noise — render only that
+          // agent's latest conversation while preserving every Agent in Work.
+          const latest =
+            sessions.find((session) => session && session.is_active) ||
+            sessions[sessions.length - 1];
+          group.appendChild(renderSessionRow(agent, latest));
+          // When the visible Session is history-only (not resumable) on a
+          // non-running Work, offer a distinct fresh-conversation control.
+          const startFresh = renderStartFreshButton(agent, [latest]);
+          if (startFresh) {
+            group.appendChild(startFresh);
+          }
         }
       }
       wrap.appendChild(group);
@@ -991,12 +997,12 @@ export function createWorkspaceKanbanSurface({
     // how many more ledger sessions exist beyond the rendered ones.
     // `session_agent_total === 0` means "not computed" (legacy payload).
     const total = Number(workspace && workspace.session_agent_total) || 0;
-    if (total > list.length) {
+    if (total > renderedAgentTotal) {
       container.appendChild(
         createNode(
           "div",
           "workspace-detail-more-sessions workspace-overview-empty",
-          `+${total - list.length} more sessions`,
+          `+${total - renderedAgentTotal} more sessions`,
         ),
       );
     }

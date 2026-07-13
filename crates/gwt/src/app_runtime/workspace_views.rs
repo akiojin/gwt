@@ -1474,6 +1474,30 @@ fn recompute_active_work_agent_counters(work: &mut gwt::ActiveWorkItemView) {
         .count();
 }
 
+fn sync_active_workspace_child_agents(work: &mut gwt::ActiveWorkItemView) {
+    if work.works.len() == 1 {
+        work.works[0].agents = work.agents.clone();
+        return;
+    }
+
+    for child in &mut work.works {
+        let existing_session_ids: HashSet<String> = child
+            .agents
+            .iter()
+            .map(|agent| agent.session_id.clone())
+            .collect();
+        child.agents = work
+            .agents
+            .iter()
+            .filter(|agent| {
+                existing_session_ids.contains(agent.session_id.as_str())
+                    || child.id == format!("work-session-{}", agent.session_id)
+            })
+            .cloned()
+            .collect();
+    }
+}
+
 fn compare_active_work_agents_newest_first(
     left: &gwt::ActiveWorkAgentView,
     right: &gwt::ActiveWorkAgentView,
@@ -1671,6 +1695,7 @@ pub(super) fn attach_registry_sessions_to_active_works(
             work.agents.sort_by(compare_active_work_agents_newest_first);
             work.agents.truncate(cap);
         }
+        sync_active_workspace_child_agents(work);
     }
     // SPEC-2359 Phase W-16 (FR-403): order the list by last update, newest
     // first — the row stamp or its freshest agent/ledger session, whichever
@@ -1828,7 +1853,7 @@ pub(super) fn mark_remote_only_active_works(
             .as_deref()
             .map(crate::runtime_support::normalize_branch_name)
             .filter(|branch| !branch.is_empty())
-            .map(|branch| local_branches.is_some_and(|set| set.contains(&branch)));
+            .and_then(|branch| local_branches.map(|set| set.contains(&branch)));
         // Branchless rows are never "remote": there is nothing to fetch.
         work.remote_only = matches!(branch_local, Some(false));
         if work.remote_only {
