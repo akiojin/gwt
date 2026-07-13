@@ -49,6 +49,9 @@ fn record_current_work_terminal_before_finalize<E: CliEnv>(
     if session_id.is_empty() {
         return Ok(());
     }
+    if !state.active || state.session_id.trim() != session_id {
+        return Ok(());
+    }
     let work_id = format!("work-session-{session_id}");
     let Some(projection) = gwt_core::workspace_projection::load_workspace_work_items(repo)
         .map_err(|error| error.to_string())?

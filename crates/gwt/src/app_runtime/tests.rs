@@ -19592,6 +19592,22 @@ fn app_runtime_active_work_projection_attaches_registry_sessions() {
     assert_eq!(row.agents[0].display_name, "Claude Code");
     assert_eq!(row.agents[0].sessions.len(), 1);
     assert_eq!(row.agents[0].sessions[0].agent_session_id, "conv-1");
+    assert_eq!(
+        row.works.len(),
+        1,
+        "backfilled Workspace has one child Work"
+    );
+    assert_eq!(
+        row.works[0].agents.len(),
+        1,
+        "ledger session must also attach to the child Work"
+    );
+    assert_eq!(row.works[0].agents[0].session_id, session.id);
+    assert_eq!(row.works[0].agents[0].sessions.len(), 1);
+    assert_eq!(
+        row.works[0].agents[0].sessions[0].agent_session_id,
+        "conv-1"
+    );
     assert_eq!(row.session_agent_total, 1);
 }
 
@@ -21331,6 +21347,17 @@ fn mark_remote_only_flags_fetched_branches_without_local_worktree() {
         works[0].works[0].close_blocked_reason.as_deref(),
         Some("remote_environment_unknown")
     );
+
+    let mut unknown = vec![row("w-unknown", Some("work/unknown"), None)];
+    super::assign_and_merge_workspace_groups(&mut unknown, Path::new("/repo"));
+    super::mark_remote_only_active_works(&mut unknown, None);
+
+    assert!(
+        !unknown[0].remote_only,
+        "missing local branch scan data must remain undetermined"
+    );
+    assert!(unknown[0].works[0].manual_close_allowed);
+    assert_eq!(unknown[0].works[0].close_blocked_reason, None);
 }
 
 /// SPEC-2359 W16-4 (FR-391): merged ∧ stale rows classify as derived Done;
