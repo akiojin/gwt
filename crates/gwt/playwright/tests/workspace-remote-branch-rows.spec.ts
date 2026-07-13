@@ -36,7 +36,8 @@ test("remote branches fold into the unified Workspace list as Remote-tagged rows
   // Bare name (origin/ stripped) + the shared Remote tag, styled like any row.
   await expect(firstRemote.locator(".workspace-overview-row-title")).toHaveText("feature-foo");
   await expect(firstRemote.locator(".workspace-overview-remote")).toHaveText("Remote");
-  await expect(firstRemote).toHaveAttribute("data-attention", "paused");
+  await expect(firstRemote).toHaveAttribute("data-attention", "remote");
+  await expect(firstRemote.locator(".workspace-overview-lifecycle")).toHaveCount(0);
 
   // ▶ continues on the branch via open_launch_wizard; the backend normalizes
   // the (already stripped) name to continue-on-branch.

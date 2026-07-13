@@ -193,11 +193,8 @@ pub enum WorkCloseDecision {
     /// A live agent session still owns this Work — block the close and do not
     /// touch the worktree (FR-352). The owning session must be stopped first.
     BlockedLiveAgent,
-    /// No live agent and a worktree path is known — remove the worktree only
-    /// (branch / PR are retained) and record the terminal close.
-    CleanupWorktree { worktree_path: PathBuf },
-    /// No live agent and no resolvable worktree path — record the terminal
-    /// close in the work history but perform no filesystem cleanup.
+    /// No live agent: record the terminal close without filesystem cleanup.
+    /// Worktree deletion belongs to the vetted cleanup transport.
     RecordOnly,
 }
 
@@ -206,21 +203,15 @@ pub enum WorkCloseDecision {
 /// Decision order:
 /// 1. If a live agent session owns this Work (`live_agent` is `true`), block the
 ///    close — the worktree must never be removed while an agent is running.
-/// 2. Otherwise, if a worktree path is known, request worktree-only cleanup.
-/// 3. Otherwise, record the close without any filesystem side effect.
+/// 2. Otherwise, record the close without any filesystem side effect.
 ///
-/// Pure: takes only resolved inputs and returns a value, so it is exercised
-/// directly by unit tests while the git removal itself is verified separately.
-pub fn decide_work_close(live_agent: bool, worktree_path: Option<PathBuf>) -> WorkCloseDecision {
+/// `worktree_path` remains in the signature for source compatibility but is
+/// intentionally ignored: close and cleanup are separate operations.
+pub fn decide_work_close(live_agent: bool, _worktree_path: Option<PathBuf>) -> WorkCloseDecision {
     if live_agent {
         return WorkCloseDecision::BlockedLiveAgent;
     }
-    match worktree_path {
-        Some(path) if !path.as_os_str().is_empty() => WorkCloseDecision::CleanupWorktree {
-            worktree_path: path,
-        },
-        _ => WorkCloseDecision::RecordOnly,
-    }
+    WorkCloseDecision::RecordOnly
 }
 
 #[cfg(test)]
@@ -244,12 +235,11 @@ mod tests {
     }
 
     #[test]
-    fn decide_work_close_cleans_worktree_when_paused_with_path() {
+    fn decide_work_close_records_only_when_paused_with_path() {
         assert_eq!(
             decide_work_close(false, Some(PathBuf::from("/repo/work/paused"))),
-            WorkCloseDecision::CleanupWorktree {
-                worktree_path: PathBuf::from("/repo/work/paused")
-            }
+            WorkCloseDecision::RecordOnly,
+            "Work close must not perform worktree cleanup"
         );
     }
 
