@@ -1,10 +1,7 @@
-use std::{
-    fs, io,
-    path::{Path, PathBuf},
-};
+use std::{io, path::Path};
 
 use chrono::Utc;
-use gwt_github::{cache::write_atomic, client::ApiError, SpecOpsError};
+use gwt_github::{client::ApiError, SpecOpsError};
 use regex::Regex;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -66,29 +63,43 @@ pub struct ImprovementPromoteIssueCommand {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-struct CandidateStore {
+pub(super) struct CandidateStore {
     #[serde(default)]
-    candidates: Vec<ImprovementCandidate>,
+    pub(super) schema_version: u32,
+    #[serde(default)]
+    pub(super) candidates: Vec<ImprovementCandidate>,
+    #[serde(default)]
+    pub(super) legacy_import: super::improvement_store::LegacyImportState,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub(crate) struct ImprovementCandidate {
-    id: String,
-    created_at: String,
-    updated_at: String,
-    source: String,
-    target_artifact: String,
-    classification: String,
-    confidence: String,
-    state: String,
-    dedupe_key: String,
-    occurrences: u64,
-    sanitized_summary: String,
-    sanitized_details: Option<String>,
-    evidence_digest: Option<String>,
-    local_evidence: Vec<LocalEvidenceReference>,
-    linked_issue: Option<LinkedIssue>,
-    dismissed_reason: Option<String>,
+    #[serde(default)]
+    pub(super) schema_version: u32,
+    pub(super) id: String,
+    pub(super) created_at: String,
+    pub(super) updated_at: String,
+    pub(super) source: String,
+    pub(super) target_artifact: String,
+    pub(super) classification: String,
+    pub(super) confidence: String,
+    pub(super) state: String,
+    pub(super) dedupe_key: String,
+    pub(super) occurrences: u64,
+    #[serde(default)]
+    pub(super) legacy_occurrence_count: Option<u64>,
+    #[serde(default)]
+    pub(super) fingerprint: Option<String>,
+    pub(super) sanitized_summary: String,
+    pub(super) sanitized_details: Option<String>,
+    pub(super) evidence_digest: Option<String>,
+    pub(super) local_evidence: Vec<LocalEvidenceReference>,
+    pub(super) linked_issue: Option<LinkedIssue>,
+    pub(super) dismissed_reason: Option<String>,
+    #[serde(default)]
+    pub(super) legacy_provenance: Vec<super::improvement_store::LegacyProvenance>,
+    #[serde(default)]
+    pub(super) attempt: Option<super::improvement_store::ResolutionAttemptLease>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -99,16 +110,18 @@ pub(crate) struct PendingImprovementStopCandidate {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-struct LocalEvidenceReference {
-    kind: String,
-    path: Option<String>,
+pub(super) struct LocalEvidenceReference {
+    pub(super) kind: String,
+    pub(super) path: Option<String>,
+    #[serde(default)]
+    pub(super) digest: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-struct LinkedIssue {
-    number: u64,
-    url: String,
-    repository: String,
+pub(super) struct LinkedIssue {
+    pub(super) number: u64,
+    pub(super) url: String,
+    pub(super) repository: String,
 }
 
 pub fn run<E: CliEnv>(
@@ -124,13 +137,6 @@ pub fn run<E: CliEnv>(
         ImprovementCommand::PromoteIssue(command) => promote_issue(env, command, out)?,
     };
     Ok(code)
-}
-
-pub(crate) fn candidate_store_path(repo_root: &Path) -> PathBuf {
-    repo_root
-        .join(".gwt")
-        .join("improvements")
-        .join("candidates.json")
 }
 
 pub(crate) fn pending_high_confidence_contract_violations(
@@ -237,44 +243,47 @@ fn capture<E: CliEnv>(
         .filter(|value| !value.trim().is_empty())
         .cloned()
         .unwrap_or_else(|| default_dedupe_key(&command, &sanitized_summary));
-    let mut store = load_store(&repo_root)?;
-    let mut updated_existing = false;
-    let candidate = if let Some(candidate) = store
-        .candidates
-        .iter_mut()
-        .find(|candidate| candidate.dedupe_key == dedupe_key)
-    {
-        candidate.updated_at = now;
-        candidate.occurrences += 1;
-        candidate.sanitized_summary = sanitized_summary;
-        candidate.sanitized_details = command.details.as_deref().map(sanitize_text);
-        candidate.evidence_digest = command.evidence_digest.as_deref().map(sanitize_text);
-        candidate.local_evidence = sanitize_local_evidence(&command.local_evidence);
-        updated_existing = true;
-        candidate.clone()
-    } else {
-        let candidate = ImprovementCandidate {
-            id: format!("impr-{}", Uuid::new_v4().simple()),
-            created_at: now.clone(),
-            updated_at: now,
-            source: command.source,
-            target_artifact: command.target_artifact,
-            classification: command.classification,
-            confidence: command.confidence,
-            state: "pending".to_string(),
-            dedupe_key,
-            occurrences: 1,
-            sanitized_summary,
-            sanitized_details: command.details.as_deref().map(sanitize_text),
-            evidence_digest: command.evidence_digest.as_deref().map(sanitize_text),
-            local_evidence: sanitize_local_evidence(&command.local_evidence),
-            linked_issue: None,
-            dismissed_reason: None,
-        };
-        store.candidates.push(candidate.clone());
-        candidate
-    };
-    save_store(&repo_root, &store)?;
+    let (candidate, updated_existing) = super::improvement_store::update(&repo_root, |store| {
+        if let Some(candidate) = store
+            .candidates
+            .iter_mut()
+            .find(|candidate| candidate.dedupe_key == dedupe_key)
+        {
+            candidate.updated_at = now.clone();
+            candidate.occurrences += 1;
+            candidate.sanitized_summary = sanitized_summary.clone();
+            candidate.sanitized_details = command.details.as_deref().map(sanitize_text);
+            candidate.evidence_digest = command.evidence_digest.as_deref().map(sanitize_text);
+            candidate.local_evidence = sanitize_local_evidence(&command.local_evidence);
+            Ok((candidate.clone(), true))
+        } else {
+            let candidate = ImprovementCandidate {
+                schema_version: super::improvement_store::STORE_SCHEMA_VERSION,
+                id: format!("impr-{}", Uuid::new_v4().simple()),
+                created_at: now.clone(),
+                updated_at: now.clone(),
+                source: command.source.clone(),
+                target_artifact: command.target_artifact.clone(),
+                classification: command.classification.clone(),
+                confidence: command.confidence.clone(),
+                state: "pending".to_string(),
+                dedupe_key: dedupe_key.clone(),
+                occurrences: 1,
+                legacy_occurrence_count: None,
+                fingerprint: None,
+                sanitized_summary: sanitized_summary.clone(),
+                sanitized_details: command.details.as_deref().map(sanitize_text),
+                evidence_digest: command.evidence_digest.as_deref().map(sanitize_text),
+                local_evidence: sanitize_local_evidence(&command.local_evidence),
+                linked_issue: None,
+                dismissed_reason: None,
+                legacy_provenance: Vec::new(),
+                attempt: None,
+            };
+            store.candidates.push(candidate.clone());
+            Ok((candidate, false))
+        }
+    })?;
     if should_publish_capture_status(&candidate) {
         post_candidate_captured_status(env, &candidate, updated_existing)?;
     }
@@ -334,14 +343,14 @@ fn dismiss(
     if command.reason.trim().is_empty() {
         return Err(invalid("dismiss reason must not be empty"));
     }
-    let mut store = load_store(repo_root)?;
     let now = Utc::now().to_rfc3339();
-    let candidate = find_candidate_mut(&mut store, &command.id)?;
-    candidate.state = "dismissed".to_string();
-    candidate.updated_at = now;
-    candidate.dismissed_reason = Some(sanitize_text(&command.reason));
-    let response = candidate_public_json(candidate);
-    save_store(repo_root, &store)?;
+    let response = super::improvement_store::update(repo_root, |store| {
+        let candidate = find_candidate_mut(store, &command.id)?;
+        candidate.state = "dismissed".to_string();
+        candidate.updated_at = now;
+        candidate.dismissed_reason = Some(sanitize_text(&command.reason));
+        Ok(candidate_public_json(candidate))
+    })?;
     write_json(out, response)?;
     Ok(0)
 }
@@ -364,18 +373,18 @@ fn link_issue(
                 number = command.number
             )
         });
-    let mut store = load_store(repo_root)?;
     let now = Utc::now().to_rfc3339();
-    let candidate = find_candidate_mut(&mut store, &command.id)?;
-    candidate.state = "linked".to_string();
-    candidate.updated_at = now;
-    candidate.linked_issue = Some(LinkedIssue {
-        number: command.number,
-        url: sanitize_text(&url),
-        repository: sanitize_text(&repository),
-    });
-    let response = candidate_public_json(candidate);
-    save_store(repo_root, &store)?;
+    let response = super::improvement_store::update(repo_root, |store| {
+        let candidate = find_candidate_mut(store, &command.id)?;
+        candidate.state = "linked".to_string();
+        candidate.updated_at = now;
+        candidate.linked_issue = Some(LinkedIssue {
+            number: command.number,
+            url: sanitize_text(&url),
+            repository: sanitize_text(&repository),
+        });
+        Ok(candidate_public_json(candidate))
+    })?;
     write_json(out, response)?;
     Ok(0)
 }
@@ -386,7 +395,7 @@ fn promote_issue<E: CliEnv>(
     out: &mut String,
 ) -> Result<i32, SpecOpsError> {
     let repo_root = env.repo_path().to_path_buf();
-    let mut store = load_store(&repo_root)?;
+    let store = load_store(&repo_root)?;
     let Some(index) = store
         .candidates
         .iter()
@@ -426,9 +435,52 @@ fn promote_issue<E: CliEnv>(
     }
     let title = issue_title(&candidate);
     let body = render_public_issue_body(&candidate);
-    let snapshot = env
-        .create_issue_in_repo("akiojin", "gwt", &title, &body, &command.labels)
-        .map_err(io_as_spec_error)?;
+    let lease_owner = std::env::var(gwt_agent::GWT_SESSION_ID_ENV)
+        .ok()
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or_else(|| format!("pid-{}", std::process::id()));
+    let lease = super::improvement_store::update(&repo_root, |store| {
+        super::improvement_store::acquire_attempt_lease(
+            store,
+            &command.id,
+            &lease_owner,
+            Utc::now(),
+            chrono::Duration::seconds(120),
+        )
+    })?;
+    let attempt_id = match lease {
+        super::improvement_store::AttemptLeaseDecision::Acquired(lease) => lease.attempt_id,
+        super::improvement_store::AttemptLeaseDecision::Busy { .. } => {
+            return Err(invalid("promotion attempt is already in progress"));
+        }
+        super::improvement_store::AttemptLeaseDecision::RemoteOutcomeUnknown => {
+            return Err(invalid(
+                "previous promotion outcome is unknown; reconcile before retry",
+            ));
+        }
+    };
+    super::improvement_store::update(&repo_root, |store| {
+        super::improvement_store::mark_attempt_submitted(store, &command.id, &attempt_id)
+    })?;
+    let snapshot = match env.create_issue_in_repo("akiojin", "gwt", &title, &body, &command.labels)
+    {
+        Ok(snapshot) => snapshot,
+        Err(error) => {
+            super::improvement_store::update(&repo_root, |store| {
+                let candidate = find_candidate_mut(store, &command.id)?;
+                if candidate
+                    .attempt
+                    .as_ref()
+                    .is_some_and(|attempt| attempt.attempt_id == attempt_id)
+                {
+                    candidate.state = "remote-outcome-unknown".to_string();
+                    candidate.updated_at = Utc::now().to_rfc3339();
+                }
+                Ok(())
+            })?;
+            return Err(io_as_spec_error(error));
+        }
+    };
     let issue_url = format!(
         "https://github.com/{UPSTREAM_REPOSITORY}/issues/{number}",
         number = snapshot.number.0
@@ -439,10 +491,14 @@ fn promote_issue<E: CliEnv>(
         url: issue_url.clone(),
         repository: UPSTREAM_REPOSITORY.to_string(),
     };
-    store.candidates[index].state = "promoted".to_string();
-    store.candidates[index].updated_at = now;
-    store.candidates[index].linked_issue = Some(linked);
-    save_store(&repo_root, &store)?;
+    super::improvement_store::update(&repo_root, |store| {
+        let candidate = find_candidate_mut(store, &command.id)?;
+        candidate.state = "promoted".to_string();
+        candidate.updated_at = now;
+        candidate.linked_issue = Some(linked);
+        candidate.attempt = None;
+        Ok(())
+    })?;
     post_candidate_promoted_status(&mut *env, &candidate, snapshot.number.0, &issue_url)?;
     write_json(
         out,
@@ -610,6 +666,8 @@ fn candidate_public_json(candidate: &ImprovementCandidate) -> Value {
         "confidence": candidate.confidence,
         "dedupe_key": candidate.dedupe_key,
         "occurrences": candidate.occurrences,
+        "legacy_occurrence_count": candidate.legacy_occurrence_count,
+        "fingerprint": candidate.fingerprint,
         "summary": candidate.sanitized_summary,
         "details": candidate.sanitized_details,
         "evidence_digest": candidate.evidence_digest,
@@ -625,23 +683,7 @@ fn candidate_public_json(candidate: &ImprovementCandidate) -> Value {
 }
 
 fn load_store(repo_root: &Path) -> Result<CandidateStore, SpecOpsError> {
-    let path = candidate_store_path(repo_root);
-    if !path.exists() {
-        return Ok(CandidateStore {
-            candidates: Vec::new(),
-        });
-    }
-    let raw = fs::read_to_string(&path).map_err(io_as_spec_error)?;
-    serde_json::from_str(&raw).map_err(serde_as_spec_error)
-}
-
-fn save_store(repo_root: &Path, store: &CandidateStore) -> Result<(), SpecOpsError> {
-    let path = candidate_store_path(repo_root);
-    if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent).map_err(io_as_spec_error)?;
-    }
-    let bytes = serde_json::to_vec_pretty(store).map_err(serde_as_spec_error)?;
-    write_atomic(&path, &bytes).map_err(io_as_spec_error)
+    super::improvement_store::load_and_repair(repo_root)
 }
 
 fn sanitize_local_evidence(items: &[Value]) -> Vec<LocalEvidenceReference> {
@@ -660,6 +702,7 @@ fn sanitize_local_evidence(items: &[Value]) -> Vec<LocalEvidenceReference> {
             Some(LocalEvidenceReference {
                 kind: sanitize_text(kind),
                 path,
+                digest: None,
             })
         })
         .collect()

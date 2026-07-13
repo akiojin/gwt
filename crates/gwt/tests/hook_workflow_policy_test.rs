@@ -84,8 +84,7 @@ fn with_temp_home<T>(f: impl FnOnce(&TempDir) -> T) -> T {
 }
 
 fn write_improvement_store(repo_path: &Path, candidates: serde_json::Value) {
-    let path = repo_path
-        .join(".gwt")
+    let path = gwt_core::paths::gwt_project_dir_for_repo_path(repo_path)
         .join("improvements")
         .join("candidates.json");
     std::fs::create_dir_all(path.parent().expect("parent")).expect("create improvements dir");
@@ -113,10 +112,11 @@ fn init_repo_with_origin(remote_url: &str) -> TempDir {
 
 #[test]
 fn gwt_self_improvement_stop_blocks_high_confidence_gwt_contract_violation_in_gwt_repo() {
-    let repo = init_repo_with_origin("https://github.com/akiojin/gwt.git");
-    write_improvement_store(
-        repo.path(),
-        json!({
+    with_temp_home(|_| {
+        let repo = init_repo_with_origin("https://github.com/akiojin/gwt.git");
+        write_improvement_store(
+            repo.path(),
+            json!({
             "candidates": [{
                 "id": "impr-high",
                 "created_at": "2026-06-23T00:00:00Z",
@@ -135,33 +135,35 @@ fn gwt_self_improvement_stop_blocks_high_confidence_gwt_contract_violation_in_gw
                 "linked_issue": null,
                 "dismissed_reason": null
             }]
-        }),
-    );
+            }),
+        );
 
-    let output = gwt_self_improvement_stop::evaluate(repo.path(), false, false);
-    let HookOutput::StopBlock { reason } = output else {
-        panic!("expected StopBlock, got {output:?}");
-    };
-    assert!(reason.contains("impr-high"));
-    assert!(reason.contains("improvement.promote_issue"));
-    assert!(reason.contains("improvement.dismiss"));
+        let output = gwt_self_improvement_stop::evaluate(repo.path(), false, false);
+        let HookOutput::StopBlock { reason } = output else {
+            panic!("expected StopBlock, got {output:?}");
+        };
+        assert!(reason.contains("impr-high"));
+        assert!(reason.contains("improvement.promote_issue"));
+        assert!(reason.contains("improvement.dismiss"));
 
-    // SPEC-3247 FR-003 / AS-4: the same high-confidence candidate in an intake
-    // (Curate) session must NOT block Stop — intake owns no Work and is not the
-    // producing-work self-improvement loop.
-    assert_eq!(
-        gwt_self_improvement_stop::evaluate(repo.path(), false, true),
-        HookOutput::Silent,
-        "intake sessions must not be forced to handle improvement candidates"
-    );
+        // SPEC-3247 FR-003 / AS-4: the same high-confidence candidate in an intake
+        // (Curate) session must NOT block Stop — intake owns no Work and is not the
+        // producing-work self-improvement loop.
+        assert_eq!(
+            gwt_self_improvement_stop::evaluate(repo.path(), false, true),
+            HookOutput::Silent,
+            "intake sessions must not be forced to handle improvement candidates"
+        );
+    });
 }
 
 #[test]
 fn gwt_self_improvement_stop_ignores_low_confidence_or_handled_candidates() {
-    let repo = init_repo_with_origin("git@github.com:akiojin/gwt.git");
-    write_improvement_store(
-        repo.path(),
-        json!({
+    with_temp_home(|_| {
+        let repo = init_repo_with_origin("git@github.com:akiojin/gwt.git");
+        write_improvement_store(
+            repo.path(),
+            json!({
             "candidates": [
                 {
                     "id": "impr-low",
@@ -200,21 +202,23 @@ fn gwt_self_improvement_stop_ignores_low_confidence_or_handled_candidates() {
                     "dismissed_reason": null
                 }
             ]
-        }),
-    );
+            }),
+        );
 
-    assert_eq!(
-        gwt_self_improvement_stop::evaluate(repo.path(), false, false),
-        HookOutput::Silent
-    );
+        assert_eq!(
+            gwt_self_improvement_stop::evaluate(repo.path(), false, false),
+            HookOutput::Silent
+        );
+    });
 }
 
 #[test]
 fn gwt_self_improvement_stop_is_noop_outside_gwt_repo() {
-    let repo = init_repo_with_origin("https://github.com/example/target-project.git");
-    write_improvement_store(
-        repo.path(),
-        json!({
+    with_temp_home(|_| {
+        let repo = init_repo_with_origin("https://github.com/example/target-project.git");
+        write_improvement_store(
+            repo.path(),
+            json!({
             "candidates": [{
                 "id": "impr-target",
                 "created_at": "2026-06-23T00:00:00Z",
@@ -233,21 +237,23 @@ fn gwt_self_improvement_stop_is_noop_outside_gwt_repo() {
                 "linked_issue": null,
                 "dismissed_reason": null
             }]
-        }),
-    );
+            }),
+        );
 
-    assert_eq!(
-        gwt_self_improvement_stop::evaluate(repo.path(), false, false),
-        HookOutput::Silent
-    );
+        assert_eq!(
+            gwt_self_improvement_stop::evaluate(repo.path(), false, false),
+            HookOutput::Silent
+        );
+    });
 }
 
 #[test]
 fn gwt_self_improvement_stop_respects_stop_hook_active() {
-    let repo = init_repo_with_origin("https://github.com/akiojin/gwt.git");
-    write_improvement_store(
-        repo.path(),
-        json!({
+    with_temp_home(|_| {
+        let repo = init_repo_with_origin("https://github.com/akiojin/gwt.git");
+        write_improvement_store(
+            repo.path(),
+            json!({
             "candidates": [{
                 "id": "impr-active-stop",
                 "created_at": "2026-06-23T00:00:00Z",
@@ -266,13 +272,14 @@ fn gwt_self_improvement_stop_respects_stop_hook_active() {
                 "linked_issue": null,
                 "dismissed_reason": null
             }]
-        }),
-    );
+            }),
+        );
 
-    assert_eq!(
-        gwt_self_improvement_stop::evaluate(repo.path(), true, false),
-        HookOutput::Silent
-    );
+        assert_eq!(
+            gwt_self_improvement_stop::evaluate(repo.path(), true, false),
+            HookOutput::Silent
+        );
+    });
 }
 
 #[test]
@@ -282,6 +289,8 @@ fn common_stop_dispatcher_does_not_run_gwt_self_improvement_stop() {
         .unwrap_or_else(std::sync::PoisonError::into_inner);
     let _session_id = ScopedEnvVar::unset(GWT_SESSION_ID_ENV);
     let _runtime_path = ScopedEnvVar::unset(GWT_SESSION_RUNTIME_PATH_ENV);
+    let home = tempfile::tempdir().expect("temp home");
+    let _home = ScopedGwtHome::set(home.path());
     let repo = init_repo_with_origin("https://github.com/akiojin/gwt.git");
     write_improvement_store(
         repo.path(),
