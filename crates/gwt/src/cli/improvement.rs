@@ -8,7 +8,10 @@ use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
-use super::CliEnv;
+use super::{
+    improvement_owner::{render_public_issue_payload, PrivacyViolation, PublicMutationContext},
+    CliEnv,
+};
 
 const UPSTREAM_REPOSITORY: &str = "akiojin/gwt";
 
@@ -507,6 +510,7 @@ pub(crate) fn pending_high_confidence_contract_violations(
 }
 
 pub fn candidate_public_values(repo_root: &Path) -> Vec<Value> {
+    let privacy_context = PublicMutationContext::for_repo(repo_root);
     let mut candidates = load_store(repo_root)
         .map(|store| store.candidates)
         .unwrap_or_default();
@@ -517,7 +521,7 @@ pub fn candidate_public_values(repo_root: &Path) -> Vec<Value> {
     });
     candidates
         .into_iter()
-        .map(|candidate| candidate_public_json(&candidate))
+        .map(|candidate| candidate_public_json(&candidate, &privacy_context))
         .collect()
 }
 
@@ -1414,6 +1418,7 @@ fn list(
     command: ImprovementListCommand,
     out: &mut String,
 ) -> Result<i32, SpecOpsError> {
+    let privacy_context = PublicMutationContext::for_repo(repo_root);
     let mut candidates = load_store(repo_root)?.candidates;
     candidates.sort_by(|a, b| {
         b.updated_at
@@ -1454,7 +1459,7 @@ fn list(
                 continue;
             }
         }
-        values.push(candidate_public_json(&candidate));
+        values.push(candidate_public_json(&candidate, &privacy_context));
         if let Some(limit) = command.limit {
             if values.len() >= limit {
                 break;
@@ -1479,6 +1484,7 @@ fn dismiss(
     if command.reason.trim().is_empty() {
         return Err(invalid("dismiss reason must not be empty"));
     }
+    let privacy_context = PublicMutationContext::for_repo(repo_root);
     let now = Utc::now().to_rfc3339();
     let response = super::improvement_store::update(repo_root, |store| {
         let candidate = find_candidate_mut(store, &command.id)?;
@@ -1488,7 +1494,7 @@ fn dismiss(
         candidate.dismissed_reason = Some(sanitize_text(&command.reason));
         transition_candidate(candidate, CandidateState::Dismissed)?;
         candidate.updated_at = now;
-        Ok(candidate_public_json(candidate))
+        Ok(candidate_public_json(candidate, &privacy_context))
     })?;
     write_json(out, response)?;
     Ok(0)
@@ -1515,6 +1521,7 @@ fn link_issue(
                 number = command.number
             )
         });
+    let privacy_context = PublicMutationContext::for_repo(repo_root);
     let now = Utc::now().to_rfc3339();
     let response = super::improvement_store::update(repo_root, |store| {
         let candidate = find_candidate_mut(store, &command.id)?;
@@ -1526,7 +1533,7 @@ fn link_issue(
             .as_ref()
             .is_some_and(|owner| owner.number == command.number)
         {
-            return Ok(candidate_public_json(candidate));
+            return Ok(candidate_public_json(candidate, &privacy_context));
         }
         transition_to_owner_resolving(candidate)?;
         candidate.updated_at = now;
@@ -1536,7 +1543,7 @@ fn link_issue(
             repository: sanitize_text(&repository),
         });
         transition_candidate(candidate, CandidateState::Linked)?;
-        Ok(candidate_public_json(candidate))
+        Ok(candidate_public_json(candidate, &privacy_context))
     })?;
     write_json(out, response)?;
     Ok(0)
@@ -1589,8 +1596,9 @@ fn promote_issue<E: CliEnv>(
             "low-confidence candidates require force:true to promote",
         ));
     }
-    let title = issue_title(&candidate);
-    let body = render_public_issue_body(&candidate);
+    let privacy_context = PublicMutationContext::for_repo(&repo_root);
+    let public_payload =
+        render_public_issue_payload(&candidate, &privacy_context).map_err(privacy_as_spec_error)?;
     let lease_owner = std::env::var(gwt_agent::GWT_SESSION_ID_ENV)
         .ok()
         .filter(|value| !value.trim().is_empty())
@@ -1620,8 +1628,13 @@ fn promote_issue<E: CliEnv>(
     super::improvement_store::update(&repo_root, |store| {
         super::improvement_store::mark_attempt_submitted(store, &command.id, &attempt_id)
     })?;
-    let snapshot = match env.create_issue_in_repo("akiojin", "gwt", &title, &body, &command.labels)
-    {
+    let snapshot = match env.create_issue_in_repo(
+        "akiojin",
+        "gwt",
+        &public_payload.title,
+        &public_payload.body,
+        &command.labels,
+    ) {
         Ok(snapshot) => snapshot,
         Err(error) => {
             super::improvement_store::update(&repo_root, |store| {
@@ -1763,79 +1776,6 @@ fn post_improvement_board_status<E: CliEnv>(env: &mut E, body: String) -> Result
     Ok(())
 }
 
-fn issue_title(candidate: &ImprovementCandidate) -> String {
-    let summary = truncate_chars(&candidate.sanitized_summary, 90);
-    format!("fix(gwt): {summary}")
-}
-
-fn render_public_issue_body(candidate: &ImprovementCandidate) -> String {
-    let mut body = String::new();
-    body.push_str("## Problem\n\n");
-    body.push_str(&candidate.sanitized_summary);
-    body.push_str("\n\n");
-    match &candidate.sanitized_details {
-        Some(details) if !details.trim().is_empty() => {
-            body.push_str("Context:\n\n");
-            body.push_str(details);
-            body.push_str("\n\n");
-        }
-        _ => {
-            body.push_str("Context:\n\nNo public-safe details were provided.\n\n");
-        }
-    }
-    body.push_str("## Expected behavior\n\n");
-    body.push_str(&format!(
-        "gwt should handle `{target}` self-improvement failures with enough public-safe context for maintainers to reproduce, prioritize, and implement the fix without relying on private local logs.\n",
-        target = candidate.target_artifact
-    ));
-    body.push_str("\n## Observed evidence\n\n");
-    match &candidate.evidence_digest {
-        Some(digest) if !digest.trim().is_empty() => body.push_str(digest),
-        _ => body.push_str("No public-safe evidence digest was provided."),
-    }
-    body.push_str(&format!(
-        "\n\nPublic metadata reports {occurrences} occurrence(s), classification `{classification}`, confidence `{confidence}`, and source `{source}`.",
-        occurrences = candidate.occurrences,
-        classification = candidate.classification,
-        confidence = candidate.confidence,
-        source = candidate.source
-    ));
-    body.push_str("\n\n## Impact\n\n");
-    body.push_str(&format!(
-        "If this remains unresolved, gwt-caused `{target}` regressions can stay local to an agent session instead of becoming trackable upstream work. This increases the chance that the same failure is repeated by future agents or users.",
-        target = candidate.target_artifact
-    ));
-    body.push_str("\n\n## Suggested verification\n\n");
-    body.push_str(&format!(
-        "- Confirm whether the gwt-owned {target} behavior still violates the expected contract.\n",
-        target = candidate.target_artifact
-    ));
-    body.push_str("- Reproduce the candidate trigger or inspect the sanitized evidence digest.\n");
-    body.push_str("- Add or update a regression test that fails before the fix.\n");
-    body.push_str(
-        "- Verify the fix without requiring private target-project logs, paths, or secrets.\n",
-    );
-    body.push_str("\n## Source candidate\n\n");
-    body.push_str(&format!("- Candidate ID: {}\n", candidate.id));
-    body.push_str(&format!("- Source: {}\n", candidate.source));
-    body.push_str(&format!(
-        "- Target artifact: {}\n",
-        candidate.target_artifact
-    ));
-    body.push_str(&format!("- Classification: {}\n", candidate.classification));
-    body.push_str(&format!("- Confidence: {}\n", candidate.confidence));
-    body.push_str(&format!("- Dedupe key: {}\n", candidate.dedupe_key));
-    body.push_str(&format!("- Occurrences: {}\n", candidate.occurrences));
-    body.push_str("\n\n## Privacy\n\n");
-    body.push_str("- Public body generated from sanitized candidate fields only.\n");
-    body.push_str("- Raw target project paths, repository names, secrets, logs, and code excerpts are local-only.\n");
-    body.push_str(&format!(
-        "- Local evidence references: {}\n",
-        candidate.local_evidence.len()
-    ));
-    body
-}
-
 fn find_candidate_mut<'a>(
     store: &'a mut CandidateStore,
     id: &str,
@@ -1847,7 +1787,10 @@ fn find_candidate_mut<'a>(
         .ok_or_else(|| invalid("candidate not found"))
 }
 
-fn candidate_public_json(candidate: &ImprovementCandidate) -> Value {
+fn candidate_public_json(
+    candidate: &ImprovementCandidate,
+    privacy_context: &PublicMutationContext,
+) -> Value {
     let resolver_revision = candidate
         .resolver_snapshot
         .as_ref()
@@ -1857,6 +1800,14 @@ fn candidate_public_json(candidate: &ImprovementCandidate) -> Value {
         .as_ref()
         .map(|snapshot| snapshot.owner_candidates.as_slice())
         .unwrap_or_default();
+    let public_payload = render_public_issue_payload(candidate, privacy_context).ok();
+    let issue_preview = public_payload.as_ref().map(|payload| {
+        json!({
+            "repository": UPSTREAM_REPOSITORY,
+            "title": payload.title,
+            "body": payload.body,
+        })
+    });
     json!({
         "id": candidate.id,
         "state": candidate.state.compatibility_state(),
@@ -1872,21 +1823,17 @@ fn candidate_public_json(candidate: &ImprovementCandidate) -> Value {
         "classification": candidate.classification,
         "confidence": candidate.confidence,
         "eligibility": candidate.eligibility,
-        "dedupe_key": candidate.dedupe_key,
         "occurrences": candidate.occurrences,
         "legacy_occurrence_count": candidate.legacy_occurrence_count,
         "fingerprint": candidate.fingerprint,
-        "summary": candidate.sanitized_summary,
-        "details": candidate.sanitized_details,
-        "evidence_digest": candidate.evidence_digest,
+        "summary": public_payload
+            .as_ref()
+            .map(|payload| payload.summary.as_str())
+            .unwrap_or("Public preview unavailable"),
         "linked_issue": candidate.linked_issue,
-        "dismissed_reason": candidate.dismissed_reason,
+        "dismissed_reason": candidate.dismissed_reason.as_ref().map(|_| "Dismissed"),
         "updated_at": candidate.updated_at,
-        "issue_preview": {
-            "repository": UPSTREAM_REPOSITORY,
-            "title": issue_title(candidate),
-            "body": render_public_issue_body(candidate),
-        },
+        "issue_preview": issue_preview,
     })
 }
 
@@ -1990,6 +1937,10 @@ fn io_as_spec_error(err: io::Error) -> SpecOpsError {
 
 fn serde_as_spec_error(err: serde_json::Error) -> SpecOpsError {
     SpecOpsError::from(ApiError::Unexpected(err.to_string()))
+}
+
+fn privacy_as_spec_error(error: PrivacyViolation) -> SpecOpsError {
+    invalid(&error.to_string())
 }
 
 #[cfg(test)]
@@ -2208,6 +2159,28 @@ mod tests {
             .as_str()
             .expect("id")
             .to_string();
+        let (_, list_out) = run_collect(
+            &mut env,
+            CliCommand::Improvement(ImprovementCommand::List(ImprovementListCommand {
+                state: Some(CandidateState::NeedsEvidence),
+                blocked_reason: None,
+                failure_subcode: None,
+                classification: None,
+                confidence: None,
+                owner_number: None,
+                limit: None,
+            })),
+        )
+        .expect("preview before mutation");
+        let listed = parse_output(&list_out);
+        let preview_title = listed["candidates"][0]["issue_preview"]["title"]
+            .as_str()
+            .expect("preview title")
+            .to_string();
+        let preview_body = listed["candidates"][0]["issue_preview"]["body"]
+            .as_str()
+            .expect("preview body")
+            .to_string();
 
         let (promote_code, promote_out) = run_collect(
             &mut env,
@@ -2229,6 +2202,8 @@ mod tests {
         let call = &env.target_issue_create_call_log[0];
         assert_eq!(call.owner, "akiojin");
         assert_eq!(call.repo, "gwt");
+        assert_eq!(call.title, preview_title);
+        assert_eq!(call.body, preview_body);
         assert!(
             !call.body.contains("/Users/alice"),
             "public Issue body must not contain private paths: {}",
@@ -2301,10 +2276,10 @@ mod tests {
         let output = parse_output(&list_out);
         let preview = &output["candidates"][0]["issue_preview"];
         assert_eq!(preview["repository"], "akiojin/gwt");
-        assert!(preview["title"]
-            .as_str()
-            .expect("preview title")
-            .starts_with("fix(gwt): Skill update missing"));
+        assert_eq!(
+            preview["title"],
+            "fix(gwt): Self-improvement contract evidence required"
+        );
         let body = preview["body"].as_str().expect("preview body");
         assert!(body.contains("## Problem"));
         assert!(body.contains("## Expected behavior"));
@@ -2313,10 +2288,9 @@ mod tests {
         assert!(body.contains("## Suggested verification"));
         assert!(body.contains("## Source candidate"));
         assert!(body.contains("## Privacy"));
-        assert!(body.contains("Stop hook allowed completion without capture."));
-        assert!(body.contains(
-            "Confirm whether the gwt-owned skill behavior still violates the expected contract."
-        ));
+        assert!(body.contains("Typed evidence is required before unattended owner resolution."));
+        assert!(!body.contains("Stop hook allowed completion without capture."));
+        assert!(!body.contains("Skill update missing"));
         assert!(body.contains("- Target artifact: skill"));
         assert!(
             !body.contains("/Users/alice"),
@@ -2772,7 +2746,7 @@ mod tests {
             )
             .unwrap(),
         );
-        let value = candidate_public_json(&candidate);
+        let value = candidate_public_json(&candidate, &PublicMutationContext::default());
         assert_eq!(value["resolution_state"], "blocked");
         assert_eq!(value["blocked_reason"], "ambiguity");
         assert_eq!(value["owner_candidates"][0]["kind"], "spec");

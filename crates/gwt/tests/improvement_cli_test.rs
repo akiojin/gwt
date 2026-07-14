@@ -1002,11 +1002,20 @@ fn improvement_legacy_capture_dedupes_without_inventing_typed_occurrences() {
     ));
     let candidates = list["candidates"].as_array().expect("candidates");
     assert_eq!(candidates.len(), 1);
-    assert_eq!(
-        candidates[0]["dedupe_key"],
-        "coordination:title-summary-drift"
-    );
+    assert!(candidates[0].get("dedupe_key").is_none());
     assert_eq!(candidates[0]["occurrences"], 0);
+    let persisted: Value = serde_json::from_slice(
+        &fs::read(canonical_candidate_store(
+            fixture.home.path(),
+            fixture.project.path(),
+        ))
+        .expect("candidate store"),
+    )
+    .expect("candidate store JSON");
+    assert_eq!(
+        persisted["candidates"][0]["dedupe_key"], "coordination:title-summary-drift",
+        "legacy dedupe remains local for migration compatibility"
+    );
 }
 
 #[test]
@@ -1689,4 +1698,61 @@ fn improvement_list_v2_rejects_invalid_filters_and_downstream_states_without_rew
         assert!(String::from_utf8_lossy(&output.stderr).contains("unknown variant"));
         assert_eq!(fs::read(path).expect("invalid state store remains"), before);
     }
+}
+
+#[test]
+fn improvement_list_v2_never_returns_raw_taint_inputs() {
+    let fixture = fixture();
+    let private_root = fixture.project.path().display().to_string();
+    let raw_summary = format!("Customer customer-8675309 failed in {private_root}");
+    let captured = operation_output(&run_gwtd_json(
+        &fixture,
+        json!({
+            "schema_version": 1,
+            "operation": "improvement.capture",
+            "params": {
+                "source": "agent-failure",
+                "target_artifact": "coordination",
+                "classification": "gwt-caused",
+                "confidence": "high",
+                "subsystem": "coordination",
+                "contract_id": "coordination.board-status",
+                "contract_schema_revision": 1,
+                "failure_code": "STATUS_NOT_POSTED",
+                "evidence": {
+                    "expected_outcome": "BOARD_STATUS_POSTED",
+                    "observed_outcome": "BOARD_STATUS_MISSING"
+                },
+                "summary": raw_summary,
+                "details": "Authorization: Bearer ghp_abcdefghijklmnopqrstuvwxyz",
+                "evidence_digest": "alice@example.com",
+                "dedupe_key": "private-repo:customer-8675309",
+                "local_evidence": [{
+                    "kind": "transcript",
+                    "path": format!("{private_root}/trace.log")
+                }]
+            }
+        }),
+    ));
+    let listed = operation_output(&run_gwtd_json(
+        &fixture,
+        json!({
+            "schema_version": 1,
+            "operation": "improvement.list",
+            "params": {"state": captured["state"]}
+        }),
+    ));
+    let candidate = &listed["candidates"][0];
+    let encoded = serde_json::to_string(candidate).expect("candidate JSON");
+    assert_eq!(candidate["summary"], "coordination: STATUS_NOT_POSTED");
+    assert!(candidate.get("details").is_none());
+    assert!(candidate.get("dedupe_key").is_none());
+    assert!(candidate.get("evidence_digest").is_none());
+    assert!(!encoded.contains("customer-8675309"));
+    assert!(!encoded.contains(&private_root));
+    assert!(!encoded.contains("ghp_"));
+    assert!(!encoded.contains("alice@example.com"));
+    assert!(candidate["issue_preview"]["body"]
+        .as_str()
+        .is_some_and(|body| body.contains("BOARD_STATUS_MISSING")));
 }
