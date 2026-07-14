@@ -11,9 +11,9 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
-use super::improvement::{CandidateStore, ImprovementCandidate};
+use super::improvement::{CandidateStore, ImprovementCandidate, ImprovementEligibility};
 
-pub(super) const STORE_SCHEMA_VERSION: u32 = 1;
+pub(super) const STORE_SCHEMA_VERSION: u32 = 2;
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub(super) struct LegacyImportState {
@@ -168,12 +168,14 @@ pub(super) fn mark_attempt_submitted(
 
 fn load_and_repair_unlocked(repo_root: &Path) -> Result<CandidateStore, SpecOpsError> {
     let canonical_path = candidate_store_path(repo_root);
-    let mut store = if canonical_path.exists() {
+    let canonical_exists = canonical_path.exists();
+    let mut store = if canonical_exists {
         let raw = fs::read_to_string(&canonical_path).map_err(io_as_spec_error)?;
         serde_json::from_str(&raw).map_err(serde_as_spec_error)?
     } else {
         CandidateStore {
             schema_version: STORE_SCHEMA_VERSION,
+            source_scope_nonce: Some(generate_source_scope_nonce()),
             candidates: Vec::new(),
             legacy_import: LegacyImportState::default(),
         }
@@ -185,8 +187,27 @@ fn load_and_repair_unlocked(repo_root: &Path) -> Result<CandidateStore, SpecOpsE
         )));
     }
 
-    let mut changed = store.schema_version != STORE_SCHEMA_VERSION;
-    store.schema_version = STORE_SCHEMA_VERSION;
+    let mut changed = !canonical_exists;
+    if store.schema_version < STORE_SCHEMA_VERSION {
+        migrate_pre_v2_store(&mut store)?;
+        changed = true;
+    } else {
+        match store.source_scope_nonce.as_deref() {
+            None => return Err(invalid("improvement source scope nonce is missing")),
+            Some(nonce) if valid_source_scope_nonce(nonce) => {}
+            Some(_) => return Err(invalid("invalid improvement source scope nonce")),
+        }
+        if let Some(candidate) = store
+            .candidates
+            .iter()
+            .find(|candidate| candidate.schema_version != STORE_SCHEMA_VERSION)
+        {
+            return Err(invalid(&format!(
+                "candidate schema version {} does not match store schema version {}",
+                candidate.schema_version, STORE_SCHEMA_VERSION
+            )));
+        }
+    }
     let mut seen_roots = HashSet::new();
     for root in discover_legacy_roots(repo_root) {
         let source_id = digest_bytes(normalized_source_identity(&root.path).as_bytes());
@@ -221,6 +242,47 @@ fn load_and_repair_unlocked(repo_root: &Path) -> Result<CandidateStore, SpecOpsE
     Ok(store)
 }
 
+fn migrate_pre_v2_store(store: &mut CandidateStore) -> Result<(), SpecOpsError> {
+    match store.source_scope_nonce.as_deref() {
+        None => store.source_scope_nonce = Some(generate_source_scope_nonce()),
+        Some(nonce) if valid_source_scope_nonce(nonce) => {}
+        Some(_) => return Err(invalid("invalid improvement source scope nonce")),
+    }
+
+    for candidate in &mut store.candidates {
+        if candidate.schema_version > 1 {
+            return Err(invalid(&format!(
+                "unsupported pre-v2 candidate schema version: {}",
+                candidate.schema_version
+            )));
+        }
+        let scalar_occurrences = candidate
+            .occurrences
+            .max(candidate.distinct_occurrences.len() as u64);
+        if scalar_occurrences > 0 || candidate.legacy_occurrence_count.is_some() {
+            candidate.legacy_occurrence_count = Some(
+                candidate
+                    .legacy_occurrence_count
+                    .unwrap_or_default()
+                    .saturating_add(scalar_occurrences),
+            );
+        }
+        candidate.occurrences = 0;
+        candidate.distinct_occurrences.clear();
+        candidate.fingerprint = Some(legacy_fingerprint(candidate));
+        candidate.typed_evidence = None;
+        candidate.eligibility = ImprovementEligibility::NeedsEvidence;
+        candidate.capture_status_generation = 0;
+        candidate.capture_status_delivered_generation = 0;
+        if matches!(candidate.state.as_str(), "pending" | "owner-resolving") {
+            candidate.state = "needs-evidence".to_string();
+        }
+        candidate.schema_version = STORE_SCHEMA_VERSION;
+    }
+    store.schema_version = STORE_SCHEMA_VERSION;
+    Ok(())
+}
+
 fn save_unlocked(repo_root: &Path, store: &CandidateStore) -> Result<(), SpecOpsError> {
     let path = candidate_store_path(repo_root);
     if let Some(parent) = path.parent() {
@@ -228,6 +290,9 @@ fn save_unlocked(repo_root: &Path, store: &CandidateStore) -> Result<(), SpecOps
     }
     let mut persisted = store.clone();
     persisted.schema_version = STORE_SCHEMA_VERSION;
+    for candidate in &mut persisted.candidates {
+        candidate.schema_version = STORE_SCHEMA_VERSION;
+    }
     let bytes = serde_json::to_vec_pretty(&persisted).map_err(serde_as_spec_error)?;
     write_atomic_and_sync_parent(&path, &bytes).map_err(io_as_spec_error)
 }
@@ -409,6 +474,12 @@ fn import_legacy_source(
             candidate.occurrences = 0;
             candidate.legacy_occurrence_count = Some(aggregate);
             candidate.fingerprint = Some(fingerprint);
+            candidate.eligibility = ImprovementEligibility::NeedsEvidence;
+            candidate.typed_evidence = None;
+            candidate.distinct_occurrences.clear();
+            candidate.capture_status_generation = 0;
+            candidate.capture_status_delivered_generation = 0;
+            candidate.attempt = None;
             candidate.legacy_provenance = vec![LegacyProvenance {
                 source_id: source_id.to_string(),
                 content_digest: content_digest.clone(),
@@ -508,6 +579,18 @@ fn digest_bytes(bytes: &[u8]) -> String {
     hex::encode(Sha256::digest(bytes))
 }
 
+fn generate_source_scope_nonce() -> String {
+    let mut material = Vec::with_capacity(16 * 3);
+    for _ in 0..3 {
+        material.extend_from_slice(Uuid::new_v4().as_bytes());
+    }
+    digest_bytes(&material)
+}
+
+fn valid_source_scope_nonce(value: &str) -> bool {
+    value.len() == 64 && value.bytes().all(|byte| byte.is_ascii_hexdigit())
+}
+
 fn write_atomic_and_sync_parent(path: &Path, bytes: &[u8]) -> io::Result<()> {
     write_atomic(path, bytes)?;
     #[cfg(unix)]
@@ -553,7 +636,7 @@ mod tests {
 
     fn store_with_candidate() -> CandidateStore {
         let candidate = serde_json::from_value(json!({
-            "schema_version": 1,
+            "schema_version": 2,
             "id": "impr-lease",
             "created_at": "2026-07-13T00:00:00Z",
             "updated_at": "2026-07-13T00:00:00Z",
@@ -574,6 +657,7 @@ mod tests {
         .expect("candidate");
         CandidateStore {
             schema_version: STORE_SCHEMA_VERSION,
+            source_scope_nonce: Some("00".repeat(32)),
             candidates: vec![candidate],
             legacy_import: LegacyImportState::default(),
         }

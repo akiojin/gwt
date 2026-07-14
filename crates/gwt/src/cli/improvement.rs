@@ -1,10 +1,11 @@
-use std::{io, path::Path};
+use std::{fs, io, path::Path};
 
 use chrono::Utc;
 use gwt_github::{client::ApiError, SpecOpsError};
 use regex::Regex;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
+use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
 use super::CliEnv;
@@ -13,7 +14,7 @@ const UPSTREAM_REPOSITORY: &str = "akiojin/gwt";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ImprovementCommand {
-    Capture(ImprovementCaptureCommand),
+    Capture(Box<ImprovementCaptureCommand>),
     List(ImprovementListCommand),
     Dismiss(ImprovementDismissCommand),
     LinkIssue(ImprovementLinkIssueCommand),
@@ -31,6 +32,17 @@ pub struct ImprovementCaptureCommand {
     pub evidence_digest: Option<String>,
     pub dedupe_key: Option<String>,
     pub local_evidence: Vec<Value>,
+    pub typed_evidence: Option<ImprovementTypedEvidenceCommand>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ImprovementTypedEvidenceCommand {
+    pub subsystem: String,
+    pub contract_id: String,
+    pub contract_schema_revision: u64,
+    pub failure_code: String,
+    pub expected_outcome: String,
+    pub observed_outcome: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -67,6 +79,8 @@ pub(super) struct CandidateStore {
     #[serde(default)]
     pub(super) schema_version: u32,
     #[serde(default)]
+    pub(super) source_scope_nonce: Option<String>,
+    #[serde(default)]
     pub(super) candidates: Vec<ImprovementCandidate>,
     #[serde(default)]
     pub(super) legacy_import: super::improvement_store::LegacyImportState,
@@ -90,6 +104,16 @@ pub(crate) struct ImprovementCandidate {
     pub(super) legacy_occurrence_count: Option<u64>,
     #[serde(default)]
     pub(super) fingerprint: Option<String>,
+    #[serde(default)]
+    pub(super) eligibility: ImprovementEligibility,
+    #[serde(default)]
+    pub(super) typed_evidence: Option<TypedFailureEvidence>,
+    #[serde(default)]
+    pub(super) distinct_occurrences: Vec<DistinctOccurrence>,
+    #[serde(default)]
+    pub(super) capture_status_generation: u64,
+    #[serde(default)]
+    pub(super) capture_status_delivered_generation: u64,
     pub(super) sanitized_summary: String,
     pub(super) sanitized_details: Option<String>,
     pub(super) evidence_digest: Option<String>,
@@ -101,6 +125,116 @@ pub(crate) struct ImprovementCandidate {
     #[serde(default)]
     pub(super) attempt: Option<super::improvement_store::ResolutionAttemptLease>,
 }
+
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub(super) enum ImprovementEligibility {
+    Deterministic,
+    InterpretiveCorroboration,
+    #[default]
+    NeedsEvidence,
+    Ineligible,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub(super) struct TypedFailureEvidence {
+    pub(super) subsystem: String,
+    pub(super) contract_id: String,
+    pub(super) contract_schema_revision: u64,
+    pub(super) failure_code: String,
+    pub(super) target_artifact: String,
+    pub(super) expected_outcome: String,
+    pub(super) observed_outcome: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub(super) struct DistinctOccurrence {
+    pub(super) opaque_key: String,
+    pub(super) evidence_digest: String,
+    pub(super) captured_at: String,
+    pub(super) origin: OccurrenceOrigin,
+    #[serde(default)]
+    pub(super) qualifies_unattended: bool,
+    #[serde(default)]
+    pub(super) producer_id: Option<String>,
+    #[serde(default)]
+    pub(super) producer_registry_revision: Option<u64>,
+    #[serde(default)]
+    pub(super) routing_basis_revision: Option<u64>,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub(super) enum OccurrenceOrigin {
+    Interpretive,
+    Deterministic,
+}
+
+// SPEC-3164 ships the sealed producer contract before #3248 registers the
+// first production caller. Keep the temporary allowance scoped to that API.
+#[cfg_attr(not(test), allow(dead_code))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum CaptureBudgetProfile {
+    Normal,
+    StrictStop,
+}
+
+#[cfg_attr(not(test), allow(dead_code))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct RegisteredProducerToken {
+    registry_revision: u64,
+    registration_index: usize,
+}
+
+#[cfg_attr(not(test), allow(dead_code))]
+#[derive(Debug, Clone)]
+pub(crate) struct RegisteredCaptureInput {
+    pub(crate) token: RegisteredProducerToken,
+    pub(crate) source_event_id: String,
+    pub(crate) routing_basis_revision: u64,
+    pub(crate) budget_profile: CaptureBudgetProfile,
+    pub(crate) source: String,
+    pub(crate) target_artifact: String,
+    pub(crate) classification: String,
+    pub(crate) confidence: String,
+    pub(crate) failure_code: String,
+    pub(crate) expected_outcome: String,
+    pub(crate) observed_outcome: String,
+    pub(crate) summary: Option<String>,
+    pub(crate) details: Option<String>,
+    pub(crate) local_evidence: Vec<Value>,
+}
+
+#[cfg_attr(not(test), allow(dead_code))]
+#[derive(Debug, Clone, Copy)]
+struct ProducerRegistration {
+    public_id: &'static str,
+    producer_id: &'static str,
+    subsystem: &'static str,
+    contract_id: &'static str,
+    contract_schema_revision: u64,
+    routing_basis_revision: u64,
+    target_artifact: &'static str,
+    allowed_budget: CaptureBudgetProfile,
+}
+
+#[cfg_attr(not(test), allow(dead_code))]
+const PRODUCER_REGISTRY_REVISION: u64 = 1;
+const _: () = assert!(PRODUCER_REGISTRY_REVISION > 0);
+#[cfg_attr(not(test), allow(dead_code))]
+const REGISTERED_PRODUCERS: &[ProducerRegistration] = &[
+    #[cfg(test)]
+    ProducerRegistration {
+        public_id: "test.coordination-gate",
+        producer_id: "test.coordination-gate.v1",
+        subsystem: "coordination",
+        contract_id: "coordination.board-status",
+        contract_schema_revision: 1,
+        routing_basis_revision: 1,
+        target_artifact: "coordination",
+        allowed_budget: CaptureBudgetProfile::Normal,
+    },
+];
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct PendingImprovementStopCandidate {
@@ -130,7 +264,7 @@ pub fn run<E: CliEnv>(
     out: &mut String,
 ) -> Result<i32, SpecOpsError> {
     let code = match command {
-        ImprovementCommand::Capture(command) => capture(env, command, out)?,
+        ImprovementCommand::Capture(command) => capture(env, *command, out)?,
         ImprovementCommand::List(command) => list(env.repo_path(), command, out)?,
         ImprovementCommand::Dismiss(command) => dismiss(env.repo_path(), command, out)?,
         ImprovementCommand::LinkIssue(command) => link_issue(env.repo_path(), command, out)?,
@@ -230,32 +364,363 @@ fn capture<E: CliEnv>(
         &command.confidence,
         &["low", "medium", "high"],
     )?;
-    if command.summary.trim().is_empty() {
+    let typed_evidence = command
+        .typed_evidence
+        .as_ref()
+        .map(|evidence| validate_typed_evidence(evidence, &command.target_artifact))
+        .transpose()?;
+    if typed_evidence.is_none() && command.summary.trim().is_empty() {
         return Err(invalid("summary must not be empty"));
     }
 
+    let repo_root = env.repo_path().to_path_buf();
+    let result = match typed_evidence {
+        Some(evidence) => capture_typed_interpretive(&repo_root, &command, evidence)?,
+        None => capture_legacy_compatibility(&repo_root, &command)?,
+    };
+    if let Some(generation) = pending_capture_status_generation(&result.candidate) {
+        post_candidate_captured_status(env, &result.candidate, result.updated_existing)?;
+        acknowledge_capture_status(&repo_root, &result.candidate.id, generation)?;
+    }
+    write_json(
+        out,
+        json!({
+            "id": result.candidate.id,
+            "state": result.candidate.state,
+            "eligibility": result.candidate.eligibility,
+            "fingerprint": result.candidate.fingerprint,
+            "occurrences": result.candidate.occurrences,
+            "legacy_occurrence_count": result.candidate.legacy_occurrence_count,
+            "updated": result.updated_existing,
+            "improvement_contract_version": 2,
+        }),
+    )?;
+    Ok(0)
+}
+
+struct CaptureResult {
+    candidate: ImprovementCandidate,
+    updated_existing: bool,
+}
+
+fn capture_typed_interpretive(
+    repo_root: &Path,
+    command: &ImprovementCaptureCommand,
+    evidence: TypedFailureEvidence,
+) -> Result<CaptureResult, SpecOpsError> {
+    capture_typed(
+        repo_root,
+        command,
+        evidence,
+        ValidatedCaptureOrigin::Interpretive {
+            session_id: verified_interpretive_session(repo_root),
+        },
+    )
+}
+
+#[cfg_attr(not(test), allow(dead_code))]
+enum ValidatedCaptureOrigin {
+    Interpretive {
+        session_id: Option<String>,
+    },
+    Registered {
+        producer_id: &'static str,
+        source_event_id: String,
+        producer_registry_revision: u64,
+        routing_basis_revision: u64,
+    },
+}
+
+fn capture_typed(
+    repo_root: &Path,
+    command: &ImprovementCaptureCommand,
+    evidence: TypedFailureEvidence,
+    origin: ValidatedCaptureOrigin,
+) -> Result<CaptureResult, SpecOpsError> {
+    let now = Utc::now().to_rfc3339();
+    let fingerprint = improvement_fingerprint(&evidence);
+    let evidence_digest = typed_evidence_digest(&evidence);
+    let qualifies_unattended = capture_claim_qualifies(command);
+    let sanitized_summary = if command.summary.trim().is_empty() {
+        format!("{}: {}", evidence.contract_id, evidence.failure_code)
+    } else {
+        sanitize_text(&command.summary)
+    };
+    super::improvement_store::update(repo_root, |store| {
+        let nonce = store
+            .source_scope_nonce
+            .as_deref()
+            .ok_or_else(|| invalid("improvement source scope nonce is missing"))?;
+        let occurrence = match &origin {
+            ValidatedCaptureOrigin::Interpretive {
+                session_id: Some(session_id),
+            } => Some(DistinctOccurrence {
+                opaque_key: opaque_occurrence_key(
+                    nonce,
+                    &fingerprint,
+                    "json.interpretive",
+                    session_id,
+                ),
+                evidence_digest: evidence_digest.clone(),
+                captured_at: now.clone(),
+                origin: OccurrenceOrigin::Interpretive,
+                qualifies_unattended,
+                producer_id: None,
+                producer_registry_revision: None,
+                routing_basis_revision: None,
+            }),
+            ValidatedCaptureOrigin::Interpretive { session_id: None } => None,
+            ValidatedCaptureOrigin::Registered {
+                producer_id,
+                source_event_id,
+                producer_registry_revision,
+                routing_basis_revision,
+            } => Some(DistinctOccurrence {
+                opaque_key: opaque_occurrence_key(
+                    nonce,
+                    &fingerprint,
+                    producer_id,
+                    source_event_id,
+                ),
+                evidence_digest: evidence_digest.clone(),
+                captured_at: now.clone(),
+                origin: OccurrenceOrigin::Deterministic,
+                qualifies_unattended,
+                producer_id: Some((*producer_id).to_string()),
+                producer_registry_revision: Some(*producer_registry_revision),
+                routing_basis_revision: Some(*routing_basis_revision),
+            }),
+        };
+
+        if let Some(candidate) = store
+            .candidates
+            .iter_mut()
+            .find(|candidate| candidate.fingerprint.as_deref() == Some(fingerprint.as_str()))
+        {
+            let Some(occurrence) = occurrence else {
+                return Ok(CaptureResult {
+                    candidate: candidate.clone(),
+                    updated_existing: true,
+                });
+            };
+            if let Some(existing) = candidate
+                .distinct_occurrences
+                .iter()
+                .find(|existing| existing.opaque_key == occurrence.opaque_key)
+            {
+                if !same_occurrence_replay(existing, &occurrence) {
+                    return Err(invalid("conflicting improvement occurrence replay"));
+                }
+                return Ok(CaptureResult {
+                    candidate: candidate.clone(),
+                    updated_existing: true,
+                });
+            }
+
+            candidate.distinct_occurrences.push(occurrence);
+            candidate.updated_at = now.clone();
+            if qualifies_unattended {
+                candidate.source = command.source.clone();
+                candidate.classification = command.classification.clone();
+                candidate.confidence = command.confidence.clone();
+                candidate.typed_evidence = Some(evidence.clone());
+                candidate.sanitized_summary = sanitized_summary.clone();
+                candidate.sanitized_details = command.details.as_deref().map(sanitize_text);
+                candidate.evidence_digest = Some(evidence_digest.clone());
+                candidate.local_evidence = sanitize_local_evidence(&command.local_evidence);
+            }
+            candidate.dedupe_key = format!("fingerprint:{fingerprint}");
+            candidate.occurrences = candidate.distinct_occurrences.len() as u64;
+            candidate.eligibility = typed_eligibility(candidate);
+            candidate.state = settled_capture_state(&candidate.state, candidate.eligibility);
+            if qualifies_unattended {
+                queue_capture_status(candidate)?;
+            }
+            return Ok(CaptureResult {
+                candidate: candidate.clone(),
+                updated_existing: true,
+            });
+        }
+
+        let distinct_occurrences = occurrence.into_iter().collect::<Vec<_>>();
+        let mut candidate = ImprovementCandidate {
+            schema_version: super::improvement_store::STORE_SCHEMA_VERSION,
+            id: format!("impr-{}", Uuid::new_v4().simple()),
+            created_at: now.clone(),
+            updated_at: now,
+            source: command.source.clone(),
+            target_artifact: command.target_artifact.clone(),
+            classification: command.classification.clone(),
+            confidence: command.confidence.clone(),
+            state: "needs-evidence".to_string(),
+            dedupe_key: format!("fingerprint:{fingerprint}"),
+            occurrences: distinct_occurrences.len() as u64,
+            legacy_occurrence_count: None,
+            fingerprint: Some(fingerprint),
+            eligibility: ImprovementEligibility::NeedsEvidence,
+            typed_evidence: Some(evidence),
+            distinct_occurrences,
+            capture_status_generation: u64::from(qualifies_unattended),
+            capture_status_delivered_generation: 0,
+            sanitized_summary,
+            sanitized_details: command.details.as_deref().map(sanitize_text),
+            evidence_digest: Some(evidence_digest),
+            local_evidence: sanitize_local_evidence(&command.local_evidence),
+            linked_issue: None,
+            dismissed_reason: None,
+            legacy_provenance: Vec::new(),
+            attempt: None,
+        };
+        candidate.eligibility = typed_eligibility(&candidate);
+        candidate.state = settled_capture_state(&candidate.state, candidate.eligibility);
+        store.candidates.push(candidate.clone());
+        Ok(CaptureResult {
+            candidate,
+            updated_existing: false,
+        })
+    })
+}
+
+#[cfg_attr(not(test), allow(dead_code))]
+pub(crate) fn registered_producer_token(
+    public_id: &str,
+) -> Result<RegisteredProducerToken, SpecOpsError> {
+    let registration_index = REGISTERED_PRODUCERS
+        .iter()
+        .position(|registration| registration.public_id == public_id)
+        .ok_or_else(|| invalid("improvement producer is not registered"))?;
+    Ok(RegisteredProducerToken {
+        registry_revision: PRODUCER_REGISTRY_REVISION,
+        registration_index,
+    })
+}
+
+#[cfg_attr(not(test), allow(dead_code))]
+pub(crate) fn capture_registered<E: CliEnv>(
+    env: &mut E,
+    input: RegisteredCaptureInput,
+) -> Result<ImprovementCandidate, SpecOpsError> {
+    let registration = registration_for_token(input.token)?;
+    if input.routing_basis_revision != registration.routing_basis_revision {
+        return Err(invalid("registered producer routing revision is stale"));
+    }
+    if input.budget_profile != registration.allowed_budget {
+        return Err(invalid(
+            "registered producer budget profile is not allowlisted",
+        ));
+    }
+    if input.target_artifact != registration.target_artifact {
+        return Err(invalid(
+            "registered producer target artifact does not match its registry entry",
+        ));
+    }
+    validate_enum(
+        "source",
+        &input.source,
+        &[
+            "agent-failure",
+            "user-correction",
+            "review-feedback",
+            "hook-runtime",
+            "verification",
+            "manual",
+        ],
+    )?;
+    validate_enum(
+        "classification",
+        &input.classification,
+        &["gwt-caused", "ambiguous", "target-project", "external"],
+    )?;
+    validate_enum("confidence", &input.confidence, &["low", "medium", "high"])?;
+    let source_event_id = normalize_lower_token("source_event_id", &input.source_event_id)?;
+    let evidence = validate_typed_evidence(
+        &ImprovementTypedEvidenceCommand {
+            subsystem: registration.subsystem.to_string(),
+            contract_id: registration.contract_id.to_string(),
+            contract_schema_revision: registration.contract_schema_revision,
+            failure_code: input.failure_code.clone(),
+            expected_outcome: input.expected_outcome.clone(),
+            observed_outcome: input.observed_outcome.clone(),
+        },
+        registration.target_artifact,
+    )?;
+    let command = ImprovementCaptureCommand {
+        source: input.source,
+        target_artifact: input.target_artifact,
+        classification: input.classification,
+        confidence: input.confidence,
+        summary: input.summary.unwrap_or_default(),
+        details: input.details,
+        evidence_digest: None,
+        dedupe_key: None,
+        local_evidence: input.local_evidence,
+        typed_evidence: None,
+    };
+    let repo_root = env.repo_path().to_path_buf();
+    let result = capture_typed(
+        &repo_root,
+        &command,
+        evidence,
+        ValidatedCaptureOrigin::Registered {
+            producer_id: registration.producer_id,
+            source_event_id,
+            producer_registry_revision: PRODUCER_REGISTRY_REVISION,
+            routing_basis_revision: registration.routing_basis_revision,
+        },
+    )?;
+    let mut candidate = result.candidate;
+    if let Some(generation) = pending_capture_status_generation(&candidate) {
+        post_candidate_captured_status(env, &candidate, result.updated_existing)?;
+        acknowledge_capture_status(&repo_root, &candidate.id, generation)?;
+        candidate.capture_status_delivered_generation = generation;
+    }
+    Ok(candidate)
+}
+
+#[cfg_attr(not(test), allow(dead_code))]
+fn registration_for_token(
+    token: RegisteredProducerToken,
+) -> Result<&'static ProducerRegistration, SpecOpsError> {
+    if token.registry_revision != PRODUCER_REGISTRY_REVISION {
+        return Err(invalid("improvement producer registry revision is invalid"));
+    }
+    REGISTERED_PRODUCERS
+        .get(token.registration_index)
+        .ok_or_else(|| invalid("improvement producer token is invalid"))
+}
+
+fn capture_legacy_compatibility(
+    repo_root: &Path,
+    command: &ImprovementCaptureCommand,
+) -> Result<CaptureResult, SpecOpsError> {
     let now = Utc::now().to_rfc3339();
     let sanitized_summary = sanitize_text(&command.summary);
-    let repo_root = env.repo_path().to_path_buf();
     let dedupe_key = command
         .dedupe_key
         .as_ref()
         .filter(|value| !value.trim().is_empty())
         .cloned()
-        .unwrap_or_else(|| default_dedupe_key(&command, &sanitized_summary));
-    let (candidate, updated_existing) = super::improvement_store::update(&repo_root, |store| {
-        if let Some(candidate) = store
-            .candidates
-            .iter_mut()
-            .find(|candidate| candidate.dedupe_key == dedupe_key)
-        {
+        .unwrap_or_else(|| default_dedupe_key(command, &sanitized_summary));
+    super::improvement_store::update(repo_root, |store| {
+        if let Some(candidate) = store.candidates.iter_mut().find(|candidate| {
+            candidate.dedupe_key == dedupe_key
+                && candidate
+                    .fingerprint
+                    .as_deref()
+                    .is_none_or(|fingerprint| fingerprint.starts_with("legacy:"))
+        }) {
             candidate.updated_at = now.clone();
-            candidate.occurrences += 1;
+            candidate.eligibility = ImprovementEligibility::NeedsEvidence;
+            candidate.state =
+                settled_capture_state(&candidate.state, ImprovementEligibility::NeedsEvidence);
             candidate.sanitized_summary = sanitized_summary.clone();
             candidate.sanitized_details = command.details.as_deref().map(sanitize_text);
             candidate.evidence_digest = command.evidence_digest.as_deref().map(sanitize_text);
             candidate.local_evidence = sanitize_local_evidence(&command.local_evidence);
-            Ok((candidate.clone(), true))
+            Ok(CaptureResult {
+                candidate: candidate.clone(),
+                updated_existing: true,
+            })
         } else {
             let candidate = ImprovementCandidate {
                 schema_version: super::improvement_store::STORE_SCHEMA_VERSION,
@@ -266,11 +731,16 @@ fn capture<E: CliEnv>(
                 target_artifact: command.target_artifact.clone(),
                 classification: command.classification.clone(),
                 confidence: command.confidence.clone(),
-                state: "pending".to_string(),
+                state: "needs-evidence".to_string(),
                 dedupe_key: dedupe_key.clone(),
-                occurrences: 1,
+                occurrences: 0,
                 legacy_occurrence_count: None,
                 fingerprint: None,
+                eligibility: ImprovementEligibility::NeedsEvidence,
+                typed_evidence: None,
+                distinct_occurrences: Vec::new(),
+                capture_status_generation: u64::from(capture_claim_qualifies(command)),
+                capture_status_delivered_generation: 0,
                 sanitized_summary: sanitized_summary.clone(),
                 sanitized_details: command.details.as_deref().map(sanitize_text),
                 evidence_digest: command.evidence_digest.as_deref().map(sanitize_text),
@@ -281,23 +751,209 @@ fn capture<E: CliEnv>(
                 attempt: None,
             };
             store.candidates.push(candidate.clone());
-            Ok((candidate, false))
+            Ok(CaptureResult {
+                candidate,
+                updated_existing: false,
+            })
         }
-    })?;
-    if should_publish_capture_status(&candidate) {
-        post_candidate_captured_status(env, &candidate, updated_existing)?;
+    })
+}
+
+fn validate_typed_evidence(
+    input: &ImprovementTypedEvidenceCommand,
+    target_artifact: &str,
+) -> Result<TypedFailureEvidence, SpecOpsError> {
+    if input.contract_schema_revision == 0 {
+        return Err(invalid(
+            "contract_schema_revision must be greater than zero",
+        ));
     }
-    write_json(
-        out,
-        json!({
-            "id": candidate.id,
-            "state": candidate.state,
-            "dedupe_key": candidate.dedupe_key,
-            "occurrences": candidate.occurrences,
-            "updated": updated_existing,
-        }),
-    )?;
-    Ok(0)
+    Ok(TypedFailureEvidence {
+        subsystem: normalize_lower_token("subsystem", &input.subsystem)?,
+        contract_id: normalize_lower_token("contract_id", &input.contract_id)?,
+        contract_schema_revision: input.contract_schema_revision,
+        failure_code: normalize_upper_token("failure_code", &input.failure_code)?,
+        target_artifact: target_artifact.to_string(),
+        expected_outcome: normalize_upper_token("expected_outcome", &input.expected_outcome)?,
+        observed_outcome: normalize_upper_token("observed_outcome", &input.observed_outcome)?,
+    })
+}
+
+fn normalize_lower_token(field: &str, input: &str) -> Result<String, SpecOpsError> {
+    validate_machine_token(field, &input.trim().to_ascii_lowercase())
+}
+
+fn normalize_upper_token(field: &str, input: &str) -> Result<String, SpecOpsError> {
+    validate_machine_token(field, &input.trim().to_ascii_uppercase())
+}
+
+fn validate_machine_token(field: &str, normalized: &str) -> Result<String, SpecOpsError> {
+    let valid = !normalized.is_empty()
+        && normalized.len() <= 128
+        && normalized
+            .bytes()
+            .next()
+            .is_some_and(|byte| byte.is_ascii_alphanumeric())
+        && normalized
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b':' | b'-'));
+    if !valid {
+        return Err(invalid(&format!(
+            "{field} must be a machine token of at most 128 characters"
+        )));
+    }
+    Ok(normalized.to_string())
+}
+
+fn improvement_fingerprint(evidence: &TypedFailureEvidence) -> String {
+    let revision = evidence.contract_schema_revision.to_string();
+    format!(
+        "v2:{}",
+        digest_fields(
+            "gwt.improvement.fingerprint.v2",
+            &[
+                &evidence.subsystem,
+                &evidence.contract_id,
+                &revision,
+                &evidence.failure_code,
+                &evidence.target_artifact,
+            ],
+        )
+    )
+}
+
+fn typed_evidence_digest(evidence: &TypedFailureEvidence) -> String {
+    let revision = evidence.contract_schema_revision.to_string();
+    digest_fields(
+        "gwt.improvement.evidence.v2",
+        &[
+            &evidence.subsystem,
+            &evidence.contract_id,
+            &revision,
+            &evidence.failure_code,
+            &evidence.target_artifact,
+            &evidence.expected_outcome,
+            &evidence.observed_outcome,
+        ],
+    )
+}
+
+fn opaque_occurrence_key(
+    nonce: &str,
+    fingerprint: &str,
+    producer: &str,
+    replay_key: &str,
+) -> String {
+    format!(
+        "occ:v1:{}",
+        digest_fields(
+            "gwt.improvement.occurrence.v1",
+            &[fingerprint, nonce, producer, replay_key],
+        )
+    )
+}
+
+fn digest_fields(domain: &str, fields: &[&str]) -> String {
+    let mut digest = Sha256::new();
+    for value in std::iter::once(domain).chain(fields.iter().copied()) {
+        digest.update((value.len() as u64).to_be_bytes());
+        digest.update(value.as_bytes());
+    }
+    hex::encode(digest.finalize())
+}
+
+fn typed_eligibility(candidate: &ImprovementCandidate) -> ImprovementEligibility {
+    if candidate.distinct_occurrences.iter().any(|occurrence| {
+        occurrence.origin == OccurrenceOrigin::Deterministic && occurrence.qualifies_unattended
+    }) {
+        return ImprovementEligibility::Deterministic;
+    }
+    if candidate
+        .distinct_occurrences
+        .iter()
+        .filter(|occurrence| {
+            occurrence.origin == OccurrenceOrigin::Interpretive && occurrence.qualifies_unattended
+        })
+        .count()
+        >= 2
+    {
+        ImprovementEligibility::InterpretiveCorroboration
+    } else if capture_fields_qualify(
+        &candidate.classification,
+        &candidate.confidence,
+        &candidate.target_artifact,
+    ) {
+        ImprovementEligibility::NeedsEvidence
+    } else {
+        ImprovementEligibility::Ineligible
+    }
+}
+
+fn capture_claim_qualifies(command: &ImprovementCaptureCommand) -> bool {
+    capture_fields_qualify(
+        &command.classification,
+        &command.confidence,
+        &command.target_artifact,
+    )
+}
+
+fn capture_fields_qualify(classification: &str, confidence: &str, target_artifact: &str) -> bool {
+    classification == "gwt-caused" && confidence == "high" && is_contract_artifact(target_artifact)
+}
+
+fn same_occurrence_replay(existing: &DistinctOccurrence, incoming: &DistinctOccurrence) -> bool {
+    existing.evidence_digest == incoming.evidence_digest
+        && existing.origin == incoming.origin
+        && existing.qualifies_unattended == incoming.qualifies_unattended
+        && existing.producer_id == incoming.producer_id
+        && existing.producer_registry_revision == incoming.producer_registry_revision
+        && existing.routing_basis_revision == incoming.routing_basis_revision
+}
+
+fn settled_capture_state(current: &str, eligibility: ImprovementEligibility) -> String {
+    if !matches!(current, "pending" | "needs-evidence" | "parked") {
+        return current.to_string();
+    }
+    match eligibility {
+        ImprovementEligibility::Deterministic
+        | ImprovementEligibility::InterpretiveCorroboration => "owner-resolving".to_string(),
+        ImprovementEligibility::NeedsEvidence | ImprovementEligibility::Ineligible => {
+            "needs-evidence".to_string()
+        }
+    }
+}
+
+fn verified_interpretive_session(repo_root: &Path) -> Option<String> {
+    let raw = std::env::var(gwt_agent::GWT_SESSION_ID_ENV).ok()?;
+    let parsed = Uuid::parse_str(raw.trim()).ok()?;
+    let session_id = parsed.to_string();
+    if raw.trim() != session_id {
+        return None;
+    }
+    let path = gwt_core::paths::gwt_sessions_dir().join(format!("{session_id}.toml"));
+    let metadata = fs::symlink_metadata(&path).ok()?;
+    if metadata.file_type().is_symlink() || !metadata.is_file() {
+        return None;
+    }
+    let session = gwt_agent::Session::load(&path).ok()?;
+    let expected_repo_hash = gwt_core::paths::project_scope_hash(repo_root).to_string();
+    if session.id != session_id {
+        return None;
+    }
+    let scope_matches = match session.repo_hash.as_deref() {
+        Some(repo_hash) => repo_hash == expected_repo_hash,
+        None => {
+            let metadata = fs::symlink_metadata(&session.worktree_path).ok()?;
+            !metadata.file_type().is_symlink()
+                && metadata.is_dir()
+                && gwt_core::paths::project_scope_hash(&session.worktree_path).as_str()
+                    == expected_repo_hash
+        }
+    };
+    if !scope_matches {
+        return None;
+    }
+    Some(session_id)
 }
 
 fn list(
@@ -513,8 +1169,34 @@ fn promote_issue<E: CliEnv>(
     Ok(0)
 }
 
-fn should_publish_capture_status(candidate: &ImprovementCandidate) -> bool {
-    candidate.confidence == "high" && candidate.classification == "gwt-caused"
+fn queue_capture_status(candidate: &mut ImprovementCandidate) -> Result<(), SpecOpsError> {
+    candidate.capture_status_generation = candidate
+        .capture_status_generation
+        .checked_add(1)
+        .ok_or_else(|| invalid("capture status generation overflow"))?;
+    Ok(())
+}
+
+fn pending_capture_status_generation(candidate: &ImprovementCandidate) -> Option<u64> {
+    (candidate.capture_status_generation > candidate.capture_status_delivered_generation)
+        .then_some(candidate.capture_status_generation)
+}
+
+fn acknowledge_capture_status(
+    repo_root: &Path,
+    candidate_id: &str,
+    generation: u64,
+) -> Result<(), SpecOpsError> {
+    super::improvement_store::update(repo_root, |store| {
+        let candidate = find_candidate_mut(store, candidate_id)?;
+        if generation == 0 || generation > candidate.capture_status_generation {
+            return Err(invalid("capture status acknowledgement is invalid"));
+        }
+        candidate.capture_status_delivered_generation = candidate
+            .capture_status_delivered_generation
+            .max(generation);
+        Ok(())
+    })
 }
 
 fn post_candidate_captured_status<E: CliEnv>(
@@ -664,6 +1346,7 @@ fn candidate_public_json(candidate: &ImprovementCandidate) -> Value {
         "target_artifact": candidate.target_artifact,
         "classification": candidate.classification,
         "confidence": candidate.confidence,
+        "eligibility": candidate.eligibility,
         "dedupe_key": candidate.dedupe_key,
         "occurrences": candidate.occurrences,
         "legacy_occurrence_count": candidate.legacy_occurrence_count,
@@ -795,6 +1478,10 @@ mod tests {
         serde_json::from_str(output.trim()).expect("JSON output")
     }
 
+    fn capture_command(command: ImprovementCaptureCommand) -> ImprovementCommand {
+        ImprovementCommand::Capture(Box::new(command))
+    }
+
     fn board_entries_json(env: &mut TestEnv) -> Value {
         let (_, board_out) = run_collect(
             env,
@@ -831,7 +1518,7 @@ mod tests {
 
         let (capture_code, capture_out) = run_collect(
             &mut env,
-            CliCommand::Improvement(ImprovementCommand::Capture(ImprovementCaptureCommand {
+            CliCommand::Improvement(capture_command(ImprovementCaptureCommand {
                 source: "agent-failure".to_string(),
                 target_artifact: "skill".to_string(),
                 classification: "gwt-caused".to_string(),
@@ -841,6 +1528,7 @@ mod tests {
                 evidence_digest: Some("Stop hook caught the missing skill update.".to_string()),
                 dedupe_key: Some("skill:missed-required-update".to_string()),
                 local_evidence: Vec::new(),
+                typed_evidence: None,
             })),
         )
         .expect("capture");
@@ -881,7 +1569,7 @@ mod tests {
 
         run_collect(
             &mut env,
-            CliCommand::Improvement(ImprovementCommand::Capture(ImprovementCaptureCommand {
+            CliCommand::Improvement(capture_command(ImprovementCaptureCommand {
                 source: "verification".to_string(),
                 target_artifact: "verification".to_string(),
                 classification: "gwt-caused".to_string(),
@@ -891,6 +1579,7 @@ mod tests {
                 evidence_digest: None,
                 dedupe_key: Some("verification:weak-signal-board".to_string()),
                 local_evidence: Vec::new(),
+                typed_evidence: None,
             })),
         )
         .expect("capture");
@@ -911,7 +1600,7 @@ mod tests {
 
         let (_, capture_out) = run_collect(
             &mut env,
-            CliCommand::Improvement(ImprovementCommand::Capture(ImprovementCaptureCommand {
+            CliCommand::Improvement(capture_command(ImprovementCaptureCommand {
                 source: "agent-failure".to_string(),
                 target_artifact: "coordination".to_string(),
                 classification: "gwt-caused".to_string(),
@@ -921,6 +1610,7 @@ mod tests {
                 evidence_digest: Some("Agent missed required Board update.".to_string()),
                 dedupe_key: Some("coordination:board-guidance-drift-post".to_string()),
                 local_evidence: Vec::new(),
+                typed_evidence: None,
             })),
         )
         .expect("capture");
@@ -971,7 +1661,7 @@ mod tests {
 
         let (capture_code, capture_out) = run_collect(
             &mut env,
-            CliCommand::Improvement(ImprovementCommand::Capture(ImprovementCaptureCommand {
+            CliCommand::Improvement(capture_command(ImprovementCaptureCommand {
                 source: "agent-failure".to_string(),
                 target_artifact: "skill".to_string(),
                 classification: "gwt-caused".to_string(),
@@ -984,6 +1674,7 @@ mod tests {
                 evidence_digest: Some("Stop hook allowed completion without capture.".to_string()),
                 dedupe_key: Some("skill:gwt-discussion:self-improvement".to_string()),
                 local_evidence: Vec::new(),
+                typed_evidence: None,
             })),
         )
         .expect("capture");
@@ -1048,7 +1739,7 @@ mod tests {
 
         let (capture_code, _capture_out) = run_collect(
             &mut env,
-            CliCommand::Improvement(ImprovementCommand::Capture(ImprovementCaptureCommand {
+            CliCommand::Improvement(capture_command(ImprovementCaptureCommand {
                 source: "agent-failure".to_string(),
                 target_artifact: "skill".to_string(),
                 classification: "gwt-caused".to_string(),
@@ -1061,6 +1752,7 @@ mod tests {
                 evidence_digest: Some("Stop hook allowed completion without capture.".to_string()),
                 dedupe_key: Some("skill:gwt-discussion:self-improvement".to_string()),
                 local_evidence: Vec::new(),
+                typed_evidence: None,
             })),
         )
         .expect("capture");
@@ -1069,7 +1761,7 @@ mod tests {
         let (list_code, list_out) = run_collect(
             &mut env,
             CliCommand::Improvement(ImprovementCommand::List(ImprovementListCommand {
-                state: Some("pending".to_string()),
+                state: Some("needs-evidence".to_string()),
                 classification: None,
                 confidence: None,
                 limit: None,
@@ -1117,7 +1809,7 @@ mod tests {
 
         let (_, capture_out) = run_collect(
             &mut env,
-            CliCommand::Improvement(ImprovementCommand::Capture(ImprovementCaptureCommand {
+            CliCommand::Improvement(capture_command(ImprovementCaptureCommand {
                 source: "verification".to_string(),
                 target_artifact: "verification".to_string(),
                 classification: "gwt-caused".to_string(),
@@ -1127,6 +1819,7 @@ mod tests {
                 evidence_digest: None,
                 dedupe_key: Some("verification:weak-signal".to_string()),
                 local_evidence: Vec::new(),
+                typed_evidence: None,
             })),
         )
         .expect("capture");
@@ -1154,7 +1847,7 @@ mod tests {
 
         let (_, capture_out) = run_collect(
             &mut env,
-            CliCommand::Improvement(ImprovementCommand::Capture(ImprovementCaptureCommand {
+            CliCommand::Improvement(capture_command(ImprovementCaptureCommand {
                 source: "manual".to_string(),
                 target_artifact: "unknown".to_string(),
                 classification: "target-project".to_string(),
@@ -1164,6 +1857,7 @@ mod tests {
                 evidence_digest: None,
                 dedupe_key: Some("target-project:not-gwt".to_string()),
                 local_evidence: Vec::new(),
+                typed_evidence: None,
             })),
         )
         .expect("capture");
@@ -1206,10 +1900,11 @@ mod tests {
             evidence_digest: None,
             dedupe_key: Some("coordination:board-guidance-drift".to_string()),
             local_evidence: Vec::new(),
+            typed_evidence: None,
         };
         let (_, capture_out) = run_collect(
             &mut env,
-            CliCommand::Improvement(ImprovementCommand::Capture(command.clone())),
+            CliCommand::Improvement(capture_command(command.clone())),
         )
         .expect("capture");
         let id = parse_output(&capture_out)["id"]
@@ -1229,14 +1924,12 @@ mod tests {
         .expect("promote");
         assert_eq!(env.target_issue_create_call_log.len(), 1);
 
-        let (_, recapture_out) = run_collect(
-            &mut env,
-            CliCommand::Improvement(ImprovementCommand::Capture(command)),
-        )
-        .expect("recapture");
+        let (_, recapture_out) =
+            run_collect(&mut env, CliCommand::Improvement(capture_command(command)))
+                .expect("recapture");
         let recapture = parse_output(&recapture_out);
         assert_eq!(recapture["id"], id);
-        assert_eq!(recapture["occurrences"], 2);
+        assert_eq!(recapture["occurrences"], 0);
 
         let (_, promote_out) = run_collect(
             &mut env,
@@ -1256,5 +1949,412 @@ mod tests {
             1,
             "already linked candidate must not create duplicate upstream Issues"
         );
+    }
+
+    fn registered_capture_input(
+        token: RegisteredProducerToken,
+        source_event_id: &str,
+        routing_basis_revision: u64,
+        budget_profile: CaptureBudgetProfile,
+    ) -> RegisteredCaptureInput {
+        RegisteredCaptureInput {
+            token,
+            source_event_id: source_event_id.to_string(),
+            routing_basis_revision,
+            budget_profile,
+            source: "hook-runtime".to_string(),
+            target_artifact: "coordination".to_string(),
+            classification: "gwt-caused".to_string(),
+            confidence: "high".to_string(),
+            failure_code: "STATUS_NOT_POSTED".to_string(),
+            expected_outcome: "BOARD_STATUS_POSTED".to_string(),
+            observed_outcome: "BOARD_STATUS_MISSING".to_string(),
+            summary: Some("Local deterministic capture context".to_string()),
+            details: None,
+            local_evidence: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn typed_identity_has_stable_golden_vectors() {
+        let evidence = TypedFailureEvidence {
+            subsystem: "coordination".to_string(),
+            contract_id: "coordination.board-status".to_string(),
+            contract_schema_revision: 1,
+            failure_code: "STATUS_NOT_POSTED".to_string(),
+            target_artifact: "coordination".to_string(),
+            expected_outcome: "BOARD_STATUS_POSTED".to_string(),
+            observed_outcome: "BOARD_STATUS_MISSING".to_string(),
+        };
+        let fingerprint = improvement_fingerprint(&evidence);
+        assert_eq!(
+            fingerprint,
+            "v2:4bea839977a5aeedbf562acaeeb547012b0447f3335279830405fafb37726532"
+        );
+        assert_eq!(
+            typed_evidence_digest(&evidence),
+            "3f649bd386b953b42442e8cefcbd1449d657f49a972f11d72f810bcda167756a"
+        );
+        assert_eq!(
+            opaque_occurrence_key(
+                &"0".repeat(64),
+                &fingerprint,
+                "test.coordination-gate.v1",
+                "event-a",
+            ),
+            "occ:v1:760fc151831a9d5bf11893e402fdf5d63727e188dbc17015c67b2054f4a97148"
+        );
+    }
+
+    #[test]
+    fn producer_registry_has_unique_revisioned_entries() {
+        let mut public_ids = std::collections::HashSet::new();
+        let mut producer_ids = std::collections::HashSet::new();
+        for registration in REGISTERED_PRODUCERS {
+            assert!(public_ids.insert(registration.public_id));
+            assert!(producer_ids.insert(registration.producer_id));
+            assert!(registration.contract_schema_revision > 0);
+            assert!(registration.routing_basis_revision > 0);
+            assert!(is_contract_artifact(registration.target_artifact));
+        }
+    }
+
+    #[test]
+    fn registered_capture_qualifies_once_and_replay_does_not_duplicate_status() {
+        let project = tempfile::tempdir().expect("project");
+        let mut env = TestEnv::new(project.path().join("cache"));
+        env.repo_path = project.path().join("source-a");
+        std::fs::create_dir_all(&env.repo_path).expect("repo path");
+        let token = registered_producer_token("test.coordination-gate").expect("registered token");
+
+        let first = capture_registered(
+            &mut env,
+            registered_capture_input(token, "event-a", 1, CaptureBudgetProfile::Normal),
+        )
+        .expect("registered capture");
+        assert_eq!(first.eligibility, ImprovementEligibility::Deterministic);
+        assert_eq!(first.state, "owner-resolving");
+        assert_eq!(first.occurrences, 1);
+        let occurrence = &first.distinct_occurrences[0];
+        assert!(occurrence.qualifies_unattended);
+        assert_eq!(
+            occurrence.producer_id.as_deref(),
+            Some("test.coordination-gate.v1")
+        );
+        assert_eq!(occurrence.producer_registry_revision, Some(1));
+        assert_eq!(occurrence.routing_basis_revision, Some(1));
+        assert_eq!(board_bodies(&mut env).len(), 1);
+
+        let replay = capture_registered(
+            &mut env,
+            registered_capture_input(token, "event-a", 1, CaptureBudgetProfile::Normal),
+        )
+        .expect("registered replay");
+        assert_eq!(replay.id, first.id);
+        assert_eq!(replay.occurrences, 1);
+        assert_eq!(
+            replay.distinct_occurrences[0].producer_id,
+            occurrence.producer_id
+        );
+        assert_eq!(
+            replay.distinct_occurrences[0].routing_basis_revision,
+            occurrence.routing_basis_revision
+        );
+        assert_eq!(board_bodies(&mut env).len(), 1, "replay must stay silent");
+
+        let mut conflicting =
+            registered_capture_input(token, "event-a", 1, CaptureBudgetProfile::Normal);
+        conflicting.observed_outcome = "BOARD_STATUS_POSTED_TOO_LATE".to_string();
+        let error = capture_registered(&mut env, conflicting)
+            .expect_err("conflicting deterministic replay must fail closed");
+        assert!(error
+            .to_string()
+            .contains("conflicting improvement occurrence replay"));
+        assert_eq!(
+            load_store(&env.repo_path)
+                .expect("store after conflict")
+                .candidates[0]
+                .occurrences,
+            1
+        );
+
+        let second = capture_registered(
+            &mut env,
+            registered_capture_input(token, "event-b", 1, CaptureBudgetProfile::Normal),
+        )
+        .expect("second registered event");
+        assert_eq!(second.id, first.id);
+        assert_eq!(second.occurrences, 2);
+        assert_eq!(board_bodies(&mut env).len(), 2);
+    }
+
+    #[test]
+    fn registered_capture_scopes_same_event_by_random_source_nonce() {
+        let project = tempfile::tempdir().expect("project");
+        let token = registered_producer_token("test.coordination-gate").expect("registered token");
+        let mut env_a = TestEnv::new(project.path().join("cache-a"));
+        env_a.repo_path = project.path().join("source-a");
+        let mut env_b = TestEnv::new(project.path().join("cache-b"));
+        env_b.repo_path = project.path().join("source-b");
+        std::fs::create_dir_all(&env_a.repo_path).expect("repo a");
+        std::fs::create_dir_all(&env_b.repo_path).expect("repo b");
+
+        let candidate_a = capture_registered(
+            &mut env_a,
+            registered_capture_input(token, "same-event", 1, CaptureBudgetProfile::Normal),
+        )
+        .expect("capture a");
+        let candidate_b = capture_registered(
+            &mut env_b,
+            registered_capture_input(token, "same-event", 1, CaptureBudgetProfile::Normal),
+        )
+        .expect("capture b");
+        let store_a = load_store(&env_a.repo_path).expect("store a");
+        let store_b = load_store(&env_b.repo_path).expect("store b");
+
+        assert_ne!(store_a.source_scope_nonce, store_b.source_scope_nonce);
+        assert_ne!(
+            candidate_a.distinct_occurrences[0].opaque_key,
+            candidate_b.distinct_occurrences[0].opaque_key
+        );
+        let replay_a = capture_registered(
+            &mut env_a,
+            registered_capture_input(token, "same-event", 1, CaptureBudgetProfile::Normal),
+        )
+        .expect("replay a");
+        assert_eq!(replay_a.occurrences, 1);
+    }
+
+    #[test]
+    fn registered_eligibility_is_not_reclassified_by_public_capture() {
+        let project = tempfile::tempdir().expect("project");
+        let token = registered_producer_token("test.coordination-gate").expect("registered token");
+        let mut env = TestEnv::new(project.path().join("cache"));
+        env.repo_path = project.path().join("source");
+        std::fs::create_dir_all(&env.repo_path).expect("repo path");
+
+        let mut ineligible_input =
+            registered_capture_input(token, "low-event", 1, CaptureBudgetProfile::Normal);
+        ineligible_input.classification = "external".to_string();
+        ineligible_input.confidence = "low".to_string();
+        let ineligible =
+            capture_registered(&mut env, ineligible_input).expect("ineligible registered capture");
+        assert_eq!(ineligible.eligibility, ImprovementEligibility::Ineligible);
+        assert_eq!(ineligible.state, "needs-evidence");
+
+        let public_command = ImprovementCaptureCommand {
+            source: "agent-failure".to_string(),
+            target_artifact: "coordination".to_string(),
+            classification: "gwt-caused".to_string(),
+            confidence: "high".to_string(),
+            summary: "Unverified public report".to_string(),
+            details: None,
+            evidence_digest: None,
+            dedupe_key: None,
+            local_evidence: Vec::new(),
+            typed_evidence: None,
+        };
+        let evidence = validate_typed_evidence(
+            &ImprovementTypedEvidenceCommand {
+                subsystem: "coordination".to_string(),
+                contract_id: "coordination.board-status".to_string(),
+                contract_schema_revision: 1,
+                failure_code: "STATUS_NOT_POSTED".to_string(),
+                expected_outcome: "BOARD_STATUS_POSTED".to_string(),
+                observed_outcome: "BOARD_STATUS_MISSING".to_string(),
+            },
+            "coordination",
+        )
+        .expect("typed evidence");
+        let after_public = capture_typed(
+            &env.repo_path,
+            &public_command,
+            evidence,
+            ValidatedCaptureOrigin::Interpretive { session_id: None },
+        )
+        .expect("public capture")
+        .candidate;
+        assert_eq!(after_public.eligibility, ImprovementEligibility::Ineligible);
+        assert_eq!(after_public.state, "needs-evidence");
+        assert_eq!(after_public.occurrences, 1);
+
+        let mut env = TestEnv::new(project.path().join("cache-eligible"));
+        env.repo_path = project.path().join("source-eligible");
+        std::fs::create_dir_all(&env.repo_path).expect("eligible repo path");
+        let deterministic = capture_registered(
+            &mut env,
+            registered_capture_input(token, "high-event", 1, CaptureBudgetProfile::Normal),
+        )
+        .expect("eligible registered capture");
+        assert_eq!(
+            deterministic.eligibility,
+            ImprovementEligibility::Deterministic
+        );
+        let mut low_public = public_command;
+        low_public.classification = "external".to_string();
+        low_public.confidence = "low".to_string();
+        let evidence = validate_typed_evidence(
+            &ImprovementTypedEvidenceCommand {
+                subsystem: "coordination".to_string(),
+                contract_id: "coordination.board-status".to_string(),
+                contract_schema_revision: 1,
+                failure_code: "STATUS_NOT_POSTED".to_string(),
+                expected_outcome: "BOARD_STATUS_POSTED".to_string(),
+                observed_outcome: "BOARD_STATUS_MISSING".to_string(),
+            },
+            "coordination",
+        )
+        .expect("typed evidence");
+        let after_low_public = capture_typed(
+            &env.repo_path,
+            &low_public,
+            evidence,
+            ValidatedCaptureOrigin::Interpretive { session_id: None },
+        )
+        .expect("low public capture")
+        .candidate;
+        assert_eq!(
+            after_low_public.eligibility,
+            ImprovementEligibility::Deterministic
+        );
+        assert_eq!(after_low_public.state, "owner-resolving");
+    }
+
+    #[test]
+    fn registered_occurrence_identity_binds_the_fingerprint() {
+        let project = tempfile::tempdir().expect("project");
+        let token = registered_producer_token("test.coordination-gate").expect("registered token");
+        let mut env = TestEnv::new(project.path().join("cache"));
+        env.repo_path = project.path().join("source");
+        std::fs::create_dir_all(&env.repo_path).expect("repo path");
+
+        let first = capture_registered(
+            &mut env,
+            registered_capture_input(token, "same-event", 1, CaptureBudgetProfile::Normal),
+        )
+        .expect("first fingerprint");
+        let mut second_input =
+            registered_capture_input(token, "same-event", 1, CaptureBudgetProfile::Normal);
+        second_input.failure_code = "STATUS_CONTENT_INVALID".to_string();
+        let second = capture_registered(&mut env, second_input).expect("second fingerprint");
+
+        assert_ne!(first.fingerprint, second.fingerprint);
+        assert_ne!(
+            first.distinct_occurrences[0].opaque_key,
+            second.distinct_occurrences[0].opaque_key
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn registered_capture_retries_pending_board_status_after_post_failure() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let project = tempfile::tempdir().expect("project");
+        let token = registered_producer_token("test.coordination-gate").expect("registered token");
+        let mut env = TestEnv::new(project.path().join("cache"));
+        env.repo_path = project.path().join("source");
+        std::fs::create_dir_all(&env.repo_path).expect("repo path");
+        std::fs::set_permissions(&env.repo_path, std::fs::Permissions::from_mode(0o500))
+            .expect("make Board path read-only");
+
+        let first = capture_registered(
+            &mut env,
+            registered_capture_input(token, "board-retry", 1, CaptureBudgetProfile::Normal),
+        );
+        std::fs::set_permissions(&env.repo_path, std::fs::Permissions::from_mode(0o700))
+            .expect("restore Board path permissions");
+        assert!(first.is_err(), "first Board post must fail");
+
+        capture_registered(
+            &mut env,
+            registered_capture_input(token, "board-retry", 1, CaptureBudgetProfile::Normal),
+        )
+        .expect("retry capture");
+        assert_eq!(board_bodies(&mut env).len(), 1);
+    }
+
+    #[test]
+    fn capture_status_ack_does_not_clear_a_newer_pending_generation() {
+        let project = tempfile::tempdir().expect("project");
+        let token = registered_producer_token("test.coordination-gate").expect("registered token");
+        let mut env = TestEnv::new(project.path().join("cache"));
+        env.repo_path = project.path().join("source");
+        std::fs::create_dir_all(&env.repo_path).expect("repo path");
+        let candidate = capture_registered(
+            &mut env,
+            registered_capture_input(token, "generation-1", 1, CaptureBudgetProfile::Normal),
+        )
+        .expect("initial delivered capture");
+
+        super::super::improvement_store::update(&env.repo_path, |store| {
+            let candidate = find_candidate_mut(store, &candidate.id)?;
+            candidate.capture_status_generation = 3;
+            candidate.capture_status_delivered_generation = 1;
+            Ok(())
+        })
+        .expect("simulate two concurrent pending captures");
+
+        acknowledge_capture_status(&env.repo_path, &candidate.id, 2)
+            .expect("older successful post acknowledgement");
+        let stored = load_store(&env.repo_path).expect("store after older acknowledgement");
+        assert_eq!(stored.candidates[0].capture_status_delivered_generation, 2);
+        assert_eq!(
+            pending_capture_status_generation(&stored.candidates[0]),
+            Some(3)
+        );
+
+        acknowledge_capture_status(&env.repo_path, &candidate.id, 3)
+            .expect("newer post acknowledgement");
+        let stored = load_store(&env.repo_path).expect("store after newer acknowledgement");
+        assert_eq!(
+            pending_capture_status_generation(&stored.candidates[0]),
+            None
+        );
+    }
+
+    #[test]
+    fn registered_capture_rejects_unregistered_stale_or_disallowed_callers_before_mutation() {
+        assert!(registered_producer_token("not-registered").is_err());
+
+        let project = tempfile::tempdir().expect("project");
+        let token = registered_producer_token("test.coordination-gate").expect("registered token");
+        for (suffix, input) in [
+            (
+                "stale",
+                registered_capture_input(token, "event", 0, CaptureBudgetProfile::Normal),
+            ),
+            (
+                "budget",
+                registered_capture_input(token, "event", 1, CaptureBudgetProfile::StrictStop),
+            ),
+            (
+                "forged",
+                registered_capture_input(
+                    RegisteredProducerToken {
+                        registry_revision: u64::MAX,
+                        registration_index: usize::MAX,
+                    },
+                    "event",
+                    1,
+                    CaptureBudgetProfile::Normal,
+                ),
+            ),
+            ("target", {
+                let mut input =
+                    registered_capture_input(token, "event", 1, CaptureBudgetProfile::Normal);
+                input.target_artifact = "skill".to_string();
+                input
+            }),
+        ] {
+            let mut env = TestEnv::new(project.path().join(format!("cache-{suffix}")));
+            env.repo_path = project.path().join(format!("source-{suffix}"));
+            std::fs::create_dir_all(&env.repo_path).expect("repo path");
+            assert!(capture_registered(&mut env, input).is_err());
+            assert!(
+                !super::super::improvement_store::candidate_store_path(&env.repo_path).exists(),
+                "rejected {suffix} caller must not mutate the store"
+            );
+        }
     }
 }

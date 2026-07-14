@@ -424,19 +424,72 @@ fn board_post(params: &Map<String, Value>) -> Result<CliCommand, CliParseError> 
 }
 
 fn improvement_capture(params: &Map<String, Value>) -> Result<CliCommand, CliParseError> {
+    for key in [
+        "producer_id",
+        "source_event_id",
+        "session_id",
+        "routing_basis_revision",
+        "budget_profile",
+        "fingerprint",
+        "occurrence_key",
+    ] {
+        reject_key(
+            params,
+            key,
+            "untrusted identity field is not accepted by public improvement.capture",
+        )?;
+    }
+    let typed_evidence = improvement_typed_evidence(params)?;
     Ok(CliCommand::Improvement(ImprovementCommand::Capture(
-        super::improvement::ImprovementCaptureCommand {
+        Box::new(super::improvement::ImprovementCaptureCommand {
             source: required_string(params, "source")?,
             target_artifact: required_string(params, "target_artifact")?,
             classification: required_string(params, "classification")?,
             confidence: required_string(params, "confidence")?,
-            summary: required_string(params, "summary")?,
+            summary: optional_string(params, "summary")?.unwrap_or_default(),
             details: optional_string(params, "details")?,
             evidence_digest: optional_string(params, "evidence_digest")?,
             dedupe_key: optional_string(params, "dedupe_key")?,
             local_evidence: optional_json_array(params, "local_evidence")?,
-        },
+            typed_evidence,
+        }),
     )))
+}
+
+fn improvement_typed_evidence(
+    params: &Map<String, Value>,
+) -> Result<Option<super::improvement::ImprovementTypedEvidenceCommand>, CliParseError> {
+    let typed_keys = [
+        "subsystem",
+        "contract_id",
+        "contract_schema_revision",
+        "failure_code",
+        "evidence",
+    ];
+    if !typed_keys.iter().any(|key| params.contains_key(*key)) {
+        return Ok(None);
+    }
+
+    let evidence = params
+        .get("evidence")
+        .and_then(Value::as_object)
+        .ok_or_else(|| CliParseError::InvalidJson("evidence must be an object".to_string()))?;
+    for key in evidence.keys() {
+        if !matches!(key.as_str(), "expected_outcome" | "observed_outcome") {
+            return Err(CliParseError::InvalidJson(format!(
+                "evidence contains unknown field: {key}"
+            )));
+        }
+    }
+
+    Ok(Some(super::improvement::ImprovementTypedEvidenceCommand {
+        subsystem: required_string(params, "subsystem")?,
+        contract_id: required_string(params, "contract_id")?,
+        contract_schema_revision: required_u64(params, "contract_schema_revision")?,
+        failure_code: required_string(params, "failure_code")?,
+        expected_outcome: required_string(evidence, "expected_outcome")?,
+        observed_outcome: required_string(evidence, "observed_outcome")?,
+    }))
 }
 
 fn improvement_list(params: &Map<String, Value>) -> Result<CliCommand, CliParseError> {
