@@ -1,6 +1,7 @@
 use gwt_agent::session::GWT_SESSION_ID_ENV;
 use serde::Deserialize;
 use serde_json::{Map, Value};
+use std::str::FromStr;
 
 use crate::protocol::{IndexSearchMatchMode, IndexSearchScope};
 
@@ -493,12 +494,60 @@ fn improvement_typed_evidence(
 }
 
 fn improvement_list(params: &Map<String, Value>) -> Result<CliCommand, CliParseError> {
+    let state = optional_string(params, "state")?
+        .map(|value| {
+            super::improvement::CandidateState::from_str(&value)
+                .map_err(|message| CliParseError::InvalidJson(message.to_string()))
+        })
+        .transpose()?;
+    let blocked_reason = optional_string(params, "blocked_reason")?
+        .map(|value| {
+            super::improvement::BlockedReason::from_str(&value)
+                .map_err(|message| CliParseError::InvalidJson(message.to_string()))
+        })
+        .transpose()?;
+    let failure_subcode = optional_string(params, "failure_subcode")?
+        .map(|value| {
+            super::improvement::FailureSubcode::from_str(&value)
+                .map_err(|message| CliParseError::InvalidJson(message.to_string()))
+        })
+        .transpose()?;
+    let classification = optional_string(params, "classification")?;
+    if classification.as_deref().is_some_and(|value| {
+        !["gwt-caused", "ambiguous", "target-project", "external"].contains(&value)
+    }) {
+        return Err(CliParseError::InvalidJson(
+            "invalid classification".to_string(),
+        ));
+    }
+    let confidence = optional_string(params, "confidence")?;
+    if confidence
+        .as_deref()
+        .is_some_and(|value| !["low", "medium", "high"].contains(&value))
+    {
+        return Err(CliParseError::InvalidJson("invalid confidence".to_string()));
+    }
+    let owner_number = optional_u64(params, "owner_number")?;
+    if owner_number == Some(0) {
+        return Err(CliParseError::InvalidJson(
+            "owner_number must be greater than zero".to_string(),
+        ));
+    }
+    let limit = optional_usize(params, "limit")?;
+    if limit == Some(0) {
+        return Err(CliParseError::InvalidJson(
+            "limit must be greater than zero".to_string(),
+        ));
+    }
     Ok(CliCommand::Improvement(ImprovementCommand::List(
         super::improvement::ImprovementListCommand {
-            state: optional_string(params, "state")?,
-            classification: optional_string(params, "classification")?,
-            confidence: optional_string(params, "confidence")?,
-            limit: optional_usize(params, "limit")?,
+            state,
+            blocked_reason,
+            failure_subcode,
+            classification,
+            confidence,
+            owner_number,
+            limit,
         },
     )))
 }

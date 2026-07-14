@@ -1,4 +1,4 @@
-use std::{fs, io, path::Path};
+use std::{fs, io, path::Path, str::FromStr};
 
 use chrono::Utc;
 use gwt_github::{client::ApiError, SpecOpsError};
@@ -45,11 +45,210 @@ pub struct ImprovementTypedEvidenceCommand {
     pub observed_outcome: String,
 }
 
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub enum CandidateState {
+    Pending,
+    NeedsEvidence,
+    OwnerResolving,
+    Linked,
+    #[serde(alias = "promoted")]
+    Created,
+    Blocked,
+    RemoteOutcomeUnknown,
+    Recurrent,
+    Parked,
+    Dismissed,
+}
+
+impl CandidateState {
+    pub(super) const fn as_str(self) -> &'static str {
+        match self {
+            Self::Pending => "pending",
+            Self::NeedsEvidence => "needs-evidence",
+            Self::OwnerResolving => "owner-resolving",
+            Self::Linked => "linked",
+            Self::Created => "created",
+            Self::Blocked => "blocked",
+            Self::RemoteOutcomeUnknown => "remote-outcome-unknown",
+            Self::Recurrent => "recurrent",
+            Self::Parked => "parked",
+            Self::Dismissed => "dismissed",
+        }
+    }
+
+    const fn compatibility_state(self) -> &'static str {
+        match self {
+            Self::Created => "promoted",
+            other => other.as_str(),
+        }
+    }
+}
+
+impl FromStr for CandidateState {
+    type Err = &'static str;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        match value {
+            "pending" => Ok(Self::Pending),
+            "needs-evidence" => Ok(Self::NeedsEvidence),
+            "owner-resolving" => Ok(Self::OwnerResolving),
+            "linked" => Ok(Self::Linked),
+            "created" | "promoted" => Ok(Self::Created),
+            "blocked" => Ok(Self::Blocked),
+            "remote-outcome-unknown" => Ok(Self::RemoteOutcomeUnknown),
+            "recurrent" => Ok(Self::Recurrent),
+            "parked" => Ok(Self::Parked),
+            "dismissed" => Ok(Self::Dismissed),
+            _ => Err("invalid improvement state"),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub enum BlockedReason {
+    Store,
+    Search,
+    Auth,
+    Privacy,
+    Ambiguity,
+    Routing,
+    Create,
+    Update,
+    Readback,
+    LocalCommit,
+    Timeout,
+    RateLimit,
+    Network,
+    Parse,
+    Reconciliation,
+}
+
+impl FromStr for BlockedReason {
+    type Err = &'static str;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        match value {
+            "store" => Ok(Self::Store),
+            "search" => Ok(Self::Search),
+            "auth" => Ok(Self::Auth),
+            "privacy" => Ok(Self::Privacy),
+            "ambiguity" => Ok(Self::Ambiguity),
+            "routing" => Ok(Self::Routing),
+            "create" => Ok(Self::Create),
+            "update" => Ok(Self::Update),
+            "readback" => Ok(Self::Readback),
+            "local-commit" => Ok(Self::LocalCommit),
+            "timeout" => Ok(Self::Timeout),
+            "rate-limit" => Ok(Self::RateLimit),
+            "network" => Ok(Self::Network),
+            "parse" => Ok(Self::Parse),
+            "reconciliation" => Ok(Self::Reconciliation),
+            _ => Err("invalid blocked reason"),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub enum FailureSubcode {
+    EmptyCorpus,
+    PartialPage,
+}
+
+impl FromStr for FailureSubcode {
+    type Err = &'static str;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        match value {
+            "empty-corpus" => Ok(Self::EmptyCorpus),
+            "partial-page" => Ok(Self::PartialPage),
+            _ => Err("invalid failure subcode"),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub(super) struct RetryMetadata {
+    pub(super) retryable: bool,
+    pub(super) remediation: String,
+    pub(super) failed_at: String,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub(super) enum OwnerKind {
+    Issue,
+    Spec,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub(super) enum OwnerMatchBasis {
+    Fingerprint,
+    Contract,
+    Semantic,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub(super) struct OwnerCandidate {
+    pub(super) number: u64,
+    pub(super) kind: OwnerKind,
+    pub(super) title: String,
+    pub(super) active: bool,
+    pub(super) url: String,
+    pub(super) match_basis: OwnerMatchBasis,
+    pub(super) selectable: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub(super) struct DurableOwnerSnapshot {
+    pub(super) number: u64,
+    pub(super) kind: OwnerKind,
+    pub(super) title: String,
+    pub(super) active: bool,
+    pub(super) url: String,
+    pub(super) fingerprint: String,
+    pub(super) readback_verified_at: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub(super) struct ResolverSnapshot {
+    pub(super) corpus_generation: String,
+    pub(super) resolver_revision: String,
+    pub(super) owner_candidates: Vec<OwnerCandidate>,
+}
+
+impl ResolverSnapshot {
+    #[cfg_attr(not(test), allow(dead_code))]
+    fn new(
+        corpus_generation: String,
+        owner_candidates: Vec<OwnerCandidate>,
+    ) -> Result<Self, SpecOpsError> {
+        if corpus_generation.trim().is_empty() {
+            return Err(invalid("resolver corpus generation must not be empty"));
+        }
+        for owner in &owner_candidates {
+            validate_owner_candidate(owner)?;
+        }
+        let resolver_revision = resolver_revision(&corpus_generation, &owner_candidates)?;
+        Ok(Self {
+            corpus_generation,
+            resolver_revision,
+            owner_candidates,
+        })
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ImprovementListCommand {
-    pub state: Option<String>,
+    pub state: Option<CandidateState>,
+    pub blocked_reason: Option<BlockedReason>,
+    pub failure_subcode: Option<FailureSubcode>,
     pub classification: Option<String>,
     pub confidence: Option<String>,
+    pub owner_number: Option<u64>,
     pub limit: Option<usize>,
 }
 
@@ -97,7 +296,17 @@ pub(crate) struct ImprovementCandidate {
     pub(super) target_artifact: String,
     pub(super) classification: String,
     pub(super) confidence: String,
-    pub(super) state: String,
+    pub(super) state: CandidateState,
+    #[serde(default)]
+    pub(super) blocked_reason: Option<BlockedReason>,
+    #[serde(default)]
+    pub(super) failure_subcode: Option<FailureSubcode>,
+    #[serde(default)]
+    pub(super) retry: Option<RetryMetadata>,
+    #[serde(default)]
+    pub(super) owner: Option<DurableOwnerSnapshot>,
+    #[serde(default)]
+    pub(super) resolver_snapshot: Option<ResolverSnapshot>,
     pub(super) dedupe_key: String,
     pub(super) occurrences: u64,
     #[serde(default)]
@@ -282,7 +491,7 @@ pub(crate) fn pending_high_confidence_contract_violations(
                 .candidates
                 .into_iter()
                 .filter(|candidate| {
-                    candidate.state == "pending"
+                    candidate.state == CandidateState::Pending
                         && candidate.classification == "gwt-caused"
                         && candidate.confidence == "high"
                         && is_contract_artifact(&candidate.target_artifact)
@@ -301,7 +510,11 @@ pub fn candidate_public_values(repo_root: &Path) -> Vec<Value> {
     let mut candidates = load_store(repo_root)
         .map(|store| store.candidates)
         .unwrap_or_default();
-    candidates.sort_by(|a, b| b.updated_at.cmp(&a.updated_at));
+    candidates.sort_by(|a, b| {
+        b.updated_at
+            .cmp(&a.updated_at)
+            .then_with(|| a.id.cmp(&b.id))
+    });
     candidates
         .into_iter()
         .map(|candidate| candidate_public_json(&candidate))
@@ -386,7 +599,7 @@ fn capture<E: CliEnv>(
         out,
         json!({
             "id": result.candidate.id,
-            "state": result.candidate.state,
+            "state": result.candidate.state.compatibility_state(),
             "eligibility": result.candidate.eligibility,
             "fingerprint": result.candidate.fingerprint,
             "occurrences": result.candidate.occurrences,
@@ -532,7 +745,8 @@ fn capture_typed(
             candidate.dedupe_key = format!("fingerprint:{fingerprint}");
             candidate.occurrences = candidate.distinct_occurrences.len() as u64;
             candidate.eligibility = typed_eligibility(candidate);
-            candidate.state = settled_capture_state(&candidate.state, candidate.eligibility);
+            let next_state = settled_typed_capture_state(&candidate.state, candidate.eligibility);
+            transition_candidate(candidate, next_state)?;
             if qualifies_unattended {
                 queue_capture_status(candidate)?;
             }
@@ -552,7 +766,12 @@ fn capture_typed(
             target_artifact: command.target_artifact.clone(),
             classification: command.classification.clone(),
             confidence: command.confidence.clone(),
-            state: "needs-evidence".to_string(),
+            state: CandidateState::NeedsEvidence,
+            blocked_reason: None,
+            failure_subcode: None,
+            retry: None,
+            owner: None,
+            resolver_snapshot: None,
             dedupe_key: format!("fingerprint:{fingerprint}"),
             occurrences: distinct_occurrences.len() as u64,
             legacy_occurrence_count: None,
@@ -572,7 +791,8 @@ fn capture_typed(
             attempt: None,
         };
         candidate.eligibility = typed_eligibility(&candidate);
-        candidate.state = settled_capture_state(&candidate.state, candidate.eligibility);
+        let next_state = settled_typed_capture_state(&candidate.state, candidate.eligibility);
+        transition_candidate(&mut candidate, next_state)?;
         store.candidates.push(candidate.clone());
         Ok(CaptureResult {
             candidate,
@@ -711,8 +931,9 @@ fn capture_legacy_compatibility(
         }) {
             candidate.updated_at = now.clone();
             candidate.eligibility = ImprovementEligibility::NeedsEvidence;
-            candidate.state =
+            let next_state =
                 settled_capture_state(&candidate.state, ImprovementEligibility::NeedsEvidence);
+            transition_candidate(candidate, next_state)?;
             candidate.sanitized_summary = sanitized_summary.clone();
             candidate.sanitized_details = command.details.as_deref().map(sanitize_text);
             candidate.evidence_digest = command.evidence_digest.as_deref().map(sanitize_text);
@@ -731,7 +952,12 @@ fn capture_legacy_compatibility(
                 target_artifact: command.target_artifact.clone(),
                 classification: command.classification.clone(),
                 confidence: command.confidence.clone(),
-                state: "needs-evidence".to_string(),
+                state: CandidateState::NeedsEvidence,
+                blocked_reason: None,
+                failure_subcode: None,
+                retry: None,
+                owner: None,
+                resolver_snapshot: None,
                 dedupe_key: dedupe_key.clone(),
                 occurrences: 0,
                 legacy_occurrence_count: None,
@@ -862,6 +1088,216 @@ fn digest_fields(domain: &str, fields: &[&str]) -> String {
     hex::encode(digest.finalize())
 }
 
+fn resolver_revision(
+    corpus_generation: &str,
+    owner_candidates: &[OwnerCandidate],
+) -> Result<String, SpecOpsError> {
+    let mut canonical = owner_candidates
+        .iter()
+        .map(|candidate| serde_json::to_string(candidate).map_err(serde_as_spec_error))
+        .collect::<Result<Vec<_>, _>>()?;
+    canonical.sort();
+    let mut fields = Vec::with_capacity(canonical.len() + 1);
+    fields.push(corpus_generation);
+    fields.extend(canonical.iter().map(String::as_str));
+    Ok(digest_fields(
+        "gwt.improvement.resolver-revision.v2",
+        &fields,
+    ))
+}
+
+fn validate_owner_candidate(owner: &OwnerCandidate) -> Result<(), SpecOpsError> {
+    validate_owner_identity(owner.number, &owner.title, &owner.url)
+}
+
+fn validate_owner_identity(number: u64, title: &str, url: &str) -> Result<(), SpecOpsError> {
+    if number == 0 {
+        return Err(invalid("owner number must be greater than zero"));
+    }
+    if title.trim().is_empty() {
+        return Err(invalid("owner title must not be empty"));
+    }
+    let expected_url = format!("https://github.com/{UPSTREAM_REPOSITORY}/issues/{number}");
+    if url != expected_url {
+        return Err(invalid(
+            "owner URL does not match the upstream issue number",
+        ));
+    }
+    Ok(())
+}
+
+pub(super) fn validate_candidate_lifecycle(
+    candidate: &ImprovementCandidate,
+) -> Result<(), SpecOpsError> {
+    match candidate.state {
+        CandidateState::Blocked => {
+            let reason = candidate
+                .blocked_reason
+                .ok_or_else(|| invalid("blocked candidate requires blocked_reason"))?;
+            if candidate.retry.is_none() {
+                return Err(invalid("blocked candidate requires retry metadata"));
+            }
+            if candidate.failure_subcode.is_some() && reason != BlockedReason::Search {
+                return Err(invalid(
+                    "failure_subcode is only valid for search blocked reason",
+                ));
+            }
+        }
+        CandidateState::RemoteOutcomeUnknown => {
+            if candidate.retry.is_none() {
+                return Err(invalid(
+                    "remote-outcome-unknown candidate requires retry metadata",
+                ));
+            }
+            if candidate.blocked_reason.is_some() || candidate.failure_subcode.is_some() {
+                return Err(invalid(
+                    "remote-outcome-unknown candidate cannot have blocked metadata",
+                ));
+            }
+        }
+        _ => {
+            if candidate.blocked_reason.is_some() || candidate.failure_subcode.is_some() {
+                return Err(invalid(
+                    "blocked metadata is only valid for blocked candidates",
+                ));
+            }
+            if candidate.retry.is_some() {
+                return Err(invalid(
+                    "retry metadata is only valid for blocked or remote outcomes",
+                ));
+            }
+        }
+    }
+
+    if let Some(retry) = &candidate.retry {
+        let normalized = normalize_upper_token("remediation", &retry.remediation)?;
+        if normalized != retry.remediation {
+            return Err(invalid("remediation must be an uppercase machine token"));
+        }
+        chrono::DateTime::parse_from_rfc3339(&retry.failed_at)
+            .map_err(|_| invalid("retry failed_at must be RFC3339"))?;
+    }
+
+    if let Some(owner) = &candidate.owner {
+        validate_owner_identity(owner.number, &owner.title, &owner.url)?;
+        if owner.fingerprint.trim().is_empty()
+            || candidate.fingerprint.as_deref() != Some(owner.fingerprint.as_str())
+        {
+            return Err(invalid("owner fingerprint does not match the candidate"));
+        }
+        chrono::DateTime::parse_from_rfc3339(&owner.readback_verified_at)
+            .map_err(|_| invalid("owner readback_verified_at must be RFC3339"))?;
+    }
+
+    if let Some(snapshot) = &candidate.resolver_snapshot {
+        if snapshot.corpus_generation.trim().is_empty() {
+            return Err(invalid("resolver corpus generation must not be empty"));
+        }
+        for owner in &snapshot.owner_candidates {
+            validate_owner_candidate(owner)?;
+        }
+        if snapshot.resolver_revision
+            != resolver_revision(&snapshot.corpus_generation, &snapshot.owner_candidates)?
+        {
+            return Err(invalid("resolver revision does not match its snapshot"));
+        }
+    }
+
+    if matches!(
+        candidate.state,
+        CandidateState::Linked | CandidateState::Created
+    ) && candidate.owner.is_none()
+        && candidate.linked_issue.is_none()
+    {
+        return Err(invalid(
+            "linked or created candidate requires a durable or legacy owner",
+        ));
+    }
+    Ok(())
+}
+
+pub(super) fn candidate_transition_allowed(from: CandidateState, to: CandidateState) -> bool {
+    if from == to {
+        return true;
+    }
+    matches!(
+        (from, to),
+        (CandidateState::Pending, CandidateState::NeedsEvidence)
+            | (CandidateState::Pending, CandidateState::OwnerResolving)
+            | (
+                CandidateState::NeedsEvidence,
+                CandidateState::OwnerResolving
+            )
+            | (CandidateState::NeedsEvidence, CandidateState::Dismissed)
+            | (CandidateState::OwnerResolving, CandidateState::Linked)
+            | (CandidateState::OwnerResolving, CandidateState::Created)
+            | (CandidateState::OwnerResolving, CandidateState::Blocked)
+            | (
+                CandidateState::OwnerResolving,
+                CandidateState::RemoteOutcomeUnknown
+            )
+            | (CandidateState::OwnerResolving, CandidateState::Dismissed)
+            | (CandidateState::Blocked, CandidateState::OwnerResolving)
+            | (CandidateState::Blocked, CandidateState::Dismissed)
+            | (
+                CandidateState::RemoteOutcomeUnknown,
+                CandidateState::OwnerResolving
+            )
+            | (CandidateState::RemoteOutcomeUnknown, CandidateState::Linked)
+            | (
+                CandidateState::RemoteOutcomeUnknown,
+                CandidateState::Created
+            )
+            | (
+                CandidateState::RemoteOutcomeUnknown,
+                CandidateState::Dismissed
+            )
+            | (CandidateState::Linked, CandidateState::Recurrent)
+            | (CandidateState::Linked, CandidateState::Dismissed)
+            | (CandidateState::Created, CandidateState::Recurrent)
+            | (CandidateState::Created, CandidateState::Dismissed)
+            | (CandidateState::Recurrent, CandidateState::OwnerResolving)
+            | (CandidateState::Recurrent, CandidateState::Blocked)
+            | (CandidateState::Recurrent, CandidateState::Dismissed)
+            | (CandidateState::Parked, CandidateState::NeedsEvidence)
+            | (CandidateState::Parked, CandidateState::OwnerResolving)
+            | (CandidateState::Parked, CandidateState::Dismissed)
+    )
+}
+
+pub(super) fn transition_candidate(
+    candidate: &mut ImprovementCandidate,
+    next_state: CandidateState,
+) -> Result<(), SpecOpsError> {
+    if !candidate_transition_allowed(candidate.state, next_state) {
+        return Err(invalid(&format!(
+            "invalid improvement transition: {} -> {}",
+            candidate.state.as_str(),
+            next_state.as_str()
+        )));
+    }
+    let mut next = candidate.clone();
+    next.state = next_state;
+    if !matches!(
+        next_state,
+        CandidateState::Blocked | CandidateState::RemoteOutcomeUnknown
+    ) {
+        next.blocked_reason = None;
+        next.failure_subcode = None;
+        next.retry = None;
+    }
+    validate_candidate_lifecycle(&next)?;
+    *candidate = next;
+    Ok(())
+}
+
+fn transition_to_owner_resolving(candidate: &mut ImprovementCandidate) -> Result<(), SpecOpsError> {
+    if candidate.state == CandidateState::Pending {
+        transition_candidate(candidate, CandidateState::NeedsEvidence)?;
+    }
+    transition_candidate(candidate, CandidateState::OwnerResolving)
+}
+
 fn typed_eligibility(candidate: &ImprovementCandidate) -> ImprovementEligibility {
     if candidate.distinct_occurrences.iter().any(|occurrence| {
         occurrence.origin == OccurrenceOrigin::Deterministic && occurrence.qualifies_unattended
@@ -910,16 +1346,33 @@ fn same_occurrence_replay(existing: &DistinctOccurrence, incoming: &DistinctOccu
         && existing.routing_basis_revision == incoming.routing_basis_revision
 }
 
-fn settled_capture_state(current: &str, eligibility: ImprovementEligibility) -> String {
-    if !matches!(current, "pending" | "needs-evidence" | "parked") {
-        return current.to_string();
+fn settled_capture_state(
+    current: &CandidateState,
+    eligibility: ImprovementEligibility,
+) -> CandidateState {
+    if !matches!(
+        current,
+        CandidateState::Pending | CandidateState::NeedsEvidence | CandidateState::Parked
+    ) {
+        return *current;
     }
     match eligibility {
         ImprovementEligibility::Deterministic
-        | ImprovementEligibility::InterpretiveCorroboration => "owner-resolving".to_string(),
+        | ImprovementEligibility::InterpretiveCorroboration => CandidateState::OwnerResolving,
         ImprovementEligibility::NeedsEvidence | ImprovementEligibility::Ineligible => {
-            "needs-evidence".to_string()
+            CandidateState::NeedsEvidence
         }
+    }
+}
+
+fn settled_typed_capture_state(
+    current: &CandidateState,
+    eligibility: ImprovementEligibility,
+) -> CandidateState {
+    if matches!(current, CandidateState::Linked | CandidateState::Created) {
+        CandidateState::Recurrent
+    } else {
+        settled_capture_state(current, eligibility)
     }
 }
 
@@ -962,11 +1415,25 @@ fn list(
     out: &mut String,
 ) -> Result<i32, SpecOpsError> {
     let mut candidates = load_store(repo_root)?.candidates;
-    candidates.sort_by(|a, b| b.updated_at.cmp(&a.updated_at));
+    candidates.sort_by(|a, b| {
+        b.updated_at
+            .cmp(&a.updated_at)
+            .then_with(|| a.id.cmp(&b.id))
+    });
     let mut values = Vec::new();
     for candidate in candidates {
-        if let Some(state) = &command.state {
-            if &candidate.state != state {
+        if let Some(state) = command.state {
+            if candidate.state != state {
+                continue;
+            }
+        }
+        if let Some(reason) = command.blocked_reason {
+            if candidate.blocked_reason != Some(reason) {
+                continue;
+            }
+        }
+        if let Some(subcode) = command.failure_subcode {
+            if candidate.failure_subcode != Some(subcode) {
                 continue;
             }
         }
@@ -980,6 +1447,13 @@ fn list(
                 continue;
             }
         }
+        if let Some(owner_number) = command.owner_number {
+            let durable_number = candidate.owner.as_ref().map(|owner| owner.number);
+            let legacy_number = candidate.linked_issue.as_ref().map(|owner| owner.number);
+            if durable_number != Some(owner_number) && legacy_number != Some(owner_number) {
+                continue;
+            }
+        }
         values.push(candidate_public_json(&candidate));
         if let Some(limit) = command.limit {
             if values.len() >= limit {
@@ -987,7 +1461,13 @@ fn list(
             }
         }
     }
-    write_json(out, json!({ "candidates": values }))?;
+    write_json(
+        out,
+        json!({
+            "improvement_contract_version": 2,
+            "candidates": values,
+        }),
+    )?;
     Ok(0)
 }
 
@@ -1002,9 +1482,12 @@ fn dismiss(
     let now = Utc::now().to_rfc3339();
     let response = super::improvement_store::update(repo_root, |store| {
         let candidate = find_candidate_mut(store, &command.id)?;
-        candidate.state = "dismissed".to_string();
-        candidate.updated_at = now;
+        if candidate.state == CandidateState::Pending {
+            transition_candidate(candidate, CandidateState::NeedsEvidence)?;
+        }
         candidate.dismissed_reason = Some(sanitize_text(&command.reason));
+        transition_candidate(candidate, CandidateState::Dismissed)?;
+        candidate.updated_at = now;
         Ok(candidate_public_json(candidate))
     })?;
     write_json(out, response)?;
@@ -1016,6 +1499,9 @@ fn link_issue(
     command: ImprovementLinkIssueCommand,
     out: &mut String,
 ) -> Result<i32, SpecOpsError> {
+    if command.number == 0 {
+        return Err(invalid("issue number must be greater than zero"));
+    }
     let repository = command
         .repository
         .filter(|value| !value.trim().is_empty())
@@ -1032,13 +1518,24 @@ fn link_issue(
     let now = Utc::now().to_rfc3339();
     let response = super::improvement_store::update(repo_root, |store| {
         let candidate = find_candidate_mut(store, &command.id)?;
-        candidate.state = "linked".to_string();
+        if matches!(
+            candidate.state,
+            CandidateState::Linked | CandidateState::Created
+        ) && candidate
+            .linked_issue
+            .as_ref()
+            .is_some_and(|owner| owner.number == command.number)
+        {
+            return Ok(candidate_public_json(candidate));
+        }
+        transition_to_owner_resolving(candidate)?;
         candidate.updated_at = now;
         candidate.linked_issue = Some(LinkedIssue {
             number: command.number,
             url: sanitize_text(&url),
             repository: sanitize_text(&repository),
         });
+        transition_candidate(candidate, CandidateState::Linked)?;
         Ok(candidate_public_json(candidate))
     })?;
     write_json(out, response)?;
@@ -1060,16 +1557,19 @@ fn promote_issue<E: CliEnv>(
         return Err(invalid("candidate not found"));
     };
     let candidate = store.candidates[index].clone();
-    if candidate.state == "dismissed" {
+    if candidate.state == CandidateState::Dismissed {
         return Err(invalid("dismissed candidates cannot be promoted"));
     }
     if let Some(linked) = &candidate.linked_issue {
-        if candidate.state == "promoted" || candidate.state == "linked" {
+        if matches!(
+            candidate.state,
+            CandidateState::Created | CandidateState::Linked | CandidateState::Recurrent
+        ) {
             write_json(
                 out,
                 json!({
                     "id": candidate.id,
-                    "state": candidate.state,
+                    "state": candidate.state.compatibility_state(),
                     "issue_number": linked.number,
                     "issue_url": linked.url,
                     "repository": linked.repository,
@@ -1096,6 +1596,8 @@ fn promote_issue<E: CliEnv>(
         .filter(|value| !value.trim().is_empty())
         .unwrap_or_else(|| format!("pid-{}", std::process::id()));
     let lease = super::improvement_store::update(&repo_root, |store| {
+        let candidate = find_candidate_mut(store, &command.id)?;
+        transition_to_owner_resolving(candidate)?;
         super::improvement_store::acquire_attempt_lease(
             store,
             &command.id,
@@ -1129,7 +1631,14 @@ fn promote_issue<E: CliEnv>(
                     .as_ref()
                     .is_some_and(|attempt| attempt.attempt_id == attempt_id)
                 {
-                    candidate.state = "remote-outcome-unknown".to_string();
+                    candidate.blocked_reason = None;
+                    candidate.failure_subcode = None;
+                    candidate.retry = Some(RetryMetadata {
+                        retryable: true,
+                        remediation: "RECONCILE_REMOTE_OUTCOME".to_string(),
+                        failed_at: Utc::now().to_rfc3339(),
+                    });
+                    transition_candidate(candidate, CandidateState::RemoteOutcomeUnknown)?;
                     candidate.updated_at = Utc::now().to_rfc3339();
                 }
                 Ok(())
@@ -1149,10 +1658,10 @@ fn promote_issue<E: CliEnv>(
     };
     super::improvement_store::update(&repo_root, |store| {
         let candidate = find_candidate_mut(store, &command.id)?;
-        candidate.state = "promoted".to_string();
         candidate.updated_at = now;
         candidate.linked_issue = Some(linked);
         candidate.attempt = None;
+        transition_candidate(candidate, CandidateState::Created)?;
         Ok(())
     })?;
     post_candidate_promoted_status(&mut *env, &candidate, snapshot.number.0, &issue_url)?;
@@ -1339,9 +1848,25 @@ fn find_candidate_mut<'a>(
 }
 
 fn candidate_public_json(candidate: &ImprovementCandidate) -> Value {
+    let resolver_revision = candidate
+        .resolver_snapshot
+        .as_ref()
+        .map(|snapshot| snapshot.resolver_revision.as_str());
+    let owner_candidates = candidate
+        .resolver_snapshot
+        .as_ref()
+        .map(|snapshot| snapshot.owner_candidates.as_slice())
+        .unwrap_or_default();
     json!({
         "id": candidate.id,
-        "state": candidate.state,
+        "state": candidate.state.compatibility_state(),
+        "resolution_state": candidate.state,
+        "blocked_reason": candidate.blocked_reason,
+        "failure_subcode": candidate.failure_subcode,
+        "retry": candidate.retry,
+        "owner": candidate.owner,
+        "resolver_revision": resolver_revision,
+        "owner_candidates": owner_candidates,
         "source": candidate.source,
         "target_artifact": candidate.target_artifact,
         "classification": candidate.classification,
@@ -1761,9 +2286,12 @@ mod tests {
         let (list_code, list_out) = run_collect(
             &mut env,
             CliCommand::Improvement(ImprovementCommand::List(ImprovementListCommand {
-                state: Some("needs-evidence".to_string()),
+                state: Some(CandidateState::NeedsEvidence),
+                blocked_reason: None,
+                failure_subcode: None,
                 classification: None,
                 confidence: None,
+                owner_number: None,
                 limit: None,
             })),
         )
@@ -1975,6 +2503,284 @@ mod tests {
         }
     }
 
+    fn lifecycle_test_candidate(state: CandidateState) -> ImprovementCandidate {
+        serde_json::from_value(json!({
+            "schema_version": 3,
+            "id": "impr-lifecycle",
+            "created_at": "2026-07-14T00:00:00Z",
+            "updated_at": "2026-07-14T00:00:00Z",
+            "source": "agent-failure",
+            "target_artifact": "coordination",
+            "classification": "gwt-caused",
+            "confidence": "high",
+            "state": state,
+            "dedupe_key": "lifecycle:test",
+            "occurrences": 1,
+            "fingerprint": "v2:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "eligibility": "deterministic",
+            "sanitized_summary": "Lifecycle test",
+            "sanitized_details": null,
+            "evidence_digest": null,
+            "local_evidence": [],
+            "linked_issue": null,
+            "dismissed_reason": null
+        }))
+        .expect("lifecycle candidate")
+    }
+
+    fn retry_metadata() -> RetryMetadata {
+        RetryMetadata {
+            retryable: true,
+            remediation: "REFRESH_OWNER_CORPUS".to_string(),
+            failed_at: "2026-07-14T00:00:00Z".to_string(),
+        }
+    }
+
+    #[test]
+    fn candidate_state_serde_and_transition_matrix_is_exact() {
+        let states = [
+            (CandidateState::Pending, "pending"),
+            (CandidateState::NeedsEvidence, "needs-evidence"),
+            (CandidateState::OwnerResolving, "owner-resolving"),
+            (CandidateState::Linked, "linked"),
+            (CandidateState::Created, "created"),
+            (CandidateState::Blocked, "blocked"),
+            (
+                CandidateState::RemoteOutcomeUnknown,
+                "remote-outcome-unknown",
+            ),
+            (CandidateState::Recurrent, "recurrent"),
+            (CandidateState::Parked, "parked"),
+            (CandidateState::Dismissed, "dismissed"),
+        ];
+        for (state, serialized) in states {
+            assert_eq!(serde_json::to_value(state).unwrap(), serialized);
+            assert_eq!(
+                serde_json::from_value::<CandidateState>(json!(serialized)).unwrap(),
+                state
+            );
+        }
+        assert_eq!(
+            serde_json::from_value::<CandidateState>(json!("promoted")).unwrap(),
+            CandidateState::Created
+        );
+        for forbidden in ["queue", "in-progress", "verification-pending", "resolved"] {
+            assert!(serde_json::from_value::<CandidateState>(json!(forbidden)).is_err());
+        }
+
+        let allowed = [
+            (CandidateState::Pending, CandidateState::NeedsEvidence),
+            (CandidateState::Pending, CandidateState::OwnerResolving),
+            (
+                CandidateState::NeedsEvidence,
+                CandidateState::OwnerResolving,
+            ),
+            (CandidateState::NeedsEvidence, CandidateState::Dismissed),
+            (CandidateState::OwnerResolving, CandidateState::Linked),
+            (CandidateState::OwnerResolving, CandidateState::Created),
+            (CandidateState::OwnerResolving, CandidateState::Blocked),
+            (
+                CandidateState::OwnerResolving,
+                CandidateState::RemoteOutcomeUnknown,
+            ),
+            (CandidateState::OwnerResolving, CandidateState::Dismissed),
+            (CandidateState::Blocked, CandidateState::OwnerResolving),
+            (CandidateState::Blocked, CandidateState::Dismissed),
+            (
+                CandidateState::RemoteOutcomeUnknown,
+                CandidateState::OwnerResolving,
+            ),
+            (CandidateState::RemoteOutcomeUnknown, CandidateState::Linked),
+            (
+                CandidateState::RemoteOutcomeUnknown,
+                CandidateState::Created,
+            ),
+            (
+                CandidateState::RemoteOutcomeUnknown,
+                CandidateState::Dismissed,
+            ),
+            (CandidateState::Linked, CandidateState::Recurrent),
+            (CandidateState::Linked, CandidateState::Dismissed),
+            (CandidateState::Created, CandidateState::Recurrent),
+            (CandidateState::Created, CandidateState::Dismissed),
+            (CandidateState::Recurrent, CandidateState::OwnerResolving),
+            (CandidateState::Recurrent, CandidateState::Blocked),
+            (CandidateState::Recurrent, CandidateState::Dismissed),
+            (CandidateState::Parked, CandidateState::NeedsEvidence),
+            (CandidateState::Parked, CandidateState::OwnerResolving),
+            (CandidateState::Parked, CandidateState::Dismissed),
+        ];
+        for (from, _) in states {
+            for (to, _) in states {
+                assert_eq!(
+                    candidate_transition_allowed(from, to),
+                    from == to || allowed.contains(&(from, to)),
+                    "unexpected transition {from:?} -> {to:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn typed_recapture_moves_owned_candidates_to_recurrent() {
+        for state in [CandidateState::Linked, CandidateState::Created] {
+            assert_eq!(
+                settled_typed_capture_state(&state, ImprovementEligibility::Deterministic),
+                CandidateState::Recurrent
+            );
+        }
+        assert_eq!(
+            settled_typed_capture_state(
+                &CandidateState::NeedsEvidence,
+                ImprovementEligibility::Deterministic,
+            ),
+            CandidateState::OwnerResolving
+        );
+    }
+
+    #[test]
+    fn blocked_reason_subcode_and_retry_matrix_is_validated() {
+        let reasons = [
+            BlockedReason::Store,
+            BlockedReason::Search,
+            BlockedReason::Auth,
+            BlockedReason::Privacy,
+            BlockedReason::Ambiguity,
+            BlockedReason::Routing,
+            BlockedReason::Create,
+            BlockedReason::Update,
+            BlockedReason::Readback,
+            BlockedReason::LocalCommit,
+            BlockedReason::Timeout,
+            BlockedReason::RateLimit,
+            BlockedReason::Network,
+            BlockedReason::Parse,
+            BlockedReason::Reconciliation,
+        ];
+        for reason in reasons {
+            let mut candidate = lifecycle_test_candidate(CandidateState::Blocked);
+            candidate.blocked_reason = Some(reason);
+            candidate.retry = Some(retry_metadata());
+            candidate.failure_subcode = None;
+            validate_candidate_lifecycle(&candidate).expect("valid blocked candidate");
+
+            for subcode in [FailureSubcode::EmptyCorpus, FailureSubcode::PartialPage] {
+                candidate.failure_subcode = Some(subcode);
+                if reason == BlockedReason::Search {
+                    validate_candidate_lifecycle(&candidate)
+                        .expect("search failure subcode must be valid");
+                } else {
+                    assert!(validate_candidate_lifecycle(&candidate).is_err());
+                }
+            }
+        }
+
+        let mut invalid = lifecycle_test_candidate(CandidateState::Blocked);
+        invalid.retry = Some(retry_metadata());
+        assert!(validate_candidate_lifecycle(&invalid).is_err());
+        invalid.blocked_reason = Some(BlockedReason::Auth);
+        invalid.failure_subcode = Some(FailureSubcode::PartialPage);
+        assert!(validate_candidate_lifecycle(&invalid).is_err());
+
+        let mut invalid = lifecycle_test_candidate(CandidateState::NeedsEvidence);
+        invalid.blocked_reason = Some(BlockedReason::Search);
+        assert!(validate_candidate_lifecycle(&invalid).is_err());
+
+        let mut remote = lifecycle_test_candidate(CandidateState::RemoteOutcomeUnknown);
+        assert!(validate_candidate_lifecycle(&remote).is_err());
+        remote.retry = Some(retry_metadata());
+        validate_candidate_lifecycle(&remote).expect("remote retry metadata");
+        remote.retry.as_mut().unwrap().remediation = "retry later".to_string();
+        assert!(validate_candidate_lifecycle(&remote).is_err());
+        remote.retry.as_mut().unwrap().remediation = "REFRESH_OWNER_CORPUS".to_string();
+        remote.retry.as_mut().unwrap().failed_at = "not-a-time".to_string();
+        assert!(validate_candidate_lifecycle(&remote).is_err());
+    }
+
+    #[test]
+    fn resolver_revision_is_order_independent_and_tamper_evident() {
+        let owner = |number, title: &str| OwnerCandidate {
+            number,
+            kind: OwnerKind::Issue,
+            title: title.to_string(),
+            active: true,
+            url: format!("https://github.com/akiojin/gwt/issues/{number}"),
+            match_basis: OwnerMatchBasis::Fingerprint,
+            selectable: true,
+        };
+        let first = ResolverSnapshot::new(
+            "generation-a".to_string(),
+            vec![owner(42, "Owner B"), owner(7, "Owner A")],
+        )
+        .expect("resolver snapshot");
+        let reordered = ResolverSnapshot::new(
+            "generation-a".to_string(),
+            vec![owner(7, "Owner A"), owner(42, "Owner B")],
+        )
+        .expect("reordered snapshot");
+        assert_eq!(first.resolver_revision, reordered.resolver_revision);
+        assert_ne!(
+            first.resolver_revision,
+            ResolverSnapshot::new(
+                "generation-b".to_string(),
+                vec![owner(7, "Owner A"), owner(42, "Owner B")],
+            )
+            .unwrap()
+            .resolver_revision
+        );
+        assert_ne!(
+            first.resolver_revision,
+            ResolverSnapshot::new(
+                "generation-a".to_string(),
+                vec![owner(7, "Changed title"), owner(42, "Owner B")],
+            )
+            .unwrap()
+            .resolver_revision
+        );
+
+        let mut candidate = lifecycle_test_candidate(CandidateState::Blocked);
+        candidate.blocked_reason = Some(BlockedReason::Ambiguity);
+        candidate.retry = Some(retry_metadata());
+        candidate.resolver_snapshot = Some(first.clone());
+        validate_candidate_lifecycle(&candidate).expect("valid resolver revision");
+        candidate
+            .resolver_snapshot
+            .as_mut()
+            .unwrap()
+            .resolver_revision = "0".repeat(64);
+        assert!(validate_candidate_lifecycle(&candidate).is_err());
+    }
+
+    #[test]
+    fn candidate_public_projection_contains_typed_owner_candidates_without_generation() {
+        let mut candidate = lifecycle_test_candidate(CandidateState::Blocked);
+        candidate.blocked_reason = Some(BlockedReason::Ambiguity);
+        candidate.failure_subcode = None;
+        candidate.retry = Some(retry_metadata());
+        candidate.resolver_snapshot = Some(
+            ResolverSnapshot::new(
+                "private-generation".to_string(),
+                vec![OwnerCandidate {
+                    number: 42,
+                    kind: OwnerKind::Spec,
+                    title: "Public SPEC title".to_string(),
+                    active: true,
+                    url: "https://github.com/akiojin/gwt/issues/42".to_string(),
+                    match_basis: OwnerMatchBasis::Contract,
+                    selectable: true,
+                }],
+            )
+            .unwrap(),
+        );
+        let value = candidate_public_json(&candidate);
+        assert_eq!(value["resolution_state"], "blocked");
+        assert_eq!(value["blocked_reason"], "ambiguity");
+        assert_eq!(value["owner_candidates"][0]["kind"], "spec");
+        assert_eq!(value["owner_candidates"][0]["match_basis"], "contract");
+        assert!(value["resolver_revision"].as_str().is_some());
+        assert!(value.get("corpus_generation").is_none());
+    }
+
     #[test]
     fn typed_identity_has_stable_golden_vectors() {
         let evidence = TypedFailureEvidence {
@@ -2033,7 +2839,7 @@ mod tests {
         )
         .expect("registered capture");
         assert_eq!(first.eligibility, ImprovementEligibility::Deterministic);
-        assert_eq!(first.state, "owner-resolving");
+        assert_eq!(first.state, CandidateState::OwnerResolving);
         assert_eq!(first.occurrences, 1);
         let occurrence = &first.distinct_occurrences[0];
         assert!(occurrence.qualifies_unattended);
@@ -2140,7 +2946,7 @@ mod tests {
         let ineligible =
             capture_registered(&mut env, ineligible_input).expect("ineligible registered capture");
         assert_eq!(ineligible.eligibility, ImprovementEligibility::Ineligible);
-        assert_eq!(ineligible.state, "needs-evidence");
+        assert_eq!(ineligible.state, CandidateState::NeedsEvidence);
 
         let public_command = ImprovementCaptureCommand {
             source: "agent-failure".to_string(),
@@ -2175,7 +2981,7 @@ mod tests {
         .expect("public capture")
         .candidate;
         assert_eq!(after_public.eligibility, ImprovementEligibility::Ineligible);
-        assert_eq!(after_public.state, "needs-evidence");
+        assert_eq!(after_public.state, CandidateState::NeedsEvidence);
         assert_eq!(after_public.occurrences, 1);
 
         let mut env = TestEnv::new(project.path().join("cache-eligible"));
@@ -2217,7 +3023,7 @@ mod tests {
             after_low_public.eligibility,
             ImprovementEligibility::Deterministic
         );
-        assert_eq!(after_low_public.state, "owner-resolving");
+        assert_eq!(after_low_public.state, CandidateState::OwnerResolving);
     }
 
     #[test]

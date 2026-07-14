@@ -11,9 +11,12 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
-use super::improvement::{CandidateStore, ImprovementCandidate, ImprovementEligibility};
+use super::improvement::{
+    transition_candidate, validate_candidate_lifecycle, CandidateState, CandidateStore,
+    ImprovementCandidate, ImprovementEligibility, RetryMetadata,
+};
 
-pub(super) const STORE_SCHEMA_VERSION: u32 = 2;
+pub(super) const STORE_SCHEMA_VERSION: u32 = 3;
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub(super) struct LegacyImportState {
@@ -130,7 +133,14 @@ pub(super) fn acquire_attempt_lease(
             });
         }
         if current.remote_phase == AttemptRemotePhase::Submitted {
-            candidate.state = "remote-outcome-unknown".to_string();
+            candidate.blocked_reason = None;
+            candidate.failure_subcode = None;
+            candidate.retry = Some(RetryMetadata {
+                retryable: true,
+                remediation: "RECONCILE_REMOTE_OUTCOME".to_string(),
+                failed_at: now.to_rfc3339(),
+            });
+            transition_candidate(candidate, CandidateState::RemoteOutcomeUnknown)?;
             candidate.updated_at = now.to_rfc3339();
             return Ok(AttemptLeaseDecision::RemoteOutcomeUnknown);
         }
@@ -188,26 +198,19 @@ fn load_and_repair_unlocked(repo_root: &Path) -> Result<CandidateStore, SpecOpsE
     }
 
     let mut changed = !canonical_exists;
-    if store.schema_version < STORE_SCHEMA_VERSION {
-        migrate_pre_v2_store(&mut store)?;
-        changed = true;
-    } else {
-        match store.source_scope_nonce.as_deref() {
-            None => return Err(invalid("improvement source scope nonce is missing")),
-            Some(nonce) if valid_source_scope_nonce(nonce) => {}
-            Some(_) => return Err(invalid("invalid improvement source scope nonce")),
+    match store.schema_version {
+        0 | 1 => {
+            migrate_pre_v2_store(&mut store)?;
+            changed = true;
         }
-        if let Some(candidate) = store
-            .candidates
-            .iter()
-            .find(|candidate| candidate.schema_version != STORE_SCHEMA_VERSION)
-        {
-            return Err(invalid(&format!(
-                "candidate schema version {} does not match store schema version {}",
-                candidate.schema_version, STORE_SCHEMA_VERSION
-            )));
+        2 => {
+            migrate_v2_store(&mut store)?;
+            changed = true;
         }
+        STORE_SCHEMA_VERSION => {}
+        _ => unreachable!("future schema rejected above"),
     }
+    validate_current_store(&store)?;
     let mut seen_roots = HashSet::new();
     for root in discover_legacy_roots(repo_root) {
         let source_id = digest_bytes(normalized_source_identity(&root.path).as_bytes());
@@ -274,12 +277,66 @@ fn migrate_pre_v2_store(store: &mut CandidateStore) -> Result<(), SpecOpsError> 
         candidate.eligibility = ImprovementEligibility::NeedsEvidence;
         candidate.capture_status_generation = 0;
         candidate.capture_status_delivered_generation = 0;
-        if matches!(candidate.state.as_str(), "pending" | "owner-resolving") {
-            candidate.state = "needs-evidence".to_string();
+        if matches!(
+            candidate.state,
+            CandidateState::Pending | CandidateState::OwnerResolving
+        ) {
+            candidate.state = CandidateState::NeedsEvidence;
         }
+        candidate.blocked_reason = None;
+        candidate.failure_subcode = None;
+        candidate.retry = None;
+        candidate.owner = None;
+        candidate.resolver_snapshot = None;
         candidate.schema_version = STORE_SCHEMA_VERSION;
+        validate_candidate_lifecycle(candidate)?;
     }
     store.schema_version = STORE_SCHEMA_VERSION;
+    Ok(())
+}
+
+fn migrate_v2_store(store: &mut CandidateStore) -> Result<(), SpecOpsError> {
+    match store.source_scope_nonce.as_deref() {
+        None => return Err(invalid("improvement source scope nonce is missing")),
+        Some(nonce) if valid_source_scope_nonce(nonce) => {}
+        Some(_) => return Err(invalid("invalid improvement source scope nonce")),
+    }
+    for candidate in &mut store.candidates {
+        if candidate.schema_version != 2 {
+            return Err(invalid(&format!(
+                "candidate schema version {} does not match store schema version 2",
+                candidate.schema_version
+            )));
+        }
+        if candidate.state == CandidateState::RemoteOutcomeUnknown && candidate.retry.is_none() {
+            candidate.retry = Some(RetryMetadata {
+                retryable: true,
+                remediation: "REFRESH_OWNER_CORPUS".to_string(),
+                failed_at: candidate.updated_at.clone(),
+            });
+        }
+        candidate.schema_version = STORE_SCHEMA_VERSION;
+        validate_candidate_lifecycle(candidate)?;
+    }
+    store.schema_version = STORE_SCHEMA_VERSION;
+    Ok(())
+}
+
+fn validate_current_store(store: &CandidateStore) -> Result<(), SpecOpsError> {
+    match store.source_scope_nonce.as_deref() {
+        None => return Err(invalid("improvement source scope nonce is missing")),
+        Some(nonce) if valid_source_scope_nonce(nonce) => {}
+        Some(_) => return Err(invalid("invalid improvement source scope nonce")),
+    }
+    for candidate in &store.candidates {
+        if candidate.schema_version != STORE_SCHEMA_VERSION {
+            return Err(invalid(&format!(
+                "candidate schema version {} does not match store schema version {}",
+                candidate.schema_version, STORE_SCHEMA_VERSION
+            )));
+        }
+        validate_candidate_lifecycle(candidate)?;
+    }
     Ok(())
 }
 
@@ -292,6 +349,7 @@ fn save_unlocked(repo_root: &Path, store: &CandidateStore) -> Result<(), SpecOps
     persisted.schema_version = STORE_SCHEMA_VERSION;
     for candidate in &mut persisted.candidates {
         candidate.schema_version = STORE_SCHEMA_VERSION;
+        validate_candidate_lifecycle(candidate)?;
     }
     let bytes = serde_json::to_vec_pretty(&persisted).map_err(serde_as_spec_error)?;
     write_atomic_and_sync_parent(&path, &bytes).map_err(io_as_spec_error)
@@ -470,7 +528,12 @@ fn import_legacy_source(
             }
         } else {
             candidate.schema_version = STORE_SCHEMA_VERSION;
-            candidate.state = "needs-evidence".to_string();
+            candidate.state = CandidateState::NeedsEvidence;
+            candidate.blocked_reason = None;
+            candidate.failure_subcode = None;
+            candidate.retry = None;
+            candidate.owner = None;
+            candidate.resolver_snapshot = None;
             candidate.occurrences = 0;
             candidate.legacy_occurrence_count = Some(aggregate);
             candidate.fingerprint = Some(fingerprint);
@@ -736,7 +799,10 @@ mod tests {
             .expect("unknown outcome"),
             AttemptLeaseDecision::RemoteOutcomeUnknown
         ));
-        assert_eq!(store.candidates[0].state, "remote-outcome-unknown");
+        assert_eq!(
+            store.candidates[0].state,
+            CandidateState::RemoteOutcomeUnknown
+        );
         assert_eq!(
             store.candidates[0]
                 .attempt

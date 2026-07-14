@@ -256,6 +256,65 @@ fn write_legacy_store(project: &Path, candidates: Vec<Value>) -> PathBuf {
     path
 }
 
+fn lifecycle_candidate(id: &str, state: &str, updated_at: &str) -> Value {
+    json!({
+        "schema_version": 3,
+        "id": id,
+        "created_at": "2026-07-14T00:00:00Z",
+        "updated_at": updated_at,
+        "source": "agent-failure",
+        "target_artifact": "coordination",
+        "classification": "gwt-caused",
+        "confidence": "high",
+        "state": state,
+        "blocked_reason": null,
+        "failure_subcode": null,
+        "retry": null,
+        "owner": null,
+        "resolver_snapshot": null,
+        "dedupe_key": format!("lifecycle:{id}"),
+        "occurrences": 1,
+        "legacy_occurrence_count": null,
+        "fingerprint": format!("v2:{id:0>64}"),
+        "eligibility": "deterministic",
+        "typed_evidence": null,
+        "distinct_occurrences": [],
+        "capture_status_generation": 0,
+        "capture_status_delivered_generation": 0,
+        "sanitized_summary": format!("Lifecycle {id}"),
+        "sanitized_details": null,
+        "evidence_digest": null,
+        "local_evidence": [],
+        "linked_issue": null,
+        "dismissed_reason": null,
+        "legacy_provenance": [],
+        "attempt": null
+    })
+}
+
+fn write_canonical_store(
+    home: &Path,
+    project: &Path,
+    schema_version: u64,
+    candidates: Vec<Value>,
+) -> PathBuf {
+    let path = canonical_candidate_store(home, project);
+    fs::create_dir_all(path.parent().expect("canonical store parent"))
+        .expect("canonical store directory");
+    fs::write(
+        &path,
+        serde_json::to_vec_pretty(&json!({
+            "schema_version": schema_version,
+            "source_scope_nonce": "11".repeat(32),
+            "candidates": candidates,
+            "legacy_import": {}
+        }))
+        .expect("serialize canonical store"),
+    )
+    .expect("write canonical store");
+    path
+}
+
 fn save_session_path(home: &Path, project: &Path, repo_hash: &str) {
     let mut session = gwt_agent::Session::new(project, "test", gwt_agent::AgentId::Codex);
     session.repo_hash = Some(repo_hash.to_string());
@@ -380,7 +439,7 @@ fn improvement_store_imports_nineteen_legacy_candidates_without_inventing_occurr
         serde_json::from_slice(&fs::read(&canonical_path).expect("canonical store"))
             .expect("parse canonical store");
     let candidates = first_store["candidates"].as_array().expect("candidates");
-    assert_eq!(first_store["schema_version"], 2);
+    assert_eq!(first_store["schema_version"], 3);
     assert!(candidates.iter().all(|candidate| {
         candidate["state"] == "needs-evidence"
             && candidate["occurrences"] == 0
@@ -706,7 +765,7 @@ fn improvement_store_serializes_concurrent_cross_process_capture() {
         candidates[0]["occurrences"], WORKERS as u64,
         "cross-process read-modify-write must not lose occurrences"
     );
-    assert_eq!(store["schema_version"], 2);
+    assert_eq!(store["schema_version"], 3);
 }
 
 #[test]
@@ -790,10 +849,10 @@ fn improvement_store_migrates_v1_occurrences_to_legacy_aggregate() {
 
     let migrated: Value = serde_json::from_slice(&fs::read(&store_path).expect("migrated store"))
         .expect("parse migrated store");
-    assert_eq!(migrated["schema_version"], 2);
+    assert_eq!(migrated["schema_version"], 3);
     assert_eq!(migrated["source_scope_nonce"].as_str().unwrap().len(), 64);
     let candidate = &migrated["candidates"][0];
-    assert_eq!(candidate["schema_version"], 2);
+    assert_eq!(candidate["schema_version"], 3);
     assert_eq!(candidate["state"], "needs-evidence");
     assert_eq!(candidate["occurrences"], 0);
     assert_eq!(candidate["legacy_occurrence_count"], 3);
@@ -1383,4 +1442,251 @@ fn memory_add_alone_does_not_create_or_advance_an_improvement_candidate() {
         }),
     ));
     assert_eq!(listed["candidates"], json!([]));
+}
+
+#[test]
+fn improvement_list_v2_filters_typed_lifecycle_and_owner_fields() {
+    let fixture = fixture();
+    let mut blocked = lifecycle_candidate("blocked", "blocked", "2026-07-14T04:00:00Z");
+    blocked["blocked_reason"] = json!("search");
+    blocked["failure_subcode"] = json!("partial-page");
+    blocked["retry"] = json!({
+        "retryable": true,
+        "remediation": "REFRESH_OWNER_CORPUS",
+        "failed_at": "2026-07-14T04:00:00Z"
+    });
+
+    let mut linked = lifecycle_candidate("linked", "linked", "2026-07-14T03:00:00Z");
+    let linked_fingerprint = linked["fingerprint"].clone();
+    linked["owner"] = json!({
+        "number": 42,
+        "kind": "issue",
+        "title": "Existing typed owner",
+        "active": true,
+        "url": "https://github.com/akiojin/gwt/issues/42",
+        "fingerprint": linked_fingerprint,
+        "readback_verified_at": "2026-07-14T03:00:00Z"
+    });
+    linked["linked_issue"] = json!({
+        "number": 42,
+        "url": "https://github.com/akiojin/gwt/issues/42",
+        "repository": "akiojin/gwt"
+    });
+
+    let mut created = lifecycle_candidate("created", "created", "2026-07-14T02:00:00Z");
+    created["confidence"] = json!("medium");
+    let created_fingerprint = created["fingerprint"].clone();
+    created["owner"] = json!({
+        "number": 84,
+        "kind": "issue",
+        "title": "New typed owner",
+        "active": true,
+        "url": "https://github.com/akiojin/gwt/issues/84",
+        "fingerprint": created_fingerprint,
+        "readback_verified_at": "2026-07-14T02:00:00Z"
+    });
+    created["linked_issue"] = json!({
+        "number": 84,
+        "url": "https://github.com/akiojin/gwt/issues/84",
+        "repository": "akiojin/gwt"
+    });
+
+    let mut needs = lifecycle_candidate("needs-evidence", "needs-evidence", "2026-07-14T01:00:00Z");
+    needs["classification"] = json!("ambiguous");
+    needs["confidence"] = json!("low");
+    needs["eligibility"] = json!("needs-evidence");
+    needs["occurrences"] = json!(0);
+
+    write_canonical_store(
+        fixture.home.path(),
+        fixture.project.path(),
+        3,
+        vec![created, needs, linked, blocked],
+    );
+
+    let list = |params: Value| {
+        operation_output(&run_gwtd_json(
+            &fixture,
+            json!({
+                "schema_version": 1,
+                "operation": "improvement.list",
+                "params": params
+            }),
+        ))
+    };
+
+    let newest = list(json!({"limit": 2}));
+    assert_eq!(newest["improvement_contract_version"], 2);
+    assert_eq!(newest["candidates"][0]["id"], "blocked");
+    assert_eq!(newest["candidates"][1]["id"], "linked");
+    assert_eq!(newest["candidates"][0]["resolution_state"], "blocked");
+    assert_eq!(newest["candidates"][0]["blocked_reason"], "search");
+    assert_eq!(newest["candidates"][0]["failure_subcode"], "partial-page");
+    assert_eq!(newest["candidates"][0]["retry"]["retryable"], true);
+
+    assert_eq!(
+        list(json!({"state": "promoted"}))["candidates"][0]["id"],
+        "created"
+    );
+    assert_eq!(
+        list(json!({"blocked_reason": "search"}))["candidates"][0]["id"],
+        "blocked"
+    );
+    assert_eq!(
+        list(json!({"failure_subcode": "partial-page"}))["candidates"][0]["id"],
+        "blocked"
+    );
+    assert_eq!(
+        list(json!({"classification": "ambiguous"}))["candidates"][0]["id"],
+        "needs-evidence"
+    );
+    assert_eq!(
+        list(json!({"confidence": "medium"}))["candidates"][0]["id"],
+        "created"
+    );
+    let owned = list(json!({"owner_number": 42}));
+    assert_eq!(owned["candidates"][0]["id"], "linked");
+    assert_eq!(owned["candidates"][0]["owner"]["number"], 42);
+}
+
+#[test]
+fn improvement_list_v2_reads_legacy_states_and_remote_retry_metadata() {
+    let fixture = fixture();
+    let states = [
+        ("pending", "pending"),
+        ("promoted", "created"),
+        ("linked", "linked"),
+        ("parked", "parked"),
+        ("dismissed", "dismissed"),
+        ("remote", "remote-outcome-unknown"),
+    ];
+    let candidates = states
+        .iter()
+        .enumerate()
+        .map(|(index, (id, state))| {
+            let mut candidate =
+                lifecycle_candidate(id, state, &format!("2026-07-14T00:{index:02}:00Z"));
+            candidate["schema_version"] = json!(2);
+            if matches!(*id, "promoted" | "linked") {
+                candidate["linked_issue"] = json!({
+                    "number": index as u64 + 1,
+                    "url": format!("https://github.com/akiojin/gwt/issues/{}", index + 1),
+                    "repository": "akiojin/gwt"
+                });
+            }
+            if *state == "dismissed" {
+                candidate["dismissed_reason"] = json!("legacy dismissal");
+            }
+            if *state == "remote-outcome-unknown" {
+                candidate["retry"] = json!({
+                    "retryable": true,
+                    "remediation": "REFRESH_OWNER_CORPUS",
+                    "failed_at": "2026-07-14T00:05:00Z"
+                });
+            }
+            candidate
+        })
+        .collect();
+    let store_path =
+        write_canonical_store(fixture.home.path(), fixture.project.path(), 2, candidates);
+
+    let listed = operation_output(&run_gwtd_json(
+        &fixture,
+        json!({
+            "schema_version": 1,
+            "operation": "improvement.list",
+            "params": {}
+        }),
+    ));
+    assert_eq!(listed["improvement_contract_version"], 2);
+    let candidates = listed["candidates"].as_array().unwrap();
+    for (id, resolution_state) in states {
+        let candidate = candidates
+            .iter()
+            .find(|candidate| candidate["id"] == id)
+            .expect("legacy candidate");
+        assert_eq!(candidate["resolution_state"], resolution_state);
+        if id == "promoted" {
+            assert_eq!(candidate["state"], "promoted");
+        }
+    }
+    let remote = candidates
+        .iter()
+        .find(|candidate| candidate["id"] == "remote")
+        .unwrap();
+    assert_eq!(remote["retry"]["remediation"], "REFRESH_OWNER_CORPUS");
+    let migrated: Value = serde_json::from_slice(&fs::read(store_path).expect("migrated store"))
+        .expect("parse migrated store");
+    assert_eq!(migrated["schema_version"], 3);
+}
+
+#[test]
+fn improvement_list_v2_rejects_invalid_filters_and_downstream_states_without_rewrite() {
+    for (params, expected) in [
+        (json!({"state": "queue"}), "invalid improvement state"),
+        (
+            json!({"blocked_reason": "unknown"}),
+            "invalid blocked reason",
+        ),
+        (
+            json!({"failure_subcode": "unknown"}),
+            "invalid failure subcode",
+        ),
+        (
+            json!({"classification": "unknown"}),
+            "invalid classification",
+        ),
+        (json!({"confidence": "unknown"}), "invalid confidence"),
+        (
+            json!({"owner_number": 0}),
+            "owner_number must be greater than zero",
+        ),
+        (json!({"limit": 0}), "limit must be greater than zero"),
+    ] {
+        let fixture = fixture();
+        let path =
+            write_canonical_store(fixture.home.path(), fixture.project.path(), 2, Vec::new());
+        let before = fs::read(&path).expect("store before invalid filter");
+        let output = run_gwtd_json_raw(
+            &fixture,
+            json!({
+                "schema_version": 1,
+                "operation": "improvement.list",
+                "params": params
+            }),
+        );
+        assert!(!output.status.success(), "invalid filter must fail");
+        assert!(
+            String::from_utf8_lossy(&output.stderr).contains(expected),
+            "unexpected error: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert_eq!(fs::read(path).expect("unchanged store"), before);
+    }
+
+    for forbidden_state in ["queue", "in-progress", "verification-pending", "resolved"] {
+        let fixture = fixture();
+        let path = write_canonical_store(
+            fixture.home.path(),
+            fixture.project.path(),
+            3,
+            vec![lifecycle_candidate(
+                "forbidden",
+                forbidden_state,
+                "2026-07-14T00:00:00Z",
+            )],
+        );
+        let before = fs::read(&path).expect("store before invalid state");
+        let output = run_gwtd_json_raw(
+            &fixture,
+            json!({
+                "schema_version": 1,
+                "operation": "improvement.list",
+                "params": {}
+            }),
+        );
+        assert!(!output.status.success(), "{forbidden_state} must not load");
+        assert!(String::from_utf8_lossy(&output.stderr).contains("unknown variant"));
+        assert_eq!(fs::read(path).expect("invalid state store remains"), before);
+    }
 }
