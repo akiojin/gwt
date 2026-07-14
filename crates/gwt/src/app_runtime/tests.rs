@@ -7448,6 +7448,8 @@ fn app_runtime_active_work_projection_resumed_paused_work_is_single_active_row()
     let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
     let repo = temp.path().join("repo");
     fs::create_dir_all(&repo).expect("create repo");
+    let worktree = repo.join("work/resume");
+    fs::create_dir_all(&worktree).expect("create worktree path");
     let mut projection =
         gwt_core::workspace_projection::WorkspaceProjection::default_for_project(&repo);
     projection.agents.push({
@@ -7460,17 +7462,17 @@ fn app_runtime_active_work_projection_resumed_paused_work_is_single_active_row()
         .expect("save projection");
     let tab = sample_project_tab("tab-1", "Repo", repo.clone(), ProjectKind::Git, &[]);
     let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
-    let build_session = |runtime: &mut AppRuntime| {
+    let build_session = |runtime: &mut AppRuntime, worktree_path: PathBuf| {
         let mut session = sample_active_agent_session("tab-1", "tab-1::agent-resume");
         session.session_id = "session-resume".to_string();
         session.branch_name = "work/resume".to_string();
-        session.worktree_path = repo.join("work/resume");
+        session.worktree_path = worktree_path;
         session.window_id = "tab-1::agent-resume".to_string();
         runtime
             .active_agent_sessions
             .insert("tab-1::agent-resume".to_string(), session);
     };
-    build_session(&mut runtime);
+    build_session(&mut runtime, worktree.clone());
 
     // Stop → paused marker persisted to work history.
     runtime.mark_agent_session_stopped("tab-1::agent-resume");
@@ -7481,7 +7483,10 @@ fn app_runtime_active_work_projection_resumed_paused_work_is_single_active_row()
     assert_eq!(paused_view.active_works[0].lifecycle_state, "paused");
 
     // Resume: the same session returns to active_agent_sessions.
-    build_session(&mut runtime);
+    let alternate_worktree_path = worktree.join("..").join("resume");
+    assert_ne!(worktree, alternate_worktree_path);
+    assert!(same_worktree_path(&worktree, &alternate_worktree_path));
+    build_session(&mut runtime, alternate_worktree_path);
     let resumed_view = runtime
         .active_work_projection_for_tab("tab-1", &runtime.tabs[0])
         .expect("resumed projection view");
@@ -7495,6 +7500,11 @@ fn app_runtime_active_work_projection_resumed_paused_work_is_single_active_row()
         "work-session-session-resume"
     );
     assert_eq!(resumed_view.active_works[0].lifecycle_state, "active");
+    assert_eq!(
+        resumed_view.active_works[0].works.len(),
+        1,
+        "one resumed Session must stay one child Work across equivalent worktree paths"
+    );
 }
 
 /// SPEC-2359 Phase W-12 Slice 5a (FR-350): a live Work and an unrelated
@@ -7599,6 +7609,23 @@ fn history_work_view(
     }
 }
 
+fn git_details_for_active_work_test(
+    branch: &str,
+    worktree: &str,
+) -> gwt_core::workspace_projection::GitDetails {
+    gwt_core::workspace_projection::GitDetails {
+        branch: Some(branch.to_string()),
+        worktree_path: Some(PathBuf::from(worktree)),
+        base_branch: Some("origin/develop".to_string()),
+        pr_number: None,
+        pr_state: None,
+        pr_url: None,
+        pr_created_at: None,
+        created_by_start_work: true,
+        created_at: chrono::Utc::now(),
+    }
+}
+
 /// Issue #3213 regression (PR #3205 orphaned): a stray agent ref that shares a
 /// session id with ANOTHER branch's Work must not swallow that Work's row.
 /// Reproduces the affected project's works.json: the issue-3184 item carried a
@@ -7659,6 +7686,280 @@ fn app_runtime_paused_work_row_survives_stray_shared_session_on_other_branch() {
         .expect("work/issue-3197 row must not be swallowed by the stray session ref");
     assert_eq!(issue_3197.branch.as_deref(), Some("work/issue-3197"));
     assert_eq!(issue_3197.lifecycle_state, "paused");
+}
+
+/// SPEC-2359 FR-471: a shared Session id cannot override a conflicting
+/// worktree identity even when the branch identity agrees.
+#[test]
+fn app_runtime_shared_session_with_conflicting_worktree_keeps_both_works() {
+    let temp = tempdir().expect("tempdir");
+    let repo = temp.path().join("repo");
+    fs::create_dir_all(&repo).expect("create repo");
+    let mut projection =
+        gwt_core::workspace_projection::WorkspaceProjection::default_for_project(&repo);
+    projection.git_details = Some(git_details_for_active_work_test(
+        "work/shared",
+        "/home/user/gwt/work/paused",
+    ));
+    projection.agents.push({
+        let mut agent = workspace_agent_summary_for_test("shared-session", Some("work-live"));
+        agent.branch = Some("work/shared".to_string());
+        agent.worktree_path = Some(PathBuf::from("/home/user/gwt/work/live"));
+        agent
+    });
+    let mut paused = history_work_view(
+        "legacy-work-paused",
+        "work/shared",
+        "/home/user/gwt/work/paused",
+        vec![history_agent_ref_view(
+            "shared-session",
+            Some("Codex"),
+            "2026-07-12T01:00:00Z",
+        )],
+    );
+    paused.title = "Paused worktree-conflict history".to_string();
+    paused.summary = Some("Paused worktree-conflict summary".to_string());
+    paused.owner = Some("Issue #471".to_string());
+    paused.execution_containers[0].pr_number = Some(471);
+    paused.execution_containers[0].pr_url = Some("https://example.test/pr/471".to_string());
+    paused.board_refs = vec!["paused-board-ref".to_string()];
+
+    let view = super::active_work_projection_from_saved_with_journal(
+        projection,
+        Vec::new(),
+        vec![paused],
+        None,
+    );
+
+    assert_eq!(
+        view.active_works.len(),
+        2,
+        "a worktree conflict must prevent shared-Session deduplication"
+    );
+    let live = view
+        .active_works
+        .iter()
+        .find(|work| work.id == "work-session-shared-session")
+        .expect("live Work");
+    assert_eq!(live.title, "Board audience follow-up");
+    assert_eq!(live.summary, None);
+    assert_eq!(live.owner, None);
+    assert_eq!(live.pr_number, None);
+    assert!(live.board_refs.is_empty());
+}
+
+/// SPEC-2359 FR-471: a shared Session id cannot override a conflicting
+/// branch identity even when the worktree identity agrees.
+#[test]
+fn app_runtime_shared_session_with_conflicting_branch_keeps_both_works() {
+    let temp = tempdir().expect("tempdir");
+    let repo = temp.path().join("repo");
+    fs::create_dir_all(&repo).expect("create repo");
+    let shared_worktree = "/home/user/gwt/work/shared";
+    let mut projection =
+        gwt_core::workspace_projection::WorkspaceProjection::default_for_project(&repo);
+    projection.git_details = Some(git_details_for_active_work_test(
+        "work/paused",
+        shared_worktree,
+    ));
+    projection.agents.push({
+        let mut agent = workspace_agent_summary_for_test("shared-session", Some("work-live"));
+        agent.branch = Some("work/live".to_string());
+        agent.worktree_path = Some(PathBuf::from(shared_worktree));
+        agent
+    });
+    let mut paused = history_work_view(
+        "legacy-work-paused",
+        "work/paused",
+        shared_worktree,
+        vec![history_agent_ref_view(
+            "shared-session",
+            Some("Codex"),
+            "2026-07-12T01:00:00Z",
+        )],
+    );
+    paused.title = "Paused branch-conflict history".to_string();
+    paused.summary = Some("Paused branch-conflict summary".to_string());
+    paused.owner = Some("Issue #472".to_string());
+    paused.execution_containers[0].pr_number = Some(472);
+    paused.execution_containers[0].pr_url = Some("https://example.test/pr/472".to_string());
+    paused.board_refs = vec!["paused-board-ref".to_string()];
+
+    let view = super::active_work_projection_from_saved_with_journal(
+        projection,
+        Vec::new(),
+        vec![paused],
+        None,
+    );
+
+    assert_eq!(
+        view.active_works.len(),
+        2,
+        "a branch conflict must prevent shared-Session deduplication"
+    );
+    let live = view
+        .active_works
+        .iter()
+        .find(|work| work.id == "work-session-shared-session")
+        .expect("live Work");
+    assert_eq!(live.title, "Board audience follow-up");
+    assert_eq!(live.summary, None);
+    assert_eq!(live.owner, None);
+    assert_eq!(live.pr_number, None);
+    assert!(live.board_refs.is_empty());
+}
+
+/// SPEC-2359 FR-471: projection fallback must participate in history matching
+/// when the live Agent omits branch identity, so foreign history metadata does
+/// not leak through a matching worktree.
+#[test]
+fn app_runtime_projection_branch_fallback_blocks_foreign_history_metadata() {
+    let temp = tempdir().expect("tempdir");
+    let repo = temp.path().join("repo");
+    fs::create_dir_all(&repo).expect("create repo");
+    let shared_worktree = "/home/user/gwt/work/shared";
+    let mut projection =
+        gwt_core::workspace_projection::WorkspaceProjection::default_for_project(&repo);
+    projection.title = "Live projection title".to_string();
+    projection.git_details = Some(git_details_for_active_work_test(
+        "work/live",
+        shared_worktree,
+    ));
+    projection.agents.push({
+        let mut agent = workspace_agent_summary_for_test("shared-session", Some("work-live"));
+        agent.branch = None;
+        agent.worktree_path = Some(PathBuf::from(shared_worktree));
+        agent
+    });
+    let mut foreign = history_work_view(
+        "legacy-work-foreign",
+        "work/foreign",
+        shared_worktree,
+        vec![history_agent_ref_view(
+            "shared-session",
+            Some("Codex"),
+            "2026-07-12T01:00:00Z",
+        )],
+    );
+    foreign.title = "Foreign history title".to_string();
+    foreign.summary = Some("Foreign history summary".to_string());
+
+    let view = super::active_work_projection_from_saved_with_journal(
+        projection,
+        Vec::new(),
+        vec![foreign],
+        None,
+    );
+
+    assert_eq!(view.active_works.len(), 2);
+    let live = view
+        .active_works
+        .iter()
+        .find(|work| work.id == "work-session-shared-session")
+        .expect("live Work");
+    assert_eq!(live.branch.as_deref(), Some("work/live"));
+    assert_eq!(live.title, "Live projection title");
+    assert_eq!(live.summary, None);
+}
+
+/// SPEC-2359 FR-471: projection fallback must participate in history matching
+/// when the live Agent omits worktree identity, so foreign history metadata
+/// does not leak through a matching branch.
+#[test]
+fn app_runtime_projection_worktree_fallback_blocks_foreign_history_metadata() {
+    let temp = tempdir().expect("tempdir");
+    let repo = temp.path().join("repo");
+    fs::create_dir_all(&repo).expect("create repo");
+    let live_worktree = "/home/user/gwt/work/live";
+    let mut projection =
+        gwt_core::workspace_projection::WorkspaceProjection::default_for_project(&repo);
+    projection.title = "Live projection title".to_string();
+    projection.git_details = Some(git_details_for_active_work_test(
+        "work/shared",
+        live_worktree,
+    ));
+    projection.agents.push({
+        let mut agent = workspace_agent_summary_for_test("shared-session", Some("work-live"));
+        agent.branch = Some("work/shared".to_string());
+        agent.worktree_path = None;
+        agent
+    });
+    let mut foreign = history_work_view(
+        "legacy-work-foreign",
+        "work/shared",
+        "/home/user/gwt/work/foreign",
+        vec![history_agent_ref_view(
+            "shared-session",
+            Some("Codex"),
+            "2026-07-12T01:00:00Z",
+        )],
+    );
+    foreign.title = "Foreign history title".to_string();
+    foreign.summary = Some("Foreign history summary".to_string());
+
+    let view = super::active_work_projection_from_saved_with_journal(
+        projection,
+        Vec::new(),
+        vec![foreign],
+        None,
+    );
+
+    assert_eq!(view.active_works.len(), 2);
+    let live = view
+        .active_works
+        .iter()
+        .find(|work| work.id == "work-session-shared-session")
+        .expect("live Work");
+    assert_eq!(live.worktree_path.as_deref(), Some(live_worktree));
+    assert_eq!(live.title, "Live projection title");
+    assert_eq!(live.summary, None);
+}
+
+/// SPEC-2359 FR-470/FR-471: branch/worktree can group a parent Workspace but
+/// cannot assign a legacy history record to a live Work when neither exact
+/// Work id nor a non-empty shared Session identifies that launch.
+#[test]
+fn app_runtime_sessionless_live_work_does_not_claim_legacy_history_by_git_identity() {
+    let temp = tempdir().expect("tempdir");
+    let repo = temp.path().join("repo");
+    fs::create_dir_all(&repo).expect("create repo");
+    let shared_worktree = "/home/user/gwt/work/shared";
+    let mut projection =
+        gwt_core::workspace_projection::WorkspaceProjection::default_for_project(&repo);
+    projection.agents.push({
+        let mut agent = workspace_agent_summary_for_test("", Some("work-live"));
+        agent.branch = Some("work/shared".to_string());
+        agent.worktree_path = Some(PathBuf::from(shared_worktree));
+        agent
+    });
+    let mut legacy = history_work_view(
+        "legacy-work-paused",
+        "work/shared",
+        shared_worktree,
+        Vec::new(),
+    );
+    legacy.title = "Legacy history metadata".to_string();
+    legacy.summary = Some("Legacy history summary".to_string());
+
+    let view = super::active_work_projection_from_saved_with_journal(
+        projection,
+        Vec::new(),
+        vec![legacy],
+        None,
+    );
+
+    assert_eq!(
+        view.active_works.len(),
+        2,
+        "git identity alone must not collapse or assign launch-scoped Work metadata"
+    );
+    let live = view
+        .active_works
+        .iter()
+        .find(|work| work.id != "legacy-work-paused")
+        .expect("sessionless live Work");
+    assert_eq!(live.title, "Board audience follow-up");
+    assert_eq!(live.summary, None);
 }
 
 /// SPEC-2359 US-85 / SC-313: Work identity is launch-scoped even when two
@@ -7752,6 +8053,158 @@ fn app_runtime_paused_works_on_same_branch_remain_distinct_children() {
             conversation_id
         );
     }
+}
+
+/// SPEC-2359 FR-470/FR-471: branch/worktree identify the parent Workspace,
+/// not one launch-scoped Work. A live Session must not hide an older Paused
+/// Work on the same execution container when their Session identities differ.
+#[test]
+fn app_runtime_live_work_keeps_distinct_paused_work_on_same_branch() {
+    let temp = tempdir().expect("tempdir");
+    let repo = temp.path().join("repo");
+    fs::create_dir_all(&repo).expect("create repo");
+    let shared_worktree = "/home/user/gwt/work/shared";
+    let mut projection =
+        gwt_core::workspace_projection::WorkspaceProjection::default_for_project(&repo);
+    projection.agents.push({
+        let mut agent = workspace_agent_summary_for_test("live-session", Some("work-live"));
+        agent.branch = Some("work/shared".to_string());
+        agent.worktree_path = Some(std::path::PathBuf::from(shared_worktree));
+        agent
+    });
+
+    let mut paused = history_work_view(
+        "work-session-paused-session",
+        "work/shared",
+        shared_worktree,
+        vec![history_agent_ref_view(
+            "paused-session",
+            Some("Codex"),
+            "2026-07-12T01:00:00Z",
+        )],
+    );
+    paused.title = "Paused Work".to_string();
+    paused.summary = Some("Paused Work summary".to_string());
+    paused.owner = Some("Issue #470".to_string());
+    paused.execution_containers[0].pr_number = Some(470);
+    paused.execution_containers[0].pr_url = Some("https://example.test/pr/470".to_string());
+    paused.board_refs = vec!["paused-work-board-ref".to_string()];
+    paused.agents[0].sessions = vec![gwt::WorkspaceHistorySessionView {
+        agent_session_id: "paused-conversation".to_string(),
+        started_at: "2026-07-12T01:00:00Z".to_string(),
+        is_active: true,
+        resumable: true,
+    }];
+
+    let mut view = super::active_work_projection_from_saved_with_journal(
+        projection,
+        Vec::new(),
+        vec![paused],
+        None,
+    );
+
+    assert_eq!(
+        view.active_works.len(),
+        2,
+        "same Workspace identity must not collapse different live/paused Sessions"
+    );
+    let live = view
+        .active_works
+        .iter()
+        .find(|work| work.id == "work-session-live-session")
+        .expect("live child Work");
+    assert_eq!(live.title, "Board audience follow-up");
+    assert_eq!(live.summary, None);
+    assert_eq!(live.owner, None);
+    assert_eq!(live.pr_number, None);
+    assert!(live.board_refs.is_empty());
+
+    super::assign_and_merge_workspace_groups(&mut view.active_works, &repo);
+    super::attach_registry_sessions_to_active_works(
+        &mut view.active_works,
+        &[],
+        None,
+        &std::collections::HashMap::new(),
+        &repo,
+    );
+
+    assert_eq!(view.active_works.len(), 1, "one branch is one Workspace");
+    let workspace = &view.active_works[0];
+    assert_eq!(workspace.works.len(), 2, "both Session-owned Works remain");
+    let paused = workspace
+        .works
+        .iter()
+        .find(|work| work.id == "work-session-paused-session")
+        .expect("Paused child Work");
+    assert_eq!(paused.lifecycle_state, "paused");
+    assert_eq!(paused.agents.len(), 1);
+    assert_eq!(paused.agents[0].session_id, "paused-session");
+}
+
+/// SPEC-2359 FR-471: a legacy history id and a live Session-derived Work id
+/// still represent one resumed Work when their worktree paths are equivalent
+/// filesystem paths with different lexical spellings.
+#[test]
+fn app_runtime_resumed_work_dedupes_equivalent_worktree_paths() {
+    let temp = tempdir().expect("tempdir");
+    let repo = temp.path().join("repo");
+    let worktree = repo.join("work/resume");
+    fs::create_dir_all(&worktree).expect("create worktree");
+    let alternate_worktree_path = worktree.join("..").join("resume");
+    assert_ne!(worktree, alternate_worktree_path);
+    assert!(same_worktree_path(&worktree, &alternate_worktree_path));
+
+    let mut projection =
+        gwt_core::workspace_projection::WorkspaceProjection::default_for_project(&repo);
+    projection.agents.push({
+        let mut agent = workspace_agent_summary_for_test("session-resume-alias", Some("work-live"));
+        agent.branch = None;
+        agent.worktree_path = Some(alternate_worktree_path);
+        agent
+    });
+
+    let mut paused = history_work_view(
+        "legacy-work-resume-alias",
+        "",
+        worktree.to_string_lossy().as_ref(),
+        vec![history_agent_ref_view(
+            "session-resume-alias",
+            Some("Codex"),
+            "2026-07-12T01:00:00Z",
+        )],
+    );
+    paused.execution_containers[0].branch = None;
+    paused.title = "Resumed history metadata".to_string();
+    paused.summary = Some("Resumed history summary".to_string());
+    paused.owner = Some("SPEC-2359".to_string());
+    paused.execution_containers[0].pr_number = Some(2359);
+    paused.execution_containers[0].pr_url = Some("https://example.test/pr/2359".to_string());
+    paused.board_refs = vec!["resumed-board-ref".to_string()];
+
+    let view = super::active_work_projection_from_saved_with_journal(
+        projection,
+        Vec::new(),
+        vec![paused],
+        None,
+    );
+
+    assert_eq!(
+        view.active_works.len(),
+        1,
+        "shared Session must dedupe equivalent worktree path spellings"
+    );
+    assert_eq!(view.active_works[0].id, "work-session-session-resume-alias");
+    assert_eq!(view.active_works[0].title, "Resumed history metadata");
+    assert_eq!(
+        view.active_works[0].summary.as_deref(),
+        Some("Resumed history summary")
+    );
+    assert_eq!(view.active_works[0].owner.as_deref(), Some("SPEC-2359"));
+    assert_eq!(view.active_works[0].pr_number, Some(2359));
+    assert_eq!(
+        view.active_works[0].board_refs,
+        vec!["resumed-board-ref".to_string()]
+    );
 }
 
 /// FR-348 compatibility guard: Work identity is agent-session-derived, so a
