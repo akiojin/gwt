@@ -2,7 +2,9 @@ use std::{collections::BTreeSet, fmt, path::Path, sync::OnceLock};
 
 use regex::Regex;
 
-use super::improvement::{ImprovementCandidate, TypedFailureEvidence};
+use super::improvement::{
+    improvement_fingerprint, typed_evidence_digest, ImprovementCandidate, TypedFailureEvidence,
+};
 
 pub(super) const MAX_PUBLIC_BODY_BYTES: usize = 16 * 1024;
 const MAX_PUBLIC_TITLE_CHARS: usize = 180;
@@ -12,6 +14,12 @@ const MAX_PUBLIC_SUMMARY_CHARS: usize = 150;
 pub(super) struct PublicIssuePayload {
     pub(super) summary: String,
     pub(super) title: String,
+    pub(super) body: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(not(test), allow(dead_code))]
+pub(super) struct PublicCommentPayload {
     pub(super) body: String,
 }
 
@@ -54,14 +62,16 @@ impl PublicMutationContext {
         }
     }
 
-    fn with_candidate(&self, candidate: &ImprovementCandidate) -> Self {
+    fn with_candidate(&self, candidate: &ImprovementCandidate, trusted_values: &[&str]) -> Self {
         let mut denied = self.denied_values.iter().cloned().collect::<BTreeSet<_>>();
         add_denied_value(&mut denied, candidate.sanitized_summary.clone());
         if let Some(details) = &candidate.sanitized_details {
             add_denied_value(&mut denied, details.clone());
         }
         if let Some(evidence_digest) = &candidate.evidence_digest {
-            add_denied_value(&mut denied, evidence_digest.clone());
+            if !trusted_values.contains(&evidence_digest.as_str()) {
+                add_denied_value(&mut denied, evidence_digest.clone());
+            }
         }
         add_denied_value(&mut denied, candidate.dedupe_key.clone());
         for evidence in &candidate.local_evidence {
@@ -160,19 +170,42 @@ pub(super) fn render_public_issue_payload(
     context: &PublicMutationContext,
 ) -> Result<PublicIssuePayload, PrivacyViolation> {
     validate_candidate_template_fields(candidate)?;
-    let (summary, problem, expected, observed) = match &candidate.typed_evidence {
-        Some(evidence) => typed_template_fields(candidate, evidence)?,
+    let (summary, problem, expected, observed, public_identity) = match &candidate.typed_evidence {
+        Some(evidence) => {
+            let (summary, problem, expected, observed) =
+                typed_template_fields(candidate, evidence)?;
+            (
+                summary,
+                problem,
+                expected,
+                observed,
+                Some(typed_public_identity(candidate, evidence)?),
+            )
+        }
         None => (
             "Self-improvement contract evidence required".to_string(),
             "A legacy self-improvement candidate does not contain typed contract evidence."
                 .to_string(),
             "Typed evidence is required before unattended owner resolution.".to_string(),
             "No free-form candidate text is rendered into a public mutation.".to_string(),
+            None,
         ),
     };
     let title = format!("fix(gwt): {summary}");
+    let identity = public_identity
+        .as_ref()
+        .map(|identity| {
+            format!(
+                "- Public evidence digest: sha256:{}\n\n{}\n",
+                identity.evidence_digest,
+                fingerprint_marker(&identity.fingerprint)
+            )
+        })
+        .unwrap_or_else(|| {
+            "- Typed public identity: unavailable for legacy evidence\n".to_string()
+        });
     let body = format!(
-        "## Problem\n\n{problem}\n\n## Expected behavior\n\n{expected}\n\n## Observed evidence\n\n{observed}\n\n## Impact\n\nA gwt-owned contract failure can recur until it has one verified upstream owner.\n\n## Suggested verification\n\n- Reproduce the typed contract outcome.\n- Add a regression test that fails before the fix.\n- Verify the corrected outcome without private source data.\n\n## Source candidate\n\n- Candidate ID: {id}\n- Target artifact: {target}\n- Classification: {classification}\n- Confidence: {confidence}\n- Occurrences: {occurrences}\n\n## Privacy\n\n- This payload is generated from contract-owned typed fields.\n- Free-form evidence, repository identity, paths, credentials, logs, and code remain local-only.\n",
+        "## Problem\n\n{problem}\n\n## Expected behavior\n\n{expected}\n\n## Observed evidence\n\n{observed}\n\n{identity}\n## Impact\n\nA gwt-owned contract failure can recur until it has one verified upstream owner.\n\n## Suggested verification\n\n- Reproduce the typed contract outcome.\n- Add a regression test that fails before the fix.\n- Verify the corrected outcome without private source data.\n\n## Source candidate\n\n- Candidate ID: {id}\n- Target artifact: {target}\n- Classification: {classification}\n- Confidence: {confidence}\n- Occurrences: {occurrences}\n\n## Privacy\n\n- This payload is generated from contract-owned typed fields.\n- Free-form evidence, repository identity, paths, credentials, logs, and code remain local-only.\n",
         id = candidate.id,
         target = candidate.target_artifact,
         classification = candidate.classification,
@@ -184,8 +217,153 @@ pub(super) fn render_public_issue_payload(
         title,
         body,
     };
-    validate_public_payload(&payload, &context.with_candidate(candidate))?;
+    let trusted_values = public_identity
+        .as_ref()
+        .map(|identity| {
+            vec![
+                identity.evidence_digest.as_str(),
+                identity.fingerprint.as_str(),
+            ]
+        })
+        .unwrap_or_default();
+    validate_public_payload(
+        &payload,
+        &context.with_candidate(candidate, &trusted_values),
+    )?;
     Ok(payload)
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct TypedPublicIdentity {
+    fingerprint: String,
+    evidence_digest: String,
+}
+
+fn typed_public_identity(
+    candidate: &ImprovementCandidate,
+    evidence: &TypedFailureEvidence,
+) -> Result<TypedPublicIdentity, PrivacyViolation> {
+    let fingerprint = improvement_fingerprint(evidence);
+    if candidate.fingerprint.as_deref() != Some(fingerprint.as_str()) {
+        return Err(PrivacyViolation::new(
+            PrivacyViolationKind::InvalidTemplateField,
+        ));
+    }
+    Ok(TypedPublicIdentity {
+        fingerprint,
+        evidence_digest: typed_evidence_digest(evidence),
+    })
+}
+
+#[cfg_attr(not(test), allow(dead_code))]
+pub(super) fn render_occurrence_comment_payload(
+    candidate: &ImprovementCandidate,
+    occurrence_key: &str,
+    context: &PublicMutationContext,
+) -> Result<PublicCommentPayload, PrivacyViolation> {
+    validate_candidate_template_fields(candidate)?;
+    if !occurrence_key_re().is_match(occurrence_key) {
+        return Err(PrivacyViolation::new(
+            PrivacyViolationKind::InvalidTemplateField,
+        ));
+    }
+    let evidence = candidate
+        .typed_evidence
+        .as_ref()
+        .ok_or_else(|| PrivacyViolation::new(PrivacyViolationKind::InvalidTemplateField))?;
+    let identity = typed_public_identity(candidate, evidence)?;
+    let body = format!(
+        "gwt recorded one typed self-improvement occurrence.\n\n- Candidate ID: {id}\n- Public evidence digest: sha256:{digest}\n\n{occurrence_marker}\n{fingerprint_marker}\n",
+        id = candidate.id,
+        digest = identity.evidence_digest,
+        occurrence_marker = occurrence_marker(occurrence_key),
+        fingerprint_marker = fingerprint_marker(&identity.fingerprint),
+    );
+    validate_public_comment(
+        &body,
+        &context.with_candidate(
+            candidate,
+            &[&identity.evidence_digest, &identity.fingerprint],
+        ),
+    )?;
+    Ok(PublicCommentPayload { body })
+}
+
+#[cfg_attr(not(test), allow(dead_code))]
+pub(super) fn render_reconciliation_comment_payload(
+    candidate: &ImprovementCandidate,
+    canonical_number: u64,
+    duplicate_number: u64,
+    context: &PublicMutationContext,
+) -> Result<PublicCommentPayload, PrivacyViolation> {
+    validate_candidate_template_fields(candidate)?;
+    if canonical_number == 0 || duplicate_number == 0 || canonical_number == duplicate_number {
+        return Err(PrivacyViolation::new(
+            PrivacyViolationKind::InvalidTemplateField,
+        ));
+    }
+    let evidence = candidate
+        .typed_evidence
+        .as_ref()
+        .ok_or_else(|| PrivacyViolation::new(PrivacyViolationKind::InvalidTemplateField))?;
+    let identity = typed_public_identity(candidate, evidence)?;
+    let body = format!(
+        "This Issue duplicates the same typed self-improvement owner.\n\n- Canonical owner: #{canonical_number}\n- Duplicate owner: #{duplicate_number}\n- Public evidence digest: sha256:{digest}\n\n<!-- gwt:improvement-reconciliation:v1 canonical:{canonical_number} duplicate:{duplicate_number} -->\n{fingerprint_marker}\n",
+        digest = identity.evidence_digest,
+        fingerprint_marker = fingerprint_marker(&identity.fingerprint),
+    );
+    validate_public_comment(
+        &body,
+        &context.with_candidate(
+            candidate,
+            &[&identity.evidence_digest, &identity.fingerprint],
+        ),
+    )?;
+    Ok(PublicCommentPayload { body })
+}
+
+#[cfg_attr(not(test), allow(dead_code))]
+fn validate_public_comment(
+    body: &str,
+    context: &PublicMutationContext,
+) -> Result<(), PrivacyViolation> {
+    validate_public_payload(
+        &PublicIssuePayload {
+            summary: "Typed self-improvement occurrence".to_string(),
+            title: "Typed self-improvement occurrence".to_string(),
+            body: body.to_string(),
+        },
+        context,
+    )
+}
+
+fn fingerprint_marker(fingerprint: &str) -> String {
+    format!("<!-- gwt:improvement-fingerprint:v1 {fingerprint} -->")
+}
+
+#[cfg_attr(not(test), allow(dead_code))]
+fn occurrence_marker(occurrence_key: &str) -> String {
+    format!("<!-- gwt:improvement-occurrence:v1 {occurrence_key} -->")
+}
+
+#[cfg_attr(not(test), allow(dead_code))]
+pub(super) fn exact_fingerprint_markers(body: &str) -> Vec<String> {
+    let mut in_code_fence = false;
+    body.lines()
+        .filter_map(|line| {
+            if line.trim_start().starts_with("```") {
+                in_code_fence = !in_code_fence;
+                return None;
+            }
+            if in_code_fence {
+                return None;
+            }
+            fingerprint_marker_re()
+                .captures(line)
+                .and_then(|captures| captures.get(1))
+                .map(|value| value.as_str().to_string())
+        })
+        .collect()
 }
 
 fn typed_template_fields(
@@ -367,6 +545,21 @@ fn machine_token_re() -> &'static Regex {
     })
 }
 
+#[cfg_attr(not(test), allow(dead_code))]
+fn fingerprint_marker_re() -> &'static Regex {
+    static RE: OnceLock<Regex> = OnceLock::new();
+    RE.get_or_init(|| {
+        Regex::new(r"^<!-- gwt:improvement-fingerprint:v1 (v2:[0-9a-f]{64}) -->$")
+            .expect("fingerprint marker regex")
+    })
+}
+
+#[cfg_attr(not(test), allow(dead_code))]
+fn occurrence_key_re() -> &'static Regex {
+    static RE: OnceLock<Regex> = OnceLock::new();
+    RE.get_or_init(|| Regex::new(r"^occ:v1:[0-9a-f]{64}$").expect("occurrence key regex"))
+}
+
 fn authorization_re() -> &'static Regex {
     static RE: OnceLock<Regex> = OnceLock::new();
     RE.get_or_init(|| Regex::new(r"(?i)authorization\s*:").expect("authorization regex"))
@@ -461,7 +654,7 @@ mod tests {
             "state": "owner-resolving",
             "dedupe_key": "private-repo:customer-8675309",
             "occurrences": 2,
-            "fingerprint": "v2:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "fingerprint": "v2:4bea839977a5aeedbf562acaeeb547012b0447f3335279830405fafb37726532",
             "eligibility": "deterministic",
             "typed_evidence": typed.then(|| json!({
                 "subsystem": "coordination",
@@ -679,5 +872,63 @@ mod tests {
         );
         assert!(!legacy.body.contains("customer-8675309"));
         assert!(!legacy.body.contains("private-repo"));
+    }
+
+    #[test]
+    fn typed_issue_template_contains_computed_digest_and_exact_fingerprint_marker() {
+        let context = PublicMutationContext::default();
+        let payload = render_public_issue_payload(&candidate(true), &context)
+            .expect("typed contract template");
+        assert!(payload.body.contains(
+            "Public evidence digest: sha256:3f649bd386b953b42442e8cefcbd1449d657f49a972f11d72f810bcda167756a"
+        ));
+        let marker = "<!-- gwt:improvement-fingerprint:v1 v2:4bea839977a5aeedbf562acaeeb547012b0447f3335279830405fafb37726532 -->";
+        assert!(payload.body.lines().any(|line| line == marker));
+
+        let lookalikes = format!(
+            "{marker}\n{marker} suffix\nprefix {marker}\n```\n{marker}\n```\n<!-- gwt:improvement-fingerprint:v1 v2:{} -->",
+            "0".repeat(64)
+        );
+        assert_eq!(
+            exact_fingerprint_markers(&lookalikes),
+            vec![
+                "v2:4bea839977a5aeedbf562acaeeb547012b0447f3335279830405fafb37726532".to_string(),
+                format!("v2:{}", "0".repeat(64)),
+            ]
+        );
+    }
+
+    #[test]
+    fn occurrence_and_reconciliation_templates_are_opaque_and_taint_free() {
+        let candidate = candidate(true);
+        let context = PublicMutationContext::from_denied_values_for_test([
+            "customer-8675309",
+            "/Users/alice/private-repo",
+            "ghp_abcdefghijklmnopqrstuvwxyz",
+            "alice@example.com",
+        ]);
+        let occurrence_key =
+            "occ:v1:760fc151831a9d5bf11893e402fdf5d63727e188dbc17015c67b2054f4a97148";
+        let occurrence = render_occurrence_comment_payload(&candidate, occurrence_key, &context)
+            .expect("occurrence comment");
+        assert!(occurrence.body.lines().any(|line| {
+            line == "<!-- gwt:improvement-occurrence:v1 occ:v1:760fc151831a9d5bf11893e402fdf5d63727e188dbc17015c67b2054f4a97148 -->"
+        }));
+        assert!(occurrence.body.contains("Public evidence digest: sha256:"));
+
+        let reconciliation = render_reconciliation_comment_payload(&candidate, 42, 84, &context)
+            .expect("reconciliation comment");
+        assert!(reconciliation.body.contains("Canonical owner: #42"));
+        assert!(reconciliation.body.contains("Duplicate owner: #84"));
+        assert!(reconciliation.body.lines().any(|line| {
+            line == "<!-- gwt:improvement-reconciliation:v1 canonical:42 duplicate:84 -->"
+        }));
+
+        for body in [&occurrence.body, &reconciliation.body] {
+            assert!(!body.contains("customer-8675309"));
+            assert!(!body.contains("private-repo"));
+            assert!(!body.contains("ghp_"));
+            assert!(!body.contains("alice@example.com"));
+        }
     }
 }

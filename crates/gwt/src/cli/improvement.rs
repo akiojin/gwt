@@ -1035,7 +1035,7 @@ fn validate_machine_token(field: &str, normalized: &str) -> Result<String, SpecO
     Ok(normalized.to_string())
 }
 
-fn improvement_fingerprint(evidence: &TypedFailureEvidence) -> String {
+pub(super) fn improvement_fingerprint(evidence: &TypedFailureEvidence) -> String {
     let revision = evidence.contract_schema_revision.to_string();
     format!(
         "v2:{}",
@@ -1052,7 +1052,7 @@ fn improvement_fingerprint(evidence: &TypedFailureEvidence) -> String {
     )
 }
 
-fn typed_evidence_digest(evidence: &TypedFailureEvidence) -> String {
+pub(super) fn typed_evidence_digest(evidence: &TypedFailureEvidence) -> String {
     let revision = evidence.contract_schema_revision.to_string();
     digest_fields(
         "gwt.improvement.evidence.v2",
