@@ -115,6 +115,23 @@ pub fn spawn_logged_blocking(
     runtime.block_on(spawn_logged(hub, kind, program, args, options))
 }
 
+/// Synchronous wrapper around [`spawn_logged_with_deadline`].
+pub fn spawn_logged_blocking_with_deadline(
+    hub: &ProcessConsoleHub,
+    kind: ProcessKind,
+    program: impl Into<OsString>,
+    args: &[impl AsRef<std::ffi::OsStr>],
+    options: SpawnOptions,
+    deadline: Instant,
+) -> std::io::Result<SpawnOutput> {
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()?;
+    runtime.block_on(spawn_logged_with_deadline(
+        hub, kind, program, args, options, deadline,
+    ))
+}
+
 /// Spawn `program` with `args`, forwarding lines to `hub` and emitting
 /// `gwt.process.summary` tracing events at start / end.
 pub async fn spawn_logged(
@@ -124,6 +141,36 @@ pub async fn spawn_logged(
     args: &[impl AsRef<std::ffi::OsStr>],
     options: SpawnOptions,
 ) -> std::io::Result<SpawnOutput> {
+    spawn_logged_inner(hub, kind, program, args, options, None).await
+}
+
+/// Spawn a logged child under one absolute deadline.
+///
+/// The deadline covers process completion and stdout/stderr EOF. On expiry the
+/// dedicated process tree is terminated and the direct child is reaped before
+/// this function returns.
+pub async fn spawn_logged_with_deadline(
+    hub: &ProcessConsoleHub,
+    kind: ProcessKind,
+    program: impl Into<OsString>,
+    args: &[impl AsRef<std::ffi::OsStr>],
+    options: SpawnOptions,
+    deadline: Instant,
+) -> std::io::Result<SpawnOutput> {
+    spawn_logged_inner(hub, kind, program, args, options, Some(deadline)).await
+}
+
+async fn spawn_logged_inner(
+    hub: &ProcessConsoleHub,
+    kind: ProcessKind,
+    program: impl Into<OsString>,
+    args: &[impl AsRef<std::ffi::OsStr>],
+    options: SpawnOptions,
+    deadline: Option<Instant>,
+) -> std::io::Result<SpawnOutput> {
+    if deadline.is_some_and(|deadline| Instant::now() >= deadline) {
+        return Err(deadline_error());
+    }
     let program = program.into();
     let spawn_id = SPAWN_ID.fetch_add(1, Ordering::Relaxed);
     let started_at = Instant::now();
@@ -169,46 +216,77 @@ pub async fn spawn_logged(
         Stdio::null()
     });
 
+    if deadline.is_some() {
+        configure_deadline_command(&mut command);
+    }
+
     let mut child = command.spawn()?;
-
-    let stdout_task = if options.capture_stdout {
-        let stdout = child.stdout.take().expect("piped stdout");
-        let hub = hub.clone();
-        Some(tokio::spawn(forward_stream(
-            stdout,
-            hub,
-            kind,
-            spawn_id,
-            ProcessStream::Stdout,
-        )))
-    } else {
-        None
+    let mut process_tree = ChildProcessTree::new(deadline.and_then(|_| child.id()));
+    let stdout = child.stdout.take();
+    let stderr = child.stderr.take();
+    let collected = {
+        let collect = async {
+            let stdout_future = async move {
+                Ok::<_, std::io::Error>(match stdout {
+                    Some(stdout) => {
+                        forward_stream(stdout, hub.clone(), kind, spawn_id, ProcessStream::Stdout)
+                            .await
+                    }
+                    None => (String::new(), 0),
+                })
+            };
+            let stderr_future = async move {
+                Ok::<_, std::io::Error>(match stderr {
+                    Some(stderr) => {
+                        forward_stream(stderr, hub.clone(), kind, spawn_id, ProcessStream::Stderr)
+                            .await
+                    }
+                    None => (String::new(), 0),
+                })
+            };
+            tokio::try_join!(child.wait(), stdout_future, stderr_future)
+        };
+        tokio::pin!(collect);
+        match deadline {
+            Some(deadline) => tokio::time::timeout_at(deadline.into(), &mut collect)
+                .await
+                .ok(),
+            None => Some(collect.await),
+        }
     };
 
-    let stderr_task = if options.capture_stderr {
-        let stderr = child.stderr.take().expect("piped stderr");
-        let hub = hub.clone();
-        Some(tokio::spawn(forward_stream(
-            stderr,
-            hub,
-            kind,
-            spawn_id,
-            ProcessStream::Stderr,
-        )))
-    } else {
-        None
+    let Some(collected) = collected else {
+        process_tree.terminate();
+        let _ = child.kill().await;
+        let _ = child.wait().await;
+        let duration_ms = started_at.elapsed().as_millis() as u64;
+        crate::process::push_command_summary_to_hub(kind, spawn_id, None, duration_ms);
+        tracing::info!(
+            target: SUMMARY_TARGET,
+            kind = kind.as_str(),
+            spawn_id = spawn_id,
+            label = %options.label,
+            phase = "end",
+            exit_code = Option::<i64>::None,
+            duration_ms = duration_ms,
+            stdout_lines = 0_u64,
+            stderr_lines = 0_u64,
+            success = false,
+            timed_out = true,
+            "process end",
+        );
+        return Err(deadline_error());
     };
-
-    let status = child.wait().await?;
-
-    let (stdout, stdout_lines) = match stdout_task {
-        Some(handle) => handle.await.unwrap_or_else(|_| (String::new(), 0)),
-        None => (String::new(), 0),
+    let (status, (stdout, stdout_lines), (stderr, stderr_lines)) = match collected {
+        Ok(collected) => collected,
+        Err(error) => {
+            process_tree.terminate();
+            let _ = child.kill().await;
+            let _ = child.wait().await;
+            return Err(error);
+        }
     };
-    let (stderr, stderr_lines) = match stderr_task {
-        Some(handle) => handle.await.unwrap_or_else(|_| (String::new(), 0)),
-        None => (String::new(), 0),
-    };
+    process_tree.disarm();
 
     let duration_ms = started_at.elapsed().as_millis() as u64;
     let exit_code = status.code();
@@ -237,6 +315,71 @@ pub async fn spawn_logged(
         stderr_lines,
     })
 }
+
+fn deadline_error() -> std::io::Error {
+    std::io::Error::new(std::io::ErrorKind::TimedOut, "process deadline expired")
+}
+
+fn configure_deadline_command(command: &mut TokioCommand) {
+    command.kill_on_drop(true);
+    configure_process_group(command);
+}
+
+#[cfg(unix)]
+fn configure_process_group(command: &mut TokioCommand) {
+    command.process_group(0);
+}
+
+#[cfg(not(unix))]
+fn configure_process_group(_command: &mut TokioCommand) {}
+
+struct ChildProcessTree {
+    pid: Option<u32>,
+}
+
+impl ChildProcessTree {
+    fn new(pid: Option<u32>) -> Self {
+        Self { pid }
+    }
+
+    fn terminate(&mut self) {
+        if let Some(pid) = self.pid.take() {
+            terminate_process_tree(pid);
+        }
+    }
+
+    fn disarm(&mut self) {
+        self.pid = None;
+    }
+}
+
+impl Drop for ChildProcessTree {
+    fn drop(&mut self) {
+        self.terminate();
+    }
+}
+
+#[cfg(unix)]
+fn terminate_process_tree(pid: u32) {
+    let process_group = -(pid as libc::pid_t);
+    // SAFETY: the deadline command was placed in its own process group and a
+    // negative pid targets only that group.
+    unsafe {
+        libc::kill(process_group, libc::SIGKILL);
+    }
+}
+
+#[cfg(windows)]
+fn terminate_process_tree(pid: u32) {
+    let _ = crate::process::hidden_command("taskkill")
+        .args(["/PID", &pid.to_string(), "/T", "/F"])
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status();
+}
+
+#[cfg(not(any(unix, windows)))]
+fn terminate_process_tree(_pid: u32) {}
 
 async fn forward_stream<R>(
     mut reader: R,
@@ -281,6 +424,8 @@ where
 
 #[cfg(test)]
 mod tests {
+    use std::time::Duration;
+
     use super::*;
 
     fn echo_command() -> (String, Vec<String>) {
@@ -439,5 +584,139 @@ mod tests {
         assert_eq!(out.stdout_lines, 0);
         let lines = hub.snapshot_kind(ProcessKind::Git);
         assert!(lines.is_empty());
+    }
+
+    #[tokio::test]
+    async fn spawn_logged_deadline_succeeds_before_expiry() {
+        let hub = ProcessConsoleHub::new();
+        let (cmd, args) = echo_command();
+        let out = spawn_logged_with_deadline(
+            &hub,
+            ProcessKind::Git,
+            cmd,
+            &args,
+            SpawnOptions::new("test deadline echo"),
+            std::time::Instant::now() + Duration::from_secs(2),
+        )
+        .await
+        .expect("command before deadline");
+        assert!(out.success());
+        assert!(out.stdout.contains("hello world"));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn expired_deadline_does_not_spawn_child() {
+        let directory = tempfile::tempdir().expect("tempdir");
+        let sentinel = directory.path().join("spawned");
+        let args = vec![
+            "-c".to_string(),
+            "touch \"$1\"".to_string(),
+            "gwt-expired-deadline".to_string(),
+            sentinel.to_string_lossy().into_owned(),
+        ];
+        let error = spawn_logged_with_deadline(
+            &ProcessConsoleHub::new(),
+            ProcessKind::Gh,
+            "sh",
+            &args,
+            SpawnOptions::new("test expired deadline"),
+            std::time::Instant::now() - Duration::from_millis(1),
+        )
+        .await
+        .expect_err("expired deadline must fail before spawn");
+        assert_eq!(error.kind(), std::io::ErrorKind::TimedOut);
+        assert!(!sentinel.exists());
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn deadline_terminates_and_reaps_child_process_tree() {
+        let directory = tempfile::tempdir().expect("tempdir");
+        let parent_file = directory.path().join("parent.pid");
+        let descendant_file = directory.path().join("descendant.pid");
+        let args = vec![
+            "-c".to_string(),
+            "echo $$ > \"$1\"; sleep 30 & echo $! > \"$2\"; wait".to_string(),
+            "gwt-deadline-tree".to_string(),
+            parent_file.to_string_lossy().into_owned(),
+            descendant_file.to_string_lossy().into_owned(),
+        ];
+        let started = std::time::Instant::now();
+        let error = spawn_logged_with_deadline(
+            &ProcessConsoleHub::new(),
+            ProcessKind::Gh,
+            "sh",
+            &args,
+            SpawnOptions::new("test deadline tree"),
+            started + Duration::from_millis(500),
+        )
+        .await
+        .expect_err("long-running process tree must time out");
+        assert_eq!(error.kind(), std::io::ErrorKind::TimedOut);
+        assert!(started.elapsed() < Duration::from_secs(3));
+
+        let parent = read_pid(&parent_file);
+        let descendant = read_pid(&descendant_file);
+        wait_for_process_exit(parent);
+        wait_for_process_exit(descendant);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn deadline_covers_descendant_held_output_pipe_without_reader_task_leak() {
+        let directory = tempfile::tempdir().expect("tempdir");
+        let descendant_file = directory.path().join("descendant.pid");
+        let args = vec![
+            "-c".to_string(),
+            "sleep 30 & echo $! > \"$1\"; exit 0".to_string(),
+            "gwt-deadline-pipe".to_string(),
+            descendant_file.to_string_lossy().into_owned(),
+        ];
+        let hub = ProcessConsoleHub::new();
+        let started = std::time::Instant::now();
+        let error = spawn_logged_with_deadline(
+            &hub,
+            ProcessKind::Gh,
+            "sh",
+            &args,
+            SpawnOptions::new("test descendant pipe"),
+            started + Duration::from_millis(500),
+        )
+        .await
+        .expect_err("descendant-held pipe must share the deadline");
+        assert_eq!(error.kind(), std::io::ErrorKind::TimedOut);
+        assert!(started.elapsed() < Duration::from_secs(3));
+        wait_for_process_exit(read_pid(&descendant_file));
+        let line_count = hub.snapshot_kind(ProcessKind::Gh).len();
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        assert_eq!(hub.snapshot_kind(ProcessKind::Gh).len(), line_count);
+    }
+
+    #[cfg(unix)]
+    fn read_pid(path: &std::path::Path) -> u32 {
+        std::fs::read_to_string(path)
+            .unwrap_or_else(|error| panic!("read {}: {error}", path.display()))
+            .trim()
+            .parse()
+            .expect("numeric pid")
+    }
+
+    #[cfg(unix)]
+    fn wait_for_process_exit(pid: u32) {
+        let deadline = std::time::Instant::now() + Duration::from_secs(2);
+        while std::time::Instant::now() < deadline {
+            let status = std::process::Command::new("kill")
+                .args(["-0", &pid.to_string()])
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .status()
+                .expect("probe process");
+            if !status.success() {
+                return;
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        panic!("process {pid} remained alive after deadline cleanup");
     }
 }

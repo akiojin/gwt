@@ -1380,6 +1380,7 @@ dependencies = [
  "fs2",
  "hex",
  "ignore",
+ "libc",
  "notify",
  "notify-debouncer-mini",
  "regex",
