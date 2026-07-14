@@ -7661,6 +7661,143 @@ fn app_runtime_paused_work_row_survives_stray_shared_session_on_other_branch() {
     assert_eq!(issue_3197.lifecycle_state, "paused");
 }
 
+/// SPEC-2359 US-85 / SC-313: Work identity is launch-scoped even when two
+/// stopped launches share one branch/worktree Workspace. They must survive
+/// the history projection as separate child Works so each keeps its Session.
+#[test]
+fn app_runtime_paused_works_on_same_branch_remain_distinct_children() {
+    let temp = tempdir().expect("tempdir");
+    let repo = temp.path().join("repo");
+    fs::create_dir_all(&repo).expect("create repo");
+    let projection =
+        gwt_core::workspace_projection::WorkspaceProjection::default_for_project(&repo);
+
+    let mut older = history_work_view(
+        "work-session-older",
+        "work/shared",
+        "/home/user/gwt/work/shared",
+        vec![history_agent_ref_view(
+            "older-session",
+            Some("Codex"),
+            "2026-07-12T01:00:00Z",
+        )],
+    );
+    older.title = "Older Work".to_string();
+    older.updated_at = "2026-07-12T01:00:00Z".to_string();
+    older.agents[0].sessions = vec![gwt::WorkspaceHistorySessionView {
+        agent_session_id: "older-conversation".to_string(),
+        started_at: "2026-07-12T01:00:00Z".to_string(),
+        is_active: true,
+        resumable: true,
+    }];
+
+    let mut newer = history_work_view(
+        "work-session-newer",
+        "work/shared",
+        "/home/user/gwt/work/shared",
+        vec![history_agent_ref_view(
+            "newer-session",
+            Some("Codex"),
+            "2026-07-13T01:00:00Z",
+        )],
+    );
+    newer.title = "Newer Work".to_string();
+    newer.updated_at = "2026-07-13T01:00:00Z".to_string();
+    newer.agents[0].sessions = vec![gwt::WorkspaceHistorySessionView {
+        agent_session_id: "newer-conversation".to_string(),
+        started_at: "2026-07-13T01:00:00Z".to_string(),
+        is_active: true,
+        resumable: true,
+    }];
+
+    let mut view = super::active_work_projection_from_saved_with_journal(
+        projection,
+        Vec::new(),
+        vec![older, newer],
+        None,
+    );
+
+    assert_eq!(
+        view.active_works.len(),
+        2,
+        "branch equality groups a Workspace later; it must not erase a distinct Work"
+    );
+
+    super::assign_and_merge_workspace_groups(&mut view.active_works, &repo);
+    super::attach_registry_sessions_to_active_works(
+        &mut view.active_works,
+        &[],
+        None,
+        &std::collections::HashMap::new(),
+        &repo,
+    );
+
+    assert_eq!(view.active_works.len(), 1, "one branch is one Workspace");
+    let workspace = &view.active_works[0];
+    assert_eq!(workspace.works.len(), 2, "both launch-scoped Works remain");
+    for (work_id, session_id, conversation_id) in [
+        ("work-session-older", "older-session", "older-conversation"),
+        ("work-session-newer", "newer-session", "newer-conversation"),
+    ] {
+        let child = workspace
+            .works
+            .iter()
+            .find(|child| child.id == work_id)
+            .expect("child Work");
+        assert_eq!(child.agents.len(), 1);
+        assert_eq!(child.agents[0].session_id, session_id);
+        assert_eq!(child.agents[0].sessions.len(), 1);
+        assert_eq!(
+            child.agents[0].sessions[0].agent_session_id,
+            conversation_id
+        );
+    }
+}
+
+/// FR-348 compatibility guard: Work identity is agent-session-derived, so a
+/// legacy and canonical history row for the same Session remain one Work even
+/// after distinct same-Workspace Sessions stop collapsing by git identity.
+#[test]
+fn app_runtime_duplicate_paused_history_for_same_session_stays_one_work() {
+    let temp = tempdir().expect("tempdir");
+    let repo = temp.path().join("repo");
+    fs::create_dir_all(&repo).expect("create repo");
+    let projection =
+        gwt_core::workspace_projection::WorkspaceProjection::default_for_project(&repo);
+    let works = vec![
+        history_work_view(
+            "legacy-work-id",
+            "work/shared",
+            "/home/user/gwt/work/shared",
+            vec![history_agent_ref_view(
+                "shared-session",
+                Some("Codex"),
+                "2026-07-12T01:00:00Z",
+            )],
+        ),
+        history_work_view(
+            "work-session-shared-session",
+            "work/shared",
+            "/home/user/gwt/work/shared",
+            vec![history_agent_ref_view(
+                "shared-session",
+                Some("Codex"),
+                "2026-07-13T01:00:00Z",
+            )],
+        ),
+    ];
+
+    let view =
+        super::active_work_projection_from_saved_with_journal(projection, Vec::new(), works, None);
+
+    assert_eq!(
+        view.active_works.len(),
+        1,
+        "the same launch Session must not become two Paused Works"
+    );
+    assert_eq!(view.active_works[0].agents[0].session_id, "shared-session");
+}
+
 /// FR-350 contract guard for the #3213 fix: a live Work synthesized without
 /// git_details (no branch / worktree on the row) still dedupes the
 /// session-sharing history item — the original purpose of the session-id
@@ -19819,6 +19956,357 @@ fn attach_registry_sessions_keeps_latest_entry_per_agent_identity() {
     assert_eq!(
         works[0].session_agent_total, 5,
         "hidden same-agent candidates stay counted for the '+N more sessions' summary"
+    );
+}
+
+fn workspace_test_agent_with_conversation(
+    session_id: &str,
+    updated_at: &str,
+    conversation: &str,
+) -> gwt::ActiveWorkAgentView {
+    gwt::ActiveWorkAgentView {
+        session_id: session_id.to_string(),
+        window_id: None,
+        agent_id: "codex".to_string(),
+        display_name: "Codex".to_string(),
+        affiliation_status: "assigned".to_string(),
+        workspace_id: None,
+        status_category: "idle".to_string(),
+        current_focus: None,
+        title_summary: None,
+        branch: Some("work/shared".to_string()),
+        worktree_path: None,
+        last_board_entry_id: None,
+        last_board_entry_kind: None,
+        coordination_scope: None,
+        updated_at: updated_at.to_string(),
+        sessions: vec![gwt::WorkspaceHistorySessionView {
+            agent_session_id: conversation.to_string(),
+            started_at: updated_at.to_string(),
+            is_active: true,
+            resumable: true,
+        }],
+    }
+}
+
+fn workspace_test_child(
+    id: &str,
+    agents: Vec<gwt::ActiveWorkAgentView>,
+) -> gwt::ActiveWorkspaceWorkView {
+    gwt::ActiveWorkspaceWorkView {
+        id: id.to_string(),
+        title: id.to_string(),
+        work_summary: None,
+        status_category: "idle".to_string(),
+        status_text: "Paused".to_string(),
+        owner: None,
+        lifecycle_state: "paused".to_string(),
+        closed_at: None,
+        manual_close_allowed: true,
+        close_blocked_reason: None,
+        agents,
+        updated_at: String::new(),
+    }
+}
+
+fn workspace_test_work(
+    agents: Vec<gwt::ActiveWorkAgentView>,
+    works: Vec<gwt::ActiveWorkspaceWorkView>,
+) -> gwt::ActiveWorkItemView {
+    gwt::ActiveWorkItemView {
+        id: "work-shared".to_string(),
+        title: "work/shared".to_string(),
+        status_category: "idle".to_string(),
+        status_text: "Paused".to_string(),
+        summary: None,
+        progress_summary: None,
+        work_summary: None,
+        owner: None,
+        next_action: None,
+        active_agents: 0,
+        blocked_agents: 0,
+        branch: Some("work/shared".to_string()),
+        worktree_path: None,
+        pr_number: None,
+        pr_url: None,
+        pr_state: None,
+        board_refs: Vec::new(),
+        session_agent_total: agents.len() as u32,
+        agents,
+        works,
+        lifecycle_state: "paused".to_string(),
+        closed_at: None,
+        merged_into_base: false,
+        workspace_key: None,
+        remote_only: false,
+        done_equivalent: false,
+        cleanup_candidate: None,
+        cleanup_blocked_reason: None,
+        updated_at: String::new(),
+    }
+}
+
+#[test]
+fn attach_registry_sessions_preserves_same_identity_agent_per_child_work() {
+    let older = workspace_test_agent_with_conversation(
+        "older-session",
+        "2026-07-12T01:00:00Z",
+        "older-conv",
+    );
+    let newer = workspace_test_agent_with_conversation(
+        "newer-session",
+        "2026-07-13T01:00:00Z",
+        "newer-conv",
+    );
+    let mut works = vec![workspace_test_work(
+        vec![older.clone(), newer.clone()],
+        vec![
+            workspace_test_child("work-session-older-session", vec![older]),
+            workspace_test_child("work-session-newer-session", vec![newer]),
+        ],
+    )];
+
+    super::attach_registry_sessions_to_active_works(
+        &mut works,
+        &[],
+        None,
+        &std::collections::HashMap::new(),
+        Path::new("/"),
+    );
+
+    assert_eq!(
+        works[0]
+            .agents
+            .iter()
+            .map(|agent| agent.session_id.as_str())
+            .collect::<Vec<_>>(),
+        vec!["newer-session"],
+        "the Workspace summary still keeps only the latest agent identity"
+    );
+    for (work_id, session_id) in [
+        ("work-session-older-session", "older-session"),
+        ("work-session-newer-session", "newer-session"),
+    ] {
+        let child = works[0]
+            .works
+            .iter()
+            .find(|child| child.id == work_id)
+            .expect("child Work");
+        assert_eq!(
+            child
+                .agents
+                .iter()
+                .map(|agent| agent.session_id.as_str())
+                .collect::<Vec<_>>(),
+            vec![session_id],
+            "each child Work must preserve its own Agent and Session"
+        );
+    }
+}
+
+#[test]
+fn attach_registry_sessions_preserves_distinct_conversations_within_one_child_work() {
+    let older = workspace_test_agent_with_conversation(
+        "older-session",
+        "2026-07-12T01:00:00Z",
+        "older-conv",
+    );
+    let newer = workspace_test_agent_with_conversation(
+        "newer-session",
+        "2026-07-13T01:00:00Z",
+        "newer-conv",
+    );
+    let mut works = vec![workspace_test_work(
+        vec![older.clone(), newer.clone()],
+        vec![workspace_test_child("work-combined", vec![older, newer])],
+    )];
+
+    super::attach_registry_sessions_to_active_works(
+        &mut works,
+        &[],
+        None,
+        &std::collections::HashMap::new(),
+        Path::new("/"),
+    );
+
+    assert_eq!(
+        works[0].works[0]
+            .agents
+            .iter()
+            .map(|agent| agent.session_id.as_str())
+            .collect::<Vec<_>>(),
+        vec!["newer-session", "older-session"],
+        "a child Work owns every distinct conversation selected for the payload"
+    );
+    assert_eq!(
+        works[0]
+            .agents
+            .iter()
+            .map(|agent| agent.session_id.as_str())
+            .collect::<Vec<_>>(),
+        vec!["newer-session"],
+        "identity collapse remains limited to the Workspace summary"
+    );
+}
+
+#[test]
+fn attach_registry_sessions_collapses_same_conversation_across_child_works() {
+    let older = workspace_test_agent_with_conversation(
+        "older-session",
+        "2026-07-12T01:00:00Z",
+        "shared-conv",
+    );
+    let newer = workspace_test_agent_with_conversation(
+        "newer-session",
+        "2026-07-13T01:00:00Z",
+        "shared-conv",
+    );
+    let mut works = vec![workspace_test_work(
+        vec![older.clone(), newer.clone()],
+        vec![
+            workspace_test_child("work-session-older-session", vec![older]),
+            workspace_test_child("work-session-newer-session", vec![newer]),
+        ],
+    )];
+
+    super::attach_registry_sessions_to_active_works(
+        &mut works,
+        &[],
+        None,
+        &std::collections::HashMap::new(),
+        Path::new("/"),
+    );
+
+    assert!(
+        works[0].works[0].agents.is_empty(),
+        "the older sibling must not retain a duplicate conversation"
+    );
+    assert_eq!(
+        works[0].works[1].agents[0].session_id, "newer-session",
+        "the newest sibling owns the shared conversation"
+    );
+    assert_eq!(works[0].session_agent_total, 1);
+}
+
+#[test]
+fn attach_registry_sessions_caps_agents_across_all_child_works() {
+    let agents = (0..12)
+        .map(|index| {
+            workspace_test_agent_with_conversation(
+                &format!("session-{index:02}"),
+                &format!("2026-07-12T{index:02}:00:00Z"),
+                &format!("conv-{index:02}"),
+            )
+        })
+        .collect::<Vec<_>>();
+    let child_works = agents
+        .iter()
+        .cloned()
+        .map(|agent| {
+            workspace_test_child(&format!("work-session-{}", agent.session_id), vec![agent])
+        })
+        .collect();
+    let mut works = vec![workspace_test_work(agents, child_works)];
+
+    super::attach_registry_sessions_to_active_works(
+        &mut works,
+        &[],
+        None,
+        &std::collections::HashMap::new(),
+        Path::new("/"),
+    );
+
+    assert_eq!(
+        works[0]
+            .works
+            .iter()
+            .map(|child| child.agents.len())
+            .sum::<usize>(),
+        crate::workspace_session_registry::REGISTRY_SESSION_CAP,
+        "the wire cap applies to the union of child Work agents"
+    );
+    assert!(
+        works[0]
+            .works
+            .iter()
+            .take(4)
+            .all(|child| child.agents.is_empty()),
+        "the oldest sessions fall outside the cap"
+    );
+}
+
+#[test]
+fn attach_registry_sessions_assigns_shared_session_to_one_canonical_child_work() {
+    let agent = workspace_test_agent_with_conversation(
+        "shared-session",
+        "2026-07-13T01:00:00Z",
+        "shared-conv",
+    );
+    let mut child_works = (0..11)
+        .map(|index| workspace_test_child(&format!("legacy-work-{index:02}"), vec![agent.clone()]))
+        .collect::<Vec<_>>();
+    child_works.insert(
+        5,
+        workspace_test_child("work-session-shared-session", vec![agent.clone()]),
+    );
+    let mut works = vec![workspace_test_work(vec![agent], child_works)];
+
+    super::attach_registry_sessions_to_active_works(
+        &mut works,
+        &[],
+        None,
+        &std::collections::HashMap::new(),
+        Path::new("/"),
+    );
+
+    assert_eq!(
+        works[0]
+            .works
+            .iter()
+            .map(|child| child.agents.len())
+            .sum::<usize>(),
+        1,
+        "one payload Agent must not be duplicated across child Works"
+    );
+    assert_eq!(
+        works[0]
+            .works
+            .iter()
+            .find(|child| child.id == "work-session-shared-session")
+            .expect("canonical child Work")
+            .agents[0]
+            .session_id,
+        "shared-session",
+        "the canonical session-derived child owns the shared Agent"
+    );
+    assert_eq!(works[0].session_agent_total, 1);
+}
+
+#[test]
+fn attach_registry_sessions_assigns_shared_session_to_latest_legacy_child_work() {
+    let agent = workspace_test_agent_with_conversation(
+        "shared-session",
+        "2026-07-13T01:00:00Z",
+        "shared-conv",
+    );
+    let mut older = workspace_test_child("legacy-work-older", vec![agent.clone()]);
+    older.updated_at = "2026-07-12T01:00:00Z".to_string();
+    let mut newer = workspace_test_child("legacy-work-newer", vec![agent.clone()]);
+    newer.updated_at = "2026-07-13T01:00:00Z".to_string();
+    let mut works = vec![workspace_test_work(vec![agent], vec![older, newer])];
+
+    super::attach_registry_sessions_to_active_works(
+        &mut works,
+        &[],
+        None,
+        &std::collections::HashMap::new(),
+        Path::new("/"),
+    );
+
+    assert!(works[0].works[0].agents.is_empty());
+    assert_eq!(
+        works[0].works[1].agents[0].session_id, "shared-session",
+        "the latest compatible legacy child owns the shared Agent"
     );
 }
 

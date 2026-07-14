@@ -872,10 +872,11 @@ fn append_paused_work_items(
 }
 
 /// SPEC-2359 Phase W-12 Slice 5a (FR-350): a Work-history item is already
-/// represented by an existing (live) `active_works` row when their ids match or
-/// when they share a branch / worktree identity. Used to dedupe Paused rows so a
-/// resumed Work and the launch-recorded history row do not duplicate the live
-/// Active row.
+/// represented by an existing `active_works` row when their ids match, or by an
+/// existing live row when they share a branch / worktree identity. Used to
+/// dedupe Paused rows so a resumed Work and the launch-recorded history row do
+/// not duplicate the live Active row. Distinct Paused Works remain launch-
+/// scoped even when they share one Workspace identity.
 ///
 /// Issue #3213: a shared agent session id never collapses two Works whose git
 /// identities conflict — a stray session ref recorded under another branch's
@@ -915,6 +916,13 @@ fn active_work_already_present(
             .map(str::trim)
             .filter(|value| !value.is_empty())
             .collect::<Vec<_>>();
+        let shares_agent_session = existing.agents.iter().any(|existing_agent| {
+            !existing_agent.session_id.trim().is_empty()
+                && work
+                    .agents
+                    .iter()
+                    .any(|history_agent| history_agent.session_id == existing_agent.session_id)
+        });
         let branch_matches = existing_branch.as_deref().is_some_and(|left| {
             container_branches
                 .iter()
@@ -925,24 +933,23 @@ fn active_work_already_present(
                 .iter()
                 .any(|right| Path::new(left) == Path::new(right))
         });
+        let branch_conflicts =
+            existing_branch.is_some() && !container_branches.is_empty() && !branch_matches;
+        let worktree_conflicts =
+            existing_worktree.is_some() && !container_worktrees.is_empty() && !worktree_matches;
+        if existing.lifecycle_state == "paused" {
+            return !branch_conflicts && !worktree_conflicts && shares_agent_session;
+        }
         if branch_matches || worktree_matches {
             return true;
         }
-        let branch_conflicts = existing_branch.is_some() && !container_branches.is_empty();
-        let worktree_conflicts = existing_worktree.is_some() && !container_worktrees.is_empty();
         if branch_conflicts || worktree_conflicts {
             return false;
         }
         // A live Work synthesized without git_details carries no execution
         // container, so dedupe by shared agent session id (the launch /
         // synthesized history row and the live row reference the same session).
-        existing.agents.iter().any(|live_agent| {
-            !live_agent.session_id.trim().is_empty()
-                && work
-                    .agents
-                    .iter()
-                    .any(|history_agent| history_agent.session_id == live_agent.session_id)
-        })
+        shares_agent_session
     })
 }
 
@@ -1474,27 +1481,134 @@ fn recompute_active_work_agent_counters(work: &mut gwt::ActiveWorkItemView) {
         .count();
 }
 
-fn sync_active_workspace_child_agents(work: &mut gwt::ActiveWorkItemView) {
+fn collapse_active_work_agents_by_conversation(
+    agents: &mut Vec<gwt::ActiveWorkAgentView>,
+) -> usize {
+    let mut sorted = std::mem::take(agents);
+    sorted.sort_by(compare_active_work_agents_newest_first);
+    let mut seen_conversations: std::collections::HashMap<String, usize> =
+        std::collections::HashMap::new();
+    let mut kept: Vec<gwt::ActiveWorkAgentView> = Vec::with_capacity(sorted.len());
+    let mut dropped = 0usize;
+    for agent in sorted {
+        let conversation = agent
+            .sessions
+            .iter()
+            .find(|session| session.is_active)
+            .or_else(|| agent.sessions.first())
+            .map(|session| session.agent_session_id.clone());
+        match conversation {
+            Some(conversation) if !conversation.is_empty() => {
+                if let Some(&index) = seen_conversations.get(&conversation) {
+                    if kept[index].display_name.trim().is_empty()
+                        && !agent.display_name.trim().is_empty()
+                    {
+                        kept[index].display_name = agent.display_name.clone();
+                    }
+                    dropped += 1;
+                } else {
+                    seen_conversations.insert(conversation, kept.len());
+                    kept.push(agent);
+                }
+            }
+            _ => kept.push(agent),
+        }
+    }
+    *agents = kept;
+    dropped
+}
+
+fn retain_latest_active_work_agent_per_identity(agents: &mut Vec<gwt::ActiveWorkAgentView>) {
+    let mut sorted = std::mem::take(agents);
+    sorted.sort_by(compare_active_work_agents_newest_first);
+    let mut seen_identities: std::collections::HashSet<String> = std::collections::HashSet::new();
+    let mut kept: Vec<gwt::ActiveWorkAgentView> = Vec::with_capacity(sorted.len());
+    for agent in sorted {
+        let Some(identity) = active_work_agent_identity_key(&agent) else {
+            kept.push(agent);
+            continue;
+        };
+        if seen_identities.insert(identity) {
+            kept.push(agent);
+        }
+    }
+    *agents = kept;
+}
+
+fn active_work_payload_agents(
+    agents: &[gwt::ActiveWorkAgentView],
+    cap: usize,
+) -> Vec<gwt::ActiveWorkAgentView> {
+    let mut summary_agents = agents.to_vec();
+    retain_latest_active_work_agent_per_identity(&mut summary_agents);
+    summary_agents.truncate(cap);
+
+    let mut selected_session_ids: HashSet<String> = summary_agents
+        .iter()
+        .map(|agent| agent.session_id.clone())
+        .collect();
+    let mut payload_agents = summary_agents;
+    let mut remaining_agents = agents.to_vec();
+    remaining_agents.sort_by(compare_active_work_agents_newest_first);
+    for agent in remaining_agents {
+        if payload_agents.len() >= cap {
+            break;
+        }
+        if selected_session_ids.insert(agent.session_id.clone()) {
+            payload_agents.push(agent);
+        }
+    }
+    payload_agents.sort_by(compare_active_work_agents_newest_first);
+    payload_agents
+}
+
+fn sync_active_workspace_child_agents(
+    work: &mut gwt::ActiveWorkItemView,
+    payload_agents: &[gwt::ActiveWorkAgentView],
+) {
     if work.works.len() == 1 {
-        work.works[0].agents = work.agents.clone();
+        work.works[0].agents = payload_agents.to_vec();
         return;
     }
 
+    let child_session_ids: Vec<HashSet<String>> = work
+        .works
+        .iter()
+        .map(|child| {
+            child
+                .agents
+                .iter()
+                .map(|agent| agent.session_id.clone())
+                .collect()
+        })
+        .collect();
     for child in &mut work.works {
-        let existing_session_ids: HashSet<String> = child
-            .agents
+        child.agents.clear();
+    }
+
+    for agent in payload_agents {
+        let canonical_child_id = format!("work-session-{}", agent.session_id);
+        let target_index = work
+            .works
             .iter()
-            .map(|agent| agent.session_id.clone())
-            .collect();
-        child.agents = work
-            .agents
-            .iter()
-            .filter(|agent| {
-                existing_session_ids.contains(agent.session_id.as_str())
-                    || child.id == format!("work-session-{}", agent.session_id)
-            })
-            .cloned()
-            .collect();
+            .position(|child| child.id == canonical_child_id)
+            .or_else(|| {
+                child_session_ids
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, session_ids)| session_ids.contains(agent.session_id.as_str()))
+                    .max_by(|(left_index, _), (right_index, _)| {
+                        let left = &work.works[*left_index];
+                        let right = &work.works[*right_index];
+                        left.updated_at
+                            .cmp(&right.updated_at)
+                            .then_with(|| left.id.cmp(&right.id))
+                    })
+                    .map(|(index, _)| index)
+            });
+        if let Some(index) = target_index {
+            work.works[index].agents.push(agent.clone());
+        }
     }
 }
 
@@ -1632,59 +1746,19 @@ pub(super) fn attach_registry_sessions_to_active_works(
         // agents whose latest conversation matches — newest updated_at wins
         // and borrows the duplicate's display_name when its own is empty.
         {
-            let mut sorted: Vec<gwt::ActiveWorkAgentView> = std::mem::take(&mut work.agents);
-            sorted.sort_by(compare_active_work_agents_newest_first);
-            let mut seen_conversations: std::collections::HashMap<String, usize> =
-                std::collections::HashMap::new();
-            let mut kept: Vec<gwt::ActiveWorkAgentView> = Vec::with_capacity(sorted.len());
-            let mut dropped = 0usize;
-            for agent in sorted {
-                let conversation = agent
-                    .sessions
-                    .iter()
-                    .find(|session| session.is_active)
-                    .or_else(|| agent.sessions.first())
-                    .map(|session| session.agent_session_id.clone());
-                match conversation {
-                    Some(conversation) if !conversation.is_empty() => {
-                        if let Some(&index) = seen_conversations.get(&conversation) {
-                            if kept[index].display_name.trim().is_empty()
-                                && !agent.display_name.trim().is_empty()
-                            {
-                                kept[index].display_name = agent.display_name.clone();
-                            }
-                            dropped += 1;
-                        } else {
-                            seen_conversations.insert(conversation, kept.len());
-                            kept.push(agent);
-                        }
-                    }
-                    _ => kept.push(agent),
-                }
-            }
-            work.agents = kept;
+            let dropped = collapse_active_work_agents_by_conversation(&mut work.agents);
             work.session_agent_total = work.session_agent_total.saturating_sub(dropped as u32);
         }
+        // Select one bounded Agent set for every child Work before the parent
+        // summary collapses identities. The latest Agent per identity is
+        // reserved first so the summary remains stable; remaining slots keep
+        // distinct conversations visible in their owning child Work.
+        let payload_agents = active_work_payload_agents(&work.agents, cap);
+        sync_active_workspace_child_agents(work, &payload_agents);
         // User verification 2026-06-17 (follow-up): Workspace detail is a
         // session summary, not a live process inventory. Per agent identity
         // only the latest history entry stays; live duplicates collapse too.
-        {
-            let mut sorted: Vec<gwt::ActiveWorkAgentView> = std::mem::take(&mut work.agents);
-            sorted.sort_by(compare_active_work_agents_newest_first);
-            let mut seen_identities: std::collections::HashSet<String> =
-                std::collections::HashSet::new();
-            let mut kept: Vec<gwt::ActiveWorkAgentView> = Vec::with_capacity(sorted.len());
-            for agent in sorted {
-                let Some(identity) = active_work_agent_identity_key(&agent) else {
-                    kept.push(agent);
-                    continue;
-                };
-                if seen_identities.insert(identity) {
-                    kept.push(agent);
-                }
-            }
-            work.agents = kept;
-        }
+        retain_latest_active_work_agent_per_identity(&mut work.agents);
         recompute_active_work_agent_counters(work);
         // The cap applies to the row's TOTAL agents: a decomposed legacy row
         // can carry hundreds of record agents, and the workspace payload feeds
@@ -1695,7 +1769,6 @@ pub(super) fn attach_registry_sessions_to_active_works(
             work.agents.sort_by(compare_active_work_agents_newest_first);
             work.agents.truncate(cap);
         }
-        sync_active_workspace_child_agents(work);
     }
     // SPEC-2359 Phase W-16 (FR-403): order the list by last update, newest
     // first — the row stamp or its freshest agent/ledger session, whichever
