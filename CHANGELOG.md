@@ -1,6 +1,35 @@
 # Changelog
 
 All notable changes to this project will be documented in this file.
+## [9.67.0] - 2026-07-15
+
+### Bug Fixes
+
+- **wizard:** Use model default reasoning for saved entries without effort
+- **restore:** Classify agent placeholders for exact startup auto-resume
+- **restore:** Keep final agent output in window detail on error exit
+- **gui:** コンテナワークスペースの起動ブランチ解決を修正
+- **workspace:** WorkとSessionの同期を修正
+- **workspace:** Paused WorkのSession投影を保持
+- **workspace:** Live Work配下のPaused Sessionを保持
+
+### Features
+
+- Adopt Codex 5.6 model snapshot with model-scoped reasoning stops
+- Issue と SPEC の実行経路を統一
+- Workspaceの操作対象を分離
+
+### Miscellaneous Tasks
+
+- Update work status
+- Update work status
+- Update work status
+- Update work status
+- Update work status
+- **ci:** Retrigger checks after flaky pty timing test
+- **work:** SPEC-2359の検証状態を記録
+- **work:** SPEC-2359の完了状態を記録
+
 ## [9.66.0] - 2026-07-10
 
 ### Bug Fixes
