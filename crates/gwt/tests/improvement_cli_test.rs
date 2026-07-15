@@ -1,4 +1,5 @@
 use std::{
+    collections::BTreeSet,
     fs,
     io::Write,
     path::{Path, PathBuf},
@@ -261,7 +262,41 @@ fn public_marker_digest(fingerprint: &str, occurrence_key: &str) -> String {
     )
 }
 
-fn write_owner_projection(home: &Path, owners: Vec<Value>) -> PathBuf {
+fn write_owner_projection(home: &Path, mut owners: Vec<Value>) -> PathBuf {
+    for owner in &mut owners {
+        for occurrence in owner["occurrences"]
+            .as_array_mut()
+            .expect("owner projection occurrences")
+        {
+            occurrence
+                .as_object_mut()
+                .expect("owner projection occurrence")
+                .entry("comment_audit")
+                .or_insert_with(|| {
+                    json!({
+                        "completeness": "legacy-unknown",
+                        "physical_comments": []
+                    })
+                });
+        }
+    }
+    let path = canonical_owner_projection(home);
+    fs::create_dir_all(path.parent().expect("owner projection parent"))
+        .expect("owner projection directory");
+    fs::write(
+        &path,
+        serde_json::to_vec_pretty(&json!({
+            "schema_version": 2,
+            "contract_revision": OWNER_PROJECTION_CONTRACT_REVISION,
+            "owners": owners,
+        }))
+        .expect("serialize owner projection"),
+    )
+    .expect("write owner projection");
+    path
+}
+
+fn write_owner_projection_v1(home: &Path, owners: Vec<Value>) -> PathBuf {
     let path = canonical_owner_projection(home);
     fs::create_dir_all(path.parent().expect("owner projection parent"))
         .expect("owner projection directory");
@@ -269,12 +304,12 @@ fn write_owner_projection(home: &Path, owners: Vec<Value>) -> PathBuf {
         &path,
         serde_json::to_vec_pretty(&json!({
             "schema_version": 1,
-            "contract_revision": OWNER_PROJECTION_CONTRACT_REVISION,
+            "contract_revision": 1,
             "owners": owners,
         }))
-        .expect("serialize owner projection"),
+        .expect("serialize legacy owner projection"),
     )
-    .expect("write owner projection");
+    .expect("write legacy owner projection");
     path
 }
 
@@ -1891,6 +1926,25 @@ fn owner_projection_revisioned_reader_returns_sanitized_owner_aggregate_fixture(
     assert_eq!(aggregate.occurrences.len(), 2);
     assert_eq!(aggregate.occurrences[0].opaque_key, occurrence_a);
     assert_eq!(aggregate.occurrences[1].opaque_key, occurrence_b);
+    let public_snapshot = serde_json::to_value(&projection).expect("serialize public projection");
+    assert_eq!(public_snapshot["contract_revision"], 1);
+    for occurrence in public_snapshot["owners"][0]["occurrences"]
+        .as_array()
+        .expect("public occurrences")
+    {
+        let keys = occurrence
+            .as_object()
+            .expect("public occurrence")
+            .keys()
+            .map(String::as_str)
+            .collect::<BTreeSet<_>>();
+        assert_eq!(
+            keys,
+            BTreeSet::from(["last_seen", "opaque_key", "public_marker_digest"])
+        );
+    }
+    assert!(!public_snapshot.to_string().contains("comment_audit"));
+    assert!(!public_snapshot.to_string().contains("comment_id"));
 
     let encoded = fs::read_to_string(projection_path).expect("projection JSON");
     for private_value in [
@@ -1904,6 +1958,106 @@ fn owner_projection_revisioned_reader_returns_sanitized_owner_aggregate_fixture(
             "projection leaked private value {private_value}: {encoded}"
         );
     }
+}
+
+#[test]
+fn owner_projection_schema_one_reader_keeps_public_revision_one_without_fabricated_audit() {
+    let home = tempfile::tempdir().expect("isolated home");
+    let _gwt_home = gwt_core::test_support::ScopedGwtHome::set(home.path());
+    let fingerprint = format!("v2:{}", "a".repeat(64));
+    let occurrence = format!("occ:v1:{}", "b".repeat(64));
+    let projection_path = write_owner_projection_v1(
+        home.path(),
+        vec![json!({
+            "owner": {
+                "number": 3164,
+                "kind": "spec",
+                "active": true,
+                "title": "Legacy owner projection",
+                "url": "https://github.com/akiojin/gwt/issues/3164",
+                "readback_verified_at": "2026-07-15T08:00:00Z"
+            },
+            "fingerprint": fingerprint,
+            "aggregate_count": 1,
+            "last_seen": "2026-07-15T08:00:00Z",
+            "occurrences": [{
+                "opaque_key": occurrence,
+                "public_marker_digest": public_marker_digest(&fingerprint, &occurrence),
+                "last_seen": "2026-07-15T08:00:00Z"
+            }],
+            "source_references": [{
+                "digest": "d".repeat(64),
+                "resolution_status": "linked",
+                "last_seen": "2026-07-15T08:00:00Z",
+                "occurrence_keys": [occurrence]
+            }]
+        })],
+    );
+    let projection = read_owner_projection().expect("migrate revision one projection");
+
+    assert_eq!(projection.contract_revision, 1);
+    let public_snapshot = serde_json::to_value(projection).expect("serialize public projection");
+    assert!(!public_snapshot.to_string().contains("comment_audit"));
+    assert!(!public_snapshot.to_string().contains("comment_id"));
+    let persisted: Value = serde_json::from_slice(
+        &fs::read(projection_path).expect("legacy owner projection fixture"),
+    )
+    .expect("parse owner projection fixture");
+    assert_eq!(persisted["schema_version"], 1);
+    assert!(persisted["owners"][0]["occurrences"][0]
+        .get("comment_audit")
+        .is_none());
+}
+
+#[test]
+fn owner_projection_private_comment_audit_is_not_exposed_by_reader() {
+    let home = tempfile::tempdir().expect("isolated home");
+    let _gwt_home = gwt_core::test_support::ScopedGwtHome::set(home.path());
+    let fingerprint = format!("v2:{}", "a".repeat(64));
+    let occurrence = format!("occ:v1:{}", "b".repeat(64));
+    let projection_path = write_owner_projection(
+        home.path(),
+        vec![json!({
+            "owner": {
+                "number": 3164,
+                "kind": "spec",
+                "active": true,
+                "title": "Owner projection with private comment audit",
+                "url": "https://github.com/akiojin/gwt/issues/3164",
+                "readback_verified_at": "2026-07-15T08:00:00Z"
+            },
+            "fingerprint": fingerprint,
+            "aggregate_count": 1,
+            "last_seen": "2026-07-15T08:00:00Z",
+            "occurrences": [{
+                "opaque_key": occurrence,
+                "public_marker_digest": public_marker_digest(&fingerprint, &occurrence),
+                "last_seen": "2026-07-15T08:00:00Z",
+                "comment_audit": {
+                    "completeness": "complete",
+                    "physical_comments": [
+                        {"owner_number": 3164, "comment_id": 10},
+                        {"owner_number": 3164, "comment_id": 11}
+                    ]
+                }
+            }],
+            "source_references": [{
+                "digest": "d".repeat(64),
+                "resolution_status": "linked",
+                "last_seen": "2026-07-15T08:00:00Z",
+                "occurrence_keys": [occurrence]
+            }]
+        })],
+    );
+    let projection = read_owner_projection().expect("read projection with private audit");
+    let public_snapshot = serde_json::to_value(projection).expect("serialize public projection");
+    assert_eq!(public_snapshot["contract_revision"], 1);
+    assert!(!public_snapshot.to_string().contains("comment_audit"));
+    assert!(!public_snapshot.to_string().contains("comment_id"));
+
+    let persisted = fs::read_to_string(projection_path).expect("private projection storage");
+    assert!(persisted.contains("comment_audit"));
+    assert!(persisted.contains("comment_id"));
 }
 
 #[test]

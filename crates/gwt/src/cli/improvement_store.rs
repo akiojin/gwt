@@ -21,7 +21,8 @@ use super::improvement_contract::{
 };
 
 pub(super) const STORE_SCHEMA_VERSION: u32 = 3;
-const OWNER_PROJECTION_SCHEMA_VERSION: u32 = 1;
+const OWNER_PROJECTION_SCHEMA_VERSION: u32 = 2;
+const LEGACY_OWNER_PROJECTION_SCHEMA_VERSION: u32 = 1;
 const UPSTREAM_REPOSITORY_KEY: &str = "github.com/akiojin/gwt";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -39,8 +40,39 @@ pub(super) struct OwnerProjectionRecord {
     pub(super) fingerprint: String,
     pub(super) aggregate_count: u64,
     pub(super) last_seen: String,
-    pub(super) occurrences: Vec<OwnerProjectionOccurrence>,
+    pub(super) occurrences: Vec<StoredOwnerProjectionOccurrence>,
     pub(super) source_references: Vec<OwnerProjectionSourceReference>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(super) struct StoredOwnerProjectionOccurrence {
+    pub(super) opaque_key: String,
+    pub(super) public_marker_digest: String,
+    pub(super) last_seen: String,
+    pub(super) comment_audit: StoredCommentAudit,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub(super) struct StoredCommentAudit {
+    pub(super) completeness: StoredCommentAuditCompleteness,
+    pub(super) physical_comments: Vec<StoredCommentRef>,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub(super) enum StoredCommentAuditCompleteness {
+    Complete,
+    LegacyUnknown,
+    NotApplicable,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
+#[serde(deny_unknown_fields)]
+pub(super) struct StoredCommentRef {
+    pub(super) owner_number: u64,
+    pub(super) comment_id: u64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -63,9 +95,33 @@ pub(super) enum OwnerProjectionResolutionStatus {
 pub(super) struct OwnerProjectionCommit {
     pub(super) owner: OwnerProjectionOwner,
     pub(super) fingerprint: String,
-    pub(super) occurrence: OwnerProjectionOccurrence,
+    pub(super) occurrence: StoredOwnerProjectionOccurrence,
     pub(super) source_reference_digest: String,
     pub(super) resolution_status: OwnerProjectionResolutionStatus,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) struct OwnerProjectionCommitOutcome {
+    pub(super) canonical_owner_number: u64,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct LegacyOwnerProjectionStoreV1 {
+    schema_version: u32,
+    contract_revision: u32,
+    owners: Vec<LegacyOwnerProjectionRecordV1>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct LegacyOwnerProjectionRecordV1 {
+    owner: OwnerProjectionOwner,
+    fingerprint: String,
+    aggregate_count: u64,
+    last_seen: String,
+    occurrences: Vec<OwnerProjectionOccurrence>,
+    source_references: Vec<OwnerProjectionSourceReference>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -173,7 +229,15 @@ pub(super) fn read_owner_projection_contract() -> Result<OwnerProjectionSnapshot
                 fingerprint: record.fingerprint,
                 aggregate_count: record.aggregate_count,
                 last_seen: record.last_seen,
-                occurrences: record.occurrences,
+                occurrences: record
+                    .occurrences
+                    .into_iter()
+                    .map(|occurrence| OwnerProjectionOccurrence {
+                        opaque_key: occurrence.opaque_key,
+                        public_marker_digest: occurrence.public_marker_digest,
+                        last_seen: occurrence.last_seen,
+                    })
+                    .collect(),
             })
             .collect(),
     })
@@ -183,29 +247,32 @@ pub(super) fn load_owner_projection() -> Result<OwnerProjectionStore, SpecOpsErr
     with_owner_projection_lock(load_owner_projection_unlocked)
 }
 
-pub(super) fn commit_owner_projection(commit: OwnerProjectionCommit) -> Result<(), SpecOpsError> {
+pub(super) fn commit_owner_projection(
+    commit: OwnerProjectionCommit,
+) -> Result<OwnerProjectionCommitOutcome, SpecOpsError> {
     commit_owner_projection_inner(commit, false)
 }
 
 #[cfg(test)]
 pub(super) fn commit_owner_projection_before_persist(
     commit: OwnerProjectionCommit,
-) -> Result<(), SpecOpsError> {
+) -> Result<OwnerProjectionCommitOutcome, SpecOpsError> {
     commit_owner_projection_inner(commit, true)
 }
 
 fn commit_owner_projection_inner(
     commit: OwnerProjectionCommit,
     fail_before_persist: bool,
-) -> Result<(), SpecOpsError> {
+) -> Result<OwnerProjectionCommitOutcome, SpecOpsError> {
     with_owner_projection_lock(|| {
         let mut store = load_owner_projection_unlocked()?;
-        apply_owner_projection_commit(&mut store, commit)?;
+        let outcome = apply_owner_projection_commit(&mut store, commit)?;
         validate_owner_projection(&store)?;
         if fail_before_persist {
             return Err(invalid("injected failure before owner projection commit"));
         }
-        save_owner_projection_unlocked(&store)
+        save_owner_projection_unlocked(&store)?;
+        Ok(outcome)
     })
 }
 
@@ -219,10 +286,70 @@ fn load_owner_projection_unlocked() -> Result<OwnerProjectionStore, SpecOpsError
         });
     }
     let bytes = fs::read(&path).map_err(io_as_spec_error)?;
-    let store: OwnerProjectionStore =
-        serde_json::from_slice(&bytes).map_err(serde_as_spec_error)?;
+    let value: serde_json::Value = serde_json::from_slice(&bytes).map_err(serde_as_spec_error)?;
+    let schema_version = value
+        .get("schema_version")
+        .and_then(serde_json::Value::as_u64)
+        .and_then(|version| u32::try_from(version).ok())
+        .ok_or_else(|| invalid("owner projection schema version is missing or invalid"))?;
+    let store = match schema_version {
+        OWNER_PROJECTION_SCHEMA_VERSION => {
+            serde_json::from_value(value).map_err(serde_as_spec_error)?
+        }
+        LEGACY_OWNER_PROJECTION_SCHEMA_VERSION => {
+            let legacy: LegacyOwnerProjectionStoreV1 =
+                serde_json::from_value(value).map_err(serde_as_spec_error)?;
+            migrate_owner_projection_v1(legacy)?
+        }
+        unsupported => {
+            return Err(invalid(&format!(
+                "unsupported owner projection schema version: {unsupported}"
+            )))
+        }
+    };
     validate_owner_projection(&store)?;
     Ok(store)
+}
+
+fn migrate_owner_projection_v1(
+    legacy: LegacyOwnerProjectionStoreV1,
+) -> Result<OwnerProjectionStore, SpecOpsError> {
+    if legacy.schema_version != LEGACY_OWNER_PROJECTION_SCHEMA_VERSION {
+        return Err(invalid("legacy owner projection schema version is invalid"));
+    }
+    if legacy.contract_revision != OWNER_PROJECTION_CONTRACT_REVISION {
+        return Err(invalid(
+            "legacy owner projection contract revision is invalid",
+        ));
+    }
+    Ok(OwnerProjectionStore {
+        schema_version: OWNER_PROJECTION_SCHEMA_VERSION,
+        contract_revision: legacy.contract_revision,
+        owners: legacy
+            .owners
+            .into_iter()
+            .map(|record| OwnerProjectionRecord {
+                owner: record.owner,
+                fingerprint: record.fingerprint,
+                aggregate_count: record.aggregate_count,
+                last_seen: record.last_seen,
+                occurrences: record
+                    .occurrences
+                    .into_iter()
+                    .map(|occurrence| StoredOwnerProjectionOccurrence {
+                        opaque_key: occurrence.opaque_key,
+                        public_marker_digest: occurrence.public_marker_digest,
+                        last_seen: occurrence.last_seen,
+                        comment_audit: StoredCommentAudit {
+                            completeness: StoredCommentAuditCompleteness::LegacyUnknown,
+                            physical_comments: Vec::new(),
+                        },
+                    })
+                    .collect(),
+                source_references: record.source_references,
+            })
+            .collect(),
+    })
 }
 
 fn save_owner_projection_unlocked(store: &OwnerProjectionStore) -> Result<(), SpecOpsError> {
@@ -259,11 +386,16 @@ fn with_owner_projection_lock<T>(
 
 fn apply_owner_projection_commit(
     store: &mut OwnerProjectionStore,
-    commit: OwnerProjectionCommit,
-) -> Result<(), SpecOpsError> {
+    mut commit: OwnerProjectionCommit,
+) -> Result<OwnerProjectionCommitOutcome, SpecOpsError> {
     validate_owner_projection_owner(&commit.owner)?;
     validate_fingerprint(&commit.fingerprint)?;
     validate_occurrence(&commit.fingerprint, &commit.occurrence)?;
+    validate_commit_comment_audit(
+        &commit.owner,
+        commit.resolution_status,
+        &commit.occurrence.comment_audit,
+    )?;
     validate_hex_digest(
         "owner projection source reference",
         &commit.source_reference_digest,
@@ -301,10 +433,24 @@ fn apply_owner_projection_commit(
         }
         if record.owner.number != commit.owner.number {
             if commit.owner.number > record.owner.number {
-                return Err(invalid(
-                    "owner projection occurrence already has a lower canonical owner",
-                ));
+                let canonical_owner_number = record.owner.number;
+                let record = &mut store.owners[index];
+                let existing = record
+                    .occurrences
+                    .iter_mut()
+                    .find(|occurrence| occurrence.opaque_key == commit.occurrence.opaque_key)
+                    .expect("occurrence index was located");
+                existing.last_seen =
+                    latest_timestamp(&existing.last_seen, &commit.occurrence.last_seen)?;
+                existing.comment_audit =
+                    merge_comment_audits(&existing.comment_audit, &commit.occurrence.comment_audit);
+                normalize_owner_projection(store)?;
+                return Ok(OwnerProjectionCommitOutcome {
+                    canonical_owner_number,
+                });
             }
+            commit.occurrence.comment_audit =
+                merge_comment_audits(&existing.comment_audit, &commit.occurrence.comment_audit);
             let record = &mut store.owners[index];
             record
                 .occurrences
@@ -360,6 +506,8 @@ fn apply_owner_projection_commit(
         .find(|occurrence| occurrence.opaque_key == commit.occurrence.opaque_key)
     {
         existing.last_seen = latest_timestamp(&existing.last_seen, &commit.occurrence.last_seen)?;
+        existing.comment_audit =
+            merge_comment_audits(&existing.comment_audit, &commit.occurrence.comment_audit);
     } else {
         record.occurrences.push(commit.occurrence.clone());
     }
@@ -392,7 +540,9 @@ fn apply_owner_projection_commit(
     }
     record.last_seen = latest_timestamp(&record.last_seen, &commit.occurrence.last_seen)?;
     normalize_owner_projection(store)?;
-    Ok(())
+    Ok(OwnerProjectionCommitOutcome {
+        canonical_owner_number: commit.owner.number,
+    })
 }
 
 fn merge_resolution_status(
@@ -420,6 +570,10 @@ fn normalize_owner_projection(store: &mut OwnerProjectionStore) -> Result<(), Sp
         record
             .occurrences
             .sort_by(|left, right| left.opaque_key.cmp(&right.opaque_key));
+        for occurrence in &mut record.occurrences {
+            occurrence.comment_audit.physical_comments.sort_unstable();
+            occurrence.comment_audit.physical_comments.dedup();
+        }
         record.source_references.sort_by(|left, right| {
             left.digest
                 .cmp(&right.digest)
@@ -581,6 +735,11 @@ fn validate_owner_projection(store: &OwnerProjectionStore) -> Result<(), SpecOps
                     .iter()
                     .find(|occurrence| occurrence.opaque_key == *key)
                     .expect("covered occurrence was validated above");
+                validate_comment_audit_for_resolution(
+                    &record.owner,
+                    source.resolution_status,
+                    &occurrence.comment_audit,
+                )?;
                 source_latest = Some(match source_latest {
                     Some(current) => latest_timestamp(&current, &occurrence.last_seen)?,
                     None => occurrence.last_seen.clone(),
@@ -651,7 +810,7 @@ fn validate_owner_projection_owner(owner: &OwnerProjectionOwner) -> Result<(), S
 
 fn validate_occurrence(
     fingerprint: &str,
-    occurrence: &OwnerProjectionOccurrence,
+    occurrence: &StoredOwnerProjectionOccurrence,
 ) -> Result<(), SpecOpsError> {
     let Some(digest) = occurrence.opaque_key.strip_prefix("occ:v1:") else {
         return Err(invalid("invalid owner projection occurrence key"));
@@ -671,7 +830,130 @@ fn validate_occurrence(
     validate_timestamp(
         "owner projection occurrence last_seen",
         &occurrence.last_seen,
-    )
+    )?;
+    validate_stored_comment_audit(&occurrence.comment_audit)
+}
+
+fn validate_stored_comment_audit(audit: &StoredCommentAudit) -> Result<(), SpecOpsError> {
+    if audit
+        .physical_comments
+        .iter()
+        .any(|reference| reference.owner_number == 0 || reference.comment_id == 0)
+        || audit
+            .physical_comments
+            .windows(2)
+            .any(|pair| pair[0] >= pair[1])
+    {
+        return Err(invalid(
+            "owner projection comment audit must contain sorted unique positive references",
+        ));
+    }
+    if audit.completeness == StoredCommentAuditCompleteness::Complete
+        && audit.physical_comments.is_empty()
+    {
+        return Err(invalid(
+            "complete owner projection comment audit requires a physical comment",
+        ));
+    }
+    if audit.completeness == StoredCommentAuditCompleteness::NotApplicable
+        && !audit.physical_comments.is_empty()
+    {
+        return Err(invalid(
+            "not-applicable owner projection comment audit must be empty",
+        ));
+    }
+    Ok(())
+}
+
+fn validate_commit_comment_audit(
+    owner: &OwnerProjectionOwner,
+    resolution_status: OwnerProjectionResolutionStatus,
+    audit: &StoredCommentAudit,
+) -> Result<(), SpecOpsError> {
+    match audit.completeness {
+        StoredCommentAuditCompleteness::Complete => {
+            if resolution_status != OwnerProjectionResolutionStatus::Linked {
+                return Err(invalid(
+                    "complete owner projection comment audit requires a linked binding",
+                ));
+            }
+            if audit
+                .physical_comments
+                .iter()
+                .any(|reference| reference.owner_number != owner.number)
+            {
+                return Err(invalid(
+                    "complete owner projection comment audit must match the incoming owner",
+                ));
+            }
+        }
+        StoredCommentAuditCompleteness::LegacyUnknown => {
+            return Err(invalid(
+                "legacy-unknown owner projection audit is migration-only",
+            ));
+        }
+        StoredCommentAuditCompleteness::NotApplicable => {
+            if resolution_status != OwnerProjectionResolutionStatus::Created
+                || !audit.physical_comments.is_empty()
+            {
+                return Err(invalid(
+                    "not-applicable owner projection comment audit requires a created binding",
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
+fn validate_comment_audit_for_resolution(
+    owner: &OwnerProjectionOwner,
+    resolution_status: OwnerProjectionResolutionStatus,
+    audit: &StoredCommentAudit,
+) -> Result<(), SpecOpsError> {
+    match (resolution_status, audit.completeness) {
+        (
+            OwnerProjectionResolutionStatus::Linked,
+            StoredCommentAuditCompleteness::NotApplicable,
+        ) => Err(invalid(
+            "linked owner projection requires comment audit coverage",
+        )),
+        (OwnerProjectionResolutionStatus::Linked, StoredCommentAuditCompleteness::Complete)
+            if !audit
+                .physical_comments
+                .iter()
+                .any(|reference| reference.owner_number == owner.number) =>
+        {
+            Err(invalid(
+                "complete linked owner projection comment audit must cover the canonical owner",
+            ))
+        }
+        _ => Ok(()),
+    }
+}
+
+fn merge_comment_audits(
+    existing: &StoredCommentAudit,
+    incoming: &StoredCommentAudit,
+) -> StoredCommentAudit {
+    let completeness = if existing.completeness == StoredCommentAuditCompleteness::LegacyUnknown
+        || incoming.completeness == StoredCommentAuditCompleteness::LegacyUnknown
+    {
+        StoredCommentAuditCompleteness::LegacyUnknown
+    } else if existing.completeness == StoredCommentAuditCompleteness::Complete
+        || incoming.completeness == StoredCommentAuditCompleteness::Complete
+    {
+        StoredCommentAuditCompleteness::Complete
+    } else {
+        StoredCommentAuditCompleteness::NotApplicable
+    };
+    let mut physical_comments = existing.physical_comments.clone();
+    physical_comments.extend(incoming.physical_comments.iter().copied());
+    physical_comments.sort_unstable();
+    physical_comments.dedup();
+    StoredCommentAudit {
+        completeness,
+        physical_comments,
+    }
 }
 
 fn validate_fingerprint(fingerprint: &str) -> Result<(), SpecOpsError> {
@@ -1357,6 +1639,56 @@ mod tests {
 
     use super::*;
 
+    fn projection_record(comment_audit: Option<serde_json::Value>) -> serde_json::Value {
+        let fingerprint = format!("v2:{}", "a".repeat(64));
+        let opaque_key = format!("occ:v1:{}", "b".repeat(64));
+        let mut occurrence = json!({
+            "opaque_key": opaque_key,
+            "public_marker_digest": owner_projection_public_marker_digest(
+                &fingerprint,
+                &opaque_key
+            ),
+            "last_seen": "2026-07-15T08:00:00Z"
+        });
+        if let Some(comment_audit) = comment_audit {
+            occurrence
+                .as_object_mut()
+                .expect("occurrence object")
+                .insert("comment_audit".to_string(), comment_audit);
+        }
+        json!({
+            "owner": {
+                "number": 3164,
+                "kind": "spec",
+                "active": true,
+                "title": "Owner projection storage test",
+                "url": "https://github.com/akiojin/gwt/issues/3164",
+                "readback_verified_at": "2026-07-15T08:00:00Z"
+            },
+            "fingerprint": fingerprint,
+            "aggregate_count": 1,
+            "last_seen": "2026-07-15T08:00:00Z",
+            "occurrences": [occurrence],
+            "source_references": [{
+                "digest": "c".repeat(64),
+                "resolution_status": "linked",
+                "last_seen": "2026-07-15T08:00:00Z",
+                "occurrence_keys": [opaque_key]
+            }]
+        })
+    }
+
+    fn write_projection_fixture(value: &serde_json::Value) {
+        let path = owner_projection_path();
+        fs::create_dir_all(path.parent().expect("projection parent"))
+            .expect("projection directory");
+        fs::write(
+            path,
+            serde_json::to_vec_pretty(value).expect("projection fixture JSON"),
+        )
+        .expect("projection fixture");
+    }
+
     fn store_with_candidate() -> CandidateStore {
         let candidate = serde_json::from_value(json!({
             "schema_version": 2,
@@ -1383,6 +1715,160 @@ mod tests {
             source_scope_nonce: Some("00".repeat(32)),
             candidates: vec![candidate],
             legacy_import: LegacyImportState::default(),
+        }
+    }
+
+    #[test]
+    fn schema_one_projection_migrates_to_private_unknown_audit_on_next_persist() {
+        let home = tempfile::tempdir().expect("isolated home");
+        let _gwt_home = gwt_core::test_support::ScopedGwtHome::set(home.path());
+        write_projection_fixture(&json!({
+            "schema_version": 1,
+            "contract_revision": 1,
+            "owners": [projection_record(None)]
+        }));
+
+        let store = load_owner_projection().expect("load schema one projection");
+
+        assert_eq!(store.schema_version, OWNER_PROJECTION_SCHEMA_VERSION);
+        assert_eq!(store.contract_revision, 1);
+        assert_eq!(
+            store.owners[0].occurrences[0].comment_audit.completeness,
+            StoredCommentAuditCompleteness::LegacyUnknown
+        );
+        assert!(store.owners[0].occurrences[0]
+            .comment_audit
+            .physical_comments
+            .is_empty());
+
+        save_owner_projection_unlocked(&store).expect("persist schema two projection");
+        let persisted: serde_json::Value = serde_json::from_slice(
+            &fs::read(owner_projection_path()).expect("persisted projection"),
+        )
+        .expect("persisted projection JSON");
+        assert_eq!(persisted["schema_version"], 2);
+        assert_eq!(
+            persisted["owners"][0]["occurrences"][0]["comment_audit"],
+            json!({
+                "completeness": "legacy-unknown",
+                "physical_comments": []
+            })
+        );
+        let public = read_owner_projection_contract().expect("public projection");
+        let public_json = serde_json::to_value(public).expect("public projection JSON");
+        assert_eq!(public_json["contract_revision"], 1);
+        assert!(!public_json.to_string().contains("comment_audit"));
+        assert!(!public_json.to_string().contains("comment_id"));
+    }
+
+    #[test]
+    fn migrated_unknown_audit_is_not_upgraded_by_one_current_owner_readback() {
+        let home = tempfile::tempdir().expect("isolated home");
+        let _gwt_home = gwt_core::test_support::ScopedGwtHome::set(home.path());
+        write_projection_fixture(&json!({
+            "schema_version": 1,
+            "contract_revision": 1,
+            "owners": [projection_record(None)]
+        }));
+        let mut store = load_owner_projection().expect("load schema one projection");
+        let record = store.owners[0].clone();
+        let occurrence = record.occurrences[0].clone();
+
+        apply_owner_projection_commit(
+            &mut store,
+            OwnerProjectionCommit {
+                owner: record.owner.clone(),
+                fingerprint: record.fingerprint.clone(),
+                occurrence: StoredOwnerProjectionOccurrence {
+                    opaque_key: occurrence.opaque_key,
+                    public_marker_digest: occurrence.public_marker_digest,
+                    last_seen: occurrence.last_seen,
+                    comment_audit: StoredCommentAudit {
+                        completeness: StoredCommentAuditCompleteness::Complete,
+                        physical_comments: vec![StoredCommentRef {
+                            owner_number: record.owner.number,
+                            comment_id: 10,
+                        }],
+                    },
+                },
+                source_reference_digest: record.source_references[0].digest.clone(),
+                resolution_status: OwnerProjectionResolutionStatus::Linked,
+            },
+        )
+        .expect("merge current owner readback into migrated projection");
+
+        let audit = &store.owners[0].occurrences[0].comment_audit;
+        assert_eq!(
+            audit.completeness,
+            StoredCommentAuditCompleteness::LegacyUnknown
+        );
+        assert_eq!(
+            audit.physical_comments,
+            vec![StoredCommentRef {
+                owner_number: 3164,
+                comment_id: 10
+            }]
+        );
+    }
+
+    #[test]
+    fn schema_two_projection_requires_canonical_private_comment_audit() {
+        for (name, audit) in [
+            ("missing", None),
+            (
+                "zero-id",
+                Some(json!({
+                    "completeness": "complete",
+                    "physical_comments": [{"owner_number": 3164, "comment_id": 0}]
+                })),
+            ),
+            (
+                "noncanonical",
+                Some(json!({
+                    "completeness": "complete",
+                    "physical_comments": [
+                        {"owner_number": 3164, "comment_id": 2},
+                        {"owner_number": 3164, "comment_id": 1}
+                    ]
+                })),
+            ),
+            (
+                "empty-complete",
+                Some(json!({
+                    "completeness": "complete",
+                    "physical_comments": []
+                })),
+            ),
+            (
+                "wrong-owner",
+                Some(json!({
+                    "completeness": "complete",
+                    "physical_comments": [{"owner_number": 9999, "comment_id": 1}]
+                })),
+            ),
+            (
+                "linked-not-applicable",
+                Some(json!({
+                    "completeness": "not-applicable",
+                    "physical_comments": []
+                })),
+            ),
+        ] {
+            let home = tempfile::tempdir().expect("isolated home");
+            let _gwt_home = gwt_core::test_support::ScopedGwtHome::set(home.path());
+            write_projection_fixture(&json!({
+                "schema_version": 2,
+                "contract_revision": 1,
+                "owners": [projection_record(audit)]
+            }));
+
+            let error = load_owner_projection().expect_err(name);
+
+            assert!(
+                error.to_string().contains("comment_audit")
+                    || error.to_string().contains("comment audit"),
+                "{name}: {error}"
+            );
         }
     }
 
