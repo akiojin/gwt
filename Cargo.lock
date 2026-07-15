@@ -1434,10 +1434,12 @@ name = "gwt-github"
 version = "9.66.0"
 dependencies = [
  "gwt-core",
+ "hex",
  "regex",
  "reqwest",
  "serde",
  "serde_json",
+ "sha2",
  "tempfile",
  "thiserror 2.0.18",
 ]

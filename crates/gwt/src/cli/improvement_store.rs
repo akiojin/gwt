@@ -100,6 +100,12 @@ pub(super) fn load_and_repair(repo_root: &Path) -> Result<CandidateStore, SpecOp
     with_store_lock(repo_root, || load_and_repair_unlocked(repo_root))
 }
 
+pub(super) fn source_scope_nonce(repo_root: &Path) -> Result<String, SpecOpsError> {
+    load_and_repair(repo_root)?
+        .source_scope_nonce
+        .ok_or_else(|| invalid("candidate store source scope nonce is missing after repair"))
+}
+
 pub(super) fn update<T>(
     repo_root: &Path,
     operation: impl FnOnce(&mut CandidateStore) -> Result<T, SpecOpsError>,

@@ -111,7 +111,7 @@ fn init_repo_with_origin(remote_url: &str) -> TempDir {
 }
 
 #[test]
-fn gwt_self_improvement_stop_blocks_high_confidence_gwt_contract_violation_in_gwt_repo() {
+fn gwt_self_improvement_stop_ignores_legacy_high_confidence_candidate_without_typed_evidence() {
     with_temp_home(|_| {
         let repo = init_repo_with_origin("https://github.com/akiojin/gwt.git");
         write_improvement_store(
@@ -138,13 +138,11 @@ fn gwt_self_improvement_stop_blocks_high_confidence_gwt_contract_violation_in_gw
             }),
         );
 
-        let output = gwt_self_improvement_stop::evaluate(repo.path(), false, false);
-        let HookOutput::StopBlock { reason } = output else {
-            panic!("expected StopBlock, got {output:?}");
-        };
-        assert!(reason.contains("impr-high"));
-        assert!(reason.contains("improvement.promote_issue"));
-        assert!(reason.contains("improvement.dismiss"));
+        assert_eq!(
+            gwt_self_improvement_stop::evaluate(repo.path(), false, false),
+            HookOutput::Silent,
+            "legacy free-form evidence must migrate to needs-evidence without blocking Stop"
+        );
 
         // SPEC-3247 FR-003 / AS-4: the same high-confidence candidate in an intake
         // (Curate) session must NOT block Stop — intake owns no Work and is not the

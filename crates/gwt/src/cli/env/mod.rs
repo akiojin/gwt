@@ -17,7 +17,7 @@ mod tests;
 
 pub use default::DefaultCliEnv;
 #[cfg(test)]
-pub use default::{IssueClientFactory, LazyIssueClient};
+pub use default::{IssueClientFactory, LazyIssueClient, LazyOwnerClient, OwnerClientFactory};
 pub(crate) use stdout_capture::StdoutCaptureEnv;
 pub use test_env::{TargetIssueCreateCall, TestEnv};
 
@@ -27,7 +27,10 @@ use std::{
 };
 
 use gwt_git::PrStatus;
-use gwt_github::{client::IssueClient, IssueNumber, IssueSnapshot, SpecListFilter};
+use gwt_github::{
+    client::{ApiError, IssueClient, OwnerRepositoryClient, ResolutionDeadline},
+    IssueNumber, IssueSnapshot, SpecListFilter, SpecOpsError,
+};
 
 use super::{
     parse_actions_args, parse_board_args, parse_discussion_args, parse_hook_args, parse_issue_args,
@@ -40,7 +43,13 @@ use super::{
 /// `client::fake::FakeIssueClient`) instead of spinning up real HTTP.
 pub trait CliEnv {
     type Client: IssueClient;
+    type OwnerClient: OwnerRepositoryClient;
     fn client(&self) -> &Self::Client;
+    fn improvement_owner_client(
+        &self,
+        deadline: &ResolutionDeadline,
+    ) -> Result<&Self::OwnerClient, ApiError>;
+    fn improvement_source_scope_nonce(&self) -> Result<String, SpecOpsError>;
     fn cache_root(&self) -> PathBuf;
     fn repo_path(&self) -> &std::path::Path;
     fn stdout(&mut self) -> &mut dyn io::Write;

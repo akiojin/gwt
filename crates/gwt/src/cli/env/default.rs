@@ -13,7 +13,12 @@ use std::{
 
 use gwt_git::PrStatus;
 use gwt_github::{
-    client::{http::HttpIssueClient, IssueClient},
+    client::{
+        http::HttpIssueClient, ApiError, CommitComparison, CompleteCollection,
+        CreateRepositoryIssue, IssueClient, MergedPullRequest, OwnerMutationError,
+        OwnerMutationResult, OwnerRepositoryClient, RepositoryComment, RepositoryIdentity,
+        RepositoryIssue, RepositoryRelease, ResolutionDeadline,
+    },
     IssueNumber, IssueSnapshot, SpecListFilter,
 };
 
@@ -23,6 +28,9 @@ use crate::cli::{LinkedPrSummary, PrChecksSummary, PrCreateCall, PrReview, PrRev
 
 pub type IssueClientFactory =
     dyn Fn(&str, &str) -> Result<HttpIssueClient, gwt_github::client::ApiError> + Send + Sync;
+pub type OwnerClientFactory = dyn Fn(&str, &str, &ResolutionDeadline) -> Result<HttpIssueClient, gwt_github::client::ApiError>
+    + Send
+    + Sync;
 
 pub struct LazyIssueClient {
     owner: String,
@@ -134,9 +142,146 @@ impl IssueClient for LazyIssueClient {
     }
 }
 
+pub struct LazyOwnerClient {
+    factory: Arc<OwnerClientFactory>,
+    resolved: OnceLock<HttpIssueClient>,
+}
+
+impl LazyOwnerClient {
+    pub(super) fn new_with_factory(factory: Arc<OwnerClientFactory>) -> Self {
+        Self {
+            factory,
+            resolved: OnceLock::new(),
+        }
+    }
+
+    fn resolve(&self, deadline: &ResolutionDeadline) -> Result<&HttpIssueClient, ApiError> {
+        if let Some(client) = self.resolved.get() {
+            return Ok(client);
+        }
+        let client = (self.factory)("akiojin", "gwt", deadline)?;
+        let _ = self.resolved.set(client);
+        self.resolved.get().ok_or_else(|| {
+            ApiError::Unexpected("lazy owner client failed to initialize".to_string())
+        })
+    }
+
+    fn resolve_upstream(
+        &self,
+        repository: &RepositoryIdentity,
+        deadline: &ResolutionDeadline,
+    ) -> Result<&HttpIssueClient, ApiError> {
+        let upstream = RepositoryIdentity::gwt_upstream();
+        if repository != &upstream {
+            return Err(ApiError::RepositoryMismatch {
+                expected: upstream.to_string(),
+                actual: repository.to_string(),
+            });
+        }
+        self.resolve(deadline)
+    }
+}
+
+impl OwnerRepositoryClient for LazyOwnerClient {
+    fn list_issues(
+        &self,
+        repository: &RepositoryIdentity,
+        deadline: &ResolutionDeadline,
+    ) -> Result<CompleteCollection<RepositoryIssue>, ApiError> {
+        self.resolve_upstream(repository, deadline)?
+            .list_issues(repository, deadline)
+    }
+
+    fn list_comments(
+        &self,
+        repository: &RepositoryIdentity,
+        number: IssueNumber,
+        deadline: &ResolutionDeadline,
+    ) -> Result<CompleteCollection<RepositoryComment>, ApiError> {
+        self.resolve_upstream(repository, deadline)?
+            .list_comments(repository, number, deadline)
+    }
+
+    fn fetch_issue(
+        &self,
+        repository: &RepositoryIdentity,
+        number: IssueNumber,
+        deadline: &ResolutionDeadline,
+    ) -> Result<RepositoryIssue, ApiError> {
+        self.resolve_upstream(repository, deadline)?
+            .fetch_issue(repository, number, deadline)
+    }
+
+    fn create_owner_comment(
+        &self,
+        repository: &RepositoryIdentity,
+        number: IssueNumber,
+        body: &str,
+        deadline: &ResolutionDeadline,
+    ) -> OwnerMutationResult<RepositoryComment> {
+        self.resolve_upstream(repository, deadline)
+            .map_err(OwnerMutationError::PreSubmit)?
+            .create_owner_comment(repository, number, body, deadline)
+    }
+
+    fn create_owner_issue(
+        &self,
+        repository: &RepositoryIdentity,
+        input: &CreateRepositoryIssue,
+        deadline: &ResolutionDeadline,
+    ) -> OwnerMutationResult<RepositoryIssue> {
+        self.resolve_upstream(repository, deadline)
+            .map_err(OwnerMutationError::PreSubmit)?
+            .create_owner_issue(repository, input, deadline)
+    }
+
+    fn close_issue_verified(
+        &self,
+        repository: &RepositoryIdentity,
+        number: IssueNumber,
+        deadline: &ResolutionDeadline,
+    ) -> OwnerMutationResult<RepositoryIssue> {
+        self.resolve_upstream(repository, deadline)
+            .map_err(OwnerMutationError::PreSubmit)?
+            .close_issue_verified(repository, number, deadline)
+    }
+
+    fn fetch_merged_pull_request(
+        &self,
+        repository: &RepositoryIdentity,
+        number: IssueNumber,
+        deadline: &ResolutionDeadline,
+    ) -> Result<Option<MergedPullRequest>, ApiError> {
+        self.resolve_upstream(repository, deadline)?
+            .fetch_merged_pull_request(repository, number, deadline)
+    }
+
+    fn fetch_release_by_tag(
+        &self,
+        repository: &RepositoryIdentity,
+        tag: &str,
+        deadline: &ResolutionDeadline,
+    ) -> Result<Option<RepositoryRelease>, ApiError> {
+        self.resolve_upstream(repository, deadline)?
+            .fetch_release_by_tag(repository, tag, deadline)
+    }
+
+    fn compare_commits(
+        &self,
+        repository: &RepositoryIdentity,
+        base: &str,
+        head: &str,
+        deadline: &ResolutionDeadline,
+    ) -> Result<CommitComparison, ApiError> {
+        self.resolve_upstream(repository, deadline)?
+            .compare_commits(repository, base, head, deadline)
+    }
+}
+
 /// Default production [`CliEnv`] that defers GitHub auth until a command
 pub struct DefaultCliEnv {
     client: LazyIssueClient,
+    owner_client: LazyOwnerClient,
     client_factory: Arc<IssueClientFactory>,
     cache_root: PathBuf,
     repo_path: PathBuf,
@@ -176,6 +321,9 @@ impl DefaultCliEnv {
     ) -> Self {
         DefaultCliEnv {
             client: LazyIssueClient::new_with_factory(owner, repo, factory.clone()),
+            owner_client: LazyOwnerClient::new_with_factory(Arc::new(
+                HttpIssueClient::from_owner_environment_with_deadline,
+            )),
             client_factory: factory,
             cache_root,
             repo_path,
@@ -217,9 +365,20 @@ impl DefaultCliEnv {
 
 impl CliEnv for DefaultCliEnv {
     type Client = LazyIssueClient;
+    type OwnerClient = LazyOwnerClient;
 
     fn client(&self) -> &Self::Client {
         &self.client
+    }
+    fn improvement_owner_client(
+        &self,
+        deadline: &ResolutionDeadline,
+    ) -> Result<&Self::OwnerClient, ApiError> {
+        deadline.remaining("owner client access")?;
+        Ok(&self.owner_client)
+    }
+    fn improvement_source_scope_nonce(&self) -> Result<String, gwt_github::SpecOpsError> {
+        crate::cli::improvement_store::source_scope_nonce(&self.repo_path)
     }
     fn cache_root(&self) -> PathBuf {
         self.cache_root.clone()

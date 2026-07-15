@@ -1,4 +1,4 @@
-use std::{fs, io, path::Path, str::FromStr};
+use std::{collections::BTreeSet, fs, io, path::Path, str::FromStr};
 
 use chrono::Utc;
 use gwt_github::{client::ApiError, SpecOpsError};
@@ -225,7 +225,7 @@ pub(super) struct ResolverSnapshot {
 
 impl ResolverSnapshot {
     #[cfg_attr(not(test), allow(dead_code))]
-    fn new(
+    pub(super) fn new(
         corpus_generation: String,
         owner_candidates: Vec<OwnerCandidate>,
     ) -> Result<Self, SpecOpsError> {
@@ -373,6 +373,21 @@ pub(super) struct DistinctOccurrence {
     pub(super) producer_registry_revision: Option<u64>,
     #[serde(default)]
     pub(super) routing_basis_revision: Option<u64>,
+    #[serde(default)]
+    pub(super) replay_proof: Option<OccurrenceReplayProof>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(tag = "kind", rename_all = "kebab-case")]
+pub(super) enum OccurrenceReplayProof {
+    InterpretiveSession {
+        source_scope_nonce: String,
+        session_id: String,
+    },
+    RegisteredEvent {
+        source_scope_nonce: String,
+        source_event_id: String,
+    },
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -443,6 +458,17 @@ const REGISTERED_PRODUCERS: &[ProducerRegistration] = &[
         contract_id: "coordination.board-status",
         contract_schema_revision: 1,
         routing_basis_revision: 1,
+        target_artifact: "coordination",
+        allowed_budget: CaptureBudgetProfile::Normal,
+    },
+    #[cfg(test)]
+    ProducerRegistration {
+        public_id: "test.owner-route",
+        producer_id: "test.owner-route.v1",
+        subsystem: "coordination",
+        contract_id: "coordination.board-status",
+        contract_schema_revision: 1,
+        routing_basis_revision: 9,
         target_artifact: "coordination",
         allowed_budget: CaptureBudgetProfile::Normal,
     },
@@ -685,6 +711,10 @@ fn capture_typed(
                 producer_id: None,
                 producer_registry_revision: None,
                 routing_basis_revision: None,
+                replay_proof: Some(OccurrenceReplayProof::InterpretiveSession {
+                    source_scope_nonce: nonce.to_string(),
+                    session_id: session_id.clone(),
+                }),
             }),
             ValidatedCaptureOrigin::Interpretive { session_id: None } => None,
             ValidatedCaptureOrigin::Registered {
@@ -706,6 +736,10 @@ fn capture_typed(
                 producer_id: Some((*producer_id).to_string()),
                 producer_registry_revision: Some(*producer_registry_revision),
                 routing_basis_revision: Some(*routing_basis_revision),
+                replay_proof: Some(OccurrenceReplayProof::RegisteredEvent {
+                    source_scope_nonce: nonce.to_string(),
+                    source_event_id: source_event_id.clone(),
+                }),
             }),
         };
 
@@ -1068,7 +1102,7 @@ pub(super) fn typed_evidence_digest(evidence: &TypedFailureEvidence) -> String {
     )
 }
 
-fn opaque_occurrence_key(
+pub(super) fn opaque_occurrence_key(
     nonce: &str,
     fingerprint: &str,
     producer: &str,
@@ -1329,6 +1363,140 @@ fn typed_eligibility(candidate: &ImprovementCandidate) -> ImprovementEligibility
     }
 }
 
+#[cfg_attr(not(test), allow(dead_code))]
+pub(super) fn owner_eligibility_is_canonical(
+    candidate: &ImprovementCandidate,
+    repo_root: &Path,
+    canonical_source_scope_nonce: &str,
+) -> bool {
+    let Some(evidence) = candidate.typed_evidence.as_ref() else {
+        return false;
+    };
+    if evidence.target_artifact != candidate.target_artifact
+        || !capture_fields_qualify(
+            &candidate.classification,
+            &candidate.confidence,
+            &candidate.target_artifact,
+        )
+        || candidate.occurrences != candidate.distinct_occurrences.len() as u64
+    {
+        return false;
+    }
+
+    let mut opaque_keys = BTreeSet::new();
+    let mut source_scope_nonces = BTreeSet::new();
+    let mut qualifying_deterministic = 0_usize;
+    let mut qualifying_interpretive = 0_usize;
+    let canonical_evidence_digest = typed_evidence_digest(evidence);
+    let canonical_fingerprint = improvement_fingerprint(evidence);
+    for occurrence in &candidate.distinct_occurrences {
+        let opaque_digest = occurrence
+            .opaque_key
+            .strip_prefix("occ:v1:")
+            .filter(|digest| {
+                digest.len() == 64
+                    && digest
+                        .bytes()
+                        .all(|byte| byte.is_ascii_digit() || matches!(byte, b'a'..=b'f'))
+            });
+        if opaque_digest.is_none()
+            || !opaque_keys.insert(occurrence.opaque_key.as_str())
+            || occurrence.evidence_digest != canonical_evidence_digest
+        {
+            return false;
+        }
+
+        let (source_scope_nonce, producer, replay_key) =
+            match (occurrence.origin, occurrence.replay_proof.as_ref()) {
+                (
+                    OccurrenceOrigin::Deterministic,
+                    Some(OccurrenceReplayProof::RegisteredEvent {
+                        source_scope_nonce,
+                        source_event_id,
+                    }),
+                ) if normalize_lower_token("source_event_id", source_event_id)
+                    .is_ok_and(|normalized| normalized == *source_event_id) =>
+                {
+                    let Some(producer_id) = occurrence.producer_id.as_deref() else {
+                        return false;
+                    };
+                    (source_scope_nonce, producer_id, source_event_id)
+                }
+                (
+                    OccurrenceOrigin::Interpretive,
+                    Some(OccurrenceReplayProof::InterpretiveSession {
+                        source_scope_nonce,
+                        session_id,
+                    }),
+                ) if interpretive_session_is_verified_for_repo(repo_root, session_id) => {
+                    (source_scope_nonce, "json.interpretive", session_id)
+                }
+                _ => return false,
+            };
+        if source_scope_nonce != canonical_source_scope_nonce
+            || !source_scope_nonce_is_canonical(source_scope_nonce)
+            || occurrence.opaque_key
+                != opaque_occurrence_key(
+                    source_scope_nonce,
+                    &canonical_fingerprint,
+                    producer,
+                    replay_key,
+                )
+        {
+            return false;
+        }
+        source_scope_nonces.insert(source_scope_nonce.as_str());
+
+        match occurrence.origin {
+            OccurrenceOrigin::Deterministic => {
+                let registered = REGISTERED_PRODUCERS.iter().any(|registration| {
+                    occurrence.producer_id.as_deref() == Some(registration.producer_id)
+                        && occurrence.producer_registry_revision == Some(PRODUCER_REGISTRY_REVISION)
+                        && occurrence.routing_basis_revision
+                            == Some(registration.routing_basis_revision)
+                        && evidence.subsystem == registration.subsystem
+                        && evidence.contract_id == registration.contract_id
+                        && evidence.contract_schema_revision
+                            == registration.contract_schema_revision
+                        && evidence.target_artifact == registration.target_artifact
+                });
+                if !registered {
+                    return false;
+                }
+                qualifying_deterministic += usize::from(occurrence.qualifies_unattended);
+            }
+            OccurrenceOrigin::Interpretive => {
+                if occurrence.producer_id.is_some()
+                    || occurrence.producer_registry_revision.is_some()
+                    || occurrence.routing_basis_revision.is_some()
+                {
+                    return false;
+                }
+                qualifying_interpretive += usize::from(occurrence.qualifies_unattended);
+            }
+        }
+    }
+
+    if source_scope_nonces.len() != 1 {
+        return false;
+    }
+
+    match candidate.eligibility {
+        ImprovementEligibility::Deterministic => qualifying_deterministic > 0,
+        ImprovementEligibility::InterpretiveCorroboration => {
+            qualifying_deterministic == 0 && qualifying_interpretive >= 2
+        }
+        ImprovementEligibility::NeedsEvidence | ImprovementEligibility::Ineligible => false,
+    }
+}
+
+fn source_scope_nonce_is_canonical(value: &str) -> bool {
+    value.len() == 64
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || matches!(byte, b'a'..=b'f'))
+}
+
 fn capture_claim_qualifies(command: &ImprovementCaptureCommand) -> bool {
     capture_fields_qualify(
         &command.classification,
@@ -1348,6 +1516,7 @@ fn same_occurrence_replay(existing: &DistinctOccurrence, incoming: &DistinctOccu
         && existing.producer_id == incoming.producer_id
         && existing.producer_registry_revision == incoming.producer_registry_revision
         && existing.routing_basis_revision == incoming.routing_basis_revision
+        && existing.replay_proof == incoming.replay_proof
 }
 
 fn settled_capture_state(
@@ -1387,30 +1556,42 @@ fn verified_interpretive_session(repo_root: &Path) -> Option<String> {
     if raw.trim() != session_id {
         return None;
     }
-    let path = gwt_core::paths::gwt_sessions_dir().join(format!("{session_id}.toml"));
-    let metadata = fs::symlink_metadata(&path).ok()?;
-    if metadata.file_type().is_symlink() || !metadata.is_file() {
-        return None;
+    interpretive_session_is_verified_for_repo(repo_root, &session_id).then_some(session_id)
+}
+
+fn interpretive_session_is_verified_for_repo(repo_root: &Path, session_id: &str) -> bool {
+    let Ok(parsed) = Uuid::parse_str(session_id) else {
+        return false;
+    };
+    if parsed.to_string() != session_id {
+        return false;
     }
-    let session = gwt_agent::Session::load(&path).ok()?;
+    let path = gwt_core::paths::gwt_sessions_dir().join(format!("{session_id}.toml"));
+    let Ok(metadata) = fs::symlink_metadata(&path) else {
+        return false;
+    };
+    if metadata.file_type().is_symlink() || !metadata.is_file() {
+        return false;
+    }
+    let Ok(session) = gwt_agent::Session::load(&path) else {
+        return false;
+    };
     let expected_repo_hash = gwt_core::paths::project_scope_hash(repo_root).to_string();
     if session.id != session_id {
-        return None;
+        return false;
     }
     let scope_matches = match session.repo_hash.as_deref() {
         Some(repo_hash) => repo_hash == expected_repo_hash,
-        None => {
-            let metadata = fs::symlink_metadata(&session.worktree_path).ok()?;
-            !metadata.file_type().is_symlink()
-                && metadata.is_dir()
-                && gwt_core::paths::project_scope_hash(&session.worktree_path).as_str()
-                    == expected_repo_hash
-        }
+        None => fs::symlink_metadata(&session.worktree_path)
+            .ok()
+            .is_some_and(|metadata| {
+                !metadata.file_type().is_symlink()
+                    && metadata.is_dir()
+                    && gwt_core::paths::project_scope_hash(&session.worktree_path).as_str()
+                        == expected_repo_hash
+            }),
     };
-    if !scope_matches {
-        return None;
-    }
-    Some(session_id)
+    scope_matches
 }
 
 fn list(
@@ -1754,7 +1935,10 @@ fn post_candidate_promoted_status<E: CliEnv>(
     post_improvement_board_status(env, body)
 }
 
-fn post_improvement_board_status<E: CliEnv>(env: &mut E, body: String) -> Result<(), SpecOpsError> {
+pub(super) fn post_improvement_board_status<E: CliEnv>(
+    env: &mut E,
+    body: String,
+) -> Result<(), SpecOpsError> {
     let mut board_out = String::new();
     super::board::run(
         env,
@@ -2815,6 +2999,15 @@ mod tests {
         assert_eq!(first.eligibility, ImprovementEligibility::Deterministic);
         assert_eq!(first.state, CandidateState::OwnerResolving);
         assert_eq!(first.occurrences, 1);
+        let canonical_source_scope_nonce = load_store(&env.repo_path)
+            .expect("candidate store")
+            .source_scope_nonce
+            .expect("source scope nonce");
+        assert!(owner_eligibility_is_canonical(
+            &first,
+            &env.repo_path,
+            &canonical_source_scope_nonce,
+        ));
         let occurrence = &first.distinct_occurrences[0];
         assert!(occurrence.qualifies_unattended);
         assert_eq!(

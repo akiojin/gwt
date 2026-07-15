@@ -11,7 +11,10 @@ use std::{
 };
 
 use gwt_git::PrStatus;
-use gwt_github::{client::fake::FakeIssueClient, IssueClient, IssueNumber, IssueSnapshot};
+use gwt_github::{
+    client::{fake::FakeIssueClient, ApiError, IssueClient, ResolutionDeadline},
+    IssueNumber, IssueSnapshot,
+};
 
 use super::{CliEnv, InternalCommandCall, InternalCommandOutput};
 
@@ -31,8 +34,10 @@ pub struct TargetIssueCreateCall {
 
 pub struct TestEnv {
     pub client: FakeIssueClient,
+    pub owner_client: FakeIssueClient,
     pub cache_root: PathBuf,
     pub repo_path: PathBuf,
+    pub improvement_source_scope_nonce: String,
     pub stdin: String,
     pub stdout: Vec<u8>,
     pub stderr: Vec<u8>,
@@ -69,8 +74,10 @@ impl TestEnv {
         let repo_path = cache_root.clone();
         TestEnv {
             client: FakeIssueClient::new(),
+            owner_client: FakeIssueClient::new(),
             cache_root,
             repo_path,
+            improvement_source_scope_nonce: "0".repeat(64),
             stdin: String::new(),
             stdout: Vec::new(),
             stderr: Vec::new(),
@@ -150,8 +157,19 @@ impl TestEnv {
 
 impl CliEnv for TestEnv {
     type Client = FakeIssueClient;
+    type OwnerClient = FakeIssueClient;
     fn client(&self) -> &Self::Client {
         &self.client
+    }
+    fn improvement_owner_client(
+        &self,
+        deadline: &ResolutionDeadline,
+    ) -> Result<&Self::OwnerClient, ApiError> {
+        deadline.remaining("test owner client access")?;
+        Ok(&self.owner_client)
+    }
+    fn improvement_source_scope_nonce(&self) -> Result<String, gwt_github::SpecOpsError> {
+        Ok(self.improvement_source_scope_nonce.clone())
     }
     fn cache_root(&self) -> PathBuf {
         self.cache_root.clone()

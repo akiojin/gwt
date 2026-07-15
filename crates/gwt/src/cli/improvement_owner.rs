@@ -1,14 +1,672 @@
-use std::{collections::BTreeSet, fmt, path::Path, sync::OnceLock};
+#![cfg_attr(not(test), allow(dead_code))]
 
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    fmt,
+    path::Path,
+    sync::OnceLock,
+    time::{Duration, Instant},
+};
+
+use chrono::Utc;
+use gwt_github::client::{
+    ApiError as GitHubApiError, IssueNumber, IssueState, OwnerRepositoryClient, RepositoryIdentity,
+    RepositoryIssue, RepositoryIssueKind, ResolutionDeadline,
+};
 use regex::Regex;
+use sha2::{Digest, Sha256};
 
-use super::improvement::{
-    improvement_fingerprint, typed_evidence_digest, ImprovementCandidate, TypedFailureEvidence,
+use super::{
+    improvement::{
+        improvement_fingerprint, post_improvement_board_status, transition_candidate,
+        typed_evidence_digest, BlockedReason, CandidateState, FailureSubcode, ImprovementCandidate,
+        OccurrenceOrigin, OccurrenceReplayProof, OwnerCandidate, OwnerKind, OwnerMatchBasis,
+        ResolverSnapshot, RetryMetadata, TypedFailureEvidence,
+    },
+    CliEnv,
 };
 
 pub(super) const MAX_PUBLIC_BODY_BYTES: usize = 16 * 1024;
 const MAX_PUBLIC_TITLE_CHARS: usize = 180;
 const MAX_PUBLIC_SUMMARY_CHARS: usize = 150;
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct ContractOwnerMapping {
+    pub(super) contract_id: String,
+    pub(super) contract_schema_revision: u64,
+    pub(super) routing_basis_revision: u64,
+    pub(super) owner_number: IssueNumber,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub(super) struct ContractRoutingRegistry {
+    mappings: Vec<ContractOwnerMapping>,
+}
+
+impl ContractRoutingRegistry {
+    pub(super) fn new(mappings: Vec<ContractOwnerMapping>) -> Self {
+        Self { mappings }
+    }
+
+    fn matching_owner_numbers(&self, candidate: &ImprovementCandidate) -> Vec<IssueNumber> {
+        let Some(evidence) = candidate.typed_evidence.as_ref() else {
+            return Vec::new();
+        };
+        self.mappings
+            .iter()
+            .filter(|mapping| {
+                mapping.contract_id == evidence.contract_id
+                    && mapping.contract_schema_revision == evidence.contract_schema_revision
+                    && candidate.distinct_occurrences.iter().any(|occurrence| {
+                        occurrence.origin == OccurrenceOrigin::Deterministic
+                            && occurrence.qualifies_unattended
+                            && occurrence.producer_registry_revision.is_some()
+                            && occurrence.routing_basis_revision
+                                == Some(mapping.routing_basis_revision)
+                    })
+            })
+            .map(|mapping| mapping.owner_number)
+            .collect()
+    }
+}
+
+pub(super) trait SemanticOwnerAdvisor {
+    fn owner_numbers(
+        &self,
+        candidate: &ImprovementCandidate,
+        deadline: &ResolutionDeadline,
+    ) -> Result<Vec<IssueNumber>, ()>;
+}
+
+#[derive(Debug, Default)]
+#[cfg_attr(not(test), allow(dead_code))]
+pub(super) struct NoSemanticOwnerAdvisor;
+
+impl SemanticOwnerAdvisor for NoSemanticOwnerAdvisor {
+    fn owner_numbers(
+        &self,
+        _candidate: &ImprovementCandidate,
+        _deadline: &ResolutionDeadline,
+    ) -> Result<Vec<IssueNumber>, ()> {
+        Ok(Vec::new())
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) enum OwnerPreflightOutcome {
+    Active {
+        owner: OwnerCandidate,
+        corpus_generation: String,
+    },
+    Historical {
+        owners: Vec<OwnerCandidate>,
+        corpus_generation: String,
+    },
+    Zero {
+        corpus_generation: String,
+    },
+    RemoteOutcomeUnknown {
+        failure_reason: BlockedReason,
+        failure_subcode: Option<FailureSubcode>,
+    },
+    Blocked {
+        reason: BlockedReason,
+        failure_subcode: Option<FailureSubcode>,
+    },
+}
+
+#[derive(Debug)]
+enum OwnerInspection {
+    Active {
+        owner: OwnerCandidate,
+        corpus_generation: String,
+    },
+    Historical {
+        owners: Vec<OwnerCandidate>,
+        corpus_generation: String,
+    },
+    Zero {
+        corpus_generation: String,
+        advisory_failed: bool,
+    },
+    Ambiguous {
+        owner_candidates: Vec<OwnerCandidate>,
+        corpus_generation: String,
+    },
+}
+
+#[derive(Debug, Clone, Copy)]
+struct OwnerResolutionFailure {
+    reason: BlockedReason,
+    failure_subcode: Option<FailureSubcode>,
+    remediation: &'static str,
+}
+
+pub(super) fn owner_resolution_preflight<E, A>(
+    env: &mut E,
+    candidate: &mut ImprovementCandidate,
+    registry: &ContractRoutingRegistry,
+    semantic_advisor: &A,
+    deadline: &ResolutionDeadline,
+) -> Result<OwnerPreflightOutcome, gwt_github::SpecOpsError>
+where
+    E: CliEnv,
+    A: SemanticOwnerAdvisor,
+{
+    if deadline.remaining("collect owner privacy context").is_err() {
+        let failure = OwnerResolutionFailure {
+            reason: BlockedReason::Timeout,
+            failure_subcode: None,
+            remediation: "RETRY_OWNER_RESOLUTION",
+        };
+        block_owner_resolution(env, candidate, failure, None)?;
+        return Ok(owner_failure_outcome(candidate, failure));
+    }
+    let canonical_source_scope_nonce = match env.improvement_source_scope_nonce() {
+        Ok(nonce) => nonce,
+        Err(_) => {
+            let failure = OwnerResolutionFailure {
+                reason: BlockedReason::Store,
+                failure_subcode: None,
+                remediation: "REPAIR_CANDIDATE_STORE",
+            };
+            block_owner_resolution(env, candidate, failure, None)?;
+            return Ok(owner_failure_outcome(candidate, failure));
+        }
+    };
+    let repo_path = env.repo_path().to_path_buf();
+    let public_context = PublicMutationContext::for_repo_with_deadline(&repo_path, deadline);
+    if deadline.remaining("collect owner privacy context").is_err() {
+        let failure = OwnerResolutionFailure {
+            reason: BlockedReason::Timeout,
+            failure_subcode: None,
+            remediation: "RETRY_OWNER_RESOLUTION",
+        };
+        block_owner_resolution(env, candidate, failure, None)?;
+        return Ok(owner_failure_outcome(candidate, failure));
+    }
+    if let Some(failure) = candidate_preflight_failure(
+        candidate,
+        &repo_path,
+        &canonical_source_scope_nonce,
+        &public_context,
+    ) {
+        block_owner_resolution(env, candidate, failure, None)?;
+        return Ok(owner_failure_outcome(candidate, failure));
+    }
+
+    let inspection = match env.improvement_owner_client(deadline) {
+        Ok(client) => inspect_owner_corpus(client, candidate, registry, semantic_advisor, deadline),
+        Err(error) => Err(owner_failure_from_api(&error)),
+    };
+
+    match inspection {
+        Ok(OwnerInspection::Active {
+            owner,
+            corpus_generation,
+        }) => Ok(OwnerPreflightOutcome::Active {
+            owner,
+            corpus_generation,
+        }),
+        Ok(OwnerInspection::Historical {
+            owners,
+            corpus_generation,
+        }) => Ok(OwnerPreflightOutcome::Historical {
+            owners,
+            corpus_generation,
+        }),
+        Ok(OwnerInspection::Zero {
+            corpus_generation,
+            advisory_failed,
+        }) => {
+            if advisory_failed {
+                post_improvement_board_status(
+                    env,
+                    format!(
+                        "Current state: Improvement Candidate {} authoritative owner search completed with advisory diagnostic ADVISORY_INDEX_UNAVAILABLE.\n\nReason: The local semantic advisor is non-authoritative.\n\nNext: Continue from the complete authoritative corpus.",
+                        candidate.id
+                    ),
+                )?;
+            }
+            Ok(OwnerPreflightOutcome::Zero { corpus_generation })
+        }
+        Ok(OwnerInspection::Ambiguous {
+            owner_candidates,
+            corpus_generation,
+        }) => {
+            let snapshot = ResolverSnapshot::new(corpus_generation, owner_candidates)?;
+            let failure = OwnerResolutionFailure {
+                reason: BlockedReason::Ambiguity,
+                failure_subcode: None,
+                remediation: "SELECT_VERIFIED_OWNER",
+            };
+            block_owner_resolution(env, candidate, failure, Some(snapshot))?;
+            Ok(owner_failure_outcome(candidate, failure))
+        }
+        Err(failure) => {
+            block_owner_resolution(env, candidate, failure, None)?;
+            Ok(owner_failure_outcome(candidate, failure))
+        }
+    }
+}
+
+fn owner_failure_outcome(
+    candidate: &ImprovementCandidate,
+    failure: OwnerResolutionFailure,
+) -> OwnerPreflightOutcome {
+    if candidate.state == CandidateState::RemoteOutcomeUnknown {
+        OwnerPreflightOutcome::RemoteOutcomeUnknown {
+            failure_reason: failure.reason,
+            failure_subcode: failure.failure_subcode,
+        }
+    } else {
+        OwnerPreflightOutcome::Blocked {
+            reason: failure.reason,
+            failure_subcode: failure.failure_subcode,
+        }
+    }
+}
+
+fn candidate_preflight_failure(
+    candidate: &ImprovementCandidate,
+    repo_root: &Path,
+    canonical_source_scope_nonce: &str,
+    public_context: &PublicMutationContext,
+) -> Option<OwnerResolutionFailure> {
+    let Some(evidence) = candidate.typed_evidence.as_ref() else {
+        return Some(OwnerResolutionFailure {
+            reason: BlockedReason::Routing,
+            failure_subcode: None,
+            remediation: "CAPTURE_TYPED_EVIDENCE",
+        });
+    };
+    let canonical_fingerprint = improvement_fingerprint(evidence);
+    let identity_is_canonical =
+        candidate.fingerprint.as_deref() == Some(canonical_fingerprint.as_str());
+    let eligibility_is_valid = super::improvement::owner_eligibility_is_canonical(
+        candidate,
+        repo_root,
+        canonical_source_scope_nonce,
+    );
+    if !identity_is_canonical || !eligibility_is_valid {
+        return Some(OwnerResolutionFailure {
+            reason: BlockedReason::Routing,
+            failure_subcode: None,
+            remediation: "CAPTURE_TYPED_EVIDENCE",
+        });
+    }
+
+    let issue_payload_is_safe = render_public_issue_payload(candidate, public_context).is_ok();
+    let occurrence_payloads_are_safe = candidate
+        .distinct_occurrences
+        .iter()
+        .filter(|occurrence| occurrence.qualifies_unattended)
+        .all(|occurrence| {
+            render_occurrence_comment_payload(candidate, &occurrence.opaque_key, public_context)
+                .is_ok()
+        });
+    if !issue_payload_is_safe || !occurrence_payloads_are_safe {
+        return Some(OwnerResolutionFailure {
+            reason: BlockedReason::Privacy,
+            failure_subcode: None,
+            remediation: "RECAPTURE_SAFE_TYPED_EVIDENCE",
+        });
+    }
+    None
+}
+
+fn inspect_owner_corpus<C, A>(
+    client: &C,
+    candidate: &ImprovementCandidate,
+    registry: &ContractRoutingRegistry,
+    semantic_advisor: &A,
+    deadline: &ResolutionDeadline,
+) -> Result<OwnerInspection, OwnerResolutionFailure>
+where
+    C: OwnerRepositoryClient + ?Sized,
+    A: SemanticOwnerAdvisor,
+{
+    let repository = RepositoryIdentity::gwt_upstream();
+    let issue_collection = client
+        .list_issues(&repository, deadline)
+        .map_err(|error| owner_failure_from_api(&error))?;
+    if issue_collection.items().is_empty() {
+        return Err(OwnerResolutionFailure {
+            reason: BlockedReason::Search,
+            failure_subcode: Some(FailureSubcode::EmptyCorpus),
+            remediation: "RETRY_OWNER_SEARCH",
+        });
+    }
+    if issue_collection.generation().as_str().is_empty() {
+        return Err(OwnerResolutionFailure {
+            reason: BlockedReason::Search,
+            failure_subcode: Some(FailureSubcode::PartialPage),
+            remediation: "RETRY_OWNER_SEARCH",
+        });
+    }
+
+    let fingerprint = candidate
+        .fingerprint
+        .as_deref()
+        .filter(|value| fingerprint_value_re().is_match(value))
+        .ok_or(OwnerResolutionFailure {
+            reason: BlockedReason::Routing,
+            failure_subcode: None,
+            remediation: "CAPTURE_TYPED_EVIDENCE",
+        })?;
+    let issue_generation = issue_collection.generation().as_str().to_string();
+    let issue_by_number = issue_collection
+        .items()
+        .iter()
+        .map(|issue| (issue.number, issue))
+        .collect::<BTreeMap<_, _>>();
+    let mut matches = BTreeMap::<IssueNumber, OwnerCandidate>::new();
+
+    for issue in issue_collection.items() {
+        let markers = exact_fingerprint_markers(&issue.body);
+        if markers.iter().any(|marker| marker == fingerprint) {
+            let mut owner = owner_candidate(issue, OwnerMatchBasis::Fingerprint);
+            owner.selectable = owner.active;
+            matches.insert(issue.number, owner);
+        }
+    }
+
+    for owner_number in registry.matching_owner_numbers(candidate) {
+        let Some(issue) = issue_by_number.get(&owner_number) else {
+            return Err(OwnerResolutionFailure {
+                reason: BlockedReason::Ambiguity,
+                failure_subcode: None,
+                remediation: "REFRESH_CONTRACT_ROUTING",
+            });
+        };
+        matches
+            .entry(owner_number)
+            .or_insert_with(|| owner_candidate(issue, OwnerMatchBasis::Contract));
+    }
+
+    let owner_comment_generation = if matches.len() == 1 {
+        let owner_number = *matches.keys().next().expect("one authoritative owner");
+        let comments = client
+            .list_comments(&repository, owner_number, deadline)
+            .map_err(|error| owner_failure_from_api(&error))?;
+        if comments.generation().as_str().is_empty() {
+            return Err(OwnerResolutionFailure {
+                reason: BlockedReason::Search,
+                failure_subcode: Some(FailureSubcode::PartialPage),
+                remediation: "RETRY_OWNER_SEARCH",
+            });
+        }
+        Some(format!(
+            "{}:{}",
+            owner_number.0,
+            comments.generation().as_str()
+        ))
+    } else {
+        None
+    };
+
+    let semantic_result = if matches.is_empty() {
+        deadline
+            .remaining("semantic owner advisor")
+            .map_err(|_| OwnerResolutionFailure {
+                reason: BlockedReason::Timeout,
+                failure_subcode: None,
+                remediation: "RETRY_WITHIN_BUDGET",
+            })?;
+        let result = semantic_advisor.owner_numbers(candidate, deadline);
+        deadline
+            .remaining("semantic owner advisor")
+            .map_err(|_| OwnerResolutionFailure {
+                reason: BlockedReason::Timeout,
+                failure_subcode: None,
+                remediation: "RETRY_WITHIN_BUDGET",
+            })?;
+        Some(result)
+    } else {
+        None
+    };
+
+    let final_issue_collection = client
+        .list_issues(&repository, deadline)
+        .map_err(|error| owner_failure_from_api(&error))?;
+    if final_issue_collection.generation().as_str().is_empty()
+        || final_issue_collection.generation() != issue_collection.generation()
+    {
+        return Err(OwnerResolutionFailure {
+            reason: BlockedReason::Search,
+            failure_subcode: Some(FailureSubcode::PartialPage),
+            remediation: "RETRY_OWNER_SEARCH",
+        });
+    }
+    let mut generation_fields = vec![issue_generation];
+    generation_fields.extend(owner_comment_generation);
+    let corpus_generation = combined_corpus_generation(generation_fields);
+
+    if !matches.is_empty() {
+        let mut owners = matches.into_values().collect::<Vec<_>>();
+        if owners.len() != 1 {
+            return Ok(OwnerInspection::Ambiguous {
+                owner_candidates: owners,
+                corpus_generation,
+            });
+        }
+
+        let owner = owners.pop().expect("one authoritative owner");
+        if owner.active {
+            return Ok(OwnerInspection::Active {
+                owner,
+                corpus_generation,
+            });
+        }
+        return Ok(OwnerInspection::Historical {
+            owners: vec![owner],
+            corpus_generation,
+        });
+    }
+
+    let semantic_result = semantic_result.expect("zero-owner inspection runs semantic advice");
+    if let Ok(semantic_numbers) = &semantic_result {
+        let semantic_candidates = semantic_numbers
+            .iter()
+            .copied()
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .filter_map(|number| issue_by_number.get(&number))
+            .map(|issue| {
+                let mut owner = owner_candidate(issue, OwnerMatchBasis::Semantic);
+                owner.selectable = false;
+                owner
+            })
+            .collect::<Vec<_>>();
+        if !semantic_candidates.is_empty() {
+            return Ok(OwnerInspection::Ambiguous {
+                owner_candidates: semantic_candidates,
+                corpus_generation,
+            });
+        }
+    }
+
+    Ok(OwnerInspection::Zero {
+        corpus_generation,
+        advisory_failed: semantic_result.is_err(),
+    })
+}
+
+fn owner_candidate(issue: &RepositoryIssue, match_basis: OwnerMatchBasis) -> OwnerCandidate {
+    OwnerCandidate {
+        number: issue.number.0,
+        kind: match issue.kind {
+            RepositoryIssueKind::Plain => OwnerKind::Issue,
+            RepositoryIssueKind::Spec => OwnerKind::Spec,
+        },
+        title: issue.title.clone(),
+        active: issue.state == IssueState::Open,
+        url: format!("https://github.com/akiojin/gwt/issues/{}", issue.number.0),
+        match_basis,
+        selectable: issue.state == IssueState::Open,
+    }
+}
+
+fn combined_corpus_generation(mut fields: Vec<String>) -> String {
+    fields.sort();
+    let mut digest = Sha256::new();
+    for value in
+        std::iter::once("gwt.owner-corpus.combined.v1").chain(fields.iter().map(String::as_str))
+    {
+        digest.update((value.len() as u64).to_be_bytes());
+        digest.update(value.as_bytes());
+    }
+    format!("gen:v1:{}", hex::encode(digest.finalize()))
+}
+
+fn owner_failure_from_api(error: &GitHubApiError) -> OwnerResolutionFailure {
+    match error {
+        GitHubApiError::PartialPage { .. }
+        | GitHubApiError::NotFound(_)
+        | GitHubApiError::CommentNotFound(_) => OwnerResolutionFailure {
+            reason: BlockedReason::Search,
+            failure_subcode: Some(FailureSubcode::PartialPage),
+            remediation: "RETRY_OWNER_SEARCH",
+        },
+        GitHubApiError::Unauthorized | GitHubApiError::PermissionDenied { .. } => {
+            OwnerResolutionFailure {
+                reason: BlockedReason::Auth,
+                failure_subcode: None,
+                remediation: "AUTHENTICATE_GITHUB",
+            }
+        }
+        GitHubApiError::Timeout { .. } => OwnerResolutionFailure {
+            reason: BlockedReason::Timeout,
+            failure_subcode: None,
+            remediation: "RETRY_WITHIN_BUDGET",
+        },
+        GitHubApiError::RateLimited { .. } => OwnerResolutionFailure {
+            reason: BlockedReason::RateLimit,
+            failure_subcode: None,
+            remediation: "RETRY_AFTER_RATE_LIMIT",
+        },
+        GitHubApiError::Network(_) => OwnerResolutionFailure {
+            reason: BlockedReason::Network,
+            failure_subcode: None,
+            remediation: "RETRY_NETWORK",
+        },
+        GitHubApiError::Parse { .. }
+        | GitHubApiError::Unexpected(_)
+        | GitHubApiError::BodyTooLarge => OwnerResolutionFailure {
+            reason: BlockedReason::Parse,
+            failure_subcode: None,
+            remediation: "REFRESH_OWNER_CORPUS",
+        },
+        GitHubApiError::TestOverrideRejected { .. } | GitHubApiError::RepositoryMismatch { .. } => {
+            OwnerResolutionFailure {
+                reason: BlockedReason::Routing,
+                failure_subcode: None,
+                remediation: "REMOVE_UNSAFE_OVERRIDE",
+            }
+        }
+    }
+}
+
+fn block_owner_resolution<E: CliEnv>(
+    env: &mut E,
+    candidate: &mut ImprovementCandidate,
+    failure: OwnerResolutionFailure,
+    resolver_snapshot: Option<ResolverSnapshot>,
+) -> Result<(), gwt_github::SpecOpsError> {
+    if candidate.state == CandidateState::RemoteOutcomeUnknown {
+        candidate.retry = Some(RetryMetadata {
+            retryable: true,
+            remediation: "REFRESH_OWNER_CORPUS".to_string(),
+            failed_at: Utc::now().to_rfc3339(),
+        });
+        candidate.resolver_snapshot = resolver_snapshot;
+        candidate.updated_at = Utc::now().to_rfc3339();
+        return post_remote_outcome_unknown_status(env, candidate, failure);
+    }
+    if matches!(
+        candidate.state,
+        CandidateState::Blocked | CandidateState::Recurrent
+    ) {
+        transition_candidate(candidate, CandidateState::OwnerResolving)?;
+    }
+    candidate.blocked_reason = Some(failure.reason);
+    candidate.failure_subcode = failure.failure_subcode;
+    candidate.retry = Some(RetryMetadata {
+        retryable: true,
+        remediation: failure.remediation.to_string(),
+        failed_at: Utc::now().to_rfc3339(),
+    });
+    candidate.resolver_snapshot = resolver_snapshot;
+    candidate.updated_at = Utc::now().to_rfc3339();
+    transition_candidate(candidate, CandidateState::Blocked)?;
+    post_owner_resolution_blocked_status(env, candidate, failure)
+}
+
+fn post_remote_outcome_unknown_status<E: CliEnv>(
+    env: &mut E,
+    candidate: &ImprovementCandidate,
+    failure: OwnerResolutionFailure,
+) -> Result<(), gwt_github::SpecOpsError> {
+    let subcode = failure
+        .failure_subcode
+        .map(failure_subcode_token)
+        .unwrap_or("none");
+    post_improvement_board_status(
+        env,
+        format!(
+            "Current state: Improvement Candidate {id} remains remote-outcome-unknown.\n\nReason: authoritative refresh failed with {reason}/{subcode}; the prior mutation may exist.\n\nNext: REFRESH_OWNER_CORPUS before any mutation retry.",
+            id = candidate.id,
+            reason = blocked_reason_token(failure.reason),
+        ),
+    )
+}
+
+fn post_owner_resolution_blocked_status<E: CliEnv>(
+    env: &mut E,
+    candidate: &ImprovementCandidate,
+    failure: OwnerResolutionFailure,
+) -> Result<(), gwt_github::SpecOpsError> {
+    let subcode = failure
+        .failure_subcode
+        .map(failure_subcode_token)
+        .unwrap_or("none");
+    post_improvement_board_status(
+        env,
+        format!(
+            "Current state: Improvement Candidate {id} owner resolution is blocked.\n\nReason: {reason}/{subcode}.\n\nNext: {remediation}.",
+            id = candidate.id,
+            reason = blocked_reason_token(failure.reason),
+            remediation = failure.remediation,
+        ),
+    )
+}
+
+fn blocked_reason_token(reason: BlockedReason) -> &'static str {
+    match reason {
+        BlockedReason::Store => "store",
+        BlockedReason::Search => "search",
+        BlockedReason::Auth => "auth",
+        BlockedReason::Privacy => "privacy",
+        BlockedReason::Ambiguity => "ambiguity",
+        BlockedReason::Routing => "routing",
+        BlockedReason::Create => "create",
+        BlockedReason::Update => "update",
+        BlockedReason::Readback => "readback",
+        BlockedReason::LocalCommit => "local-commit",
+        BlockedReason::Timeout => "timeout",
+        BlockedReason::RateLimit => "rate-limit",
+        BlockedReason::Network => "network",
+        BlockedReason::Parse => "parse",
+        BlockedReason::Reconciliation => "reconciliation",
+    }
+}
+
+fn failure_subcode_token(subcode: FailureSubcode) -> &'static str {
+    match subcode {
+        FailureSubcode::EmptyCorpus => "empty-corpus",
+        FailureSubcode::PartialPage => "partial-page",
+    }
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) struct PublicIssuePayload {
@@ -23,28 +681,67 @@ pub(super) struct PublicCommentPayload {
     pub(super) body: String,
 }
 
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone)]
 pub(super) struct PublicMutationContext {
     denied_values: Vec<String>,
+    collection_complete: bool,
+}
+
+impl Default for PublicMutationContext {
+    fn default() -> Self {
+        Self {
+            denied_values: Vec::new(),
+            collection_complete: true,
+        }
+    }
 }
 
 impl PublicMutationContext {
     pub(super) fn for_repo(repo_root: &Path) -> Self {
+        let expires_at = Instant::now()
+            .checked_add(Duration::from_secs(3))
+            .unwrap_or_else(Instant::now);
+        Self::for_repo_until(repo_root, expires_at)
+    }
+
+    fn for_repo_with_deadline(repo_root: &Path, deadline: &ResolutionDeadline) -> Self {
+        Self::for_repo_until(repo_root, deadline.expires_at())
+    }
+
+    fn for_repo_until(repo_root: &Path, expires_at: Instant) -> Self {
         let mut denied = BTreeSet::new();
+        let mut collection_complete = true;
         add_path(&mut denied, repo_root);
-        if let Ok(canonical) = std::fs::canonicalize(repo_root) {
-            add_path(&mut denied, &canonical);
+        match std::fs::canonicalize(repo_root) {
+            Ok(canonical) => add_path(&mut denied, &canonical),
+            Err(_) => collection_complete = false,
         }
-        if let Ok(main_root) = gwt_git::worktree::main_worktree_root(repo_root) {
-            add_path(&mut denied, &main_root);
-            if let Ok(worktrees) = gwt_git::WorktreeManager::new(main_root).list() {
-                for worktree in worktrees {
-                    add_path(&mut denied, &worktree.path);
+        let has_git_metadata = match repo_root.join(".git").try_exists() {
+            Ok(exists) => exists,
+            Err(_) => {
+                collection_complete = false;
+                false
+            }
+        };
+        match gwt_git::worktree::main_worktree_root(repo_root) {
+            Ok(main_root) => {
+                add_path(&mut denied, &main_root);
+                match gwt_git::WorktreeManager::new(main_root).list() {
+                    Ok(worktrees) => {
+                        for worktree in worktrees {
+                            add_path(&mut denied, &worktree.path);
+                        }
+                    }
+                    Err(_) => collection_complete = false,
                 }
             }
+            Err(_) if has_git_metadata => collection_complete = false,
+            Err(_) => {}
         }
-        if let Some(slug) = source_repository_slug(repo_root) {
-            add_denied_value(&mut denied, slug);
+        match source_repository_slug(repo_root, expires_at) {
+            Ok(Some(slug)) => add_denied_value(&mut denied, slug),
+            Ok(None) => {}
+            Err(()) => collection_complete = false,
         }
         for key in ["HOME", "USERPROFILE", "USER", "USERNAME"] {
             if let Ok(value) = std::env::var(key) {
@@ -52,13 +749,27 @@ impl PublicMutationContext {
             }
         }
         add_secret_environment_values(&mut denied, std::env::vars());
-        for agent in gwt_agent::load_custom_agents_from_path(&gwt_core::paths::gwt_config_path())
-            .unwrap_or_default()
-        {
-            add_secret_environment_values(&mut denied, agent.env);
+        let config_path = gwt_core::paths::gwt_config_path();
+        let config_exists = match config_path.try_exists() {
+            Ok(exists) => exists,
+            Err(_) => {
+                collection_complete = false;
+                false
+            }
+        };
+        if config_exists {
+            match gwt_agent::load_custom_agents_from_path(&config_path) {
+                Ok(agents) => {
+                    for agent in agents {
+                        add_secret_environment_values(&mut denied, agent.env);
+                    }
+                }
+                Err(_) => collection_complete = false,
+            }
         }
         Self {
             denied_values: denied.into_iter().collect(),
+            collection_complete,
         }
     }
 
@@ -79,8 +790,28 @@ impl PublicMutationContext {
                 add_denied_value(&mut denied, path.clone());
             }
         }
+        for occurrence in &candidate.distinct_occurrences {
+            match occurrence.replay_proof.as_ref() {
+                Some(OccurrenceReplayProof::InterpretiveSession {
+                    source_scope_nonce,
+                    session_id,
+                }) => {
+                    add_denied_value(&mut denied, source_scope_nonce.clone());
+                    add_denied_value(&mut denied, session_id.clone());
+                }
+                Some(OccurrenceReplayProof::RegisteredEvent {
+                    source_scope_nonce,
+                    source_event_id,
+                }) => {
+                    add_denied_value(&mut denied, source_scope_nonce.clone());
+                    add_denied_value(&mut denied, source_event_id.clone());
+                }
+                None => {}
+            }
+        }
         Self {
             denied_values: denied.into_iter().collect(),
+            collection_complete: self.collection_complete,
         }
     }
 
@@ -96,12 +827,14 @@ impl PublicMutationContext {
         }
         Self {
             denied_values: denied.into_iter().collect(),
+            collection_complete: true,
         }
     }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum PrivacyViolationKind {
+    ContextIncomplete,
     DynamicValue,
     UnixPath,
     WindowsPath,
@@ -120,6 +853,7 @@ pub(super) enum PrivacyViolationKind {
 impl PrivacyViolationKind {
     const fn code(self) -> &'static str {
         match self {
+            Self::ContextIncomplete => "CONTEXT_INCOMPLETE",
             Self::DynamicValue => "DYNAMIC_VALUE",
             Self::UnixPath => "UNIX_PATH",
             Self::WindowsPath => "WINDOWS_PATH",
@@ -348,14 +1082,27 @@ fn occurrence_marker(occurrence_key: &str) -> String {
 
 #[cfg_attr(not(test), allow(dead_code))]
 pub(super) fn exact_fingerprint_markers(body: &str) -> Vec<String> {
-    let mut in_code_fence = false;
+    let mut code_fence: Option<(u8, usize)> = None;
     body.lines()
         .filter_map(|line| {
-            if line.trim_start().starts_with("```") {
-                in_code_fence = !in_code_fence;
-                return None;
+            if let Some((delimiter, length, trailing_blank)) = markdown_fence_delimiter(line) {
+                match code_fence {
+                    Some((open_delimiter, open_length))
+                        if delimiter == open_delimiter
+                            && length >= open_length
+                            && trailing_blank =>
+                    {
+                        code_fence = None;
+                        return None;
+                    }
+                    None => {
+                        code_fence = Some((delimiter, length));
+                        return None;
+                    }
+                    _ => {}
+                }
             }
-            if in_code_fence {
+            if code_fence.is_some() {
                 return None;
             }
             fingerprint_marker_re()
@@ -364,6 +1111,26 @@ pub(super) fn exact_fingerprint_markers(body: &str) -> Vec<String> {
                 .map(|value| value.as_str().to_string())
         })
         .collect()
+}
+
+fn markdown_fence_delimiter(line: &str) -> Option<(u8, usize, bool)> {
+    let indent = line.bytes().take_while(|byte| *byte == b' ').count();
+    if indent > 3 {
+        return None;
+    }
+    let content = &line[indent..];
+    let delimiter = content.bytes().next()?;
+    if !matches!(delimiter, b'`' | b'~') {
+        return None;
+    }
+    let length = content
+        .bytes()
+        .take_while(|byte| *byte == delimiter)
+        .count();
+    (length >= 3).then(|| {
+        let trailing_blank = content[length..].trim().is_empty();
+        (delimiter, length, trailing_blank)
+    })
 }
 
 fn typed_template_fields(
@@ -440,6 +1207,11 @@ pub(super) fn validate_public_payload(
     payload: &PublicIssuePayload,
     context: &PublicMutationContext,
 ) -> Result<(), PrivacyViolation> {
+    if !context.collection_complete {
+        return Err(PrivacyViolation::new(
+            PrivacyViolationKind::ContextIncomplete,
+        ));
+    }
     if payload.summary.chars().count() > MAX_PUBLIC_SUMMARY_CHARS
         || payload.title.chars().count() > MAX_PUBLIC_TITLE_CHARS
         || payload.title.contains(['\r', '\n'])
@@ -479,28 +1251,35 @@ fn add_path(denied: &mut BTreeSet<String>, path: &Path) {
 
 fn add_denied_value(denied: &mut BTreeSet<String>, value: String) {
     let value = value.trim();
-    if value.chars().count() >= 4 && !value.contains("[redacted-") && value != "***redacted***" {
+    if !value.is_empty() && !value.contains("[redacted-") && value != "***redacted***" {
         denied.insert(value.to_string());
     }
 }
 
-fn source_repository_slug(repo_root: &Path) -> Option<String> {
-    let mut command = gwt_core::process::hidden_command("git");
-    let output = command
-        .arg("-C")
-        .arg(repo_root)
-        .args(["config", "--get", "remote.origin.url"])
-        .output()
-        .ok()?;
-    if !output.status.success() {
-        return None;
+fn source_repository_slug(repo_root: &Path, expires_at: Instant) -> Result<Option<String>, ()> {
+    let repo_root = repo_root.to_str().ok_or(())?;
+    let hub = gwt_core::process_console::global();
+    let output = gwt_core::process_console::spawn_logged_blocking_with_deadline(
+        &hub,
+        gwt_core::process_console::ProcessKind::Git,
+        "git",
+        &["-C", repo_root, "config", "--get", "remote.origin.url"],
+        gwt_core::process_console::SpawnOptions::new("git remote origin"),
+        expires_at,
+    )
+    .map_err(|_| ())?;
+    if !output.success() {
+        return if output.exit_code == Some(1) {
+            Ok(None)
+        } else {
+            Err(())
+        };
     }
-    let remote = String::from_utf8(output.stdout).ok()?;
-    let normalized = gwt_core::repo_hash::normalize_origin_url(remote.trim());
-    normalized
-        .strip_prefix("github.com/")
-        .map(str::to_string)
-        .filter(|slug| slug.contains('/'))
+    let normalized = gwt_core::repo_hash::normalize_origin_url(output.stdout.trim());
+    Ok(normalized
+        .split_once('/')
+        .map(|(_, slug)| slug.to_string())
+        .filter(|slug| slug.contains('/')))
 }
 
 fn is_secret_environment_key(key: &str) -> bool {
@@ -552,6 +1331,11 @@ fn fingerprint_marker_re() -> &'static Regex {
         Regex::new(r"^<!-- gwt:improvement-fingerprint:v1 (v2:[0-9a-f]{64}) -->$")
             .expect("fingerprint marker regex")
     })
+}
+
+fn fingerprint_value_re() -> &'static Regex {
+    static RE: OnceLock<Regex> = OnceLock::new();
+    RE.get_or_init(|| Regex::new(r"^v2:[0-9a-f]{64}$").expect("fingerprint value regex"))
 }
 
 #[cfg_attr(not(test), allow(dead_code))]
@@ -635,13 +1419,29 @@ fn code_excerpt_re() -> &'static Regex {
 #[cfg(test)]
 mod tests {
     use std::process::Command;
+    use std::sync::Mutex;
+    use std::time::{Duration, Instant};
 
     use serde_json::json;
 
     use super::*;
-    use crate::cli::improvement::ImprovementCandidate;
+    use crate::cli::{
+        improvement::{
+            opaque_occurrence_key, DistinctOccurrence, ImprovementCandidate,
+            ImprovementEligibility, OccurrenceOrigin, OccurrenceReplayProof, OwnerMatchBasis,
+        },
+        run_collect, BoardCommand, CliCommand, TestEnv,
+    };
+    use gwt_github::client::{
+        fake::{FakeIssueClient, OwnerRepositoryFaultTiming, OwnerRepositoryOperation},
+        ApiError as GitHubApiError, CommentId, IssueNumber, IssueState, RepositoryComment,
+        RepositoryIdentity, RepositoryIssue, RepositoryIssueKind, ResolutionDeadline, UpdatedAt,
+    };
 
     fn candidate(typed: bool) -> ImprovementCandidate {
+        let fingerprint = "v2:4bea839977a5aeedbf562acaeeb547012b0447f3335279830405fafb37726532";
+        let source_scope_nonce = "0".repeat(64);
+        let source_event_id = "event-1";
         serde_json::from_value(json!({
             "schema_version": 3,
             "id": "impr-public-template",
@@ -653,8 +1453,8 @@ mod tests {
             "confidence": "high",
             "state": "owner-resolving",
             "dedupe_key": "private-repo:customer-8675309",
-            "occurrences": 2,
-            "fingerprint": "v2:4bea839977a5aeedbf562acaeeb547012b0447f3335279830405fafb37726532",
+            "occurrences": 1,
+            "fingerprint": fingerprint,
             "eligibility": "deterministic",
             "typed_evidence": typed.then(|| json!({
                 "subsystem": "coordination",
@@ -665,7 +1465,26 @@ mod tests {
                 "expected_outcome": "BOARD_STATUS_POSTED",
                 "observed_outcome": "BOARD_STATUS_MISSING"
             })),
-            "distinct_occurrences": [],
+            "distinct_occurrences": if typed { vec![json!({
+                "opaque_key": opaque_occurrence_key(
+                    &source_scope_nonce,
+                    fingerprint,
+                    "test.coordination-gate.v1",
+                    source_event_id,
+                ),
+                "evidence_digest": "3f649bd386b953b42442e8cefcbd1449d657f49a972f11d72f810bcda167756a",
+                "captured_at": "2026-07-14T00:00:00Z",
+                "origin": "deterministic",
+                "qualifies_unattended": true,
+                "producer_id": "test.coordination-gate.v1",
+                "producer_registry_revision": 1,
+                "routing_basis_revision": 1,
+                "replay_proof": {
+                    "kind": "registered-event",
+                    "source_scope_nonce": source_scope_nonce,
+                    "source_event_id": source_event_id
+                }
+            })] } else { Vec::new() },
             "sanitized_summary": "Customer customer-8675309 failed at /Users/alice/private-repo",
             "sanitized_details": "Authorization: Bearer ghp_abcdefghijklmnopqrstuvwxyz",
             "evidence_digest": "alice@example.com",
@@ -685,6 +1504,98 @@ mod tests {
             title: "fix(gwt): Safe contract failure".to_string(),
             body: body.to_string(),
         }
+    }
+
+    fn resolution_deadline() -> ResolutionDeadline {
+        ResolutionDeadline::new(Duration::from_secs(1), Duration::from_secs(5))
+    }
+
+    fn owner_issue(number: u64, state: IssueState, body: impl Into<String>) -> RepositoryIssue {
+        RepositoryIssue {
+            repository: RepositoryIdentity::gwt_upstream(),
+            number: IssueNumber(number),
+            title: format!("Owner {number}"),
+            body: body.into(),
+            labels: Vec::new(),
+            state,
+            kind: RepositoryIssueKind::Plain,
+            updated_at: UpdatedAt::new(format!("u{number}")),
+        }
+    }
+
+    struct StaticSemanticAdvisor(Result<Vec<IssueNumber>, ()>);
+
+    impl SemanticOwnerAdvisor for StaticSemanticAdvisor {
+        fn owner_numbers(
+            &self,
+            _candidate: &ImprovementCandidate,
+            _deadline: &ResolutionDeadline,
+        ) -> Result<Vec<IssueNumber>, ()> {
+            self.0.clone()
+        }
+    }
+
+    struct SlowSemanticAdvisor(Duration);
+
+    impl SemanticOwnerAdvisor for SlowSemanticAdvisor {
+        fn owner_numbers(
+            &self,
+            _candidate: &ImprovementCandidate,
+            _deadline: &ResolutionDeadline,
+        ) -> Result<Vec<IssueNumber>, ()> {
+            std::thread::sleep(self.0);
+            Ok(Vec::new())
+        }
+    }
+
+    struct CorpusMutatingAdvisor<'a> {
+        client: &'a FakeIssueClient,
+        issue: RepositoryIssue,
+    }
+
+    impl SemanticOwnerAdvisor for CorpusMutatingAdvisor<'_> {
+        fn owner_numbers(
+            &self,
+            _candidate: &ImprovementCandidate,
+            _deadline: &ResolutionDeadline,
+        ) -> Result<Vec<IssueNumber>, ()> {
+            self.client.seed_repository_issue(self.issue.clone());
+            Ok(Vec::new())
+        }
+    }
+
+    #[derive(Default)]
+    struct DeadlineRecordingAdvisor {
+        expires_at: Mutex<Option<Instant>>,
+    }
+
+    impl SemanticOwnerAdvisor for DeadlineRecordingAdvisor {
+        fn owner_numbers(
+            &self,
+            _candidate: &ImprovementCandidate,
+            deadline: &ResolutionDeadline,
+        ) -> Result<Vec<IssueNumber>, ()> {
+            *self.expires_at.lock().expect("deadline recording lock") = Some(deadline.expires_at());
+            Ok(Vec::new())
+        }
+    }
+
+    fn board_bodies(env: &mut TestEnv) -> Vec<String> {
+        let (_, output) = run_collect(
+            env,
+            CliCommand::Board(BoardCommand::Show {
+                json: true,
+                workspace: None,
+                all: true,
+            }),
+        )
+        .expect("board show");
+        serde_json::from_str::<serde_json::Value>(&output).expect("board json")["board"]["entries"]
+            .as_array()
+            .expect("entries")
+            .iter()
+            .map(|entry| entry["body"].as_str().expect("body").to_string())
+            .collect()
     }
 
     fn run_git(repo: &Path, args: &[&str]) {
@@ -718,7 +1629,7 @@ mod tests {
                 "remote",
                 "add",
                 "origin",
-                "https://github.com/acme/private-repo.git",
+                "https://gitlab.example/acme/private-repo.git",
             ],
         );
         std::fs::write(repository.join("README.md"), "fixture\n").expect("README");
@@ -782,6 +1693,7 @@ mod tests {
             "alice-machine-user",
             "customer-8675309",
             "configured-secret-value",
+            "xy",
         ] {
             let context = PublicMutationContext::from_denied_values_for_test([denied]);
             let error = validate_public_payload(
@@ -792,6 +1704,56 @@ mod tests {
             assert_eq!(error.kind(), PrivacyViolationKind::DynamicValue);
             assert!(!error.to_string().contains(denied));
         }
+    }
+
+    #[test]
+    fn privacy_validator_rejects_replay_proof_values_in_typed_public_fields() {
+        let mut candidate = candidate(true);
+        let private_nonce = match candidate.distinct_occurrences[0]
+            .replay_proof
+            .as_ref()
+            .expect("replay proof")
+        {
+            OccurrenceReplayProof::RegisteredEvent {
+                source_scope_nonce, ..
+            }
+            | OccurrenceReplayProof::InterpretiveSession {
+                source_scope_nonce, ..
+            } => source_scope_nonce.clone(),
+        };
+        candidate
+            .typed_evidence
+            .as_mut()
+            .expect("typed evidence")
+            .expected_outcome = private_nonce.clone();
+        let evidence = candidate.typed_evidence.as_ref().expect("typed evidence");
+        let fingerprint = improvement_fingerprint(evidence);
+        let evidence_digest = typed_evidence_digest(evidence);
+        candidate.fingerprint = Some(fingerprint.clone());
+        let occurrence = &mut candidate.distinct_occurrences[0];
+        occurrence.evidence_digest = evidence_digest;
+        let (source_scope_nonce, source_event_id) =
+            match occurrence.replay_proof.as_ref().expect("replay proof") {
+                OccurrenceReplayProof::RegisteredEvent {
+                    source_scope_nonce,
+                    source_event_id,
+                } => (source_scope_nonce, source_event_id),
+                OccurrenceReplayProof::InterpretiveSession { .. } => {
+                    panic!("expected registered event proof")
+                }
+            };
+        occurrence.opaque_key = opaque_occurrence_key(
+            source_scope_nonce,
+            &fingerprint,
+            occurrence.producer_id.as_deref().expect("producer"),
+            source_event_id,
+        );
+
+        let error = render_public_issue_payload(&candidate, &PublicMutationContext::default())
+            .expect_err("private replay proof value must fail closed");
+
+        assert_eq!(error.kind(), PrivacyViolationKind::DynamicValue);
+        assert!(!error.to_string().contains(private_nonce.as_str()));
     }
 
     #[test]
@@ -846,6 +1808,65 @@ mod tests {
     }
 
     #[test]
+    fn incomplete_dynamic_privacy_context_fails_closed_before_owner_transport() {
+        let root = tempfile::tempdir().expect("root");
+        let missing_repo = root.path().join("missing-repository");
+        let context = PublicMutationContext::for_repo(&missing_repo);
+        assert!(render_public_issue_payload(&candidate(true), &context).is_err());
+        let expired_deadline = ResolutionDeadline::at(
+            Instant::now() - Duration::from_millis(1),
+            Duration::from_secs(1),
+        );
+        let expired_context =
+            PublicMutationContext::for_repo_with_deadline(root.path(), &expired_deadline);
+        assert!(render_public_issue_payload(&candidate(true), &expired_context).is_err());
+
+        let mut env = TestEnv::new(root.path().join("cache"));
+        env.repo_path = missing_repo;
+        let mut privacy_candidate = candidate(true);
+        let outcome = owner_resolution_preflight(
+            &mut env,
+            &mut privacy_candidate,
+            &ContractRoutingRegistry::default(),
+            &NoSemanticOwnerAdvisor,
+            &resolution_deadline(),
+        )
+        .expect("privacy blocked outcome");
+
+        assert!(matches!(
+            outcome,
+            OwnerPreflightOutcome::Blocked {
+                reason: BlockedReason::Privacy,
+                ..
+            }
+        ));
+        assert!(env.owner_client.owner_call_log().is_empty());
+        assert!(board_bodies(&mut env)
+            .last()
+            .is_some_and(|body| body.contains("Reason: privacy/none")));
+
+        let mut expired_env = TestEnv::new(root.path().join("expired-cache"));
+        expired_env.repo_path = root.path().to_path_buf();
+        let mut expired_candidate = candidate(true);
+        let expired_outcome = owner_resolution_preflight(
+            &mut expired_env,
+            &mut expired_candidate,
+            &ContractRoutingRegistry::default(),
+            &NoSemanticOwnerAdvisor,
+            &expired_deadline,
+        )
+        .expect("timeout blocked outcome");
+        assert!(matches!(
+            expired_outcome,
+            OwnerPreflightOutcome::Blocked {
+                reason: BlockedReason::Timeout,
+                ..
+            }
+        ));
+        assert!(expired_env.owner_client.owner_call_log().is_empty());
+    }
+
+    #[test]
     fn typed_and_legacy_templates_never_render_free_form_candidate_fields() {
         let context = PublicMutationContext::from_denied_values_for_test([
             "customer-8675309",
@@ -886,7 +1907,7 @@ mod tests {
         assert!(payload.body.lines().any(|line| line == marker));
 
         let lookalikes = format!(
-            "{marker}\n{marker} suffix\nprefix {marker}\n```\n{marker}\n```\n<!-- gwt:improvement-fingerprint:v1 v2:{} -->",
+            "{marker}\n{marker} suffix\nprefix {marker}\n```\n{marker}\n```\n~~~markdown\n{marker}\n~~~\n<!-- gwt:improvement-fingerprint:v1 v2:{} -->",
             "0".repeat(64)
         );
         assert_eq!(
@@ -930,5 +1951,873 @@ mod tests {
             assert!(!body.contains("ghp_"));
             assert!(!body.contains("alice@example.com"));
         }
+    }
+
+    #[test]
+    fn owner_preflight_finds_body_marker_then_fully_reads_only_the_exact_owner_comments() {
+        let project = tempfile::tempdir().expect("project");
+        let mut env = TestEnv::new(project.path().join("cache"));
+        env.repo_path = project.path().to_path_buf();
+        let candidate = candidate(true);
+        let repository = RepositoryIdentity::gwt_upstream();
+        env.owner_client.seed_repository_issue(owner_issue(
+            42,
+            IssueState::Open,
+            fingerprint_marker(candidate.fingerprint.as_deref().expect("fingerprint")),
+        ));
+        let mut comments = (1..=204)
+            .map(|id| RepositoryComment {
+                id: CommentId(id),
+                body: format!("public comment {id}"),
+                updated_at: UpdatedAt::new(format!("c{id}")),
+            })
+            .collect::<Vec<_>>();
+        comments.push(RepositoryComment {
+            id: CommentId(205),
+            body: occurrence_marker(&candidate.distinct_occurrences[0].opaque_key),
+            updated_at: UpdatedAt::new("c205"),
+        });
+        env.owner_client
+            .seed_repository_comments(&repository, IssueNumber(42), comments);
+
+        let mut candidate = candidate;
+        let outcome = owner_resolution_preflight(
+            &mut env,
+            &mut candidate,
+            &ContractRoutingRegistry::default(),
+            &NoSemanticOwnerAdvisor,
+            &resolution_deadline(),
+        )
+        .expect("preflight");
+        match outcome {
+            OwnerPreflightOutcome::Active { owner, .. } => {
+                assert_eq!(owner.number, 42);
+                assert_eq!(owner.match_basis, OwnerMatchBasis::Fingerprint);
+            }
+            other => panic!("expected active owner, got {other:?}"),
+        }
+        assert_eq!(env.owner_client.owner_mutation_count(), 0);
+        let calls = env.owner_client.owner_call_log();
+        assert_eq!(
+            calls
+                .iter()
+                .filter(|call| call.operation == OwnerRepositoryOperation::ListIssues)
+                .count(),
+            2
+        );
+        assert_eq!(
+            calls
+                .iter()
+                .filter(|call| call.operation == OwnerRepositoryOperation::ListComments)
+                .count(),
+            1
+        );
+        assert_eq!(
+            calls
+                .iter()
+                .find(|call| call.operation == OwnerRepositoryOperation::ListComments)
+                .and_then(|call| call.issue_number),
+            Some(IssueNumber(42))
+        );
+    }
+
+    #[test]
+    fn owner_preflight_matches_only_the_candidate_fingerprint_on_a_shared_owner() {
+        let project = tempfile::tempdir().expect("project");
+        let mut env = TestEnv::new(project.path().join("cache"));
+        env.repo_path = project.path().to_path_buf();
+        let candidate = candidate(true);
+        let candidate_marker =
+            fingerprint_marker(candidate.fingerprint.as_deref().expect("fingerprint"));
+        let other_marker = fingerprint_marker(&format!("v2:{}", "0".repeat(64)));
+        env.owner_client.seed_repository_issue(owner_issue(
+            42,
+            IssueState::Open,
+            format!("{candidate_marker}\n{other_marker}"),
+        ));
+
+        let mut candidate = candidate;
+        let outcome = owner_resolution_preflight(
+            &mut env,
+            &mut candidate,
+            &ContractRoutingRegistry::default(),
+            &StaticSemanticAdvisor(Ok(Vec::new())),
+            &resolution_deadline(),
+        )
+        .expect("preflight");
+
+        assert!(matches!(
+            outcome,
+            OwnerPreflightOutcome::Active { owner, .. }
+                if owner.number == 42 && owner.match_basis == OwnerMatchBasis::Fingerprint
+        ));
+        assert_eq!(env.owner_client.owner_mutation_count(), 0);
+    }
+
+    #[test]
+    fn owner_preflight_zero_confirms_two_stable_issue_generations_without_comment_n_plus_one() {
+        let project = tempfile::tempdir().expect("project");
+        let mut env = TestEnv::new(project.path().join("cache"));
+        env.repo_path = project.path().to_path_buf();
+        let repository = RepositoryIdentity::gwt_upstream();
+        for number in 1..=125 {
+            env.owner_client.seed_repository_issue(owner_issue(
+                number,
+                IssueState::Open,
+                "unrelated public owner",
+            ));
+        }
+        env.owner_client
+            .queue_owner_issue_generations(&repository, ["generation-stable", "generation-stable"]);
+        let mut candidate = candidate(true);
+
+        let outcome = owner_resolution_preflight(
+            &mut env,
+            &mut candidate,
+            &ContractRoutingRegistry::default(),
+            &StaticSemanticAdvisor(Ok(Vec::new())),
+            &resolution_deadline(),
+        )
+        .expect("preflight");
+
+        assert!(matches!(
+            outcome,
+            OwnerPreflightOutcome::Zero { corpus_generation }
+                if !corpus_generation.is_empty()
+        ));
+        assert_eq!(env.owner_client.owner_mutation_count(), 0);
+        let calls = env.owner_client.owner_call_log();
+        assert_eq!(
+            calls
+                .iter()
+                .filter(|call| call.operation == OwnerRepositoryOperation::ListIssues)
+                .count(),
+            2
+        );
+        assert!(!calls
+            .iter()
+            .any(|call| call.operation == OwnerRepositoryOperation::ListComments));
+    }
+
+    #[test]
+    fn owner_preflight_fails_closed_when_issue_generation_changes_during_resolution() {
+        let project = tempfile::tempdir().expect("project");
+        let mut env = TestEnv::new(project.path().join("cache"));
+        env.repo_path = project.path().to_path_buf();
+        let repository = RepositoryIdentity::gwt_upstream();
+        env.owner_client.seed_repository_issue(owner_issue(
+            7,
+            IssueState::Closed,
+            "unrelated public issue",
+        ));
+        env.owner_client
+            .queue_owner_issue_generations(&repository, ["generation-before", "generation-after"]);
+        let mut candidate = candidate(true);
+
+        let outcome = owner_resolution_preflight(
+            &mut env,
+            &mut candidate,
+            &ContractRoutingRegistry::default(),
+            &StaticSemanticAdvisor(Ok(Vec::new())),
+            &resolution_deadline(),
+        )
+        .expect("preflight");
+
+        assert!(matches!(
+            outcome,
+            OwnerPreflightOutcome::Blocked {
+                reason: BlockedReason::Search,
+                failure_subcode: Some(FailureSubcode::PartialPage)
+            }
+        ));
+        let calls = env.owner_client.owner_call_log();
+        assert_eq!(
+            calls
+                .iter()
+                .filter(|call| call.operation == OwnerRepositoryOperation::ListIssues)
+                .count(),
+            2
+        );
+        assert!(!calls
+            .iter()
+            .any(|call| call.operation == OwnerRepositoryOperation::ListComments));
+        assert_eq!(env.owner_client.owner_mutation_count(), 0);
+        assert!(board_bodies(&mut env)
+            .last()
+            .is_some_and(|body| body.contains("Reason: search/partial-page")));
+    }
+
+    #[test]
+    fn owner_preflight_rejects_noncanonical_ineligible_and_private_candidates_before_remote_read() {
+        for case in ["fingerprint", "eligibility", "privacy"] {
+            let project = tempfile::tempdir().expect("project");
+            let mut env = TestEnv::new(project.path().join("cache"));
+            env.repo_path = project.path().to_path_buf();
+            let mut candidate = candidate(true);
+            let expected_reason = match case {
+                "fingerprint" => {
+                    candidate.fingerprint = Some(format!("v2:{}", "0".repeat(64)));
+                    BlockedReason::Routing
+                }
+                "eligibility" => {
+                    candidate.eligibility =
+                        super::super::improvement::ImprovementEligibility::NeedsEvidence;
+                    BlockedReason::Routing
+                }
+                "privacy" => {
+                    let evidence = candidate.typed_evidence.as_mut().expect("typed evidence");
+                    evidence.expected_outcome = "alice@example.com".to_string();
+                    let fingerprint = improvement_fingerprint(evidence);
+                    let evidence_digest = typed_evidence_digest(evidence);
+                    candidate.fingerprint = Some(fingerprint.clone());
+                    let occurrence = &mut candidate.distinct_occurrences[0];
+                    occurrence.evidence_digest = evidence_digest;
+                    let OccurrenceReplayProof::RegisteredEvent {
+                        source_scope_nonce,
+                        source_event_id,
+                    } = occurrence.replay_proof.as_ref().expect("replay proof")
+                    else {
+                        panic!("registered replay proof");
+                    };
+                    occurrence.opaque_key = opaque_occurrence_key(
+                        source_scope_nonce,
+                        &fingerprint,
+                        occurrence.producer_id.as_deref().expect("producer"),
+                        source_event_id,
+                    );
+                    BlockedReason::Privacy
+                }
+                _ => unreachable!(),
+            };
+
+            let outcome = owner_resolution_preflight(
+                &mut env,
+                &mut candidate,
+                &ContractRoutingRegistry::default(),
+                &StaticSemanticAdvisor(Ok(Vec::new())),
+                &resolution_deadline(),
+            )
+            .expect("preflight");
+
+            assert!(matches!(
+                outcome,
+                OwnerPreflightOutcome::Blocked { reason, .. } if reason == expected_reason
+            ));
+            assert!(env.owner_client.owner_call_log().is_empty(), "{case}");
+            assert_eq!(env.owner_client.owner_mutation_count(), 0, "{case}");
+            let reason = blocked_reason_token(expected_reason);
+            assert!(board_bodies(&mut env).last().is_some_and(|body| {
+                body.contains(candidate.id.as_str())
+                    && body.contains(format!("Reason: {reason}/none").as_str())
+            }));
+        }
+    }
+
+    #[test]
+    fn owner_preflight_rejects_tampered_producer_and_duplicate_interpretive_occurrences() {
+        for case in [
+            "missing-producer",
+            "stale-registry",
+            "unregistered-producer",
+            "mismatched-evidence-digest",
+            "duplicate-interpretive",
+            "forged-distinct-interpretive",
+        ] {
+            let project = tempfile::tempdir().expect("project");
+            let mut env = TestEnv::new(project.path().join("cache"));
+            env.repo_path = project.path().to_path_buf();
+            let mut candidate = candidate(true);
+            match case {
+                "missing-producer" => candidate.distinct_occurrences[0].producer_id = None,
+                "stale-registry" => {
+                    candidate.distinct_occurrences[0].producer_registry_revision = Some(999)
+                }
+                "unregistered-producer" => {
+                    candidate.distinct_occurrences[0].producer_id = Some("unknown.v1".to_string())
+                }
+                "mismatched-evidence-digest" => {
+                    candidate.distinct_occurrences[0].evidence_digest = "b".repeat(64)
+                }
+                "duplicate-interpretive" => {
+                    let source_scope_nonce = "0".repeat(64);
+                    let session_id = "00000000-0000-4000-8000-000000000001";
+                    let fingerprint = candidate.fingerprint.clone().expect("fingerprint");
+                    let occurrence = &mut candidate.distinct_occurrences[0];
+                    occurrence.origin = OccurrenceOrigin::Interpretive;
+                    occurrence.producer_id = None;
+                    occurrence.producer_registry_revision = None;
+                    occurrence.routing_basis_revision = None;
+                    occurrence.opaque_key = opaque_occurrence_key(
+                        &source_scope_nonce,
+                        &fingerprint,
+                        "json.interpretive",
+                        session_id,
+                    );
+                    occurrence.replay_proof = Some(OccurrenceReplayProof::InterpretiveSession {
+                        source_scope_nonce,
+                        session_id: session_id.to_string(),
+                    });
+                    let duplicate = occurrence.clone();
+                    candidate.distinct_occurrences.push(duplicate);
+                    candidate.occurrences = 2;
+                    candidate.eligibility = ImprovementEligibility::InterpretiveCorroboration;
+                }
+                "forged-distinct-interpretive" => {
+                    let source_scope_nonce = "0".repeat(64);
+                    let first_session = "00000000-0000-4000-8000-000000000001";
+                    let second_session = "00000000-0000-4000-8000-000000000002";
+                    let fingerprint = candidate.fingerprint.clone().expect("fingerprint");
+                    let occurrence = &mut candidate.distinct_occurrences[0];
+                    occurrence.origin = OccurrenceOrigin::Interpretive;
+                    occurrence.producer_id = None;
+                    occurrence.producer_registry_revision = None;
+                    occurrence.routing_basis_revision = None;
+                    occurrence.opaque_key = opaque_occurrence_key(
+                        &source_scope_nonce,
+                        &fingerprint,
+                        "json.interpretive",
+                        first_session,
+                    );
+                    occurrence.replay_proof = Some(OccurrenceReplayProof::InterpretiveSession {
+                        source_scope_nonce: source_scope_nonce.clone(),
+                        session_id: first_session.to_string(),
+                    });
+                    let mut forged = occurrence.clone();
+                    forged.opaque_key = opaque_occurrence_key(
+                        &source_scope_nonce,
+                        &fingerprint,
+                        "json.interpretive",
+                        second_session,
+                    );
+                    forged.replay_proof = Some(OccurrenceReplayProof::InterpretiveSession {
+                        source_scope_nonce,
+                        session_id: second_session.to_string(),
+                    });
+                    candidate.distinct_occurrences.push(forged);
+                    candidate.occurrences = 2;
+                    candidate.eligibility = ImprovementEligibility::InterpretiveCorroboration;
+                }
+                _ => unreachable!(),
+            }
+
+            let outcome = owner_resolution_preflight(
+                &mut env,
+                &mut candidate,
+                &ContractRoutingRegistry::default(),
+                &NoSemanticOwnerAdvisor,
+                &resolution_deadline(),
+            )
+            .expect("tampered candidate outcome");
+
+            assert!(
+                matches!(
+                    outcome,
+                    OwnerPreflightOutcome::Blocked {
+                        reason: BlockedReason::Routing,
+                        ..
+                    }
+                ),
+                "{case}: {outcome:?}"
+            );
+            assert!(env.owner_client.owner_call_log().is_empty(), "{case}");
+            assert!(board_bodies(&mut env).last().is_some_and(|body| {
+                body.contains(candidate.id.as_str()) && body.contains("Reason: routing/none")
+            }));
+        }
+    }
+
+    #[test]
+    fn owner_preflight_rejects_replay_proof_outside_canonical_source_scope() {
+        let project = tempfile::tempdir().expect("project");
+        let mut env = TestEnv::new(project.path().join("cache"));
+        env.repo_path = project.path().to_path_buf();
+        let mut candidate = candidate(true);
+        let forged_nonce = "f".repeat(64);
+        let occurrence = &mut candidate.distinct_occurrences[0];
+        let source_event_id = match occurrence.replay_proof.as_mut().expect("replay proof") {
+            OccurrenceReplayProof::RegisteredEvent {
+                source_scope_nonce,
+                source_event_id,
+            } => {
+                *source_scope_nonce = forged_nonce.clone();
+                source_event_id.clone()
+            }
+            OccurrenceReplayProof::InterpretiveSession { .. } => {
+                panic!("expected registered event proof")
+            }
+        };
+        occurrence.opaque_key = opaque_occurrence_key(
+            &forged_nonce,
+            candidate.fingerprint.as_deref().expect("fingerprint"),
+            occurrence.producer_id.as_deref().expect("producer"),
+            &source_event_id,
+        );
+
+        let outcome = owner_resolution_preflight(
+            &mut env,
+            &mut candidate,
+            &ContractRoutingRegistry::default(),
+            &NoSemanticOwnerAdvisor,
+            &resolution_deadline(),
+        )
+        .expect("canonical source scope outcome");
+
+        assert!(matches!(
+            outcome,
+            OwnerPreflightOutcome::Blocked {
+                reason: BlockedReason::Routing,
+                ..
+            }
+        ));
+        assert!(env.owner_client.owner_call_log().is_empty());
+    }
+
+    #[test]
+    fn owner_preflight_preserves_remote_outcome_unknown_when_refresh_fails() {
+        let project = tempfile::tempdir().expect("project");
+        let mut env = TestEnv::new(project.path().join("cache"));
+        env.repo_path = project.path().to_path_buf();
+        env.owner_client.fail_next_owner_operation(
+            OwnerRepositoryOperation::ListIssues,
+            OwnerRepositoryFaultTiming::BeforeSubmit,
+            GitHubApiError::Timeout {
+                operation: "private-timeout".to_string(),
+            },
+        );
+        let mut candidate = candidate(true);
+        candidate.state = CandidateState::RemoteOutcomeUnknown;
+        candidate.retry = Some(RetryMetadata {
+            retryable: true,
+            remediation: "REFRESH_OWNER_CORPUS".to_string(),
+            failed_at: "2026-07-14T00:00:00Z".to_string(),
+        });
+
+        let outcome = owner_resolution_preflight(
+            &mut env,
+            &mut candidate,
+            &ContractRoutingRegistry::default(),
+            &StaticSemanticAdvisor(Ok(Vec::new())),
+            &resolution_deadline(),
+        )
+        .expect("preflight");
+
+        assert!(matches!(
+            outcome,
+            OwnerPreflightOutcome::RemoteOutcomeUnknown {
+                failure_reason: BlockedReason::Timeout,
+                ..
+            }
+        ));
+        assert_eq!(candidate.state, CandidateState::RemoteOutcomeUnknown);
+        assert!(candidate.blocked_reason.is_none());
+        assert_eq!(
+            candidate
+                .retry
+                .as_ref()
+                .map(|retry| retry.remediation.as_str()),
+            Some("REFRESH_OWNER_CORPUS")
+        );
+        let status = board_bodies(&mut env).pop().expect("remote outcome status");
+        assert!(status.contains("remote-outcome-unknown"));
+        assert!(!status.contains("owner resolution is blocked"));
+        assert_eq!(env.owner_client.owner_mutation_count(), 0);
+    }
+
+    #[test]
+    fn owner_inspection_fails_closed_when_corpus_changes_during_semantic_advice() {
+        let client = FakeIssueClient::new();
+        client.seed_repository_issue(owner_issue(7, IssueState::Closed, "unrelated public issue"));
+        let candidate = candidate(true);
+        let advisor = CorpusMutatingAdvisor {
+            client: &client,
+            issue: owner_issue(
+                42,
+                IssueState::Open,
+                fingerprint_marker(candidate.fingerprint.as_deref().expect("fingerprint")),
+            ),
+        };
+
+        let outcome = inspect_owner_corpus(
+            &client,
+            &candidate,
+            &ContractRoutingRegistry::default(),
+            &advisor,
+            &resolution_deadline(),
+        );
+
+        assert!(matches!(
+            outcome,
+            Err(OwnerResolutionFailure {
+                reason: BlockedReason::Search,
+                failure_subcode: Some(FailureSubcode::PartialPage),
+                ..
+            })
+        ));
+        assert_eq!(client.owner_mutation_count(), 0);
+        assert_eq!(
+            client
+                .owner_call_log()
+                .iter()
+                .filter(|call| call.operation == OwnerRepositoryOperation::ListIssues)
+                .count(),
+            2
+        );
+    }
+
+    #[test]
+    fn owner_preflight_blocks_empty_multiple_and_semantic_only_without_mutation() {
+        let cases = ["empty", "multiple", "semantic-only"];
+        for case in cases {
+            let project = tempfile::tempdir().expect("project");
+            let mut env = TestEnv::new(project.path().join("cache"));
+            env.repo_path = project.path().to_path_buf();
+            let mut candidate = candidate(true);
+            let marker = fingerprint_marker(candidate.fingerprint.as_deref().expect("fingerprint"));
+            let advisor = match case {
+                "empty" => StaticSemanticAdvisor(Ok(Vec::new())),
+                "multiple" => {
+                    env.owner_client.seed_repository_issue(owner_issue(
+                        41,
+                        IssueState::Open,
+                        marker.clone(),
+                    ));
+                    env.owner_client.seed_repository_issue(owner_issue(
+                        42,
+                        IssueState::Open,
+                        marker.clone(),
+                    ));
+                    StaticSemanticAdvisor(Ok(Vec::new()))
+                }
+                "semantic-only" => {
+                    env.owner_client.seed_repository_issue(owner_issue(
+                        42,
+                        IssueState::Open,
+                        "no exact marker",
+                    ));
+                    StaticSemanticAdvisor(Ok(vec![IssueNumber(42)]))
+                }
+                _ => unreachable!(),
+            };
+            let outcome = owner_resolution_preflight(
+                &mut env,
+                &mut candidate,
+                &ContractRoutingRegistry::default(),
+                &advisor,
+                &resolution_deadline(),
+            )
+            .expect("preflight");
+            let OwnerPreflightOutcome::Blocked {
+                reason,
+                failure_subcode,
+            } = outcome
+            else {
+                panic!("{case} must block")
+            };
+            if case == "empty" {
+                assert_eq!(reason, crate::cli::improvement::BlockedReason::Search);
+                assert_eq!(
+                    failure_subcode,
+                    Some(crate::cli::improvement::FailureSubcode::EmptyCorpus)
+                );
+            } else {
+                assert_eq!(reason, crate::cli::improvement::BlockedReason::Ambiguity);
+                assert_eq!(failure_subcode, None);
+            }
+            assert_eq!(env.owner_client.owner_mutation_count(), 0, "{case}");
+            assert!(board_bodies(&mut env).last().is_some_and(|body| {
+                body.contains(candidate.id.as_str())
+                    && body.contains(match case {
+                        "empty" => "Reason: search/empty-corpus",
+                        "multiple" | "semantic-only" => "Reason: ambiguity/none",
+                        _ => unreachable!(),
+                    })
+            }));
+            if case != "empty" {
+                assert!(!env
+                    .owner_client
+                    .owner_call_log()
+                    .iter()
+                    .any(|call| call.operation == OwnerRepositoryOperation::ListComments));
+            }
+        }
+    }
+
+    #[test]
+    fn advisory_semantic_failure_does_not_block_complete_authoritative_zero() {
+        let project = tempfile::tempdir().expect("project");
+        let mut env = TestEnv::new(project.path().join("cache"));
+        env.repo_path = project.path().to_path_buf();
+        env.owner_client.seed_repository_issue(owner_issue(
+            7,
+            IssueState::Closed,
+            "unrelated public issue",
+        ));
+        let mut candidate = candidate(true);
+        let outcome = owner_resolution_preflight(
+            &mut env,
+            &mut candidate,
+            &ContractRoutingRegistry::default(),
+            &StaticSemanticAdvisor(Err(())),
+            &resolution_deadline(),
+        )
+        .expect("preflight");
+        assert!(matches!(outcome, OwnerPreflightOutcome::Zero { .. }));
+        assert_eq!(env.owner_client.owner_mutation_count(), 0);
+        assert!(board_bodies(&mut env)
+            .iter()
+            .any(|body| body.contains("ADVISORY_INDEX_UNAVAILABLE")));
+    }
+
+    #[test]
+    fn semantic_advisor_receives_the_same_absolute_resolution_deadline() {
+        let project = tempfile::tempdir().expect("project");
+        let mut env = TestEnv::new(project.path().join("cache"));
+        env.repo_path = project.path().to_path_buf();
+        env.owner_client.seed_repository_issue(owner_issue(
+            7,
+            IssueState::Closed,
+            "unrelated public issue",
+        ));
+        let deadline = resolution_deadline();
+        let advisor = DeadlineRecordingAdvisor::default();
+        let mut candidate = candidate(true);
+
+        let outcome = owner_resolution_preflight(
+            &mut env,
+            &mut candidate,
+            &ContractRoutingRegistry::default(),
+            &advisor,
+            &deadline,
+        )
+        .expect("preflight");
+
+        assert!(matches!(outcome, OwnerPreflightOutcome::Zero { .. }));
+        assert_eq!(
+            *advisor.expires_at.lock().expect("deadline recording lock"),
+            Some(deadline.expires_at())
+        );
+    }
+
+    #[test]
+    fn semantic_advisor_cannot_confirm_zero_after_the_resolution_deadline() {
+        let project = tempfile::tempdir().expect("project");
+        let mut env = TestEnv::new(project.path().join("cache"));
+        env.repo_path = project.path().to_path_buf();
+        env.owner_client.seed_repository_issue(owner_issue(
+            7,
+            IssueState::Closed,
+            "unrelated public issue",
+        ));
+        let deadline = ResolutionDeadline::new(Duration::from_secs(1), Duration::from_millis(200));
+        let mut candidate = candidate(true);
+
+        let outcome = owner_resolution_preflight(
+            &mut env,
+            &mut candidate,
+            &ContractRoutingRegistry::default(),
+            &SlowSemanticAdvisor(Duration::from_millis(250)),
+            &deadline,
+        )
+        .expect("deadline outcome");
+
+        assert!(matches!(
+            outcome,
+            OwnerPreflightOutcome::Blocked {
+                reason: BlockedReason::Timeout,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn owner_preflight_maps_typed_failures_and_posts_taint_free_board_status() {
+        let failures = vec![
+            (
+                GitHubApiError::PartialPage {
+                    operation: "private-page".to_string(),
+                    completed_pages: 1,
+                },
+                crate::cli::improvement::BlockedReason::Search,
+                Some(crate::cli::improvement::FailureSubcode::PartialPage),
+            ),
+            (
+                GitHubApiError::Unauthorized,
+                crate::cli::improvement::BlockedReason::Auth,
+                None,
+            ),
+            (
+                GitHubApiError::Timeout {
+                    operation: "private-timeout".to_string(),
+                },
+                crate::cli::improvement::BlockedReason::Timeout,
+                None,
+            ),
+            (
+                GitHubApiError::RateLimited {
+                    retry_after: Some(60),
+                },
+                crate::cli::improvement::BlockedReason::RateLimit,
+                None,
+            ),
+            (
+                GitHubApiError::Network("private-host.example".to_string()),
+                crate::cli::improvement::BlockedReason::Network,
+                None,
+            ),
+            (
+                GitHubApiError::Parse {
+                    operation: "private-json".to_string(),
+                    message: "secret payload".to_string(),
+                },
+                crate::cli::improvement::BlockedReason::Parse,
+                None,
+            ),
+        ];
+        for (error, expected_reason, expected_subcode) in failures {
+            let project = tempfile::tempdir().expect("project");
+            let mut env = TestEnv::new(project.path().join("cache"));
+            env.repo_path = project.path().to_path_buf();
+            env.owner_client.fail_next_owner_operation(
+                OwnerRepositoryOperation::ListIssues,
+                OwnerRepositoryFaultTiming::BeforeSubmit,
+                error,
+            );
+            let mut candidate = candidate(true);
+            let outcome = owner_resolution_preflight(
+                &mut env,
+                &mut candidate,
+                &ContractRoutingRegistry::default(),
+                &StaticSemanticAdvisor(Ok(Vec::new())),
+                &resolution_deadline(),
+            )
+            .expect("preflight");
+            assert!(matches!(
+                outcome,
+                OwnerPreflightOutcome::Blocked { reason, failure_subcode }
+                    if reason == expected_reason && failure_subcode == expected_subcode
+            ));
+            assert_eq!(env.owner_client.owner_mutation_count(), 0);
+            let bodies = board_bodies(&mut env);
+            let body = bodies.last().expect("blocked board status");
+            assert!(body.contains(candidate.id.as_str()));
+            for taint in [
+                "private-page",
+                "private-timeout",
+                "private-host",
+                "secret payload",
+            ] {
+                assert!(!body.contains(taint), "board leaked {taint}: {body}");
+            }
+        }
+    }
+
+    #[test]
+    fn revision_pinned_contract_mapping_is_authoritative() {
+        let project = tempfile::tempdir().expect("project");
+        let mut env = TestEnv::new(project.path().join("cache"));
+        env.repo_path = project.path().to_path_buf();
+        env.owner_client.seed_repository_issue(owner_issue(
+            77,
+            IssueState::Open,
+            "owner selected by pinned contract",
+        ));
+        let mut candidate = candidate(true);
+        let source_scope_nonce = "0".repeat(64);
+        let source_event_id = "event-route-1";
+        let opaque_key = opaque_occurrence_key(
+            &source_scope_nonce,
+            candidate.fingerprint.as_deref().expect("fingerprint"),
+            "test.owner-route.v1",
+            source_event_id,
+        );
+        candidate.distinct_occurrences.push(DistinctOccurrence {
+            opaque_key,
+            evidence_digest: "3f649bd386b953b42442e8cefcbd1449d657f49a972f11d72f810bcda167756a"
+                .to_string(),
+            captured_at: "2026-07-14T00:00:00Z".to_string(),
+            origin: OccurrenceOrigin::Deterministic,
+            qualifies_unattended: true,
+            producer_id: Some("test.owner-route.v1".to_string()),
+            producer_registry_revision: Some(1),
+            routing_basis_revision: Some(9),
+            replay_proof: Some(OccurrenceReplayProof::RegisteredEvent {
+                source_scope_nonce,
+                source_event_id: source_event_id.to_string(),
+            }),
+        });
+        candidate.occurrences = 2;
+        let registry = ContractRoutingRegistry::new(vec![ContractOwnerMapping {
+            contract_id: "coordination.board-status".to_string(),
+            contract_schema_revision: 1,
+            routing_basis_revision: 9,
+            owner_number: IssueNumber(77),
+        }]);
+        let outcome = owner_resolution_preflight(
+            &mut env,
+            &mut candidate,
+            &registry,
+            &StaticSemanticAdvisor(Ok(Vec::new())),
+            &resolution_deadline(),
+        )
+        .expect("preflight");
+        assert!(matches!(
+            outcome,
+            OwnerPreflightOutcome::Active { owner, .. }
+                if owner.number == 77 && owner.match_basis == OwnerMatchBasis::Contract
+        ));
+    }
+
+    #[test]
+    fn revision_pinned_contract_mapping_ignores_nonqualifying_occurrences() {
+        let project = tempfile::tempdir().expect("project");
+        let mut env = TestEnv::new(project.path().join("cache"));
+        env.repo_path = project.path().to_path_buf();
+        env.owner_client.seed_repository_issue(owner_issue(
+            77,
+            IssueState::Open,
+            "unrelated public issue",
+        ));
+        let mut candidate = candidate(true);
+        let source_scope_nonce = "0".repeat(64);
+        let source_event_id = "event-route-1";
+        let opaque_key = opaque_occurrence_key(
+            &source_scope_nonce,
+            candidate.fingerprint.as_deref().expect("fingerprint"),
+            "test.owner-route.v1",
+            source_event_id,
+        );
+        candidate.distinct_occurrences.push(DistinctOccurrence {
+            opaque_key,
+            evidence_digest: "3f649bd386b953b42442e8cefcbd1449d657f49a972f11d72f810bcda167756a"
+                .to_string(),
+            captured_at: "2026-07-14T00:00:00Z".to_string(),
+            origin: OccurrenceOrigin::Deterministic,
+            qualifies_unattended: false,
+            producer_id: Some("test.owner-route.v1".to_string()),
+            producer_registry_revision: Some(1),
+            routing_basis_revision: Some(9),
+            replay_proof: Some(OccurrenceReplayProof::RegisteredEvent {
+                source_scope_nonce,
+                source_event_id: source_event_id.to_string(),
+            }),
+        });
+        candidate.occurrences = 2;
+        let registry = ContractRoutingRegistry::new(vec![ContractOwnerMapping {
+            contract_id: "coordination.board-status".to_string(),
+            contract_schema_revision: 1,
+            routing_basis_revision: 9,
+            owner_number: IssueNumber(77),
+        }]);
+
+        let outcome = owner_resolution_preflight(
+            &mut env,
+            &mut candidate,
+            &registry,
+            &StaticSemanticAdvisor(Ok(Vec::new())),
+            &resolution_deadline(),
+        )
+        .expect("preflight");
+
+        assert!(matches!(outcome, OwnerPreflightOutcome::Zero { .. }));
     }
 }

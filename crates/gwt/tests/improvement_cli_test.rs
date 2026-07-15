@@ -1128,6 +1128,25 @@ fn improvement_capture_v2_requires_two_distinct_verified_sessions() {
         candidate["distinct_occurrences"].as_array().unwrap().len(),
         2
     );
+    let occurrences = candidate["distinct_occurrences"]
+        .as_array()
+        .expect("distinct occurrences");
+    let mut bound_sessions = occurrences
+        .iter()
+        .map(|occurrence| {
+            let proof = &occurrence["replay_proof"];
+            assert_eq!(proof["kind"], "interpretive-session");
+            assert_eq!(proof["source_scope_nonce"], nonce);
+            proof["session_id"]
+                .as_str()
+                .expect("verified session binding")
+                .to_string()
+        })
+        .collect::<Vec<_>>();
+    bound_sessions.sort();
+    let mut expected_sessions = vec![session_a, session_b];
+    expected_sessions.sort();
+    assert_eq!(bound_sessions, expected_sessions);
     assert_ne!(candidate["evidence_digest"], "caller-controlled-digest");
     assert_ne!(candidate["dedupe_key"], "caller-controlled-dedupe");
 }

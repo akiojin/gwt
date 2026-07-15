@@ -16,9 +16,13 @@ use gwt_agent::session::GWT_SESSION_ID_ENV;
 use gwt_core::workspace_projection::load_or_default_workspace_projection;
 use gwt_git::PrStatus;
 use gwt_github::{
-    client::{fake::FakeIssueClient, IssueClient},
+    client::{
+        fake::FakeIssueClient, IssueClient, OwnerRepositoryClient, RepositoryIdentity,
+        ResolutionDeadline,
+    },
     IssueNumber, SpecListFilter,
 };
+use std::time::Duration;
 
 use super::*;
 
@@ -216,6 +220,14 @@ fn failing_factory(counter: Arc<AtomicUsize>) -> Arc<IssueClientFactory> {
     })
 }
 
+fn failing_owner_factory(counter: Arc<AtomicUsize>) -> Arc<OwnerClientFactory> {
+    Arc::new(move |owner, repo, _deadline| {
+        assert_eq!((owner, repo), ("akiojin", "gwt"));
+        counter.fetch_add(1, Ordering::SeqCst);
+        Err(gwt_github::client::ApiError::Unauthorized)
+    })
+}
+
 #[test]
 fn lazy_issue_client_defers_resolution_until_first_issue_call() {
     let calls = Arc::new(AtomicUsize::new(0));
@@ -250,6 +262,90 @@ fn default_cli_env_construction_does_not_touch_issue_client_factory() {
         Err(gwt_github::client::ApiError::Unauthorized)
     ));
     assert_eq!(calls.load(Ordering::SeqCst), 1);
+}
+
+#[test]
+fn lazy_owner_client_is_upstream_fixed_and_preserves_typed_auth_failure() {
+    let calls = Arc::new(AtomicUsize::new(0));
+    let client = LazyOwnerClient::new_with_factory(failing_owner_factory(calls.clone()));
+    let deadline = ResolutionDeadline::new(Duration::from_secs(1), Duration::from_secs(5));
+
+    assert_eq!(calls.load(Ordering::SeqCst), 0);
+    let error = client
+        .list_issues(&RepositoryIdentity::gwt_upstream(), &deadline)
+        .expect_err("auth failure");
+    assert_eq!(error, gwt_github::client::ApiError::Unauthorized);
+    assert_eq!(calls.load(Ordering::SeqCst), 1);
+}
+
+#[test]
+fn lazy_owner_client_rejects_non_upstream_repository_before_auth_or_network() {
+    let calls = Arc::new(AtomicUsize::new(0));
+    let client = LazyOwnerClient::new_with_factory(failing_owner_factory(calls.clone()));
+    let deadline = ResolutionDeadline::new(Duration::from_secs(1), Duration::from_secs(5));
+
+    let error = client
+        .list_issues(&RepositoryIdentity::new("example", "target"), &deadline)
+        .expect_err("non-upstream repository must be rejected");
+
+    assert!(matches!(
+        error,
+        gwt_github::client::ApiError::RepositoryMismatch { .. }
+    ));
+    assert_eq!(calls.load(Ordering::SeqCst), 0);
+}
+
+#[test]
+fn owner_runtime_override_requires_complete_explicit_loopback_environment() {
+    let _env_lock = crate::env_test_lock().lock().expect("env lock");
+    const KEYS: [&str; 4] = [
+        "GWT_OWNER_GITHUB_TEST_MODE",
+        "GWT_OWNER_GITHUB_REST_BASE",
+        "GWT_OWNER_GITHUB_GRAPHQL_URL",
+        "GWT_OWNER_GITHUB_TOKEN",
+    ];
+    for key in KEYS {
+        env::remove_var(key);
+    }
+    env::set_var("GWT_OWNER_GITHUB_TEST_MODE", "loopback-v1");
+    env::set_var("GWT_OWNER_GITHUB_REST_BASE", "http://127.0.0.1:43123");
+    env::set_var(
+        "GWT_OWNER_GITHUB_GRAPHQL_URL",
+        "http://localhost:43123/graphql",
+    );
+    env::set_var("GWT_OWNER_GITHUB_TOKEN", "test-token");
+    let deadline = ResolutionDeadline::new(Duration::from_secs(1), Duration::from_secs(5));
+
+    let loopback = gwt_github::client::http::HttpIssueClient::from_owner_environment_with_deadline(
+        "akiojin", "gwt", &deadline,
+    );
+    assert!(loopback.is_ok());
+
+    env::set_var("GWT_OWNER_GITHUB_REST_BASE", "https://example.com");
+    let remote = gwt_github::client::http::HttpIssueClient::from_owner_environment_with_deadline(
+        "akiojin", "gwt", &deadline,
+    );
+    assert!(matches!(
+        remote,
+        Err(gwt_github::client::ApiError::TestOverrideRejected { .. })
+    ));
+    for key in KEYS {
+        env::remove_var(key);
+    }
+}
+
+#[test]
+fn test_env_uses_a_distinct_owner_repository_client() {
+    let env = TestEnv::new(PathBuf::from("cache-root"));
+    let deadline = ResolutionDeadline::new(Duration::from_secs(1), Duration::from_secs(5));
+    assert!(!std::ptr::eq(&env.client, &env.owner_client));
+    assert!(env
+        .improvement_owner_client(&deadline)
+        .expect("owner client")
+        .list_issues(&RepositoryIdentity::gwt_upstream(), &deadline)
+        .expect("owner list")
+        .items()
+        .is_empty());
 }
 
 #[test]

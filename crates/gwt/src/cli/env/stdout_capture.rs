@@ -1,7 +1,10 @@
 use std::io;
 
 use gwt_git::PrStatus;
-use gwt_github::{IssueNumber, IssueSnapshot};
+use gwt_github::{
+    client::{ApiError, ResolutionDeadline},
+    IssueNumber, IssueSnapshot,
+};
 
 use super::{CliEnv, InternalCommandOutput};
 use crate::cli::{LinkedPrSummary, PrChecksSummary, PrReview, PrReviewThread};
@@ -13,9 +16,21 @@ pub(crate) struct StdoutCaptureEnv<'a, E: CliEnv> {
 
 impl<E: CliEnv> CliEnv for StdoutCaptureEnv<'_, E> {
     type Client = E::Client;
+    type OwnerClient = E::OwnerClient;
 
     fn client(&self) -> &Self::Client {
         self.inner.client()
+    }
+
+    fn improvement_owner_client(
+        &self,
+        deadline: &ResolutionDeadline,
+    ) -> Result<&Self::OwnerClient, ApiError> {
+        self.inner.improvement_owner_client(deadline)
+    }
+
+    fn improvement_source_scope_nonce(&self) -> Result<String, gwt_github::SpecOpsError> {
+        self.inner.improvement_source_scope_nonce()
     }
 
     fn cache_root(&self) -> std::path::PathBuf {
