@@ -1,5 +1,5 @@
 use std::{
-    collections::HashSet,
+    collections::{BTreeMap, BTreeSet, HashSet},
     fs::{self, OpenOptions},
     io,
     path::{Path, PathBuf},
@@ -15,8 +15,58 @@ use super::improvement::{
     transition_candidate, validate_candidate_lifecycle, CandidateState, CandidateStore,
     ImprovementCandidate, ImprovementEligibility, RetryMetadata,
 };
+use super::improvement_contract::{
+    OwnerProjectionAggregate, OwnerProjectionOccurrence, OwnerProjectionOwner,
+    OwnerProjectionSnapshot, OWNER_PROJECTION_CONTRACT_REVISION,
+};
 
 pub(super) const STORE_SCHEMA_VERSION: u32 = 3;
+const OWNER_PROJECTION_SCHEMA_VERSION: u32 = 1;
+const UPSTREAM_REPOSITORY_KEY: &str = "github.com/akiojin/gwt";
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(super) struct OwnerProjectionStore {
+    schema_version: u32,
+    contract_revision: u32,
+    pub(super) owners: Vec<OwnerProjectionRecord>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(super) struct OwnerProjectionRecord {
+    pub(super) owner: OwnerProjectionOwner,
+    pub(super) fingerprint: String,
+    pub(super) aggregate_count: u64,
+    pub(super) last_seen: String,
+    pub(super) occurrences: Vec<OwnerProjectionOccurrence>,
+    pub(super) source_references: Vec<OwnerProjectionSourceReference>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(super) struct OwnerProjectionSourceReference {
+    pub(super) digest: String,
+    pub(super) resolution_status: OwnerProjectionResolutionStatus,
+    pub(super) last_seen: String,
+    pub(super) occurrence_keys: Vec<String>,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub(super) enum OwnerProjectionResolutionStatus {
+    Linked,
+    Created,
+}
+
+#[derive(Debug, Clone)]
+pub(super) struct OwnerProjectionCommit {
+    pub(super) owner: OwnerProjectionOwner,
+    pub(super) fingerprint: String,
+    pub(super) occurrence: OwnerProjectionOccurrence,
+    pub(super) source_reference_digest: String,
+    pub(super) resolution_status: OwnerProjectionResolutionStatus,
+}
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub(super) struct LegacyImportState {
@@ -94,6 +144,579 @@ pub(super) fn evidence_dir_path(repo_root: &Path) -> PathBuf {
     gwt_core::paths::gwt_project_dir_for_repo_path(repo_root)
         .join("improvements")
         .join("evidence")
+}
+
+pub(super) fn owner_projection_path() -> PathBuf {
+    owner_projection_dir().join("projection.json")
+}
+
+fn owner_projection_dir() -> PathBuf {
+    let repository_key = digest_fields(
+        "gwt.improvement.owner-projection.repository-key.v1",
+        &[UPSTREAM_REPOSITORY_KEY],
+    );
+    gwt_core::paths::gwt_home()
+        .join("improvements")
+        .join("owner-projections")
+        .join(repository_key)
+}
+
+pub(super) fn read_owner_projection_contract() -> Result<OwnerProjectionSnapshot, SpecOpsError> {
+    let store = load_owner_projection()?;
+    Ok(OwnerProjectionSnapshot {
+        contract_revision: store.contract_revision,
+        owners: store
+            .owners
+            .into_iter()
+            .map(|record| OwnerProjectionAggregate {
+                owner: record.owner,
+                fingerprint: record.fingerprint,
+                aggregate_count: record.aggregate_count,
+                last_seen: record.last_seen,
+                occurrences: record.occurrences,
+            })
+            .collect(),
+    })
+}
+
+pub(super) fn load_owner_projection() -> Result<OwnerProjectionStore, SpecOpsError> {
+    with_owner_projection_lock(load_owner_projection_unlocked)
+}
+
+pub(super) fn commit_owner_projection(commit: OwnerProjectionCommit) -> Result<(), SpecOpsError> {
+    commit_owner_projection_inner(commit, false)
+}
+
+#[cfg(test)]
+pub(super) fn commit_owner_projection_before_persist(
+    commit: OwnerProjectionCommit,
+) -> Result<(), SpecOpsError> {
+    commit_owner_projection_inner(commit, true)
+}
+
+fn commit_owner_projection_inner(
+    commit: OwnerProjectionCommit,
+    fail_before_persist: bool,
+) -> Result<(), SpecOpsError> {
+    with_owner_projection_lock(|| {
+        let mut store = load_owner_projection_unlocked()?;
+        apply_owner_projection_commit(&mut store, commit)?;
+        validate_owner_projection(&store)?;
+        if fail_before_persist {
+            return Err(invalid("injected failure before owner projection commit"));
+        }
+        save_owner_projection_unlocked(&store)
+    })
+}
+
+fn load_owner_projection_unlocked() -> Result<OwnerProjectionStore, SpecOpsError> {
+    let path = owner_projection_path();
+    if !path.exists() {
+        return Ok(OwnerProjectionStore {
+            schema_version: OWNER_PROJECTION_SCHEMA_VERSION,
+            contract_revision: OWNER_PROJECTION_CONTRACT_REVISION,
+            owners: Vec::new(),
+        });
+    }
+    let bytes = fs::read(&path).map_err(io_as_spec_error)?;
+    let store: OwnerProjectionStore =
+        serde_json::from_slice(&bytes).map_err(serde_as_spec_error)?;
+    validate_owner_projection(&store)?;
+    Ok(store)
+}
+
+fn save_owner_projection_unlocked(store: &OwnerProjectionStore) -> Result<(), SpecOpsError> {
+    validate_owner_projection(store)?;
+    let path = owner_projection_path();
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent).map_err(io_as_spec_error)?;
+    }
+    let bytes = serde_json::to_vec_pretty(store).map_err(serde_as_spec_error)?;
+    write_atomic_and_sync_parent(&path, &bytes).map_err(io_as_spec_error)
+}
+
+fn with_owner_projection_lock<T>(
+    operation: impl FnOnce() -> Result<T, SpecOpsError>,
+) -> Result<T, SpecOpsError> {
+    let directory = owner_projection_dir();
+    fs::create_dir_all(&directory).map_err(io_as_spec_error)?;
+    let lock = OpenOptions::new()
+        .create(true)
+        .read(true)
+        .write(true)
+        .truncate(false)
+        .open(directory.join(".lock"))
+        .map_err(io_as_spec_error)?;
+    lock.lock_exclusive().map_err(io_as_spec_error)?;
+    let result = operation();
+    let unlock_result = FileExt::unlock(&lock).map_err(io_as_spec_error);
+    match (result, unlock_result) {
+        (Ok(value), Ok(())) => Ok(value),
+        (Err(error), _) => Err(error),
+        (Ok(_), Err(error)) => Err(error),
+    }
+}
+
+fn apply_owner_projection_commit(
+    store: &mut OwnerProjectionStore,
+    commit: OwnerProjectionCommit,
+) -> Result<(), SpecOpsError> {
+    validate_owner_projection_owner(&commit.owner)?;
+    validate_fingerprint(&commit.fingerprint)?;
+    validate_occurrence(&commit.fingerprint, &commit.occurrence)?;
+    validate_hex_digest(
+        "owner projection source reference",
+        &commit.source_reference_digest,
+    )?;
+
+    let existing_occurrence_index = store.owners.iter().position(|record| {
+        record
+            .occurrences
+            .iter()
+            .any(|occurrence| occurrence.opaque_key == commit.occurrence.opaque_key)
+    });
+    if let Some(index) = existing_occurrence_index {
+        let record = &store.owners[index];
+        let existing = record
+            .occurrences
+            .iter()
+            .find(|occurrence| occurrence.opaque_key == commit.occurrence.opaque_key)
+            .expect("occurrence index was located");
+        let covering_sources = record
+            .source_references
+            .iter()
+            .filter(|source| {
+                source
+                    .occurrence_keys
+                    .iter()
+                    .any(|key| key == &existing.opaque_key)
+            })
+            .map(|source| source.digest.as_str())
+            .collect::<Vec<_>>();
+        let same_binding = record.fingerprint == commit.fingerprint
+            && existing.public_marker_digest == commit.occurrence.public_marker_digest
+            && covering_sources == [commit.source_reference_digest.as_str()];
+        if !same_binding {
+            return Err(invalid("conflicting owner projection occurrence"));
+        }
+        if record.owner.number != commit.owner.number {
+            if commit.owner.number > record.owner.number {
+                return Err(invalid(
+                    "owner projection occurrence already has a lower canonical owner",
+                ));
+            }
+            let record = &mut store.owners[index];
+            record
+                .occurrences
+                .retain(|occurrence| occurrence.opaque_key != commit.occurrence.opaque_key);
+            for source in &mut record.source_references {
+                source
+                    .occurrence_keys
+                    .retain(|key| key != &commit.occurrence.opaque_key);
+            }
+            record
+                .source_references
+                .retain(|source| !source.occurrence_keys.is_empty());
+            if record.occurrences.is_empty() {
+                store.owners.remove(index);
+            }
+        }
+    }
+
+    let record = if let Some(index) = store.owners.iter().position(|record| {
+        record.owner.number == commit.owner.number && record.fingerprint == commit.fingerprint
+    }) {
+        &mut store.owners[index]
+    } else {
+        store.owners.push(OwnerProjectionRecord {
+            owner: commit.owner.clone(),
+            fingerprint: commit.fingerprint.clone(),
+            aggregate_count: 0,
+            last_seen: commit.occurrence.last_seen.clone(),
+            occurrences: Vec::new(),
+            source_references: Vec::new(),
+        });
+        store.owners.last_mut().expect("record was inserted")
+    };
+    let stored_verified_at =
+        chrono::DateTime::parse_from_rfc3339(&record.owner.readback_verified_at)
+            .map_err(|_| invalid("owner projection readback_verified_at must be RFC3339"))?;
+    let incoming_verified_at =
+        chrono::DateTime::parse_from_rfc3339(&commit.owner.readback_verified_at)
+            .map_err(|_| invalid("owner projection readback_verified_at must be RFC3339"))?;
+    if incoming_verified_at > stored_verified_at {
+        record.owner = commit.owner.clone();
+    } else if incoming_verified_at == stored_verified_at
+        && (record.owner.kind != commit.owner.kind
+            || record.owner.active != commit.owner.active
+            || record.owner.title != commit.owner.title)
+    {
+        return Err(invalid("conflicting owner projection readback state"));
+    }
+
+    if let Some(existing) = record
+        .occurrences
+        .iter_mut()
+        .find(|occurrence| occurrence.opaque_key == commit.occurrence.opaque_key)
+    {
+        existing.last_seen = latest_timestamp(&existing.last_seen, &commit.occurrence.last_seen)?;
+    } else {
+        record.occurrences.push(commit.occurrence.clone());
+    }
+    if let Some(source) = record
+        .source_references
+        .iter_mut()
+        .find(|source| source.digest == commit.source_reference_digest)
+    {
+        source.resolution_status =
+            merge_resolution_status(source.resolution_status, commit.resolution_status)?;
+        source.last_seen = latest_timestamp(&source.last_seen, &commit.occurrence.last_seen)?;
+        if !source
+            .occurrence_keys
+            .iter()
+            .any(|key| key == &commit.occurrence.opaque_key)
+        {
+            source
+                .occurrence_keys
+                .push(commit.occurrence.opaque_key.clone());
+        }
+    } else {
+        record
+            .source_references
+            .push(OwnerProjectionSourceReference {
+                digest: commit.source_reference_digest,
+                resolution_status: commit.resolution_status,
+                last_seen: commit.occurrence.last_seen.clone(),
+                occurrence_keys: vec![commit.occurrence.opaque_key],
+            });
+    }
+    record.last_seen = latest_timestamp(&record.last_seen, &commit.occurrence.last_seen)?;
+    normalize_owner_projection(store)?;
+    Ok(())
+}
+
+fn merge_resolution_status(
+    current: OwnerProjectionResolutionStatus,
+    incoming: OwnerProjectionResolutionStatus,
+) -> Result<OwnerProjectionResolutionStatus, SpecOpsError> {
+    match (current, incoming) {
+        (OwnerProjectionResolutionStatus::Linked, OwnerProjectionResolutionStatus::Linked) => {
+            Ok(OwnerProjectionResolutionStatus::Linked)
+        }
+        (OwnerProjectionResolutionStatus::Created, OwnerProjectionResolutionStatus::Created) => {
+            Ok(OwnerProjectionResolutionStatus::Created)
+        }
+        (OwnerProjectionResolutionStatus::Created, OwnerProjectionResolutionStatus::Linked) => {
+            Ok(OwnerProjectionResolutionStatus::Created)
+        }
+        (OwnerProjectionResolutionStatus::Linked, OwnerProjectionResolutionStatus::Created) => {
+            Err(invalid("conflicting owner projection resolution status"))
+        }
+    }
+}
+
+fn normalize_owner_projection(store: &mut OwnerProjectionStore) -> Result<(), SpecOpsError> {
+    for record in &mut store.owners {
+        record
+            .occurrences
+            .sort_by(|left, right| left.opaque_key.cmp(&right.opaque_key));
+        record.source_references.sort_by(|left, right| {
+            left.digest
+                .cmp(&right.digest)
+                .then_with(|| left.last_seen.cmp(&right.last_seen))
+        });
+        for source in &mut record.source_references {
+            source.occurrence_keys.sort();
+            source.occurrence_keys.dedup();
+            let mut latest: Option<String> = None;
+            for key in &source.occurrence_keys {
+                let occurrence = record
+                    .occurrences
+                    .iter()
+                    .find(|occurrence| &occurrence.opaque_key == key)
+                    .ok_or_else(|| {
+                        invalid("owner projection source references an unknown occurrence")
+                    })?;
+                latest = Some(match latest {
+                    Some(current) => latest_timestamp(&current, &occurrence.last_seen)?,
+                    None => occurrence.last_seen.clone(),
+                });
+            }
+            source.last_seen = latest.ok_or_else(|| {
+                invalid("owner projection source reference requires occurrence coverage")
+            })?;
+        }
+        record.aggregate_count = record.occurrences.len() as u64;
+        record.last_seen = record
+            .occurrences
+            .iter()
+            .try_fold(None::<String>, |latest, occurrence| {
+                Ok::<_, SpecOpsError>(Some(match latest {
+                    Some(current) => latest_timestamp(&current, &occurrence.last_seen)?,
+                    None => occurrence.last_seen.clone(),
+                }))
+            })?
+            .ok_or_else(|| invalid("owner projection aggregate requires an occurrence"))?;
+    }
+    store.owners.sort_by(owner_projection_record_order);
+    Ok(())
+}
+
+fn validate_owner_projection(store: &OwnerProjectionStore) -> Result<(), SpecOpsError> {
+    if store.schema_version != OWNER_PROJECTION_SCHEMA_VERSION {
+        return Err(invalid(&format!(
+            "unsupported owner projection schema version: {}",
+            store.schema_version
+        )));
+    }
+    if store.contract_revision != OWNER_PROJECTION_CONTRACT_REVISION {
+        return Err(invalid(&format!(
+            "unsupported owner projection contract revision: {}",
+            store.contract_revision
+        )));
+    }
+
+    let mut owner_keys = BTreeSet::new();
+    let mut global_occurrences = BTreeMap::new();
+    if store
+        .owners
+        .windows(2)
+        .any(|pair| owner_projection_record_order(&pair[0], &pair[1]).is_ge())
+    {
+        return Err(invalid(
+            "owner projection owners are not in canonical order",
+        ));
+    }
+    for record in &store.owners {
+        validate_owner_projection_owner(&record.owner)?;
+        validate_fingerprint(&record.fingerprint)?;
+        validate_timestamp("owner projection last_seen", &record.last_seen)?;
+        if record.aggregate_count != record.occurrences.len() as u64 {
+            return Err(invalid(
+                "owner projection aggregate_count does not match unique occurrences",
+            ));
+        }
+        if record.occurrences.is_empty() {
+            return Err(invalid("owner projection aggregate requires an occurrence"));
+        }
+        if record
+            .occurrences
+            .windows(2)
+            .any(|pair| pair[0].opaque_key >= pair[1].opaque_key)
+        {
+            return Err(invalid(
+                "owner projection occurrences are not in canonical order",
+            ));
+        }
+        if !owner_keys.insert((record.owner.number, record.fingerprint.as_str())) {
+            return Err(invalid("duplicate owner projection aggregate"));
+        }
+
+        let occurrence_keys = record
+            .occurrences
+            .iter()
+            .map(|occurrence| occurrence.opaque_key.as_str())
+            .collect::<BTreeSet<_>>();
+        if occurrence_keys.len() != record.occurrences.len() {
+            return Err(invalid("duplicate owner projection occurrence"));
+        }
+        let mut occurrence_coverage = BTreeMap::<&str, usize>::new();
+        for occurrence in &record.occurrences {
+            validate_occurrence(&record.fingerprint, occurrence)?;
+            if global_occurrences
+                .insert(occurrence.opaque_key.as_str(), record.owner.number)
+                .is_some()
+            {
+                return Err(invalid("conflicting owner projection occurrence"));
+            }
+            occurrence_coverage.insert(occurrence.opaque_key.as_str(), 0);
+        }
+
+        let mut source_digests = BTreeSet::new();
+        if record
+            .source_references
+            .windows(2)
+            .any(|pair| pair[0].digest >= pair[1].digest)
+        {
+            return Err(invalid(
+                "owner projection source references are not in canonical order",
+            ));
+        }
+        for source in &record.source_references {
+            validate_hex_digest("owner projection source reference", &source.digest)?;
+            validate_timestamp("owner projection source last_seen", &source.last_seen)?;
+            if !source_digests.insert(source.digest.as_str()) {
+                return Err(invalid("duplicate owner projection source reference"));
+            }
+            if source.occurrence_keys.is_empty() {
+                return Err(invalid(
+                    "owner projection source reference requires occurrence coverage",
+                ));
+            }
+            if source
+                .occurrence_keys
+                .windows(2)
+                .any(|pair| pair[0] >= pair[1])
+            {
+                return Err(invalid(
+                    "owner projection source occurrence coverage is not in canonical order",
+                ));
+            }
+            let mut covered = BTreeSet::new();
+            let mut source_latest: Option<String> = None;
+            for key in &source.occurrence_keys {
+                if !covered.insert(key.as_str()) {
+                    return Err(invalid(
+                        "duplicate owner projection source occurrence coverage",
+                    ));
+                }
+                let Some(count) = occurrence_coverage.get_mut(key.as_str()) else {
+                    return Err(invalid(
+                        "owner projection source references an unknown occurrence",
+                    ));
+                };
+                *count += 1;
+                let occurrence = record
+                    .occurrences
+                    .iter()
+                    .find(|occurrence| occurrence.opaque_key == *key)
+                    .expect("covered occurrence was validated above");
+                source_latest = Some(match source_latest {
+                    Some(current) => latest_timestamp(&current, &occurrence.last_seen)?,
+                    None => occurrence.last_seen.clone(),
+                });
+            }
+            if !timestamps_equal(
+                &source.last_seen,
+                source_latest
+                    .as_deref()
+                    .expect("source occurrence coverage is non-empty"),
+            )? {
+                return Err(invalid(
+                    "owner projection source last_seen does not match its occurrences",
+                ));
+            }
+        }
+        if occurrence_coverage.values().any(|count| *count != 1) {
+            return Err(invalid(
+                "owner projection occurrence must bind exactly one source reference",
+            ));
+        }
+        let record_latest = record
+            .occurrences
+            .iter()
+            .try_fold(None::<String>, |latest, occurrence| {
+                Ok::<_, SpecOpsError>(Some(match latest {
+                    Some(current) => latest_timestamp(&current, &occurrence.last_seen)?,
+                    None => occurrence.last_seen.clone(),
+                }))
+            })?
+            .expect("aggregate occurrence is non-empty");
+        if !timestamps_equal(&record.last_seen, &record_latest)? {
+            return Err(invalid(
+                "owner projection last_seen does not match its occurrences",
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn owner_projection_record_order(
+    left: &OwnerProjectionRecord,
+    right: &OwnerProjectionRecord,
+) -> std::cmp::Ordering {
+    left.owner
+        .number
+        .cmp(&right.owner.number)
+        .then_with(|| left.owner.kind.cmp(&right.owner.kind))
+        .then_with(|| left.fingerprint.cmp(&right.fingerprint))
+}
+
+fn validate_owner_projection_owner(owner: &OwnerProjectionOwner) -> Result<(), SpecOpsError> {
+    if owner.number == 0 {
+        return Err(invalid("owner projection number must be greater than zero"));
+    }
+    if owner.title.trim().is_empty() {
+        return Err(invalid("owner projection title must not be empty"));
+    }
+    let expected_url = format!("https://github.com/akiojin/gwt/issues/{}", owner.number);
+    if owner.url != expected_url {
+        return Err(invalid("owner projection URL is not canonical"));
+    }
+    validate_timestamp(
+        "owner projection readback_verified_at",
+        &owner.readback_verified_at,
+    )
+}
+
+fn validate_occurrence(
+    fingerprint: &str,
+    occurrence: &OwnerProjectionOccurrence,
+) -> Result<(), SpecOpsError> {
+    let Some(digest) = occurrence.opaque_key.strip_prefix("occ:v1:") else {
+        return Err(invalid("invalid owner projection occurrence key"));
+    };
+    validate_hex_digest("owner projection occurrence key", digest)?;
+    validate_hex_digest(
+        "owner projection public marker digest",
+        &occurrence.public_marker_digest,
+    )?;
+    if occurrence.public_marker_digest
+        != owner_projection_public_marker_digest(fingerprint, &occurrence.opaque_key)
+    {
+        return Err(invalid(
+            "owner projection public marker digest does not match its occurrence",
+        ));
+    }
+    validate_timestamp(
+        "owner projection occurrence last_seen",
+        &occurrence.last_seen,
+    )
+}
+
+fn validate_fingerprint(fingerprint: &str) -> Result<(), SpecOpsError> {
+    let Some(digest) = fingerprint.strip_prefix("v2:") else {
+        return Err(invalid("invalid owner projection fingerprint"));
+    };
+    validate_hex_digest("owner projection fingerprint", digest)
+}
+
+fn validate_hex_digest(field: &str, value: &str) -> Result<(), SpecOpsError> {
+    if value.len() == 64
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || matches!(byte, b'a'..=b'f'))
+    {
+        Ok(())
+    } else {
+        Err(invalid(&format!("invalid {field}")))
+    }
+}
+
+fn validate_timestamp(field: &str, value: &str) -> Result<(), SpecOpsError> {
+    chrono::DateTime::parse_from_rfc3339(value)
+        .map(|_| ())
+        .map_err(|_| invalid(&format!("{field} must be RFC3339")))
+}
+
+fn latest_timestamp(left: &str, right: &str) -> Result<String, SpecOpsError> {
+    let left_value = chrono::DateTime::parse_from_rfc3339(left)
+        .map_err(|_| invalid("owner projection timestamp must be RFC3339"))?;
+    let right_value = chrono::DateTime::parse_from_rfc3339(right)
+        .map_err(|_| invalid("owner projection timestamp must be RFC3339"))?;
+    Ok(if right_value > left_value {
+        right.to_string()
+    } else {
+        left.to_string()
+    })
+}
+
+fn timestamps_equal(left: &str, right: &str) -> Result<bool, SpecOpsError> {
+    let left_value = chrono::DateTime::parse_from_rfc3339(left)
+        .map_err(|_| invalid("owner projection timestamp must be RFC3339"))?;
+    let right_value = chrono::DateTime::parse_from_rfc3339(right)
+        .map_err(|_| invalid("owner projection timestamp must be RFC3339"))?;
+    Ok(left_value == right_value)
 }
 
 pub(super) fn load_and_repair(repo_root: &Path) -> Result<CandidateStore, SpecOpsError> {
@@ -646,6 +1269,37 @@ fn legacy_fingerprint(candidate: &ImprovementCandidate) -> String {
 
 fn digest_bytes(bytes: &[u8]) -> String {
     hex::encode(Sha256::digest(bytes))
+}
+
+fn digest_fields(domain: &str, fields: &[&str]) -> String {
+    let mut digest = Sha256::new();
+    for value in std::iter::once(domain).chain(fields.iter().copied()) {
+        digest.update((value.len() as u64).to_be_bytes());
+        digest.update(value.as_bytes());
+    }
+    hex::encode(digest.finalize())
+}
+
+pub(super) fn owner_projection_source_reference_digest(
+    source_scope_nonce: &str,
+    candidate_id: &str,
+    fingerprint: &str,
+) -> String {
+    digest_fields(
+        "gwt.improvement.owner-projection.source-reference.v1",
+        &[source_scope_nonce, candidate_id, fingerprint],
+    )
+}
+
+pub(super) fn owner_projection_public_marker_digest(
+    fingerprint: &str,
+    occurrence_key: &str,
+) -> String {
+    let marker = format!("<!-- gwt:improvement-occurrence:v1 {occurrence_key} -->");
+    digest_fields(
+        "gwt.improvement.owner-projection.public-marker.v1",
+        &[fingerprint, &marker],
+    )
 }
 
 fn generate_source_scope_nonce() -> String {

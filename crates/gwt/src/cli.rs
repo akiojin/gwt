@@ -17,6 +17,7 @@ mod env;
 pub mod gwtd_resolver;
 pub mod hook;
 pub mod improvement;
+pub mod improvement_contract;
 mod improvement_owner;
 mod improvement_store;
 pub(crate) mod index;

@@ -514,7 +514,7 @@ pub fn run<E: CliEnv>(
 pub(crate) fn pending_high_confidence_contract_violations(
     repo_root: &Path,
 ) -> Vec<PendingImprovementStopCandidate> {
-    load_store(repo_root)
+    load_store_with_projection_fallback(repo_root)
         .map(|store| {
             store
                 .candidates
@@ -537,7 +537,7 @@ pub(crate) fn pending_high_confidence_contract_violations(
 
 pub fn candidate_public_values(repo_root: &Path) -> Vec<Value> {
     let privacy_context = PublicMutationContext::for_repo(repo_root);
-    let mut candidates = load_store(repo_root)
+    let mut candidates = load_store_with_projection_fallback(repo_root)
         .map(|store| store.candidates)
         .unwrap_or_default();
     candidates.sort_by(|a, b| {
@@ -2022,7 +2022,12 @@ fn candidate_public_json(
 }
 
 fn load_store(repo_root: &Path) -> Result<CandidateStore, SpecOpsError> {
+    super::improvement_owner::repair_source_success_snapshots(repo_root)?;
     super::improvement_store::load_and_repair(repo_root)
+}
+
+fn load_store_with_projection_fallback(repo_root: &Path) -> Result<CandidateStore, SpecOpsError> {
+    load_store(repo_root).or_else(|_| super::improvement_store::load_and_repair(repo_root))
 }
 
 fn sanitize_local_evidence(items: &[Value]) -> Vec<LocalEvidenceReference> {

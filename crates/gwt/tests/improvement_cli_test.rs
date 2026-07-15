@@ -9,6 +9,8 @@ use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use tempfile::TempDir;
 
+use gwt::cli::improvement_contract::{read_owner_projection, OWNER_PROJECTION_CONTRACT_REVISION};
+
 struct Fixture {
     home: TempDir,
     project: TempDir,
@@ -217,6 +219,63 @@ fn canonical_candidate_store(home: &Path, project: &Path) -> PathBuf {
         .join(repo_hash.as_str())
         .join("improvements")
         .join("candidates.json")
+}
+
+fn digest_fields(domain: &str, fields: &[&str]) -> String {
+    let mut digest = Sha256::new();
+    for value in std::iter::once(domain).chain(fields.iter().copied()) {
+        digest.update((value.len() as u64).to_be_bytes());
+        digest.update(value.as_bytes());
+    }
+    hex::encode(digest.finalize())
+}
+
+fn canonical_owner_projection(home: &Path) -> PathBuf {
+    let repository_key = digest_fields(
+        "gwt.improvement.owner-projection.repository-key.v1",
+        &["github.com/akiojin/gwt"],
+    );
+    home.join(".gwt")
+        .join("improvements")
+        .join("owner-projections")
+        .join(repository_key)
+        .join("projection.json")
+}
+
+fn source_reference_digest(
+    source_scope_nonce: &str,
+    candidate_id: &str,
+    fingerprint: &str,
+) -> String {
+    digest_fields(
+        "gwt.improvement.owner-projection.source-reference.v1",
+        &[source_scope_nonce, candidate_id, fingerprint],
+    )
+}
+
+fn public_marker_digest(fingerprint: &str, occurrence_key: &str) -> String {
+    let marker = format!("<!-- gwt:improvement-occurrence:v1 {occurrence_key} -->");
+    digest_fields(
+        "gwt.improvement.owner-projection.public-marker.v1",
+        &[fingerprint, &marker],
+    )
+}
+
+fn write_owner_projection(home: &Path, owners: Vec<Value>) -> PathBuf {
+    let path = canonical_owner_projection(home);
+    fs::create_dir_all(path.parent().expect("owner projection parent"))
+        .expect("owner projection directory");
+    fs::write(
+        &path,
+        serde_json::to_vec_pretty(&json!({
+            "schema_version": 1,
+            "contract_revision": OWNER_PROJECTION_CONTRACT_REVISION,
+            "owners": owners,
+        }))
+        .expect("serialize owner projection"),
+    )
+    .expect("write owner projection");
+    path
 }
 
 fn legacy_candidate(index: usize, occurrences: u64, evidence_path: Option<&Path>) -> Value {
@@ -1774,4 +1833,496 @@ fn improvement_list_v2_never_returns_raw_taint_inputs() {
     assert!(candidate["issue_preview"]["body"]
         .as_str()
         .is_some_and(|body| body.contains("BOARD_STATUS_MISSING")));
+}
+
+#[test]
+fn owner_projection_revisioned_reader_returns_sanitized_owner_aggregate_fixture() {
+    let home = tempfile::tempdir().expect("isolated home");
+    let _gwt_home = gwt_core::test_support::ScopedGwtHome::set(home.path());
+    let fingerprint = format!("v2:{}", "a".repeat(64));
+    let occurrence_a = format!("occ:v1:{}", "b".repeat(64));
+    let occurrence_b = format!("occ:v1:{}", "c".repeat(64));
+    let projection_path = write_owner_projection(
+        home.path(),
+        vec![json!({
+            "owner": {
+                "number": 3164,
+                "kind": "spec",
+                "active": true,
+                "title": "Self-improvement owner projection",
+                "url": "https://github.com/akiojin/gwt/issues/3164",
+                "readback_verified_at": "2026-07-15T08:00:00Z"
+            },
+            "fingerprint": fingerprint,
+            "aggregate_count": 2,
+            "last_seen": "2026-07-15T08:00:00Z",
+            "occurrences": [
+                {
+                    "opaque_key": occurrence_a,
+                    "public_marker_digest": public_marker_digest(&fingerprint, &occurrence_a),
+                    "last_seen": "2026-07-15T07:59:00Z"
+                },
+                {
+                    "opaque_key": occurrence_b,
+                    "public_marker_digest": public_marker_digest(&fingerprint, &occurrence_b),
+                    "last_seen": "2026-07-15T08:00:00Z"
+                }
+            ],
+            "source_references": [
+                {
+                    "digest": "f".repeat(64),
+                    "resolution_status": "linked",
+                    "last_seen": "2026-07-15T08:00:00Z",
+                    "occurrence_keys": [occurrence_a, occurrence_b]
+                }
+            ]
+        })],
+    );
+
+    let projection = read_owner_projection().expect("read revisioned projection");
+    assert_eq!(
+        projection.contract_revision,
+        OWNER_PROJECTION_CONTRACT_REVISION
+    );
+    assert_eq!(projection.owners.len(), 1);
+    let aggregate = &projection.owners[0];
+    assert_eq!(aggregate.owner.number, 3164);
+    assert_eq!(aggregate.aggregate_count, 2);
+    assert_eq!(aggregate.occurrences.len(), 2);
+    assert_eq!(aggregate.occurrences[0].opaque_key, occurrence_a);
+    assert_eq!(aggregate.occurrences[1].opaque_key, occurrence_b);
+
+    let encoded = fs::read_to_string(projection_path).expect("projection JSON");
+    for private_value in [
+        "source_scope_nonce",
+        "/Users/alice/private-target",
+        "github.com/customer/private-target",
+        "raw candidate summary",
+    ] {
+        assert!(
+            !encoded.contains(private_value),
+            "projection leaked private value {private_value}: {encoded}"
+        );
+    }
+}
+
+#[test]
+fn owner_projection_reader_rejects_marker_digest_not_bound_to_occurrence() {
+    let home = tempfile::tempdir().expect("isolated home");
+    let _gwt_home = gwt_core::test_support::ScopedGwtHome::set(home.path());
+    let fingerprint = format!("v2:{}", "a".repeat(64));
+    let occurrence = format!("occ:v1:{}", "b".repeat(64));
+    write_owner_projection(
+        home.path(),
+        vec![json!({
+            "owner": {
+                "number": 3164,
+                "kind": "spec",
+                "active": true,
+                "title": "Self-improvement owner projection",
+                "url": "https://github.com/akiojin/gwt/issues/3164",
+                "readback_verified_at": "2026-07-15T08:00:00Z"
+            },
+            "fingerprint": fingerprint,
+            "aggregate_count": 1,
+            "last_seen": "2026-07-15T08:00:00Z",
+            "occurrences": [{
+                "opaque_key": occurrence,
+                "public_marker_digest": "c".repeat(64),
+                "last_seen": "2026-07-15T08:00:00Z"
+            }],
+            "source_references": [{
+                "digest": "d".repeat(64),
+                "resolution_status": "linked",
+                "last_seen": "2026-07-15T08:00:00Z",
+                "occurrence_keys": [occurrence]
+            }]
+        })],
+    );
+
+    let error = read_owner_projection().expect_err("tampered marker digest must fail closed");
+    assert!(error.to_string().contains("public marker digest"));
+}
+
+#[test]
+fn owner_projection_reader_rejects_noncanonical_order_and_aggregate_timestamp() {
+    let home = tempfile::tempdir().expect("isolated home");
+    let _gwt_home = gwt_core::test_support::ScopedGwtHome::set(home.path());
+    let fingerprint = format!("v2:{}", "a".repeat(64));
+    let occurrence_a = format!("occ:v1:{}", "b".repeat(64));
+    let occurrence_b = format!("occ:v1:{}", "c".repeat(64));
+    write_owner_projection(
+        home.path(),
+        vec![json!({
+            "owner": {
+                "number": 3164,
+                "kind": "spec",
+                "active": true,
+                "title": "Self-improvement owner projection",
+                "url": "https://github.com/akiojin/gwt/issues/3164",
+                "readback_verified_at": "2026-07-15T08:00:00Z"
+            },
+            "fingerprint": fingerprint,
+            "aggregate_count": 2,
+            "last_seen": "2026-07-15T08:01:00Z",
+            "occurrences": [
+                {
+                    "opaque_key": occurrence_b,
+                    "public_marker_digest": public_marker_digest(&fingerprint, &occurrence_b),
+                    "last_seen": "2026-07-15T08:00:00Z"
+                },
+                {
+                    "opaque_key": occurrence_a,
+                    "public_marker_digest": public_marker_digest(&fingerprint, &occurrence_a),
+                    "last_seen": "2026-07-15T07:59:00Z"
+                }
+            ],
+            "source_references": [{
+                "digest": "d".repeat(64),
+                "resolution_status": "linked",
+                "last_seen": "2026-07-15T08:00:00Z",
+                "occurrence_keys": [occurrence_b, occurrence_a]
+            }]
+        })],
+    );
+
+    let error = read_owner_projection().expect_err("noncanonical projection must fail closed");
+    assert!(
+        error.to_string().contains("canonical order") || error.to_string().contains("last_seen")
+    );
+}
+
+#[test]
+fn candidate_public_values_fall_back_to_local_store_when_projection_is_corrupt() {
+    let fixture = fixture();
+    let captured = operation_output(&run_gwtd_json(
+        &fixture,
+        capture_payload(
+            "projection:corrupt-fallback",
+            "Projection corruption must not hide the local candidate",
+        ),
+    ));
+    let projection_path = canonical_owner_projection(fixture.home.path());
+    fs::create_dir_all(projection_path.parent().expect("projection parent"))
+        .expect("projection directory");
+    fs::write(&projection_path, b"{not-json").expect("corrupt projection");
+    let _gwt_home = gwt_core::test_support::ScopedGwtHome::set(fixture.home.path());
+
+    let candidates = gwt::cli::improvement::candidate_public_values(fixture.project.path());
+    assert_eq!(candidates.len(), 1);
+    assert_eq!(candidates[0]["id"], captured["id"]);
+}
+
+#[test]
+fn improvement_list_repairs_missing_source_success_from_latest_verified_projection_binding() {
+    let fixture = fixture();
+    let source_scope_nonce = "11".repeat(32);
+    let candidate_id = "impr-projection-repair";
+    let fingerprint = format!("v2:{}", "1".repeat(64));
+    let current_occurrence = format!("occ:v1:{}", "8".repeat(64));
+    let mut candidate =
+        lifecycle_candidate(candidate_id, "owner-resolving", "2026-07-15T07:00:00Z");
+    candidate["fingerprint"] = json!(fingerprint);
+    candidate["owner"] = Value::Null;
+    candidate["linked_issue"] = Value::Null;
+    candidate["distinct_occurrences"] = json!([{
+        "opaque_key": current_occurrence,
+        "evidence_digest": "a".repeat(64),
+        "captured_at": "2026-07-15T07:00:00Z",
+        "origin": "interpretive",
+        "qualifies_unattended": false,
+        "producer_id": null,
+        "producer_registry_revision": null,
+        "routing_basis_revision": null,
+        "replay_proof": null
+    }]);
+    write_canonical_store(
+        fixture.home.path(),
+        fixture.project.path(),
+        3,
+        vec![candidate],
+    );
+    let source_reference = source_reference_digest(&source_scope_nonce, candidate_id, &fingerprint);
+    write_owner_projection(
+        fixture.home.path(),
+        vec![
+            json!({
+                "owner": {
+                    "number": 10,
+                    "kind": "issue",
+                    "active": true,
+                    "title": "Older verified owner",
+                    "url": "https://github.com/akiojin/gwt/issues/10",
+                    "readback_verified_at": "2026-07-15T07:10:00Z"
+                },
+                "fingerprint": fingerprint,
+                "aggregate_count": 1,
+                "last_seen": "2026-07-15T07:10:00Z",
+                "occurrences": [{
+                    "opaque_key": format!("occ:v1:{}", "2".repeat(64)),
+                    "public_marker_digest": public_marker_digest(
+                        &fingerprint,
+                        &format!("occ:v1:{}", "2".repeat(64)),
+                    ),
+                    "last_seen": "2026-07-15T07:10:00Z"
+                }],
+                "source_references": [{
+                    "digest": source_reference,
+                    "resolution_status": "linked",
+                    "last_seen": "2026-07-15T07:10:00Z",
+                    "occurrence_keys": [format!("occ:v1:{}", "2".repeat(64))]
+                }]
+            }),
+            json!({
+                "owner": {
+                    "number": 20,
+                    "kind": "spec",
+                    "active": true,
+                    "title": "Latest verified owner",
+                    "url": "https://github.com/akiojin/gwt/issues/20",
+                    "readback_verified_at": "2026-07-15T07:20:00Z"
+                },
+                "fingerprint": fingerprint,
+                "aggregate_count": 1,
+                "last_seen": "2026-07-15T07:20:00Z",
+                "occurrences": [{
+                    "opaque_key": current_occurrence,
+                    "public_marker_digest": public_marker_digest(&fingerprint, &current_occurrence),
+                    "last_seen": "2026-07-15T07:20:00Z"
+                }],
+                "source_references": [{
+                    "digest": source_reference,
+                    "resolution_status": "created",
+                    "last_seen": "2026-07-15T07:20:00Z",
+                    "occurrence_keys": [current_occurrence]
+                }]
+            }),
+            json!({
+                "owner": {
+                    "number": 30,
+                    "kind": "issue",
+                    "active": true,
+                    "title": "Foreign fingerprint owner",
+                    "url": "https://github.com/akiojin/gwt/issues/30",
+                    "readback_verified_at": "2026-07-15T07:30:00Z"
+                },
+                "fingerprint": format!("v2:{}", "9".repeat(64)),
+                "aggregate_count": 1,
+                "last_seen": "2026-07-15T07:30:00Z",
+                "occurrences": [{
+                    "opaque_key": format!("occ:v1:{}", "6".repeat(64)),
+                    "public_marker_digest": public_marker_digest(
+                        &format!("v2:{}", "9".repeat(64)),
+                        &format!("occ:v1:{}", "6".repeat(64)),
+                    ),
+                    "last_seen": "2026-07-15T07:30:00Z"
+                }],
+                "source_references": [{
+                    "digest": source_reference,
+                    "resolution_status": "linked",
+                    "last_seen": "2026-07-15T07:30:00Z",
+                    "occurrence_keys": [format!("occ:v1:{}", "6".repeat(64))]
+                }]
+            }),
+        ],
+    );
+
+    let listed = operation_output(&run_gwtd_json(
+        &fixture,
+        json!({
+            "schema_version": 1,
+            "operation": "improvement.list",
+            "params": {}
+        }),
+    ));
+    let repaired = &listed["candidates"][0];
+    assert_eq!(repaired["id"], candidate_id);
+    assert_eq!(repaired["state"], "promoted");
+    assert_eq!(repaired["resolution_state"], "created");
+    assert_eq!(repaired["owner"]["number"], 20);
+    assert_eq!(repaired["owner"]["title"], "Latest verified owner");
+    assert_eq!(repaired["linked_issue"]["number"], 20);
+
+    let store_path = canonical_candidate_store(fixture.home.path(), fixture.project.path());
+    let repaired_bytes = fs::read(&store_path).expect("repaired source store");
+    let persisted: Value = serde_json::from_slice(&repaired_bytes).expect("source store JSON");
+    assert_eq!(persisted["candidates"][0]["state"], "created");
+    assert_eq!(persisted["candidates"][0]["owner"]["number"], 20);
+
+    operation_output(&run_gwtd_json(
+        &fixture,
+        json!({
+            "schema_version": 1,
+            "operation": "improvement.list",
+            "params": {}
+        }),
+    ));
+    assert_eq!(
+        fs::read(store_path).expect("idempotently repaired store"),
+        repaired_bytes,
+        "list repair must be idempotent"
+    );
+}
+
+#[test]
+fn improvement_list_does_not_repair_when_projection_misses_a_current_occurrence() {
+    let fixture = fixture();
+    let source_scope_nonce = "11".repeat(32);
+    let candidate_id = "impr-projection-new-occurrence";
+    let fingerprint = format!("v2:{}", "a".repeat(64));
+    let projected_occurrence = format!("occ:v1:{}", "b".repeat(64));
+    let new_occurrence = format!("occ:v1:{}", "c".repeat(64));
+    let mut candidate =
+        lifecycle_candidate(candidate_id, "owner-resolving", "2026-07-15T08:00:00Z");
+    candidate["fingerprint"] = json!(fingerprint);
+    candidate["occurrences"] = json!(2);
+    candidate["distinct_occurrences"] = json!([
+        {
+            "opaque_key": projected_occurrence,
+            "evidence_digest": "d".repeat(64),
+            "captured_at": "2026-07-15T07:00:00Z",
+            "origin": "interpretive",
+            "qualifies_unattended": false,
+            "replay_proof": null
+        },
+        {
+            "opaque_key": new_occurrence,
+            "evidence_digest": "e".repeat(64),
+            "captured_at": "2026-07-15T08:00:00Z",
+            "origin": "interpretive",
+            "qualifies_unattended": false,
+            "replay_proof": null
+        }
+    ]);
+    write_canonical_store(
+        fixture.home.path(),
+        fixture.project.path(),
+        3,
+        vec![candidate],
+    );
+    let source_reference = source_reference_digest(&source_scope_nonce, candidate_id, &fingerprint);
+    write_owner_projection(
+        fixture.home.path(),
+        vec![json!({
+            "owner": {
+                "number": 40,
+                "kind": "issue",
+                "active": true,
+                "title": "Stale verified owner binding",
+                "url": "https://github.com/akiojin/gwt/issues/40",
+                "readback_verified_at": "2026-07-15T07:00:00Z"
+            },
+            "fingerprint": fingerprint,
+            "aggregate_count": 1,
+            "last_seen": "2026-07-15T07:00:00Z",
+            "occurrences": [{
+                "opaque_key": projected_occurrence,
+                "public_marker_digest": public_marker_digest(&fingerprint, &projected_occurrence),
+                "last_seen": "2026-07-15T07:00:00Z"
+            }],
+            "source_references": [{
+                "digest": source_reference,
+                "resolution_status": "linked",
+                "last_seen": "2026-07-15T07:00:00Z",
+                "occurrence_keys": [projected_occurrence]
+            }]
+        })],
+    );
+
+    let listed = operation_output(&run_gwtd_json(
+        &fixture,
+        json!({
+            "schema_version": 1,
+            "operation": "improvement.list",
+            "params": {}
+        }),
+    ));
+    let candidate = &listed["candidates"][0];
+    assert_eq!(candidate["resolution_state"], "owner-resolving");
+    assert!(candidate["owner"].is_null());
+    assert!(candidate["linked_issue"].is_null());
+}
+
+#[test]
+fn improvement_list_does_not_downgrade_a_newer_source_snapshot_from_stale_projection() {
+    let fixture = fixture();
+    let source_scope_nonce = "11".repeat(32);
+    let candidate_id = "impr-projection-stale-race";
+    let fingerprint = format!("v2:{}", "1".repeat(64));
+    let current_occurrence = format!("occ:v1:{}", "2".repeat(64));
+    let mut candidate = lifecycle_candidate(candidate_id, "linked", "2026-07-15T09:05:00Z");
+    candidate["fingerprint"] = json!(fingerprint);
+    candidate["distinct_occurrences"] = json!([{
+        "opaque_key": current_occurrence,
+        "evidence_digest": "3".repeat(64),
+        "captured_at": "2026-07-15T08:00:00Z",
+        "origin": "interpretive",
+        "qualifies_unattended": false,
+        "replay_proof": null
+    }]);
+    candidate["owner"] = json!({
+        "number": 99,
+        "kind": "issue",
+        "title": "Newer source snapshot",
+        "active": true,
+        "url": "https://github.com/akiojin/gwt/issues/99",
+        "fingerprint": fingerprint,
+        "readback_verified_at": "2026-07-15T09:00:00Z"
+    });
+    candidate["linked_issue"] = json!({
+        "number": 99,
+        "url": "https://github.com/akiojin/gwt/issues/99",
+        "repository": "akiojin/gwt"
+    });
+    let store_path = write_canonical_store(
+        fixture.home.path(),
+        fixture.project.path(),
+        3,
+        vec![candidate],
+    );
+    let before = fs::read(&store_path).expect("newer source snapshot");
+    let source_reference = source_reference_digest(&source_scope_nonce, candidate_id, &fingerprint);
+    write_owner_projection(
+        fixture.home.path(),
+        vec![json!({
+            "owner": {
+                "number": 40,
+                "kind": "issue",
+                "active": true,
+                "title": "Stale projection owner",
+                "url": "https://github.com/akiojin/gwt/issues/40",
+                "readback_verified_at": "2026-07-15T08:00:00Z"
+            },
+            "fingerprint": fingerprint,
+            "aggregate_count": 1,
+            "last_seen": "2026-07-15T08:05:00Z",
+            "occurrences": [{
+                "opaque_key": current_occurrence,
+                "public_marker_digest": public_marker_digest(&fingerprint, &current_occurrence),
+                "last_seen": "2026-07-15T08:05:00Z"
+            }],
+            "source_references": [{
+                "digest": source_reference,
+                "resolution_status": "linked",
+                "last_seen": "2026-07-15T08:05:00Z",
+                "occurrence_keys": [current_occurrence]
+            }]
+        })],
+    );
+
+    let listed = operation_output(&run_gwtd_json(
+        &fixture,
+        json!({
+            "schema_version": 1,
+            "operation": "improvement.list",
+            "params": {}
+        }),
+    ));
+    assert_eq!(listed["candidates"][0]["owner"]["number"], 99);
+    assert_eq!(listed["candidates"][0]["resolution_state"], "linked");
+    assert_eq!(
+        fs::read(store_path).expect("source snapshot after stale repair"),
+        before,
+        "a stale projection snapshot must not overwrite a newer source snapshot"
+    );
 }

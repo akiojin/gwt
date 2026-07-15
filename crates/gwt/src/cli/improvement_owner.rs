@@ -19,9 +19,14 @@ use sha2::{Digest, Sha256};
 use super::{
     improvement::{
         improvement_fingerprint, post_improvement_board_status, transition_candidate,
-        typed_evidence_digest, BlockedReason, CandidateState, FailureSubcode, ImprovementCandidate,
-        OccurrenceOrigin, OccurrenceReplayProof, OwnerCandidate, OwnerKind, OwnerMatchBasis,
-        ResolverSnapshot, RetryMetadata, TypedFailureEvidence,
+        typed_evidence_digest, BlockedReason, CandidateState, DurableOwnerSnapshot, FailureSubcode,
+        ImprovementCandidate, LinkedIssue, OccurrenceOrigin, OccurrenceReplayProof, OwnerCandidate,
+        OwnerKind, OwnerMatchBasis, ResolverSnapshot, RetryMetadata, TypedFailureEvidence,
+    },
+    improvement_contract::{OwnerProjectionOwner, OwnerProjectionOwnerKind},
+    improvement_store::{
+        OwnerProjectionCommit, OwnerProjectionRecord, OwnerProjectionResolutionStatus,
+        OwnerProjectionSourceReference, OwnerProjectionStore,
     },
     CliEnv,
 };
@@ -29,6 +34,21 @@ use super::{
 pub(super) const MAX_PUBLIC_BODY_BYTES: usize = 16 * 1024;
 const MAX_PUBLIC_TITLE_CHARS: usize = 180;
 const MAX_PUBLIC_SUMMARY_CHARS: usize = 150;
+
+#[derive(Debug, Clone)]
+struct ReadbackVerifiedOwnerBinding {
+    candidate_id: String,
+    owner: DurableOwnerSnapshot,
+    occurrence_key: String,
+    resolution_status: CandidateState,
+    last_seen: String,
+}
+
+#[cfg(test)]
+#[derive(Debug, Clone, Copy)]
+enum ProjectionCommitFailurePoint {
+    BeforePersist,
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) struct ContractOwnerMapping {
@@ -68,6 +88,390 @@ impl ContractRoutingRegistry {
             .map(|mapping| mapping.owner_number)
             .collect()
     }
+}
+
+fn commit_readback_verified_binding(
+    source_repo_root: &Path,
+    binding: &ReadbackVerifiedOwnerBinding,
+) -> Result<(), gwt_github::SpecOpsError> {
+    let commit = prepare_owner_projection_commit(source_repo_root, binding)?;
+    super::improvement_store::commit_owner_projection(commit)
+}
+
+#[cfg(test)]
+fn commit_readback_verified_binding_for_test(
+    source_repo_root: &Path,
+    binding: &ReadbackVerifiedOwnerBinding,
+    failure_point: ProjectionCommitFailurePoint,
+) -> Result<(), gwt_github::SpecOpsError> {
+    let commit = prepare_owner_projection_commit(source_repo_root, binding)?;
+    match failure_point {
+        ProjectionCommitFailurePoint::BeforePersist => {
+            super::improvement_store::commit_owner_projection_before_persist(commit)
+        }
+    }
+}
+
+fn prepare_owner_projection_commit(
+    source_repo_root: &Path,
+    binding: &ReadbackVerifiedOwnerBinding,
+) -> Result<OwnerProjectionCommit, gwt_github::SpecOpsError> {
+    let source_store = super::improvement_store::load_and_repair(source_repo_root)?;
+    let source_scope_nonce = source_store
+        .source_scope_nonce
+        .as_deref()
+        .ok_or_else(|| owner_projection_error("source scope nonce is missing"))?;
+    let candidate = source_store
+        .candidates
+        .iter()
+        .find(|candidate| candidate.id == binding.candidate_id)
+        .ok_or_else(|| owner_projection_error("candidate not found for owner projection"))?;
+    let fingerprint = candidate
+        .fingerprint
+        .as_deref()
+        .ok_or_else(|| owner_projection_error("candidate fingerprint is missing"))?;
+    if binding.owner.fingerprint != fingerprint {
+        return Err(owner_projection_error(
+            "verified owner fingerprint does not match candidate",
+        ));
+    }
+    if !candidate
+        .distinct_occurrences
+        .iter()
+        .any(|occurrence| occurrence.opaque_key == binding.occurrence_key)
+    {
+        return Err(owner_projection_error(
+            "verified owner binding occurrence is not present in candidate",
+        ));
+    }
+    let resolution_status = match binding.resolution_status {
+        CandidateState::Linked => OwnerProjectionResolutionStatus::Linked,
+        CandidateState::Created => OwnerProjectionResolutionStatus::Created,
+        _ => {
+            return Err(owner_projection_error(
+                "verified owner binding must resolve to linked or created",
+            ))
+        }
+    };
+    validate_projection_owner_snapshot(&binding.owner)?;
+    let projection_privacy_context =
+        PublicMutationContext::for_repo(source_repo_root).with_candidate(candidate, &[]);
+    validate_public_payload(
+        &PublicIssuePayload {
+            summary: "Verified upstream owner identity".to_string(),
+            title: binding.owner.title.clone(),
+            body: "Verified upstream owner identity.".to_string(),
+        },
+        &projection_privacy_context,
+    )
+    .map_err(|error| {
+        owner_projection_error(&format!(
+            "owner projection privacy validation failed: {error}"
+        ))
+    })?;
+    chrono::DateTime::parse_from_rfc3339(&binding.last_seen)
+        .map_err(|_| owner_projection_error("owner projection last_seen must be RFC3339"))?;
+    let source_reference_digest =
+        super::improvement_store::owner_projection_source_reference_digest(
+            source_scope_nonce,
+            &candidate.id,
+            fingerprint,
+        );
+    let public_marker_digest = super::improvement_store::owner_projection_public_marker_digest(
+        fingerprint,
+        &binding.occurrence_key,
+    );
+    Ok(OwnerProjectionCommit {
+        owner: owner_projection_owner(&binding.owner),
+        fingerprint: fingerprint.to_string(),
+        occurrence: super::improvement_contract::OwnerProjectionOccurrence {
+            opaque_key: binding.occurrence_key.clone(),
+            public_marker_digest,
+            last_seen: binding.last_seen.clone(),
+        },
+        source_reference_digest,
+        resolution_status,
+    })
+}
+
+fn validate_projection_owner_snapshot(
+    owner: &DurableOwnerSnapshot,
+) -> Result<(), gwt_github::SpecOpsError> {
+    if owner.number == 0 || owner.title.trim().is_empty() || !owner.active {
+        return Err(owner_projection_error(
+            "verified owner snapshot is not an active public owner",
+        ));
+    }
+    let canonical_url = format!("https://github.com/akiojin/gwt/issues/{}", owner.number);
+    if owner.url != canonical_url {
+        return Err(owner_projection_error(
+            "verified owner snapshot URL is not canonical",
+        ));
+    }
+    chrono::DateTime::parse_from_rfc3339(&owner.readback_verified_at)
+        .map(|_| ())
+        .map_err(|_| owner_projection_error("verified owner readback timestamp must be RFC3339"))
+}
+
+fn owner_projection_owner(owner: &DurableOwnerSnapshot) -> OwnerProjectionOwner {
+    OwnerProjectionOwner {
+        number: owner.number,
+        kind: match owner.kind {
+            OwnerKind::Issue => OwnerProjectionOwnerKind::Issue,
+            OwnerKind::Spec => OwnerProjectionOwnerKind::Spec,
+        },
+        active: owner.active,
+        title: owner.title.clone(),
+        url: owner.url.clone(),
+        readback_verified_at: owner.readback_verified_at.clone(),
+    }
+}
+
+pub(super) fn repair_source_success_snapshots(
+    source_repo_root: &Path,
+) -> Result<bool, gwt_github::SpecOpsError> {
+    // Projection and source stores have independent locks. Read the projection
+    // fully before acquiring a source lock; cross-file atomicity is not implied.
+    let projection = super::improvement_store::load_owner_projection()?;
+    let source_store = super::improvement_store::load_and_repair(source_repo_root)?;
+    if !source_store_needs_projection_repair(&source_store, &projection)? {
+        return Ok(false);
+    }
+    super::improvement_store::update(source_repo_root, |store| {
+        let source_scope_nonce = store
+            .source_scope_nonce
+            .clone()
+            .ok_or_else(|| owner_projection_error("source scope nonce is missing"))?;
+        let mut changed = false;
+        for candidate in &mut store.candidates {
+            let Some(binding) =
+                latest_projection_binding(&projection, &source_scope_nonce, candidate)?
+            else {
+                continue;
+            };
+            changed |= apply_projection_binding(candidate, binding)?;
+        }
+        Ok(changed)
+    })
+}
+
+fn source_store_needs_projection_repair(
+    store: &super::improvement::CandidateStore,
+    projection: &OwnerProjectionStore,
+) -> Result<bool, gwt_github::SpecOpsError> {
+    let source_scope_nonce = store
+        .source_scope_nonce
+        .as_deref()
+        .ok_or_else(|| owner_projection_error("source scope nonce is missing"))?;
+    for candidate in &store.candidates {
+        let Some(binding) = latest_projection_binding(projection, source_scope_nonce, candidate)?
+        else {
+            continue;
+        };
+        let mut projected = candidate.clone();
+        if apply_projection_binding(&mut projected, binding)? {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
+fn latest_projection_binding<'a>(
+    projection: &'a OwnerProjectionStore,
+    source_scope_nonce: &str,
+    candidate: &ImprovementCandidate,
+) -> Result<
+    Option<(
+        &'a OwnerProjectionRecord,
+        &'a OwnerProjectionSourceReference,
+    )>,
+    gwt_github::SpecOpsError,
+> {
+    if matches!(
+        candidate.state,
+        CandidateState::Pending
+            | CandidateState::NeedsEvidence
+            | CandidateState::Parked
+            | CandidateState::Dismissed
+    ) {
+        return Ok(None);
+    }
+    let Some(fingerprint) = candidate.fingerprint.as_deref() else {
+        return Ok(None);
+    };
+    let current_occurrences = candidate
+        .distinct_occurrences
+        .iter()
+        .map(|occurrence| occurrence.opaque_key.as_str())
+        .collect::<BTreeSet<_>>();
+    if current_occurrences.is_empty()
+        || current_occurrences.len() != candidate.distinct_occurrences.len()
+    {
+        return Ok(None);
+    }
+    let source_reference = super::improvement_store::owner_projection_source_reference_digest(
+        source_scope_nonce,
+        &candidate.id,
+        fingerprint,
+    );
+    let mut matches = projection
+        .owners
+        .iter()
+        .filter(|record| record.fingerprint == fingerprint)
+        .flat_map(|record| {
+            record
+                .source_references
+                .iter()
+                .filter(|source| source.digest == source_reference)
+                .map(move |source| (record, source))
+        })
+        .collect::<Vec<_>>();
+    let projected_occurrences = matches
+        .iter()
+        .flat_map(|(_, source)| source.occurrence_keys.iter().map(String::as_str))
+        .collect::<BTreeSet<_>>();
+    if !current_occurrences
+        .iter()
+        .all(|key| projected_occurrences.contains(key))
+    {
+        return Ok(None);
+    }
+    matches.sort_by(|(left_record, left_source), (right_record, right_source)| {
+        projection_binding_order(left_record, left_source, right_record, right_source)
+    });
+    Ok(matches.pop())
+}
+
+fn projection_binding_order(
+    left_record: &OwnerProjectionRecord,
+    left_source: &OwnerProjectionSourceReference,
+    right_record: &OwnerProjectionRecord,
+    right_source: &OwnerProjectionSourceReference,
+) -> std::cmp::Ordering {
+    let left_verified =
+        chrono::DateTime::parse_from_rfc3339(&left_record.owner.readback_verified_at)
+            .expect("validated projection timestamp");
+    let right_verified =
+        chrono::DateTime::parse_from_rfc3339(&right_record.owner.readback_verified_at)
+            .expect("validated projection timestamp");
+    let left_seen = chrono::DateTime::parse_from_rfc3339(&left_source.last_seen)
+        .expect("validated projection timestamp");
+    let right_seen = chrono::DateTime::parse_from_rfc3339(&right_source.last_seen)
+        .expect("validated projection timestamp");
+    left_verified
+        .cmp(&right_verified)
+        .then_with(|| left_seen.cmp(&right_seen))
+        .then_with(|| left_record.owner.number.cmp(&right_record.owner.number))
+        .then_with(|| left_record.owner.kind.cmp(&right_record.owner.kind))
+        .then_with(|| left_record.fingerprint.cmp(&right_record.fingerprint))
+}
+
+fn apply_projection_binding(
+    candidate: &mut ImprovementCandidate,
+    (record, source): (&OwnerProjectionRecord, &OwnerProjectionSourceReference),
+) -> Result<bool, gwt_github::SpecOpsError> {
+    if candidate.fingerprint.as_deref() != Some(record.fingerprint.as_str()) {
+        return Ok(false);
+    }
+    let target_state = match source.resolution_status {
+        OwnerProjectionResolutionStatus::Linked => CandidateState::Linked,
+        OwnerProjectionResolutionStatus::Created => CandidateState::Created,
+    };
+    let owner = DurableOwnerSnapshot {
+        number: record.owner.number,
+        kind: match record.owner.kind {
+            OwnerProjectionOwnerKind::Issue => OwnerKind::Issue,
+            OwnerProjectionOwnerKind::Spec => OwnerKind::Spec,
+        },
+        title: record.owner.title.clone(),
+        active: record.owner.active,
+        url: record.owner.url.clone(),
+        fingerprint: record.fingerprint.clone(),
+        readback_verified_at: record.owner.readback_verified_at.clone(),
+    };
+    let linked_issue = LinkedIssue {
+        number: record.owner.number,
+        url: record.owner.url.clone(),
+        repository: "akiojin/gwt".to_string(),
+    };
+    let core_current = candidate.state == target_state
+        && candidate.owner.as_ref().is_some_and(|current| {
+            current.number == owner.number
+                && current.kind == owner.kind
+                && current.title == owner.title
+                && current.active == owner.active
+                && current.url == owner.url
+                && current.fingerprint == owner.fingerprint
+                && current.readback_verified_at == owner.readback_verified_at
+        })
+        && candidate.linked_issue.as_ref().is_some_and(|current| {
+            current.number == linked_issue.number
+                && current.url == linked_issue.url
+                && current.repository == linked_issue.repository
+        });
+    let already_current = core_current
+        && candidate.blocked_reason.is_none()
+        && candidate.failure_subcode.is_none()
+        && candidate.retry.is_none()
+        && candidate.attempt.is_none();
+    if already_current {
+        return Ok(false);
+    }
+    if !core_current
+        && matches!(
+            candidate.state,
+            CandidateState::Linked | CandidateState::Created
+        )
+    {
+        if let Some(current_owner) = candidate.owner.as_ref() {
+            let current_verified = chrono::DateTime::parse_from_rfc3339(
+                &current_owner.readback_verified_at,
+            )
+            .map_err(|_| owner_projection_error("candidate owner readback timestamp is invalid"))?;
+            let projected_verified =
+                chrono::DateTime::parse_from_rfc3339(&record.owner.readback_verified_at)
+                    .expect("validated projection timestamp");
+            let current_seen = chrono::DateTime::parse_from_rfc3339(&candidate.updated_at)
+                .map_err(|_| owner_projection_error("candidate updated_at must be RFC3339"))?;
+            let projected_seen = chrono::DateTime::parse_from_rfc3339(&source.last_seen)
+                .expect("validated projection timestamp");
+            match (projected_verified, projected_seen).cmp(&(current_verified, current_seen)) {
+                std::cmp::Ordering::Less => return Ok(false),
+                std::cmp::Ordering::Equal => {
+                    return Err(owner_projection_error(
+                        "conflicting owner binding at the same verified revision",
+                    ))
+                }
+                std::cmp::Ordering::Greater => {}
+            }
+        }
+    }
+    candidate.owner = Some(owner);
+    candidate.linked_issue = Some(linked_issue);
+    candidate.state = target_state;
+    candidate.blocked_reason = None;
+    candidate.failure_subcode = None;
+    candidate.retry = None;
+    candidate.attempt = None;
+    candidate.updated_at = later_rfc3339(&candidate.updated_at, &source.last_seen)?;
+    super::improvement::validate_candidate_lifecycle(candidate)?;
+    Ok(true)
+}
+
+fn later_rfc3339(left: &str, right: &str) -> Result<String, gwt_github::SpecOpsError> {
+    let left_value = chrono::DateTime::parse_from_rfc3339(left)
+        .map_err(|_| owner_projection_error("candidate updated_at must be RFC3339"))?;
+    let right_value = chrono::DateTime::parse_from_rfc3339(right)
+        .map_err(|_| owner_projection_error("projection last_seen must be RFC3339"))?;
+    Ok(if right_value > left_value {
+        right.to_string()
+    } else {
+        left.to_string()
+    })
+}
+
+fn owner_projection_error(message: &str) -> gwt_github::SpecOpsError {
+    gwt_github::SpecOpsError::from(GitHubApiError::Unexpected(message.to_string()))
 }
 
 pub(super) trait SemanticOwnerAdvisor {
@@ -1418,6 +1822,7 @@ fn code_excerpt_re() -> &'static Regex {
 
 #[cfg(test)]
 mod tests {
+    use std::fs;
     use std::process::Command;
     use std::sync::Mutex;
     use std::time::{Duration, Instant};
@@ -1427,8 +1832,9 @@ mod tests {
     use super::*;
     use crate::cli::{
         improvement::{
-            opaque_occurrence_key, DistinctOccurrence, ImprovementCandidate,
-            ImprovementEligibility, OccurrenceOrigin, OccurrenceReplayProof, OwnerMatchBasis,
+            opaque_occurrence_key, CandidateState, DistinctOccurrence, DurableOwnerSnapshot,
+            ImprovementCandidate, ImprovementEligibility, OccurrenceOrigin, OccurrenceReplayProof,
+            OwnerKind, OwnerMatchBasis,
         },
         run_collect, BoardCommand, CliCommand, TestEnv,
     };
@@ -2819,5 +3225,335 @@ mod tests {
         .expect("preflight");
 
         assert!(matches!(outcome, OwnerPreflightOutcome::Zero { .. }));
+    }
+
+    fn store_projection_candidate(
+        repo_root: &Path,
+        nonce: &str,
+        candidate_id: &str,
+        source_event_id: &str,
+    ) -> (String, String) {
+        let mut candidate = candidate(true);
+        candidate.id = candidate_id.to_string();
+        candidate.sanitized_summary = format!(
+            "Private candidate from {}",
+            repo_root.join("customer/private-target").display()
+        );
+        let fingerprint = candidate.fingerprint.clone().expect("fingerprint");
+        let occurrence_key = opaque_occurrence_key(
+            nonce,
+            &fingerprint,
+            "test.coordination-gate.v1",
+            source_event_id,
+        );
+        let occurrence = candidate
+            .distinct_occurrences
+            .first_mut()
+            .expect("typed occurrence");
+        occurrence.opaque_key = occurrence_key.clone();
+        occurrence.replay_proof = Some(OccurrenceReplayProof::RegisteredEvent {
+            source_scope_nonce: nonce.to_string(),
+            source_event_id: source_event_id.to_string(),
+        });
+        candidate.occurrences = 1;
+        crate::cli::improvement_store::update(repo_root, |store| {
+            store.source_scope_nonce = Some(nonce.to_string());
+            store.candidates = vec![candidate];
+            Ok(())
+        })
+        .expect("store source candidate");
+        (fingerprint, occurrence_key)
+    }
+
+    fn verified_projection_owner(number: u64, fingerprint: &str) -> DurableOwnerSnapshot {
+        DurableOwnerSnapshot {
+            number,
+            kind: OwnerKind::Issue,
+            title: format!("Verified public owner {number}"),
+            active: true,
+            url: format!("https://github.com/akiojin/gwt/issues/{number}"),
+            fingerprint: fingerprint.to_string(),
+            readback_verified_at: "2026-07-15T08:00:00Z".to_string(),
+        }
+    }
+
+    fn append_projection_occurrence(
+        repo_root: &Path,
+        nonce: &str,
+        source_event_id: &str,
+    ) -> String {
+        let store = crate::cli::improvement_store::load_and_repair(repo_root)
+            .expect("load source candidate");
+        let candidate = store.candidates.first().expect("source candidate");
+        let fingerprint = candidate.fingerprint.as_deref().expect("fingerprint");
+        let producer_id = candidate.distinct_occurrences[0]
+            .producer_id
+            .as_deref()
+            .expect("registered producer");
+        let occurrence_key =
+            opaque_occurrence_key(nonce, fingerprint, producer_id, source_event_id);
+        crate::cli::improvement_store::update(repo_root, |store| {
+            let candidate = store.candidates.first_mut().expect("source candidate");
+            let mut occurrence = candidate.distinct_occurrences[0].clone();
+            occurrence.opaque_key = occurrence_key.clone();
+            occurrence.captured_at = "2026-07-15T09:00:00Z".to_string();
+            occurrence.replay_proof = Some(OccurrenceReplayProof::RegisteredEvent {
+                source_scope_nonce: nonce.to_string(),
+                source_event_id: source_event_id.to_string(),
+            });
+            candidate.distinct_occurrences.push(occurrence);
+            candidate.occurrences = candidate.distinct_occurrences.len() as u64;
+            candidate.updated_at = "2026-07-15T09:00:00Z".to_string();
+            Ok(())
+        })
+        .expect("append source occurrence");
+        occurrence_key
+    }
+
+    #[test]
+    fn projection_first_commit_aggregates_two_sources_and_dedupes_source_replay() {
+        let home = tempfile::tempdir().expect("isolated home");
+        let _gwt_home = gwt_core::test_support::ScopedGwtHome::set(home.path());
+        let source_a = tempfile::tempdir().expect("source A");
+        let source_b = tempfile::tempdir().expect("source B");
+        let (fingerprint, occurrence_a) = store_projection_candidate(
+            source_a.path(),
+            &"1".repeat(64),
+            "impr-source-a",
+            "same-producer-event",
+        );
+        let (_, occurrence_b) = store_projection_candidate(
+            source_b.path(),
+            &"2".repeat(64),
+            "impr-source-b",
+            "same-producer-event",
+        );
+        assert_ne!(occurrence_a, occurrence_b);
+        let owner = verified_projection_owner(3164, &fingerprint);
+        let binding_a = ReadbackVerifiedOwnerBinding {
+            candidate_id: "impr-source-a".to_string(),
+            owner: owner.clone(),
+            occurrence_key: occurrence_a,
+            resolution_status: CandidateState::Linked,
+            last_seen: "2026-07-15T08:01:00Z".to_string(),
+        };
+        let binding_b = ReadbackVerifiedOwnerBinding {
+            candidate_id: "impr-source-b".to_string(),
+            owner,
+            occurrence_key: occurrence_b,
+            resolution_status: CandidateState::Linked,
+            last_seen: "2026-07-15T08:02:00Z".to_string(),
+        };
+
+        commit_readback_verified_binding(source_a.path(), &binding_a).expect("source A commit");
+        commit_readback_verified_binding(source_a.path(), &binding_a).expect("source A replay");
+        commit_readback_verified_binding(source_b.path(), &binding_b).expect("source B commit");
+
+        let projection =
+            crate::cli::improvement_contract::read_owner_projection().expect("revisioned reader");
+        assert_eq!(projection.owners.len(), 1);
+        assert_eq!(projection.owners[0].aggregate_count, 2);
+        assert_eq!(projection.owners[0].occurrences.len(), 2);
+
+        let raw_path = crate::cli::improvement_store::owner_projection_path();
+        let raw = fs::read_to_string(raw_path).expect("projection JSON");
+        for forbidden in [
+            "1".repeat(64),
+            "2".repeat(64),
+            source_a.path().display().to_string(),
+            source_b.path().display().to_string(),
+            "Private candidate".to_string(),
+            "customer/private-target".to_string(),
+        ] {
+            assert!(
+                !raw.contains(&forbidden),
+                "projection leaked {forbidden}: {raw}"
+            );
+        }
+
+        for source in [source_a.path(), source_b.path()] {
+            let store = crate::cli::improvement_store::load_and_repair(source)
+                .expect("source store remains readable");
+            assert!(store.candidates[0].owner.is_none());
+            assert_eq!(store.candidates[0].state, CandidateState::OwnerResolving);
+        }
+    }
+
+    #[test]
+    fn projection_commit_rejects_conflicting_opaque_key_and_failure_before_persist() {
+        let home = tempfile::tempdir().expect("isolated home");
+        let _gwt_home = gwt_core::test_support::ScopedGwtHome::set(home.path());
+        let source_a = tempfile::tempdir().expect("source A");
+        let source_b = tempfile::tempdir().expect("source B");
+        let nonce = "3".repeat(64);
+        let (fingerprint, occurrence_key) = store_projection_candidate(
+            source_a.path(),
+            &nonce,
+            "impr-source-a",
+            "conflicting-event",
+        );
+        let (_, conflicting_key) = store_projection_candidate(
+            source_b.path(),
+            &nonce,
+            "impr-source-b",
+            "conflicting-event",
+        );
+        assert_eq!(occurrence_key, conflicting_key);
+        let binding_a = ReadbackVerifiedOwnerBinding {
+            candidate_id: "impr-source-a".to_string(),
+            owner: verified_projection_owner(41, &fingerprint),
+            occurrence_key,
+            resolution_status: CandidateState::Linked,
+            last_seen: "2026-07-15T08:01:00Z".to_string(),
+        };
+        let binding_b = ReadbackVerifiedOwnerBinding {
+            candidate_id: "impr-source-b".to_string(),
+            owner: verified_projection_owner(42, &fingerprint),
+            occurrence_key: conflicting_key,
+            resolution_status: CandidateState::Linked,
+            last_seen: "2026-07-15T08:02:00Z".to_string(),
+        };
+
+        let interrupted = commit_readback_verified_binding_for_test(
+            source_a.path(),
+            &binding_a,
+            ProjectionCommitFailurePoint::BeforePersist,
+        );
+        assert!(interrupted.is_err());
+        assert!(
+            !crate::cli::improvement_store::owner_projection_path().exists(),
+            "failure before projection commit must not create a false owner"
+        );
+
+        commit_readback_verified_binding(source_a.path(), &binding_a).expect("first commit");
+        let error = commit_readback_verified_binding(source_b.path(), &binding_b)
+            .expect_err("conflicting opaque occurrence must fail closed");
+        assert!(error
+            .to_string()
+            .contains("conflicting owner projection occurrence"));
+        let projection = crate::cli::improvement_contract::read_owner_projection()
+            .expect("projection after conflict");
+        assert_eq!(projection.owners.len(), 1);
+        assert_eq!(projection.owners[0].aggregate_count, 1);
+    }
+
+    #[test]
+    fn projection_commit_rejects_private_source_data_in_owner_title() {
+        let home = tempfile::tempdir().expect("isolated home");
+        let _gwt_home = gwt_core::test_support::ScopedGwtHome::set(home.path());
+        let source = tempfile::tempdir().expect("private source");
+        let (fingerprint, occurrence_key) = store_projection_candidate(
+            source.path(),
+            &"6".repeat(64),
+            "impr-private-owner-title",
+            "private-title-event",
+        );
+        let mut owner = verified_projection_owner(77, &fingerprint);
+        owner.title = format!("Failure in {}", source.path().display());
+        let binding = ReadbackVerifiedOwnerBinding {
+            candidate_id: "impr-private-owner-title".to_string(),
+            owner,
+            occurrence_key,
+            resolution_status: CandidateState::Linked,
+            last_seen: "2026-07-15T08:00:00Z".to_string(),
+        };
+
+        let error = commit_readback_verified_binding(source.path(), &binding)
+            .expect_err("private owner title must not enter the projection");
+        assert!(error.to_string().contains("privacy"));
+        assert!(!crate::cli::improvement_store::owner_projection_path().exists());
+    }
+
+    #[test]
+    fn projection_reconciliation_moves_an_occurrence_to_the_lowest_owner_without_downgrade() {
+        let home = tempfile::tempdir().expect("isolated home");
+        let _gwt_home = gwt_core::test_support::ScopedGwtHome::set(home.path());
+        let source = tempfile::tempdir().expect("source");
+        let (fingerprint, occurrence_key) = store_projection_candidate(
+            source.path(),
+            &"4".repeat(64),
+            "impr-reconciliation",
+            "reconciliation-event",
+        );
+        let losing = ReadbackVerifiedOwnerBinding {
+            candidate_id: "impr-reconciliation".to_string(),
+            owner: verified_projection_owner(42, &fingerprint),
+            occurrence_key: occurrence_key.clone(),
+            resolution_status: CandidateState::Created,
+            last_seen: "2026-07-15T08:00:00Z".to_string(),
+        };
+        let canonical = ReadbackVerifiedOwnerBinding {
+            candidate_id: "impr-reconciliation".to_string(),
+            owner: verified_projection_owner(41, &fingerprint),
+            occurrence_key,
+            resolution_status: CandidateState::Linked,
+            last_seen: "2026-07-15T08:01:00Z".to_string(),
+        };
+
+        commit_readback_verified_binding(source.path(), &losing).expect("losing owner commit");
+        commit_readback_verified_binding(source.path(), &canonical)
+            .expect("lowest owner reconciliation commit");
+        repair_source_success_snapshots(source.path()).expect("repair canonical owner");
+
+        let projection = crate::cli::improvement_contract::read_owner_projection()
+            .expect("projection after reconciliation");
+        assert_eq!(projection.owners.len(), 1);
+        assert_eq!(projection.owners[0].owner.number, 41);
+        let source_store =
+            crate::cli::improvement_store::load_and_repair(source.path()).expect("repaired source");
+        assert_eq!(source_store.candidates[0].state, CandidateState::Linked);
+        assert_eq!(
+            source_store.candidates[0].owner.as_ref().unwrap().number,
+            41
+        );
+
+        let stale = commit_readback_verified_binding(source.path(), &losing)
+            .expect_err("higher losing owner must not reclaim the occurrence");
+        assert!(stale.to_string().contains("canonical owner"));
+    }
+
+    #[test]
+    fn projection_repair_uses_union_coverage_and_preserves_created_disposition() {
+        let home = tempfile::tempdir().expect("isolated home");
+        let _gwt_home = gwt_core::test_support::ScopedGwtHome::set(home.path());
+        let source = tempfile::tempdir().expect("source");
+        let nonce = "5".repeat(64);
+        let (fingerprint, first_occurrence) =
+            store_projection_candidate(source.path(), &nonce, "impr-regression", "original-event");
+        let recurrent_occurrence =
+            append_projection_occurrence(source.path(), &nonce, "regression-event");
+        let historical = ReadbackVerifiedOwnerBinding {
+            candidate_id: "impr-regression".to_string(),
+            owner: verified_projection_owner(10, &fingerprint),
+            occurrence_key: first_occurrence,
+            resolution_status: CandidateState::Linked,
+            last_seen: "2026-07-15T08:00:00Z".to_string(),
+        };
+        let regression = ReadbackVerifiedOwnerBinding {
+            candidate_id: "impr-regression".to_string(),
+            owner: verified_projection_owner(20, &fingerprint),
+            occurrence_key: recurrent_occurrence,
+            resolution_status: CandidateState::Created,
+            last_seen: "2026-07-15T09:01:00Z".to_string(),
+        };
+
+        commit_readback_verified_binding(source.path(), &historical)
+            .expect("historical owner commit");
+        commit_readback_verified_binding(source.path(), &regression)
+            .expect("regression owner commit");
+        let replay_as_linked = ReadbackVerifiedOwnerBinding {
+            resolution_status: CandidateState::Linked,
+            last_seen: "2026-07-15T09:02:00Z".to_string(),
+            ..regression.clone()
+        };
+        commit_readback_verified_binding(source.path(), &replay_as_linked)
+            .expect("later replay must not downgrade created disposition");
+        assert!(repair_source_success_snapshots(source.path()).expect("repair regression owner"));
+
+        let source_store =
+            crate::cli::improvement_store::load_and_repair(source.path()).expect("repaired source");
+        let candidate = &source_store.candidates[0];
+        assert_eq!(candidate.state, CandidateState::Created);
+        assert_eq!(candidate.owner.as_ref().unwrap().number, 20);
     }
 }
