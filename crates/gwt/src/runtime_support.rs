@@ -309,7 +309,7 @@ pub fn synthetic_branch_entry(branch_name: &str) -> BranchListEntry {
 pub fn knowledge_kind_for_preset(preset: WindowPreset) -> Option<KnowledgeKind> {
     match preset {
         WindowPreset::Issue => Some(KnowledgeKind::Issue),
-        WindowPreset::Spec => Some(KnowledgeKind::Spec),
+        WindowPreset::Spec => Some(KnowledgeKind::Issue),
         WindowPreset::Pr => Some(KnowledgeKind::Pr),
         _ => None,
     }
@@ -833,7 +833,11 @@ pub fn parse_github_remote_url(url: &str) -> Option<(String, String)> {
 mod tests {
     use std::path::PathBuf;
 
-    use super::{front_door_route, intake_hook_config_is_disposable, FrontDoorRoute};
+    use super::{
+        front_door_route, intake_hook_config_is_disposable, knowledge_kind_for_preset,
+        FrontDoorRoute,
+    };
+    use gwt::WindowPreset;
 
     fn argv(parts: &[&str]) -> Vec<String> {
         parts.iter().map(std::string::ToString::to_string).collect()
@@ -922,6 +926,14 @@ mod tests {
                 "non-GUI helper tooling must stay on the CLI path: {args:?}"
             );
         }
+    }
+
+    #[test]
+    fn legacy_spec_preset_uses_unified_issue_knowledge_kind() {
+        assert_eq!(
+            knowledge_kind_for_preset(WindowPreset::Spec),
+            Some(gwt::KnowledgeKind::Issue)
+        );
     }
 
     // SPEC #2920 Q9 (supersede of SPEC-1942 US-14): `gwt serve` is removed in

@@ -237,6 +237,13 @@ fn init_repo(repo_path: &Path) {
     }
 }
 
+fn init_repo_with_initial_commit(repo_path: &Path) {
+    init_repo(repo_path);
+    run_git(repo_path, &["config", "user.name", "Test User"]);
+    run_git(repo_path, &["config", "user.email", "test@example.com"]);
+    run_git(repo_path, &["commit", "--allow-empty", "-m", "init"]);
+}
+
 fn init_repo_without_origin(repo_path: &Path) {
     let output = gwt_core::process::hidden_command("git")
         .args(["init", "-q"])
@@ -3114,7 +3121,7 @@ fn app_runtime_open_agent_kanban_launch_wizard_records_launch_target() {
     let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
     let repo = temp.path().join("repo");
     fs::create_dir_all(&repo).expect("create repo");
-    init_repo(&repo);
+    init_repo_with_initial_commit(&repo);
     let tab = sample_project_tab(
         "tab-1",
         "Repo",
@@ -6665,6 +6672,19 @@ fn app_runtime_active_work_projection_separates_sessions_on_same_branch() {
         row.session_agent_total, 2,
         "hidden same-agent candidates stay counted for the session summary"
     );
+    assert_eq!(
+        row.works.len(),
+        2,
+        "both launch-scoped Works remain addressable"
+    );
+    assert!(row
+        .works
+        .iter()
+        .any(|work| work.id == "work-session-session-a"));
+    assert!(row
+        .works
+        .iter()
+        .any(|work| work.id == "work-session-session-b"));
     assert!(row.workspace_key.is_some());
 }
 
@@ -7314,12 +7334,11 @@ fn app_runtime_close_work_blocks_when_owning_agent_is_live() {
     );
 }
 
-/// SPEC-2359 Phase W-12 Slice 4 (FR-352): the worktree-only cleanup removes
-/// the actual worktree directory but retains the branch (branch / PR are
-/// preserved). Uses a real temp git repo + worktree to verify the
-/// `remove_force` side effect.
+/// SPEC-2359 W-21 (FR-463): Work close records lifecycle history only. The
+/// actual worktree and branch remain until the independent cleanup transport
+/// removes them.
 #[test]
-fn app_runtime_close_work_removes_worktree_only_and_retains_branch() {
+fn app_runtime_close_work_retains_worktree_and_branch() {
     let _env_lock = env_test_lock()
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -7393,18 +7412,26 @@ fn app_runtime_close_work_removes_worktree_only_and_retains_branch() {
     let tab = sample_project_tab("tab-1", "Repo", repo.clone(), ProjectKind::Git, &[]);
     let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
 
-    // No live agent session → cleanup path. Close (Done).
+    // No live agent session: close the Work without cleaning its materialization.
     let events = runtime.close_work("work-session-session-cleanup", "done");
     assert!(!events.is_empty());
 
     assert!(
-        !worktree_path.exists(),
-        "worktree-only cleanup must remove the worktree directory"
+        worktree_path.exists(),
+        "Work close must retain the worktree directory"
     );
     assert!(
         crate::runtime_support::local_branch_exists(&repo, "work/cleanup").unwrap_or(false),
         "worktree-only cleanup must retain the branch (branch / PR are preserved)"
     );
+    let works = gwt_core::workspace_projection::load_or_synthesize_workspace_work_items(&repo)
+        .expect("load Work history");
+    let closed = works
+        .work_items
+        .iter()
+        .find(|item| item.id == "work-session-session-cleanup")
+        .expect("closed Work remains in history");
+    assert!(closed.is_terminal());
 }
 
 /// SPEC-2359 Phase W-12 Slice 5a (FR-350): resuming a paused Work (a live
@@ -7421,6 +7448,8 @@ fn app_runtime_active_work_projection_resumed_paused_work_is_single_active_row()
     let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
     let repo = temp.path().join("repo");
     fs::create_dir_all(&repo).expect("create repo");
+    let worktree = repo.join("work/resume");
+    fs::create_dir_all(&worktree).expect("create worktree path");
     let mut projection =
         gwt_core::workspace_projection::WorkspaceProjection::default_for_project(&repo);
     projection.agents.push({
@@ -7433,17 +7462,17 @@ fn app_runtime_active_work_projection_resumed_paused_work_is_single_active_row()
         .expect("save projection");
     let tab = sample_project_tab("tab-1", "Repo", repo.clone(), ProjectKind::Git, &[]);
     let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
-    let build_session = |runtime: &mut AppRuntime| {
+    let build_session = |runtime: &mut AppRuntime, worktree_path: PathBuf| {
         let mut session = sample_active_agent_session("tab-1", "tab-1::agent-resume");
         session.session_id = "session-resume".to_string();
         session.branch_name = "work/resume".to_string();
-        session.worktree_path = repo.join("work/resume");
+        session.worktree_path = worktree_path;
         session.window_id = "tab-1::agent-resume".to_string();
         runtime
             .active_agent_sessions
             .insert("tab-1::agent-resume".to_string(), session);
     };
-    build_session(&mut runtime);
+    build_session(&mut runtime, worktree.clone());
 
     // Stop → paused marker persisted to work history.
     runtime.mark_agent_session_stopped("tab-1::agent-resume");
@@ -7454,7 +7483,10 @@ fn app_runtime_active_work_projection_resumed_paused_work_is_single_active_row()
     assert_eq!(paused_view.active_works[0].lifecycle_state, "paused");
 
     // Resume: the same session returns to active_agent_sessions.
-    build_session(&mut runtime);
+    let alternate_worktree_path = worktree.join("..").join("resume");
+    assert_ne!(worktree, alternate_worktree_path);
+    assert!(same_worktree_path(&worktree, &alternate_worktree_path));
+    build_session(&mut runtime, alternate_worktree_path);
     let resumed_view = runtime
         .active_work_projection_for_tab("tab-1", &runtime.tabs[0])
         .expect("resumed projection view");
@@ -7468,6 +7500,11 @@ fn app_runtime_active_work_projection_resumed_paused_work_is_single_active_row()
         "work-session-session-resume"
     );
     assert_eq!(resumed_view.active_works[0].lifecycle_state, "active");
+    assert_eq!(
+        resumed_view.active_works[0].works.len(),
+        1,
+        "one resumed Session must stay one child Work across equivalent worktree paths"
+    );
 }
 
 /// SPEC-2359 Phase W-12 Slice 5a (FR-350): a live Work and an unrelated
@@ -7572,6 +7609,23 @@ fn history_work_view(
     }
 }
 
+fn git_details_for_active_work_test(
+    branch: &str,
+    worktree: &str,
+) -> gwt_core::workspace_projection::GitDetails {
+    gwt_core::workspace_projection::GitDetails {
+        branch: Some(branch.to_string()),
+        worktree_path: Some(PathBuf::from(worktree)),
+        base_branch: Some("origin/develop".to_string()),
+        pr_number: None,
+        pr_state: None,
+        pr_url: None,
+        pr_created_at: None,
+        created_by_start_work: true,
+        created_at: chrono::Utc::now(),
+    }
+}
+
 /// Issue #3213 regression (PR #3205 orphaned): a stray agent ref that shares a
 /// session id with ANOTHER branch's Work must not swallow that Work's row.
 /// Reproduces the affected project's works.json: the issue-3184 item carried a
@@ -7632,6 +7686,569 @@ fn app_runtime_paused_work_row_survives_stray_shared_session_on_other_branch() {
         .expect("work/issue-3197 row must not be swallowed by the stray session ref");
     assert_eq!(issue_3197.branch.as_deref(), Some("work/issue-3197"));
     assert_eq!(issue_3197.lifecycle_state, "paused");
+}
+
+/// SPEC-2359 FR-471: a shared Session id cannot override a conflicting
+/// worktree identity even when the branch identity agrees.
+#[test]
+fn app_runtime_shared_session_with_conflicting_worktree_keeps_both_works() {
+    let temp = tempdir().expect("tempdir");
+    let repo = temp.path().join("repo");
+    fs::create_dir_all(&repo).expect("create repo");
+    let mut projection =
+        gwt_core::workspace_projection::WorkspaceProjection::default_for_project(&repo);
+    projection.git_details = Some(git_details_for_active_work_test(
+        "work/shared",
+        "/home/user/gwt/work/paused",
+    ));
+    projection.agents.push({
+        let mut agent = workspace_agent_summary_for_test("shared-session", Some("work-live"));
+        agent.branch = Some("work/shared".to_string());
+        agent.worktree_path = Some(PathBuf::from("/home/user/gwt/work/live"));
+        agent
+    });
+    let mut paused = history_work_view(
+        "legacy-work-paused",
+        "work/shared",
+        "/home/user/gwt/work/paused",
+        vec![history_agent_ref_view(
+            "shared-session",
+            Some("Codex"),
+            "2026-07-12T01:00:00Z",
+        )],
+    );
+    paused.title = "Paused worktree-conflict history".to_string();
+    paused.summary = Some("Paused worktree-conflict summary".to_string());
+    paused.owner = Some("Issue #471".to_string());
+    paused.execution_containers[0].pr_number = Some(471);
+    paused.execution_containers[0].pr_url = Some("https://example.test/pr/471".to_string());
+    paused.board_refs = vec!["paused-board-ref".to_string()];
+
+    let view = super::active_work_projection_from_saved_with_journal(
+        projection,
+        Vec::new(),
+        vec![paused],
+        None,
+    );
+
+    assert_eq!(
+        view.active_works.len(),
+        2,
+        "a worktree conflict must prevent shared-Session deduplication"
+    );
+    let live = view
+        .active_works
+        .iter()
+        .find(|work| work.id == "work-session-shared-session")
+        .expect("live Work");
+    assert_eq!(live.title, "Board audience follow-up");
+    assert_eq!(live.summary, None);
+    assert_eq!(live.owner, None);
+    assert_eq!(live.pr_number, None);
+    assert!(live.board_refs.is_empty());
+}
+
+/// SPEC-2359 FR-471: a shared Session id cannot override a conflicting
+/// branch identity even when the worktree identity agrees.
+#[test]
+fn app_runtime_shared_session_with_conflicting_branch_keeps_both_works() {
+    let temp = tempdir().expect("tempdir");
+    let repo = temp.path().join("repo");
+    fs::create_dir_all(&repo).expect("create repo");
+    let shared_worktree = "/home/user/gwt/work/shared";
+    let mut projection =
+        gwt_core::workspace_projection::WorkspaceProjection::default_for_project(&repo);
+    projection.git_details = Some(git_details_for_active_work_test(
+        "work/paused",
+        shared_worktree,
+    ));
+    projection.agents.push({
+        let mut agent = workspace_agent_summary_for_test("shared-session", Some("work-live"));
+        agent.branch = Some("work/live".to_string());
+        agent.worktree_path = Some(PathBuf::from(shared_worktree));
+        agent
+    });
+    let mut paused = history_work_view(
+        "legacy-work-paused",
+        "work/paused",
+        shared_worktree,
+        vec![history_agent_ref_view(
+            "shared-session",
+            Some("Codex"),
+            "2026-07-12T01:00:00Z",
+        )],
+    );
+    paused.title = "Paused branch-conflict history".to_string();
+    paused.summary = Some("Paused branch-conflict summary".to_string());
+    paused.owner = Some("Issue #472".to_string());
+    paused.execution_containers[0].pr_number = Some(472);
+    paused.execution_containers[0].pr_url = Some("https://example.test/pr/472".to_string());
+    paused.board_refs = vec!["paused-board-ref".to_string()];
+
+    let view = super::active_work_projection_from_saved_with_journal(
+        projection,
+        Vec::new(),
+        vec![paused],
+        None,
+    );
+
+    assert_eq!(
+        view.active_works.len(),
+        2,
+        "a branch conflict must prevent shared-Session deduplication"
+    );
+    let live = view
+        .active_works
+        .iter()
+        .find(|work| work.id == "work-session-shared-session")
+        .expect("live Work");
+    assert_eq!(live.title, "Board audience follow-up");
+    assert_eq!(live.summary, None);
+    assert_eq!(live.owner, None);
+    assert_eq!(live.pr_number, None);
+    assert!(live.board_refs.is_empty());
+}
+
+/// SPEC-2359 FR-471: projection fallback must participate in history matching
+/// when the live Agent omits branch identity, so foreign history metadata does
+/// not leak through a matching worktree.
+#[test]
+fn app_runtime_projection_branch_fallback_blocks_foreign_history_metadata() {
+    let temp = tempdir().expect("tempdir");
+    let repo = temp.path().join("repo");
+    fs::create_dir_all(&repo).expect("create repo");
+    let shared_worktree = "/home/user/gwt/work/shared";
+    let mut projection =
+        gwt_core::workspace_projection::WorkspaceProjection::default_for_project(&repo);
+    projection.title = "Live projection title".to_string();
+    projection.git_details = Some(git_details_for_active_work_test(
+        "work/live",
+        shared_worktree,
+    ));
+    projection.agents.push({
+        let mut agent = workspace_agent_summary_for_test("shared-session", Some("work-live"));
+        agent.branch = None;
+        agent.worktree_path = Some(PathBuf::from(shared_worktree));
+        agent
+    });
+    let mut foreign = history_work_view(
+        "legacy-work-foreign",
+        "work/foreign",
+        shared_worktree,
+        vec![history_agent_ref_view(
+            "shared-session",
+            Some("Codex"),
+            "2026-07-12T01:00:00Z",
+        )],
+    );
+    foreign.title = "Foreign history title".to_string();
+    foreign.summary = Some("Foreign history summary".to_string());
+
+    let view = super::active_work_projection_from_saved_with_journal(
+        projection,
+        Vec::new(),
+        vec![foreign],
+        None,
+    );
+
+    assert_eq!(view.active_works.len(), 2);
+    let live = view
+        .active_works
+        .iter()
+        .find(|work| work.id == "work-session-shared-session")
+        .expect("live Work");
+    assert_eq!(live.branch.as_deref(), Some("work/live"));
+    assert_eq!(live.title, "Live projection title");
+    assert_eq!(live.summary, None);
+}
+
+/// SPEC-2359 FR-471: projection fallback must participate in history matching
+/// when the live Agent omits worktree identity, so foreign history metadata
+/// does not leak through a matching branch.
+#[test]
+fn app_runtime_projection_worktree_fallback_blocks_foreign_history_metadata() {
+    let temp = tempdir().expect("tempdir");
+    let repo = temp.path().join("repo");
+    fs::create_dir_all(&repo).expect("create repo");
+    let live_worktree = "/home/user/gwt/work/live";
+    let mut projection =
+        gwt_core::workspace_projection::WorkspaceProjection::default_for_project(&repo);
+    projection.title = "Live projection title".to_string();
+    projection.git_details = Some(git_details_for_active_work_test(
+        "work/shared",
+        live_worktree,
+    ));
+    projection.agents.push({
+        let mut agent = workspace_agent_summary_for_test("shared-session", Some("work-live"));
+        agent.branch = Some("work/shared".to_string());
+        agent.worktree_path = None;
+        agent
+    });
+    let mut foreign = history_work_view(
+        "legacy-work-foreign",
+        "work/shared",
+        "/home/user/gwt/work/foreign",
+        vec![history_agent_ref_view(
+            "shared-session",
+            Some("Codex"),
+            "2026-07-12T01:00:00Z",
+        )],
+    );
+    foreign.title = "Foreign history title".to_string();
+    foreign.summary = Some("Foreign history summary".to_string());
+
+    let view = super::active_work_projection_from_saved_with_journal(
+        projection,
+        Vec::new(),
+        vec![foreign],
+        None,
+    );
+
+    assert_eq!(view.active_works.len(), 2);
+    let live = view
+        .active_works
+        .iter()
+        .find(|work| work.id == "work-session-shared-session")
+        .expect("live Work");
+    assert_eq!(live.worktree_path.as_deref(), Some(live_worktree));
+    assert_eq!(live.title, "Live projection title");
+    assert_eq!(live.summary, None);
+}
+
+/// SPEC-2359 FR-470/FR-471: branch/worktree can group a parent Workspace but
+/// cannot assign a legacy history record to a live Work when neither exact
+/// Work id nor a non-empty shared Session identifies that launch.
+#[test]
+fn app_runtime_sessionless_live_work_does_not_claim_legacy_history_by_git_identity() {
+    let temp = tempdir().expect("tempdir");
+    let repo = temp.path().join("repo");
+    fs::create_dir_all(&repo).expect("create repo");
+    let shared_worktree = "/home/user/gwt/work/shared";
+    let mut projection =
+        gwt_core::workspace_projection::WorkspaceProjection::default_for_project(&repo);
+    projection.agents.push({
+        let mut agent = workspace_agent_summary_for_test("", Some("work-live"));
+        agent.branch = Some("work/shared".to_string());
+        agent.worktree_path = Some(PathBuf::from(shared_worktree));
+        agent
+    });
+    let mut legacy = history_work_view(
+        "legacy-work-paused",
+        "work/shared",
+        shared_worktree,
+        Vec::new(),
+    );
+    legacy.title = "Legacy history metadata".to_string();
+    legacy.summary = Some("Legacy history summary".to_string());
+
+    let view = super::active_work_projection_from_saved_with_journal(
+        projection,
+        Vec::new(),
+        vec![legacy],
+        None,
+    );
+
+    assert_eq!(
+        view.active_works.len(),
+        2,
+        "git identity alone must not collapse or assign launch-scoped Work metadata"
+    );
+    let live = view
+        .active_works
+        .iter()
+        .find(|work| work.id != "legacy-work-paused")
+        .expect("sessionless live Work");
+    assert_eq!(live.title, "Board audience follow-up");
+    assert_eq!(live.summary, None);
+}
+
+/// SPEC-2359 US-85 / SC-313: Work identity is launch-scoped even when two
+/// stopped launches share one branch/worktree Workspace. They must survive
+/// the history projection as separate child Works so each keeps its Session.
+#[test]
+fn app_runtime_paused_works_on_same_branch_remain_distinct_children() {
+    let temp = tempdir().expect("tempdir");
+    let repo = temp.path().join("repo");
+    fs::create_dir_all(&repo).expect("create repo");
+    let projection =
+        gwt_core::workspace_projection::WorkspaceProjection::default_for_project(&repo);
+
+    let mut older = history_work_view(
+        "work-session-older",
+        "work/shared",
+        "/home/user/gwt/work/shared",
+        vec![history_agent_ref_view(
+            "older-session",
+            Some("Codex"),
+            "2026-07-12T01:00:00Z",
+        )],
+    );
+    older.title = "Older Work".to_string();
+    older.updated_at = "2026-07-12T01:00:00Z".to_string();
+    older.agents[0].sessions = vec![gwt::WorkspaceHistorySessionView {
+        agent_session_id: "older-conversation".to_string(),
+        started_at: "2026-07-12T01:00:00Z".to_string(),
+        is_active: true,
+        resumable: true,
+    }];
+
+    let mut newer = history_work_view(
+        "work-session-newer",
+        "work/shared",
+        "/home/user/gwt/work/shared",
+        vec![history_agent_ref_view(
+            "newer-session",
+            Some("Codex"),
+            "2026-07-13T01:00:00Z",
+        )],
+    );
+    newer.title = "Newer Work".to_string();
+    newer.updated_at = "2026-07-13T01:00:00Z".to_string();
+    newer.agents[0].sessions = vec![gwt::WorkspaceHistorySessionView {
+        agent_session_id: "newer-conversation".to_string(),
+        started_at: "2026-07-13T01:00:00Z".to_string(),
+        is_active: true,
+        resumable: true,
+    }];
+
+    let mut view = super::active_work_projection_from_saved_with_journal(
+        projection,
+        Vec::new(),
+        vec![older, newer],
+        None,
+    );
+
+    assert_eq!(
+        view.active_works.len(),
+        2,
+        "branch equality groups a Workspace later; it must not erase a distinct Work"
+    );
+
+    super::assign_and_merge_workspace_groups(&mut view.active_works, &repo);
+    super::attach_registry_sessions_to_active_works(
+        &mut view.active_works,
+        &[],
+        None,
+        &std::collections::HashMap::new(),
+        &repo,
+    );
+
+    assert_eq!(view.active_works.len(), 1, "one branch is one Workspace");
+    let workspace = &view.active_works[0];
+    assert_eq!(workspace.works.len(), 2, "both launch-scoped Works remain");
+    for (work_id, session_id, conversation_id) in [
+        ("work-session-older", "older-session", "older-conversation"),
+        ("work-session-newer", "newer-session", "newer-conversation"),
+    ] {
+        let child = workspace
+            .works
+            .iter()
+            .find(|child| child.id == work_id)
+            .expect("child Work");
+        assert_eq!(child.agents.len(), 1);
+        assert_eq!(child.agents[0].session_id, session_id);
+        assert_eq!(child.agents[0].sessions.len(), 1);
+        assert_eq!(
+            child.agents[0].sessions[0].agent_session_id,
+            conversation_id
+        );
+    }
+}
+
+/// SPEC-2359 FR-470/FR-471: branch/worktree identify the parent Workspace,
+/// not one launch-scoped Work. A live Session must not hide an older Paused
+/// Work on the same execution container when their Session identities differ.
+#[test]
+fn app_runtime_live_work_keeps_distinct_paused_work_on_same_branch() {
+    let temp = tempdir().expect("tempdir");
+    let repo = temp.path().join("repo");
+    fs::create_dir_all(&repo).expect("create repo");
+    let shared_worktree = "/home/user/gwt/work/shared";
+    let mut projection =
+        gwt_core::workspace_projection::WorkspaceProjection::default_for_project(&repo);
+    projection.agents.push({
+        let mut agent = workspace_agent_summary_for_test("live-session", Some("work-live"));
+        agent.branch = Some("work/shared".to_string());
+        agent.worktree_path = Some(std::path::PathBuf::from(shared_worktree));
+        agent
+    });
+
+    let mut paused = history_work_view(
+        "work-session-paused-session",
+        "work/shared",
+        shared_worktree,
+        vec![history_agent_ref_view(
+            "paused-session",
+            Some("Codex"),
+            "2026-07-12T01:00:00Z",
+        )],
+    );
+    paused.title = "Paused Work".to_string();
+    paused.summary = Some("Paused Work summary".to_string());
+    paused.owner = Some("Issue #470".to_string());
+    paused.execution_containers[0].pr_number = Some(470);
+    paused.execution_containers[0].pr_url = Some("https://example.test/pr/470".to_string());
+    paused.board_refs = vec!["paused-work-board-ref".to_string()];
+    paused.agents[0].sessions = vec![gwt::WorkspaceHistorySessionView {
+        agent_session_id: "paused-conversation".to_string(),
+        started_at: "2026-07-12T01:00:00Z".to_string(),
+        is_active: true,
+        resumable: true,
+    }];
+
+    let mut view = super::active_work_projection_from_saved_with_journal(
+        projection,
+        Vec::new(),
+        vec![paused],
+        None,
+    );
+
+    assert_eq!(
+        view.active_works.len(),
+        2,
+        "same Workspace identity must not collapse different live/paused Sessions"
+    );
+    let live = view
+        .active_works
+        .iter()
+        .find(|work| work.id == "work-session-live-session")
+        .expect("live child Work");
+    assert_eq!(live.title, "Board audience follow-up");
+    assert_eq!(live.summary, None);
+    assert_eq!(live.owner, None);
+    assert_eq!(live.pr_number, None);
+    assert!(live.board_refs.is_empty());
+
+    super::assign_and_merge_workspace_groups(&mut view.active_works, &repo);
+    super::attach_registry_sessions_to_active_works(
+        &mut view.active_works,
+        &[],
+        None,
+        &std::collections::HashMap::new(),
+        &repo,
+    );
+
+    assert_eq!(view.active_works.len(), 1, "one branch is one Workspace");
+    let workspace = &view.active_works[0];
+    assert_eq!(workspace.works.len(), 2, "both Session-owned Works remain");
+    let paused = workspace
+        .works
+        .iter()
+        .find(|work| work.id == "work-session-paused-session")
+        .expect("Paused child Work");
+    assert_eq!(paused.lifecycle_state, "paused");
+    assert_eq!(paused.agents.len(), 1);
+    assert_eq!(paused.agents[0].session_id, "paused-session");
+}
+
+/// SPEC-2359 FR-471: a legacy history id and a live Session-derived Work id
+/// still represent one resumed Work when their worktree paths are equivalent
+/// filesystem paths with different lexical spellings.
+#[test]
+fn app_runtime_resumed_work_dedupes_equivalent_worktree_paths() {
+    let temp = tempdir().expect("tempdir");
+    let repo = temp.path().join("repo");
+    let worktree = repo.join("work/resume");
+    fs::create_dir_all(&worktree).expect("create worktree");
+    let alternate_worktree_path = worktree.join("..").join("resume");
+    assert_ne!(worktree, alternate_worktree_path);
+    assert!(same_worktree_path(&worktree, &alternate_worktree_path));
+
+    let mut projection =
+        gwt_core::workspace_projection::WorkspaceProjection::default_for_project(&repo);
+    projection.agents.push({
+        let mut agent = workspace_agent_summary_for_test("session-resume-alias", Some("work-live"));
+        agent.branch = None;
+        agent.worktree_path = Some(alternate_worktree_path);
+        agent
+    });
+
+    let mut paused = history_work_view(
+        "legacy-work-resume-alias",
+        "",
+        worktree.to_string_lossy().as_ref(),
+        vec![history_agent_ref_view(
+            "session-resume-alias",
+            Some("Codex"),
+            "2026-07-12T01:00:00Z",
+        )],
+    );
+    paused.execution_containers[0].branch = None;
+    paused.title = "Resumed history metadata".to_string();
+    paused.summary = Some("Resumed history summary".to_string());
+    paused.owner = Some("SPEC-2359".to_string());
+    paused.execution_containers[0].pr_number = Some(2359);
+    paused.execution_containers[0].pr_url = Some("https://example.test/pr/2359".to_string());
+    paused.board_refs = vec!["resumed-board-ref".to_string()];
+
+    let view = super::active_work_projection_from_saved_with_journal(
+        projection,
+        Vec::new(),
+        vec![paused],
+        None,
+    );
+
+    assert_eq!(
+        view.active_works.len(),
+        1,
+        "shared Session must dedupe equivalent worktree path spellings"
+    );
+    assert_eq!(view.active_works[0].id, "work-session-session-resume-alias");
+    assert_eq!(view.active_works[0].title, "Resumed history metadata");
+    assert_eq!(
+        view.active_works[0].summary.as_deref(),
+        Some("Resumed history summary")
+    );
+    assert_eq!(view.active_works[0].owner.as_deref(), Some("SPEC-2359"));
+    assert_eq!(view.active_works[0].pr_number, Some(2359));
+    assert_eq!(
+        view.active_works[0].board_refs,
+        vec!["resumed-board-ref".to_string()]
+    );
+}
+
+/// FR-348 compatibility guard: Work identity is agent-session-derived, so a
+/// legacy and canonical history row for the same Session remain one Work even
+/// after distinct same-Workspace Sessions stop collapsing by git identity.
+#[test]
+fn app_runtime_duplicate_paused_history_for_same_session_stays_one_work() {
+    let temp = tempdir().expect("tempdir");
+    let repo = temp.path().join("repo");
+    fs::create_dir_all(&repo).expect("create repo");
+    let projection =
+        gwt_core::workspace_projection::WorkspaceProjection::default_for_project(&repo);
+    let works = vec![
+        history_work_view(
+            "legacy-work-id",
+            "work/shared",
+            "/home/user/gwt/work/shared",
+            vec![history_agent_ref_view(
+                "shared-session",
+                Some("Codex"),
+                "2026-07-12T01:00:00Z",
+            )],
+        ),
+        history_work_view(
+            "work-session-shared-session",
+            "work/shared",
+            "/home/user/gwt/work/shared",
+            vec![history_agent_ref_view(
+                "shared-session",
+                Some("Codex"),
+                "2026-07-13T01:00:00Z",
+            )],
+        ),
+    ];
+
+    let view =
+        super::active_work_projection_from_saved_with_journal(projection, Vec::new(), works, None);
+
+    assert_eq!(
+        view.active_works.len(),
+        1,
+        "the same launch Session must not become two Paused Works"
+    );
+    assert_eq!(view.active_works[0].agents[0].session_id, "shared-session");
 }
 
 /// FR-350 contract guard for the #3213 fix: a live Work synthesized without
@@ -7888,6 +8505,148 @@ fn app_runtime_runtime_status_stopped_keeps_active_agent_window_for_diagnostics(
         "workspace must retain the stopped agent window"
     );
     assert!(!runtime.active_agent_sessions.contains_key(&window_id));
+}
+
+// Issue #3274 (SPEC-1921 exact session restore amendment): when a resumed
+// agent process exits because the provider no longer has the conversation,
+// the final screen output must survive into the persistent window detail.
+// The vt100 state is dropped together with the runtime on Error, so a client
+// that reconnects later would otherwise face an empty Error window with no
+// clue why exact session restore failed.
+#[test]
+fn app_runtime_agent_error_exit_promotes_exact_resume_failure_diagnostic() {
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedEnvVar::set("HOME", temp.path());
+    let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+    let tab = sample_project_tab_with_window(
+        "tab-1",
+        "agent-1",
+        WindowPreset::Agent,
+        WindowProcessStatus::Running,
+    );
+    let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+    let window_id = combined_window_id("tab-1", "agent-1");
+    insert_test_pane_runtime(&mut runtime, &window_id);
+    runtime
+        .runtimes
+        .get(&window_id)
+        .expect("runtime")
+        .pane
+        .lock()
+        .expect("pane")
+        .process_bytes(b"No conversation found with session ID: resume-target-1\r\n");
+
+    let _ = runtime.handle_runtime_status(
+        window_id.clone(),
+        WindowProcessStatus::Error,
+        Some("Process exited with status 1".to_string()),
+    );
+
+    let detail = runtime
+        .window_details
+        .get(&window_id)
+        .cloned()
+        .unwrap_or_default();
+    assert!(
+        detail.contains("Exact session restore failed"),
+        "exact-resume failure must be promoted to an explicit diagnostic, got: {detail}"
+    );
+    assert!(
+        detail.contains("resume-target-1"),
+        "diagnostic must carry the reported session id, got: {detail}"
+    );
+    assert!(
+        !runtime.runtimes.contains_key(&window_id),
+        "errored runtime is still torn down after the tail is captured"
+    );
+}
+
+// Issue #3274: any agent error exit keeps its last screen output in the
+// window detail so the failure reason survives reconnects, while non-agent
+// process windows keep the plain exit detail.
+#[test]
+fn app_runtime_agent_error_exit_keeps_last_output_in_window_detail() {
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedEnvVar::set("HOME", temp.path());
+    let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+    let mut persisted = empty_workspace_state();
+    persisted.windows.push(sample_window(
+        "agent-1",
+        WindowPreset::Agent,
+        WindowProcessStatus::Running,
+    ));
+    persisted.windows.push(sample_window(
+        "shell-1",
+        WindowPreset::Shell,
+        WindowProcessStatus::Running,
+    ));
+    persisted.next_z_index = 3;
+    let agent_tab = ProjectTabRuntime {
+        id: "tab-1".to_string(),
+        title: "Repo".to_string(),
+        project_root: temp.path().join("repo"),
+        kind: ProjectKind::Git,
+        workspace: WindowCanvasState::from_persisted(persisted),
+        migration_pending: false,
+        main_worktree_root_cache: std::sync::Arc::new(std::sync::OnceLock::new()),
+    };
+    let mut runtime = sample_runtime(temp.path(), vec![agent_tab], Some("tab-1"));
+    let agent_window_id = combined_window_id("tab-1", "agent-1");
+    let shell_window_id = combined_window_id("tab-1", "shell-1");
+    insert_test_pane_runtime(&mut runtime, &agent_window_id);
+    insert_test_pane_runtime(&mut runtime, &shell_window_id);
+    runtime
+        .runtimes
+        .get(&agent_window_id)
+        .expect("agent runtime")
+        .pane
+        .lock()
+        .expect("agent pane")
+        .process_bytes(b"unexpected fatal: config parse error\r\n");
+    runtime
+        .runtimes
+        .get(&shell_window_id)
+        .expect("shell runtime")
+        .pane
+        .lock()
+        .expect("shell pane")
+        .process_bytes(b"command not found: frobnicate\r\n");
+
+    let _ = runtime.handle_runtime_status(
+        agent_window_id.clone(),
+        WindowProcessStatus::Error,
+        Some("Process exited with status 1".to_string()),
+    );
+    let _ = runtime.handle_runtime_status(
+        shell_window_id.clone(),
+        WindowProcessStatus::Error,
+        Some("Process exited with status 1".to_string()),
+    );
+
+    let agent_detail = runtime
+        .window_details
+        .get(&agent_window_id)
+        .cloned()
+        .unwrap_or_default();
+    assert!(
+        agent_detail.contains("Process exited with status 1")
+            && agent_detail.contains("unexpected fatal: config parse error"),
+        "agent error detail must keep the last screen output, got: {agent_detail}"
+    );
+    assert_eq!(
+        runtime
+            .window_details
+            .get(&shell_window_id)
+            .map(String::as_str),
+        Some("Process exited with status 1"),
+        "non-agent windows keep the plain exit detail"
+    );
 }
 
 #[test]
@@ -9590,6 +10349,315 @@ fn open_project_restore_resumes_paused_agent_even_after_stopped_drift() {
         .pending_auto_resume_sources
         .values()
         .any(|source| source == "session-open-resume"));
+}
+
+// SPEC-1921 Phase 65 (T335): restored Agent-family windows with exact
+// provider session ids are startup auto-resumed and their stopped
+// placeholders are removed across the legacy `Agent`, `Claude`, and `Codex`
+// presets — the removal must not be limited to `WindowPreset::Agent`.
+#[test]
+fn app_runtime_startup_auto_resume_removes_stale_placeholders_across_agent_family_presets() {
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedEnvVar::set("HOME", temp.path());
+    let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+    let repo = temp.path().join("repo");
+    init_git_clone_with_origin(&repo);
+    let worktree = temp.path().join("worktrees").join("family-restore");
+    run_git(
+        &repo,
+        &[
+            "worktree",
+            "add",
+            "-b",
+            "work/family-restore",
+            worktree.to_str().expect("worktree path"),
+        ],
+    );
+
+    let mut persisted = empty_workspace_state();
+    let legacy_window = sample_window(
+        "agent-legacy",
+        WindowPreset::Agent,
+        WindowProcessStatus::Stopped,
+    );
+    let mut claude_window = sample_window(
+        "agent-claude",
+        WindowPreset::Claude,
+        WindowProcessStatus::Stopped,
+    );
+    claude_window.agent_id = Some("claude".to_string());
+    let mut codex_window = sample_window(
+        "agent-codex",
+        WindowPreset::Codex,
+        WindowProcessStatus::Stopped,
+    );
+    codex_window.agent_id = Some("codex".to_string());
+    let mut legacy_window = legacy_window;
+    legacy_window.session_id = Some("session-family-legacy".to_string());
+    claude_window.session_id = Some("session-family-claude".to_string());
+    codex_window.session_id = Some("session-family-codex".to_string());
+    persisted.windows.push(legacy_window);
+    persisted.windows.push(claude_window);
+    persisted.windows.push(codex_window);
+    persisted.next_z_index = 4;
+    let tab = ProjectTabRuntime {
+        id: "tab-family".to_string(),
+        title: "Family Restore".to_string(),
+        project_root: worktree.clone(),
+        kind: ProjectKind::Git,
+        workspace: WindowCanvasState::from_persisted(persisted),
+        migration_pending: false,
+        main_worktree_root_cache: std::sync::Arc::new(std::sync::OnceLock::new()),
+    };
+    let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-family"));
+
+    for (session_id, native_id, agent_id) in [
+        (
+            "session-family-legacy",
+            "native-family-legacy",
+            gwt_agent::AgentId::ClaudeCode,
+        ),
+        (
+            "session-family-claude",
+            "native-family-claude",
+            gwt_agent::AgentId::ClaudeCode,
+        ),
+        (
+            "session-family-codex",
+            "native-family-codex",
+            gwt_agent::AgentId::Codex,
+        ),
+    ] {
+        let mut session = gwt_agent::Session::new(&worktree, "work/family-restore", agent_id);
+        session.id = session_id.to_string();
+        session.agent_session_id = Some(native_id.to_string());
+        session.restore_window_on_startup = true;
+        session.record_hook_event("Stop");
+        session.record_completed_stop();
+        session
+            .save(&runtime.sessions_dir)
+            .expect("save resumable session");
+    }
+
+    runtime.bootstrap();
+    runtime.handle_frontend_event(
+        "client-1".to_string(),
+        FrontendEvent::StartupAutoResumeReady {
+            bounds: canvas_bounds(),
+        },
+    );
+
+    let agent_windows = runtime.tabs[0]
+        .workspace
+        .persisted()
+        .windows
+        .iter()
+        .filter(|window| crate::runtime_support::window_is_agent_pane(window))
+        .count();
+    assert_eq!(
+        agent_windows, 3,
+        "each Agent-family placeholder must be replaced by exactly one resumed window; \
+         a stale Claude/Codex placeholder must not survive next to its resumed window"
+    );
+    assert_eq!(runtime.pending_auto_resume_sources.len(), 3);
+    for source in [
+        "session-family-legacy",
+        "session-family-claude",
+        "session-family-codex",
+    ] {
+        assert!(
+            runtime
+                .pending_auto_resume_sources
+                .values()
+                .any(|value| value == source),
+            "resumed window must track source session {source}"
+        );
+    }
+}
+
+// SPEC-1921 Phase 65 (T336): a restored Agent-family window whose persisted
+// session has no exact provider session id must stay a stopped placeholder
+// with an explicit "exact session restore is unavailable" diagnostic — and
+// must never fall back to Continue / latest / new-session launches.
+#[test]
+fn app_runtime_startup_auto_resume_without_exact_id_keeps_placeholder_with_diagnostic() {
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedEnvVar::set("HOME", temp.path());
+    let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+    let repo = temp.path().join("repo");
+    init_git_clone_with_origin(&repo);
+    let worktree = temp.path().join("worktrees").join("no-exact-id");
+    run_git(
+        &repo,
+        &[
+            "worktree",
+            "add",
+            "-b",
+            "work/no-exact-id",
+            worktree.to_str().expect("worktree path"),
+        ],
+    );
+
+    let mut persisted = empty_workspace_state();
+    let mut codex_window = sample_window(
+        "agent-noid",
+        WindowPreset::Codex,
+        WindowProcessStatus::Stopped,
+    );
+    codex_window.agent_id = Some("codex".to_string());
+    codex_window.session_id = Some("session-no-exact-id".to_string());
+    persisted.windows.push(codex_window);
+    persisted.next_z_index = 2;
+    let tab = ProjectTabRuntime {
+        id: "tab-noid".to_string(),
+        title: "No Exact Id".to_string(),
+        project_root: worktree.clone(),
+        kind: ProjectKind::Git,
+        workspace: WindowCanvasState::from_persisted(persisted),
+        migration_pending: false,
+        main_worktree_root_cache: std::sync::Arc::new(std::sync::OnceLock::new()),
+    };
+    let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-noid"));
+
+    // The Codex placeholder session id is structurally unusable for exact
+    // resume, so this session has no exact provider id.
+    let mut session =
+        gwt_agent::Session::new(&worktree, "work/no-exact-id", gwt_agent::AgentId::Codex);
+    session.id = "session-no-exact-id".to_string();
+    session.agent_session_id = Some("agent-session".to_string());
+    session.restore_window_on_startup = true;
+    session.record_hook_event("Stop");
+    session.record_completed_stop();
+    session
+        .save(&runtime.sessions_dir)
+        .expect("save session without exact id");
+
+    runtime.seed_restored_window_details();
+    runtime.bootstrap();
+    runtime.handle_frontend_event(
+        "client-1".to_string(),
+        FrontendEvent::StartupAutoResumeReady {
+            bounds: canvas_bounds(),
+        },
+    );
+
+    let windows = runtime.tabs[0].workspace.persisted().windows.clone();
+    assert_eq!(windows.len(), 1, "no fallback window may be spawned");
+    assert_eq!(windows[0].id, "agent-noid");
+    assert_eq!(windows[0].status, WindowProcessStatus::Stopped);
+    assert!(
+        runtime.pending_auto_resume_sources.is_empty(),
+        "a session without an exact provider id must not auto-resume"
+    );
+    assert!(
+        runtime.runtimes.is_empty(),
+        "no Continue/latest/new-session process may be launched as a fallback"
+    );
+
+    let detail = runtime
+        .window_details
+        .get(&combined_window_id("tab-noid", "agent-noid"))
+        .cloned()
+        .unwrap_or_default();
+    assert!(
+        detail.contains("Exact session restore is unavailable"),
+        "placeholder must explain exact session restore is unavailable, got: {detail}"
+    );
+    assert!(
+        !detail.contains("Restored window is paused"),
+        "the generic paused message must be replaced by the exact-restore diagnostic"
+    );
+}
+
+// SPEC-1921 Phase 65 (T336/T337): an exact auto-resume candidate must not be
+// labeled with the generic paused-placeholder detail (it resumes as soon as
+// the canvas is ready), while non-agent process windows keep the generic
+// message.
+#[test]
+fn app_runtime_startup_auto_resume_candidate_skips_generic_paused_detail() {
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedEnvVar::set("HOME", temp.path());
+    let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+    let repo = temp.path().join("repo");
+    init_git_clone_with_origin(&repo);
+    let worktree = temp.path().join("worktrees").join("candidate-detail");
+    run_git(
+        &repo,
+        &[
+            "worktree",
+            "add",
+            "-b",
+            "work/candidate-detail",
+            worktree.to_str().expect("worktree path"),
+        ],
+    );
+
+    let mut persisted = empty_workspace_state();
+    let mut claude_window = sample_window(
+        "agent-candidate",
+        WindowPreset::Claude,
+        WindowProcessStatus::Stopped,
+    );
+    claude_window.agent_id = Some("claude".to_string());
+    claude_window.session_id = Some("session-candidate-detail".to_string());
+    persisted.windows.push(claude_window);
+    persisted.windows.push(sample_window(
+        "shell-1",
+        WindowPreset::Shell,
+        WindowProcessStatus::Stopped,
+    ));
+    persisted.next_z_index = 3;
+    let tab = ProjectTabRuntime {
+        id: "tab-candidate".to_string(),
+        title: "Candidate Detail".to_string(),
+        project_root: worktree.clone(),
+        kind: ProjectKind::Git,
+        workspace: WindowCanvasState::from_persisted(persisted),
+        migration_pending: false,
+        main_worktree_root_cache: std::sync::Arc::new(std::sync::OnceLock::new()),
+    };
+    let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-candidate"));
+
+    let mut session = gwt_agent::Session::new(
+        &worktree,
+        "work/candidate-detail",
+        gwt_agent::AgentId::ClaudeCode,
+    );
+    session.id = "session-candidate-detail".to_string();
+    session.agent_session_id = Some("native-candidate-detail".to_string());
+    session.restore_window_on_startup = true;
+    session.record_hook_event("Stop");
+    session.record_completed_stop();
+    session
+        .save(&runtime.sessions_dir)
+        .expect("save resumable session");
+
+    runtime.seed_restored_window_details();
+
+    assert!(
+        !runtime
+            .window_details
+            .contains_key(&combined_window_id("tab-candidate", "agent-candidate")),
+        "an exact auto-resume candidate must not carry the generic paused detail"
+    );
+    let shell_detail = runtime
+        .window_details
+        .get(&combined_window_id("tab-candidate", "shell-1"))
+        .cloned()
+        .unwrap_or_default();
+    assert!(
+        shell_detail.contains("Restored window is paused"),
+        "non-agent process windows keep the generic paused message, got: {shell_detail}"
+    );
 }
 
 #[test]
@@ -12387,9 +13455,11 @@ fn app_runtime_load_knowledge_bridge_replies_with_cache_backed_issue_and_spec_vi
             refresh_enabled,
             ..
         } if *knowledge_kind == gwt::KnowledgeKind::Issue
-            && entries.len() == 1
-            && entries[0].number == 42
-            && entries[0].linked_branch_count == 1
+            && entries.len() == 2
+            && entries.iter().any(|entry| entry.number == 42
+                && entry.linked_branch_count == 1
+                && !entry.is_spec)
+            && entries.iter().any(|entry| entry.number == 1930 && entry.is_spec)
             && *selected_number == Some(42)
             && *refresh_enabled
     ));
@@ -12405,7 +13475,7 @@ fn app_runtime_load_knowledge_bridge_replies_with_cache_backed_issue_and_spec_vi
         "client-1",
         KnowledgeLoadRequest {
             id: &combined_window_id("tab-1", "spec-1"),
-            kind: gwt::KnowledgeKind::Spec,
+            kind: gwt::KnowledgeKind::Issue,
             request_id: None,
             selected_number: Some(1930),
             refresh: false,
@@ -12420,9 +13490,9 @@ fn app_runtime_load_knowledge_bridge_replies_with_cache_backed_issue_and_spec_vi
             selected_number,
             refresh_enabled,
             ..
-        } if *knowledge_kind == gwt::KnowledgeKind::Spec
-            && entries.len() == 1
-            && entries[0].number == 1930
+        } if *knowledge_kind == gwt::KnowledgeKind::Issue
+            && entries.len() == 2
+            && entries.iter().any(|entry| entry.number == 1930 && entry.is_spec)
             && *selected_number == Some(1930)
             && *refresh_enabled
     ));
@@ -15011,7 +16081,7 @@ fn app_runtime_issue_monitor_auto_launch_uses_start_with_last_settings() {
 
     let repo = temp.path().join("repo");
     fs::create_dir_all(&repo).expect("create repo");
-    init_repo(&repo);
+    init_repo_with_initial_commit(&repo);
     let sessions_dir = temp.path().join("sessions");
     fs::create_dir_all(&sessions_dir).expect("create sessions dir");
     let mut previous = gwt_agent::Session::new(&repo, "develop", gwt_agent::AgentId::Codex);
@@ -15220,7 +16290,7 @@ fn app_runtime_issue_monitor_auto_launch_uses_last_settings_runtime_target() {
     assert_eq!(runtime_target, gwt_agent::LaunchRuntimeTarget::Host);
     assert_eq!(
         process.args.last().map(String::as_str),
-        Some("$gwt-build-spec SPEC-3165"),
+        Some("$gwt-execute #3165"),
         "Issue Monitor auto launch must pass the generated prompt to the agent"
     );
 }
@@ -15284,7 +16354,7 @@ fn app_runtime_issue_monitor_configure_saves_profile_without_launching() {
 
     let repo = temp.path().join("repo");
     fs::create_dir_all(&repo).expect("create repo");
-    init_repo(&repo);
+    init_repo_with_initial_commit(&repo);
     let tab = sample_project_tab("tab-1", "Repo", repo.clone(), ProjectKind::Git, &[]);
     let (mut runtime, recorded_events) =
         sample_runtime_with_events(temp.path(), vec![tab], Some("tab-1"));
@@ -15328,7 +16398,7 @@ fn app_runtime_issue_monitor_configure_saves_profile_without_launching() {
             .expect("launch wizard")
             .wizard
             .initial_prompt,
-        "$gwt-build-spec SPEC-3165"
+        "$gwt-execute #3165"
     );
 
     runtime.handle_launch_wizard_action(
@@ -15608,7 +16678,7 @@ fn app_runtime_issue_monitor_auto_launch_prefers_saved_profile() {
 
     let repo = temp.path().join("repo");
     fs::create_dir_all(&repo).expect("create repo");
-    init_repo(&repo);
+    init_repo_with_initial_commit(&repo);
     let prefs = gwt::IssueMonitorPrefs {
         launch_profile: Some(sample_issue_monitor_launch_profile()),
         ..Default::default()
@@ -15671,7 +16741,7 @@ fn app_runtime_issue_monitor_auto_launch_without_previous_settings_opens_wizard(
 
     let repo = temp.path().join("repo");
     fs::create_dir_all(&repo).expect("create repo");
-    init_repo(&repo);
+    init_repo_with_initial_commit(&repo);
     let tab = sample_project_tab("tab-1", "Repo", repo, ProjectKind::Git, &[]);
     let (mut runtime, _recorded_events) =
         sample_runtime_with_events(temp.path(), vec![tab], Some("tab-1"));
@@ -15705,7 +16775,7 @@ fn app_runtime_issue_monitor_auto_launch_without_previous_settings_opens_wizard(
             .expect("launch wizard")
             .wizard
             .initial_prompt,
-        "$gwt-build-spec SPEC-3165"
+        "$gwt-execute #3165"
     );
 }
 
@@ -15720,7 +16790,7 @@ fn app_runtime_issue_monitor_auto_launch_keeps_existing_settings_wizard() {
 
     let repo = temp.path().join("repo");
     fs::create_dir_all(&repo).expect("create repo");
-    init_repo(&repo);
+    init_repo_with_initial_commit(&repo);
     let tab = sample_project_tab("tab-1", "Repo", repo, ProjectKind::Git, &[]);
     let (mut runtime, _recorded_events) =
         sample_runtime_with_events(temp.path(), vec![tab], Some("tab-1"));
@@ -15765,7 +16835,7 @@ fn app_runtime_issue_monitor_launch_now_ignores_auto_max_active_setting() {
 
     let repo = temp.path().join("repo");
     fs::create_dir_all(&repo).expect("create repo");
-    init_repo(&repo);
+    init_repo_with_initial_commit(&repo);
     let prefs = gwt::IssueMonitorPrefs {
         enabled: true,
         max_active_agents: 1,
@@ -15811,7 +16881,7 @@ fn app_runtime_issue_monitor_launch_now_wires_launch_feedback_to_issue_row() {
 
     let repo = temp.path().join("repo");
     fs::create_dir_all(&repo).expect("create repo");
-    init_repo(&repo);
+    init_repo_with_initial_commit(&repo);
     let tab = sample_project_tab("tab-1", "Repo", repo, ProjectKind::Git, &[]);
     let (mut runtime, recorded_events) =
         sample_runtime_with_events(temp.path(), vec![tab], Some("tab-1"));
@@ -19112,6 +20182,22 @@ fn app_runtime_active_work_projection_attaches_registry_sessions() {
     assert_eq!(row.agents[0].display_name, "Claude Code");
     assert_eq!(row.agents[0].sessions.len(), 1);
     assert_eq!(row.agents[0].sessions[0].agent_session_id, "conv-1");
+    assert_eq!(
+        row.works.len(),
+        1,
+        "backfilled Workspace has one child Work"
+    );
+    assert_eq!(
+        row.works[0].agents.len(),
+        1,
+        "ledger session must also attach to the child Work"
+    );
+    assert_eq!(row.works[0].agents[0].session_id, session.id);
+    assert_eq!(row.works[0].agents[0].sessions.len(), 1);
+    assert_eq!(
+        row.works[0].agents[0].sessions[0].agent_session_id,
+        "conv-1"
+    );
     assert_eq!(row.session_agent_total, 1);
 }
 
@@ -19161,6 +20247,7 @@ fn attach_registry_sessions_caps_total_agents_on_the_wire() {
         pr_state: None,
         board_refs: Vec::new(),
         agents,
+        works: Vec::new(),
         lifecycle_state: "paused".to_string(),
         closed_at: None,
         session_agent_total: 0,
@@ -19281,6 +20368,7 @@ fn attach_registry_sessions_keeps_latest_entry_per_agent_identity() {
                 "conv-l",
             ),
         ],
+        works: Vec::new(),
         lifecycle_state: "paused".to_string(),
         closed_at: None,
         session_agent_total: 0,
@@ -19321,6 +20409,357 @@ fn attach_registry_sessions_keeps_latest_entry_per_agent_identity() {
     assert_eq!(
         works[0].session_agent_total, 5,
         "hidden same-agent candidates stay counted for the '+N more sessions' summary"
+    );
+}
+
+fn workspace_test_agent_with_conversation(
+    session_id: &str,
+    updated_at: &str,
+    conversation: &str,
+) -> gwt::ActiveWorkAgentView {
+    gwt::ActiveWorkAgentView {
+        session_id: session_id.to_string(),
+        window_id: None,
+        agent_id: "codex".to_string(),
+        display_name: "Codex".to_string(),
+        affiliation_status: "assigned".to_string(),
+        workspace_id: None,
+        status_category: "idle".to_string(),
+        current_focus: None,
+        title_summary: None,
+        branch: Some("work/shared".to_string()),
+        worktree_path: None,
+        last_board_entry_id: None,
+        last_board_entry_kind: None,
+        coordination_scope: None,
+        updated_at: updated_at.to_string(),
+        sessions: vec![gwt::WorkspaceHistorySessionView {
+            agent_session_id: conversation.to_string(),
+            started_at: updated_at.to_string(),
+            is_active: true,
+            resumable: true,
+        }],
+    }
+}
+
+fn workspace_test_child(
+    id: &str,
+    agents: Vec<gwt::ActiveWorkAgentView>,
+) -> gwt::ActiveWorkspaceWorkView {
+    gwt::ActiveWorkspaceWorkView {
+        id: id.to_string(),
+        title: id.to_string(),
+        work_summary: None,
+        status_category: "idle".to_string(),
+        status_text: "Paused".to_string(),
+        owner: None,
+        lifecycle_state: "paused".to_string(),
+        closed_at: None,
+        manual_close_allowed: true,
+        close_blocked_reason: None,
+        agents,
+        updated_at: String::new(),
+    }
+}
+
+fn workspace_test_work(
+    agents: Vec<gwt::ActiveWorkAgentView>,
+    works: Vec<gwt::ActiveWorkspaceWorkView>,
+) -> gwt::ActiveWorkItemView {
+    gwt::ActiveWorkItemView {
+        id: "work-shared".to_string(),
+        title: "work/shared".to_string(),
+        status_category: "idle".to_string(),
+        status_text: "Paused".to_string(),
+        summary: None,
+        progress_summary: None,
+        work_summary: None,
+        owner: None,
+        next_action: None,
+        active_agents: 0,
+        blocked_agents: 0,
+        branch: Some("work/shared".to_string()),
+        worktree_path: None,
+        pr_number: None,
+        pr_url: None,
+        pr_state: None,
+        board_refs: Vec::new(),
+        session_agent_total: agents.len() as u32,
+        agents,
+        works,
+        lifecycle_state: "paused".to_string(),
+        closed_at: None,
+        merged_into_base: false,
+        workspace_key: None,
+        remote_only: false,
+        done_equivalent: false,
+        cleanup_candidate: None,
+        cleanup_blocked_reason: None,
+        updated_at: String::new(),
+    }
+}
+
+#[test]
+fn attach_registry_sessions_preserves_same_identity_agent_per_child_work() {
+    let older = workspace_test_agent_with_conversation(
+        "older-session",
+        "2026-07-12T01:00:00Z",
+        "older-conv",
+    );
+    let newer = workspace_test_agent_with_conversation(
+        "newer-session",
+        "2026-07-13T01:00:00Z",
+        "newer-conv",
+    );
+    let mut works = vec![workspace_test_work(
+        vec![older.clone(), newer.clone()],
+        vec![
+            workspace_test_child("work-session-older-session", vec![older]),
+            workspace_test_child("work-session-newer-session", vec![newer]),
+        ],
+    )];
+
+    super::attach_registry_sessions_to_active_works(
+        &mut works,
+        &[],
+        None,
+        &std::collections::HashMap::new(),
+        Path::new("/"),
+    );
+
+    assert_eq!(
+        works[0]
+            .agents
+            .iter()
+            .map(|agent| agent.session_id.as_str())
+            .collect::<Vec<_>>(),
+        vec!["newer-session"],
+        "the Workspace summary still keeps only the latest agent identity"
+    );
+    for (work_id, session_id) in [
+        ("work-session-older-session", "older-session"),
+        ("work-session-newer-session", "newer-session"),
+    ] {
+        let child = works[0]
+            .works
+            .iter()
+            .find(|child| child.id == work_id)
+            .expect("child Work");
+        assert_eq!(
+            child
+                .agents
+                .iter()
+                .map(|agent| agent.session_id.as_str())
+                .collect::<Vec<_>>(),
+            vec![session_id],
+            "each child Work must preserve its own Agent and Session"
+        );
+    }
+}
+
+#[test]
+fn attach_registry_sessions_preserves_distinct_conversations_within_one_child_work() {
+    let older = workspace_test_agent_with_conversation(
+        "older-session",
+        "2026-07-12T01:00:00Z",
+        "older-conv",
+    );
+    let newer = workspace_test_agent_with_conversation(
+        "newer-session",
+        "2026-07-13T01:00:00Z",
+        "newer-conv",
+    );
+    let mut works = vec![workspace_test_work(
+        vec![older.clone(), newer.clone()],
+        vec![workspace_test_child("work-combined", vec![older, newer])],
+    )];
+
+    super::attach_registry_sessions_to_active_works(
+        &mut works,
+        &[],
+        None,
+        &std::collections::HashMap::new(),
+        Path::new("/"),
+    );
+
+    assert_eq!(
+        works[0].works[0]
+            .agents
+            .iter()
+            .map(|agent| agent.session_id.as_str())
+            .collect::<Vec<_>>(),
+        vec!["newer-session", "older-session"],
+        "a child Work owns every distinct conversation selected for the payload"
+    );
+    assert_eq!(
+        works[0]
+            .agents
+            .iter()
+            .map(|agent| agent.session_id.as_str())
+            .collect::<Vec<_>>(),
+        vec!["newer-session"],
+        "identity collapse remains limited to the Workspace summary"
+    );
+}
+
+#[test]
+fn attach_registry_sessions_collapses_same_conversation_across_child_works() {
+    let older = workspace_test_agent_with_conversation(
+        "older-session",
+        "2026-07-12T01:00:00Z",
+        "shared-conv",
+    );
+    let newer = workspace_test_agent_with_conversation(
+        "newer-session",
+        "2026-07-13T01:00:00Z",
+        "shared-conv",
+    );
+    let mut works = vec![workspace_test_work(
+        vec![older.clone(), newer.clone()],
+        vec![
+            workspace_test_child("work-session-older-session", vec![older]),
+            workspace_test_child("work-session-newer-session", vec![newer]),
+        ],
+    )];
+
+    super::attach_registry_sessions_to_active_works(
+        &mut works,
+        &[],
+        None,
+        &std::collections::HashMap::new(),
+        Path::new("/"),
+    );
+
+    assert!(
+        works[0].works[0].agents.is_empty(),
+        "the older sibling must not retain a duplicate conversation"
+    );
+    assert_eq!(
+        works[0].works[1].agents[0].session_id, "newer-session",
+        "the newest sibling owns the shared conversation"
+    );
+    assert_eq!(works[0].session_agent_total, 1);
+}
+
+#[test]
+fn attach_registry_sessions_caps_agents_across_all_child_works() {
+    let agents = (0..12)
+        .map(|index| {
+            workspace_test_agent_with_conversation(
+                &format!("session-{index:02}"),
+                &format!("2026-07-12T{index:02}:00:00Z"),
+                &format!("conv-{index:02}"),
+            )
+        })
+        .collect::<Vec<_>>();
+    let child_works = agents
+        .iter()
+        .cloned()
+        .map(|agent| {
+            workspace_test_child(&format!("work-session-{}", agent.session_id), vec![agent])
+        })
+        .collect();
+    let mut works = vec![workspace_test_work(agents, child_works)];
+
+    super::attach_registry_sessions_to_active_works(
+        &mut works,
+        &[],
+        None,
+        &std::collections::HashMap::new(),
+        Path::new("/"),
+    );
+
+    assert_eq!(
+        works[0]
+            .works
+            .iter()
+            .map(|child| child.agents.len())
+            .sum::<usize>(),
+        crate::workspace_session_registry::REGISTRY_SESSION_CAP,
+        "the wire cap applies to the union of child Work agents"
+    );
+    assert!(
+        works[0]
+            .works
+            .iter()
+            .take(4)
+            .all(|child| child.agents.is_empty()),
+        "the oldest sessions fall outside the cap"
+    );
+}
+
+#[test]
+fn attach_registry_sessions_assigns_shared_session_to_one_canonical_child_work() {
+    let agent = workspace_test_agent_with_conversation(
+        "shared-session",
+        "2026-07-13T01:00:00Z",
+        "shared-conv",
+    );
+    let mut child_works = (0..11)
+        .map(|index| workspace_test_child(&format!("legacy-work-{index:02}"), vec![agent.clone()]))
+        .collect::<Vec<_>>();
+    child_works.insert(
+        5,
+        workspace_test_child("work-session-shared-session", vec![agent.clone()]),
+    );
+    let mut works = vec![workspace_test_work(vec![agent], child_works)];
+
+    super::attach_registry_sessions_to_active_works(
+        &mut works,
+        &[],
+        None,
+        &std::collections::HashMap::new(),
+        Path::new("/"),
+    );
+
+    assert_eq!(
+        works[0]
+            .works
+            .iter()
+            .map(|child| child.agents.len())
+            .sum::<usize>(),
+        1,
+        "one payload Agent must not be duplicated across child Works"
+    );
+    assert_eq!(
+        works[0]
+            .works
+            .iter()
+            .find(|child| child.id == "work-session-shared-session")
+            .expect("canonical child Work")
+            .agents[0]
+            .session_id,
+        "shared-session",
+        "the canonical session-derived child owns the shared Agent"
+    );
+    assert_eq!(works[0].session_agent_total, 1);
+}
+
+#[test]
+fn attach_registry_sessions_assigns_shared_session_to_latest_legacy_child_work() {
+    let agent = workspace_test_agent_with_conversation(
+        "shared-session",
+        "2026-07-13T01:00:00Z",
+        "shared-conv",
+    );
+    let mut older = workspace_test_child("legacy-work-older", vec![agent.clone()]);
+    older.updated_at = "2026-07-12T01:00:00Z".to_string();
+    let mut newer = workspace_test_child("legacy-work-newer", vec![agent.clone()]);
+    newer.updated_at = "2026-07-13T01:00:00Z".to_string();
+    let mut works = vec![workspace_test_work(vec![agent], vec![older, newer])];
+
+    super::attach_registry_sessions_to_active_works(
+        &mut works,
+        &[],
+        None,
+        &std::collections::HashMap::new(),
+        Path::new("/"),
+    );
+
+    assert!(works[0].works[0].agents.is_empty());
+    assert_eq!(
+        works[0].works[1].agents[0].session_id, "shared-session",
+        "the latest compatible legacy child owns the shared Agent"
     );
 }
 
@@ -19390,6 +20829,7 @@ fn attach_registry_sessions_recomputes_agent_counters_after_identity_collapse() 
             ),
             agent_view("codex-blocked", "Codex", "blocked", "2026-06-09T00:00:00Z"),
         ],
+        works: Vec::new(),
         lifecycle_state: "active".to_string(),
         closed_at: None,
         session_agent_total: 0,
@@ -19473,6 +20913,7 @@ fn attach_registry_sessions_drops_ghost_agents_without_identity_or_sessions() {
             bare_agent("gwt-ghost", ""),
             bare_agent("gwt-named", "Claude Code"),
         ],
+        works: Vec::new(),
         lifecycle_state: "paused".to_string(),
         closed_at: None,
         session_agent_total: 0,
@@ -19605,6 +21046,7 @@ fn attach_registry_sessions_dedupes_agents_sharing_a_conversation() {
             // A different conversation must survive untouched.
             agent_view("gwt-other", "Codex", "2026-06-11T00:00:00Z", "conv-other"),
         ],
+        works: Vec::new(),
         lifecycle_state: "paused".to_string(),
         closed_at: None,
         session_agent_total: 0,
@@ -19738,6 +21180,7 @@ fn attach_registry_sessions_filters_agents_from_other_workspace_rows() {
                 "019ed018-c208-7183-bb6e-b08ba2ef4981",
             ),
         ],
+        works: Vec::new(),
         lifecycle_state: "paused".to_string(),
         closed_at: None,
         session_agent_total: 0,
@@ -19902,6 +21345,7 @@ fn active_works_are_sorted_by_latest_update_descending() {
         pr_state: None,
         board_refs: Vec::new(),
         agents: Vec::new(),
+        works: Vec::new(),
         lifecycle_state: "paused".to_string(),
         closed_at: None,
         session_agent_total: 0,
@@ -19978,6 +21422,7 @@ fn mark_merged_active_works_flags_cache_and_pr_state() {
         pr_state: pr_state.map(str::to_string),
         board_refs: Vec::new(),
         agents: Vec::new(),
+        works: Vec::new(),
         lifecycle_state: "paused".to_string(),
         closed_at: None,
         session_agent_total: 0,
@@ -20045,6 +21490,7 @@ fn dirty_worktree_pr_state_merged_does_not_flag_or_cleanup() {
         pr_state: Some("MERGED".to_string()),
         board_refs: Vec::new(),
         agents: Vec::new(),
+        works: Vec::new(),
         lifecycle_state: "paused".to_string(),
         closed_at: None,
         session_agent_total: 0,
@@ -20628,6 +22074,7 @@ fn assign_and_merge_workspace_groups_unifies_same_branch_rows() {
         branch: Option<&str>,
         updated_at: &str,
         agents: usize,
+        lifecycle: &str,
     ) -> gwt::ActiveWorkItemView {
         gwt::ActiveWorkItemView {
             id: id.to_string(),
@@ -20648,7 +22095,8 @@ fn assign_and_merge_workspace_groups_unifies_same_branch_rows() {
             pr_state: None,
             board_refs: Vec::new(),
             agents: Vec::new(),
-            lifecycle_state: "paused".to_string(),
+            works: Vec::new(),
+            lifecycle_state: lifecycle.to_string(),
             closed_at: None,
             session_agent_total: 1,
             merged_into_base: false,
@@ -20668,15 +22116,23 @@ fn assign_and_merge_workspace_groups_unifies_same_branch_rows() {
             "work-session-aaaa",
             Some("work/x"),
             "2026-06-11T10:00:00Z",
-            1,
+            0,
+            "paused",
         ),
         row(
             "work-session-bbbb",
             Some("origin/work/x"),
             "2026-06-12T10:00:00Z",
             2,
+            "active",
         ),
-        row("workspace-1748822400000", None, "2026-06-10T10:00:00Z", 0),
+        row(
+            "workspace-1748822400000",
+            None,
+            "2026-06-10T10:00:00Z",
+            0,
+            "paused",
+        ),
     ];
 
     super::assign_and_merge_workspace_groups(&mut works, &root);
@@ -20697,9 +22153,38 @@ fn assign_and_merge_workspace_groups_unifies_same_branch_rows() {
         group.id, "work-session-bbbb",
         "newest row is the representative"
     );
-    assert_eq!(group.active_agents, 3, "agent counts sum");
+    assert_eq!(group.active_agents, 2, "agent counts sum");
     assert_eq!(group.session_agent_total, 2, "session totals sum");
     assert!(group.workspace_key.is_some());
+    assert_eq!(
+        group.works.len(),
+        2,
+        "Workspace grouping must preserve both child Works"
+    );
+    assert_eq!(
+        group
+            .works
+            .iter()
+            .map(|work| work.id.as_str())
+            .collect::<std::collections::BTreeSet<_>>(),
+        std::collections::BTreeSet::from(["work-session-aaaa", "work-session-bbbb"]),
+        "each child Work keeps its stable identity"
+    );
+    let paused = group
+        .works
+        .iter()
+        .find(|work| work.id == "work-session-aaaa")
+        .expect("paused child Work");
+    assert_eq!(paused.lifecycle_state, "paused");
+    assert!(paused.manual_close_allowed);
+    assert_eq!(paused.close_blocked_reason, None);
+    let active = group
+        .works
+        .iter()
+        .find(|work| work.id == "work-session-bbbb")
+        .expect("active child Work");
+    assert!(!active.manual_close_allowed);
+    assert_eq!(active.close_blocked_reason.as_deref(), Some("live_agent"));
     let legacy = works
         .iter()
         .find(|work| work.id == "workspace-1748822400000")
@@ -20707,6 +22192,37 @@ fn assign_and_merge_workspace_groups_unifies_same_branch_rows() {
     assert_eq!(
         legacy.workspace_key.as_deref(),
         Some("workspace-1748822400000")
+    );
+}
+
+#[test]
+fn legacy_workspace_lifecycle_does_not_create_an_implicit_close_target() {
+    let legacy = serde_json::json!({
+        "id": "work-legacy-parent",
+        "title": "Legacy Workspace",
+        "status_category": "idle",
+        "status_text": "Paused",
+        "summary": null,
+        "owner": null,
+        "next_action": null,
+        "active_agents": 0,
+        "blocked_agents": 0,
+        "branch": "work/legacy",
+        "worktree_path": null,
+        "pr_number": null,
+        "pr_url": null,
+        "pr_state": null,
+        "board_refs": [],
+        "agents": [],
+        "lifecycle_state": "paused"
+    });
+
+    let workspace: gwt::ActiveWorkItemView =
+        serde_json::from_value(legacy).expect("deserialize legacy Workspace row");
+
+    assert!(
+        workspace.works.is_empty(),
+        "legacy parent lifecycle is display compatibility only and must not invent a child Work"
     );
 }
 
@@ -20736,6 +22252,7 @@ fn mark_remote_only_flags_fetched_branches_without_local_worktree() {
             pr_state: None,
             board_refs: Vec::new(),
             agents: Vec::new(),
+            works: Vec::new(),
             lifecycle_state: "paused".to_string(),
             closed_at: None,
             session_agent_total: 0,
@@ -20758,12 +22275,30 @@ fn mark_remote_only_flags_fetched_branches_without_local_worktree() {
         row("w-branchless", None, None),
     ];
 
+    super::assign_and_merge_workspace_groups(&mut works, Path::new("/repo"));
     super::mark_remote_only_active_works(&mut works, Some(&local));
 
     assert!(works[0].remote_only, "fetched-only branch is Remote");
     assert!(!works[1].remote_only, "locally checked-out branch is not");
     assert!(!works[2].remote_only, "rows with a worktree are not");
     assert!(!works[3].remote_only, "branchless rows are not");
+    assert_eq!(works[0].works.len(), 1);
+    assert!(!works[0].works[0].manual_close_allowed);
+    assert_eq!(
+        works[0].works[0].close_blocked_reason.as_deref(),
+        Some("remote_environment_unknown")
+    );
+
+    let mut unknown = vec![row("w-unknown", Some("work/unknown"), None)];
+    super::assign_and_merge_workspace_groups(&mut unknown, Path::new("/repo"));
+    super::mark_remote_only_active_works(&mut unknown, None);
+
+    assert!(
+        !unknown[0].remote_only,
+        "missing local branch scan data must remain undetermined"
+    );
+    assert!(unknown[0].works[0].manual_close_allowed);
+    assert_eq!(unknown[0].works[0].close_blocked_reason, None);
 }
 
 /// SPEC-2359 W16-4 (FR-391): merged ∧ stale rows classify as derived Done;
@@ -20798,6 +22333,7 @@ fn mark_merged_classifies_done_equivalent_for_stale_merged_rows() {
             pr_state: pr_state.map(str::to_string),
             board_refs: Vec::new(),
             agents: Vec::new(),
+            works: Vec::new(),
             lifecycle_state: lifecycle.to_string(),
             closed_at: None,
             session_agent_total: 0,
@@ -20873,6 +22409,7 @@ fn mark_cleanup_candidates_exposes_no_changes_reason_without_merged_badge() {
         pr_state: None,
         board_refs: Vec::new(),
         agents: Vec::new(),
+        works: Vec::new(),
         lifecycle_state: "paused".to_string(),
         closed_at: None,
         session_agent_total: 0,
@@ -20934,6 +22471,7 @@ fn mark_cleanup_candidates_sets_blocked_reason_for_live_agent_and_process() {
             pr_state: Some("MERGED".to_string()),
             board_refs: Vec::new(),
             agents: Vec::new(),
+            works: Vec::new(),
             lifecycle_state: "active".to_string(),
             closed_at: None,
             session_agent_total: 0,
@@ -20964,6 +22502,7 @@ fn mark_cleanup_candidates_sets_blocked_reason_for_live_agent_and_process() {
             pr_state: None,
             board_refs: Vec::new(),
             agents: Vec::new(),
+            works: Vec::new(),
             lifecycle_state: "paused".to_string(),
             closed_at: None,
             session_agent_total: 0,
@@ -21142,6 +22681,7 @@ fn apply_work_summary_external_sources_prefers_pr_then_ai_then_commit_subject() 
         pr_state: None,
         board_refs: vec![],
         agents: vec![],
+        works: Vec::new(),
         lifecycle_state: "paused".to_string(),
         closed_at: None,
         session_agent_total: 0,

@@ -5,6 +5,15 @@ description: "Use when gwt-discussion has produced a finished SPEC design and th
 
 # gwt-register-spec
 
+## Transition alias
+
+`gwt-register-spec` is a temporary alias for `gwt-register-issue`. If this skill
+is invoked from a `gwt-discussion` Register Spec action bundle, continue through
+the matching `gwt-register-issue/SKILL.md` asset from the active provider skill
+tree and use its design-required registration flow. Keep this file only to
+preserve the create-then-edit roundtrip safety notes during the one-release
+alias window.
+
 Sub-skill called from `gwt-discussion` to materialize an already-decided SPEC
 design into a `gwt-spec` GitHub Issue. Encapsulates the canonical 2-step
 `issue.spec.create` → `issue.spec.edit` JSON operation flow so that the

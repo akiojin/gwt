@@ -92,24 +92,86 @@ const CLAUDE_MODEL_OPTIONS: [ModelDisplayOption; 5] = [
     },
 ];
 
-const CODEX_MODEL_OPTIONS: [ModelDisplayOption; 4] = [
-    ModelDisplayOption {
-        label: "gpt-5.5",
-        description: "Frontier model for complex coding, research, and real-world work",
+#[derive(Clone, Copy)]
+pub(super) struct CodexModelCapability {
+    pub(super) model: ModelDisplayOption,
+    pub(super) default_effort: &'static str,
+    pub(super) max_effort: &'static str,
+}
+
+// SPEC-1921 US-20 / FR-121..FR-123: fixed 2026-07-10 Codex picker snapshot.
+// Model rows and reasoning rows both derive from this single capability table
+// so stop counts and defaults cannot drift from the model list. A later
+// snapshot update edits this table together with the focused tests; the
+// wizard never reads a runtime model cache for these rows.
+const CODEX_MODEL_CAPABILITIES: [CodexModelCapability; 7] = [
+    CodexModelCapability {
+        model: ModelDisplayOption {
+            label: "gpt-5.5",
+            description: "Frontier model for complex coding, research, and real-world work",
+        },
+        default_effort: "medium",
+        max_effort: "xhigh",
     },
-    ModelDisplayOption {
-        label: "gpt-5.4",
-        description: "Strong model for everyday coding",
+    CodexModelCapability {
+        model: ModelDisplayOption {
+            label: "gpt-5.6-sol",
+            description: "Latest frontier agentic coding model",
+        },
+        default_effort: "low",
+        max_effort: "ultra",
     },
-    ModelDisplayOption {
-        label: "gpt-5.4-mini",
-        description: "Small, fast, and cost-efficient model for simpler coding tasks",
+    CodexModelCapability {
+        model: ModelDisplayOption {
+            label: "gpt-5.6-terra",
+            description: "Balanced agentic coding model for everyday work",
+        },
+        default_effort: "medium",
+        max_effort: "ultra",
     },
-    ModelDisplayOption {
-        label: "gpt-5.3-codex-spark",
-        description: "Ultra-fast coding model",
+    CodexModelCapability {
+        model: ModelDisplayOption {
+            label: "gpt-5.6-luna",
+            description: "Fast and affordable agentic coding model",
+        },
+        default_effort: "medium",
+        max_effort: "max",
+    },
+    CodexModelCapability {
+        model: ModelDisplayOption {
+            label: "gpt-5.4",
+            description: "Strong model for everyday coding",
+        },
+        default_effort: "medium",
+        max_effort: "xhigh",
+    },
+    CodexModelCapability {
+        model: ModelDisplayOption {
+            label: "gpt-5.4-mini",
+            description: "Small, fast, and cost-efficient model for simpler coding tasks",
+        },
+        default_effort: "medium",
+        max_effort: "xhigh",
+    },
+    CodexModelCapability {
+        model: ModelDisplayOption {
+            label: "gpt-5.3-codex-spark",
+            description: "Ultra-fast coding model",
+        },
+        default_effort: "high",
+        max_effort: "xhigh",
     },
 ];
+
+const CODEX_MODEL_OPTIONS: [ModelDisplayOption; CODEX_MODEL_CAPABILITIES.len()] = {
+    let mut options = [CODEX_MODEL_CAPABILITIES[0].model; CODEX_MODEL_CAPABILITIES.len()];
+    let mut index = 0;
+    while index < CODEX_MODEL_CAPABILITIES.len() {
+        options[index] = CODEX_MODEL_CAPABILITIES[index].model;
+        index += 1;
+    }
+    options
+};
 
 const GEMINI_MODEL_OPTIONS: [ModelDisplayOption; 7] = [
     ModelDisplayOption {
@@ -219,7 +281,10 @@ pub(super) const CLAUDE_SONNET_REASONING_OPTIONS: [ReasoningDisplayOption; 4] = 
     },
 ];
 
-pub(super) const CODEX_REASONING_OPTIONS: [ReasoningDisplayOption; 4] = [
+// Full Codex reasoning ladder in ascending depth order. Per-model rows take a
+// prefix of this ladder up to the model's `max_effort` and mark the model's
+// `default_effort` row; descriptions mirror the Codex CLI picker copy.
+const CODEX_REASONING_LADDER: [ReasoningDisplayOption; 6] = [
     ReasoningDisplayOption {
         label: "Low",
         stored_value: "low",
@@ -229,22 +294,58 @@ pub(super) const CODEX_REASONING_OPTIONS: [ReasoningDisplayOption; 4] = [
     ReasoningDisplayOption {
         label: "Medium",
         stored_value: "medium",
-        description: "Balances speed and reasoning depth",
-        is_default: true,
+        description: "Balances speed and reasoning depth for everyday tasks",
+        is_default: false,
     },
     ReasoningDisplayOption {
         label: "High",
         stored_value: "high",
-        description: "Greater reasoning depth",
+        description: "Greater reasoning depth for complex problems",
         is_default: false,
     },
     ReasoningDisplayOption {
         label: "Extra high",
         stored_value: "xhigh",
-        description: "Maximum reasoning depth",
+        description: "Extra high reasoning depth for complex problems",
+        is_default: false,
+    },
+    ReasoningDisplayOption {
+        label: "Max",
+        stored_value: "max",
+        description: "Maximum reasoning depth for the hardest problems",
+        is_default: false,
+    },
+    ReasoningDisplayOption {
+        label: "Ultra",
+        stored_value: "ultra",
+        description: "Maximum reasoning with automatic task delegation",
         is_default: false,
     },
 ];
+
+// Unknown or legacy persisted Codex models keep the conservative pre-5.6
+// surface so a stale saved model can never unlock stops the CLI would reject.
+const CODEX_FALLBACK_DEFAULT_EFFORT: &str = "medium";
+const CODEX_FALLBACK_MAX_EFFORT: &str = "xhigh";
+
+pub(super) fn codex_reasoning_options_for_model(model: &str) -> Vec<ReasoningDisplayOption> {
+    let capability = CODEX_MODEL_CAPABILITIES
+        .iter()
+        .find(|capability| capability.model.label == model);
+    let default_effort = capability.map_or(CODEX_FALLBACK_DEFAULT_EFFORT, |row| row.default_effort);
+    let max_effort = capability.map_or(CODEX_FALLBACK_MAX_EFFORT, |row| row.max_effort);
+    let end = CODEX_REASONING_LADDER
+        .iter()
+        .position(|option| option.stored_value == max_effort)
+        .map_or(CODEX_REASONING_LADDER.len(), |index| index + 1);
+    CODEX_REASONING_LADDER[..end]
+        .iter()
+        .map(|option| ReasoningDisplayOption {
+            is_default: option.stored_value == default_effort,
+            ..*option
+        })
+        .collect()
+}
 
 pub(super) const EXECUTION_MODE_OPTIONS: [ExecutionModeOption; 3] = [
     ExecutionModeOption {
@@ -1329,7 +1430,15 @@ mod tests {
         );
         assert_eq!(
             current_model_options("codex"),
-            vec!["gpt-5.5", "gpt-5.4", "gpt-5.4-mini", "gpt-5.3-codex-spark"]
+            vec![
+                "gpt-5.5",
+                "gpt-5.6-sol",
+                "gpt-5.6-terra",
+                "gpt-5.6-luna",
+                "gpt-5.4",
+                "gpt-5.4-mini",
+                "gpt-5.3-codex-spark",
+            ]
         );
         assert_eq!(
             current_model_options("gemini"),
@@ -1348,6 +1457,88 @@ mod tests {
         assert!(current_model_options("custom").is_empty());
         assert!(model_display_options("custom").is_empty());
         assert!(!model_display_options("codex").is_empty());
+    }
+
+    // SPEC-1921 US-20 / FR-121: the Codex picker is the fixed, tested
+    // 2026-07-10 seven-model snapshot with the current descriptions.
+    #[test]
+    fn codex_model_catalog_matches_2026_07_10_snapshot() {
+        let rows: Vec<(&str, &str)> = model_display_options("codex")
+            .iter()
+            .map(|option| (option.label, option.description))
+            .collect();
+        assert_eq!(
+            rows,
+            vec![
+                (
+                    "gpt-5.5",
+                    "Frontier model for complex coding, research, and real-world work",
+                ),
+                ("gpt-5.6-sol", "Latest frontier agentic coding model"),
+                (
+                    "gpt-5.6-terra",
+                    "Balanced agentic coding model for everyday work",
+                ),
+                ("gpt-5.6-luna", "Fast and affordable agentic coding model"),
+                ("gpt-5.4", "Strong model for everyday coding"),
+                (
+                    "gpt-5.4-mini",
+                    "Small, fast, and cost-efficient model for simpler coding tasks",
+                ),
+                ("gpt-5.3-codex-spark", "Ultra-fast coding model"),
+            ]
+        );
+    }
+
+    fn codex_capability_row(model: &str) -> (Vec<&'static str>, &'static str) {
+        let options = codex_reasoning_options_for_model(model);
+        let values: Vec<&'static str> = options.iter().map(|option| option.stored_value).collect();
+        let default = options
+            .iter()
+            .find(|option| option.is_default)
+            .expect("codex reasoning rows must include a default stop")
+            .stored_value;
+        (values, default)
+    }
+
+    // SPEC-1921 US-20 / FR-122 + FR-123: reasoning rows and the initial stop
+    // derive from the selected model's capability row, so Sol/Terra expose six
+    // stops through Ultra, Luna five through Max, and the rest four through
+    // Extra high, with Sol=Low / Spark=High / others=Medium defaults.
+    #[test]
+    fn codex_reasoning_capability_rows_follow_model() {
+        const SIX: [&str; 6] = ["low", "medium", "high", "xhigh", "max", "ultra"];
+        const FIVE: [&str; 5] = ["low", "medium", "high", "xhigh", "max"];
+        const FOUR: [&str; 4] = ["low", "medium", "high", "xhigh"];
+
+        assert_eq!(codex_capability_row("gpt-5.6-sol"), (SIX.to_vec(), "low"));
+        assert_eq!(
+            codex_capability_row("gpt-5.6-terra"),
+            (SIX.to_vec(), "medium")
+        );
+        assert_eq!(
+            codex_capability_row("gpt-5.6-luna"),
+            (FIVE.to_vec(), "medium")
+        );
+        assert_eq!(codex_capability_row("gpt-5.5"), (FOUR.to_vec(), "medium"));
+        assert_eq!(codex_capability_row("gpt-5.4"), (FOUR.to_vec(), "medium"));
+        assert_eq!(
+            codex_capability_row("gpt-5.4-mini"),
+            (FOUR.to_vec(), "medium")
+        );
+        assert_eq!(
+            codex_capability_row("gpt-5.3-codex-spark"),
+            (FOUR.to_vec(), "high")
+        );
+    }
+
+    // Unknown or legacy persisted Codex models keep the conservative pre-5.6
+    // surface so a stale saved model can never unlock unsupported stops.
+    #[test]
+    fn codex_reasoning_capability_falls_back_conservatively_for_unknown_model() {
+        let (values, default) = codex_capability_row("gpt-5.2-codex");
+        assert_eq!(values, vec!["low", "medium", "high", "xhigh"]);
+        assert_eq!(default, "medium");
     }
 
     #[test]
@@ -1494,12 +1685,15 @@ mod tests {
             .iter()
             .map(|option| option.stored_value)
             .collect();
-        let codex: Vec<&str> = super::CODEX_REASONING_OPTIONS
+        // `ultra` is a real Codex effort on 5.6 Sol/Terra; `ultracode` stays a
+        // Claude-only session setting and must never appear as a Codex stop.
+        let codex: Vec<&str> = codex_reasoning_options_for_model("gpt-5.6-sol")
             .iter()
             .map(|option| option.stored_value)
             .collect();
         assert!(!sonnet.contains(&"ultracode"));
         assert!(!codex.contains(&"ultracode"));
+        assert!(codex.contains(&"ultra"));
     }
 
     #[test]

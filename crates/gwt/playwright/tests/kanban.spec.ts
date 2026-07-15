@@ -1,44 +1,42 @@
-/* SPEC-2017 Phase 4 — Knowledge Bridge Kanban visual coverage.
+/* Knowledge Bridge Work Item compatibility coverage.
  *
  * The fixture serves the embedded frontend assets directly through Playwright
  * routes and replaces WebSocket with a deterministic cache-backed backend.
- * That keeps visual coverage active in CI without depending on a live gwt GUI
+ * That keeps browser coverage active in CI without depending on a live gwt GUI
  * process, GitHub cache state, or the user's local workspace.
  */
 import { expect, test } from "@playwright/test";
 import { APP_URL, installEmbeddedRoutes } from "./_helpers/embedded-frontend";
 
-test.describe("Knowledge Bridge Kanban visual snapshots", () => {
+test.describe("Legacy SPEC preset Work Item compatibility", () => {
   test.use({
     deviceScaleFactor: 1,
     viewport: { width: 3840, height: 1100 },
   });
 
-  for (const hideDone of [false, true]) {
-    test(`${hideDone ? "hides" : "shows"} done column`, async ({ page }, testInfo) => {
-      await installEmbeddedRoutes(page);
-      await installKanbanBackend(page, {
-        hideDone,
-        theme: testInfo.project.name.includes("light") ? "light" : "dark",
-      });
-
-      await page.goto(APP_URL);
-
-      const board = page.locator(".surface-knowledge .kanban-board");
-      await expect(board).toHaveAttribute(
-        "data-hide-done",
-        hideDone ? "true" : "false",
-      );
-      await expect(page.locator(".surface-knowledge .kanban-card")).toHaveCount(6);
-      await expect(
-        page.locator(".surface-knowledge .kanban-column[data-phase='done'] [data-role='count']"),
-      ).toHaveText("1");
-
-      await expect(board).toHaveScreenshot(
-        hideDone ? "kanban-hide-done.png" : "kanban-show-done.png",
-      );
+  test("renders gwt-spec entries through the unified Work Item list", async ({
+    page,
+  }, testInfo) => {
+    await installEmbeddedRoutes(page);
+    await installSpecPresetBackend(page, {
+      theme: testInfo.project.name.includes("light") ? "light" : "dark",
     });
-  }
+
+    await page.goto(APP_URL);
+
+    await expect(page.locator(".surface-knowledge .knowledge-list")).toBeVisible();
+    await expect(page.locator(".surface-knowledge .knowledge-heading")).toHaveText(
+      "Cached work items",
+    );
+    await expect(page.locator(".surface-knowledge .knowledge-search")).toHaveAttribute(
+      "placeholder",
+      "Semantic search work items",
+    );
+    await expect(page.locator(".surface-knowledge .kanban-board")).toHaveCount(0);
+    await expect(page.locator(".surface-knowledge .knowledge-row")).toHaveCount(5);
+    await expect(page.getByText("SPEC Issue Kanban View")).toBeVisible();
+    await expect(page.getByText("Merge Kanban implementation bundle")).toHaveCount(0);
+  });
 });
 
 test.describe("Issue Bridge load recovery", () => {
@@ -56,6 +54,10 @@ test.describe("Issue Bridge load recovery", () => {
     await page.goto(APP_URL);
 
     await expect(page.locator(".surface-knowledge .knowledge-list")).toBeVisible();
+    await expect(page.locator(".surface-knowledge .knowledge-list")).toHaveAttribute(
+      "aria-label",
+      "Cached work items",
+    );
     await expect(page.locator(".surface-knowledge .kanban-board")).toHaveCount(0);
     await expect(
       page.locator(".surface-knowledge .kanban-column[data-phase='planning']"),
@@ -63,8 +65,16 @@ test.describe("Issue Bridge load recovery", () => {
     await expect(
       page.locator(".surface-knowledge .kanban-column[data-phase='implementation']"),
     ).toHaveCount(0);
-    await expect(page.locator(".surface-knowledge .knowledge-row")).toHaveCount(2);
+    await expect(page.locator(".surface-knowledge .knowledge-row")).toHaveCount(3);
+    await expect(page.locator(".surface-knowledge .knowledge-heading")).toHaveText(
+      "Cached work items",
+    );
+    await expect(page.locator(".surface-knowledge .knowledge-search")).toHaveAttribute(
+      "placeholder",
+      "Semantic search work items",
+    );
     await expect(page.getByText("Closed issue hidden by default")).toHaveCount(0);
+    await expect(page.getByText("Design-required work item shares Issue list")).toBeVisible();
     await expect(page.getByText("(plain)")).toHaveCount(0);
   });
 
@@ -76,7 +86,7 @@ test.describe("Issue Bridge load recovery", () => {
 
     await page.goto(APP_URL);
 
-    await expect(page.locator(".surface-knowledge .knowledge-row")).toHaveCount(2);
+    await expect(page.locator(".surface-knowledge .knowledge-row")).toHaveCount(3);
     await expect(page.getByText("Closed issue hidden by default")).toHaveCount(0);
 
     await page.locator(".surface-knowledge [data-issue-filter='closed']").click();
@@ -86,7 +96,7 @@ test.describe("Issue Bridge load recovery", () => {
 
     await page.locator(".surface-knowledge [data-issue-filter='all']").click();
 
-    await expect(page.locator(".surface-knowledge .knowledge-row")).toHaveCount(3);
+    await expect(page.locator(".surface-knowledge .knowledge-row")).toHaveCount(4);
   });
 
   test("selecting an Issue row renders cached detail in the right pane", async ({
@@ -118,7 +128,7 @@ test.describe("Issue Bridge load recovery", () => {
 
     await page.goto(APP_URL);
 
-    await expect(page.locator(".surface-knowledge .knowledge-row")).toHaveCount(2);
+    await expect(page.locator(".surface-knowledge .knowledge-row")).toHaveCount(3);
     await page.locator(".surface-knowledge .knowledge-row[data-issue-number='3095']").click();
     await expect(
       page.locator(".surface-knowledge .knowledge-detail-pane"),
@@ -152,7 +162,7 @@ test.describe("Issue Bridge load recovery", () => {
     await page.goto(APP_URL);
 
     await expect(page.locator(".surface-knowledge .knowledge-list")).toBeVisible();
-    await expect(page.locator(".surface-knowledge .knowledge-row")).toHaveCount(2);
+    await expect(page.locator(".surface-knowledge .knowledge-row")).toHaveCount(3);
   });
 
   test("manual refresh recovers a stale empty loading state", async ({ page }) => {
@@ -167,13 +177,13 @@ test.describe("Issue Bridge load recovery", () => {
     await expect(refresh).toBeEnabled();
     await refresh.click();
 
-    await expect(page.locator(".surface-knowledge .knowledge-row")).toHaveCount(2);
+    await expect(page.locator(".surface-knowledge .knowledge-row")).toHaveCount(3);
   });
 });
 
-async function installKanbanBackend(page, { hideDone, theme }) {
+async function installSpecPresetBackend(page, { theme }) {
   await page.addInitScript(
-    ({ hideDone: shouldHideDone, theme: selectedTheme }) => {
+    ({ theme: selectedTheme }) => {
       const entries = [
         {
           number: 2017,
@@ -291,11 +301,6 @@ async function installKanbanBackend(page, { hideDone, theme }) {
       };
 
       localStorage.setItem("gwt:ui:theme", selectedTheme);
-      if (shouldHideDone) {
-        localStorage.setItem("kanban-hide-done", "1");
-      } else {
-        localStorage.removeItem("kanban-hide-done");
-      }
 
       class FixtureWebSocket extends EventTarget {
         static CONNECTING = 0;
@@ -375,7 +380,7 @@ async function installKanbanBackend(page, { hideDone, theme }) {
         value: FixtureWebSocket,
       });
     },
-    { hideDone, theme },
+    { theme },
   );
 }
 
@@ -413,6 +418,18 @@ async function installIssueBridgeBackend(
         };
       }
       const entries = [
+        {
+          number: 3273,
+          title: "Design-required work item shares Issue list",
+          state: "open",
+          meta: "gwt-spec tagged work item",
+          labels: ["GWT-SPEC", "phase/implementation"],
+          linked_branch_count: 0,
+          match_score: 98,
+          phase: "implementation",
+          has_unknown_phase: false,
+          is_spec: true,
+        },
         {
           number: 3096,
           title: "Issue Bridge shows empty columns despite cached issues",

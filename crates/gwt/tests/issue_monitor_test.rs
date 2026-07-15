@@ -86,17 +86,17 @@ fn monitor_maps_gwt_spec_label_to_spec_launch_kind() {
 
     assert_eq!(launch.issue_number, 3165);
     assert_eq!(launch.linked_issue_kind, LinkedIssueKind::Spec);
-    assert_eq!(launch.branch_name, "feature/spec-3165");
+    assert_eq!(launch.branch_name, "work/issue-3165");
     assert_eq!(
         issue_monitor_launch_prompt(launch.linked_issue_kind, launch.issue_number),
-        "$gwt-build-spec SPEC-3165"
+        "$gwt-execute #3165"
     );
     assert_eq!(
         monitor
             .inbox_item(3165)
             .and_then(|item| item.launch_plan.as_ref())
             .map(|plan| plan.prompt.as_str()),
-        Some("$gwt-build-spec SPEC-3165")
+        Some("$gwt-execute #3165")
     );
 }
 
@@ -136,7 +136,7 @@ fn monitor_runs_one_active_launch_and_keeps_remaining_items_queued() {
     assert_eq!(first.branch_name, "work/issue-42");
     assert_eq!(
         issue_monitor_launch_prompt(first.linked_issue_kind, first.issue_number),
-        "$gwt-fix-issue #42"
+        "$gwt-execute #42"
     );
     assert_eq!(monitor.queue_len(), 1);
     assert!(monitor

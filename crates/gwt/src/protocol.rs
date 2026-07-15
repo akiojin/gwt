@@ -1246,6 +1246,35 @@ fn default_work_lifecycle_state() -> String {
     "active".to_string()
 }
 
+/// One launch-scoped Work contained by a canonical-branch Workspace row.
+///
+/// Workspace is a read projection; lifecycle operations target this stable
+/// Work identity. The parent row keeps its legacy lifecycle fields only for
+/// older consumers and never supplies an implicit close target.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ActiveWorkspaceWorkView {
+    pub id: String,
+    pub title: String,
+    #[serde(default)]
+    pub work_summary: Option<String>,
+    pub status_category: String,
+    pub status_text: String,
+    #[serde(default)]
+    pub owner: Option<String>,
+    #[serde(default = "default_work_lifecycle_state")]
+    pub lifecycle_state: String,
+    #[serde(default)]
+    pub closed_at: Option<String>,
+    #[serde(default)]
+    pub manual_close_allowed: bool,
+    #[serde(default)]
+    pub close_blocked_reason: Option<String>,
+    #[serde(default)]
+    pub agents: Vec<ActiveWorkAgentView>,
+    #[serde(default)]
+    pub updated_at: String,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ActiveWorkItemView {
     pub id: String,
@@ -1274,6 +1303,11 @@ pub struct ActiveWorkItemView {
     pub pr_state: Option<String>,
     pub board_refs: Vec<String>,
     pub agents: Vec<ActiveWorkAgentView>,
+    /// Launch-scoped Works grouped under this canonical-branch Workspace.
+    /// Empty for legacy payloads; consumers must not infer an operation target
+    /// from the parent row when no child Work is present.
+    #[serde(default)]
+    pub works: Vec<ActiveWorkspaceWorkView>,
     /// SPEC-2359 Phase W-12 (FR-349): agent-session Work lifecycle state
     /// (active / paused / done / discarded). Distinct from `status_category`
     /// which tracks runtime agent activity. Back-compat default is `"active"`.
@@ -3201,6 +3235,7 @@ mod tests {
                     pr_state: Some("OPEN".to_string()),
                     board_refs: vec!["board-1".to_string()],
                     agents: Vec::new(),
+                    works: Vec::new(),
                     lifecycle_state: "active".to_string(),
                     closed_at: None,
                     session_agent_total: 0,

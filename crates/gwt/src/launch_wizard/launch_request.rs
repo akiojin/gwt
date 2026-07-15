@@ -336,14 +336,14 @@ mod tests {
         );
         state.agent_id = "codex".to_string();
         state.apply(LaunchWizardAction::SetInitialPrompt {
-            value: "$gwt-build-spec SPEC-3165".to_string(),
+            value: "$gwt-execute #3165".to_string(),
         });
 
         let config = state.build_launch_config().expect("launch config");
 
         assert_eq!(
             config.args.last().map(String::as_str),
-            Some("$gwt-build-spec SPEC-3165")
+            Some("$gwt-execute #3165")
         );
     }
 

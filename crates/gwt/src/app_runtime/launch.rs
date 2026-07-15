@@ -1719,11 +1719,11 @@ impl AppRuntime {
     /// - If the owning agent session (derived from `work_id`) is still live, the
     ///   close is blocked and the worktree is left untouched (FR-352). The
     ///   owning agent must be stopped first.
-    /// - Otherwise (a Paused Work with no running agent), the worktree is removed
-    ///   (worktree only — branch / PR are retained) and the terminal close is
-    ///   recorded in the work history. A `done` close records a Done event; a
-    ///   `discarded` close records a Discard event. Both remove the Work from the
-    ///   active Work surface. Re-closing an already-closed Work is a noop.
+    /// - Otherwise (a Paused Work with no running agent), only the terminal close
+    ///   is recorded in Work history. Worktree, branch, and PR are unchanged;
+    ///   worktree deletion remains an independent vetted cleanup operation. A
+    ///   `done` close records a Done event and `discarded` records a Discard
+    ///   event. Re-closing an already-closed Work is a noop.
     pub(crate) fn close_work(&mut self, work_id: &str, close_kind: &str) -> Vec<OutboundEvent> {
         let work_id = work_id.trim();
         if work_id.is_empty() {
@@ -1760,12 +1760,7 @@ impl AppRuntime {
                 .any(|session| session.session_id == session_id)
         });
 
-        // Resolve the worktree path from the retained work history so a Paused
-        // Work can have its worktree removed without a live session.
-        let worktree_path = self.resolve_work_worktree_path(&project_root, work_id);
-
-        let decision =
-            gwt_core::workspace_projection::decide_work_close(has_live_agent, worktree_path);
+        let decision = gwt_core::workspace_projection::decide_work_close(has_live_agent, None);
 
         match decision {
             gwt_core::workspace_projection::WorkCloseDecision::BlockedLiveAgent => {
@@ -1777,14 +1772,9 @@ impl AppRuntime {
                 );
                 return Vec::new();
             }
-            gwt_core::workspace_projection::WorkCloseDecision::CleanupWorktree {
-                worktree_path,
-            } => {
-                self.remove_work_worktree_only(&project_root, &worktree_path);
-            }
             gwt_core::workspace_projection::WorkCloseDecision::RecordOnly => {
-                // No resolvable worktree path: record the close without any
-                // filesystem side effect.
+                // Work close records lifecycle only. Worktree deletion is an
+                // independent cleanup operation with its own safety gates.
             }
         }
 
@@ -1820,53 +1810,6 @@ impl AppRuntime {
         self.active_work_projection_broadcast_for_active_tab()
             .into_iter()
             .collect()
-    }
-
-    /// SPEC-2359 Phase W-12 Slice 4 (FR-352): resolve the worktree path for
-    /// `work_id` from the retained work history's execution containers. Returns
-    /// `None` when the Work has no recorded worktree, in which case the close is
-    /// recorded without filesystem cleanup.
-    fn resolve_work_worktree_path(&self, project_root: &Path, work_id: &str) -> Option<PathBuf> {
-        let projection = self
-            .work_items_cache
-            .borrow_mut()
-            .load_or_synthesize(project_root)
-            .ok()?;
-        let item = projection
-            .work_items
-            .iter()
-            .find(|item| item.id == work_id)?;
-        item.execution_containers
-            .iter()
-            .find_map(|container| container.worktree_path.clone())
-    }
-
-    /// SPEC-2359 Phase W-12 Slice 4 (FR-352): remove the worktree at
-    /// `worktree_path` (worktree only — the branch and any PR are retained). A
-    /// missing or already-removed worktree is treated as success so the close
-    /// stays robust; other failures are logged but do not abort recording the
-    /// close.
-    fn remove_work_worktree_only(&self, project_root: &Path, worktree_path: &Path) {
-        let main_repo_path = match gwt_git::worktree::main_worktree_root(project_root) {
-            Ok(path) => path,
-            Err(error) => {
-                tracing::warn!(
-                    project_root = %project_root.display(),
-                    worktree_path = %worktree_path.display(),
-                    error = %error,
-                    "Work close could not resolve main worktree root; skipping worktree removal"
-                );
-                return;
-            }
-        };
-        let manager = gwt_git::WorktreeManager::new(&main_repo_path);
-        if let Err(error) = manager.remove_force(worktree_path) {
-            tracing::warn!(
-                worktree_path = %worktree_path.display(),
-                error = %error,
-                "Work close worktree removal failed; recording the close anyway"
-            );
-        }
     }
 
     pub(crate) fn mark_agent_session_stopped(&mut self, window_id: &str) {

@@ -29,6 +29,13 @@ pub use quick_start::{load_quick_start_entries, load_sessions};
 
 const DEFAULT_NEW_BRANCH_BASE_BRANCH: &str = "develop";
 const BRANCH_TYPE_PREFIXES: [&str; 4] = ["feature/", "bugfix/", "hotfix/", "release/"];
+pub const GWT_SPEC_LABEL: &str = "gwt-spec";
+
+pub fn has_gwt_spec_label(labels: &[String]) -> bool {
+    labels
+        .iter()
+        .any(|label| label.eq_ignore_ascii_case(GWT_SPEC_LABEL))
+}
 
 /// Distinguishes the source bridge so branch names seed as `issue-{n}` vs
 /// `spec-{n}` (kept independent of `linked_issue_number` because Branches-window
@@ -43,10 +50,7 @@ pub enum LinkedIssueKind {
 
 impl LinkedIssueKind {
     fn branch_kind_segment(self) -> &'static str {
-        match self {
-            LinkedIssueKind::Issue => "issue",
-            LinkedIssueKind::Spec => "spec",
-        }
+        "issue"
     }
 }
 
@@ -65,10 +69,28 @@ pub enum LaunchWizardMode {
     ExistingBranch,
 }
 
-pub fn knowledge_launch_target_branch_name(kind: LinkedIssueKind, number: u64) -> String {
-    match kind {
-        LinkedIssueKind::Issue => format!("work/issue-{number}"),
-        LinkedIssueKind::Spec => format!("feature/spec-{number}"),
+pub fn knowledge_launch_target_branch_name(_kind: LinkedIssueKind, number: u64) -> String {
+    format!("work/issue-{number}")
+}
+
+#[cfg(test)]
+mod work_item_unification_tests {
+    use super::{knowledge_launch_target_branch_name, LinkedIssueKind};
+
+    #[test]
+    fn spec_compatibility_kind_uses_unified_work_issue_branch_for_new_launches() {
+        assert_eq!(
+            knowledge_launch_target_branch_name(LinkedIssueKind::Spec, 2014),
+            "work/issue-2014"
+        );
+    }
+
+    #[test]
+    fn issue_kind_keeps_unified_work_issue_branch_for_new_launches() {
+        assert_eq!(
+            knowledge_launch_target_branch_name(LinkedIssueKind::Issue, 42),
+            "work/issue-42"
+        );
     }
 }
 
@@ -461,6 +483,10 @@ impl LaunchWizardPreviousProfiles {
 struct AgentLaunchDraft {
     model: String,
     reasoning: String,
+    /// SPEC-1921 US-20 / FR-123: whether `reasoning` was an explicit user or
+    /// restored selection (preserve/clamp on model change) rather than an
+    /// untouched model default (follow the target model's default).
+    reasoning_explicit: bool,
     version: String,
     mode: String,
     resume_session_id: Option<String>,
@@ -787,6 +813,10 @@ pub struct LaunchWizardState {
     agent_drafts: HashMap<String, AgentLaunchDraft>,
     pub model: String,
     pub reasoning: String,
+    /// SPEC-1921 US-20 / FR-123: distinguishes an untouched model-default
+    /// reasoning stop from an explicit user or restored selection so model
+    /// changes can pick the target default vs. preserve/clamp respectively.
+    reasoning_explicit: bool,
     pub version: String,
     pub mode: String,
     pub resume_session_id: Option<String>,

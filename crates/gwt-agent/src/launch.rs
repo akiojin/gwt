@@ -1625,6 +1625,54 @@ mod tests {
     }
 
     #[test]
+    fn build_codex_with_max_reasoning_emits_effort_and_detailed_summaries() {
+        // SPEC-1921 US-20 / FR-124: `max` is a plain Codex reasoning effort and
+        // must pass through unchanged, followed by the detailed-summaries flag.
+        let config = AgentLaunchBuilder::new(AgentId::Codex)
+            .reasoning_level("max")
+            .build();
+
+        assert!(config
+            .args
+            .windows(2)
+            .any(|pair| pair[0] == "-c" && pair[1] == "model_reasoning_effort=max"));
+        assert!(config
+            .args
+            .windows(2)
+            .any(|pair| pair[0] == "-c" && pair[1] == "model_reasoning_summaries=detailed"));
+    }
+
+    #[test]
+    fn build_codex_with_ultra_reasoning_emits_effort_without_extra_flag() {
+        // SPEC-1921 US-20 / FR-124: `ultra` passes through like any other effort
+        // with no Ultra-specific launch flag. The only arg mentioning "ultra"
+        // must be the effort value itself.
+        let config = AgentLaunchBuilder::new(AgentId::Codex)
+            .reasoning_level("ultra")
+            .build();
+
+        assert!(config
+            .args
+            .windows(2)
+            .any(|pair| pair[0] == "-c" && pair[1] == "model_reasoning_effort=ultra"));
+        assert!(config
+            .args
+            .windows(2)
+            .any(|pair| pair[0] == "-c" && pair[1] == "model_reasoning_summaries=detailed"));
+
+        // No Ultra-specific extra flag: the sole "ultra" mention is the effort value.
+        let ultra_args: Vec<&String> = config
+            .args
+            .iter()
+            .filter(|arg| arg.contains("ultra"))
+            .collect();
+        assert_eq!(
+            ultra_args,
+            vec![&"model_reasoning_effort=ultra".to_string()]
+        );
+    }
+
+    #[test]
     fn build_codex_fast_mode() {
         let config = AgentLaunchBuilder::new(AgentId::Codex)
             .fast_mode(true)

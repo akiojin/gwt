@@ -38,8 +38,9 @@ export function createWorkspaceKanbanSurface({
   const ATTENTION_PRIORITY = Object.freeze({
     needs_attention: 0,
     running: 1,
-    paused: 2,
-    closed: 3,
+    remote: 2,
+    paused: 3,
+    closed: 4,
   });
 
   function compactText(value, fallback = "") {
@@ -161,6 +162,9 @@ export function createWorkspaceKanbanSurface({
         label: "Closed",
         reason: item?.done_equivalent ? "Merged with no updates" : formatLifecycleStateLabel(lifecycle),
       };
+    }
+    if (item?.remote_only) {
+      return { lane: "remote", label: "Remote", reason: "" };
     }
     const reason = explicitAttentionReason(item);
     if (reason) {
@@ -295,6 +299,17 @@ export function createWorkspaceKanbanSurface({
         : Array.isArray(fallback.agents)
           ? fallback.agents
           : [],
+      // W-21: launch-scoped Works are explicit children of the canonical
+      // branch Workspace. Empty means legacy display compatibility only; it
+      // must never create an implicit close target from the parent row.
+      works: Array.isArray(item?.works)
+        ? item.works.map((work) => ({
+            ...work,
+            agents: Array.isArray(work?.agents) ? work.agents : [],
+            manual_close_allowed: Boolean(work?.manual_close_allowed),
+            close_blocked_reason: compactText(work?.close_blocked_reason),
+          }))
+        : [],
       // SPEC-2359 W16-2 (FR-389): Workspace grouping key (backend merges
       // same-key rows before the wire; carried for tooling/tests).
       workspace_key: item?.workspace_key || null,
@@ -538,7 +553,7 @@ export function createWorkspaceKanbanSurface({
     // SPEC-2359 US-83 (UX revision 2026-06-24): a startable remote branch has
     // no Work yet, so a lifecycle state ("Paused") would misread as a stalled
     // Work. The Remote tag is its only state marker.
-    if (!item.startable_remote) {
+    if (!item.remote_only) {
       const doneEquivalent = Boolean(item.done_equivalent);
       const lifecycleBadge = createNode(
         "span",
@@ -880,17 +895,9 @@ export function createWorkspaceKanbanSurface({
     return section;
   }
 
-  // SPEC-2359 Workspace → Work → Session: the detail is Session-centric. Each
-  // `work` (a launch, carried in `workspace.agents`) holds its conversation
-  // Sessions in `work.sessions`. Sessions render as the primary rows; a Work
-  // heading only appears when the Workspace has more than one Work. Persistent
-  // Works always render (no live-only filtering), so Paused Workspaces are not
-  // mislabelled "No assigned agents".
-  // SPEC-2359 W-15 (FR-379 follow-up): Launch opens the launch wizard
-  // prefilled with the Workspace's branch; the new launch becomes a new Work
-  // joining this Workspace. Lives in the detail header actions as the primary
-  // action — one fixed home, never after the variable-length Work list
-  // (placement feedback, user verification 2026-06-11).
+  // Workspace -> Work -> Session: Workspace is a read projection. Launch is a
+  // branch operation, lifecycle close targets a child Work, and Resume targets
+  // a Session owned by that Work.
   function renderLaunchWorkspaceButton(workspace, windowId) {
     const branch = workspace && workspace.branch ? String(workspace.branch) : "";
     if (!branch) return null;
@@ -920,53 +927,67 @@ export function createWorkspaceKanbanSurface({
       return;
     }
     const wrap = createNode("div", "workspace-detail-work-list");
+    let renderedAgentTotal = 0;
     for (const work of list) {
       const group = createNode("div", "workspace-detail-work-group");
-      group.dataset.agentColor = agentColorKeyword(work);
-      // Each Work is one Agent (a launch). The Agent header names the agent
-      // (tool); the Work's Sessions (its conversation history) are listed under
-      // it as sub-rows, and Resume lives on each Session row (a single list
-      // element) so any conversation can be resumed directly. The header is
-      // always shown so two Sessions of one Work never look like two Agents.
+      if (work?.id) group.dataset.workId = work.id;
+      const agents = Array.isArray(work?.agents) ? work.agents : [];
+      const displayedAgents = agents.length > 0 ? agents : [work];
+      const firstAgent = displayedAgents[0];
+      renderedAgentTotal += agents.length;
+      group.dataset.agentColor = agentColorKeyword(firstAgent);
       const head = createNode("div", "workspace-detail-work-head");
       head.appendChild(
         createNode(
           "div",
           "workspace-detail-work-heading",
-          work.display_name || work.agent_id || "Agent",
+          work.work_summary
+            || work.title
+            || firstAgent.display_name
+            || firstAgent.agent_id
+            || "Work",
         ),
       );
+      if (!workspace?.remote_only) {
+        const lifecycle = createNode(
+          "span",
+          "workspace-overview-lifecycle",
+          formatLifecycleStateLabel(work.lifecycle_state),
+        );
+        lifecycle.dataset.lifecycle = String(work.lifecycle_state || "active").toLowerCase();
+        head.appendChild(lifecycle);
+      }
+      appendWorkCloseActions(head, work);
       group.appendChild(head);
 
-      const sessions = Array.isArray(work.sessions) ? work.sessions : [];
-      if (sessions.length === 0) {
-        // No conversation recorded yet — still expose a Resume control on the
-        // placeholder row so a session-less Work stays launchable.
-        const empty = createNode(
-          "div",
-          "workspace-overview-empty workspace-detail-session-empty",
-          "No session yet",
-        );
-        const resumeBtn = renderWorkResumeButton(work);
-        if (resumeBtn) {
-          empty.appendChild(resumeBtn);
-        }
-        group.appendChild(empty);
-      } else {
-        // User decision 2026-06-12: multiple Session rows per agent read as
-        // noise — render only the latest conversation (the active one, or the
-        // newest by order; the backend sorts oldest-first).
-        const latest =
-          sessions.find((session) => session && session.is_active) ||
-          sessions[sessions.length - 1];
-        group.appendChild(renderSessionRow(work, latest));
-        // E1: when the visible Session is history-only (not resumable) on a
-        // non-running Work, no Resume appears — offer a "Start Fresh" control
-        // so the Work stays launchable. Distinct label so the user knows it
-        // starts a new conversation, not a resumed one.
-        const startFresh = renderStartFreshButton(work, [latest]);
-        if (startFresh) {
-          group.appendChild(startFresh);
+      for (const agent of displayedAgents) {
+        const sessions = Array.isArray(agent.sessions) ? agent.sessions : [];
+        if (sessions.length === 0) {
+          // No conversation recorded yet — still expose a Resume control on
+          // the placeholder row so a session-less Work stays launchable.
+          const empty = createNode(
+            "div",
+            "workspace-overview-empty workspace-detail-session-empty",
+            "No session yet",
+          );
+          const resumeBtn = renderWorkResumeButton(agent);
+          if (resumeBtn) {
+            empty.appendChild(resumeBtn);
+          }
+          group.appendChild(empty);
+        } else {
+          // Multiple Session rows per agent read as noise — render only that
+          // agent's latest conversation while preserving every Agent in Work.
+          const latest =
+            sessions.find((session) => session && session.is_active) ||
+            sessions[sessions.length - 1];
+          group.appendChild(renderSessionRow(agent, latest));
+          // When the visible Session is history-only (not resumable) on a
+          // non-running Work, offer a distinct fresh-conversation control.
+          const startFresh = renderStartFreshButton(agent, [latest]);
+          if (startFresh) {
+            group.appendChild(startFresh);
+          }
         }
       }
       wrap.appendChild(group);
@@ -976,15 +997,58 @@ export function createWorkspaceKanbanSurface({
     // how many more ledger sessions exist beyond the rendered ones.
     // `session_agent_total === 0` means "not computed" (legacy payload).
     const total = Number(workspace && workspace.session_agent_total) || 0;
-    if (total > list.length) {
+    if (total > renderedAgentTotal) {
       container.appendChild(
         createNode(
           "div",
           "workspace-detail-more-sessions workspace-overview-empty",
-          `+${total - list.length} more sessions`,
+          `+${total - renderedAgentTotal} more sessions`,
         ),
       );
     }
+  }
+
+  function appendWorkCloseActions(container, work) {
+    if (!work?.id) return;
+    const lifecycle = String(work.lifecycle_state || "active").toLowerCase();
+    if (lifecycle === "done" || lifecycle === "discarded") return;
+    if (!work.manual_close_allowed && !work.close_blocked_reason) return;
+
+    const actions = createNode("div", "workspace-detail-work-actions");
+    for (const [action, label, closeKind] of [
+      ["close-work-done", "Done", "done"],
+      ["close-work-discard", "Discard", "discarded"],
+    ]) {
+      const button = createNode("button", "wizard-button is-compact", label);
+      button.type = "button";
+      button.dataset.action = action;
+      if (!work.manual_close_allowed) {
+        button.disabled = true;
+        button.title = work.close_blocked_reason;
+        button.setAttribute("aria-label", `${label} unavailable: ${work.close_blocked_reason}`);
+      } else {
+        button.addEventListener("click", () =>
+          send({ kind: "close_work", work_id: work.id, close_kind: closeKind }),
+        );
+      }
+      actions.appendChild(button);
+    }
+    container.appendChild(actions);
+  }
+
+  function displayedWorkspaceWorks(workspace) {
+    if (Array.isArray(workspace?.works) && workspace.works.length > 0) {
+      return workspace.works;
+    }
+    // Legacy payloads carried launch/session summaries directly in `agents`.
+    // Preserve Resume/display compatibility without inventing close targets.
+    return (Array.isArray(workspace?.agents) ? workspace.agents : []).map((agent) => ({
+      title: agent.display_name || agent.agent_id || "Work",
+      lifecycle_state: workspace?.lifecycle_state || "active",
+      agents: [agent],
+      manual_close_allowed: false,
+      close_blocked_reason: "",
+    }));
   }
 
   function renderWorkResumeButton(work) {
@@ -1347,64 +1411,6 @@ export function createWorkspaceKanbanSurface({
     titleWrap.appendChild(subtitle);
     header.appendChild(titleWrap);
 
-    const actions = createNode("div", "workspace-detail-actions");
-    // SPEC-2359: Resume is a per-Work (launch) operation, so the Resume control
-    // lives on each Work row (see appendWorks / renderWorkResumeButton). The
-    // Workspace header carries Launch Agent (the primary Workspace action —
-    // a new Work joining this Workspace) plus the lifecycle closes
-    // (Done / Discard / Clean Up).
-    const launchAction = renderLaunchWorkspaceButton(workspace, windowId);
-    if (launchAction) {
-      actions.appendChild(launchAction);
-    }
-    // SPEC-2359 Phase W-12 (FR-351): the Work surface owns Work lifecycle
-    // closing. Done / Discard are explicit user closes (FR-350 — agent stop
-    // alone never closes a Work). The actual cleanup is a follow-up slice, so
-    // these buttons only emit the `close_work` message for now.
-    const lifecycleState = String(workspace.lifecycle_state || "active").toLowerCase();
-    // SPEC-2359 US-83: a startable remote branch has no Work yet, so the detail
-    // offers only Launch — Done / Discard would close a Work that does not exist.
-    if (
-      !workspace.startable_remote &&
-      lifecycleState !== "done" &&
-      lifecycleState !== "discarded"
-    ) {
-      const doneButton = createNode("button", "wizard-button", "Done");
-      doneButton.type = "button";
-      doneButton.dataset.action = "close-work-done";
-      doneButton.addEventListener("click", () =>
-        send({ kind: "close_work", work_id: workspace.id, close_kind: "done" }),
-      );
-      actions.appendChild(doneButton);
-
-      const discardButton = createNode("button", "wizard-button", "Discard");
-      discardButton.type = "button";
-      discardButton.dataset.action = "close-work-discard";
-      discardButton.addEventListener("click", () =>
-        send({ kind: "close_work", work_id: workspace.id, close_kind: "discarded" }),
-      );
-      actions.appendChild(discardButton);
-    }
-    // SPEC-2359 US-78: cleanup eligibility is backend-owned per row after the
-    // live-agent guard. `merged_into_base` is only a display badge.
-    if (workspace.cleanup_candidate) {
-      const cleanupButton = createNode("button", "wizard-button", "Clean Up");
-      cleanupButton.type = "button";
-      cleanupButton.dataset.action = "cleanup-merged-workspace";
-      cleanupButton.addEventListener("click", () =>
-        openWorkspaceCleanup?.(workspace.cleanup_candidate, windowId),
-      );
-      actions.appendChild(cleanupButton);
-    } else if (workspace.cleanup_blocked_reason) {
-      const cleanupButton = createNode("button", "wizard-button", "Clean Up");
-      cleanupButton.type = "button";
-      cleanupButton.disabled = true;
-      cleanupButton.dataset.action = "cleanup-blocked-workspace";
-      cleanupButton.title = cleanupBlockedTitle(workspace.cleanup_blocked_reason);
-      cleanupButton.setAttribute("aria-label", cleanupButton.title);
-      actions.appendChild(cleanupButton);
-    }
-    header.appendChild(actions);
     container.appendChild(header);
 
     // SPEC-3075: the Work *purpose* ("what work was running") is the detail
@@ -1446,8 +1452,45 @@ export function createWorkspaceKanbanSurface({
       }),
     );
     container.appendChild(
+      (() => {
+        const section = detailSection("Branch", (body) => {
+          appendDefinitionList(body, [["Branch", workspace.branch]]);
+          const launchAction = renderLaunchWorkspaceButton(workspace, windowId);
+          if (launchAction) body.appendChild(launchAction);
+        });
+        section.dataset.section = "branch-context";
+        return section;
+      })(),
+    );
+    if (workspace.worktree_path || workspace.cleanup_candidate || workspace.cleanup_blocked_reason) {
+      const worktreeSection = detailSection("Worktree", (body) => {
+        appendDefinitionList(body, [
+          ["Path", compactPath(workspace.worktree_path) || workspace.worktree_path],
+        ]);
+        if (workspace.cleanup_candidate) {
+          const cleanupButton = createNode("button", "wizard-button", "Clean Up");
+          cleanupButton.type = "button";
+          cleanupButton.dataset.action = "cleanup-merged-workspace";
+          cleanupButton.addEventListener("click", () =>
+            openWorkspaceCleanup?.(workspace.cleanup_candidate, windowId),
+          );
+          body.appendChild(cleanupButton);
+        } else if (workspace.cleanup_blocked_reason) {
+          const cleanupButton = createNode("button", "wizard-button", "Clean Up");
+          cleanupButton.type = "button";
+          cleanupButton.disabled = true;
+          cleanupButton.dataset.action = "cleanup-blocked-workspace";
+          cleanupButton.title = cleanupBlockedTitle(workspace.cleanup_blocked_reason);
+          cleanupButton.setAttribute("aria-label", cleanupButton.title);
+          body.appendChild(cleanupButton);
+        }
+      });
+      worktreeSection.dataset.section = "worktree-context";
+      container.appendChild(worktreeSection);
+    }
+    container.appendChild(
       detailSection("Agents & Sessions", (body) => {
-        appendWorks(body, workspace.agents, workspace);
+        appendWorks(body, displayedWorkspaceWorks(workspace), workspace);
       }),
     );
     container.appendChild(
@@ -1475,11 +1518,7 @@ export function createWorkspaceKanbanSurface({
     );
     container.appendChild(
       detailSection("Context", (body) => {
-        appendDefinitionList(body, [
-          ["Purpose", purposeText],
-          ["Branch", workspace.branch],
-          ["Worktree", compactPath(workspace.worktree_path) || workspace.worktree_path],
-        ]);
+        appendDefinitionList(body, [["Purpose", purposeText]]);
       }),
     );
   }
