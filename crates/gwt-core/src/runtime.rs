@@ -1176,22 +1176,22 @@ mod tests {
         assert_eq!(fs::read_to_string(&path).unwrap(), "second");
 
         let mut ok = if cfg!(windows) {
-            let mut command = Command::new("cmd");
+            let mut command = crate::process::hidden_command("cmd");
             command.args(["/C", "exit 0"]);
             command
         } else {
-            let mut command = Command::new("sh");
+            let mut command = crate::process::hidden_command("sh");
             command.args(["-c", "exit 0"]);
             command
         };
         run_checked(&mut ok, "ok").unwrap();
 
         let mut failing = if cfg!(windows) {
-            let mut command = Command::new("cmd");
+            let mut command = crate::process::hidden_command("cmd");
             command.args(["/C", "echo fail 1>&2 & exit 4"]);
             command
         } else {
-            let mut command = Command::new("sh");
+            let mut command = crate::process::hidden_command("sh");
             command.args(["-c", "echo fail >&2; exit 4"]);
             command
         };

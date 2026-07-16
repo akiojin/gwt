@@ -725,13 +725,13 @@ mod tests {
 
     fn init_repo(path: &Path, origin: &str) {
         std::fs::create_dir_all(path).expect("repo dir");
-        let init = std::process::Command::new("git")
+        let init = gwt_core::process::hidden_command("git")
             .args(["init", "--quiet"])
             .current_dir(path)
             .status()
             .expect("git init");
         assert!(init.success(), "git init failed for {}", path.display());
-        let remote = std::process::Command::new("git")
+        let remote = gwt_core::process::hidden_command("git")
             .args(["remote", "add", "origin", origin])
             .current_dir(path)
             .status()

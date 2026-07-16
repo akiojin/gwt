@@ -740,7 +740,7 @@ fn powershell_coordination_hook_command(event: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use std::process::Command;
+    use gwt_core::process::hidden_command;
 
     use crate::provider_hooks::{
         generate_hermes_hooks_with_source, generate_openclaw_hooks, generate_opencode_hooks,
@@ -820,14 +820,14 @@ mod tests {
     }
 
     fn init_repo_with_origin(worktree: &Path, remote_url: &str) {
-        assert!(Command::new("git")
+        assert!(hidden_command("git")
             .arg("init")
             .arg("-q")
             .arg(worktree)
             .status()
             .expect("git init")
             .success());
-        assert!(Command::new("git")
+        assert!(hidden_command("git")
             .arg("-C")
             .arg(worktree)
             .args(["remote", "add", "origin", remote_url])
@@ -1355,7 +1355,6 @@ mod tests {
 
     #[test]
     fn tracked_legacy_node_bash_blockers_trigger_migration() {
-        use std::process::Command;
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join(".codex/hooks.json");
         fs::create_dir_all(path.parent().unwrap()).unwrap();
@@ -1380,13 +1379,13 @@ mod tests {
         )
         .unwrap();
 
-        assert!(Command::new("git")
+        assert!(hidden_command("git")
             .arg("init")
             .arg(dir.path())
             .status()
             .unwrap()
             .success());
-        assert!(Command::new("git")
+        assert!(hidden_command("git")
             .arg("-C")
             .arg(dir.path())
             .arg("add")
@@ -1410,7 +1409,6 @@ mod tests {
 
     #[test]
     fn tracked_block_bash_policy_hook_triggers_migration() {
-        use std::process::Command;
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join(".codex/hooks.json");
         fs::create_dir_all(path.parent().unwrap()).unwrap();
@@ -1435,13 +1433,13 @@ mod tests {
         )
         .unwrap();
 
-        assert!(Command::new("git")
+        assert!(hidden_command("git")
             .arg("init")
             .arg(dir.path())
             .status()
             .unwrap()
             .success());
-        assert!(Command::new("git")
+        assert!(hidden_command("git")
             .arg("-C")
             .arg(dir.path())
             .arg("add")
@@ -1465,7 +1463,6 @@ mod tests {
 
     #[test]
     fn tracked_legacy_inline_shell_runtime_hook_triggers_migration() {
-        use std::process::Command;
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join(".codex/hooks.json");
         fs::create_dir_all(path.parent().unwrap()).unwrap();
@@ -1490,13 +1487,13 @@ mod tests {
         )
         .unwrap();
 
-        assert!(Command::new("git")
+        assert!(hidden_command("git")
             .arg("init")
             .arg(dir.path())
             .status()
             .unwrap()
             .success());
-        assert!(Command::new("git")
+        assert!(hidden_command("git")
             .arg("-C")
             .arg(dir.path())
             .arg("add")
@@ -1858,13 +1855,13 @@ mod tests {
         )
         .unwrap();
 
-        assert!(Command::new("git")
+        assert!(hidden_command("git")
             .arg("init")
             .arg(dir.path())
             .status()
             .unwrap()
             .success());
-        assert!(Command::new("git")
+        assert!(hidden_command("git")
             .arg("-C")
             .arg(dir.path())
             .arg("add")
@@ -1949,13 +1946,13 @@ mod tests {
         )
         .unwrap();
 
-        assert!(Command::new("git")
+        assert!(hidden_command("git")
             .arg("init")
             .arg(dir.path())
             .status()
             .unwrap()
             .success());
-        assert!(Command::new("git")
+        assert!(hidden_command("git")
             .arg("-C")
             .arg(dir.path())
             .arg("add")
@@ -2017,13 +2014,13 @@ mod tests {
         )
         .unwrap();
 
-        assert!(Command::new("git")
+        assert!(hidden_command("git")
             .arg("init")
             .arg(dir.path())
             .status()
             .unwrap()
             .success());
-        assert!(Command::new("git")
+        assert!(hidden_command("git")
             .arg("-C")
             .arg(dir.path())
             .arg("add")
@@ -2130,13 +2127,13 @@ mod tests {
         )
         .unwrap();
 
-        assert!(Command::new("git")
+        assert!(hidden_command("git")
             .arg("init")
             .arg(dir.path())
             .status()
             .unwrap()
             .success());
-        assert!(Command::new("git")
+        assert!(hidden_command("git")
             .arg("-C")
             .arg(dir.path())
             .arg("add")
@@ -2264,13 +2261,13 @@ mod tests {
         )
         .unwrap();
 
-        assert!(Command::new("git")
+        assert!(hidden_command("git")
             .arg("init")
             .arg(dir.path())
             .status()
             .unwrap()
             .success());
-        assert!(Command::new("git")
+        assert!(hidden_command("git")
             .arg("-C")
             .arg(dir.path())
             .arg("add")
@@ -2476,7 +2473,6 @@ mod tests {
 
     #[test]
     fn tracked_pathless_gwt_hook_literal_triggers_migration() {
-        use std::process::Command;
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join(".codex/hooks.json");
         fs::create_dir_all(path.parent().unwrap()).unwrap();
@@ -2501,13 +2497,13 @@ mod tests {
         )
         .unwrap();
 
-        assert!(Command::new("git")
+        assert!(hidden_command("git")
             .arg("init")
             .arg(dir.path())
             .status()
             .unwrap()
             .success());
-        assert!(Command::new("git")
+        assert!(hidden_command("git")
             .arg("-C")
             .arg(dir.path())
             .arg("add")

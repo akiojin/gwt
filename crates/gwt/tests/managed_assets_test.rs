@@ -9,6 +9,7 @@ use gwt::{
     refresh_managed_gwt_assets_for_worktree,
 };
 use gwt_agent::AgentId;
+use gwt_core::process::hidden_command;
 use gwt_skills::{CodexHookDiscoveryMode, SessionKind};
 use serde_json::Value;
 use tempfile::tempdir;
@@ -417,7 +418,7 @@ fn refresh_managed_gwt_assets_keeps_command_assets_on_gwtd_cli_surface() {
 }
 
 fn run_git(repo: &Path, args: &[&str]) {
-    let output = std::process::Command::new("git")
+    let output = hidden_command("git")
         .args(args)
         .current_dir(repo)
         .output()

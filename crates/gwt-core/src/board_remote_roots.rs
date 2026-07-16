@@ -327,7 +327,7 @@ mod tests {
     fn init_repo_with_origin(path: &Path, url: &str) {
         fs::create_dir_all(path).unwrap();
         for args in [vec!["init"], vec!["remote", "add", "origin", url]] {
-            let output = std::process::Command::new("git")
+            let output = crate::process::hidden_command("git")
                 .args(&args)
                 .current_dir(path)
                 .output()

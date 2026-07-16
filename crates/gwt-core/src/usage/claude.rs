@@ -9,7 +9,6 @@
 
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::process::Command;
 
 use chrono::{DateTime, Utc};
 use serde_json::Value;
@@ -113,7 +112,7 @@ fn creds_from_file(home: &Path) -> Option<ClaudeCreds> {
 
 #[cfg(target_os = "macos")]
 fn creds_from_keychain() -> Option<ClaudeCreds> {
-    let out = Command::new("security")
+    let out = crate::process::hidden_command("security")
         .args([
             "find-generic-password",
             "-s",
@@ -146,7 +145,7 @@ pub fn resolve_claude_creds(home: &Path) -> Option<ClaudeCreds> {
 /// Build the `User-Agent` from the installed `claude --version`
 /// (`"2.1.159 (Claude Code)"` → `claude-code/2.1.159`).
 pub fn claude_user_agent() -> String {
-    let version = Command::new("claude")
+    let version = crate::process::hidden_command("claude")
         .arg("--version")
         .output()
         .ok()
