@@ -731,9 +731,26 @@ fn sweep_live_registrations_excluding(
         };
         match fs2::FileExt::try_lock_exclusive(&file) {
             Ok(()) => {
-                // No live holder: stale registration from a dead process.
-                drop(file);
-                let _ = fs::remove_file(&path);
+                // No live holder. A freshly created registration is briefly
+                // lockable (and still empty) before its owner takes the
+                // shared lock and writes the payload — leave it alone so a
+                // concurrent sweep never unlinks a live claimant. Anything
+                // empty for longer than a minute is a real crash residue.
+                let (len, age) = file
+                    .metadata()
+                    .map(|meta| {
+                        let age = meta
+                            .modified()
+                            .ok()
+                            .and_then(|modified| modified.elapsed().ok())
+                            .unwrap_or_default();
+                        (meta.len(), age)
+                    })
+                    .unwrap_or((0, Duration::ZERO));
+                if len > 0 || age > Duration::from_secs(60) {
+                    drop(file);
+                    let _ = fs::remove_file(&path);
+                }
             }
             Err(err) if is_contended(&err) => {
                 live.push(read_registration(&path));
@@ -747,4 +764,215 @@ fn sweep_live_registrations_excluding(
 fn read_registration(path: &Path) -> Option<Registration> {
     let raw = fs::read(path).ok()?;
     serde_json::from_slice(&raw).ok()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn open(root: &Path) -> IndexCoordinator {
+        IndexCoordinator::open(root).expect("open coordinator")
+    }
+
+    fn own(
+        coordinator: &IndexCoordinator,
+        key: &TargetKey,
+        priority: JobPriority,
+    ) -> TargetJobGuard {
+        match coordinator
+            .request_job(key, priority, Duration::from_secs(5))
+            .expect("request job")
+        {
+            JobAdmission::Owner(guard) => guard,
+            JobAdmission::Joined(_) => panic!(
+                "expected ownership of {} (state: {:?})",
+                key.file_stem(),
+                std::fs::read_to_string(coordinator.target_state_path(key)).ok(),
+            ),
+        }
+    }
+
+    #[test]
+    fn target_key_accessors_and_file_stem_are_sanitized() {
+        let repo = TargetKey::repo_shared("repo/hash", "issues");
+        assert_eq!(repo.repo_hash(), "repo/hash");
+        assert_eq!(repo.scope(), "issues");
+        assert_eq!(repo.worktree_hash(), None);
+        assert_eq!(repo.file_stem(), "repo_hash--issues");
+
+        let worktree = TargetKey::worktree("repo", "files-docs", "wt:1");
+        assert_eq!(worktree.worktree_hash(), Some("wt:1"));
+        assert_eq!(worktree.file_stem(), "repo--files-docs--wt_1");
+    }
+
+    #[test]
+    fn priority_labels_and_ranking() {
+        assert_eq!(
+            JobPriority::InteractiveSearch.as_str(),
+            "interactive-search"
+        );
+        assert_eq!(JobPriority::ManualRebuild.as_str(), "manual-rebuild");
+        assert_eq!(JobPriority::Background.as_str(), "background");
+        assert!(JobPriority::InteractiveSearch < JobPriority::Background);
+    }
+
+    #[test]
+    fn owner_identity_is_stable_within_a_process() {
+        let first = OwnerIdentity::current();
+        let second = OwnerIdentity::current();
+        assert_eq!(first, second);
+        assert_eq!(first.pid, std::process::id());
+    }
+
+    #[test]
+    fn open_default_creates_the_coordinator_root() {
+        let coordinator = IndexCoordinator::open_default().expect("open default");
+        assert!(coordinator.root().is_dir());
+    }
+
+    #[test]
+    fn heavy_acquisition_times_out_while_another_owner_holds_it() {
+        let tmp = tempfile::tempdir().unwrap();
+        let coordinator = open(tmp.path());
+        let holder = own(
+            &coordinator,
+            &TargetKey::repo_shared("repo-a", "issues"),
+            JobPriority::Background,
+        );
+        let _heavy = holder.acquire_heavy(Duration::from_secs(5)).unwrap();
+
+        let other = own(
+            &coordinator,
+            &TargetKey::repo_shared("repo-b", "specs"),
+            JobPriority::Background,
+        );
+        match other.acquire_heavy(Duration::from_millis(120)) {
+            Ok(_) => panic!("heavy lease must stay exclusive"),
+            Err(CoordinatorError::Timeout { waited_ms }) => assert!(waited_ms >= 100),
+            Err(other) => panic!("expected timeout, got {other:?}"),
+        }
+        other.complete(JobOutcome::Completed).unwrap();
+        holder.complete(JobOutcome::Completed).unwrap();
+    }
+
+    #[test]
+    fn background_defers_while_higher_priority_claimant_is_pending() {
+        let tmp = tempfile::tempdir().unwrap();
+        let coordinator = open(tmp.path());
+        let holder = own(
+            &coordinator,
+            &TargetKey::repo_shared("repo-a", "issues"),
+            JobPriority::Background,
+        );
+        let heavy = holder.acquire_heavy(Duration::from_secs(5)).unwrap();
+
+        // An interactive claimant queues for the heavy lease in a thread.
+        let root = coordinator.root().to_path_buf();
+        let interactive = std::thread::spawn(move || {
+            let coordinator = open(&root);
+            let guard = own(
+                &coordinator,
+                &TargetKey::repo_shared("repo-b", "files"),
+                JobPriority::InteractiveSearch,
+            );
+            let heavy = guard
+                .acquire_heavy(Duration::from_secs(10))
+                .expect("interactive eventually acquires");
+            drop(heavy);
+            guard.complete(JobOutcome::Completed).unwrap();
+        });
+
+        // The pending interactive registration becomes visible (FR-383).
+        // Generous deadline: the claimant thread competes with the whole
+        // parallel test suite for CPU and disk.
+        let deadline = Instant::now() + Duration::from_secs(30);
+        loop {
+            if coordinator
+                .pending_higher_priority(JobPriority::Background)
+                .unwrap()
+            {
+                break;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "interactive claimant must be visible as pending"
+            );
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert!(!coordinator
+            .pending_higher_priority(JobPriority::InteractiveSearch)
+            .unwrap());
+
+        drop(heavy);
+        holder.complete(JobOutcome::Completed).unwrap();
+        interactive.join().unwrap();
+    }
+
+    #[test]
+    fn waiter_times_out_when_owner_never_completes() {
+        let tmp = tempfile::tempdir().unwrap();
+        let coordinator = open(tmp.path());
+        let key = TargetKey::repo_shared("repo-a", "issues");
+        let owner = own(&coordinator, &key, JobPriority::Background);
+        assert_eq!(owner.waiter_count().unwrap(), 0);
+        assert_eq!(owner.priority(), JobPriority::Background);
+        assert_eq!(owner.key().scope(), "issues");
+
+        let waiter = match coordinator
+            .request_job(&key, JobPriority::Background, Duration::from_secs(5))
+            .unwrap()
+        {
+            JobAdmission::Joined(waiter) => waiter,
+            JobAdmission::Owner(_) => panic!("owner already holds the target"),
+        };
+        assert_eq!(waiter.key().scope(), "issues");
+        assert_eq!(owner.waiter_count().unwrap(), 1);
+        let error = waiter
+            .wait(Duration::from_millis(120))
+            .expect_err("owner never completes");
+        assert!(matches!(error, CoordinatorError::Timeout { .. }));
+        owner.complete(JobOutcome::Completed).unwrap();
+    }
+
+    #[test]
+    fn waiters_observe_failed_and_abandoned_outcomes() {
+        let tmp = tempfile::tempdir().unwrap();
+        let coordinator = open(tmp.path());
+        let key = TargetKey::repo_shared("repo-a", "board");
+
+        let owner = own(&coordinator, &key, JobPriority::Background);
+        let waiter = match coordinator
+            .request_job(&key, JobPriority::Background, Duration::from_secs(5))
+            .unwrap()
+        {
+            JobAdmission::Joined(waiter) => waiter,
+            JobAdmission::Owner(_) => panic!("expected join"),
+        };
+        owner
+            .complete(JobOutcome::Failed {
+                message: "disk full".to_string(),
+            })
+            .unwrap();
+        assert_eq!(
+            waiter.wait(Duration::from_secs(5)).unwrap(),
+            JobOutcome::Failed {
+                message: "disk full".to_string()
+            }
+        );
+
+        // Owner dropping without publishing surfaces OwnerGone.
+        let owner = own(&coordinator, &key, JobPriority::Background);
+        let waiter = match coordinator
+            .request_job(&key, JobPriority::Background, Duration::from_secs(5))
+            .unwrap()
+        {
+            JobAdmission::Joined(waiter) => waiter,
+            JobAdmission::Owner(_) => panic!("expected join"),
+        };
+        drop(owner);
+        assert_eq!(
+            waiter.wait(Duration::from_secs(5)).unwrap(),
+            JobOutcome::OwnerGone
+        );
+    }
 }

@@ -532,4 +532,74 @@ not json
         assert!(!content.contains("not json"), "{content}");
         assert!(!dir.path().join("index.log").exists());
     }
+
+    /// Phase 70 T-IDX-401 (Issue #3264): manual rebuild coordinates through
+    /// the host-wide coordinator and reports per-action results.
+    #[cfg(unix)]
+    #[test]
+    fn run_rebuild_coordinates_and_reports_per_action_result() {
+        use gwt_core::test_support::ScopedEnvVar;
+        use std::os::unix::fs::PermissionsExt;
+
+        let _lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let home = tmp.path().join("home");
+        std::fs::create_dir_all(&home).expect("home");
+        let _home = ScopedEnvVar::set("HOME", &home);
+        let _userprofile = ScopedEnvVar::set("USERPROFILE", &home);
+
+        let repo = tmp.path().join("repo");
+        std::fs::create_dir_all(&repo).expect("repo dir");
+        run_git_at(tmp.path(), &["init", repo.to_str().unwrap()]);
+        run_git_at(&repo, &["config", "user.email", "test@example.com"]);
+        run_git_at(&repo, &["config", "user.name", "Test User"]);
+        run_git_at(
+            &repo,
+            &[
+                "remote",
+                "add",
+                "origin",
+                "https://github.com/example/project.git",
+            ],
+        );
+        std::fs::write(repo.join("README.md"), "# repo\n").expect("readme");
+        run_git_at(&repo, &["add", "README.md"]);
+        run_git_at(&repo, &["commit", "-m", "init"]);
+
+        let log = tmp.path().join("runner-log.txt");
+        let python = gwt_core::runtime::project_index_python_path();
+        std::fs::create_dir_all(python.parent().expect("venv dir")).expect("create venv dir");
+        std::fs::write(
+            &python,
+            format!(
+                "#!/bin/sh\necho \"$@\" >> \"{}\"\nprintf '{{\"ok\": true}}\\n'\n",
+                log.display()
+            ),
+        )
+        .expect("fake python");
+        std::fs::set_permissions(&python, std::fs::Permissions::from_mode(0o755))
+            .expect("chmod fake python");
+
+        let mut env = crate::cli::env::TestEnv::new(tmp.path().join("cache"));
+        env.repo_path = repo.clone();
+        let mut out = String::new();
+        let code = run(
+            &mut env,
+            IndexCommand::Rebuild {
+                scope: IndexScope::Issues,
+            },
+            &mut out,
+        )
+        .expect("rebuild runs");
+        assert_eq!(code, 0, "rebuild must succeed: {out}");
+        assert!(out.contains("issues: ok"), "{out}");
+        let calls = std::fs::read_to_string(&log).unwrap_or_default();
+        assert!(calls.contains("--action index-issues"), "{calls}");
+        assert!(
+            calls.contains("--qos interactive"),
+            "manual rebuild runs at interactive QoS: {calls}"
+        );
+    }
 }

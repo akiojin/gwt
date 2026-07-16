@@ -384,3 +384,70 @@ fn add_worktree(repo: &Path, worktree: &Path) {
         String::from_utf8_lossy(&output.stderr)
     );
 }
+
+/// Phase 70 T-IDX-401 (Issue #3264): the manual rebuild entry coordinates,
+/// passes interactive QoS, resumes after a runner yield, and surfaces
+/// runner failures.
+#[cfg(unix)]
+#[test]
+fn manual_rebuild_runner_resumes_yields_and_surfaces_failures() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let _env_lock = env_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let home = tmp.path().join("home");
+    fs::create_dir_all(&home).expect("create home");
+    let _home = ScopedEnvVar::set("HOME", &home);
+    let _userprofile = ScopedEnvVar::set("USERPROFILE", &home);
+
+    let repo = tmp.path().join("repo");
+    init_git_repo(&repo);
+    add_origin(&repo, "https://github.com/example/project.git");
+    commit_file(&repo, "README.md", "# repo\n");
+
+    let runner_log = tmp.path().join("runner-log.txt");
+    let yield_flag = tmp.path().join("yielded-once");
+    let python = gwt_core::runtime::project_index_python_path();
+    fs::create_dir_all(python.parent().expect("python parent")).expect("create venv dir");
+    // First index invocation reports a cooperative yield; the retry
+    // completes. Probe-style invocations always succeed.
+    fs::write(
+        &python,
+        format!(
+            "#!/bin/sh\necho \"$@\" >> \"{log}\"\nif [ ! -f \"{flag}\" ]; then\n  touch \"{flag}\"\n  printf '{{\"ok\": true, \"yielded\": true, \"resumable\": true}}\\n'\nelse\n  printf '{{\"ok\": true, \"indexed\": 1}}\\n'\nfi\n",
+            log = runner_log.display(),
+            flag = yield_flag.display(),
+        ),
+    )
+    .expect("write fake python");
+    fs::set_permissions(&python, fs::Permissions::from_mode(0o755)).expect("chmod");
+
+    gwt::manual_rebuild_runner(&repo, gwt::index_worker::IndexRebuildScope::Issues, None)
+        .expect("yielded rebuild resumes and completes");
+    let calls = fs::read_to_string(&runner_log).expect("runner log");
+    let rebuild_calls = calls
+        .lines()
+        .filter(|line| line.contains("--action index-issues"))
+        .count();
+    assert_eq!(
+        rebuild_calls, 2,
+        "a yielded rebuild must re-run after releasing the heavy lease: {calls}"
+    );
+    assert!(
+        calls.contains("--qos interactive"),
+        "manual rebuilds run at interactive QoS: {calls}"
+    );
+
+    // Runner failure propagates as an error instead of silent success.
+    fs::write(
+        &python,
+        "#!/bin/sh\ncase \"$*\" in *\"--action index-\"*) echo broken >&2; exit 3;; *) printf '{\"ok\": true}\\n';; esac\n",
+    )
+    .expect("write failing python");
+    let error =
+        gwt::manual_rebuild_runner(&repo, gwt::index_worker::IndexRebuildScope::Issues, None)
+            .expect_err("runner failure must propagate");
+    assert!(error.contains("broken"), "{error}");
+}

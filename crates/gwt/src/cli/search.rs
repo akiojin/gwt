@@ -480,4 +480,137 @@ mod tests {
         render_text(&mut out, &[], &[]);
         assert!(out.contains("no results"), "empty notice missing: {out}");
     }
+
+    #[test]
+    fn render_not_ready_text_mentions_the_retry_contract() {
+        use crate::index_search::{IndexSearchError, IndexSearchNotReady};
+        let mut out = String::new();
+        let error = IndexSearchError::NotReady(IndexSearchNotReady {
+            reason: "files index is missing".to_string(),
+            affected_scopes: vec!["files".to_string()],
+            waited_ms: 30_000,
+            retry_after_ms: 5_000,
+        });
+        render_not_ready(&mut out, false, &error);
+        assert!(out.contains("index not ready"), "{out}");
+        assert!(out.contains("files"), "{out}");
+        // Non-NotReady errors render nothing (handled by the caller).
+        let mut untouched = String::new();
+        render_not_ready(
+            &mut untouched,
+            true,
+            &IndexSearchError::Other("boom".to_string()),
+        );
+        assert!(untouched.is_empty());
+    }
+
+    /// Phase 70 (Issue #3264): the CLI search surface reports stale scopes
+    /// additively and returns a typed retryable exit for missing scopes.
+    #[cfg(unix)]
+    #[test]
+    fn run_reports_stale_metadata_and_not_ready_exit() {
+        use gwt_core::test_support::ScopedEnvVar;
+        use std::os::unix::fs::PermissionsExt;
+
+        let _lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let home = tmp.path().join("home");
+        std::fs::create_dir_all(&home).expect("home");
+        let _home = ScopedEnvVar::set("HOME", &home);
+        let _userprofile = ScopedEnvVar::set("USERPROFILE", &home);
+
+        let repo = tmp.path().join("repo");
+        std::fs::create_dir_all(&repo).expect("repo dir");
+        let git = |args: &[&str], cwd: &std::path::Path| {
+            let output = gwt_core::process::hidden_command("git")
+                .args(args)
+                .current_dir(cwd)
+                .output()
+                .expect("git");
+            assert!(
+                output.status.success(),
+                "git {args:?}: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+        };
+        git(&["init", repo.to_str().unwrap()], tmp.path());
+        git(&["config", "user.email", "test@example.com"], &repo);
+        git(&["config", "user.name", "Test User"], &repo);
+        git(
+            &[
+                "remote",
+                "add",
+                "origin",
+                "https://github.com/example/project.git",
+            ],
+            &repo,
+        );
+        std::fs::write(repo.join("README.md"), "# repo\n").expect("readme");
+        git(&["add", "README.md"], &repo);
+        git(&["commit", "-m", "init"], &repo);
+
+        let runner_log = tmp.path().join("runner-log.txt");
+        let _log_env = ScopedEnvVar::set("GWT_FAKE_RUNNER_LOG", &runner_log);
+        let payload =
+            r#"{"ok": true, "scopes": {"issues": {"state": "stale"}}, "stale_scopes": ["issues"]}"#;
+        let _payload_env = ScopedEnvVar::set("GWT_FAKE_RUNNER_PAYLOAD", payload);
+        let python = gwt_core::runtime::project_index_python_path();
+        std::fs::create_dir_all(python.parent().expect("venv dir")).expect("create venv dir");
+        std::fs::write(
+            &python,
+            "#!/bin/sh\necho \"$@\" >> \"$GWT_FAKE_RUNNER_LOG\"\nprintf '%s\\n' \"$GWT_FAKE_RUNNER_PAYLOAD\"\n",
+        )
+        .expect("fake python");
+        std::fs::set_permissions(&python, std::fs::Permissions::from_mode(0o755)).expect("chmod");
+
+        let mut env = crate::cli::env::TestEnv::new(tmp.path().join("cache"));
+        env.repo_path = repo.clone();
+
+        // Text mode: verified results + stale note.
+        let mut out = String::new();
+        let command = SearchCommand {
+            query: "stale lookup".to_string(),
+            scopes: vec![IndexSearchScope::Issues],
+            match_mode: IndexSearchMatchMode::Semantic,
+            n_results: Some(5),
+            json: false,
+        };
+        let code = run(&mut env, command.clone(), &mut out).expect("search runs");
+        assert_eq!(code, 0, "{out}");
+        assert!(out.contains("stale scopes [issues]"), "{out}");
+
+        // JSON mode carries the additive freshness metadata.
+        let mut out = String::new();
+        let mut json_command = command.clone();
+        json_command.json = true;
+        let code = run(&mut env, json_command, &mut out).expect("json search runs");
+        assert_eq!(code, 0, "{out}");
+        assert!(out.contains("\"stale_scopes\""), "{out}");
+
+        // Missing scopes return the typed retryable exit code (FR-388).
+        let _wait = ScopedEnvVar::set("GWT_INDEX_SEARCH_REPAIR_WAIT_MS", "100");
+        let missing_payload = r#"{"ok": true, "scopes": {"issues": {"state": "missing"}}}"#;
+        let _missing_env = ScopedEnvVar::set("GWT_FAKE_RUNNER_PAYLOAD", missing_payload);
+        let mut out = String::new();
+        let mut not_ready = command;
+        not_ready.json = true;
+        let code = run(&mut env, not_ready, &mut out).expect("not-ready returns typed exit");
+        assert_eq!(code, 75, "{out}");
+        assert!(out.contains("INDEX_NOT_READY"), "{out}");
+
+        // The stale refresh queued in the background must land before the
+        // scoped HOME reverts (single-flight rebuild against the fake runner).
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        while !std::fs::read_to_string(&runner_log)
+            .unwrap_or_default()
+            .contains("--action index-issues")
+        {
+            if std::time::Instant::now() >= deadline {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(25));
+        }
+    }
 }

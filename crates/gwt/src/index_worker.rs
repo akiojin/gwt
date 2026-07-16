@@ -999,6 +999,7 @@ const INDEX_HEAVY_LEASE_TIMEOUT: Duration = Duration::from_secs(30 * 60);
 const INDEX_SHARED_JOB_WAIT_TIMEOUT: Duration = Duration::from_secs(30 * 60);
 
 /// Result of a coordinated index job (SPEC #1939 Phase 70 FR-382).
+#[derive(Debug)]
 pub(crate) enum CoordinatedRun<T> {
     /// This process owned the job and ran `build`.
     Ran(T),
@@ -2828,5 +2829,106 @@ detached
         );
         assert_eq!(payload["worktrees"]["wtAhash"]["branch"], "develop");
         assert_eq!(payload["worktrees"]["wtBhash"]["path"], "/abs/wtB");
+    }
+
+    #[test]
+    fn run_coordinated_index_job_runs_the_owner_build() {
+        let run = run_coordinated_index_job(
+            "ownertestrepo001",
+            "files",
+            Some("wt001"),
+            JobPriority::Background,
+            || Ok(BuildStep::Done(7)),
+        )
+        .expect("owner build succeeds");
+        match run {
+            CoordinatedRun::Ran(value) => assert_eq!(value, 7),
+            CoordinatedRun::Coalesced => panic!("no concurrent job exists"),
+        }
+    }
+
+    #[test]
+    fn run_coordinated_index_job_propagates_build_failures() {
+        let error = run_coordinated_index_job::<()>(
+            "failtestrepo0001",
+            "issues",
+            None,
+            JobPriority::Background,
+            || Err("boom".to_string()),
+        )
+        .expect_err("build failure propagates");
+        assert_eq!(error, "boom");
+    }
+
+    #[test]
+    fn run_coordinated_index_job_resumes_after_a_yield() {
+        let mut calls = 0;
+        let run = run_coordinated_index_job(
+            "yieldtestrepo001",
+            "files",
+            Some("wt002"),
+            JobPriority::Background,
+            || {
+                calls += 1;
+                if calls == 1 {
+                    Ok(BuildStep::Yielded)
+                } else {
+                    Ok(BuildStep::Done(()))
+                }
+            },
+        )
+        .expect("yielded build resumes");
+        assert!(matches!(run, CoordinatedRun::Ran(())));
+        assert_eq!(calls, 2, "the build must re-run after releasing the lease");
+    }
+
+    #[test]
+    fn run_coordinated_index_job_coalesces_into_a_running_equivalent_job() {
+        use gwt_core::index_coordinator::{IndexCoordinator, JobAdmission, JobOutcome, TargetKey};
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let started = tmp.path().join("owner-started");
+        let release = tmp.path().join("release-owner");
+        let started_for_thread = started.clone();
+        let release_for_thread = release.clone();
+
+        let owner = std::thread::spawn(move || {
+            let coordinator = IndexCoordinator::open_default().expect("open coordinator");
+            let key = TargetKey::repo_shared("coalescetestrepo", "specs");
+            let guard = match coordinator
+                .request_job(
+                    &key,
+                    JobPriority::Background,
+                    std::time::Duration::from_secs(5),
+                )
+                .expect("request job")
+            {
+                JobAdmission::Owner(guard) => guard,
+                JobAdmission::Joined(_) => panic!("owner thread must win the target"),
+            };
+            std::fs::write(&started_for_thread, b"started").expect("write marker");
+            let deadline = Instant::now() + Duration::from_secs(10);
+            while !release_for_thread.exists() {
+                assert!(Instant::now() < deadline, "release signal never arrived");
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            guard.complete(JobOutcome::Completed).expect("complete");
+        });
+
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while !started.exists() {
+            assert!(Instant::now() < deadline, "owner never started");
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        std::fs::write(&release, b"go").expect("write release");
+        let run = run_coordinated_index_job::<()>(
+            "coalescetestrepo",
+            "specs",
+            None,
+            JobPriority::Background,
+            || panic!("a coalesced caller must not run its own build"),
+        )
+        .expect("coalesced join succeeds");
+        assert!(matches!(run, CoordinatedRun::Coalesced));
+        owner.join().expect("owner thread");
     }
 }

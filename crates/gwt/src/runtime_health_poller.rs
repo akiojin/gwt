@@ -910,4 +910,26 @@ mod tests {
             "only real state changes may trigger a broadcast"
         );
     }
+
+    #[test]
+    fn poll_once_refreshes_full_and_known_pid_scopes() {
+        // FR-396: the full reconciliation discovers the runtime PID set; the
+        // known-PID refresh reuses it without a full OS scan.
+        let clients = crate::embedded_server::ClientHub::default();
+        let mut poller = Poller::new(crate::PtyWriterRegistry::default());
+        let full = poller.poll_once(Utc::now(), &clients, RefreshScope::FullReconcile);
+        assert!(
+            full.process_count >= 1,
+            "the poller must at least observe this process: {full:?}"
+        );
+        assert!(
+            !poller.known_pids.is_empty(),
+            "full reconciliation must seed the known PID set"
+        );
+        let known = poller.poll_once(Utc::now(), &clients, RefreshScope::KnownPids);
+        assert!(
+            known.process_count >= 1,
+            "known-PID refresh keeps reporting the runtime set: {known:?}"
+        );
+    }
 }
