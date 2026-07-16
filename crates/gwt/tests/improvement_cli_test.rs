@@ -1202,7 +1202,10 @@ fn improvement_capture_v2_requires_two_distinct_verified_sessions() {
     assert_eq!(corroborated["fingerprint"], fingerprint);
     assert_eq!(corroborated["occurrences"], 2);
     assert_eq!(corroborated["eligibility"], "interpretive-corroboration");
-    assert_eq!(corroborated["state"], "owner-resolving");
+    assert_eq!(
+        corroborated["state"], "blocked",
+        "eligible public capture must run Owner Resolution instead of persisting an in-progress state"
+    );
 
     let store: Value = serde_json::from_slice(
         &fs::read(canonical_candidate_store(
@@ -1218,6 +1221,10 @@ fn improvement_capture_v2_requires_two_distinct_verified_sessions() {
     assert_eq!(nonce.len(), 64, "source scope nonce must be 256 bits");
     assert!(nonce.chars().all(|character| character.is_ascii_hexdigit()));
     let candidate = &store["candidates"][0];
+    assert!(
+        candidate["blocked_reason"].is_string(),
+        "the bounded resolver must persist its fail-closed reason"
+    );
     assert_eq!(
         candidate["distinct_occurrences"].as_array().unwrap().len(),
         2

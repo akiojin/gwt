@@ -158,6 +158,8 @@ pub(super) struct ResolutionAttemptLease {
     pub(super) started_at: chrono::DateTime<chrono::Utc>,
     pub(super) expires_at: chrono::DateTime<chrono::Utc>,
     pub(super) remote_phase: AttemptRemotePhase,
+    #[serde(default)]
+    pub(super) intent: ResolutionAttemptIntent,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -165,6 +167,33 @@ pub(super) struct ResolutionAttemptLease {
 pub(super) enum AttemptRemotePhase {
     NotSubmitted,
     Submitted,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(tag = "kind", rename_all = "kebab-case")]
+pub(super) enum ResolutionAttemptIntent {
+    #[default]
+    Unassigned,
+    CreateIssue {
+        fingerprint: String,
+        public_payload_digest: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        created_owner_number: Option<u64>,
+    },
+    OccurrenceComments {
+        owner_number: u64,
+        occurrence_keys: Vec<String>,
+        public_payload_digest: String,
+    },
+    ReconciliationComment {
+        canonical_owner_number: u64,
+        duplicate_owner_number: u64,
+        public_payload_digest: String,
+    },
+    CloseDuplicate {
+        canonical_owner_number: u64,
+        duplicate_owner_number: u64,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -247,32 +276,80 @@ pub(super) fn load_owner_projection() -> Result<OwnerProjectionStore, SpecOpsErr
     with_owner_projection_lock(load_owner_projection_unlocked)
 }
 
+#[cfg(test)]
 pub(super) fn commit_owner_projection(
     commit: OwnerProjectionCommit,
 ) -> Result<OwnerProjectionCommitOutcome, SpecOpsError> {
-    commit_owner_projection_inner(commit, false)
+    commit_owner_projection_batch_inner(vec![commit], None, false).map(|mut outcomes| {
+        outcomes
+            .pop()
+            .expect("one projection commit produces one outcome")
+    })
+}
+
+pub(super) fn commit_owner_projection_batch(
+    commits: Vec<OwnerProjectionCommit>,
+    expected_canonical_owner_number: u64,
+) -> Result<Vec<OwnerProjectionCommitOutcome>, SpecOpsError> {
+    commit_owner_projection_batch_inner(commits, Some(expected_canonical_owner_number), false)
+}
+
+#[cfg(test)]
+pub(super) fn fail_next_owner_projection_commit() -> Result<(), SpecOpsError> {
+    with_owner_projection_lock(|| {
+        fs::write(owner_projection_dir().join(".fail-next-commit"), b"failure")
+            .map_err(io_as_spec_error)
+    })
 }
 
 #[cfg(test)]
 pub(super) fn commit_owner_projection_before_persist(
     commit: OwnerProjectionCommit,
 ) -> Result<OwnerProjectionCommitOutcome, SpecOpsError> {
-    commit_owner_projection_inner(commit, true)
+    commit_owner_projection_batch_inner(vec![commit], None, true).map(|mut outcomes| {
+        outcomes
+            .pop()
+            .expect("one projection commit produces one outcome")
+    })
 }
 
-fn commit_owner_projection_inner(
-    commit: OwnerProjectionCommit,
+fn commit_owner_projection_batch_inner(
+    commits: Vec<OwnerProjectionCommit>,
+    expected_canonical_owner_number: Option<u64>,
     fail_before_persist: bool,
-) -> Result<OwnerProjectionCommitOutcome, SpecOpsError> {
+) -> Result<Vec<OwnerProjectionCommitOutcome>, SpecOpsError> {
+    if commits.is_empty() {
+        return Err(invalid("owner projection commit batch must not be empty"));
+    }
     with_owner_projection_lock(|| {
         let mut store = load_owner_projection_unlocked()?;
-        let outcome = apply_owner_projection_commit(&mut store, commit)?;
+        let outcomes = commits
+            .into_iter()
+            .map(|commit| apply_owner_projection_commit(&mut store, commit))
+            .collect::<Result<Vec<_>, _>>()?;
+        if expected_canonical_owner_number.is_some_and(|expected| {
+            outcomes
+                .iter()
+                .any(|outcome| outcome.canonical_owner_number != expected)
+        }) {
+            return Err(invalid(
+                "owner lost canonical election during projection commit",
+            ));
+        }
         validate_owner_projection(&store)?;
+        #[cfg(test)]
+        {
+            let failure_marker = owner_projection_dir().join(".fail-next-commit");
+            if failure_marker.exists() {
+                fs::remove_file(failure_marker).map_err(io_as_spec_error)?;
+                return Err(invalid("injected owner projection commit failure"));
+            }
+        }
         if fail_before_persist {
             return Err(invalid("injected failure before owner projection commit"));
         }
         save_owner_projection_unlocked(&store)?;
-        Ok(outcome)
+        Ok(outcomes)
     })
 }
 
@@ -1011,6 +1088,15 @@ pub(super) fn source_scope_nonce(repo_root: &Path) -> Result<String, SpecOpsErro
         .ok_or_else(|| invalid("candidate store source scope nonce is missing after repair"))
 }
 
+#[cfg(test)]
+pub(super) fn fail_next_created_owner_number_save(repo_root: &Path) -> Result<(), SpecOpsError> {
+    let marker = created_owner_number_save_failure_marker(repo_root);
+    if let Some(parent) = marker.parent() {
+        fs::create_dir_all(parent).map_err(io_as_spec_error)?;
+    }
+    fs::write(marker, b"failure").map_err(io_as_spec_error)
+}
+
 pub(super) fn update<T>(
     repo_root: &Path,
     operation: impl FnOnce(&mut CandidateStore) -> Result<T, SpecOpsError>,
@@ -1062,6 +1148,7 @@ pub(super) fn acquire_attempt_lease(
         started_at: now,
         expires_at: now + ttl,
         remote_phase: AttemptRemotePhase::NotSubmitted,
+        intent: ResolutionAttemptIntent::Unassigned,
     };
     candidate.attempt = Some(lease.clone());
     candidate.updated_at = now.to_rfc3339();
@@ -1072,7 +1159,11 @@ pub(super) fn mark_attempt_submitted(
     store: &mut CandidateStore,
     candidate_id: &str,
     attempt_id: &str,
+    intent: ResolutionAttemptIntent,
 ) -> Result<(), SpecOpsError> {
+    if intent == ResolutionAttemptIntent::Unassigned {
+        return Err(invalid("promotion attempt intent must be assigned"));
+    }
     let candidate = store
         .candidates
         .iter_mut()
@@ -1083,8 +1174,110 @@ pub(super) fn mark_attempt_submitted(
         .as_mut()
         .filter(|attempt| attempt.attempt_id == attempt_id)
         .ok_or_else(|| invalid("promotion attempt lease is stale"))?;
+    if attempt.remote_phase == AttemptRemotePhase::Submitted && attempt.intent != intent {
+        return Err(invalid(
+            "promotion attempt intent cannot change after submission",
+        ));
+    }
+    attempt.intent = intent;
     attempt.remote_phase = AttemptRemotePhase::Submitted;
     Ok(())
+}
+
+pub(super) fn record_created_owner_number(
+    store: &mut CandidateStore,
+    candidate_id: &str,
+    attempt_id: &str,
+    owner_number: u64,
+) -> Result<ResolutionAttemptLease, SpecOpsError> {
+    if owner_number == 0 {
+        return Err(invalid("created owner number must be positive"));
+    }
+    let candidate = store
+        .candidates
+        .iter_mut()
+        .find(|candidate| candidate.id == candidate_id)
+        .ok_or_else(|| invalid("candidate not found"))?;
+    let attempt = candidate
+        .attempt
+        .as_mut()
+        .filter(|attempt| attempt.attempt_id == attempt_id)
+        .ok_or_else(|| invalid("promotion attempt lease is stale"))?;
+    if attempt.remote_phase != AttemptRemotePhase::Submitted {
+        return Err(invalid(
+            "created owner number requires a submitted create intent",
+        ));
+    }
+    let ResolutionAttemptIntent::CreateIssue {
+        created_owner_number,
+        ..
+    } = &mut attempt.intent
+    else {
+        return Err(invalid(
+            "created owner number requires a submitted create intent",
+        ));
+    };
+    match created_owner_number {
+        Some(existing) if *existing != owner_number => {
+            return Err(invalid("created owner number cannot change after readback"));
+        }
+        Some(_) => {}
+        None => *created_owner_number = Some(owner_number),
+    }
+    Ok(attempt.clone())
+}
+
+pub(super) fn renew_attempt_lease(
+    store: &mut CandidateStore,
+    candidate_id: &str,
+    attempt_id: &str,
+    now: chrono::DateTime<chrono::Utc>,
+    ttl: chrono::Duration,
+) -> Result<ResolutionAttemptLease, SpecOpsError> {
+    if ttl <= chrono::Duration::zero() {
+        return Err(invalid("promotion attempt lease TTL must be positive"));
+    }
+    let candidate = store
+        .candidates
+        .iter_mut()
+        .find(|candidate| candidate.id == candidate_id)
+        .ok_or_else(|| invalid("candidate not found"))?;
+    let attempt = candidate
+        .attempt
+        .as_mut()
+        .filter(|attempt| attempt.attempt_id == attempt_id)
+        .ok_or_else(|| invalid("promotion attempt lease is stale"))?;
+    if attempt.expires_at <= now {
+        return Err(invalid("promotion attempt lease has expired"));
+    }
+    attempt.expires_at = now + ttl;
+    Ok(attempt.clone())
+}
+
+pub(super) fn complete_attempt_step(
+    store: &mut CandidateStore,
+    candidate_id: &str,
+    attempt_id: &str,
+    intent: &ResolutionAttemptIntent,
+) -> Result<ResolutionAttemptLease, SpecOpsError> {
+    let candidate = store
+        .candidates
+        .iter_mut()
+        .find(|candidate| candidate.id == candidate_id)
+        .ok_or_else(|| invalid("candidate not found"))?;
+    let attempt = candidate
+        .attempt
+        .as_mut()
+        .filter(|attempt| attempt.attempt_id == attempt_id)
+        .ok_or_else(|| invalid("promotion attempt lease is stale"))?;
+    if attempt.remote_phase != AttemptRemotePhase::Submitted || &attempt.intent != intent {
+        return Err(invalid(
+            "promotion attempt step does not match submitted intent",
+        ));
+    }
+    attempt.remote_phase = AttemptRemotePhase::NotSubmitted;
+    attempt.intent = ResolutionAttemptIntent::Unassigned;
+    Ok(attempt.clone())
 }
 
 fn load_and_repair_unlocked(repo_root: &Path) -> Result<CandidateStore, SpecOpsError> {
@@ -1263,7 +1456,34 @@ fn save_unlocked(repo_root: &Path, store: &CandidateStore) -> Result<(), SpecOps
         validate_candidate_lifecycle(candidate)?;
     }
     let bytes = serde_json::to_vec_pretty(&persisted).map_err(serde_as_spec_error)?;
+    #[cfg(test)]
+    {
+        let failure_marker = created_owner_number_save_failure_marker(repo_root);
+        let saves_created_owner_number = persisted.candidates.iter().any(|candidate| {
+            candidate.attempt.as_ref().is_some_and(|attempt| {
+                matches!(
+                    attempt.intent,
+                    ResolutionAttemptIntent::CreateIssue {
+                        created_owner_number: Some(_),
+                        ..
+                    }
+                )
+            })
+        });
+        if saves_created_owner_number && failure_marker.exists() {
+            fs::remove_file(failure_marker).map_err(io_as_spec_error)?;
+            return Err(invalid("injected created owner number source save failure"));
+        }
+    }
     write_atomic_and_sync_parent(&path, &bytes).map_err(io_as_spec_error)
+}
+
+#[cfg(test)]
+fn created_owner_number_save_failure_marker(repo_root: &Path) -> PathBuf {
+    candidate_store_path(repo_root)
+        .parent()
+        .expect("candidate store has an improvements parent")
+        .join(".fail-next-created-owner-number-save")
 }
 
 fn with_store_lock<T>(
@@ -1885,7 +2105,11 @@ mod tests {
         )
         .expect("first lease");
         let first_id = match first {
-            AttemptLeaseDecision::Acquired(lease) => lease.attempt_id,
+            AttemptLeaseDecision::Acquired(lease) => {
+                let serialized = serde_json::to_value(&lease).expect("serialize lease");
+                assert_eq!(serialized["intent"]["kind"], "unassigned");
+                lease.attempt_id
+            }
             other => panic!("expected acquired lease, got {other:?}"),
         };
 
@@ -1932,7 +2156,21 @@ mod tests {
             AttemptLeaseDecision::Acquired(lease) => lease.attempt_id,
             other => panic!("expected acquired lease, got {other:?}"),
         };
-        mark_attempt_submitted(&mut store, "impr-lease", &attempt_id).expect("mark submitted");
+        let intent = ResolutionAttemptIntent::CreateIssue {
+            fingerprint: "v2:typed-owner-fingerprint".to_string(),
+            public_payload_digest: "sha256:typed-owner-payload".to_string(),
+            created_owner_number: None,
+        };
+        mark_attempt_submitted(&mut store, "impr-lease", &attempt_id, intent.clone())
+            .expect("mark submitted");
+        assert_eq!(
+            store.candidates[0]
+                .attempt
+                .as_ref()
+                .expect("attempt")
+                .intent,
+            intent
+        );
 
         assert!(matches!(
             acquire_attempt_lease(

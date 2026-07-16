@@ -10,7 +10,7 @@ use std::{
     collections::{HashMap, VecDeque},
     sync::{
         atomic::{AtomicU64, Ordering},
-        Mutex,
+        Arc, Mutex,
     },
 };
 
@@ -24,12 +24,13 @@ use crate::client::{
 };
 
 /// In-memory fake [`IssueClient`].
+#[derive(Clone)]
 pub struct FakeIssueClient {
-    inner: Mutex<FakeState>,
-    next_issue_number: AtomicU64,
-    next_comment_id: AtomicU64,
-    next_owner_comment_id: AtomicU64,
-    clock: AtomicU64,
+    inner: Arc<Mutex<FakeState>>,
+    next_issue_number: Arc<AtomicU64>,
+    next_comment_id: Arc<AtomicU64>,
+    next_owner_comment_id: Arc<AtomicU64>,
+    clock: Arc<AtomicU64>,
 }
 
 struct FakeState {
@@ -47,6 +48,8 @@ struct FakeState {
     owner_next_issue_number: HashMap<RepositoryIdentity, u64>,
     owner_generations: HashMap<RepositoryIdentity, u64>,
     owner_issue_generation_queue: HashMap<RepositoryIdentity, VecDeque<CollectionGeneration>>,
+    owner_issue_view_queue:
+        HashMap<RepositoryIdentity, VecDeque<(Vec<RepositoryIssue>, CollectionGeneration)>>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -92,7 +95,7 @@ struct OwnerRepositoryFault {
 impl FakeIssueClient {
     pub fn new() -> Self {
         FakeIssueClient {
-            inner: Mutex::new(FakeState {
+            inner: Arc::new(Mutex::new(FakeState {
                 issues: HashMap::new(),
                 call_log: Vec::new(),
                 owner_issues: HashMap::new(),
@@ -106,11 +109,12 @@ impl FakeIssueClient {
                 owner_next_issue_number: HashMap::new(),
                 owner_generations: HashMap::new(),
                 owner_issue_generation_queue: HashMap::new(),
-            }),
-            next_issue_number: AtomicU64::new(1),
-            next_comment_id: AtomicU64::new(1),
-            next_owner_comment_id: AtomicU64::new(1),
-            clock: AtomicU64::new(1),
+                owner_issue_view_queue: HashMap::new(),
+            })),
+            next_issue_number: Arc::new(AtomicU64::new(1)),
+            next_comment_id: Arc::new(AtomicU64::new(1)),
+            next_owner_comment_id: Arc::new(AtomicU64::new(1)),
+            clock: Arc::new(AtomicU64::new(1)),
         }
     }
 
@@ -218,6 +222,22 @@ impl FakeIssueClient {
                     .into_iter()
                     .map(|generation| CollectionGeneration::new(generation.into())),
             );
+    }
+
+    pub fn queue_owner_issue_views<I, S>(&self, repository: &RepositoryIdentity, views: I)
+    where
+        I: IntoIterator<Item = (Vec<RepositoryIssue>, S)>,
+        S: Into<String>,
+    {
+        self.inner
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .owner_issue_view_queue
+            .entry(repository.clone())
+            .or_default()
+            .extend(views.into_iter().map(|(issues, generation)| {
+                (issues, CollectionGeneration::new(generation.into()))
+            }));
     }
 
     pub fn seed_merged_pull_request(
@@ -602,17 +622,26 @@ impl OwnerRepositoryClient for FakeIssueClient {
             repository,
             None,
         )?;
-        let mut issues = state
-            .owner_issues
-            .get(repository)
-            .map(|issues| issues.values().cloned().collect::<Vec<_>>())
-            .unwrap_or_default();
-        issues.sort_by_key(|issue| issue.number);
-        let generation = state
-            .owner_issue_generation_queue
+        let queued_view = state
+            .owner_issue_view_queue
             .get_mut(repository)
-            .and_then(VecDeque::pop_front)
-            .unwrap_or_else(|| Self::owner_generation(&state, repository));
+            .and_then(VecDeque::pop_front);
+        let (mut issues, generation) = if let Some(view) = queued_view {
+            view
+        } else {
+            let issues = state
+                .owner_issues
+                .get(repository)
+                .map(|issues| issues.values().cloned().collect::<Vec<_>>())
+                .unwrap_or_default();
+            let generation = state
+                .owner_issue_generation_queue
+                .get_mut(repository)
+                .and_then(VecDeque::pop_front)
+                .unwrap_or_else(|| Self::owner_generation(&state, repository));
+            (issues, generation)
+        };
+        issues.sort_by_key(|issue| issue.number);
         if let Some(error) = after_error {
             return Err(error);
         }
@@ -1176,6 +1205,52 @@ mod owner_repository_tests {
 
         assert_eq!(before.generation().as_str(), "generation-before");
         assert_eq!(after.generation().as_str(), "generation-after");
+    }
+
+    #[test]
+    fn fake_can_replay_distinct_visible_issue_snapshots_for_race_tests() {
+        let client = FakeIssueClient::new();
+        let repository = RepositoryIdentity::gwt_upstream();
+        let first = repository_issue(
+            &repository,
+            10,
+            RepositoryIssueKind::Plain,
+            IssueState::Open,
+        );
+        let second = repository_issue(
+            &repository,
+            11,
+            RepositoryIssueKind::Plain,
+            IssueState::Open,
+        );
+        client.queue_owner_issue_views(
+            &repository,
+            [
+                (vec![first.clone()], "visible-before"),
+                (vec![first.clone()], "visible-before"),
+                (vec![first, second.clone()], "visible-after"),
+            ],
+        );
+
+        let before = client.list_issues(&repository, &deadline()).unwrap();
+        let stable_before = client.list_issues(&repository, &deadline()).unwrap();
+        let after = client.list_issues(&repository, &deadline()).unwrap();
+
+        assert_eq!(before.items().len(), 1);
+        assert_eq!(stable_before.generation().as_str(), "visible-before");
+        assert_eq!(
+            after.items(),
+            &[
+                repository_issue(
+                    &repository,
+                    10,
+                    RepositoryIssueKind::Plain,
+                    IssueState::Open,
+                ),
+                second
+            ]
+        );
+        assert_eq!(after.generation().as_str(), "visible-after");
     }
 
     #[test]

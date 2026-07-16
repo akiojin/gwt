@@ -1,4 +1,4 @@
-use std::{collections::BTreeSet, fs, io, path::Path, str::FromStr};
+use std::{collections::BTreeSet, fs, path::Path, str::FromStr};
 
 use chrono::Utc;
 use gwt_github::{client::ApiError, SpecOpsError};
@@ -9,7 +9,10 @@ use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
 use super::{
-    improvement_owner::{render_public_issue_payload, PrivacyViolation, PublicMutationContext},
+    improvement_owner::{
+        deliver_pending_owner_status, render_public_issue_payload, resolve_candidate_owner,
+        PublicMutationContext,
+    },
     CliEnv,
 };
 
@@ -326,6 +329,14 @@ pub(crate) struct ImprovementCandidate {
     pub(super) capture_status_generation: u64,
     #[serde(default)]
     pub(super) capture_status_delivered_generation: u64,
+    #[serde(default)]
+    pub(super) owner_status_generation: u64,
+    #[serde(default)]
+    pub(super) owner_status_delivered_generation: u64,
+    #[serde(default)]
+    pub(super) reconciliation_required: bool,
+    #[serde(default)]
+    pub(super) reconciliation_owner_numbers: Vec<u64>,
     pub(super) sanitized_summary: String,
     pub(super) sanitized_details: Option<String>,
     pub(super) evidence_digest: Option<String>,
@@ -621,20 +632,33 @@ fn capture<E: CliEnv>(
         Some(evidence) => capture_typed_interpretive(&repo_root, &command, evidence)?,
         None => capture_legacy_compatibility(&repo_root, &command)?,
     };
-    if let Some(generation) = pending_capture_status_generation(&result.candidate) {
-        post_candidate_captured_status(env, &result.candidate, result.updated_existing)?;
-        acknowledge_capture_status(&repo_root, &result.candidate.id, generation)?;
+    let updated_existing = result.updated_existing;
+    let mut candidate = result.candidate;
+    let pending_generation = pending_capture_status_generation(&candidate);
+    if let Some(generation) = pending_generation {
+        post_candidate_captured_status(env, &candidate, updated_existing)?;
+        acknowledge_capture_status(&repo_root, &candidate.id, generation)?;
+        candidate.capture_status_delivered_generation = generation;
+    }
+    if matches!(
+        candidate.state,
+        CandidateState::Linked | CandidateState::Created
+    ) {
+        deliver_pending_owner_status(env, &mut candidate)?;
+    }
+    if should_resolve_after_capture(&candidate, pending_generation) {
+        candidate = resolve_candidate_owner(env, &candidate.id, CaptureBudgetProfile::Normal)?;
     }
     write_json(
         out,
         json!({
-            "id": result.candidate.id,
-            "state": result.candidate.state.compatibility_state(),
-            "eligibility": result.candidate.eligibility,
-            "fingerprint": result.candidate.fingerprint,
-            "occurrences": result.candidate.occurrences,
-            "legacy_occurrence_count": result.candidate.legacy_occurrence_count,
-            "updated": result.updated_existing,
+            "id": candidate.id,
+            "state": candidate.state.compatibility_state(),
+            "eligibility": candidate.eligibility,
+            "fingerprint": candidate.fingerprint,
+            "occurrences": candidate.occurrences,
+            "legacy_occurrence_count": candidate.legacy_occurrence_count,
+            "updated": updated_existing,
             "improvement_contract_version": 2,
         }),
     )?;
@@ -819,6 +843,10 @@ fn capture_typed(
             distinct_occurrences,
             capture_status_generation: u64::from(qualifies_unattended),
             capture_status_delivered_generation: 0,
+            owner_status_generation: 0,
+            owner_status_delivered_generation: 0,
+            reconciliation_required: false,
+            reconciliation_owner_numbers: Vec::new(),
             sanitized_summary,
             sanitized_details: command.details.as_deref().map(sanitize_text),
             evidence_digest: Some(evidence_digest),
@@ -927,10 +955,20 @@ pub(crate) fn capture_registered<E: CliEnv>(
         },
     )?;
     let mut candidate = result.candidate;
-    if let Some(generation) = pending_capture_status_generation(&candidate) {
+    let pending_generation = pending_capture_status_generation(&candidate);
+    if let Some(generation) = pending_generation {
         post_candidate_captured_status(env, &candidate, result.updated_existing)?;
         acknowledge_capture_status(&repo_root, &candidate.id, generation)?;
         candidate.capture_status_delivered_generation = generation;
+    }
+    if matches!(
+        candidate.state,
+        CandidateState::Linked | CandidateState::Created
+    ) {
+        deliver_pending_owner_status(env, &mut candidate)?;
+    }
+    if should_resolve_after_capture(&candidate, pending_generation) {
+        candidate = resolve_candidate_owner(env, &candidate.id, input.budget_profile)?;
     }
     Ok(candidate)
 }
@@ -1005,6 +1043,10 @@ fn capture_legacy_compatibility(
                 distinct_occurrences: Vec::new(),
                 capture_status_generation: u64::from(capture_claim_qualifies(command)),
                 capture_status_delivered_generation: 0,
+                owner_status_generation: 0,
+                owner_status_delivered_generation: 0,
+                reconciliation_required: false,
+                reconciliation_owner_numbers: Vec::new(),
                 sanitized_summary: sanitized_summary.clone(),
                 sanitized_details: command.details.as_deref().map(sanitize_text),
                 evidence_digest: command.evidence_digest.as_deref().map(sanitize_text),
@@ -1167,6 +1209,31 @@ fn validate_owner_identity(number: u64, title: &str, url: &str) -> Result<(), Sp
 pub(super) fn validate_candidate_lifecycle(
     candidate: &ImprovementCandidate,
 ) -> Result<(), SpecOpsError> {
+    if candidate.capture_status_delivered_generation > candidate.capture_status_generation {
+        return Err(invalid(
+            "capture status delivery generation exceeds its queued generation",
+        ));
+    }
+    if candidate.owner_status_delivered_generation > candidate.owner_status_generation {
+        return Err(invalid(
+            "owner status delivery generation exceeds its queued generation",
+        ));
+    }
+    if !candidate.reconciliation_required && !candidate.reconciliation_owner_numbers.is_empty() {
+        return Err(invalid(
+            "reconciliation owner numbers require the reconciliation latch",
+        ));
+    }
+    if candidate.reconciliation_owner_numbers.contains(&0)
+        || candidate
+            .reconciliation_owner_numbers
+            .windows(2)
+            .any(|pair| pair[0] >= pair[1])
+    {
+        return Err(invalid(
+            "reconciliation owner numbers must be sorted unique positive values",
+        ));
+    }
     match candidate.state {
         CandidateState::Blocked => {
             let reason = candidate
@@ -1735,6 +1802,14 @@ fn promote_issue<E: CliEnv>(
     command: ImprovementPromoteIssueCommand,
     out: &mut String,
 ) -> Result<i32, SpecOpsError> {
+    if command.force {
+        return Err(invalid("UNSAFE_FORCE_REMOVED"));
+    }
+    if !command.labels.is_empty() {
+        return Err(invalid(
+            "manual labels are not supported by Owner Resolution",
+        ));
+    }
     let repo_root = env.repo_path().to_path_buf();
     let store = load_store(&repo_root)?;
     let Some(index) = store
@@ -1767,108 +1842,24 @@ fn promote_issue<E: CliEnv>(
             return Ok(0);
         }
     }
-    if !command.force && candidate.classification != "gwt-caused" {
-        return Err(invalid(
-            "candidate is not classified as gwt-caused; pass force:true to promote",
-        ));
-    }
-    if !command.force && candidate.confidence == "low" {
-        return Err(invalid(
-            "low-confidence candidates require force:true to promote",
-        ));
-    }
-    let privacy_context = PublicMutationContext::for_repo(&repo_root);
-    let public_payload =
-        render_public_issue_payload(&candidate, &privacy_context).map_err(privacy_as_spec_error)?;
-    let lease_owner = std::env::var(gwt_agent::GWT_SESSION_ID_ENV)
-        .ok()
-        .filter(|value| !value.trim().is_empty())
-        .unwrap_or_else(|| format!("pid-{}", std::process::id()));
-    let lease = super::improvement_store::update(&repo_root, |store| {
-        let candidate = find_candidate_mut(store, &command.id)?;
-        transition_to_owner_resolving(candidate)?;
-        super::improvement_store::acquire_attempt_lease(
-            store,
-            &command.id,
-            &lease_owner,
-            Utc::now(),
-            chrono::Duration::seconds(120),
-        )
-    })?;
-    let attempt_id = match lease {
-        super::improvement_store::AttemptLeaseDecision::Acquired(lease) => lease.attempt_id,
-        super::improvement_store::AttemptLeaseDecision::Busy { .. } => {
-            return Err(invalid("promotion attempt is already in progress"));
-        }
-        super::improvement_store::AttemptLeaseDecision::RemoteOutcomeUnknown => {
-            return Err(invalid(
-                "previous promotion outcome is unknown; reconcile before retry",
-            ));
-        }
-    };
-    super::improvement_store::update(&repo_root, |store| {
-        super::improvement_store::mark_attempt_submitted(store, &command.id, &attempt_id)
-    })?;
-    let snapshot = match env.create_issue_in_repo(
-        "akiojin",
-        "gwt",
-        &public_payload.title,
-        &public_payload.body,
-        &command.labels,
-    ) {
-        Ok(snapshot) => snapshot,
-        Err(error) => {
-            super::improvement_store::update(&repo_root, |store| {
-                let candidate = find_candidate_mut(store, &command.id)?;
-                if candidate
-                    .attempt
-                    .as_ref()
-                    .is_some_and(|attempt| attempt.attempt_id == attempt_id)
-                {
-                    candidate.blocked_reason = None;
-                    candidate.failure_subcode = None;
-                    candidate.retry = Some(RetryMetadata {
-                        retryable: true,
-                        remediation: "RECONCILE_REMOTE_OUTCOME".to_string(),
-                        failed_at: Utc::now().to_rfc3339(),
-                    });
-                    transition_candidate(candidate, CandidateState::RemoteOutcomeUnknown)?;
-                    candidate.updated_at = Utc::now().to_rfc3339();
-                }
-                Ok(())
-            })?;
-            return Err(io_as_spec_error(error));
-        }
-    };
-    let issue_url = format!(
-        "https://github.com/{UPSTREAM_REPOSITORY}/issues/{number}",
-        number = snapshot.number.0
-    );
-    let now = Utc::now().to_rfc3339();
-    let linked = LinkedIssue {
-        number: snapshot.number.0,
-        url: issue_url.clone(),
-        repository: UPSTREAM_REPOSITORY.to_string(),
-    };
-    super::improvement_store::update(&repo_root, |store| {
-        let candidate = find_candidate_mut(store, &command.id)?;
-        candidate.updated_at = now;
-        candidate.linked_issue = Some(linked);
-        candidate.attempt = None;
-        transition_candidate(candidate, CandidateState::Created)?;
-        Ok(())
-    })?;
-    post_candidate_promoted_status(&mut *env, &candidate, snapshot.number.0, &issue_url)?;
-    write_json(
-        out,
+    let candidate = resolve_candidate_owner(env, &command.id, CaptureBudgetProfile::Normal)?;
+    let response = if let Some(linked) = &candidate.linked_issue {
         json!({
             "id": candidate.id,
-            "state": "promoted",
-            "repository": UPSTREAM_REPOSITORY,
-            "issue_number": snapshot.number.0,
-            "issue_url": issue_url,
-        }),
-    )?;
+            "state": candidate.state.compatibility_state(),
+            "repository": linked.repository,
+            "issue_number": linked.number,
+            "issue_url": linked.url,
+        })
+    } else {
+        json!({
+            "id": candidate.id,
+            "state": candidate.state.compatibility_state(),
+            "blocked_reason": candidate.blocked_reason,
+            "failure_subcode": candidate.failure_subcode,
+        })
+    };
+    write_json(out, response)?;
     Ok(0)
 }
 
@@ -1883,6 +1874,17 @@ fn queue_capture_status(candidate: &mut ImprovementCandidate) -> Result<(), Spec
 fn pending_capture_status_generation(candidate: &ImprovementCandidate) -> Option<u64> {
     (candidate.capture_status_generation > candidate.capture_status_delivered_generation)
         .then_some(candidate.capture_status_generation)
+}
+
+fn should_resolve_after_capture(
+    candidate: &ImprovementCandidate,
+    pending_generation: Option<u64>,
+) -> bool {
+    candidate.state == CandidateState::OwnerResolving
+        || (matches!(
+            candidate.state,
+            CandidateState::Blocked | CandidateState::Recurrent
+        ) && pending_generation.is_some())
 }
 
 fn acknowledge_capture_status(
@@ -1913,23 +1915,9 @@ fn post_candidate_captured_status<E: CliEnv>(
         "captured"
     };
     let body = format!(
-        "Current state: Improvement Candidate {id} was {status} with high confidence for `{target}`.\n\nReason: {summary}\n\nNext: Review it in Improvement Inbox, promote it to an upstream gwt Issue, or dismiss it with a reason.",
+        "Current state: Improvement Candidate {id} was {status} with high confidence for `{target}`.\n\nReason: {summary}\n\nNext: Owner Resolution runs automatically when the candidate is eligible; use Improvement Inbox only for audit or fail-closed remediation.",
         id = candidate.id,
         target = candidate.target_artifact,
-        summary = candidate.sanitized_summary,
-    );
-    post_improvement_board_status(env, body)
-}
-
-fn post_candidate_promoted_status<E: CliEnv>(
-    env: &mut E,
-    candidate: &ImprovementCandidate,
-    issue_number: u64,
-    issue_url: &str,
-) -> Result<(), SpecOpsError> {
-    let body = format!(
-        "Current state: Improvement Candidate {id} was promoted to akiojin/gwt Issue #{issue_number}.\n\nReason: {summary}\n\nNext: Track the follow-up in {issue_url}.",
-        id = candidate.id,
         summary = candidate.sanitized_summary,
     );
     post_improvement_board_status(env, body)
@@ -2120,16 +2108,8 @@ fn invalid(message: &str) -> SpecOpsError {
     SpecOpsError::from(ApiError::Unexpected(message.to_string()))
 }
 
-fn io_as_spec_error(err: io::Error) -> SpecOpsError {
-    SpecOpsError::from(ApiError::Network(err.to_string()))
-}
-
 fn serde_as_spec_error(err: serde_json::Error) -> SpecOpsError {
     SpecOpsError::from(ApiError::Unexpected(err.to_string()))
-}
-
-fn privacy_as_spec_error(error: PrivacyViolation) -> SpecOpsError {
-    invalid(&error.to_string())
 }
 
 #[cfg(test)]
@@ -2257,7 +2237,7 @@ mod tests {
     }
 
     #[test]
-    fn promote_issue_posts_board_status_with_upstream_issue() {
+    fn promote_issue_rejects_untyped_candidate_without_owner_mutation() {
         let project = tempfile::tempdir().expect("project");
         let mut env = TestEnv::new(project.path().join("cache"));
         env.repo_path = project.path().join("target-project");
@@ -2284,7 +2264,7 @@ mod tests {
             .expect("candidate id")
             .to_string();
 
-        run_collect(
+        let error = run_collect(
             &mut env,
             CliCommand::Improvement(ImprovementCommand::PromoteIssue(
                 ImprovementPromoteIssueCommand {
@@ -2294,28 +2274,19 @@ mod tests {
                 },
             )),
         )
-        .expect("promote");
+        .expect_err("untyped candidate must not enter Owner Resolution");
 
         let bodies = board_bodies(&mut env);
-        assert_eq!(
-            bodies.len(),
-            2,
-            "capture and promote should each post a board status"
-        );
-        let promoted = bodies.last().expect("promoted board body");
-        assert!(promoted.contains(&id), "promoted body should include id");
-        assert!(
-            promoted.contains("akiojin/gwt Issue #1"),
-            "promoted body should include upstream Issue: {promoted}"
-        );
-        assert!(
-            promoted.contains("Board guidance drift"),
-            "promoted body should include sanitized summary: {promoted}"
-        );
+        assert!(error.to_string().contains("not eligible"));
+        assert_eq!(bodies.len(), 1, "rejected promote must not post status");
+        assert!(bodies[0].contains(&id));
+        assert!(env.owner_client.owner_call_log().is_empty());
+        assert!(env.owner_client.owner_mutation_call_log().is_empty());
+        assert!(env.target_issue_create_call_log.is_empty());
     }
 
     #[test]
-    fn promote_issue_creates_sanitized_issue_in_upstream_gwt_repo() {
+    fn promote_issue_rejects_manual_labels_before_owner_transport() {
         let project = tempfile::tempdir().expect("project");
         let mut env = TestEnv::new(project.path().join("cache"));
         env.repo_path = project.path().join("target-project");
@@ -2371,7 +2342,7 @@ mod tests {
             .expect("preview body")
             .to_string();
 
-        let (promote_code, promote_out) = run_collect(
+        let error = run_collect(
             &mut env,
             CliCommand::Improvement(ImprovementCommand::PromoteIssue(
                 ImprovementPromoteIssueCommand {
@@ -2381,41 +2352,27 @@ mod tests {
                 },
             )),
         )
-        .expect("promote");
+        .expect_err("manual labels must be rejected before candidate lookup");
 
-        assert_eq!(promote_code, 0, "promotion output: {promote_out}");
-        let output = parse_output(&promote_out);
-        assert_eq!(output["state"], "promoted");
-        assert_eq!(output["repository"], "akiojin/gwt");
-        assert_eq!(env.target_issue_create_call_log.len(), 1);
-        let call = &env.target_issue_create_call_log[0];
-        assert_eq!(call.owner, "akiojin");
-        assert_eq!(call.repo, "gwt");
-        assert_eq!(call.title, preview_title);
-        assert_eq!(call.body, preview_body);
+        assert!(error
+            .to_string()
+            .contains("manual labels are not supported"));
+        assert!(!preview_title.contains("/Users/alice"));
         assert!(
-            !call.body.contains("/Users/alice"),
-            "public Issue body must not contain private paths: {}",
-            call.body
+            !preview_body.contains("/Users/alice"),
+            "public preview must not contain private paths: {preview_body}"
         );
         assert!(
-            !call.body.contains("ghp_1234567890abcdef"),
-            "public Issue body must not contain token-like secrets: {}",
-            call.body
+            !preview_body.contains("ghp_1234567890abcdef"),
+            "public preview must not contain token-like secrets: {preview_body}"
         );
-        assert!(call.body.contains("## Problem"));
-        assert!(call.body.contains("## Expected behavior"));
-        assert!(call.body.contains("## Observed evidence"));
-        assert!(call.body.contains("## Impact"));
-        assert!(call.body.contains("## Suggested verification"));
-        assert!(call.body.contains("## Source candidate"));
-        assert!(call.body.contains("- Target artifact: skill"));
-        assert!(call.body.contains("Candidate ID"));
-        assert!(call.body.contains(&id));
+        assert!(env.owner_client.owner_call_log().is_empty());
+        assert!(env.owner_client.owner_mutation_call_log().is_empty());
+        assert!(env.target_issue_create_call_log.is_empty());
         assert_eq!(
             std::fs::read_to_string(&skill_path).expect("skill file"),
             "original skill",
-            "promotion must not auto-mutate skill files"
+            "rejected promotion must not mutate skill files"
         );
     }
 
@@ -2492,7 +2449,7 @@ mod tests {
     }
 
     #[test]
-    fn promote_issue_requires_gwt_cause_and_enough_confidence_without_force() {
+    fn promote_issue_requires_owner_eligible_candidate() {
         let project = tempfile::tempdir().expect("project");
         let mut env = TestEnv::new(project.path().join("cache"));
         env.repo_path = project.path().join("target-project");
@@ -2531,9 +2488,10 @@ mod tests {
         )
         .expect_err("low-confidence promotion should be rejected");
         assert!(
-            err.to_string().contains("low-confidence"),
+            err.to_string().contains("not eligible"),
             "unexpected error: {err}"
         );
+        assert!(env.owner_client.owner_mutation_call_log().is_empty());
         assert!(env.target_issue_create_call_log.is_empty());
 
         let (_, capture_out) = run_collect(
@@ -2568,65 +2526,47 @@ mod tests {
         )
         .expect_err("non-gwt-caused promotion should be rejected");
         assert!(
-            err.to_string().contains("not classified as gwt-caused"),
+            err.to_string().contains("not eligible"),
             "unexpected error: {err}"
         );
+        assert!(env.owner_client.owner_mutation_call_log().is_empty());
         assert!(env.target_issue_create_call_log.is_empty());
     }
 
     #[test]
-    fn repeated_capture_preserves_linked_issue_and_promote_is_idempotent() {
+    fn resolved_capture_preserves_linked_owner_and_promote_is_idempotent() {
+        let home = tempfile::tempdir().expect("isolated home");
+        let _gwt_home = gwt_core::test_support::ScopedGwtHome::set(home.path());
         let project = tempfile::tempdir().expect("project");
         let mut env = TestEnv::new(project.path().join("cache"));
         env.repo_path = project.path().join("target-project");
         std::fs::create_dir_all(&env.repo_path).expect("repo path");
+        seed_revision_pinned_active_owner(&mut env);
+        let token = registered_producer_token("test.owner-route").expect("registered token");
 
-        let command = ImprovementCaptureCommand {
-            source: "agent-failure".to_string(),
-            target_artifact: "coordination".to_string(),
-            classification: "gwt-caused".to_string(),
-            confidence: "high".to_string(),
-            summary: "Board guidance drift".to_string(),
-            details: None,
-            evidence_digest: None,
-            dedupe_key: Some("coordination:board-guidance-drift".to_string()),
-            local_evidence: Vec::new(),
-            typed_evidence: None,
-        };
-        let (_, capture_out) = run_collect(
+        let first = capture_registered(
             &mut env,
-            CliCommand::Improvement(capture_command(command.clone())),
+            registered_capture_input(token, "idempotent", 9, CaptureBudgetProfile::Normal),
         )
-        .expect("capture");
-        let id = parse_output(&capture_out)["id"]
-            .as_str()
-            .expect("id")
-            .to_string();
-        run_collect(
-            &mut env,
-            CliCommand::Improvement(ImprovementCommand::PromoteIssue(
-                ImprovementPromoteIssueCommand {
-                    id: id.clone(),
-                    force: false,
-                    labels: Vec::new(),
-                },
-            )),
-        )
-        .expect("promote");
-        assert_eq!(env.target_issue_create_call_log.len(), 1);
+        .expect("resolved capture");
+        assert_eq!(first.state, CandidateState::Linked);
+        assert_eq!(first.linked_issue.as_ref().unwrap().number, 77);
+        let mutation_count = env.owner_client.owner_mutation_count();
 
-        let (_, recapture_out) =
-            run_collect(&mut env, CliCommand::Improvement(capture_command(command)))
-                .expect("recapture");
-        let recapture = parse_output(&recapture_out);
-        assert_eq!(recapture["id"], id);
-        assert_eq!(recapture["occurrences"], 0);
+        let replay = capture_registered(
+            &mut env,
+            registered_capture_input(token, "idempotent", 9, CaptureBudgetProfile::Normal),
+        )
+        .expect("replayed capture");
+        assert_eq!(replay.id, first.id);
+        assert_eq!(replay.state, CandidateState::Linked);
+        assert_eq!(env.owner_client.owner_mutation_count(), mutation_count);
 
         let (_, promote_out) = run_collect(
             &mut env,
             CliCommand::Improvement(ImprovementCommand::PromoteIssue(
                 ImprovementPromoteIssueCommand {
-                    id,
+                    id: first.id,
                     force: false,
                     labels: Vec::new(),
                 },
@@ -2636,9 +2576,54 @@ mod tests {
         let promoted = parse_output(&promote_out);
         assert_eq!(promoted["already_linked"], true);
         assert_eq!(
-            env.target_issue_create_call_log.len(),
-            1,
-            "already linked candidate must not create duplicate upstream Issues"
+            env.owner_client.owner_mutation_count(),
+            mutation_count,
+            "already linked candidate must not repeat owner mutation"
+        );
+    }
+
+    #[test]
+    fn registered_recapture_updates_the_active_owner_occurrence() {
+        let home = tempfile::tempdir().expect("isolated home");
+        let _gwt_home = gwt_core::test_support::ScopedGwtHome::set(home.path());
+        let project = tempfile::tempdir().expect("project");
+        let mut env = TestEnv::new(project.path().join("cache"));
+        env.repo_path = project.path().join("target-project");
+        std::fs::create_dir_all(&env.repo_path).expect("repo path");
+        seed_revision_pinned_active_owner(&mut env);
+        let token = registered_producer_token("test.owner-route").expect("registered token");
+
+        let first = capture_registered(
+            &mut env,
+            registered_capture_input(
+                token,
+                "active-occurrence-a",
+                9,
+                CaptureBudgetProfile::Normal,
+            ),
+        )
+        .expect("first linked occurrence");
+        assert_eq!(first.state, CandidateState::Linked);
+        let first_mutations = env.owner_client.owner_mutation_count();
+
+        let recurrent = capture_registered(
+            &mut env,
+            registered_capture_input(
+                token,
+                "active-occurrence-b",
+                9,
+                CaptureBudgetProfile::Normal,
+            ),
+        )
+        .expect("recurrent occurrence resolution");
+
+        assert_eq!(recurrent.state, CandidateState::Linked);
+        assert_eq!(recurrent.occurrences, 2);
+        assert_eq!(recurrent.owner.as_ref().unwrap().number, 77);
+        assert_eq!(
+            env.owner_client.owner_mutation_count(),
+            first_mutations + 1,
+            "only the new immutable occurrence comment should be added"
         );
     }
 
@@ -2663,6 +2648,104 @@ mod tests {
             summary: Some("Local deterministic capture context".to_string()),
             details: None,
             local_evidence: Vec::new(),
+        }
+    }
+
+    fn capture_registered_candidate_without_resolution(
+        env: &mut TestEnv,
+        source_event_id: &str,
+    ) -> ImprovementCandidate {
+        let evidence = TypedFailureEvidence {
+            subsystem: "coordination".to_string(),
+            contract_id: "coordination.board-status".to_string(),
+            contract_schema_revision: 1,
+            failure_code: "STATUS_NOT_POSTED".to_string(),
+            target_artifact: "coordination".to_string(),
+            expected_outcome: "BOARD_STATUS_POSTED".to_string(),
+            observed_outcome: "BOARD_STATUS_MISSING".to_string(),
+        };
+        let command = ImprovementCaptureCommand {
+            source: "hook-runtime".to_string(),
+            target_artifact: "coordination".to_string(),
+            classification: "gwt-caused".to_string(),
+            confidence: "high".to_string(),
+            summary: "Local deterministic capture context".to_string(),
+            details: None,
+            evidence_digest: None,
+            dedupe_key: None,
+            local_evidence: Vec::new(),
+            typed_evidence: None,
+        };
+        let candidate = capture_typed(
+            &env.repo_path,
+            &command,
+            evidence,
+            ValidatedCaptureOrigin::Registered {
+                producer_id: "test.coordination-gate.v1",
+                source_event_id: source_event_id.to_string(),
+                producer_registry_revision: PRODUCER_REGISTRY_REVISION,
+                routing_basis_revision: 1,
+            },
+        )
+        .expect("capture candidate")
+        .candidate;
+        env.improvement_source_scope_nonce =
+            crate::cli::improvement_store::source_scope_nonce(&env.repo_path)
+                .expect("canonical source scope nonce");
+        candidate
+    }
+
+    fn seed_revision_pinned_active_owner(env: &mut TestEnv) {
+        env.improvement_source_scope_nonce =
+            crate::cli::improvement_store::source_scope_nonce(&env.repo_path)
+                .expect("canonical source scope nonce");
+        let fingerprint = improvement_fingerprint(&TypedFailureEvidence {
+            subsystem: "coordination".to_string(),
+            contract_id: "coordination.board-status".to_string(),
+            contract_schema_revision: 1,
+            failure_code: "STATUS_NOT_POSTED".to_string(),
+            target_artifact: "coordination".to_string(),
+            expected_outcome: "BOARD_STATUS_POSTED".to_string(),
+            observed_outcome: "BOARD_STATUS_MISSING".to_string(),
+        });
+        env.owner_client
+            .seed_repository_issue(gwt_github::client::RepositoryIssue {
+                repository: gwt_github::client::RepositoryIdentity::gwt_upstream(),
+                number: gwt_github::client::IssueNumber(77),
+                title: "Revision-pinned active owner".to_string(),
+                body: format!("<!-- gwt:improvement-fingerprint:v1 {fingerprint} -->"),
+                labels: Vec::new(),
+                state: gwt_github::client::IssueState::Open,
+                kind: gwt_github::client::RepositoryIssueKind::Plain,
+                updated_at: gwt_github::client::UpdatedAt::new("u77"),
+            });
+    }
+
+    fn seed_exact_plain_owners(env: &mut TestEnv, numbers: &[u64]) {
+        env.improvement_source_scope_nonce =
+            crate::cli::improvement_store::source_scope_nonce(&env.repo_path)
+                .expect("canonical source scope nonce");
+        let fingerprint = improvement_fingerprint(&TypedFailureEvidence {
+            subsystem: "coordination".to_string(),
+            contract_id: "coordination.board-status".to_string(),
+            contract_schema_revision: 1,
+            failure_code: "STATUS_NOT_POSTED".to_string(),
+            target_artifact: "coordination".to_string(),
+            expected_outcome: "BOARD_STATUS_POSTED".to_string(),
+            observed_outcome: "BOARD_STATUS_MISSING".to_string(),
+        });
+        for number in numbers {
+            env.owner_client
+                .seed_repository_issue(gwt_github::client::RepositoryIssue {
+                    repository: gwt_github::client::RepositoryIdentity::gwt_upstream(),
+                    number: gwt_github::client::IssueNumber(*number),
+                    title: format!("Duplicate owner {number}"),
+                    body: format!("<!-- gwt:improvement-fingerprint:v1 {fingerprint} -->"),
+                    labels: Vec::new(),
+                    state: gwt_github::client::IssueState::Open,
+                    kind: gwt_github::client::RepositoryIssueKind::Plain,
+                    updated_at: gwt_github::client::UpdatedAt::new(format!("u{number}")),
+                });
         }
     }
 
@@ -2989,11 +3072,1082 @@ mod tests {
     }
 
     #[test]
+    fn registered_capture_automatically_creates_owner_after_capture_status_ack() {
+        let home = tempfile::tempdir().expect("isolated home");
+        let _gwt_home = gwt_core::test_support::ScopedGwtHome::set(home.path());
+        let project = tempfile::tempdir().expect("project");
+        let mut env = TestEnv::new(project.path().join("cache"));
+        env.repo_path = project.path().join("source");
+        std::fs::create_dir_all(&env.repo_path).expect("repo path");
+        env.improvement_source_scope_nonce =
+            crate::cli::improvement_store::source_scope_nonce(&env.repo_path)
+                .expect("canonical source scope nonce");
+        env.owner_client
+            .seed_repository_issue(gwt_github::client::RepositoryIssue {
+                repository: gwt_github::client::RepositoryIdentity::gwt_upstream(),
+                number: gwt_github::client::IssueNumber(77),
+                title: "Unrelated public issue".to_string(),
+                body: "No improvement fingerprint".to_string(),
+                labels: Vec::new(),
+                state: gwt_github::client::IssueState::Open,
+                kind: gwt_github::client::RepositoryIssueKind::Plain,
+                updated_at: gwt_github::client::UpdatedAt::new("u77"),
+            });
+        let token = registered_producer_token("test.coordination-gate").expect("registered token");
+
+        let candidate = capture_registered(
+            &mut env,
+            registered_capture_input(token, "auto-create", 1, CaptureBudgetProfile::Normal),
+        )
+        .expect("registered capture");
+
+        assert_eq!(
+            candidate.state,
+            CandidateState::Created,
+            "candidate: {candidate:?}"
+        );
+        assert_eq!(candidate.owner.as_ref().unwrap().number, 78);
+        assert_eq!(candidate.linked_issue.as_ref().unwrap().number, 78);
+        let stored = load_store(&env.repo_path).expect("stored candidate");
+        assert_eq!(stored.candidates[0].state, CandidateState::Created);
+        assert_eq!(stored.candidates[0].owner.as_ref().unwrap().number, 78);
+        let mutations = env.owner_client.owner_mutation_call_log();
+        assert_eq!(mutations.len(), 1);
+        assert_eq!(
+            mutations[0].operation,
+            gwt_github::client::fake::OwnerRepositoryOperation::CreateIssue
+        );
+        let bodies = board_bodies(&mut env);
+        assert_eq!(bodies.len(), 2);
+        assert!(bodies[0].contains("was captured"));
+        assert!(bodies[1].contains("was created"));
+    }
+
+    #[test]
+    fn registered_capture_preserves_new_owner_mutation_certainty() {
+        use gwt_github::client::fake::{OwnerRepositoryFaultTiming, OwnerRepositoryOperation};
+
+        for (timing, expected_state, expected_mutations) in [
+            (
+                OwnerRepositoryFaultTiming::BeforeSubmit,
+                CandidateState::Blocked,
+                0,
+            ),
+            (
+                OwnerRepositoryFaultTiming::AfterSubmit,
+                CandidateState::RemoteOutcomeUnknown,
+                1,
+            ),
+        ] {
+            let home = tempfile::tempdir().expect("isolated home");
+            let _gwt_home = gwt_core::test_support::ScopedGwtHome::set(home.path());
+            let project = tempfile::tempdir().expect("project");
+            let mut env = TestEnv::new(project.path().join("cache"));
+            env.repo_path = project.path().join("source");
+            std::fs::create_dir_all(&env.repo_path).expect("repo path");
+            env.improvement_source_scope_nonce =
+                crate::cli::improvement_store::source_scope_nonce(&env.repo_path)
+                    .expect("canonical source scope nonce");
+            env.owner_client
+                .seed_repository_issue(gwt_github::client::RepositoryIssue {
+                    repository: gwt_github::client::RepositoryIdentity::gwt_upstream(),
+                    number: gwt_github::client::IssueNumber(77),
+                    title: "Unrelated public issue".to_string(),
+                    body: "No improvement fingerprint".to_string(),
+                    labels: Vec::new(),
+                    state: gwt_github::client::IssueState::Open,
+                    kind: gwt_github::client::RepositoryIssueKind::Plain,
+                    updated_at: gwt_github::client::UpdatedAt::new("u77"),
+                });
+            env.owner_client.fail_next_owner_operation(
+                OwnerRepositoryOperation::CreateIssue,
+                timing,
+                gwt_github::client::ApiError::Timeout {
+                    operation: "create proven-zero owner".to_string(),
+                },
+            );
+            let token =
+                registered_producer_token("test.coordination-gate").expect("registered token");
+            let input = registered_capture_input(
+                token,
+                "create-certainty",
+                1,
+                CaptureBudgetProfile::Normal,
+            );
+
+            let candidate = capture_registered(&mut env, input.clone())
+                .expect("mutation certainty must settle durably");
+
+            assert_eq!(
+                candidate.state, expected_state,
+                "timing: {timing:?}, candidate: {candidate:?}"
+            );
+            assert_eq!(
+                env.owner_client.owner_mutation_count(),
+                expected_mutations,
+                "timing: {timing:?}"
+            );
+            let stored = load_store(&env.repo_path).expect("stored candidate");
+            assert_eq!(stored.candidates[0].state, expected_state);
+
+            if timing == OwnerRepositoryFaultTiming::AfterSubmit {
+                let replay = capture_registered(&mut env, input)
+                    .expect("remote-unknown replay must not mutate");
+                assert_eq!(replay.state, CandidateState::RemoteOutcomeUnknown);
+                assert_eq!(env.owner_client.owner_mutation_count(), 1);
+                let adopted =
+                    resolve_candidate_owner(&mut env, &candidate.id, CaptureBudgetProfile::Normal)
+                        .expect("authoritative retry must adopt the created owner");
+                assert_eq!(adopted.state, CandidateState::Created);
+                assert_eq!(adopted.owner.as_ref().unwrap().number, 78);
+                assert_eq!(env.owner_client.owner_mutation_count(), 1);
+            }
+        }
+    }
+
+    #[test]
+    fn new_owner_local_commit_failure_preserves_create_intent_for_adoption() {
+        let home = tempfile::tempdir().expect("isolated home");
+        let _gwt_home = gwt_core::test_support::ScopedGwtHome::set(home.path());
+        let project = tempfile::tempdir().expect("project");
+        let mut env = TestEnv::new(project.path().join("cache"));
+        env.repo_path = project.path().join("source");
+        std::fs::create_dir_all(&env.repo_path).expect("repo path");
+        let candidate =
+            capture_registered_candidate_without_resolution(&mut env, "local-commit-failure");
+        env.owner_client
+            .seed_repository_issue(gwt_github::client::RepositoryIssue {
+                repository: gwt_github::client::RepositoryIdentity::gwt_upstream(),
+                number: gwt_github::client::IssueNumber(77),
+                title: "Unrelated public issue".to_string(),
+                body: "No improvement fingerprint".to_string(),
+                labels: Vec::new(),
+                state: gwt_github::client::IssueState::Open,
+                kind: gwt_github::client::RepositoryIssueKind::Plain,
+                updated_at: gwt_github::client::UpdatedAt::new("u77"),
+            });
+        crate::cli::improvement_store::fail_next_owner_projection_commit()
+            .expect("projection commit failure injection");
+
+        let unknown =
+            resolve_candidate_owner(&mut env, &candidate.id, CaptureBudgetProfile::Normal)
+                .expect("local commit failure must settle durably");
+
+        assert_eq!(unknown.state, CandidateState::RemoteOutcomeUnknown);
+        assert_eq!(unknown.blocked_reason, None);
+        assert!(matches!(
+            unknown.attempt.as_ref().expect("submitted attempt").intent,
+            crate::cli::improvement_store::ResolutionAttemptIntent::CreateIssue { .. }
+        ));
+        assert_eq!(env.owner_client.owner_mutation_count(), 1);
+
+        let adopted =
+            resolve_candidate_owner(&mut env, &candidate.id, CaptureBudgetProfile::Normal)
+                .expect("retry must adopt the read-back created owner");
+
+        assert_eq!(adopted.state, CandidateState::Created);
+        assert_eq!(adopted.owner.as_ref().unwrap().number, 78);
+        assert_eq!(env.owner_client.owner_mutation_count(), 1);
+    }
+
+    #[test]
+    fn remote_unknown_refresh_failure_preserves_unknown_intent_without_mutation() {
+        use gwt_github::client::fake::{OwnerRepositoryFaultTiming, OwnerRepositoryOperation};
+
+        let home = tempfile::tempdir().expect("isolated home");
+        let _gwt_home = gwt_core::test_support::ScopedGwtHome::set(home.path());
+        let project = tempfile::tempdir().expect("project");
+        let mut env = TestEnv::new(project.path().join("cache"));
+        env.repo_path = project.path().join("source");
+        std::fs::create_dir_all(&env.repo_path).expect("repo path");
+        env.improvement_source_scope_nonce =
+            crate::cli::improvement_store::source_scope_nonce(&env.repo_path)
+                .expect("canonical source scope nonce");
+        env.owner_client
+            .seed_repository_issue(gwt_github::client::RepositoryIssue {
+                repository: gwt_github::client::RepositoryIdentity::gwt_upstream(),
+                number: gwt_github::client::IssueNumber(77),
+                title: "Unrelated public issue".to_string(),
+                body: "No improvement fingerprint".to_string(),
+                labels: Vec::new(),
+                state: gwt_github::client::IssueState::Open,
+                kind: gwt_github::client::RepositoryIssueKind::Plain,
+                updated_at: gwt_github::client::UpdatedAt::new("u77"),
+            });
+        env.owner_client.fail_next_owner_operation(
+            OwnerRepositoryOperation::CreateIssue,
+            OwnerRepositoryFaultTiming::AfterSubmit,
+            gwt_github::client::ApiError::Timeout {
+                operation: "create proven-zero owner".to_string(),
+            },
+        );
+        let token = registered_producer_token("test.coordination-gate").expect("registered token");
+        let unknown = capture_registered(
+            &mut env,
+            registered_capture_input(token, "unknown-refresh", 1, CaptureBudgetProfile::Normal),
+        )
+        .expect("capture must preserve unknown");
+        assert_eq!(unknown.state, CandidateState::RemoteOutcomeUnknown);
+        env.owner_client.fail_next_owner_operation(
+            OwnerRepositoryOperation::ListIssues,
+            OwnerRepositoryFaultTiming::BeforeSubmit,
+            gwt_github::client::ApiError::Timeout {
+                operation: "refresh unknown owner".to_string(),
+            },
+        );
+
+        let retried = resolve_candidate_owner(&mut env, &unknown.id, CaptureBudgetProfile::Normal)
+            .expect("refresh failure must settle durably");
+
+        assert_eq!(retried.state, CandidateState::RemoteOutcomeUnknown);
+        assert_eq!(env.owner_client.owner_mutation_count(), 1);
+        let attempt = retried.attempt.expect("submitted recovery intent");
+        assert_eq!(
+            attempt.remote_phase,
+            crate::cli::improvement_store::AttemptRemotePhase::Submitted
+        );
+        assert!(matches!(
+            attempt.intent,
+            crate::cli::improvement_store::ResolutionAttemptIntent::CreateIssue { .. }
+        ));
+    }
+
+    #[test]
+    fn remote_unknown_create_adoption_survives_a_new_occurrence() {
+        use gwt_github::client::fake::{OwnerRepositoryFaultTiming, OwnerRepositoryOperation};
+
+        let home = tempfile::tempdir().expect("isolated home");
+        let _gwt_home = gwt_core::test_support::ScopedGwtHome::set(home.path());
+        let project = tempfile::tempdir().expect("project");
+        let mut env = TestEnv::new(project.path().join("cache"));
+        env.repo_path = project.path().join("source");
+        std::fs::create_dir_all(&env.repo_path).expect("repo path");
+        env.improvement_source_scope_nonce =
+            crate::cli::improvement_store::source_scope_nonce(&env.repo_path)
+                .expect("canonical source scope nonce");
+        env.owner_client
+            .seed_repository_issue(gwt_github::client::RepositoryIssue {
+                repository: gwt_github::client::RepositoryIdentity::gwt_upstream(),
+                number: gwt_github::client::IssueNumber(77),
+                title: "Unrelated public issue".to_string(),
+                body: "No improvement fingerprint".to_string(),
+                labels: Vec::new(),
+                state: gwt_github::client::IssueState::Open,
+                kind: gwt_github::client::RepositoryIssueKind::Plain,
+                updated_at: gwt_github::client::UpdatedAt::new("u77"),
+            });
+        env.owner_client.fail_next_owner_operation(
+            OwnerRepositoryOperation::CreateIssue,
+            OwnerRepositoryFaultTiming::AfterSubmit,
+            gwt_github::client::ApiError::Timeout {
+                operation: "create owner before recapture".to_string(),
+            },
+        );
+        let producer =
+            registered_producer_token("test.coordination-gate").expect("registered token");
+        let unknown = capture_registered(
+            &mut env,
+            registered_capture_input(
+                producer,
+                "unknown-occurrence-a",
+                1,
+                CaptureBudgetProfile::Normal,
+            ),
+        )
+        .expect("unknown create outcome");
+        assert_eq!(unknown.state, CandidateState::RemoteOutcomeUnknown);
+
+        let recaptured = capture_registered(
+            &mut env,
+            registered_capture_input(
+                producer,
+                "unknown-occurrence-b",
+                1,
+                CaptureBudgetProfile::Normal,
+            ),
+        )
+        .expect("new occurrence while outcome is unknown");
+        assert_eq!(recaptured.state, CandidateState::RemoteOutcomeUnknown);
+        assert_eq!(recaptured.occurrences, 2);
+
+        let adopted = resolve_candidate_owner(&mut env, &unknown.id, CaptureBudgetProfile::Normal)
+            .expect("retry must adopt the exact created marker");
+
+        assert_eq!(adopted.state, CandidateState::Created);
+        assert_eq!(adopted.owner.as_ref().unwrap().number, 78);
+        assert_eq!(env.owner_client.owner_mutation_count(), 1);
+    }
+
+    #[test]
+    fn legacy_unassigned_remote_intent_never_authorizes_zero_owner_create() {
+        let home = tempfile::tempdir().expect("isolated home");
+        let _gwt_home = gwt_core::test_support::ScopedGwtHome::set(home.path());
+        let project = tempfile::tempdir().expect("project");
+        let mut env = TestEnv::new(project.path().join("cache"));
+        env.repo_path = project.path().join("source");
+        std::fs::create_dir_all(&env.repo_path).expect("repo path");
+        let candidate = capture_registered_candidate_without_resolution(&mut env, "legacy-unknown");
+        env.owner_client
+            .seed_repository_issue(gwt_github::client::RepositoryIssue {
+                repository: gwt_github::client::RepositoryIdentity::gwt_upstream(),
+                number: gwt_github::client::IssueNumber(77),
+                title: "Unrelated public issue".to_string(),
+                body: "No improvement fingerprint".to_string(),
+                labels: Vec::new(),
+                state: gwt_github::client::IssueState::Open,
+                kind: gwt_github::client::RepositoryIssueKind::Plain,
+                updated_at: gwt_github::client::UpdatedAt::new("u77"),
+            });
+        crate::cli::improvement_store::update(&env.repo_path, |store| {
+            let stored = find_candidate_mut(store, &candidate.id)?;
+            let now = Utc::now();
+            stored.retry = Some(RetryMetadata {
+                retryable: true,
+                remediation: "REFRESH_OWNER_CORPUS".to_string(),
+                failed_at: now.to_rfc3339(),
+            });
+            transition_candidate(stored, CandidateState::RemoteOutcomeUnknown)?;
+            stored.attempt = Some(crate::cli::improvement_store::ResolutionAttemptLease {
+                attempt_id: "legacy-unassigned".to_string(),
+                lease_owner: "legacy-worker".to_string(),
+                started_at: now - chrono::Duration::seconds(30),
+                expires_at: now - chrono::Duration::seconds(1),
+                remote_phase: crate::cli::improvement_store::AttemptRemotePhase::Submitted,
+                intent: crate::cli::improvement_store::ResolutionAttemptIntent::Unassigned,
+            });
+            Ok(())
+        })
+        .expect("seed legacy unknown attempt");
+
+        let retried =
+            resolve_candidate_owner(&mut env, &candidate.id, CaptureBudgetProfile::Normal)
+                .expect("legacy unknown retry");
+
+        assert_eq!(retried.state, CandidateState::RemoteOutcomeUnknown);
+        assert_eq!(env.owner_client.owner_mutation_count(), 0);
+        assert!(matches!(
+            retried.attempt.expect("unknown attempt").intent,
+            crate::cli::improvement_store::ResolutionAttemptIntent::Unassigned
+        ));
+    }
+
+    #[test]
+    fn resolver_rechecks_authoritative_corpus_before_create_and_adopts_visible_owner() {
+        let home = tempfile::tempdir().expect("isolated home");
+        let _gwt_home = gwt_core::test_support::ScopedGwtHome::set(home.path());
+        let project = tempfile::tempdir().expect("project");
+        let mut env = TestEnv::new(project.path().join("cache"));
+        env.repo_path = project.path().join("source");
+        std::fs::create_dir_all(&env.repo_path).expect("repo path");
+        let evidence = TypedFailureEvidence {
+            subsystem: "coordination".to_string(),
+            contract_id: "coordination.board-status".to_string(),
+            contract_schema_revision: 1,
+            failure_code: "STATUS_NOT_POSTED".to_string(),
+            target_artifact: "coordination".to_string(),
+            expected_outcome: "BOARD_STATUS_POSTED".to_string(),
+            observed_outcome: "BOARD_STATUS_MISSING".to_string(),
+        };
+        let command = ImprovementCaptureCommand {
+            source: "hook-runtime".to_string(),
+            target_artifact: "coordination".to_string(),
+            classification: "gwt-caused".to_string(),
+            confidence: "high".to_string(),
+            summary: "Local deterministic capture context".to_string(),
+            details: None,
+            evidence_digest: None,
+            dedupe_key: None,
+            local_evidence: Vec::new(),
+            typed_evidence: None,
+        };
+        let candidate = capture_typed(
+            &env.repo_path,
+            &command,
+            evidence,
+            ValidatedCaptureOrigin::Registered {
+                producer_id: "test.coordination-gate.v1",
+                source_event_id: "pre-create-race".to_string(),
+                producer_registry_revision: PRODUCER_REGISTRY_REVISION,
+                routing_basis_revision: 1,
+            },
+        )
+        .expect("capture candidate")
+        .candidate;
+        env.improvement_source_scope_nonce =
+            crate::cli::improvement_store::source_scope_nonce(&env.repo_path)
+                .expect("canonical source scope nonce");
+        let payload = render_public_issue_payload(
+            &candidate,
+            &PublicMutationContext::for_repo(&env.repo_path),
+        )
+        .expect("typed owner payload");
+        let repository = gwt_github::client::RepositoryIdentity::gwt_upstream();
+        let unrelated = gwt_github::client::RepositoryIssue {
+            repository: repository.clone(),
+            number: gwt_github::client::IssueNumber(77),
+            title: "Unrelated public issue".to_string(),
+            body: "No improvement fingerprint".to_string(),
+            labels: Vec::new(),
+            state: gwt_github::client::IssueState::Open,
+            kind: gwt_github::client::RepositoryIssueKind::Plain,
+            updated_at: gwt_github::client::UpdatedAt::new("u77"),
+        };
+        let visible_owner = gwt_github::client::RepositoryIssue {
+            repository: repository.clone(),
+            number: gwt_github::client::IssueNumber(78),
+            title: payload.title,
+            body: payload.body,
+            labels: Vec::new(),
+            state: gwt_github::client::IssueState::Open,
+            kind: gwt_github::client::RepositoryIssueKind::Plain,
+            updated_at: gwt_github::client::UpdatedAt::new("u78"),
+        };
+        env.owner_client
+            .seed_repository_issue(visible_owner.clone());
+        env.owner_client.queue_owner_issue_views(
+            &repository,
+            [
+                (vec![unrelated.clone()], "before"),
+                (vec![unrelated.clone()], "before"),
+                (vec![unrelated.clone(), visible_owner.clone()], "after"),
+                (vec![unrelated, visible_owner], "after"),
+            ],
+        );
+
+        let resolved =
+            resolve_candidate_owner(&mut env, &candidate.id, CaptureBudgetProfile::Normal)
+                .expect("second scan must adopt the owner");
+
+        assert_eq!(resolved.state, CandidateState::Created);
+        assert_eq!(resolved.owner.as_ref().unwrap().number, 78);
+        assert_eq!(env.owner_client.owner_mutation_count(), 0);
+    }
+
+    #[test]
+    fn registered_capture_automatically_links_revision_pinned_active_owner() {
+        let home = tempfile::tempdir().expect("isolated home");
+        let _gwt_home = gwt_core::test_support::ScopedGwtHome::set(home.path());
+        let project = tempfile::tempdir().expect("project");
+        let mut env = TestEnv::new(project.path().join("cache"));
+        env.repo_path = project.path().join("source");
+        std::fs::create_dir_all(&env.repo_path).expect("repo path");
+        seed_revision_pinned_active_owner(&mut env);
+        let token = registered_producer_token("test.owner-route").expect("registered token");
+
+        let candidate = capture_registered(
+            &mut env,
+            registered_capture_input(token, "auto-link", 9, CaptureBudgetProfile::Normal),
+        )
+        .expect("registered capture");
+
+        assert_eq!(candidate.state, CandidateState::Linked);
+        assert_eq!(candidate.owner.as_ref().unwrap().number, 77);
+        assert_eq!(candidate.linked_issue.as_ref().unwrap().number, 77);
+        let stored = load_store(&env.repo_path).expect("stored candidate");
+        assert_eq!(stored.candidates[0].state, CandidateState::Linked);
+        assert_eq!(stored.candidates[0].owner.as_ref().unwrap().number, 77);
+        let mutations = env.owner_client.owner_mutation_call_log();
+        assert_eq!(mutations.len(), 1);
+        assert_eq!(
+            mutations[0].operation,
+            gwt_github::client::fake::OwnerRepositoryOperation::CreateComment
+        );
+        let bodies = board_bodies(&mut env);
+        assert_eq!(bodies.len(), 2);
+        assert!(bodies[0].contains("was captured"));
+        assert!(bodies[1].contains("was linked"));
+    }
+
+    #[test]
+    fn resolver_reconciles_exact_plain_issue_duplicates_to_lowest_owner() {
+        use gwt_github::client::{
+            IssueNumber, IssueState, OwnerRepositoryClient, RepositoryIdentity, RepositoryIssue,
+            RepositoryIssueKind, ResolutionDeadline, UpdatedAt,
+        };
+        use std::time::Duration;
+
+        let home = tempfile::tempdir().expect("isolated home");
+        let _gwt_home = gwt_core::test_support::ScopedGwtHome::set(home.path());
+        let project = tempfile::tempdir().expect("project");
+        let mut env = TestEnv::new(project.path().join("cache"));
+        env.repo_path = project.path().join("source");
+        std::fs::create_dir_all(&env.repo_path).expect("repo path");
+        env.improvement_source_scope_nonce =
+            crate::cli::improvement_store::source_scope_nonce(&env.repo_path)
+                .expect("canonical source scope nonce");
+        let fingerprint = improvement_fingerprint(&TypedFailureEvidence {
+            subsystem: "coordination".to_string(),
+            contract_id: "coordination.board-status".to_string(),
+            contract_schema_revision: 1,
+            failure_code: "STATUS_NOT_POSTED".to_string(),
+            target_artifact: "coordination".to_string(),
+            expected_outcome: "BOARD_STATUS_POSTED".to_string(),
+            observed_outcome: "BOARD_STATUS_MISSING".to_string(),
+        });
+        let repository = RepositoryIdentity::gwt_upstream();
+        for number in [78, 79] {
+            env.owner_client.seed_repository_issue(RepositoryIssue {
+                repository: repository.clone(),
+                number: IssueNumber(number),
+                title: format!("Duplicate owner {number}"),
+                body: format!("<!-- gwt:improvement-fingerprint:v1 {fingerprint} -->"),
+                labels: Vec::new(),
+                state: IssueState::Open,
+                kind: RepositoryIssueKind::Plain,
+                updated_at: UpdatedAt::new(format!("u{number}")),
+            });
+        }
+        let token = registered_producer_token("test.coordination-gate").expect("registered token");
+
+        let resolved = capture_registered(
+            &mut env,
+            registered_capture_input(token, "duplicate-race", 1, CaptureBudgetProfile::Normal),
+        )
+        .expect("duplicates must reconcile");
+
+        assert_eq!(resolved.state, CandidateState::Linked);
+        assert_eq!(resolved.owner.as_ref().unwrap().number, 78);
+        let deadline = ResolutionDeadline::new(Duration::from_secs(1), Duration::from_secs(5));
+        let duplicate = env
+            .owner_client
+            .fetch_issue(&repository, IssueNumber(79), &deadline)
+            .expect("duplicate readback");
+        assert_eq!(duplicate.state, IssueState::Closed);
+        let duplicate_comments = env
+            .owner_client
+            .list_comments(&repository, IssueNumber(79), &deadline)
+            .expect("duplicate comments");
+        assert!(duplicate_comments.items().iter().any(|comment| {
+            comment
+                .body
+                .contains("gwt:improvement-reconciliation:v1 canonical:78 duplicate:79")
+        }));
+        let mutations = env.owner_client.owner_mutation_call_log();
+        assert_eq!(
+            mutations
+                .iter()
+                .filter(|call| {
+                    call.operation
+                        == gwt_github::client::fake::OwnerRepositoryOperation::CreateIssue
+                })
+                .count(),
+            0
+        );
+        assert_eq!(mutations.len(), 3, "reconcile comment, close, occurrence");
+    }
+
+    #[test]
+    fn independent_machine_stores_converge_after_delayed_duplicate_visibility() {
+        use gwt_github::client::{
+            fake::FakeIssueClient, IssueNumber, IssueState, OwnerRepositoryClient,
+            RepositoryIdentity, RepositoryIssue, RepositoryIssueKind, ResolutionDeadline,
+            UpdatedAt,
+        };
+        use std::time::Duration;
+
+        let home_a = tempfile::tempdir().expect("machine A home");
+        let home_b = tempfile::tempdir().expect("machine B home");
+        let project = tempfile::tempdir().expect("source repository");
+        let repository = RepositoryIdentity::gwt_upstream();
+        let shared_owner = FakeIssueClient::new();
+        let unrelated = RepositoryIssue {
+            repository: repository.clone(),
+            number: IssueNumber(77),
+            title: "Unrelated public issue".to_string(),
+            body: "No improvement fingerprint".to_string(),
+            labels: Vec::new(),
+            state: IssueState::Open,
+            kind: RepositoryIssueKind::Plain,
+            updated_at: UpdatedAt::new("u77"),
+        };
+        shared_owner.seed_repository_issue(unrelated.clone());
+        let mut env_a = TestEnv::new(project.path().join("cache-a"));
+        env_a.repo_path = project.path().join("source-a");
+        std::fs::create_dir_all(&env_a.repo_path).expect("machine A source");
+        env_a.owner_client = shared_owner.clone();
+        let mut env_b = TestEnv::new(project.path().join("cache-b"));
+        env_b.repo_path = project.path().join("source-b");
+        std::fs::create_dir_all(&env_b.repo_path).expect("machine B source");
+        env_b.owner_client = shared_owner.clone();
+
+        let candidate_a = {
+            let _home = gwt_core::test_support::ScopedGwtHome::set(home_a.path());
+            let candidate =
+                capture_registered_candidate_without_resolution(&mut env_a, "machine-a");
+            let resolved =
+                resolve_candidate_owner(&mut env_a, &candidate.id, CaptureBudgetProfile::Normal)
+                    .expect("machine A create");
+            assert_eq!(resolved.state, CandidateState::Created);
+            assert_eq!(resolved.owner.as_ref().unwrap().number, 78);
+            candidate
+        };
+
+        let resolved_b = {
+            let _home = gwt_core::test_support::ScopedGwtHome::set(home_b.path());
+            let candidate_b =
+                capture_registered_candidate_without_resolution(&mut env_b, "machine-b");
+            let payload = render_public_issue_payload(
+                &candidate_b,
+                &PublicMutationContext::for_repo(&env_b.repo_path),
+            )
+            .expect("machine B payload");
+            let predicted_79 = RepositoryIssue {
+                repository: repository.clone(),
+                number: IssueNumber(79),
+                title: payload.title,
+                body: payload.body,
+                labels: Vec::new(),
+                state: IssueState::Open,
+                kind: RepositoryIssueKind::Plain,
+                updated_at: UpdatedAt::new("predicted-u79"),
+            };
+            let hidden = vec![unrelated.clone()];
+            let machine_b_only = vec![unrelated.clone(), predicted_79];
+            shared_owner.queue_owner_issue_views(
+                &repository,
+                [
+                    (hidden.clone(), "machine-b-zero-1"),
+                    (hidden.clone(), "machine-b-zero-1"),
+                    (hidden.clone(), "machine-b-zero-2"),
+                    (hidden, "machine-b-zero-2"),
+                    (machine_b_only.clone(), "machine-b-only"),
+                    (machine_b_only, "machine-b-only"),
+                ],
+            );
+
+            let initially_created =
+                resolve_candidate_owner(&mut env_b, &candidate_b.id, CaptureBudgetProfile::Normal)
+                    .expect("machine B create");
+            assert_eq!(initially_created.state, CandidateState::Created);
+            assert_eq!(initially_created.owner.as_ref().unwrap().number, 79);
+
+            resolve_candidate_owner(&mut env_b, &candidate_b.id, CaptureBudgetProfile::Normal)
+                .expect("machine B convergence audit")
+        };
+
+        assert_eq!(resolved_b.state, CandidateState::Linked);
+        assert_eq!(resolved_b.owner.as_ref().unwrap().number, 78);
+        let deadline = ResolutionDeadline::new(Duration::from_secs(1), Duration::from_secs(5));
+        assert_eq!(
+            shared_owner
+                .fetch_issue(&repository, IssueNumber(79), &deadline)
+                .expect("duplicate owner")
+                .state,
+            IssueState::Closed
+        );
+        assert!(shared_owner
+            .fetch_issue(&repository, IssueNumber(80), &deadline)
+            .is_err());
+        assert_eq!(
+            shared_owner
+                .owner_mutation_call_log()
+                .iter()
+                .filter(|call| {
+                    call.operation
+                        == gwt_github::client::fake::OwnerRepositoryOperation::CreateIssue
+                })
+                .count(),
+            2
+        );
+        {
+            let _home = gwt_core::test_support::ScopedGwtHome::set(home_a.path());
+            let stored_a = load_store(&env_a.repo_path).expect("machine A store");
+            let stored_a = stored_a
+                .candidates
+                .iter()
+                .find(|candidate| candidate.id == candidate_a.id)
+                .expect("machine A candidate");
+            assert_eq!(stored_a.owner.as_ref().unwrap().number, 78);
+        }
+    }
+
+    #[test]
+    fn reconciliation_failure_stops_then_retry_reuses_exact_comment() {
+        use gwt_github::client::fake::{OwnerRepositoryFaultTiming, OwnerRepositoryOperation};
+        use gwt_github::client::{
+            IssueNumber, OwnerRepositoryClient, RepositoryIdentity, ResolutionDeadline,
+        };
+        use std::time::Duration;
+
+        let home = tempfile::tempdir().expect("isolated home");
+        let _gwt_home = gwt_core::test_support::ScopedGwtHome::set(home.path());
+        let project = tempfile::tempdir().expect("project");
+        let mut env = TestEnv::new(project.path().join("cache"));
+        env.repo_path = project.path().join("source");
+        std::fs::create_dir_all(&env.repo_path).expect("repo path");
+        seed_exact_plain_owners(&mut env, &[78, 79]);
+        env.owner_client.fail_next_owner_operation(
+            OwnerRepositoryOperation::CloseIssue,
+            OwnerRepositoryFaultTiming::BeforeSubmit,
+            gwt_github::client::ApiError::PermissionDenied {
+                message: "close duplicate".to_string(),
+            },
+        );
+        let producer =
+            registered_producer_token("test.coordination-gate").expect("registered token");
+
+        let blocked = capture_registered(
+            &mut env,
+            registered_capture_input(
+                producer,
+                "duplicate-close-failure",
+                1,
+                CaptureBudgetProfile::Normal,
+            ),
+        )
+        .expect("known reconciliation failure must settle");
+
+        assert_eq!(blocked.state, CandidateState::Blocked);
+        assert_eq!(blocked.blocked_reason, Some(BlockedReason::Reconciliation));
+        assert!(blocked.reconciliation_required);
+        assert_eq!(blocked.reconciliation_owner_numbers, vec![78, 79]);
+        let mutations = env.owner_client.owner_mutation_call_log();
+        assert_eq!(mutations.len(), 1, "must stop before close and occurrence");
+        assert_eq!(
+            mutations[0].operation,
+            OwnerRepositoryOperation::CreateComment
+        );
+
+        env.owner_client.fail_next_owner_operation(
+            OwnerRepositoryOperation::ListIssues,
+            OwnerRepositoryFaultTiming::BeforeSubmit,
+            gwt_github::client::ApiError::Network(
+                "temporary duplicate-corpus refresh failure".to_string(),
+            ),
+        );
+        let refresh_blocked =
+            resolve_candidate_owner(&mut env, &blocked.id, CaptureBudgetProfile::Normal)
+                .expect("temporary reconciliation refresh failure must settle");
+        assert_eq!(refresh_blocked.state, CandidateState::Blocked);
+        assert_eq!(
+            refresh_blocked.blocked_reason,
+            Some(BlockedReason::Reconciliation),
+            "a transient refresh failure must not clear the no-create reconciliation latch"
+        );
+        assert!(refresh_blocked.reconciliation_required);
+        assert_eq!(env.owner_client.owner_mutation_count(), 1);
+
+        super::super::improvement_store::update(&env.repo_path, |store| {
+            let candidate = find_candidate_mut(store, &blocked.id)?;
+            candidate.state = CandidateState::OwnerResolving;
+            candidate.blocked_reason = None;
+            candidate.failure_subcode = None;
+            candidate.retry = None;
+            candidate.attempt = Some(super::super::improvement_store::ResolutionAttemptLease {
+                attempt_id: "crashed-reconciliation-attempt".to_string(),
+                lease_owner: "crashed-worker".to_string(),
+                started_at: Utc::now() - chrono::Duration::minutes(2),
+                expires_at: Utc::now() - chrono::Duration::minutes(1),
+                remote_phase: super::super::improvement_store::AttemptRemotePhase::NotSubmitted,
+                intent: super::super::improvement_store::ResolutionAttemptIntent::Unassigned,
+            });
+            validate_candidate_lifecycle(candidate)
+        })
+        .expect("simulate crash after reconciliation attempt acquisition");
+
+        let deadline = ResolutionDeadline::new(Duration::from_secs(1), Duration::from_secs(5));
+        let canonical = env
+            .owner_client
+            .fetch_issue(
+                &RepositoryIdentity::gwt_upstream(),
+                IssueNumber(78),
+                &deadline,
+            )
+            .expect("canonical owner");
+        env.owner_client.queue_owner_issue_views(
+            &RepositoryIdentity::gwt_upstream(),
+            [
+                (vec![canonical.clone()], "canonical-only"),
+                (vec![canonical], "canonical-only"),
+            ],
+        );
+        let cleanup_blocked =
+            resolve_candidate_owner(&mut env, &blocked.id, CaptureBudgetProfile::Normal)
+                .expect("hidden duplicate cleanup must settle");
+        assert_eq!(cleanup_blocked.state, CandidateState::Blocked);
+        assert_eq!(
+            cleanup_blocked.blocked_reason,
+            Some(BlockedReason::Reconciliation),
+            "canonical visibility alone must not prove duplicate cleanup"
+        );
+        assert!(cleanup_blocked.reconciliation_required);
+        assert_eq!(cleanup_blocked.reconciliation_owner_numbers, vec![78, 79]);
+        assert_eq!(env.owner_client.owner_mutation_count(), 1);
+
+        let repository = RepositoryIdentity::gwt_upstream();
+        let unrelated = gwt_github::client::RepositoryIssue {
+            repository: repository.clone(),
+            number: IssueNumber(77),
+            title: "Temporarily visible unrelated Issue".to_string(),
+            body: "No matching fingerprint".to_string(),
+            labels: Vec::new(),
+            state: gwt_github::client::IssueState::Open,
+            kind: gwt_github::client::RepositoryIssueKind::Plain,
+            updated_at: gwt_github::client::UpdatedAt::new("u77"),
+        };
+        env.owner_client.queue_owner_issue_views(
+            &repository,
+            [
+                (vec![unrelated.clone()], "hidden-1"),
+                (vec![unrelated], "hidden-1"),
+            ],
+        );
+        let still_blocked =
+            resolve_candidate_owner(&mut env, &blocked.id, CaptureBudgetProfile::Normal)
+                .expect("reconciliation-only retry must settle");
+        assert_eq!(still_blocked.state, CandidateState::Blocked);
+        assert_eq!(
+            still_blocked.blocked_reason,
+            Some(BlockedReason::Reconciliation)
+        );
+        assert!(still_blocked.reconciliation_required);
+        assert_eq!(env.owner_client.owner_mutation_count(), 1);
+
+        let linked = resolve_candidate_owner(&mut env, &blocked.id, CaptureBudgetProfile::Normal)
+            .expect("retry reconciliation");
+
+        assert_eq!(linked.state, CandidateState::Linked);
+        assert_eq!(linked.owner.as_ref().unwrap().number, 78);
+        assert!(!linked.reconciliation_required);
+        assert!(linked.reconciliation_owner_numbers.is_empty());
+        let duplicate_comments = env
+            .owner_client
+            .list_comments(
+                &RepositoryIdentity::gwt_upstream(),
+                IssueNumber(79),
+                &deadline,
+            )
+            .expect("duplicate comments");
+        assert_eq!(
+            duplicate_comments
+                .items()
+                .iter()
+                .filter(|comment| comment.body.contains("gwt:improvement-reconciliation:v1"))
+                .count(),
+            1,
+            "retry must not duplicate the immutable reconciliation marker"
+        );
+        assert_eq!(env.owner_client.owner_mutation_count(), 3);
+        assert!(env
+            .owner_client
+            .owner_mutation_call_log()
+            .iter()
+            .all(|call| call.operation != OwnerRepositoryOperation::CreateIssue));
+    }
+
+    #[test]
+    fn reconciliation_post_submit_unknown_adopts_comment_before_close_retry() {
+        use gwt_github::client::fake::{OwnerRepositoryFaultTiming, OwnerRepositoryOperation};
+        use gwt_github::client::{
+            IssueNumber, OwnerRepositoryClient, RepositoryIdentity, ResolutionDeadline,
+        };
+        use std::time::Duration;
+
+        let home = tempfile::tempdir().expect("isolated home");
+        let _gwt_home = gwt_core::test_support::ScopedGwtHome::set(home.path());
+        let project = tempfile::tempdir().expect("project");
+        let mut env = TestEnv::new(project.path().join("cache"));
+        env.repo_path = project.path().join("source");
+        std::fs::create_dir_all(&env.repo_path).expect("repo path");
+        seed_exact_plain_owners(&mut env, &[78, 79]);
+        env.owner_client.fail_next_owner_operation(
+            OwnerRepositoryOperation::CreateComment,
+            OwnerRepositoryFaultTiming::AfterSubmit,
+            gwt_github::client::ApiError::Timeout {
+                operation: "reconciliation comment response".to_string(),
+            },
+        );
+        let producer =
+            registered_producer_token("test.coordination-gate").expect("registered token");
+
+        let unknown = capture_registered(
+            &mut env,
+            registered_capture_input(
+                producer,
+                "duplicate-comment-unknown",
+                1,
+                CaptureBudgetProfile::Normal,
+            ),
+        )
+        .expect("unknown reconciliation must settle");
+        assert_eq!(unknown.state, CandidateState::RemoteOutcomeUnknown);
+        assert_eq!(env.owner_client.owner_mutation_count(), 1);
+
+        let linked = resolve_candidate_owner(&mut env, &unknown.id, CaptureBudgetProfile::Normal)
+            .expect("authoritative comment adoption");
+
+        assert_eq!(linked.state, CandidateState::Linked);
+        assert_eq!(linked.owner.as_ref().unwrap().number, 78);
+        assert_eq!(env.owner_client.owner_mutation_count(), 3);
+        let deadline = ResolutionDeadline::new(Duration::from_secs(1), Duration::from_secs(5));
+        let comments = env
+            .owner_client
+            .list_comments(
+                &RepositoryIdentity::gwt_upstream(),
+                IssueNumber(79),
+                &deadline,
+            )
+            .expect("duplicate comments");
+        assert_eq!(
+            comments
+                .items()
+                .iter()
+                .filter(|comment| comment.body.contains("gwt:improvement-reconciliation:v1"))
+                .count(),
+            1
+        );
+    }
+
+    #[test]
+    fn registered_capture_preserves_active_owner_mutation_certainty() {
+        use gwt_github::client::fake::{OwnerRepositoryFaultTiming, OwnerRepositoryOperation};
+
+        for (timing, expected_state, expected_mutations) in [
+            (
+                OwnerRepositoryFaultTiming::BeforeSubmit,
+                CandidateState::Blocked,
+                0,
+            ),
+            (
+                OwnerRepositoryFaultTiming::AfterSubmit,
+                CandidateState::RemoteOutcomeUnknown,
+                1,
+            ),
+        ] {
+            let home = tempfile::tempdir().expect("isolated home");
+            let _gwt_home = gwt_core::test_support::ScopedGwtHome::set(home.path());
+            let project = tempfile::tempdir().expect("project");
+            let mut env = TestEnv::new(project.path().join("cache"));
+            env.repo_path = project.path().join("source");
+            std::fs::create_dir_all(&env.repo_path).expect("repo path");
+            seed_revision_pinned_active_owner(&mut env);
+            env.owner_client.fail_next_owner_operation(
+                OwnerRepositoryOperation::CreateComment,
+                timing,
+                gwt_github::client::ApiError::Timeout {
+                    operation: "create active owner occurrence".to_string(),
+                },
+            );
+            let token = registered_producer_token("test.owner-route").expect("registered token");
+            let input =
+                registered_capture_input(token, "certainty", 9, CaptureBudgetProfile::Normal);
+
+            let candidate = capture_registered(&mut env, input.clone())
+                .expect("mutation certainty must settle durably");
+
+            assert_eq!(candidate.state, expected_state, "timing: {timing:?}");
+            assert_eq!(
+                env.owner_client.owner_mutation_count(),
+                expected_mutations,
+                "timing: {timing:?}"
+            );
+            let stored = load_store(&env.repo_path).expect("stored candidate");
+            assert_eq!(stored.candidates[0].state, expected_state);
+
+            if timing == OwnerRepositoryFaultTiming::AfterSubmit {
+                let replay = capture_registered(&mut env, input)
+                    .expect("remote-unknown replay must not mutate");
+                assert_eq!(replay.state, CandidateState::RemoteOutcomeUnknown);
+                assert_eq!(env.owner_client.owner_mutation_count(), 1);
+                let adopted =
+                    resolve_candidate_owner(&mut env, &candidate.id, CaptureBudgetProfile::Normal)
+                        .expect("authoritative retry must adopt the occurrence comment");
+                assert_eq!(adopted.state, CandidateState::Linked);
+                assert_eq!(adopted.owner.as_ref().unwrap().number, 77);
+                assert_eq!(env.owner_client.owner_mutation_count(), 1);
+            }
+        }
+    }
+
+    #[test]
+    fn resolver_honors_live_lease_and_takes_over_expired_unsubmitted_lease() {
+        let home = tempfile::tempdir().expect("isolated home");
+        let _gwt_home = gwt_core::test_support::ScopedGwtHome::set(home.path());
+        let project = tempfile::tempdir().expect("project");
+        let mut env = TestEnv::new(project.path().join("cache"));
+        env.repo_path = project.path().join("source");
+        std::fs::create_dir_all(&env.repo_path).expect("repo path");
+        env.improvement_source_scope_nonce =
+            crate::cli::improvement_store::source_scope_nonce(&env.repo_path)
+                .expect("canonical source scope nonce");
+        let token = registered_producer_token("test.coordination-gate").expect("registered token");
+        let blocked = capture_registered(
+            &mut env,
+            registered_capture_input(token, "lease", 1, CaptureBudgetProfile::Normal),
+        )
+        .expect("initial blocked capture");
+        assert_eq!(blocked.state, CandidateState::Blocked);
+        let initial_owner_calls = env.owner_client.owner_call_log().len();
+        let now = Utc::now();
+        crate::cli::improvement_store::update(&env.repo_path, |store| {
+            let candidate = find_candidate_mut(store, &blocked.id)?;
+            transition_candidate(candidate, CandidateState::OwnerResolving)?;
+            candidate.attempt = Some(crate::cli::improvement_store::ResolutionAttemptLease {
+                attempt_id: "attempt-live".to_string(),
+                lease_owner: "other-worker".to_string(),
+                started_at: now,
+                expires_at: now + chrono::Duration::seconds(30),
+                remote_phase: crate::cli::improvement_store::AttemptRemotePhase::NotSubmitted,
+                intent: crate::cli::improvement_store::ResolutionAttemptIntent::Unassigned,
+            });
+            Ok(())
+        })
+        .expect("seed live lease");
+
+        let error = resolve_candidate_owner(&mut env, &blocked.id, CaptureBudgetProfile::Normal)
+            .expect_err("live lease must block duplicate local resolution");
+
+        assert!(error.to_string().contains("already in progress"));
+        assert_eq!(env.owner_client.owner_call_log().len(), initial_owner_calls);
+
+        crate::cli::improvement_store::update(&env.repo_path, |store| {
+            let candidate = find_candidate_mut(store, &blocked.id)?;
+            candidate.attempt.as_mut().unwrap().expires_at =
+                Utc::now() - chrono::Duration::seconds(1);
+            Ok(())
+        })
+        .expect("expire lease");
+        let retried = resolve_candidate_owner(&mut env, &blocked.id, CaptureBudgetProfile::Normal)
+            .expect("expired unsubmitted lease must be taken over");
+        assert_eq!(retried.state, CandidateState::Blocked);
+        assert!(retried.attempt.is_none());
+        assert!(env.owner_client.owner_call_log().len() > initial_owner_calls);
+    }
+
+    #[test]
+    fn promote_force_is_removed_before_candidate_lookup_or_owner_transport() {
+        let project = tempfile::tempdir().expect("project");
+        let mut env = TestEnv::new(project.path().join("cache"));
+        env.repo_path = project.path().join("source");
+        std::fs::create_dir_all(&env.repo_path).expect("repo path");
+
+        let error = run_collect(
+            &mut env,
+            CliCommand::Improvement(ImprovementCommand::PromoteIssue(
+                ImprovementPromoteIssueCommand {
+                    id: "missing-candidate".to_string(),
+                    force: true,
+                    labels: Vec::new(),
+                },
+            )),
+        )
+        .expect_err("force must be removed before candidate lookup");
+
+        assert!(error.to_string().contains("UNSAFE_FORCE_REMOVED"));
+        assert!(env.owner_client.owner_call_log().is_empty());
+        assert!(env.owner_client.owner_mutation_call_log().is_empty());
+        assert!(env.target_issue_create_call_log.is_empty());
+    }
+
+    #[test]
     fn registered_capture_qualifies_once_and_replay_does_not_duplicate_status() {
         let project = tempfile::tempdir().expect("project");
         let mut env = TestEnv::new(project.path().join("cache"));
         env.repo_path = project.path().join("source-a");
         std::fs::create_dir_all(&env.repo_path).expect("repo path");
+        env.improvement_source_scope_nonce =
+            crate::cli::improvement_store::source_scope_nonce(&env.repo_path)
+                .expect("canonical source scope nonce");
         let token = registered_producer_token("test.coordination-gate").expect("registered token");
 
         let first = capture_registered(
@@ -3002,7 +4156,9 @@ mod tests {
         )
         .expect("registered capture");
         assert_eq!(first.eligibility, ImprovementEligibility::Deterministic);
-        assert_eq!(first.state, CandidateState::OwnerResolving);
+        assert_eq!(first.state, CandidateState::Blocked);
+        assert_eq!(first.blocked_reason, Some(BlockedReason::Search));
+        assert_eq!(first.failure_subcode, Some(FailureSubcode::EmptyCorpus));
         assert_eq!(first.occurrences, 1);
         let canonical_source_scope_nonce = load_store(&env.repo_path)
             .expect("candidate store")
@@ -3021,7 +4177,7 @@ mod tests {
         );
         assert_eq!(occurrence.producer_registry_revision, Some(1));
         assert_eq!(occurrence.routing_basis_revision, Some(1));
-        assert_eq!(board_bodies(&mut env).len(), 1);
+        assert_eq!(board_bodies(&mut env).len(), 2);
 
         let replay = capture_registered(
             &mut env,
@@ -3038,7 +4194,7 @@ mod tests {
             replay.distinct_occurrences[0].routing_basis_revision,
             occurrence.routing_basis_revision
         );
-        assert_eq!(board_bodies(&mut env).len(), 1, "replay must stay silent");
+        assert_eq!(board_bodies(&mut env).len(), 2, "replay must stay silent");
 
         let mut conflicting =
             registered_capture_input(token, "event-a", 1, CaptureBudgetProfile::Normal);
@@ -3063,7 +4219,8 @@ mod tests {
         .expect("second registered event");
         assert_eq!(second.id, first.id);
         assert_eq!(second.occurrences, 2);
-        assert_eq!(board_bodies(&mut env).len(), 2);
+        assert_eq!(second.state, CandidateState::Blocked);
+        assert_eq!(board_bodies(&mut env).len(), 4);
     }
 
     #[test]
@@ -3159,6 +4316,9 @@ mod tests {
         let mut env = TestEnv::new(project.path().join("cache-eligible"));
         env.repo_path = project.path().join("source-eligible");
         std::fs::create_dir_all(&env.repo_path).expect("eligible repo path");
+        env.improvement_source_scope_nonce =
+            crate::cli::improvement_store::source_scope_nonce(&env.repo_path)
+                .expect("canonical source scope nonce");
         let deterministic = capture_registered(
             &mut env,
             registered_capture_input(token, "high-event", 1, CaptureBudgetProfile::Normal),
@@ -3195,7 +4355,7 @@ mod tests {
             after_low_public.eligibility,
             ImprovementEligibility::Deterministic
         );
-        assert_eq!(after_low_public.state, CandidateState::OwnerResolving);
+        assert_eq!(after_low_public.state, CandidateState::Blocked);
     }
 
     #[test]
@@ -3205,6 +4365,9 @@ mod tests {
         let mut env = TestEnv::new(project.path().join("cache"));
         env.repo_path = project.path().join("source");
         std::fs::create_dir_all(&env.repo_path).expect("repo path");
+        env.improvement_source_scope_nonce =
+            crate::cli::improvement_store::source_scope_nonce(&env.repo_path)
+                .expect("canonical source scope nonce");
 
         let first = capture_registered(
             &mut env,
@@ -3233,6 +4396,9 @@ mod tests {
         let mut env = TestEnv::new(project.path().join("cache"));
         env.repo_path = project.path().join("source");
         std::fs::create_dir_all(&env.repo_path).expect("repo path");
+        env.improvement_source_scope_nonce =
+            crate::cli::improvement_store::source_scope_nonce(&env.repo_path)
+                .expect("canonical source scope nonce");
         std::fs::set_permissions(&env.repo_path, std::fs::Permissions::from_mode(0o500))
             .expect("make Board path read-only");
 
@@ -3249,7 +4415,850 @@ mod tests {
             registered_capture_input(token, "board-retry", 1, CaptureBudgetProfile::Normal),
         )
         .expect("retry capture");
-        assert_eq!(board_bodies(&mut env).len(), 1);
+        let bodies = board_bodies(&mut env);
+        assert_eq!(bodies.len(), 2);
+        assert!(bodies[0].contains("was updated"));
+        assert!(bodies[1].contains("is blocked"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn resolver_persists_blocked_state_before_failure_status_post() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let home = tempfile::tempdir().expect("isolated home");
+        let _gwt_home = gwt_core::test_support::ScopedGwtHome::set(home.path());
+        let project = tempfile::tempdir().expect("project");
+        let mut env = TestEnv::new(project.path().join("cache"));
+        env.repo_path = project.path().join("source");
+        std::fs::create_dir_all(&env.repo_path).expect("repo path");
+        env.improvement_source_scope_nonce =
+            crate::cli::improvement_store::source_scope_nonce(&env.repo_path)
+                .expect("canonical source scope nonce");
+        let evidence = TypedFailureEvidence {
+            subsystem: "coordination".to_string(),
+            contract_id: "coordination.board-status".to_string(),
+            contract_schema_revision: 1,
+            failure_code: "STATUS_NOT_POSTED".to_string(),
+            target_artifact: "coordination".to_string(),
+            expected_outcome: "BOARD_STATUS_POSTED".to_string(),
+            observed_outcome: "BOARD_STATUS_MISSING".to_string(),
+        };
+        let command = ImprovementCaptureCommand {
+            source: "hook-runtime".to_string(),
+            target_artifact: "coordination".to_string(),
+            classification: "gwt-caused".to_string(),
+            confidence: "high".to_string(),
+            summary: "Local deterministic capture context".to_string(),
+            details: None,
+            evidence_digest: None,
+            dedupe_key: None,
+            local_evidence: Vec::new(),
+            typed_evidence: None,
+        };
+        let captured = capture_typed(
+            &env.repo_path,
+            &command,
+            evidence,
+            ValidatedCaptureOrigin::Registered {
+                producer_id: "test.coordination-gate.v1",
+                source_event_id: "blocked-board".to_string(),
+                producer_registry_revision: 1,
+                routing_basis_revision: 1,
+            },
+        )
+        .expect("registered capture without status delivery")
+        .candidate;
+        assert_eq!(captured.state, CandidateState::OwnerResolving);
+
+        let coordination_dir = gwt_core::coordination::coordination_dir(&env.repo_path);
+        std::fs::create_dir_all(&coordination_dir).expect("coordination directory");
+        std::fs::set_permissions(&coordination_dir, std::fs::Permissions::from_mode(0o500))
+            .expect("make Board store read-only");
+        let result = resolve_candidate_owner(&mut env, &captured.id, CaptureBudgetProfile::Normal);
+        std::fs::set_permissions(&coordination_dir, std::fs::Permissions::from_mode(0o700))
+            .expect("restore Board store permissions");
+
+        assert!(result.is_err(), "failure status post must surface");
+        let stored = load_store(&env.repo_path).expect("stored blocked candidate");
+        assert_eq!(stored.candidates[0].state, CandidateState::Blocked);
+        assert_eq!(
+            stored.candidates[0].blocked_reason,
+            Some(BlockedReason::Search)
+        );
+        assert_eq!(
+            stored.candidates[0].failure_subcode,
+            Some(FailureSubcode::EmptyCorpus)
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn owner_success_board_status_retries_after_durable_commit() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let home = tempfile::tempdir().expect("isolated home");
+        let _gwt_home = gwt_core::test_support::ScopedGwtHome::set(home.path());
+        let project = tempfile::tempdir().expect("project");
+        let mut env = TestEnv::new(project.path().join("cache"));
+        env.repo_path = project.path().join("source");
+        std::fs::create_dir_all(&env.repo_path).expect("repo path");
+        env.owner_client
+            .seed_repository_issue(gwt_github::client::RepositoryIssue {
+                repository: gwt_github::client::RepositoryIdentity::gwt_upstream(),
+                number: gwt_github::client::IssueNumber(77),
+                title: "Unrelated public issue".to_string(),
+                body: "No improvement fingerprint".to_string(),
+                labels: Vec::new(),
+                state: gwt_github::client::IssueState::Open,
+                kind: gwt_github::client::RepositoryIssueKind::Plain,
+                updated_at: gwt_github::client::UpdatedAt::new("u77"),
+            });
+        let captured =
+            capture_registered_candidate_without_resolution(&mut env, "owner-board-retry");
+        let coordination_dir = gwt_core::coordination::coordination_dir(&env.repo_path);
+        std::fs::create_dir_all(&coordination_dir).expect("coordination directory");
+        std::fs::set_permissions(&coordination_dir, std::fs::Permissions::from_mode(0o500))
+            .expect("make Board store read-only");
+
+        let first = resolve_candidate_owner(&mut env, &captured.id, CaptureBudgetProfile::Normal);
+
+        std::fs::set_permissions(&coordination_dir, std::fs::Permissions::from_mode(0o700))
+            .expect("restore Board store permissions");
+        assert!(
+            first.is_err(),
+            "the failed success-status post must surface"
+        );
+        let stored = load_store(&env.repo_path).expect("stored created candidate");
+        let stored = stored
+            .candidates
+            .iter()
+            .find(|candidate| candidate.id == captured.id)
+            .expect("created candidate");
+        assert_eq!(stored.state, CandidateState::Created);
+        assert_eq!(stored.owner.as_ref().unwrap().number, 78);
+        assert_eq!(stored.owner_status_generation, 1);
+        assert_eq!(stored.owner_status_delivered_generation, 0);
+        let recurrent =
+            capture_registered_candidate_without_resolution(&mut env, "owner-board-retry-next");
+        assert_eq!(recurrent.id, captured.id);
+        assert_eq!(recurrent.state, CandidateState::Recurrent);
+        assert_eq!(recurrent.occurrences, 2);
+
+        let retried = resolve_candidate_owner(&mut env, &captured.id, CaptureBudgetProfile::Normal)
+            .expect("retry pending success status");
+
+        assert_eq!(retried.state, CandidateState::Created);
+        assert_eq!(retried.owner.as_ref().unwrap().number, 78);
+        assert_eq!(retried.occurrences, 2);
+        assert_eq!(
+            retried.owner_status_delivered_generation,
+            retried.owner_status_generation
+        );
+        let bodies = board_bodies(&mut env);
+        assert_eq!(
+            bodies
+                .iter()
+                .filter(|body| body.contains("owner #78 was created"))
+                .count(),
+            1,
+            "the durable created status must be delivered exactly once"
+        );
+        assert!(bodies
+            .iter()
+            .all(|body| !body.contains("was linked to active")));
+        assert_eq!(
+            env.owner_client
+                .owner_mutation_call_log()
+                .iter()
+                .filter(|call| {
+                    call.operation
+                        == gwt_github::client::fake::OwnerRepositoryOperation::CreateIssue
+                })
+                .count(),
+            1,
+            "status retry must not create another owner"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn same_event_replay_delivers_pending_owner_success_status() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let home = tempfile::tempdir().expect("isolated home");
+        let _gwt_home = gwt_core::test_support::ScopedGwtHome::set(home.path());
+        let project = tempfile::tempdir().expect("project");
+        let mut env = TestEnv::new(project.path().join("cache"));
+        env.repo_path = project.path().join("source");
+        std::fs::create_dir_all(&env.repo_path).expect("repo path");
+        env.owner_client
+            .seed_repository_issue(gwt_github::client::RepositoryIssue {
+                repository: gwt_github::client::RepositoryIdentity::gwt_upstream(),
+                number: gwt_github::client::IssueNumber(77),
+                title: "Unrelated public issue".to_string(),
+                body: "No improvement fingerprint".to_string(),
+                labels: Vec::new(),
+                state: gwt_github::client::IssueState::Open,
+                kind: gwt_github::client::RepositoryIssueKind::Plain,
+                updated_at: gwt_github::client::UpdatedAt::new("u77"),
+            });
+        let captured =
+            capture_registered_candidate_without_resolution(&mut env, "owner-board-same-event");
+        let coordination_dir = gwt_core::coordination::coordination_dir(&env.repo_path);
+        std::fs::create_dir_all(&coordination_dir).expect("coordination directory");
+        std::fs::set_permissions(&coordination_dir, std::fs::Permissions::from_mode(0o500))
+            .expect("make Board store read-only");
+
+        let first = resolve_candidate_owner(&mut env, &captured.id, CaptureBudgetProfile::Normal);
+
+        std::fs::set_permissions(&coordination_dir, std::fs::Permissions::from_mode(0o700))
+            .expect("restore Board store permissions");
+        assert!(
+            first.is_err(),
+            "the failed success-status post must surface"
+        );
+        let producer =
+            registered_producer_token("test.coordination-gate").expect("registered token");
+        let replay = capture_registered(
+            &mut env,
+            registered_capture_input(
+                producer,
+                "owner-board-same-event",
+                1,
+                CaptureBudgetProfile::Normal,
+            ),
+        )
+        .expect("same event replay");
+
+        assert_eq!(replay.state, CandidateState::Created);
+        assert_eq!(replay.owner.as_ref().unwrap().number, 78);
+        assert_eq!(replay.occurrences, 1);
+        assert_eq!(
+            replay.owner_status_delivered_generation, replay.owner_status_generation,
+            "same-event retry must drain the durable owner status"
+        );
+        assert_eq!(
+            board_bodies(&mut env)
+                .iter()
+                .filter(|body| body.contains("owner #78 was created"))
+                .count(),
+            1
+        );
+        assert_eq!(
+            env.owner_client
+                .owner_mutation_call_log()
+                .iter()
+                .filter(|call| {
+                    call.operation
+                        == gwt_github::client::fake::OwnerRepositoryOperation::CreateIssue
+                })
+                .count(),
+            1,
+            "same-event status retry must not create another owner"
+        );
+    }
+
+    #[test]
+    fn successful_candidate_stable_zero_never_creates_replacement_owner() {
+        use gwt_github::client::{IssueNumber, OwnerRepositoryClient, RepositoryIdentity};
+
+        let home = tempfile::tempdir().expect("isolated home");
+        let _gwt_home = gwt_core::test_support::ScopedGwtHome::set(home.path());
+        let project = tempfile::tempdir().expect("project");
+        let mut env = TestEnv::new(project.path().join("cache"));
+        env.repo_path = project.path().join("source");
+        std::fs::create_dir_all(&env.repo_path).expect("repo path");
+        env.improvement_source_scope_nonce =
+            crate::cli::improvement_store::source_scope_nonce(&env.repo_path)
+                .expect("canonical source scope nonce");
+        env.owner_client
+            .seed_repository_issue(gwt_github::client::RepositoryIssue {
+                repository: RepositoryIdentity::gwt_upstream(),
+                number: IssueNumber(77),
+                title: "Unrelated public issue".to_string(),
+                body: "No improvement fingerprint".to_string(),
+                labels: Vec::new(),
+                state: gwt_github::client::IssueState::Open,
+                kind: gwt_github::client::RepositoryIssueKind::Plain,
+                updated_at: gwt_github::client::UpdatedAt::new("u77"),
+            });
+        let producer =
+            registered_producer_token("test.coordination-gate").expect("registered token");
+        let created = capture_registered(
+            &mut env,
+            registered_capture_input(
+                producer,
+                "known-owner-stable-zero",
+                1,
+                CaptureBudgetProfile::Normal,
+            ),
+        )
+        .expect("initial owner creation");
+        assert_eq!(created.state, CandidateState::Created);
+        assert_eq!(created.owner.as_ref().unwrap().number, 78);
+        let deadline = gwt_github::client::ResolutionDeadline::new(
+            std::time::Duration::from_secs(1),
+            std::time::Duration::from_secs(5),
+        );
+        let unrelated = env
+            .owner_client
+            .fetch_issue(
+                &RepositoryIdentity::gwt_upstream(),
+                IssueNumber(77),
+                &deadline,
+            )
+            .expect("unrelated issue");
+        env.owner_client.queue_owner_issue_views(
+            &RepositoryIdentity::gwt_upstream(),
+            [
+                (vec![unrelated.clone()], "known-owner-hidden"),
+                (vec![unrelated.clone()], "known-owner-hidden"),
+                (vec![unrelated.clone()], "known-owner-hidden"),
+                (vec![unrelated], "known-owner-hidden"),
+            ],
+        );
+
+        let audited = resolve_candidate_owner(&mut env, &created.id, CaptureBudgetProfile::Normal)
+            .expect("known-owner zero must settle fail-closed");
+
+        assert_eq!(audited.state, CandidateState::Blocked);
+        assert_eq!(audited.blocked_reason, Some(BlockedReason::Readback));
+        assert_eq!(audited.owner.as_ref().unwrap().number, 78);
+        assert_eq!(
+            env.owner_client
+                .owner_mutation_call_log()
+                .iter()
+                .filter(|call| {
+                    call.operation
+                        == gwt_github::client::fake::OwnerRepositoryOperation::CreateIssue
+                })
+                .count(),
+            1,
+            "stable zero must not replace an already durable owner"
+        );
+
+        let still_hidden =
+            resolve_candidate_owner(&mut env, &created.id, CaptureBudgetProfile::Normal)
+                .expect("second stable-zero audit");
+        assert_eq!(still_hidden.state, CandidateState::Blocked);
+        assert_eq!(still_hidden.owner.as_ref().unwrap().number, 78);
+        let recovered =
+            resolve_candidate_owner(&mut env, &created.id, CaptureBudgetProfile::Normal)
+                .expect("visible durable owner retry");
+        assert!(matches!(
+            recovered.state,
+            CandidateState::Linked | CandidateState::Created
+        ));
+        assert_eq!(recovered.owner.as_ref().unwrap().number, 78);
+        assert_eq!(
+            env.owner_client
+                .owner_mutation_call_log()
+                .iter()
+                .filter(|call| {
+                    call.operation
+                        == gwt_github::client::fake::OwnerRepositoryOperation::CreateIssue
+                })
+                .count(),
+            1
+        );
+    }
+
+    #[test]
+    fn post_create_stable_zero_recovers_the_readback_owner_without_a_second_create() {
+        use gwt_github::client::{
+            IssueNumber, OwnerRepositoryClient, RepositoryIdentity, RepositoryIssue,
+        };
+
+        let home = tempfile::tempdir().expect("isolated home");
+        let _gwt_home = gwt_core::test_support::ScopedGwtHome::set(home.path());
+        let project = tempfile::tempdir().expect("project");
+        let mut env = TestEnv::new(project.path().join("cache"));
+        env.repo_path = project.path().join("source");
+        std::fs::create_dir_all(&env.repo_path).expect("repo path");
+        let candidate =
+            capture_registered_candidate_without_resolution(&mut env, "post-create-stable-zero");
+        let repository = RepositoryIdentity::gwt_upstream();
+        let unrelated = RepositoryIssue {
+            repository: repository.clone(),
+            number: IssueNumber(77),
+            title: "Unrelated public issue".to_string(),
+            body: "No improvement fingerprint".to_string(),
+            labels: Vec::new(),
+            state: gwt_github::client::IssueState::Open,
+            kind: gwt_github::client::RepositoryIssueKind::Plain,
+            updated_at: gwt_github::client::UpdatedAt::new("u77"),
+        };
+        env.owner_client.seed_repository_issue(unrelated.clone());
+        env.owner_client.queue_owner_issue_views(
+            &repository,
+            [
+                (vec![unrelated.clone()], "zero-1"),
+                (vec![unrelated.clone()], "zero-1"),
+                (vec![unrelated.clone()], "zero-2"),
+                (vec![unrelated.clone()], "zero-2"),
+                (vec![unrelated.clone()], "post-create-zero"),
+                (vec![unrelated.clone()], "post-create-zero"),
+            ],
+        );
+
+        let unknown =
+            resolve_candidate_owner(&mut env, &candidate.id, CaptureBudgetProfile::Normal)
+                .expect("post-create zero must preserve recovery state");
+        assert_eq!(unknown.state, CandidateState::RemoteOutcomeUnknown);
+        assert!(matches!(
+            unknown.attempt.as_ref().map(|attempt| &attempt.intent),
+            Some(
+                crate::cli::improvement_store::ResolutionAttemptIntent::CreateIssue {
+                    created_owner_number: Some(78),
+                    ..
+                }
+            )
+        ));
+        assert_eq!(
+            env.owner_client
+                .owner_mutation_call_log()
+                .iter()
+                .filter(|call| {
+                    call.operation
+                        == gwt_github::client::fake::OwnerRepositoryOperation::CreateIssue
+                })
+                .count(),
+            1
+        );
+
+        env.owner_client.queue_owner_issue_views(
+            &repository,
+            [
+                (vec![unrelated.clone()], "retry-zero-1"),
+                (vec![unrelated.clone()], "retry-zero-1"),
+                (vec![unrelated.clone()], "retry-zero-2"),
+                (vec![unrelated.clone()], "retry-zero-2"),
+                (vec![unrelated.clone()], "retry-post-create-zero"),
+                (vec![unrelated], "retry-post-create-zero"),
+            ],
+        );
+        let still_unknown =
+            resolve_candidate_owner(&mut env, &candidate.id, CaptureBudgetProfile::Normal)
+                .expect("recorded readback owner must block another create");
+
+        assert_eq!(still_unknown.state, CandidateState::RemoteOutcomeUnknown);
+        assert_eq!(
+            env.owner_client
+                .owner_mutation_call_log()
+                .iter()
+                .filter(|call| {
+                    call.operation
+                        == gwt_github::client::fake::OwnerRepositoryOperation::CreateIssue
+                })
+                .count(),
+            1,
+            "stable zero retry must not create a replacement owner"
+        );
+        assert!(env
+            .owner_client
+            .fetch_issue(
+                &repository,
+                IssueNumber(79),
+                &gwt_github::client::ResolutionDeadline::new(
+                    std::time::Duration::from_secs(1),
+                    std::time::Duration::from_secs(5),
+                ),
+            )
+            .is_err());
+    }
+
+    #[test]
+    fn created_owner_number_survives_one_shot_source_save_failure() {
+        use gwt_github::client::{
+            IssueNumber, IssueState, OwnerRepositoryClient, RepositoryIdentity, RepositoryIssue,
+            RepositoryIssueKind, ResolutionDeadline, UpdatedAt,
+        };
+        use std::time::Duration;
+
+        let home = tempfile::tempdir().expect("isolated home");
+        let _gwt_home = gwt_core::test_support::ScopedGwtHome::set(home.path());
+        let project = tempfile::tempdir().expect("project");
+        let mut env = TestEnv::new(project.path().join("cache"));
+        env.repo_path = project.path().join("source");
+        std::fs::create_dir_all(&env.repo_path).expect("repo path");
+        let candidate =
+            capture_registered_candidate_without_resolution(&mut env, "numbered-save-failure");
+        let payload = render_public_issue_payload(
+            &candidate,
+            &PublicMutationContext::for_repo(&env.repo_path),
+        )
+        .expect("owner payload");
+        let repository = RepositoryIdentity::gwt_upstream();
+        let unrelated = RepositoryIssue {
+            repository: repository.clone(),
+            number: IssueNumber(77),
+            title: "Unrelated public issue".to_string(),
+            body: "No improvement fingerprint".to_string(),
+            labels: Vec::new(),
+            state: IssueState::Open,
+            kind: RepositoryIssueKind::Plain,
+            updated_at: UpdatedAt::new("u77"),
+        };
+        let competing_owner = RepositoryIssue {
+            repository: repository.clone(),
+            number: IssueNumber(78),
+            title: payload.title,
+            body: payload.body,
+            labels: Vec::new(),
+            state: IssueState::Open,
+            kind: RepositoryIssueKind::Plain,
+            updated_at: UpdatedAt::new("u78"),
+        };
+        env.owner_client.seed_repository_issue(unrelated.clone());
+        env.owner_client
+            .seed_repository_issue(competing_owner.clone());
+        env.owner_client.queue_owner_issue_views(
+            &repository,
+            [
+                (vec![unrelated.clone()], "zero-1"),
+                (vec![unrelated.clone()], "zero-1"),
+                (vec![unrelated.clone()], "zero-2"),
+                (vec![unrelated], "zero-2"),
+            ],
+        );
+        crate::cli::improvement_store::fail_next_created_owner_number_save(&env.repo_path)
+            .expect("source save failure injection");
+
+        let unknown =
+            resolve_candidate_owner(&mut env, &candidate.id, CaptureBudgetProfile::Normal)
+                .expect("one-shot source save failure must settle");
+
+        assert_eq!(unknown.state, CandidateState::RemoteOutcomeUnknown);
+        assert!(matches!(
+            unknown.attempt.as_ref().map(|attempt| &attempt.intent),
+            Some(
+                crate::cli::improvement_store::ResolutionAttemptIntent::CreateIssue {
+                    created_owner_number: Some(79),
+                    ..
+                }
+            )
+        ));
+        let deadline = ResolutionDeadline::new(Duration::from_secs(1), Duration::from_secs(5));
+        assert_eq!(
+            env.owner_client
+                .fetch_issue(&repository, IssueNumber(79), &deadline)
+                .expect("created owner")
+                .state,
+            IssueState::Open
+        );
+
+        env.owner_client.queue_owner_issue_views(
+            &repository,
+            [
+                (vec![competing_owner.clone()], "competing-only"),
+                (vec![competing_owner], "competing-only"),
+            ],
+        );
+        let blocked =
+            resolve_candidate_owner(&mut env, &candidate.id, CaptureBudgetProfile::Normal)
+                .expect("hidden created owner must remain in reconciliation");
+        assert!(!matches!(
+            blocked.state,
+            CandidateState::Linked | CandidateState::Created
+        ));
+        assert!(blocked.reconciliation_required);
+        assert_eq!(blocked.reconciliation_owner_numbers, vec![78, 79]);
+        assert_eq!(
+            env.owner_client
+                .fetch_issue(&repository, IssueNumber(79), &deadline)
+                .expect("unsettled created owner")
+                .state,
+            IssueState::Open
+        );
+    }
+
+    #[test]
+    fn post_create_hidden_owner_preserves_the_complete_reconciliation_set() {
+        use gwt_github::client::{
+            IssueNumber, IssueState, OwnerRepositoryClient, RepositoryIdentity, RepositoryIssue,
+            RepositoryIssueKind, ResolutionDeadline, UpdatedAt,
+        };
+        use std::time::Duration;
+
+        let home = tempfile::tempdir().expect("isolated home");
+        let _gwt_home = gwt_core::test_support::ScopedGwtHome::set(home.path());
+        let project = tempfile::tempdir().expect("project");
+        let mut env = TestEnv::new(project.path().join("cache"));
+        env.repo_path = project.path().join("source");
+        std::fs::create_dir_all(&env.repo_path).expect("repo path");
+        let candidate =
+            capture_registered_candidate_without_resolution(&mut env, "hidden-created-owner");
+        let payload = render_public_issue_payload(
+            &candidate,
+            &PublicMutationContext::for_repo(&env.repo_path),
+        )
+        .expect("owner payload");
+        let repository = RepositoryIdentity::gwt_upstream();
+        let unrelated = RepositoryIssue {
+            repository: repository.clone(),
+            number: IssueNumber(77),
+            title: "Unrelated public issue".to_string(),
+            body: "No improvement fingerprint".to_string(),
+            labels: Vec::new(),
+            state: IssueState::Open,
+            kind: RepositoryIssueKind::Plain,
+            updated_at: UpdatedAt::new("u77"),
+        };
+        let competing_owner = RepositoryIssue {
+            repository: repository.clone(),
+            number: IssueNumber(78),
+            title: payload.title,
+            body: payload.body,
+            labels: Vec::new(),
+            state: IssueState::Open,
+            kind: RepositoryIssueKind::Plain,
+            updated_at: UpdatedAt::new("u78"),
+        };
+        env.owner_client.seed_repository_issue(unrelated.clone());
+        env.owner_client
+            .seed_repository_issue(competing_owner.clone());
+        env.owner_client.queue_owner_issue_views(
+            &repository,
+            [
+                (vec![unrelated.clone()], "zero-1"),
+                (vec![unrelated.clone()], "zero-1"),
+                (vec![unrelated.clone()], "zero-2"),
+                (vec![unrelated], "zero-2"),
+                (vec![competing_owner.clone()], "post-create-other"),
+                (vec![competing_owner.clone()], "post-create-other"),
+            ],
+        );
+
+        let unknown =
+            resolve_candidate_owner(&mut env, &candidate.id, CaptureBudgetProfile::Normal)
+                .expect("post-create conflict must settle durably");
+
+        assert_eq!(unknown.state, CandidateState::RemoteOutcomeUnknown);
+        assert!(unknown.reconciliation_required);
+        assert_eq!(unknown.reconciliation_owner_numbers, vec![78, 79]);
+        let deadline = ResolutionDeadline::new(Duration::from_secs(1), Duration::from_secs(5));
+        assert_eq!(
+            env.owner_client
+                .fetch_issue(&repository, IssueNumber(79), &deadline)
+                .expect("hidden created owner")
+                .state,
+            IssueState::Open
+        );
+
+        env.owner_client.queue_owner_issue_views(
+            &repository,
+            [
+                (vec![competing_owner.clone()], "created-still-hidden"),
+                (vec![competing_owner], "created-still-hidden"),
+            ],
+        );
+        let still_unsettled =
+            resolve_candidate_owner(&mut env, &candidate.id, CaptureBudgetProfile::Normal)
+                .expect("hidden known duplicate must remain unsettled");
+        assert!(!matches!(
+            still_unsettled.state,
+            CandidateState::Linked | CandidateState::Created
+        ));
+        assert!(still_unsettled.reconciliation_required);
+        assert_eq!(still_unsettled.reconciliation_owner_numbers, vec![78, 79]);
+        assert_eq!(
+            env.owner_client
+                .fetch_issue(&repository, IssueNumber(79), &deadline)
+                .expect("still-open hidden owner")
+                .state,
+            IssueState::Open
+        );
+
+        let converged =
+            resolve_candidate_owner(&mut env, &candidate.id, CaptureBudgetProfile::Normal)
+                .expect("fully visible duplicate set must converge");
+        assert_eq!(converged.state, CandidateState::Linked);
+        assert_eq!(converged.owner.as_ref().unwrap().number, 78);
+        assert!(!converged.reconciliation_required);
+        assert!(converged.reconciliation_owner_numbers.is_empty());
+        assert_eq!(
+            env.owner_client
+                .fetch_issue(&repository, IssueNumber(79), &deadline)
+                .expect("reconciled duplicate")
+                .state,
+            IssueState::Closed
+        );
+    }
+
+    #[test]
+    fn post_create_duplicate_view_unions_the_hidden_created_owner() {
+        use gwt_github::client::{
+            IssueNumber, IssueState, OwnerRepositoryClient, RepositoryIdentity, RepositoryIssue,
+            RepositoryIssueKind, ResolutionDeadline, UpdatedAt,
+        };
+        use std::time::Duration;
+
+        let home = tempfile::tempdir().expect("isolated home");
+        let _gwt_home = gwt_core::test_support::ScopedGwtHome::set(home.path());
+        let project = tempfile::tempdir().expect("project");
+        let mut env = TestEnv::new(project.path().join("cache"));
+        env.repo_path = project.path().join("source");
+        std::fs::create_dir_all(&env.repo_path).expect("repo path");
+        let candidate =
+            capture_registered_candidate_without_resolution(&mut env, "hidden-created-duplicate");
+        let payload = render_public_issue_payload(
+            &candidate,
+            &PublicMutationContext::for_repo(&env.repo_path),
+        )
+        .expect("owner payload");
+        let repository = RepositoryIdentity::gwt_upstream();
+        let unrelated = RepositoryIssue {
+            repository: repository.clone(),
+            number: IssueNumber(77),
+            title: "Unrelated public issue".to_string(),
+            body: "No improvement fingerprint".to_string(),
+            labels: Vec::new(),
+            state: IssueState::Open,
+            kind: RepositoryIssueKind::Plain,
+            updated_at: UpdatedAt::new("u77"),
+        };
+        let owner_78 = RepositoryIssue {
+            repository: repository.clone(),
+            number: IssueNumber(78),
+            title: payload.title.clone(),
+            body: payload.body.clone(),
+            labels: Vec::new(),
+            state: IssueState::Open,
+            kind: RepositoryIssueKind::Plain,
+            updated_at: UpdatedAt::new("u78"),
+        };
+        let owner_79 = RepositoryIssue {
+            repository: repository.clone(),
+            number: IssueNumber(79),
+            title: payload.title,
+            body: payload.body,
+            labels: Vec::new(),
+            state: IssueState::Open,
+            kind: RepositoryIssueKind::Plain,
+            updated_at: UpdatedAt::new("u79"),
+        };
+        for issue in [&unrelated, &owner_78, &owner_79] {
+            env.owner_client.seed_repository_issue(issue.clone());
+        }
+        env.owner_client.queue_owner_issue_views(
+            &repository,
+            [
+                (vec![unrelated.clone()], "zero-1"),
+                (vec![unrelated.clone()], "zero-1"),
+                (vec![unrelated.clone()], "zero-2"),
+                (vec![unrelated], "zero-2"),
+                (
+                    vec![owner_78.clone(), owner_79.clone()],
+                    "visible-duplicates",
+                ),
+                (vec![owner_78.clone(), owner_79], "visible-duplicates"),
+                (vec![owner_78.clone()], "canonical-only"),
+                (vec![owner_78], "canonical-only"),
+            ],
+        );
+
+        let unsettled =
+            resolve_candidate_owner(&mut env, &candidate.id, CaptureBudgetProfile::Normal)
+                .expect("hidden created duplicate must settle fail-closed");
+
+        assert!(!matches!(
+            unsettled.state,
+            CandidateState::Linked | CandidateState::Created
+        ));
+        assert!(unsettled.reconciliation_required);
+        assert_eq!(unsettled.reconciliation_owner_numbers, vec![78, 79, 80]);
+        let deadline = ResolutionDeadline::new(Duration::from_secs(1), Duration::from_secs(5));
+        assert_eq!(
+            env.owner_client
+                .fetch_issue(&repository, IssueNumber(80), &deadline)
+                .expect("hidden created owner")
+                .state,
+            IssueState::Open
+        );
+
+        let converged =
+            resolve_candidate_owner(&mut env, &candidate.id, CaptureBudgetProfile::Normal)
+                .expect("known hidden duplicate must converge once visible");
+        assert_eq!(converged.state, CandidateState::Linked);
+        assert_eq!(converged.owner.as_ref().unwrap().number, 78);
+        assert!(!converged.reconciliation_required);
+        assert!(converged.reconciliation_owner_numbers.is_empty());
+        assert_eq!(
+            env.owner_client
+                .fetch_issue(&repository, IssueNumber(80), &deadline)
+                .expect("reconciled hidden owner")
+                .state,
+            IssueState::Closed
+        );
+    }
+
+    #[test]
+    fn visible_owner_conflicting_with_durable_owner_is_reconciled_before_rebind() {
+        use gwt_github::client::{
+            IssueNumber, IssueState, OwnerRepositoryClient, RepositoryIdentity, ResolutionDeadline,
+        };
+        use std::time::Duration;
+
+        let home = tempfile::tempdir().expect("isolated home");
+        let _gwt_home = gwt_core::test_support::ScopedGwtHome::set(home.path());
+        let project = tempfile::tempdir().expect("project");
+        let mut env = TestEnv::new(project.path().join("cache"));
+        env.repo_path = project.path().join("source");
+        std::fs::create_dir_all(&env.repo_path).expect("repo path");
+        seed_exact_plain_owners(&mut env, &[79]);
+        let producer =
+            registered_producer_token("test.coordination-gate").expect("registered token");
+        let linked = capture_registered(
+            &mut env,
+            registered_capture_input(
+                producer,
+                "durable-owner-conflict",
+                1,
+                CaptureBudgetProfile::Normal,
+            ),
+        )
+        .expect("initial durable owner");
+        assert_eq!(linked.state, CandidateState::Linked);
+        assert_eq!(linked.owner.as_ref().unwrap().number, 79);
+
+        seed_exact_plain_owners(&mut env, &[78]);
+        let repository = RepositoryIdentity::gwt_upstream();
+        let deadline = ResolutionDeadline::new(Duration::from_secs(1), Duration::from_secs(5));
+        let lower_owner = env
+            .owner_client
+            .fetch_issue(&repository, IssueNumber(78), &deadline)
+            .expect("lower owner");
+        env.owner_client.queue_owner_issue_views(
+            &repository,
+            [
+                (vec![lower_owner.clone()], "lower-only"),
+                (vec![lower_owner], "lower-only"),
+            ],
+        );
+
+        let reconciled =
+            resolve_candidate_owner(&mut env, &linked.id, CaptureBudgetProfile::Normal)
+                .expect("durable owner conflict must reconcile");
+
+        assert_eq!(reconciled.state, CandidateState::Linked);
+        assert_eq!(reconciled.owner.as_ref().unwrap().number, 78);
+        assert!(!reconciled.reconciliation_required);
+        assert!(reconciled.reconciliation_owner_numbers.is_empty());
+        assert_eq!(
+            env.owner_client
+                .fetch_issue(&repository, IssueNumber(79), &deadline)
+                .expect("former durable owner")
+                .state,
+            IssueState::Closed,
+            "the previous durable owner must not remain an open duplicate"
+        );
+        assert!(env
+            .owner_client
+            .owner_mutation_call_log()
+            .iter()
+            .all(|call| call.operation
+                != gwt_github::client::fake::OwnerRepositoryOperation::CreateIssue));
     }
 
     #[test]
