@@ -160,12 +160,12 @@ fn ingest_work_events_contents_locked<'a>(
         .into_iter()
         .filter(|(event, _)| {
             seen_event_ids.contains(&event.id)
-                || !previous
+                || previous
                     .work_items
                     .iter()
                     .find(|item| item.id == event.work_item_id)
                     .and_then(terminal_close_time)
-                    .is_some_and(|closed_at| event.updated_at <= closed_at)
+                    .is_none_or(|closed_at| event.updated_at > closed_at)
         })
         .collect();
     let mut projection = refold_work_events_projection_with_keys(&previous, replayable)?;
