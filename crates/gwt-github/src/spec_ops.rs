@@ -7,14 +7,16 @@
 
 use std::collections::BTreeMap;
 
+use sha2::{Digest, Sha256};
+
 use crate::{
     body::{Comment as BodyComment, SectionLocation, SectionsIndex, SpecMeta},
     cache::{Cache, CacheError},
     client::{
-        ApiError, CommentSnapshot, FetchResult, IssueClient, IssueNumber, IssueSnapshot,
+        ApiError, CommentId, CommentSnapshot, FetchResult, IssueClient, IssueNumber, IssueSnapshot,
         IssueState, UpdatedAt,
     },
-    routing::decide_routing,
+    routing::{decide_routing, split_section_into_parts},
     sections::SectionName,
 };
 
@@ -27,8 +29,29 @@ pub enum SpecOpsError {
     Cache(#[from] CacheError),
     #[error(transparent)]
     Parse(#[from] crate::body::ParseError),
+    #[error(transparent)]
+    Split(#[from] crate::routing::SplitError),
     #[error("section '{0}' not found")]
     SectionNotFound(String),
+    /// Post-write readback found remote content that differs from what was
+    /// written (SPEC-3248 P7C / #3284). The write was rolled back where
+    /// possible and must not be treated as committed.
+    #[error(
+        "post-write readback mismatch for section '{section}' — remote content \
+         does not match the written content; do not trust this write"
+    )]
+    ReadbackMismatch { section: String },
+}
+
+/// Receipt for a committed [`SpecOps::write_section`] call (SPEC-3248 P7C /
+/// #3284): canonical content size, comment part count (`0` when the section
+/// is body-resident), and the SHA-256 of the canonical content that the
+/// post-write readback verified against the remote copy.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WriteReceipt {
+    pub bytes: usize,
+    pub parts: usize,
+    pub sha256: String,
 }
 
 /// High-level SPEC operations backed by an [`IssueClient`] and a [`Cache`].
@@ -78,26 +101,34 @@ impl<C: IssueClient> SpecOps<C> {
 
     /// Replace the content of a section.
     ///
-    /// The updated content is routed via [`decide_routing`]. When the target
-    /// ends up in the body, a single `patch_body` call updates the Issue.
-    /// When the target is routed to a comment, the appropriate
-    /// `create_comment` / `patch_comment` is emitted followed by one final
-    /// `patch_body` that persists the new section index map. Cache is updated
-    /// only on success; failures leave the cache untouched.
+    /// The updated content is canonicalized (surrounding newlines trimmed,
+    /// matching what a later parse returns) and routed via
+    /// [`decide_routing`]. Comment-resident content is split into
+    /// comment-sized parts by [`split_section_into_parts`] (SPEC-3248 P7C /
+    /// #3284) and written with `part=N/M` markers.
+    ///
+    /// Write protocol for part-count-changing comment writes is
+    /// create-then-swap-then-delete: new part comments are created first, a
+    /// single `patch_body` atomically swaps the section index to the new
+    /// comment ids, and stale comments are deleted only after the post-write
+    /// readback verifies the remote content. A failure before the index swap
+    /// leaves readers on the previous content (zero partial overwrite); a
+    /// readback mismatch rolls the body back and fails closed.
     pub fn write_section(
         &self,
         number: IssueNumber,
         name: &SectionName,
         content: &str,
-    ) -> Result<(), SpecOpsError> {
+    ) -> Result<WriteReceipt, SpecOpsError> {
         // Refresh cache to the latest snapshot before editing.
         self.refresh_cache(number)?;
         let entry = self
             .cache
             .load_entry(number)
             .ok_or_else(|| SpecOpsError::SectionNotFound(format!("issue {}", number.0)))?;
+        let canonical = crate::sections::trim_surrounding_newlines(content).to_string();
         let mut spec_body = entry.spec_body.clone();
-        spec_body.splice(name.clone(), content.to_string());
+        spec_body.splice(name.clone(), canonical.clone());
 
         // Recompute routing from the new section map.
         let new_routing = decide_routing(&spec_body.sections);
@@ -112,66 +143,120 @@ impl<C: IssueClient> SpecOps<C> {
             .cloned()
             .unwrap_or(SectionLocation::Body);
 
-        // Start from the latest full body text and patch it in place.
+        // Start from the latest full body text and patch it in place. Keep
+        // the original for rollback after a readback mismatch.
+        let original_body = entry.snapshot.body.clone();
         let mut issue_body = entry.snapshot.body;
         let mut new_sections_index = spec_body.sections_index.clone();
+
+        let prev_ids: Vec<u64> = match &prev_location {
+            Some(SectionLocation::Comments(ids)) => ids.clone(),
+            _ => Vec::new(),
+        };
+
+        // Comments created by this write (rolled back on readback mismatch)
+        // and stale comments to delete after a verified swap.
+        let mut created_ids: Vec<u64> = Vec::new();
+        let mut stale_ids: Vec<u64> = Vec::new();
+        // Whether rolling back means restoring the original body text.
+        let mut rollback_body = false;
+        let parts_written: usize;
 
         match (&prev_location, &new_location) {
             // Stay in body: rewrite the section between the markers, then patch.
             (Some(SectionLocation::Body) | None, SectionLocation::Body) => {
-                issue_body = rewrite_body_section(&issue_body, name, content);
+                issue_body = rewrite_body_section(&issue_body, name, &canonical);
                 new_sections_index
                     .0
                     .insert(name.clone(), SectionLocation::Body);
                 issue_body = rewrite_index_map(&issue_body, &new_sections_index);
                 let _snap = self.client.patch_body(number, &issue_body)?;
+                rollback_body = true;
+                parts_written = 0;
             }
-            // Body -> Comment promotion: create a new comment, drop the
-            // body-inline markers, then patch the body with the new index map.
-            (Some(SectionLocation::Body) | None, SectionLocation::Comments(_)) => {
-                let comment_body = wrap_comment_body(name, content);
-                let comment: CommentSnapshot = self.client.create_comment(number, &comment_body)?;
+            // Comment -> Comment, single part staying single: patch the
+            // existing comment in place (stable comment id, single atomic
+            // mutation).
+            (Some(SectionLocation::Comments(ids)), SectionLocation::Comments(_))
+                if ids.len() == 1
+                    && canonical.len() <= crate::routing::COMMENT_PART_BUDGET_BYTES =>
+            {
+                let comment_body = wrap_comment_part_body(name, &canonical, 1, 1);
+                let _patched = self
+                    .client
+                    .patch_comment(CommentId(ids[0]), &comment_body)?;
+                parts_written = 1;
+            }
+            // Every other comment-resident shape (promotion from body, part
+            // count changes, or an index entry with no recorded id):
+            // create-then-swap-then-delete.
+            (_, SectionLocation::Comments(_)) => {
+                let parts = split_section_into_parts(&canonical)?;
+                let total = parts.len();
+                for (i, part) in parts.iter().enumerate() {
+                    let comment_body = wrap_comment_part_body(name, part, i + 1, total);
+                    let comment: CommentSnapshot =
+                        self.client.create_comment(number, &comment_body)?;
+                    created_ids.push(comment.id.0);
+                }
                 new_sections_index
                     .0
-                    .insert(name.clone(), SectionLocation::Comments(vec![comment.id.0]));
-                issue_body = strip_body_section(&issue_body, name);
+                    .insert(name.clone(), SectionLocation::Comments(created_ids.clone()));
+                if matches!(&prev_location, Some(SectionLocation::Body)) {
+                    issue_body = strip_body_section(&issue_body, name);
+                }
                 issue_body = rewrite_index_map(&issue_body, &new_sections_index);
                 let _snap = self.client.patch_body(number, &issue_body)?;
-            }
-            // Comment -> Comment: patch the first referenced comment in place.
-            (Some(SectionLocation::Comments(ids)), SectionLocation::Comments(_)) => {
-                if let Some(first) = ids.first().copied() {
-                    let comment_body = wrap_comment_body(name, content);
-                    let _patched = self
-                        .client
-                        .patch_comment(crate::client::CommentId(first), &comment_body)?;
-                    // Routing (and existing id list) is unchanged.
-                } else {
-                    // Index claimed comment but no id recorded — treat as new.
-                    let comment_body = wrap_comment_body(name, content);
-                    let comment = self.client.create_comment(number, &comment_body)?;
-                    new_sections_index
-                        .0
-                        .insert(name.clone(), SectionLocation::Comments(vec![comment.id.0]));
-                    issue_body = rewrite_index_map(&issue_body, &new_sections_index);
-                    let _snap = self.client.patch_body(number, &issue_body)?;
-                }
+                rollback_body = true;
+                stale_ids = prev_ids;
+                parts_written = total;
             }
             // Comment -> Body: (rare) inline the content back into the body.
             (Some(SectionLocation::Comments(_)), SectionLocation::Body) => {
-                issue_body = insert_body_section(&issue_body, name, content);
+                issue_body = insert_body_section(&issue_body, name, &canonical);
                 new_sections_index
                     .0
                     .insert(name.clone(), SectionLocation::Body);
                 issue_body = rewrite_index_map(&issue_body, &new_sections_index);
                 let _snap = self.client.patch_body(number, &issue_body)?;
+                rollback_body = true;
+                stale_ids = prev_ids;
+                parts_written = 0;
             }
         }
 
-        // After a successful write, refresh the cache from the server so the
-        // locally-assembled body and any side-effect changes remain consistent.
-        self.refresh_cache(number)?;
-        Ok(())
+        // Post-write readback: refetch the issue unconditionally and verify
+        // the section now parses back to exactly the canonical content.
+        let readback_ok = self.readback_section(number, name, &canonical)?;
+        if !readback_ok {
+            // Roll back: restore the original body (and with it the original
+            // section index), then drop any comments this write created.
+            if rollback_body {
+                let _ = self.client.patch_body(number, &original_body);
+            }
+            for id in created_ids {
+                let _ = self.client.delete_comment(CommentId(id));
+            }
+            // Leave the cache on the (restored) remote state.
+            let _ = self.force_refresh_cache(number);
+            return Err(SpecOpsError::ReadbackMismatch {
+                section: name.0.clone(),
+            });
+        }
+
+        // Verified: clean up stale comments that are no longer referenced by
+        // the swapped index. Deletion failures leave harmless orphans (the
+        // index no longer references them), so they are best-effort.
+        for id in stale_ids {
+            let _ = self.client.delete_comment(CommentId(id));
+        }
+        self.force_refresh_cache(number)?;
+
+        Ok(WriteReceipt {
+            bytes: canonical.len(),
+            parts: parts_written,
+            sha256: format!("{:x}", Sha256::digest(canonical.as_bytes())),
+        })
     }
 
     /// Create a brand-new SPEC.
@@ -211,16 +296,24 @@ impl<C: IssueClient> SpecOps<C> {
         let created = self.client.create_issue(title, &initial_body, &labels)?;
         let number = created.number;
 
-        // 2. For each comment-resident section, create a comment and record the id.
+        // 2. For each comment-resident section, create one comment per part
+        //    (SPEC-3248 P7C / #3284) and record the ids in part order.
         let mut comment_id_map: BTreeMap<SectionName, Vec<u64>> = BTreeMap::new();
         let mut ordered: Vec<(&SectionName, &SectionLocation)> = routing.0.iter().collect();
         ordered.sort_by(|a, b| a.0.cmp(b.0));
         for (name, location) in ordered {
             if matches!(location, SectionLocation::Comments(_)) {
                 let content = sections.get(name).cloned().unwrap_or_default();
-                let comment_body = wrap_comment_body(name, &content);
-                let snapshot = self.client.create_comment(number, &comment_body)?;
-                comment_id_map.insert(name.clone(), vec![snapshot.id.0]);
+                let canonical = crate::sections::trim_surrounding_newlines(&content).to_string();
+                let parts = split_section_into_parts(&canonical)?;
+                let total = parts.len();
+                let mut ids: Vec<u64> = Vec::new();
+                for (i, part) in parts.iter().enumerate() {
+                    let comment_body = wrap_comment_part_body(name, part, i + 1, total);
+                    let snapshot = self.client.create_comment(number, &comment_body)?;
+                    ids.push(snapshot.id.0);
+                }
+                comment_id_map.insert(name.clone(), ids);
             }
         }
 
@@ -261,6 +354,31 @@ impl<C: IssueClient> SpecOps<C> {
                 Ok(())
             }
         }
+    }
+
+    /// Unconditional refresh: refetch the issue without a conditional key so
+    /// same-timestamp mutations (GitHub `updatedAt` has second granularity)
+    /// cannot leave the cache stale during post-write readback.
+    fn force_refresh_cache(&self, number: IssueNumber) -> Result<(), SpecOpsError> {
+        match self.client.fetch(number, None)? {
+            FetchResult::Updated(snapshot) => {
+                self.cache.write_snapshot(&snapshot)?;
+                Ok(())
+            }
+            FetchResult::NotModified => Ok(()),
+        }
+    }
+
+    /// Post-write readback (SPEC-3248 P7C / #3284): refetch the remote issue
+    /// and confirm the section parses back to exactly `expected`.
+    fn readback_section(
+        &self,
+        number: IssueNumber,
+        name: &SectionName,
+        expected: &str,
+    ) -> Result<bool, SpecOpsError> {
+        self.force_refresh_cache(number)?;
+        Ok(self.cache.read_section(number, name)?.as_deref() == Some(expected))
     }
 }
 
@@ -347,6 +465,22 @@ fn wrap_comment_body(name: &SectionName, content: &str) -> String {
     let trimmed = content.trim_end_matches('\n');
     format!(
         "<!-- artifact:{name} BEGIN -->\n{trimmed}\n<!-- artifact:{name} END -->",
+        name = name.0
+    )
+}
+
+/// Wrap one part of a (possibly multipart) comment-resident section. A
+/// single-part section keeps the unmarked legacy format so older readers stay
+/// compatible; multipart sections carry `part=N/M` markers under the parser's
+/// exact-trim contract, so the part content must not be re-trimmed here — a
+/// part may legitimately begin or end with blank lines that belong to the
+/// section content.
+fn wrap_comment_part_body(name: &SectionName, content: &str, index: usize, total: usize) -> String {
+    if total <= 1 {
+        return wrap_comment_body(name, content);
+    }
+    format!(
+        "<!-- artifact:{name} BEGIN part={index}/{total} -->\n{content}\n<!-- artifact:{name} END part={index}/{total} -->",
         name = name.0
     )
 }

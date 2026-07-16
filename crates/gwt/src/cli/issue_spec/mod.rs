@@ -475,12 +475,24 @@ fn write_spec_section<E: CliEnv>(
         },
         cache,
     );
-    ops.write_section(IssueNumber(number), &SectionName(section.clone()), &content)?;
-    out.push_str(&format!(
-        "wrote {} bytes to section '{section}'\n",
-        content.len()
-    ));
+    let receipt =
+        ops.write_section(IssueNumber(number), &SectionName(section.clone()), &content)?;
+    out.push_str(&render_write_receipt(&section, &receipt));
     Ok(0)
+}
+
+/// Render the committed-write evidence line (SPEC-3248 P7C / #3284): byte
+/// count, storage shape, content hash, and the readback confirmation.
+fn render_write_receipt(section: &str, receipt: &gwt_github::WriteReceipt) -> String {
+    let shape = match receipt.parts {
+        0 => "body".to_string(),
+        1 => "1 comment part".to_string(),
+        n => format!("{n} comment parts"),
+    };
+    format!(
+        "wrote {} bytes to section '{section}' ({shape}, sha256:{}, readback verified)\n",
+        receipt.bytes, receipt.sha256
+    )
 }
 
 fn write_structured_spec_section<E: CliEnv>(
@@ -511,11 +523,9 @@ fn write_structured_spec_section<E: CliEnv>(
     } else {
         merge_structured_spec(&existing, &structured)
     };
-    ops.write_section(IssueNumber(number), &SectionName(section.clone()), &content)?;
-    out.push_str(&format!(
-        "wrote {} bytes to section '{section}'\n",
-        content.len()
-    ));
+    let receipt =
+        ops.write_section(IssueNumber(number), &SectionName(section.clone()), &content)?;
+    out.push_str(&render_write_receipt(&section, &receipt));
     Ok(0)
 }
 
