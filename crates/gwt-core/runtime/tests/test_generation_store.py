@@ -128,6 +128,14 @@ class GenerationStoreTests(unittest.TestCase):
         baseline = self._build(project)
         self.assertTrue(baseline.get("ok"), baseline)
 
+        # Change every document so the rebuild has real embedding work
+        # (unchanged records would be reused without checkpoints, FR-391).
+        for index in range(48):
+            (project / "src" / f"module_{index:02}.rs").write_text(
+                f"//! module {index} v2\nfn feature_{index}_v2() {{}}\n",
+                encoding="utf-8",
+            )
+
         home = self.base / "home"
         home.mkdir(exist_ok=True)
         env = os.environ.copy()

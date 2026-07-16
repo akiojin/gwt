@@ -102,7 +102,8 @@ class SearchMultiContractTests(unittest.TestCase):
             docs_db = runner.resolve_db_path(
                 REPO_HASH, WORKTREE_HASH, "files-docs", db_root=db_root
             )
-            (docs_db / "chroma.sqlite3").write_bytes(b"corrupt-not-a-database")
+            docs_store = runner.resolve_active_store(docs_db)
+            (docs_store / "chroma.sqlite3").write_bytes(b"corrupt-not-a-database")
 
             payload = runner.action_search_multi_v2(
                 repo_hash=REPO_HASH,

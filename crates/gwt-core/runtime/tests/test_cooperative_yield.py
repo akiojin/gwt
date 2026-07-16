@@ -126,7 +126,14 @@ class CooperativeYieldTests(unittest.TestCase):
 
         # 2. An interactive claimant is pending on the heavy lease: the
         #    background rebuild must yield at the 16-document boundary with a
-        #    resumable continuation instead of finishing the batch.
+        #    resumable continuation instead of finishing the batch. Every
+        #    document is changed first so the rebuild has real embedding work
+        #    (unchanged records are reused without checkpoints, FR-391).
+        for index in range(TOTAL_DOCS):
+            (self.project_root / "src" / f"module_{index:02}.rs").write_text(
+                f"//! module {index} v2\nfn feature_{index}_v2() {{}}\n",
+                encoding="utf-8",
+            )
         pending = _write_pending_claimant(self.coordinator_root, "interactive-search")
         yielded = self._run_index()
         self.assertTrue(yielded.get("ok"), yielded)
