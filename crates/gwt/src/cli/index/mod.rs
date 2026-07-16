@@ -138,15 +138,38 @@ fn run_rebuild<E: CliEnv>(
     let log_dir = audit_log_dir(&context);
     for action in rebuild_actions(scope) {
         let _ = audit_rebuild_start(&log_dir, &context, action.label);
-        let output = run_runner_rebuild(&context, action)?;
-        let _ = audit_runner_progress(&log_dir, &context, action.label, &output.stderr);
-        let _ = audit_rebuild_result(&log_dir, &context, action.label, &output);
-        if output.status.success() {
-            out.push_str(&format!("{}: ok\n", action.label));
-        } else {
-            ok = false;
-            out.push_str(&format!("{}: error\n", action.label));
-            out.push_str(&format_runner_failure(&output));
+        let coordinator_worktree = action
+            .needs_worktree_hash
+            .then(|| context.worktree_hash.clone());
+        // Manual rebuilds coordinate host-wide like every other index build
+        // (SPEC #1939 Phase 70 FR-379/FR-383): at most one heavy runner tree,
+        // manual priority above background repair.
+        let run = crate::index_worker::run_coordinated_index_job(
+            context.repo_hash.as_str(),
+            action.label,
+            coordinator_worktree.as_deref(),
+            gwt_core::index_coordinator::JobPriority::ManualRebuild,
+            || {
+                let output = run_runner_rebuild(&context, action).map_err(|err| err.to_string())?;
+                let _ = audit_runner_progress(&log_dir, &context, action.label, &output.stderr);
+                let _ = audit_rebuild_result(&log_dir, &context, action.label, &output);
+                if output.status.success() {
+                    Ok(())
+                } else {
+                    Err(format_runner_failure(&output))
+                }
+            },
+        );
+        match run {
+            Ok(_) => out.push_str(&format!("{}: ok\n", action.label)),
+            Err(error) => {
+                ok = false;
+                out.push_str(&format!("{}: error\n", action.label));
+                out.push_str(&error);
+                if !error.ends_with('\n') {
+                    out.push('\n');
+                }
+            }
         }
     }
 

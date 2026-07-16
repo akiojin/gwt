@@ -238,13 +238,22 @@ impl RunnerSpawner for PythonRunnerSpawner {
         project_root: &Path,
         respect_ttl: bool,
     ) -> std::io::Result<()> {
+        // A missing venv python must surface synchronously to the caller;
+        // once the job is detached behind the coordinator only logs would
+        // see it.
+        if !self.python_executable.is_file() {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::NotFound,
+                format!(
+                    "index runner python not found: {}",
+                    self.python_executable.display()
+                ),
+            ));
+        }
         // SPEC-1924 FR-039 / SPEC-2809 Phase D-runner — emit a
         // `gwt.process.summary` start event so the Console window's
         // runner tab and the Logs Process facet observe the Python
-        // chroma index runner spawn. The process is fire-and-forget
-        // (caller does not wait), so the `end` event is best-effort
-        // and intentionally omitted; the canonical log retains the
-        // start sentinel which is enough for incident triage.
+        // chroma index runner spawn.
         let spawn_id = RUNNER_SPAWN_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let label = format!(
             "{} {} --action index-issues",
@@ -278,9 +287,121 @@ impl RunnerSpawner for PythonRunnerSpawner {
         if respect_ttl {
             cmd.arg("--respect-ttl");
         }
-        // Spawn-and-forget: the caller wraps this in a tokio task and we want
-        // a non-blocking return.
-        cmd.spawn().map(|_| ())
+        cmd.stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped());
+        // Fire-and-forget for the caller, but the detached thread routes the
+        // heavy index build through the host-wide coordinator (SPEC #1939
+        // Phase 70 FR-379/FR-382) and drains the child while it runs.
+        let repo_hash = repo_hash.to_string();
+        std::thread::Builder::new()
+            .name("gwt-index-issues".to_string())
+            .spawn(move || run_coordinated_issue_index(&repo_hash, cmd, spawn_id, &label))
+            .map(|_| ())
+    }
+}
+
+/// Timeouts for the coordinated background issue index build.
+const ISSUE_INDEX_ADMISSION_TIMEOUT: Duration = Duration::from_secs(30);
+const ISSUE_INDEX_HEAVY_TIMEOUT: Duration = Duration::from_secs(30 * 60);
+const ISSUE_INDEX_SHARED_WAIT_TIMEOUT: Duration = Duration::from_secs(30 * 60);
+
+fn run_coordinated_issue_index(
+    repo_hash: &str,
+    mut cmd: std::process::Command,
+    spawn_id: u64,
+    label: &str,
+) {
+    use crate::index_coordinator::{
+        IndexCoordinator, JobAdmission, JobOutcome, JobPriority, TargetKey,
+    };
+
+    let coordinator = match IndexCoordinator::open_default() {
+        Ok(coordinator) => coordinator,
+        Err(err) => {
+            tracing::warn!(
+                target: "gwt::index",
+                spawn_id = spawn_id,
+                error = %err,
+                "issue index skipped: coordinator unavailable"
+            );
+            return;
+        }
+    };
+    let key = TargetKey::repo_shared(repo_hash, "issues");
+    match coordinator.request_job(&key, JobPriority::Background, ISSUE_INDEX_ADMISSION_TIMEOUT) {
+        Ok(JobAdmission::Owner(guard)) => {
+            let heavy = match guard.acquire_heavy(ISSUE_INDEX_HEAVY_TIMEOUT) {
+                Ok(heavy) => heavy,
+                Err(err) => {
+                    tracing::warn!(
+                        target: "gwt::index",
+                        spawn_id = spawn_id,
+                        error = %err,
+                        "issue index skipped: heavy lease unavailable"
+                    );
+                    let _ = guard.complete(JobOutcome::Failed {
+                        message: format!("heavy lease unavailable: {err}"),
+                    });
+                    return;
+                }
+            };
+            let outcome = match cmd.spawn().and_then(|child| child.wait_with_output()) {
+                Ok(output) if output.status.success() => JobOutcome::Completed,
+                Ok(output) => {
+                    tracing::warn!(
+                        target: "gwt::index",
+                        spawn_id = spawn_id,
+                        exit_status = %output.status,
+                        stderr = %String::from_utf8_lossy(&output.stderr),
+                        "issue index runner failed"
+                    );
+                    JobOutcome::Failed {
+                        message: format!("issue index runner exited with {}", output.status),
+                    }
+                }
+                Err(err) => {
+                    tracing::warn!(
+                        target: "gwt::index",
+                        spawn_id = spawn_id,
+                        error = %err,
+                        "issue index runner spawn failed"
+                    );
+                    JobOutcome::Failed {
+                        message: err.to_string(),
+                    }
+                }
+            };
+            drop(heavy);
+            let completed = matches!(outcome, JobOutcome::Completed);
+            let _ = guard.complete(outcome);
+            tracing::info!(
+                target: "gwt.process.summary",
+                kind = "runner",
+                spawn_id = spawn_id,
+                label = %label,
+                phase = "end",
+                success = completed,
+                "process end",
+            );
+        }
+        Ok(JobAdmission::Joined(waiter)) => {
+            // An equivalent issue index build is already running host-wide;
+            // coalesce instead of spawning a duplicate model load (FR-382).
+            let _ = waiter.wait(ISSUE_INDEX_SHARED_WAIT_TIMEOUT);
+            tracing::info!(
+                target: "gwt::index",
+                spawn_id = spawn_id,
+                "issue index coalesced into a concurrent equivalent job"
+            );
+        }
+        Err(err) => {
+            tracing::warn!(
+                target: "gwt::index",
+                spawn_id = spawn_id,
+                error = %err,
+                "issue index skipped: job admission failed"
+            );
+        }
     }
 }
 

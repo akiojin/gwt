@@ -206,9 +206,7 @@ fn bootstrap_preserves_repo_scoped_memory_index_directory() {
 #[cfg(unix)]
 #[test]
 fn default_rebuild_runner_waits_for_host_wide_heavy_lease() {
-    use gwt_core::index_coordinator::{
-        IndexCoordinator, JobAdmission, JobPriority, TargetKey,
-    };
+    use gwt_core::index_coordinator::{IndexCoordinator, JobAdmission, JobPriority, TargetKey};
     use std::os::unix::fs::PermissionsExt;
     use std::time::{Duration, Instant};
 
@@ -258,7 +256,11 @@ fn default_rebuild_runner_waits_for_host_wide_heavy_lease() {
 
     let rebuild_repo = repo.clone();
     let rebuild = std::thread::spawn(move || {
-        gwt::default_rebuild_runner(&rebuild_repo, gwt::index_worker::IndexRebuildScope::Issues, None)
+        gwt::default_rebuild_runner(
+            &rebuild_repo,
+            gwt::index_worker::IndexRebuildScope::Issues,
+            None,
+        )
     });
 
     // While the heavy lease is held elsewhere the rebuild must not spawn the
@@ -266,7 +268,10 @@ fn default_rebuild_runner_waits_for_host_wide_heavy_lease() {
     let held_window = Instant::now();
     while held_window.elapsed() < Duration::from_millis(500) {
         assert!(
-            !runner_log.exists() || fs::read_to_string(&runner_log).unwrap_or_default().is_empty(),
+            !runner_log.exists()
+                || fs::read_to_string(&runner_log)
+                    .unwrap_or_default()
+                    .is_empty(),
             "rebuild spawned a runner while the host-wide heavy lease was held"
         );
         std::thread::sleep(Duration::from_millis(25));

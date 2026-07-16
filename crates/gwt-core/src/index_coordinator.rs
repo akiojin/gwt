@@ -8,10 +8,16 @@
 //! target job -> host-wide heavy -> active generation (FR-392). The heavy
 //! lease can only be acquired through an owned [`TargetJobGuard`] so the
 //! order is enforced by construction.
+//!
+//! Liveness never relies on PID probing: waiters and pending heavy claimants
+//! keep a kernel shared lock on their registration file, so a crashed
+//! process is detected by `try_lock_exclusive` succeeding on its file. This
+//! makes PID reuse (FR-383) harmless by design.
 
-use std::io;
+use std::fs::{self, File, OpenOptions};
+use std::io::{self, Write};
 use std::path::{Path, PathBuf};
-use std::time::Duration;
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
 
@@ -19,6 +25,7 @@ use serde::{Deserialize, Serialize};
 pub const COORDINATOR_SCHEMA_VERSION: u32 = 1;
 
 const COORDINATOR_DIR_NAME: &str = "index-coordinator";
+const POLL_INTERVAL: Duration = Duration::from_millis(25);
 
 /// Coordinator root under an explicit gwt home (`<gwt_home>/runtime/index-coordinator`).
 pub fn coordinator_root_from(gwt_home: &Path) -> PathBuf {
@@ -98,7 +105,9 @@ fn sanitize(part: &str) -> String {
 }
 
 /// Job priority (FR-383): interactive search > manual rebuild > background
-/// bootstrap / repair. Same priority is served in arrival order.
+/// bootstrap / repair. Variant order defines the ranking (`Ord`: smaller is
+/// higher priority). Same-priority claimants are served in poll order, which
+/// approximates arrival order without a persistent queue.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum JobPriority {
@@ -153,9 +162,43 @@ pub struct Ticket {
 #[serde(tag = "kind", rename_all = "kebab-case")]
 pub enum JobOutcome {
     Completed,
-    Failed { message: String },
+    Failed {
+        message: String,
+    },
     /// The owning process disappeared without publishing an outcome.
     OwnerGone,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+enum JobStatus {
+    Running,
+    Completed,
+    Failed,
+    Abandoned,
+}
+
+/// Per-target job state, published atomically for waiters and diagnostics.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct JobState {
+    schema_version: u32,
+    epoch: u64,
+    status: JobStatus,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    message: Option<String>,
+    owner: OwnerIdentity,
+    priority: JobPriority,
+    updated_at_ms: u64,
+}
+
+/// Waiter / pending-heavy registration payload (diagnostics only; liveness
+/// comes from the kernel shared lock each registrant keeps on its file).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct Registration {
+    schema_version: u32,
+    owner: OwnerIdentity,
+    priority: JobPriority,
+    registered_at_ms: u64,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -186,7 +229,8 @@ impl IndexCoordinator {
     /// Open (and create when missing) the coordinator directory.
     pub fn open(root: impl Into<PathBuf>) -> Result<Self, CoordinatorError> {
         let root = root.into();
-        std::fs::create_dir_all(&root)?;
+        fs::create_dir_all(root.join("targets"))?;
+        fs::create_dir_all(root.join("heavy.pending"))?;
         Ok(Self { root })
     }
 
@@ -200,22 +244,19 @@ impl IndexCoordinator {
     }
 
     pub fn target_lock_path(&self, key: &TargetKey) -> PathBuf {
-        self.targets_dir().join(format!("{}.lock", key.file_stem()))
+        target_lock_path(&self.root, key)
     }
 
     pub fn target_ticket_path(&self, key: &TargetKey) -> PathBuf {
-        self.targets_dir()
-            .join(format!("{}.ticket.json", key.file_stem()))
+        target_ticket_path(&self.root, key)
     }
 
     pub fn target_state_path(&self, key: &TargetKey) -> PathBuf {
-        self.targets_dir()
-            .join(format!("{}.state.json", key.file_stem()))
+        target_state_path(&self.root, key)
     }
 
     pub fn target_waiters_dir(&self, key: &TargetKey) -> PathBuf {
-        self.targets_dir()
-            .join(format!("{}.waiters", key.file_stem()))
+        target_waiters_dir(&self.root, key)
     }
 
     pub fn heavy_lock_path(&self) -> PathBuf {
@@ -230,41 +271,123 @@ impl IndexCoordinator {
         self.root.join("heavy.pending")
     }
 
-    fn targets_dir(&self) -> PathBuf {
-        self.root.join("targets")
-    }
-
     /// Request the job slot for `key`. Returns [`JobAdmission::Owner`] when
     /// this caller takes the target kernel lock, or [`JobAdmission::Joined`]
     /// when a live owner already holds it. Stale tickets (dead PID, recycled
-    /// PID with a different start id, crash before spawn) must not block
+    /// PID with a different start id, crash before spawn) never block
     /// admission: the kernel lock is the only truth.
     pub fn request_job(
         &self,
-        _key: &TargetKey,
-        _priority: JobPriority,
-        _timeout: Duration,
+        key: &TargetKey,
+        priority: JobPriority,
+        timeout: Duration,
     ) -> Result<JobAdmission, CoordinatorError> {
-        Err(CoordinatorError::Unavailable(
-            "index coordinator job admission is not implemented yet (T-IDX-384)".to_string(),
-        ))
+        fs::create_dir_all(self.root.join("targets"))?;
+        let started = Instant::now();
+        let lock_path = self.target_lock_path(key);
+        loop {
+            let lock_file = open_lock_file(&lock_path)?;
+            match fs2::FileExt::try_lock_exclusive(&lock_file) {
+                Ok(()) => {
+                    let state_path = self.target_state_path(key);
+                    let epoch = read_state(&state_path).map(|s| s.epoch).unwrap_or(0) + 1;
+                    let owner = OwnerIdentity::current();
+                    write_json_atomic(
+                        &self.target_ticket_path(key),
+                        &Ticket {
+                            schema_version: COORDINATOR_SCHEMA_VERSION,
+                            target: key.file_stem(),
+                            priority,
+                            owner: owner.clone(),
+                            acquired_at_ms: now_ms(),
+                        },
+                    )?;
+                    write_json_atomic(
+                        &state_path,
+                        &JobState {
+                            schema_version: COORDINATOR_SCHEMA_VERSION,
+                            epoch,
+                            status: JobStatus::Running,
+                            message: None,
+                            owner,
+                            priority,
+                            updated_at_ms: now_ms(),
+                        },
+                    )?;
+                    return Ok(JobAdmission::Owner(TargetJobGuard {
+                        root: self.root.clone(),
+                        key: key.clone(),
+                        priority,
+                        epoch,
+                        _lock_file: lock_file,
+                        completed: false,
+                    }));
+                }
+                Err(err) if is_contended(&err) => {
+                    // A live owner holds the target: join as a waiter. The
+                    // owner may release between our probe and the join; the
+                    // waiter's wait loop resolves that through the same
+                    // kernel-lock probe.
+                    let state = read_state(&self.target_state_path(key));
+                    let joined_epoch = match &state {
+                        Some(s) if s.status == JobStatus::Running => s.epoch,
+                        Some(s) => s.epoch + 1,
+                        None => 1,
+                    };
+                    let waiters_dir = self.target_waiters_dir(key);
+                    fs::create_dir_all(&waiters_dir)?;
+                    let waiter_path = waiters_dir.join(format!("{}.json", uuid::Uuid::new_v4()));
+                    // Create and shared-lock the registration BEFORE writing
+                    // content so a concurrent stale sweep never deletes a
+                    // just-registered live waiter.
+                    let waiter_file = open_lock_file(&waiter_path)?;
+                    waiter_file.lock_shared()?;
+                    let registration = Registration {
+                        schema_version: COORDINATOR_SCHEMA_VERSION,
+                        owner: OwnerIdentity::current(),
+                        priority,
+                        registered_at_ms: now_ms(),
+                    };
+                    let mut handle = &waiter_file;
+                    handle.write_all(&serde_json::to_vec(&registration).map_err(io_invalid)?)?;
+                    handle.flush()?;
+                    return Ok(JobAdmission::Joined(JobWaiter {
+                        state_path: self.target_state_path(key),
+                        lock_path,
+                        waiter_path,
+                        _waiter_file: waiter_file,
+                        key: key.clone(),
+                        joined_epoch,
+                    }));
+                }
+                Err(err) => {
+                    if started.elapsed() >= timeout {
+                        return Err(CoordinatorError::Io(err));
+                    }
+                    std::thread::sleep(POLL_INTERVAL);
+                }
+            }
+        }
     }
 
-    /// True when any caller with priority strictly higher than `than` is
-    /// waiting for the heavy lease (FR-389: background claimants must not
+    /// True when any live caller with priority strictly higher than `than`
+    /// is waiting for the heavy lease (FR-389: background claimants must not
     /// re-acquire while higher-priority tickets remain).
-    pub fn pending_higher_priority(&self, _than: JobPriority) -> Result<bool, CoordinatorError> {
-        Err(CoordinatorError::Unavailable(
-            "index coordinator pending-priority scan is not implemented yet (T-IDX-384)"
-                .to_string(),
-        ))
+    pub fn pending_higher_priority(&self, than: JobPriority) -> Result<bool, CoordinatorError> {
+        Ok(scan_live_pending(&self.heavy_pending_dir())?
+            .into_iter()
+            .any(|priority| priority < than))
     }
 }
 
 /// Exclusive owner of one target job (kernel target lock held).
 pub struct TargetJobGuard {
+    root: PathBuf,
     key: TargetKey,
     priority: JobPriority,
+    epoch: u64,
+    _lock_file: File,
+    completed: bool,
 }
 
 impl TargetJobGuard {
@@ -278,37 +401,154 @@ impl TargetJobGuard {
 
     /// Acquire the host-wide heavy lease (model-loading runner slot). Only
     /// reachable through an owned target guard, enforcing the fixed lock
-    /// order target job -> heavy (FR-392).
-    pub fn acquire_heavy(&self, _timeout: Duration) -> Result<HeavyLease, CoordinatorError> {
-        Err(CoordinatorError::Unavailable(
-            "index coordinator heavy lease is not implemented yet (T-IDX-384)".to_string(),
-        ))
+    /// order target job -> heavy (FR-392). Non-interactive claimants defer
+    /// while live higher-priority claimants are pending (FR-383).
+    pub fn acquire_heavy(&self, timeout: Duration) -> Result<HeavyLease, CoordinatorError> {
+        let pending_dir = self.root.join("heavy.pending");
+        fs::create_dir_all(&pending_dir)?;
+        let pending_path = pending_dir.join(format!("{}.json", uuid::Uuid::new_v4()));
+        let pending_file = open_lock_file(&pending_path)?;
+        pending_file.lock_shared()?;
+        let registration = Registration {
+            schema_version: COORDINATOR_SCHEMA_VERSION,
+            owner: OwnerIdentity::current(),
+            priority: self.priority,
+            registered_at_ms: now_ms(),
+        };
+        {
+            let mut handle = &pending_file;
+            handle.write_all(&serde_json::to_vec(&registration).map_err(io_invalid)?)?;
+            handle.flush()?;
+        }
+        let cleanup_pending = |file: File, path: &Path| {
+            drop(file);
+            let _ = fs::remove_file(path);
+        };
+
+        let started = Instant::now();
+        let heavy_lock_path = self.root.join("heavy.lock");
+        let heavy_file = match open_lock_file(&heavy_lock_path) {
+            Ok(file) => file,
+            Err(err) => {
+                cleanup_pending(pending_file, &pending_path);
+                return Err(CoordinatorError::Io(err));
+            }
+        };
+        loop {
+            let must_defer = self.priority != JobPriority::InteractiveSearch
+                && scan_live_pending_excluding(&pending_dir, &pending_path)
+                    .unwrap_or_default()
+                    .into_iter()
+                    .any(|priority| priority < self.priority);
+            if !must_defer {
+                match fs2::FileExt::try_lock_exclusive(&heavy_file) {
+                    Ok(()) => {
+                        let _ = write_json_atomic(
+                            &self.root.join("heavy.ticket.json"),
+                            &Ticket {
+                                schema_version: COORDINATOR_SCHEMA_VERSION,
+                                target: self.key.file_stem(),
+                                priority: self.priority,
+                                owner: OwnerIdentity::current(),
+                                acquired_at_ms: now_ms(),
+                            },
+                        );
+                        cleanup_pending(pending_file, &pending_path);
+                        return Ok(HeavyLease {
+                            _lock_file: heavy_file,
+                            ticket_path: self.root.join("heavy.ticket.json"),
+                        });
+                    }
+                    Err(err) if is_contended(&err) => {}
+                    Err(err) => {
+                        cleanup_pending(pending_file, &pending_path);
+                        return Err(CoordinatorError::Io(err));
+                    }
+                }
+            }
+            if started.elapsed() >= timeout {
+                cleanup_pending(pending_file, &pending_path);
+                return Err(CoordinatorError::Timeout {
+                    waited_ms: started.elapsed().as_millis() as u64,
+                });
+            }
+            std::thread::sleep(POLL_INTERVAL);
+        }
     }
 
-    /// Number of live waiters currently joined to this target job.
+    /// Number of live waiters currently joined to this target job. Stale
+    /// registrations (crashed waiters) are swept while counting.
     pub fn waiter_count(&self) -> Result<usize, CoordinatorError> {
-        Err(CoordinatorError::Unavailable(
-            "index coordinator waiter accounting is not implemented yet (T-IDX-384)".to_string(),
-        ))
+        let waiters_dir = target_waiters_dir(&self.root, &self.key);
+        Ok(sweep_live_registrations(&waiters_dir)?.len())
     }
 
     /// Publish the shared outcome and release the target job slot.
-    pub fn complete(self, _outcome: JobOutcome) -> Result<(), CoordinatorError> {
-        Err(CoordinatorError::Unavailable(
-            "index coordinator completion is not implemented yet (T-IDX-384)".to_string(),
-        ))
+    pub fn complete(mut self, outcome: JobOutcome) -> Result<(), CoordinatorError> {
+        let (status, message) = match outcome {
+            JobOutcome::Completed => (JobStatus::Completed, None),
+            JobOutcome::Failed { message } => (JobStatus::Failed, Some(message)),
+            JobOutcome::OwnerGone => (JobStatus::Abandoned, None),
+        };
+        self.publish_state(status, message)?;
+        let _ = fs::remove_file(target_ticket_path(&self.root, &self.key));
+        self.completed = true;
+        Ok(())
+    }
+
+    fn publish_state(
+        &self,
+        status: JobStatus,
+        message: Option<String>,
+    ) -> Result<(), CoordinatorError> {
+        write_json_atomic(
+            &target_state_path(&self.root, &self.key),
+            &JobState {
+                schema_version: COORDINATOR_SCHEMA_VERSION,
+                epoch: self.epoch,
+                status,
+                message,
+                owner: OwnerIdentity::current(),
+                priority: self.priority,
+                updated_at_ms: now_ms(),
+            },
+        )?;
+        Ok(())
+    }
+}
+
+impl Drop for TargetJobGuard {
+    fn drop(&mut self) {
+        if !self.completed {
+            let _ = self.publish_state(JobStatus::Abandoned, None);
+            let _ = fs::remove_file(target_ticket_path(&self.root, &self.key));
+        }
+        // Kernel target lock releases when `_lock_file` drops.
     }
 }
 
 /// Host-wide heavy lease. Dropping releases the kernel heavy lock.
 pub struct HeavyLease {
-    _private: (),
+    _lock_file: File,
+    ticket_path: PathBuf,
+}
+
+impl Drop for HeavyLease {
+    fn drop(&mut self) {
+        let _ = fs::remove_file(&self.ticket_path);
+        // Kernel heavy lock releases when `_lock_file` drops.
+    }
 }
 
 /// Waiter joined to another owner's target job. Dropping deregisters the
 /// waiter; the shared job keeps running while other waiters remain (AS-8).
 pub struct JobWaiter {
+    state_path: PathBuf,
+    lock_path: PathBuf,
+    waiter_path: PathBuf,
+    _waiter_file: File,
     key: TargetKey,
+    joined_epoch: u64,
 }
 
 impl JobWaiter {
@@ -318,9 +558,193 @@ impl JobWaiter {
 
     /// Wait for the shared outcome: `Completed` / `Failed` published by the
     /// owner, or `OwnerGone` when the owner vanished without publishing.
-    pub fn wait(self, _timeout: Duration) -> Result<JobOutcome, CoordinatorError> {
-        Err(CoordinatorError::Unavailable(
-            "index coordinator waiter wait is not implemented yet (T-IDX-384)".to_string(),
-        ))
+    pub fn wait(self, timeout: Duration) -> Result<JobOutcome, CoordinatorError> {
+        let started = Instant::now();
+        loop {
+            if let Some(outcome) = self.published_outcome() {
+                return Ok(outcome);
+            }
+            // Kernel-lock probe: if the target lock is free the owner either
+            // finished (state re-read resolves it) or died without
+            // publishing.
+            let probe = open_lock_file(&self.lock_path)?;
+            if fs2::FileExt::try_lock_exclusive(&probe).is_ok() {
+                let outcome = self.published_outcome().unwrap_or(JobOutcome::OwnerGone);
+                drop(probe);
+                return Ok(outcome);
+            }
+            if started.elapsed() >= timeout {
+                return Err(CoordinatorError::Timeout {
+                    waited_ms: started.elapsed().as_millis() as u64,
+                });
+            }
+            std::thread::sleep(POLL_INTERVAL);
+        }
     }
+
+    fn published_outcome(&self) -> Option<JobOutcome> {
+        let state = read_state(&self.state_path)?;
+        if state.epoch < self.joined_epoch {
+            return None;
+        }
+        match state.status {
+            JobStatus::Running => None,
+            JobStatus::Completed => Some(JobOutcome::Completed),
+            JobStatus::Failed => Some(JobOutcome::Failed {
+                message: state.message.unwrap_or_default(),
+            }),
+            JobStatus::Abandoned => Some(JobOutcome::OwnerGone),
+        }
+    }
+}
+
+impl Drop for JobWaiter {
+    fn drop(&mut self) {
+        // Shared lock releases when `_waiter_file` drops; remove the
+        // registration so owners stop counting this caller.
+        let _ = fs::remove_file(&self.waiter_path);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Internal helpers
+// ---------------------------------------------------------------------------
+
+fn target_lock_path(root: &Path, key: &TargetKey) -> PathBuf {
+    root.join("targets")
+        .join(format!("{}.lock", key.file_stem()))
+}
+
+fn target_ticket_path(root: &Path, key: &TargetKey) -> PathBuf {
+    root.join("targets")
+        .join(format!("{}.ticket.json", key.file_stem()))
+}
+
+fn target_state_path(root: &Path, key: &TargetKey) -> PathBuf {
+    root.join("targets")
+        .join(format!("{}.state.json", key.file_stem()))
+}
+
+fn target_waiters_dir(root: &Path, key: &TargetKey) -> PathBuf {
+    root.join("targets")
+        .join(format!("{}.waiters", key.file_stem()))
+}
+
+fn open_lock_file(path: &Path) -> io::Result<File> {
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    OpenOptions::new()
+        .create(true)
+        .read(true)
+        .write(true)
+        .truncate(false)
+        .open(path)
+}
+
+fn is_contended(err: &io::Error) -> bool {
+    err.kind() == io::ErrorKind::WouldBlock
+        || err.raw_os_error() == fs2::lock_contended_error().raw_os_error()
+}
+
+fn io_invalid(err: serde_json::Error) -> io::Error {
+    io::Error::new(io::ErrorKind::InvalidData, err)
+}
+
+fn now_ms() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0)
+}
+
+/// Atomic JSON publish: write a sibling temp file, then rename over the
+/// destination so readers never observe a torn payload.
+fn write_json_atomic<T: Serialize>(path: &Path, value: &T) -> io::Result<()> {
+    let parent = path.parent().unwrap_or_else(|| Path::new("."));
+    fs::create_dir_all(parent)?;
+    let tmp = parent.join(format!(
+        ".{}.tmp-{}",
+        path.file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_else(|| "state".to_string()),
+        std::process::id()
+    ));
+    let payload = serde_json::to_vec(value).map_err(io_invalid)?;
+    fs::write(&tmp, payload)?;
+    fs::rename(&tmp, path)?;
+    Ok(())
+}
+
+fn read_state(path: &Path) -> Option<JobState> {
+    let raw = fs::read(path).ok()?;
+    serde_json::from_slice(&raw).ok()
+}
+
+/// Scan a registration dir, sweep stale entries (their shared lock is gone,
+/// so `try_lock_exclusive` succeeds), and return the live priorities.
+fn scan_live_pending(dir: &Path) -> Result<Vec<JobPriority>, CoordinatorError> {
+    Ok(sweep_live_registrations(dir)?
+        .into_iter()
+        .filter_map(|registration| registration.map(|r| r.priority))
+        .collect())
+}
+
+fn scan_live_pending_excluding(
+    dir: &Path,
+    exclude: &Path,
+) -> Result<Vec<JobPriority>, CoordinatorError> {
+    Ok(sweep_live_registrations_excluding(dir, Some(exclude))?
+        .into_iter()
+        .filter_map(|registration| registration.map(|r| r.priority))
+        .collect())
+}
+
+/// Returns one entry per live registration file (parse failures yield
+/// `None` entries so callers can still count liveness).
+fn sweep_live_registrations(dir: &Path) -> Result<Vec<Option<Registration>>, CoordinatorError> {
+    sweep_live_registrations_excluding(dir, None)
+}
+
+fn sweep_live_registrations_excluding(
+    dir: &Path,
+    exclude: Option<&Path>,
+) -> Result<Vec<Option<Registration>>, CoordinatorError> {
+    let entries = match fs::read_dir(dir) {
+        Ok(entries) => entries,
+        Err(err) if err.kind() == io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(err) => return Err(CoordinatorError::Io(err)),
+    };
+    let mut live = Vec::new();
+    for entry in entries {
+        let Ok(entry) = entry else { continue };
+        let path = entry.path();
+        if path.extension().and_then(|e| e.to_str()) != Some("json") {
+            continue;
+        }
+        if exclude.is_some_and(|excluded| excluded == path) {
+            live.push(read_registration(&path));
+            continue;
+        }
+        let Ok(file) = open_lock_file(&path) else {
+            continue;
+        };
+        match fs2::FileExt::try_lock_exclusive(&file) {
+            Ok(()) => {
+                // No live holder: stale registration from a dead process.
+                drop(file);
+                let _ = fs::remove_file(&path);
+            }
+            Err(err) if is_contended(&err) => {
+                live.push(read_registration(&path));
+            }
+            Err(_) => {}
+        }
+    }
+    Ok(live)
+}
+
+fn read_registration(path: &Path) -> Option<Registration> {
+    let raw = fs::read(path).ok()?;
+    serde_json::from_slice(&raw).ok()
 }

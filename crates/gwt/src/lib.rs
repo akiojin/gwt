@@ -83,10 +83,10 @@ pub use index_worker::{
     auto_repair_unhealthy_scopes, auto_repair_unhealthy_targets, build_aggregated_status_view,
     collect_unhealthy_rebuild_targets, collect_unhealthy_rebuild_targets_for_project_root,
     default_rebuild_runner, global_aggregated_status_cache, list_worktree_probe_inputs,
-    parse_scope_health, AggregatedStatusCache, IndexRebuildRunnerFn, IndexRebuildScope,
-    IndexRebuildSpawner, ProjectIndexScopes, ProjectIndexStatusState, ProjectIndexStatusView,
-    RebuildProgress, RebuildTarget, ScopeHealthView, WorktreeMeta, WorktreeProbeInput,
-    WorktreeProbeOutcome,
+    manual_rebuild_runner, parse_scope_health, rebuild_index_target, AggregatedStatusCache,
+    IndexRebuildRunnerFn, IndexRebuildScope, IndexRebuildSpawner, ProjectIndexScopes,
+    ProjectIndexStatusState, ProjectIndexStatusView, RebuildProgress, RebuildTarget,
+    ScopeHealthView, WorktreeMeta, WorktreeProbeInput, WorktreeProbeOutcome,
 };
 pub use issue_monitor::{
     is_auto_improve_candidate, issue_monitor_launch_plan, issue_monitor_launch_profile_summary,

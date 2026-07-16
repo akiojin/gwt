@@ -15,7 +15,7 @@ use std::time::{Duration, Instant};
 
 use fs2::FileExt;
 use gwt_core::index_coordinator::{
-    IndexCoordinator, JobAdmission, JobOutcome, JobPriority, OwnerIdentity, Ticket, TargetKey,
+    IndexCoordinator, JobAdmission, JobOutcome, JobPriority, OwnerIdentity, TargetKey, Ticket,
     COORDINATOR_SCHEMA_VERSION,
 };
 
@@ -379,14 +379,8 @@ fn heavy_lease_is_host_wide_exclusive_across_processes() {
                 arena.coord_env(),
                 ("GWT_COORD_TARGET", target.to_string()),
                 ("GWT_COORD_HOLD_MS", "250".to_string()),
-                (
-                    "GWT_COORD_LEDGER",
-                    ledger.to_string_lossy().into_owned(),
-                ),
-                (
-                    "GWT_COORD_RESULT",
-                    result.to_string_lossy().into_owned(),
-                ),
+                ("GWT_COORD_LEDGER", ledger.to_string_lossy().into_owned()),
+                ("GWT_COORD_RESULT", result.to_string_lossy().into_owned()),
             ],
         ));
     }
@@ -427,10 +421,7 @@ fn same_target_requests_coalesce_into_single_shared_build() {
                 "GWT_COORD_BUILD_COUNT",
                 build_count.to_string_lossy().into_owned(),
             ),
-            (
-                "GWT_COORD_MARKER",
-                started.to_string_lossy().into_owned(),
-            ),
+            ("GWT_COORD_MARKER", started.to_string_lossy().into_owned()),
             (
                 "GWT_COORD_RESULT",
                 arena.path("result-owner").to_string_lossy().into_owned(),
@@ -475,8 +466,8 @@ fn same_target_requests_coalesce_into_single_shared_build() {
         "same-target concurrent requests must coalesce into one shared build"
     );
     for label in ["join-1", "join-2"] {
-        let result = fs::read_to_string(arena.path(&format!("result-{label}")))
-            .expect("read joiner result");
+        let result =
+            fs::read_to_string(arena.path(&format!("result-{label}"))).expect("read joiner result");
         assert!(
             result.contains("Completed"),
             "joiner {label} must receive the shared completed outcome, got {result}"
@@ -504,14 +495,8 @@ fn waiter_departure_keeps_shared_job_running() {
                 "GWT_COORD_BUILD_COUNT",
                 build_count.to_string_lossy().into_owned(),
             ),
-            (
-                "GWT_COORD_MARKER",
-                started.to_string_lossy().into_owned(),
-            ),
-            (
-                "GWT_COORD_MARKER2",
-                saw_two.to_string_lossy().into_owned(),
-            ),
+            ("GWT_COORD_MARKER", started.to_string_lossy().into_owned()),
+            ("GWT_COORD_MARKER2", saw_two.to_string_lossy().into_owned()),
             (
                 "GWT_COORD_RESULT",
                 arena.path("result-owner").to_string_lossy().into_owned(),
@@ -523,16 +508,10 @@ fn waiter_departure_keeps_shared_job_running() {
     let departing = spawn_helper(
         "departing",
         &[
-            (
-                "GWT_COORD_ROLE",
-                "join-then-depart-on-signal".to_string(),
-            ),
+            ("GWT_COORD_ROLE", "join-then-depart-on-signal".to_string()),
             arena.coord_env(),
             ("GWT_COORD_TARGET", target.to_string()),
-            (
-                "GWT_COORD_MARKER",
-                joined.to_string_lossy().into_owned(),
-            ),
+            ("GWT_COORD_MARKER", joined.to_string_lossy().into_owned()),
             (
                 "GWT_COORD_SIGNAL",
                 depart_signal.to_string_lossy().into_owned(),
@@ -598,10 +577,7 @@ fn killed_heavy_owner_releases_locks_for_next_claimant() {
             ("GWT_COORD_ROLE", "hold-heavy-and-park".to_string()),
             arena.coord_env(),
             ("GWT_COORD_TARGET", "repo-a|files|wt-1".to_string()),
-            (
-                "GWT_COORD_MARKER",
-                ready.to_string_lossy().into_owned(),
-            ),
+            ("GWT_COORD_MARKER", ready.to_string_lossy().into_owned()),
         ],
     );
     wait_for_file(&ready, Duration::from_secs(20));
