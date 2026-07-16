@@ -450,8 +450,7 @@ pub fn run_daemon_hook<E: CliEnv>(
             Ok(emit_hook_output(env, &output))
         }
         HookKind::GwtSelfImprovementStop => {
-            let cwd = env.repo_path().to_path_buf();
-            let output = gwt_self_improvement_stop::handle_with_input(&cwd, &stdin);
+            let output = gwt_self_improvement_stop::handle_with_input(env, &stdin);
             Ok(emit_hook_output(env, &output))
         }
     }

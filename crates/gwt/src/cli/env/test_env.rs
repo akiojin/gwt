@@ -8,6 +8,8 @@ use std::{
     collections::HashMap,
     io::{self},
     path::PathBuf,
+    sync::Mutex,
+    time::Duration,
 };
 
 use gwt_git::PrStatus;
@@ -67,6 +69,15 @@ pub struct TestEnv {
     pub job_logs: HashMap<u64, String>,
     pub job_log_call_log: Vec<u64>,
     pub internal_command_call_log: Vec<InternalCommandCall>,
+    owner_client_access_log: Mutex<Vec<OwnerClientAccessObservation>>,
+}
+
+#[derive(Debug, Clone)]
+struct OwnerClientAccessObservation {
+    connect_timeout: Duration,
+    total_remaining: Duration,
+    candidate_store_persisted: bool,
+    candidate_id: Option<String>,
 }
 
 impl TestEnv {
@@ -107,7 +118,46 @@ impl TestEnv {
             job_logs: HashMap::new(),
             job_log_call_log: Vec::new(),
             internal_command_call_log: Vec::new(),
+            owner_client_access_log: Mutex::new(Vec::new()),
         }
+    }
+
+    pub fn owner_client_access_count(&self) -> usize {
+        self.owner_client_access_log
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .len()
+    }
+
+    pub fn last_owner_client_budget(&self) -> Option<(Duration, Duration)> {
+        self.owner_client_access_log
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .last()
+            .map(|access| (access.connect_timeout, access.total_remaining))
+    }
+
+    pub fn last_owner_client_access_saw_persisted_candidate(&self) -> Option<bool> {
+        self.owner_client_access_log
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .last()
+            .map(|access| access.candidate_store_persisted)
+    }
+
+    pub fn last_owner_client_candidate_id(&self) -> Option<String> {
+        self.owner_client_access_log
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .last()
+            .and_then(|access| access.candidate_id.clone())
+    }
+
+    pub fn clear_owner_client_access_log(&self) {
+        self.owner_client_access_log
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clear();
     }
 
     pub fn seed_linked_prs(&mut self, number: u64, linked_prs: Vec<LinkedPrSummary>) {
@@ -165,7 +215,43 @@ impl CliEnv for TestEnv {
         &self,
         deadline: &ResolutionDeadline,
     ) -> Result<&Self::OwnerClient, ApiError> {
-        deadline.remaining("test owner client access")?;
+        let total_remaining = deadline.remaining("test owner client access")?;
+        let connect_timeout = deadline.connect_timeout("test owner client connect")?;
+        let candidate_store_path = gwt_core::paths::gwt_project_dir_for_repo_path(&self.repo_path)
+            .join("improvements")
+            .join("candidates.json");
+        let candidate_id = std::fs::read(&candidate_store_path)
+            .ok()
+            .and_then(|bytes| serde_json::from_slice::<serde_json::Value>(&bytes).ok())
+            .and_then(|store| {
+                store
+                    .get("candidates")
+                    .and_then(serde_json::Value::as_array)
+                    .and_then(|candidates| {
+                        candidates.iter().find_map(|candidate| {
+                            if candidate.get("state").and_then(serde_json::Value::as_str)
+                                == Some("owner-resolving")
+                            {
+                                candidate
+                                    .get("id")
+                                    .and_then(serde_json::Value::as_str)
+                                    .map(str::to_string)
+                            } else {
+                                None
+                            }
+                        })
+                    })
+            });
+        let candidate_store_persisted = candidate_id.is_some();
+        self.owner_client_access_log
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .push(OwnerClientAccessObservation {
+                connect_timeout,
+                total_remaining,
+                candidate_store_persisted,
+                candidate_id,
+            });
         Ok(&self.owner_client)
     }
     fn improvement_source_scope_nonce(&self) -> Result<String, gwt_github::SpecOpsError> {

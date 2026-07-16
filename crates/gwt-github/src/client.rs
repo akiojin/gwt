@@ -268,6 +268,15 @@ impl ResolutionDeadline {
         self.expires_at
     }
 
+    pub fn reserving(&self, reserve: Duration) -> Self {
+        Self::at(
+            self.expires_at
+                .checked_sub(reserve)
+                .unwrap_or_else(Instant::now),
+            self.connect_timeout_cap,
+        )
+    }
+
     pub fn remaining(&self, operation: &str) -> Result<Duration, ApiError> {
         self.expires_at
             .checked_duration_since(Instant::now())

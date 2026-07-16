@@ -159,6 +159,8 @@ pub(super) struct ResolutionAttemptLease {
     pub(super) expires_at: chrono::DateTime<chrono::Utc>,
     pub(super) remote_phase: AttemptRemotePhase,
     #[serde(default)]
+    pub(super) remote_mutation_seen: bool,
+    #[serde(default)]
     pub(super) intent: ResolutionAttemptIntent,
 }
 
@@ -509,7 +511,7 @@ fn with_owner_projection_lock<T>(
         .truncate(false)
         .open(directory.join(".lock"))
         .map_err(io_as_spec_error)?;
-    lock.lock_exclusive().map_err(io_as_spec_error)?;
+    gwt_core::operation_deadline::lock_exclusive(&lock).map_err(io_as_spec_error)?;
     let result = operation();
     let unlock_result = FileExt::unlock(&lock).map_err(io_as_spec_error);
     match (result, unlock_result) {
@@ -1206,6 +1208,7 @@ pub(super) fn acquire_attempt_lease(
         started_at: now,
         expires_at: now + ttl,
         remote_phase: AttemptRemotePhase::NotSubmitted,
+        remote_mutation_seen: false,
         intent: ResolutionAttemptIntent::Unassigned,
     };
     candidate.attempt = Some(lease.clone());
@@ -1257,6 +1260,7 @@ pub(super) fn mark_attempt_submitted(
         .expect("attempt was validated before mutation");
     attempt.intent = intent;
     attempt.remote_phase = AttemptRemotePhase::Submitted;
+    attempt.remote_mutation_seen = true;
     Ok(())
 }
 
@@ -1625,7 +1629,7 @@ fn with_store_lock<T>(
         .truncate(false)
         .open(improvements_dir.join(".lock"))
         .map_err(io_as_spec_error)?;
-    lock.lock_exclusive().map_err(io_as_spec_error)?;
+    gwt_core::operation_deadline::lock_exclusive(&lock).map_err(io_as_spec_error)?;
     let result = operation();
     let unlock_result = FileExt::unlock(&lock).map_err(io_as_spec_error);
     match (result, unlock_result) {

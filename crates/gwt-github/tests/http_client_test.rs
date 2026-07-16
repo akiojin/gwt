@@ -7,7 +7,10 @@
 //! code mapping matches [`ApiError`].
 
 use gwt_github::client::{
-    http::{FakeTransport, HttpIssueClient, HttpMethod, HttpResponse},
+    http::{
+        FakeTransport, HttpError, HttpIssueClient, HttpMethod, HttpRequest, HttpResponse,
+        HttpTransport, ReqwestTransport,
+    },
     ApiError, CommentId, CommitComparisonStatus, CreateRepositoryIssue, FetchResult, IssueClient,
     IssueNumber, IssueState, OwnerMutationError, OwnerRepositoryClient, RepositoryActorType,
     RepositoryAuthorAssociation, RepositoryIdentity, RepositoryIssueKind, ResolutionDeadline,
@@ -15,6 +18,8 @@ use gwt_github::client::{
 };
 use std::{
     ffi::{OsStr, OsString},
+    io::ErrorKind,
+    net::{TcpListener, TcpStream},
     sync::Mutex,
     time::{Duration, Instant},
 };
@@ -29,6 +34,22 @@ const OWNER_ENV_KEYS: [&str; 4] = [
     "GWT_OWNER_GITHUB_GRAPHQL_URL",
     "GWT_OWNER_GITHUB_TOKEN",
 ];
+
+fn accept_loopback_with_timeout(listener: &TcpListener, timeout: Duration) -> TcpStream {
+    listener
+        .set_nonblocking(true)
+        .expect("nonblocking loopback listener");
+    let deadline = Instant::now() + timeout;
+    loop {
+        match listener.accept() {
+            Ok((stream, _)) => return stream,
+            Err(error) if error.kind() == ErrorKind::WouldBlock && Instant::now() < deadline => {
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            Err(error) => panic!("loopback accept failed before {timeout:?}: {error}"),
+        }
+    }
+}
 
 struct ScopedEnv {
     original: Vec<(&'static str, Option<OsString>)>,
@@ -910,6 +931,181 @@ fn owner_mutation_failures_expose_submission_certainty() {
     }
 }
 
+struct PreSubmitTimeoutTransport;
+
+impl HttpTransport for PreSubmitTimeoutTransport {
+    fn execute(&self, _request: HttpRequest) -> Result<HttpResponse, HttpError> {
+        panic!("owner mutation must use the deadline-aware transport method")
+    }
+
+    fn execute_with_deadline(
+        &self,
+        _request: HttpRequest,
+        _deadline: &ResolutionDeadline,
+    ) -> Result<HttpResponse, HttpError> {
+        Err(HttpError::PreSubmitTimeout(
+            "deadline expired before request submission".to_string(),
+        ))
+    }
+}
+
+#[test]
+fn owner_mutation_preserves_a_known_pre_submit_transport_timeout() {
+    let client = HttpIssueClient::with_transport(
+        PreSubmitTimeoutTransport,
+        "test-token".to_string(),
+        "akiojin",
+        "gwt",
+    );
+    let error = client
+        .create_owner_issue(
+            &RepositoryIdentity::gwt_upstream(),
+            &CreateRepositoryIssue {
+                title: "Created".to_string(),
+                body: "Body".to_string(),
+                labels: Vec::new(),
+            },
+            &owner_deadline(),
+        )
+        .expect_err("known pre-submit timeout");
+
+    assert!(matches!(
+        error,
+        OwnerMutationError::PreSubmit(ApiError::Timeout { .. })
+    ));
+}
+
+#[test]
+fn owner_mutation_classifies_connection_refusal_as_pre_submit_network_failure() {
+    let listener = TcpListener::bind("127.0.0.1:0").expect("reserve loopback port");
+    let address = listener.local_addr().expect("loopback address");
+    drop(listener);
+    let client = HttpIssueClient::with_transport(
+        ReqwestTransport::new().expect("reqwest transport"),
+        "test-token".to_string(),
+        "akiojin",
+        "gwt",
+    )
+    .with_test_endpoints(
+        format!("http://{address}"),
+        format!("http://{address}/graphql"),
+        true,
+    )
+    .expect("loopback endpoints");
+
+    let error = client
+        .create_owner_issue(
+            &RepositoryIdentity::gwt_upstream(),
+            &CreateRepositoryIssue {
+                title: "Created".to_string(),
+                body: "Body".to_string(),
+                labels: Vec::new(),
+            },
+            &owner_deadline(),
+        )
+        .expect_err("connection refusal must be pre-submit");
+
+    assert!(matches!(
+        error,
+        OwnerMutationError::PreSubmit(ApiError::Network(_))
+    ));
+}
+
+struct LateResponseTransport;
+
+impl HttpTransport for LateResponseTransport {
+    fn execute(&self, _request: HttpRequest) -> Result<HttpResponse, HttpError> {
+        panic!("owner reads must use the deadline-aware transport method")
+    }
+
+    fn execute_with_deadline(
+        &self,
+        _request: HttpRequest,
+        _deadline: &ResolutionDeadline,
+    ) -> Result<HttpResponse, HttpError> {
+        std::thread::sleep(Duration::from_millis(25));
+        Ok(owner_page(Vec::new(), false, None))
+    }
+}
+
+#[test]
+fn owner_read_rejects_a_response_returned_after_the_absolute_deadline() {
+    let client = HttpIssueClient::with_transport(
+        LateResponseTransport,
+        "test-token".to_string(),
+        "akiojin",
+        "gwt",
+    );
+    let deadline = ResolutionDeadline::new(Duration::from_millis(1), Duration::from_millis(5));
+
+    let error = client
+        .list_issues(&RepositoryIdentity::gwt_upstream(), &deadline)
+        .expect_err("late owner response");
+
+    assert!(matches!(error, ApiError::Timeout { .. }));
+}
+
+#[test]
+fn reqwest_owner_read_stops_within_the_absolute_deadline_when_response_stalls() {
+    let listener = TcpListener::bind("127.0.0.1:0").expect("loopback listener");
+    let address = listener.local_addr().expect("loopback address");
+    let server = std::thread::spawn(move || {
+        let _stream = accept_loopback_with_timeout(&listener, Duration::from_secs(2));
+        std::thread::sleep(Duration::from_millis(400));
+    });
+    let client = HttpIssueClient::with_transport(
+        ReqwestTransport::new().expect("reqwest transport"),
+        "test-token".to_string(),
+        "akiojin",
+        "gwt",
+    )
+    .with_test_endpoints(
+        format!("http://{address}"),
+        format!("http://{address}/graphql"),
+        true,
+    )
+    .expect("loopback endpoints");
+    let deadline = ResolutionDeadline::new(Duration::from_millis(20), Duration::from_millis(60));
+    let started = Instant::now();
+
+    let error = client
+        .list_issues(&RepositoryIdentity::gwt_upstream(), &deadline)
+        .expect_err("stalled owner response");
+    let elapsed = started.elapsed();
+
+    assert!(matches!(error, ApiError::Timeout { .. }));
+    assert!(elapsed < Duration::from_millis(300), "elapsed={elapsed:?}");
+    server.join().expect("stalled loopback server");
+}
+
+#[test]
+fn owner_mutation_marks_a_response_returned_after_the_deadline_as_remote_unknown() {
+    let client = HttpIssueClient::with_transport(
+        LateResponseTransport,
+        "test-token".to_string(),
+        "akiojin",
+        "gwt",
+    );
+    let deadline = ResolutionDeadline::new(Duration::from_millis(1), Duration::from_millis(5));
+
+    let error = client
+        .create_owner_issue(
+            &RepositoryIdentity::gwt_upstream(),
+            &CreateRepositoryIssue {
+                title: "Created".to_string(),
+                body: "Body".to_string(),
+                labels: Vec::new(),
+            },
+            &deadline,
+        )
+        .expect_err("late mutation response");
+
+    assert!(matches!(
+        error,
+        OwnerMutationError::RemoteOutcomeUnknown(ApiError::Timeout { .. })
+    ));
+}
+
 #[test]
 fn owner_graphql_and_http_failures_keep_typed_classification() {
     let cases = [
@@ -1386,4 +1582,28 @@ fn owner_environment_override_requires_complete_debug_loopback_contract() {
         empty_token,
         Err(ApiError::TestOverrideRejected { .. })
     ));
+}
+
+#[test]
+fn owner_environment_override_rejects_an_expired_deadline_before_client_construction() {
+    let _lock = OWNER_ENV_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let env = ScopedEnv::cleared(&OWNER_ENV_KEYS);
+    env.set(OWNER_ENV_KEYS[0], "loopback-v1");
+    env.set(OWNER_ENV_KEYS[1], "http://127.0.0.1:43123");
+    env.set(OWNER_ENV_KEYS[2], "http://localhost:43123/graphql");
+    env.set(OWNER_ENV_KEYS[3], "test-owner-token");
+    let deadline = ResolutionDeadline::at(
+        Instant::now() - Duration::from_millis(1),
+        Duration::from_secs(1),
+    );
+
+    let error =
+        match HttpIssueClient::from_owner_environment_with_deadline("akiojin", "gwt", &deadline) {
+            Err(error) => error,
+            Ok(_) => panic!("expired override deadline must fail"),
+        };
+
+    assert!(matches!(error, ApiError::Timeout { .. }));
 }

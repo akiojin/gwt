@@ -50,6 +50,8 @@ pub struct SpawnOptions {
     pub capture_stdout: bool,
     /// Whether to pipe and forward stderr.
     pub capture_stderr: bool,
+    /// Whether captured output is forwarded to the Process Console hub.
+    pub forward_output: bool,
 }
 
 impl SpawnOptions {
@@ -60,6 +62,7 @@ impl SpawnOptions {
             envs: Vec::new(),
             capture_stdout: true,
             capture_stderr: true,
+            forward_output: true,
         }
     }
 
@@ -76,6 +79,11 @@ impl SpawnOptions {
     pub fn capture(mut self, stdout: bool, stderr: bool) -> Self {
         self.capture_stdout = stdout;
         self.capture_stderr = stderr;
+        self
+    }
+
+    pub fn forward_output(mut self, forward: bool) -> Self {
+        self.forward_output = forward;
         self
     }
 }
@@ -224,13 +232,21 @@ async fn spawn_logged_inner(
     let mut process_tree = ChildProcessTree::new(deadline.and_then(|_| child.id()));
     let stdout = child.stdout.take();
     let stderr = child.stderr.take();
+    let forward_output = options.forward_output;
     let collected = {
         let collect = async {
             let stdout_future = async move {
                 Ok::<_, std::io::Error>(match stdout {
                     Some(stdout) => {
-                        forward_stream(stdout, hub.clone(), kind, spawn_id, ProcessStream::Stdout)
-                            .await
+                        forward_stream(
+                            stdout,
+                            hub.clone(),
+                            kind,
+                            spawn_id,
+                            ProcessStream::Stdout,
+                            forward_output,
+                        )
+                        .await
                     }
                     None => (String::new(), 0),
                 })
@@ -238,8 +254,15 @@ async fn spawn_logged_inner(
             let stderr_future = async move {
                 Ok::<_, std::io::Error>(match stderr {
                     Some(stderr) => {
-                        forward_stream(stderr, hub.clone(), kind, spawn_id, ProcessStream::Stderr)
-                            .await
+                        forward_stream(
+                            stderr,
+                            hub.clone(),
+                            kind,
+                            spawn_id,
+                            ProcessStream::Stderr,
+                            forward_output,
+                        )
+                        .await
                     }
                     None => (String::new(), 0),
                 })
@@ -387,6 +410,7 @@ async fn forward_stream<R>(
     kind: ProcessKind,
     spawn_id: u64,
     stream: ProcessStream,
+    forward_output: bool,
 ) -> (String, u64)
 where
     R: AsyncRead + Unpin,
@@ -406,18 +430,20 @@ where
     // string). Empty fragments are dropped — they only mark boundary
     // adjacency, not content.
     let mut total_lines: u64 = 0;
-    for piece in buf.split(['\n', '\r']) {
-        if piece.is_empty() {
-            continue;
+    if forward_output {
+        for piece in buf.split(['\n', '\r']) {
+            if piece.is_empty() {
+                continue;
+            }
+            // SPEC-2809 FR-008 — ANSI strip then redaction for hub-facing
+            // text. The caller-facing `buf` keeps the raw bytes so
+            // `gh auth token` and other secret-handling helpers still
+            // receive the original value.
+            let stripped = super::strip_ansi::strip_ansi(piece);
+            let redacted = redact::redact_line(&stripped);
+            hub.push(ProcessLine::new(kind, spawn_id, stream, redacted));
+            total_lines += 1;
         }
-        // SPEC-2809 FR-008 — ANSI strip then redaction for hub-facing
-        // text. The caller-facing `buf` keeps the raw bytes so
-        // `gh auth token` and other secret-handling helpers still
-        // receive the original value.
-        let stripped = super::strip_ansi::strip_ansi(piece);
-        let redacted = redact::redact_line(&stripped);
-        hub.push(ProcessLine::new(kind, spawn_id, stream, redacted));
-        total_lines += 1;
     }
     (buf, total_lines)
 }
@@ -584,6 +610,36 @@ mod tests {
         assert_eq!(out.stdout_lines, 0);
         let lines = hub.snapshot_kind(ProcessKind::Git);
         assert!(lines.is_empty());
+    }
+
+    #[tokio::test]
+    async fn spawn_logged_can_capture_sensitive_stdout_without_forwarding_it() {
+        let hub = ProcessConsoleHub::new();
+        let sensitive = "https://user:unredacted-secret@github.com/akiojin/gwt.git";
+        let (cmd, args) = if cfg!(windows) {
+            (
+                "cmd".to_string(),
+                vec!["/C".to_string(), format!("echo {sensitive}")],
+            )
+        } else {
+            (
+                "sh".to_string(),
+                vec!["-c".to_string(), format!("echo {sensitive}")],
+            )
+        };
+        let out = spawn_logged(
+            &hub,
+            ProcessKind::Git,
+            cmd,
+            &args,
+            SpawnOptions::new("sensitive git config").forward_output(false),
+        )
+        .await
+        .expect("capture sensitive output");
+
+        assert!(out.stdout.contains(sensitive));
+        assert_eq!(out.stdout_lines, 0);
+        assert!(hub.snapshot_kind(ProcessKind::Git).is_empty());
     }
 
     #[tokio::test]

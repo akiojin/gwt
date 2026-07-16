@@ -1,7 +1,10 @@
-use std::{collections::BTreeSet, fs, path::Path, str::FromStr};
+use std::{collections::BTreeSet, fs, path::Path, str::FromStr, time::Duration};
 
 use chrono::Utc;
-use gwt_github::{client::ApiError, SpecOpsError};
+use gwt_github::{
+    client::{ApiError, ResolutionDeadline},
+    SpecOpsError,
+};
 use regex::Regex;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -441,6 +444,26 @@ pub(crate) enum CaptureBudgetProfile {
     StrictStop,
 }
 
+impl CaptureBudgetProfile {
+    pub(super) fn resolution_deadline(self) -> ResolutionDeadline {
+        match self {
+            Self::Normal => {
+                ResolutionDeadline::new(Duration::from_secs(5), Duration::from_secs(120))
+            }
+            Self::StrictStop => {
+                ResolutionDeadline::new(Duration::from_secs(3), Duration::from_secs(15))
+            }
+        }
+    }
+
+    pub(super) const fn lease_ttl(self) -> chrono::Duration {
+        match self {
+            Self::Normal => chrono::Duration::seconds(120),
+            Self::StrictStop => chrono::Duration::seconds(15),
+        }
+    }
+}
+
 #[cfg_attr(not(test), allow(dead_code))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct RegisteredProducerToken {
@@ -513,13 +536,6 @@ const REGISTERED_PRODUCERS: &[ProducerRegistration] = &[
     },
 ];
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct PendingImprovementStopCandidate {
-    pub id: String,
-    pub summary: String,
-    pub target_artifact: String,
-}
-
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub(super) struct LocalEvidenceReference {
     pub(super) kind: String,
@@ -550,30 +566,6 @@ pub fn run<E: CliEnv>(
     Ok(code)
 }
 
-pub(crate) fn pending_high_confidence_contract_violations(
-    repo_root: &Path,
-) -> Vec<PendingImprovementStopCandidate> {
-    load_store_with_projection_fallback(repo_root)
-        .map(|store| {
-            store
-                .candidates
-                .into_iter()
-                .filter(|candidate| {
-                    candidate.state == CandidateState::Pending
-                        && candidate.classification == "gwt-caused"
-                        && candidate.confidence == "high"
-                        && is_contract_artifact(&candidate.target_artifact)
-                })
-                .map(|candidate| PendingImprovementStopCandidate {
-                    id: candidate.id,
-                    summary: candidate.sanitized_summary,
-                    target_artifact: candidate.target_artifact,
-                })
-                .collect()
-        })
-        .unwrap_or_default()
-}
-
 pub fn candidate_public_values(repo_root: &Path) -> Vec<Value> {
     let privacy_context = PublicMutationContext::for_repo(repo_root);
     let mut candidates = load_store_with_projection_fallback(repo_root)
@@ -590,7 +582,7 @@ pub fn candidate_public_values(repo_root: &Path) -> Vec<Value> {
         .collect()
 }
 
-fn is_contract_artifact(target_artifact: &str) -> bool {
+pub(super) fn is_contract_artifact(target_artifact: &str) -> bool {
     matches!(
         target_artifact,
         "skill"
@@ -3553,6 +3545,7 @@ mod tests {
                 started_at: now - chrono::Duration::seconds(30),
                 expires_at: now - chrono::Duration::seconds(1),
                 remote_phase: crate::cli::improvement_store::AttemptRemotePhase::Submitted,
+                remote_mutation_seen: true,
                 intent: crate::cli::improvement_store::ResolutionAttemptIntent::Unassigned,
             });
             Ok(())
@@ -3980,6 +3973,7 @@ mod tests {
                 started_at: Utc::now() - chrono::Duration::minutes(2),
                 expires_at: Utc::now() - chrono::Duration::minutes(1),
                 remote_phase: super::super::improvement_store::AttemptRemotePhase::NotSubmitted,
+                remote_mutation_seen: false,
                 intent: super::super::improvement_store::ResolutionAttemptIntent::Unassigned,
             });
             validate_candidate_lifecycle(candidate)
@@ -4356,6 +4350,7 @@ mod tests {
                 started_at: now,
                 expires_at: now + chrono::Duration::seconds(30),
                 remote_phase: crate::cli::improvement_store::AttemptRemotePhase::NotSubmitted,
+                remote_mutation_seen: false,
                 intent: crate::cli::improvement_store::ResolutionAttemptIntent::Unassigned,
             });
             Ok(())
@@ -4384,6 +4379,8 @@ mod tests {
 
     #[test]
     fn promote_force_is_removed_before_candidate_lookup_or_owner_transport() {
+        let home = tempfile::tempdir().expect("isolated home");
+        let _gwt_home = gwt_core::test_support::ScopedGwtHome::set(home.path());
         let project = tempfile::tempdir().expect("project");
         let mut env = TestEnv::new(project.path().join("cache"));
         env.repo_path = project.path().join("source");
@@ -4409,6 +4406,8 @@ mod tests {
 
     #[test]
     fn registered_capture_qualifies_once_and_replay_does_not_duplicate_status() {
+        let home = tempfile::tempdir().expect("isolated home");
+        let _gwt_home = gwt_core::test_support::ScopedGwtHome::set(home.path());
         let project = tempfile::tempdir().expect("project");
         let mut env = TestEnv::new(project.path().join("cache"));
         env.repo_path = project.path().join("source-a");
@@ -4493,6 +4492,8 @@ mod tests {
 
     #[test]
     fn distinct_public_outcomes_with_one_fingerprint_remain_owner_eligible() {
+        let home = tempfile::tempdir().expect("isolated home");
+        let _gwt_home = gwt_core::test_support::ScopedGwtHome::set(home.path());
         let project = tempfile::tempdir().expect("project");
         let mut env = TestEnv::new(project.path().join("cache"));
         env.repo_path = project.path().join("source");
@@ -4541,6 +4542,8 @@ mod tests {
 
     #[test]
     fn registered_recurrence_is_occurrence_scoped_digest_bound_and_capability_gated() {
+        let home = tempfile::tempdir().expect("isolated home");
+        let _gwt_home = gwt_core::test_support::ScopedGwtHome::set(home.path());
         let project = tempfile::tempdir().expect("project");
         let mut env = TestEnv::new(project.path().join("cache"));
         env.repo_path = project.path().join("source");
@@ -4608,6 +4611,8 @@ mod tests {
 
     #[test]
     fn registered_capture_scopes_same_event_by_random_source_nonce() {
+        let home = tempfile::tempdir().expect("isolated home");
+        let _gwt_home = gwt_core::test_support::ScopedGwtHome::set(home.path());
         let project = tempfile::tempdir().expect("project");
         let token = registered_producer_token("test.coordination-gate").expect("registered token");
         let mut env_a = TestEnv::new(project.path().join("cache-a"));
@@ -4645,6 +4650,8 @@ mod tests {
 
     #[test]
     fn registered_eligibility_is_not_reclassified_by_public_capture() {
+        let home = tempfile::tempdir().expect("isolated home");
+        let _gwt_home = gwt_core::test_support::ScopedGwtHome::set(home.path());
         let project = tempfile::tempdir().expect("project");
         let token = registered_producer_token("test.coordination-gate").expect("registered token");
         let mut env = TestEnv::new(project.path().join("cache"));
@@ -4743,6 +4750,8 @@ mod tests {
 
     #[test]
     fn registered_occurrence_identity_binds_the_fingerprint() {
+        let home = tempfile::tempdir().expect("isolated home");
+        let _gwt_home = gwt_core::test_support::ScopedGwtHome::set(home.path());
         let project = tempfile::tempdir().expect("project");
         let token = registered_producer_token("test.coordination-gate").expect("registered token");
         let mut env = TestEnv::new(project.path().join("cache"));
@@ -4774,6 +4783,8 @@ mod tests {
     fn registered_capture_retries_pending_board_status_after_post_failure() {
         use std::os::unix::fs::PermissionsExt;
 
+        let home = tempfile::tempdir().expect("isolated home");
+        let _gwt_home = gwt_core::test_support::ScopedGwtHome::set(home.path());
         let project = tempfile::tempdir().expect("project");
         let token = registered_producer_token("test.coordination-gate").expect("registered token");
         let mut env = TestEnv::new(project.path().join("cache"));

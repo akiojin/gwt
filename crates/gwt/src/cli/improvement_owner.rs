@@ -3,7 +3,7 @@
 use std::{
     collections::{BTreeMap, BTreeSet},
     fmt,
-    path::Path,
+    path::{Path, PathBuf},
     sync::OnceLock,
     time::{Duration, Instant},
 };
@@ -976,10 +976,10 @@ enum OwnerInspection {
 }
 
 #[derive(Debug, Clone, Copy)]
-struct OwnerResolutionFailure {
-    reason: BlockedReason,
-    failure_subcode: Option<FailureSubcode>,
-    remediation: &'static str,
+pub(super) struct OwnerResolutionFailure {
+    pub(super) reason: BlockedReason,
+    pub(super) failure_subcode: Option<FailureSubcode>,
+    pub(super) remediation: &'static str,
 }
 
 #[derive(Debug)]
@@ -1001,6 +1001,35 @@ struct ResolutionAttemptToken {
     candidate_id: String,
     attempt_id: String,
     ttl: chrono::Duration,
+}
+
+struct UnhandledResolutionSettlement {
+    repo_root: PathBuf,
+    token: ResolutionAttemptToken,
+    resolution_deadline: ResolutionDeadline,
+}
+
+impl Drop for UnhandledResolutionSettlement {
+    fn drop(&mut self) {
+        let failure = if self
+            .resolution_deadline
+            .remaining("owner resolution fallback settlement")
+            .is_err()
+        {
+            OwnerResolutionFailure {
+                reason: BlockedReason::Timeout,
+                failure_subcode: None,
+                remediation: "RETRY_WITHIN_BUDGET",
+            }
+        } else {
+            OwnerResolutionFailure {
+                reason: BlockedReason::Store,
+                failure_subcode: None,
+                remediation: "RELOAD_CANDIDATE_STORE",
+            }
+        };
+        let _ = settle_unhandled_resolution_failure(&self.repo_root, &self.token, failure);
+    }
 }
 
 #[derive(Debug)]
@@ -3302,6 +3331,34 @@ pub(super) fn deliver_pending_owner_status<E: CliEnv>(
     Ok(())
 }
 
+pub(super) fn retry_pending_owner_status_with_deadline<E: CliEnv>(
+    env: &mut E,
+    candidate_id: &str,
+    deadline: &ResolutionDeadline,
+) -> Result<ImprovementCandidate, gwt_github::SpecOpsError> {
+    let _operation_deadline =
+        gwt_core::operation_deadline::ScopedOperationDeadline::enter(deadline.expires_at());
+    deadline.remaining("pending owner status entry")?;
+    let repo_root = env.repo_path().to_path_buf();
+    repair_source_success_snapshots(&repo_root)?;
+    let mut candidate = super::improvement_store::load_and_repair(&repo_root)?
+        .candidates
+        .into_iter()
+        .find(|candidate| candidate.id == candidate_id)
+        .ok_or_else(|| owner_projection_error("candidate not found"))?;
+    if !matches!(
+        candidate.state,
+        CandidateState::Linked | CandidateState::Created
+    ) {
+        return Err(owner_projection_error(
+            "pending owner status requires a successful owner state",
+        ));
+    }
+    deliver_pending_owner_status(env, &mut candidate)?;
+    deadline.remaining("pending owner status completion")?;
+    Ok(candidate)
+}
+
 fn post_new_owner_created_status<E: CliEnv>(
     env: &mut E,
     candidate: &ImprovementCandidate,
@@ -3351,6 +3408,38 @@ pub(super) fn resolve_candidate_owner<E: CliEnv>(
     candidate_id: &str,
     budget_profile: CaptureBudgetProfile,
 ) -> Result<ImprovementCandidate, gwt_github::SpecOpsError> {
+    let deadline = budget_profile.resolution_deadline();
+    resolve_candidate_owner_with_deadline(env, candidate_id, budget_profile, &deadline)
+}
+
+pub(super) fn resolve_candidate_owner_with_deadline<E: CliEnv>(
+    env: &mut E,
+    candidate_id: &str,
+    budget_profile: CaptureBudgetProfile,
+    deadline: &ResolutionDeadline,
+) -> Result<ImprovementCandidate, gwt_github::SpecOpsError> {
+    resolve_candidate_owner_with_operation_deadline(
+        env,
+        candidate_id,
+        budget_profile,
+        deadline,
+        deadline.expires_at(),
+    )
+}
+
+pub(super) fn resolve_candidate_owner_with_operation_deadline<E: CliEnv>(
+    env: &mut E,
+    candidate_id: &str,
+    budget_profile: CaptureBudgetProfile,
+    deadline: &ResolutionDeadline,
+    operation_expires_at: Instant,
+) -> Result<ImprovementCandidate, gwt_github::SpecOpsError> {
+    let _operation_deadline =
+        gwt_core::operation_deadline::ScopedOperationDeadline::enter(operation_expires_at);
+    let unhandled_settlement = std::cell::OnceCell::new();
+    let _resolution_operation_deadline =
+        gwt_core::operation_deadline::ScopedOperationDeadline::enter(deadline.expires_at());
+    deadline.remaining("owner resolution entry")?;
     let repo_root = env.repo_path().to_path_buf();
     repair_source_success_snapshots(&repo_root)?;
     let mut current = super::improvement_store::load_and_repair(&repo_root)?
@@ -3385,15 +3474,17 @@ pub(super) fn resolve_candidate_owner<E: CliEnv>(
             reconciliation_only,
         ),
     };
+    assert!(
+        unhandled_settlement
+            .set(UnhandledResolutionSettlement {
+                repo_root: repo_root.clone(),
+                token: attempt_token.clone(),
+                resolution_deadline: *deadline,
+            })
+            .is_ok(),
+        "owner resolution settlement guard must be installed exactly once"
+    );
 
-    let deadline = match budget_profile {
-        CaptureBudgetProfile::Normal => {
-            ResolutionDeadline::new(Duration::from_secs(5), Duration::from_secs(120))
-        }
-        CaptureBudgetProfile::StrictStop => {
-            ResolutionDeadline::new(Duration::from_secs(3), Duration::from_secs(15))
-        }
-    };
     let mut recovery_pending = recovering_remote_unknown;
     let mut recovered_comment_evidence = Vec::new();
     if recovery_pending
@@ -3408,7 +3499,7 @@ pub(super) fn resolve_candidate_owner<E: CliEnv>(
             &mut candidate,
             &attempt_token,
             &recovery_intent,
-            &deadline,
+            deadline,
         ) {
             Ok(Some(evidence)) => recovered_comment_evidence.push(evidence),
             Ok(None) => {}
@@ -3429,7 +3520,7 @@ pub(super) fn resolve_candidate_owner<E: CliEnv>(
             &mut candidate,
             &attempt_token,
             &recovery_intent,
-            &deadline,
+            deadline,
         ) {
             Ok(Some(evidence)) => recovered_comment_evidence.push(evidence),
             Ok(None) => {}
@@ -3444,7 +3535,7 @@ pub(super) fn resolve_candidate_owner<E: CliEnv>(
         &mut candidate,
         &ContractRoutingRegistry::current(),
         &NoSemanticOwnerAdvisor,
-        &deadline,
+        deadline,
     )?;
     merge_recovered_comment_evidence(&mut outcome, recovered_comment_evidence);
     let mut create_resolution_intent = candidate.pending_create_resolution.clone().or_else(|| {
@@ -3490,7 +3581,7 @@ pub(super) fn resolve_candidate_owner<E: CliEnv>(
                 owner,
                 comments,
                 create_resolution_intent.as_ref(),
-                &deadline,
+                deadline,
             )
         }
         OwnerPreflightOutcome::DuplicateExactIssues {
@@ -3505,7 +3596,7 @@ pub(super) fn resolve_candidate_owner<E: CliEnv>(
                     &attempt_token,
                     &intent,
                     &owners,
-                    &deadline,
+                    deadline,
                 ) {
                     Ok(settled_intent) => {
                         create_resolution_intent = Some(settled_intent);
@@ -3550,7 +3641,7 @@ pub(super) fn resolve_candidate_owner<E: CliEnv>(
                 &attempt_token,
                 owners,
                 comments_by_owner,
-                &deadline,
+                deadline,
             ) {
                 Ok((owner, comments)) => resolve_active_owner_outcome(
                     env,
@@ -3559,7 +3650,7 @@ pub(super) fn resolve_candidate_owner<E: CliEnv>(
                     owner,
                     comments,
                     create_resolution_intent.as_ref(),
-                    &deadline,
+                    deadline,
                 ),
                 Err(error) => settle_owner_commit_error(env, candidate, &attempt_token, error),
             }
@@ -3608,7 +3699,7 @@ pub(super) fn resolve_candidate_owner<E: CliEnv>(
                 &mut candidate,
                 &ContractRoutingRegistry::current(),
                 &NoSemanticOwnerAdvisor,
-                &deadline,
+                deadline,
             )?;
             let authorization = match refreshed {
                 OwnerPreflightOutcome::Active {
@@ -3621,7 +3712,7 @@ pub(super) fn resolve_candidate_owner<E: CliEnv>(
                         owner,
                         comments,
                         Some(&adoption_intent),
-                        &deadline,
+                        deadline,
                     );
                 }
                 OwnerPreflightOutcome::DuplicateExactIssues {
@@ -3635,7 +3726,7 @@ pub(super) fn resolve_candidate_owner<E: CliEnv>(
                         &attempt_token,
                         owners,
                         comments_by_owner,
-                        &deadline,
+                        deadline,
                     ) {
                         Ok((owner, comments)) => resolve_active_owner_outcome(
                             env,
@@ -3644,7 +3735,7 @@ pub(super) fn resolve_candidate_owner<E: CliEnv>(
                             owner,
                             comments,
                             Some(&adoption_intent),
-                            &deadline,
+                            deadline,
                         ),
                         Err(error) => {
                             settle_owner_commit_error(env, candidate, &attempt_token, error)
@@ -3679,7 +3770,7 @@ pub(super) fn resolve_candidate_owner<E: CliEnv>(
                 &mut candidate,
                 &attempt_token,
                 &authorization,
-                &deadline,
+                deadline,
             ) {
                 Ok(NewOwnerPostflight::Committed) => Ok(candidate),
                 Ok(NewOwnerPostflight::Active { owner, comments }) => {
@@ -3691,7 +3782,7 @@ pub(super) fn resolve_candidate_owner<E: CliEnv>(
                         owner,
                         comments,
                         adoption_intent.as_ref(),
-                        &deadline,
+                        deadline,
                     )
                 }
                 Err(error) => settle_owner_commit_error(env, candidate, &attempt_token, error),
@@ -3737,7 +3828,7 @@ pub(super) fn resolve_candidate_owner<E: CliEnv>(
                 &mut candidate,
                 &ContractRoutingRegistry::current(),
                 &NoSemanticOwnerAdvisor,
-                &deadline,
+                deadline,
             )?;
             let authorization = match refreshed {
                 OwnerPreflightOutcome::Active {
@@ -3750,7 +3841,7 @@ pub(super) fn resolve_candidate_owner<E: CliEnv>(
                         owner,
                         comments,
                         Some(&adoption_intent),
-                        &deadline,
+                        deadline,
                     );
                 }
                 OwnerPreflightOutcome::DuplicateExactIssues {
@@ -3764,7 +3855,7 @@ pub(super) fn resolve_candidate_owner<E: CliEnv>(
                         &attempt_token,
                         owners,
                         comments_by_owner,
-                        &deadline,
+                        deadline,
                     ) {
                         Ok((owner, comments)) => resolve_active_owner_outcome(
                             env,
@@ -3773,7 +3864,7 @@ pub(super) fn resolve_candidate_owner<E: CliEnv>(
                             owner,
                             comments,
                             Some(&adoption_intent),
-                            &deadline,
+                            deadline,
                         ),
                         Err(error) => {
                             settle_owner_commit_error(env, candidate, &attempt_token, error)
@@ -3806,7 +3897,7 @@ pub(super) fn resolve_candidate_owner<E: CliEnv>(
                 &mut candidate,
                 &attempt_token,
                 &authorization,
-                &deadline,
+                deadline,
             ) {
                 Ok(NewOwnerPostflight::Committed) => Ok(candidate),
                 Ok(NewOwnerPostflight::Active { owner, comments }) => {
@@ -3818,7 +3909,7 @@ pub(super) fn resolve_candidate_owner<E: CliEnv>(
                         owner,
                         comments,
                         adoption_intent.as_ref(),
-                        &deadline,
+                        deadline,
                     )
                 }
                 Err(error) => settle_owner_commit_error(env, candidate, &attempt_token, error),
@@ -3884,14 +3975,9 @@ pub(super) fn select_candidate_owner<E: CliEnv>(
         ));
     }
 
-    let deadline = match budget_profile {
-        CaptureBudgetProfile::Normal => {
-            ResolutionDeadline::new(Duration::from_secs(5), Duration::from_secs(120))
-        }
-        CaptureBudgetProfile::StrictStop => {
-            ResolutionDeadline::new(Duration::from_secs(3), Duration::from_secs(15))
-        }
-    };
+    let deadline = budget_profile.resolution_deadline();
+    let _operation_deadline =
+        gwt_core::operation_deadline::ScopedOperationDeadline::enter(deadline.expires_at());
     let source_scope_nonce = env.improvement_source_scope_nonce()?;
     let public_context = PublicMutationContext::for_repo_with_deadline(&repo_root, &deadline);
     if let Some(failure) = candidate_preflight_failure(
@@ -4673,6 +4759,7 @@ fn settle_created_owner_postflight<E: CliEnv>(
 fn restore_remote_intent(candidate: &mut ImprovementCandidate, intent: &ResolutionAttemptIntent) {
     if let Some(attempt) = candidate.attempt.as_mut() {
         attempt.remote_phase = AttemptRemotePhase::Submitted;
+        attempt.remote_mutation_seen = true;
         attempt.intent = intent.clone();
         attempt.expires_at = Utc::now();
     }
@@ -4947,6 +5034,7 @@ fn preserve_remote_unknown_recovery<E: CliEnv>(
     candidate.updated_at = now.to_rfc3339();
     if let Some(attempt) = candidate.attempt.as_mut() {
         attempt.remote_phase = AttemptRemotePhase::Submitted;
+        attempt.remote_mutation_seen = true;
         attempt.intent = recovery_intent.clone();
         attempt.expires_at = now;
     }
@@ -4964,10 +5052,7 @@ fn begin_resolution_attempt(
         .filter(|value| !value.trim().is_empty())
         .unwrap_or_else(|| format!("pid-{}", std::process::id()));
     let now = Utc::now();
-    let ttl = match budget_profile {
-        CaptureBudgetProfile::Normal => chrono::Duration::seconds(120),
-        CaptureBudgetProfile::StrictStop => chrono::Duration::seconds(15),
-    };
+    let ttl = budget_profile.lease_ttl();
     super::improvement_store::update(repo_root, |store| {
         let index = store
             .candidates
@@ -5488,6 +5573,7 @@ fn settle_owner_commit_error<E: CliEnv>(
         OwnerResolutionCommitError::RemoteOutcomeUnknown { failure, source: _ } => {
             if let Some(attempt) = candidate.attempt.as_mut() {
                 attempt.remote_phase = AttemptRemotePhase::Submitted;
+                attempt.remote_mutation_seen = true;
                 attempt.expires_at = Utc::now();
             }
             candidate.blocked_reason = None;
@@ -5801,6 +5887,76 @@ fn owner_failure_from_api(error: &GitHubApiError) -> OwnerResolutionFailure {
             }
         }
     }
+}
+
+pub(super) fn owner_resolution_failure_from_error(
+    error: &gwt_github::SpecOpsError,
+) -> OwnerResolutionFailure {
+    match error {
+        gwt_github::SpecOpsError::Api(error) => owner_failure_from_api(error),
+        gwt_github::SpecOpsError::Cache(_)
+        | gwt_github::SpecOpsError::Parse(_)
+        | gwt_github::SpecOpsError::SectionNotFound(_) => OwnerResolutionFailure {
+            reason: BlockedReason::Store,
+            failure_subcode: None,
+            remediation: "RELOAD_CANDIDATE_STORE",
+        },
+    }
+}
+
+fn settle_unhandled_resolution_failure(
+    repo_root: &Path,
+    token: &ResolutionAttemptToken,
+    failure: OwnerResolutionFailure,
+) -> Result<bool, gwt_github::SpecOpsError> {
+    super::improvement_store::update(repo_root, |store| {
+        let candidate = store
+            .candidates
+            .iter_mut()
+            .find(|candidate| candidate.id == token.candidate_id)
+            .ok_or_else(|| owner_projection_error("candidate not found"))?;
+        if candidate.state != CandidateState::OwnerResolving
+            || candidate
+                .attempt
+                .as_ref()
+                .is_none_or(|attempt| attempt.attempt_id != token.attempt_id)
+        {
+            return Ok(false);
+        }
+        let now = Utc::now();
+        let remote_outcome_unknown = candidate.attempt.as_ref().is_some_and(|attempt| {
+            attempt.remote_phase == AttemptRemotePhase::Submitted || attempt.remote_mutation_seen
+        });
+        candidate.resolver_snapshot = None;
+        candidate.updated_at = now.to_rfc3339();
+        if remote_outcome_unknown {
+            let attempt = candidate
+                .attempt
+                .as_mut()
+                .expect("attempt was validated before settlement");
+            attempt.remote_phase = AttemptRemotePhase::Submitted;
+            attempt.expires_at = now;
+            candidate.blocked_reason = None;
+            candidate.failure_subcode = None;
+            candidate.retry = Some(RetryMetadata {
+                retryable: true,
+                remediation: "REFRESH_OWNER_CORPUS".to_string(),
+                failed_at: now.to_rfc3339(),
+            });
+            transition_candidate(candidate, CandidateState::RemoteOutcomeUnknown)?;
+        } else {
+            candidate.blocked_reason = Some(failure.reason);
+            candidate.failure_subcode = failure.failure_subcode;
+            candidate.retry = Some(RetryMetadata {
+                retryable: true,
+                remediation: failure.remediation.to_string(),
+                failed_at: now.to_rfc3339(),
+            });
+            candidate.attempt = None;
+            transition_candidate(candidate, CandidateState::Blocked)?;
+        }
+        Ok(true)
+    })
 }
 
 fn block_owner_resolution<E: CliEnv>(
@@ -6549,7 +6705,7 @@ fn source_repository_slug(repo_root: &Path, expires_at: Instant) -> Result<Optio
         gwt_core::process_console::ProcessKind::Git,
         "git",
         &["-C", repo_root, "config", "--get", "remote.origin.url"],
-        gwt_core::process_console::SpawnOptions::new("git remote origin"),
+        gwt_core::process_console::SpawnOptions::new("git remote origin").forward_output(false),
         expires_at,
     )
     .map_err(|_| ())?;
@@ -7414,6 +7570,146 @@ mod tests {
             assert!(!body.contains("ghp_"));
             assert!(!body.contains("alice@example.com"));
         }
+    }
+
+    #[test]
+    fn direct_stop_unhandled_failure_is_persisted_as_blocked() {
+        let home = tempfile::tempdir().expect("isolated home");
+        let _gwt_home = gwt_core::test_support::ScopedGwtHome::set(home.path());
+        let project = tempfile::tempdir().expect("project");
+        let repo_root = project.path();
+        let initial = candidate(true);
+        let candidate_id = initial.id.clone();
+        crate::cli::improvement_store::update(repo_root, |store| {
+            store.candidates.push(initial);
+            Ok(())
+        })
+        .expect("seed candidate");
+        let ResolutionAttemptStart::Acquired { token, .. } =
+            begin_resolution_attempt(repo_root, &candidate_id, CaptureBudgetProfile::StrictStop)
+                .expect("acquire direct Stop attempt");
+        let failure = OwnerResolutionFailure {
+            reason: BlockedReason::Timeout,
+            failure_subcode: None,
+            remediation: "RETRY_WITHIN_BUDGET",
+        };
+
+        settle_unhandled_resolution_failure(repo_root, &token, failure)
+            .expect("persist direct Stop failure");
+
+        let stored = crate::cli::improvement_store::load_and_repair(repo_root)
+            .expect("load candidate")
+            .candidates
+            .into_iter()
+            .find(|candidate| candidate.id == candidate_id)
+            .expect("stored candidate");
+        assert_eq!(stored.state, CandidateState::Blocked);
+        assert_eq!(stored.blocked_reason, Some(BlockedReason::Timeout));
+        assert!(stored.attempt.is_none());
+        assert_eq!(
+            stored.retry.expect("retry metadata").remediation,
+            "RETRY_WITHIN_BUDGET"
+        );
+    }
+
+    #[test]
+    fn unhandled_settlement_requires_the_exact_attempt_id() {
+        let home = tempfile::tempdir().expect("isolated home");
+        let _gwt_home = gwt_core::test_support::ScopedGwtHome::set(home.path());
+        let project = tempfile::tempdir().expect("project");
+        let repo_root = project.path();
+        let initial = candidate(true);
+        let candidate_id = initial.id.clone();
+        crate::cli::improvement_store::update(repo_root, |store| {
+            store.candidates.push(initial);
+            Ok(())
+        })
+        .expect("seed candidate");
+        let ResolutionAttemptStart::Acquired { token, .. } =
+            begin_resolution_attempt(repo_root, &candidate_id, CaptureBudgetProfile::StrictStop)
+                .expect("acquire first attempt");
+        let mut wrong_token = token.clone();
+        wrong_token.attempt_id = "attempt-other-worker".to_string();
+        let failure = OwnerResolutionFailure {
+            reason: BlockedReason::Store,
+            failure_subcode: None,
+            remediation: "RELOAD_CANDIDATE_STORE",
+        };
+
+        let settled = settle_unhandled_resolution_failure(repo_root, &wrong_token, failure)
+            .expect("stale settlement is a no-op");
+
+        assert!(!settled);
+        let stored = crate::cli::improvement_store::load_and_repair(repo_root)
+            .expect("load candidate")
+            .candidates
+            .into_iter()
+            .find(|candidate| candidate.id == candidate_id)
+            .expect("stored candidate");
+        assert_eq!(stored.state, CandidateState::OwnerResolving);
+        assert_eq!(
+            stored.attempt.expect("active attempt").attempt_id,
+            token.attempt_id
+        );
+    }
+
+    #[test]
+    fn unhandled_failure_after_a_completed_remote_step_stays_remote_unknown() {
+        let home = tempfile::tempdir().expect("isolated home");
+        let _gwt_home = gwt_core::test_support::ScopedGwtHome::set(home.path());
+        let project = tempfile::tempdir().expect("project");
+        let repo_root = project.path();
+        let initial = candidate(true);
+        let candidate_id = initial.id.clone();
+        crate::cli::improvement_store::update(repo_root, |store| {
+            store.candidates.push(initial);
+            Ok(())
+        })
+        .expect("seed candidate");
+        let ResolutionAttemptStart::Acquired { token, .. } =
+            begin_resolution_attempt(repo_root, &candidate_id, CaptureBudgetProfile::StrictStop)
+                .expect("acquire direct Stop attempt");
+        let intent = ResolutionAttemptIntent::CloseDuplicate {
+            canonical_owner_number: 41,
+            duplicate_owner_number: 42,
+        };
+        crate::cli::improvement_store::update(repo_root, |store| {
+            crate::cli::improvement_store::mark_attempt_submitted(
+                store,
+                &candidate_id,
+                &token.attempt_id,
+                intent.clone(),
+            )?;
+            crate::cli::improvement_store::complete_attempt_step(
+                store,
+                &candidate_id,
+                &token.attempt_id,
+                &intent,
+            )?;
+            Ok(())
+        })
+        .expect("complete one remote mutation step");
+        let failure = OwnerResolutionFailure {
+            reason: BlockedReason::Store,
+            failure_subcode: None,
+            remediation: "RELOAD_CANDIDATE_STORE",
+        };
+
+        settle_unhandled_resolution_failure(repo_root, &token, failure)
+            .expect("persist remote uncertainty");
+
+        let stored = crate::cli::improvement_store::load_and_repair(repo_root)
+            .expect("load candidate")
+            .candidates
+            .into_iter()
+            .find(|candidate| candidate.id == candidate_id)
+            .expect("stored candidate");
+        assert_eq!(stored.state, CandidateState::RemoteOutcomeUnknown);
+        assert_eq!(stored.blocked_reason, None);
+        assert_eq!(
+            stored.retry.expect("retry metadata").remediation,
+            "REFRESH_OWNER_CORPUS"
+        );
     }
 
     #[test]

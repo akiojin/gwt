@@ -17,8 +17,8 @@
 //! go through the REST endpoints.
 
 use std::{
-    collections::HashSet,
-    sync::Mutex,
+    collections::{BTreeMap, HashSet},
+    sync::{Arc, Mutex},
     time::{Duration, Instant},
 };
 
@@ -74,6 +74,10 @@ pub struct HttpResponse {
 pub enum HttpError {
     #[error("transport error: {0}")]
     Transport(String),
+    #[error("transport error before request submission: {0}")]
+    PreSubmitTransport(String),
+    #[error("transport timeout before request submission: {0}")]
+    PreSubmitTimeout(String),
     #[error("transport timeout: {0}")]
     Timeout(String),
 }
@@ -86,12 +90,7 @@ pub trait HttpTransport: Send + Sync {
         &self,
         request: HttpRequest,
         deadline: &ResolutionDeadline,
-    ) -> Result<HttpResponse, HttpError> {
-        deadline
-            .remaining("github http request")
-            .map_err(|error| HttpError::Timeout(error.to_string()))?;
-        self.execute(request)
-    }
+    ) -> Result<HttpResponse, HttpError>;
 }
 
 // ---------------------------------------------------------------------------
@@ -177,7 +176,7 @@ impl HttpTransport for FakeTransport {
     ) -> Result<HttpResponse, HttpError> {
         deadline
             .remaining("github http request")
-            .map_err(|error| HttpError::Timeout(error.to_string()))?;
+            .map_err(|error| HttpError::PreSubmitTimeout(error.to_string()))?;
         let mut state = self
             .state
             .lock()
@@ -197,29 +196,33 @@ impl HttpTransport for FakeTransport {
 
 /// Production [`HttpTransport`] backed by `reqwest` blocking.
 pub struct ReqwestTransport {
-    standard_client: reqwest::blocking::Client,
-    strict_client: reqwest::blocking::Client,
+    standard_client: Arc<reqwest::blocking::Client>,
+    strict_client: Arc<reqwest::blocking::Client>,
 }
 
 impl ReqwestTransport {
     pub fn new() -> Result<Self, HttpError> {
         Ok(Self {
-            standard_client: build_reqwest_client(Duration::from_secs(5))?,
-            strict_client: build_reqwest_client(Duration::from_secs(3))?,
+            standard_client: Arc::new(build_reqwest_client(Duration::from_secs(5))?),
+            strict_client: Arc::new(build_reqwest_client(Duration::from_secs(3))?),
         })
     }
 
     fn deadline_client(
         &self,
         deadline: &ResolutionDeadline,
-    ) -> Result<&reqwest::blocking::Client, HttpError> {
+    ) -> Result<Arc<reqwest::blocking::Client>, HttpError> {
         let connect_timeout = deadline
             .connect_timeout("github http connect")
-            .map_err(|error| HttpError::Timeout(error.to_string()))?;
-        if connect_timeout <= Duration::from_secs(3) {
-            Ok(&self.strict_client)
+            .map_err(|error| HttpError::PreSubmitTimeout(error.to_string()))?;
+        if connect_timeout == Duration::from_secs(3) {
+            Ok(Arc::clone(&self.strict_client))
+        } else if connect_timeout == Duration::from_secs(5) {
+            Ok(Arc::clone(&self.standard_client))
         } else {
-            Ok(&self.standard_client)
+            build_reqwest_client(connect_timeout)
+                .map(Arc::new)
+                .map_err(|error| HttpError::PreSubmitTransport(error.to_string()))
         }
     }
 }
@@ -241,7 +244,7 @@ impl Default for ReqwestTransport {
 
 impl HttpTransport for ReqwestTransport {
     fn execute(&self, request: HttpRequest) -> Result<HttpResponse, HttpError> {
-        execute_reqwest(&self.standard_client, request, None)
+        execute_reqwest(self.standard_client.as_ref(), request, None)
     }
 
     fn execute_with_deadline(
@@ -249,11 +252,14 @@ impl HttpTransport for ReqwestTransport {
         request: HttpRequest,
         deadline: &ResolutionDeadline,
     ) -> Result<HttpResponse, HttpError> {
+        deadline
+            .remaining("github http request")
+            .map_err(|error| HttpError::PreSubmitTimeout(error.to_string()))?;
+        let client = self.deadline_client(deadline)?;
         let remaining = deadline
             .remaining("github http request")
-            .map_err(|error| HttpError::Timeout(error.to_string()))?;
-        let client = self.deadline_client(deadline)?;
-        execute_reqwest(client, request, Some(remaining))
+            .map_err(|error| HttpError::PreSubmitTimeout(error.to_string()))?;
+        execute_reqwest(client.as_ref(), request, Some(remaining))
     }
 }
 
@@ -278,7 +284,13 @@ fn execute_reqwest(
         builder = builder.body(body);
     }
     let resp = builder.send().map_err(|error| {
-        if error.is_timeout() {
+        if error.is_builder() {
+            HttpError::PreSubmitTransport(error.to_string())
+        } else if error.is_connect() && error.is_timeout() {
+            HttpError::PreSubmitTimeout(error.to_string())
+        } else if error.is_connect() {
+            HttpError::PreSubmitTransport(error.to_string())
+        } else if error.is_timeout() {
             HttpError::Timeout(error.to_string())
         } else {
             HttpError::Transport(error.to_string())
@@ -337,9 +349,11 @@ impl HttpIssueClient<ReqwestTransport> {
         repo: &str,
         deadline: &ResolutionDeadline,
     ) -> Result<Self, ApiError> {
+        deadline.remaining("owner client construction")?;
         let token = resolve_gh_token_with_deadline(deadline)?;
         let transport =
             ReqwestTransport::new().map_err(|error| ApiError::Network(error.to_string()))?;
+        deadline.remaining("owner client construction")?;
         Ok(Self::with_transport(transport, token, owner, repo))
     }
 
@@ -348,6 +362,7 @@ impl HttpIssueClient<ReqwestTransport> {
         repo: &str,
         deadline: &ResolutionDeadline,
     ) -> Result<Self, ApiError> {
+        deadline.remaining("owner client construction")?;
         const MODE: &str = "GWT_OWNER_GITHUB_TEST_MODE";
         const REST: &str = "GWT_OWNER_GITHUB_REST_BASE";
         const GRAPHQL: &str = "GWT_OWNER_GITHUB_GRAPHQL_URL";
@@ -373,11 +388,13 @@ impl HttpIssueClient<ReqwestTransport> {
         }
         let transport =
             ReqwestTransport::new().map_err(|error| ApiError::Network(error.to_string()))?;
-        Self::with_transport(transport, token, owner, repo).with_test_endpoints(
+        let client = Self::with_transport(transport, token, owner, repo).with_test_endpoints(
             rest_base,
             graphql_url,
             true,
-        )
+        )?;
+        deadline.remaining("owner client construction")?;
+        Ok(client)
     }
 }
 
@@ -499,14 +516,19 @@ impl<T: HttpTransport> HttpIssueClient<T> {
         operation: &str,
     ) -> Result<HttpResponse, ApiError> {
         deadline.remaining(operation)?;
-        self.transport
+        let response = self
+            .transport
             .execute_with_deadline(request, deadline)
             .map_err(|error| match error {
-                HttpError::Timeout(_) => ApiError::Timeout {
+                HttpError::PreSubmitTimeout(_) | HttpError::Timeout(_) => ApiError::Timeout {
                     operation: operation.to_string(),
                 },
-                HttpError::Transport(message) => ApiError::Network(message),
-            })
+                HttpError::PreSubmitTransport(message) | HttpError::Transport(message) => {
+                    ApiError::Network(message)
+                }
+            })?;
+        deadline.remaining(operation)?;
+        Ok(response)
     }
 
     fn owner_graphql(
@@ -534,6 +556,7 @@ impl<T: HttpTransport> HttpIssueClient<T> {
                 operation: operation.to_string(),
                 message: error.to_string(),
             })?;
+        deadline.remaining(operation)?;
         if let Some(errors) = value.get("errors").filter(|errors| !errors.is_null()) {
             return Err(classify_graphql_errors(errors, operation));
         }
@@ -564,15 +587,27 @@ impl<T: HttpTransport> HttpIssueClient<T> {
                 },
                 deadline,
             )
-            .map_err(|error| {
-                let error = match error {
-                    HttpError::Timeout(_) => ApiError::Timeout {
+            .map_err(|error| match error {
+                HttpError::PreSubmitTimeout(_) => {
+                    OwnerMutationError::PreSubmit(ApiError::Timeout {
                         operation: operation.to_string(),
-                    },
-                    HttpError::Transport(message) => ApiError::Network(message),
-                };
-                OwnerMutationError::RemoteOutcomeUnknown(error)
+                    })
+                }
+                HttpError::PreSubmitTransport(message) => {
+                    OwnerMutationError::PreSubmit(ApiError::Network(message))
+                }
+                HttpError::Timeout(_) => {
+                    OwnerMutationError::RemoteOutcomeUnknown(ApiError::Timeout {
+                        operation: operation.to_string(),
+                    })
+                }
+                HttpError::Transport(message) => {
+                    OwnerMutationError::RemoteOutcomeUnknown(ApiError::Network(message))
+                }
             })?;
+        deadline
+            .remaining(operation)
+            .map_err(OwnerMutationError::RemoteOutcomeUnknown)?;
         check_status(&response).map_err(|error| {
             if response.status >= 500 {
                 OwnerMutationError::RemoteOutcomeUnknown(error)
@@ -744,7 +779,7 @@ fn resolve_gh_token() -> Result<String, ApiError> {
         gwt_core::process_console::ProcessKind::Gh,
         "gh",
         &["auth", "token"],
-        gwt_core::process_console::SpawnOptions::new("gh auth token"),
+        gwt_core::process_console::SpawnOptions::new("gh auth token").forward_output(false),
     )
     .map_err(|e| ApiError::Network(format!("gh auth token: {e}")))?;
     if !output.success() {
@@ -765,7 +800,7 @@ fn resolve_gh_token_with_deadline(deadline: &ResolutionDeadline) -> Result<Strin
         gwt_core::process_console::ProcessKind::Gh,
         "gh",
         &["auth", "token"],
-        gwt_core::process_console::SpawnOptions::new("gh auth token"),
+        gwt_core::process_console::SpawnOptions::new("gh auth token").forward_output(false),
         deadline.expires_at(),
     )
     .map_err(|error| {
@@ -789,9 +824,40 @@ fn resolve_gh_token_with_deadline(deadline: &ResolutionDeadline) -> Result<Strin
 
 #[cfg(test)]
 mod transport_tests {
-    use std::{ptr, time::Duration};
+    use std::{
+        ffi::OsString,
+        sync::{Arc, Mutex},
+        time::Duration,
+    };
 
-    use super::{ReqwestTransport, ResolutionDeadline};
+    use super::{
+        issue_generation, resolve_gh_token, resolve_gh_token_with_deadline, HttpError, HttpMethod,
+        HttpRequest, HttpTransport, ReqwestTransport, ResolutionDeadline,
+    };
+
+    static ENV_LOCK: Mutex<()> = Mutex::new(());
+
+    struct ScopedEnvVar {
+        name: &'static str,
+        previous: Option<OsString>,
+    }
+
+    impl ScopedEnvVar {
+        fn set(name: &'static str, value: impl AsRef<std::ffi::OsStr>) -> Self {
+            let previous = std::env::var_os(name);
+            std::env::set_var(name, value);
+            Self { name, previous }
+        }
+    }
+
+    impl Drop for ScopedEnvVar {
+        fn drop(&mut self) {
+            match self.previous.take() {
+                Some(value) => std::env::set_var(self.name, value),
+                None => std::env::remove_var(self.name),
+            }
+        }
+    }
 
     #[test]
     fn reqwest_transport_reuses_prebuilt_clients_by_connect_timeout_profile() {
@@ -807,8 +873,94 @@ mod transport_tests {
             .expect("reused standard client");
         let strict = transport.deadline_client(&strict).expect("strict client");
 
-        assert!(ptr::eq(first, second));
-        assert!(!ptr::eq(first, strict));
+        assert!(Arc::ptr_eq(&first, &second));
+        assert!(!Arc::ptr_eq(&first, &strict));
+    }
+
+    #[test]
+    fn reqwest_transport_does_not_expand_noncanonical_connect_caps() {
+        let transport = ReqwestTransport::new().expect("transport");
+        let one_second = ResolutionDeadline::new(Duration::from_secs(1), Duration::from_secs(30));
+        let strict = ResolutionDeadline::new(Duration::from_secs(3), Duration::from_secs(30));
+
+        let one_second = transport
+            .deadline_client(&one_second)
+            .expect("one-second client");
+        let strict = transport.deadline_client(&strict).expect("strict client");
+
+        assert!(
+            !Arc::ptr_eq(&one_second, &strict),
+            "a one-second cap must not reuse the three-second client"
+        );
+    }
+
+    #[test]
+    fn reqwest_builder_failures_are_known_pre_submit() {
+        let transport = ReqwestTransport::new().expect("transport");
+        let deadline = ResolutionDeadline::new(Duration::from_secs(1), Duration::from_secs(5));
+        let request = HttpRequest {
+            method: HttpMethod::Get,
+            url: "://invalid-url".to_string(),
+            headers: Vec::new(),
+            body: None,
+        };
+
+        let error = transport
+            .execute_with_deadline(request, &deadline)
+            .expect_err("invalid URL must fail before submission");
+
+        assert!(
+            matches!(error, HttpError::PreSubmitTransport(_)),
+            "{error:?}"
+        );
+    }
+
+    #[test]
+    fn corpus_generation_rejects_an_expired_absolute_deadline() {
+        let deadline = ResolutionDeadline::at(
+            std::time::Instant::now() - Duration::from_millis(1),
+            Duration::from_secs(1),
+        );
+
+        let error = issue_generation(&[], &deadline, "owner corpus generation")
+            .expect_err("expired generation must stop");
+
+        assert!(matches!(error, super::ApiError::Timeout { .. }));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn gh_auth_token_stdout_is_capture_only_for_both_paths() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let _env_lock = ENV_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let fake_bin = tempfile::tempdir().expect("fake bin");
+        let fake_gh = fake_bin.path().join("gh");
+        std::fs::write(&fake_gh, "#!/bin/sh\nprintf '%s\\n' \"$GWT_TEST_SECRET\"\n")
+            .expect("write fake gh");
+        std::fs::set_permissions(&fake_gh, std::fs::Permissions::from_mode(0o755))
+            .expect("make fake gh executable");
+        let secret = "unstructured-secret-value-without-known-prefix-92731";
+        let _path = ScopedEnvVar::set("PATH", fake_bin.path());
+        let _secret = ScopedEnvVar::set("GWT_TEST_SECRET", secret);
+        let installed_hub = gwt_core::process_console::ProcessConsoleHub::new();
+        let _ = gwt_core::process_console::set_global(installed_hub);
+        let hub = gwt_core::process_console::global();
+
+        assert_eq!(resolve_gh_token().expect("normal token"), secret);
+        let deadline = ResolutionDeadline::new(Duration::from_millis(100), Duration::from_secs(1));
+        assert_eq!(
+            resolve_gh_token_with_deadline(&deadline).expect("deadline token"),
+            secret
+        );
+
+        let leaked = hub
+            .snapshot_kind(gwt_core::process_console::ProcessKind::Gh)
+            .into_iter()
+            .any(|line| line.message.contains(secret));
+        assert!(!leaked, "gh auth token stdout reached Process Console");
     }
 }
 
@@ -1126,56 +1278,96 @@ fn parse_owner_comment(value: &Value, operation: &str) -> Result<RepositoryComme
     })
 }
 
-fn complete_generation(domain: &str, mut rows: Vec<String>) -> CollectionGeneration {
-    rows.sort();
-    let mut digest = Sha256::new();
-    for value in std::iter::once(domain).chain(rows.iter().map(String::as_str)) {
-        digest.update((value.len() as u64).to_be_bytes());
-        digest.update(value.as_bytes());
+fn complete_generation(
+    domain: &str,
+    rows: Vec<String>,
+    deadline: &ResolutionDeadline,
+    operation: &str,
+) -> Result<CollectionGeneration, ApiError> {
+    let mut sorted_rows = BTreeMap::<String, usize>::new();
+    for row in rows {
+        deadline.remaining(operation)?;
+        *sorted_rows.entry(row).or_default() += 1;
     }
-    CollectionGeneration::new(format!("gen:v1:{}", hex::encode(digest.finalize())))
+    let mut digest = Sha256::new();
+    digest.update((domain.len() as u64).to_be_bytes());
+    digest.update(domain.as_bytes());
+    for (value, count) in sorted_rows {
+        for _ in 0..count {
+            deadline.remaining(operation)?;
+            digest.update((value.len() as u64).to_be_bytes());
+            digest.update(value.as_bytes());
+        }
+    }
+    deadline.remaining(operation)?;
+    Ok(CollectionGeneration::new(format!(
+        "gen:v1:{}",
+        hex::encode(digest.finalize())
+    )))
 }
 
-fn issue_generation(issues: &[RepositoryIssue]) -> CollectionGeneration {
-    complete_generation(
-        "gwt.owner-corpus.issues.v1",
-        issues
-            .iter()
-            .map(|issue| {
-                format!(
-                    "{}\0{}\0{}\0{}\0{:?}\0{:?}\0{}\0{}",
-                    issue.repository,
-                    issue.number.0,
-                    issue.title,
-                    issue.body,
-                    issue.state,
-                    issue.kind,
-                    issue.labels.join("\u{1f}"),
-                    issue.updated_at.0,
-                )
-            })
-            .collect(),
-    )
+fn issue_generation(
+    issues: &[RepositoryIssue],
+    deadline: &ResolutionDeadline,
+    operation: &str,
+) -> Result<CollectionGeneration, ApiError> {
+    let mut rows = Vec::with_capacity(issues.len());
+    for issue in issues {
+        deadline.remaining(operation)?;
+        rows.push(format!(
+            "{}\0{}\0{}\0{}\0{:?}\0{:?}\0{}\0{}",
+            issue.repository,
+            issue.number.0,
+            issue.title,
+            issue.body,
+            issue.state,
+            issue.kind,
+            issue.labels.join("\u{1f}"),
+            issue.updated_at.0,
+        ));
+    }
+    complete_generation("gwt.owner-corpus.issues.v1", rows, deadline, operation)
 }
 
-fn comment_generation(comments: &[RepositoryComment]) -> CollectionGeneration {
-    complete_generation(
-        "gwt.owner-corpus.comments.v1",
-        comments
-            .iter()
-            .map(|comment| {
-                format!(
-                    "{}\0{}\0{}\0{:?}\0{:?}\0{:?}",
-                    comment.id.0,
-                    comment.body,
-                    comment.updated_at.0,
-                    comment.author_login,
-                    comment.author_type,
-                    comment.author_association,
-                )
-            })
-            .collect(),
-    )
+fn comment_generation(
+    comments: &[RepositoryComment],
+    deadline: &ResolutionDeadline,
+    operation: &str,
+) -> Result<CollectionGeneration, ApiError> {
+    let mut rows = Vec::with_capacity(comments.len());
+    for comment in comments {
+        deadline.remaining(operation)?;
+        rows.push(format!(
+            "{}\0{}\0{}\0{:?}\0{:?}\0{:?}",
+            comment.id.0,
+            comment.body,
+            comment.updated_at.0,
+            comment.author_login,
+            comment.author_type,
+            comment.author_association,
+        ));
+    }
+    complete_generation("gwt.owner-corpus.comments.v1", rows, deadline, operation)
+}
+
+fn sort_owner_collection_by_key<T, K: Ord>(
+    values: &mut Vec<T>,
+    deadline: &ResolutionDeadline,
+    operation: &str,
+    key: impl Fn(&T) -> K,
+) -> Result<(), ApiError> {
+    let mut buckets = BTreeMap::<K, Vec<T>>::new();
+    for value in std::mem::take(values) {
+        deadline.remaining(operation)?;
+        buckets.entry(key(&value)).or_default().push(value);
+    }
+    for (_, mut bucket) in buckets {
+        for value in bucket.drain(..) {
+            deadline.remaining(operation)?;
+            values.push(value);
+        }
+    }
+    Ok(())
 }
 
 fn page_connection<'a>(
@@ -1508,8 +1700,10 @@ impl<T: HttpTransport> OwnerRepositoryClient for HttpIssueClient<T> {
                 page_connection(&value, &["data", "repository", "issues"], operation)
                     .map_err(|error| remap_partial_page(error, completed_pages))?;
             for node in nodes {
+                deadline.remaining(operation)?;
                 issues.push(parse_owner_issue(node, repository, operation, false)?);
             }
+            deadline.remaining(operation)?;
             completed_pages += 1;
             if !has_next {
                 break;
@@ -1528,8 +1722,9 @@ impl<T: HttpTransport> OwnerRepositoryClient for HttpIssueClient<T> {
             }
             cursor = Some(next_cursor.to_string());
         }
-        issues.sort_by_key(|issue| issue.number);
-        let generation = issue_generation(&issues);
+        sort_owner_collection_by_key(&mut issues, deadline, operation, |issue| issue.number)?;
+        let generation = issue_generation(&issues, deadline, operation)?;
+        deadline.remaining(operation)?;
         Ok(CompleteCollection::from_complete(issues, generation))
     }
 
@@ -1569,8 +1764,10 @@ impl<T: HttpTransport> OwnerRepositoryClient for HttpIssueClient<T> {
             )
             .map_err(|error| remap_partial_page(error, completed_pages))?;
             for node in nodes {
+                deadline.remaining(operation)?;
                 comments.push(parse_owner_comment(node, operation)?);
             }
+            deadline.remaining(operation)?;
             completed_pages += 1;
             if !has_next {
                 break;
@@ -1589,8 +1786,9 @@ impl<T: HttpTransport> OwnerRepositoryClient for HttpIssueClient<T> {
             }
             cursor = Some(next_cursor.to_string());
         }
-        comments.sort_by_key(|comment| comment.id);
-        let generation = comment_generation(&comments);
+        sort_owner_collection_by_key(&mut comments, deadline, operation, |comment| comment.id)?;
+        let generation = comment_generation(&comments, deadline, operation)?;
+        deadline.remaining(operation)?;
         Ok(CompleteCollection::from_complete(comments, generation))
     }
 
@@ -1620,7 +1818,9 @@ impl<T: HttpTransport> OwnerRepositoryClient for HttpIssueClient<T> {
         if issue.is_null() {
             return Err(ApiError::NotFound(number));
         }
-        parse_owner_issue(issue, repository, operation, false)
+        let issue = parse_owner_issue(issue, repository, operation, false)?;
+        deadline.remaining(operation)?;
+        Ok(issue)
     }
 
     fn create_owner_comment(
@@ -1650,7 +1850,7 @@ impl<T: HttpTransport> OwnerRepositoryClient for HttpIssueClient<T> {
         let readback = self
             .list_comments(repository, number, deadline)
             .map_err(OwnerMutationError::RemoteOutcomeUnknown)?;
-        readback
+        let comment = readback
             .items()
             .iter()
             .find(|comment| comment.id == submitted.id && comment.body == body)
@@ -1660,7 +1860,11 @@ impl<T: HttpTransport> OwnerRepositoryClient for HttpIssueClient<T> {
                     operation: "read back owner comment".to_string(),
                     message: "created comment was absent or changed during readback".to_string(),
                 })
-            })
+            })?;
+        deadline
+            .remaining(operation)
+            .map_err(OwnerMutationError::RemoteOutcomeUnknown)?;
+        Ok(comment)
     }
 
     fn create_owner_issue(
@@ -1700,6 +1904,9 @@ impl<T: HttpTransport> OwnerRepositoryClient for HttpIssueClient<T> {
                 message: "created Issue did not match the submitted payload".to_string(),
             }));
         }
+        deadline
+            .remaining(operation)
+            .map_err(OwnerMutationError::RemoteOutcomeUnknown)?;
         Ok(readback)
     }
 
@@ -1730,6 +1937,9 @@ impl<T: HttpTransport> OwnerRepositoryClient for HttpIssueClient<T> {
                 ApiError::Unexpected("duplicate owner close readback remained open".to_string()),
             ));
         }
+        deadline
+            .remaining(operation)
+            .map_err(OwnerMutationError::RemoteOutcomeUnknown)?;
         Ok(issue)
     }
 
@@ -1772,13 +1982,16 @@ impl<T: HttpTransport> OwnerRepositoryClient for HttpIssueClient<T> {
             });
         }
         if !merged {
+            deadline.remaining(operation)?;
             return Ok(None);
         }
-        Ok(Some(MergedPullRequest {
+        let pull_request = MergedPullRequest {
             number: returned_number,
             merge_commit_sha: required_string(&value, "merge_commit_sha", operation)?,
             merged_at: required_string(&value, "merged_at", operation)?,
-        }))
+        };
+        deadline.remaining(operation)?;
+        Ok(Some(pull_request))
     }
 
     fn fetch_release_by_tag(
@@ -1809,11 +2022,13 @@ impl<T: HttpTransport> OwnerRepositoryClient for HttpIssueClient<T> {
                 message: format!("release tag mismatch: requested {tag}, received {returned_tag}"),
             });
         }
-        Ok(Some(RepositoryRelease {
+        let release = RepositoryRelease {
             tag_name: returned_tag,
             target_commitish: required_string(&value, "target_commitish", operation)?,
             published_at: required_string(&value, "published_at", operation)?,
-        }))
+        };
+        deadline.remaining(operation)?;
+        Ok(Some(release))
     }
 
     fn compare_commits(
@@ -1892,6 +2107,7 @@ impl<T: HttpTransport> OwnerRepositoryClient for HttpIssueClient<T> {
             behind_by: required_u64(&value, "behind_by", operation)?,
         };
         comparison.validate_response(operation)?;
+        deadline.remaining(operation)?;
         Ok(comparison)
     }
 }

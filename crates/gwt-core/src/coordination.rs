@@ -908,10 +908,10 @@ fn with_coordination_lock<T>(
         .write(true)
         .truncate(false)
         .open(coordination_lock_path(worktree_root))?;
-    lock.lock_exclusive()?;
+    crate::operation_deadline::lock_exclusive(&lock)?;
 
     let result = operation();
-    let unlock_result = lock.unlock();
+    let unlock_result = FileExt::unlock(&lock);
     match (result, unlock_result) {
         (Ok(value), Ok(())) => Ok(value),
         (Err(err), _) => Err(err),

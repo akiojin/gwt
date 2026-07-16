@@ -32,6 +32,40 @@ pub struct WorktreeManager {
     repo_path: PathBuf,
 }
 
+struct GitOutput {
+    success: bool,
+    stdout: Vec<u8>,
+    stderr: Vec<u8>,
+}
+
+fn run_git_observing_operation_deadline(
+    args: &[&str],
+    current_dir: &Path,
+) -> std::io::Result<GitOutput> {
+    if let Some(deadline) = gwt_core::operation_deadline::ensure_remaining("git")? {
+        let output = gwt_core::process_console::spawn_logged_blocking_with_deadline(
+            &gwt_core::process_console::global(),
+            gwt_core::process_console::ProcessKind::Git,
+            "git",
+            args,
+            gwt_core::process_console::SpawnOptions::new(format!("git {}", args.join(" ")))
+                .current_dir(current_dir),
+            deadline,
+        )?;
+        return Ok(GitOutput {
+            success: output.success(),
+            stdout: output.stdout.into_bytes(),
+            stderr: output.stderr.into_bytes(),
+        });
+    }
+    let output = gwt_core::process::run_git_logged(args, Some(current_dir))?;
+    Ok(GitOutput {
+        success: output.status.success(),
+        stdout: output.stdout,
+        stderr: output.stderr,
+    })
+}
+
 /// Outcome of an optional remote-branch delete.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RemoteDeleteOutcome {
@@ -49,13 +83,13 @@ impl WorktreeManager {
 
     /// List all worktrees for this repository.
     pub fn list(&self) -> Result<Vec<WorktreeInfo>> {
-        let output = gwt_core::process::run_git_logged(
+        let output = run_git_observing_operation_deadline(
             &["worktree", "list", "--porcelain"],
-            Some(&self.repo_path),
+            &self.repo_path,
         )
         .map_err(|e| GwtError::Git(format!("worktree list: {e}")))?;
 
-        if !output.status.success() {
+        if !output.success {
             let stderr = String::from_utf8_lossy(&output.stderr).to_string();
             return Err(GwtError::Git(format!("worktree list: {stderr}")));
         }
@@ -877,13 +911,13 @@ fn to_tracking_ref(remote_ref: &str) -> Option<String> {
 
 /// Resolve the main worktree root for a repository or linked worktree path.
 pub fn main_worktree_root(repo_path: &Path) -> Result<PathBuf> {
-    let output = gwt_core::process::run_git_logged(
+    let output = run_git_observing_operation_deadline(
         &["rev-parse", "--path-format=absolute", "--git-common-dir"],
-        Some(repo_path),
+        repo_path,
     )
     .map_err(|e| GwtError::Git(format!("rev-parse --git-common-dir: {e}")))?;
 
-    if !output.status.success() {
+    if !output.success {
         if let Some(bare_child) = first_child_bare_repository(repo_path) {
             let bare_child = std::fs::canonicalize(&bare_child).unwrap_or(bare_child);
             return Ok(normalize_windows_child_process_path(&bare_child));
@@ -1043,6 +1077,21 @@ fn matches_annotation(line: &str, key: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn worktree_listing_honors_the_active_operation_deadline() {
+        let repository = tempfile::tempdir().expect("repository");
+        init_git_repo(repository.path());
+        let _deadline = gwt_core::operation_deadline::ScopedOperationDeadline::enter(
+            Instant::now() - Duration::from_millis(1),
+        );
+
+        let error = WorktreeManager::new(repository.path())
+            .list()
+            .expect_err("expired operation deadline");
+
+        assert!(error.to_string().contains("deadline"), "{error}");
+    }
 
     fn comparable_path(path: &Path) -> String {
         path.to_string_lossy()

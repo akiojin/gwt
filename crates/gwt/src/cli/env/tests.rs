@@ -10,8 +10,10 @@ use std::{
         atomic::{AtomicUsize, Ordering},
         Arc,
     },
+    time::{Duration, Instant},
 };
 
+use super::*;
 use gwt_agent::session::GWT_SESSION_ID_ENV;
 use gwt_core::workspace_projection::load_or_default_workspace_projection;
 use gwt_git::PrStatus;
@@ -22,9 +24,6 @@ use gwt_github::{
     },
     IssueNumber, SpecListFilter,
 };
-use std::time::Duration;
-
-use super::*;
 
 fn sample_pr_status() -> PrStatus {
     PrStatus {
@@ -291,6 +290,26 @@ fn lazy_owner_client_rejects_non_upstream_repository_before_auth_or_network() {
     assert!(matches!(
         error,
         gwt_github::client::ApiError::RepositoryMismatch { .. }
+    ));
+    assert_eq!(calls.load(Ordering::SeqCst), 0);
+}
+
+#[test]
+fn lazy_owner_client_rejects_an_expired_deadline_before_factory_resolution() {
+    let calls = Arc::new(AtomicUsize::new(0));
+    let client = LazyOwnerClient::new_with_factory(failing_owner_factory(calls.clone()));
+    let deadline = ResolutionDeadline::at(
+        Instant::now() - Duration::from_millis(1),
+        Duration::from_secs(1),
+    );
+
+    let error = client
+        .list_issues(&RepositoryIdentity::gwt_upstream(), &deadline)
+        .expect_err("expired owner deadline");
+
+    assert!(matches!(
+        error,
+        gwt_github::client::ApiError::Timeout { .. }
     ));
     assert_eq!(calls.load(Ordering::SeqCst), 0);
 }

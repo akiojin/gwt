@@ -12,6 +12,7 @@ pub mod error;
 pub mod index;
 pub mod logging;
 pub mod migration;
+pub mod operation_deadline;
 pub mod paths;
 pub mod process;
 pub mod process_console;

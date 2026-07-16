@@ -159,7 +159,9 @@ impl LazyOwnerClient {
         if let Some(client) = self.resolved.get() {
             return Ok(client);
         }
+        deadline.remaining("owner client factory")?;
         let client = (self.factory)("akiojin", "gwt", deadline)?;
+        deadline.remaining("owner client factory")?;
         let _ = self.resolved.set(client);
         self.resolved.get().ok_or_else(|| {
             ApiError::Unexpected("lazy owner client failed to initialize".to_string())
@@ -334,20 +336,22 @@ impl DefaultCliEnv {
         }
     }
 
-    /// Build an env for hook dispatch that deliberately skips
-    /// `gh auth token` resolution. Hook handlers never touch GitHub,
-    /// so forcing them to depend on the user having run `gh auth
-    /// login` would break every Bash tool call on a fresh machine.
+    /// Build an env for hook dispatch without eagerly resolving GitHub auth.
     ///
     /// The inner `HttpIssueClient` is constructed with an empty token
-    /// and empty owner/repo strings; any attempt to actually call it
-    /// would fail (which is fine — the hook code paths go through
-    /// `run_hook`, not the SPEC issue client).
+    /// and empty owner/repo strings. Owner Resolution uses the separate lazy,
+    /// deadline-aware upstream client and is reached only by the direct
+    /// self-improvement Stop hook.
     pub fn new_for_hooks() -> Self {
+        Self::new_for_hooks_at(std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")))
+    }
+
+    /// Build a hook environment for an explicitly resolved worktree.
+    pub fn new_for_hooks_at(repo_path: PathBuf) -> Self {
         Self::new_with_client_factory_and_cache_root(
             "",
             "",
-            std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")),
+            repo_path,
             crate::issue_cache::detached_issue_cache_root(),
             Arc::new(|_, _| {
                 let transport = gwt_github::client::http::ReqwestTransport::new()
