@@ -14,6 +14,11 @@ use crate::OutboundEvent;
 use crate::PtyWriterRegistry;
 
 const TICK_SECS: u64 = 5;
+/// Phase 70 FR-396 (Issue #3264): full OS process reconciliation at most
+/// every 60 seconds; normal ticks only refresh the known runtime PIDs.
+const FULL_RECONCILE_TICKS: u64 = 60 / TICK_SECS;
+/// Broadcast on change, or at latest every 15 seconds as a heartbeat.
+const HEARTBEAT_TICKS: u64 = 15 / TICK_SECS;
 const WARMING_SAMPLES: u64 = 2;
 const WARN_CPU_PERCENT: f32 = 50.0;
 const HOT_CPU_PERCENT: f32 = 100.0;
@@ -38,10 +43,70 @@ async fn run(clients: ClientHub, pty_writers: PtyWriterRegistry) {
         if !clients.has_clients() {
             continue;
         }
-        let snapshot = poller.poll_once(Utc::now(), &clients);
-        clients.dispatch(vec![OutboundEvent::broadcast(
-            BackendEvent::RuntimeHealth { snapshot },
-        )]);
+        let scope = poller.budget.begin_tick();
+        let snapshot = poller.poll_once(Utc::now(), &clients, scope);
+        if poller
+            .budget
+            .should_broadcast(&comparable_snapshot(&snapshot))
+        {
+            clients.dispatch(vec![OutboundEvent::broadcast(
+                BackendEvent::RuntimeHealth { snapshot },
+            )]);
+        }
+    }
+}
+
+/// Snapshot serialization used for change detection, with the per-tick
+/// timestamp removed so identical states compare equal.
+fn comparable_snapshot(snapshot: &RuntimeHealthSnapshotView) -> String {
+    let mut value = serde_json::to_value(snapshot).unwrap_or(serde_json::Value::Null);
+    if let Some(object) = value.as_object_mut() {
+        object.remove("generated_at");
+        object.remove("generatedAt");
+    }
+    value.to_string()
+}
+
+/// Refresh scope for one poll tick (FR-396).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RefreshScope {
+    /// Full OS process reconciliation (at most every 60s).
+    FullReconcile,
+    /// Only the previously known runtime PIDs.
+    KnownPids,
+}
+
+/// FR-396 poll / broadcast budget: full reconciliation every 60s, known-PID
+/// refresh otherwise, broadcast only on change or a 15s heartbeat.
+#[derive(Default)]
+struct PollBudget {
+    tick: u64,
+    ticks_since_broadcast: u64,
+    last_payload: Option<String>,
+}
+
+impl PollBudget {
+    fn begin_tick(&mut self) -> RefreshScope {
+        let scope = if self.tick.is_multiple_of(FULL_RECONCILE_TICKS) {
+            RefreshScope::FullReconcile
+        } else {
+            RefreshScope::KnownPids
+        };
+        self.tick += 1;
+        scope
+    }
+
+    fn should_broadcast(&mut self, payload: &str) -> bool {
+        let changed = self.last_payload.as_deref() != Some(payload);
+        let heartbeat_due = self.ticks_since_broadcast >= HEARTBEAT_TICKS - 1;
+        if changed || heartbeat_due {
+            self.last_payload = Some(payload.to_string());
+            self.ticks_since_broadcast = 0;
+            true
+        } else {
+            self.ticks_since_broadcast += 1;
+            false
+        }
     }
 }
 
@@ -52,6 +117,8 @@ struct Poller {
     last_dropped_lossy: u64,
     severity: SeverityTracker,
     pty_writers: PtyWriterRegistry,
+    budget: PollBudget,
+    known_pids: Vec<sysinfo::Pid>,
 }
 
 impl Poller {
@@ -63,6 +130,8 @@ impl Poller {
             last_dropped_lossy: 0,
             severity: SeverityTracker::default(),
             pty_writers,
+            budget: PollBudget::default(),
+            known_pids: Vec::new(),
         }
     }
 
@@ -70,18 +139,36 @@ impl Poller {
         &mut self,
         generated_at: DateTime<Utc>,
         clients: &ClientHub,
+        scope: RefreshScope,
     ) -> RuntimeHealthSnapshotView {
-        self.system.refresh_processes_specifics(
-            ProcessesToUpdate::All,
-            true,
-            ProcessRefreshKind::nothing()
-                .with_cpu()
-                .with_memory()
-                .with_cmd(UpdateKind::OnlyIfNotSet)
-                .with_exe(UpdateKind::OnlyIfNotSet)
-                .with_cwd(UpdateKind::OnlyIfNotSet)
-                .without_tasks(),
-        );
+        let refresh_kind = ProcessRefreshKind::nothing()
+            .with_cpu()
+            .with_memory()
+            .with_cmd(UpdateKind::OnlyIfNotSet)
+            .with_exe(UpdateKind::OnlyIfNotSet)
+            .with_cwd(UpdateKind::OnlyIfNotSet)
+            .without_tasks();
+        match scope {
+            RefreshScope::FullReconcile => {
+                self.system
+                    .refresh_processes_specifics(ProcessesToUpdate::All, true, refresh_kind);
+            }
+            RefreshScope::KnownPids => {
+                // FR-396: normal ticks only refresh the runtime PIDs selected
+                // by the previous reconciliation (plus this process); new or
+                // exited processes reconcile within 60s.
+                let mut pids = self.known_pids.clone();
+                let root = sysinfo::Pid::from_u32(self.root_pid);
+                if !pids.contains(&root) {
+                    pids.push(root);
+                }
+                self.system.refresh_processes_specifics(
+                    ProcessesToUpdate::Some(&pids),
+                    true,
+                    refresh_kind,
+                );
+            }
+        }
         let observed = observe_processes(&self.system);
         let parent_by_pid = parent_by_pid(&observed);
         let direct_focus_windows = focus_window_ids_by_pty_pid(&self.pty_writers);
@@ -94,6 +181,10 @@ impl Poller {
             .iter()
             .map(|process| process.memory_bytes)
             .sum::<u64>();
+        self.known_pids = selected
+            .iter()
+            .map(|process| sysinfo::Pid::from_u32(process.pid))
+            .collect();
         let queue = self.queue_snapshot(clients.health_stats());
         let state = self.next_state(cpu_percent, memory_bytes, queue.dropped_lossy_delta);
         let runner_count = selected
@@ -763,5 +854,60 @@ mod tests {
         assert_eq!(tracker.classify(queue_sample), RuntimeHealthState::Ok);
         assert_eq!(tracker.classify(queue_sample), RuntimeHealthState::Ok);
         assert_eq!(tracker.classify(queue_sample), RuntimeHealthState::Warn);
+    }
+
+    #[test]
+    fn poll_budget_runs_full_reconciliation_every_60_seconds() {
+        // FR-396: with 5s ticks, tick 0 and tick 12 reconcile fully; the
+        // ticks in between only refresh known PIDs.
+        let mut budget = PollBudget::default();
+        assert_eq!(budget.begin_tick(), RefreshScope::FullReconcile);
+        for _ in 1..FULL_RECONCILE_TICKS {
+            assert_eq!(budget.begin_tick(), RefreshScope::KnownPids);
+        }
+        assert_eq!(budget.begin_tick(), RefreshScope::FullReconcile);
+    }
+
+    #[test]
+    fn poll_budget_broadcasts_on_change_or_15s_heartbeat() {
+        let mut budget = PollBudget::default();
+        // First payload always broadcasts.
+        assert!(budget.should_broadcast("state-a"));
+        // Unchanged payloads are suppressed until the 15s heartbeat.
+        assert!(!budget.should_broadcast("state-a"));
+        assert!(!budget.should_broadcast("state-a"));
+        assert!(
+            budget.should_broadcast("state-a"),
+            "an unchanged snapshot must still heartbeat every 15s"
+        );
+        // A change broadcasts immediately.
+        assert!(!budget.should_broadcast("state-a"));
+        assert!(budget.should_broadcast("state-b"));
+    }
+
+    #[test]
+    fn comparable_snapshot_ignores_the_generated_at_timestamp() {
+        let make = |generated_at: &str| RuntimeHealthSnapshotView {
+            generated_at: generated_at.to_string(),
+            state: "ok".to_string(),
+            cpu_percent: Some(1.0),
+            memory_bytes: 42,
+            process_count: 1,
+            runner_count: 0,
+            queue: RuntimeHealthQueueView {
+                client_count: 1,
+                queued_entries: 0,
+                dirty_panes: 0,
+                dropped_lossy: 0,
+                dropped_lossy_delta: 0,
+                dead_clients: 0,
+            },
+            processes: Vec::new(),
+        };
+        assert_eq!(
+            comparable_snapshot(&make("2026-07-16T00:00:00Z")),
+            comparable_snapshot(&make("2026-07-16T00:00:05Z")),
+            "only real state changes may trigger a broadcast"
+        );
     }
 }
