@@ -13,10 +13,79 @@ use crate::{
 
 const INDEX_SEARCH_LIMIT: usize = 50;
 
+/// Exit code for retryable "index not ready" search failures (Phase 70
+/// FR-388): missing / corrupt scopes that did not repair within the wait
+/// window must never degrade into a silent empty success.
+pub const INDEX_NOT_READY_EXIT_CODE: i32 = 75;
+
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct ProjectIndexSearchOutcome {
     pub results: Vec<IndexSearchResult>,
     pub suggestions: Vec<IndexSearchResult>,
+    /// Scopes whose results came from a healthy but stale generation
+    /// (FR-387 stale-while-revalidate).
+    pub stale_scopes: Vec<String>,
+    /// True when a single-flight refresh was queued for the stale scopes.
+    pub refresh_queued: bool,
+}
+
+/// Typed retry information for FR-388 `INDEX_NOT_READY` failures.
+#[derive(Debug, Clone, PartialEq)]
+pub struct IndexSearchNotReady {
+    pub reason: String,
+    pub affected_scopes: Vec<String>,
+    pub waited_ms: u64,
+    pub retry_after_ms: u64,
+}
+
+/// Search error surface (Phase 70 FR-388). `NotReady` is retryable and maps
+/// to exit code 75 / `error_code=INDEX_NOT_READY` on the CLI surface.
+#[derive(Debug, Clone, PartialEq)]
+pub enum IndexSearchError {
+    NotReady(IndexSearchNotReady),
+    Other(String),
+}
+
+impl IndexSearchError {
+    pub fn exit_code(&self) -> i32 {
+        match self {
+            IndexSearchError::NotReady(_) => INDEX_NOT_READY_EXIT_CODE,
+            IndexSearchError::Other(_) => 1,
+        }
+    }
+
+    pub fn error_code(&self) -> Option<&'static str> {
+        match self {
+            IndexSearchError::NotReady(_) => Some("INDEX_NOT_READY"),
+            IndexSearchError::Other(_) => None,
+        }
+    }
+
+    pub fn retryable(&self) -> bool {
+        matches!(self, IndexSearchError::NotReady(_))
+    }
+}
+
+impl std::fmt::Display for IndexSearchError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            IndexSearchError::NotReady(not_ready) => write!(
+                f,
+                "index not ready for scopes [{}] after {} ms: {} (retry in {} ms)",
+                not_ready.affected_scopes.join(", "),
+                not_ready.waited_ms,
+                not_ready.reason,
+                not_ready.retry_after_ms,
+            ),
+            IndexSearchError::Other(message) => f.write_str(message),
+        }
+    }
+}
+
+impl From<String> for IndexSearchError {
+    fn from(message: String) -> Self {
+        IndexSearchError::Other(message)
+    }
 }
 
 /// `auto_build`: `false` for GUI interactive search (the watcher owns index
@@ -30,7 +99,7 @@ pub fn search_project_index(
     selected_worktree_hash: Option<&str>,
     match_mode: IndexSearchMatchMode,
     auto_build: bool,
-) -> Result<ProjectIndexSearchOutcome, String> {
+) -> Result<ProjectIndexSearchOutcome, IndexSearchError> {
     let query = query.trim();
     if query.is_empty() {
         return Ok(ProjectIndexSearchOutcome::default());
@@ -142,6 +211,8 @@ pub fn search_project_index(
     Ok(ProjectIndexSearchOutcome {
         results,
         suggestions,
+        stale_scopes: Vec::new(),
+        refresh_queued: false,
     })
 }
 
@@ -216,7 +287,8 @@ pub fn work_advisory(project_root: &Path, query: &str) -> Result<Vec<IndexSearch
             None,
             IndexSearchMatchMode::Semantic,
             true,
-        )?,
+        )
+        .map_err(|error| error.to_string())?,
     };
     Ok(filter_strong_advisory_matches(
         outcome.results,

@@ -132,7 +132,7 @@ pub fn run<E: CliEnv>(
         // missing or stale indexes inline (SPEC-1942 FR-107).
         true,
     )
-    .map_err(|message| SpecOpsError::from(ApiError::Unexpected(message)))?;
+    .map_err(|error| SpecOpsError::from(ApiError::Unexpected(error.to_string())))?;
     let mut results = outcome.results;
     let mut suggestions = outcome.suggestions;
     if let Some(limit) = cmd.n_results {
