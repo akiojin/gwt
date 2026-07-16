@@ -283,7 +283,9 @@ impl RunnerSpawner for PythonRunnerSpawner {
             .arg("--repo-hash")
             .arg(repo_hash)
             .arg("--project-root")
-            .arg(project_root);
+            .arg(project_root)
+            .arg("--qos")
+            .arg("background");
         if respect_ttl {
             cmd.arg("--respect-ttl");
         }

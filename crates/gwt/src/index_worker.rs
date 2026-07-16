@@ -958,15 +958,29 @@ pub(crate) enum CoordinatedRun<T> {
     Coalesced,
 }
 
+/// One round of a coordinated build (FR-389).
+pub(crate) enum BuildStep<T> {
+    Done(T),
+    /// The runner parked a resumable continuation to hand the heavy lease to
+    /// a higher-priority claimant; the owner must re-acquire and resume.
+    Yielded,
+}
+
+/// Backstop against a pathological yield loop; each round is additionally
+/// bounded by the heavy lease timeout.
+const MAX_BUILD_YIELDS: u32 = 1000;
+
 /// Run one index build for `(repo_hash, scope, worktree_hash?)` through the
 /// host-wide coordinator: at most one model-loaded runner tree host-wide
-/// (FR-379), same-target requests coalesce into one shared job (FR-382).
+/// (FR-379), same-target requests coalesce into one shared job (FR-382),
+/// and a yielded background build releases the heavy lease before resuming
+/// (FR-389).
 pub(crate) fn run_coordinated_index_job<T>(
     repo_hash: &str,
     scope_label: &str,
     worktree_hash: Option<&str>,
     priority: JobPriority,
-    build: impl FnOnce() -> Result<T, String>,
+    mut build: impl FnMut() -> Result<BuildStep<T>, String>,
 ) -> Result<CoordinatedRun<T>, String> {
     let coordinator = IndexCoordinator::open_default()
         .map_err(|err| format!("index coordinator unavailable: {err}"))?;
@@ -974,7 +988,6 @@ pub(crate) fn run_coordinated_index_job<T>(
         Some(worktree) => TargetKey::worktree(repo_hash, scope_label, worktree),
         None => TargetKey::repo_shared(repo_hash, scope_label),
     };
-    let mut build = Some(build);
     // One retry when the previous owner vanished without publishing.
     for _ in 0..2 {
         let admission = coordinator
@@ -982,22 +995,48 @@ pub(crate) fn run_coordinated_index_job<T>(
             .map_err(|err| format!("index job admission failed: {err}"))?;
         match admission {
             JobAdmission::Owner(guard) => {
-                let heavy = guard
-                    .acquire_heavy(INDEX_HEAVY_LEASE_TIMEOUT)
-                    .map_err(|err| format!("index heavy lease failed: {err}"))?;
-                let build = build.take().expect("index build closure reused");
-                let result = build();
-                drop(heavy);
-                let completion = match &result {
-                    Ok(_) => JobOutcome::Completed,
-                    Err(message) => JobOutcome::Failed {
-                        message: message.clone(),
-                    },
-                };
-                guard
-                    .complete(completion)
-                    .map_err(|err| format!("index job completion failed: {err}"))?;
-                return result.map(CoordinatedRun::Ran);
+                let mut yields: u32 = 0;
+                loop {
+                    let heavy = guard
+                        .acquire_heavy(INDEX_HEAVY_LEASE_TIMEOUT)
+                        .map_err(|err| format!("index heavy lease failed: {err}"))?;
+                    let step = build();
+                    drop(heavy);
+                    match step {
+                        Ok(BuildStep::Done(value)) => {
+                            guard
+                                .complete(JobOutcome::Completed)
+                                .map_err(|err| format!("index job completion failed: {err}"))?;
+                            return Ok(CoordinatedRun::Ran(value));
+                        }
+                        Ok(BuildStep::Yielded) => {
+                            yields += 1;
+                            if yields > MAX_BUILD_YIELDS {
+                                let message =
+                                    "index build yielded too many times without completing"
+                                        .to_string();
+                                let _ = guard.complete(JobOutcome::Failed {
+                                    message: message.clone(),
+                                });
+                                return Err(message);
+                            }
+                            // Give the pending higher-priority claimant a
+                            // chance to take the freshly released lease
+                            // before re-queueing; acquire_heavy then defers
+                            // for as long as higher-priority claimants stay
+                            // pending (FR-383).
+                            std::thread::sleep(Duration::from_millis(50));
+                        }
+                        Err(message) => {
+                            guard
+                                .complete(JobOutcome::Failed {
+                                    message: message.clone(),
+                                })
+                                .map_err(|err| format!("index job completion failed: {err}"))?;
+                            return Err(message);
+                        }
+                    }
+                }
             }
             JobAdmission::Joined(waiter) => {
                 let outcome = waiter
@@ -1117,6 +1156,10 @@ pub fn rebuild_index_target(
     let coordinator_worktree = action
         .needs_worktree_hash
         .then(|| ctx.worktree_hash.clone());
+    let qos = match priority {
+        JobPriority::Background => "background",
+        JobPriority::ManualRebuild | JobPriority::InteractiveSearch => "interactive",
+    };
     let run = run_coordinated_index_job(
         ctx.repo_hash.as_str(),
         action.label,
@@ -1134,7 +1177,7 @@ pub fn rebuild_index_target(
                 action = rebuild_action,
                 "project index rebuild started"
             );
-            let output = run_runner_rebuild(&ctx, action).map_err(|err| err.to_string())?;
+            let output = run_runner_rebuild(&ctx, action, qos).map_err(|err| err.to_string())?;
             tracing::info!(
                 target: "gwt::index",
                 scope = rebuild_label,
@@ -1147,7 +1190,15 @@ pub fn rebuild_index_target(
             if !output.status.success() {
                 return Err(format_runner_failure(&output));
             }
-            Ok(())
+            if runner_payload_yielded(&output.stdout) {
+                tracing::info!(
+                    target: "gwt::index",
+                    scope = rebuild_label,
+                    "project index rebuild yielded to a higher-priority claimant"
+                );
+                return Ok(BuildStep::Yielded);
+            }
+            Ok(BuildStep::Done(()))
         },
     )?;
     if let CoordinatedRun::Coalesced = run {
@@ -1158,6 +1209,15 @@ pub fn rebuild_index_target(
         );
     }
     Ok(())
+}
+
+/// True when the runner parked a resumable continuation instead of
+/// completing (Phase 70 FR-389 `yielded` payload field).
+pub(crate) fn runner_payload_yielded(stdout: &[u8]) -> bool {
+    serde_json::from_slice::<serde_json::Value>(stdout)
+        .ok()
+        .and_then(|payload| payload.get("yielded").and_then(serde_json::Value::as_bool))
+        .unwrap_or(false)
 }
 
 /// Collect every unhealthy `(scope, worktree_hash?)` cell from an aggregated

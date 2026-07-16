@@ -143,6 +143,7 @@ pub(crate) fn rebuild_actions(scope: IndexScope) -> Vec<RebuildAction> {
 pub(crate) fn run_runner_rebuild(
     context: &IndexContext,
     action: RebuildAction,
+    qos: &str,
 ) -> Result<std::process::Output, SpecOpsError> {
     let mut command = gwt_core::process::hidden_command(&context.python);
     command
@@ -155,6 +156,8 @@ pub(crate) fn run_runner_rebuild(
         .arg(&context.project_root)
         .arg("--mode")
         .arg("full")
+        .arg("--qos")
+        .arg(qos)
         .current_dir(&context.project_root);
     if action.needs_worktree_hash {
         command.arg("--worktree-hash").arg(&context.worktree_hash);

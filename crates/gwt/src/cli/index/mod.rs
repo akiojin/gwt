@@ -150,11 +150,12 @@ fn run_rebuild<E: CliEnv>(
             coordinator_worktree.as_deref(),
             gwt_core::index_coordinator::JobPriority::ManualRebuild,
             || {
-                let output = run_runner_rebuild(&context, action).map_err(|err| err.to_string())?;
+                let output = run_runner_rebuild(&context, action, "interactive")
+                    .map_err(|err| err.to_string())?;
                 let _ = audit_runner_progress(&log_dir, &context, action.label, &output.stderr);
                 let _ = audit_rebuild_result(&log_dir, &context, action.label, &output);
                 if output.status.success() {
-                    Ok(())
+                    Ok(crate::index_worker::BuildStep::Done(()))
                 } else {
                     Err(format_runner_failure(&output))
                 }

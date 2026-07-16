@@ -99,6 +99,7 @@ class CooperativeYieldTests(unittest.TestCase):
             capture_output=True,
             text=True,
             timeout=180,
+            env=env,
         )
         self.assertEqual(
             proc.returncode,
