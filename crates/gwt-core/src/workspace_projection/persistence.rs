@@ -18,7 +18,7 @@ use uuid::Uuid;
 
 use crate::{
     coordination::{BoardEntry, BoardEntryKind},
-    error::{GwtError, Result},
+    error::{GwtError, JsonDecodeKind, Result},
     paths::{
         gwt_project_dir_for_repo_path, gwt_repo_local_work_events_path,
         gwt_workspace_journal_path_for_repo_path, gwt_workspace_projection_path_for_repo_path,
@@ -293,6 +293,16 @@ pub enum WorkspaceSessionAssignment {
     Assigned(String),
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum WorkspaceTerminalEventOutcome {
+    Emitted,
+    AlreadyMatching,
+    WrongTerminal,
+    AmbiguousTerminal,
+    AssignedWorkMissing(String),
+    NoTarget,
+}
+
 pub fn try_resolve_workspace_assignment_for_session(
     repo_path: &Path,
     session_id: &str,
@@ -387,16 +397,51 @@ pub fn mutate_existing_workspace_projection<T>(
 ) -> Result<Option<T>> {
     let current_path = gwt_workspace_projection_path_for_repo_path(repo_path);
     let _ = migrate_legacy_workspace_projection(repo_path, &current_path)?;
+    mutate_existing_workspace_projection_at(repo_path, &current_path, false, update)
+}
+
+pub fn mutate_existing_workspace_projection_for_cleanup<T>(
+    repo_path: &Path,
+    update: impl FnOnce(&mut WorkspaceProjection) -> Result<T>,
+) -> Result<Option<T>> {
+    let current_path = gwt_workspace_projection_path_for_repo_path(repo_path);
+    mutate_existing_workspace_projection_at(repo_path, &current_path, true, update)
+}
+
+fn mutate_existing_workspace_projection_at<T>(
+    repo_path: &Path,
+    current_path: &Path,
+    invalidate_legacy: bool,
+    update: impl FnOnce(&mut WorkspaceProjection) -> Result<T>,
+) -> Result<Option<T>> {
     let work_items_path = current_path.with_file_name("works.json");
     with_workspace_work_items_lock(&work_items_path, || {
-        let Some(mut projection) = load_workspace_projection_from_path(&current_path)? else {
+        let Some(mut projection) = load_workspace_projection_from_path(current_path)? else {
+            if invalidate_legacy {
+                remove_legacy_workspace_projection(repo_path, current_path)?;
+            }
             return Ok(None);
         };
         projection.project_root = repo_path.to_path_buf();
         let result = update(&mut projection)?;
-        save_workspace_projection_to_path_unlocked(&current_path, &projection)?;
+        if invalidate_legacy {
+            remove_legacy_workspace_projection(repo_path, current_path)?;
+        }
+        save_workspace_projection_to_path_unlocked(current_path, &projection)?;
         Ok(Some(result))
     })
+}
+
+fn remove_legacy_workspace_projection(repo_path: &Path, canonical_path: &Path) -> Result<()> {
+    let legacy_path = legacy_workspace_projection_path_for_repo_path(repo_path);
+    if legacy_path == canonical_path {
+        return Ok(());
+    }
+    match fs::remove_file(legacy_path) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(error.into()),
+    }
 }
 
 pub fn mutate_workspace_projection_at<T>(
@@ -446,6 +491,7 @@ const WORKSPACE_STATE_TRANSACTION_COORDINATOR_DIR: &str =
     ".gwt-pending-workspace-state-transactions";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct PendingWorkspaceStateTransaction {
     version: u32,
     #[serde(default)]
@@ -469,6 +515,12 @@ struct PendingWorkspaceStateTransaction {
     journal_entries: Vec<WorkspaceJournalEntry>,
 }
 
+#[derive(Debug, Deserialize)]
+struct PendingWorkspaceStateTransactionRouting {
+    current_path: PathBuf,
+    work_items_path: PathBuf,
+}
+
 fn pending_workspace_state_transaction_path(current_path: &Path) -> PathBuf {
     current_path.with_file_name("pending-state-transaction.json")
 }
@@ -487,12 +539,28 @@ fn pending_workspace_state_transaction_paths(
     if let Some(path) = pending_workspace_state_transaction_coordinator_path(transaction) {
         paths.push(path);
     }
+    if let Some(path) = legacy_pending_workspace_state_transaction_coordinator_path(transaction)
+        .filter(|path| path.exists())
+    {
+        paths.push(path);
+    }
     paths.sort();
     paths.dedup();
     paths
 }
 
 fn pending_workspace_state_transaction_coordinator_path(
+    transaction: &PendingWorkspaceStateTransaction,
+) -> Option<PathBuf> {
+    let transaction_id = transaction.transaction_id.as_deref()?;
+    Some(
+        crate::paths::gwt_home()
+            .join(WORKSPACE_STATE_TRANSACTION_COORDINATOR_DIR)
+            .join(format!("{transaction_id}.json")),
+    )
+}
+
+fn legacy_pending_workspace_state_transaction_coordinator_path(
     transaction: &PendingWorkspaceStateTransaction,
 ) -> Option<PathBuf> {
     let transaction_id = transaction.transaction_id.as_deref()?;
@@ -521,6 +589,9 @@ fn discover_pending_workspace_state_transaction_coordinators(
     lock_targets: &[PathBuf],
 ) -> Result<Vec<PathBuf>> {
     let mut coordinator_dirs = HashSet::new();
+    let global_coordinator_dir =
+        crate::paths::gwt_home().join(WORKSPACE_STATE_TRANSACTION_COORDINATOR_DIR);
+    coordinator_dirs.insert(global_coordinator_dir.clone());
     let mut coordinator_paths = Vec::new();
     for target in lock_targets {
         let Some(parent) = target.parent() else {
@@ -528,34 +599,50 @@ fn discover_pending_workspace_state_transaction_coordinators(
         };
         for ancestor in parent.ancestors() {
             let coordinator_dir = ancestor.join(WORKSPACE_STATE_TRANSACTION_COORDINATOR_DIR);
-            if !coordinator_dirs.insert(coordinator_dir.clone()) || !coordinator_dir.is_dir() {
-                continue;
-            }
-            let entries = match fs::read_dir(&coordinator_dir) {
-                Ok(entries) => entries,
+            coordinator_dirs.insert(coordinator_dir);
+        }
+    }
+    for coordinator_dir in coordinator_dirs {
+        if !coordinator_dir.is_dir() {
+            continue;
+        }
+        let entries = match fs::read_dir(&coordinator_dir) {
+            Ok(entries) => entries,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(error) => return Err(error.into()),
+        };
+        for entry in entries {
+            let entry = entry?;
+            let file_type = match entry.file_type() {
+                Ok(file_type) => file_type,
                 Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
                 Err(error) => return Err(error.into()),
             };
-            for entry in entries {
-                let entry = entry?;
-                if !entry.file_type()?.is_file() {
-                    continue;
+            if !file_type.is_file() {
+                continue;
+            }
+            let path = entry.path();
+            if path.extension().and_then(|extension| extension.to_str()) != Some("json") {
+                continue;
+            }
+            let bytes = match fs::read(&path) {
+                Ok(bytes) => bytes,
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+                Err(error) => return Err(error.into()),
+            };
+            match serde_json::from_slice::<PendingWorkspaceStateTransactionRouting>(&bytes) {
+                Ok(routing) => {
+                    let current_lock_target = routing.current_path.with_file_name("works.json");
+                    if lock_targets.iter().any(|target| {
+                        target == &current_lock_target || target == &routing.work_items_path
+                    }) {
+                        coordinator_paths.push(path);
+                    }
                 }
-                let path = entry.path();
-                let Ok(bytes) = fs::read(&path) else {
-                    continue;
-                };
-                let Ok(transaction) =
-                    serde_json::from_slice::<PendingWorkspaceStateTransaction>(&bytes)
-                else {
-                    continue;
-                };
-                let current_lock_target = transaction.current_path.with_file_name("works.json");
-                if lock_targets.iter().any(|target| {
-                    target == &current_lock_target || target == &transaction.work_items_path
-                }) {
+                Err(_) if coordinator_dir != global_coordinator_dir => {
                     coordinator_paths.push(path);
                 }
+                Err(_) => {}
             }
         }
     }
@@ -598,7 +685,7 @@ pub fn transact_workspace_state_at<T>(
         let journal_path = current_path.with_file_name("journal.jsonl");
         let persisted_work_items = load_workspace_work_items_from_path(work_items_path)?;
         let synthesized = persisted_work_items.is_none();
-        let work_items = match persisted_work_items {
+        let mut work_items = match persisted_work_items {
             Some(work_items) => work_items,
             None => load_or_synthesize_workspace_work_items_from_paths(
                 work_items_path,
@@ -607,6 +694,10 @@ pub fn transact_workspace_state_at<T>(
                 project_root,
             )?,
         };
+        let recovered_close_events = recover_unprojected_workspace_work_events_locked(
+            &mut work_items,
+            &work_items_path.with_file_name("work-events-closed.jsonl"),
+        )?;
         let (result, events) = update(&mut projection, &work_items, !synthesized)?;
 
         let mut next_work_items = work_items;
@@ -629,7 +720,7 @@ pub fn transact_workspace_state_at<T>(
             current_precondition: Some(current_precondition),
             work_items_precondition: Some(work_items_precondition),
             projection,
-            work_items: (!events.is_empty()).then_some(next_work_items),
+            work_items: (recovered_close_events || !events.is_empty()).then_some(next_work_items),
             events_path: (!events.is_empty()).then(|| events_path.to_path_buf()),
             events,
             journal_path: None,
@@ -745,11 +836,31 @@ pub fn load_workspace_work_items(repo_path: &Path) -> Result<Option<WorkItemsPro
     )
 }
 
+fn classify_json_decode_error(context: &'static str, error: serde_json::Error) -> GwtError {
+    let kind = match error.classify() {
+        serde_json::error::Category::Syntax | serde_json::error::Category::Eof => {
+            JsonDecodeKind::Malformed
+        }
+        serde_json::error::Category::Data => JsonDecodeKind::IncompatibleSchema,
+        serde_json::error::Category::Io => {
+            return GwtError::Io(std::io::Error::new(
+                error.io_error_kind().unwrap_or(std::io::ErrorKind::Other),
+                error,
+            ));
+        }
+    };
+    GwtError::JsonDecode {
+        context,
+        kind,
+        message: error.to_string(),
+    }
+}
+
 pub fn load_workspace_work_items_from_path(path: &Path) -> Result<Option<WorkItemsProjection>> {
     match fs::read(path) {
         Ok(bytes) => {
             let mut items: WorkItemsProjection = serde_json::from_slice(&bytes)
-                .map_err(|error| GwtError::Other(format!("workspace work items json: {error}")))?;
+                .map_err(|error| classify_json_decode_error("workspace work items json", error))?;
             for item in &mut items.work_items {
                 if item.title == "Workspace" {
                     item.title = "Work".to_string();
@@ -968,9 +1079,14 @@ fn with_workspace_transaction_recovery<T>(
         )?);
         marker_paths.sort();
         marker_paths.dedup();
-        let discovered = find_pending_workspace_state_transaction(&marker_paths)
-            .ok()
-            .flatten();
+        let discovered = match find_pending_workspace_state_transaction(&marker_paths) {
+            Ok(discovered) => discovered,
+            Err(GwtError::JsonDecode {
+                kind: JsonDecodeKind::Malformed,
+                ..
+            }) => None,
+            Err(error) => return Err(error),
+        };
 
         let mut lock_targets = base_lock_targets.clone();
         if let Some(transaction) = discovered.as_ref() {
@@ -984,16 +1100,27 @@ fn with_workspace_transaction_recovery<T>(
         marker_paths.dedup();
 
         let outcome = with_workspace_work_items_locks(&lock_targets, || {
+            marker_paths.extend(discover_pending_workspace_state_transaction_coordinators(
+                &lock_targets,
+            )?);
+            marker_paths.sort();
+            marker_paths.dedup();
             loop {
                 let pending = match find_pending_workspace_state_transaction(&marker_paths) {
                     Ok(pending) => pending,
-                    Err(error) => {
+                    Err(
+                        error @ GwtError::JsonDecode {
+                            kind: JsonDecodeKind::Malformed,
+                            ..
+                        },
+                    ) => {
                         quarantine_invalid_pending_workspace_state_transactions(
                             &marker_paths,
                             &error,
                         )?;
                         return Err(error);
                     }
+                    Err(error) => return Err(error),
                 };
                 let Some(transaction) = pending else {
                     break;
@@ -1036,24 +1163,33 @@ fn find_pending_workspace_state_transaction(
         };
         let transaction: PendingWorkspaceStateTransaction = serde_json::from_slice(&bytes)
             .map_err(|error| {
-                GwtError::Other(format!(
-                    "workspace state transaction json at {}: {error}",
-                    marker_path.display()
-                ))
+                classify_json_decode_error("workspace state transaction json", error)
             })?;
         let valid_marker_paths = pending_workspace_state_transaction_paths(&transaction);
         if !(MIN_WORKSPACE_STATE_TRANSACTION_VERSION..=WORKSPACE_STATE_TRANSACTION_VERSION)
             .contains(&transaction.version)
-            || (transaction.version >= 2
-                && (transaction.transaction_id.is_none()
-                    || transaction.current_precondition.is_none()
-                    || transaction.work_items_precondition.is_none()))
+        {
+            return Err(GwtError::JsonDecode {
+                context: "workspace state transaction json",
+                kind: JsonDecodeKind::IncompatibleSchema,
+                message: format!(
+                    "unsupported transaction version {} at {}",
+                    transaction.version,
+                    marker_path.display()
+                ),
+            });
+        }
+        if (transaction.version >= 2
+            && (transaction.transaction_id.is_none()
+                || transaction.current_precondition.is_none()
+                || transaction.work_items_precondition.is_none()))
             || !valid_marker_paths.iter().any(|path| path == marker_path)
         {
-            return Err(GwtError::Other(format!(
-                "invalid workspace state transaction at {}",
-                marker_path.display()
-            )));
+            return Err(GwtError::JsonDecode {
+                context: "workspace state transaction json",
+                kind: JsonDecodeKind::Malformed,
+                message: format!("invalid current transaction at {}", marker_path.display()),
+            });
         }
         return Ok(Some(transaction));
     }
@@ -1069,8 +1205,13 @@ fn quarantine_invalid_pending_workspace_state_transactions(
         if !marker_path.exists() {
             continue;
         }
-        if find_pending_workspace_state_transaction(std::slice::from_ref(marker_path)).is_ok() {
-            continue;
+        match find_pending_workspace_state_transaction(std::slice::from_ref(marker_path)) {
+            Ok(_) => continue,
+            Err(GwtError::JsonDecode {
+                kind: JsonDecodeKind::Malformed,
+                ..
+            }) => {}
+            Err(_) => continue,
         }
         let file_name = marker_path
             .file_name()
@@ -1676,7 +1817,7 @@ pub fn repair_resume_owner_bleed_paths(
     current_projection_path: &Path,
     now: DateTime<Utc>,
 ) -> Result<ResumeOwnerBleedRepairReport> {
-    with_workspace_work_items_lock(work_items_path, || {
+    with_workspace_current_and_work_items_lock(current_projection_path, work_items_path, || {
         repair_resume_owner_bleed_paths_locked(work_items_path, current_projection_path, now)
     })
 }
@@ -1975,6 +2116,28 @@ pub fn emit_workspace_done_event_for_session_paths(
     legacy_work_item_id: &str,
     updated_at: DateTime<Utc>,
 ) -> Result<bool> {
+    Ok(matches!(
+        emit_workspace_done_event_for_session_outcome_paths(
+            current_path,
+            work_items_path,
+            events_path,
+            session_id,
+            legacy_work_item_id,
+            updated_at,
+        )?,
+        WorkspaceTerminalEventOutcome::Emitted
+    ))
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn emit_workspace_done_event_for_session_outcome_paths(
+    current_path: &Path,
+    work_items_path: &Path,
+    events_path: &Path,
+    session_id: &str,
+    legacy_work_item_id: &str,
+    updated_at: DateTime<Utc>,
+) -> Result<WorkspaceTerminalEventOutcome> {
     let mut event = WorkEvent::new(WorkEventKind::Done, legacy_work_item_id, updated_at);
     event.status_category = Some(WorkspaceStatusCategory::Done);
     emit_workspace_terminal_event_for_session_paths(
@@ -1996,6 +2159,28 @@ pub fn emit_workspace_discard_event_for_session_paths(
     legacy_work_item_id: &str,
     updated_at: DateTime<Utc>,
 ) -> Result<bool> {
+    Ok(matches!(
+        emit_workspace_discard_event_for_session_outcome_paths(
+            current_path,
+            work_items_path,
+            events_path,
+            session_id,
+            legacy_work_item_id,
+            updated_at,
+        )?,
+        WorkspaceTerminalEventOutcome::Emitted
+    ))
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn emit_workspace_discard_event_for_session_outcome_paths(
+    current_path: &Path,
+    work_items_path: &Path,
+    events_path: &Path,
+    session_id: &str,
+    legacy_work_item_id: &str,
+    updated_at: DateTime<Utc>,
+) -> Result<WorkspaceTerminalEventOutcome> {
     let event = WorkEvent::new(WorkEventKind::Discard, legacy_work_item_id, updated_at);
     emit_workspace_terminal_event_for_session_paths(
         current_path,
@@ -2014,11 +2199,32 @@ pub fn emit_workspace_done_event_for_session(
     legacy_work_item_id: &str,
     updated_at: DateTime<Utc>,
 ) -> Result<bool> {
+    Ok(matches!(
+        emit_workspace_done_event_for_session_outcome(
+            project_state_root,
+            work_event_root,
+            session_id,
+            legacy_work_item_id,
+            updated_at,
+        )?,
+        WorkspaceTerminalEventOutcome::Emitted
+    ))
+}
+
+pub fn emit_workspace_done_event_for_session_outcome(
+    project_state_root: &Path,
+    work_event_root: &Path,
+    session_id: &str,
+    legacy_work_item_id: &str,
+    updated_at: DateTime<Utc>,
+) -> Result<WorkspaceTerminalEventOutcome> {
     let current_path = gwt_workspace_projection_path_for_repo_path(project_state_root);
     let _ = migrate_legacy_workspace_projection(project_state_root, &current_path)?;
-    emit_workspace_done_event_for_session_paths(
+    let work_items_path = gwt_workspace_work_items_path_for_repo_path(work_event_root);
+    let _ = migrate_legacy_workspace_work_items(work_event_root, &work_items_path)?;
+    emit_workspace_done_event_for_session_outcome_paths(
         &current_path,
-        &gwt_workspace_work_items_path_for_repo_path(work_event_root),
+        &work_items_path,
         &gwt_workspace_work_events_closed_path_for_repo_path(work_event_root),
         session_id,
         legacy_work_item_id,
@@ -2033,11 +2239,32 @@ pub fn emit_workspace_discard_event_for_session(
     legacy_work_item_id: &str,
     updated_at: DateTime<Utc>,
 ) -> Result<bool> {
+    Ok(matches!(
+        emit_workspace_discard_event_for_session_outcome(
+            project_state_root,
+            work_event_root,
+            session_id,
+            legacy_work_item_id,
+            updated_at,
+        )?,
+        WorkspaceTerminalEventOutcome::Emitted
+    ))
+}
+
+pub fn emit_workspace_discard_event_for_session_outcome(
+    project_state_root: &Path,
+    work_event_root: &Path,
+    session_id: &str,
+    legacy_work_item_id: &str,
+    updated_at: DateTime<Utc>,
+) -> Result<WorkspaceTerminalEventOutcome> {
     let current_path = gwt_workspace_projection_path_for_repo_path(project_state_root);
     let _ = migrate_legacy_workspace_projection(project_state_root, &current_path)?;
-    emit_workspace_discard_event_for_session_paths(
+    let work_items_path = gwt_workspace_work_items_path_for_repo_path(work_event_root);
+    let _ = migrate_legacy_workspace_work_items(work_event_root, &work_items_path)?;
+    emit_workspace_discard_event_for_session_outcome_paths(
         &current_path,
-        &gwt_workspace_work_items_path_for_repo_path(work_event_root),
+        &work_items_path,
         &gwt_workspace_work_events_closed_path_for_repo_path(work_event_root),
         session_id,
         legacy_work_item_id,
@@ -2052,19 +2279,27 @@ fn emit_workspace_terminal_event_for_session_paths(
     session_id: &str,
     legacy_work_item_id: &str,
     mut event: WorkEvent,
-) -> Result<bool> {
+) -> Result<WorkspaceTerminalEventOutcome> {
     with_workspace_current_and_work_items_lock(current_path, work_items_path, || {
         let assignment = load_workspace_projection_from_path(current_path)?
             .as_ref()
             .map(|projection| workspace_assignment_for_session(projection, session_id))
             .unwrap_or(WorkspaceSessionAssignment::Missing);
-        let target = match assignment {
-            WorkspaceSessionAssignment::Assigned(work_id) => work_id,
-            WorkspaceSessionAssignment::Unassigned => return Ok(false),
-            WorkspaceSessionAssignment::Missing => legacy_work_item_id.to_string(),
+        let (target, assigned_target) = match assignment {
+            WorkspaceSessionAssignment::Assigned(work_id) => (work_id, true),
+            WorkspaceSessionAssignment::Unassigned => {
+                return Ok(WorkspaceTerminalEventOutcome::NoTarget)
+            }
+            WorkspaceSessionAssignment::Missing => (legacy_work_item_id.to_string(), false),
         };
         event.work_item_id = target;
-        emit_workspace_terminal_event_if_absent_locked(work_items_path, events_path, event, false)
+        emit_workspace_terminal_event_outcome_locked(
+            work_items_path,
+            events_path,
+            event,
+            assigned_target,
+            false,
+        )
     })
 }
 
@@ -2101,6 +2336,25 @@ fn emit_workspace_terminal_event_if_absent_locked(
     event: WorkEvent,
     allow_missing_target: bool,
 ) -> Result<bool> {
+    Ok(matches!(
+        emit_workspace_terminal_event_outcome_locked(
+            work_items_path,
+            events_path,
+            event,
+            false,
+            allow_missing_target,
+        )?,
+        WorkspaceTerminalEventOutcome::Emitted
+    ))
+}
+
+fn emit_workspace_terminal_event_outcome_locked(
+    work_items_path: &Path,
+    events_path: &Path,
+    event: WorkEvent,
+    assigned_target: bool,
+    allow_missing_target: bool,
+) -> Result<WorkspaceTerminalEventOutcome> {
     let mut projection = load_workspace_work_items_from_path(work_items_path)?
         .unwrap_or_else(|| WorkItemsProjection::empty(event.updated_at));
     let recovered = recover_unprojected_workspace_work_events_locked(&mut projection, events_path)?;
@@ -2112,26 +2366,52 @@ fn emit_workspace_terminal_event_if_absent_locked(
         if recovered {
             save_workspace_work_items_projection_to_path(work_items_path, &projection)?;
         }
-        return Ok(false);
+        return Ok(if assigned_target {
+            WorkspaceTerminalEventOutcome::AssignedWorkMissing(event.work_item_id)
+        } else {
+            WorkspaceTerminalEventOutcome::NoTarget
+        });
     }
-    if item.is_some_and(WorkItem::is_terminal) {
+    let outcome = item.and_then(|item| {
+        if item.status_category == WorkspaceStatusCategory::Done && item.discarded {
+            Some(WorkspaceTerminalEventOutcome::AmbiguousTerminal)
+        } else {
+            let matches_requested_terminal = match event.kind {
+                WorkEventKind::Done => {
+                    item.status_category == WorkspaceStatusCategory::Done && !item.discarded
+                }
+                WorkEventKind::Discard => item.discarded,
+                _ => false,
+            };
+            if matches_requested_terminal {
+                Some(WorkspaceTerminalEventOutcome::AlreadyMatching)
+            } else if item.is_terminal() {
+                Some(WorkspaceTerminalEventOutcome::WrongTerminal)
+            } else {
+                None
+            }
+        }
+    });
+    if let Some(outcome) = outcome {
         if recovered {
             save_workspace_work_items_projection_to_path(work_items_path, &projection)?;
         }
-        return Ok(false);
+        return Ok(outcome);
     }
-    Ok(persist_workspace_work_events_locked(
+    persist_workspace_work_events_locked(
         work_items_path,
         events_path,
         &mut projection,
         vec![event],
-    )? == 1)
+    )?;
+    Ok(WorkspaceTerminalEventOutcome::Emitted)
 }
 
 fn recover_unprojected_workspace_work_events_locked(
     projection: &mut WorkItemsProjection,
     events_path: &Path,
 ) -> Result<bool> {
+    repair_jsonl_tail(events_path)?;
     let content = match fs::read_to_string(events_path) {
         Ok(content) => content,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),

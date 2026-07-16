@@ -361,6 +361,37 @@ fn seed_assigned_branch_work(
     .expect("seed assigned branch Work");
 }
 
+fn seed_ambiguous_legacy_assigned_work(
+    work_event_root: &std::path::Path,
+    project_state_root: &std::path::Path,
+    session_id: &str,
+    work_id: &str,
+) {
+    seed_assigned_branch_work(work_event_root, project_state_root, session_id, work_id);
+    let work_items_path =
+        gwt_core::paths::gwt_workspace_work_items_path_for_repo_path(work_event_root);
+    let mut projection = gwt_core::workspace_projection::load_workspace_work_items(work_event_root)
+        .unwrap()
+        .unwrap();
+    let item = projection
+        .work_items
+        .iter_mut()
+        .find(|item| item.id == work_id)
+        .expect("assigned Work");
+    let terminal_at = chrono::DateTime::parse_from_rfc3339("2026-07-16T10:00:00Z")
+        .unwrap()
+        .with_timezone(&chrono::Utc);
+    item.status_category = gwt_core::workspace_projection::WorkspaceStatusCategory::Done;
+    item.completed_at = Some(terminal_at);
+    item.discarded = true;
+    item.discarded_at = Some(terminal_at);
+    gwt_core::workspace_projection::save_workspace_work_items_projection_to_path(
+        &work_items_path,
+        &projection,
+    )
+    .expect("seed ambiguous legacy Work");
+}
+
 #[test]
 fn build_complete_prefers_assigned_branch_work_over_legacy_session_work() {
     let _lock = env_lock()
@@ -702,6 +733,270 @@ fn build_complete_does_not_fall_back_when_assigned_work_is_terminal() {
         .find(|item| item.id == format!("work-session-{session_id}"))
         .unwrap();
     assert!(!legacy.is_terminal());
+}
+
+#[test]
+fn build_complete_rejects_assigned_discarded_work_and_keeps_build_active() {
+    let _lock = env_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let (mut env, dir) = new_env();
+    let _home = ScopedGwtHome::set(dir.path().join("home"));
+    let session_id = "session-assigned-discarded-complete";
+    let work_id = "work-feature-build-resolution-discarded";
+    let work_event_root = dir.path().join("work-event-root");
+    std::fs::create_dir_all(&work_event_root).unwrap();
+    let _session = ScopedEnvVar::set(gwt_agent::GWT_SESSION_ID_ENV, session_id);
+    seed_assigned_branch_work(
+        &work_event_root,
+        &dir.path().join("project-state-root"),
+        session_id,
+        work_id,
+    );
+    gwt_core::workspace_projection::emit_workspace_discard_event_if_absent(
+        &work_event_root,
+        work_id,
+        chrono::Utc::now(),
+    )
+    .unwrap();
+
+    dispatch_json(&mut env, "build.start", serde_json::json!({"spec": 2359}));
+    let code = dispatch_json(
+        &mut env,
+        "build.complete",
+        serde_json::json!({"spec": 2359}),
+    );
+
+    let state = skill_state::load(dir.path(), "build-spec")
+        .unwrap()
+        .unwrap();
+    let projection = gwt_core::workspace_projection::load_workspace_work_items(&work_event_root)
+        .unwrap()
+        .unwrap();
+    let assigned = projection
+        .work_items
+        .iter()
+        .find(|item| item.id == work_id)
+        .expect("assigned discarded Work");
+    let done_events = assigned
+        .events
+        .iter()
+        .filter(|event| event.kind == gwt_core::workspace_projection::WorkEventKind::Done)
+        .count();
+
+    assert_eq!(
+        (
+            code,
+            state.active,
+            assigned.discarded,
+            assigned.status_category,
+            done_events,
+        ),
+        (
+            1,
+            true,
+            true,
+            gwt_core::workspace_projection::WorkspaceStatusCategory::Idle,
+            0,
+        ),
+        "build.complete must reject an assigned Discarded Work without changing its terminal kind"
+    );
+}
+
+#[test]
+fn build_abort_rejects_assigned_done_work_and_keeps_build_active() {
+    let _lock = env_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let (mut env, dir) = new_env();
+    let _home = ScopedGwtHome::set(dir.path().join("home"));
+    let session_id = "session-assigned-done-abort";
+    let work_id = "work-feature-build-resolution-done";
+    let work_event_root = dir.path().join("work-event-root");
+    std::fs::create_dir_all(&work_event_root).unwrap();
+    let _session = ScopedEnvVar::set(gwt_agent::GWT_SESSION_ID_ENV, session_id);
+    seed_assigned_branch_work(
+        &work_event_root,
+        &dir.path().join("project-state-root"),
+        session_id,
+        work_id,
+    );
+    gwt_core::workspace_projection::emit_workspace_done_event_if_absent(
+        &work_event_root,
+        work_id,
+        chrono::Utc::now(),
+    )
+    .unwrap();
+
+    dispatch_json(&mut env, "build.start", serde_json::json!({"spec": 2359}));
+    let code = dispatch_json(
+        &mut env,
+        "build.abort",
+        serde_json::json!({"spec": 2359, "reason": "cancelled"}),
+    );
+
+    let state = skill_state::load(dir.path(), "build-spec")
+        .unwrap()
+        .unwrap();
+    let projection = gwt_core::workspace_projection::load_workspace_work_items(&work_event_root)
+        .unwrap()
+        .unwrap();
+    let assigned = projection
+        .work_items
+        .iter()
+        .find(|item| item.id == work_id)
+        .expect("assigned Done Work");
+    let discard_events = assigned
+        .events
+        .iter()
+        .filter(|event| event.kind == gwt_core::workspace_projection::WorkEventKind::Discard)
+        .count();
+
+    assert_eq!(
+        (
+            code,
+            state.active,
+            assigned.discarded,
+            assigned.status_category,
+            discard_events,
+        ),
+        (
+            1,
+            true,
+            false,
+            gwt_core::workspace_projection::WorkspaceStatusCategory::Done,
+            0,
+        ),
+        "build.abort must reject an assigned Done Work without changing its terminal kind"
+    );
+}
+
+#[test]
+fn build_complete_rejects_ambiguous_legacy_work_and_keeps_build_active() {
+    let _lock = env_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let (mut env, dir) = new_env();
+    let _home = ScopedGwtHome::set(dir.path().join("home"));
+    let session_id = "session-ambiguous-legacy-complete";
+    let work_id = "work-ambiguous-legacy-complete";
+    let work_event_root = dir.path().join("work-event-root");
+    let project_state_root = dir.path().join("project-state-root");
+    std::fs::create_dir_all(&work_event_root).unwrap();
+    let _session = ScopedEnvVar::set(gwt_agent::GWT_SESSION_ID_ENV, session_id);
+    seed_ambiguous_legacy_assigned_work(&work_event_root, &project_state_root, session_id, work_id);
+
+    dispatch_json(&mut env, "build.start", serde_json::json!({"spec": 2359}));
+    let code = dispatch_json(
+        &mut env,
+        "build.complete",
+        serde_json::json!({"spec": 2359}),
+    );
+
+    let state = skill_state::load(dir.path(), "build-spec")
+        .unwrap()
+        .unwrap();
+    let projection = gwt_core::workspace_projection::load_workspace_work_items(&work_event_root)
+        .unwrap()
+        .unwrap();
+    let item = projection
+        .work_items
+        .iter()
+        .find(|item| item.id == work_id)
+        .expect("ambiguous legacy Work");
+    let terminal_events = item
+        .events
+        .iter()
+        .filter(|event| {
+            matches!(
+                event.kind,
+                gwt_core::workspace_projection::WorkEventKind::Done
+                    | gwt_core::workspace_projection::WorkEventKind::Discard
+            )
+        })
+        .count();
+
+    assert_eq!(
+        (
+            code,
+            state.active,
+            item.status_category,
+            item.discarded,
+            terminal_events,
+        ),
+        (
+            1,
+            true,
+            gwt_core::workspace_projection::WorkspaceStatusCategory::Done,
+            true,
+            0,
+        ),
+        "build.complete must reject an ambiguous legacy terminal state without finalizing"
+    );
+}
+
+#[test]
+fn build_abort_rejects_ambiguous_legacy_work_and_keeps_build_active() {
+    let _lock = env_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let (mut env, dir) = new_env();
+    let _home = ScopedGwtHome::set(dir.path().join("home"));
+    let session_id = "session-ambiguous-legacy-abort";
+    let work_id = "work-ambiguous-legacy-abort";
+    let work_event_root = dir.path().join("work-event-root");
+    let project_state_root = dir.path().join("project-state-root");
+    std::fs::create_dir_all(&work_event_root).unwrap();
+    let _session = ScopedEnvVar::set(gwt_agent::GWT_SESSION_ID_ENV, session_id);
+    seed_ambiguous_legacy_assigned_work(&work_event_root, &project_state_root, session_id, work_id);
+
+    dispatch_json(&mut env, "build.start", serde_json::json!({"spec": 2359}));
+    let code = dispatch_json(
+        &mut env,
+        "build.abort",
+        serde_json::json!({"spec": 2359, "reason": "cancelled"}),
+    );
+
+    let state = skill_state::load(dir.path(), "build-spec")
+        .unwrap()
+        .unwrap();
+    let projection = gwt_core::workspace_projection::load_workspace_work_items(&work_event_root)
+        .unwrap()
+        .unwrap();
+    let item = projection
+        .work_items
+        .iter()
+        .find(|item| item.id == work_id)
+        .expect("ambiguous legacy Work");
+    let terminal_events = item
+        .events
+        .iter()
+        .filter(|event| {
+            matches!(
+                event.kind,
+                gwt_core::workspace_projection::WorkEventKind::Done
+                    | gwt_core::workspace_projection::WorkEventKind::Discard
+            )
+        })
+        .count();
+
+    assert_eq!(
+        (
+            code,
+            state.active,
+            item.status_category,
+            item.discarded,
+            terminal_events,
+        ),
+        (
+            1,
+            true,
+            gwt_core::workspace_projection::WorkspaceStatusCategory::Done,
+            true,
+            0,
+        ),
+        "build.abort must reject an ambiguous legacy terminal state without finalizing"
+    );
 }
 
 #[test]

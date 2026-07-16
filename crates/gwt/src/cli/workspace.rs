@@ -442,6 +442,26 @@ pub(super) fn run<E: CliEnv>(
                         "workspace not found: {workspace_id}"
                     )));
                 };
+                if item.is_terminal() {
+                    return Err(GwtError::Other(format!(
+                        "cannot join terminal Work: {workspace_id}"
+                    )));
+                }
+                let Some(agent) = projection.latest_agent_for_session(&agent_session).cloned()
+                else {
+                    return Err(GwtError::Other(format!(
+                        "agent session not found: {agent_session}"
+                    )));
+                };
+                let event = workspace_claim_event(
+                    &workspace_id,
+                    &agent_session,
+                    current_focus.clone(),
+                    title_summary.clone().or_else(|| Some(item.title.clone())),
+                    item.owner.clone(),
+                    None,
+                    &agent,
+                );
                 assign_agent_to_workspace(
                     projection,
                     &agent_session,
@@ -451,7 +471,7 @@ pub(super) fn run<E: CliEnv>(
                 )
                 .map_err(spec_ops_as_core_error)?;
                 apply_workspace_item_to_projection(projection, item);
-                Ok(((), Vec::new()))
+                Ok(((), vec![event]))
             })
             .map_err(core_error)?;
             publish_workspace_change(env.repo_path());
@@ -958,17 +978,35 @@ fn workspace_join_event(
     owner: Option<String>,
     agent: &WorkspaceAgentSummary,
 ) -> WorkEvent {
+    workspace_claim_event(
+        workspace_id,
+        &input.agent_session,
+        input.current_focus.clone(),
+        Some(input.title_summary.clone()),
+        owner,
+        input.boundary.as_deref(),
+        agent,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn workspace_claim_event(
+    workspace_id: &str,
+    agent_session: &str,
+    current_focus: Option<String>,
+    title_summary: Option<String>,
+    owner: Option<String>,
+    boundary: Option<&str>,
+    agent: &WorkspaceAgentSummary,
+) -> WorkEvent {
     let now = Utc::now();
     let mut event = WorkEvent::new(WorkEventKind::Claim, workspace_id.to_string(), now);
-    event.intent = input.current_focus.clone();
-    event.summary = Some(format!("Joined Workspace: {}", input.title_summary));
+    event.intent = current_focus;
+    event.summary = title_summary.map(|title| format!("Joined Workspace: {title}"));
     event.status_category = Some(WorkspaceStatusCategory::Active);
     event.owner = owner;
-    event.next_action = input
-        .boundary
-        .as_deref()
-        .map(|boundary| format!("Boundary: {boundary}"));
-    event.agent_session_id = Some(input.agent_session.clone());
+    event.next_action = boundary.map(|boundary| format!("Boundary: {boundary}"));
+    event.agent_session_id = Some(agent_session.to_string());
     event.agent_id = Some(agent.agent_id.clone());
     event.display_name = Some(agent.display_name.clone());
     event.execution_container = Some(workspace_execution_container_from_agent(agent));
@@ -1814,7 +1852,7 @@ mod tests {
     }
 
     #[test]
-    fn workspace_join_assigns_unassigned_agent_to_existing_workspace() {
+    fn workspace_join_assigns_agent_with_durable_claim_provenance() {
         let _guard = env_guard();
         let gwt_home = tempfile::tempdir().expect("gwt home");
         let _home = ScopedHome::set(gwt_home.path());
@@ -1860,6 +1898,193 @@ mod tests {
         );
         assert_eq!(agent.workspace_id.as_deref(), Some("workspace-existing"));
         assert_eq!(saved.id, "workspace-existing");
+
+        let attached_by_after_join = load_workspace_work_items(&repo)
+            .expect("load Work items after Join")
+            .expect("Work items after Join")
+            .work_items
+            .into_iter()
+            .find(|item| item.id == "workspace-existing")
+            .and_then(|item| {
+                item.agents
+                    .into_iter()
+                    .find(|agent| agent.session_id == "session-1")
+            })
+            .and_then(|agent| agent.attached_by);
+
+        gwt_core::workspace_projection::rebuild_work_items_from_events_for_repo(&repo)
+            .expect("refold Work items from events");
+        let attached_by_after_refold = load_workspace_work_items(&repo)
+            .expect("load refolded Work items")
+            .expect("refolded Work items")
+            .work_items
+            .into_iter()
+            .find(|item| item.id == "workspace-existing")
+            .and_then(|item| {
+                item.agents
+                    .into_iter()
+                    .find(|agent| agent.session_id == "session-1")
+            })
+            .and_then(|agent| agent.attached_by);
+
+        assert_eq!(
+            (attached_by_after_join, attached_by_after_refold),
+            (Some(WorkEventKind::Claim), Some(WorkEventKind::Claim)),
+            "direct Join must persist Claim provenance in the hot projection and event refold"
+        );
+    }
+
+    #[test]
+    fn workspace_join_rejects_terminal_work_without_persisting_claim_or_assignment() {
+        let _guard = env_guard();
+        let gwt_home = tempfile::tempdir().expect("gwt home");
+        let _home = ScopedHome::set(gwt_home.path());
+        let temp = tempfile::tempdir().expect("tempdir");
+
+        for (label, close_kind) in [
+            ("done", WorkEventKind::Done),
+            ("discarded", WorkEventKind::Discard),
+        ] {
+            let repo = temp.path().join(label);
+            std::fs::create_dir_all(&repo).expect("repo");
+            let mut env = TestEnv::new(repo.clone());
+            let mut current = WorkspaceProjection::default_for_project(&repo);
+            current.agents.push(unassigned_agent("session-1"));
+            save_workspace_projection(&repo, &current).expect("save projection");
+            let work_id = format!("work-{label}");
+            let mut start = WorkEvent::new(WorkEventKind::Start, &work_id, Utc::now());
+            start.title = Some(format!("{label} Work"));
+            start.status_category = Some(WorkspaceStatusCategory::Active);
+            record_workspace_work_event(&repo, start).expect("record workspace");
+            match close_kind {
+                WorkEventKind::Done => {
+                    gwt_core::workspace_projection::emit_workspace_done_event_if_absent(
+                        &repo,
+                        &work_id,
+                        Utc::now(),
+                    )
+                    .expect("complete Work");
+                }
+                WorkEventKind::Discard => {
+                    gwt_core::workspace_projection::emit_workspace_discard_event_if_absent(
+                        &repo,
+                        &work_id,
+                        Utc::now(),
+                    )
+                    .expect("discard Work");
+                }
+                _ => unreachable!(),
+            }
+            let current_before = load_workspace_projection(&repo).unwrap().unwrap();
+            let works_before = load_workspace_work_items(&repo).unwrap().unwrap();
+            let mut out = String::new();
+
+            let result = run(
+                &mut env,
+                WorkspaceCommand::Join {
+                    agent_session: "session-1".to_string(),
+                    workspace_id: work_id,
+                    current_focus: Some("Must not join terminal Work".to_string()),
+                    title_summary: Some("Terminal Work".to_string()),
+                },
+                &mut out,
+            );
+
+            assert!(result.is_err(), "joining {label} Work must fail");
+            assert!(out.is_empty());
+            assert_eq!(
+                load_workspace_projection(&repo).unwrap().unwrap(),
+                current_before,
+                "joining {label} Work must not assign the Agent"
+            );
+            assert_eq!(
+                load_workspace_work_items(&repo).unwrap().unwrap(),
+                works_before,
+                "joining {label} Work must not append Claim"
+            );
+        }
+    }
+
+    #[test]
+    fn workspace_join_recovers_durable_unprojected_terminal_event_before_claim() {
+        let _guard = env_guard();
+        let gwt_home = tempfile::tempdir().expect("gwt home");
+        let _home = ScopedHome::set(gwt_home.path());
+        let temp = tempfile::tempdir().expect("tempdir");
+
+        for (label, close_kind) in [
+            ("done", WorkEventKind::Done),
+            ("discarded", WorkEventKind::Discard),
+        ] {
+            let repo = temp.path().join(format!("partial-{label}"));
+            std::fs::create_dir_all(&repo).expect("repo");
+            let mut env = TestEnv::new(repo.clone());
+            let mut current = WorkspaceProjection::default_for_project(&repo);
+            current.agents.push(unassigned_agent("session-1"));
+            save_workspace_projection(&repo, &current).expect("save projection");
+            let work_id = format!("work-partial-{label}");
+            let mut start = WorkEvent::new(WorkEventKind::Start, &work_id, Utc::now());
+            start.title = Some(format!("Partial {label} Work"));
+            start.status_category = Some(WorkspaceStatusCategory::Active);
+            record_workspace_work_event(&repo, start).expect("record workspace");
+
+            let mut close = WorkEvent::new(close_kind, &work_id, Utc::now());
+            if close_kind == WorkEventKind::Done {
+                close.status_category = Some(WorkspaceStatusCategory::Done);
+            }
+            let closed_events_path =
+                gwt_core::paths::gwt_workspace_work_events_closed_path_for_repo_path(&repo);
+            gwt_core::workspace_projection::append_workspace_work_event_to_path(
+                &closed_events_path,
+                &close,
+            )
+            .expect("append durable close without projecting it");
+            let current_before = load_workspace_projection(&repo).unwrap().unwrap();
+            let works_before = load_workspace_work_items(&repo).unwrap().unwrap();
+            assert!(
+                !works_before
+                    .work_items
+                    .iter()
+                    .find(|item| item.id == work_id)
+                    .unwrap()
+                    .is_terminal(),
+                "fixture must leave works.json stale"
+            );
+            let shared_events_path = gwt_core::paths::gwt_repo_local_work_events_path(&repo);
+            let shared_before = std::fs::read(&shared_events_path).unwrap();
+            let mut out = String::new();
+
+            let result = run(
+                &mut env,
+                WorkspaceCommand::Join {
+                    agent_session: "session-1".to_string(),
+                    workspace_id: work_id,
+                    current_focus: Some("Must observe durable close".to_string()),
+                    title_summary: Some("Partial terminal Work".to_string()),
+                },
+                &mut out,
+            );
+
+            assert!(result.is_err(), "partial {label} close must block Join");
+            assert!(out.is_empty());
+            assert_eq!(
+                load_workspace_projection(&repo).unwrap().unwrap(),
+                current_before
+            );
+            assert_eq!(
+                load_workspace_work_items(&repo).unwrap().unwrap(),
+                works_before
+            );
+            assert_eq!(std::fs::read(&shared_events_path).unwrap(), shared_before);
+            assert_eq!(
+                std::fs::read_to_string(&closed_events_path)
+                    .unwrap()
+                    .lines()
+                    .count(),
+                1,
+                "Join must not duplicate or remove the durable close event"
+            );
+        }
     }
 
     #[test]
