@@ -218,6 +218,25 @@ fn read_issue_meta(path: &Path) -> Option<IssueMetadata> {
     serde_json::from_slice(&bytes).ok()
 }
 
+/// FR-394 post-lock revalidation: true when the issue index meta records a
+/// full refresh at or after `since`, meaning an equivalent refresh finished
+/// while this caller waited for the coordinator lock and the duplicate can
+/// be skipped.
+pub fn issue_index_refreshed_since(
+    index_root: &Path,
+    repo_hash: &str,
+    since: DateTime<Utc>,
+) -> bool {
+    let meta_path = index_root.join(repo_hash).join("issues").join("meta.json");
+    let Some(meta) = read_issue_meta(&meta_path) else {
+        return false;
+    };
+    let Ok(last) = DateTime::parse_from_rfc3339(&meta.last_full_refresh) else {
+        return false;
+    };
+    last.with_timezone(&Utc) >= since
+}
+
 // =====================================================================
 // Default RunnerSpawner: spawns the actual Python runner via tokio
 // =====================================================================
@@ -330,8 +349,24 @@ fn run_coordinated_issue_index(
         }
     };
     let key = TargetKey::repo_shared(repo_hash, "issues");
+    let requested_at = Utc::now();
     match coordinator.request_job(&key, JobPriority::Background, ISSUE_INDEX_ADMISSION_TIMEOUT) {
         Ok(JobAdmission::Owner(guard)) => {
+            // FR-394 post-lock revalidation: skip the duplicate when an
+            // equivalent refresh completed while we queued for the target.
+            if issue_index_refreshed_since(
+                &crate::index::paths::gwt_index_root(),
+                repo_hash,
+                requested_at,
+            ) {
+                let _ = guard.complete(crate::index_coordinator::JobOutcome::Completed);
+                tracing::info!(
+                    target: "gwt::index",
+                    spawn_id = spawn_id,
+                    "issue index skipped: refreshed while waiting for the coordinator"
+                );
+                return;
+            }
             let heavy = match guard.acquire_heavy(ISSUE_INDEX_HEAVY_TIMEOUT) {
                 Ok(heavy) => heavy,
                 Err(err) => {

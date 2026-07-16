@@ -684,13 +684,59 @@ fn aggregate_project_index_status_for_path_inner(
     );
 
     let coverage = selection.coverage;
+    // Phase 70 FR-393 / AS-13: one batch status process covers every
+    // selected worktree instead of one serial Python spawn per worktree.
+    let worktree_hashes: Vec<String> = selection
+        .inputs
+        .iter()
+        .map(|input| input.worktree_hash.clone())
+        .collect();
+    let batch = probe_worktrees_status_batch(&repo_root, &repo_hash, &worktree_hashes);
     let mut probes: Vec<WorktreeProbeOutcome> = Vec::with_capacity(selection.inputs.len());
-    for input in selection.inputs {
-        let payload = probe_worktree_status(&repo_root, &repo_hash, &input.worktree_hash);
-        probes.push(WorktreeProbeOutcome {
-            input,
-            status_payload: payload,
-        });
+    match batch {
+        Ok(payload) => {
+            let runtime = payload
+                .get("runtime")
+                .cloned()
+                .unwrap_or(serde_json::Value::Null);
+            let repo_status = payload
+                .get("status")
+                .cloned()
+                .unwrap_or_else(|| serde_json::json!({}));
+            let worktrees = payload
+                .get("worktrees")
+                .cloned()
+                .unwrap_or_else(|| serde_json::json!({}));
+            for input in selection.inputs {
+                let mut status = repo_status.clone();
+                if let (Some(status_obj), Some(worktree_obj)) = (
+                    status.as_object_mut(),
+                    worktrees
+                        .get(&input.worktree_hash)
+                        .and_then(serde_json::Value::as_object),
+                ) {
+                    for (key, value) in worktree_obj {
+                        status_obj.insert(key.clone(), value.clone());
+                    }
+                }
+                probes.push(WorktreeProbeOutcome {
+                    input,
+                    status_payload: Ok(serde_json::json!({
+                        "ok": true,
+                        "runtime": runtime.clone(),
+                        "status": status,
+                    })),
+                });
+            }
+        }
+        Err(error) => {
+            for input in selection.inputs {
+                probes.push(WorktreeProbeOutcome {
+                    input,
+                    status_payload: Err(error.clone()),
+                });
+            }
+        }
     }
 
     let mut view = build_aggregated_status_view(report.runner_hash.as_str(), &probes);
@@ -824,10 +870,11 @@ fn push_worktree_probe_input(
     Ok(())
 }
 
-fn probe_worktree_status(
+/// One batch status process for every selected worktree (FR-393 / AS-13).
+fn probe_worktrees_status_batch(
     repo_root: &Path,
     repo_hash: &RepoHash,
-    worktree_hash: &str,
+    worktree_hashes: &[String],
 ) -> Result<serde_json::Value, String> {
     let runner_started = Instant::now();
     let output = gwt_core::process::hidden_command(project_index_python_path())
@@ -836,19 +883,22 @@ fn probe_worktree_status(
         .arg("status")
         .arg("--repo-hash")
         .arg(repo_hash.as_str())
-        .arg("--worktree-hash")
-        .arg(worktree_hash)
+        .arg("--worktree-hashes")
+        .arg(worktree_hashes.join(","))
         .current_dir(repo_root)
         .output()
         .map_err(|err| format!("run project index status: {err}"))?;
     if !output.status.success() {
+        // FR-393: a failed runner invocation invalidates the positive probe
+        // cache so the next ensure re-verifies the runtime.
+        gwt_core::runtime::invalidate_project_index_probe_cache();
         tracing::warn!(
             target: "gwt::index",
             project_root = %repo_root.display(),
-            worktree_hash,
+            worktree_count = worktree_hashes.len(),
             elapsed_ms = runner_started.elapsed().as_millis() as u64,
             exit_status = %output.status,
-            "project index status runner failed for worktree"
+            "project index batch status runner failed"
         );
         let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
         let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
@@ -858,10 +908,9 @@ fn probe_worktree_status(
     tracing::debug!(
         target: "gwt::index",
         project_root = %repo_root.display(),
-        worktree_hash,
+        worktree_count = worktree_hashes.len(),
         elapsed_ms = runner_started.elapsed().as_millis() as u64,
-        exit_status = %output.status,
-        "project index status runner completed for worktree"
+        "project index batch status runner completed"
     );
     serde_json::from_slice(&output.stdout)
         .map_err(|err| format!("parse project index status: {err}"))

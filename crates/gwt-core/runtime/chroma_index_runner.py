@@ -4998,6 +4998,7 @@ def action_status_v2(
     repo_hash: str,
     worktree_hash: Optional[str],
     db_root: Optional[Path] = None,
+    worktree_hashes: Optional[Sequence[str]] = None,
 ) -> dict:
     out: Dict[str, Any] = {
         "issues": _issue_status_v2(repo_hash, db_root=db_root),
@@ -5011,7 +5012,22 @@ def action_status_v2(
         for scope in ("files", "files-docs"):
             out[scope] = _scope_status_v2(repo_hash, worktree_hash, scope, db_root=db_root)
 
-    return {"ok": True, "runtime": _runtime_status_v2(), "status": out}
+    payload = {"ok": True, "runtime": _runtime_status_v2(), "status": out}
+    if worktree_hashes:
+        # Phase 70 FR-393 / AS-13: one batch process reports every requested
+        # worktree so all-worktree status no longer spawns one Python per
+        # worktree.
+        payload["worktrees"] = {
+            hash_value: {
+                scope: _scope_status_v2(
+                    repo_hash, hash_value, scope, db_root=db_root
+                )
+                for scope in ("files", "files-docs")
+            }
+            for hash_value in worktree_hashes
+            if hash_value
+        }
+    return payload
 
 
 # =====================================================================
@@ -5073,6 +5089,8 @@ def parse_args() -> argparse.Namespace:
     )
     # Explicit index root override (defaults to ~/.gwt/index).
     parser.add_argument("--db-root", dest="db_root", default="")
+    # Phase 70 AS-13: batch all-worktree status in one process.
+    parser.add_argument("--worktree-hashes", dest="worktree_hashes", default="")
     return parser.parse_args()
 
 
@@ -5084,7 +5102,19 @@ def _dispatch_v2(action: str, args: argparse.Namespace) -> int:
 
     try:
         if action == "status":
-            emit(action_status_v2(repo_hash, worktree_hash))
+            worktree_hashes = [
+                value.strip()
+                for value in (args.worktree_hashes or "").split(",")
+                if value.strip()
+            ]
+            emit(
+                action_status_v2(
+                    repo_hash,
+                    worktree_hash,
+                    db_root=db_root,
+                    worktree_hashes=worktree_hashes or None,
+                )
+            )
             return 0
 
         if action == "index-issues":

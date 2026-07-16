@@ -166,3 +166,52 @@ fn python_runner_spawner_builds_issue_index_command_and_surfaces_spawn_errors() 
         .expect_err("missing executable should surface the spawn error");
     assert_eq!(error.kind(), std::io::ErrorKind::NotFound);
 }
+
+/// Phase 70 T-IDX-394 (Issue #3264 FR-394): after taking the coordinator
+/// lock, a queued issue refresh must detect that an equivalent refresh
+/// already completed and skip the duplicate run.
+#[test]
+fn issue_index_refreshed_since_detects_completed_duplicate() {
+    use gwt_core::index::runtime::issue_index_refreshed_since;
+
+    let tmp = tempfile::tempdir().unwrap();
+    let index_root = tmp.path().join("index");
+    let issues_dir = index_root.join("abc1234567890def").join("issues");
+    std::fs::create_dir_all(&issues_dir).unwrap();
+
+    // No meta yet: nothing was refreshed.
+    let now = chrono::Utc::now();
+    assert!(!issue_index_refreshed_since(
+        &index_root,
+        "abc1234567890def",
+        now
+    ));
+
+    std::fs::write(
+        issues_dir.join("meta.json"),
+        serde_json::json!({
+            "schema_version": 1,
+            "last_full_refresh": now.to_rfc3339(),
+            "ttl_minutes": 15,
+        })
+        .to_string(),
+    )
+    .unwrap();
+
+    assert!(
+        issue_index_refreshed_since(
+            &index_root,
+            "abc1234567890def",
+            now - chrono::Duration::minutes(1)
+        ),
+        "a refresh completed after our request must be detected"
+    );
+    assert!(
+        !issue_index_refreshed_since(
+            &index_root,
+            "abc1234567890def",
+            now + chrono::Duration::minutes(1)
+        ),
+        "an older refresh must not satisfy a newer request"
+    );
+}
