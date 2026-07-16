@@ -51,6 +51,18 @@ Keep these artifacts throughout the discussion:
   or build context
 - `Action Bundle` for the concrete follow-up actions that should happen next
 
+When the discussed work touches multiple Issues/SPECs, the artifact update is
+not complete until exactly one Primary Execution Owner is selected and every
+related owner is classified (SPEC-3248 Multi-Issue Primary Owner Bundle):
+
+- `bundled-required` — must ship in the Primary owner's PR; copy or summarize
+  its required tasks and acceptance into the Primary so a single-Issue
+  Execution launch can implement the full bundled scope without opening every
+  related Issue
+- `dependent-follow-up` — separately deliverable with explicit ordering and
+  blocker notes; never a hidden Primary completion requirement
+- `reference-only` — background reading, not part of the PR's completion
+
 `Discussion TODO` is not an implementation task list. It tracks unresolved
 questions, dependency checks, deferred decisions, coverage gaps, exit blockers,
 the next question to ask, and the depth state for the active proposal.

@@ -202,6 +202,14 @@ Required checks:
 - Acceptance checkboxes in the tasks section reflect behavior that has actually been accepted
 - TDD checkboxes in the tasks section reflect real verification evidence
 - Completion markers in the tasks section do not claim completion that is not backed by code
+- Bundled-required owners are covered (SPEC-3248 Multi-Issue Primary Owner
+  Bundle): when the Primary owner's tasks/plan classify related Issues/SPECs
+  as `bundled-required`, their implementation, tests, and acceptance must be
+  complete inside this same execution before reporting done. One primary
+  Execution agent/session owns the entire bundled scope end-to-end; helper
+  subagents may contribute but never split completion ownership.
+  `dependent-follow-up` owners are recorded with explicit ordering and do not
+  block Primary completion.
 - If artifacts disagree, return to `gwt-discussion` — do not proceed to PR
 - Ready PR Gate passed for a releaseable slice. An incomplete Draft PR
   handoff must be reported separately and does not satisfy completion.

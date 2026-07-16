@@ -477,6 +477,12 @@ fn write_spec_section<E: CliEnv>(
     );
     let receipt =
         ops.write_section(IssueNumber(number), &SectionName(section.clone()), &content)?;
+    super::intake_outcome::auto_record_issue_operation(
+        env.repo_path(),
+        "issue.spec.edit",
+        super::intake_outcome::IntakeOutcomeKind::SpecUpdated,
+        number,
+    );
     out.push_str(&render_write_receipt(&section, &receipt));
     Ok(0)
 }
@@ -525,6 +531,12 @@ fn write_structured_spec_section<E: CliEnv>(
     };
     let receipt =
         ops.write_section(IssueNumber(number), &SectionName(section.clone()), &content)?;
+    super::intake_outcome::auto_record_issue_operation(
+        env.repo_path(),
+        "issue.spec.edit",
+        super::intake_outcome::IntakeOutcomeKind::SpecUpdated,
+        number,
+    );
     out.push_str(&render_write_receipt(&section, &receipt));
     Ok(0)
 }
@@ -550,6 +562,12 @@ fn create_spec_from_markdown<E: CliEnv>(
         .map(|section| (section.name, section.content))
         .collect();
     let snapshot = ops.create_spec(&title, sections, &labels)?;
+    super::intake_outcome::auto_record_issue_operation(
+        env.repo_path(),
+        "issue.spec.create",
+        super::intake_outcome::IntakeOutcomeKind::SpecCreated,
+        snapshot.number.0,
+    );
     out.push_str(&format!(
         "created issue #{} with labels {:?}\n",
         snapshot.number.0, snapshot.labels
@@ -575,6 +593,12 @@ fn create_spec_from_structured_json<E: CliEnv>(
     let spec = render_structured_spec(&normalize_spec_heading_from_title(&title), &structured);
     let sections = BTreeMap::from([(SectionName(SPEC_SECTION_NAME.to_string()), spec)]);
     let snapshot = ops.create_spec(&title, sections, &labels)?;
+    super::intake_outcome::auto_record_issue_operation(
+        env.repo_path(),
+        "issue.spec.create",
+        super::intake_outcome::IntakeOutcomeKind::SpecCreated,
+        snapshot.number.0,
+    );
     out.push_str(&format!(
         "created issue #{} with labels {:?}\n",
         snapshot.number.0, snapshot.labels
