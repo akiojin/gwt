@@ -75,7 +75,7 @@ def configure_qos_threads(qos: str) -> None:
 
 
 def _lower_process_priority() -> None:
-    if os.name == "nt":
+    if os.name == "nt":  # pragma: no cover - Windows-only branch
         try:
             import ctypes
 
@@ -1930,7 +1930,7 @@ def _gc_abandoned_generations(gen_root: Path, keep: set) -> None:
             continue
         try:
             abandoned_for = now - entry.stat().st_mtime
-        except OSError:
+        except OSError:  # pragma: no cover - entry vanished mid-scan
             continue
         if abandoned_for > GENERATION_GC_SECONDS:
             shutil.rmtree(entry, ignore_errors=True)
@@ -2171,7 +2171,7 @@ def _copy_unchanged_records(
                     )
                     got_ids = got.get("ids") or []
                     embeddings = got.get("embeddings")
-                    if not got_ids or embeddings is None:
+                    if not got_ids or embeddings is None:  # pragma: no cover - store drift
                         continue
                     staging_collection.upsert(
                         ids=list(got_ids),
@@ -2235,7 +2235,7 @@ def _index_files_full_with_staging(
                 reused = int(continuation.get("reused", 0))
                 try:
                     staged_ids = set(collection.get().get("ids") or [])
-                except Exception:
+                except Exception:  # pragma: no cover - defensive chroma fallback
                     staged_ids = set()
             else:
                 # FR-391: reuse unchanged embeddings from the previous
@@ -2246,7 +2246,7 @@ def _index_files_full_with_staging(
                 if reused:
                     try:
                         staged_ids = set(collection.get().get("ids") or [])
-                    except Exception:
+                    except Exception:  # pragma: no cover - defensive chroma fallback
                         staged_ids = set()
             pending_paths: List[Path] = []
             for fpath in paths:
