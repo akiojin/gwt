@@ -8,9 +8,10 @@
 use std::{path::Path, time::Instant};
 
 use super::{
-    board_reminder, diagnostics, execution_completion_stop_check, skill_build_spec_stop_check,
-    skill_discussion_stop_check, skill_plan_spec_stop_check, skill_register_spec_stop_check,
-    workflow_policy, workspace_identity, HookError, HookOutput, IntentBoundaryEvent,
+    board_reminder, diagnostics, execution_completion_stop_check, intake_completion_stop_check,
+    skill_build_spec_stop_check, skill_discussion_stop_check, skill_plan_spec_stop_check,
+    skill_register_spec_stop_check, workflow_policy, workspace_identity, HookError, HookOutput,
+    IntentBoundaryEvent,
 };
 use crate::discussion_resume::{load_pending_goal, PendingDiscussionGoal};
 
@@ -94,6 +95,11 @@ fn handle_user_prompt_submit(
             tracing::warn!(?error, "workspace-identity hook step failed");
         }
     });
+    // SPEC-3248 P7A (FR-016): mark the intake artifact requirement dirty for
+    // curation/producing prompts. Fail-open state writer.
+    run_value(event, "intake-outcome-required-since", || {
+        intake_completion_stop_check::handle_user_prompt_submit(worktree_root, input);
+    });
     let output = run_step(event, "board-reminder", || {
         board_reminder::handle_with_input(event, input)
     })?;
@@ -148,23 +154,61 @@ fn handle_stop(
     let reminder = run_step(event, "board-reminder", || {
         board_reminder::handle_with_input(event, input)
     })?;
-    for output in [
-        run_value(event, "skill-discussion-stop-check", || {
-            skill_discussion_stop_check::handle_with_input(worktree_root, input)
-        }),
-        run_value(event, "skill-plan-spec-stop-check", || {
-            skill_plan_spec_stop_check::handle_with_input(worktree_root, input, current_session)
-        }),
-        run_value(event, "skill-build-spec-stop-check", || {
-            skill_build_spec_stop_check::handle_with_input(worktree_root, input, current_session)
-        }),
-        run_value(event, "skill-register-spec-stop-check", || {
-            skill_register_spec_stop_check::handle_with_input(worktree_root, input, current_session)
-        }),
-        run_value(event, "execution-completion-stop-check", || {
-            execution_completion_stop_check::handle_with_input(worktree_root, input)
-        }),
-    ] {
+    // Evaluate the stop-checks lazily, one at a time: the first StopBlock
+    // wins and the remaining checks must NOT run. This matters since the
+    // intake completion gate (SPEC-3248 P7A) has a persistent side effect
+    // (self-improvement auto-capture) that must only fire for the block the
+    // agent actually sees.
+    let stop_checks: [(&str, Box<dyn FnOnce() -> HookOutput + '_>); 6] = [
+        (
+            "skill-discussion-stop-check",
+            Box::new(|| skill_discussion_stop_check::handle_with_input(worktree_root, input)),
+        ),
+        (
+            "skill-plan-spec-stop-check",
+            Box::new(|| {
+                skill_plan_spec_stop_check::handle_with_input(worktree_root, input, current_session)
+            }),
+        ),
+        (
+            "skill-build-spec-stop-check",
+            Box::new(|| {
+                skill_build_spec_stop_check::handle_with_input(
+                    worktree_root,
+                    input,
+                    current_session,
+                )
+            }),
+        ),
+        (
+            "skill-register-spec-stop-check",
+            Box::new(|| {
+                skill_register_spec_stop_check::handle_with_input(
+                    worktree_root,
+                    input,
+                    current_session,
+                )
+            }),
+        ),
+        // SPEC-3248 P7A (FR-014): intake completion hard gate. Runs before
+        // completed-stop recording like every entry in this chain.
+        (
+            "intake-completion-stop-check",
+            Box::new(|| {
+                intake_completion_stop_check::handle_with_input(
+                    worktree_root,
+                    input,
+                    current_session,
+                )
+            }),
+        ),
+        (
+            "execution-completion-stop-check",
+            Box::new(|| execution_completion_stop_check::handle_with_input(worktree_root, input)),
+        ),
+    ];
+    for (handler, check) in stop_checks {
+        let output = run_value(event, handler, check);
         if matches!(output, HookOutput::StopBlock { .. }) {
             run_step(event, "blocked-stop-runtime-state", || {
                 crate::daemon_runtime::handle_blocked_stop_runtime_state(input)
@@ -393,6 +437,182 @@ mod tests {
         };
         assert_eq!(event, IntentBoundaryEvent::SessionStart);
         assert!(text.contains("pending gwt-discussion Goal Start"), "{text}");
+    }
+
+    // SPEC-3248 P7A (T-095): managed-hook lifecycle for the intake artifact
+    // gate — a curation prompt marks the requirement dirty, Stop blocks while
+    // no fresh outcome exists (auto-capturing one self-improvement
+    // candidate), a valid outcome clears the block, and the next prompt makes
+    // that outcome stale so Stop blocks again (updating the same candidate).
+    #[test]
+    fn intake_artifact_gate_lifecycle_blocks_until_fresh_outcome() {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let worktree = tempfile::tempdir().unwrap();
+        let _home = ScopedEnvVar::set("HOME", worktree.path());
+        let _userprofile = ScopedEnvVar::set("USERPROFILE", worktree.path());
+        let sessions_dir = worktree.path().join(".gwt").join("sessions");
+        let mut session = Session::new(worktree.path(), "intake/curate", AgentId::ClaudeCode);
+        session.agent_session_id = Some("agent-intake".to_string());
+        let session_id = session.id.clone();
+        session.save(&sessions_dir).unwrap();
+        let runtime_path = gwt_agent::runtime_state_path(&sessions_dir, &session_id);
+        let _session_env = ScopedEnvVar::set(GWT_SESSION_ID_ENV, &session_id);
+        let _runtime_env = ScopedEnvVar::set(GWT_SESSION_RUNTIME_PATH_ENV, &runtime_path);
+        let _forward_url = ScopedEnvVar::unset(gwt_agent::GWT_HOOK_FORWARD_URL_ENV);
+        let _forward_token = ScopedEnvVar::unset(gwt_agent::GWT_HOOK_FORWARD_TOKEN_ENV);
+        let _codex_thread_id = ScopedEnvVar::unset("CODEX_THREAD_ID");
+        gwt_skills::write_lane_file(worktree.path(), &gwt_skills::INTAKE_PROFILE).unwrap();
+
+        let prompt_input = serde_json::json!({
+            "prompt": "このバグ報告を Issue に登録して",
+            "session_id": "agent-intake",
+        })
+        .to_string();
+        let stop_input = serde_json::json!({
+            "session_id": "agent-intake",
+            "stop_hook_active": false,
+        })
+        .to_string();
+
+        // 1. Curation prompt marks the artifact requirement dirty.
+        handle_with_input(
+            "UserPromptSubmit",
+            &prompt_input,
+            worktree.path(),
+            Some(&session_id),
+        )
+        .expect("prompt hook output");
+
+        // 2. Stop without an outcome blocks and captures one candidate.
+        let output = handle_with_input("Stop", &stop_input, worktree.path(), Some(&session_id))
+            .expect("stop hook output");
+        let HookOutput::StopBlock { reason } = output else {
+            panic!("expected intake artifact gate StopBlock, got {output:?}");
+        };
+        assert!(reason.contains("Intake artifact gate"), "{reason}");
+        let candidates = crate::cli::improvement::candidate_public_values(worktree.path());
+        assert_eq!(candidates.len(), 1);
+        assert_eq!(
+            candidates[0].get("occurrences").and_then(|v| v.as_u64()),
+            Some(1)
+        );
+
+        // 3. A valid Issue/SPEC outcome clears the block.
+        crate::cli::intake_outcome::record_outcome(
+            worktree.path(),
+            &session_id,
+            crate::cli::intake_outcome::IntakeOutcome {
+                kind: crate::cli::intake_outcome::IntakeOutcomeKind::IssueCreated,
+                number: Some(4242),
+                reason: None,
+                source_operation: "issue.create".to_string(),
+                recorded_at: chrono::Utc::now(),
+            },
+        )
+        .unwrap();
+        let output = handle_with_input("Stop", &stop_input, worktree.path(), Some(&session_id))
+            .expect("stop hook output");
+        assert!(
+            !matches!(output, HookOutput::StopBlock { .. }),
+            "fresh valid outcome must pass Stop, got {output:?}"
+        );
+
+        // 4. A later prompt makes the outcome stale; Stop blocks again and
+        //    updates the same candidate (stable dedupe).
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        handle_with_input(
+            "UserPromptSubmit",
+            &prompt_input,
+            worktree.path(),
+            Some(&session_id),
+        )
+        .expect("prompt hook output");
+        let output = handle_with_input("Stop", &stop_input, worktree.path(), Some(&session_id))
+            .expect("stop hook output");
+        let HookOutput::StopBlock { reason } = output else {
+            panic!("expected stale-outcome StopBlock, got {output:?}");
+        };
+        assert!(
+            reason.contains("predates the latest user prompt"),
+            "{reason}"
+        );
+        let candidates = crate::cli::improvement::candidate_public_values(worktree.path());
+        assert_eq!(candidates.len(), 1, "dedupe must keep one candidate");
+        assert_eq!(
+            candidates[0].get("occurrences").and_then(|v| v.as_u64()),
+            Some(2)
+        );
+    }
+
+    // SPEC-3248 P7A review follow-up: stop-checks are evaluated lazily — when
+    // an earlier gate (gwt-discussion) produces the StopBlock, the intake
+    // completion gate must NOT run, so its auto-capture side effect fires
+    // only for blocks the agent actually sees.
+    #[test]
+    fn earlier_stop_block_skips_intake_gate_side_effects() {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let worktree = tempfile::tempdir().unwrap();
+        let _home = ScopedEnvVar::set("HOME", worktree.path());
+        let _userprofile = ScopedEnvVar::set("USERPROFILE", worktree.path());
+        let sessions_dir = worktree.path().join(".gwt").join("sessions");
+        let mut session = Session::new(worktree.path(), "intake/curate", AgentId::ClaudeCode);
+        session.agent_session_id = Some("agent-intake".to_string());
+        let session_id = session.id.clone();
+        session.save(&sessions_dir).unwrap();
+        let runtime_path = gwt_agent::runtime_state_path(&sessions_dir, &session_id);
+        let _session_env = ScopedEnvVar::set(GWT_SESSION_ID_ENV, &session_id);
+        let _runtime_env = ScopedEnvVar::set(GWT_SESSION_RUNTIME_PATH_ENV, &runtime_path);
+        let _forward_url = ScopedEnvVar::unset(gwt_agent::GWT_HOOK_FORWARD_URL_ENV);
+        let _forward_token = ScopedEnvVar::unset(gwt_agent::GWT_HOOK_FORWARD_TOKEN_ENV);
+        let _codex_thread_id = ScopedEnvVar::unset("CODEX_THREAD_ID");
+        gwt_skills::write_lane_file(worktree.path(), &gwt_skills::INTAKE_PROFILE).unwrap();
+
+        // Arm the intake gate (dirty marker, no outcome) AND leave an active
+        // discussion with a pending question so the discussion gate blocks
+        // first.
+        crate::cli::intake_outcome::mark_required_since(
+            worktree.path(),
+            &session_id,
+            chrono::Utc::now(),
+        )
+        .unwrap();
+        let discussions = worktree.path().join(".gwt/work/discussions.md");
+        std::fs::create_dir_all(discussions.parent().unwrap()).unwrap();
+        std::fs::write(
+            &discussions,
+            "## Discussion TODO\n\n\
+             ### Proposal A - Hook-driven resume [active]\n\
+             - Summary: Keep unfinished discussion state in the local artifact.\n\
+             - Next Question: Should SessionStart surface the resume proposal?\n",
+        )
+        .unwrap();
+
+        let stop_input = serde_json::json!({
+            "session_id": "agent-intake",
+            "stop_hook_active": false,
+        })
+        .to_string();
+        let output = handle_with_input("Stop", &stop_input, worktree.path(), Some(&session_id))
+            .expect("stop hook output");
+        let HookOutput::StopBlock { reason } = output else {
+            panic!("expected discussion StopBlock, got {output:?}");
+        };
+        assert!(
+            reason.contains("Discussion is still"),
+            "discussion gate must win: {reason}"
+        );
+        assert!(
+            !reason.contains("Intake artifact gate"),
+            "intake gate must not contribute: {reason}"
+        );
+        assert!(
+            crate::cli::improvement::candidate_public_values(worktree.path()).is_empty(),
+            "intake auto-capture must not fire when an earlier gate blocks"
+        );
     }
 
     #[test]

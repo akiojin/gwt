@@ -27,6 +27,7 @@ pub mod forward;
 pub mod gwt_self_improvement_stop;
 pub mod health;
 mod identity;
+pub mod intake_completion_stop_check;
 pub mod provider_event;
 pub mod runtime_state;
 pub mod segments;

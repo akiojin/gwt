@@ -18,6 +18,7 @@ pub mod gwtd_resolver;
 pub mod hook;
 pub mod improvement;
 pub(crate) mod index;
+pub(crate) mod intake_outcome;
 pub(crate) mod issue;
 mod issue_spec;
 mod json_envelope;
@@ -152,6 +153,8 @@ pub enum CliCommand {
     Hook(HookCommand),
     Improvement(ImprovementCommand),
     Index(IndexCommand),
+    /// SPEC-3248 P7A: `intake.outcome.record` JSON operation (FR-012).
+    Intake(intake_outcome::IntakeCommand),
     Diagnostics(DiagnosticsCommand),
     Memory(MemoryCommand),
     Discuss(DiscussCommand),
@@ -584,6 +587,7 @@ pub(crate) fn run_collect<E: CliEnv>(
         CliCommand::Board(inner) => board::run(env, inner, &mut out)?,
         CliCommand::Improvement(inner) => improvement::run(env, inner, &mut out)?,
         CliCommand::Index(inner) => index::run(env, inner, &mut out)?,
+        CliCommand::Intake(inner) => intake_outcome::run(env, inner, &mut out)?,
         CliCommand::Memory(inner) => memory::run(env, inner, &mut out)?,
         CliCommand::Discuss(action) => discuss::run(env, action, &mut out)?,
         CliCommand::Discussion(inner) => discussion::run(env, inner, &mut out)?,

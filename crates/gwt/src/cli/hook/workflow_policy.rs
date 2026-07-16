@@ -1434,6 +1434,59 @@ Coverage requirements.
         );
     }
 
+    // SPEC-3248 P7A (T-076): the intake lane still blocks production code
+    // edits while the standalone gwtd JSON envelope operations that settle
+    // curation — Issue/SPEC ops, `intake.outcome.record`,
+    // `improvement.capture`, and `memory.add` — pass the lane guard.
+    #[test]
+    fn intake_lane_allows_curation_json_operations_while_blocking_code_edits() {
+        let repo = tempfile::tempdir().expect("repo");
+        gwt_skills::write_lane_file(repo.path(), &gwt_skills::INTAKE_PROFILE).expect("intake lane");
+
+        let bash_event = |command: &str| HookEvent {
+            tool_name: Some("Bash".to_string()),
+            tool_input: Some(serde_json::json!({ "command": command })),
+            transcript_path: None,
+            cwd: None,
+        };
+
+        for operation in [
+            "issue.create",
+            "issue.comment",
+            "issue.spec.create",
+            "issue.spec.edit",
+            "intake.outcome.record",
+            "improvement.capture",
+            "memory.add",
+        ] {
+            let command = format!(
+                "gwtd <<'JSON'\n{{\"schema_version\":1,\"operation\":\"{operation}\",\"params\":{{}}}}\nJSON"
+            );
+            assert_eq!(
+                evaluate_lane_code_edit_guard(&bash_event(&command), repo.path()).expect("guard"),
+                HookOutput::Silent,
+                "intake must allow standalone JSON operation {operation}"
+            );
+        }
+
+        // Production source edits stay blocked alongside the allowlist.
+        let edit_event = HookEvent {
+            tool_name: Some("Edit".to_string()),
+            tool_input: Some(serde_json::json!({
+                "file_path": repo.path().join("crates/gwt/src/main.rs").to_str().unwrap()
+            })),
+            transcript_path: None,
+            cwd: None,
+        };
+        assert!(
+            matches!(
+                evaluate_lane_code_edit_guard(&edit_event, repo.path()).expect("guard"),
+                HookOutput::PreToolUsePermission { .. }
+            ),
+            "intake must still block production code edits"
+        );
+    }
+
     #[test]
     fn evaluate_with_context_uses_explicit_title_summary_state() {
         let repo = tempfile::tempdir().expect("repo");

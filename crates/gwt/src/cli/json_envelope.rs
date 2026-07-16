@@ -103,6 +103,13 @@ fn parse(input: &str) -> Result<ParsedEnvelope, CliParseError> {
         }
         "improvement.capture" => improvement_capture(params)?,
         "improvement.list" => improvement_list(params)?,
+        "intake.outcome.record" | "intake.outcome-record" => {
+            CliCommand::Intake(crate::cli::intake_outcome::IntakeCommand::OutcomeRecord {
+                kind: required_string(params, "kind")?,
+                number: optional_u64(params, "number")?,
+                reason: optional_string(params, "reason")?,
+            })
+        }
         "improvement.dismiss" => improvement_dismiss(params)?,
         "improvement.link_issue" | "improvement.link-issue" => improvement_link_issue(params)?,
         "improvement.promote_issue" | "improvement.promote-issue" => {
@@ -1358,6 +1365,30 @@ mod tests {
                 json!({"title": "t", "body": ["a", "b"], "structured": true})
             ),
             CliCommand::Issue(IssueCommand::SpecCreateJsonBody { .. })
+        ));
+    }
+
+    // SPEC-3248 P7A (T-072/FR-012): intake.outcome.record parse variants.
+    #[test]
+    fn intake_outcome_record_variants() {
+        assert!(matches!(
+            ok(
+                "intake.outcome.record",
+                json!({"kind": "no_action", "reason": "duplicate of #3248"})
+            ),
+            CliCommand::Intake(crate::cli::intake_outcome::IntakeCommand::OutcomeRecord { .. })
+        ));
+        assert!(matches!(
+            ok(
+                "intake.outcome-record",
+                json!({"kind": "issue_updated", "number": 3248})
+            ),
+            CliCommand::Intake(crate::cli::intake_outcome::IntakeCommand::OutcomeRecord { .. })
+        ));
+        // kind is required at the parse layer.
+        assert!(matches!(
+            err("intake.outcome.record", json!({"number": 1})),
+            CliParseError::MissingFlag("kind")
         ));
     }
 
