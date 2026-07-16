@@ -155,10 +155,14 @@ fn repository_name_from_url(url: &str) -> Result<String> {
         return Err(GwtError::Git("repository URL is required".to_string()));
     }
 
-    let without_query = trimmed
+    // Git accepts local filesystem paths as clone sources. Normalize only the
+    // separator used for name extraction so Windows paths follow the same
+    // final-component rules as URLs without changing the value passed to Git.
+    let normalized = trimmed.replace('\\', "/");
+    let without_query = normalized
         .split(['?', '#'])
         .next()
-        .unwrap_or(trimmed)
+        .unwrap_or(&normalized)
         .trim_end_matches('/');
     let path_part = if let Some((_prefix, rest)) = without_query.split_once("://") {
         rest.rsplit_once('/')
@@ -753,6 +757,22 @@ mod tests {
         assert_eq!(target.repo_name, "gwt");
         assert_eq!(target.workspace_home, parent.join("gwt"));
         assert_eq!(target.bare_repo_path, parent.join("gwt").join("gwt.git"));
+    }
+
+    #[test]
+    fn github_project_clone_target_derives_workspace_from_windows_path() {
+        let parent = Path::new("C:\\projects");
+
+        let target =
+            derive_github_project_clone_target("C:\\Users\\example\\repos\\sample.git", parent)
+                .expect("derive target from Windows path");
+
+        assert_eq!(target.repo_name, "sample");
+        assert_eq!(target.workspace_home, parent.join("sample"));
+        assert_eq!(
+            target.bare_repo_path,
+            parent.join("sample").join("sample.git")
+        );
     }
 
     // ---- install_develop_protection tests ----
