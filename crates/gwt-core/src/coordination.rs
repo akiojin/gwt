@@ -319,6 +319,14 @@ pub struct BoardEntry {
     pub origin_branch: Option<String>,
     #[serde(default)]
     pub origin_session_id: Option<String>,
+    /// Session lane that produced the entry (for example `intake`). Missing
+    /// on legacy entries and therefore intentionally nullable.
+    #[serde(default)]
+    pub origin_session_kind: Option<String>,
+    /// Durable recovery record associated with the originating session.
+    /// Missing on entries written before Intake recovery support.
+    #[serde(default)]
+    pub origin_recovery_id: Option<String>,
     #[serde(default)]
     pub origin_agent_id: Option<String>,
     #[serde(default)]
@@ -347,6 +355,16 @@ impl BoardEntry {
 
     pub fn with_origin_session_id(mut self, value: impl Into<String>) -> Self {
         self.origin_session_id = Some(value.into());
+        self
+    }
+
+    pub fn with_origin_session_kind(mut self, value: impl Into<String>) -> Self {
+        self.origin_session_kind = Some(value.into());
+        self
+    }
+
+    pub fn with_origin_recovery_id(mut self, value: impl Into<String>) -> Self {
+        self.origin_recovery_id = Some(value.into());
         self
     }
 
@@ -434,6 +452,8 @@ impl BoardEntry {
             related_owners,
             origin_branch: None,
             origin_session_id: None,
+            origin_session_kind: None,
+            origin_recovery_id: None,
             origin_agent_id: None,
             target_owners: Vec::new(),
             mentions: Vec::new(),
@@ -465,6 +485,8 @@ pub fn normalize_audience(values: Vec<String>) -> Vec<String> {
 pub struct BoardOrigin {
     pub branch: String,
     pub session_id: String,
+    pub session_kind: String,
+    pub recovery_id: String,
     pub agent_id: String,
 }
 
@@ -477,8 +499,20 @@ impl BoardOrigin {
         Self {
             branch: branch.into(),
             session_id: session_id.into(),
+            session_kind: String::new(),
+            recovery_id: String::new(),
             agent_id: agent_id.into(),
         }
+    }
+
+    pub fn with_session_kind(mut self, value: impl Into<String>) -> Self {
+        self.session_kind = value.into();
+        self
+    }
+
+    pub fn with_recovery_id(mut self, value: impl Into<String>) -> Self {
+        self.recovery_id = value.into();
+        self
     }
 }
 
@@ -573,6 +607,8 @@ impl BoardEntryDraft {
         entry.audience = normalize_board_audience(self.audience);
         entry.origin_branch = blank_to_none(&self.origin.branch);
         entry.origin_session_id = blank_to_none(&self.origin.session_id);
+        entry.origin_session_kind = blank_to_none(&self.origin.session_kind);
+        entry.origin_recovery_id = blank_to_none(&self.origin.recovery_id);
         entry.origin_agent_id = blank_to_none(&self.origin.agent_id);
         Ok(entry)
     }
@@ -705,10 +741,14 @@ mod board_entry_draft_tests {
     #[test]
     fn finalize_drops_blank_origin_fields_and_keeps_nonblank() {
         let mut d = draft("body");
-        d.origin = BoardOrigin::new("  ", "session-1", " agent-a ");
+        d.origin = BoardOrigin::new("  ", "session-1", " agent-a ")
+            .with_session_kind(" intake ")
+            .with_recovery_id(" recovery-1 ");
         let entry = d.finalize().expect("finalize");
         assert_eq!(entry.origin_branch, None);
         assert_eq!(entry.origin_session_id.as_deref(), Some("session-1"));
+        assert_eq!(entry.origin_session_kind.as_deref(), Some("intake"));
+        assert_eq!(entry.origin_recovery_id.as_deref(), Some("recovery-1"));
         assert_eq!(entry.origin_agent_id.as_deref(), Some("agent-a"));
     }
 
@@ -885,6 +925,100 @@ pub fn post_entry(worktree_root: &Path, entry: BoardEntry) -> Result<Coordinatio
     let mut entry = entry;
     entry.normalize_audience();
     append_event(worktree_root, &CoordinationEvent::MessageAppended { entry })
+}
+
+/// Failure returned by [`post_entry_idempotent`]. A repeated request with the
+/// same immutable content succeeds, while reusing an ID for different content
+/// is surfaced as a conflict rather than silently appending a duplicate.
+#[derive(Debug, thiserror::Error)]
+pub enum PostEntryIdempotentError {
+    #[error(transparent)]
+    Storage(#[from] GwtError),
+    #[error("Board entry ID `{entry_id}` already exists with different content")]
+    Conflict { entry_id: String },
+}
+
+enum IdempotentPostLockedOutcome {
+    Success(CoordinationSnapshot),
+    Conflict,
+}
+
+/// Append `entry` at most once by its caller-supplied ID.
+///
+/// Retries may reconstruct a [`BoardEntry`] and therefore carry fresh
+/// `created_at` / `updated_at` values. Those generated timestamps and the
+/// non-persisted `body_html` cache are excluded from the content comparison;
+/// every other persisted field must match. The lookup runs under the same
+/// coordination lock as the append, so concurrent retries cannot both append.
+pub fn post_entry_idempotent(
+    worktree_root: &Path,
+    mut entry: BoardEntry,
+) -> std::result::Result<CoordinationSnapshot, PostEntryIdempotentError> {
+    entry.normalize_audience();
+    let entry_id = entry.id.clone();
+    let outcome = with_coordination_lock(worktree_root, || {
+        ensure_repo_local_files(worktree_root)?;
+        let coordination_root = coordination_dir(worktree_root);
+        if import_late_legacy_event_log_locked(&coordination_root)? {
+            repair_snapshot_locked(worktree_root)?;
+        }
+
+        let matching_entries = load_board_entries_from_segments_root(&coordination_root)?
+            .into_iter()
+            .filter(|existing| existing.id == entry.id)
+            .collect::<Vec<_>>();
+        if !matching_entries.is_empty() {
+            if matching_entries
+                .iter()
+                .all(|existing| board_entries_have_same_idempotent_content(existing, &entry))
+            {
+                return Ok(IdempotentPostLockedOutcome::Success(load_snapshot_locked(
+                    worktree_root,
+                )?));
+            }
+            return Ok(IdempotentPostLockedOutcome::Conflict);
+        }
+
+        append_event_locked(worktree_root, &CoordinationEvent::MessageAppended { entry })
+            .map(IdempotentPostLockedOutcome::Success)
+    })?;
+
+    match outcome {
+        IdempotentPostLockedOutcome::Success(snapshot) => Ok(snapshot),
+        IdempotentPostLockedOutcome::Conflict => {
+            Err(PostEntryIdempotentError::Conflict { entry_id })
+        }
+    }
+}
+
+fn board_entries_have_same_idempotent_content(
+    existing: &BoardEntry,
+    candidate: &BoardEntry,
+) -> bool {
+    let mut existing = existing.clone();
+    let mut candidate = candidate.clone();
+    existing.normalize_audience();
+    candidate.normalize_audience();
+    existing.created_at = candidate.created_at;
+    existing.updated_at = candidate.updated_at;
+    existing.body_html = None;
+    candidate.body_html = None;
+    existing == candidate
+}
+
+fn load_snapshot_locked(worktree_root: &Path) -> Result<CoordinationSnapshot> {
+    let coordination_root = coordination_dir(worktree_root);
+    let mut projection: BoardProjection =
+        load_json_or_default(&coordination_board_projection_path(worktree_root))?;
+    normalize_board_projection(&mut projection);
+    let manifest = load_event_manifest_from_dir(&coordination_root)?;
+    if legacy_event_log_needs_import(&coordination_root)?
+        || projection_needs_rebuild(&projection, &manifest)
+    {
+        repair_snapshot_locked(worktree_root)
+    } else {
+        Ok(CoordinationSnapshot { board: projection })
+    }
 }
 
 pub fn append_event(
@@ -1890,6 +2024,26 @@ pub fn load_entries_since_for_scope(
     Ok(filter_board_entries_for_scope(entries, scope))
 }
 
+/// Load every Board entry produced by one GWT session, including entries that
+/// have aged out of the bounded hot projection. Results are chronological.
+pub fn load_entries_for_origin_session(
+    worktree_root: &Path,
+    origin_session_id: &str,
+) -> Result<Vec<BoardEntry>> {
+    ensure_repo_local_files(worktree_root)?;
+    let origin_session_id = origin_session_id.trim();
+    if origin_session_id.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let mut entries = load_board_entries_from_segments_root(&coordination_dir(worktree_root))?
+        .into_iter()
+        .filter(|entry| entry.origin_session_id.as_deref() == Some(origin_session_id))
+        .collect::<Vec<_>>();
+    entries.sort_by_key(|entry| entry.created_at);
+    Ok(entries)
+}
+
 /// Check whether `author` has posted a message of the given `kind` within the
 /// trailing `within` duration. Used by `board-reminder` for redundancy
 /// suppression.
@@ -2848,6 +3002,113 @@ mod tests {
     }
 
     #[test]
+    fn post_entry_idempotent_reuses_existing_entry_with_same_content() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut entry = BoardEntry::new(
+            AuthorKind::Agent,
+            "Codex",
+            BoardEntryKind::Decision,
+            "Use durable recovery checkpoints",
+            None,
+            None,
+            vec!["intake".into()],
+            vec![],
+        )
+        .with_origin_session_id("session-1")
+        .with_origin_session_kind("intake")
+        .with_origin_recovery_id("recovery-1");
+        entry.id = "milestone-1".to_string();
+
+        let first = post_entry_idempotent(dir.path(), entry.clone()).unwrap();
+        assert_eq!(first.board.total_entries, 1);
+
+        let mut retry = entry;
+        retry.created_at += chrono::Duration::seconds(5);
+        retry.updated_at = retry.created_at;
+        let second = post_entry_idempotent(dir.path(), retry).unwrap();
+
+        assert_eq!(second.board.total_entries, 1);
+        assert_eq!(
+            load_entries_for_origin_session(dir.path(), "session-1")
+                .unwrap()
+                .len(),
+            1
+        );
+    }
+
+    #[test]
+    fn post_entry_idempotent_rejects_same_id_with_different_content() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut entry = BoardEntry::new(
+            AuthorKind::Agent,
+            "Codex",
+            BoardEntryKind::Decision,
+            "Use durable recovery checkpoints",
+            None,
+            None,
+            vec![],
+            vec![],
+        );
+        entry.id = "milestone-conflict".to_string();
+        post_entry_idempotent(dir.path(), entry.clone()).unwrap();
+
+        entry.body = "Use terminal scrollback".to_string();
+        let error = post_entry_idempotent(dir.path(), entry).unwrap_err();
+
+        assert!(matches!(
+            error,
+            PostEntryIdempotentError::Conflict { ref entry_id }
+                if entry_id == "milestone-conflict"
+        ));
+        let snapshot = load_snapshot(dir.path()).unwrap();
+        assert_eq!(snapshot.board.total_entries, 1);
+        assert_eq!(
+            snapshot.board.entries[0].body,
+            "Use durable recovery checkpoints"
+        );
+    }
+
+    #[test]
+    fn load_entries_for_origin_session_filters_exactly_and_chronologically() {
+        let dir = tempfile::tempdir().unwrap();
+        let base = Utc.with_ymd_and_hms(2026, 7, 16, 0, 0, 0).unwrap();
+
+        for (id, session_id, offset) in [
+            ("later", "session-1", 20),
+            ("other", "session-10", 10),
+            ("earlier", "session-1", 0),
+        ] {
+            let mut entry = BoardEntry::new(
+                AuthorKind::Agent,
+                "Codex",
+                BoardEntryKind::Status,
+                id,
+                None,
+                None,
+                vec![],
+                vec![],
+            )
+            .with_origin_session_id(session_id);
+            entry.id = id.to_string();
+            entry.created_at = base + chrono::Duration::seconds(offset);
+            entry.updated_at = entry.created_at;
+            post_entry(dir.path(), entry).unwrap();
+        }
+
+        let entries = load_entries_for_origin_session(dir.path(), " session-1 ").unwrap();
+        assert_eq!(
+            entries
+                .iter()
+                .map(|entry| entry.id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["earlier", "later"]
+        );
+        assert!(load_entries_for_origin_session(dir.path(), "   ")
+            .unwrap()
+            .is_empty());
+    }
+
+    #[test]
     fn rebuild_snapshot_reconstructs_message_order_without_cards() {
         let dir = tempfile::tempdir().unwrap();
 
@@ -3385,6 +3646,40 @@ mod tests {
 
         let snapshot = load_snapshot(root.as_path()).unwrap();
         assert_eq!(snapshot.board.entries.len(), 8);
+    }
+
+    #[test]
+    fn concurrent_idempotent_retries_append_one_record() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = Arc::new(dir.path().to_path_buf());
+        let mut entry = BoardEntry::new(
+            AuthorKind::System,
+            "gwt",
+            BoardEntryKind::Status,
+            "Intake recovery is available",
+            None,
+            None,
+            vec![],
+            vec![],
+        )
+        .with_origin_session_id("session-concurrent")
+        .with_origin_recovery_id("recovery-concurrent");
+        entry.id = "milestone-concurrent".to_string();
+
+        let handles = (0..8)
+            .map(|_| {
+                let root = Arc::clone(&root);
+                let entry = entry.clone();
+                thread::spawn(move || post_entry_idempotent(&root, entry).unwrap())
+            })
+            .collect::<Vec<_>>();
+        for handle in handles {
+            handle.join().unwrap();
+        }
+
+        let snapshot = load_snapshot(root.as_path()).unwrap();
+        assert_eq!(snapshot.board.total_entries, 1);
+        assert_eq!(snapshot.board.entries[0].id, "milestone-concurrent");
     }
 
     #[test]
@@ -4234,10 +4529,14 @@ mod tests {
         )
         .with_origin_branch("feature/update-board")
         .with_origin_session_id("sess-a3f2")
+        .with_origin_session_kind("intake")
+        .with_origin_recovery_id("recovery-a3f2")
         .with_origin_agent_id("agent-codex-001");
 
         assert_eq!(entry.origin_branch.as_deref(), Some("feature/update-board"));
         assert_eq!(entry.origin_session_id.as_deref(), Some("sess-a3f2"));
+        assert_eq!(entry.origin_session_kind.as_deref(), Some("intake"));
+        assert_eq!(entry.origin_recovery_id.as_deref(), Some("recovery-a3f2"));
         assert_eq!(entry.origin_agent_id.as_deref(), Some("agent-codex-001"));
     }
 
@@ -4332,7 +4631,31 @@ mod tests {
         let entry: BoardEntry = serde_json::from_str(legacy_json).unwrap();
         assert_eq!(entry.origin_branch, None);
         assert_eq!(entry.origin_session_id, None);
+        assert_eq!(entry.origin_session_kind, None);
+        assert_eq!(entry.origin_recovery_id, None);
         assert_eq!(entry.origin_agent_id, None);
+    }
+
+    #[test]
+    fn board_entry_accepts_nullable_origin_branch_with_recovery_origin() {
+        let json = r#"{
+            "id": "milestone-1",
+            "author_kind": "agent",
+            "author": "Codex",
+            "kind": "status",
+            "body": "recoverable intake",
+            "created_at": "2026-07-16T00:00:00Z",
+            "updated_at": "2026-07-16T00:00:00Z",
+            "origin_branch": null,
+            "origin_session_id": "session-1",
+            "origin_session_kind": "intake",
+            "origin_recovery_id": "recovery-1"
+        }"#;
+
+        let entry: BoardEntry = serde_json::from_str(json).unwrap();
+        assert_eq!(entry.origin_branch, None);
+        assert_eq!(entry.origin_session_kind.as_deref(), Some("intake"));
+        assert_eq!(entry.origin_recovery_id.as_deref(), Some("recovery-1"));
     }
 
     fn write_legacy_board_post(path: &std::path::Path, entry: &BoardEntry) {

@@ -25,7 +25,7 @@
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::thread;
 
 use super::{
@@ -34,7 +34,7 @@ use super::{
     apply_windows_host_shell_wrapper, combined_window_id, detect_shell_program,
     finalize_docker_agent_launch_config, geometry_to_pty_size, install_launch_gwt_bin_env,
     intake_hook_config_is_disposable, is_ephemeral_intake_worktree, launch_output_mirror,
-    mark_auto_resume_source_completed, normalize_branch_name,
+    normalize_branch_name, pin_host_codex_latest_runner,
     refresh_managed_gwt_assets_for_agent_with_codex_hook_discovery_mode,
     resolve_docker_launch_plan, resolve_launch_spec_with_fallback, resolve_launch_worktree,
     same_worktree_path, save_resumed_workspace_projection, save_start_work_workspace_projection,
@@ -43,6 +43,9 @@ use super::{
     WindowGeometry, WindowPreset, WindowProcessStatus, WindowRuntime, WorkspaceResumeContext,
 };
 
+const RECOVERY_CONTINUATION_MAX_VISIBLE_ITEMS: usize = 12;
+const RECOVERY_CONTINUATION_MAX_CHARS: usize = 12_000;
+
 #[derive(Debug, Clone)]
 pub struct ProcessLaunch {
     pub(crate) command: String,
@@ -50,6 +53,216 @@ pub struct ProcessLaunch {
     pub(crate) env: HashMap<String, String>,
     pub(crate) remove_env: Vec<String>,
     pub(crate) cwd: Option<PathBuf>,
+}
+
+fn executable_basename(command: &str) -> &str {
+    command
+        .rsplit(['/', '\\'])
+        .next()
+        .unwrap_or(command)
+        .trim_end_matches(".exe")
+        .trim_end_matches(".cmd")
+        .trim_end_matches(".bat")
+}
+
+fn codex_runner_prefix_len(command: &str, args: &[String]) -> Result<usize, String> {
+    match executable_basename(command).to_ascii_lowercase().as_str() {
+        "codex" => Ok(0),
+        "bunx" | "npx" => {
+            let mut package_index = 0;
+            if args.get(package_index).is_some_and(|arg| arg == "--yes") {
+                package_index += 1;
+            }
+            let package = args.get(package_index).ok_or_else(|| {
+                "Codex package runner is missing its @openai/codex package spec".to_string()
+            })?;
+            if package == "@openai/codex" || package.starts_with("@openai/codex@") {
+                Ok(package_index + 1)
+            } else {
+                Err("Codex package runner does not target @openai/codex".to_string())
+            }
+        }
+        _ => Err("Codex Host runner cannot be paired with an exact app-server".to_string()),
+    }
+}
+
+struct PreparedContainerCodexBridge {
+    app_server: gwt::codex_bridge::CodexAppServerLaunch,
+    runner_prefix_len: usize,
+    compose_files: Vec<PathBuf>,
+    service: String,
+    container_cwd: String,
+    recovery_attachments: Option<gwt::codex_bridge::ContainerRecoveryAttachmentBundle>,
+}
+
+enum PreparedCodexBridge {
+    Host(gwt::codex_bridge::CodexAppServerLaunch),
+    Container(PreparedContainerCodexBridge),
+}
+
+fn codex_app_server_for_runner(
+    config: &gwt_agent::LaunchConfig,
+    runner_prefix_len: usize,
+    cwd: Option<PathBuf>,
+) -> gwt::codex_bridge::CodexAppServerLaunch {
+    let mut args = config.args[..runner_prefix_len].to_vec();
+    args.extend([
+        "app-server".to_string(),
+        "--listen".to_string(),
+        "stdio://".to_string(),
+    ]);
+    gwt::codex_bridge::CodexAppServerLaunch {
+        command: config.command.clone(),
+        args,
+        env: HashMap::new(),
+        remove_env: vec![gwt::codex_bridge::CODEX_REMOTE_AUTH_TOKEN_ENV.to_string()],
+        cwd,
+    }
+}
+
+fn prepare_codex_remote_bridge(
+    config: &mut gwt_agent::LaunchConfig,
+) -> Result<Option<PreparedCodexBridge>, String> {
+    if config.agent_id != gwt_agent::AgentId::Codex {
+        return Ok(None);
+    }
+    let runner_prefix_len = codex_runner_prefix_len(&config.command, &config.args)?;
+    match config.runtime_target {
+        gwt_agent::LaunchRuntimeTarget::Host => {
+            let endpoint =
+                gwt::codex_bridge::codex_bridge_endpoint().map_err(|error| error.to_string())?;
+            let app_server =
+                codex_app_server_for_runner(config, runner_prefix_len, config.working_dir.clone());
+            config.args.splice(
+                runner_prefix_len..runner_prefix_len,
+                [
+                    "--remote".to_string(),
+                    endpoint,
+                    "--remote-auth-token-env".to_string(),
+                    gwt::codex_bridge::CODEX_REMOTE_AUTH_TOKEN_ENV.to_string(),
+                ],
+            );
+            Ok(Some(PreparedCodexBridge::Host(app_server)))
+        }
+        gwt_agent::LaunchRuntimeTarget::Docker => {
+            let worktree = config
+                .working_dir
+                .as_deref()
+                .ok_or_else(|| "Docker Codex launch is missing its worktree".to_string())?;
+            let plan = resolve_docker_launch_plan(worktree, config.docker_service.as_deref())?;
+            let app_server = codex_app_server_for_runner(
+                config,
+                runner_prefix_len,
+                Some(PathBuf::from(&plan.container_cwd)),
+            );
+            Ok(Some(PreparedCodexBridge::Container(
+                PreparedContainerCodexBridge {
+                    app_server,
+                    runner_prefix_len,
+                    compose_files: plan.compose_files_for_runtime(),
+                    service: plan.service,
+                    container_cwd: plan.container_cwd,
+                    recovery_attachments: None,
+                },
+            )))
+        }
+    }
+}
+
+fn prepare_container_checkpoint_attachments(
+    project_root: &Path,
+    config: &mut gwt_agent::LaunchConfig,
+) -> Result<Option<gwt::codex_bridge::ContainerRecoveryAttachmentBundle>, String> {
+    if config.agent_id != gwt_agent::AgentId::Codex
+        || config.runtime_target != gwt_agent::LaunchRuntimeTarget::Docker
+    {
+        return Ok(None);
+    }
+    if !config
+        .recovery_continuation
+        .as_ref()
+        .is_some_and(|continuation| continuation.inherit_checkpoint)
+    {
+        return Ok(None);
+    }
+    let store = gwt_core::recovery::RecoveryStore::for_project_dir(
+        gwt_core::paths::gwt_project_dir_for_repo_path(project_root),
+    );
+    prepare_container_checkpoint_attachments_from_store(&store, config)
+}
+
+fn prepare_container_checkpoint_attachments_from_store(
+    store: &gwt_core::recovery::RecoveryStore,
+    config: &mut gwt_agent::LaunchConfig,
+) -> Result<Option<gwt::codex_bridge::ContainerRecoveryAttachmentBundle>, String> {
+    let continuation = config
+        .recovery_continuation
+        .as_ref()
+        .filter(|continuation| continuation.inherit_checkpoint)
+        .ok_or_else(|| "checkpoint continuation provenance is missing".to_string())?;
+    let record = store
+        .load(&continuation.source_recovery_id)
+        .map_err(|error| format!("load source recovery attachments: {error}"))?
+        .ok_or_else(|| "source recovery attachments are unavailable".to_string())?;
+    if record.checkpoint_revision != continuation.source_checkpoint_revision {
+        return Err(format!(
+            "source recovery attachment revision changed: expected {}, found {}",
+            continuation.source_checkpoint_revision, record.checkpoint_revision
+        ));
+    }
+    let references = record
+        .checkpoint
+        .as_ref()
+        .map(|checkpoint| checkpoint.attachment_refs.as_slice())
+        .unwrap_or_default();
+    let Some(bundle) =
+        gwt::codex_bridge::prepare_container_recovery_attachments(store, references)?
+    else {
+        return Ok(None);
+    };
+    let container_paths = bundle.container_paths()?;
+    let prompt = gwt_core::recovery::build_checkpoint_continuation_prompt_with_attachment_paths(
+        &record,
+        &container_paths,
+        RECOVERY_CONTINUATION_MAX_VISIBLE_ITEMS,
+        RECOVERY_CONTINUATION_MAX_CHARS,
+    )
+    .map_err(|error| format!("build container recovery attachment prompt: {error}"))?;
+    let previous_prompt = config
+        .initial_prompt
+        .as_deref()
+        .ok_or_else(|| "checkpoint continuation is missing its prompt".to_string())?;
+    let trailing_prompt = config
+        .args
+        .last_mut()
+        .ok_or_else(|| "checkpoint continuation is missing its prompt argument".to_string())?;
+    if trailing_prompt != previous_prompt {
+        return Err("checkpoint continuation prompt argument changed before staging".to_string());
+    }
+    *trailing_prompt = prompt.clone();
+    config.initial_prompt = Some(prompt);
+    Ok(Some(bundle))
+}
+
+/// Prepare the Host-only Codex split without starting either process.
+///
+/// The app-server retains the exact executable and package/version prefix used
+/// by the TUI. Only the fixed app-server subcommand differs. The route
+/// capability itself is injected later, immediately before PTY spawn.
+#[cfg(test)]
+fn prepare_host_codex_remote_bridge(
+    config: &mut gwt_agent::LaunchConfig,
+) -> Result<Option<gwt::codex_bridge::CodexAppServerLaunch>, String> {
+    if config.agent_id != gwt_agent::AgentId::Codex
+        || config.runtime_target != gwt_agent::LaunchRuntimeTarget::Host
+    {
+        return Ok(None);
+    }
+
+    match prepare_codex_remote_bridge(config)? {
+        Some(PreparedCodexBridge::Host(app_server)) => Ok(Some(app_server)),
+        Some(PreparedCodexBridge::Container(_)) | None => Ok(None),
+    }
 }
 
 pub type AgentLaunchCompletion = (
@@ -64,6 +277,29 @@ pub type AgentLaunchCompletion = (
     gwt_agent::LaunchRuntimeTarget,
     String,
 );
+
+fn pending_codex_bridge_routes(
+) -> &'static Mutex<HashMap<String, gwt::codex_bridge::CodexLaunchBridgeLease>> {
+    static ROUTES: OnceLock<Mutex<HashMap<String, gwt::codex_bridge::CodexLaunchBridgeLease>>> =
+        OnceLock::new();
+    ROUTES.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+fn stage_codex_bridge_route(window_id: String, route: gwt::codex_bridge::CodexLaunchBridgeLease) {
+    pending_codex_bridge_routes()
+        .lock()
+        .unwrap_or_else(|error| error.into_inner())
+        .insert(window_id, route);
+}
+
+fn take_staged_codex_bridge_route(
+    window_id: &str,
+) -> Option<gwt::codex_bridge::CodexLaunchBridgeLease> {
+    pending_codex_bridge_routes()
+        .lock()
+        .unwrap_or_else(|error| error.into_inner())
+        .remove(window_id)
+}
 
 pub type AgentLaunchResult = Result<AgentLaunchCompletion, String>;
 
@@ -86,10 +322,30 @@ pub(super) fn dispatch_agent_launch_success<F>(
 pub(super) fn launch_config_from_persisted_session(
     session: &gwt_agent::Session,
 ) -> gwt_agent::LaunchConfig {
+    launch_config_from_persisted_session_inner(session, None)
+}
+
+/// Build a fresh-provider launch that carries only the bounded, durable
+/// checkpoint prompt. In particular, this rebuilds provider argv instead of
+/// mutating an exact-resume config, so a rejected provider root can never leak
+/// its resume flag or id into the continuation attempt.
+pub(super) fn launch_checkpoint_continuation_config(
+    session: &gwt_agent::Session,
+    prompt: &str,
+) -> gwt_agent::LaunchConfig {
+    launch_config_from_persisted_session_inner(session, Some(prompt))
+}
+
+fn launch_config_from_persisted_session_inner(
+    session: &gwt_agent::Session,
+    checkpoint_prompt: Option<&str>,
+) -> gwt_agent::LaunchConfig {
     let agent_id = session.agent_id.clone();
     let mut builder = gwt_agent::AgentLaunchBuilder::new(agent_id);
     builder = builder.working_dir(session.worktree_path.clone());
-    if !session.branch.is_empty() {
+    if session.is_ephemeral {
+        builder = builder.ephemeral(session.ephemeral_base_ref.clone());
+    } else if !session.branch.is_empty() {
         builder = builder.branch(session.branch.clone());
     }
     if let Some(model) = session.model.clone() {
@@ -119,7 +375,12 @@ pub(super) fn launch_config_from_persisted_session(
         builder = builder.linked_issue_number(linked);
     }
 
-    if let Some(resume_id) = session.exact_resume_session_id() {
+    if let Some(prompt) = checkpoint_prompt {
+        builder = builder
+            .session_mode(gwt_agent::SessionMode::Normal)
+            .initial_prompt(prompt.to_string())
+            .extra_arg(prompt.to_string());
+    } else if let Some(resume_id) = session.exact_resume_session_id() {
         builder = builder
             .session_mode(gwt_agent::SessionMode::Resume)
             .resume_session_id(resume_id.to_string());
@@ -135,6 +396,123 @@ pub(super) fn launch_config_from_persisted_session(
         config.display_name = session.display_name.clone();
     }
     config
+}
+
+fn persist_recovery_checkpoint_before_spawn(
+    project_root: &Path,
+    worktree_path: &Path,
+    config: &gwt_agent::LaunchConfig,
+    session: &mut gwt_agent::Session,
+    project_dir_override: Option<&Path>,
+) -> Result<(), String> {
+    let output = gwt_core::process::hidden_command("git")
+        .args(["rev-parse", "--verify", "HEAD^{commit}"])
+        .current_dir(worktree_path)
+        .output()
+        .map_err(|error| format!("resolve recovery base OID: {error}"))?;
+    if !output.status.success() {
+        return Err(format!(
+            "resolve recovery base OID: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        ));
+    }
+    let launch_head_oid = String::from_utf8(output.stdout)
+        .map_err(|error| format!("decode recovery base OID: {error}"))?
+        .trim()
+        .to_string();
+    if launch_head_oid.is_empty() {
+        return Err("resolve recovery base OID: git returned an empty OID".to_string());
+    }
+
+    let recovery_id = session
+        .recovery_id
+        .clone()
+        .ok_or_else(|| "new session is missing recovery identity".to_string())?;
+    session.launch_base_oid = Some(launch_head_oid.clone());
+    session
+        .advance_recovery_launch_stage(
+            gwt_agent::session::RecoveryLaunchStage::WorktreeMaterialized,
+        )
+        .map_err(|error| format!("advance Session worktree recovery stage: {error}"))?;
+    let session_kind = if config.is_ephemeral {
+        gwt_core::recovery::RecoverySessionKind::Intake
+    } else {
+        gwt_core::recovery::RecoverySessionKind::Execution
+    };
+    let runtime = match config.runtime_target {
+        gwt_agent::LaunchRuntimeTarget::Host => "host",
+        gwt_agent::LaunchRuntimeTarget::Docker => "docker",
+    };
+    let project_dir = project_dir_override
+        .map(Path::to_path_buf)
+        .unwrap_or_else(|| gwt_core::paths::gwt_project_dir_for_repo_path(project_root));
+    let store = gwt_core::recovery::RecoveryStore::for_project_dir(project_dir);
+    let request = gwt_core::recovery::CreateRecovery {
+        recovery_id: recovery_id.clone(),
+        session_id: session.id.clone(),
+        repo_id: gwt_core::paths::project_scope_hash(project_root).to_string(),
+        session_kind,
+        worktree_path: worktree_path.to_path_buf(),
+        launch_base_ref: config
+            .ephemeral_base_ref
+            .clone()
+            .or_else(|| config.base_branch.clone()),
+        launch_base_oid: launch_head_oid.clone(),
+        launch_head_oid: launch_head_oid.clone(),
+        provider: config.agent_id.to_string(),
+        model: config.model.clone(),
+        runtime: runtime.to_string(),
+        initial_prompt: config.initial_prompt.clone().unwrap_or_default(),
+        created_at: session.created_at,
+    };
+    store
+        .create(request, format!("create:{}", session.id))
+        .map_err(|error| format!("persist recovery checkpoint before spawn: {error}"))?;
+    if session_kind == gwt_core::recovery::RecoverySessionKind::Intake {
+        gwt_git::recovery::ensure_recovery_base_pin(project_root, &recovery_id, &launch_head_oid)
+            .map_err(|error| format!("pin Intake recovery base before spawn: {error}"))?;
+    }
+
+    if let Some(continuation) = config.recovery_continuation.as_ref() {
+        if continuation.target_recovery_id != recovery_id {
+            return Err("checkpoint continuation target identity changed before spawn".to_string());
+        }
+        store
+            .link_continuation(
+                gwt_core::recovery::RecoveryContinuationLink {
+                    source_recovery_id: continuation.source_recovery_id.clone(),
+                    target_recovery_id: recovery_id.clone(),
+                    source_checkpoint_revision: continuation.source_checkpoint_revision,
+                    definitive_reason: continuation.reason.clone(),
+                    linked_at: chrono::Utc::now(),
+                },
+                format!("link-continuation:{}", session.id),
+            )
+            .map_err(|error| {
+                format!("persist checkpoint continuation provenance before spawn: {error}")
+            })?;
+    }
+
+    if let Some(root_id) = config.resume_session_id.as_deref() {
+        store
+            .bind_root(
+                &recovery_id,
+                gwt_core::recovery::ProviderRootBinding {
+                    root_id: root_id.to_string(),
+                    session_tree_id: None,
+                    quality: gwt_core::recovery::BindingQuality::Preassigned,
+                    bound_at: chrono::Utc::now(),
+                },
+                format!("preassign-root:{}", session.id),
+            )
+            .map_err(|error| format!("persist exact recovery binding before spawn: {error}"))?;
+        session.provider_binding_quality =
+            Some(gwt_agent::session::ProviderBindingQuality::Verified);
+        session
+            .observe_provider_root_role(gwt_agent::session::ProviderRootRole::Root)
+            .map_err(|error| format!("record preassigned provider root role: {error}"))?;
+    }
+    Ok(())
 }
 
 #[derive(Debug, Clone)]
@@ -715,12 +1093,12 @@ impl AppRuntime {
     ) -> Vec<OutboundEvent> {
         let workspace_resume_context = self.pending_workspace_resume_contexts.remove(&window_id);
         let launch_feedback_context = self.pending_launch_feedback_contexts.remove(&window_id);
-        let auto_resume_source_session_id = self.pending_auto_resume_sources.remove(&window_id);
+        let mut codex_bridge_route = take_staged_codex_bridge_route(&window_id);
         self.inflight_launches
             .retain(|_, (pending_window_id, _)| pending_window_id != &window_id);
         match result {
             Ok((
-                process_launch,
+                mut process_launch,
                 session_id,
                 branch_name,
                 display_name,
@@ -732,6 +1110,10 @@ impl AppRuntime {
                 agent_project_root,
             )) => {
                 let Some(address) = self.window_lookup.get(&window_id).cloned() else {
+                    self.mark_pending_auto_resume_attention(
+                        &window_id,
+                        "Recovery launch lost its target window before provider readiness",
+                    );
                     return self.launch_error_events(
                         window_id,
                         "Window not found".to_string(),
@@ -739,6 +1121,10 @@ impl AppRuntime {
                     );
                 };
                 let Some(tab) = self.tab(&address.tab_id) else {
+                    self.mark_pending_auto_resume_attention(
+                        &window_id,
+                        "Recovery launch lost its project before provider readiness",
+                    );
                     return self.launch_error_events(
                         window_id,
                         "Project tab not found".to_string(),
@@ -750,6 +1136,10 @@ impl AppRuntime {
                 // launch bursts cheap).
                 self.spawn_work_events_ingest(tab.project_root.clone(), false);
                 let Some(window) = tab.workspace.window(&address.raw_id) else {
+                    self.mark_pending_auto_resume_attention(
+                        &window_id,
+                        "Recovery launch lost its target window before provider readiness",
+                    );
                     return self.launch_error_events(
                         window_id,
                         "Window not found".to_string(),
@@ -785,9 +1175,6 @@ impl AppRuntime {
                         .workspace
                         .set_session_id(&address.raw_id, Some(session_id_for_restore.clone()));
                 }
-                if let Some(source_session_id) = auto_resume_source_session_id {
-                    mark_auto_resume_source_completed(&self.sessions_dir, &source_session_id);
-                }
                 self.refresh_launch_wizard_session_cache(&window_id);
 
                 // SPEC-2809 — Launch Wizard always spawns an AI agent
@@ -810,6 +1197,26 @@ impl AppRuntime {
                     "spawn_pty",
                     &format!("argv=[{}]", process_launch.args.join(" ")),
                 );
+                if let Some(route) = codex_bridge_route.as_ref() {
+                    route.install_auth_token(&mut process_launch.env);
+                }
+                if let Err(error) = gwt_agent::persist_recovery_launch_stage(
+                    &self.sessions_dir,
+                    &session_id_for_restore,
+                    gwt_agent::session::RecoveryLaunchStage::SpawnRequested,
+                ) {
+                    self.mark_pending_auto_resume_attention(
+                        &window_id,
+                        "Recovery spawn request could not be persisted before PTY launch",
+                    );
+                    return self.launch_error_events(
+                        window_id,
+                        format!(
+                            "persist SpawnRequested recovery boundary before PTY spawn: {error}"
+                        ),
+                        launch_feedback_context,
+                    );
+                }
                 match self.spawn_process_window_with_console_kind(
                     &window_id,
                     geometry,
@@ -817,6 +1224,31 @@ impl AppRuntime {
                     Some(gwt_core::process_console::ProcessKind::AgentBootstrap),
                 ) {
                     Ok(()) => {
+                        if let Err(error) = gwt_agent::persist_recovery_launch_stage(
+                            &self.sessions_dir,
+                            &session_id_for_restore,
+                            gwt_agent::session::RecoveryLaunchStage::ProcessSpawned,
+                        ) {
+                            // A live provider without a durable ProcessSpawned
+                            // boundary would be indistinguishable from a
+                            // never-started launch after a crash. Stop it and
+                            // keep the recovery visible for operator attention.
+                            self.stop_window_runtime(&window_id);
+                            self.mark_pending_auto_resume_attention(
+                                &window_id,
+                                "Recovery launch stage could not be persisted after PTY spawn",
+                            );
+                            return self.launch_error_events(
+                                window_id,
+                                format!(
+                                    "persist ProcessSpawned recovery boundary after PTY spawn: {error}"
+                                ),
+                                launch_feedback_context,
+                            );
+                        }
+                        if let Some(route) = codex_bridge_route.take() {
+                            self.codex_bridge_routes.insert(window_id.clone(), route);
+                        }
                         emit_agent_launch_stage(stage_id, "ready", "PTY handoff complete");
                         let linkage_result = match linked_issue_number {
                             Some(issue_number) => record_issue_branch_link_with_cache_dir(
@@ -930,11 +1362,21 @@ impl AppRuntime {
                         events
                     }
                     Err(error) => {
+                        self.mark_pending_auto_resume_attention(
+                            &window_id,
+                            "Recovery PTY failed before provider readiness",
+                        );
                         self.launch_error_events(window_id, error, launch_feedback_context)
                     }
                 }
             }
-            Err(error) => self.launch_error_events(window_id, error, launch_feedback_context),
+            Err(error) => {
+                self.mark_pending_auto_resume_attention(
+                    &window_id,
+                    "Recovery launch failed before provider readiness",
+                );
+                self.launch_error_events(window_id, error, launch_feedback_context)
+            }
         }
     }
 
@@ -1552,6 +1994,12 @@ impl AppRuntime {
                         message,
                     });
                 }
+                if let Some(version) = pin_host_codex_latest_runner(&mut config)? {
+                    proxy.send(UserEvent::LaunchProgress {
+                        window_id: window_id.clone(),
+                        message: format!("Pinned Codex latest to {version}."),
+                    });
+                }
             }
             install_launch_gwt_bin_env(&mut config.env_vars, config.runtime_target)?;
             // SPEC-3248 P8a: derive the execution entrypoint from the raw
@@ -1562,35 +2010,53 @@ impl AppRuntime {
                 &config.args,
                 config.session_mode == gwt_agent::SessionMode::Resume,
             );
+            let container_recovery_attachments =
+                prepare_container_checkpoint_attachments(Path::new(&project_root), &mut config)?;
+            let mut prepared_codex_bridge = prepare_codex_remote_bridge(&mut config)?;
+            if let Some(attachments) = container_recovery_attachments {
+                let Some(PreparedCodexBridge::Container(container)) =
+                    prepared_codex_bridge.as_mut()
+                else {
+                    return Err(
+                        "container recovery attachments require a Codex sidecar".to_string()
+                    );
+                };
+                container.recovery_attachments = Some(attachments);
+            }
             apply_windows_host_shell_wrapper(&mut config)?;
 
             let branch_name = config.branch.clone().unwrap_or_else(|| "work".to_string());
 
             let agent_id = config.agent_id.clone();
-            let mut session =
-                gwt_agent::Session::new(&worktree_path, branch_name.clone(), agent_id.clone());
+            let mut session = gwt_agent::Session::from_launch_config(
+                &worktree_path,
+                branch_name.clone(),
+                &config,
+            );
             session.project_state_root = Some(
                 gwt_core::paths::normalize_windows_child_process_path(Path::new(&project_root)),
             );
-            session.display_name = config.display_name.clone();
-            session.tool_version = config.tool_version.clone();
-            session.model = config.model.clone();
-            session.reasoning_level = config.reasoning_level.clone();
-            session.session_mode = config.session_mode;
-            session.skip_permissions = config.skip_permissions;
-            session.fast_mode = config.fast_mode;
-            session.codex_fast_mode = config.codex_fast_mode;
-            session.runtime_target = config.runtime_target;
-            session.docker_service = config.docker_service.clone();
-            session.docker_lifecycle_intent = config.docker_lifecycle_intent;
-            session.linked_issue_number = config.linked_issue_number;
-            session.launch_command = config.command.clone();
-            session.launch_args = config.args.clone();
-            session.windows_shell = config.windows_shell;
             if session.session_mode == gwt_agent::SessionMode::Resume {
                 session.agent_session_id = config.resume_session_id.clone();
             }
             session.update_status(gwt_agent::AgentStatus::Running);
+
+            // Persist the complete launch ledger before publishing the
+            // Recovery Record. If the process dies between these two durable
+            // writes, startup's idempotent legacy importer can reconstruct the
+            // missing record from this Session; the inverse ordering leaves a
+            // Recovery Center candidate that cannot launch without a Session.
+            session
+                .save(&sessions_dir)
+                .map_err(|error| error.to_string())?;
+
+            persist_recovery_checkpoint_before_spawn(
+                Path::new(&project_root),
+                &worktree_path,
+                &config,
+                &mut session,
+                None,
+            )?;
 
             let session_id = session.id.clone();
             let runtime_path = gwt_agent::runtime_state_path(&sessions_dir, &session_id);
@@ -1598,6 +2064,11 @@ impl AppRuntime {
                 gwt_agent::GWT_SESSION_ID_ENV.to_string(),
                 session_id.clone(),
             );
+            if let Some(recovery_id) = session.recovery_id.clone() {
+                config
+                    .env_vars
+                    .insert(gwt_agent::GWT_RECOVERY_ID_ENV.to_string(), recovery_id);
+            }
             // SPEC-3247 FR-001: export the session-kind signal into the spawned
             // agent's env HERE, in the production spawn path (the `prepare.rs`
             // helper is an alternate path with no production callers). Derived
@@ -1629,7 +2100,6 @@ impl AppRuntime {
                 .env_vars
                 .entry("COLORTERM".to_string())
                 .or_insert_with(|| "truecolor".to_string());
-            finalize_docker_agent_launch_config(Path::new(&project_root), &mut config)?;
             let runtime_target = config.runtime_target;
             let agent_project_root = if runtime_target == gwt_agent::LaunchRuntimeTarget::Docker {
                 resolve_docker_launch_plan(&worktree_path, config.docker_service.as_deref())?
@@ -1677,6 +2147,126 @@ impl AppRuntime {
                     }
                 }
             }
+            let codex_bridge_route = if let Some(prepared) = prepared_codex_bridge.as_mut() {
+                // Runtime/session/hook environment is finalized only after the
+                // recovery checkpoint. Mirror it into app-server without the
+                // bridge bearer token, which stays solely in the route lease
+                // until the main thread is about to spawn the remote TUI.
+                let recovery_id = session.recovery_id.clone().ok_or_else(|| {
+                    "Codex bridge session is missing recovery identity".to_string()
+                })?;
+                let durability: Arc<dyn gwt::codex_bridge::CodexDurabilitySink> =
+                    Arc::new(gwt::codex_bridge::RecoveryCodexDurability::new(
+                        sessions_dir.clone(),
+                        session_id.clone(),
+                        recovery_id,
+                        gwt_core::paths::gwt_project_dir_for_repo_path(Path::new(&project_root)),
+                        worktree_path.clone(),
+                    ));
+                let ready_proxy = proxy.clone();
+                let failure_proxy = proxy.clone();
+                let ready_window_id = window_id.clone();
+                let failure_window_id = window_id.clone();
+                let ready_session_id = session_id.clone();
+                let failure_session_id = session_id.clone();
+                let on_ready: Arc<dyn Fn() + Send + Sync> = Arc::new(move || {
+                    ready_proxy.send(UserEvent::CodexBridgeReady {
+                        window_id: ready_window_id.clone(),
+                        session_id: ready_session_id.clone(),
+                    });
+                });
+                let on_failure: Arc<dyn Fn(gwt::codex_bridge::CodexBridgeFailure) + Send + Sync> =
+                    Arc::new(move |failure| {
+                        failure_proxy.send(UserEvent::CodexBridgeFailure {
+                            window_id: failure_window_id.clone(),
+                            session_id: failure_session_id.clone(),
+                            failure,
+                        });
+                    });
+                Some(match prepared {
+                    PreparedCodexBridge::Host(app_server) => {
+                        app_server.env = config.env_vars.clone();
+                        app_server
+                            .env
+                            .remove(gwt::codex_bridge::CODEX_REMOTE_AUTH_TOKEN_ENV);
+                        app_server.remove_env = config.remove_env.clone();
+                        if !app_server
+                            .remove_env
+                            .iter()
+                            .any(|key| key == gwt::codex_bridge::CODEX_REMOTE_AUTH_TOKEN_ENV)
+                        {
+                            app_server
+                                .remove_env
+                                .push(gwt::codex_bridge::CODEX_REMOTE_AUTH_TOKEN_ENV.to_string());
+                        }
+                        app_server.cwd = config.working_dir.clone();
+                        gwt::codex_bridge::CodexLaunchBridgeLease::Host(
+                            gwt::codex_bridge::register_codex_bridge_route(
+                                gwt::codex_bridge::CodexBridgeRouteConfig {
+                                    app_server: app_server.clone(),
+                                    expected_resume_id: config.resume_session_id.clone(),
+                                    durability,
+                                    on_ready,
+                                    on_failure,
+                                },
+                            )
+                            .map_err(|error| error.to_string())?,
+                        )
+                    }
+                    PreparedCodexBridge::Container(container) => {
+                        container.app_server.env = config.env_vars.clone();
+                        container
+                            .app_server
+                            .env
+                            .remove(gwt::codex_bridge::CODEX_REMOTE_AUTH_TOKEN_ENV);
+                        container.app_server.remove_env = config.remove_env.clone();
+                        if !container
+                            .app_server
+                            .remove_env
+                            .iter()
+                            .any(|key| key == gwt::codex_bridge::CODEX_REMOTE_AUTH_TOKEN_ENV)
+                        {
+                            container
+                                .app_server
+                                .remove_env
+                                .push(gwt::codex_bridge::CODEX_REMOTE_AUTH_TOKEN_ENV.to_string());
+                        }
+                        let lease = gwt::codex_bridge::start_container_codex_bridge(
+                            gwt::codex_bridge::CodexContainerBridgeConfig {
+                                compose_files: container.compose_files.clone(),
+                                service: container.service.clone(),
+                                working_dir: Some(container.container_cwd.clone()),
+                                app_server: container.app_server.clone(),
+                                expected_resume_id: config.resume_session_id.clone(),
+                                recovery_attachments: container.recovery_attachments.take(),
+                                durability,
+                                on_ready,
+                                on_failure,
+                            },
+                        )?;
+                        config.args.splice(
+                            container.runner_prefix_len..container.runner_prefix_len,
+                            [
+                                "--remote".to_string(),
+                                lease.endpoint().to_string(),
+                                "--remote-auth-token-env".to_string(),
+                                gwt::codex_bridge::CODEX_REMOTE_AUTH_TOKEN_ENV.to_string(),
+                            ],
+                        );
+                        // Value stays empty until the main-thread PTY handoff;
+                        // only the name is needed while Compose argv is built.
+                        config.env_vars.insert(
+                            gwt::codex_bridge::CODEX_REMOTE_AUTH_TOKEN_ENV.to_string(),
+                            String::new(),
+                        );
+                        gwt::codex_bridge::CodexLaunchBridgeLease::Container(lease)
+                    }
+                })
+            } else {
+                None
+            };
+
+            finalize_docker_agent_launch_config(Path::new(&project_root), &mut config)?;
 
             let process_launch = ProcessLaunch {
                 command: config.command.clone(),
@@ -1697,6 +2287,7 @@ impl AppRuntime {
                 config.base_branch.clone(),
                 runtime_target,
                 agent_project_root,
+                codex_bridge_route,
             ))
         })();
 
@@ -1718,7 +2309,11 @@ impl AppRuntime {
                 base_branch,
                 runtime_target,
                 agent_project_root,
+                codex_bridge_route,
             )) => {
+                if let Some(route) = codex_bridge_route {
+                    stage_codex_bridge_route(window_id.clone(), route);
+                }
                 dispatch_agent_launch_success(
                     proxy,
                     window_id,
@@ -1859,12 +2454,15 @@ impl AppRuntime {
         // when dirty so uncommitted work is never lost. Skip the Paused-Work /
         // projection persistence entirely.
         if self.is_ephemeral_intake_session(&session) {
-            self.finalize_ephemeral_intake_worktree(&session);
-            let _ = gwt_agent::persist_session_status(
-                &self.sessions_dir,
-                &session.session_id,
-                gwt_agent::AgentStatus::Stopped,
-            );
+            let recovery_retained = self.retain_stopped_intake_recovery(&session);
+            if !recovery_retained {
+                self.finalize_ephemeral_intake_worktree(&session);
+                let _ = gwt_agent::persist_session_status(
+                    &self.sessions_dir,
+                    &session.session_id,
+                    gwt_agent::AgentStatus::Stopped,
+                );
+            }
             self.launch_wizard_cache.mark_stopped(&session.session_id);
             return;
         }
@@ -1896,6 +2494,125 @@ impl AppRuntime {
             gwt_agent::AgentStatus::Stopped,
         );
         self.launch_wizard_cache.mark_stopped(&session.session_id);
+    }
+
+    /// Persist provider-stop evidence before deciding whether an Intake
+    /// worktree is disposable. Any nonterminal RecoveryRecord owns that
+    /// worktree until successor retirement or explicit discard, even when the
+    /// worktree is perfectly clean.
+    fn retain_stopped_intake_recovery(&self, active: &ActiveAgentSession) -> bool {
+        let session_path = self
+            .sessions_dir
+            .join(format!("{}.toml", active.session_id));
+        let source = match gwt_agent::Session::load_and_migrate(&session_path) {
+            Ok(source) => source,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return false,
+            Err(error) => {
+                // A running recovery launch always materializes its Session
+                // before spawn. If that ledger is unreadable, cleanup cannot
+                // prove the Intake is unowned and must fail closed.
+                tracing::warn!(
+                    session_id = %active.session_id,
+                    error = %error,
+                    "keeping stopped Intake because its Session ledger is unavailable"
+                );
+                return true;
+            }
+        };
+        let Some(recovery_id) = source.recovery_id.as_deref() else {
+            return false;
+        };
+        let project_root = source
+            .project_state_root
+            .as_deref()
+            .unwrap_or(&source.worktree_path);
+        let store = gwt_core::recovery::RecoveryStore::for_project_dir(
+            gwt_core::paths::gwt_project_dir_for_repo_path(project_root),
+        );
+        let record = match store.load(recovery_id) {
+            Ok(Some(record)) => record,
+            Ok(None) => return false,
+            Err(error) => {
+                tracing::warn!(
+                    recovery_id,
+                    error = %error,
+                    "keeping stopped Intake because RecoveryStore inventory failed"
+                );
+                return true;
+            }
+        };
+        if matches!(
+            record.lifecycle,
+            gwt_core::recovery::RecoveryLifecycle::Resolved
+                | gwt_core::recovery::RecoveryLifecycle::Discarded
+        ) {
+            return false;
+        }
+
+        let stopped_at = chrono::Utc::now();
+        let proof_required = record.launch_stage
+            >= gwt_core::recovery::RecoveryLaunchStage::SpawnRequested
+            && !record.launch_stage.is_terminal()
+            && matches!(
+                record.lifecycle,
+                gwt_core::recovery::RecoveryLifecycle::Launching
+                    | gwt_core::recovery::RecoveryLifecycle::Running
+                    | gwt_core::recovery::RecoveryLifecycle::Interrupted
+            )
+            && record.recovery_lease.is_none();
+        let interruption = if proof_required {
+            store.interrupt_after_supervisor_stop(
+                recovery_id,
+                record.generation,
+                &source.id,
+                stopped_at,
+                "gwt observed the Intake provider process stop",
+                format!(
+                    "runtime-supervisor-stop-v1:{}:{}",
+                    source.id, record.generation
+                ),
+            )
+        } else if record.launch_stage < gwt_core::recovery::RecoveryLaunchStage::Ready
+            && !matches!(
+                record.lifecycle,
+                gwt_core::recovery::RecoveryLifecycle::Interrupted
+                    | gwt_core::recovery::RecoveryLifecycle::Attention
+                    | gwt_core::recovery::RecoveryLifecycle::Recovering
+            )
+        {
+            store.set_lifecycle(
+                recovery_id,
+                gwt_core::recovery::RecoveryLifecycle::Interrupted,
+                Some("gwt observed the Intake provider process stop".to_string()),
+                format!(
+                    "runtime-provider-stop-v1:{}:{}",
+                    source.id, record.generation
+                ),
+            )
+        } else {
+            Ok(record)
+        };
+        if let Err(error) = interruption {
+            // Never turn a ledger race or storage failure into destructive
+            // worktree cleanup. Startup reconciliation can retry the proof.
+            tracing::warn!(
+                recovery_id,
+                error = %error,
+                "failed to persist stopped Intake recovery; retaining its worktree"
+            );
+        }
+        if let Err(error) = gwt_agent::update_session(&self.sessions_dir, &source.id, |session| {
+            session.update_status(gwt_agent::AgentStatus::Interrupted);
+            session.restore_window_on_startup = true;
+            Ok(())
+        }) {
+            tracing::warn!(
+                session_id = %source.id,
+                error = %error,
+                "failed to project stopped Intake recovery into Session state"
+            );
+        }
+        true
     }
 
     /// SPEC-3214 (codex #3235 review): whether a stopped session is an
@@ -2184,5 +2901,449 @@ mod fr001_capability_cache_tests {
         );
         assert!(!off.claude_ultracode_supported());
         assert!(!off.claude_workflows_enabled());
+    }
+}
+
+#[cfg(test)]
+mod recovery_checkpoint_tests {
+    use std::path::Path;
+
+    use super::{
+        launch_checkpoint_continuation_config, launch_config_from_persisted_session,
+        persist_recovery_checkpoint_before_spawn,
+    };
+
+    fn run_git(repo: &Path, args: &[&str]) {
+        let status = gwt_core::process::hidden_command("git")
+            .args(args)
+            .current_dir(repo)
+            .status()
+            .expect("run git");
+        assert!(status.success(), "git {args:?}");
+    }
+
+    #[test]
+    fn production_launch_persists_recovery_before_provider_spawn() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let repo = temp.path().join("repo");
+        std::fs::create_dir_all(&repo).expect("create repo");
+        run_git(&repo, &["init", "-q", "-b", "develop"]);
+        run_git(&repo, &["config", "user.name", "Codex"]);
+        run_git(&repo, &["config", "user.email", "codex@example.com"]);
+        std::fs::write(repo.join("README.md"), "recovery\n").expect("write fixture");
+        run_git(&repo, &["add", "README.md"]);
+        run_git(&repo, &["commit", "-qm", "init"]);
+
+        let config = gwt_agent::AgentLaunchBuilder::new(gwt_agent::AgentId::Codex)
+            .working_dir(&repo)
+            .ephemeral(Some("develop".to_string()))
+            .initial_prompt("Investigate interrupted Intake")
+            .extra_arg("Investigate interrupted Intake")
+            .build();
+        let mut session = gwt_agent::Session::from_launch_config(&repo, "work", &config);
+        let project_dir = temp.path().join("project-store");
+
+        persist_recovery_checkpoint_before_spawn(
+            &repo,
+            &repo,
+            &config,
+            &mut session,
+            Some(&project_dir),
+        )
+        .expect("persist pre-spawn checkpoint");
+
+        let recovery_id = session.recovery_id.as_deref().expect("recovery id");
+        let record = gwt_core::recovery::RecoveryStore::for_project_dir(&project_dir)
+            .load(recovery_id)
+            .expect("load recovery")
+            .expect("record");
+        assert_eq!(record.initial_prompt, "Investigate interrupted Intake");
+        assert_eq!(
+            session.recovery_launch_stage,
+            Some(gwt_agent::session::RecoveryLaunchStage::WorktreeMaterialized)
+        );
+        assert_eq!(
+            session.launch_base_oid.as_deref(),
+            Some(record.launch_base_oid.as_str())
+        );
+        assert_eq!(
+            gwt_git::recovery::verify_recovery_base_pin(
+                &repo,
+                recovery_id,
+                &record.launch_base_oid,
+            )
+            .expect("pre-spawn Intake base pin"),
+            gwt_git::recovery::recovery_base_ref_name(recovery_id).unwrap()
+        );
+    }
+
+    #[test]
+    fn persisted_intake_resume_keeps_ephemeral_lane_and_authoritative_base() {
+        let mut session =
+            gwt_agent::Session::new("/tmp/.intake-4", "work", gwt_agent::AgentId::Codex);
+        session.is_ephemeral = true;
+        session.session_kind = Some(gwt_skills::SessionKind::Intake);
+        session.ephemeral_base_ref = Some("origin/develop".to_string());
+        session.session_mode = gwt_agent::SessionMode::Resume;
+        session.agent_session_id = Some("019b-root".to_string());
+
+        let config = launch_config_from_persisted_session(&session);
+
+        assert!(config.is_ephemeral);
+        assert_eq!(config.ephemeral_base_ref.as_deref(), Some("origin/develop"));
+        assert!(config.branch.is_none(), "Intake restore remains branchless");
+        assert_eq!(
+            config.working_dir.as_deref(),
+            Some(Path::new("/tmp/.intake-4"))
+        );
+        assert_eq!(config.resume_session_id.as_deref(), Some("019b-root"));
+    }
+
+    #[test]
+    fn checkpoint_continuation_starts_normal_session_with_prompt() {
+        let mut session =
+            gwt_agent::Session::new("/tmp/.intake-4", "", gwt_agent::AgentId::ClaudeCode);
+        session.is_ephemeral = true;
+        session.session_kind = Some(gwt_skills::SessionKind::Intake);
+        session.ephemeral_base_ref = Some("origin/develop".to_string());
+        session.session_mode = gwt_agent::SessionMode::Resume;
+        session.agent_session_id = Some("stale-provider-root".to_string());
+        let prompt = "Continue the interrupted Intake from its durable checkpoint.";
+
+        let config = launch_checkpoint_continuation_config(&session, prompt);
+
+        assert_eq!(config.session_mode, gwt_agent::SessionMode::Normal);
+        assert_eq!(config.resume_session_id, None);
+        assert_eq!(config.initial_prompt.as_deref(), Some(prompt));
+        assert_eq!(config.args.last().map(String::as_str), Some(prompt));
+        assert!(
+            !config.args.iter().any(|arg| arg == "stale-provider-root"),
+            "checkpoint continuation must not retain exact-resume argv"
+        );
+        assert!(config.is_ephemeral);
+        assert_eq!(config.ephemeral_base_ref.as_deref(), Some("origin/develop"));
+    }
+
+    #[test]
+    fn checkpoint_continuation_persists_bidirectional_provenance_before_spawn() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let repo = temp.path().join("repo");
+        std::fs::create_dir_all(&repo).expect("create repo");
+        run_git(&repo, &["init", "-q", "-b", "develop"]);
+        run_git(&repo, &["config", "user.name", "Codex"]);
+        run_git(&repo, &["config", "user.email", "codex@example.com"]);
+        std::fs::write(repo.join("README.md"), "recovery\n").expect("write fixture");
+        run_git(&repo, &["add", "README.md"]);
+        run_git(&repo, &["commit", "-qm", "init"]);
+        let project_dir = temp.path().join("project-store");
+        let store = gwt_core::recovery::RecoveryStore::for_project_dir(&project_dir);
+        store
+            .create(
+                gwt_core::recovery::CreateRecovery {
+                    recovery_id: "source-recovery".to_string(),
+                    session_id: "source-session".to_string(),
+                    repo_id: gwt_core::paths::project_scope_hash(&repo).to_string(),
+                    session_kind: gwt_core::recovery::RecoverySessionKind::Intake,
+                    worktree_path: repo.clone(),
+                    launch_base_ref: Some("develop".to_string()),
+                    launch_base_oid: "1".repeat(40),
+                    launch_head_oid: "1".repeat(40),
+                    provider: "claude".to_string(),
+                    model: None,
+                    runtime: "host".to_string(),
+                    initial_prompt: "Investigate".to_string(),
+                    created_at: chrono::Utc::now(),
+                },
+                "create-source",
+            )
+            .expect("create source recovery");
+        let reason = "Exact provider resume rejected: No conversation found with session ID";
+        store
+            .prepare_successor(
+                gwt_core::recovery::RecoveryContinuationLink {
+                    source_recovery_id: "source-recovery".to_string(),
+                    target_recovery_id: "target-recovery".to_string(),
+                    source_checkpoint_revision: 0,
+                    definitive_reason: reason.to_string(),
+                    linked_at: chrono::Utc::now(),
+                },
+                "prepare-target-recovery",
+            )
+            .expect("prepare target identity before materialization");
+        let mut config = gwt_agent::AgentLaunchBuilder::new(gwt_agent::AgentId::ClaudeCode)
+            .working_dir(&repo)
+            .ephemeral(Some("develop".to_string()))
+            .initial_prompt("Continue durable checkpoint")
+            .extra_arg("Continue durable checkpoint")
+            .build();
+        config.recovery_continuation = Some(gwt_agent::RecoveryContinuationHandoff {
+            source_session_id: "source-session".to_string(),
+            source_recovery_id: "source-recovery".to_string(),
+            target_recovery_id: "target-recovery".to_string(),
+            source_checkpoint_revision: 0,
+            reason: reason.to_string(),
+            inherit_checkpoint: true,
+        });
+        let mut session = gwt_agent::Session::from_launch_config(&repo, "", &config);
+        assert_eq!(session.recovery_id.as_deref(), Some("target-recovery"));
+
+        persist_recovery_checkpoint_before_spawn(
+            &repo,
+            &repo,
+            &config,
+            &mut session,
+            Some(&project_dir),
+        )
+        .expect("persist linked continuation");
+
+        let mut retry_config = config.clone();
+        retry_config.recovery_retry_session_id = Some(session.id.clone());
+        retry_config.recovery_retry_created_at = Some(session.created_at);
+        let mut retry_session = gwt_agent::Session::from_launch_config(&repo, "", &retry_config);
+        assert_eq!(retry_session.id, session.id);
+        assert_eq!(retry_session.recovery_id, session.recovery_id);
+        persist_recovery_checkpoint_before_spawn(
+            &repo,
+            &repo,
+            &retry_config,
+            &mut retry_session,
+            Some(&project_dir),
+        )
+        .expect("retry same pre-spawn successor identity idempotently");
+
+        let source = store.load("source-recovery").unwrap().unwrap();
+        let target = store.load("target-recovery").unwrap().unwrap();
+        let link = target.continuation_source.expect("target source link");
+        assert_eq!(link.source_recovery_id, "source-recovery");
+        assert_eq!(link.target_recovery_id, "target-recovery");
+        assert_eq!(link.source_checkpoint_revision, 0);
+        assert_eq!(link.definitive_reason, reason);
+        assert_eq!(source.continuation_targets, vec![link]);
+        assert_eq!(store.list().unwrap().len(), 2);
+    }
+}
+
+#[cfg(test)]
+mod codex_remote_bridge_launch_tests {
+    use super::{
+        prepare_codex_remote_bridge, prepare_container_checkpoint_attachments_from_store,
+        prepare_host_codex_remote_bridge, PreparedCodexBridge,
+    };
+
+    #[test]
+    fn direct_codex_uses_same_runner_for_remote_tui_and_app_server() {
+        let mut config = gwt_agent::AgentLaunchBuilder::new(gwt_agent::AgentId::Codex).build();
+        config.command = "codex".to_string();
+        config.args = vec![
+            "--no-alt-screen".to_string(),
+            "resume".to_string(),
+            "root-1".to_string(),
+        ];
+
+        let app_server = prepare_host_codex_remote_bridge(&mut config)
+            .expect("prepare bridge")
+            .expect("Codex Host is bridged");
+
+        assert_eq!(app_server.command, "codex");
+        assert_eq!(app_server.args, ["app-server", "--listen", "stdio://"]);
+        assert_eq!(config.args[0], "--remote");
+        assert!(config.args[1].starts_with("ws://127.0.0.1:"));
+        assert_eq!(config.args[2], "--remote-auth-token-env");
+        assert_eq!(
+            config.args[3],
+            gwt::codex_bridge::CODEX_REMOTE_AUTH_TOKEN_ENV
+        );
+        assert!(app_server
+            .remove_env
+            .iter()
+            .any(|key| key == gwt::codex_bridge::CODEX_REMOTE_AUTH_TOKEN_ENV));
+        assert!(config.args[4..].starts_with(&["--no-alt-screen".to_string()]));
+    }
+
+    #[test]
+    fn version_pinned_npx_runner_is_identical_for_tui_and_app_server() {
+        let mut config = gwt_agent::AgentLaunchBuilder::new(gwt_agent::AgentId::Codex).build();
+        config.command = "npx.cmd".to_string();
+        config.args = vec![
+            "--yes".to_string(),
+            "@openai/codex@0.144.5".to_string(),
+            "--no-alt-screen".to_string(),
+        ];
+
+        let app_server = prepare_host_codex_remote_bridge(&mut config)
+            .expect("prepare bridge")
+            .expect("Codex Host is bridged");
+
+        assert_eq!(app_server.command, "npx.cmd");
+        assert_eq!(
+            app_server.args,
+            [
+                "--yes",
+                "@openai/codex@0.144.5",
+                "app-server",
+                "--listen",
+                "stdio://"
+            ]
+        );
+        assert_eq!(&config.args[..2], ["--yes", "@openai/codex@0.144.5"]);
+        assert_eq!(config.args[2], "--remote");
+    }
+
+    #[test]
+    fn docker_and_non_codex_launches_remain_unbridged() {
+        let mut docker = gwt_agent::AgentLaunchBuilder::new(gwt_agent::AgentId::Codex)
+            .runtime_target(gwt_agent::LaunchRuntimeTarget::Docker)
+            .build();
+        let docker_args = docker.args.clone();
+        assert!(prepare_host_codex_remote_bridge(&mut docker)
+            .expect("Docker is a supported no-op")
+            .is_none());
+        assert_eq!(docker.args, docker_args);
+
+        let mut claude = gwt_agent::AgentLaunchBuilder::new(gwt_agent::AgentId::ClaudeCode).build();
+        let claude_args = claude.args.clone();
+        assert!(prepare_host_codex_remote_bridge(&mut claude)
+            .expect("Claude is a supported no-op")
+            .is_none());
+        assert_eq!(claude.args, claude_args);
+    }
+
+    #[test]
+    fn docker_codex_prepares_container_local_sidecar_without_host_endpoint() {
+        let repo = tempfile::tempdir().expect("repo");
+        std::fs::write(
+            repo.path().join("docker-compose.yml"),
+            "services:\n  app:\n    image: node:22\n    working_dir: /workspace\n    volumes:\n      - .:/workspace\n",
+        )
+        .expect("compose");
+        let mut config = gwt_agent::AgentLaunchBuilder::new(gwt_agent::AgentId::Codex)
+            .runtime_target(gwt_agent::LaunchRuntimeTarget::Docker)
+            .working_dir(repo.path())
+            .docker_service("app")
+            .build();
+        config.command = "npx".to_string();
+        config.args = vec![
+            "--yes".to_string(),
+            "@openai/codex@0.144.5".to_string(),
+            "--no-alt-screen".to_string(),
+        ];
+
+        let prepared = prepare_codex_remote_bridge(&mut config)
+            .expect("prepare")
+            .expect("Docker Codex bridge");
+        let PreparedCodexBridge::Container(container) = prepared else {
+            panic!("expected container sidecar");
+        };
+
+        assert_eq!(container.service, "app");
+        assert_eq!(container.container_cwd, "/workspace");
+        assert_eq!(container.runner_prefix_len, 2);
+        assert_eq!(container.app_server.command, "npx");
+        assert_eq!(
+            container.app_server.args,
+            [
+                "--yes",
+                "@openai/codex@0.144.5",
+                "app-server",
+                "--listen",
+                "stdio://"
+            ]
+        );
+        assert!(container
+            .app_server
+            .remove_env
+            .iter()
+            .any(|key| key == gwt::codex_bridge::CODEX_REMOTE_AUTH_TOKEN_ENV));
+        assert!(config.args.iter().all(|arg| !arg.starts_with("ws://")));
+    }
+
+    #[test]
+    fn docker_checkpoint_prompt_uses_only_sidecar_container_attachment_paths() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let store = gwt_core::recovery::RecoveryStore::new(temp.path().join("recovery-store"));
+        let attachment = store
+            .copy_attachment_bytes("design evidence.png", b"durable container evidence")
+            .expect("copy attachment");
+        store
+            .create(
+                gwt_core::recovery::CreateRecovery {
+                    recovery_id: "source-container-recovery".to_string(),
+                    session_id: "source-container-session".to_string(),
+                    repo_id: "container-repo".to_string(),
+                    session_kind: gwt_core::recovery::RecoverySessionKind::Intake,
+                    worktree_path: temp.path().to_path_buf(),
+                    launch_base_ref: Some("develop".to_string()),
+                    launch_base_oid: "1".repeat(40),
+                    launch_head_oid: "1".repeat(40),
+                    provider: "codex".to_string(),
+                    model: None,
+                    runtime: "docker".to_string(),
+                    initial_prompt: "Review the image".to_string(),
+                    created_at: chrono::Utc::now(),
+                },
+                "create-container-source",
+            )
+            .expect("create source");
+        store
+            .bind_root(
+                "source-container-recovery",
+                gwt_core::recovery::ProviderRootBinding {
+                    root_id: "source-container-root".to_string(),
+                    session_tree_id: None,
+                    quality: gwt_core::recovery::BindingQuality::Verified,
+                    bound_at: chrono::Utc::now(),
+                },
+                "bind-container-source",
+            )
+            .expect("bind source");
+        let source = store
+            .replace_checkpoint(
+                "source-container-recovery",
+                "source-container-root",
+                0,
+                gwt_core::recovery::SemanticCheckpoint {
+                    summary: "Continue reviewing the supplied design evidence.".to_string(),
+                    attachment_refs: vec![attachment.clone()],
+                    ..gwt_core::recovery::SemanticCheckpoint::default()
+                },
+                "checkpoint-container-source",
+            )
+            .expect("checkpoint source");
+
+        let seed = "Continue from the durable checkpoint.";
+        let mut config = gwt_agent::AgentLaunchBuilder::new(gwt_agent::AgentId::Codex)
+            .runtime_target(gwt_agent::LaunchRuntimeTarget::Docker)
+            .initial_prompt(seed)
+            .extra_arg(seed)
+            .build();
+        config.recovery_continuation = Some(gwt_agent::RecoveryContinuationHandoff {
+            source_session_id: "source-container-session".to_string(),
+            source_recovery_id: source.recovery_id.clone(),
+            target_recovery_id: "target-container-recovery".to_string(),
+            source_checkpoint_revision: source.checkpoint_revision,
+            reason: "test container continuation".to_string(),
+            inherit_checkpoint: true,
+        });
+
+        let bundle = prepare_container_checkpoint_attachments_from_store(&store, &mut config)
+            .expect("prepare container attachments")
+            .expect("attachment bundle");
+        let container_paths = bundle.container_paths().expect("container manifest");
+        let digest = attachment.content_id.strip_prefix("sha256:").unwrap();
+        let host_blob = store
+            .root()
+            .join("attachments")
+            .join("sha256")
+            .join(&digest[..2])
+            .join(digest)
+            .to_string_lossy()
+            .into_owned();
+        let prompt = config.initial_prompt.as_deref().expect("final prompt");
+
+        assert_eq!(config.args.last().map(String::as_str), Some(prompt));
+        assert!(prompt.contains(&container_paths[0]));
+        assert!(container_paths[0].starts_with("/tmp/gwt-codex-recovery-"));
+        assert!(!prompt.contains(&host_blob));
+        assert!(!format!("{bundle:?}").contains(&host_blob));
     }
 }

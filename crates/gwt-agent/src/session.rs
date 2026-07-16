@@ -13,12 +13,76 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use crate::{
-    launch::{normalize_launch_args, LaunchConfig},
+    launch::{normalize_launch_args, LaunchConfig, RecoveryContinuationHandoff},
     types::{
         AgentId, AgentStatus, DockerLifecycleIntent, LaunchRuntimeTarget, SessionMode,
         WindowsShellKind, WorkflowBypass,
     },
 };
+
+/// Maximum serialized size of one durable Session ledger (4 MiB).
+pub const MAX_SESSION_TOML_BYTES: u64 = 4 * 1024 * 1024;
+/// A complete startup/import inventory may contain at most this many directory
+/// entries. 4,096 is well above a normal local Session inventory while keeping
+/// startup CPU and path allocation bounded under hostile local state.
+pub const MAX_SESSION_DIRECTORY_ENTRIES: usize = 4_096;
+/// Maximum Session TOML files accepted in one complete inventory.
+pub const MAX_SESSION_TOML_FILES: usize = 2_048;
+/// Maximum aggregate size of all Session TOMLs in one complete inventory.
+/// 256 MiB permits thousands of ordinary ledgers without allowing the later
+/// deserialize pass to consume multi-gigabyte CPU or memory.
+pub const MAX_SESSION_TOML_AGGREGATE_BYTES: u64 = 256 * 1024 * 1024;
+
+/// Shared actual-read budget for one complete Session inventory pass.
+///
+/// Each file is opened no-follow and consumed through that same handle. The
+/// remaining aggregate bound is also supplied to the handle, so a file that is
+/// swapped or grows during the read cannot bypass the inventory cap.
+#[derive(Debug)]
+pub struct SessionInventoryReadBudget {
+    limit: u64,
+    remaining: u64,
+}
+
+impl Default for SessionInventoryReadBudget {
+    fn default() -> Self {
+        Self::with_limit(MAX_SESSION_TOML_AGGREGATE_BYTES)
+    }
+}
+
+impl SessionInventoryReadBudget {
+    pub fn with_limit(limit: u64) -> Self {
+        Self {
+            limit,
+            remaining: limit,
+        }
+    }
+
+    fn read(&mut self, path: &Path) -> io::Result<Vec<u8>> {
+        let max_bytes = MAX_SESSION_TOML_BYTES.min(self.remaining);
+        let description = if self.remaining < MAX_SESSION_TOML_BYTES {
+            "aggregate Session TOML inventory"
+        } else {
+            "Session TOML inventory entry"
+        };
+        let file = gwt_core::bounded_file::BoundedRegularFile::open(path, max_bytes, description)?;
+        self.read_opened(file)
+    }
+
+    fn read_opened(
+        &mut self,
+        file: gwt_core::bounded_file::BoundedRegularFile,
+    ) -> io::Result<Vec<u8>> {
+        let bytes = file.read_all()?;
+        self.remaining = self
+            .remaining
+            .checked_sub(bytes.len() as u64)
+            .ok_or_else(|| {
+                session_inventory_limit_error("aggregate Session TOML bytes", self.limit)
+            })?;
+        Ok(bytes)
+    }
+}
 
 /// Idle duration (in seconds) after which a session is considered stopped.
 const IDLE_TIMEOUT_SECS: i64 = 60;
@@ -27,6 +91,7 @@ const CODEX_PLACEHOLDER_SESSION_ID: &str = "agent-session";
 /// Environment variable injected into agent PTYs so hooks can identify the
 /// backing gwt session.
 pub const GWT_SESSION_ID_ENV: &str = "GWT_SESSION_ID";
+pub const GWT_RECOVERY_ID_ENV: &str = "GWT_RECOVERY_ID";
 /// Environment variable injected into agent PTYs so hooks can write the
 /// matching runtime sidecar without discovering gwt paths on their own.
 pub const GWT_SESSION_RUNTIME_PATH_ENV: &str = "GWT_SESSION_RUNTIME_PATH";
@@ -48,6 +113,111 @@ pub const GWT_HOOK_FORWARD_TOKEN_ENV: &str = "GWT_HOOK_FORWARD_TOKEN";
 pub struct AgentSessionHistoryEntry {
     pub agent_session_id: String,
     pub started_at: DateTime<Utc>,
+}
+
+/// Durable launch progress used to distinguish a recoverable checkpoint from
+/// a session whose provider process was never started or bound.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum RecoveryLaunchStage {
+    Created,
+    Prepared,
+    WorktreeMaterialized,
+    SpawnRequested,
+    ProcessSpawned,
+    ProviderBound,
+    Ready,
+    /// Source recovery completed after the replacement provider reached Ready.
+    Resolved,
+    /// User explicitly discarded the source recovery in Recovery Center.
+    Discarded,
+}
+
+impl RecoveryLaunchStage {
+    pub fn is_terminal(self) -> bool {
+        matches!(self, Self::Resolved | Self::Discarded)
+    }
+}
+
+fn recovery_launch_stage_rank(stage: RecoveryLaunchStage) -> u8 {
+    match stage {
+        RecoveryLaunchStage::Created => 0,
+        RecoveryLaunchStage::Prepared => 1,
+        RecoveryLaunchStage::WorktreeMaterialized => 2,
+        RecoveryLaunchStage::SpawnRequested => 3,
+        RecoveryLaunchStage::ProcessSpawned => 4,
+        RecoveryLaunchStage::ProviderBound => 5,
+        RecoveryLaunchStage::Ready => 6,
+        RecoveryLaunchStage::Resolved | RecoveryLaunchStage::Discarded => 7,
+    }
+}
+
+/// Exclusive recovery claim. A bounded lease prevents two windows from
+/// restoring the same durable session concurrently while still allowing a
+/// crashed claimant to be replaced after expiry.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct SessionRecoveryLease {
+    pub lease_id: String,
+    pub holder_id: String,
+    pub acquired_at: DateTime<Utc>,
+    pub expires_at: DateTime<Utc>,
+}
+
+/// Whether the captured provider conversation is the root conversation for
+/// this gwt session or a child agent that must not replace the root binding.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ProviderRootRole {
+    Root,
+    Subagent,
+}
+
+/// Root-role evidence carried by a provider hook observation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ProviderRootObservationRole {
+    Root,
+    Subagent,
+    Ambiguous,
+}
+
+/// Strength of the persisted provider-session binding.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
+#[serde(rename_all = "snake_case")]
+pub enum ProviderBindingQuality {
+    Inferred,
+    Verified,
+}
+
+mod optional_session_kind_serde {
+    use serde::{de::Error, Deserialize, Deserializer, Serializer};
+
+    use gwt_skills::SessionKind;
+
+    pub fn serialize<S>(value: &Option<SessionKind>, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        match value {
+            Some(kind) => serializer.serialize_some(kind.as_env_str()),
+            None => serializer.serialize_none(),
+        }
+    }
+
+    pub fn deserialize<'de, D>(deserializer: D) -> Result<Option<SessionKind>, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let value = Option::<String>::deserialize(deserializer)?;
+        value
+            .map(|raw| match raw.trim().to_ascii_lowercase().as_str() {
+                "intake" => Ok(SessionKind::Intake),
+                "execution" => Ok(SessionKind::Execution),
+                _ => Err(D::Error::custom(format!(
+                    "unknown persisted session kind: {raw}"
+                ))),
+            })
+            .transpose()
+    }
 }
 
 /// Represents a single agent session.
@@ -81,6 +251,42 @@ pub struct Session {
     pub reasoning_level: Option<String>,
     #[serde(default)]
     pub session_mode: SessionMode,
+    /// Durable lane identity. `None` means a pre-schema-v4 session whose lane
+    /// cannot be classified safely from the historical ledger alone.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        with = "optional_session_kind_serde"
+    )]
+    pub session_kind: Option<gwt_skills::SessionKind>,
+    /// Whether this session owns a disposable detached Intake worktree.
+    #[serde(default)]
+    pub is_ephemeral: bool,
+    /// Requested committish used to materialize the Intake worktree.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ephemeral_base_ref: Option<String>,
+    /// Resolved commit captured at materialization time. This remains stable
+    /// even when the requested ref advances before a later recovery.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub launch_base_oid: Option<String>,
+    /// Stable identity for coordinating retries of this recovery record.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub recovery_id: Option<String>,
+    /// Durable source/successor handoff used to repair source retirement after
+    /// a process crash that loses the in-memory window mapping.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub recovery_continuation: Option<RecoveryContinuationHandoff>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub recovery_launch_stage: Option<RecoveryLaunchStage>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub recovery_lease: Option<SessionRecoveryLease>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider_root_role: Option<ProviderRootRole>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider_binding_quality: Option<ProviderBindingQuality>,
+    /// Monotonic checkpoint counter for rejecting stale recovery writes.
+    #[serde(default)]
+    pub checkpoint_revision: u64,
     #[serde(default)]
     pub skip_permissions: bool,
     #[serde(default)]
@@ -161,7 +367,7 @@ impl Session {
     /// Current persisted session schema version. SPEC-1921 Phase 53 / FR-066.
     /// Bump when adding a new migration in `migrate_legacy_launch_args` and
     /// ensure the new migration is idempotent relative to this value.
-    pub const CURRENT_SCHEMA_VERSION: u32 = 3;
+    pub const CURRENT_SCHEMA_VERSION: u32 = 4;
 
     /// Create a new session with a generated UUID.
     pub fn new(
@@ -188,6 +394,19 @@ impl Session {
             model: None,
             reasoning_level: None,
             session_mode: SessionMode::Normal,
+            session_kind: Some(gwt_skills::SessionKind::Execution),
+            is_ephemeral: false,
+            ephemeral_base_ref: None,
+            launch_base_oid: None,
+            recovery_id: Some(Uuid::new_v4().to_string()),
+            recovery_continuation: None,
+            recovery_launch_stage: Some(RecoveryLaunchStage::Created),
+            recovery_lease: None,
+            // Provider role is unknown until a bridge or structured hook
+            // proves that the observed conversation is the launch root.
+            provider_root_role: None,
+            provider_binding_quality: None,
+            checkpoint_revision: 0,
             skip_permissions: false,
             fast_mode: false,
             codex_fast_mode: false,
@@ -224,11 +443,27 @@ impl Session {
         config: &LaunchConfig,
     ) -> Self {
         let mut session = Self::new(worktree_path, branch, config.agent_id.clone());
+        if let Some(session_id) = config.recovery_retry_session_id.as_ref() {
+            session.id = session_id.clone();
+        }
+        if let Some(created_at) = config.recovery_retry_created_at {
+            session.created_at = created_at;
+        }
+        if let Some(continuation) = config.recovery_continuation.as_ref() {
+            session.recovery_id = Some(continuation.target_recovery_id.clone());
+        }
+        session.recovery_continuation = config.recovery_continuation.clone();
         session.display_name = config.display_name.clone();
         session.tool_version = config.tool_version.clone();
         session.model = config.model.clone();
         session.reasoning_level = config.reasoning_level.clone();
         session.session_mode = config.session_mode;
+        session.session_kind = Some(gwt_skills::SessionKind::from_is_ephemeral(
+            config.is_ephemeral,
+        ));
+        session.is_ephemeral = config.is_ephemeral;
+        session.ephemeral_base_ref = config.ephemeral_base_ref.clone();
+        session.recovery_launch_stage = Some(RecoveryLaunchStage::Prepared);
         session.skip_permissions = config.skip_permissions;
         session.fast_mode = config.fast_mode;
         session.codex_fast_mode = config.codex_fast_mode;
@@ -254,6 +489,41 @@ impl Session {
         ) {
             self.last_activity_at = now;
         }
+    }
+
+    /// Advance the Session-side mirror of the recovery store launch stage.
+    pub fn advance_recovery_launch_stage(
+        &mut self,
+        requested: RecoveryLaunchStage,
+    ) -> io::Result<()> {
+        if let Some(current) = self.recovery_launch_stage {
+            if current.is_terminal() && current != requested {
+                return Err(io::Error::other(format!(
+                    "invalid recovery launch stage transition from {current:?} to {requested:?}"
+                )));
+            }
+            if recovery_launch_stage_rank(requested) <= recovery_launch_stage_rank(current) {
+                return Ok(());
+            }
+        }
+        self.recovery_launch_stage = Some(requested);
+        self.updated_at = Utc::now();
+        Ok(())
+    }
+
+    /// Record provider root evidence without allowing a child/root role flip.
+    pub fn observe_provider_root_role(&mut self, role: ProviderRootRole) -> io::Result<()> {
+        match self.provider_root_role {
+            None => self.provider_root_role = Some(role),
+            Some(current) if current == role => {}
+            Some(current) => {
+                return Err(io::Error::other(format!(
+                    "provider root role conflicts: current {current:?}, observed {role:?}"
+                )));
+            }
+        }
+        self.updated_at = Utc::now();
+        Ok(())
     }
 
     /// Persist that a managed runtime hook was observed for this session.
@@ -381,11 +651,12 @@ impl Session {
     /// `load` must not silently rewrite `launch_args`. Callers that need
     /// legacy migration applied should use [`Session::load_and_migrate`].
     pub fn load(path: &Path) -> std::io::Result<Self> {
-        let content = std::fs::read_to_string(path)?;
-        let mut session: Self = toml::from_str(&content)
-            .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e.to_string()))?;
-        session.normalize_fast_mode_fields();
-        Ok(session)
+        let bytes = gwt_core::bounded_file::read_bounded_regular_file(
+            path,
+            MAX_SESSION_TOML_BYTES,
+            "Session TOML",
+        )?;
+        Self::from_toml_bytes(&bytes)
     }
 
     /// Load a session and apply any pending legacy migrations. Production
@@ -395,6 +666,23 @@ impl Session {
     pub fn load_and_migrate(path: &Path) -> std::io::Result<Self> {
         let mut session = Self::load(path)?;
         session.migrate_legacy_launch_args();
+        Ok(session)
+    }
+
+    pub(crate) fn load_with_inventory_budget(
+        path: &Path,
+        budget: &mut SessionInventoryReadBudget,
+    ) -> io::Result<Self> {
+        let bytes = budget.read(path)?;
+        Self::from_toml_bytes(&bytes)
+    }
+
+    fn from_toml_bytes(bytes: &[u8]) -> io::Result<Self> {
+        let content = std::str::from_utf8(bytes)
+            .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
+        let mut session: Self = toml::from_str(content)
+            .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error.to_string()))?;
+        session.normalize_fast_mode_fields();
         Ok(session)
     }
 
@@ -422,6 +710,14 @@ impl Session {
             }
             self.schema_version = 3;
         }
+
+        if self.schema_version < 4 {
+            // Schema 3 did not persist enough evidence to distinguish Intake
+            // from Execution, verify a provider binding, or reconstruct an
+            // exact detached base. Keep every new field at its serde default
+            // instead of manufacturing recovery evidence from ambiguous data.
+            self.schema_version = 4;
+        }
     }
 
     fn normalize_fast_mode_fields(&mut self) {
@@ -433,6 +729,86 @@ impl Session {
     pub fn fast_mode_enabled(&self) -> bool {
         self.fast_mode || self.codex_fast_mode
     }
+}
+
+/// Return a complete, sorted inventory of Session TOML paths.
+///
+/// Enumeration errors and budget exhaustion are returned to the caller rather
+/// than silently truncating the inventory. Startup recovery uses that signal to
+/// suppress weak placeholder import and orphan pruning.
+pub fn discover_session_toml_paths(sessions_dir: &Path) -> io::Result<Vec<PathBuf>> {
+    discover_session_toml_paths_with_limits(
+        sessions_dir,
+        MAX_SESSION_DIRECTORY_ENTRIES,
+        MAX_SESSION_TOML_FILES,
+    )
+}
+
+pub(crate) fn discover_session_toml_paths_with_limits(
+    sessions_dir: &Path,
+    max_entries: usize,
+    max_toml_files: usize,
+) -> io::Result<Vec<PathBuf>> {
+    let entries = match fs::read_dir(sessions_dir) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(error) => return Err(error),
+    };
+    let mut entry_count = 0_usize;
+    let mut toml_count = 0_usize;
+    let mut paths = Vec::new();
+    for entry in entries {
+        let entry = entry?;
+        entry_count = entry_count.saturating_add(1);
+        if entry_count > max_entries {
+            return Err(session_inventory_limit_error(
+                "directory entries",
+                max_entries as u64,
+            ));
+        }
+        let path = entry.path();
+        if !path
+            .extension()
+            .is_some_and(|extension| extension.eq_ignore_ascii_case("toml"))
+        {
+            continue;
+        }
+        let file_type = entry.file_type()?;
+        if !file_type.is_file() {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!(
+                    "Session inventory entry {} must be a regular file",
+                    path.display()
+                ),
+            ));
+        }
+        toml_count = toml_count.saturating_add(1);
+        if toml_count > max_toml_files {
+            return Err(session_inventory_limit_error(
+                "Session TOML files",
+                max_toml_files as u64,
+            ));
+        }
+        // Open through the same no-follow primitive used by the eventual
+        // consumer. This rejects links and non-regular files during discovery;
+        // actual bytes are independently bounded on their consuming handle.
+        gwt_core::bounded_file::BoundedRegularFile::open(
+            &path,
+            MAX_SESSION_TOML_BYTES,
+            "Session TOML inventory entry",
+        )?;
+        paths.push(path);
+    }
+    paths.sort();
+    Ok(paths)
+}
+
+fn session_inventory_limit_error(field: &str, limit: u64) -> io::Error {
+    io::Error::new(
+        io::ErrorKind::InvalidData,
+        format!("Session inventory exceeds the {limit} {field} limit"),
+    )
 }
 
 fn session_file_path(dir: &Path, session_id: &str) -> PathBuf {
@@ -534,6 +910,29 @@ where
     with_session_lock(sessions_dir, session_id, || {
         let path = session_file_path(sessions_dir, session_id);
         let mut session = Session::load_and_migrate(&path)?;
+        mutate(&mut session)?;
+        let content = serialize_session_toml(&session)?;
+        write_session_toml_atomic(&path, &content)?;
+        Ok(session)
+    })
+}
+
+/// Inventory-aware variant used by startup scans. The Session is parsed from
+/// the same handle charged to the shared aggregate budget while its normal
+/// per-session lock is held, then persisted without a second content read.
+pub fn update_session_with_inventory_budget<F>(
+    sessions_dir: &Path,
+    session_id: &str,
+    budget: &mut SessionInventoryReadBudget,
+    mutate: F,
+) -> io::Result<Session>
+where
+    F: FnOnce(&mut Session) -> io::Result<()>,
+{
+    with_session_lock(sessions_dir, session_id, || {
+        let path = session_file_path(sessions_dir, session_id);
+        let mut session = Session::load_with_inventory_budget(&path, budget)?;
+        session.migrate_legacy_launch_args();
         mutate(&mut session)?;
         let content = serialize_session_toml(&session)?;
         write_session_toml_atomic(&path, &content)?;
@@ -716,9 +1115,177 @@ pub fn persist_agent_session_id(
     session_id: &str,
     agent_session_id: &str,
 ) -> std::io::Result<()> {
+    persist_agent_session_id_with_recovery_project_dir(
+        sessions_dir,
+        session_id,
+        agent_session_id,
+        None,
+    )
+}
+
+/// Persist a provider session id only when the observation proves it is the
+/// root conversation for the gwt launch.
+pub fn persist_observed_provider_session_id(
+    sessions_dir: &Path,
+    session_id: &str,
+    agent_session_id: &str,
+    role: ProviderRootObservationRole,
+) -> std::io::Result<()> {
+    match role {
+        ProviderRootObservationRole::Root => {
+            persist_agent_session_id(sessions_dir, session_id, agent_session_id)?;
+            // Root-role evidence belongs to the Session ledger even for a
+            // legacy session that predates Recovery Store materialization.
+            // When a recovery record exists, `persist_agent_session_id`
+            // already bound the Store first and this observation is an
+            // idempotent Session-side mirror.
+            update_session(sessions_dir, session_id, |session| {
+                session.observe_provider_root_role(ProviderRootRole::Root)
+            })
+            .map(|_| ())
+        }
+        ProviderRootObservationRole::Subagent | ProviderRootObservationRole::Ambiguous => Ok(()),
+    }
+}
+
+/// Persist one successful provider/PTY launch boundary to the Recovery Store
+/// first and then mirror it into the Session ledger.
+pub fn persist_recovery_launch_stage(
+    sessions_dir: &Path,
+    session_id: &str,
+    stage: RecoveryLaunchStage,
+) -> std::io::Result<()> {
+    persist_recovery_launch_stage_with_project_dir(sessions_dir, session_id, stage, None)
+}
+
+fn persist_recovery_launch_stage_with_project_dir(
+    sessions_dir: &Path,
+    session_id: &str,
+    stage: RecoveryLaunchStage,
+    recovery_project_dir: Option<&Path>,
+) -> std::io::Result<()> {
+    let before = Session::load_and_migrate(&session_file_path(sessions_dir, session_id))?;
+    if let (Some(recovery_id), Some(project_root)) = (
+        before.recovery_id.as_deref(),
+        before.project_state_root.as_deref(),
+    ) {
+        let project_dir = recovery_project_dir
+            .map(Path::to_path_buf)
+            .unwrap_or_else(|| gwt_core::paths::gwt_project_dir_for_repo_path(project_root));
+        let store = gwt_core::recovery::RecoveryStore::for_project_dir(project_dir);
+        if store
+            .load(recovery_id)
+            .map_err(recovery_store_io_error)?
+            .is_some()
+        {
+            let root_role = before.provider_root_role.map(|role| match role {
+                ProviderRootRole::Root => gwt_core::recovery::ProviderRootRole::Root,
+                ProviderRootRole::Subagent => gwt_core::recovery::ProviderRootRole::Subagent,
+            });
+            store
+                .advance_launch_stage(
+                    recovery_id,
+                    core_recovery_launch_stage(stage),
+                    root_role,
+                    format!(
+                        "launch-stage:{session_id}:{}",
+                        recovery_launch_stage_name(stage)
+                    ),
+                )
+                .map_err(recovery_store_io_error)?;
+        }
+    }
+    update_session(sessions_dir, session_id, |session| {
+        session.advance_recovery_launch_stage(stage)
+    })
+    .map(|_| ())
+}
+
+fn core_recovery_launch_stage(
+    stage: RecoveryLaunchStage,
+) -> gwt_core::recovery::RecoveryLaunchStage {
+    match stage {
+        RecoveryLaunchStage::Created => gwt_core::recovery::RecoveryLaunchStage::Created,
+        RecoveryLaunchStage::Prepared => gwt_core::recovery::RecoveryLaunchStage::Prepared,
+        RecoveryLaunchStage::WorktreeMaterialized => {
+            gwt_core::recovery::RecoveryLaunchStage::WorktreeMaterialized
+        }
+        RecoveryLaunchStage::SpawnRequested => {
+            gwt_core::recovery::RecoveryLaunchStage::SpawnRequested
+        }
+        RecoveryLaunchStage::ProcessSpawned => {
+            gwt_core::recovery::RecoveryLaunchStage::ProcessSpawned
+        }
+        RecoveryLaunchStage::ProviderBound => {
+            gwt_core::recovery::RecoveryLaunchStage::ProviderBound
+        }
+        RecoveryLaunchStage::Ready => gwt_core::recovery::RecoveryLaunchStage::Ready,
+        RecoveryLaunchStage::Resolved => gwt_core::recovery::RecoveryLaunchStage::Resolved,
+        RecoveryLaunchStage::Discarded => gwt_core::recovery::RecoveryLaunchStage::Discarded,
+    }
+}
+
+fn recovery_launch_stage_name(stage: RecoveryLaunchStage) -> &'static str {
+    match stage {
+        RecoveryLaunchStage::Created => "created",
+        RecoveryLaunchStage::Prepared => "prepared",
+        RecoveryLaunchStage::WorktreeMaterialized => "worktree-materialized",
+        RecoveryLaunchStage::SpawnRequested => "spawn-requested",
+        RecoveryLaunchStage::ProcessSpawned => "process-spawned",
+        RecoveryLaunchStage::ProviderBound => "provider-bound",
+        RecoveryLaunchStage::Ready => "ready",
+        RecoveryLaunchStage::Resolved => "resolved",
+        RecoveryLaunchStage::Discarded => "discarded",
+    }
+}
+
+fn persist_agent_session_id_with_recovery_project_dir(
+    sessions_dir: &Path,
+    session_id: &str,
+    agent_session_id: &str,
+    recovery_project_dir: Option<&Path>,
+) -> std::io::Result<()> {
     let agent_session_id = agent_session_id.trim();
     if agent_session_id.is_empty() {
         return Ok(());
+    }
+
+    let before = Session::load_and_migrate(&session_file_path(sessions_dir, session_id))?;
+    let mut recovery_bound = false;
+    if let (Some(recovery_id), Some(project_root)) = (
+        before.recovery_id.as_deref(),
+        before.project_state_root.as_deref(),
+    ) {
+        let project_dir = recovery_project_dir
+            .map(Path::to_path_buf)
+            .unwrap_or_else(|| gwt_core::paths::gwt_project_dir_for_repo_path(project_root));
+        let store = gwt_core::recovery::RecoveryStore::for_project_dir(project_dir);
+        let recovery_exists = store
+            .load(recovery_id)
+            .map_err(recovery_store_io_error)?
+            .is_some();
+        if recovery_exists {
+            match store.bind_root_semantic(
+                recovery_id,
+                agent_session_id,
+                None,
+                gwt_core::recovery::BindingQuality::Verified,
+                format!("bind-provider-root:{agent_session_id}"),
+            ) {
+                Ok(_) => recovery_bound = true,
+                Err(gwt_core::recovery::RecoveryStoreError::RootBindingConflict { .. }) => {
+                    store
+                        .set_lifecycle(
+                            recovery_id,
+                            gwt_core::recovery::RecoveryLifecycle::Attention,
+                            Some("provider root changed after an exact binding".to_string()),
+                            format!("root-conflict:{agent_session_id}"),
+                        )
+                        .map_err(recovery_store_io_error)?;
+                }
+                Err(error) => return Err(recovery_store_io_error(error)),
+            }
+        }
     }
 
     update_session(sessions_dir, session_id, |session| {
@@ -740,9 +1307,18 @@ pub fn persist_agent_session_id(
             });
         }
         session.agent_session_id = Some(agent_session_id.to_string());
+        if recovery_bound {
+            session.observe_provider_root_role(ProviderRootRole::Root)?;
+            session.provider_binding_quality = Some(ProviderBindingQuality::Verified);
+            session.advance_recovery_launch_stage(RecoveryLaunchStage::ProviderBound)?;
+        }
         Ok(())
     })
     .map(|_| ())
+}
+
+fn recovery_store_io_error(error: gwt_core::recovery::RecoveryStoreError) -> io::Error {
+    io::Error::other(error.to_string())
 }
 
 /// Persist whether the GUI should recreate this session's agent window during
@@ -777,6 +1353,100 @@ mod tests {
     use super::*;
 
     #[test]
+    fn session_load_rejects_oversized_and_non_regular_toml() {
+        let dir = tempfile::tempdir().unwrap();
+        let oversized = dir.path().join("oversized.toml");
+        File::create(&oversized)
+            .unwrap()
+            .set_len(MAX_SESSION_TOML_BYTES + 1)
+            .unwrap();
+
+        let oversized_error = Session::load(&oversized).unwrap_err();
+        assert!(oversized_error.to_string().contains("size limit"));
+
+        let directory = dir.path().join("directory.toml");
+        fs::create_dir(&directory).unwrap();
+        let directory_error = Session::load(&directory).unwrap_err();
+        assert!(directory_error.to_string().contains("regular file"));
+    }
+
+    #[test]
+    fn session_inventory_fails_closed_instead_of_truncating() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(dir.path().join("one.toml"), b"one").unwrap();
+        fs::write(dir.path().join("two.toml"), b"two").unwrap();
+        fs::write(dir.path().join("unrelated.tmp"), b"three").unwrap();
+
+        let entry_error = discover_session_toml_paths_with_limits(dir.path(), 2, 10)
+            .expect_err("every directory entry must consume the inventory budget");
+        assert!(entry_error.to_string().contains("directory entries"));
+
+        let file_error = discover_session_toml_paths_with_limits(dir.path(), 10, 1)
+            .expect_err("the Session file count must not be silently truncated");
+        assert!(file_error.to_string().contains("Session TOML files"));
+
+        let mut budget = SessionInventoryReadBudget::with_limit(5);
+        assert_eq!(budget.read(&dir.path().join("one.toml")).unwrap(), b"one");
+        let byte_error = budget
+            .read(&dir.path().join("two.toml"))
+            .expect_err("actual Session bytes must share one aggregate budget");
+        assert!(byte_error.to_string().contains("aggregate Session TOML"));
+    }
+
+    #[test]
+    fn session_inventory_actual_read_budget_survives_path_swap_and_growth() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("session.toml");
+        let replacement = dir.path().join("replacement");
+        fs::write(&path, b"old").unwrap();
+        fs::write(&replacement, b"replacement bytes").unwrap();
+        let opened = gwt_core::bounded_file::BoundedRegularFile::open(
+            &path,
+            5,
+            "Session TOML inventory entry",
+        )
+        .unwrap();
+        fs::remove_file(&path).unwrap();
+        fs::rename(&replacement, &path).unwrap();
+        let mut budget = SessionInventoryReadBudget::with_limit(5);
+        assert_eq!(budget.read_opened(opened).unwrap(), b"old");
+        assert_eq!(budget.remaining, 2);
+
+        let growing = dir.path().join("growing.toml");
+        fs::write(&growing, b"123").unwrap();
+        let opened = gwt_core::bounded_file::BoundedRegularFile::open(
+            &growing,
+            5,
+            "Session TOML inventory entry",
+        )
+        .unwrap();
+        OpenOptions::new()
+            .append(true)
+            .open(&growing)
+            .unwrap()
+            .write_all(b"456")
+            .unwrap();
+        let mut budget = SessionInventoryReadBudget::with_limit(5);
+        assert!(budget.read_opened(opened).is_err());
+        assert_eq!(budget.remaining, 5, "failed reads must not consume budget");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn session_load_and_inventory_reject_symlink_toml() {
+        use std::os::unix::fs::symlink;
+
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("target");
+        fs::write(&target, b"not a session").unwrap();
+        let link = dir.path().join("linked.toml");
+        symlink(&target, &link).unwrap();
+
+        assert!(Session::load(&link).is_err());
+        assert!(discover_session_toml_paths(dir.path()).is_err());
+    }
+
+    #[test]
     fn new_session_has_uuid_id() {
         let session = Session::new("/tmp/wt", "feature/test", AgentId::ClaudeCode);
         assert!(!session.id.is_empty());
@@ -809,6 +1479,99 @@ mod tests {
         assert!(!session.restore_window_on_startup);
         // SPEC-1921 FR-102: new sessions default to no backend override.
         assert!(session.backend_id.is_none());
+        assert_eq!(
+            session.session_kind,
+            Some(gwt_skills::SessionKind::Execution)
+        );
+        assert!(!session.is_ephemeral);
+        assert!(session.ephemeral_base_ref.is_none());
+        assert!(session.launch_base_oid.is_none());
+        assert!(session.recovery_id.is_some());
+        assert_eq!(
+            session.recovery_launch_stage,
+            Some(RecoveryLaunchStage::Created)
+        );
+        assert!(session.recovery_lease.is_none());
+        assert!(session.provider_root_role.is_none());
+        assert!(session.provider_binding_quality.is_none());
+        assert_eq!(session.checkpoint_revision, 0);
+    }
+
+    #[test]
+    fn schema_four_recovery_metadata_round_trips() {
+        let dir = tempfile::tempdir().unwrap();
+        let now = Utc::now();
+        let mut session = Session::new("/tmp/wt", "", AgentId::Codex);
+        session.session_kind = Some(gwt_skills::SessionKind::Intake);
+        session.is_ephemeral = true;
+        session.ephemeral_base_ref = Some("origin/develop".to_string());
+        session.launch_base_oid = Some("1111111111111111111111111111111111111111".to_string());
+        session.recovery_launch_stage = Some(RecoveryLaunchStage::ProviderBound);
+        session.recovery_lease = Some(SessionRecoveryLease {
+            lease_id: "lease-1".to_string(),
+            holder_id: "window-1".to_string(),
+            acquired_at: now,
+            expires_at: now + chrono::Duration::minutes(5),
+        });
+        session.provider_root_role = Some(ProviderRootRole::Root);
+        session.provider_binding_quality = Some(ProviderBindingQuality::Verified);
+        session.checkpoint_revision = 7;
+
+        session.save(dir.path()).unwrap();
+        let loaded = Session::load(&dir.path().join(format!("{}.toml", session.id))).unwrap();
+
+        assert_eq!(loaded.schema_version, Session::CURRENT_SCHEMA_VERSION);
+        assert_eq!(loaded.session_kind, Some(gwt_skills::SessionKind::Intake));
+        assert!(loaded.is_ephemeral);
+        assert_eq!(loaded.ephemeral_base_ref.as_deref(), Some("origin/develop"));
+        assert_eq!(loaded.launch_base_oid, session.launch_base_oid);
+        assert_eq!(loaded.recovery_id, session.recovery_id);
+        assert_eq!(
+            loaded.recovery_launch_stage,
+            Some(RecoveryLaunchStage::ProviderBound)
+        );
+        assert_eq!(loaded.recovery_lease, session.recovery_lease);
+        assert_eq!(loaded.provider_root_role, Some(ProviderRootRole::Root));
+        assert_eq!(
+            loaded.provider_binding_quality,
+            Some(ProviderBindingQuality::Verified)
+        );
+        assert_eq!(loaded.checkpoint_revision, 7);
+    }
+
+    #[test]
+    fn schema_three_without_recovery_metadata_stays_unbound_when_migrated() {
+        let legacy = r#"
+id = "1d3d2d2d-3333-4444-5555-888888888888"
+worktree_path = "/path/that/does/not/exist"
+branch = "work"
+agent_id = { type = "Codex" }
+status = "Running"
+launch_command = "codex"
+launch_args = []
+schema_version = 3
+created_at = "2026-07-01T00:00:00Z"
+updated_at = "2026-07-01T00:00:00Z"
+last_activity_at = "2026-07-01T00:00:00Z"
+display_name = "Codex"
+"#;
+        let mut session: Session = toml::from_str(legacy).expect("deserialize schema 3");
+
+        assert!(session.session_kind.is_none());
+        assert!(!session.is_ephemeral);
+        assert!(session.recovery_id.is_none());
+        assert!(session.provider_root_role.is_none());
+        assert!(session.provider_binding_quality.is_none());
+        assert_eq!(session.checkpoint_revision, 0);
+
+        session.migrate_legacy_launch_args();
+
+        assert_eq!(session.schema_version, Session::CURRENT_SCHEMA_VERSION);
+        assert!(
+            session.session_kind.is_none(),
+            "legacy Intake-vs-Execution ambiguity must remain explicit"
+        );
+        assert!(session.recovery_id.is_none());
     }
 
     #[test]
@@ -1125,6 +1888,143 @@ display_name = "Claude Code"
 
         let loaded = Session::load(&dir.path().join(format!("{session_id}.toml"))).unwrap();
         assert_eq!(loaded.agent_session_id.as_deref(), Some("agent-123"));
+    }
+
+    #[test]
+    fn persist_agent_session_id_binds_recovery_root_before_promoting_session() {
+        let dir = tempfile::tempdir().unwrap();
+        let project_dir = dir.path().join("project-store");
+        let worktree = dir.path().join("intake");
+        std::fs::create_dir_all(&worktree).unwrap();
+        let mut session = Session::new(&worktree, "work", AgentId::Codex);
+        session.session_kind = Some(gwt_skills::SessionKind::Intake);
+        session.is_ephemeral = true;
+        session.project_state_root = Some(worktree.clone());
+        let session_id = session.id.clone();
+        let recovery_id = session.recovery_id.clone().unwrap();
+        session.save(dir.path()).unwrap();
+        let store = gwt_core::recovery::RecoveryStore::for_project_dir(&project_dir);
+        store
+            .create(
+                gwt_core::recovery::CreateRecovery {
+                    recovery_id: recovery_id.clone(),
+                    session_id: session_id.clone(),
+                    repo_id: "repo".to_string(),
+                    session_kind: gwt_core::recovery::RecoverySessionKind::Intake,
+                    worktree_path: worktree,
+                    launch_base_ref: Some("origin/develop".to_string()),
+                    launch_base_oid: "1111111111111111111111111111111111111111".to_string(),
+                    launch_head_oid: "1111111111111111111111111111111111111111".to_string(),
+                    provider: "codex".to_string(),
+                    model: None,
+                    runtime: "host".to_string(),
+                    initial_prompt: "Investigate".to_string(),
+                    created_at: session.created_at,
+                },
+                "create",
+            )
+            .unwrap();
+
+        persist_agent_session_id_with_recovery_project_dir(
+            dir.path(),
+            &session_id,
+            "provider-root",
+            Some(&project_dir),
+        )
+        .unwrap();
+        // Provider hooks are at-least-once. A repeated SessionStart for the
+        // same root must reuse the semantic operation instead of conflicting
+        // on a newly generated observation timestamp.
+        persist_agent_session_id_with_recovery_project_dir(
+            dir.path(),
+            &session_id,
+            "provider-root",
+            Some(&project_dir),
+        )
+        .unwrap();
+
+        let recovery = store.load(&recovery_id).unwrap().unwrap();
+        assert_eq!(
+            recovery
+                .provider_root
+                .as_ref()
+                .map(|root| root.root_id.as_str()),
+            Some("provider-root")
+        );
+        let loaded = Session::load(&dir.path().join(format!("{session_id}.toml"))).unwrap();
+        assert_eq!(loaded.agent_session_id.as_deref(), Some("provider-root"));
+        assert_eq!(
+            loaded.provider_binding_quality,
+            Some(ProviderBindingQuality::Verified)
+        );
+        assert_eq!(
+            loaded.recovery_launch_stage,
+            Some(RecoveryLaunchStage::ProviderBound)
+        );
+    }
+
+    #[test]
+    fn persist_recovery_launch_stage_writes_store_before_session_mirror() {
+        let dir = tempfile::tempdir().unwrap();
+        let project_dir = dir.path().join("project-store");
+        let worktree = dir.path().join("intake");
+        std::fs::create_dir_all(&worktree).unwrap();
+        let mut session = Session::new(&worktree, "work", AgentId::Codex);
+        session.project_state_root = Some(worktree.clone());
+        let session_id = session.id.clone();
+        let recovery_id = session.recovery_id.clone().unwrap();
+        session.save(dir.path()).unwrap();
+        let store = gwt_core::recovery::RecoveryStore::for_project_dir(&project_dir);
+        store
+            .create(
+                gwt_core::recovery::CreateRecovery {
+                    recovery_id: recovery_id.clone(),
+                    session_id: session_id.clone(),
+                    repo_id: "repo".to_string(),
+                    session_kind: gwt_core::recovery::RecoverySessionKind::Intake,
+                    worktree_path: worktree,
+                    launch_base_ref: Some("origin/develop".to_string()),
+                    launch_base_oid: "1".repeat(40),
+                    launch_head_oid: "1".repeat(40),
+                    provider: "codex".to_string(),
+                    model: None,
+                    runtime: "host".to_string(),
+                    initial_prompt: "Investigate".to_string(),
+                    created_at: session.created_at,
+                },
+                "create-stage-test",
+            )
+            .unwrap();
+
+        persist_recovery_launch_stage_with_project_dir(
+            dir.path(),
+            &session_id,
+            RecoveryLaunchStage::SpawnRequested,
+            Some(&project_dir),
+        )
+        .unwrap();
+        assert_eq!(
+            store.load(&recovery_id).unwrap().unwrap().launch_stage,
+            gwt_core::recovery::RecoveryLaunchStage::SpawnRequested
+        );
+        assert_eq!(
+            Session::load(&dir.path().join(format!("{session_id}.toml")))
+                .unwrap()
+                .recovery_launch_stage,
+            Some(RecoveryLaunchStage::SpawnRequested)
+        );
+
+        persist_recovery_launch_stage_with_project_dir(
+            dir.path(),
+            &session_id,
+            RecoveryLaunchStage::ProcessSpawned,
+            Some(&project_dir),
+        )
+        .unwrap();
+        assert_eq!(
+            store.load(&recovery_id).unwrap().unwrap().launch_stage,
+            gwt_core::recovery::RecoveryLaunchStage::ProcessSpawned
+        );
     }
 
     // SPEC-2359 Workspace → Work → Session: Claude Code / Codex can split one
@@ -1708,6 +2608,17 @@ display_name = "Claude Code"
         config.docker_lifecycle_intent = DockerLifecycleIntent::Restart;
         config.linked_issue_number = Some(1921);
         config.session_mode = crate::SessionMode::Continue;
+        config.is_ephemeral = true;
+        config.ephemeral_base_ref = Some("origin/develop".to_string());
+        let handoff = RecoveryContinuationHandoff {
+            source_session_id: "source-session".to_string(),
+            source_recovery_id: "source-recovery".to_string(),
+            target_recovery_id: "target-recovery".to_string(),
+            source_checkpoint_revision: 7,
+            reason: "Recovery Center requested checkpoint continuation".to_string(),
+            inherit_checkpoint: true,
+        };
+        config.recovery_continuation = Some(handoff.clone());
 
         let session = Session::from_launch_config("/tmp/worktree", "feature/demo", &config);
 
@@ -1736,6 +2647,22 @@ display_name = "Claude Code"
         assert_eq!(session.linked_issue_number, Some(1921));
         assert_eq!(session.session_mode, crate::SessionMode::Continue);
         assert_eq!(session.status, AgentStatus::Running);
+        assert_eq!(session.session_kind, Some(gwt_skills::SessionKind::Intake));
+        assert!(session.is_ephemeral);
+        assert_eq!(
+            session.ephemeral_base_ref.as_deref(),
+            Some("origin/develop")
+        );
+        assert_eq!(
+            session.recovery_launch_stage,
+            Some(RecoveryLaunchStage::Prepared)
+        );
+        assert_eq!(session.recovery_id.as_deref(), Some("target-recovery"));
+        assert_eq!(session.recovery_continuation.as_ref(), Some(&handoff));
+        let persisted = toml::to_string(&session).expect("serialize successor Session");
+        let restored: Session = toml::from_str(&persisted).expect("restore successor Session");
+        assert_eq!(restored.recovery_id.as_deref(), Some("target-recovery"));
+        assert_eq!(restored.recovery_continuation, Some(handoff));
     }
 
     #[test]

@@ -260,6 +260,60 @@ After each answer:
 - re-rank the remaining unresolved questions
 - Ask the next highest-impact question if any remain
 
+### Durable milestone checkpoint
+
+Persist the structured milestone at every meaningful discussion boundary:
+after Phase 2 findings are ready and before the first question, after applying
+each user answer and before asking the next question, before an interruption or
+handoff, and after the final Action Bundle. Do not emit heartbeat-style entries
+when no public-safe finding, decision, question, next action, or status changed.
+
+Run the JSON operation `discussion.update` once with the current title, status,
+related SPECs, concise summary, confirmed decisions, open questions, and next
+action. For a managed Intake root this single operation is the durability
+boundary: it updates the machine-local discussion memo, then atomically replaces
+the semantic Recovery checkpoint plus its deterministic Board outbox intent
+inside Recovery Store. The memo and Recovery Store remain separate writes. The
+memo section and Recovery checkpoint therefore carry the same deterministic
+operation marker, and the Stop boundary rejects a process-stop or concurrency
+mismatch until `discussion.update` is retried and both projections converge.
+Repeating the same structured milestone is a no-op for checkpoint revision and
+Board identity. Board acknowledgement happens only after the idempotent local
+post succeeds; unsupported remote delivery remains durably pending and does
+not roll back the checkpoint.
+
+Do not call `intake.checkpoint.update` for the same structured milestone by
+default. Use `intake.checkpoint.current` followed by
+`intake.checkpoint.update` only when this boundary must add or retain a
+continuation-critical attachment or a completed allowlisted visible item. Read
+the current numeric `revision` and state as the merge base, repeat its
+structured fields and title unchanged, retain every still-required
+`attachment_ref`, and add new files through `attachment_paths`. This
+supplemental complete-replacement CAS reuses the automatic Board intent, so it
+adds one checkpoint revision for the extra payload but no second Board post.
+On a revision mismatch, read current state again, merge explicitly, and retry;
+never overwrite it last-write-wins.
+
+Pre-upgrade current Intake sessions may lack `GWT_RECOVERY_ID`. The operation
+resolves the exact `GWT_SESSION_ID` ledger and uses bounded provider metadata
+to import its Recovery owner on demand. A missing, ambiguous, or non-root owner
+remains in Recovery Center Attention. Do not bypass that state or reconstruct
+it from transcript, argv, bridge text, or Board.
+
+Visible items are restricted to completed root-visible assistant messages,
+plans, or questions and completed user answers or messages. The milestone must
+be public-safe and useful without the private conversation. Do not include
+transcripts, tool output, hidden reasoning, credentials, tokens, environment
+values, approvals, or unrelated file contents. If either operation fails, keep
+the discussion active, report the durability failure, and retry it before
+treating that answer as checkpointed. The Stop boundary rejects a missing or
+stale structured checkpoint; it never fabricates a Board milestone from an
+incomplete crash turn.
+
+The final checkpoint title and body must say whether the discussion was
+completed, parked, or interrupted. This gives Board a current Intake milestone
+without publishing the transcript or fabricating historical entries.
+
 ## Depth Interview Loop
 
 Use this loop for every non-trivial discussion, including ordinary

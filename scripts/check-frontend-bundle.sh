@@ -24,6 +24,7 @@ node_check crates/gwt/web/branch-list-state.js
 node_check crates/gwt/web/migration-modal.js
 node_check crates/gwt/web/project-clone-modal.js
 node_check crates/gwt/web/board-surface.js
+node_check crates/gwt/web/recovery-center-modal.js
 node_check crates/gwt/web/agent-kanban-surface.js
 node_check crates/gwt/web/workspace-kanban-surface.js
 node_check crates/gwt/web/theme-manager.js

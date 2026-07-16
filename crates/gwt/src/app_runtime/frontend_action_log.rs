@@ -222,6 +222,14 @@ pub(super) fn frontend_user_action_log(event: &FrontendEvent) -> Option<Frontend
             FrontendUserActionLog::new("update_terminal_grid", "terminal").window(id)
         }
         FrontendEvent::ListWindows => FrontendUserActionLog::new("list_windows", "window"),
+        FrontendEvent::ListRecoveryCenter => {
+            FrontendUserActionLog::new("list_recovery_center", "recovery_center")
+        }
+        FrontendEvent::RecoveryCenterAction { request, .. } => {
+            FrontendUserActionLog::new("recovery_center_action", "recovery_center")
+                .target(&request.action_handle)
+                .mode(request.action.as_str())
+        }
         FrontendEvent::CloseWindow { id } => {
             FrontendUserActionLog::new("close_window", "window").window(id)
         }

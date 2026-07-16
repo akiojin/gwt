@@ -100,6 +100,7 @@ pub(crate) mod persist_dispatcher;
 mod profile;
 mod project_tabs;
 mod pty_io;
+mod recovery_center;
 mod runtime_events;
 mod settings_update;
 mod startup;
@@ -208,6 +209,27 @@ pub(crate) struct PendingStartupAutoResumeSession {
     pub(crate) tab_id: String,
     pub(crate) session: gwt_agent::Session,
     pub(crate) workspace_resume_context: Option<WorkspaceResumeContext>,
+    pub(crate) fallback_geometry: Option<WindowGeometry>,
+}
+
+#[derive(Clone, PartialEq, Eq)]
+pub(crate) struct PendingProviderRootClaim {
+    pub(crate) recovery_id: String,
+    pub(crate) claim_token: String,
+    pub(crate) project_dir: PathBuf,
+    pub(crate) claim_ttl: chrono::Duration,
+}
+
+impl std::fmt::Debug for PendingProviderRootClaim {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("PendingProviderRootClaim")
+            .field("recovery_id", &self.recovery_id)
+            .field("claim_token", &"<redacted>")
+            .field("project_dir", &self.project_dir)
+            .field("claim_ttl", &self.claim_ttl)
+            .finish()
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -478,6 +500,7 @@ pub struct AppRuntime {
     pub(crate) profile_selections: HashMap<String, String>,
     pub(crate) profile_config_path: Option<PathBuf>,
     pub(crate) runtimes: HashMap<String, WindowRuntime>,
+    pub(crate) codex_bridge_routes: HashMap<String, gwt::codex_bridge::CodexLaunchBridgeLease>,
     pub(crate) window_details: HashMap<String, String>,
     pub(crate) launch_error_terminal_details: HashMap<String, String>,
     pub(crate) window_lookup: HashMap<String, WindowAddress>,
@@ -498,6 +521,9 @@ pub struct AppRuntime {
     /// launch completion/failure or after a TTL.
     pub(crate) inflight_launches: HashMap<String, (String, std::time::Instant)>,
     pub(crate) pending_auto_resume_sources: HashMap<String, String>,
+    /// Exact-resume provider-root CAS claims keyed by the launched window.
+    /// Raw provider root ids remain exclusively in RecoveryStore records.
+    pub(crate) pending_provider_root_claims: HashMap<String, PendingProviderRootClaim>,
     pub(crate) pending_startup_auto_resume_sessions: Vec<PendingStartupAutoResumeSession>,
     pub(crate) active_agent_sessions: HashMap<String, ActiveAgentSession>,
     /// SPEC-2359 W-15 (FR-386): per-project set of branches (canonical names)
@@ -698,6 +724,7 @@ impl AppRuntime {
             profile_selections: HashMap::new(),
             profile_config_path: None,
             runtimes: HashMap::new(),
+            codex_bridge_routes: HashMap::new(),
             window_details: HashMap::new(),
             launch_error_terminal_details: HashMap::new(),
             window_lookup: HashMap::new(),
@@ -713,6 +740,7 @@ impl AppRuntime {
             inflight_launches: HashMap::new(),
             pending_launch_feedback_contexts: HashMap::new(),
             pending_auto_resume_sources: HashMap::new(),
+            pending_provider_root_claims: HashMap::new(),
             pending_startup_auto_resume_sessions: Vec::new(),
             active_agent_sessions: HashMap::new(),
             work_merged_branches: HashMap::new(),
@@ -1868,6 +1896,10 @@ impl AppRuntime {
             }
             FrontendEvent::ListWindows => {
                 vec![OutboundEvent::reply(client_id, self.list_windows_event())]
+            }
+            FrontendEvent::ListRecoveryCenter => self.recovery_center_events(&client_id),
+            FrontendEvent::RecoveryCenterAction { request, bounds } => {
+                self.recovery_center_action_events(&client_id, request, bounds)
             }
             FrontendEvent::UpdateWindowGeometry {
                 id,

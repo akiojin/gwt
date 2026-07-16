@@ -9,7 +9,7 @@ const here = dirname(fileURLToPath(import.meta.url));
 
 test("Usage hover shows account label while status strip stays compact", async () => {
   const { createProviderUsageSurface } = await import(
-    resolve(here, "../provider-usage-surface.js")
+    pathToFileURL(resolve(here, "../provider-usage-surface.js")).href
   );
   const { applyProviderUsage } = await importOperatorShell();
   const { document, window } = parseHTML(

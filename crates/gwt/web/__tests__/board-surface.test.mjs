@@ -10,6 +10,7 @@ import {
   boardEntryOriginSessionId,
   boardEntryAudienceLabels,
   boardEntryMentionsSelf,
+  isIntakeBoardEntry,
   entryVisibleForWorkspace,
   mentionForReplyParent,
   mentionsForBoardSubmit,
@@ -62,7 +63,7 @@ test("Board surface exposes clear audience and reply affordances", () => {
   assert.match(appSource, /showBoardMentionNotification/);
   assert.match(appSource, /Jump to original/);
   assert.match(appSource, /state\.audienceFilter\s*=\s*"all"/);
-  assert.match(appSource, /all:\s*state\.audienceFilter\s*===\s*"all"/);
+  assert.match(appSource, /kind:\s*"load_board",[\s\S]{0,500}?all:\s*true/);
 });
 
 test("Board surface exposes origin Agent focus and resume affordances", () => {
@@ -259,6 +260,42 @@ test("visibleBoardEntries 'all' filter still bypasses workspace scoping", () => 
 
   const visibleIds = visibleBoardEntries(state, []).map((entry) => entry.id);
   assert.deepEqual(visibleIds, ["broadcast", "scoped-other"]);
+});
+
+test("Intake filter uses explicit origin metadata and legacy intake topics", () => {
+  const current = {
+    id: "current-intake",
+    origin_session_kind: "intake",
+    audience: ["other-work"],
+  };
+  const legacyCurrentSummary = {
+    id: "legacy-intake-summary",
+    origin_session_kind: null,
+    related_topics: ["recovery", "intake"],
+  };
+  const titleOnly = {
+    id: "title-only",
+    title: "Intake checkpoint: must not be inferred",
+  };
+  const execution = {
+    id: "execution",
+    origin_session_kind: "execution",
+    related_topics: [],
+  };
+  const state = {
+    audienceFilter: "intake",
+    currentWorkspaceId: "current-work",
+    entries: [current, legacyCurrentSummary, titleOnly, execution],
+  };
+
+  assert.equal(isIntakeBoardEntry(current), true);
+  assert.equal(isIntakeBoardEntry(legacyCurrentSummary), true);
+  assert.equal(isIntakeBoardEntry(titleOnly), false);
+  assert.deepEqual(
+    visibleBoardEntries(state).map((entry) => entry.id),
+    ["current-intake", "legacy-intake-summary"],
+    "Intake filtering must be independent of Work audience and avoid title inference",
+  );
 });
 
 test("Board notification helper prepares focused state for click-through", () => {

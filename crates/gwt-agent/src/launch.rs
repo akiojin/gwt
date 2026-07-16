@@ -376,6 +376,21 @@ pub fn resolve_host_npx_fallback_executable(env: &HashMap<String, String>) -> St
     .unwrap_or_else(|| "npx".to_string())
 }
 
+/// Durable provenance carried only by checkpoint-continuation launches. The
+/// target id is assigned before asynchronous preparation so the source and
+/// target RecoveryStore records can be linked before provider spawn.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct RecoveryContinuationHandoff {
+    #[serde(default)]
+    pub source_session_id: String,
+    pub source_recovery_id: String,
+    pub target_recovery_id: String,
+    pub source_checkpoint_revision: u64,
+    pub reason: String,
+    #[serde(default)]
+    pub inherit_checkpoint: bool,
+}
+
 /// Final configuration used to spawn an agent process.
 #[derive(Debug, Clone)]
 pub struct LaunchConfig {
@@ -394,6 +409,15 @@ pub struct LaunchConfig {
     pub reasoning_level: Option<String>,
     pub session_mode: SessionMode,
     pub resume_session_id: Option<String>,
+    /// User-visible prompt submitted when this gwt session is first created.
+    /// Kept separately from argv so recovery never has to guess which trailing
+    /// argument belonged to the conversation.
+    pub initial_prompt: Option<String>,
+    pub recovery_continuation: Option<RecoveryContinuationHandoff>,
+    /// Reuse a successor Session ledger created before a crash at the
+    /// pre-spawn boundary. Normal launches leave both fields unset.
+    pub recovery_retry_session_id: Option<String>,
+    pub recovery_retry_created_at: Option<chrono::DateTime<chrono::Utc>>,
     pub skip_permissions: bool,
     pub fast_mode: bool,
     /// Legacy Codex-only compatibility field. New callers should use
@@ -447,6 +471,7 @@ pub struct AgentLaunchBuilder {
     reasoning_level: Option<String>,
     session_mode: SessionMode,
     resume_session_id: Option<String>,
+    initial_prompt: Option<String>,
     permission_mode: Option<PermissionMode>,
     env_overrides: HashMap<String, String>,
     /// Env table from a `CustomCodingAgent`. Merged into the spawn env AFTER
@@ -496,6 +521,7 @@ impl AgentLaunchBuilder {
             reasoning_level: None,
             session_mode: SessionMode::Normal,
             resume_session_id: None,
+            initial_prompt: None,
             permission_mode: None,
             env_overrides: HashMap::new(),
             custom_agent_env: HashMap::new(),
@@ -588,6 +614,13 @@ impl AgentLaunchBuilder {
 
     pub fn resume_session_id(mut self, id: impl Into<String>) -> Self {
         self.resume_session_id = Some(id.into());
+        self
+    }
+
+    /// Capture the initial user-visible prompt as durable launch metadata.
+    /// The caller remains responsible for adding it to the provider argv.
+    pub fn initial_prompt(mut self, prompt: impl Into<String>) -> Self {
+        self.initial_prompt = Some(prompt.into());
         self
     }
 
@@ -800,6 +833,7 @@ impl AgentLaunchBuilder {
         let reasoning_level = self.reasoning_level.clone();
         let session_mode = self.session_mode;
         let resume_session_id = self.resume_session_id.clone();
+        let initial_prompt = self.initial_prompt.clone();
         let fast_mode = self.fast_mode && self.agent_id.supports_fast_mode();
         let codex_fast_mode = matches!(self.agent_id, AgentId::Codex) && self.fast_mode;
 
@@ -819,6 +853,10 @@ impl AgentLaunchBuilder {
             reasoning_level,
             session_mode,
             resume_session_id,
+            initial_prompt,
+            recovery_continuation: None,
+            recovery_retry_session_id: None,
+            recovery_retry_created_at: None,
             skip_permissions,
             fast_mode,
             codex_fast_mode,

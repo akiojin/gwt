@@ -7,7 +7,7 @@
 use std::{
     collections::{HashMap, HashSet},
     fs,
-    io::Write,
+    io::{Seek, SeekFrom, Write},
     path::{Path, PathBuf},
 };
 
@@ -1365,8 +1365,12 @@ fn repair_jsonl_tail(path: &Path) -> Result<()> {
         .iter()
         .rposition(|byte| *byte == b'\n')
         .map_or(0, |index| index + 1);
-    let mut file = fs::OpenOptions::new().append(true).open(path)?;
+    // Windows does not allow `set_len` on a handle opened with append-only
+    // access. Open for ordinary writes and seek explicitly for the valid-tail
+    // case so both newline repair and truncation use the same portable handle.
+    let mut file = fs::OpenOptions::new().write(true).open(path)?;
     if serde_json::from_slice::<serde_json::Value>(&bytes[tail_start..]).is_ok() {
+        file.seek(SeekFrom::End(0))?;
         file.write_all(b"\n")?;
     } else {
         file.set_len(tail_start as u64)?;

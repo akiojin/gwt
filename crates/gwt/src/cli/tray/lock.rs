@@ -29,12 +29,24 @@ use fs2::FileExt;
 /// embedded server has finished binding and is updated via atomic
 /// rename once the bind is known so a second launch can always read a
 /// valid value back.
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[derive(Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct TrayLockFile {
     pub pid: u32,
     pub url: String,
     pub started_at: DateTime<Utc>,
     pub version: String,
+}
+
+impl std::fmt::Debug for TrayLockFile {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("TrayLockFile")
+            .field("pid", &self.pid)
+            .field("url", &"<redacted>")
+            .field("started_at", &self.started_at)
+            .field("version", &self.version)
+            .finish()
+    }
 }
 
 /// Resolve the canonical tray lock path for the given gwt_home + user id.
@@ -145,7 +157,7 @@ impl Drop for TrayLockHandle {
     }
 }
 
-#[derive(Debug, thiserror::Error)]
+#[derive(thiserror::Error)]
 pub enum TrayLockError {
     #[error("tray-resident gwt is already running for user {user_id} (lock: {path})\nopen the running instance at: {url}")]
     AlreadyRunning {
@@ -165,6 +177,36 @@ pub enum TrayLockError {
         #[source]
         source: serde_json::Error,
     },
+}
+
+impl std::fmt::Debug for TrayLockError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::AlreadyRunning { user_id, path, url } => formatter
+                .debug_struct("AlreadyRunning")
+                .field("user_id", user_id)
+                .field("path", path)
+                .field(
+                    "url",
+                    &if url.is_empty() {
+                        "<empty>"
+                    } else {
+                        "<redacted>"
+                    },
+                )
+                .finish(),
+            Self::Io { path, source } => formatter
+                .debug_struct("Io")
+                .field("path", path)
+                .field("source", source)
+                .finish(),
+            Self::Corrupt { path, source } => formatter
+                .debug_struct("Corrupt")
+                .field("path", path)
+                .field("source", source)
+                .finish(),
+        }
+    }
 }
 
 /// Acquire the per-user tray lock. On success the returned
@@ -206,18 +248,22 @@ fn acquire_inner(
             path: path.clone(),
             source,
         })?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            fs::set_permissions(parent, fs::Permissions::from_mode(0o700)).map_err(|source| {
+                TrayLockError::Io {
+                    path: parent.to_path_buf(),
+                    source,
+                }
+            })?;
+        }
     }
     let guard_path = guard_lock_path(&path);
-    let guard_file = OpenOptions::new()
-        .read(true)
-        .write(true)
-        .create(true)
-        .truncate(false)
-        .open(&guard_path)
-        .map_err(|source| TrayLockError::Io {
-            path: guard_path.clone(),
-            source,
-        })?;
+    let guard_file = open_private_lock_file(&guard_path).map_err(|source| TrayLockError::Io {
+        path: guard_path.clone(),
+        source,
+    })?;
     match guard_file.try_lock_exclusive() {
         Ok(()) => {}
         Err(_) => {
@@ -232,16 +278,10 @@ fn acquire_inner(
             });
         }
     }
-    let mut file = OpenOptions::new()
-        .read(true)
-        .write(true)
-        .create(true)
-        .truncate(false)
-        .open(&path)
-        .map_err(|source| TrayLockError::Io {
-            path: path.clone(),
-            source,
-        })?;
+    let mut file = open_private_lock_file(&path).map_err(|source| TrayLockError::Io {
+        path: path.clone(),
+        source,
+    })?;
     let payload = build_lock_payload(std::process::id(), "");
     write_lock_contents(&path, &mut file, &payload).map_err(|source| TrayLockError::Io {
         path: path.clone(),
@@ -253,6 +293,23 @@ fn acquire_inner(
         guard_path,
         guard_file,
     })
+}
+
+fn open_private_lock_file(path: &Path) -> io::Result<File> {
+    let mut options = OpenOptions::new();
+    options.read(true).write(true).create(true).truncate(false);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt as _;
+        options.mode(0o600);
+    }
+    let file = options.open(path)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        file.set_permissions(fs::Permissions::from_mode(0o600))?;
+    }
+    Ok(file)
 }
 
 fn build_lock_payload(pid: u32, url: &str) -> TrayLockFile {
@@ -267,13 +324,13 @@ fn build_lock_payload(pid: u32, url: &str) -> TrayLockFile {
 fn write_lock_contents(path: &Path, file: &mut File, payload: &TrayLockFile) -> io::Result<()> {
     use std::io::Seek;
     file.seek(io::SeekFrom::Start(0))?;
+    file.set_len(0)?;
     let json = serde_json::to_vec(payload).map_err(io::Error::other)?;
     file.write_all(&json)?;
     file.sync_all()?;
     tracing::debug!(
         target: "gwt_tray_lock",
         path = %path.display(),
-        url = %payload.url,
         "wrote tray lock contents"
     );
     Ok(())

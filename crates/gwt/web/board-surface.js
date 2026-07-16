@@ -139,8 +139,26 @@ export function boardEntryVisibleForWorkspace(entry, workspaceId) {
   return entryVisibleForWorkspace(entry, workspaceId);
 }
 
+// SPEC-2359 FR-535: Intake entries are classified only from explicit origin
+// metadata. `related_topics: ["intake"]` is retained as the compatibility path
+// for Board milestones created before origin_session_kind was introduced.
+// Titles are intentionally ignored so ordinary posts that happen to discuss
+// Intake are not silently moved into the Intake lane.
+export function isIntakeBoardEntry(entry) {
+  if (String(entry?.origin_session_kind || "").trim().toLowerCase() === "intake") {
+    return true;
+  }
+  const relatedTopics = Array.isArray(entry?.related_topics) ? entry.related_topics : [];
+  return relatedTopics.some(
+    (topic) => String(topic || "").trim().toLowerCase() === "intake",
+  );
+}
+
 export function visibleBoardEntries(state, selfKeys = []) {
   const entries = state?.entries || [];
+  if (state?.audienceFilter === "intake") {
+    return entries.filter(isIntakeBoardEntry);
+  }
   if (state?.audienceFilter === "all") {
     return entries;
   }
@@ -160,6 +178,7 @@ export function applyBoardMentionNotificationFocus(state, entryId) {
 // --- SPEC-2959: Work-lane grouping ------------------------------------------
 
 const GENERAL_LANE_KEY = "__general__";
+const INTAKE_LANE_KEY = "__intake__";
 
 function nonEmptyString(value) {
   const trimmed = String(value || "").trim();
@@ -181,6 +200,9 @@ function laneLabelFor(workspace, key) {
 // SPEC-2959 FR-010: lane key is the first audience workspace id; otherwise the
 // entry's origin_branch resolved to a known workspace; otherwise General.
 function laneKeyForEntry(entry, byId, byBranch) {
+  if (isIntakeBoardEntry(entry)) {
+    return INTAKE_LANE_KEY;
+  }
   const audience = normalizedBoardWorkspaceAudience(entry);
   if (audience.length > 0) {
     const known = audience.find((id) => byId.has(id));
@@ -194,9 +216,22 @@ function laneKeyForEntry(entry, byId, byBranch) {
 }
 
 function makeLane(key, byId) {
+  if (key === INTAKE_LANE_KEY) {
+    return {
+      key,
+      isIntake: true,
+      isGeneral: false,
+      label: "Intake",
+      lifecycle: "",
+      isDone: false,
+      latestAt: "",
+      entries: [],
+    };
+  }
   if (key === GENERAL_LANE_KEY) {
     return {
       key,
+      isIntake: false,
       isGeneral: true,
       label: "General",
       lifecycle: "",
@@ -209,6 +244,7 @@ function makeLane(key, byId) {
   const lifecycle = String(workspace?.lifecycle || "").toLowerCase();
   return {
     key,
+    isIntake: false,
     isGeneral: false,
     label: laneLabelFor(workspace, key),
     lifecycle,
@@ -264,4 +300,4 @@ export function groupBoardLanes(entries, options = {}) {
   return ordered;
 }
 
-export { GENERAL_LANE_KEY };
+export { GENERAL_LANE_KEY, INTAKE_LANE_KEY };

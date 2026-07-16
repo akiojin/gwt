@@ -9,7 +9,11 @@ import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { dirname, resolve } from "node:path";
 
-import { groupBoardLanes, GENERAL_LANE_KEY } from "../board-surface.js";
+import {
+  groupBoardLanes,
+  GENERAL_LANE_KEY,
+  INTAKE_LANE_KEY,
+} from "../board-surface.js";
 
 // SPEC-3064 Phase 3 (E6c): the Board renderers moved from app.js into
 // board-logs-surface.js; source-pattern asserts scan both files so the
@@ -75,6 +79,31 @@ test("broadcast / unattributed entries land in the General lane", () => {
   assert.equal(lanes[0].key, GENERAL_LANE_KEY);
   assert.equal(lanes[0].label, "General");
   assert.equal(lanes[0].isGeneral, true);
+});
+
+test("Intake metadata owns a dedicated lane even with a nullable branch", () => {
+  const lanes = groupBoardLanes(
+    [
+      {
+        ...entry({ id: "current", created_at: "2026-07-16T10:00:00Z" }),
+        origin_session_kind: "intake",
+        origin_branch: null,
+      },
+      {
+        ...entry({ id: "legacy", created_at: "2026-07-16T10:01:00Z" }),
+        related_topics: ["intake"],
+        origin_branch: null,
+      },
+    ],
+    { workspaces },
+  );
+
+  assert.equal(lanes.length, 1);
+  assert.equal(lanes[0].key, INTAKE_LANE_KEY);
+  assert.equal(lanes[0].label, "Intake");
+  assert.equal(lanes[0].isIntake, true);
+  assert.equal(lanes[0].isGeneral, false);
+  assert.deepEqual(lanes[0].entries.map((item) => item.id), ["current", "legacy"]);
 });
 
 test("lanes order by latest activity with Done/Archived pushed to the end", () => {

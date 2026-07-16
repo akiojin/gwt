@@ -926,6 +926,16 @@ mod tests {
                 "expected discussion skill to continue with the next highest-impact question in {relative}"
             );
             assert!(
+                discussion_skill.contains("Durable milestone checkpoint")
+                    && discussion_skill.contains("`discussion.update`")
+                    && discussion_skill.contains("`intake.checkpoint.current`")
+                    && discussion_skill.contains("`intake.checkpoint.update`")
+                    && discussion_skill.contains("`expected_revision`")
+                    && discussion_skill.contains("public-safe")
+                    && discussion_skill.contains("Do not include transcripts"),
+                "expected discussion skill to durably checkpoint public-safe Board milestones in {relative}"
+            );
+            assert!(
                 discussion_skill.contains("Codex | `request_user_input`")
                     && discussion_skill.contains("Do not end the discussion after a single answer"),
                 "expected discussion skill to require Codex question UI and forbid one-answer exits in {relative}"

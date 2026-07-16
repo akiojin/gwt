@@ -1,4 +1,4 @@
-use gwt_agent::{Session, GWT_SESSION_ID_ENV};
+use gwt_agent::{ProviderRootObservationRole, Session, GWT_SESSION_ID_ENV};
 use serde::Deserialize;
 
 use super::{HookError, HookEvent};
@@ -76,6 +76,15 @@ pub(crate) struct RawHookEvent {
     session_id: Option<String>,
     transcript_path: Option<String>,
     cwd: Option<String>,
+    #[serde(default, alias = "agentId")]
+    agent_id: Option<String>,
+    #[serde(
+        default,
+        rename = "isSidechain",
+        alias = "is_sidechain",
+        alias = "sidechain"
+    )]
+    is_sidechain: Option<bool>,
 }
 
 impl RawHookEvent {
@@ -96,6 +105,35 @@ impl RawHookEvent {
 
     pub(crate) fn cwd(&self) -> Option<&str> {
         self.cwd.as_deref()
+    }
+
+    pub(crate) fn provider_root_observation_role(
+        &self,
+        session: &Session,
+    ) -> ProviderRootObservationRole {
+        if !matches!(session.agent_id, gwt_agent::AgentId::ClaudeCode) {
+            return ProviderRootObservationRole::Root;
+        }
+
+        // Claude's hook contract reserves agent_id for calls running inside a
+        // subagent. agent_type alone is not a child discriminator because it
+        // is also present when the main thread was launched with --agent.
+        if self
+            .agent_id
+            .as_deref()
+            .is_some_and(|value| !value.trim().is_empty())
+        {
+            return ProviderRootObservationRole::Subagent;
+        }
+
+        match self.is_sidechain {
+            Some(true) => ProviderRootObservationRole::Subagent,
+            // A concrete Claude hook session_id with no subagent-only
+            // agent_id is the structured main-thread signal. This is the
+            // ordinary root SessionStart payload in Claude's hook contract.
+            Some(false) | None if self.session_id().is_some() => ProviderRootObservationRole::Root,
+            Some(false) | None => ProviderRootObservationRole::Ambiguous,
+        }
     }
 }
 
@@ -196,6 +234,8 @@ mod tests {
             session_id: Some(session_id.to_string()),
             transcript_path: None,
             cwd: None,
+            agent_id: None,
+            is_sidechain: None,
         }
     }
 
@@ -256,5 +296,51 @@ mod tests {
             HookAgentSessionId::Provided(id)
                 if id.as_str() == "019e4646-9d79-79f0-b74a-df9f74f9f0fd"
         ));
+    }
+
+    #[test]
+    fn claude_session_start_uses_absent_agent_id_as_main_thread_root_evidence() {
+        let session = Session::new("/tmp/worktree", "work/recover", AgentId::ClaudeCode);
+        let root = RawHookEvent::read_from_str(r#"{"session_id":"claude-root"}"#)
+            .unwrap()
+            .unwrap();
+        let named_root = RawHookEvent::read_from_str(
+            r#"{"session_id":"claude-root","agent_type":"security-reviewer"}"#,
+        )
+        .unwrap()
+        .unwrap();
+        let child = RawHookEvent::read_from_str(
+            r#"{"session_id":"claude-child","agentId":"child-1","agent_type":"Explore"}"#,
+        )
+        .unwrap()
+        .unwrap();
+        let legacy_child =
+            RawHookEvent::read_from_str(r#"{"session_id":"claude-child","is_sidechain":true}"#)
+                .unwrap()
+                .unwrap();
+        let missing_session = RawHookEvent::read_from_str(r#"{"tool_name":"Bash"}"#)
+            .unwrap()
+            .unwrap();
+
+        assert_eq!(
+            root.provider_root_observation_role(&session),
+            ProviderRootObservationRole::Root
+        );
+        assert_eq!(
+            named_root.provider_root_observation_role(&session),
+            ProviderRootObservationRole::Root
+        );
+        assert_eq!(
+            child.provider_root_observation_role(&session),
+            ProviderRootObservationRole::Subagent
+        );
+        assert_eq!(
+            legacy_child.provider_root_observation_role(&session),
+            ProviderRootObservationRole::Subagent
+        );
+        assert_eq!(
+            missing_session.provider_root_observation_role(&session),
+            ProviderRootObservationRole::Ambiguous
+        );
     }
 }

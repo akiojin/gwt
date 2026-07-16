@@ -5042,6 +5042,377 @@ button.workspace-board-ref:focus-visible {
   padding-top: var(--space-2);
 }
 
+/* Recovery Center — dense evidence-first modal. Attention candidates can
+   block for a decision; exact candidates remain available for manual review. */
+:root[data-theme] .recovery-center-shell {
+  width: min(980px, calc(100vw - 32px));
+  max-height: min(820px, calc(100vh - 32px));
+  overflow: hidden;
+  gap: var(--space-3);
+}
+
+:root[data-theme] .recovery-center-header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: var(--space-4);
+}
+
+:root[data-theme] .recovery-center-header__titles {
+  min-width: 0;
+}
+
+:root[data-theme] .recovery-center-title,
+:root[data-theme] .recovery-center-subtitle {
+  margin: 0;
+}
+
+:root[data-theme] .recovery-center-title {
+  color: var(--color-text);
+  font-size: var(--type-lg);
+}
+
+:root[data-theme] .recovery-center-subtitle {
+  margin-top: var(--space-1);
+  color: var(--color-text-subtle);
+  font-size: var(--type-sm);
+  text-transform: none;
+}
+
+:root[data-theme] .recovery-center-close {
+  flex: none;
+}
+
+:root[data-theme] .recovery-center-layout {
+  display: grid;
+  grid-template-columns: minmax(0, 1.35fr) minmax(260px, 0.65fr);
+  gap: var(--space-3);
+  min-height: 0;
+  overflow: hidden;
+}
+
+:root[data-theme] .recovery-center-list {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  min-height: 0;
+  max-height: 68vh;
+  overflow: auto;
+  padding-right: var(--space-1);
+}
+
+:root[data-theme] .recovery-center-row {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  width: 100%;
+  padding: var(--space-3);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  background: var(--color-surface);
+  color: var(--color-text);
+  font: inherit;
+  text-align: left;
+  text-transform: none;
+  cursor: pointer;
+}
+
+:root[data-theme] .recovery-center-row:hover,
+:root[data-theme] .recovery-center-row:focus-visible,
+:root[data-theme] .recovery-center-row.is-selected {
+  border-color: var(--color-state-active);
+  background: var(--color-surface-elevated);
+  outline: none;
+}
+
+:root[data-theme] .recovery-center-row:disabled {
+  cursor: wait;
+  opacity: 0.72;
+}
+
+:root[data-theme] .recovery-center-row__heading,
+:root[data-theme] .recovery-center-row__identity,
+:root[data-theme] .recovery-center-row__signals {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: var(--space-2);
+}
+
+:root[data-theme] .recovery-center-row__heading {
+  justify-content: space-between;
+}
+
+:root[data-theme] .recovery-center-row__title {
+  min-width: 0;
+  overflow: hidden;
+  color: var(--color-text);
+  font-weight: 650;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+:root[data-theme] .recovery-center-row__provider {
+  color: var(--color-text-subtle);
+  font-family: var(--font-mono);
+  font-size: var(--type-xs);
+}
+
+:root[data-theme] .recovery-center-row__evidence {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: var(--space-2);
+}
+
+:root[data-theme] .recovery-center-evidence {
+  min-width: 0;
+}
+
+:root[data-theme] .recovery-center-evidence__label,
+:root[data-theme] .recovery-center-evidence__value {
+  display: block;
+}
+
+:root[data-theme] .recovery-center-evidence__label {
+  color: var(--color-text-subtle);
+  font-size: var(--type-xs);
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+
+:root[data-theme] .recovery-center-evidence__value {
+  margin-top: 2px;
+  overflow-wrap: anywhere;
+  color: var(--color-text);
+  font-family: var(--font-mono);
+  font-size: var(--type-xs);
+}
+
+:root[data-theme] .recovery-center-chip {
+  display: inline-flex;
+  align-items: center;
+  min-height: 22px;
+  padding: 2px var(--space-2);
+  border-radius: var(--radius-pill, 999px);
+  background: color-mix(in oklab, var(--color-border) 55%, transparent);
+  color: var(--color-text-subtle);
+  font-size: var(--type-xs);
+  letter-spacing: 0.04em;
+}
+
+:root[data-theme] .recovery-center-chip--kind,
+:root[data-theme] .recovery-center-chip--exact-available,
+:root[data-theme] .recovery-center-chip--healthy {
+  background: color-mix(in oklab, var(--color-state-active) 16%, transparent);
+  color: var(--color-state-active);
+}
+
+:root[data-theme] .recovery-center-chip--degraded,
+:root[data-theme] .recovery-center-chip--ambiguous,
+:root[data-theme] .recovery-center-chip--exact-unknown {
+  background: color-mix(in oklab, var(--color-state-needs-input) 16%, transparent);
+  color: var(--color-state-needs-input);
+}
+
+:root[data-theme] .recovery-center-chip--unavailable,
+:root[data-theme] .recovery-center-chip--board-error,
+:root[data-theme] .recovery-center-chip--exact-unavailable {
+  background: color-mix(in oklab, var(--color-state-blocked) 14%, transparent);
+  color: var(--color-state-blocked);
+}
+
+:root[data-theme] .recovery-center-decision {
+  min-height: 0;
+  overflow: auto;
+  padding: var(--space-3);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  background: var(--color-surface);
+}
+
+:root[data-theme] .recovery-center-decision__title {
+  margin: 0 0 var(--space-3);
+  color: var(--color-text);
+  font-size: var(--type-base);
+  text-transform: none;
+}
+
+:root[data-theme] .recovery-center-details {
+  display: grid;
+  grid-template-columns: max-content 1fr;
+  gap: var(--space-1) var(--space-2);
+  margin: 0 0 var(--space-3);
+  font-size: var(--type-xs);
+}
+
+:root[data-theme] .recovery-center-details__label {
+  color: var(--color-text-subtle);
+}
+
+:root[data-theme] .recovery-center-details__value {
+  margin: 0;
+  overflow-wrap: anywhere;
+  color: var(--color-text);
+}
+
+:root[data-theme] .recovery-center-provider-roots {
+  display: grid;
+  gap: var(--space-2);
+  margin: 0 0 var(--space-3);
+  padding: var(--space-3);
+  border: 1px solid color-mix(in oklab, var(--color-state-needs-input) 45%, var(--color-border));
+  border-radius: var(--radius-md);
+  background: color-mix(in oklab, var(--color-state-needs-input) 6%, var(--color-surface));
+}
+
+:root[data-theme] .recovery-center-provider-roots__title {
+  padding: 0 var(--space-1);
+  color: var(--color-text);
+  font-size: var(--type-sm);
+  font-weight: 650;
+}
+
+:root[data-theme] .recovery-center-provider-roots__help {
+  margin: 0;
+  color: var(--color-text-subtle);
+  font-size: var(--type-xs);
+}
+
+:root[data-theme] .recovery-center-provider-root {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  gap: var(--space-2);
+  align-items: start;
+  padding: var(--space-2);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-sm);
+  background: var(--color-surface-raised, var(--color-surface));
+  cursor: pointer;
+}
+
+:root[data-theme] .recovery-center-provider-root:has(input:checked) {
+  border-color: var(--color-state-active);
+  box-shadow: 0 0 0 1px color-mix(in oklab, var(--color-state-active) 40%, transparent);
+}
+
+:root[data-theme] .recovery-center-provider-root__input {
+  margin-top: 0.15rem;
+}
+
+:root[data-theme] .recovery-center-provider-root__copy {
+  display: grid;
+  min-width: 0;
+  gap: 0.15rem;
+}
+
+:root[data-theme] .recovery-center-provider-root__id {
+  overflow-wrap: anywhere;
+  color: var(--color-text);
+  font-family: var(--font-mono);
+  font-size: var(--type-xs);
+}
+
+:root[data-theme] .recovery-center-provider-root__evidence {
+  color: var(--color-text-subtle);
+  font-size: var(--type-xs);
+}
+
+:root[data-theme] .recovery-center-actions {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: var(--space-2);
+}
+
+:root[data-theme] .recovery-center-action {
+  min-width: 0;
+  white-space: normal;
+}
+
+:root[data-theme] .recovery-center-pending,
+:root[data-theme] .recovery-center-error {
+  margin-top: var(--space-3);
+  padding: var(--space-2);
+  border-radius: var(--radius-md);
+  font-size: var(--type-sm);
+}
+
+:root[data-theme] .recovery-center-pending {
+  background: color-mix(in oklab, var(--color-state-active) 12%, transparent);
+  color: var(--color-state-active);
+}
+
+:root[data-theme] .recovery-center-error {
+  background: color-mix(in oklab, var(--color-state-blocked) 12%, transparent);
+  color: var(--color-state-blocked);
+}
+
+:root[data-theme] .recovery-center-discard-confirm {
+  margin-top: var(--space-3);
+  padding: var(--space-3);
+  border: 1px solid color-mix(in oklab, var(--color-state-blocked) 55%, transparent);
+  border-radius: var(--radius-md);
+  background: color-mix(in oklab, var(--color-state-blocked) 8%, transparent);
+}
+
+:root[data-theme] .recovery-center-discard-confirm__title,
+:root[data-theme] .recovery-center-discard-confirm__copy {
+  margin: 0;
+}
+
+:root[data-theme] .recovery-center-discard-confirm__title {
+  color: var(--color-state-blocked);
+  font-size: var(--type-sm);
+}
+
+:root[data-theme] .recovery-center-discard-confirm__copy {
+  margin-top: var(--space-1);
+  color: var(--color-text-subtle);
+  font-size: var(--type-xs);
+}
+
+:root[data-theme] .recovery-center-discard-confirm__actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: var(--space-2);
+  margin-top: var(--space-2);
+}
+
+:root[data-theme] .recovery-center-empty {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: var(--space-1);
+  padding: var(--space-6) var(--space-3);
+  border: 1px dashed var(--color-border);
+  border-radius: var(--radius-md);
+  color: var(--color-text-subtle);
+  text-align: center;
+}
+
+:root[data-theme] .recovery-center-empty__title {
+  color: var(--color-text);
+}
+
+@media (max-width: 760px) {
+  :root[data-theme] .recovery-center-shell {
+    max-height: calc(100vh - 16px);
+  }
+
+  :root[data-theme] .recovery-center-layout {
+    grid-template-columns: 1fr;
+    overflow: auto;
+  }
+
+  :root[data-theme] .recovery-center-list {
+    max-height: 46vh;
+  }
+
+  :root[data-theme] .recovery-center-row__evidence,
+  :root[data-theme] .recovery-center-actions {
+    grid-template-columns: 1fr;
+  }
+}
+
 /* SPEC-2359 US-83 (UX revision 2026-06-24): eligible existing remote branches
    now render as ordinary .workspace-overview-row rows tagged .workspace-overview-remote
    inside the unified Workspace list, so they need no dedicated section styling. */

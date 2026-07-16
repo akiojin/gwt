@@ -7,7 +7,7 @@ use std::{
     ffi::OsString,
     io::{BufRead, BufReader, Read},
     path::{Path, PathBuf},
-    process::{Output, Stdio},
+    process::{Child, Command, Output, Stdio},
     sync::mpsc::{self, RecvTimeoutError},
     thread,
     time::{Duration, Instant},
@@ -796,6 +796,103 @@ pub fn compose_service_exec_capture_with_files(
         Some(compose_parent_dir_for_files(compose_files)),
         docker_compose_exec_timeout(),
     )
+}
+
+/// Build the argv for an attached command in exactly one Compose service.
+///
+/// The returned arguments deliberately use `exec -T`: stdin/stdout remain an
+/// application control channel while Compose does not allocate an extra TTY.
+/// Environment entries may be either `NAME=value` or just `NAME`; the latter
+/// asks Compose to copy the value from the host process environment without
+/// placing the secret itself in argv.
+pub fn compose_service_exec_attached_args(
+    compose_files: &[PathBuf],
+    service: &str,
+    working_dir: Option<&str>,
+    env: &[String],
+    args: &[String],
+) -> Vec<String> {
+    let mut docker_args = vec!["compose".to_string()];
+    docker_args.extend(compose_file_args(compose_files));
+    docker_args.extend(["exec".to_string(), "-T".to_string()]);
+    if let Some(working_dir) = working_dir {
+        docker_args.extend(["-w".to_string(), working_dir.to_string()]);
+    }
+    for entry in env {
+        docker_args.extend(["-e".to_string(), entry.clone()]);
+    }
+    docker_args.push(service.to_string());
+    docker_args.extend(args.iter().cloned());
+    docker_args
+}
+
+fn require_single_container_id(stdout: &str, service: &str) -> Result<String> {
+    let container_ids = stdout
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .collect::<Vec<_>>();
+    if container_ids.len() != 1 {
+        return Err(GwtError::Docker(format!(
+            "compose service '{service}' must resolve to exactly one running container (found {})",
+            container_ids.len()
+        )));
+    }
+    Ok(container_ids[0].to_string())
+}
+
+fn exact_compose_service_container_id_with_files(
+    compose_files: &[PathBuf],
+    service: &str,
+) -> Result<String> {
+    let mut docker_args = vec!["compose".to_string()];
+    docker_args.extend(compose_file_args(compose_files));
+    docker_args.extend(["ps".to_string(), "-q".to_string(), service.to_string()]);
+    let arg_refs = docker_args.iter().map(String::as_str).collect::<Vec<_>>();
+    let output = run_docker_status_query_with_retry(
+        &arg_refs,
+        "docker compose ps -q",
+        Some(compose_parent_dir_for_files(compose_files)),
+    )?;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+        return Err(GwtError::Docker(if stderr.is_empty() {
+            "docker compose ps -q failed".to_string()
+        } else {
+            stderr
+        }));
+    }
+    require_single_container_id(&String::from_utf8_lossy(&output.stdout), service)
+}
+
+/// Spawn an attached command in a Compose service with piped stdin/stdout.
+///
+/// A scaled service is intentionally rejected instead of letting Compose pick
+/// an arbitrary replica: the sidecar and the TUI must execute in the same
+/// container-local network namespace. The selected container id is validated
+/// immediately before spawning the command.
+pub fn spawn_compose_service_exec_attached_with_files(
+    compose_files: &[PathBuf],
+    service: &str,
+    working_dir: Option<&str>,
+    env: &[String],
+    args: &[String],
+) -> Result<Child> {
+    let _container_id = exact_compose_service_container_id_with_files(compose_files, service)?;
+    let docker_args =
+        compose_service_exec_attached_args(compose_files, service, working_dir, env, args);
+    let mut command = Command::new(docker_binary());
+    command
+        .args(&docker_args)
+        .current_dir(compose_parent_dir_for_files(compose_files))
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    command.spawn().map_err(|error| {
+        GwtError::Docker(format!(
+            "failed to start attached compose command for service '{service}': {error}"
+        ))
+    })
 }
 
 /// Return whether a compose service executes as root inside the container.
@@ -1788,6 +1885,64 @@ mod tests {
 
             result.expect("compose exec capture should use compose-exec timeout");
         });
+    }
+
+    #[test]
+    fn attached_compose_exec_is_single_service_stdin_transport_without_network_flags() {
+        let compose = PathBuf::from("/repo/compose.yml");
+        let args = compose_service_exec_attached_args(
+            &[compose.clone()],
+            "app",
+            Some("/workspace"),
+            &["GWT_SESSION_ID=session-1".to_string()],
+            &[
+                "/usr/local/bin/gwtd".to_string(),
+                "__internal".to_string(),
+                "codex-sidecar".to_string(),
+            ],
+        );
+
+        assert_eq!(
+            args,
+            [
+                "compose",
+                "-f",
+                compose.to_str().expect("utf8 path"),
+                "exec",
+                "-T",
+                "-w",
+                "/workspace",
+                "-e",
+                "GWT_SESSION_ID=session-1",
+                "app",
+                "/usr/local/bin/gwtd",
+                "__internal",
+                "codex-sidecar",
+            ]
+        );
+        let joined = args.join(" ");
+        for forbidden in ["--publish", "-p", "--add-host", "host.docker.internal"] {
+            assert!(
+                !joined.contains(forbidden),
+                "forbidden network flag: {joined}"
+            );
+        }
+    }
+
+    #[test]
+    fn attached_compose_exec_requires_exactly_one_container_id() {
+        assert_eq!(
+            require_single_container_id("abc123\n", "app").expect("one container"),
+            "abc123"
+        );
+        assert!(require_single_container_id("", "app")
+            .expect_err("zero containers must fail")
+            .to_string()
+            .contains("exactly one"));
+        assert!(require_single_container_id("abc123\ndef456\n", "app")
+            .expect_err("scaled services must fail")
+            .to_string()
+            .contains("exactly one"));
     }
 
     #[test]

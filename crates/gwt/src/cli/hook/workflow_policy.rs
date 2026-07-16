@@ -157,6 +157,9 @@ pub fn handle() -> Result<HookOutput, HookError> {
 }
 
 pub fn handle_with_input(input: &str) -> Result<HookOutput, HookError> {
+    if let Some(output) = block_bash_policy::evaluate_subagent_intake_checkpoint_call(input) {
+        return Ok(output);
+    }
     let Some(event) = HookEvent::read_from_str(input)? else {
         return Ok(HookOutput::Silent);
     };

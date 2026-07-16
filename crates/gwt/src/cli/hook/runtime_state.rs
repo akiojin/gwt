@@ -13,7 +13,8 @@ use std::{
 
 use chrono::{SecondsFormat, Utc};
 use gwt_agent::{
-    persist_agent_session_id, persist_session_status, AgentStatus, PendingDiscussionResume, Session,
+    persist_observed_provider_session_id, persist_session_status, AgentStatus,
+    PendingDiscussionResume, ProviderRootObservationRole, Session,
 };
 use serde::Serialize;
 
@@ -131,11 +132,13 @@ fn sync_agent_session_id(
     sessions_dir: &Path,
     gwt_session_id: &GwtSessionId,
     agent_session_id: &HookSessionId,
+    role: ProviderRootObservationRole,
 ) -> io::Result<()> {
-    persist_agent_session_id(
+    persist_observed_provider_session_id(
         sessions_dir,
         gwt_session_id.as_str(),
         agent_session_id.as_str(),
+        role,
     )
 }
 
@@ -226,7 +229,12 @@ pub fn handle_with_input(event: &str, input: &str) -> Result<(), HookError> {
         hook_event.as_ref(),
     )?;
     if let Some(agent_session_id) = agent_session_id.as_ref() {
-        if let Err(error) = sync_agent_session_id(&sessions_dir, &gwt_session_id, agent_session_id)
+        let role = session.as_ref().zip(hook_event.as_ref()).map_or(
+            ProviderRootObservationRole::Ambiguous,
+            |(session, event)| event.provider_root_observation_role(session),
+        );
+        if let Err(error) =
+            sync_agent_session_id(&sessions_dir, &gwt_session_id, agent_session_id, role)
         {
             log_session_metadata_error("sync agent_session_id for", &gwt_session_id, &error);
         }
@@ -646,10 +654,53 @@ mod tests {
             .unwrap()
             .session_id()
             .unwrap();
-        sync_agent_session_id(&sessions_dir, &gwt_session_id, &agent_session_id).unwrap();
+        sync_agent_session_id(
+            &sessions_dir,
+            &gwt_session_id,
+            &agent_session_id,
+            ProviderRootObservationRole::Root,
+        )
+        .unwrap();
 
         let loaded = Session::load(&sessions_dir.join(format!("{session_id}.toml"))).unwrap();
         assert_eq!(loaded.agent_session_id.as_deref(), Some("agent-123"));
+    }
+
+    #[test]
+    fn claude_sidechain_session_start_cannot_bind_before_main_thread_root() {
+        let _lock = env_lock();
+        let mut env = EnvGuard::new();
+        let dir = tempfile::tempdir().unwrap();
+        let sessions_dir = dir.path().join(".gwt").join("sessions");
+        let worktree = dir.path().join("repo");
+        std::fs::create_dir_all(&worktree).unwrap();
+        let session = Session::new(&worktree, "feature/demo", AgentId::ClaudeCode);
+        let session_id = session.id.clone();
+        session.save(&sessions_dir).unwrap();
+        let runtime_path = gwt_agent::runtime_state_path(&sessions_dir, &session_id);
+        env.set(GWT_SESSION_ID_ENV, session_id.clone());
+        env.set(
+            gwt_agent::GWT_SESSION_RUNTIME_PATH_ENV,
+            runtime_path.as_os_str().to_os_string(),
+        );
+
+        handle_with_input(
+            "SessionStart",
+            r#"{"session_id":"child","agent_id":"child-1","agent_type":"Explore"}"#,
+        )
+        .unwrap();
+        let still_unbound =
+            Session::load(&sessions_dir.join(format!("{session_id}.toml"))).unwrap();
+        assert!(still_unbound.agent_session_id.is_none());
+        assert!(still_unbound.provider_root_role.is_none());
+
+        handle_with_input("SessionStart", r#"{"session_id":"root"}"#).unwrap();
+        let bound = Session::load(&sessions_dir.join(format!("{session_id}.toml"))).unwrap();
+        assert_eq!(bound.agent_session_id.as_deref(), Some("root"));
+        assert_eq!(
+            bound.provider_root_role,
+            Some(gwt_agent::session::ProviderRootRole::Root)
+        );
     }
 
     #[test]

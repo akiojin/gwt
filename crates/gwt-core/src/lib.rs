@@ -5,6 +5,7 @@
 //! (gwt-git, gwt-agent, etc.) build on top of these primitives.
 
 pub mod board_remote_roots;
+pub mod bounded_file;
 pub mod config;
 pub mod coordination;
 pub mod daemon;
@@ -16,6 +17,7 @@ pub mod paths;
 pub mod process;
 pub mod process_console;
 pub mod process_executor;
+pub mod recovery;
 mod release_contract;
 pub mod release_notes;
 pub mod repo_hash;

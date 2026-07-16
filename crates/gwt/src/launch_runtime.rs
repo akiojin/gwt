@@ -217,13 +217,32 @@ fn is_start_work_branch_name(branch_name: &str) -> bool {
 
 /// Reap orphaned ephemeral intake worktrees at startup (SPEC-3214 T-006).
 ///
-/// A crash between an intake launch and its session-end cleanup leaves a
-/// detached `.intake-*` worktree behind. On startup no intake session is live,
-/// so every `.intake-*` worktree is an orphan: remove the clean ones and keep
-/// the dirty ones (uncommitted work is never destroyed). Bounded by
-/// `max_removals` so a pathological pile-up cannot stall startup. Returns the
-/// number removed. Never errors — best-effort recovery.
+/// Compatibility wrapper for callers with no durable recovery inventory.
+/// Prefer [`prune_orphan_intake_worktrees_with_protected`] during startup so a
+/// recoverable Intake is never mistaken for an orphan.
 pub fn prune_orphan_intake_worktrees(repo_path: &Path, max_removals: usize) -> usize {
+    prune_orphan_intake_worktrees_with_protected(
+        repo_path,
+        max_removals,
+        &std::collections::HashSet::new(),
+    )
+}
+
+/// Reap unreferenced ephemeral Intake worktrees while retaining every path in
+/// `protected_paths`.
+///
+/// A crash between launch and session-end cleanup can leave detached
+/// `.intake-*` worktrees behind, but a surviving Session or RecoveryStore
+/// record means that worktree is recoverable rather than orphaned. Protected
+/// path comparison is canonicalized when possible, so spelling differences do
+/// not bypass the guard. Unprotected worktrees are removed only when they have
+/// no user changes or unreachable commits. Bounded by `max_removals`; errors
+/// fail closed and keep the worktree.
+pub fn prune_orphan_intake_worktrees_with_protected(
+    repo_path: &Path,
+    max_removals: usize,
+    protected_paths: &std::collections::HashSet<PathBuf>,
+) -> usize {
     let Ok(main_repo_path) = gwt_git::worktree::main_worktree_root(repo_path) else {
         return 0;
     };
@@ -238,6 +257,16 @@ pub fn prune_orphan_intake_worktrees(repo_path: &Path, max_removals: usize) -> u
             break;
         }
         if !is_ephemeral_intake_worktree(&worktree.path) {
+            continue;
+        }
+        if protected_paths
+            .iter()
+            .any(|protected| same_worktree_path(protected, &worktree.path))
+        {
+            tracing::debug!(
+                worktree_path = %worktree.path.display(),
+                "keeping Intake worktree referenced by recovery inventory"
+            );
             continue;
         }
         // codex #3236 P2: only reap the branchless intake worktrees this feature
@@ -268,6 +297,187 @@ pub fn prune_orphan_intake_worktrees(repo_path: &Path, max_removals: usize) -> u
         let _ = manager.prune();
     }
     removed
+}
+
+/// Repair the Git reachability pins for every unresolved Intake discovered in
+/// one startup recovery inventory. Existing same-OID refs are idempotent;
+/// mismatches and missing commits are returned for diagnostics and never
+/// rewritten.
+pub fn repair_unresolved_intake_recovery_base_pins(
+    repo_path: &Path,
+    records: &[gwt_core::recovery::RecoveryRecord],
+) -> Vec<(String, String)> {
+    let expected_repo_id = gwt_core::paths::project_scope_hash(repo_path).to_string();
+    let mut failures = Vec::new();
+    for record in records {
+        if record.session_kind != gwt_core::recovery::RecoverySessionKind::Intake
+            || matches!(
+                record.lifecycle,
+                gwt_core::recovery::RecoveryLifecycle::Resolved
+                    | gwt_core::recovery::RecoveryLifecycle::Discarded
+            )
+        {
+            continue;
+        }
+        if record.repo_id != expected_repo_id {
+            failures.push((
+                record.recovery_id.clone(),
+                "recovery repo identity does not match the active project".to_string(),
+            ));
+            continue;
+        }
+        if let Err(error) = gwt_git::recovery::ensure_recovery_base_pin(
+            repo_path,
+            &record.recovery_id,
+            &record.launch_base_oid,
+        ) {
+            failures.push((record.recovery_id.clone(), error.to_string()));
+        }
+    }
+    failures
+}
+
+#[cfg(test)]
+mod intake_prune_tests {
+    use std::{collections::HashSet, fs, path::Path};
+
+    fn run_git(repo: &Path, args: &[&str]) {
+        let status = gwt_core::process::hidden_command("git")
+            .args(args)
+            .current_dir(repo)
+            .status()
+            .expect("run git");
+        assert!(status.success(), "git {args:?}");
+    }
+
+    fn init_repo(repo: &Path) {
+        fs::create_dir_all(repo).expect("create repo");
+        run_git(repo, &["init", "-q", "-b", "develop"]);
+        run_git(repo, &["config", "user.name", "Gwt Test"]);
+        run_git(repo, &["config", "user.email", "gwt@example.com"]);
+        fs::write(repo.join("README.md"), "fixture\n").expect("write fixture");
+        run_git(repo, &["add", "README.md"]);
+        run_git(repo, &["commit", "-qm", "initial"]);
+    }
+
+    #[test]
+    fn prune_preserves_protected_paths_and_user_work() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let repo = temp.path().join("repo");
+        init_repo(&repo);
+        let manager = gwt_git::WorktreeManager::new(&repo);
+
+        let protected = temp.path().join(".intake-protected");
+        let disposable = temp.path().join(".intake-disposable");
+        let user_work = temp.path().join(".intake-user-work");
+        for path in [&protected, &disposable, &user_work] {
+            manager
+                .create_detached("HEAD", path)
+                .expect("create detached Intake");
+        }
+        gwt_skills::write_lane_file(&disposable, &gwt_skills::INTAKE_PROFILE)
+            .expect("write generated lane registry");
+        gwt_skills::update_git_exclude(&disposable).expect("install managed excludes");
+        fs::write(user_work.join("notes.txt"), "keep this\n").expect("write user work");
+
+        let protected_paths = HashSet::from([protected.join(".")]);
+        let removed =
+            super::prune_orphan_intake_worktrees_with_protected(&repo, 10, &protected_paths);
+
+        assert_eq!(removed, 1);
+        assert!(protected.exists(), "referenced Intake must be retained");
+        assert!(
+            !disposable.exists(),
+            "unreferenced Intake with generated files only is disposable"
+        );
+        assert!(
+            user_work.exists() && user_work.join("notes.txt").exists(),
+            "true user changes must be retained"
+        );
+    }
+
+    #[test]
+    fn startup_inventory_repairs_missing_pins_for_unresolved_intake_only() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let repo = temp.path().join("repo");
+        init_repo(&repo);
+        let base_oid = {
+            let output = gwt_core::process::hidden_command("git")
+                .args(["rev-parse", "HEAD"])
+                .current_dir(&repo)
+                .output()
+                .expect("resolve HEAD");
+            assert!(output.status.success());
+            String::from_utf8(output.stdout).unwrap().trim().to_string()
+        };
+        let store =
+            gwt_core::recovery::RecoveryStore::for_project_dir(temp.path().join("project-store"));
+        for (recovery_id, kind, lifecycle) in [
+            (
+                "repair-intake",
+                gwt_core::recovery::RecoverySessionKind::Intake,
+                gwt_core::recovery::RecoveryLifecycle::Interrupted,
+            ),
+            (
+                "skip-execution",
+                gwt_core::recovery::RecoverySessionKind::Execution,
+                gwt_core::recovery::RecoveryLifecycle::Interrupted,
+            ),
+            (
+                "skip-terminal",
+                gwt_core::recovery::RecoverySessionKind::Intake,
+                gwt_core::recovery::RecoveryLifecycle::Resolved,
+            ),
+        ] {
+            store
+                .create(
+                    gwt_core::recovery::CreateRecovery {
+                        recovery_id: recovery_id.to_string(),
+                        session_id: format!("session-{recovery_id}"),
+                        repo_id: gwt_core::paths::project_scope_hash(&repo).to_string(),
+                        session_kind: kind,
+                        worktree_path: temp.path().join(".intake-5"),
+                        launch_base_ref: Some("develop".to_string()),
+                        launch_base_oid: base_oid.clone(),
+                        launch_head_oid: base_oid.clone(),
+                        provider: "codex".to_string(),
+                        model: None,
+                        runtime: "host".to_string(),
+                        initial_prompt: String::new(),
+                        created_at: chrono::Utc::now(),
+                    },
+                    format!("create:{recovery_id}"),
+                )
+                .expect("create recovery");
+            if lifecycle == gwt_core::recovery::RecoveryLifecycle::Resolved {
+                store
+                    .set_lifecycle(
+                        recovery_id,
+                        lifecycle,
+                        None,
+                        format!("resolve:{recovery_id}"),
+                    )
+                    .expect("resolve recovery");
+            }
+        }
+
+        let failures = super::repair_unresolved_intake_recovery_base_pins(
+            &repo,
+            &store.list().expect("recovery inventory"),
+        );
+
+        assert!(failures.is_empty());
+        gwt_git::recovery::verify_recovery_base_pin(&repo, "repair-intake", &base_oid)
+            .expect("repaired pin");
+        assert!(
+            gwt_git::recovery::verify_recovery_base_pin(&repo, "skip-execution", &base_oid,)
+                .is_err()
+        );
+        assert!(
+            gwt_git::recovery::verify_recovery_base_pin(&repo, "skip-terminal", &base_oid,)
+                .is_err()
+        );
+    }
 }
 
 pub fn resolve_launch_worktree(
@@ -732,6 +942,60 @@ pub fn apply_host_package_runner_fallback_checked(
         probe_host_package_runner_outcome,
         repair_windows_npx_cache,
     )
+}
+
+pub fn pin_host_codex_latest_runner(
+    config: &mut gwt_agent::LaunchConfig,
+) -> Result<Option<String>, String> {
+    if config.agent_id != gwt_agent::AgentId::Codex
+        || !(command_matches_runner(&config.command, "bunx")
+            || command_matches_runner(&config.command, "npx"))
+    {
+        return Ok(None);
+    }
+    let package_index = usize::from(
+        config
+            .args
+            .first()
+            .is_some_and(|arg| matches!(arg.as_str(), "--yes" | "-y")),
+    );
+    if config.args.get(package_index).map(String::as_str) != Some("@openai/codex@latest") {
+        return Ok(None);
+    }
+    let mut probe_args = config.args[..=package_index].to_vec();
+    probe_args.push("--version".to_string());
+    let hub = gwt_core::process_console::global();
+    let outcome = probe_host_package_runner_with_timeout_and_hub(
+        PackageRunnerProbeRequest {
+            command: &config.command,
+            args: probe_args,
+            env_vars: &config.env_vars,
+            remove_env: &config.remove_env,
+            cwd: config.working_dir.clone(),
+            timeout: Duration::from_secs(60),
+            poll_interval: Duration::from_millis(50),
+        },
+        &hub,
+    );
+    if !outcome.success {
+        return Err(format!(
+            "Could not resolve @openai/codex@latest to one exact version before bridge launch. {}",
+            outcome.diagnostic()
+        ));
+    }
+    pin_codex_latest_from_output(config, package_index, &outcome.combined_output()).map(Some)
+}
+
+fn pin_codex_latest_from_output(
+    config: &mut gwt_agent::LaunchConfig,
+    package_index: usize,
+    output: &str,
+) -> Result<String, String> {
+    let version = gwt::codex_bridge::parse_codex_cli_version(output)
+        .ok_or_else(|| "Codex latest probe did not report an exact semantic version".to_string())?;
+    config.args[package_index] = format!("@openai/codex@{version}");
+    config.tool_version = Some(version.clone());
+    Ok(version)
 }
 
 fn apply_host_package_runner_fallback_checked_with_probe_and_repair<F, R>(
@@ -1630,6 +1894,26 @@ mod tests {
         config.runtime_target = gwt_agent::LaunchRuntimeTarget::Host;
         config.docker_lifecycle_intent = gwt_agent::DockerLifecycleIntent::Connect;
         config
+    }
+
+    #[test]
+    fn codex_latest_probe_output_rewrites_runner_and_metadata_to_exact_version() {
+        let mut config = gwt_agent::AgentLaunchBuilder::new(gwt_agent::AgentId::Codex)
+            .version("latest")
+            .build();
+        config.command = "npx".to_string();
+        config.args = vec![
+            "--yes".to_string(),
+            "@openai/codex@latest".to_string(),
+            "--no-alt-screen".to_string(),
+        ];
+
+        let version =
+            pin_codex_latest_from_output(&mut config, 1, "codex-cli 0.144.5").expect("pin version");
+
+        assert_eq!(version, "0.144.5");
+        assert_eq!(config.args[1], "@openai/codex@0.144.5");
+        assert_eq!(config.tool_version.as_deref(), Some("0.144.5"));
     }
 
     fn run_git(repo: &Path, args: &[&str]) {

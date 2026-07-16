@@ -8,9 +8,9 @@ use crate::{
     environment::LaunchEnvironment,
     launch::LaunchConfig,
     session::{
-        runtime_state_path, Session, SessionRuntimeState, GWT_BIN_PATH_ENV,
-        GWT_HOOK_FORWARD_TOKEN_ENV, GWT_HOOK_FORWARD_URL_ENV, GWT_SESSION_ID_ENV,
-        GWT_SESSION_RUNTIME_PATH_ENV,
+        runtime_state_path, RecoveryLaunchStage, Session, SessionRuntimeState, GWT_BIN_PATH_ENV,
+        GWT_HOOK_FORWARD_TOKEN_ENV, GWT_HOOK_FORWARD_URL_ENV, GWT_RECOVERY_ID_ENV,
+        GWT_SESSION_ID_ENV, GWT_SESSION_RUNTIME_PATH_ENV,
     },
     types::{AgentId, DockerLifecycleIntent, LaunchRuntimeTarget},
 };
@@ -24,13 +24,53 @@ const DOCKER_GWT_OVERRIDE_FILE_NAME: &str = "docker-compose.gwt.override.yml";
 const DOCKER_USER_OVERRIDE_FILE_NAME: &str = "docker-compose.override.yml";
 const START_WORK_BASE_BRANCH_CANDIDATES: [&str; 1] = ["origin/develop"];
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct PreparedProcessLaunch {
     pub command: String,
     pub args: Vec<String>,
     pub env: HashMap<String, String>,
     pub remove_env: Vec<String>,
     pub cwd: Option<PathBuf>,
+}
+
+impl std::fmt::Debug for PreparedProcessLaunch {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let redacted_env = self
+            .env
+            .iter()
+            .map(|(key, value)| {
+                (
+                    key.as_str(),
+                    if key == GWT_HOOK_FORWARD_TOKEN_ENV {
+                        "<redacted>"
+                    } else {
+                        value.as_str()
+                    },
+                )
+            })
+            .collect::<std::collections::BTreeMap<_, _>>();
+        let token_assignment_prefix = format!("{GWT_HOOK_FORWARD_TOKEN_ENV}=");
+        let redacted_args = self
+            .args
+            .iter()
+            .map(|argument| {
+                if argument.starts_with(&token_assignment_prefix) {
+                    format!("{token_assignment_prefix}<redacted>")
+                } else {
+                    argument.clone()
+                }
+            })
+            .collect::<Vec<_>>();
+
+        formatter
+            .debug_struct("PreparedProcessLaunch")
+            .field("command", &self.command)
+            .field("args", &redacted_args)
+            .field("env", &redacted_env)
+            .field("remove_env", &self.remove_env)
+            .field("cwd", &self.cwd)
+            .finish()
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -42,10 +82,20 @@ pub struct PreparedAgentLaunch {
     pub used_host_package_runner_fallback: bool,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct HookForwardEnv {
     pub url: String,
     pub token: String,
+}
+
+impl std::fmt::Debug for HookForwardEnv {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("HookForwardEnv")
+            .field("url", &self.url)
+            .field("token", &"<redacted>")
+            .finish()
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -111,6 +161,7 @@ struct PrepareLaunchDeps<'a> {
     current_exe: &'a Path,
     probe_host_runner: &'a mut PackageRunnerProbe,
     lookup_gwt_bin: &'a GwtBinLookup,
+    recovery_project_dir: Option<&'a Path>,
 }
 
 pub fn prepare_agent_launch<F>(
@@ -137,6 +188,7 @@ where
             current_exe: &current_exe,
             probe_host_runner: &mut probe_host_runner,
             lookup_gwt_bin: &lookup_gwt_bin,
+            recovery_project_dir: None,
         },
     )
 }
@@ -156,6 +208,7 @@ where
         current_exe,
         probe_host_runner,
         lookup_gwt_bin,
+        recovery_project_dir,
     } = deps;
 
     resolve_launch_worktree(repo_path, &mut config)?;
@@ -202,8 +255,69 @@ where
         .branch
         .clone()
         .unwrap_or_else(|| "workspace".to_string());
-    let session = Session::from_launch_config(&worktree_path, branch_name, &config);
+    let mut session = Session::from_launch_config(&worktree_path, branch_name, &config);
+    session.project_state_root = Some(normalize_child_process_path(repo_path));
+    session.repo_hash = Some(gwt_core::paths::project_scope_hash(repo_path).to_string());
     let runtime_path = runtime_state_path(sessions_dir, &session.id);
+
+    if let Some(launch_head_oid) = resolve_git_head_oid(&worktree_path) {
+        session.launch_base_oid = Some(launch_head_oid.clone());
+        session
+            .advance_recovery_launch_stage(RecoveryLaunchStage::WorktreeMaterialized)
+            .map_err(|error| format!("advance Session worktree recovery stage: {error}"))?;
+        let project_dir = recovery_project_dir
+            .map(Path::to_path_buf)
+            .unwrap_or_else(|| gwt_core::paths::gwt_project_dir_for_repo_path(repo_path));
+        let recovery_id = session
+            .recovery_id
+            .clone()
+            .ok_or_else(|| "new session is missing recovery identity".to_string())?;
+        let session_kind = if config.is_ephemeral {
+            gwt_core::recovery::RecoverySessionKind::Intake
+        } else {
+            gwt_core::recovery::RecoverySessionKind::Execution
+        };
+        let runtime = match config.runtime_target {
+            LaunchRuntimeTarget::Host => "host",
+            LaunchRuntimeTarget::Docker => "docker",
+        };
+        let request = gwt_core::recovery::CreateRecovery {
+            recovery_id: recovery_id.clone(),
+            session_id: session.id.clone(),
+            repo_id: gwt_core::paths::project_scope_hash(repo_path).to_string(),
+            session_kind,
+            worktree_path: worktree_path.clone(),
+            launch_base_ref: config
+                .ephemeral_base_ref
+                .clone()
+                .or_else(|| config.base_branch.clone()),
+            launch_base_oid: launch_head_oid.clone(),
+            launch_head_oid: launch_head_oid.clone(),
+            provider: config.agent_id.to_string(),
+            model: config.model.clone(),
+            runtime: runtime.to_string(),
+            initial_prompt: config.initial_prompt.clone().unwrap_or_default(),
+            created_at: session.created_at,
+        };
+        // Session first makes the cross-file crash boundary repairable: a
+        // restart can import a missing Recovery Record from this durable
+        // launch ledger, while a record without its Session cannot be safely
+        // materialized by Recovery Center.
+        session
+            .save(sessions_dir)
+            .map_err(|error| error.to_string())?;
+        let store = gwt_core::recovery::RecoveryStore::for_project_dir(project_dir);
+        store
+            .create(request, format!("create:{}", session.id))
+            .map_err(|error| format!("persist recovery checkpoint before spawn: {error}"))?;
+        if session_kind == gwt_core::recovery::RecoverySessionKind::Intake {
+            gwt_git::recovery::ensure_recovery_base_pin(repo_path, &recovery_id, &launch_head_oid)
+                .map_err(|error| format!("pin Intake recovery base before spawn: {error}"))?;
+        }
+        config
+            .env_vars
+            .insert(GWT_RECOVERY_ID_ENV.to_string(), recovery_id);
+    }
 
     config
         .env_vars
@@ -258,6 +372,20 @@ where
         worktree_path,
         used_host_package_runner_fallback,
     })
+}
+
+fn resolve_git_head_oid(worktree_path: &Path) -> Option<String> {
+    let output = gwt_core::process::hidden_command("git")
+        .args(["rev-parse", "--verify", "HEAD^{commit}"])
+        .current_dir(worktree_path)
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let oid = String::from_utf8(output.stdout).ok()?;
+    let oid = oid.trim();
+    (!oid.is_empty()).then(|| oid.to_string())
 }
 
 fn normalize_child_process_path(path: &Path) -> PathBuf {
@@ -1640,6 +1768,43 @@ mod tests {
     use tempfile::tempdir;
 
     #[test]
+    fn hook_forward_env_debug_redacts_bearer_token() {
+        const SENTINEL: &str = "HOOK_FORWARD_TOKEN_SENTINEL";
+        let environment = HookForwardEnv {
+            url: "http://127.0.0.1:45123/internal/hook-live".to_string(),
+            token: SENTINEL.to_string(),
+        };
+
+        let debug = format!("{environment:?}");
+
+        assert!(
+            !debug.contains(SENTINEL),
+            "secret leaked via Debug: {debug}"
+        );
+        assert!(debug.contains("<redacted>"));
+
+        let process_launch = PreparedProcessLaunch {
+            command: "docker".to_string(),
+            args: vec![
+                "compose".to_string(),
+                "-e".to_string(),
+                format!("{GWT_HOOK_FORWARD_TOKEN_ENV}={SENTINEL}"),
+            ],
+            env: HashMap::from([(GWT_HOOK_FORWARD_TOKEN_ENV.to_string(), SENTINEL.to_string())]),
+            remove_env: Vec::new(),
+            cwd: None,
+        };
+
+        let prepared_debug = format!("{process_launch:?}");
+
+        assert!(
+            !prepared_debug.contains(SENTINEL),
+            "secret leaked from prepared launch via Debug: {prepared_debug}"
+        );
+        assert!(prepared_debug.contains("<redacted>"));
+    }
+
+    #[test]
     fn docker_compose_exec_env_args_does_not_override_container_path() {
         let mut env = HashMap::new();
         env.insert("PATH".to_string(), "/usr/local/bin".to_string());
@@ -1756,10 +1921,13 @@ mod tests {
         let temp = tempdir().expect("tempdir");
         let worktree = temp.path().join("repo-feature");
         let sessions_dir = temp.path().join(".gwt").join("sessions");
-        fs::create_dir_all(&worktree).expect("create worktree");
+        let recovery_project_dir = temp.path().join(".gwt").join("projects").join("repo");
+        init_git_repo(&worktree);
 
         let refresh_calls = AtomicUsize::new(0);
         let mut config = sample_versioned_launch_config(&worktree);
+        config.is_ephemeral = true;
+        config.initial_prompt = Some("Investigate recovery durability".to_string());
         config
             .env_vars
             .insert("GWT_PROJECT_ROOT".to_string(), "/stale/project".to_string());
@@ -1798,6 +1966,7 @@ mod tests {
                 ),
                 probe_host_runner: &mut probe_host_runner,
                 lookup_gwt_bin: &lookup_gwt_bin,
+                recovery_project_dir: Some(&recovery_project_dir),
             },
         )
         .expect("prepare launch");
@@ -1860,6 +2029,32 @@ mod tests {
             Some("npx"),
         );
         assert_eq!(prepared.session.branch, "feature/demo");
+        assert_eq!(
+            prepared.session.recovery_launch_stage,
+            Some(crate::session::RecoveryLaunchStage::WorktreeMaterialized)
+        );
+        assert!(prepared.session.launch_base_oid.is_some());
+        let recovery_id = prepared
+            .session
+            .recovery_id
+            .as_deref()
+            .expect("recovery id");
+        let recovery = gwt_core::recovery::RecoveryStore::for_project_dir(&recovery_project_dir)
+            .load(recovery_id)
+            .expect("load recovery")
+            .expect("durable recovery");
+        assert_eq!(recovery.session_id, prepared.session.id);
+        assert_eq!(recovery.initial_prompt, "Investigate recovery durability");
+        assert_eq!(
+            recovery.launch_base_oid,
+            prepared.session.launch_base_oid.unwrap()
+        );
+        gwt_git::recovery::verify_recovery_base_pin(
+            &worktree,
+            recovery_id,
+            &recovery.launch_base_oid,
+        )
+        .expect("pre-spawn Intake base pin");
     }
 
     #[test]
@@ -1892,6 +2087,7 @@ mod tests {
                     current_exe: Path::new("/usr/local/bin/gwt"),
                     probe_host_runner: &mut probe_host_runner,
                     lookup_gwt_bin: &lookup_gwt_bin,
+                    recovery_project_dir: None,
                 },
             )
             .expect("prepare launch");
@@ -1937,6 +2133,7 @@ mod tests {
                 ),
                 probe_host_runner: &mut probe_host_runner,
                 lookup_gwt_bin: &lookup_gwt_bin,
+                recovery_project_dir: None,
             },
         )
         .expect("prepare launch");
@@ -2627,6 +2824,7 @@ mod tests {
                 current_exe: Path::new("/opt/gwt/bin/gwt"),
                 probe_host_runner: &mut probe_host_runner,
                 lookup_gwt_bin: &lookup_gwt_bin,
+                recovery_project_dir: None,
             },
         )
         .expect("prepare launch");

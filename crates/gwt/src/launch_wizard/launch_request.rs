@@ -166,7 +166,9 @@ impl LaunchWizardState {
 
         let initial_prompt = self.initial_prompt.trim();
         if !initial_prompt.is_empty() {
-            builder = builder.extra_arg(initial_prompt.to_string());
+            builder = builder
+                .initial_prompt(initial_prompt.to_string())
+                .extra_arg(initial_prompt.to_string());
         }
 
         let mut config = builder.build();
@@ -187,7 +189,7 @@ impl LaunchWizardState {
             // branch/base/working_dir here is the invariant guard — no wizard
             // state may leak a named branch into an intake launch.
             config.is_ephemeral = true;
-            config.ephemeral_base_ref = None;
+            config.ephemeral_base_ref = self.context.ephemeral_base_ref.clone();
             config.branch = None;
             config.base_branch = None;
             config.working_dir = None;
@@ -274,6 +276,24 @@ mod tests {
     }
 
     #[test]
+    fn production_intake_mode_preserves_explicit_ephemeral_base_ref() {
+        // Regression: the production opener marks the wizard as Intake after
+        // assigning `origin/develop`.  The Intake invariant cleanup must clear
+        // branch/worktree state without clearing that authoritative base ref.
+        let mut state = LaunchWizardState::open_intake_with_previous_profiles(
+            intake_context("origin/develop"),
+            sample_agent_options(),
+            Vec::new(),
+            LaunchWizardPreviousProfiles::default(),
+        );
+        state.agent_id = "codex".to_string();
+
+        let config = state.build_launch_config().expect("intake launch config");
+
+        assert_eq!(config.ephemeral_base_ref.as_deref(), Some("origin/develop"));
+    }
+
+    #[test]
     fn build_launch_config_for_codex_resume_uses_resume_session_id() {
         let mut state = LaunchWizardState::open_with(
             context(branch("feature/gui"), "feature/gui"),
@@ -345,6 +365,7 @@ mod tests {
             config.args.last().map(String::as_str),
             Some("$gwt-execute #3165")
         );
+        assert_eq!(config.initial_prompt.as_deref(), Some("$gwt-execute #3165"));
     }
 
     #[test]

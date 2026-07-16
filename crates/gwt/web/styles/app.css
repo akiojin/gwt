@@ -3794,6 +3794,11 @@ body {
   border-style: dashed;
 }
 
+.board-lane.intake {
+  border-color: color-mix(in oklab, var(--color-state-active) 58%, var(--color-border));
+  background: color-mix(in oklab, var(--color-state-active) 7%, var(--color-surface));
+}
+
 .board-lane-header {
   display: flex;
   align-items: center;
@@ -4137,7 +4142,8 @@ body {
   margin-top: 8px;
 }
 
-.board-for-you-filter.active {
+.board-for-you-filter.active,
+.board-intake-filter.active {
   border-color: var(--color-focus-ring);
   color: var(--color-text);
   background: color-mix(in oklab, var(--color-state-active) 18%, var(--color-surface));

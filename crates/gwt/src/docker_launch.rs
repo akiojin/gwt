@@ -68,7 +68,7 @@ pub struct DevContainerLaunchDefaults {
 }
 
 impl DockerLaunchPlan {
-    fn compose_files_for_runtime(&self) -> Vec<PathBuf> {
+    pub(crate) fn compose_files_for_runtime(&self) -> Vec<PathBuf> {
         let mut compose_files = self.compose_files.clone();
         if self.override_file.exists() {
             compose_files.push(self.override_file.clone());
@@ -98,6 +98,14 @@ pub fn apply_docker_runtime_to_launch_config(
     maybe_inject_docker_sandbox_env(&launch, config)?;
     install_launch_gwt_bin_env(&mut config.env_vars, gwt_agent::LaunchRuntimeTarget::Docker)?;
     let runtime_program = resolve_docker_exec_program(&launch, config)?;
+    if config.agent_id == gwt_agent::AgentId::Codex {
+        if let Some(version) = runtime_program.args.iter().find_map(|arg| {
+            arg.strip_prefix("@openai/codex@")
+                .filter(|version| semver::Version::parse(version).is_ok())
+        }) {
+            config.tool_version = Some(version.to_string());
+        }
+    }
     config.command = runtime_program.executable;
     config.args = runtime_program.args;
     config
@@ -270,9 +278,15 @@ pub fn docker_compose_exec_env_args(env_vars: &HashMap<String, String>) -> Vec<S
         if key.eq_ignore_ascii_case("PATH") {
             continue;
         }
-        let value = env_vars.get(key).map(String::as_str).unwrap_or_default();
         args.push("-e".to_string());
-        args.push(format!("{key}={value}"));
+        if key == gwt::codex_bridge::CODEX_REMOTE_AUTH_TOKEN_ENV {
+            // Compose copies this one value from the docker/podman CLI process
+            // environment. The capability must never appear in argv or logs.
+            args.push(key.to_string());
+        } else {
+            let value = env_vars.get(key).map(String::as_str).unwrap_or_default();
+            args.push(format!("{key}={value}"));
+        }
     }
     args
 }
@@ -339,7 +353,14 @@ fn resolve_docker_package_runner(
         )
         .map_err(|err| err.to_string())?;
         if output.status.success() {
-            return Ok(candidate.into_exec_program(agent_args));
+            let mut program = candidate.into_exec_program(agent_args);
+            let probe_output = format!(
+                "{}\n{}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+            pin_docker_codex_latest_program(&mut program, version_spec, &probe_output)?;
+            return Ok(program);
         }
     }
 
@@ -347,6 +368,28 @@ fn resolve_docker_package_runner(
         "Selected Docker runtime cannot launch {version_spec} in service '{}'",
         launch.service
     ))
+}
+
+fn pin_docker_codex_latest_program(
+    program: &mut DockerExecProgram,
+    version_spec: &str,
+    probe_output: &str,
+) -> Result<Option<String>, String> {
+    if version_spec != "@openai/codex@latest" {
+        return Ok(None);
+    }
+    let version = gwt::codex_bridge::parse_codex_cli_version(probe_output)
+        .ok_or_else(|| "Codex latest probe did not report an exact semantic version".to_string())?;
+    let package_index = usize::from(program.args.first().is_some_and(|arg| arg == "--yes"));
+    let package = program
+        .args
+        .get_mut(package_index)
+        .ok_or_else(|| "Codex latest package runner lost its package argument".to_string())?;
+    if package != version_spec {
+        return Err("Codex latest package runner changed before version pinning".to_string());
+    }
+    *package = format!("@openai/codex@{version}");
+    Ok(Some(version))
 }
 
 pub fn strip_package_runner_args(args: &[String], version_spec: &str) -> Vec<String> {
@@ -736,5 +779,60 @@ mod docker_exec_env_tests {
                 .any(|arg| arg == "GWT_BIN_PATH=/usr/local/bin/gwtd"),
             "non-PATH env vars must still be injected: {args:?}"
         );
+    }
+
+    #[test]
+    fn docker_compose_exec_copies_bridge_token_by_name_without_argv_value() {
+        let token = "0123456789abcdef0123456789abcdef-secret";
+        let mut env = HashMap::new();
+        env.insert(
+            gwt::codex_bridge::CODEX_REMOTE_AUTH_TOKEN_ENV.to_string(),
+            token.to_string(),
+        );
+
+        let args = docker_compose_exec_env_args(&env);
+
+        assert!(args
+            .windows(2)
+            .any(|pair| { pair == ["-e", gwt::codex_bridge::CODEX_REMOTE_AUTH_TOKEN_ENV,] }));
+        assert!(!args.iter().any(|arg| arg.contains(token)));
+    }
+
+    #[test]
+    fn docker_codex_latest_probe_rewrites_bunx_and_npx_to_exact_version() {
+        for (executable, args, package_index) in [
+            (
+                "bunx",
+                vec![
+                    "@openai/codex@latest".to_string(),
+                    "--no-alt-screen".to_string(),
+                ],
+                0,
+            ),
+            (
+                "npx",
+                vec![
+                    "--yes".to_string(),
+                    "@openai/codex@latest".to_string(),
+                    "--no-alt-screen".to_string(),
+                ],
+                1,
+            ),
+        ] {
+            let mut program = DockerExecProgram {
+                executable: executable.to_string(),
+                args,
+            };
+            let version = pin_docker_codex_latest_program(
+                &mut program,
+                "@openai/codex@latest",
+                "codex-cli 0.144.5",
+            )
+            .expect("pin Docker latest")
+            .expect("resolved version");
+            assert_eq!(version, "0.144.5");
+            assert_eq!(program.args[package_index], "@openai/codex@0.144.5");
+            assert!(program.args.iter().all(|arg| !arg.ends_with("@latest")));
+        }
     }
 }

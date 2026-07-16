@@ -59,6 +59,19 @@ pub use memory::MemoryCommand;
 pub use search::SearchCommand;
 pub(crate) use title_summary_guard::validate_title_summary_work_name;
 
+/// Replay Board milestone intents that were durably queued with recovery
+/// checkpoints. The binary startup runtime uses this public boundary because
+/// `app_runtime` is compiled in the binary crate while the CLI implementation
+/// lives in the `gwt` library crate.
+pub fn flush_recovery_board_outbox(
+    repo_root: &std::path::Path,
+    store: &gwt_core::recovery::RecoveryStore,
+    recovery_id: &str,
+) -> Result<(), String> {
+    discussion::flush_recovery_board_outbox(repo_root, store, recovery_id)
+        .map_err(|error| error.to_string())
+}
+
 /// Compact linked PR summary used by `issue.linked_prs`.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct LinkedPrSummary {

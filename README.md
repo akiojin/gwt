@@ -144,7 +144,11 @@ gwt open                            # open the running tray's URL in the OS defa
 StatusNotifierItem host (e.g. GNOME 3.26+ without the AppIndicator
 extension). The embedded server still starts and prints
 `gwt browser URL: ...` to stderr, so you can open the URL by hand or
-through `gwt open`.
+through `gwt open`. The complete URL is a process-local capability: keep it
+private and copy the whole value, including its fragment. It rotates whenever
+gwt restarts. The frontend exchanges the fragment for an HttpOnly,
+SameSite-strict session cookie and immediately removes the fragment from
+visible browser history.
 
 The tray-resident process is one per OS-login user. Launching `gwt`
 twice for the same user makes the second invocation print the
@@ -158,15 +162,19 @@ v10.0.0 (SPEC #2920 Q9). CI / automation scripts that relied on
 the old command should use the current `gwt` invocation instead.
 `gwt browser URL: ...` is still written to stderr and
 `GWT_BROWSER_URL_FILE` still receives the bound URL after the embedded
-server starts.
+server starts. The handoff file contains the same private capability and is
+written by a same-directory crash-consistent replacement. gwt enforces mode
+`0600` on Unix; on Windows, place it in a directory whose ACL is private to the
+current user. Do not publish it as a CI artifact.
 
-Trust boundary: **LAN only** (including VPN-extended LAN). The embedded
-browser server does not ship TLS termination, an authentication gate, or rate
-limiting. Anyone that can reach the bind address can drive the embedded UI,
-which includes spawning terminals. The `--bind` flag is opt-in: the default
-`127.0.0.1` keeps the same loopback-trust behaviour as the native GUI. For
-external access, run the host behind a VPN (Tailscale, WireGuard, etc.) rather
-than exposing the port to the public Internet.
+Trust boundary: **authenticated LAN only** (including VPN-extended LAN). Every
+WebSocket requires the process-local browser session cookie (or the narrower
+managed-pane bearer), and missing or foreign origins fail closed. The server
+still does not provide TLS termination or rate limiting, so the capability and
+session traffic are not safe on an untrusted network. The `--bind` flag is
+opt-in; the default `127.0.0.1` remains the safest choice. For access from
+another machine, use a trusted VPN (Tailscale, WireGuard, etc.) and the complete
+capability URL rather than exposing the port to the public Internet.
 
 Platform note: on Linux, `tao 0.35` still requires a display server (X11 or
 Wayland) at EventLoop creation. macOS and Windows browser-server launches
@@ -177,7 +185,9 @@ tao-detach follow-up tracked under SPEC-1942.
 Every HTTP / WebSocket request is mirrored to `tracing::info!(target =
 "gwt_access", ...)` so the operator can see *which* peer is connecting in
 real time on stderr and in `~/.gwt/logs/<date>/`. `/healthz` is demoted to
-`debug!` to avoid drowning the stream with health probes.
+`debug!` to avoid drowning the stream with health probes. URL fragments,
+cookies, authorization values, and recovery handles are not written to the
+access log.
 
 Lifecycle: the running `gwt` process owns the agent / PTY lifetime. Closing a
 browser tab does **not** stop running agents — only `Ctrl-C` / `SIGTERM` asks
@@ -282,6 +292,91 @@ In terminal windows, drag to select text and release the mouse button to copy.
 On Windows, `Ctrl+C` copies the current terminal selection and clears it; if no
 selection exists, `Ctrl+C` stays mapped to the running terminal process. On
 Linux, `Ctrl+Shift+C` also copies the current terminal selection.
+
+### Session recovery
+
+gwt creates a project-scoped recovery record before a recoverable Intake or
+Execution agent starts. After an app or machine crash, a verified provider
+conversation resumes automatically in its original worktree. If the provider
+definitively reports that the exact conversation no longer exists, gwt starts
+a new provider conversation with the latest bounded semantic checkpoint; it
+does not silently start with a blank prompt. Retryable authentication,
+transport, or protocol failures remain visible for operator attention.
+
+`Recovery Center` in the Command Palette opens all current recovery candidates.
+At startup it opens automatically only when a candidate needs a decision, so
+successful exact restores do not interrupt normal work. Each candidate shows
+its Intake/Execution kind, provider, worktree, checkpoint coverage, capture
+health, Board delivery state, and exact-resume evidence. Available actions are:
+
+- `Focus` — focus the already-running replacement
+- `Confirm & Resume` — confirm an authoritative exact provider conversation
+- `Continue Checkpoint` — start a new conversation with the durable checkpoint
+- `Start Fresh` — explicitly start again with the original initial request;
+  it is unavailable when that request did not survive legacy migration
+- `Open Board` / `Details` — inspect the public milestone or recovery evidence
+- `Discard` — remove gwt recovery content after a second confirmation
+
+On the first startup after upgrading, gwt also inventories recoverable legacy
+Session files and paused window projections. It imports each distinct session
+as a candidate without replaying a saved command or guessing a provider root.
+If the legacy Session omitted its provider root, gwt reads only bounded native
+provider metadata and matches root kind, canonical worktree, and launch time;
+it does not import provider messages. One uniquely strong match may resume
+exactly. When several provider conversations could own the same Intake,
+Recovery Center shows their recorded evidence and requires an explicit
+selection. If neither exact evidence nor an earlier semantic checkpoint
+survived, the candidate remains in Attention instead of reconstructing private
+discussion content from argv or Board.
+
+If an unresolved ephemeral Intake worktree itself is missing, gwt recreates
+only its recorded `.intake` / `.intake-N` path at the immutable pinned base
+commit before recovery. It never recreates an Execution or arbitrary user path,
+and a missing or mismatched pin leaves the candidate in Attention.
+
+Intake discussion checkpoints publish concise, idempotent milestones to Board.
+They include confirmed decisions, open questions, affected SPECs, and the next
+action, but never the private transcript, tool output, hidden reasoning, or
+credentials. Existing legacy transcripts are not backfilled automatically;
+only a current, user-confirmed summary may be published. Copied recovery
+attachments are content-addressed. Recovery Store accepts up to 32 MiB per
+attachment; managed Codex capture uses a stricter 24 MiB safety bound.
+Unresolved recovery content has no time-based expiry. `Discard` or a completed
+recovery removes the checkpoint and copied attachments immediately, keeps only
+a minimal tombstone for 30 days, and leaves the provider's own conversation
+history untouched.
+
+In a current managed Intake, each structured `discussion.update` is also the
+semantic checkpoint and deterministic Board-outbox boundary. Repeating the
+same milestone creates neither a new checkpoint revision nor a duplicate Board
+entry. The memo and Recovery checkpoint keep the same deterministic operation
+marker, so Stop rejects a crash/concurrency mismatch until a retry converges.
+`intake.checkpoint.current/update` is needed only to supplement that
+milestone with allowlisted completed visible items or retained/new attachments.
+For a pre-upgrade current Intake with no `GWT_RECOVERY_ID`, gwt resolves the
+exact `GWT_SESSION_ID` ledger and performs a bounded metadata-only import on
+demand. Missing or ambiguous roots remain in Recovery Center Attention; gwt
+does not infer them from private conversation or Board content. Docker Claude
+attachment capture is a known limitation: its structured discussion fields
+remain durable, but attachment fallback is unavailable until an allowlisted
+copy is captured by the managed runtime.
+
+The Board's `Intake` filter shows these milestones by their recorded Intake
+origin or explicit `intake` topic; titles are never guessed. Local Board replay
+uses the original milestone ID and converges to one entry after a crash. Slack
+and Teams do not currently preserve a caller-supplied idempotency ID, so gwt
+keeps remote milestone delivery pending instead of risking a duplicate or a
+false acknowledgement. The recovery checkpoint still commits, and Recovery
+Center displays the bounded delivery error until a safe delivery path is
+available.
+
+Codex Host recovery uses a dedicated loopback-only bridge that is separate
+from the browser server. Docker and Podman use the mounted `gwtd` sidecar and
+the selected Compose service's own loopback; no published port, host gateway,
+or token-bearing URL is required. Container recovery therefore requires the
+normal gwt Linux bundle mount plus a Codex runner available in that service.
+Runner, bridge, or control-channel mismatches fail closed into Recovery Center
+instead of falling back to an unobserved direct Codex launch.
 
 ## Issue Monitor
 

@@ -229,6 +229,13 @@ impl AppRuntime {
         self.stop_window_runtime_inner(window_id, true);
     }
 
+    /// Kill a failed recovery provider without applying normal Intake stop
+    /// cleanup to the durable source session/worktree. The recovery lifecycle
+    /// owns that cleanup after an operator decision.
+    pub(super) fn stop_window_runtime_preserving_recovery(&mut self, window_id: &str) {
+        self.stop_window_runtime_inner(window_id, false);
+    }
+
     fn stop_window_runtime_inner(&mut self, window_id: &str, mark_session_stopped: bool) {
         let threads = self.start_window_runtime_stop(window_id, mark_session_stopped);
         Self::join_runtime_stop_threads(threads);
@@ -244,6 +251,9 @@ impl AppRuntime {
         }
         self.remove_window_state_tracking(window_id);
         self.deregister_pty_writer(window_id);
+        // Dropping the last route lease unregisters the loopback capability
+        // and cancels the paired Codex app-server before the PTY is joined.
+        self.codex_bridge_routes.remove(window_id);
         let mut threads = RuntimeStopThreads {
             output_thread: None,
             status_thread: None,

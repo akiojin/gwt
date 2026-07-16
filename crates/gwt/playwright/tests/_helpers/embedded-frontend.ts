@@ -113,6 +113,7 @@ const ROOT_MODULES = new Set([
   "workspace-kanban-surface.js",
   // SPEC-2359 US-42 — Workspace Resume Picker modal renderer.
   "workspace-resume-picker-modal.js",
+  "recovery-center-modal.js",
 ]);
 
 export async function installEmbeddedRoutes(page: any): Promise<void> {

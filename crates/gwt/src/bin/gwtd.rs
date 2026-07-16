@@ -26,6 +26,23 @@ fn main() -> ExitCode {
         _ => {}
     }
 
+    if matches!(
+        (
+            argv.get(1).map(String::as_str),
+            argv.get(2).map(String::as_str),
+            argv.get(3),
+        ),
+        (Some("__internal"), Some("codex-sidecar"), None)
+    ) {
+        return match gwt::codex_bridge::run_container_codex_sidecar() {
+            Ok(()) => ExitCode::SUCCESS,
+            Err(_) => {
+                eprintln!("gwtd internal Codex sidecar failed");
+                ExitCode::FAILURE
+            }
+        };
+    }
+
     let code = match argv.get(1).map(String::as_str) {
         None => run_json_envelope_cli(&argv),
         Some(_) if is_allowed_argv_exception(&argv) => {
@@ -298,19 +315,23 @@ fn format_memory_help() -> String {
 
 fn format_discussion_help() -> String {
     [
-        "discussion.* — Persist/update Git-managed discussion notes via JSON envelope.",
+        "discussion.* / intake.checkpoint.* — Persist discussion notes and durable Intake checkpoints.",
         "",
         "Usage:",
         "  gwtd <<'JSON'",
         "  {\"schema_version\":1,\"operation\":\"discussion.update\",\"params\":{\"title\":\"...\",\"summary\":\"...\",\"next\":\"...\"}}",
         "  JSON",
         "",
-        "Operation:",
+        "Operations:",
         "  discussion.update",
+        "  intake.checkpoint.current",
+        "  intake.checkpoint.update",
         "",
         "Key params:",
         "  date, title, status, topics, related_specs, related_works",
         "  promoted_to, summary, decisions, open_questions, next",
+        "  intake.checkpoint.update also requires expected_revision and accepts",
+        "  visible_items plus attachment_paths from the allowlisted Intake context",
         "",
     ]
     .join("\n")

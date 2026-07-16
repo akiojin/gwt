@@ -14,8 +14,9 @@ use std::sync::mpsc as std_mpsc;
 use std::sync::Mutex;
 
 use super::{
-    close_window_from_workspace, should_auto_close_agent_window, AppRuntime, BackendEvent,
-    OutboundEvent, WindowPreset, WindowProcessStatus,
+    close_window_from_workspace, mark_auto_resume_source_completed, should_auto_close_agent_window,
+    AppRuntime, BackendEvent, OutboundEvent, PendingProviderRootClaim, WindowPreset,
+    WindowProcessStatus,
 };
 
 /// Issue #3274: how many trailing non-empty screen lines survive into the
@@ -27,6 +28,92 @@ const AGENT_ERROR_TAIL_MAX_CHARS: usize = 240;
 /// ever gets — promote it to an explicit diagnostic (SPEC-1921 exact session
 /// restore amendment: stale provider ids keep a visible diagnostic).
 const EXACT_RESUME_FAILURE_SIGNATURE: &str = "No conversation found with session ID";
+
+pub(super) fn mark_recovery_ready_for_session(
+    sessions_dir: &Path,
+    session_id: &str,
+    project_dir_override: Option<&Path>,
+    provider_root_claim: Option<&PendingProviderRootClaim>,
+) -> std::io::Result<()> {
+    let path = sessions_dir.join(format!("{session_id}.toml"));
+    let session = gwt_agent::Session::load_and_migrate(&path)?;
+    let mut durable_ready_committed = false;
+    if let (Some(recovery_id), Some(project_root)) = (
+        session.recovery_id.as_deref(),
+        session.project_state_root.as_deref(),
+    ) {
+        let project_dir = project_dir_override
+            .map(Path::to_path_buf)
+            .unwrap_or_else(|| gwt_core::paths::gwt_project_dir_for_repo_path(project_root));
+        let store = gwt_core::recovery::RecoveryStore::for_project_dir(project_dir);
+        if store
+            .load(recovery_id)
+            .map_err(|error| std::io::Error::other(error.to_string()))?
+            .is_some()
+        {
+            let exact_handoff = session.recovery_continuation.as_ref().filter(|handoff| {
+                session.session_mode == gwt_agent::SessionMode::Resume
+                    && !handoff.inherit_checkpoint
+            });
+            match (exact_handoff, provider_root_claim) {
+                (Some(handoff), Some(claim))
+                    if handoff.target_recovery_id == recovery_id
+                        && handoff.source_recovery_id == claim.recovery_id =>
+                {
+                    store
+                        .complete_claimed_provider_ready(
+                            &claim.recovery_id,
+                            recovery_id,
+                            &claim.claim_token,
+                            chrono::Utc::now(),
+                            format!("provider-ready-claim:{session_id}"),
+                        )
+                        .map_err(|error| std::io::Error::other(error.to_string()))?;
+                }
+                (Some(_), Some(_)) => {
+                    return Err(std::io::Error::other(
+                        "exact recovery Ready handoff no longer matches its provider-root claim",
+                    ));
+                }
+                (Some(_), None) => {
+                    return Err(std::io::Error::other(
+                        "exact recovery Ready requires its provider-root claim",
+                    ));
+                }
+                (None, Some(_)) => {
+                    return Err(std::io::Error::other(
+                        "provider-root claim cannot complete Ready without an exact recovery handoff",
+                    ));
+                }
+                (None, None) => {
+                    store
+                        .complete_provider_ready(
+                            recovery_id,
+                            chrono::Utc::now(),
+                            format!("provider-ready:{session_id}"),
+                        )
+                        .map_err(|error| std::io::Error::other(error.to_string()))?;
+                }
+            }
+            durable_ready_committed = true;
+        }
+    }
+    let session_update = gwt_agent::update_session(sessions_dir, session_id, |session| {
+        session.advance_recovery_launch_stage(gwt_agent::session::RecoveryLaunchStage::Ready)
+    });
+    match session_update {
+        Ok(_) => Ok(()),
+        Err(error) if durable_ready_committed => {
+            tracing::warn!(
+                session_id,
+                error = %error,
+                "Recovery Record crossed Ready but Session stage update failed"
+            );
+            Ok(())
+        }
+        Err(error) => Err(error),
+    }
+}
 
 /// Compose the persistent window detail for an errored agent process from the
 /// plain exit detail and the final screen tail. Pure so the classification is
@@ -53,6 +140,29 @@ fn compose_agent_error_detail(base: Option<String>, tail: Option<&str>) -> Optio
         Some(base) if !base.is_empty() => Some(format!("{base} — last output: {tail}")),
         _ => Some(format!("Agent exited — last output: {tail}")),
     }
+}
+
+pub(super) fn exact_resume_rejection_matches_root(tail: &str, expected_root_id: &str) -> bool {
+    let expected_root_id = expected_root_id.trim();
+    if expected_root_id.is_empty() {
+        return false;
+    }
+    tail.split(EXACT_RESUME_FAILURE_SIGNATURE)
+        .skip(1)
+        .filter_map(|suffix| {
+            suffix
+                .trim_start_matches(|character: char| {
+                    character.is_whitespace() || matches!(character, ':' | '=' | '`' | '"' | '\'')
+                })
+                .split_whitespace()
+                .next()
+        })
+        .map(|reported| {
+            reported.trim_matches(|character: char| {
+                matches!(character, '.' | ',' | ';' | '`' | '"' | '\'')
+            })
+        })
+        .any(|reported| reported == expected_root_id)
 }
 
 impl AppRuntime {
@@ -122,6 +232,7 @@ impl AppRuntime {
             self.mark_agent_session_stopped(&id);
             self.deregister_pty_writer(&id);
             self.runtimes.remove(&id);
+            self.codex_bridge_routes.remove(&id);
             self.window_details.remove(&id);
             // SPEC-3214 FR-002: the status arrived after the window was torn
             // down, so the PTY is gone — safe point to destroy any pending
@@ -145,17 +256,30 @@ impl AppRuntime {
 
         let keep_active_agent_session_for_recovery =
             self.should_keep_active_agent_session_for_recoverable_pty_error(&id, status);
+        let pending_auto_recovery = self.pending_auto_resume_sources.contains_key(&id);
         // Issue #3274: an errored agent runtime is torn down below, dropping
         // its vt100 state — a client that reconnects later replays nothing and
         // an empty Error window gives no clue why. Capture the final screen
         // tail into the persistent detail before the state is gone; the raw
         // output stays available in logs.
-        let detail = if matches!(status, WindowProcessStatus::Error)
+        let final_screen_tail = if matches!(status, WindowProcessStatus::Error)
             && matches!(
                 self.window_preset(&id),
                 Some(WindowPreset::Agent | WindowPreset::Claude | WindowPreset::Codex)
             ) {
-            compose_agent_error_detail(detail, self.final_screen_tail(&id).as_deref())
+            self.final_screen_tail(&id)
+        } else {
+            None
+        };
+        let exact_resume_rejected = pending_auto_recovery
+            && self
+                .pending_auto_resume_exact_root(&id)
+                .zip(final_screen_tail.as_deref())
+                .is_some_and(|(expected_root, tail)| {
+                    exact_resume_rejection_matches_root(tail, &expected_root)
+                });
+        let detail = if final_screen_tail.is_some() {
+            compose_agent_error_detail(detail, final_screen_tail.as_deref())
         } else {
             detail
         };
@@ -164,15 +288,34 @@ impl AppRuntime {
         }
         self.window_pty_statuses.insert(id.clone(), status);
         let composed_status = self.recompute_window_state(&id).unwrap_or(status);
-        let should_auto_close =
-            should_auto_close_agent_window(&self.active_agent_sessions, &id, &composed_status)
-                && self.window_hook_states.get(&id).copied() == Some(WindowProcessStatus::Stopped);
+        let should_auto_close = !pending_auto_recovery
+            && should_auto_close_agent_window(&self.active_agent_sessions, &id, &composed_status)
+            && self.window_hook_states.get(&id).copied() == Some(WindowProcessStatus::Stopped);
         match detail.as_ref() {
             Some(detail) if !detail.is_empty() => {
                 self.window_details.insert(id.clone(), detail.clone());
             }
             _ => {
                 self.window_details.remove(&id);
+            }
+        }
+        if exact_resume_rejected {
+            // The failed provider attempt may be an ephemeral Intake. Replace
+            // it before the normal terminal path can classify and delete its
+            // clean worktree. No mapping means no active recovery owner, in
+            // which case the historical diagnostic-only path remains intact.
+            self.codex_bridge_routes.remove(&id);
+            if let Some(mut fallback_events) = self.fallback_after_exact_resume_rejection(&id) {
+                if fallback_events.is_empty() {
+                    let _ = self.persist();
+                    fallback_events.extend(Self::status_events(
+                        id.clone(),
+                        composed_status,
+                        detail,
+                    ));
+                    fallback_events.extend(self.launch_next_startup_auto_resume_session());
+                }
+                return fallback_events;
             }
         }
         if should_auto_close {
@@ -200,14 +343,26 @@ impl AppRuntime {
         } else if status != WindowProcessStatus::Error {
             self.recoverable_agent_error_windows.remove(&id);
         }
+        let mut advance_startup_queue = false;
         if matches!(
             status,
             WindowProcessStatus::Error | WindowProcessStatus::Stopped
-        ) && !keep_active_agent_session_for_recovery
+        ) && (!keep_active_agent_session_for_recovery || pending_auto_recovery)
         {
-            self.runtimes.remove(&id);
-            self.remove_window_state_tracking(&id);
-            self.mark_agent_session_stopped(&id);
+            if pending_auto_recovery {
+                self.mark_pending_auto_resume_attention(
+                    &id,
+                    Self::recovery_provider_stopped_attention_reason(),
+                );
+                self.codex_bridge_routes.remove(&id);
+                self.preserve_failed_auto_resume_attempt(&id);
+                advance_startup_queue = true;
+            } else {
+                self.runtimes.remove(&id);
+                self.codex_bridge_routes.remove(&id);
+                self.remove_window_state_tracking(&id);
+                self.mark_agent_session_stopped(&id);
+            }
         }
         let _ = self.persist();
 
@@ -215,6 +370,9 @@ impl AppRuntime {
         // exited — drain any intake worktree cleanup queued by the session
         // stop above (or by an earlier explicit stop of this window).
         let mut events = self.take_ephemeral_worktree_cleanup_events();
+        if advance_startup_queue {
+            events.extend(self.launch_next_startup_auto_resume_session());
+        }
         if is_agent_window
             && composed_status == WindowProcessStatus::Error
             && !keep_active_agent_session_for_recovery
@@ -254,6 +412,13 @@ impl AppRuntime {
         (!tail.is_empty()).then_some(tail)
     }
 
+    fn pending_auto_resume_exact_root(&self, window_id: &str) -> Option<String> {
+        let source_session_id = self.pending_auto_resume_sources.get(window_id)?;
+        let source_path = self.sessions_dir.join(format!("{source_session_id}.toml"));
+        let source = gwt_agent::Session::load_and_migrate(&source_path).ok()?;
+        source.exact_resume_session_id().map(str::to_string)
+    }
+
     pub(crate) fn handle_runtime_hook_event(
         &mut self,
         event: gwt::RuntimeHookEvent,
@@ -291,6 +456,67 @@ impl AppRuntime {
         let Some(hook_state) = gwt::window_state::runtime_hook_window_state(&event) else {
             return events;
         };
+        let codex_bridge_waiting_for_root = self
+            .codex_bridge_routes
+            .get(&window_id)
+            .is_some_and(|route| !route.root_forwarded());
+        if gwt::window_state::is_live_agent_hook_state(hook_state) && !codex_bridge_waiting_for_root
+        {
+            let ready_session_id = self
+                .active_agent_sessions
+                .get(&window_id)
+                .map(|session| session.session_id.clone());
+            if let Some(ready_session_id) = ready_session_id {
+                let provider_root_claim =
+                    self.pending_provider_root_claims.get(&window_id).cloned();
+                match mark_recovery_ready_for_session(
+                    &self.sessions_dir,
+                    &ready_session_id,
+                    provider_root_claim
+                        .as_ref()
+                        .map(|claim| claim.project_dir.as_path()),
+                    provider_root_claim.as_ref(),
+                ) {
+                    Ok(()) => {
+                        self.pending_provider_root_claims.remove(&window_id);
+                        if let Some(source_session_id) =
+                            self.pending_auto_resume_sources.get(&window_id).cloned()
+                        {
+                            match mark_auto_resume_source_completed(
+                                &self.sessions_dir,
+                                &source_session_id,
+                            ) {
+                                Ok(()) => {
+                                    self.pending_auto_resume_sources.remove(&window_id);
+                                    events.extend(self.launch_next_startup_auto_resume_session());
+                                }
+                                Err(error) => {
+                                    tracing::warn!(
+                                        source_session_id,
+                                        error = %error,
+                                        "provider ready but source finalization failed; keeping recovery active"
+                                    );
+                                    events.extend(self.launch_next_startup_auto_resume_session());
+                                }
+                            }
+                        }
+                    }
+                    Err(error) => {
+                        tracing::warn!(
+                            session_id = %ready_session_id,
+                            error = %error,
+                            "provider ready barrier failed; keeping recovery source active"
+                        );
+                        self.abort_pending_provider_root_claim_attempt(
+                            &window_id,
+                            "Provider Ready claim barrier rejected the recovery launch",
+                        );
+                        events.extend(self.launch_next_startup_auto_resume_session());
+                        return events;
+                    }
+                }
+            }
+        }
         self.recoverable_agent_error_windows.remove(&window_id);
         if self.window_hook_states.get(&window_id).copied() == Some(hook_state) {
             return events;
@@ -354,6 +580,122 @@ impl AppRuntime {
         }
         events.extend(Self::status_events(window_id, composed_state, detail));
         events
+    }
+
+    pub(crate) fn handle_codex_bridge_ready(
+        &mut self,
+        window_id: String,
+        session_id: String,
+    ) -> Vec<OutboundEvent> {
+        let mut events = Vec::new();
+        let route_is_ready = self
+            .codex_bridge_routes
+            .get(&window_id)
+            .is_some_and(gwt::codex_bridge::CodexLaunchBridgeLease::root_forwarded);
+        let session_matches = self
+            .active_agent_sessions
+            .get(&window_id)
+            .is_some_and(|session| session.session_id == session_id);
+        if !route_is_ready || !session_matches {
+            return events;
+        }
+
+        let provider_root_claim = self.pending_provider_root_claims.get(&window_id).cloned();
+        match mark_recovery_ready_for_session(
+            &self.sessions_dir,
+            &session_id,
+            provider_root_claim
+                .as_ref()
+                .map(|claim| claim.project_dir.as_path()),
+            provider_root_claim.as_ref(),
+        ) {
+            Ok(()) => {
+                self.pending_provider_root_claims.remove(&window_id);
+                if let Some(source_session_id) =
+                    self.pending_auto_resume_sources.get(&window_id).cloned()
+                {
+                    match mark_auto_resume_source_completed(&self.sessions_dir, &source_session_id)
+                    {
+                        Ok(()) => {
+                            self.pending_auto_resume_sources.remove(&window_id);
+                            events.extend(self.launch_next_startup_auto_resume_session());
+                        }
+                        Err(error) => {
+                            tracing::warn!(
+                                source_session_id,
+                                error = %error,
+                                "Codex bridge ready but source finalization failed; keeping recovery active"
+                            );
+                            events.extend(self.launch_next_startup_auto_resume_session());
+                        }
+                    }
+                }
+            }
+            Err(error) => {
+                tracing::warn!(
+                    session_id = %session_id,
+                    error = %error,
+                    "Codex bridge ready barrier failed; keeping recovery source active"
+                );
+                self.abort_pending_provider_root_claim_attempt(
+                    &window_id,
+                    "Provider Ready claim barrier rejected the recovery launch",
+                );
+                events.extend(self.launch_next_startup_auto_resume_session());
+            }
+        }
+        events
+    }
+
+    pub(crate) fn handle_codex_bridge_failure(
+        &mut self,
+        window_id: String,
+        session_id: String,
+        failure: gwt::codex_bridge::CodexBridgeFailure,
+    ) -> Vec<OutboundEvent> {
+        let session_matches = self
+            .active_agent_sessions
+            .get(&window_id)
+            .is_some_and(|session| session.session_id == session_id);
+        if !session_matches || !self.codex_bridge_routes.contains_key(&window_id) {
+            return Vec::new();
+        }
+
+        // Dropping the lease cancels the app-server before any replacement is
+        // launched. The bearer capability and one-time route are retired with
+        // it, so a fallback can never attach to the rejected provider.
+        self.codex_bridge_routes.remove(&window_id);
+        if failure.kind == gwt::codex_bridge::CodexBridgeFailureKind::DefinitiveThreadNotFound {
+            if let Some(mut events) = self.fallback_after_exact_resume_rejection(&window_id) {
+                if events.is_empty() {
+                    let _ = self.persist();
+                    events.extend(self.launch_next_startup_auto_resume_session());
+                }
+                return events;
+            }
+        }
+
+        // Authentication, schema/protocol and transport failures are not
+        // evidence that provider history is gone. Keep the source recovery and
+        // require operator attention instead of silently creating a new root.
+        if self.mark_pending_auto_resume_attention(&window_id, &failure.reason) {
+            self.preserve_failed_auto_resume_attempt(&window_id);
+            self.window_pty_statuses
+                .insert(window_id.clone(), WindowProcessStatus::Error);
+            self.window_details
+                .insert(window_id.clone(), failure.reason.clone());
+            let status = self
+                .recompute_window_state(&window_id)
+                .unwrap_or(WindowProcessStatus::Error);
+            let _ = self.persist();
+            let mut events = Self::status_events(window_id, status, Some(failure.reason));
+            events.extend(self.launch_next_startup_auto_resume_session());
+            return events;
+        }
+
+        self.window_details
+            .insert(window_id.clone(), failure.reason.clone());
+        Self::status_events(window_id, WindowProcessStatus::Error, Some(failure.reason))
     }
 
     fn should_keep_active_agent_session_for_recoverable_pty_error(
@@ -598,6 +940,225 @@ fn publish_runtime_hook_change(project_root: &Path, event: &gwt::RuntimeHookEven
 
 #[cfg(not(unix))]
 fn publish_runtime_hook_change(_project_root: &Path, _event: &gwt::RuntimeHookEvent) {}
+
+#[cfg(test)]
+mod recovery_ready_tests {
+    use super::{mark_recovery_ready_for_session, PendingProviderRootClaim};
+
+    #[test]
+    fn provider_ready_barrier_updates_recovery_before_source_retirement() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let sessions_dir = temp.path().join("sessions");
+        let project_dir = temp.path().join("project-store");
+        let worktree = temp.path().join("intake");
+        std::fs::create_dir_all(&worktree).expect("worktree");
+        let mut session = gwt_agent::Session::new(&worktree, "work", gwt_agent::AgentId::Codex);
+        session.project_state_root = Some(worktree.clone());
+        let session_id = session.id.clone();
+        let recovery_id = session.recovery_id.clone().expect("recovery id");
+        session.session_mode = gwt_agent::SessionMode::Resume;
+        session.recovery_continuation = Some(gwt_agent::RecoveryContinuationHandoff {
+            source_session_id: session_id.clone(),
+            source_recovery_id: recovery_id.clone(),
+            target_recovery_id: recovery_id.clone(),
+            source_checkpoint_revision: 0,
+            reason: "Recovery Center requested exact provider resume".to_string(),
+            inherit_checkpoint: false,
+        });
+        session.save(&sessions_dir).expect("save session");
+        let store = gwt_core::recovery::RecoveryStore::for_project_dir(&project_dir);
+        store
+            .create(
+                gwt_core::recovery::CreateRecovery {
+                    recovery_id: recovery_id.clone(),
+                    session_id: session_id.clone(),
+                    repo_id: "repo".to_string(),
+                    session_kind: gwt_core::recovery::RecoverySessionKind::Intake,
+                    worktree_path: worktree,
+                    launch_base_ref: None,
+                    launch_base_oid: "1111111111111111111111111111111111111111".to_string(),
+                    launch_head_oid: "1111111111111111111111111111111111111111".to_string(),
+                    provider: "codex".to_string(),
+                    model: None,
+                    runtime: "host".to_string(),
+                    initial_prompt: "Investigate".to_string(),
+                    created_at: session.created_at,
+                },
+                "create",
+            )
+            .expect("create recovery");
+
+        store
+            .bind_root(
+                &recovery_id,
+                gwt_core::recovery::ProviderRootBinding {
+                    root_id: "ready-provider-root".to_string(),
+                    session_tree_id: None,
+                    quality: gwt_core::recovery::BindingQuality::Verified,
+                    bound_at: chrono::Utc::now(),
+                },
+                "bind-ready-root",
+            )
+            .expect("bind ready root");
+        let before_claim = store.load(&recovery_id).unwrap().unwrap();
+        let acquired_at = chrono::Utc::now();
+        store
+            .claim_recovery_with_provider_root(
+                &recovery_id,
+                before_claim.generation,
+                "ready-provider-root",
+                false,
+                gwt_core::recovery::RecoveryLease {
+                    lease_id: "ready-claim-token".to_string(),
+                    holder_id: "runtime-ready-test".to_string(),
+                    acquired_at,
+                    expires_at: acquired_at + chrono::Duration::minutes(5),
+                },
+                "pending-ready-window",
+                "ready integration test",
+                "claim-ready-root",
+            )
+            .expect("claim ready root");
+
+        mark_recovery_ready_for_session(
+            &sessions_dir,
+            &session_id,
+            Some(&project_dir),
+            Some(&PendingProviderRootClaim {
+                recovery_id: recovery_id.clone(),
+                claim_token: "ready-claim-token".to_string(),
+                project_dir: project_dir.clone(),
+                claim_ttl: chrono::Duration::minutes(5),
+            }),
+        )
+        .expect("ready barrier");
+
+        assert_eq!(
+            store.load(&recovery_id).unwrap().unwrap().lifecycle,
+            gwt_core::recovery::RecoveryLifecycle::Running
+        );
+        assert!(store
+            .active_provider_root_claim("codex", "ready-provider-root", chrono::Utc::now())
+            .unwrap()
+            .is_none());
+        let loaded =
+            gwt_agent::Session::load(&sessions_dir.join(format!("{session_id}.toml"))).unwrap();
+        assert_eq!(
+            loaded.recovery_launch_stage,
+            Some(gwt_agent::session::RecoveryLaunchStage::Ready)
+        );
+    }
+
+    #[test]
+    fn exact_ready_without_in_memory_claim_mapping_fails_closed() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let sessions_dir = temp.path().join("sessions");
+        let project_dir = temp.path().join("project-store");
+        let worktree = temp.path().join("intake");
+        std::fs::create_dir_all(&worktree).expect("worktree");
+        let mut session = gwt_agent::Session::new(&worktree, "work", gwt_agent::AgentId::Codex);
+        session.project_state_root = Some(worktree.clone());
+        session.session_mode = gwt_agent::SessionMode::Resume;
+        let session_id = session.id.clone();
+        let recovery_id = session.recovery_id.clone().expect("recovery id");
+        session.recovery_continuation = Some(gwt_agent::RecoveryContinuationHandoff {
+            source_session_id: "source-session".to_string(),
+            source_recovery_id: "source-recovery".to_string(),
+            target_recovery_id: recovery_id.clone(),
+            source_checkpoint_revision: 0,
+            reason: "Startup requested exact provider resume".to_string(),
+            inherit_checkpoint: false,
+        });
+        session.save(&sessions_dir).expect("save exact session");
+        let store = gwt_core::recovery::RecoveryStore::for_project_dir(&project_dir);
+        store
+            .create(
+                gwt_core::recovery::CreateRecovery {
+                    recovery_id: recovery_id.clone(),
+                    session_id: session_id.clone(),
+                    repo_id: "repo".to_string(),
+                    session_kind: gwt_core::recovery::RecoverySessionKind::Intake,
+                    worktree_path: worktree,
+                    launch_base_ref: None,
+                    launch_base_oid: "1".repeat(40),
+                    launch_head_oid: "1".repeat(40),
+                    provider: "codex".to_string(),
+                    model: None,
+                    runtime: "host".to_string(),
+                    initial_prompt: "Investigate".to_string(),
+                    created_at: session.created_at,
+                },
+                "create-missing-ready-claim",
+            )
+            .expect("create recovery");
+
+        let error =
+            mark_recovery_ready_for_session(&sessions_dir, &session_id, Some(&project_dir), None)
+                .expect_err("exact Ready must not bypass a lost in-memory claim mapping");
+
+        assert!(error.to_string().contains("provider-root claim"));
+        let recovery = store.load(&recovery_id).unwrap().unwrap();
+        assert!(recovery.launch_stage < gwt_core::recovery::RecoveryLaunchStage::Ready);
+        assert_ne!(
+            recovery.lifecycle,
+            gwt_core::recovery::RecoveryLifecycle::Running
+        );
+        let session =
+            gwt_agent::Session::load(&sessions_dir.join(format!("{session_id}.toml"))).unwrap();
+        assert_ne!(
+            session.recovery_launch_stage,
+            Some(gwt_agent::session::RecoveryLaunchStage::Ready)
+        );
+    }
+
+    #[test]
+    fn fresh_ready_without_provider_root_claim_uses_the_normal_barrier() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let sessions_dir = temp.path().join("sessions");
+        let project_dir = temp.path().join("project-store");
+        let worktree = temp.path().join("intake");
+        std::fs::create_dir_all(&worktree).expect("worktree");
+        let mut session = gwt_agent::Session::new(&worktree, "work", gwt_agent::AgentId::Codex);
+        session.project_state_root = Some(worktree.clone());
+        let session_id = session.id.clone();
+        let recovery_id = session.recovery_id.clone().expect("recovery id");
+        session.save(&sessions_dir).expect("save fresh session");
+        let store = gwt_core::recovery::RecoveryStore::for_project_dir(&project_dir);
+        store
+            .create(
+                gwt_core::recovery::CreateRecovery {
+                    recovery_id: recovery_id.clone(),
+                    session_id: session_id.clone(),
+                    repo_id: "repo".to_string(),
+                    session_kind: gwt_core::recovery::RecoverySessionKind::Intake,
+                    worktree_path: worktree,
+                    launch_base_ref: None,
+                    launch_base_oid: "1".repeat(40),
+                    launch_head_oid: "1".repeat(40),
+                    provider: "codex".to_string(),
+                    model: None,
+                    runtime: "host".to_string(),
+                    initial_prompt: "Investigate".to_string(),
+                    created_at: session.created_at,
+                },
+                "create-fresh-ready",
+            )
+            .expect("create recovery");
+
+        mark_recovery_ready_for_session(&sessions_dir, &session_id, Some(&project_dir), None)
+            .expect("fresh Ready");
+
+        let recovery = store.load(&recovery_id).unwrap().unwrap();
+        assert_eq!(
+            recovery.lifecycle,
+            gwt_core::recovery::RecoveryLifecycle::Running
+        );
+        assert_eq!(
+            recovery.launch_stage,
+            gwt_core::recovery::RecoveryLaunchStage::Ready
+        );
+    }
+}
 
 #[cfg(test)]
 mod tests {

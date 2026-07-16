@@ -19,6 +19,8 @@ import { createTerminalContextMenuController } from "/terminal-context-menu.js";
 //   by the app.js terminal host.
 // - TERMINAL_SELECTION_DRAG_THRESHOLD: drag-vs-click pixel threshold const
 //   shared with the app.js terminal selection handling.
+// - ensureFrontendSession(): exchanges the fragment bootstrap capability for
+//   the HttpOnly process session before any upload capability is requested.
 export function createTerminalAttachments({
   send,
   terminalMap,
@@ -28,6 +30,7 @@ export function createTerminalAttachments({
   workspaceWindowElement,
   scheduleTerminalViewportRefresh,
   TERMINAL_SELECTION_DRAG_THRESHOLD,
+  ensureFrontendSession,
 }) {
       const SUPPORTED_IMAGE_PASTE_MIME_TYPES = new Set([
         "image/png",
@@ -307,18 +310,26 @@ export function createTerminalAttachments({
 
       async function attachmentUploadToken() {
         if (!attachmentUploadTokenPromise) {
-          attachmentUploadTokenPromise = fetch("/internal/attachment-upload-token", {
-            credentials: "same-origin",
-          }).then(async (response) => {
-            if (!response.ok) {
-              throw new Error(`attachment upload token failed: ${response.status}`);
-            }
-            const payload = await response.json();
-            if (!payload?.token) {
-              throw new Error("attachment upload token missing");
-            }
-            return payload.token;
-          });
+          attachmentUploadTokenPromise = Promise.resolve()
+            .then(() => ensureFrontendSession())
+            .then(() => fetch("/internal/attachment-upload-token", {
+              method: "POST",
+              credentials: "same-origin",
+            }))
+            .then(async (response) => {
+              if (!response.ok) {
+                throw new Error(`attachment upload token failed: ${response.status}`);
+              }
+              const payload = await response.json();
+              if (!payload?.token) {
+                throw new Error("attachment upload token missing");
+              }
+              return payload.token;
+            })
+            .catch((error) => {
+              attachmentUploadTokenPromise = null;
+              throw error;
+            });
         }
         return attachmentUploadTokenPromise;
       }
@@ -343,6 +354,7 @@ export function createTerminalAttachments({
               }
               const xhr = new XMLHttpRequest();
               xhr.open("POST", `/internal/attachments/upload?${params.toString()}`);
+              xhr.withCredentials = true;
               xhr.setRequestHeader("x-gwt-upload-token", token);
               xhr.responseType = "json";
               xhr.upload.onprogress = (event) => {

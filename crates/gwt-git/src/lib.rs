@@ -11,6 +11,7 @@ pub mod diff;
 pub mod issue;
 pub mod migration;
 pub mod pr_status;
+pub mod recovery;
 pub mod refs;
 pub mod repository;
 pub mod worktree;

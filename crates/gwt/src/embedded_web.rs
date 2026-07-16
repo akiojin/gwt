@@ -90,6 +90,7 @@ root_js_modules! {
     "workspace-kanban-surface.js" => "createWorkspaceKanbanSurface",
     "improvement-inbox-surface.js" => "createImprovementInboxSurface",
     "workspace-resume-picker-modal.js" => "createWorkspaceResumePickerController",
+    "recovery-center-modal.js" => "createRecoveryCenterController",
     "update-cta.js" => "createUpdateCtaController",
     "terminal-context-menu.js" => "createTerminalContextMenuController",
     "terminal-copy-shortcut.js" => "classifyTerminalCopyKeyEvent",

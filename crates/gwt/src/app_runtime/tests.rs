@@ -44,13 +44,32 @@ use super::{
     AgentKanbanLaunchTarget, AgentLaunchCompletion, AppEventProxy, AppRuntime,
     AttachmentProgressPhase, BlockingTaskSpawner, DispatchTarget, KnowledgeLoadRequest,
     KnowledgeRefreshTask, KnowledgeSearchRequest, LaunchFeedbackContext, LaunchWizardMemoryCache,
-    LaunchWizardSession, OutboundEvent, ProcessLaunch, ProjectTabRuntime, UserEvent, WindowRuntime,
-    WorkspaceLaunchProjectionKind, WorkspaceResumeContext,
+    LaunchWizardSession, OutboundEvent, PendingProviderRootClaim, ProcessLaunch, ProjectTabRuntime,
+    UserEvent, WindowRuntime, WorkspaceLaunchProjectionKind, WorkspaceResumeContext,
 };
 use crate::{
     combined_window_id, geometry_to_pty_size, same_worktree_path, AttachmentUploadStore,
     PtyWriterRegistry, UploadedAttachment,
 };
+
+#[test]
+fn pending_provider_root_claim_debug_redacts_claim_token() {
+    const SENTINEL: &str = "PROVIDER_ROOT_CLAIM_TOKEN_SENTINEL";
+    let pending = PendingProviderRootClaim {
+        recovery_id: "recovery-1".to_string(),
+        claim_token: SENTINEL.to_string(),
+        project_dir: PathBuf::from("project"),
+        claim_ttl: chrono::Duration::minutes(5),
+    };
+
+    let debug = format!("{pending:?}");
+
+    assert!(
+        !debug.contains(SENTINEL),
+        "secret leaked via Debug: {debug}"
+    );
+    assert!(debug.contains("<redacted>"));
+}
 
 #[test]
 fn improvement_action_error_message_explains_missing_github_auth() {
@@ -2030,6 +2049,7 @@ fn sample_runtime_with_events(
         profile_selections: HashMap::new(),
         profile_config_path: Some(temp_root.join("profile-config.toml")),
         runtimes: HashMap::new(),
+        codex_bridge_routes: HashMap::new(),
         window_details: HashMap::new(),
         launch_error_terminal_details: HashMap::new(),
         window_lookup: HashMap::new(),
@@ -2045,6 +2065,7 @@ fn sample_runtime_with_events(
         inflight_launches: HashMap::new(),
         pending_launch_feedback_contexts: HashMap::new(),
         pending_auto_resume_sources: HashMap::new(),
+        pending_provider_root_claims: HashMap::new(),
         pending_startup_auto_resume_sessions: Vec::new(),
         active_agent_sessions: HashMap::<String, ActiveAgentSession>::new(),
         work_merged_branches: HashMap::new(),
@@ -2379,6 +2400,52 @@ fn run_git(repo: &Path, args: &[&str]) {
         .status()
         .expect("run git");
     assert!(status.success(), "git {args:?} failed");
+}
+
+fn create_recovery_for_session_test(
+    repo: &Path,
+    session: &gwt_agent::Session,
+    initial_prompt: &str,
+) -> gwt_core::recovery::RecoveryStore {
+    let recovery_id = session.recovery_id.as_deref().expect("recovery id");
+    let launch_base_oid = {
+        let output = gwt_core::process::hidden_command("git")
+            .args(["rev-parse", "--verify", "HEAD^{commit}"])
+            .current_dir(repo)
+            .output()
+            .expect("resolve recovery fixture base");
+        assert!(output.status.success(), "recovery fixture repo HEAD");
+        String::from_utf8(output.stdout)
+            .expect("utf8 recovery fixture OID")
+            .trim()
+            .to_string()
+    };
+    let store = gwt_core::recovery::RecoveryStore::for_project_dir(
+        gwt_core::paths::gwt_project_dir_for_repo_path(repo),
+    );
+    store
+        .create(
+            gwt_core::recovery::CreateRecovery {
+                recovery_id: recovery_id.to_string(),
+                session_id: session.id.clone(),
+                repo_id: gwt_core::paths::project_scope_hash(repo).to_string(),
+                session_kind: gwt_core::recovery::RecoverySessionKind::Intake,
+                worktree_path: session.worktree_path.clone(),
+                launch_base_ref: session.ephemeral_base_ref.clone(),
+                launch_base_oid: launch_base_oid.clone(),
+                launch_head_oid: launch_base_oid.clone(),
+                provider: session.agent_id.to_string(),
+                model: session.model.clone(),
+                runtime: "host".to_string(),
+                initial_prompt: initial_prompt.to_string(),
+                created_at: session.created_at,
+            },
+            format!("test-create:{recovery_id}"),
+        )
+        .expect("create recovery fixture");
+    gwt_git::recovery::ensure_recovery_base_pin(repo, recovery_id, &launch_base_oid)
+        .expect("pin recovery fixture base");
+    store
 }
 
 fn run_git_with_paths(args: &[&str], paths: &[&Path]) {
@@ -6937,6 +7004,96 @@ fn ephemeral_intake_session_stop_removes_clean_worktree_and_emits_no_paused_work
 }
 
 #[test]
+fn ready_intake_provider_stop_is_interrupted_before_clean_worktree_retention() {
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedEnvVar::set("HOME", temp.path());
+    let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+    let repo = temp.path().join("repo");
+    init_git_clone_with_origin(&repo);
+    let intake = temp.path().join(".intake-ready-stop");
+    gwt_git::WorktreeManager::new(&repo)
+        .create_detached("HEAD", &intake)
+        .expect("Intake worktree");
+    let tab = sample_project_tab("tab-1", "Repo", repo.clone(), ProjectKind::Git, &[]);
+    let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+    let mut source = gwt_agent::Session::new(&intake, "", gwt_agent::AgentId::Codex);
+    source.id = "session-ready-intake-stop".to_string();
+    source.project_state_root = Some(repo.clone());
+    source.repo_hash = Some(gwt_core::paths::project_scope_hash(&repo).to_string());
+    source.recovery_id = Some("recovery-ready-intake-stop".to_string());
+    source.session_kind = Some(gwt_skills::SessionKind::Intake);
+    source.is_ephemeral = true;
+    source.agent_session_id = Some("provider-ready-intake-stop".to_string());
+    source.restore_window_on_startup = true;
+    source
+        .advance_recovery_launch_stage(gwt_agent::session::RecoveryLaunchStage::Ready)
+        .expect("mark Session Ready");
+    source
+        .save(&runtime.sessions_dir)
+        .expect("save source Session");
+    let store = create_recovery_for_session_test(&repo, &source, "Recover stopped Intake");
+    store
+        .bind_root_semantic(
+            "recovery-ready-intake-stop",
+            "provider-ready-intake-stop",
+            None,
+            gwt_core::recovery::BindingQuality::Verified,
+            "bind-ready-intake-stop",
+        )
+        .expect("bind provider root");
+    store
+        .complete_provider_ready(
+            "recovery-ready-intake-stop",
+            chrono::Utc::now(),
+            "complete-ready-intake-stop",
+        )
+        .expect("publish Ready");
+    let window_id = "tab-1::intake";
+    let mut active = sample_active_agent_session("tab-1", window_id);
+    active.session_id = source.id.clone();
+    active.branch_name.clear();
+    active.worktree_path = intake.clone();
+    active.window_id = window_id.to_string();
+    runtime
+        .active_agent_sessions
+        .insert(window_id.to_string(), active);
+
+    runtime.mark_agent_session_stopped(window_id);
+
+    assert!(
+        intake.is_dir(),
+        "a nonterminal Recovery owns even a clean Intake worktree"
+    );
+    let stopped = store
+        .load("recovery-ready-intake-stop")
+        .expect("load stopped Recovery")
+        .expect("stopped Recovery");
+    assert_eq!(
+        stopped.lifecycle,
+        gwt_core::recovery::RecoveryLifecycle::Interrupted
+    );
+    assert_eq!(
+        stopped.launch_stage,
+        gwt_core::recovery::RecoveryLaunchStage::Ready
+    );
+    assert_eq!(
+        stopped
+            .supervisor_stop_proof
+            .as_ref()
+            .map(|proof| proof.session_id.as_str()),
+        Some(source.id.as_str())
+    );
+    let source =
+        gwt_agent::Session::load(&runtime.sessions_dir.join("session-ready-intake-stop.toml"))
+            .expect("reload stopped Session");
+    assert_eq!(source.status, gwt_agent::AgentStatus::Interrupted);
+    assert!(source.restore_window_on_startup);
+}
+
+#[test]
 fn ephemeral_intake_session_stop_keeps_dirty_worktree() {
     let _env_lock = env_test_lock()
         .lock()
@@ -8564,6 +8721,760 @@ fn app_runtime_agent_error_exit_promotes_exact_resume_failure_diagnostic() {
     );
 }
 
+#[test]
+fn exact_resume_rejection_must_name_the_requested_provider_root() {
+    assert!(super::runtime_events::exact_resume_rejection_matches_root(
+        "No conversation found with session ID: missing-provider-root",
+        "missing-provider-root"
+    ));
+    assert!(!super::runtime_events::exact_resume_rejection_matches_root(
+        "No conversation found with session ID: another-provider-root",
+        "missing-provider-root"
+    ));
+    assert!(!super::runtime_events::exact_resume_rejection_matches_root(
+        "No conversation found with session ID: missing-provider-root-child",
+        "missing-provider-root"
+    ));
+}
+
+#[test]
+fn app_runtime_recovery_launch_failure_marks_attention_and_preserves_source() {
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedEnvVar::set("HOME", temp.path());
+    let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+    let repo = temp.path().join("repo");
+    init_git_clone_with_origin(&repo);
+    let worktree = temp.path().join(".intake-launch-failure");
+    gwt_git::WorktreeManager::new(&repo)
+        .create_detached("HEAD", &worktree)
+        .expect("create Intake worktree");
+    let tab = sample_project_tab_with_window_at(
+        "tab-recovery-failure",
+        "agent-recovery-failure",
+        repo.clone(),
+        WindowPreset::Agent,
+        WindowProcessStatus::Running,
+    );
+    let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-recovery-failure"));
+    let mut source = gwt_agent::Session::new(&worktree, "", gwt_agent::AgentId::Codex);
+    source.id = "source-recovery-failure".to_string();
+    source.project_state_root = Some(repo.clone());
+    source.recovery_id = Some("recovery-launch-failure".to_string());
+    source.session_kind = Some(gwt_skills::SessionKind::Intake);
+    source.is_ephemeral = true;
+    source.ephemeral_base_ref = Some("origin/develop".to_string());
+    source.restore_window_on_startup = true;
+    source
+        .save(&runtime.sessions_dir)
+        .expect("save source Session");
+    let store = create_recovery_for_session_test(&repo, &source, "Continue Intake");
+    let window_id = combined_window_id("tab-recovery-failure", "agent-recovery-failure");
+    runtime
+        .pending_auto_resume_sources
+        .insert(window_id.clone(), source.id.clone());
+
+    let _ = runtime.handle_launch_complete(
+        window_id.clone(),
+        Err("provider binary could not be started".to_string()),
+    );
+
+    let record = store
+        .load("recovery-launch-failure")
+        .expect("load recovery")
+        .expect("recovery");
+    assert_eq!(
+        record.lifecycle,
+        gwt_core::recovery::RecoveryLifecycle::Attention
+    );
+    assert_eq!(
+        runtime.pending_auto_resume_sources.get(&window_id),
+        Some(&source.id),
+        "source mapping must survive until a provider Ready barrier"
+    );
+    let loaded =
+        gwt_agent::Session::load(&runtime.sessions_dir.join("source-recovery-failure.toml"))
+            .expect("load source Session");
+    assert!(loaded.restore_window_on_startup);
+    assert!(
+        worktree.is_dir(),
+        "launch failure must preserve Intake worktree"
+    );
+}
+
+#[test]
+fn provider_ready_purges_safe_source_but_keeps_unacked_board_source() {
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedEnvVar::set("HOME", temp.path());
+    let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+    let repo = temp.path().join("repo");
+    init_git_clone_with_origin(&repo);
+    let sessions_dir = temp.path().join("sessions");
+    let manager = gwt_git::WorktreeManager::new(&repo);
+
+    let safe_worktree = temp.path().join(".intake-ready-safe");
+    manager
+        .create_detached("HEAD", &safe_worktree)
+        .expect("create safe Intake worktree");
+    let mut safe = gwt_agent::Session::new(&safe_worktree, "", gwt_agent::AgentId::Codex);
+    safe.id = "source-ready-safe".to_string();
+    safe.project_state_root = Some(repo.clone());
+    safe.recovery_id = Some("recovery-ready-safe".to_string());
+    safe.session_kind = Some(gwt_skills::SessionKind::Intake);
+    safe.is_ephemeral = true;
+    safe.restore_window_on_startup = true;
+    safe.save(&sessions_dir).expect("save safe source");
+    let store = create_recovery_for_session_test(&repo, &safe, "Continue Intake");
+    let safe_base_oid = store
+        .load("recovery-ready-safe")
+        .unwrap()
+        .unwrap()
+        .launch_base_oid;
+    gwt_git::recovery::verify_recovery_base_pin(&repo, "recovery-ready-safe", &safe_base_oid)
+        .expect("safe source pin before Ready");
+
+    super::mark_auto_resume_source_completed(&sessions_dir, &safe.id)
+        .expect("ready source completion");
+
+    assert!(store.load("recovery-ready-safe").unwrap().is_none());
+    assert_eq!(
+        store
+            .load_tombstone("recovery-ready-safe")
+            .unwrap()
+            .expect("resolved tombstone")
+            .lifecycle,
+        gwt_core::recovery::RecoveryLifecycle::Resolved
+    );
+    let retired = gwt_agent::Session::load(&sessions_dir.join("source-ready-safe.toml"))
+        .expect("load retired source");
+    assert!(!retired.restore_window_on_startup);
+    assert!(gwt_git::recovery::verify_recovery_base_pin(
+        &repo,
+        "recovery-ready-safe",
+        &safe_base_oid,
+    )
+    .is_err());
+
+    let outbox_worktree = temp.path().join(".intake-ready-outbox");
+    manager
+        .create_detached("HEAD", &outbox_worktree)
+        .expect("create outbox Intake worktree");
+    let mut outbox = gwt_agent::Session::new(&outbox_worktree, "", gwt_agent::AgentId::Codex);
+    outbox.id = "source-ready-outbox".to_string();
+    outbox.project_state_root = Some(repo.clone());
+    outbox.recovery_id = Some("recovery-ready-outbox".to_string());
+    outbox.session_kind = Some(gwt_skills::SessionKind::Intake);
+    outbox.is_ephemeral = true;
+    outbox.restore_window_on_startup = true;
+    outbox.save(&sessions_dir).expect("save outbox source");
+    create_recovery_for_session_test(&repo, &outbox, "Continue Intake");
+    store
+        .bind_root(
+            "recovery-ready-outbox",
+            gwt_core::recovery::ProviderRootBinding {
+                root_id: "root-ready-outbox".to_string(),
+                session_tree_id: None,
+                quality: gwt_core::recovery::BindingQuality::Verified,
+                bound_at: chrono::Utc::now(),
+            },
+            "bind-ready-outbox",
+        )
+        .expect("bind source root");
+    store
+        .replace_checkpoint(
+            "recovery-ready-outbox",
+            "root-ready-outbox",
+            0,
+            gwt_core::recovery::SemanticCheckpoint {
+                board_intents: vec![gwt_core::recovery::BoardMilestoneIntent {
+                    entry_id: "unacked-ready-milestone".to_string(),
+                    title: "Recovered Intake".to_string(),
+                    body: "Durable milestone pending Board publication".to_string(),
+                    queued_at: chrono::Utc::now(),
+                }],
+                ..Default::default()
+            },
+            "checkpoint-ready-outbox",
+        )
+        .expect("queue Board outbox");
+
+    super::mark_auto_resume_source_completed(&sessions_dir, &outbox.id)
+        .expect("Board outage must not block provider continuity");
+
+    let retained_record = store
+        .load("recovery-ready-outbox")
+        .unwrap()
+        .expect("recovery retained");
+    assert_eq!(
+        retained_record.lifecycle,
+        gwt_core::recovery::RecoveryLifecycle::Attention
+    );
+    gwt_git::recovery::verify_recovery_base_pin(
+        &repo,
+        "recovery-ready-outbox",
+        &retained_record.launch_base_oid,
+    )
+    .expect("unresolved Board source keeps its base pin");
+    assert!(store
+        .load_tombstone("recovery-ready-outbox")
+        .unwrap()
+        .is_none());
+    let retained = gwt_agent::Session::load(&sessions_dir.join("source-ready-outbox.toml"))
+        .expect("load retained source");
+    assert_eq!(retained.status, gwt_agent::AgentStatus::Stopped);
+    assert!(!retained.restore_window_on_startup);
+    assert_eq!(
+        retained.recovery_launch_stage,
+        Some(gwt_agent::session::RecoveryLaunchStage::Ready)
+    );
+    assert!(outbox_worktree.is_dir());
+}
+
+#[test]
+fn startup_repairs_successor_after_source_tombstone_crash_and_retires_intake_session() {
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedEnvVar::set("HOME", temp.path());
+    let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+    let repo = temp.path().join("repo");
+    init_git_clone_with_origin(&repo);
+    let worktree = temp.path().join(".intake-successor-restart");
+    gwt_git::WorktreeManager::new(&repo)
+        .create_detached("HEAD", &worktree)
+        .expect("create Intake worktree");
+    let sessions_dir = temp.path().join("sessions");
+
+    let mut source = gwt_agent::Session::new(&worktree, "", gwt_agent::AgentId::Codex);
+    source.id = "source-successor-restart".to_string();
+    source.project_state_root = Some(repo.clone());
+    source.recovery_id = Some("recovery-source-successor-restart".to_string());
+    source.session_kind = Some(gwt_skills::SessionKind::Intake);
+    source.is_ephemeral = true;
+    source.ephemeral_base_ref = Some("origin/develop".to_string());
+    source.agent_session_id = Some("native-source-successor-restart".to_string());
+    source.restore_window_on_startup = true;
+    source.record_hook_event("Stop");
+    source.record_completed_stop();
+    source.save(&sessions_dir).expect("save source Session");
+    let store = create_recovery_for_session_test(&repo, &source, "Continue interrupted Intake");
+    let source_record = store
+        .load("recovery-source-successor-restart")
+        .unwrap()
+        .unwrap();
+    let source_base_oid = source_record.launch_base_oid.clone();
+
+    let link = store
+        .prepare_successor(
+            gwt_core::recovery::RecoveryContinuationLink {
+                source_recovery_id: source_record.recovery_id.clone(),
+                target_recovery_id: "recovery-target-successor-restart".to_string(),
+                source_checkpoint_revision: source_record.checkpoint_revision,
+                definitive_reason: "Startup requested exact provider resume".to_string(),
+                linked_at: chrono::Utc::now(),
+            },
+            "prepare-successor-restart",
+        )
+        .expect("prepare durable successor");
+
+    let mut target = gwt_agent::Session::new(&worktree, "", gwt_agent::AgentId::Codex);
+    target.id = "target-successor-restart".to_string();
+    target.project_state_root = Some(repo.clone());
+    target.recovery_id = Some(link.target_recovery_id.clone());
+    target.recovery_continuation = Some(gwt_agent::RecoveryContinuationHandoff {
+        source_session_id: source.id.clone(),
+        source_recovery_id: source_record.recovery_id.clone(),
+        target_recovery_id: link.target_recovery_id.clone(),
+        source_checkpoint_revision: link.source_checkpoint_revision,
+        reason: link.definitive_reason.clone(),
+        inherit_checkpoint: false,
+    });
+    target.session_kind = Some(gwt_skills::SessionKind::Intake);
+    target.is_ephemeral = true;
+    target.ephemeral_base_ref = Some("origin/develop".to_string());
+    target.agent_session_id = Some("native-target-successor-restart".to_string());
+    target.session_mode = gwt_agent::SessionMode::Resume;
+    target.save(&sessions_dir).expect("save successor Session");
+    create_recovery_for_session_test(&repo, &target, "Continue interrupted Intake exactly");
+    store
+        .link_continuation(link.clone(), "link-successor-restart")
+        .expect("link materialized successor");
+    let retry_config = super::startup::prepare_materialized_successor_retry(&target)
+        .expect("prepare materialized successor retry")
+        .expect("pre-spawn successor is retryable");
+    assert_eq!(retry_config.session_mode, gwt_agent::SessionMode::Resume);
+    assert_eq!(
+        retry_config.recovery_retry_session_id.as_deref(),
+        Some(target.id.as_str())
+    );
+    assert_eq!(
+        retry_config
+            .recovery_continuation
+            .as_ref()
+            .map(|handoff| handoff.target_recovery_id.as_str()),
+        Some(link.target_recovery_id.as_str())
+    );
+    let retried_session = gwt_agent::Session::from_launch_config(&worktree, "", &retry_config);
+    assert_eq!(retried_session.id, target.id);
+    assert_eq!(
+        retried_session.recovery_id.as_deref(),
+        Some(link.target_recovery_id.as_str())
+    );
+    store
+        .bind_root_semantic(
+            &link.target_recovery_id,
+            "native-target-successor-restart",
+            None,
+            gwt_core::recovery::BindingQuality::Verified,
+            "bind-target-successor-restart",
+        )
+        .expect("bind successor provider root");
+    store
+        .advance_launch_stage(
+            &link.target_recovery_id,
+            gwt_core::recovery::RecoveryLaunchStage::Ready,
+            Some(gwt_core::recovery::ProviderRootRole::Root),
+            "ready-target-successor-restart",
+        )
+        .expect("mark successor Ready");
+
+    // Crash after publishing the source tombstone but before payload/intent,
+    // Session, and Git-pin cleanup. Runtime and startup repair must derive the
+    // same terminal operation id from the durable successor transaction.
+    let faulted = gwt_core::recovery::RecoveryStore::for_project_dir(store.root())
+        .with_fault_injection_for_test(
+            gwt_core::recovery::RecoveryStoreFaultPoint::AfterTombstonePublication,
+        );
+    assert!(matches!(
+        faulted.reconcile_successors(),
+        Err(gwt_core::recovery::RecoveryStoreError::InjectedFault(
+            gwt_core::recovery::RecoveryStoreFaultPoint::AfterTombstonePublication
+        ))
+    ));
+    assert_eq!(
+        store
+            .load_tombstone(&source_record.recovery_id)
+            .unwrap()
+            .expect("source tombstone at crash boundary")
+            .lifecycle,
+        gwt_core::recovery::RecoveryLifecycle::Resolved
+    );
+    assert!(
+        store
+            .root()
+            .join("recoveries")
+            .join(&source_record.recovery_id)
+            .is_dir(),
+        "source payload still exists at the injected crash boundary"
+    );
+    let before_restart =
+        gwt_agent::Session::load(&sessions_dir.join("source-successor-restart.toml"))
+            .expect("load source before restart repair");
+    assert!(before_restart.restore_window_on_startup);
+    gwt_git::recovery::verify_recovery_base_pin(
+        &repo,
+        &source_record.recovery_id,
+        &source_base_oid,
+    )
+    .expect("source pin still exists at crash boundary");
+
+    let tab = sample_project_tab(
+        "tab-successor-restart",
+        "Successor restart",
+        repo.clone(),
+        ProjectKind::Git,
+        &[],
+    );
+    let mut restarted = sample_runtime(temp.path(), vec![tab], Some("tab-successor-restart"));
+    restarted.bootstrap();
+
+    assert!(store.load(&source_record.recovery_id).unwrap().is_none());
+    assert!(store
+        .prepared_successor_for_source(&source_record.recovery_id)
+        .unwrap()
+        .is_none());
+
+    let retired = gwt_agent::Session::load(&sessions_dir.join("source-successor-restart.toml"))
+        .expect("load retired source after restart");
+    assert_eq!(retired.status, gwt_agent::AgentStatus::Stopped);
+    assert!(!retired.restore_window_on_startup);
+    assert_eq!(
+        retired.recovery_launch_stage,
+        Some(gwt_agent::session::RecoveryLaunchStage::Resolved)
+    );
+    assert!(gwt_git::recovery::verify_recovery_base_pin(
+        &repo,
+        &source_record.recovery_id,
+        &source_base_oid,
+    )
+    .is_err());
+    assert!(restarted.pending_startup_auto_resume_sessions.is_empty());
+    assert!(restarted.pending_auto_resume_sources.is_empty());
+}
+
+#[test]
+fn startup_ready_successor_with_remote_board_outage_retires_session_but_keeps_outbox() {
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedEnvVar::set("HOME", temp.path());
+    let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+    let repo = temp.path().join("repo");
+    init_git_clone_with_origin(&repo);
+    gwt_config::ProjectBoardConfig {
+        provider: Some(gwt_config::BoardProviderKind::Slack),
+        channel: Some("C-RECOVERY-OUTAGE".to_string()),
+        tenant: Some("recovery-test".to_string()),
+    }
+    .save_to_work_dir(&gwt_core::paths::gwt_repo_local_work_dir(&repo))
+    .expect("configure remote Board fixture");
+    assert_eq!(gwt::board_provider::routing_for(&repo).provider, "slack");
+    let worktree = temp.path().join(".intake-successor-board-outage");
+    gwt_git::WorktreeManager::new(&repo)
+        .create_detached("HEAD", &worktree)
+        .expect("create Intake worktree");
+    let sessions_dir = temp.path().join("sessions");
+
+    let mut source = gwt_agent::Session::new(&worktree, "", gwt_agent::AgentId::Codex);
+    source.id = "source-successor-board-outage".to_string();
+    source.project_state_root = Some(repo.clone());
+    source.recovery_id = Some("recovery-source-successor-board-outage".to_string());
+    source.session_kind = Some(gwt_skills::SessionKind::Intake);
+    source.is_ephemeral = true;
+    source.ephemeral_base_ref = Some("origin/develop".to_string());
+    source.agent_session_id = Some("native-source-successor-board-outage".to_string());
+    source.restore_window_on_startup = true;
+    source.record_hook_event("Stop");
+    source.record_completed_stop();
+    source.save(&sessions_dir).expect("save source Session");
+    let store = create_recovery_for_session_test(&repo, &source, "Continue interrupted Intake");
+    store
+        .bind_root(
+            "recovery-source-successor-board-outage",
+            gwt_core::recovery::ProviderRootBinding {
+                root_id: "native-source-successor-board-outage".to_string(),
+                session_tree_id: None,
+                quality: gwt_core::recovery::BindingQuality::Verified,
+                bound_at: chrono::Utc::now(),
+            },
+            "bind-source-successor-board-outage",
+        )
+        .expect("bind source root");
+    let source_record = store
+        .replace_checkpoint(
+            "recovery-source-successor-board-outage",
+            "native-source-successor-board-outage",
+            0,
+            gwt_core::recovery::SemanticCheckpoint {
+                summary: "Recovered Intake while remote Board is unavailable".to_string(),
+                board_intents: vec![gwt_core::recovery::BoardMilestoneIntent {
+                    entry_id: "remote-board-outage-milestone".to_string(),
+                    title: "Recovered Intake".to_string(),
+                    body: "Publish after the remote Board becomes available".to_string(),
+                    queued_at: chrono::Utc::now(),
+                }],
+                ..Default::default()
+            },
+            "checkpoint-source-successor-board-outage",
+        )
+        .expect("queue remote Board milestone");
+    let source_base_oid = source_record.launch_base_oid.clone();
+    let link = store
+        .prepare_successor(
+            gwt_core::recovery::RecoveryContinuationLink {
+                source_recovery_id: source_record.recovery_id.clone(),
+                target_recovery_id: "recovery-target-successor-board-outage".to_string(),
+                source_checkpoint_revision: source_record.checkpoint_revision,
+                definitive_reason: "Recovery Center requested fresh provider start".to_string(),
+                linked_at: chrono::Utc::now(),
+            },
+            "prepare-successor-board-outage",
+        )
+        .expect("prepare successor");
+
+    let mut target = gwt_agent::Session::new(&worktree, "", gwt_agent::AgentId::Codex);
+    target.id = "target-successor-board-outage".to_string();
+    target.project_state_root = Some(repo.clone());
+    target.recovery_id = Some(link.target_recovery_id.clone());
+    target.recovery_continuation = Some(gwt_agent::RecoveryContinuationHandoff {
+        source_session_id: source.id.clone(),
+        source_recovery_id: source_record.recovery_id.clone(),
+        target_recovery_id: link.target_recovery_id.clone(),
+        source_checkpoint_revision: link.source_checkpoint_revision,
+        reason: link.definitive_reason.clone(),
+        inherit_checkpoint: false,
+    });
+    target.session_kind = Some(gwt_skills::SessionKind::Intake);
+    target.is_ephemeral = true;
+    target.ephemeral_base_ref = Some("origin/develop".to_string());
+    target.save(&sessions_dir).expect("save target Session");
+    create_recovery_for_session_test(&repo, &target, "Fresh recovered provider");
+    store
+        .link_continuation(link.clone(), "link-successor-board-outage")
+        .expect("link successor");
+    store
+        .bind_root_semantic(
+            &link.target_recovery_id,
+            "native-target-successor-board-outage",
+            None,
+            gwt_core::recovery::BindingQuality::Verified,
+            "bind-target-successor-board-outage",
+        )
+        .expect("bind target root");
+    store
+        .advance_launch_stage(
+            &link.target_recovery_id,
+            gwt_core::recovery::RecoveryLaunchStage::Ready,
+            Some(gwt_core::recovery::ProviderRootRole::Root),
+            "ready-target-successor-board-outage",
+        )
+        .expect("mark successor Ready");
+    store
+        .reconcile_successors()
+        .expect("observe Ready successor");
+    assert!(store.load(&source_record.recovery_id).unwrap().is_some());
+    assert!(store
+        .prepared_successor_for_source(&source_record.recovery_id)
+        .unwrap()
+        .is_some());
+
+    let tab = sample_project_tab(
+        "tab-successor-board-outage",
+        "Successor Board outage",
+        repo.clone(),
+        ProjectKind::Git,
+        &[],
+    );
+    let mut restarted = sample_runtime(temp.path(), vec![tab], Some("tab-successor-board-outage"));
+    restarted.bootstrap();
+
+    let retired =
+        gwt_agent::Session::load(&sessions_dir.join("source-successor-board-outage.toml"))
+            .expect("load source after restart");
+    assert_eq!(retired.status, gwt_agent::AgentStatus::Stopped);
+    assert!(!retired.restore_window_on_startup);
+    assert_eq!(
+        retired.recovery_launch_stage,
+        Some(gwt_agent::session::RecoveryLaunchStage::Ready)
+    );
+    let retained = store
+        .load(&source_record.recovery_id)
+        .unwrap()
+        .expect("Board source remains durable");
+    assert_eq!(retained.board_outbox.len(), 1);
+    assert!(store
+        .prepared_successor_for_source(&source_record.recovery_id)
+        .unwrap()
+        .is_some());
+    assert!(store
+        .load_tombstone(&source_record.recovery_id)
+        .unwrap()
+        .is_none());
+    gwt_git::recovery::verify_recovery_base_pin(
+        &repo,
+        &source_record.recovery_id,
+        &source_base_oid,
+    )
+    .expect("pending Board source keeps its Intake pin");
+    assert!(restarted.pending_startup_auto_resume_sessions.is_empty());
+    assert!(restarted.pending_auto_resume_sources.is_empty());
+}
+
+#[test]
+fn app_runtime_exact_resume_rejection_switches_to_checkpoint_continuation() {
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedEnvVar::set("HOME", temp.path());
+    let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+    let repo = temp.path().join("repo");
+    init_git_clone_with_origin(&repo);
+    let worktree = temp.path().join(".intake-exact-fallback");
+    gwt_git::WorktreeManager::new(&repo)
+        .create_detached("HEAD", &worktree)
+        .expect("create Intake worktree");
+    let tab = sample_project_tab_with_window_at(
+        "tab-exact-fallback",
+        "agent-exact-fallback",
+        repo.clone(),
+        WindowPreset::Agent,
+        WindowProcessStatus::Running,
+    );
+    let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-exact-fallback"));
+    let mut source = gwt_agent::Session::new(&worktree, "", gwt_agent::AgentId::ClaudeCode);
+    source.id = "source-exact-fallback".to_string();
+    source.project_state_root = Some(repo.clone());
+    source.recovery_id = Some("recovery-exact-fallback".to_string());
+    source.session_kind = Some(gwt_skills::SessionKind::Intake);
+    source.is_ephemeral = true;
+    source.ephemeral_base_ref = Some("origin/develop".to_string());
+    source.agent_session_id = Some("missing-provider-root".to_string());
+    source.restore_window_on_startup = true;
+    source
+        .save(&runtime.sessions_dir)
+        .expect("save source Session");
+    let store = create_recovery_for_session_test(
+        &repo,
+        &source,
+        "Continue the interrupted Intake discussion",
+    );
+    let source_record = store
+        .set_lifecycle(
+            "recovery-exact-fallback",
+            gwt_core::recovery::RecoveryLifecycle::Recovering,
+            Some("Startup requested exact provider resume".to_string()),
+            "claim-source-exact-fallback",
+        )
+        .expect("claim exact source");
+    let exact_link = store
+        .prepare_successor(
+            gwt_core::recovery::RecoveryContinuationLink {
+                source_recovery_id: source_record.recovery_id.clone(),
+                target_recovery_id: "recovery-failed-exact-attempt".to_string(),
+                source_checkpoint_revision: source_record.checkpoint_revision,
+                definitive_reason: "Startup requested exact provider resume".to_string(),
+                linked_at: chrono::Utc::now(),
+            },
+            "prepare-failed-exact-attempt",
+        )
+        .expect("prepare exact successor");
+    let mut failed_target = gwt_agent::Session::new(&worktree, "", gwt_agent::AgentId::ClaudeCode);
+    failed_target.id = "failed-exact-attempt".to_string();
+    failed_target.project_state_root = Some(repo.clone());
+    failed_target.recovery_id = Some(exact_link.target_recovery_id.clone());
+    failed_target.recovery_continuation = Some(gwt_agent::RecoveryContinuationHandoff {
+        source_session_id: source.id.clone(),
+        source_recovery_id: source_record.recovery_id.clone(),
+        target_recovery_id: exact_link.target_recovery_id.clone(),
+        source_checkpoint_revision: exact_link.source_checkpoint_revision,
+        reason: exact_link.definitive_reason.clone(),
+        inherit_checkpoint: false,
+    });
+    failed_target.session_kind = Some(gwt_skills::SessionKind::Intake);
+    failed_target.is_ephemeral = true;
+    failed_target.ephemeral_base_ref = Some("origin/develop".to_string());
+    failed_target.agent_session_id = Some("missing-provider-root".to_string());
+    failed_target.session_mode = gwt_agent::SessionMode::Resume;
+    failed_target
+        .save(&runtime.sessions_dir)
+        .expect("save failed exact target Session");
+    create_recovery_for_session_test(
+        &repo,
+        &failed_target,
+        "Continue the interrupted Intake discussion",
+    );
+    store
+        .link_continuation(exact_link.clone(), "link-failed-exact-attempt")
+        .expect("link failed exact successor");
+    store
+        .bind_root(
+            &exact_link.target_recovery_id,
+            gwt_core::recovery::ProviderRootBinding {
+                root_id: "missing-provider-root".to_string(),
+                session_tree_id: None,
+                quality: gwt_core::recovery::BindingQuality::Preassigned,
+                bound_at: chrono::Utc::now(),
+            },
+            "bind-failed-exact-attempt",
+        )
+        .expect("bind failed exact target");
+    store
+        .advance_launch_stage(
+            &exact_link.target_recovery_id,
+            gwt_core::recovery::RecoveryLaunchStage::SpawnRequested,
+            Some(gwt_core::recovery::ProviderRootRole::Root),
+            "spawn-failed-exact-attempt",
+        )
+        .expect("record failed exact spawn");
+    let window_id = combined_window_id("tab-exact-fallback", "agent-exact-fallback");
+    let mut attempt = sample_active_agent_session("tab-exact-fallback", &window_id);
+    attempt.session_id = failed_target.id.clone();
+    attempt.agent_id = "claude".to_string();
+    attempt.branch_name.clear();
+    attempt.worktree_path = worktree.clone();
+    attempt.agent_project_root = repo.to_string_lossy().into_owned();
+    runtime
+        .active_agent_sessions
+        .insert(window_id.clone(), attempt);
+    runtime
+        .pending_auto_resume_sources
+        .insert(window_id.clone(), source.id.clone());
+    insert_test_pane_runtime(&mut runtime, &window_id);
+    runtime
+        .runtimes
+        .get(&window_id)
+        .expect("runtime")
+        .pane
+        .lock()
+        .expect("pane")
+        .process_bytes(b"No conversation found with session ID: missing-provider-root\r\n");
+
+    let _ = runtime.handle_runtime_status(
+        window_id,
+        WindowProcessStatus::Error,
+        Some("Process exited with status 1".to_string()),
+    );
+
+    assert!(
+        runtime
+            .pending_auto_resume_sources
+            .values()
+            .any(|candidate| candidate == &failed_target.id),
+        "checkpoint continuation must chain from the rejected exact successor"
+    );
+    assert_eq!(
+        store
+            .load("recovery-exact-fallback")
+            .expect("load recovery")
+            .expect("recovery")
+            .lifecycle,
+        gwt_core::recovery::RecoveryLifecycle::Recovering
+    );
+    let rejected_exact = store
+        .load(&exact_link.target_recovery_id)
+        .expect("load rejected exact successor")
+        .expect("rejected exact successor");
+    assert_eq!(
+        rejected_exact.lifecycle_reason.as_deref(),
+        Some("Exact provider resume rejected: No conversation found with session ID")
+    );
+    let semantic_link = store
+        .prepared_successor_for_source(&exact_link.target_recovery_id)
+        .expect("load semantic fallback successor")
+        .expect("semantic fallback successor");
+    assert_ne!(
+        semantic_link.target_recovery_id,
+        exact_link.target_recovery_id
+    );
+    assert_eq!(
+        semantic_link.definitive_reason,
+        "Exact provider resume rejected: No conversation found with session ID"
+    );
+    assert!(
+        worktree.is_dir(),
+        "exact rejection must not reap Intake worktree"
+    );
+    assert_eq!(
+        runtime.tabs[0]
+            .workspace
+            .persisted()
+            .windows
+            .iter()
+            .filter(|window| window.preset == WindowPreset::Agent)
+            .count(),
+        1,
+        "failed exact window must be replaced, not duplicated"
+    );
+}
+
 // Issue #3274: any agent error exit keeps its last screen output in the
 // window detail so the failure reason survives reconnects, while non-agent
 // process windows keep the plain exit detail.
@@ -9962,6 +10873,729 @@ fn app_runtime_resume_branch_latest_returns_branch_error_when_no_resumable_sessi
 }
 
 #[test]
+fn app_runtime_bootstrap_discovers_intake_recovery_before_pruning() {
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedEnvVar::set("HOME", temp.path());
+    let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+    let repo = temp.path().join("repo");
+    init_git_clone_with_origin(&repo);
+    let manager = gwt_git::WorktreeManager::new(&repo);
+
+    let session_v4 = temp.path().join(".intake-session-v4");
+    let session_legacy = temp.path().join(".intake-session-legacy");
+    let store_active = temp.path().join(".intake-store-active");
+    let store_terminal = temp.path().join(".intake-store-terminal");
+    let store_outbox_failed = temp.path().join(".intake-store-outbox-failed");
+    let generated_orphan = temp.path().join(".intake-generated-orphan");
+    let user_work = temp.path().join(".intake-user-work");
+    for path in [
+        &session_v4,
+        &session_legacy,
+        &store_active,
+        &store_terminal,
+        &store_outbox_failed,
+        &generated_orphan,
+        &user_work,
+    ] {
+        manager
+            .create_detached("HEAD", path)
+            .expect("create detached Intake worktree");
+    }
+    gwt_skills::write_lane_file(&generated_orphan, &gwt_skills::INTAKE_PROFILE)
+        .expect("write generated lane file");
+    gwt_skills::update_git_exclude(&generated_orphan).expect("install managed excludes");
+    std::fs::write(user_work.join("notes.txt"), "unfinished discussion\n")
+        .expect("write user work");
+
+    let tab = sample_project_tab(
+        "tab-intake-recovery",
+        "Intake recovery",
+        repo.clone(),
+        ProjectKind::Git,
+        &[],
+    );
+    let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-intake-recovery"));
+
+    let mut v4 = gwt_agent::Session::new(&session_v4, "", gwt_agent::AgentId::Codex);
+    v4.id = "session-intake-v4".to_string();
+    v4.session_kind = Some(gwt_skills::SessionKind::Intake);
+    v4.is_ephemeral = true;
+    v4.recovery_id = None;
+    v4.recovery_launch_stage = None;
+    v4.provider_root_role = None;
+    v4.provider_binding_quality = None;
+    v4.agent_session_id = Some("native-intake-v4".to_string());
+    v4.restore_window_on_startup = true;
+    v4.record_hook_event("Stop");
+    v4.record_completed_stop();
+    v4.save(&runtime.sessions_dir).expect("save v4 Intake");
+
+    let mut legacy = gwt_agent::Session::new(&session_legacy, "", gwt_agent::AgentId::Codex);
+    legacy.id = "session-intake-legacy".to_string();
+    legacy.schema_version = 3;
+    legacy.session_kind = None;
+    legacy.is_ephemeral = false;
+    legacy.recovery_id = None;
+    legacy.recovery_launch_stage = None;
+    legacy.provider_root_role = None;
+    legacy
+        .save(&runtime.sessions_dir)
+        .expect("save ambiguous legacy session");
+
+    let recovery_store = gwt_core::recovery::RecoveryStore::for_project_dir(
+        gwt_core::paths::gwt_project_dir_for_repo_path(&repo),
+    );
+    let create_recovery = |recovery_id: &str, session_id: &str, worktree_path: &Path| {
+        gwt_core::recovery::CreateRecovery {
+            recovery_id: recovery_id.to_string(),
+            session_id: session_id.to_string(),
+            repo_id: gwt_core::paths::project_scope_hash(&repo).to_string(),
+            session_kind: gwt_core::recovery::RecoverySessionKind::Intake,
+            worktree_path: worktree_path.to_path_buf(),
+            launch_base_ref: Some("origin/develop".to_string()),
+            launch_base_oid: "1".repeat(40),
+            launch_head_oid: "1".repeat(40),
+            provider: "codex".to_string(),
+            model: None,
+            runtime: "host".to_string(),
+            initial_prompt: "Investigate recovery".to_string(),
+            created_at: chrono::Utc::now(),
+        }
+    };
+    recovery_store
+        .create(
+            create_recovery("recovery-active", "store-active", &store_active),
+            "create-active",
+        )
+        .expect("create nonterminal recovery");
+    recovery_store
+        .bind_root(
+            "recovery-active",
+            gwt_core::recovery::ProviderRootBinding {
+                root_id: "root-active".to_string(),
+                session_tree_id: None,
+                quality: gwt_core::recovery::BindingQuality::Verified,
+                bound_at: chrono::Utc::now(),
+            },
+            "bind-active",
+        )
+        .expect("bind active recovery");
+    recovery_store
+        .replace_checkpoint(
+            "recovery-active",
+            "root-active",
+            0,
+            gwt_core::recovery::SemanticCheckpoint {
+                summary: "Recovered Intake checkpoint".to_string(),
+                board_intents: vec![gwt_core::recovery::BoardMilestoneIntent {
+                    entry_id: "startup-replay-valid".to_string(),
+                    title: "Recovered Intake".to_string(),
+                    body: "Replay this durable milestone".to_string(),
+                    queued_at: chrono::Utc::now(),
+                }],
+                ..Default::default()
+            },
+            "checkpoint-active",
+        )
+        .expect("queue active Board milestone");
+    recovery_store
+        .create(
+            create_recovery("recovery-terminal", "store-terminal", &store_terminal),
+            "create-terminal",
+        )
+        .expect("create terminal recovery");
+    recovery_store
+        .set_lifecycle(
+            "recovery-terminal",
+            gwt_core::recovery::RecoveryLifecycle::Resolved,
+            None,
+            "resolve-terminal",
+        )
+        .expect("resolve terminal recovery");
+    recovery_store
+        .create(
+            create_recovery(
+                "recovery-outbox-failed",
+                "store-outbox-failed",
+                &store_outbox_failed,
+            ),
+            "create-outbox-failed",
+        )
+        .expect("create failed-outbox recovery");
+    recovery_store
+        .bind_root(
+            "recovery-outbox-failed",
+            gwt_core::recovery::ProviderRootBinding {
+                root_id: "root-outbox-failed".to_string(),
+                session_tree_id: None,
+                quality: gwt_core::recovery::BindingQuality::Verified,
+                bound_at: chrono::Utc::now(),
+            },
+            "bind-outbox-failed",
+        )
+        .expect("bind failed-outbox recovery");
+    recovery_store
+        .replace_checkpoint(
+            "recovery-outbox-failed",
+            "root-outbox-failed",
+            0,
+            gwt_core::recovery::SemanticCheckpoint {
+                board_intents: vec![gwt_core::recovery::BoardMilestoneIntent {
+                    entry_id: "startup-replay-invalid".to_string(),
+                    title: "Invalid empty milestone".to_string(),
+                    body: "   ".to_string(),
+                    queued_at: chrono::Utc::now(),
+                }],
+                ..Default::default()
+            },
+            "checkpoint-outbox-failed",
+        )
+        .expect("queue invalid Board milestone");
+    recovery_store
+        .set_lifecycle(
+            "recovery-outbox-failed",
+            gwt_core::recovery::RecoveryLifecycle::Resolved,
+            None,
+            "resolve-outbox-failed",
+        )
+        .expect("resolve failed-outbox recovery");
+
+    runtime.bootstrap();
+
+    assert!(
+        session_v4.exists(),
+        "v4 Intake Session must be protected before queueing"
+    );
+    assert!(
+        session_legacy.exists(),
+        "ambiguous legacy Session must fail closed and remain recoverable"
+    );
+    assert!(
+        store_active.exists(),
+        "nonterminal project RecoveryStore record must protect its worktree"
+    );
+    assert!(
+        !store_terminal.exists(),
+        "terminal recovery no longer protects a clean orphan"
+    );
+    assert!(
+        !generated_orphan.exists(),
+        "an unreferenced Intake with generated metadata only is disposable"
+    );
+    assert!(
+        user_work.exists() && user_work.join("notes.txt").exists(),
+        "true user work is never pruned"
+    );
+    let imported_legacy = recovery_store
+        .load("legacy-session-intake-legacy")
+        .expect("load imported legacy recovery")
+        .expect("legacy Session imported before store discovery");
+    assert_eq!(
+        imported_legacy.lifecycle,
+        gwt_core::recovery::RecoveryLifecycle::Attention
+    );
+    let replayed = recovery_store
+        .load("recovery-active")
+        .expect("load replayed recovery")
+        .expect("active recovery");
+    assert!(replayed.board_outbox.is_empty());
+    assert!(
+        replayed
+            .board_entry_ids
+            .contains(&"startup-replay-valid".to_string()),
+        "successful startup replay is durably acknowledged"
+    );
+    let failed_outbox = recovery_store
+        .load("recovery-outbox-failed")
+        .expect("load failed-outbox recovery")
+        .expect("failed-outbox recovery");
+    assert_eq!(failed_outbox.board_outbox.len(), 1);
+    assert!(
+        store_outbox_failed.exists(),
+        "failed outbox replay keeps even a terminal recovery path protected"
+    );
+    assert_eq!(
+        runtime.pending_startup_auto_resume_sessions.len(),
+        1,
+        "the exact v4 Intake candidate is queued before prune"
+    );
+    assert_eq!(
+        runtime.pending_startup_auto_resume_sessions[0]
+            .session
+            .recovery_id
+            .as_deref(),
+        Some("legacy-session-intake-v4"),
+        "queueing must observe metadata written by the legacy importer"
+    );
+    let synced_v4 = gwt_agent::Session::load(&runtime.sessions_dir.join("session-intake-v4.toml"))
+        .expect("load exact imported Session");
+    assert_eq!(
+        synced_v4.recovery_id.as_deref(),
+        Some("legacy-session-intake-v4")
+    );
+    let synced_legacy =
+        gwt_agent::Session::load(&runtime.sessions_dir.join("session-intake-legacy.toml"))
+            .expect("load attention imported Session");
+    assert_eq!(
+        synced_legacy.recovery_id.as_deref(),
+        Some("legacy-session-intake-legacy")
+    );
+    assert_eq!(
+        synced_legacy.session_kind,
+        Some(gwt_skills::SessionKind::Intake)
+    );
+    assert!(synced_legacy.is_ephemeral);
+}
+
+#[test]
+fn app_runtime_bootstrap_does_not_queue_attention_legacy_exact_session() {
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedEnvVar::set("HOME", temp.path());
+    let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+    let repo = temp.path().join("repo");
+    init_git_clone_with_origin(&repo);
+
+    let mut persisted = empty_workspace_state();
+    let mut placeholder = sample_window(
+        "agent-attention-exact",
+        WindowPreset::Codex,
+        WindowProcessStatus::Stopped,
+    );
+    placeholder.session_id = Some("legacy-attention-exact".to_string());
+    persisted.windows.push(placeholder);
+    persisted.next_z_index = 2;
+    let tab = ProjectTabRuntime {
+        id: "tab-attention-exact".to_string(),
+        title: "Ambiguous legacy exact".to_string(),
+        project_root: repo.clone(),
+        kind: ProjectKind::Git,
+        workspace: WindowCanvasState::from_persisted(persisted),
+        migration_pending: false,
+        main_worktree_root_cache: std::sync::Arc::new(std::sync::OnceLock::new()),
+    };
+    let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-attention-exact"));
+    let mut session = gwt_agent::Session::new(&repo, "develop", gwt_agent::AgentId::Codex);
+    session.id = "legacy-attention-exact".to_string();
+    session.recovery_id = None;
+    session.session_kind = None;
+    session.is_ephemeral = false;
+    session.agent_session_id = Some("native-attention-exact".to_string());
+    session.restore_window_on_startup = true;
+    session
+        .save(&runtime.sessions_dir)
+        .expect("save ambiguous exact legacy Session");
+
+    runtime.bootstrap();
+
+    let store = gwt_core::recovery::RecoveryStore::for_project_dir(
+        gwt_core::paths::gwt_project_dir_for_repo_path(&repo),
+    );
+    let record = store
+        .load("legacy-legacy-attention-exact")
+        .expect("load imported recovery")
+        .expect("imported recovery");
+    assert_eq!(
+        record.lifecycle,
+        gwt_core::recovery::RecoveryLifecycle::Attention
+    );
+    assert!(record.provider_root.is_some());
+    assert!(
+        runtime.pending_startup_auto_resume_sessions.is_empty(),
+        "an authoritative root does not override an Attention lifecycle"
+    );
+}
+
+#[test]
+fn app_runtime_bootstrap_does_not_queue_matching_legacy_tombstone() {
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedEnvVar::set("HOME", temp.path());
+    let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+    let repo = temp.path().join("repo");
+    init_git_clone_with_origin(&repo);
+
+    let mut persisted = empty_workspace_state();
+    let mut placeholder = sample_window(
+        "agent-tombstoned-exact",
+        WindowPreset::Codex,
+        WindowProcessStatus::Stopped,
+    );
+    placeholder.session_id = Some("tombstoned-exact".to_string());
+    persisted.windows.push(placeholder);
+    persisted.next_z_index = 2;
+    let tab = ProjectTabRuntime {
+        id: "tab-tombstoned-exact".to_string(),
+        title: "Tombstoned exact".to_string(),
+        project_root: repo.clone(),
+        kind: ProjectKind::Git,
+        workspace: WindowCanvasState::from_persisted(persisted),
+        migration_pending: false,
+        main_worktree_root_cache: std::sync::Arc::new(std::sync::OnceLock::new()),
+    };
+    let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-tombstoned-exact"));
+    let mut session = gwt_agent::Session::new(&repo, "develop", gwt_agent::AgentId::Codex);
+    session.id = "tombstoned-exact".to_string();
+    session.recovery_id = Some("legacy-tombstoned-exact".to_string());
+    session.session_kind = Some(gwt_skills::SessionKind::Execution);
+    session.agent_session_id = Some("native-tombstoned-exact".to_string());
+    session.restore_window_on_startup = true;
+    let store = create_recovery_for_session_test(&repo, &session, "legacy recovery");
+    store
+        .bind_root(
+            "legacy-tombstoned-exact",
+            gwt_core::recovery::ProviderRootBinding {
+                root_id: "native-tombstoned-exact".to_string(),
+                session_tree_id: None,
+                quality: gwt_core::recovery::BindingQuality::Verified,
+                bound_at: chrono::Utc::now(),
+            },
+            "bind-tombstoned-exact",
+        )
+        .expect("bind exact root");
+    let tombstone = store
+        .finalize_and_purge(
+            "legacy-tombstoned-exact",
+            gwt_core::recovery::RecoveryLifecycle::Discarded,
+            chrono::Utc::now(),
+            "discard-tombstoned-exact",
+        )
+        .expect("tombstone recovery");
+    session.recovery_id = None;
+    session
+        .save(&runtime.sessions_dir)
+        .expect("save legacy Session without recovery id");
+
+    runtime.bootstrap();
+
+    assert!(store
+        .load("legacy-tombstoned-exact")
+        .expect("load purged recovery")
+        .is_none());
+    assert_eq!(
+        store
+            .load_tombstone("legacy-tombstoned-exact")
+            .expect("load tombstone"),
+        Some(tombstone)
+    );
+    assert!(
+        runtime.pending_startup_auto_resume_sessions.is_empty(),
+        "a matching terminal tombstone must suppress legacy exact auto-resume"
+    );
+}
+
+#[test]
+fn app_runtime_bootstrap_imports_sessionless_window_and_projection_once_as_attention() {
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedEnvVar::set("HOME", temp.path());
+    let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+    let repo = temp.path().join("repo");
+    init_git_clone_with_origin(&repo);
+
+    let mut projection =
+        gwt_core::workspace_projection::WorkspaceProjection::default_for_project(&repo);
+    let mut projected = workspace_agent_summary_for_test("sessionless-agent", None);
+    projected.window_id = Some("agent-1".to_string());
+    projected.worktree_path = Some(repo.clone());
+    projected.current_focus = Some("private projection text must not become a prompt".to_string());
+    projection.agents.push(projected);
+    projection.agents.push(
+        gwt_core::workspace_projection::WorkspaceAgentSummary::shell_work(
+            "shell-1",
+            Some(repo.clone()),
+            None,
+            gwt_core::workspace_projection::WorkspaceStatusCategory::Idle,
+            chrono::Utc::now(),
+        ),
+    );
+    gwt_core::workspace_projection::save_workspace_projection(&repo, &projection)
+        .expect("save projection");
+
+    let mut persisted = empty_workspace_state();
+    let mut agent = sample_window("agent-1", WindowPreset::Agent, WindowProcessStatus::Stopped);
+    agent.agent_id = Some("codex".to_string());
+    agent.session_id = None;
+    agent.lane_kind = gwt::WindowLaneKind::Intake;
+    persisted.windows.push(agent);
+    persisted.windows.push(sample_window(
+        "board-1",
+        WindowPreset::Board,
+        WindowProcessStatus::Stopped,
+    ));
+    persisted.next_z_index = 3;
+    let tab = ProjectTabRuntime {
+        id: "tab-legacy-placeholder".to_string(),
+        title: "Legacy Placeholder".to_string(),
+        project_root: repo.clone(),
+        kind: ProjectKind::Git,
+        workspace: WindowCanvasState::from_persisted(persisted),
+        migration_pending: false,
+        main_worktree_root_cache: std::sync::Arc::new(std::sync::OnceLock::new()),
+    };
+    let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-legacy-placeholder"));
+
+    runtime.bootstrap();
+
+    let store = gwt_core::recovery::RecoveryStore::for_project_dir(
+        gwt_core::paths::gwt_project_dir_for_repo_path(&repo),
+    );
+    let records = store.list().expect("list imported placeholders");
+    assert_eq!(
+        records.len(),
+        1,
+        "window and projection evidence for one Session must deduplicate"
+    );
+    let record = &records[0];
+    assert_eq!(record.session_id, "sessionless-agent");
+    assert_eq!(
+        record.session_kind,
+        gwt_core::recovery::RecoverySessionKind::Intake,
+    );
+    assert_eq!(
+        record.lifecycle,
+        gwt_core::recovery::RecoveryLifecycle::Attention
+    );
+    assert_eq!(record.provider_root, None);
+    assert_eq!(record.initial_prompt, "");
+    assert!(!record
+        .initial_prompt
+        .contains("private projection text must not become a prompt"));
+    assert!(runtime.pending_startup_auto_resume_sessions.is_empty());
+    assert!(
+        !runtime.sessions_dir.join("sessionless-agent.toml").exists(),
+        "projection migration must not fabricate a Session ledger"
+    );
+}
+
+#[test]
+fn app_runtime_bootstrap_does_not_reimport_discarded_sessionless_projection_after_tombstone_expiry()
+{
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedEnvVar::set("HOME", temp.path());
+    let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+    let repo = temp.path().join("repo");
+    init_git_clone_with_origin(&repo);
+
+    let mut projection =
+        gwt_core::workspace_projection::WorkspaceProjection::default_for_project(&repo);
+    let mut projected = workspace_agent_summary_for_test("sessionless-expired", None);
+    projected.window_id = Some("agent-expired".to_string());
+    projected.worktree_path = Some(repo.clone());
+    projected.current_focus = Some("private legacy discussion".to_string());
+    projection.agents.push(projected);
+    gwt_core::workspace_projection::save_workspace_projection(&repo, &projection)
+        .expect("save projection");
+
+    let runtime_for_restart = || {
+        let mut persisted = empty_workspace_state();
+        let mut agent = sample_window(
+            "agent-expired",
+            WindowPreset::Agent,
+            WindowProcessStatus::Stopped,
+        );
+        agent.agent_id = Some("codex".to_string());
+        agent.session_id = None;
+        agent.lane_kind = gwt::WindowLaneKind::Intake;
+        persisted.windows.push(agent);
+        persisted.next_z_index = 2;
+        let tab = ProjectTabRuntime {
+            id: "tab-sessionless-expired".to_string(),
+            title: "Expired sessionless recovery".to_string(),
+            project_root: repo.clone(),
+            kind: ProjectKind::Git,
+            workspace: WindowCanvasState::from_persisted(persisted),
+            migration_pending: false,
+            main_worktree_root_cache: std::sync::Arc::new(std::sync::OnceLock::new()),
+        };
+        sample_runtime(temp.path(), vec![tab], Some("tab-sessionless-expired"))
+    };
+
+    let store = gwt_core::recovery::RecoveryStore::for_project_dir(
+        gwt_core::paths::gwt_project_dir_for_repo_path(&repo),
+    );
+    let mut first = runtime_for_restart();
+    first.bootstrap();
+    let imported = store
+        .list()
+        .expect("list first import")
+        .into_iter()
+        .find(|record| record.session_id == "sessionless-expired")
+        .expect("sessionless projection recovery");
+    let purged_at = chrono::Utc::now() - chrono::Duration::days(31);
+    store
+        .finalize_and_purge(
+            &imported.recovery_id,
+            gwt_core::recovery::RecoveryLifecycle::Discarded,
+            purged_at,
+            "discard-expired-sessionless",
+        )
+        .expect("discard sessionless recovery");
+
+    // The first restart after expiry still sees the tombstone. It must project
+    // that terminal decision back to the legacy identity before retention
+    // removes the 30-day tombstone.
+    let mut cleanup_restart = runtime_for_restart();
+    cleanup_restart.bootstrap();
+    assert!(store
+        .load_tombstone(&imported.recovery_id)
+        .expect("load expired tombstone")
+        .is_none());
+    let terminal_projection = gwt_core::workspace_projection::load_workspace_projection(&repo)
+        .expect("load terminal projection")
+        .expect("terminal projection");
+    let terminal_agent = terminal_projection
+        .agents
+        .iter()
+        .find(|agent| agent.session_id == "sessionless-expired")
+        .expect("terminal agent identity");
+    assert_eq!(
+        terminal_agent.status_category,
+        gwt_core::workspace_projection::WorkspaceStatusCategory::Done
+    );
+    assert_eq!(
+        terminal_agent.current_focus, None,
+        "terminal migration must not retain private discussion text"
+    );
+
+    // A later restart has neither record nor tombstone. The terminal source
+    // identity itself must suppress both the projection row and its matching
+    // persisted window, so the discarded recovery cannot be resurrected.
+    let mut later_restart = runtime_for_restart();
+    later_restart.bootstrap();
+    assert!(store
+        .load(&imported.recovery_id)
+        .expect("load recovery after later restart")
+        .is_none());
+    assert!(store.list().expect("list after later restart").is_empty());
+}
+
+#[test]
+fn app_runtime_bootstrap_does_not_import_live_or_done_projection_agents() {
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedEnvVar::set("HOME", temp.path());
+    let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+    let repo = temp.path().join("repo");
+    init_git_clone_with_origin(&repo);
+
+    let mut projection =
+        gwt_core::workspace_projection::WorkspaceProjection::default_for_project(&repo);
+    let mut live = workspace_agent_summary_for_test("projection-live", None);
+    live.worktree_path = Some(repo.clone());
+    let mut done = workspace_agent_summary_for_test("projection-done", None);
+    done.worktree_path = Some(repo.clone());
+    done.window_id = Some("done-window".to_string());
+    done.status_category = gwt_core::workspace_projection::WorkspaceStatusCategory::Done;
+    done.updated_at = chrono::Utc::now();
+    let mut stale_active = done.clone();
+    stale_active.status_category = gwt_core::workspace_projection::WorkspaceStatusCategory::Active;
+    stale_active.updated_at = done.updated_at - chrono::Duration::hours(1);
+    projection.agents.extend([live, stale_active, done]);
+    gwt_core::workspace_projection::save_workspace_projection(&repo, &projection)
+        .expect("save projection");
+
+    let mut persisted = empty_workspace_state();
+    let mut done_window = sample_window(
+        "done-window",
+        WindowPreset::Agent,
+        WindowProcessStatus::Stopped,
+    );
+    done_window.session_id = None;
+    persisted.windows.push(done_window);
+    persisted.next_z_index = 2;
+    let tab = ProjectTabRuntime {
+        id: "tab-projection".to_string(),
+        title: "Projection".to_string(),
+        project_root: repo.clone(),
+        kind: ProjectKind::Git,
+        workspace: WindowCanvasState::from_persisted(persisted),
+        migration_pending: false,
+        main_worktree_root_cache: std::sync::Arc::new(std::sync::OnceLock::new()),
+    };
+    let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-projection"));
+    let mut live_session = sample_active_agent_session("tab-projection", "agent-live");
+    live_session.session_id = "projection-live".to_string();
+    live_session.worktree_path = repo.clone();
+    runtime
+        .active_agent_sessions
+        .insert(live_session.window_id.clone(), live_session);
+
+    runtime.bootstrap();
+
+    let store = gwt_core::recovery::RecoveryStore::for_project_dir(
+        gwt_core::paths::gwt_project_dir_for_repo_path(&repo),
+    );
+    assert!(
+        store.list().expect("list recoveries").is_empty(),
+        "live and terminal projection rows are not crash leftovers"
+    );
+}
+
+#[test]
+fn app_runtime_bootstrap_imports_window_candidate_when_projection_is_corrupt() {
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedEnvVar::set("HOME", temp.path());
+    let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+    let repo = temp.path().join("repo");
+    init_git_clone_with_origin(&repo);
+    let projection_path = gwt_core::paths::gwt_workspace_projection_path_for_repo_path(&repo);
+    fs::create_dir_all(projection_path.parent().expect("projection parent"))
+        .expect("projection parent");
+    fs::write(&projection_path, b"{not valid json").expect("corrupt projection");
+
+    let mut persisted = empty_workspace_state();
+    let mut agent = sample_window(
+        "agent-corrupt-projection",
+        WindowPreset::Codex,
+        WindowProcessStatus::Stopped,
+    );
+    agent.session_id = Some("window-survives-corrupt-projection".to_string());
+    persisted.windows.push(agent);
+    persisted.next_z_index = 2;
+    let tab = ProjectTabRuntime {
+        id: "tab-corrupt-projection".to_string(),
+        title: "Corrupt projection".to_string(),
+        project_root: repo.clone(),
+        kind: ProjectKind::Git,
+        workspace: WindowCanvasState::from_persisted(persisted),
+        migration_pending: false,
+        main_worktree_root_cache: std::sync::Arc::new(std::sync::OnceLock::new()),
+    };
+    let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-corrupt-projection"));
+
+    runtime.bootstrap();
+
+    let store = gwt_core::recovery::RecoveryStore::for_project_dir(
+        gwt_core::paths::gwt_project_dir_for_repo_path(&repo),
+    );
+    let records = store.list().expect("list recoveries");
+    assert_eq!(records.len(), 1);
+    assert_eq!(records[0].session_id, "window-survives-corrupt-projection");
+    assert_eq!(
+        records[0].lifecycle,
+        gwt_core::recovery::RecoveryLifecycle::Attention
+    );
+}
+
+#[test]
 fn app_runtime_bootstrap_auto_resumes_clean_waiting_input_session() {
     let _env_lock = env_test_lock()
         .lock()
@@ -10265,6 +11899,806 @@ fn app_runtime_bootstrap_queues_startup_auto_resume_until_canvas_ready() {
         .count();
     assert_eq!(agent_windows, 1);
     assert_eq!(runtime.pending_auto_resume_sources.len(), 1);
+    let source = gwt_agent::Session::load(&runtime.sessions_dir.join("session-queued-auto.toml"))
+        .expect("load source recovery Session");
+    let recovery_id = source
+        .recovery_id
+        .as_deref()
+        .expect("legacy startup import must assign a recovery id");
+    let project_root = source
+        .project_state_root
+        .as_deref()
+        .unwrap_or(&source.worktree_path);
+    let store = gwt_core::recovery::RecoveryStore::for_project_dir(
+        gwt_core::paths::gwt_project_dir_for_repo_path(project_root),
+    );
+    let recovery = store
+        .load(recovery_id)
+        .expect("load recovery")
+        .expect("recovery record");
+    assert!(
+        recovery
+            .recovery_lease
+            .as_ref()
+            .is_some_and(|lease| lease.holder_id.starts_with("startup:")),
+        "startup launch must hold the durable cross-process recovery lease"
+    );
+}
+
+#[test]
+fn cold_restart_reclaims_ready_intake_once_and_retires_source_after_successor_ready() {
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedEnvVar::set("HOME", temp.path());
+    let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+    let repo = temp.path().join("repo");
+    init_git_clone_with_origin(&repo);
+    let worktree = temp.path().join(".intake");
+    gwt_git::WorktreeManager::new(&repo)
+        .create_detached("HEAD", &worktree)
+        .expect("create Intake worktree");
+    let tab = sample_project_tab(
+        "tab-ready-cold-restart",
+        "Ready cold restart",
+        repo.clone(),
+        ProjectKind::Git,
+        &[],
+    );
+    let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-ready-cold-restart"));
+    let mut source = gwt_agent::Session::new(&worktree, "", gwt_agent::AgentId::Codex);
+    source.id = "session-ready-cold-restart".to_string();
+    source.project_state_root = Some(repo.clone());
+    source.repo_hash = Some(gwt_core::paths::project_scope_hash(&repo).to_string());
+    source.recovery_id = Some("recovery-ready-cold-restart".to_string());
+    source.session_kind = Some(gwt_skills::SessionKind::Intake);
+    source.is_ephemeral = true;
+    source.ephemeral_base_ref = Some("origin/develop".to_string());
+    source.agent_session_id = Some("provider-ready-cold-restart".to_string());
+    source.restore_window_on_startup = true;
+    source.update_status(gwt_agent::AgentStatus::Running);
+    source
+        .advance_recovery_launch_stage(gwt_agent::session::RecoveryLaunchStage::Ready)
+        .expect("mark source Session Ready");
+    source
+        .save(&runtime.sessions_dir)
+        .expect("save Ready source Session");
+    let store = create_recovery_for_session_test(&repo, &source, "Recover Ready Intake");
+    store
+        .bind_root_semantic(
+            source.recovery_id.as_deref().unwrap(),
+            source.agent_session_id.as_deref().unwrap(),
+            None,
+            gwt_core::recovery::BindingQuality::Verified,
+            "bind-ready-cold-restart",
+        )
+        .expect("bind exact provider root");
+    store
+        .complete_provider_ready(
+            source.recovery_id.as_deref().unwrap(),
+            chrono::Utc::now(),
+            "complete-ready-cold-restart",
+        )
+        .expect("publish original Ready provider");
+
+    // A new AppRuntime owns no inherited PTY. Bootstrap must publish the
+    // durable stop proof before exposing this historical Ready owner to the
+    // exact-resume queue.
+    runtime.bootstrap();
+    let interrupted_source =
+        gwt_agent::Session::load(&runtime.sessions_dir.join("session-ready-cold-restart.toml"))
+            .expect("load interrupted source Session");
+    assert_eq!(
+        interrupted_source.status,
+        gwt_agent::AgentStatus::Interrupted
+    );
+    let interrupted = store
+        .load("recovery-ready-cold-restart")
+        .expect("load interrupted Recovery")
+        .expect("interrupted Recovery");
+    assert_eq!(
+        interrupted.lifecycle,
+        gwt_core::recovery::RecoveryLifecycle::Interrupted
+    );
+    assert_eq!(
+        interrupted.launch_stage,
+        gwt_core::recovery::RecoveryLaunchStage::Ready
+    );
+    assert_eq!(runtime.pending_startup_auto_resume_sessions.len(), 1);
+
+    runtime.handle_frontend_event(
+        "client-1".to_string(),
+        FrontendEvent::StartupAutoResumeReady {
+            bounds: canvas_bounds(),
+        },
+    );
+    let prepared = store
+        .prepared_successor_for_source("recovery-ready-cold-restart")
+        .expect("load prepared successor")
+        .expect("prepared successor");
+    assert_eq!(runtime.pending_auto_resume_sources.len(), 1);
+    assert_eq!(runtime.pending_provider_root_claims.len(), 1);
+    assert_eq!(
+        runtime
+            .tab("tab-ready-cold-restart")
+            .unwrap()
+            .workspace
+            .persisted()
+            .windows
+            .iter()
+            .filter(|window| window.preset == WindowPreset::Agent)
+            .count(),
+        1
+    );
+
+    // A repeated frontend-ready handshake must not allocate or spawn a second
+    // successor while the first is crossing its provider Ready barrier.
+    runtime.handle_frontend_event(
+        "client-1".to_string(),
+        FrontendEvent::StartupAutoResumeReady {
+            bounds: canvas_bounds(),
+        },
+    );
+    assert_eq!(runtime.pending_provider_root_claims.len(), 1);
+    assert_eq!(
+        runtime
+            .tab("tab-ready-cold-restart")
+            .unwrap()
+            .workspace
+            .persisted()
+            .windows
+            .iter()
+            .filter(|window| window.preset == WindowPreset::Agent)
+            .count(),
+        1
+    );
+    assert_eq!(
+        store
+            .prepared_successor_for_source("recovery-ready-cold-restart")
+            .unwrap()
+            .unwrap()
+            .target_recovery_id,
+        prepared.target_recovery_id
+    );
+
+    // Agent preparation is asynchronous behind the GUI event proxy. Materialize
+    // the already-assigned target identity here, then drive the same claimed
+    // Ready barrier that the provider lifecycle event uses in production.
+    let mut target = gwt_agent::Session::new(&worktree, "", gwt_agent::AgentId::Codex);
+    target.id = "session-ready-cold-restart-target".to_string();
+    target.project_state_root = Some(repo.clone());
+    target.repo_hash = Some(gwt_core::paths::project_scope_hash(&repo).to_string());
+    target.recovery_id = Some(prepared.target_recovery_id.clone());
+    target.session_kind = Some(gwt_skills::SessionKind::Intake);
+    target.is_ephemeral = true;
+    target.ephemeral_base_ref = Some("origin/develop".to_string());
+    target.agent_session_id = source.agent_session_id.clone();
+    target.session_mode = gwt_agent::SessionMode::Resume;
+    target.recovery_continuation = Some(gwt_agent::RecoveryContinuationHandoff {
+        source_session_id: source.id.clone(),
+        source_recovery_id: prepared.source_recovery_id.clone(),
+        target_recovery_id: prepared.target_recovery_id.clone(),
+        source_checkpoint_revision: prepared.source_checkpoint_revision,
+        reason: prepared.definitive_reason.clone(),
+        inherit_checkpoint: false,
+    });
+    target
+        .save(&runtime.sessions_dir)
+        .expect("save target Session");
+    create_recovery_for_session_test(&repo, &target, "Resume interrupted Intake exactly");
+    store
+        .link_continuation(prepared.clone(), "link-ready-cold-restart")
+        .expect("link materialized Ready successor");
+    store
+        .bind_root_semantic(
+            &prepared.target_recovery_id,
+            source.agent_session_id.as_deref().unwrap(),
+            None,
+            gwt_core::recovery::BindingQuality::Verified,
+            "bind-target-ready-cold-restart",
+        )
+        .expect("bind target provider root");
+    let target_session_id = target.id.clone();
+    let window_id = runtime
+        .pending_provider_root_claims
+        .keys()
+        .next()
+        .cloned()
+        .expect("successor provider-root claim window");
+    let claim = runtime
+        .pending_provider_root_claims
+        .get(&window_id)
+        .cloned()
+        .expect("exact successor provider-root claim");
+    assert_eq!(claim.recovery_id, "recovery-ready-cold-restart");
+    super::runtime_events::mark_recovery_ready_for_session(
+        &runtime.sessions_dir,
+        &target_session_id,
+        Some(store.root()),
+        Some(&claim),
+    )
+    .expect("publish successor Ready");
+    super::mark_auto_resume_source_completed(&runtime.sessions_dir, "session-ready-cold-restart")
+        .expect("retire Ready source");
+
+    let target = store
+        .load(&prepared.target_recovery_id)
+        .expect("load target Recovery")
+        .expect("target Recovery");
+    assert_eq!(
+        target.launch_stage,
+        gwt_core::recovery::RecoveryLaunchStage::Ready
+    );
+    assert_eq!(
+        store
+            .load_tombstone("recovery-ready-cold-restart")
+            .expect("load source tombstone")
+            .expect("source tombstone")
+            .lifecycle,
+        gwt_core::recovery::RecoveryLifecycle::Resolved
+    );
+    let retired_source =
+        gwt_agent::Session::load(&runtime.sessions_dir.join("session-ready-cold-restart.toml"))
+            .expect("load retired source Session");
+    assert_eq!(retired_source.status, gwt_agent::AgentStatus::Stopped);
+    assert!(!retired_source.restore_window_on_startup);
+}
+
+#[test]
+fn cold_restart_recreates_pinned_ready_intake_without_hook_or_placeholder() {
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedEnvVar::set("HOME", temp.path());
+    let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+    let repo = temp.path().join("repo");
+    init_git_clone_with_origin(&repo);
+    let worktree = temp.path().join(".intake");
+    let worktree_manager = gwt_git::WorktreeManager::new(&repo);
+    worktree_manager
+        .create_detached("HEAD", &worktree)
+        .expect("create Intake worktree");
+    let tab = sample_project_tab(
+        "tab-ready-missing",
+        "Ready missing cold restart",
+        repo.clone(),
+        ProjectKind::Git,
+        &[],
+    );
+    let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-ready-missing"));
+    let mut source = gwt_agent::Session::new(&worktree, "", gwt_agent::AgentId::Codex);
+    source.id = "session-ready-missing".to_string();
+    source.project_state_root = Some(repo.clone());
+    source.repo_hash = Some(gwt_core::paths::project_scope_hash(&repo).to_string());
+    source.recovery_id = Some("recovery-ready-missing".to_string());
+    source.session_kind = Some(gwt_skills::SessionKind::Intake);
+    source.is_ephemeral = true;
+    source.ephemeral_base_ref = Some("origin/develop".to_string());
+    source.agent_session_id = Some("provider-ready-missing".to_string());
+    source.restore_window_on_startup = true;
+    source.update_status(gwt_agent::AgentStatus::Running);
+    source
+        .advance_recovery_launch_stage(gwt_agent::session::RecoveryLaunchStage::Ready)
+        .expect("mark source Session Ready");
+    source
+        .save(&runtime.sessions_dir)
+        .expect("save Ready source Session");
+    let store = create_recovery_for_session_test(&repo, &source, "Recover missing Ready Intake");
+    store
+        .bind_root_semantic(
+            source.recovery_id.as_deref().unwrap(),
+            source.agent_session_id.as_deref().unwrap(),
+            None,
+            gwt_core::recovery::BindingQuality::Verified,
+            "bind-ready-missing",
+        )
+        .expect("bind exact provider root");
+    store
+        .complete_provider_ready(
+            source.recovery_id.as_deref().unwrap(),
+            chrono::Utc::now(),
+            "complete-ready-missing",
+        )
+        .expect("publish original Ready provider");
+    worktree_manager
+        .remove(&worktree)
+        .expect("remove stopped Intake worktree");
+    assert!(!worktree.exists());
+    assert!(source.last_hook_event_at.is_none());
+    assert!(source.last_completed_stop_at.is_none());
+    assert!(runtime.tabs[0]
+        .workspace
+        .persisted()
+        .windows
+        .iter()
+        .all(|window| window.preset != WindowPreset::Agent));
+
+    runtime.bootstrap();
+
+    assert!(
+        worktree.is_dir(),
+        "a pinned managed Ready recovery must recreate its missing Intake worktree"
+    );
+    assert_eq!(runtime.pending_startup_auto_resume_sessions.len(), 1);
+    assert_eq!(
+        runtime.pending_startup_auto_resume_sessions[0].session.id,
+        "session-ready-missing"
+    );
+    let interrupted = store
+        .load("recovery-ready-missing")
+        .expect("load interrupted Recovery")
+        .expect("interrupted Recovery");
+    assert_eq!(
+        interrupted.lifecycle,
+        gwt_core::recovery::RecoveryLifecycle::Interrupted
+    );
+    assert_eq!(
+        interrupted.launch_stage,
+        gwt_core::recovery::RecoveryLaunchStage::Ready
+    );
+    assert!(interrupted
+        .supervisor_stop_proof
+        .as_ref()
+        .is_some_and(|proof| proof.session_id == "session-ready-missing"));
+}
+
+#[test]
+fn cold_restart_ready_recovery_restores_missing_exact_id_from_recovery_sot() {
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedEnvVar::set("HOME", temp.path());
+    let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+    let repo = temp.path().join("repo");
+    init_git_clone_with_origin(&repo);
+    let worktree = temp.path().join(".intake");
+    gwt_git::WorktreeManager::new(&repo)
+        .create_detached("HEAD", &worktree)
+        .expect("create Intake worktree");
+    let tab = sample_project_tab(
+        "tab-ready-semantic",
+        "Ready semantic cold restart",
+        repo.clone(),
+        ProjectKind::Git,
+        &[],
+    );
+    let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-ready-semantic"));
+    let mut source = gwt_agent::Session::new(&worktree, "", gwt_agent::AgentId::Codex);
+    source.id = "session-ready-semantic".to_string();
+    source.project_state_root = Some(repo.clone());
+    source.repo_hash = Some(gwt_core::paths::project_scope_hash(&repo).to_string());
+    source.recovery_id = Some("recovery-ready-semantic".to_string());
+    source.session_kind = Some(gwt_skills::SessionKind::Intake);
+    source.is_ephemeral = true;
+    source.ephemeral_base_ref = Some("origin/develop".to_string());
+    source.agent_session_id = None;
+    source.restore_window_on_startup = true;
+    source.update_status(gwt_agent::AgentStatus::Running);
+    source
+        .advance_recovery_launch_stage(gwt_agent::session::RecoveryLaunchStage::Ready)
+        .expect("mark source Session Ready");
+    source
+        .save(&runtime.sessions_dir)
+        .expect("save Ready source Session");
+    let store = create_recovery_for_session_test(
+        &repo,
+        &source,
+        "Continue the interrupted Intake from its durable checkpoint",
+    );
+    store
+        .bind_root_semantic(
+            source.recovery_id.as_deref().unwrap(),
+            "provider-ready-semantic",
+            None,
+            gwt_core::recovery::BindingQuality::Verified,
+            "bind-ready-semantic",
+        )
+        .expect("bind historical provider root");
+    store
+        .complete_provider_ready(
+            source.recovery_id.as_deref().unwrap(),
+            chrono::Utc::now(),
+            "complete-ready-semantic",
+        )
+        .expect("publish historical Ready provider");
+
+    runtime.bootstrap();
+
+    assert_eq!(runtime.pending_startup_auto_resume_sessions.len(), 1);
+    assert_eq!(
+        runtime.pending_startup_auto_resume_sessions[0]
+            .session
+            .exact_resume_session_id(),
+        Some("provider-ready-semantic"),
+        "an authoritative Recovery root must repair a stale Session projection before launch"
+    );
+    let interrupted = store
+        .load("recovery-ready-semantic")
+        .expect("load interrupted semantic Recovery")
+        .expect("interrupted semantic Recovery");
+    assert_eq!(
+        interrupted.lifecycle,
+        gwt_core::recovery::RecoveryLifecycle::Interrupted
+    );
+    assert_eq!(
+        interrupted.launch_stage,
+        gwt_core::recovery::RecoveryLaunchStage::Ready
+    );
+    assert!(interrupted
+        .supervisor_stop_proof
+        .as_ref()
+        .is_some_and(|proof| proof.session_id == source.id));
+
+    runtime.handle_frontend_event(
+        "client-1".to_string(),
+        FrontendEvent::StartupAutoResumeReady {
+            bounds: canvas_bounds(),
+        },
+    );
+
+    let claimed = store
+        .load("recovery-ready-semantic")
+        .expect("load claimed semantic Recovery")
+        .expect("claimed semantic Recovery");
+    assert_eq!(
+        claimed.lifecycle,
+        gwt_core::recovery::RecoveryLifecycle::Recovering
+    );
+    assert!(claimed
+        .recovery_lease
+        .as_ref()
+        .is_some_and(|lease| lease.holder_id.starts_with("startup:")));
+    assert_eq!(runtime.pending_provider_root_claims.len(), 1);
+    let successor = store
+        .prepared_successor_for_source("recovery-ready-semantic")
+        .expect("load semantic successor")
+        .expect("semantic successor");
+    assert_ne!(
+        successor.target_recovery_id, "recovery-ready-semantic",
+        "the exact continuation must still materialize a fresh Recovery owner"
+    );
+    assert_eq!(runtime.pending_auto_resume_sources.len(), 1);
+}
+
+#[test]
+fn app_runtime_bootstrap_recreates_pinned_missing_intake_before_serial_exact_resume() {
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedEnvVar::set("HOME", temp.path());
+    let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+    let repo = temp.path().join("repo");
+    init_git_clone_with_origin(&repo);
+    let launch_base_oid = {
+        let output = gwt_core::process::hidden_command("git")
+            .args(["rev-parse", "HEAD"])
+            .current_dir(&repo)
+            .output()
+            .expect("resolve HEAD");
+        assert!(output.status.success());
+        String::from_utf8(output.stdout).unwrap().trim().to_string()
+    };
+    let missing_intake = temp.path().join(".intake-5");
+    let tab = sample_project_tab(
+        "tab-missing-intake",
+        "Missing Intake",
+        repo.clone(),
+        ProjectKind::Git,
+        &[],
+    );
+    let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-missing-intake"));
+    let mut session = gwt_agent::Session::new(&missing_intake, "", gwt_agent::AgentId::Codex);
+    session.id = "session-missing-intake-auto".to_string();
+    session.project_state_root = Some(repo.clone());
+    session.repo_hash = Some(gwt_core::paths::project_scope_hash(&repo).to_string());
+    session.recovery_id = Some("recovery-missing-intake-auto".to_string());
+    session.session_kind = Some(gwt_skills::SessionKind::Intake);
+    session.is_ephemeral = true;
+    session.ephemeral_base_ref = Some("origin/develop".to_string());
+    session.launch_base_oid = Some(launch_base_oid.clone());
+    session.agent_session_id = Some("native-missing-intake-auto".to_string());
+    session.restore_window_on_startup = true;
+    session.record_hook_event("Stop");
+    session.record_completed_stop();
+    session
+        .save(&runtime.sessions_dir)
+        .expect("save missing Intake Session");
+    let store = gwt_core::recovery::RecoveryStore::for_project_dir(
+        gwt_core::paths::gwt_project_dir_for_repo_path(&repo),
+    );
+    store
+        .create(
+            gwt_core::recovery::CreateRecovery {
+                recovery_id: "recovery-missing-intake-auto".to_string(),
+                session_id: session.id.clone(),
+                repo_id: gwt_core::paths::project_scope_hash(&repo).to_string(),
+                session_kind: gwt_core::recovery::RecoverySessionKind::Intake,
+                worktree_path: missing_intake.clone(),
+                launch_base_ref: Some("origin/develop".to_string()),
+                launch_base_oid: launch_base_oid.clone(),
+                launch_head_oid: launch_base_oid.clone(),
+                provider: session.agent_id.to_string(),
+                model: None,
+                runtime: "host".to_string(),
+                initial_prompt: "Recover missing Intake".to_string(),
+                created_at: session.created_at,
+            },
+            "create-missing-intake-auto",
+        )
+        .expect("create missing Intake recovery");
+    store
+        .bind_root(
+            "recovery-missing-intake-auto",
+            gwt_core::recovery::ProviderRootBinding {
+                root_id: "native-missing-intake-auto".to_string(),
+                session_tree_id: None,
+                quality: gwt_core::recovery::BindingQuality::Verified,
+                bound_at: chrono::Utc::now(),
+            },
+            "bind-missing-intake-auto",
+        )
+        .expect("bind exact root");
+    store
+        .set_lifecycle(
+            "recovery-missing-intake-auto",
+            gwt_core::recovery::RecoveryLifecycle::Attention,
+            Some("legacy_import_attention:missing_intake_worktree".to_string()),
+            "attention-missing-intake-auto",
+        )
+        .expect("mark missing worktree Attention");
+    gwt_git::recovery::ensure_recovery_base_pin(
+        &repo,
+        "recovery-missing-intake-auto",
+        &launch_base_oid,
+    )
+    .expect("pin missing Intake base");
+
+    runtime.bootstrap();
+
+    assert!(
+        missing_intake.is_dir(),
+        "startup must recreate the safe Intake path"
+    );
+    assert_eq!(runtime.pending_startup_auto_resume_sessions.len(), 1);
+    assert!(runtime.tabs[0]
+        .workspace
+        .persisted()
+        .windows
+        .iter()
+        .all(|window| window.preset != WindowPreset::Agent));
+    runtime.handle_frontend_event(
+        "client-1".to_string(),
+        FrontendEvent::StartupAutoResumeReady {
+            bounds: canvas_bounds(),
+        },
+    );
+    assert_eq!(runtime.pending_auto_resume_sources.len(), 1);
+    assert_eq!(
+        runtime.tabs[0]
+            .workspace
+            .persisted()
+            .windows
+            .iter()
+            .filter(|window| window.preset == WindowPreset::Agent)
+            .count(),
+        1
+    );
+    let output = gwt_core::process::hidden_command("git")
+        .args(["rev-parse", "HEAD"])
+        .current_dir(&missing_intake)
+        .output()
+        .expect("read recreated HEAD");
+    assert!(output.status.success());
+    assert_eq!(
+        String::from_utf8(output.stdout).unwrap().trim(),
+        launch_base_oid
+    );
+}
+
+#[test]
+fn app_runtime_startup_recovery_lease_conflict_prevents_duplicate_launch() {
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedEnvVar::set("HOME", temp.path());
+    let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+    let repo = temp.path().join("repo");
+    init_git_clone_with_origin(&repo);
+    let worktree = temp.path().join("worktrees").join("startup-lease-conflict");
+    run_git(
+        &repo,
+        &[
+            "worktree",
+            "add",
+            "-b",
+            "work/startup-lease-conflict",
+            worktree.to_str().expect("worktree path"),
+        ],
+    );
+    let tab = sample_project_tab(
+        "tab-startup-lease-conflict",
+        "Startup lease conflict",
+        worktree.clone(),
+        ProjectKind::Git,
+        &[],
+    );
+    let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-startup-lease-conflict"));
+    let mut session = gwt_agent::Session::new(
+        &worktree,
+        "work/startup-lease-conflict",
+        gwt_agent::AgentId::Codex,
+    );
+    session.id = "session-startup-lease-conflict".to_string();
+    session.agent_session_id = Some("native-startup-lease-conflict".to_string());
+    session.restore_window_on_startup = true;
+    session.record_hook_event("Stop");
+    session.record_completed_stop();
+    session
+        .save(&runtime.sessions_dir)
+        .expect("save resumable session");
+
+    runtime.bootstrap();
+    assert_eq!(runtime.pending_startup_auto_resume_sessions.len(), 1);
+    let source = gwt_agent::Session::load(
+        &runtime
+            .sessions_dir
+            .join("session-startup-lease-conflict.toml"),
+    )
+    .expect("load imported source Session");
+    let recovery_id = source
+        .recovery_id
+        .as_deref()
+        .expect("legacy startup import recovery id");
+    let project_root = source
+        .project_state_root
+        .as_deref()
+        .unwrap_or(&source.worktree_path);
+    let store = gwt_core::recovery::RecoveryStore::for_project_dir(
+        gwt_core::paths::gwt_project_dir_for_repo_path(project_root),
+    );
+    let record = store
+        .load(recovery_id)
+        .expect("load recovery")
+        .expect("recovery record");
+    let acquired_at = chrono::Utc::now();
+    store
+        .claim_recovery(
+            recovery_id,
+            record.generation,
+            gwt_core::recovery::RecoveryLease {
+                lease_id: "competing-startup-lease".to_string(),
+                holder_id: "other-gwt-instance".to_string(),
+                acquired_at,
+                expires_at: acquired_at + chrono::Duration::minutes(5),
+            },
+            "Competing startup owner",
+            "claim-competing-startup-owner",
+        )
+        .expect("claim recovery from competing owner");
+
+    runtime.handle_frontend_event(
+        "client-1".to_string(),
+        FrontendEvent::StartupAutoResumeReady {
+            bounds: canvas_bounds(),
+        },
+    );
+
+    assert!(runtime.tabs[0]
+        .workspace
+        .persisted()
+        .windows
+        .iter()
+        .all(|window| window.preset != WindowPreset::Agent));
+    assert!(runtime.pending_auto_resume_sources.is_empty());
+    assert!(runtime.runtimes.is_empty());
+    assert_eq!(
+        store
+            .load(recovery_id)
+            .expect("reload recovery")
+            .expect("claimed recovery")
+            .recovery_lease
+            .as_ref()
+            .map(|lease| lease.holder_id.as_str()),
+        Some("other-gwt-instance")
+    );
+}
+
+#[test]
+fn startup_exact_claim_blocks_manual_resume_of_same_provider_root() {
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedEnvVar::set("HOME", temp.path());
+    let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+    let repo = temp.path().join("repo");
+    init_git_clone_with_origin(&repo);
+    let store = gwt_core::recovery::RecoveryStore::for_project_dir(
+        gwt_core::paths::gwt_project_dir_for_repo_path(&repo),
+    );
+    let repo_id = gwt_core::paths::project_scope_hash(&repo).to_string();
+    let launch_base_oid = {
+        let output = gwt_core::process::hidden_command("git")
+            .args(["rev-parse", "--verify", "HEAD^{commit}"])
+            .current_dir(&repo)
+            .output()
+            .expect("resolve startup/manual fixture base");
+        assert!(output.status.success());
+        String::from_utf8(output.stdout)
+            .expect("utf8 fixture OID")
+            .trim()
+            .to_string()
+    };
+    let now = chrono::Utc::now();
+    for (recovery_id, session_id) in [
+        ("startup-root-owner", "session-startup-root-owner"),
+        ("manual-root-owner", "session-manual-root-owner"),
+    ] {
+        store
+            .create(
+                gwt_core::recovery::CreateRecovery {
+                    recovery_id: recovery_id.to_string(),
+                    session_id: session_id.to_string(),
+                    repo_id: repo_id.clone(),
+                    session_kind: gwt_core::recovery::RecoverySessionKind::Execution,
+                    worktree_path: repo.clone(),
+                    launch_base_ref: Some("origin/develop".to_string()),
+                    launch_base_oid: launch_base_oid.clone(),
+                    launch_head_oid: launch_base_oid.clone(),
+                    provider: "codex".to_string(),
+                    model: None,
+                    runtime: "host".to_string(),
+                    initial_prompt: "Recover exact provider root".to_string(),
+                    created_at: now,
+                },
+                format!("create-{recovery_id}"),
+            )
+            .expect("create exact recovery");
+        store
+            .bind_root(
+                recovery_id,
+                gwt_core::recovery::ProviderRootBinding {
+                    root_id: "shared-startup-manual-root".to_string(),
+                    session_tree_id: None,
+                    quality: gwt_core::recovery::BindingQuality::Verified,
+                    bound_at: now,
+                },
+                format!("bind-{recovery_id}"),
+            )
+            .expect("bind shared exact root");
+    }
+    let mut startup = gwt_agent::Session::new(&repo, "", gwt_agent::AgentId::Codex);
+    startup.id = "session-startup-root-owner".to_string();
+    startup.project_state_root = Some(repo.clone());
+    startup.repo_hash = Some(repo_id);
+    startup.recovery_id = Some("startup-root-owner".to_string());
+    startup.session_kind = Some(gwt_skills::SessionKind::Execution);
+    startup.is_ephemeral = false;
+    startup.agent_session_id = Some("shared-startup-manual-root".to_string());
+
+    let token = super::startup::claim_startup_recovery(&startup)
+        .expect("startup exact claim")
+        .expect("provider-root claim token");
+    assert!(!token.is_empty());
+
+    let manual = store.load("manual-root-owner").unwrap().unwrap();
+    let error = super::recovery_center::handle_recovery_center_action_for_test(
+        &store,
+        &manual.recovery_id,
+        manual.generation,
+        gwt::protocol::RecoveryCenterAction::ConfirmResume,
+    )
+    .expect_err("manual resume must not duplicate startup exact root");
+    assert_eq!(
+        error.code,
+        gwt::protocol::RecoveryCenterErrorCode::ActionUnavailable
+    );
+    assert!(error.message.contains("already owns"));
 }
 
 #[test]
@@ -10326,6 +12760,9 @@ fn open_project_restore_resumes_paused_agent_even_after_stopped_drift() {
         .save(&runtime.sessions_dir)
         .expect("save resumable session");
 
+    // Normal application startup imports pre-recovery Session files before an
+    // Open Project restore can claim them.
+    runtime.bootstrap();
     let events = runtime.restore_open_project_windows("tab-open");
 
     assert!(
@@ -10464,21 +12901,29 @@ fn app_runtime_startup_auto_resume_removes_stale_placeholders_across_agent_famil
         .count();
     assert_eq!(
         agent_windows, 3,
-        "each Agent-family placeholder must be replaced by exactly one resumed window; \
-         a stale Claude/Codex placeholder must not survive next to its resumed window"
+        "serial restore must replace one placeholder without duplicating the two queued panes"
     );
-    assert_eq!(runtime.pending_auto_resume_sources.len(), 3);
+    assert_eq!(runtime.pending_auto_resume_sources.len(), 1);
+    assert_eq!(runtime.pending_startup_auto_resume_sessions.len(), 2);
+    let mut scheduled_sources = runtime
+        .pending_auto_resume_sources
+        .values()
+        .cloned()
+        .collect::<HashSet<_>>();
+    scheduled_sources.extend(
+        runtime
+            .pending_startup_auto_resume_sessions
+            .iter()
+            .map(|pending| pending.session.id.clone()),
+    );
     for source in [
         "session-family-legacy",
         "session-family-claude",
         "session-family-codex",
     ] {
         assert!(
-            runtime
-                .pending_auto_resume_sources
-                .values()
-                .any(|value| value == source),
-            "resumed window must track source session {source}"
+            scheduled_sources.contains(source),
+            "serial restore must retain source session {source}"
         );
     }
 }
@@ -10578,6 +13023,208 @@ fn app_runtime_startup_auto_resume_without_exact_id_keeps_placeholder_with_diagn
         !detail.contains("Restored window is paused"),
         "the generic paused message must be replaced by the exact-restore diagnostic"
     );
+}
+
+#[test]
+fn app_runtime_startup_without_exact_id_queues_durable_checkpoint_continuation() {
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedEnvVar::set("HOME", temp.path());
+    let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+    let repo = temp.path().join("repo");
+    init_git_clone_with_origin(&repo);
+    let worktree = temp.path().join(".intake");
+    gwt_git::WorktreeManager::new(&repo)
+        .create_detached("HEAD", &worktree)
+        .expect("create Intake worktree");
+
+    let mut persisted = empty_workspace_state();
+    let mut placeholder = sample_window(
+        "agent-checkpoint",
+        WindowPreset::Claude,
+        WindowProcessStatus::Stopped,
+    );
+    placeholder.agent_id = Some("claude".to_string());
+    placeholder.session_id = Some("session-checkpoint".to_string());
+    persisted.windows.push(placeholder);
+    persisted.next_z_index = 2;
+    let tab = ProjectTabRuntime {
+        id: "tab-checkpoint".to_string(),
+        title: "Checkpoint recovery".to_string(),
+        project_root: repo.clone(),
+        kind: ProjectKind::Git,
+        workspace: WindowCanvasState::from_persisted(persisted),
+        migration_pending: false,
+        main_worktree_root_cache: std::sync::Arc::new(std::sync::OnceLock::new()),
+    };
+    let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-checkpoint"));
+    let mut session = gwt_agent::Session::new(&worktree, "", gwt_agent::AgentId::ClaudeCode);
+    session.id = "session-checkpoint".to_string();
+    session.project_state_root = Some(repo.clone());
+    session.recovery_id = Some("recovery-checkpoint".to_string());
+    session.session_kind = Some(gwt_skills::SessionKind::Intake);
+    session.is_ephemeral = true;
+    session.ephemeral_base_ref = Some("origin/develop".to_string());
+    session.agent_session_id = None;
+    session.restore_window_on_startup = true;
+    session
+        .save(&runtime.sessions_dir)
+        .expect("save source Session");
+    let store = create_recovery_for_session_test(
+        &repo,
+        &session,
+        "Investigate the interrupted Intake discussion",
+    );
+
+    runtime.bootstrap();
+
+    let projected_session =
+        gwt_agent::Session::load(&runtime.sessions_dir.join("session-checkpoint.toml"))
+            .expect("load projected checkpoint Session");
+    let projected_recovery = store
+        .load("recovery-checkpoint")
+        .expect("load projected checkpoint Recovery")
+        .expect("projected checkpoint Recovery");
+    assert_eq!(
+        runtime.pending_startup_auto_resume_sessions.len(),
+        1,
+        "checkpoint source was not queued: status={:?}, lifecycle={:?}, stage={:?}, reason={:?}, worktree_exists={}, placeholder_windows={:?}",
+        projected_session.status,
+        projected_recovery.lifecycle,
+        projected_recovery.launch_stage,
+        projected_recovery.lifecycle_reason,
+        projected_session.worktree_path.exists(),
+        runtime.tabs[0]
+            .workspace
+            .persisted()
+            .windows
+            .iter()
+            .map(|window| (window.id.clone(), window.status, window.session_id.clone()))
+            .collect::<Vec<_>>()
+    );
+    assert_eq!(
+        runtime.pending_startup_auto_resume_sessions[0].session.id,
+        "session-checkpoint"
+    );
+    assert_eq!(
+        store
+            .load("recovery-checkpoint")
+            .expect("load recovery")
+            .expect("recovery")
+            .lifecycle,
+        gwt_core::recovery::RecoveryLifecycle::Attention
+    );
+    assert!(
+        store
+            .load("recovery-checkpoint")
+            .expect("reload queued recovery")
+            .expect("queued recovery")
+            .recovery_lease
+            .is_none(),
+        "queue construction must remain read-only until frontend launch readiness"
+    );
+    runtime.handle_frontend_event(
+        "client-1".to_string(),
+        FrontendEvent::StartupAutoResumeReady {
+            bounds: canvas_bounds(),
+        },
+    );
+    let claimed = store
+        .load("recovery-checkpoint")
+        .expect("reload recovery")
+        .expect("claimed recovery");
+    assert!(
+        claimed
+            .recovery_lease
+            .as_ref()
+            .is_some_and(|lease| lease.holder_id.starts_with("startup:")),
+        "semantic startup continuation must hold the durable recovery lease"
+    );
+    assert!(
+        runtime.pending_provider_root_claims.is_empty(),
+        "checkpoint continuation must not claim an unavailable provider root"
+    );
+    assert!(store
+        .prepared_successor_for_source("recovery-checkpoint")
+        .expect("load checkpoint successor")
+        .is_some());
+    assert!(
+        worktree.is_dir(),
+        "queueing must preserve the Intake worktree"
+    );
+}
+
+#[test]
+fn app_runtime_startup_missing_checkpoint_context_marks_attention_without_launch() {
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedEnvVar::set("HOME", temp.path());
+    let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+    let repo = temp.path().join("repo");
+    init_git_clone_with_origin(&repo);
+    let worktree = temp.path().join(".intake-missing-context");
+    gwt_git::WorktreeManager::new(&repo)
+        .create_detached("HEAD", &worktree)
+        .expect("create Intake worktree");
+
+    let mut persisted = empty_workspace_state();
+    let mut placeholder = sample_window(
+        "agent-missing-context",
+        WindowPreset::Agent,
+        WindowProcessStatus::Stopped,
+    );
+    placeholder.agent_id = Some("codex".to_string());
+    placeholder.session_id = Some("session-missing-context".to_string());
+    persisted.windows.push(placeholder);
+    persisted.next_z_index = 2;
+    let tab = ProjectTabRuntime {
+        id: "tab-missing-context".to_string(),
+        title: "Missing checkpoint context".to_string(),
+        project_root: repo.clone(),
+        kind: ProjectKind::Git,
+        workspace: WindowCanvasState::from_persisted(persisted),
+        migration_pending: false,
+        main_worktree_root_cache: std::sync::Arc::new(std::sync::OnceLock::new()),
+    };
+    let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-missing-context"));
+    let mut session = gwt_agent::Session::new(&worktree, "", gwt_agent::AgentId::Codex);
+    session.id = "session-missing-context".to_string();
+    session.project_state_root = Some(repo.clone());
+    session.recovery_id = Some("recovery-missing-context".to_string());
+    session.session_kind = Some(gwt_skills::SessionKind::Intake);
+    session.is_ephemeral = true;
+    session.ephemeral_base_ref = Some("origin/develop".to_string());
+    session.agent_session_id = None;
+    session.restore_window_on_startup = true;
+    session
+        .save(&runtime.sessions_dir)
+        .expect("save source Session");
+    let store = create_recovery_for_session_test(&repo, &session, "");
+
+    runtime.bootstrap();
+
+    assert!(runtime.pending_startup_auto_resume_sessions.is_empty());
+    let record = store
+        .load("recovery-missing-context")
+        .expect("load recovery")
+        .expect("recovery");
+    assert_eq!(
+        record.lifecycle,
+        gwt_core::recovery::RecoveryLifecycle::Attention
+    );
+    assert!(record
+        .lifecycle_reason
+        .as_deref()
+        .is_some_and(|reason| reason.contains("context")));
+    let source =
+        gwt_agent::Session::load(&runtime.sessions_dir.join("session-missing-context.toml"))
+            .expect("load source Session");
+    assert!(source.restore_window_on_startup);
+    assert!(worktree.is_dir(), "Attention must preserve Intake worktree");
 }
 
 // SPEC-1921 Phase 65 (T336/T337): an exact auto-resume candidate must not be
@@ -10720,7 +13367,7 @@ fn app_runtime_startup_auto_resume_uses_centered_stack_bounds() {
         },
     );
 
-    let geometries = runtime.tabs[0]
+    let mut geometries = runtime.tabs[0]
         .workspace
         .persisted()
         .windows
@@ -10728,6 +13375,12 @@ fn app_runtime_startup_auto_resume_uses_centered_stack_bounds() {
         .filter(|window| window.preset == WindowPreset::Agent)
         .map(|window| window.geometry.clone())
         .collect::<Vec<_>>();
+    geometries.extend(
+        runtime
+            .pending_startup_auto_resume_sessions
+            .iter()
+            .filter_map(|pending| pending.fallback_geometry.clone()),
+    );
     assert_eq!(geometries.len(), 3);
     assert_eq!(
         geometries
@@ -11153,7 +13806,7 @@ fn app_runtime_bootstrap_does_not_auto_resume_sessions_outside_restored_tabs() {
 }
 
 #[test]
-fn app_runtime_bootstrap_auto_resume_dedupes_and_skips_stale_without_count_cap() {
+fn app_runtime_bootstrap_auto_resume_serializes_deduped_fresh_sessions() {
     let _env_lock = env_test_lock()
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -11218,14 +13871,25 @@ fn app_runtime_bootstrap_auto_resume_dedupes_and_skips_stale_without_count_cap()
 
     assert_eq!(
         runtime.pending_auto_resume_sources.len(),
-        4,
-        "startup auto-resume must restore every fresh unique exact-resumable session"
+        1,
+        "only the newest recovery may launch before its Ready barrier"
     );
-    let resumed_sources = runtime
+    assert_eq!(
+        runtime.pending_startup_auto_resume_sessions.len(),
+        3,
+        "remaining unique fresh sessions must stay queued newest-first"
+    );
+    let mut resumed_sources = runtime
         .pending_auto_resume_sources
         .values()
         .cloned()
         .collect::<std::collections::HashSet<_>>();
+    resumed_sources.extend(
+        runtime
+            .pending_startup_auto_resume_sessions
+            .iter()
+            .map(|pending| pending.session.id.clone()),
+    );
     assert!(
         !resumed_sources.contains("session-duplicate-native-one"),
         "duplicate native agent session ids must not launch twice"
@@ -11236,7 +13900,7 @@ fn app_runtime_bootstrap_auto_resume_dedupes_and_skips_stale_without_count_cap()
     );
     assert!(
         resumed_sources.contains("session-fresh-4"),
-        "startup auto-resume must not drop fresh unique sessions due to an arbitrary count cap"
+        "serial startup must not drop fresh unique sessions due to a count cap"
     );
 }
 
@@ -13037,6 +15701,115 @@ fn app_runtime_load_board_replies_with_repo_scoped_snapshot() {
             && id == &window_id
             && entries.len() == 1
             && entries[0].body == "Need review"
+    ));
+}
+
+#[test]
+fn app_runtime_load_board_surfaces_intake_checkpoint_wire_metadata_and_html() {
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedEnvVar::set("HOME", temp.path());
+    let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+    let repo = temp.path().join("repo");
+    fs::create_dir_all(&repo).expect("create repo");
+    let store = gwt_core::recovery::RecoveryStore::for_project_dir(
+        gwt_core::paths::gwt_project_dir_for_repo_path(&repo),
+    );
+    store
+        .create(
+            gwt_core::recovery::CreateRecovery {
+                recovery_id: "recovery-board-wire".to_string(),
+                session_id: "session-board-wire".to_string(),
+                repo_id: gwt_core::paths::project_scope_hash(&repo).to_string(),
+                session_kind: gwt_core::recovery::RecoverySessionKind::Intake,
+                worktree_path: repo.clone(),
+                launch_base_ref: Some("origin/develop".to_string()),
+                launch_base_oid: "5".repeat(40),
+                launch_head_oid: "5".repeat(40),
+                provider: "codex".to_string(),
+                model: None,
+                runtime: "host".to_string(),
+                initial_prompt: "Show the current Intake checkpoint".to_string(),
+                created_at: chrono::Utc::now(),
+            },
+            "create-board-wire",
+        )
+        .expect("create recovery");
+    store
+        .bind_root(
+            "recovery-board-wire",
+            gwt_core::recovery::ProviderRootBinding {
+                root_id: "root-board-wire".to_string(),
+                session_tree_id: None,
+                quality: gwt_core::recovery::BindingQuality::Verified,
+                bound_at: chrono::Utc::now(),
+            },
+            "bind-board-wire",
+        )
+        .expect("bind recovery");
+    store
+        .replace_checkpoint(
+            "recovery-board-wire",
+            "root-board-wire",
+            0,
+            gwt_core::recovery::SemanticCheckpoint {
+                summary: "Current Intake checkpoint".to_string(),
+                board_intents: vec![gwt_core::recovery::BoardMilestoneIntent {
+                    entry_id: "intake-board-wire".to_string(),
+                    title: "Intake checkpoint: Wire visibility".to_string(),
+                    body: "Current **Intake** checkpoint body".to_string(),
+                    queued_at: chrono::Utc::now(),
+                }],
+                ..Default::default()
+            },
+            "checkpoint-board-wire",
+        )
+        .expect("queue Board checkpoint");
+    gwt::cli::flush_recovery_board_outbox(&repo, &store, "recovery-board-wire")
+        .expect("publish Board checkpoint");
+
+    let tab = sample_project_tab_with_window_at(
+        "tab-1",
+        "board-1",
+        repo,
+        WindowPreset::Board,
+        WindowProcessStatus::Ready,
+    );
+    let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+    let window_id = combined_window_id("tab-1", "board-1");
+    let events = runtime.handle_frontend_event(
+        "client-1".to_string(),
+        FrontendEvent::LoadBoard {
+            id: window_id.clone(),
+            all: true,
+        },
+    );
+
+    assert!(matches!(
+        &events[..],
+        [OutboundEvent {
+            target: DispatchTarget::Client(client_id),
+            event: BackendEvent::BoardEntries {
+                id,
+                entries,
+                total_entries,
+                ..
+            },
+        }] if client_id == "client-1"
+            && id == &window_id
+            && *total_entries == 1
+            && entries.len() == 1
+            && entries[0].id == "intake-board-wire"
+            && entries[0].title.as_deref() == Some("Intake checkpoint: Wire visibility")
+            && entries[0].body == "Current **Intake** checkpoint body"
+            && entries[0].body_html.as_deref().is_some_and(|html|
+                html.contains("<strong>Intake</strong>"))
+            && entries[0].origin_session_id.as_deref() == Some("session-board-wire")
+            && entries[0].origin_session_kind.as_deref() == Some("intake")
+            && entries[0].origin_recovery_id.as_deref() == Some("recovery-board-wire")
+            && entries[0].origin_branch.is_none()
     ));
 }
 

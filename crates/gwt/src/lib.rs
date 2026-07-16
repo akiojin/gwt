@@ -7,6 +7,7 @@ pub mod board_remote;
 pub mod branch_cleanup;
 pub mod branch_list;
 pub mod cli;
+pub mod codex_bridge;
 pub mod custom_agents_dispatch;
 pub mod custom_agents_service;
 #[cfg(unix)]

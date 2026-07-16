@@ -245,7 +245,7 @@ pub(super) fn run<E: CliEnv>(
 /// waiting for their file watcher to fire. Errors are logged at debug
 /// level and ignored — local file is the source of truth.
 #[cfg(unix)]
-fn publish_board_change(project_root: &std::path::Path, entries_count: usize) {
+pub(crate) fn publish_board_change(project_root: &std::path::Path, entries_count: usize) {
     // CLI path runs in a short-lived process: `board.post`
     // returns to the shell immediately, so a detached publish thread
     // would be killed before it finishes the connect/publish/ack
@@ -270,7 +270,7 @@ fn publish_board_change(project_root: &std::path::Path, entries_count: usize) {
 }
 
 #[cfg(not(unix))]
-fn publish_board_change(_project_root: &std::path::Path, _entries_count: usize) {
+pub(crate) fn publish_board_change(_project_root: &std::path::Path, _entries_count: usize) {
     // Daemon publishing is gated on Unix; CLI continues to drive the
     // local file path on other platforms.
 }

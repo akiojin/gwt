@@ -191,6 +191,7 @@ impl AppRuntime {
         match gwt::board_provider::post_entry(&tab.project_root, entry) {
             Ok(snapshot) => {
                 publish_board_change(&tab.project_root, snapshot.board.entries.len());
+                let total_entries = snapshot.board.total_entries;
                 let mut entries = snapshot.board.entries;
                 // Capture the milestone entry before attaching the serialize-only
                 // `body_html`, so workspace milestone persistence stays clean.
@@ -201,6 +202,7 @@ impl AppRuntime {
                     BackendEvent::BoardEntries {
                         id,
                         entries,
+                        total_entries,
                         has_more_before: snapshot.board.has_more_before,
                     },
                 )];
@@ -559,6 +561,7 @@ impl AppRuntime {
         };
         match snapshot_result {
             Ok(snapshot) => {
+                let total_entries = snapshot.board.total_entries;
                 let mut entries = snapshot.board.entries;
                 attach_board_body_html(&mut entries);
                 vec![OutboundEvent::reply(
@@ -566,6 +569,7 @@ impl AppRuntime {
                     BackendEvent::BoardEntries {
                         id: id.to_string(),
                         entries,
+                        total_entries,
                         has_more_before: snapshot.board.has_more_before,
                     },
                 )]
@@ -712,11 +716,13 @@ impl AppRuntime {
                         .map(|snapshot| snapshot.board)
                         .unwrap_or_else(|_| snapshot.board.clone())
                 };
+                let total_entries = board.total_entries;
                 let mut entries = board.entries;
                 attach_board_body_html(&mut entries);
                 events.push(OutboundEvent::broadcast(BackendEvent::BoardEntries {
                     id: window_id,
                     entries,
+                    total_entries,
                     has_more_before: board.has_more_before,
                 }));
             }

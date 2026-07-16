@@ -163,6 +163,176 @@ pub enum WorkspaceResumeSource {
     Journal,
 }
 
+/// Explicit user actions exposed by the Recovery Center.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RecoveryCenterAction {
+    Focus,
+    ConfirmResume,
+    ContinueCheckpoint,
+    StartFresh,
+    OpenBoard,
+    Details,
+    Discard,
+}
+
+impl RecoveryCenterAction {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Focus => "focus",
+            Self::ConfirmResume => "confirm_resume",
+            Self::ContinueCheckpoint => "continue_checkpoint",
+            Self::StartFresh => "start_fresh",
+            Self::OpenBoard => "open_board",
+            Self::Details => "details",
+            Self::Discard => "discard",
+        }
+    }
+}
+
+/// Opaque, process-scoped input for one Recovery Center action.
+///
+/// Durable recovery ids, generations, and provider thread ids deliberately
+/// stay behind the backend boundary. The action handle binds those values to
+/// the current process and rendered generation.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub struct RecoveryCenterActionRequest {
+    pub action_handle: String,
+    pub action: RecoveryCenterAction,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider_choice_handle: Option<String>,
+}
+
+/// One opaque provider-session choice for an ambiguous exact resume.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub struct RecoveryCenterProviderChoice {
+    pub choice_handle: String,
+    pub label: String,
+    pub evidence_count: usize,
+}
+
+/// Public-safe read-side DTO for one project-scoped recovery candidate.
+///
+/// This projection intentionally contains no raw prompt, checkpoint, root
+/// input, absolute path, provider thread id, recovery id, session id, or claim
+/// capability. Private launch material lives only in the runtime's internal
+/// recovery types.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub struct RecoveryCenterCandidate {
+    pub action_handle: String,
+    #[serde(rename = "kind", alias = "session_kind")]
+    pub session_kind: gwt_core::recovery::RecoverySessionKind,
+    pub lifecycle: gwt_core::recovery::RecoveryLifecycle,
+    pub attention_required: bool,
+    pub purpose_preview: String,
+    pub worktree_name: String,
+    pub worktree_available: bool,
+    pub launch_base_ref: Option<String>,
+    pub provider: String,
+    pub model: Option<String>,
+    pub runtime: String,
+    pub provider_binding_quality: Option<gwt_core::recovery::BindingQuality>,
+    #[serde(default)]
+    pub provider_choices: Vec<RecoveryCenterProviderChoice>,
+    pub checkpoint_revision: u64,
+    #[serde(rename = "coverage", alias = "checkpoint_coverage")]
+    pub checkpoint_coverage: gwt_core::recovery::CheckpointCoverage,
+    pub last_checkpoint_at: Option<String>,
+    pub capture_health: RecoveryCaptureHealth,
+    pub board_pending: usize,
+    pub board_delivery_failed: bool,
+    pub exact_available: bool,
+    pub exact_ambiguous: bool,
+    /// Curated, bounded display metadata. Producers must never copy arbitrary
+    /// provider/store error text into this map.
+    pub details: std::collections::BTreeMap<String, String>,
+    pub available_actions: Vec<RecoveryCenterAction>,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
+/// Project-level Recovery Center snapshot. Every candidate comes from the
+/// same project-scoped RecoveryStore.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub struct RecoveryCenterView {
+    pub project_name: String,
+    pub attention_only: bool,
+    pub candidates: Vec<RecoveryCenterCandidate>,
+}
+
+/// Launch behavior requested after a Recovery Center confirmation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RecoveryCenterLaunchMode {
+    ConfirmResume,
+    ContinueCheckpoint,
+    StartFresh,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RecoveryCaptureHealth {
+    Healthy,
+    Degraded,
+    Unavailable,
+}
+
+/// Public-safe successful backend result for a Recovery Center action.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum RecoveryCenterActionResult {
+    Focus {
+        action_handle: String,
+        accepted: bool,
+        window_id: String,
+    },
+    LaunchRequested {
+        action_handle: String,
+        accepted: bool,
+        mode: RecoveryCenterLaunchMode,
+    },
+    OpenBoard {
+        action_handle: String,
+        accepted: bool,
+        board_entry_ids: Vec<String>,
+    },
+    Details {
+        action_handle: String,
+        accepted: bool,
+        candidate: Box<RecoveryCenterCandidate>,
+    },
+    Discarded {
+        action_handle: String,
+        accepted: bool,
+        purged_at: String,
+    },
+}
+
+/// Stable machine-readable Recovery Center error classification.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RecoveryCenterErrorCode {
+    NoActiveProject,
+    NotFound,
+    StaleCandidate,
+    ActionUnavailable,
+    WorktreeUnavailable,
+    Store,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub struct RecoveryCenterError {
+    pub action_handle: Option<String>,
+    pub action: Option<RecoveryCenterAction>,
+    pub code: RecoveryCenterErrorCode,
+    pub message: String,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 #[serde(tag = "source", rename_all = "snake_case")]
 pub enum FileAttachment {
@@ -280,6 +450,12 @@ pub enum FrontendEvent {
         rows: u16,
     },
     ListWindows,
+    ListRecoveryCenter,
+    RecoveryCenterAction {
+        request: RecoveryCenterActionRequest,
+        #[serde(default)]
+        bounds: Option<WindowGeometry>,
+    },
     UpdateWindowGeometry {
         id: String,
         geometry: WindowGeometry,
@@ -1449,6 +1625,15 @@ pub enum BackendEvent {
     WindowList {
         windows: Vec<PersistedWindowState>,
     },
+    RecoveryCenterState {
+        center: RecoveryCenterView,
+    },
+    RecoveryCenterActionResult {
+        result: RecoveryCenterActionResult,
+    },
+    RecoveryCenterError {
+        error: RecoveryCenterError,
+    },
     ImprovementCandidates {
         candidates: Vec<serde_json::Value>,
     },
@@ -1626,6 +1811,8 @@ pub enum BackendEvent {
     BoardEntries {
         id: String,
         entries: Vec<BoardEntry>,
+        #[serde(default)]
+        total_entries: usize,
         #[serde(default)]
         has_more_before: bool,
     },
@@ -2159,6 +2346,21 @@ pub const BACKEND_EVENT_POLICIES: &[BackendEventPolicy] = &[
         BackendEventBackpressurePolicy::LatestWins,
     ),
     BackendEventPolicy::new(
+        "recovery_center_state",
+        BackendEventDeliveryClass::Snapshot,
+        BackendEventBackpressurePolicy::ClientScopedSnapshot,
+    ),
+    BackendEventPolicy::new(
+        "recovery_center_action_result",
+        BackendEventDeliveryClass::Snapshot,
+        BackendEventBackpressurePolicy::ClientScopedSnapshot,
+    ),
+    BackendEventPolicy::new(
+        "recovery_center_error",
+        BackendEventDeliveryClass::Error,
+        BackendEventBackpressurePolicy::FailOpenError,
+    ),
+    BackendEventPolicy::new(
         "improvement_candidates",
         BackendEventDeliveryClass::IdempotentLatest,
         BackendEventBackpressurePolicy::LatestWins,
@@ -2615,6 +2817,9 @@ impl BackendEvent {
             BackendEvent::WindowCanvasState { .. } => "workspace_state",
             BackendEvent::ActiveWorkProjection { .. } => "active_work_projection",
             BackendEvent::WindowList { .. } => "window_list",
+            BackendEvent::RecoveryCenterState { .. } => "recovery_center_state",
+            BackendEvent::RecoveryCenterActionResult { .. } => "recovery_center_action_result",
+            BackendEvent::RecoveryCenterError { .. } => "recovery_center_error",
             BackendEvent::ImprovementCandidates { .. } => "improvement_candidates",
             BackendEvent::ImprovementActionResult { .. } => "improvement_action_result",
             BackendEvent::ImprovementActionError { .. } => "improvement_action_error",
@@ -2763,6 +2968,7 @@ mod tests {
             AuthorKind, BoardEntry, BoardEntryKind, BoardMention, BoardMentionTargetKind,
         },
         logging::{LogEvent, LogLevel},
+        recovery::{BindingQuality, CheckpointCoverage, RecoveryLifecycle, RecoverySessionKind},
     };
     use serde_json::Value;
 
@@ -2779,8 +2985,134 @@ mod tests {
         BackendEventBackpressurePolicy, BackendEventDeliveryClass, BranchEntriesPhase,
         FrontendEvent, IndexSearchMatchMode, IndexSearchResult, IndexSearchScope,
         IndexSearchTarget, ProfileEntryView, ProfileEnvEntryView, ProfileSnapshotView,
+        RecoveryCaptureHealth, RecoveryCenterAction, RecoveryCenterActionResult,
+        RecoveryCenterCandidate, RecoveryCenterLaunchMode, RecoveryCenterProviderChoice,
         UiTracePayload, BACKEND_EVENT_POLICIES,
     };
+
+    #[test]
+    fn recovery_center_protocol_uses_snake_case_ui_contract() {
+        let actions = [
+            (RecoveryCenterAction::Focus, "focus"),
+            (RecoveryCenterAction::ConfirmResume, "confirm_resume"),
+            (
+                RecoveryCenterAction::ContinueCheckpoint,
+                "continue_checkpoint",
+            ),
+            (RecoveryCenterAction::StartFresh, "start_fresh"),
+            (RecoveryCenterAction::OpenBoard, "open_board"),
+            (RecoveryCenterAction::Details, "details"),
+            (RecoveryCenterAction::Discard, "discard"),
+        ];
+        for (action, expected) in actions {
+            assert_eq!(
+                serde_json::to_value(action).expect("serialize recovery action"),
+                serde_json::json!(expected)
+            );
+            assert_eq!(action.as_str(), expected);
+        }
+
+        let event = serde_json::from_value::<FrontendEvent>(serde_json::json!({
+            "kind": "recovery_center_action",
+            "request": {
+                "action_handle": "rc1_opaque",
+                "action": "continue_checkpoint"
+            },
+            "bounds": {
+                "x": 12.0,
+                "y": 24.0,
+                "width": 1200.0,
+                "height": 800.0
+            }
+        }))
+        .expect("deserialize Recovery Center action");
+        assert!(matches!(
+            event,
+            FrontendEvent::RecoveryCenterAction { request, bounds }
+                if request.action_handle == "rc1_opaque"
+                    && request.action == RecoveryCenterAction::ContinueCheckpoint
+                    && bounds
+                        .as_ref()
+                        .is_some_and(|bounds| bounds.width == 1200.0 && bounds.height == 800.0)
+        ));
+
+        let candidate = RecoveryCenterCandidate {
+            action_handle: "rc1_opaque".to_string(),
+            session_kind: RecoverySessionKind::Intake,
+            lifecycle: RecoveryLifecycle::Attention,
+            attention_required: true,
+            purpose_preview: "Investigate recovery…".to_string(),
+            worktree_name: ".intake-7".to_string(),
+            worktree_available: true,
+            launch_base_ref: Some("origin/develop".to_string()),
+            provider: "Codex".to_string(),
+            model: Some("gpt-5".to_string()),
+            runtime: "host".to_string(),
+            provider_binding_quality: Some(BindingQuality::Inferred),
+            provider_choices: vec![RecoveryCenterProviderChoice {
+                choice_handle: "rp1_opaque".to_string(),
+                label: "Candidate 1".to_string(),
+                evidence_count: 2,
+            }],
+            checkpoint_revision: 2,
+            checkpoint_coverage: CheckpointCoverage::Stale,
+            last_checkpoint_at: Some("2026-07-16T00:00:00Z".to_string()),
+            capture_health: RecoveryCaptureHealth::Degraded,
+            board_pending: 1,
+            board_delivery_failed: true,
+            exact_available: false,
+            exact_ambiguous: true,
+            details: std::collections::BTreeMap::new(),
+            available_actions: vec![RecoveryCenterAction::Details],
+            created_at: "2026-07-16T00:00:00Z".to_string(),
+            updated_at: "2026-07-16T00:01:00Z".to_string(),
+        };
+        let value = serde_json::to_value(candidate).expect("serialize recovery candidate");
+        assert_eq!(value["kind"], "intake");
+        assert_eq!(value["attention_required"], true);
+        assert_eq!(value["coverage"], "stale");
+        assert_eq!(value["capture_health"], "degraded");
+        assert_eq!(value["board_pending"], 1);
+        assert_eq!(value["board_delivery_failed"], true);
+        assert_eq!(value["exact_available"], false);
+        assert!(value.get("session_kind").is_none());
+        assert!(value.get("checkpoint_coverage").is_none());
+
+        let result = RecoveryCenterActionResult::LaunchRequested {
+            action_handle: "rc1_opaque".to_string(),
+            accepted: true,
+            mode: RecoveryCenterLaunchMode::ConfirmResume,
+        };
+        let wire = serde_json::to_string(&result).expect("serialize safe launch result");
+        assert_eq!(
+            serde_json::from_str::<Value>(&wire).unwrap(),
+            serde_json::json!({
+                "kind": "launch_requested",
+                "action_handle": "rc1_opaque",
+                "accepted": true,
+                "mode": "confirm_resume"
+            })
+        );
+        for forbidden in [
+            "recovery_id",
+            "session_id",
+            "generation",
+            "worktree_path",
+            "launch_base_oid",
+            "launch_head_oid",
+            "initial_prompt",
+            "continuation_prompt",
+            "provider_root_id",
+            "provider_root_claim_token",
+            "checkpoint\"",
+            "latest_root_input",
+        ] {
+            assert!(
+                !wire.contains(forbidden),
+                "public launch result exposed forbidden field {forbidden}: {wire}"
+            );
+        }
+    }
 
     #[test]
     fn pane_send_input_deserializes_session_scoped_injection_contract() {
@@ -4014,6 +4346,7 @@ mod tests {
                 vec!["coordination".to_string()],
                 vec!["2018".to_string()],
             )],
+            total_entries: 1,
             has_more_before: false,
         };
 
@@ -4032,6 +4365,7 @@ mod tests {
             Value::String("coordination".to_string()),
             "expected board snapshot payload to keep related topics on the wire",
         );
+        assert_eq!(value["total_entries"], Value::from(1));
     }
 
     #[test]
@@ -4052,6 +4386,7 @@ mod tests {
         let event = BackendEvent::BoardEntries {
             id: "board-1".to_string(),
             entries: vec![entry],
+            total_entries: 1,
             has_more_before: false,
         };
 

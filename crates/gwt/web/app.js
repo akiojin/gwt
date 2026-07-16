@@ -33,6 +33,7 @@
       import { createTerminalAttachments } from "/terminal-attachments.js";
       import { createProjectIndexSearchSurface } from "/project-index-search-surface.js";
       import { createWorkspaceResumePickerController } from "/workspace-resume-picker-modal.js";
+      import { createRecoveryCenterController } from "/recovery-center-modal.js";
       import { createLaunchPendingController } from "/launch-pending-controller.js";
       import { createConnectionOverlay } from "/connection-overlay.js";
       import { createUpdateCtaController } from "/update-cta.js";
@@ -1091,6 +1092,39 @@
         return url.toString();
       }
 
+      // The process-local browser capability arrives only in the URL
+      // fragment, which is never sent in HTTP requests or access logs. Remove
+      // it from visible history immediately, then exchange it over a
+      // same-origin POST for an HttpOnly/SameSite session cookie used by /ws.
+      let frontendBootstrapCapability = (() => {
+        const fragment = new URLSearchParams(window.location.hash.replace(/^#/, ""));
+        const capability = fragment.get("gwt-auth") || "";
+        if (capability) {
+          const clean = `${window.location.pathname}${window.location.search}`;
+          window.history.replaceState(window.history.state, document.title, clean);
+        }
+        return capability;
+      })();
+      let frontendSessionPromise = null;
+      let socketConnectPending = false;
+
+      function ensureFrontendSession() {
+        if (!frontendBootstrapCapability) return Promise.resolve();
+        if (frontendSessionPromise) return frontendSessionPromise;
+        frontendSessionPromise = fetch("/internal/frontend-session", {
+          method: "POST",
+          credentials: "same-origin",
+          headers: { "x-gwt-bootstrap-token": frontendBootstrapCapability },
+        }).then((response) => {
+          if (!response.ok) throw new Error(`Frontend authentication failed (${response.status}).`);
+          frontendBootstrapCapability = "";
+        }).catch((error) => {
+          frontendSessionPromise = null;
+          throw error;
+        });
+        return frontendSessionPromise;
+      }
+
       function handleSocketOpen() {
         socketReceiveDispatcherGeneration += 1;
         const ownGeneration = socketReceiveDispatcherGeneration;
@@ -1108,6 +1142,7 @@
         });
         setConnectionState(true);
         send({ kind: "frontend_ready" });
+        send({ kind: "list_recovery_center" });
         while (pendingMessages.length > 0) {
           socket.send(JSON.stringify(pendingMessages.shift()));
         }
@@ -1186,12 +1221,25 @@
       }
 
       function connectSocket() {
-        if (socket && socket.readyState <= WebSocket.OPEN) {
+        if (socketConnectPending || (socket && socket.readyState <= WebSocket.OPEN)) {
           return;
         }
-        socket = new WebSocket(websocketUrl());
+        socketConnectPending = true;
         setConnectionState(false);
-        installSocketEventHandlers(socket);
+        ensureFrontendSession()
+          .then(() => {
+            if (socket && socket.readyState <= WebSocket.OPEN) return;
+            socket = new WebSocket(websocketUrl());
+            installSocketEventHandlers(socket);
+          })
+          .catch((error) => {
+            console.warn("gwt frontend authentication failed", error);
+            if (reconnectTimer) window.clearTimeout(reconnectTimer);
+            reconnectTimer = window.setTimeout(connectSocket, 1000);
+          })
+          .finally(() => {
+            socketConnectPending = false;
+          });
       }
 
       function emptyWorkspace() {
@@ -3468,6 +3516,7 @@
         workspaceWindowElement,
         scheduleTerminalViewportRefresh,
         TERMINAL_SELECTION_DRAG_THRESHOLD,
+        ensureFrontendSession,
       });
 
       // SPEC-2356 — xterm content stays on the Dark Operator palette even when
@@ -4098,6 +4147,7 @@
         activeProjectTab,
         visibleBounds,
         getActiveWorkProjection: () => activeWorkProjection,
+        openRecoveryCenter: () => requestRecoveryCenter(true),
       });
 
       function openIssueLaunchWizard(windowId, issueNumber) {
@@ -4203,6 +4253,84 @@
         getResumeBounds: () => visibleBounds(),
         launchPending,
       });
+
+      // Unified crash recovery surface. Startup requests the project-scoped
+      // inventory and opens only attention candidates; the command palette
+      // opens the same modal in all-candidates mode. Generation is copied from
+      // the selected snapshot so stale actions fail instead of racing a newer
+      // checkpoint.
+      const recoveryCenterCandidates = new Map();
+      let recoveryCenterManualRequest = false;
+      let recoveryCenterAutoEvaluated = false;
+
+      function requestRecoveryCenter(manual = false) {
+        recoveryCenterManualRequest = recoveryCenterManualRequest || manual;
+        send({ kind: "list_recovery_center" });
+      }
+
+      function recoveryActionFromResult(result) {
+        switch (result?.kind) {
+          case "focus":
+            return "focus";
+          case "launch_requested":
+            return result?.mode || "";
+          case "open_board":
+            return "open_board";
+          case "details":
+            return "details";
+          case "discarded":
+            return "discard";
+          default:
+            return "";
+        }
+      }
+
+      function recoveryActionHandleFromResult(result) {
+        return result?.action_handle || result?.candidate?.action_handle || "";
+      }
+
+      function applyRecoveryActionSideEffect(result) {
+        if (result?.kind === "focus") {
+          const windowData = (activeWorkspace().windows || []).find(
+            (windowEntry) => windowEntry.id === result.window_id,
+          );
+          if (windowData) frameWindow(windowData.id);
+        } else if (result?.kind === "open_board") {
+          focusOrSpawnPreset("board");
+          const entryId = Array.isArray(result.board_entry_ids) ? result.board_entry_ids[0] : null;
+          if (entryId) focusBoardEntry(entryId);
+        }
+      }
+
+      const recoveryCenter = createRecoveryCenterController({
+        modalEl: document.getElementById("recovery-center-modal"),
+        dialogEl: document.querySelector("#recovery-center-modal .modal-shell"),
+        createNode,
+        sendAction: ({ actionHandle, action, providerChoiceHandle }) => {
+          const candidate = recoveryCenterCandidates.get(actionHandle);
+          if (!candidate) {
+            throw new Error("Recovery candidate changed; refresh and try again.");
+          }
+          send({
+            kind: "recovery_center_action",
+            request: {
+              action_handle: actionHandle,
+              action,
+              provider_choice_handle: providerChoiceHandle || undefined,
+            },
+            bounds: visibleBounds(),
+          });
+        },
+      });
+
+      if (window.__operatorShell?.palette) {
+        window.__operatorShell.palette.register({
+          id: "recovery-center",
+          label: "Recovery Center",
+          group: "Sessions",
+          handler: () => requestRecoveryCenter(true),
+        });
+      }
 
       // SPEC-3064 Phase 3 (E6b): the Branches window & cleanup surface
       // (branch list state map, branch rows/list rendering, cleanup modal
@@ -5520,6 +5648,50 @@
             agentKanbanPendingPlacement.clear();
             applyLaunchWizardOpenErrorEvent(event);
             break;
+          case "recovery_center_state": {
+            const candidates = Array.isArray(event.center?.candidates)
+              ? event.center.candidates
+              : [];
+            recoveryCenterCandidates.clear();
+            for (const candidate of candidates) {
+              if (candidate?.action_handle) {
+                recoveryCenterCandidates.set(candidate.action_handle, candidate);
+              }
+            }
+            recoveryCenter.setCandidates(candidates);
+            if (recoveryCenterManualRequest) {
+              recoveryCenterManualRequest = false;
+              recoveryCenter.open(candidates);
+            } else if (!recoveryCenterAutoEvaluated) {
+              recoveryCenterAutoEvaluated = true;
+              if (candidates.some((candidate) => candidate?.attention_required === true)) {
+                recoveryCenter.openAttention(event.center?.candidates || []);
+              }
+            }
+            break;
+          }
+          case "recovery_center_action_result": {
+            const result = event.result || {};
+            applyRecoveryActionSideEffect(result);
+            recoveryCenter.handleActionResult({
+              action_handle: recoveryActionHandleFromResult(result),
+              action: recoveryActionFromResult(result),
+              ok: true,
+              resolved: result.kind === "discarded",
+              close: ["focus", "launch_requested", "open_board"].includes(result.kind),
+            });
+            requestRecoveryCenter(false);
+            break;
+          }
+          case "recovery_center_error":
+            recoveryCenter.handleActionResult({
+              action_handle: event.error?.action_handle,
+              action: event.error?.action,
+              ok: false,
+              message: event.error?.message || "Recovery request failed.",
+            });
+            requestRecoveryCenter(false);
+            break;
           // SPEC-2359 US-42 — Resume Picker dispatcher slots.
           case "workspace_resumable_agents":
             workspaceResumePicker.handleAgentsList(event);
@@ -6573,6 +6745,9 @@
             frontendUnits.socketTransport.send({
               kind: "open_intake_session",
             });
+            return;
+          case "recovery-center":
+            requestRecoveryCenter(true);
             return;
           case "stop-all-windows":
             requestStopAllWindows();

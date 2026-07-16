@@ -12,8 +12,8 @@ use axum::{
         Query, Request, State,
     },
     http::{
-        header::{AUTHORIZATION, HOST, ORIGIN, USER_AGENT},
-        HeaderMap, StatusCode,
+        header::{AUTHORIZATION, COOKIE, HOST, ORIGIN, SET_COOKIE, USER_AGENT},
+        HeaderMap, HeaderValue, StatusCode,
     },
     middleware::{self, Next},
     response::{Html, IntoResponse, Response},
@@ -53,6 +53,9 @@ const LOSSLESS_HARD_CAP: usize = 8192;
 /// reaches the cap. SPEC-1942 US-14 follow-up review: previous unbounded Vec
 /// would grow without limit in long-running browser-server sessions.
 const ACCESS_LOG_RING_CAPACITY: usize = 1024;
+const FRONTEND_BOOTSTRAP_FRAGMENT_KEY: &str = "gwt-auth";
+const FRONTEND_BOOTSTRAP_HEADER: &str = "x-gwt-bootstrap-token";
+const FRONTEND_SESSION_COOKIE_PREFIX: &str = "gwt_frontend_session_";
 
 /// One captured HTTP / WebSocket access event. Emitted both as
 /// `tracing::info!(target: "gwt_access", ...)` (or `debug!` for `/healthz`)
@@ -508,6 +511,9 @@ struct ServerState {
     proxy: AppEventProxy,
     clients: ClientHub,
     hook_forward_token: String,
+    frontend_bootstrap_token: String,
+    frontend_session_cookie_name: String,
+    frontend_session_token: String,
     attachment_upload_token: String,
     attachment_uploads: AttachmentUploadStore,
     pty_writers: PtyWriterRegistry,
@@ -519,6 +525,7 @@ struct ServerState {
 
 pub struct EmbeddedServer {
     url: String,
+    browser_url: String,
     hook_forward_token: String,
     shutdown_tx: Option<oneshot::Sender<()>>,
     // Same rationale as `ServerState::access_log`: tests read it via the
@@ -573,6 +580,15 @@ impl EmbeddedServer {
         let addr = listener.local_addr()?;
         let (shutdown_tx, shutdown_rx) = oneshot::channel();
         let hook_forward_token = Uuid::new_v4().to_string();
+        let frontend_bootstrap_token = format!("{}{}", Uuid::new_v4(), Uuid::new_v4());
+        // Cookies are host-scoped rather than port-scoped. A process-unique
+        // name prevents two local/LAN GWT instances on different ports from
+        // overwriting each other's authenticated WebSocket session.
+        let frontend_session_cookie_name = format!(
+            "{FRONTEND_SESSION_COOKIE_PREFIX}{}",
+            Uuid::new_v4().simple()
+        );
+        let frontend_session_token = format!("{}{}", Uuid::new_v4(), Uuid::new_v4());
         let attachment_upload_token = Uuid::new_v4().to_string();
         let access_log = AccessLogSink::default();
 
@@ -586,18 +602,22 @@ impl EmbeddedServer {
             .route("/oauth/callback", get(oauth_callback_handler))
             .route(
                 "/internal/attachment-upload-token",
-                get(attachment_upload_token_handler),
+                post(attachment_upload_token_handler),
             )
             .route(
                 "/internal/attachments/upload",
                 post(attachment_upload_handler),
             )
             .route("/internal/hook-live", post(hook_live_handler))
+            .route("/internal/frontend-session", post(frontend_session_handler))
             .route("/ws", get(websocket_handler))
             .with_state(ServerState {
                 proxy,
                 clients,
                 hook_forward_token: hook_forward_token.clone(),
+                frontend_bootstrap_token: frontend_bootstrap_token.clone(),
+                frontend_session_cookie_name,
+                frontend_session_token,
                 attachment_upload_token,
                 attachment_uploads,
                 pty_writers,
@@ -661,8 +681,12 @@ impl EmbeddedServer {
             }
         });
 
+        let url = format!("http://{}:{}/", display_host(addr.ip()), addr.port());
+        let browser_url =
+            format!("{url}#{FRONTEND_BOOTSTRAP_FRAGMENT_KEY}={frontend_bootstrap_token}");
         Ok(Self {
-            url: format!("http://{}:{}/", display_host(addr.ip()), addr.port()),
+            url,
+            browser_url,
             hook_forward_token,
             shutdown_tx: Some(shutdown_tx),
             access_log,
@@ -678,6 +702,13 @@ impl EmbeddedServer {
 
     pub(super) fn url(&self) -> &str {
         &self.url
+    }
+
+    /// Browser entrypoint containing a process-local capability in the URL
+    /// fragment. Fragments never cross the HTTP/access-log boundary; app.js
+    /// exchanges it once for an HttpOnly same-site session cookie.
+    pub(super) fn browser_url(&self) -> &str {
+        &self.browser_url
     }
 
     pub(super) fn shutdown(&mut self) {
@@ -789,7 +820,7 @@ async fn oauth_callback_handler(
     }
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Serialize)]
 struct AttachmentUploadTokenResponse {
     token: String,
 }
@@ -809,10 +840,20 @@ struct AttachmentUploadResponse {
     size: u64,
 }
 
-async fn attachment_upload_token_handler(State(state): State<ServerState>) -> impl IntoResponse {
+async fn attachment_upload_token_handler(
+    headers: HeaderMap,
+    State(state): State<ServerState>,
+) -> Response {
+    if !websocket_origin_authorized(&headers) {
+        return StatusCode::FORBIDDEN.into_response();
+    }
+    if !frontend_session_cookie_authorized(&headers, &state) {
+        return StatusCode::UNAUTHORIZED.into_response();
+    }
     Json(AttachmentUploadTokenResponse {
         token: state.attachment_upload_token,
     })
+    .into_response()
 }
 
 async fn attachment_upload_handler(
@@ -824,10 +865,13 @@ async fn attachment_upload_handler(
     if !websocket_origin_authorized(&headers) {
         return StatusCode::FORBIDDEN.into_response();
     }
+    if !frontend_session_cookie_authorized(&headers, &state) {
+        return StatusCode::UNAUTHORIZED.into_response();
+    }
     let authorized = headers
         .get("x-gwt-upload-token")
         .and_then(|value| value.to_str().ok())
-        .is_some_and(|token| token == state.attachment_upload_token);
+        .is_some_and(|token| constant_time_token_eq(token, &state.attachment_upload_token));
     if !authorized {
         return StatusCode::UNAUTHORIZED.into_response();
     }
@@ -1021,7 +1065,36 @@ async fn websocket_handler(
     if !websocket_origin_authorized(&headers) {
         return StatusCode::FORBIDDEN.into_response();
     }
+    if !websocket_session_authorized(&headers, &state) {
+        return StatusCode::UNAUTHORIZED.into_response();
+    }
     ws.on_upgrade(move |socket| client_session(socket, state))
+}
+
+async fn frontend_session_handler(
+    headers: HeaderMap,
+    State(state): State<ServerState>,
+) -> Response {
+    if !websocket_origin_authorized(&headers) {
+        return StatusCode::FORBIDDEN.into_response();
+    }
+    let authorized = headers
+        .get(FRONTEND_BOOTSTRAP_HEADER)
+        .and_then(|value| value.to_str().ok())
+        .is_some_and(|token| constant_time_token_eq(token, &state.frontend_bootstrap_token));
+    if !authorized {
+        return StatusCode::UNAUTHORIZED.into_response();
+    }
+    let cookie = format!(
+        "{}={}; HttpOnly; SameSite=Strict; Path=/",
+        state.frontend_session_cookie_name, state.frontend_session_token
+    );
+    let Ok(cookie) = HeaderValue::from_str(&cookie) else {
+        return StatusCode::INTERNAL_SERVER_ERROR.into_response();
+    };
+    let mut response = StatusCode::NO_CONTENT.into_response();
+    response.headers_mut().insert(SET_COOKIE, cookie);
+    response
 }
 
 async fn hook_live_handler(
@@ -1211,12 +1284,12 @@ pub fn hook_forward_authorized(headers: &HeaderMap, expected_token: &str) -> boo
         .get(AUTHORIZATION)
         .and_then(|value| value.to_str().ok())
         .and_then(|value| value.strip_prefix("Bearer "))
-        .is_some_and(|token| token == expected_token)
+        .is_some_and(|token| constant_time_token_eq(token, expected_token))
 }
 
 pub fn websocket_origin_authorized(headers: &HeaderMap) -> bool {
     let Some(origin) = headers.get(ORIGIN) else {
-        return true;
+        return false;
     };
     let Some(host) = headers.get(HOST) else {
         return false;
@@ -1229,7 +1302,38 @@ pub fn websocket_origin_authorized(headers: &HeaderMap) -> bool {
     };
 
     let origin = origin.trim_end_matches('/');
-    origin == format!("http://{host}") || origin == format!("https://{host}")
+    origin == format!("http://{host}")
+}
+
+fn websocket_session_authorized(headers: &HeaderMap, state: &ServerState) -> bool {
+    frontend_session_cookie_authorized(headers, state)
+        || hook_forward_authorized(headers, &state.hook_forward_token)
+}
+
+fn frontend_session_cookie_authorized(headers: &HeaderMap, state: &ServerState) -> bool {
+    headers
+        .get(COOKIE)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|cookies| {
+            cookies.split(';').find_map(|cookie| {
+                let (name, value) = cookie.trim().split_once('=')?;
+                (name == state.frontend_session_cookie_name).then_some(value)
+            })
+        })
+        .is_some_and(|token| constant_time_token_eq(token, &state.frontend_session_token))
+}
+
+fn constant_time_token_eq(left: &str, right: &str) -> bool {
+    if left.len() != right.len() {
+        return false;
+    }
+    left.as_bytes()
+        .iter()
+        .zip(right.as_bytes())
+        .fold(0_u8, |difference, (left, right)| {
+            difference | (left ^ right)
+        })
+        == 0
 }
 
 #[cfg(test)]
@@ -1247,7 +1351,7 @@ mod tests {
     };
 
     use axum::http::{
-        header::{HOST, ORIGIN},
+        header::{AUTHORIZATION, COOKIE, HOST, ORIGIN},
         HeaderMap,
     };
     use gwt::{BackendEvent, FrontendEvent, RuntimeHookEvent, RuntimeHookEventKind};
@@ -1258,8 +1362,9 @@ mod tests {
 
     use super::{
         handle_frontend_message, prepare_outbound, queue_class_for_kind,
-        websocket_origin_authorized, ClientHub, ClientQueue, DrainStep, EmbeddedServer, QueueClass,
-        ServerState, DRAIN_LOW_WATER, LOSSLESS_HARD_CAP, LOSSY_HIGH_WATER,
+        websocket_origin_authorized, websocket_session_authorized, ClientHub, ClientQueue,
+        DrainStep, EmbeddedServer, QueueClass, ServerState, DRAIN_LOW_WATER,
+        FRONTEND_SESSION_COOKIE_PREFIX, LOSSLESS_HARD_CAP, LOSSY_HIGH_WATER,
     };
 
     fn sample_server_state() -> (ServerState, Arc<Mutex<Vec<UserEvent>>>) {
@@ -1269,6 +1374,9 @@ mod tests {
                 proxy,
                 clients: ClientHub::default(),
                 hook_forward_token: "token".to_string(),
+                frontend_bootstrap_token: "bootstrap-token".to_string(),
+                frontend_session_cookie_name: "gwt_frontend_session_test".to_string(),
+                frontend_session_token: "frontend-token".to_string(),
                 attachment_upload_token: "upload-token".to_string(),
                 attachment_uploads: AttachmentUploadStore::in_system_temp(),
                 pty_writers: Arc::new(RwLock::new(HashMap::new())),
@@ -1276,6 +1384,31 @@ mod tests {
             },
             events,
         )
+    }
+
+    fn exchange_frontend_session(
+        client: &reqwest::blocking::Client,
+        server: &EmbeddedServer,
+    ) -> String {
+        let bootstrap_token = server
+            .browser_url()
+            .split_once("#gwt-auth=")
+            .map(|(_, token)| token)
+            .expect("browser URL bootstrap capability");
+        let response = client
+            .post(format!("{}internal/frontend-session", server.url()))
+            .header("origin", server.url().trim_end_matches('/'))
+            .header("x-gwt-bootstrap-token", bootstrap_token)
+            .send()
+            .expect("frontend session exchange");
+        assert_eq!(response.status(), HttpStatusCode::NO_CONTENT);
+        response
+            .headers()
+            .get(reqwest::header::SET_COOKIE)
+            .and_then(|value| value.to_str().ok())
+            .and_then(|cookie| cookie.split(';').next())
+            .expect("frontend session cookie")
+            .to_string()
     }
 
     fn sample_runtime_hook_event() -> RuntimeHookEvent {
@@ -1707,19 +1840,150 @@ mod tests {
     }
 
     #[test]
-    fn websocket_origin_authorized_requires_same_host_when_origin_is_present() {
+    fn websocket_origin_authorized_requires_present_same_host_origin() {
         let mut headers = HeaderMap::new();
         headers.insert(HOST, "127.0.0.1:3000".parse().expect("host header"));
-        assert!(websocket_origin_authorized(&headers));
+        assert!(!websocket_origin_authorized(&headers));
 
         headers.insert(ORIGIN, "http://127.0.0.1:3000".parse().expect("origin"));
         assert!(websocket_origin_authorized(&headers));
 
         headers.insert(ORIGIN, "https://127.0.0.1:3000".parse().expect("origin"));
-        assert!(websocket_origin_authorized(&headers));
+        assert!(!websocket_origin_authorized(&headers));
 
         headers.insert(ORIGIN, "http://evil.example:3000".parse().expect("origin"));
         assert!(!websocket_origin_authorized(&headers));
+    }
+
+    #[test]
+    fn websocket_session_requires_process_cookie_or_hook_bearer() {
+        let (state, _) = sample_server_state();
+        let mut headers = HeaderMap::new();
+        assert!(!websocket_session_authorized(&headers, &state));
+
+        headers.insert(
+            COOKIE,
+            "other=value; gwt_frontend_session_test=wrong"
+                .parse()
+                .expect("cookie"),
+        );
+        assert!(!websocket_session_authorized(&headers, &state));
+        headers.insert(
+            COOKIE,
+            "other=value; gwt_frontend_session_test=frontend-token"
+                .parse()
+                .expect("cookie"),
+        );
+        assert!(websocket_session_authorized(&headers, &state));
+
+        headers.remove(COOKIE);
+        headers.insert(
+            AUTHORIZATION,
+            "Bearer token".parse().expect("authorization"),
+        );
+        assert!(websocket_session_authorized(&headers, &state));
+    }
+
+    #[test]
+    fn embedded_frontend_exchanges_fragment_capability_for_private_process_cookie() {
+        let runtime = Runtime::new().expect("tokio runtime");
+        let (proxy, _events) = AppEventProxy::stub();
+        let mut server = EmbeddedServer::start(
+            &runtime,
+            proxy,
+            ClientHub::default(),
+            Arc::new(RwLock::new(HashMap::new())),
+            AttachmentUploadStore::in_system_temp(),
+        )
+        .expect("embedded server");
+        let browser_url = server.browser_url().to_string();
+        let (base_url, fragment) = browser_url
+            .split_once('#')
+            .expect("browser URL carries a fragment capability");
+        assert_eq!(base_url, server.url());
+        assert!(!server.url().contains("gwt-auth"));
+        let bootstrap_token = fragment
+            .strip_prefix("gwt-auth=")
+            .expect("known fragment key");
+        assert!(!bootstrap_token.is_empty());
+
+        let endpoint = format!("{}internal/frontend-session", server.url());
+        let origin = server.url().trim_end_matches('/');
+        let client = reqwest::blocking::Client::new();
+        let missing_origin = client
+            .post(&endpoint)
+            .header("x-gwt-bootstrap-token", bootstrap_token)
+            .send()
+            .expect("missing-origin exchange");
+        assert_eq!(missing_origin.status(), HttpStatusCode::FORBIDDEN);
+
+        let wrong_token = client
+            .post(&endpoint)
+            .header("origin", origin)
+            .header("x-gwt-bootstrap-token", "wrong-token")
+            .send()
+            .expect("wrong-token exchange");
+        assert_eq!(wrong_token.status(), HttpStatusCode::UNAUTHORIZED);
+
+        let exchange = || {
+            client
+                .post(&endpoint)
+                .header("origin", origin)
+                .header("x-gwt-bootstrap-token", bootstrap_token)
+                .send()
+                .expect("authorized exchange")
+        };
+        let first = exchange();
+        assert_eq!(first.status(), HttpStatusCode::NO_CONTENT);
+        let first_cookie = first
+            .headers()
+            .get(reqwest::header::SET_COOKIE)
+            .and_then(|value| value.to_str().ok())
+            .expect("session cookie")
+            .to_string();
+        assert!(first_cookie.starts_with(FRONTEND_SESSION_COOKIE_PREFIX));
+        assert!(first_cookie.contains("; HttpOnly"));
+        assert!(first_cookie.contains("; SameSite=Strict"));
+        assert!(first_cookie.contains("; Path=/"));
+        assert!(!first_cookie.contains(bootstrap_token));
+        assert!(!first_cookie.to_ascii_lowercase().contains("domain="));
+
+        // The bootstrap capability may open more than one browser client for
+        // the same process; all receive the same process-local session.
+        let second = exchange();
+        assert_eq!(second.status(), HttpStatusCode::NO_CONTENT);
+        assert_eq!(
+            second
+                .headers()
+                .get(reqwest::header::SET_COOKIE)
+                .and_then(|value| value.to_str().ok()),
+            Some(first_cookie.as_str())
+        );
+
+        assert!(server.access_log().snapshot().iter().all(|record| {
+            !record.path.contains(bootstrap_token) && !record.path.contains("gwt-auth")
+        }));
+
+        let (second_proxy, _second_events) = AppEventProxy::stub();
+        let mut restarted = EmbeddedServer::start(
+            &runtime,
+            second_proxy,
+            ClientHub::default(),
+            Arc::new(RwLock::new(HashMap::new())),
+            AttachmentUploadStore::in_system_temp(),
+        )
+        .expect("restarted embedded server");
+        assert_ne!(
+            restarted
+                .browser_url()
+                .split_once('#')
+                .map(|(_, value)| value),
+            Some(fragment),
+            "bootstrap capability rotates on every process start"
+        );
+
+        restarted.shutdown();
+        server.shutdown();
     }
 
     #[test]
@@ -1957,6 +2221,122 @@ mod tests {
     }
 
     #[test]
+    fn attachment_routes_require_same_origin_frontend_session_and_upload_capability() {
+        let runtime = Runtime::new().expect("tokio runtime");
+        let (proxy, _events) = AppEventProxy::stub();
+        let mut server = EmbeddedServer::start(
+            &runtime,
+            proxy,
+            ClientHub::default(),
+            Arc::new(RwLock::new(HashMap::new())),
+            AttachmentUploadStore::in_system_temp(),
+        )
+        .expect("embedded server");
+        let client = reqwest::blocking::Client::new();
+        let origin = server.url().trim_end_matches('/').to_string();
+        let session_cookie = exchange_frontend_session(&client, &server);
+        let token_endpoint = format!("{}internal/attachment-upload-token", server.url());
+
+        let missing_origin = client
+            .post(&token_endpoint)
+            .header("cookie", &session_cookie)
+            .send()
+            .expect("missing-origin token request");
+        assert_eq!(missing_origin.status(), HttpStatusCode::FORBIDDEN);
+
+        let foreign_origin = client
+            .post(&token_endpoint)
+            .header("origin", "http://evil.example")
+            .header("cookie", &session_cookie)
+            .send()
+            .expect("foreign-origin token request");
+        assert_eq!(foreign_origin.status(), HttpStatusCode::FORBIDDEN);
+
+        let missing_session = client
+            .post(&token_endpoint)
+            .header("origin", &origin)
+            .send()
+            .expect("missing-session token request");
+        assert_eq!(missing_session.status(), HttpStatusCode::UNAUTHORIZED);
+
+        let cookie_name = session_cookie
+            .split_once('=')
+            .map(|(name, _)| name)
+            .expect("session cookie name");
+        let wrong_session = client
+            .post(&token_endpoint)
+            .header("origin", &origin)
+            .header("cookie", format!("{cookie_name}=wrong-token"))
+            .send()
+            .expect("wrong-session token request");
+        assert_eq!(wrong_session.status(), HttpStatusCode::UNAUTHORIZED);
+
+        let token_response = client
+            .post(&token_endpoint)
+            .header("origin", &origin)
+            .header("cookie", &session_cookie)
+            .send()
+            .expect("authorized token request");
+        assert_eq!(token_response.status(), HttpStatusCode::OK);
+        let upload_token = token_response
+            .json::<serde_json::Value>()
+            .expect("token json")
+            .get("token")
+            .and_then(|value| value.as_str())
+            .expect("upload token")
+            .to_string();
+        let upload_endpoint = format!(
+            "{}internal/attachments/upload?filename=blocked.txt&size=7",
+            server.url()
+        );
+
+        let upload_missing_origin = client
+            .post(&upload_endpoint)
+            .header("cookie", &session_cookie)
+            .header("x-gwt-upload-token", &upload_token)
+            .body("blocked")
+            .send()
+            .expect("missing-origin upload");
+        assert_eq!(upload_missing_origin.status(), HttpStatusCode::FORBIDDEN);
+
+        let upload_foreign_origin = client
+            .post(&upload_endpoint)
+            .header("origin", "http://evil.example")
+            .header("cookie", &session_cookie)
+            .header("x-gwt-upload-token", &upload_token)
+            .body("blocked")
+            .send()
+            .expect("foreign-origin upload");
+        assert_eq!(upload_foreign_origin.status(), HttpStatusCode::FORBIDDEN);
+
+        let upload_missing_session = client
+            .post(&upload_endpoint)
+            .header("origin", &origin)
+            .header("x-gwt-upload-token", &upload_token)
+            .body("blocked")
+            .send()
+            .expect("missing-session upload");
+        assert_eq!(
+            upload_missing_session.status(),
+            HttpStatusCode::UNAUTHORIZED
+        );
+
+        let upload_missing_capability = client
+            .post(&upload_endpoint)
+            .header("origin", &origin)
+            .header("cookie", &session_cookie)
+            .body("blocked")
+            .send()
+            .expect("missing-upload-capability upload");
+        assert_eq!(
+            upload_missing_capability.status(),
+            HttpStatusCode::UNAUTHORIZED
+        );
+
+        server.shutdown();
+    }
+
+    #[test]
     fn embedded_server_streams_attachment_uploads_into_upload_store() {
         let runtime = Runtime::new().expect("tokio runtime");
         let (proxy, _events) = AppEventProxy::stub();
@@ -1967,8 +2347,12 @@ mod tests {
             EmbeddedServer::start(&runtime, proxy, clients, pty_writers, upload_store.clone())
                 .expect("embedded server");
         let client = reqwest::blocking::Client::new();
+        let origin = server.url().trim_end_matches('/').to_string();
+        let session_cookie = exchange_frontend_session(&client, &server);
         let token_response: serde_json::Value = client
-            .get(format!("{}internal/attachment-upload-token", server.url()))
+            .post(format!("{}internal/attachment-upload-token", server.url()))
+            .header("origin", &origin)
+            .header("cookie", &session_cookie)
             .send()
             .expect("token request")
             .json()
@@ -1984,6 +2368,8 @@ mod tests {
                 "{}internal/attachments/upload?filename=Large%20File.bin&mime_type=application%2Foctet-stream&size=12",
                 server.url()
             ))
+            .header("origin", &origin)
+            .header("cookie", &session_cookie)
             .header("x-gwt-upload-token", token)
             .body("upload-bytes")
             .send()
@@ -2024,8 +2410,12 @@ mod tests {
             EmbeddedServer::start(&runtime, proxy, clients, pty_writers, upload_store.clone())
                 .expect("embedded server");
         let client = reqwest::blocking::Client::new();
+        let origin = server.url().trim_end_matches('/').to_string();
+        let session_cookie = exchange_frontend_session(&client, &server);
         let token_response: serde_json::Value = client
-            .get(format!("{}internal/attachment-upload-token", server.url()))
+            .post(format!("{}internal/attachment-upload-token", server.url()))
+            .header("origin", &origin)
+            .header("cookie", &session_cookie)
             .send()
             .expect("token request")
             .json()
@@ -2041,6 +2431,8 @@ mod tests {
                 "{}internal/attachments/upload?filename=%E8%B3%87%E6%96%99%20%E6%97%A5%E6%9C%AC%E8%AA%9E.txt&mime_type=text%2Fplain&size=7",
                 server.url()
             ))
+            .header("origin", &origin)
+            .header("cookie", &session_cookie)
             .header("x-gwt-upload-token", token)
             .body("nihongo")
             .send()

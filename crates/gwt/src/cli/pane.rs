@@ -4,10 +4,17 @@ use std::{collections::HashMap, path::Path, time::Duration};
 
 use base64::Engine;
 use futures_util::{SinkExt, StreamExt};
-use gwt_agent::session::GWT_SESSION_ID_ENV;
+use gwt_agent::session::{GWT_HOOK_FORWARD_TOKEN_ENV, GWT_SESSION_ID_ENV};
 use gwt_github::{ApiError, SpecOpsError};
 use serde_json::{json, Value};
-use tokio_tungstenite::{connect_async, tungstenite::Message};
+use tokio_tungstenite::{
+    connect_async,
+    tungstenite::{
+        client::IntoClientRequest,
+        http::{HeaderValue, Request},
+        Message,
+    },
+};
 
 use crate::{
     persistence::{PersistedWindowState, WindowState},
@@ -120,9 +127,7 @@ async fn send_pane_input(
     let window_id = resolve_send_target(&windows, requested_id, &session_id)?;
     let line = ensure_trailing_submit(text);
 
-    let (mut socket, _) = connect_async(ws_url)
-        .await
-        .map_err(|err| format!("pane websocket connect failed ({ws_url}): {err}"))?;
+    let mut socket = connect_pane_websocket(ws_url).await?;
     send_frontend_event(
         &mut socket,
         json!({ "kind": "pane_send_input", "session_id": session_id, "text": line }),
@@ -153,9 +158,7 @@ async fn request_window_list(
     ws_url: &str,
     project_root: &str,
 ) -> Result<Vec<PersistedWindowState>, String> {
-    let (mut socket, _) = connect_async(ws_url)
-        .await
-        .map_err(|err| format!("pane websocket connect failed ({ws_url}): {err}"))?;
+    let mut socket = connect_pane_websocket(ws_url).await?;
     send_frontend_event(&mut socket, json!({ "kind": "frontend_ready" })).await?;
 
     next_workspace_windows(&mut socket, project_root, "pane list").await
@@ -167,9 +170,7 @@ async fn read_pane_snapshot(
     requested_id: &str,
     lines: usize,
 ) -> Result<String, String> {
-    let (mut socket, _) = connect_async(ws_url)
-        .await
-        .map_err(|err| format!("pane websocket connect failed ({ws_url}): {err}"))?;
+    let mut socket = connect_pane_websocket(ws_url).await?;
     send_frontend_event(&mut socket, json!({ "kind": "frontend_ready" })).await?;
 
     let mut windows = Vec::new();
@@ -212,9 +213,7 @@ async fn close_pane(
         return Err(format!("pane close: unknown pane {requested_id}"));
     };
 
-    let (mut socket, _) = connect_async(ws_url)
-        .await
-        .map_err(|err| format!("pane websocket connect failed ({ws_url}): {err}"))?;
+    let mut socket = connect_pane_websocket(ws_url).await?;
     send_frontend_event(
         &mut socket,
         json!({ "kind": "close_window", "id": resolved_id }),
@@ -240,6 +239,56 @@ async fn send_frontend_event(
         .send(Message::Text(payload.to_string().into()))
         .await
         .map_err(|err| format!("pane websocket send failed: {err}"))
+}
+
+async fn connect_pane_websocket(
+    ws_url: &str,
+) -> Result<
+    tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>,
+    String,
+> {
+    let token = std::env::var(GWT_HOOK_FORWARD_TOKEN_ENV)
+        .ok()
+        .filter(|value| !value.trim().is_empty())
+        .ok_or_else(|| {
+            format!(
+                "{GWT_HOOK_FORWARD_TOKEN_ENV} is not set; pane websocket authentication is unavailable"
+            )
+        })?;
+    let request = pane_websocket_request(ws_url, token.trim())?;
+    connect_async(request)
+        .await
+        .map(|(socket, _)| socket)
+        .map_err(|error| format!("pane websocket connect failed ({ws_url}): {error}"))
+}
+
+fn pane_websocket_request(ws_url: &str, token: &str) -> Result<Request<()>, String> {
+    let mut request = ws_url
+        .into_client_request()
+        .map_err(|error| format!("invalid pane websocket URL ({ws_url}): {error}"))?;
+    let origin = websocket_origin_from_url(ws_url)
+        .ok_or_else(|| format!("could not derive pane websocket Origin from {ws_url}"))?;
+    request.headers_mut().insert(
+        "origin",
+        HeaderValue::from_str(&origin)
+            .map_err(|error| format!("invalid pane websocket Origin: {error}"))?,
+    );
+    request.headers_mut().insert(
+        "authorization",
+        HeaderValue::from_str(&format!("Bearer {token}"))
+            .map_err(|error| format!("invalid pane websocket authorization: {error}"))?,
+    );
+    Ok(request)
+}
+
+fn websocket_origin_from_url(ws_url: &str) -> Option<String> {
+    let ws_url = ws_url.trim();
+    let (scheme, rest) = ws_url
+        .strip_prefix("ws://")
+        .map(|rest| ("http://", rest))
+        .or_else(|| ws_url.strip_prefix("wss://").map(|rest| ("https://", rest)))?;
+    let host_end = rest.find('/').unwrap_or(rest.len());
+    (host_end > 0).then(|| format!("{scheme}{}", &rest[..host_end]))
 }
 
 async fn next_backend_json(
@@ -721,6 +770,47 @@ mod tests {
             websocket_url_from_hook_forward_url("file:///tmp/socket"),
             None
         );
+    }
+
+    #[test]
+    fn pane_websocket_request_uses_origin_and_bearer_headers_without_url_token() {
+        let request =
+            pane_websocket_request("ws://127.0.0.1:61234/ws", "process-capability-secret")
+                .expect("authenticated request");
+
+        assert_eq!(request.uri().to_string(), "ws://127.0.0.1:61234/ws");
+        assert_eq!(
+            request
+                .headers()
+                .get("origin")
+                .and_then(|value| value.to_str().ok()),
+            Some("http://127.0.0.1:61234")
+        );
+        assert_eq!(
+            request
+                .headers()
+                .get("authorization")
+                .and_then(|value| value.to_str().ok()),
+            Some("Bearer process-capability-secret")
+        );
+        assert!(!request
+            .uri()
+            .to_string()
+            .contains("process-capability-secret"));
+    }
+
+    #[test]
+    fn websocket_origin_is_derived_for_supported_schemes_only() {
+        assert_eq!(
+            websocket_origin_from_url("ws://127.0.0.1:61234/ws"),
+            Some("http://127.0.0.1:61234".to_string())
+        );
+        assert_eq!(
+            websocket_origin_from_url("wss://example.test/ws"),
+            Some("https://example.test".to_string())
+        );
+        assert_eq!(websocket_origin_from_url("file:///tmp/socket"), None);
+        assert_eq!(websocket_origin_from_url("ws:///ws"), None);
     }
 
     #[test]

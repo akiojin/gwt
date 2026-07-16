@@ -12,6 +12,7 @@ pub mod custom;
 pub mod detect;
 pub mod environment;
 pub mod launch;
+pub mod legacy_recovery;
 pub mod migration;
 pub mod prepare;
 pub mod presets;
@@ -39,7 +40,14 @@ pub use detect::{AgentDetector, DetectedAgent};
 pub use environment::LaunchEnvironment;
 pub use launch::{
     canonical_launch_args, normalize_launch_args, resolve_host_npx_fallback_executable,
-    resolve_runner, AgentLaunchBuilder, LaunchConfig, ResolvedRunner,
+    resolve_runner, AgentLaunchBuilder, LaunchConfig, RecoveryContinuationHandoff, ResolvedRunner,
+};
+pub use legacy_recovery::{
+    import_legacy_recovery_placeholders, import_legacy_recovery_sessions,
+    LegacyRecoveryAttentionReason, LegacyRecoveryImportError, LegacyRecoveryImportReport,
+    LegacyRecoveryImportStage, LegacyRecoveryImportedAttention, LegacyRecoveryImportedExact,
+    LegacyRecoveryPlaceholder, LegacyRecoveryPlaceholderKind, LegacyRecoveryPlaceholderSource,
+    LegacyRecoverySkipReason, LegacyRecoverySkipped,
 };
 pub use migration::{migrate_legacy_backend_rows, resolve_legacy_backend_remap, MigrationReport};
 pub use prepare::{
@@ -54,13 +62,16 @@ pub use presets::{
     PresetDefinition, PresetError, PresetId,
 };
 pub use session::{
-    persist_agent_session_id, persist_session_completed_stop, persist_session_hook_event,
+    discover_session_toml_paths, persist_agent_session_id, persist_observed_provider_session_id,
+    persist_recovery_launch_stage, persist_session_completed_stop, persist_session_hook_event,
     persist_session_restore_window_on_startup, persist_session_status, reset_runtime_state_dir,
     reset_runtime_state_dir_for_pid, runtime_state_dir_for_pid, runtime_state_path,
     runtime_state_path_for_pid, sessions_dir_from_runtime_path, update_session,
-    AgentSessionHistoryEntry, PendingDiscussionResume, Session, SessionRuntimeState,
-    GWT_BIN_PATH_ENV, GWT_HOOK_FORWARD_TOKEN_ENV, GWT_HOOK_FORWARD_URL_ENV, GWT_SESSION_ID_ENV,
-    GWT_SESSION_RUNTIME_PATH_ENV,
+    update_session_with_inventory_budget, AgentSessionHistoryEntry, PendingDiscussionResume,
+    ProviderRootObservationRole, Session, SessionInventoryReadBudget, SessionRuntimeState,
+    GWT_BIN_PATH_ENV, GWT_HOOK_FORWARD_TOKEN_ENV, GWT_HOOK_FORWARD_URL_ENV, GWT_RECOVERY_ID_ENV,
+    GWT_SESSION_ID_ENV, GWT_SESSION_RUNTIME_PATH_ENV, MAX_SESSION_DIRECTORY_ENTRIES,
+    MAX_SESSION_TOML_AGGREGATE_BYTES, MAX_SESSION_TOML_BYTES, MAX_SESSION_TOML_FILES,
 };
 pub use store::{
     load_custom_agents_from_path, load_stored_custom_agents_from_path,

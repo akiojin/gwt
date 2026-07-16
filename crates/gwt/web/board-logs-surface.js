@@ -53,6 +53,7 @@ export function createBoardLogsSurface({
   activeProjectTab,
   visibleBounds,
   getActiveWorkProjection,
+  openRecoveryCenter,
 }) {
       const boardStateMap = new Map();
       const logStateMap = new Map();
@@ -112,6 +113,7 @@ export function createBoardLogsSurface({
         if (!boardStateMap.has(windowId)) {
           boardStateMap.set(windowId, {
             entries: [],
+            totalEntries: 0,
             loading: false,
             submitting: false,
             error: "",
@@ -130,7 +132,6 @@ export function createBoardLogsSurface({
             focusEntryId: null,
             pendingFocusScroll: false,
             audienceFilter: "workspace",
-            currentWorkspaceId: "",
             forYouUnread: 0,
             lastNotifiedMentionEntryId: null,
             currentWorkspaceId: currentProjectWorkspaceId,
@@ -475,7 +476,10 @@ export function createBoardLogsSurface({
         send({
           kind: "load_board",
           id: windowId,
-          all: state.audienceFilter === "all",
+          // FR-535 filters the aggregate snapshot in the frontend. Loading a
+          // Work-scoped projection here would make Intake milestones look
+          // lost and would make the visible/total counts misleading.
+          all: true,
         });
       }
 
@@ -495,7 +499,7 @@ export function createBoardLogsSurface({
           id: windowId,
           before_entry_id: beforeEntryId,
           limit: 50,
-          all: state.audienceFilter === "all",
+          all: true,
         });
       }
 
@@ -951,6 +955,7 @@ export function createBoardLogsSurface({
         const allFilter = body.querySelector("[data-action='toggle-board-all']");
         const forYouFilter = body.querySelector("[data-action='toggle-board-for-you']");
         const workspaceFilter = body.querySelector("[data-action='toggle-board-workspace']");
+        const intakeFilter = body.querySelector("[data-action='toggle-board-intake']");
         if (!status || !timeline || !composer) {
           return;
         }
@@ -984,7 +989,12 @@ export function createBoardLogsSurface({
         }
         state.currentWorkspaceId = currentProjectWorkspaceId;
 
-        const entryCountLabel = `${state.entries.length} entr${state.entries.length === 1 ? "y" : "ies"}`;
+        const visibleEntries = visibleBoardEntries(state);
+        const totalEntries = Math.max(
+          state.entries.length,
+          Number.isFinite(Number(state.totalEntries)) ? Number(state.totalEntries) : 0,
+        );
+        const entryCountLabel = `Visible ${visibleEntries.length} / Total ${totalEntries}`;
         status.textContent = state.error
           ? state.error
           : state.loading
@@ -992,9 +1002,9 @@ export function createBoardLogsSurface({
               ? "Saving entry..."
               : "Loading coordination..."
             : state.loadingOlder
-              ? `Loading earlier entries... - ${entryCountLabel}`
+              ? `${entryCountLabel} · Loading earlier entries...`
               : state.newEntriesAvailable
-                ? `${entryCountLabel} - New updates`
+                ? `${entryCountLabel} · New updates`
                 : entryCountLabel;
         status.className = "board-status";
         if (state.error) {
@@ -1022,6 +1032,11 @@ export function createBoardLogsSurface({
           const workspaceActive = state.audienceFilter === "workspace";
           workspaceFilter.setAttribute("aria-pressed", workspaceActive ? "true" : "false");
           workspaceFilter.classList.toggle("active", workspaceActive);
+        }
+        if (intakeFilter) {
+          const intakeActive = state.audienceFilter === "intake";
+          intakeFilter.setAttribute("aria-pressed", intakeActive ? "true" : "false");
+          intakeFilter.classList.toggle("active", intakeActive);
         }
 
         // The actual scroll viewport is `.board-timeline-scroll`, the
@@ -1056,8 +1071,6 @@ export function createBoardLogsSurface({
           });
         }
 
-        const visibleEntries = visibleBoardEntries(state);
-
         timeline.innerHTML = "";
         if (state.hasMoreBefore) {
           const loadOlder = createNode(
@@ -1077,6 +1090,8 @@ export function createBoardLogsSurface({
               "board-empty workspace-empty-state",
               state.audienceFilter === "for_you"
                 ? "No posts addressed to you."
+                : state.audienceFilter === "intake"
+                  ? "No Intake milestones yet."
                 : state.audienceFilter === "workspace"
                   ? "No posts in this Work."
                 : "No coordination entries yet.",
@@ -1203,6 +1218,7 @@ export function createBoardLogsSurface({
 
           const laneEl = createNode("section", "board-lane");
           laneEl.dataset.laneKey = lane.key;
+          if (lane.isIntake) laneEl.classList.add("intake");
           if (lane.isGeneral) laneEl.classList.add("general");
           if (lane.isDone) laneEl.classList.add("done");
           if (collapsed) laneEl.classList.add("collapsed");
@@ -1303,7 +1319,10 @@ export function createBoardLogsSurface({
           option.textContent = ws.titleSummary || ws.title || ws.branch || ws.id;
           toSelect.appendChild(option);
         }
-        toSelect.value = boardComposerTarget(state);
+        const selectedTarget = boardComposerTarget(state);
+        for (const option of toSelect.querySelectorAll("option")) {
+          option.selected = option.value === selectedTarget;
+        }
         toSelect.addEventListener("change", (event) => {
           state.composerTarget = event.target.value;
         });
@@ -1373,6 +1392,8 @@ export function createBoardLogsSurface({
                   <button class="text-button board-all-filter" data-action="toggle-board-all" type="button" aria-pressed="false">All</button>
                   <button class="text-button board-for-you-filter" data-action="toggle-board-for-you" type="button" aria-pressed="false">For you</button>
                   <button class="text-button board-workspace-filter" data-action="toggle-board-workspace" type="button" aria-pressed="false">Work</button>
+                  <button class="text-button board-intake-filter" data-action="toggle-board-intake" type="button" aria-pressed="false">Intake</button>
+                  <button class="text-button board-recovery-center-link" data-action="open-recovery-center" type="button">Recovery Center</button>
                   <button class="icon-button" data-action="refresh-board" aria-label="Refresh board">↻</button>
                 </div>
               </div>
@@ -1418,7 +1439,6 @@ export function createBoardLogsSurface({
               const state = ensureBoardState(windowData.id);
               state.audienceFilter = state.audienceFilter === "all" ? "workspace" : "all";
               state.error = "";
-              requestBoard(windowData.id);
               renderBoard(windowData.id);
             });
           // SPEC-2359 FR-101: toggle the Workspace audience filter. The
@@ -1434,8 +1454,23 @@ export function createBoardLogsSurface({
               state.audienceFilter =
                 state.audienceFilter === "workspace" ? "all" : "workspace";
               state.error = "";
-              requestBoard(windowData.id);
               renderBoard(windowData.id);
+            });
+          body
+            .querySelector("[data-action='toggle-board-intake']")
+            .addEventListener("click", (event) => {
+              event.stopPropagation();
+              const state = ensureBoardState(windowData.id);
+              state.audienceFilter =
+                state.audienceFilter === "intake" ? "workspace" : "intake";
+              state.error = "";
+              renderBoard(windowData.id);
+            });
+          body
+            .querySelector("[data-action='open-recovery-center']")
+            .addEventListener("click", (event) => {
+              event.stopPropagation();
+              openRecoveryCenter?.();
             });
           // SPEC-2963 FR-030: per-project Board destination chip → config popover.
           body
@@ -1581,6 +1616,10 @@ export function createBoardLogsSurface({
                   && String(entry.body || "").trim() === pendingSubmit.body;
               });
             state.entries = mergeBoardEntries(state.entries, incomingEntries);
+            const projectedTotal = Number(event.total_entries);
+            state.totalEntries = Number.isFinite(projectedTotal)
+              ? Math.max(state.entries.length, projectedTotal)
+              : Math.max(state.totalEntries || 0, state.entries.length);
             state.hasMoreBefore = retainedHistory
               ? state.hasMoreBefore
               : Boolean(event.has_more_before);
@@ -1602,7 +1641,7 @@ export function createBoardLogsSurface({
               state.pendingSubmit = null;
               state.submitting = false;
               state.pendingSelfPostScroll = true;
-            } else if (addedEntry && !state.shouldFollowBoardBottom) {
+            } else if (addedEntry && existingEntryIds.size > 0 && !state.shouldFollowBoardBottom) {
               state.newEntriesAvailable = true;
             }
             if (

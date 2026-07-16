@@ -45,10 +45,20 @@ pub struct RuntimeHookEvent {
     pub occurred_at: String,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct HookForwardTarget {
     pub url: String,
     pub token: String,
+}
+
+impl std::fmt::Debug for HookForwardTarget {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("HookForwardTarget")
+            .field("url", &self.url)
+            .field("token", &"<redacted>")
+            .finish()
+    }
 }
 
 impl HookForwardTarget {

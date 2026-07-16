@@ -29,6 +29,47 @@ pub fn evaluate(event: &HookEvent, worktree_root: &Path) -> Result<HookOutput, H
     Ok(evaluate_bash_command(command, worktree_root).unwrap_or(HookOutput::Silent))
 }
 
+pub(crate) fn evaluate_subagent_intake_checkpoint_call(input: &str) -> Option<HookOutput> {
+    let value = serde_json::from_str::<serde_json::Value>(input).ok()?;
+    let is_subagent = value
+        .get("isSidechain")
+        .or_else(|| value.get("is_sidechain"))
+        .and_then(serde_json::Value::as_bool)
+        == Some(true)
+        || ["agent_id", "agentId"].iter().any(|name| {
+            value
+                .get(*name)
+                .and_then(serde_json::Value::as_str)
+                .is_some_and(|value| !value.trim().is_empty())
+        });
+    if !is_subagent {
+        return None;
+    }
+    let is_bash = value
+        .get("tool_name")
+        .or_else(|| value.get("toolName"))
+        .and_then(serde_json::Value::as_str)
+        == Some("Bash");
+    let command = value
+        .get("tool_input")
+        .or_else(|| value.get("toolInput"))
+        .and_then(|tool_input| tool_input.get("command"))
+        .and_then(serde_json::Value::as_str)?;
+    if !is_bash || !invokes_intake_checkpoint_operation(command) {
+        return None;
+    }
+    Some(HookOutput::pre_tool_use_permission(
+        "Intake discussion durability is root-session owned",
+        "A Claude subagent cannot read or replace the root Intake checkpoint or publish a structured discussion milestone. Return the result to the root agent and let the root invoke discussion.update or intake.checkpoint.current/update.",
+    ))
+}
+
+fn invokes_intake_checkpoint_operation(command: &str) -> bool {
+    command.contains("discussion.update")
+        || command.contains("intake.checkpoint.current")
+        || command.contains("intake.checkpoint.update")
+}
+
 pub fn handle() -> Result<HookOutput, HookError> {
     let mut input = String::new();
     std::io::stdin().read_to_string(&mut input)?;
@@ -36,6 +77,9 @@ pub fn handle() -> Result<HookOutput, HookError> {
 }
 
 pub fn handle_with_input(input: &str) -> Result<HookOutput, HookError> {
+    if let Some(output) = evaluate_subagent_intake_checkpoint_call(input) {
+        return Ok(output);
+    }
     let Some(event) = HookEvent::read_from_str(input)? else {
         return Ok(HookOutput::Silent);
     };
@@ -346,5 +390,57 @@ mod tests {
             evaluate_bash_command("sleep 30 && gwtd pr checks 123", Path::new("/worktree"));
 
         assert!(decision.is_none());
+    }
+
+    #[test]
+    fn claude_subagent_cannot_invoke_root_intake_checkpoint_operations() {
+        let input = r#"{
+              "tool_name":"Bash",
+              "tool_input":{"command":"$GWT_BIN < checkpoint.json # intake.checkpoint.update"},
+              "agent_id":"child-1",
+              "agent_type":"general-purpose"
+            }"#;
+
+        let decision = evaluate_subagent_intake_checkpoint_call(input).unwrap();
+        assert_eq!(
+            decision.summary(),
+            "Intake discussion durability is root-session owned"
+        );
+    }
+
+    #[test]
+    fn claude_subagent_cannot_publish_discussion_update_checkpoint() {
+        let input = r#"{
+              "tool_name":"Bash",
+              "tool_input":{"command":"$GWT_BIN < update.json # discussion.update"},
+              "agent_id":"child-discussion"
+            }"#;
+
+        let decision = evaluate_subagent_intake_checkpoint_call(input).unwrap();
+        assert_eq!(
+            decision.summary(),
+            "Intake discussion durability is root-session owned"
+        );
+    }
+
+    #[test]
+    fn claude_root_can_invoke_intake_checkpoint_operations() {
+        let input = r#"{
+              "tool_name":"Bash",
+              "tool_input":{"command":"$GWT_BIN < checkpoint.json # intake.checkpoint.current"}
+            }"#;
+
+        assert!(evaluate_subagent_intake_checkpoint_call(input).is_none());
+    }
+
+    #[test]
+    fn claude_main_thread_agent_type_without_agent_id_is_not_rejected() {
+        let input = r#"{
+              "tool_name":"Bash",
+              "tool_input":{"command":"$GWT_BIN < checkpoint.json # intake.checkpoint.current"},
+              "agent_type":"security-reviewer"
+            }"#;
+
+        assert!(evaluate_subagent_intake_checkpoint_call(input).is_none());
     }
 }

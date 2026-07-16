@@ -1394,6 +1394,21 @@ fn pending_recovery_repairs_partial_jsonl_tails_before_exact_once_append() {
 }
 
 #[test]
+fn jsonl_tail_repair_preserves_a_complete_record_without_trailing_newline() {
+    let temp = tempfile::tempdir().unwrap();
+    let path = temp.path().join("events.jsonl");
+    let record = br#"{"id":"complete-without-newline"}"#;
+    std::fs::write(&path, record).unwrap();
+
+    repair_jsonl_tail(&path).unwrap();
+    repair_jsonl_tail(&path).unwrap();
+
+    let mut expected = record.to_vec();
+    expected.push(b'\n');
+    assert_eq!(std::fs::read(path).unwrap(), expected);
+}
+
+#[test]
 fn corrupt_pending_transaction_is_quarantined_and_retry_can_write() {
     let temp = tempfile::tempdir().unwrap();
     let current = temp.path().join("state/current.json");

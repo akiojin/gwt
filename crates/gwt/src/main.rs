@@ -92,7 +92,8 @@ use embedded_server::{ClientHub, EmbeddedServer};
 pub(crate) use launch_runtime::{
     apply_host_package_runner_fallback_checked, apply_windows_host_shell_wrapper,
     build_shell_process_launch, ensure_docker_launch_runtime_ready, install_launch_gwt_bin_env,
-    prune_orphan_intake_worktrees, resolve_launch_worktree, resolve_shell_launch_worktree,
+    pin_host_codex_latest_runner, prune_orphan_intake_worktrees, resolve_launch_worktree,
+    resolve_shell_launch_worktree,
 };
 #[cfg(test)]
 pub(crate) use launch_runtime::{
@@ -127,7 +128,7 @@ const DOCKER_GWTD_BIN_PATH: &str = "/usr/local/bin/gwtd";
 const DOCKER_HOST_GWT_BIN_NAME: &str = "gwt-linux";
 const DOCKER_HOST_GWTD_BIN_NAME: &str = "gwtd-linux";
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, PartialEq, Eq)]
 struct GuiFrontDoorLaunchSurface<'a> {
     browser_url: &'a str,
 }
@@ -155,6 +156,8 @@ pub(crate) fn write_browser_url_handoff_file(
     path_env_value: Option<&str>,
     url: &str,
 ) -> BrowserUrlHandoffOutcome {
+    use std::io::Write as _;
+
     let raw = match path_env_value {
         Some(raw) => raw,
         None => return BrowserUrlHandoffOutcome::Disabled,
@@ -164,12 +167,33 @@ pub(crate) fn write_browser_url_handoff_file(
         return BrowserUrlHandoffOutcome::Disabled;
     }
     let path = std::path::PathBuf::from(trimmed);
-    match std::fs::write(&path, url) {
+    let write_result = (|| -> std::io::Result<()> {
+        let parent = path.parent().ok_or_else(|| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "browser URL handoff target has no parent directory",
+            )
+        })?;
+        // Keep the capability handoff private and replace the destination via
+        // a same-directory rename so readers never observe a partial token.
+        let mut temporary = tempfile::NamedTempFile::new_in(parent)?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            temporary
+                .as_file()
+                .set_permissions(std::fs::Permissions::from_mode(0o600))?;
+        }
+        temporary.write_all(url.as_bytes())?;
+        temporary.as_file_mut().sync_all()?;
+        temporary.persist(&path).map_err(|error| error.error)?;
+        Ok(())
+    })();
+    match write_result {
         Ok(()) => {
             tracing::info!(
                 target: "gwt::startup",
                 path = %path.display(),
-                url = %url,
                 "embedded server URL written for CI handoff"
             );
             BrowserUrlHandoffOutcome::Wrote(path)
@@ -958,6 +982,27 @@ pub(crate) struct DockerBundleMounts {
 /// are rare (pane create/destroy), so `RwLock` is the natural fit.
 type PtyWriterRegistry = Arc<RwLock<HashMap<String, Arc<PtyHandle>>>>;
 
+#[derive(Clone)]
+struct SecretToken(String);
+
+impl SecretToken {
+    fn into_inner(self) -> String {
+        self.0
+    }
+}
+
+impl From<String> for SecretToken {
+    fn from(token: String) -> Self {
+        Self(token)
+    }
+}
+
+impl std::fmt::Debug for SecretToken {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("<redacted>")
+    }
+}
+
 #[cfg_attr(
     windows,
     allow(
@@ -1108,6 +1153,20 @@ enum UserEvent {
         window_id: String,
         result: AgentLaunchResult,
     },
+    CodexBridgeReady {
+        window_id: String,
+        session_id: String,
+    },
+    CodexBridgeFailure {
+        window_id: String,
+        session_id: String,
+        failure: gwt::codex_bridge::CodexBridgeFailure,
+    },
+    RenewProviderRootClaim {
+        window_id: String,
+        recovery_id: String,
+        claim_token: SecretToken,
+    },
     ShellLaunchComplete {
         window_id: String,
         result: Result<ProcessLaunch, String>,
@@ -1244,6 +1303,24 @@ mod tests {
             width: 1400.0,
             height: 900.0,
         }
+    }
+
+    #[test]
+    fn renew_provider_root_claim_event_debug_redacts_claim_token() {
+        const SENTINEL: &str = "USER_EVENT_CLAIM_TOKEN_SENTINEL";
+        let event = UserEvent::RenewProviderRootClaim {
+            window_id: "window-1".to_string(),
+            recovery_id: "recovery-1".to_string(),
+            claim_token: SENTINEL.to_string().into(),
+        };
+
+        let debug = format!("{event:?}");
+
+        assert!(
+            !debug.contains(SENTINEL),
+            "secret leaked via Debug: {debug}"
+        );
+        assert!(debug.contains("<redacted>"));
     }
 
     #[cfg(unix)]
@@ -2013,6 +2090,28 @@ mod tests {
             written, url,
             "Playwright workflow reads this file; trailing newline / whitespace would break the URL"
         );
+
+        let rotated_url = "http://127.0.0.1:44558/#gwt-auth=rotated";
+        assert_eq!(
+            super::write_browser_url_handoff_file(Some(target.to_str().unwrap()), rotated_url,),
+            super::BrowserUrlHandoffOutcome::Wrote(target.clone()),
+        );
+        assert_eq!(
+            std::fs::read_to_string(&target).expect("read rotated URL"),
+            rotated_url,
+            "atomic replacement must not leave bytes from the previous capability"
+        );
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            let mode = std::fs::metadata(&target)
+                .expect("handoff metadata")
+                .permissions()
+                .mode()
+                & 0o777;
+            assert_eq!(mode, 0o600, "capability handoff must be current-user-only");
+        }
     }
 
     #[test]
@@ -2425,6 +2524,7 @@ mod tests {
             profile_selections: HashMap::new(),
             profile_config_path: Some(temp_root.join("profile-config.toml")),
             runtimes: HashMap::new(),
+            codex_bridge_routes: HashMap::new(),
             window_details: HashMap::new(),
             launch_error_terminal_details: HashMap::new(),
             window_lookup: HashMap::new(),
@@ -2440,6 +2540,7 @@ mod tests {
             pending_workspace_resume_contexts: HashMap::new(),
             inflight_launches: HashMap::new(),
             pending_auto_resume_sources: HashMap::new(),
+            pending_provider_root_claims: HashMap::new(),
             pending_startup_auto_resume_sessions: Vec::new(),
             active_agent_sessions: HashMap::new(),
             work_merged_branches: HashMap::new(),
@@ -7204,11 +7305,11 @@ fn main() -> std::io::Result<()> {
     // SPEC #2920 Phase 4: own the browser URL so it can survive the
     // tao event_loop closure's 'static requirement (the closure moves
     // `server`, which the previous `&str` borrow blocked).
-    let browser_url: String = server.url().to_string();
+    let browser_url: String = server.browser_url().to_string();
     let front_door = gui_front_door_launch_surface(&browser_url);
     // SPEC-2785 FR-E: hand the bound URL to AppRuntime so
     // `open_server_url_events` can gate `OpenServerUrl` requests against it.
-    app.set_server_url(browser_url.clone());
+    app.set_server_url(server.url().to_string());
     // SPEC-2970: background provider-usage poller. The shared Notify lets the
     // Claude opt-in toggle request an immediate refresh.
     let usage_refresh = std::sync::Arc::new(tokio::sync::Notify::new());
@@ -7580,6 +7681,33 @@ fn main() -> std::io::Result<()> {
                 let events = app.handle_launch_complete(window_id, result);
                 clients.dispatch(events);
             }
+            Event::UserEvent(UserEvent::CodexBridgeReady {
+                window_id,
+                session_id,
+            }) => {
+                let events = app.handle_codex_bridge_ready(window_id, session_id);
+                clients.dispatch(events);
+            }
+            Event::UserEvent(UserEvent::CodexBridgeFailure {
+                window_id,
+                session_id,
+                failure,
+            }) => {
+                let events = app.handle_codex_bridge_failure(window_id, session_id, failure);
+                clients.dispatch(events);
+            }
+            Event::UserEvent(UserEvent::RenewProviderRootClaim {
+                window_id,
+                recovery_id,
+                claim_token,
+            }) => {
+                let events = app.handle_pending_provider_root_claim_renewal(
+                    window_id,
+                    recovery_id,
+                    claim_token.into_inner(),
+                );
+                clients.dispatch(events);
+            }
             Event::UserEvent(UserEvent::ShellLaunchComplete { window_id, result }) => {
                 let events = app.handle_shell_launch_complete(window_id, result);
                 clients.dispatch(events);
@@ -7871,7 +7999,6 @@ fn main() -> std::io::Result<()> {
                             tracing::warn!(
                                 target: "gwt_tray",
                                 error = %error,
-                                url = browser_url.as_str(),
                                 "tray Open menu failed to launch the default browser"
                             );
                         }
@@ -7881,7 +8008,6 @@ fn main() -> std::io::Result<()> {
                             tracing::warn!(
                                 target: "gwt_tray",
                                 error = %error,
-                                url = browser_url.as_str(),
                                 "tray Copy URL menu failed to copy browser URL to clipboard"
                             );
                         }
@@ -7899,7 +8025,6 @@ fn main() -> std::io::Result<()> {
                             tracing::warn!(
                                 target: "gwt_tray",
                                 error = %error,
-                                url = about_url.as_str(),
                                 "tray About menu failed to launch the default browser"
                             );
                         }

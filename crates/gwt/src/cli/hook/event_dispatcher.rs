@@ -734,4 +734,30 @@ mod tests {
         assert!(reason.contains("push-only"), "{reason}");
         assert!(reason.contains("gwt-manage-pr"), "{reason}");
     }
+
+    #[test]
+    fn claude_child_pre_tool_use_denies_root_intake_checkpoint_cli() {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let worktree = tempfile::tempdir().unwrap();
+        let _session_id = ScopedEnvVar::unset(gwt_agent::GWT_SESSION_ID_ENV);
+        let _runtime_path = ScopedEnvVar::unset(gwt_agent::GWT_SESSION_RUNTIME_PATH_ENV);
+        let _forward_url = ScopedEnvVar::unset(gwt_agent::GWT_HOOK_FORWARD_URL_ENV);
+        let _forward_token = ScopedEnvVar::unset(gwt_agent::GWT_HOOK_FORWARD_TOKEN_ENV);
+        let input = r#"{
+          "tool_name":"Bash",
+          "tool_input":{"command":"$GWT_BIN < payload.json # intake.checkpoint.update"},
+          "agent_id":"child-agent",
+          "agent_type":"general-purpose"
+        }"#;
+
+        let output = handle_with_input("PreToolUse", input, worktree.path(), None).unwrap();
+
+        assert!(matches!(
+            output,
+            HookOutput::PreToolUsePermission { ref summary, .. }
+                if summary == "Intake checkpoints are root-session owned"
+        ));
+    }
 }

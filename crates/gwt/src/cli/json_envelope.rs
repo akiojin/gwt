@@ -246,6 +246,10 @@ fn parse(input: &str) -> Result<ParsedEnvelope, CliParseError> {
         "hook.doctor" => hook_doctor(params)?,
         "memory.add" => memory_add(params)?,
         "discussion.update" => discussion_update(params)?,
+        "intake.checkpoint.current" => {
+            CliCommand::Discussion(super::DiscussionCommand::IntakeCheckpointShow)
+        }
+        "intake.checkpoint.update" => intake_checkpoint_update(params)?,
         "discuss.resolve" => discuss_proposal(params, DiscussEnvelopeAction::Resolve)?,
         "discuss.park" => discuss_proposal(params, DiscussEnvelopeAction::Park)?,
         "discuss.reject" => discuss_proposal(params, DiscussEnvelopeAction::Reject)?,
@@ -601,11 +605,15 @@ fn hook_doctor(params: &Map<String, Value>) -> Result<CliCommand, CliParseError>
 }
 
 fn discussion_update(params: &Map<String, Value>) -> Result<CliCommand, CliParseError> {
+    let status = optional_string(params, "status")?
+        .map(|status| super::discussion::valid_status(&status))
+        .transpose()?
+        .unwrap_or_else(|| "active".to_string());
     Ok(CliCommand::Discussion(super::DiscussionCommand::Update(
         super::discussion::DiscussionUpdateCommand {
             date: optional_string(params, "date")?,
             title: required_string(params, "title")?,
-            status: optional_string(params, "status")?.unwrap_or_else(|| "active".to_string()),
+            status,
             topics: optional_string_vec(params, "topics")?,
             related_specs: optional_u64_vec(params, "related_specs")?,
             related_works: optional_string_vec(params, "related_works")?,
@@ -616,6 +624,100 @@ fn discussion_update(params: &Map<String, Value>) -> Result<CliCommand, CliParse
             next: required_string(params, "next")?,
         },
     )))
+}
+
+fn intake_checkpoint_update(params: &Map<String, Value>) -> Result<CliCommand, CliParseError> {
+    let visible_items = optional_json_array(params, "visible_items")?
+        .into_iter()
+        .map(parse_checkpoint_visible_item)
+        .collect::<Result<Vec<_>, _>>()?;
+    let retained_attachment_refs = optional_json_array(params, "retained_attachment_refs")?
+        .into_iter()
+        .map(parse_checkpoint_attachment_ref)
+        .collect::<Result<Vec<_>, _>>()?;
+    let attachment_paths = optional_string_vec(params, "attachment_paths")?
+        .into_iter()
+        .map(std::path::PathBuf::from)
+        .collect();
+    Ok(CliCommand::Discussion(
+        super::DiscussionCommand::IntakeCheckpointUpdate(
+            super::discussion::IntakeCheckpointUpdateCommand {
+                expected_revision: required_u64(params, "expected_revision")?,
+                title: required_string(params, "title")?,
+                related_specs: optional_u64_vec(params, "related_specs")?,
+                summary: required_string(params, "summary")?,
+                decisions: optional_string_vec(params, "decisions")?,
+                open_questions: optional_string_vec(params, "open_questions")?,
+                next: required_string(params, "next")?,
+                visible_items,
+                retained_attachment_refs,
+                attachment_paths,
+            },
+        ),
+    ))
+}
+
+fn parse_checkpoint_attachment_ref(
+    value: Value,
+) -> Result<gwt_core::recovery::RecoveryAttachmentRef, CliParseError> {
+    let object = value.as_object().ok_or_else(|| {
+        CliParseError::InvalidJson("retained_attachment_refs must contain objects".to_string())
+    })?;
+    const ALLOWED_KEYS: &[&str] = &["content_id", "file_name", "byte_len"];
+    if let Some(key) = object
+        .keys()
+        .find(|key| !ALLOWED_KEYS.contains(&key.as_str()))
+    {
+        return Err(CliParseError::InvalidJson(format!(
+            "retained_attachment_refs contains disallowed field: {key}"
+        )));
+    }
+    Ok(gwt_core::recovery::RecoveryAttachmentRef {
+        content_id: required_string(object, "content_id")?,
+        file_name: required_string(object, "file_name")?,
+        byte_len: required_u64(object, "byte_len")?,
+    })
+}
+
+fn parse_checkpoint_visible_item(
+    value: Value,
+) -> Result<gwt_core::recovery::VisibleDiscussionItem, CliParseError> {
+    let object = value.as_object().ok_or_else(|| {
+        CliParseError::InvalidJson("visible_items must contain objects".to_string())
+    })?;
+    const ALLOWED_KEYS: &[&str] = &["role", "kind", "text", "partial"];
+    if let Some(key) = object
+        .keys()
+        .find(|key| !ALLOWED_KEYS.contains(&key.as_str()))
+    {
+        return Err(CliParseError::InvalidJson(format!(
+            "visible_items contains disallowed field: {key}"
+        )));
+    }
+    let role = required_string(object, "role")?;
+    let kind = required_string(object, "kind")?;
+    let allowed = matches!(
+        (role.as_str(), kind.as_str()),
+        ("assistant", "assistant_message" | "plan" | "question")
+            | ("user", "answer" | "user_message")
+    );
+    if !allowed {
+        return Err(CliParseError::InvalidJson(format!(
+            "visible_items role/kind is not allowlisted: {role}/{kind}"
+        )));
+    }
+    let partial = optional_bool(object, "partial")?.unwrap_or(false);
+    if partial {
+        return Err(CliParseError::InvalidJson(
+            "visible_items must contain completed items only".to_string(),
+        ));
+    }
+    Ok(gwt_core::recovery::VisibleDiscussionItem {
+        role,
+        kind,
+        text: required_string(object, "text")?,
+        partial: false,
+    })
 }
 
 enum DiscussEnvelopeAction {
@@ -1648,6 +1750,131 @@ mod tests {
             ),
             CliCommand::Discussion(_)
         ));
+    }
+
+    #[test]
+    fn discussion_update_rejects_non_structured_status_text() {
+        assert!(matches!(
+            err(
+                "discussion.update",
+                json!({
+                    "title": "t",
+                    "status": "raw transcript follows",
+                    "summary": "s",
+                    "next": "n",
+                })
+            ),
+            CliParseError::InvalidValue {
+                flag: "--status",
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn intake_checkpoint_update_parses_explicit_cas_and_allowlisted_content() {
+        assert!(matches!(
+            ok(
+                "intake.checkpoint.update",
+                json!({
+                    "expected_revision": 3,
+                    "title": "Recovery design",
+                    "summary": "The recovery contract is agreed.",
+                    "next": "Implement the approved contract.",
+                    "related_specs": [1921, 3214],
+                    "decisions": ["Exact resume runs first."],
+                    "open_questions": ["None."],
+                    "visible_items": [{
+                        "role": "assistant",
+                        "kind": "plan",
+                        "text": "Implement recovery in phases.",
+                        "partial": false
+                    }],
+                    "retained_attachment_refs": [{
+                        "content_id": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                        "file_name": "design.png",
+                        "byte_len": 42
+                    }],
+                    "attachment_paths": [".gwt/drop-files/design.png"]
+                })
+            ),
+            CliCommand::Discussion(
+                super::super::discussion::DiscussionCommand::IntakeCheckpointUpdate(_)
+            )
+        ));
+    }
+
+    #[test]
+    fn intake_checkpoint_current_parses_as_session_scoped_read() {
+        assert!(matches!(
+            ok("intake.checkpoint.current", json!({})),
+            CliCommand::Discussion(
+                super::super::discussion::DiscussionCommand::IntakeCheckpointShow
+            )
+        ));
+    }
+
+    #[test]
+    fn intake_checkpoint_update_rejects_partial_or_non_allowlisted_visible_items() {
+        let base = json!({
+            "expected_revision": 0,
+            "title": "t",
+            "summary": "s",
+            "next": "n",
+            "visible_items": [{
+                "role": "assistant",
+                "kind": "plan",
+                "text": "visible",
+                "partial": true
+            }]
+        });
+        match err("intake.checkpoint.update", base) {
+            CliParseError::InvalidJson(message) => {
+                assert!(message.contains("completed items only"), "{message}")
+            }
+            other => panic!("unexpected error: {other:?}"),
+        }
+
+        let with_tool_output = json!({
+            "expected_revision": 0,
+            "title": "t",
+            "summary": "s",
+            "next": "n",
+            "visible_items": [{
+                "role": "assistant",
+                "kind": "assistant_message",
+                "text": "visible",
+                "tool_output": "must never be captured"
+            }]
+        });
+        match err("intake.checkpoint.update", with_tool_output) {
+            CliParseError::InvalidJson(message) => {
+                assert!(message.contains("disallowed field"), "{message}")
+            }
+            other => panic!("unexpected error: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn intake_checkpoint_update_rejects_non_allowlisted_attachment_metadata() {
+        let payload = json!({
+            "expected_revision": 0,
+            "title": "t",
+            "summary": "s",
+            "next": "n",
+            "retained_attachment_refs": [{
+                "content_id": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                "file_name": "image.png",
+                "byte_len": 42,
+                "source_path": "C:/private/image.png"
+            }]
+        });
+        match err("intake.checkpoint.update", payload) {
+            CliParseError::InvalidJson(message) => {
+                assert!(message.contains("disallowed field: source_path"));
+            }
+            other => panic!("unexpected error: {other:?}"),
+        }
     }
 
     #[test]

@@ -778,6 +778,24 @@
         ></div>
       </div>
 
+      <!-- Recovery Center — attention-first session recovery. Startup only
+           opens it for candidates needing a decision; the manual entry point
+           can review every recovery candidate. Renderer and controller live
+           in /recovery-center-modal.js. -->
+      <div
+        class="modal-backdrop"
+        id="recovery-center-modal"
+        aria-hidden="true"
+      >
+        <div
+          class="modal-shell recovery-center-shell"
+          role="dialog"
+          aria-modal="true"
+          aria-label="Recovery Center"
+          tabindex="-1"
+        ></div>
+      </div>
+
       <!-- SPEC-2017 US-9: Knowledge Bridge Drawer. Re-uses the
            SPEC-2356 .op-drawer / .op-drawer-backdrop pattern (slide-
            over + backdrop + reduced-motion fallback). Body content
