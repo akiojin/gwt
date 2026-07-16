@@ -5,13 +5,14 @@
 //! stale-detection / classify / prune pipeline.
 
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     fs,
     io::Write,
     path::{Path, PathBuf},
 };
 
 use chrono::{DateTime, Utc};
+use fs2::FileExt;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
@@ -102,8 +103,35 @@ fn copy_legacy_workspace_file_if_needed(legacy_path: &Path, canonical_path: &Pat
     if let Some(parent) = canonical_path.parent() {
         fs::create_dir_all(parent)?;
     }
-    fs::copy(legacy_path, canonical_path)?;
-    Ok(())
+    let bytes = fs::read(legacy_path)?;
+    let file_name = canonical_path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("legacy-workspace-file");
+    let temp_path = canonical_path.with_file_name(format!(
+        ".{file_name}.migration-{}-{}",
+        std::process::id(),
+        Uuid::new_v4()
+    ));
+    {
+        let mut file = fs::File::create(&temp_path)?;
+        file.write_all(&bytes)?;
+        file.sync_all()?;
+    }
+    match fs::hard_link(&temp_path, canonical_path) {
+        Ok(()) => {
+            fs::remove_file(&temp_path)?;
+            Ok(())
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+            fs::remove_file(&temp_path)?;
+            Ok(())
+        }
+        Err(error) => {
+            let _ = fs::remove_file(&temp_path);
+            Err(error.into())
+        }
+    }
 }
 
 /// SPEC-2359 Phase W-12 Slice 5b (FR-355): the gitattributes line that joins
@@ -125,6 +153,13 @@ const WORK_EVENTS_GITATTRIBUTES_LINE: &str = "**/.gwt/work/events.jsonl merge=un
 /// across linked worktrees because they all resolve to the same main worktree
 /// root.
 fn repo_local_work_events_path_with_migration(repo_path: &Path) -> Result<PathBuf> {
+    let work_items_path = gwt_workspace_work_items_path_for_repo_path(repo_path);
+    with_workspace_work_items_lock(&work_items_path, || {
+        repo_local_work_events_path_with_migration_locked(repo_path)
+    })
+}
+
+fn repo_local_work_events_path_with_migration_locked(repo_path: &Path) -> Result<PathBuf> {
     let events_path = gwt_repo_local_work_events_path(repo_path);
     if !events_path.exists() {
         // Primary migration source: the home Project State event log.
@@ -181,37 +216,42 @@ fn migrate_legacy_workspace_projection(
     repo_path: &Path,
     canonical_path: &Path,
 ) -> Result<Option<WorkspaceProjection>> {
-    if canonical_path.exists() {
-        return load_workspace_projection_from_path(canonical_path);
-    }
+    let work_items_path = canonical_path.with_file_name("works.json");
+    with_workspace_work_items_lock(&work_items_path, || {
+        if let Some(projection) = load_workspace_projection_from_path(canonical_path)? {
+            return Ok(Some(projection));
+        }
 
-    let legacy_path = legacy_workspace_projection_path_for_repo_path(repo_path);
-    if legacy_path == canonical_path {
-        return load_workspace_projection_from_path(canonical_path);
-    }
-    let Some(projection) = load_workspace_projection_from_path(&legacy_path)? else {
-        return Ok(None);
-    };
-    save_workspace_projection_to_path(canonical_path, &projection)?;
-    Ok(Some(projection))
+        let legacy_path = legacy_workspace_projection_path_for_repo_path(repo_path);
+        if legacy_path == canonical_path {
+            return load_workspace_projection_from_path(canonical_path);
+        }
+        let Some(projection) = load_workspace_projection_from_path(&legacy_path)? else {
+            return Ok(None);
+        };
+        save_workspace_projection_to_path_unlocked(canonical_path, &projection)?;
+        Ok(Some(projection))
+    })
 }
 
 fn migrate_legacy_workspace_work_items(
     repo_path: &Path,
     canonical_path: &Path,
 ) -> Result<Option<WorkItemsProjection>> {
-    if let Some(projection) = load_workspace_work_items_from_path(canonical_path)? {
-        return Ok(Some(projection));
-    }
-    let legacy_path = legacy_workspace_work_items_path_for_repo_path(repo_path);
-    if legacy_path == canonical_path {
-        return load_workspace_work_items_from_path(canonical_path);
-    }
-    let Some(projection) = load_workspace_work_items_from_path(&legacy_path)? else {
-        return Ok(None);
-    };
-    save_workspace_work_items_projection_to_path(canonical_path, &projection)?;
-    Ok(Some(projection))
+    with_workspace_work_items_lock(canonical_path, || {
+        if let Some(projection) = load_workspace_work_items_from_path(canonical_path)? {
+            return Ok(Some(projection));
+        }
+        let legacy_path = legacy_workspace_work_items_path_for_repo_path(repo_path);
+        if legacy_path == canonical_path {
+            return load_workspace_work_items_from_path(canonical_path);
+        }
+        let Some(projection) = load_workspace_work_items_from_path(&legacy_path)? else {
+            return Ok(None);
+        };
+        save_workspace_work_items_projection_to_path(canonical_path, &projection)?;
+        Ok(Some(projection))
+    })
 }
 
 pub fn load_workspace_projection(repo_path: &Path) -> Result<Option<WorkspaceProjection>> {
@@ -229,13 +269,63 @@ pub fn load_workspace_projection(repo_path: &Path) -> Result<Option<WorkspacePro
 /// audience auto-attach, reminder injection scoping, and the
 /// duplicate-work coordination gate corpus.
 pub fn resolve_workspace_id_for_session(repo_path: &Path, session_id: &str) -> Option<String> {
-    let projection = load_workspace_projection(repo_path).ok().flatten()?;
-    projection
-        .agents
-        .iter()
-        .find(|agent| agent.session_id == session_id)
-        .filter(|agent| !agent.is_unassigned())
-        .and_then(|agent| agent.workspace_id.clone())
+    try_resolve_workspace_id_for_session(repo_path, session_id)
+        .ok()
+        .flatten()
+}
+
+pub fn try_resolve_workspace_id_for_session(
+    repo_path: &Path,
+    session_id: &str,
+) -> Result<Option<String>> {
+    Ok(
+        match try_resolve_workspace_assignment_for_session(repo_path, session_id)? {
+            WorkspaceSessionAssignment::Assigned(workspace_id) => Some(workspace_id),
+            WorkspaceSessionAssignment::Unassigned | WorkspaceSessionAssignment::Missing => None,
+        },
+    )
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum WorkspaceSessionAssignment {
+    Missing,
+    Unassigned,
+    Assigned(String),
+}
+
+pub fn try_resolve_workspace_assignment_for_session(
+    repo_path: &Path,
+    session_id: &str,
+) -> Result<WorkspaceSessionAssignment> {
+    let Some(projection) = load_workspace_projection(repo_path)? else {
+        return Ok(WorkspaceSessionAssignment::Missing);
+    };
+    Ok(workspace_assignment_for_session(&projection, session_id))
+}
+
+fn workspace_assignment_for_session(
+    projection: &WorkspaceProjection,
+    session_id: &str,
+) -> WorkspaceSessionAssignment {
+    let latest = latest_workspace_agent_for_session(projection, session_id);
+    let Some(agent) = latest else {
+        return WorkspaceSessionAssignment::Missing;
+    };
+    if agent.is_unassigned() {
+        return WorkspaceSessionAssignment::Unassigned;
+    }
+    agent
+        .workspace_id
+        .clone()
+        .map(WorkspaceSessionAssignment::Assigned)
+        .unwrap_or(WorkspaceSessionAssignment::Unassigned)
+}
+
+fn latest_workspace_agent_for_session<'a>(
+    projection: &'a WorkspaceProjection,
+    session_id: &str,
+) -> Option<&'a WorkspaceAgentSummary> {
+    projection.latest_agent_for_session(session_id)
 }
 
 /// SPEC-2359 FR-097: resolve the currently assigned Workspace id for a
@@ -250,18 +340,19 @@ pub fn resolve_workspace_id_for_mention(
     target_value: &str,
 ) -> Option<String> {
     let projection = load_workspace_projection(repo_path).ok().flatten()?;
-    projection
-        .agents
-        .iter()
-        .find(|agent| match target_kind {
-            "session" => agent.session_id == target_value,
-            "agent" => {
+    let agent = match target_kind {
+        "session" => projection.latest_agent_for_session(target_value),
+        "agent" => projection
+            .latest_agents()
+            .filter(|agent| {
                 agent.agent_id == target_value
                     || agent.display_name == target_value
                     || agent.display_name.eq_ignore_ascii_case(target_value)
-            }
-            _ => false,
-        })
+            })
+            .max_by(|left, right| left.updated_at.cmp(&right.updated_at)),
+        _ => None,
+    };
+    agent
         .filter(|agent| !agent.is_unassigned())
         .and_then(|agent| agent.workspace_id.clone())
 }
@@ -276,6 +367,277 @@ pub fn save_workspace_projection(repo_path: &Path, projection: &WorkspaceProject
         &gwt_workspace_projection_path_for_repo_path(repo_path),
         projection,
     )
+}
+
+/// Mutate the current Workspace projection while holding the project lock from
+/// before load through the atomic save. This is the canonical RMW path for
+/// writers that do not also emit a Work event.
+pub fn mutate_workspace_projection<T>(
+    repo_path: &Path,
+    update: impl FnOnce(&mut WorkspaceProjection) -> Result<T>,
+) -> Result<T> {
+    let current_path = gwt_workspace_projection_path_for_repo_path(repo_path);
+    let _ = migrate_legacy_workspace_projection(repo_path, &current_path)?;
+    mutate_workspace_projection_at(&current_path, repo_path, update)
+}
+
+pub fn mutate_existing_workspace_projection<T>(
+    repo_path: &Path,
+    update: impl FnOnce(&mut WorkspaceProjection) -> Result<T>,
+) -> Result<Option<T>> {
+    let current_path = gwt_workspace_projection_path_for_repo_path(repo_path);
+    let _ = migrate_legacy_workspace_projection(repo_path, &current_path)?;
+    let work_items_path = current_path.with_file_name("works.json");
+    with_workspace_work_items_lock(&work_items_path, || {
+        let Some(mut projection) = load_workspace_projection_from_path(&current_path)? else {
+            return Ok(None);
+        };
+        projection.project_root = repo_path.to_path_buf();
+        let result = update(&mut projection)?;
+        save_workspace_projection_to_path_unlocked(&current_path, &projection)?;
+        Ok(Some(result))
+    })
+}
+
+pub fn mutate_workspace_projection_at<T>(
+    current_path: &Path,
+    project_root: &Path,
+    update: impl FnOnce(&mut WorkspaceProjection) -> Result<T>,
+) -> Result<T> {
+    let work_items_path = current_path.with_file_name("works.json");
+    with_workspace_work_items_lock(&work_items_path, || {
+        let mut projection =
+            load_or_default_workspace_projection_from_path(current_path, project_root)?;
+        projection.project_root = project_root.to_path_buf();
+        let result = update(&mut projection)?;
+        save_workspace_projection_to_path_unlocked(current_path, &projection)?;
+        Ok(result)
+    })
+}
+
+/// Update assignment/current state and its Work events under one project lock.
+/// The closure sees one consistent snapshot of both projections and returns
+/// the events that belong to the same state transition.
+pub fn transact_workspace_state<T>(
+    repo_path: &Path,
+    update: impl FnOnce(
+        &mut WorkspaceProjection,
+        &WorkItemsProjection,
+        bool,
+    ) -> Result<(T, Vec<WorkEvent>)>,
+) -> Result<T> {
+    let current_path = gwt_workspace_projection_path_for_repo_path(repo_path);
+    let work_items_path = gwt_workspace_work_items_path_for_repo_path(repo_path);
+    let _ = migrate_legacy_workspace_projection(repo_path, &current_path)?;
+    let _ = migrate_legacy_workspace_work_items(repo_path, &work_items_path)?;
+    let events_path = repo_local_work_events_path_with_migration(repo_path)?;
+    transact_workspace_state_at(
+        &current_path,
+        &work_items_path,
+        &events_path,
+        repo_path,
+        update,
+    )
+}
+
+const WORKSPACE_STATE_TRANSACTION_VERSION: u32 = 2;
+const MIN_WORKSPACE_STATE_TRANSACTION_VERSION: u32 = 1;
+const WORKSPACE_STATE_TRANSACTION_COORDINATOR_DIR: &str =
+    ".gwt-pending-workspace-state-transactions";
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct PendingWorkspaceStateTransaction {
+    version: u32,
+    #[serde(default)]
+    transaction_id: Option<String>,
+    current_path: PathBuf,
+    work_items_path: PathBuf,
+    #[serde(default)]
+    current_precondition: Option<String>,
+    #[serde(default)]
+    work_items_precondition: Option<String>,
+    projection: WorkspaceProjection,
+    #[serde(default)]
+    work_items: Option<WorkItemsProjection>,
+    #[serde(default)]
+    events_path: Option<PathBuf>,
+    #[serde(default)]
+    events: Vec<WorkEvent>,
+    #[serde(default)]
+    journal_path: Option<PathBuf>,
+    #[serde(default)]
+    journal_entries: Vec<WorkspaceJournalEntry>,
+}
+
+fn pending_workspace_state_transaction_path(current_path: &Path) -> PathBuf {
+    current_path.with_file_name("pending-state-transaction.json")
+}
+
+fn pending_workspace_state_transaction_path_for_work_items(work_items_path: &Path) -> PathBuf {
+    work_items_path.with_file_name("pending-state-transaction.json")
+}
+
+fn pending_workspace_state_transaction_paths(
+    transaction: &PendingWorkspaceStateTransaction,
+) -> Vec<PathBuf> {
+    let mut paths = vec![
+        pending_workspace_state_transaction_path(&transaction.current_path),
+        pending_workspace_state_transaction_path_for_work_items(&transaction.work_items_path),
+    ];
+    if let Some(path) = pending_workspace_state_transaction_coordinator_path(transaction) {
+        paths.push(path);
+    }
+    paths.sort();
+    paths.dedup();
+    paths
+}
+
+fn pending_workspace_state_transaction_coordinator_path(
+    transaction: &PendingWorkspaceStateTransaction,
+) -> Option<PathBuf> {
+    let transaction_id = transaction.transaction_id.as_deref()?;
+    let current_parent = transaction.current_path.parent()?;
+    let work_items_parent = transaction.work_items_path.parent()?;
+    let common_parent = common_path_ancestor(current_parent, work_items_parent)?;
+    Some(
+        common_parent
+            .join(WORKSPACE_STATE_TRANSACTION_COORDINATOR_DIR)
+            .join(format!("{transaction_id}.json")),
+    )
+}
+
+fn common_path_ancestor(left: &Path, right: &Path) -> Option<PathBuf> {
+    let mut common = PathBuf::new();
+    for (left_component, right_component) in left.components().zip(right.components()) {
+        if left_component != right_component {
+            break;
+        }
+        common.push(left_component.as_os_str());
+    }
+    (!common.as_os_str().is_empty()).then_some(common)
+}
+
+fn discover_pending_workspace_state_transaction_coordinators(
+    lock_targets: &[PathBuf],
+) -> Result<Vec<PathBuf>> {
+    let mut coordinator_dirs = HashSet::new();
+    let mut coordinator_paths = Vec::new();
+    for target in lock_targets {
+        let Some(parent) = target.parent() else {
+            continue;
+        };
+        for ancestor in parent.ancestors() {
+            let coordinator_dir = ancestor.join(WORKSPACE_STATE_TRANSACTION_COORDINATOR_DIR);
+            if !coordinator_dirs.insert(coordinator_dir.clone()) || !coordinator_dir.is_dir() {
+                continue;
+            }
+            let entries = match fs::read_dir(&coordinator_dir) {
+                Ok(entries) => entries,
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+                Err(error) => return Err(error.into()),
+            };
+            for entry in entries {
+                let entry = entry?;
+                if !entry.file_type()?.is_file() {
+                    continue;
+                }
+                let path = entry.path();
+                let Ok(bytes) = fs::read(&path) else {
+                    continue;
+                };
+                let Ok(transaction) =
+                    serde_json::from_slice::<PendingWorkspaceStateTransaction>(&bytes)
+                else {
+                    continue;
+                };
+                let current_lock_target = transaction.current_path.with_file_name("works.json");
+                if lock_targets.iter().any(|target| {
+                    target == &current_lock_target || target == &transaction.work_items_path
+                }) {
+                    coordinator_paths.push(path);
+                }
+            }
+        }
+    }
+    coordinator_paths.sort();
+    coordinator_paths.dedup();
+    Ok(coordinator_paths)
+}
+
+fn workspace_state_file_fingerprint(path: &Path) -> Result<String> {
+    use sha2::{Digest, Sha256};
+
+    match fs::read(path) {
+        Ok(bytes) => {
+            let mut hasher = Sha256::new();
+            hasher.update(bytes);
+            Ok(format!("sha256:{:x}", hasher.finalize()))
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok("missing".to_string()),
+        Err(error) => Err(error.into()),
+    }
+}
+
+pub fn transact_workspace_state_at<T>(
+    current_path: &Path,
+    work_items_path: &Path,
+    events_path: &Path,
+    project_root: &Path,
+    update: impl FnOnce(
+        &mut WorkspaceProjection,
+        &WorkItemsProjection,
+        bool,
+    ) -> Result<(T, Vec<WorkEvent>)>,
+) -> Result<T> {
+    with_workspace_current_and_work_items_lock(current_path, work_items_path, || {
+        let current_precondition = workspace_state_file_fingerprint(current_path)?;
+        let work_items_precondition = workspace_state_file_fingerprint(work_items_path)?;
+        let mut projection =
+            load_or_default_workspace_projection_from_path(current_path, project_root)?;
+        projection.project_root = project_root.to_path_buf();
+        let journal_path = current_path.with_file_name("journal.jsonl");
+        let persisted_work_items = load_workspace_work_items_from_path(work_items_path)?;
+        let synthesized = persisted_work_items.is_none();
+        let work_items = match persisted_work_items {
+            Some(work_items) => work_items,
+            None => load_or_synthesize_workspace_work_items_from_paths(
+                work_items_path,
+                current_path,
+                &journal_path,
+                project_root,
+            )?,
+        };
+        let (result, events) = update(&mut projection, &work_items, !synthesized)?;
+
+        let mut next_work_items = work_items;
+        for event in &events {
+            if next_work_items.apply_event(event.clone())
+                == WorkEventApplyOutcome::RejectedSessionConflict
+            {
+                return Err(GwtError::Other(format!(
+                    "workspace state transaction rejected Session conflict for Work {}",
+                    event.work_item_id
+                )));
+            }
+        }
+
+        let transaction = PendingWorkspaceStateTransaction {
+            version: WORKSPACE_STATE_TRANSACTION_VERSION,
+            transaction_id: Some(Uuid::new_v4().to_string()),
+            current_path: current_path.to_path_buf(),
+            work_items_path: work_items_path.to_path_buf(),
+            current_precondition: Some(current_precondition),
+            work_items_precondition: Some(work_items_precondition),
+            projection,
+            work_items: (!events.is_empty()).then_some(next_work_items),
+            events_path: (!events.is_empty()).then(|| events_path.to_path_buf()),
+            events,
+            journal_path: None,
+            journal_entries: Vec::new(),
+        };
+        persist_workspace_state_transaction_locked(current_path, &transaction)?;
+        Ok(result)
+    })
 }
 
 pub fn update_workspace_projection_with_journal(
@@ -293,22 +655,52 @@ pub fn update_workspace_projection_with_journal_for_work_event_root(
     let current_path = gwt_workspace_projection_path_for_repo_path(project_state_root);
     let journal_path = gwt_workspace_journal_path_for_repo_path(project_state_root);
     let _ = migrate_legacy_workspace_projection(project_state_root, &current_path)?;
-    copy_legacy_workspace_file_if_needed(
-        &legacy_workspace_journal_path_for_repo_path(project_state_root),
-        &journal_path,
-    )?;
-    let entry = update_workspace_projection_with_journal_paths(
-        &current_path,
-        &journal_path,
-        project_state_root,
-        update,
-    )?;
-    if let Some(projection) = load_workspace_projection(project_state_root)? {
+    let work_items_path = gwt_workspace_work_items_path_for_repo_path(work_event_root);
+    let _ = migrate_legacy_workspace_work_items(work_event_root, &work_items_path)?;
+    let events_path = repo_local_work_events_path_with_migration(work_event_root)?;
+    with_workspace_current_and_work_items_lock(&current_path, &work_items_path, || {
+        let current_precondition = workspace_state_file_fingerprint(&current_path)?;
+        let work_items_precondition = workspace_state_file_fingerprint(&work_items_path)?;
+        copy_legacy_workspace_file_if_needed(
+            &legacy_workspace_journal_path_for_repo_path(project_state_root),
+            &journal_path,
+        )?;
+        let mut projection =
+            load_or_default_workspace_projection_from_path(&current_path, project_state_root)?;
+        projection.project_root = project_state_root.to_path_buf();
+        let mut work_items = load_or_synthesize_workspace_work_items_from_paths(
+            &work_items_path,
+            &current_path,
+            &journal_path,
+            project_state_root,
+        )?;
+        let entry = projection.apply_update(update, Utc::now());
         let event =
             workspace_work_event_from_journal_entry_for_root(&projection, &entry, work_event_root);
-        record_workspace_work_event(work_event_root, event)?;
-    }
-    Ok(entry)
+        if work_items.apply_event(event.clone()) == WorkEventApplyOutcome::RejectedSessionConflict {
+            return Err(GwtError::Other(format!(
+                "workspace journal event rejected Session conflict for Work {}",
+                event.work_item_id
+            )));
+        }
+
+        let transaction = PendingWorkspaceStateTransaction {
+            version: WORKSPACE_STATE_TRANSACTION_VERSION,
+            transaction_id: Some(Uuid::new_v4().to_string()),
+            current_path: current_path.clone(),
+            work_items_path: work_items_path.clone(),
+            current_precondition: Some(current_precondition),
+            work_items_precondition: Some(work_items_precondition),
+            projection,
+            work_items: Some(work_items),
+            events_path: Some(events_path.clone()),
+            events: vec![event],
+            journal_path: Some(journal_path.clone()),
+            journal_entries: vec![entry.clone()],
+        };
+        persist_workspace_state_transaction_locked(&current_path, &transaction)?;
+        Ok(entry)
+    })
 }
 
 pub fn mark_workspace_agent_stopped(
@@ -382,17 +774,19 @@ pub fn load_or_synthesize_workspace_work_items(repo_path: &Path) -> Result<WorkI
     let journal_path = gwt_workspace_journal_path_for_repo_path(repo_path);
     let work_items_path = gwt_workspace_work_items_path_for_repo_path(repo_path);
     let _ = migrate_legacy_workspace_projection(repo_path, &current_path)?;
-    copy_legacy_workspace_file_if_needed(
-        &legacy_workspace_journal_path_for_repo_path(repo_path),
-        &journal_path,
-    )?;
     let _ = migrate_legacy_workspace_work_items(repo_path, &work_items_path)?;
-    load_or_synthesize_workspace_work_items_from_paths(
-        &work_items_path,
-        &current_path,
-        &journal_path,
-        repo_path,
-    )
+    with_workspace_current_and_work_items_lock(&current_path, &work_items_path, || {
+        copy_legacy_workspace_file_if_needed(
+            &legacy_workspace_journal_path_for_repo_path(repo_path),
+            &journal_path,
+        )?;
+        load_or_synthesize_workspace_work_items_from_paths(
+            &work_items_path,
+            &current_path,
+            &journal_path,
+            repo_path,
+        )
+    })
 }
 
 pub fn load_or_synthesize_workspace_work_items_from_paths(
@@ -503,6 +897,366 @@ pub fn save_workspace_work_items_projection_to_path(
     write_atomic(path, &bytes)
 }
 
+pub(crate) fn with_workspace_work_items_lock<T>(
+    work_items_path: &Path,
+    operation: impl FnOnce() -> Result<T>,
+) -> Result<T> {
+    with_workspace_transaction_recovery(
+        vec![work_items_path.to_path_buf()],
+        vec![pending_workspace_state_transaction_path_for_work_items(
+            work_items_path,
+        )],
+        operation,
+    )
+}
+
+fn with_workspace_work_items_locks<T>(
+    work_items_paths: &[PathBuf],
+    operation: impl FnOnce() -> Result<T>,
+) -> Result<T> {
+    let mut lock_paths = work_items_paths
+        .iter()
+        .map(|path| path.with_extension("lock"))
+        .collect::<Vec<_>>();
+    lock_paths.sort();
+    lock_paths.dedup();
+    let mut locks = Vec::with_capacity(lock_paths.len());
+    for lock_path in lock_paths {
+        if let Some(parent) = lock_path.parent() {
+            fs::create_dir_all(parent)?;
+        }
+        let lock = fs::OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .read(true)
+            .write(true)
+            .open(&lock_path)?;
+        lock.lock_exclusive()?;
+        locks.push(lock);
+    }
+    let result = operation();
+    drop(locks);
+    result
+}
+
+pub(crate) fn with_workspace_current_and_work_items_lock<T>(
+    current_path: &Path,
+    work_items_path: &Path,
+    operation: impl FnOnce() -> Result<T>,
+) -> Result<T> {
+    let current_work_items_path = current_path.with_file_name("works.json");
+    with_workspace_transaction_recovery(
+        vec![current_work_items_path, work_items_path.to_path_buf()],
+        vec![
+            pending_workspace_state_transaction_path(current_path),
+            pending_workspace_state_transaction_path_for_work_items(work_items_path),
+        ],
+        operation,
+    )
+}
+
+fn with_workspace_transaction_recovery<T>(
+    base_lock_targets: Vec<PathBuf>,
+    base_marker_paths: Vec<PathBuf>,
+    operation: impl FnOnce() -> Result<T>,
+) -> Result<T> {
+    let mut operation = Some(operation);
+    loop {
+        let mut marker_paths = base_marker_paths.clone();
+        marker_paths.extend(discover_pending_workspace_state_transaction_coordinators(
+            &base_lock_targets,
+        )?);
+        marker_paths.sort();
+        marker_paths.dedup();
+        let discovered = find_pending_workspace_state_transaction(&marker_paths)
+            .ok()
+            .flatten();
+
+        let mut lock_targets = base_lock_targets.clone();
+        if let Some(transaction) = discovered.as_ref() {
+            lock_targets.push(transaction.current_path.with_file_name("works.json"));
+            lock_targets.push(transaction.work_items_path.clone());
+            marker_paths.extend(pending_workspace_state_transaction_paths(transaction));
+        }
+        lock_targets.sort();
+        lock_targets.dedup();
+        marker_paths.sort();
+        marker_paths.dedup();
+
+        let outcome = with_workspace_work_items_locks(&lock_targets, || {
+            loop {
+                let pending = match find_pending_workspace_state_transaction(&marker_paths) {
+                    Ok(pending) => pending,
+                    Err(error) => {
+                        quarantine_invalid_pending_workspace_state_transactions(
+                            &marker_paths,
+                            &error,
+                        )?;
+                        return Err(error);
+                    }
+                };
+                let Some(transaction) = pending else {
+                    break;
+                };
+                let required_locks = [
+                    transaction.current_path.with_file_name("works.json"),
+                    transaction.work_items_path.clone(),
+                ];
+                if required_locks
+                    .iter()
+                    .any(|required| !lock_targets.iter().any(|locked| locked == required))
+                {
+                    return Ok(None);
+                }
+                apply_workspace_state_transaction_locked(
+                    &transaction.current_path,
+                    &transaction,
+                    true,
+                )?;
+            }
+            let operation = operation
+                .take()
+                .expect("workspace state operation must run exactly once");
+            operation().map(Some)
+        })?;
+        if let Some(result) = outcome {
+            return Ok(result);
+        }
+    }
+}
+
+fn find_pending_workspace_state_transaction(
+    marker_paths: &[PathBuf],
+) -> Result<Option<PendingWorkspaceStateTransaction>> {
+    for marker_path in marker_paths {
+        let bytes = match fs::read(marker_path) {
+            Ok(bytes) => bytes,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(error) => return Err(error.into()),
+        };
+        let transaction: PendingWorkspaceStateTransaction = serde_json::from_slice(&bytes)
+            .map_err(|error| {
+                GwtError::Other(format!(
+                    "workspace state transaction json at {}: {error}",
+                    marker_path.display()
+                ))
+            })?;
+        let valid_marker_paths = pending_workspace_state_transaction_paths(&transaction);
+        if !(MIN_WORKSPACE_STATE_TRANSACTION_VERSION..=WORKSPACE_STATE_TRANSACTION_VERSION)
+            .contains(&transaction.version)
+            || (transaction.version >= 2
+                && (transaction.transaction_id.is_none()
+                    || transaction.current_precondition.is_none()
+                    || transaction.work_items_precondition.is_none()))
+            || !valid_marker_paths.iter().any(|path| path == marker_path)
+        {
+            return Err(GwtError::Other(format!(
+                "invalid workspace state transaction at {}",
+                marker_path.display()
+            )));
+        }
+        return Ok(Some(transaction));
+    }
+    Ok(None)
+}
+
+fn quarantine_invalid_pending_workspace_state_transactions(
+    marker_paths: &[PathBuf],
+    source_error: &GwtError,
+) -> Result<()> {
+    let mut quarantined = Vec::new();
+    for marker_path in marker_paths {
+        if !marker_path.exists() {
+            continue;
+        }
+        if find_pending_workspace_state_transaction(std::slice::from_ref(marker_path)).is_ok() {
+            continue;
+        }
+        let file_name = marker_path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or("pending-state-transaction.json");
+        let quarantine_path =
+            marker_path.with_file_name(format!("{file_name}.corrupt-{}", Uuid::new_v4()));
+        fs::rename(marker_path, &quarantine_path)?;
+        quarantined.push(quarantine_path);
+    }
+    if quarantined.is_empty() {
+        return Err(GwtError::Other(format!(
+            "workspace state transaction could not be quarantined: {source_error}"
+        )));
+    }
+    Err(GwtError::Other(format!(
+        "quarantined corrupt workspace state transaction at {}: {source_error}",
+        quarantined
+            .iter()
+            .map(|path| path.display().to_string())
+            .collect::<Vec<_>>()
+            .join(", ")
+    )))
+}
+
+fn persist_workspace_state_transaction_locked(
+    current_path: &Path,
+    transaction: &PendingWorkspaceStateTransaction,
+) -> Result<()> {
+    let bytes = serde_json::to_vec_pretty(transaction)
+        .map_err(|error| GwtError::Other(format!("workspace state transaction json: {error}")))?;
+    let coordinator_path = pending_workspace_state_transaction_coordinator_path(transaction);
+    let mut marker_paths = pending_workspace_state_transaction_paths(transaction);
+    marker_paths.sort_by_key(|path| coordinator_path.as_ref() != Some(path));
+    let mut written_markers = Vec::new();
+    for marker_path in &marker_paths {
+        if let Err(error) = write_atomic(marker_path, &bytes) {
+            for written in written_markers {
+                let _ = fs::remove_file(written);
+            }
+            return Err(error);
+        }
+        written_markers.push(marker_path);
+    }
+    apply_workspace_state_transaction_locked(current_path, transaction, false)
+}
+
+fn apply_workspace_state_transaction_locked(
+    current_path: &Path,
+    transaction: &PendingWorkspaceStateTransaction,
+    recovering: bool,
+) -> Result<()> {
+    if transaction.current_path != current_path {
+        return Err(GwtError::Other(format!(
+            "workspace state transaction current path mismatch: {} != {}",
+            transaction.current_path.display(),
+            current_path.display()
+        )));
+    }
+    if let Some(journal_path) = transaction.journal_path.as_deref() {
+        if recovering {
+            append_workspace_journal_entries_if_missing(
+                journal_path,
+                &transaction.journal_entries,
+            )?;
+        } else {
+            for entry in &transaction.journal_entries {
+                append_workspace_journal_entry_to_path(journal_path, entry)?;
+            }
+        }
+    }
+    if let Some(events_path) = transaction.events_path.as_deref() {
+        if recovering {
+            append_workspace_work_events_if_missing(events_path, &transaction.events)?;
+        } else {
+            append_workspace_work_events_to_path(events_path, &transaction.events)?;
+        }
+    }
+    if let Some(work_items) = transaction.work_items.as_ref() {
+        let may_write = !recovering
+            || workspace_state_snapshot_matches_precondition(
+                &transaction.work_items_path,
+                transaction.work_items_precondition.as_deref(),
+            )?;
+        if may_write {
+            save_workspace_work_items_projection_to_path(&transaction.work_items_path, work_items)?;
+        }
+    }
+    if !recovering
+        || workspace_state_snapshot_matches_precondition(
+            current_path,
+            transaction.current_precondition.as_deref(),
+        )?
+    {
+        save_workspace_projection_to_path_unlocked(current_path, &transaction.projection)?;
+    }
+    let coordinator_path = pending_workspace_state_transaction_coordinator_path(transaction);
+    let mut marker_paths = pending_workspace_state_transaction_paths(transaction);
+    marker_paths.sort_by_key(|path| coordinator_path.as_ref() == Some(path));
+    for marker_path in marker_paths {
+        match fs::remove_file(marker_path) {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error.into()),
+        }
+    }
+    Ok(())
+}
+
+fn workspace_state_snapshot_matches_precondition(
+    path: &Path,
+    precondition: Option<&str>,
+) -> Result<bool> {
+    let Some(precondition) = precondition else {
+        return Ok(true);
+    };
+    Ok(workspace_state_file_fingerprint(path)? == precondition)
+}
+
+fn existing_jsonl_ids(path: &Path) -> Result<HashSet<String>> {
+    repair_jsonl_tail(path)?;
+    let content = match fs::read(path) {
+        Ok(content) => content,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(HashSet::new()),
+        Err(error) => return Err(error.into()),
+    };
+    Ok(content
+        .split(|byte| *byte == b'\n')
+        .filter(|line| !line.is_empty())
+        .filter_map(|line| serde_json::from_slice::<serde_json::Value>(line).ok())
+        .filter_map(|value| {
+            value
+                .get("id")
+                .and_then(|id| id.as_str())
+                .map(str::to_string)
+        })
+        .collect())
+}
+
+fn repair_jsonl_tail(path: &Path) -> Result<()> {
+    let bytes = match fs::read(path) {
+        Ok(bytes) => bytes,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(error.into()),
+    };
+    if bytes.is_empty() || bytes.last() == Some(&b'\n') {
+        return Ok(());
+    }
+
+    let tail_start = bytes
+        .iter()
+        .rposition(|byte| *byte == b'\n')
+        .map_or(0, |index| index + 1);
+    let mut file = fs::OpenOptions::new().append(true).open(path)?;
+    if serde_json::from_slice::<serde_json::Value>(&bytes[tail_start..]).is_ok() {
+        file.write_all(b"\n")?;
+    } else {
+        file.set_len(tail_start as u64)?;
+    }
+    file.sync_all()?;
+    Ok(())
+}
+
+fn append_workspace_journal_entries_if_missing(
+    path: &Path,
+    entries: &[WorkspaceJournalEntry],
+) -> Result<()> {
+    let mut seen = existing_jsonl_ids(path)?;
+    for entry in entries {
+        if seen.insert(entry.id.clone()) {
+            append_workspace_journal_entry_to_path(path, entry)?;
+        }
+    }
+    Ok(())
+}
+
+fn append_workspace_work_events_if_missing(path: &Path, events: &[WorkEvent]) -> Result<()> {
+    let mut seen = existing_jsonl_ids(path)?;
+    let missing = events
+        .iter()
+        .filter(|event| seen.insert(event.id.clone()))
+        .cloned()
+        .collect::<Vec<_>>();
+    append_workspace_work_events_to_path(path, &missing)
+}
+
 pub fn record_workspace_work_event(repo_path: &Path, event: WorkEvent) -> Result<()> {
     let work_items_path = gwt_workspace_work_items_path_for_repo_path(repo_path);
     let _ = migrate_legacy_workspace_work_items(repo_path, &work_items_path)?;
@@ -515,12 +1269,50 @@ pub fn record_workspace_work_event_paths(
     events_path: &Path,
     event: WorkEvent,
 ) -> Result<()> {
-    let mut projection = load_workspace_work_items_from_path(work_items_path)?
-        .unwrap_or_else(|| WorkItemsProjection::empty(event.updated_at));
-    projection.apply_event(event.clone());
-    save_workspace_work_items_projection_to_path(work_items_path, &projection)?;
-    append_workspace_work_event_to_path(events_path, &event)?;
-    Ok(())
+    record_workspace_work_events_paths(work_items_path, events_path, vec![event])
+}
+
+pub fn record_workspace_work_events_paths(
+    work_items_path: &Path,
+    events_path: &Path,
+    events: Vec<WorkEvent>,
+) -> Result<()> {
+    with_workspace_work_items_lock(work_items_path, || {
+        let initial_updated_at = events
+            .first()
+            .map(|event| event.updated_at)
+            .unwrap_or_else(Utc::now);
+        let mut projection = load_workspace_work_items_from_path(work_items_path)?
+            .unwrap_or_else(|| WorkItemsProjection::empty(initial_updated_at));
+        persist_workspace_work_events_locked(
+            work_items_path,
+            events_path,
+            &mut projection,
+            events,
+        )?;
+        Ok(())
+    })
+}
+
+fn persist_workspace_work_events_locked(
+    work_items_path: &Path,
+    events_path: &Path,
+    projection: &mut WorkItemsProjection,
+    events: Vec<WorkEvent>,
+) -> Result<usize> {
+    if events.is_empty() {
+        return Ok(0);
+    }
+    let mut candidate = projection.clone();
+    for event in &events {
+        if candidate.apply_event(event.clone()) == WorkEventApplyOutcome::RejectedSessionConflict {
+            return Ok(0);
+        }
+    }
+    append_workspace_work_events_to_path(events_path, &events)?;
+    *projection = candidate;
+    save_workspace_work_items_projection_to_path(work_items_path, projection)?;
+    Ok(events.len())
 }
 
 /// SPEC-2359 Phase W-15 (FR-379/FR-381): one locally existing worktree as
@@ -719,6 +1511,15 @@ pub fn decompose_legacy_multi_branch_work_items_paths(
     work_items_path: &Path,
     project_root: &Path,
 ) -> Result<usize> {
+    with_workspace_work_items_lock(work_items_path, || {
+        decompose_legacy_multi_branch_work_items_paths_locked(work_items_path, project_root)
+    })
+}
+
+fn decompose_legacy_multi_branch_work_items_paths_locked(
+    work_items_path: &Path,
+    project_root: &Path,
+) -> Result<usize> {
     let Some(mut projection) = load_workspace_work_items_from_path(work_items_path)? else {
         return Ok(0);
     };
@@ -875,6 +1676,16 @@ pub fn repair_resume_owner_bleed_paths(
     current_projection_path: &Path,
     now: DateTime<Utc>,
 ) -> Result<ResumeOwnerBleedRepairReport> {
+    with_workspace_work_items_lock(work_items_path, || {
+        repair_resume_owner_bleed_paths_locked(work_items_path, current_projection_path, now)
+    })
+}
+
+fn repair_resume_owner_bleed_paths_locked(
+    work_items_path: &Path,
+    current_projection_path: &Path,
+    now: DateTime<Utc>,
+) -> Result<ResumeOwnerBleedRepairReport> {
     use std::collections::HashSet;
 
     let mut report = ResumeOwnerBleedRepairReport::default();
@@ -990,7 +1801,7 @@ pub fn repair_resume_owner_bleed_paths(
         }
     }
     if current_changed {
-        save_workspace_projection_to_path(current_projection_path, &current)?;
+        save_workspace_projection_to_path_unlocked(current_projection_path, &current)?;
     }
     Ok(report)
 }
@@ -1035,15 +1846,16 @@ pub fn record_workspace_work_paused_event_paths(
     event.execution_container = execution_container;
     // Pause must not regress a terminal Work, so leave status_category implicit;
     // record the board refs (if any) so the retained row keeps its provenance.
-    record_workspace_work_event_paths(work_items_path, events_path, event)?;
+    let mut events = Vec::with_capacity(board_refs.len() + 1);
     for board_ref in board_refs {
         if let Some(board_ref) = non_empty_clone(Some(board_ref.as_str())) {
             let mut ref_event = WorkEvent::new(WorkEventKind::Update, work_item_id, updated_at);
             ref_event.board_entry_id = Some(board_ref);
-            record_workspace_work_event_paths(work_items_path, events_path, ref_event)?;
+            events.push(ref_event);
         }
     }
-    Ok(())
+    events.push(event);
+    record_workspace_work_events_paths(work_items_path, events_path, events)
 }
 
 /// SPEC-2359 Phase W-12 Slice 5a (FR-350): convenience wrapper resolving the
@@ -1083,24 +1895,20 @@ pub fn record_workspace_work_paused_event(
 }
 
 /// SPEC-2359 US-37 / FR-117..FR-120: Emit a single Done `WorkEvent`
-/// for `work_item_id` iff no Done event has been recorded for it yet. This is
-/// the canonical write path for auto-done emission from PR merge detection,
-/// user-confirmed cleanup, and startup retroactive migration. Returns
-/// `Ok(true)` when a new Done event was appended, `Ok(false)` when an
-/// existing Done event was found (idempotent noop).
+/// for `work_item_id` iff its current projection is not terminal. This is the
+/// canonical write path for auto-done emission from PR merge detection,
+/// user-confirmed cleanup, and startup retroactive migration. A Work that was
+/// explicitly reopened after an earlier Done may receive a new Done event;
+/// retries while it remains terminal are idempotent noops.
 pub fn emit_workspace_done_event_if_absent_paths(
     work_items_path: &Path,
     events_path: &Path,
     work_item_id: &str,
     updated_at: DateTime<Utc>,
 ) -> Result<bool> {
-    if work_item_has_done_event_in_projection(work_items_path, work_item_id)? {
-        return Ok(false);
-    }
     let mut event = WorkEvent::new(WorkEventKind::Done, work_item_id, updated_at);
     event.status_category = Some(WorkspaceStatusCategory::Done);
-    record_workspace_work_event_paths(work_items_path, events_path, event)?;
-    Ok(true)
+    emit_workspace_terminal_event_if_absent_paths(work_items_path, events_path, event)
 }
 
 /// SPEC-2359 US-37 / FR-117..FR-120: Convenience wrapper resolving the
@@ -1121,24 +1929,6 @@ pub fn emit_workspace_done_event_if_absent(
     )
 }
 
-fn work_item_has_done_event_in_projection(
-    work_items_path: &Path,
-    work_item_id: &str,
-) -> Result<bool> {
-    let Some(projection) = load_workspace_work_items_from_path(work_items_path)? else {
-        return Ok(false);
-    };
-    Ok(projection
-        .work_items
-        .iter()
-        .filter(|item| item.id == work_item_id)
-        .any(|item| {
-            item.events
-                .iter()
-                .any(|event| event.kind == WorkEventKind::Done)
-        }))
-}
-
 /// SPEC-2359 Phase W-12 Slice 4 (FR-352): Emit a single Discard
 /// `WorkEvent` for `work_item_id` iff the Work is not already
 /// terminal (Done or already Discarded). This is the canonical write path for a
@@ -1151,12 +1941,8 @@ pub fn emit_workspace_discard_event_if_absent_paths(
     work_item_id: &str,
     updated_at: DateTime<Utc>,
 ) -> Result<bool> {
-    if work_item_is_terminal_in_projection(work_items_path, work_item_id)? {
-        return Ok(false);
-    }
     let event = WorkEvent::new(WorkEventKind::Discard, work_item_id, updated_at);
-    record_workspace_work_event_paths(work_items_path, events_path, event)?;
-    Ok(true)
+    emit_workspace_terminal_event_if_absent_paths(work_items_path, events_path, event)
 }
 
 /// SPEC-2359 Phase W-12 Slice 4 (FR-352): Convenience wrapper resolving the
@@ -1177,18 +1963,210 @@ pub fn emit_workspace_discard_event_if_absent(
     )
 }
 
+/// Resolve the latest Session assignment and emit Done while holding the
+/// Work projection transaction lock. `legacy_work_item_id` is used only when
+/// no Session row exists; an explicit Unassigned row disables fallback.
+#[allow(clippy::too_many_arguments)]
+pub fn emit_workspace_done_event_for_session_paths(
+    current_path: &Path,
+    work_items_path: &Path,
+    events_path: &Path,
+    session_id: &str,
+    legacy_work_item_id: &str,
+    updated_at: DateTime<Utc>,
+) -> Result<bool> {
+    let mut event = WorkEvent::new(WorkEventKind::Done, legacy_work_item_id, updated_at);
+    event.status_category = Some(WorkspaceStatusCategory::Done);
+    emit_workspace_terminal_event_for_session_paths(
+        current_path,
+        work_items_path,
+        events_path,
+        session_id,
+        legacy_work_item_id,
+        event,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn emit_workspace_discard_event_for_session_paths(
+    current_path: &Path,
+    work_items_path: &Path,
+    events_path: &Path,
+    session_id: &str,
+    legacy_work_item_id: &str,
+    updated_at: DateTime<Utc>,
+) -> Result<bool> {
+    let event = WorkEvent::new(WorkEventKind::Discard, legacy_work_item_id, updated_at);
+    emit_workspace_terminal_event_for_session_paths(
+        current_path,
+        work_items_path,
+        events_path,
+        session_id,
+        legacy_work_item_id,
+        event,
+    )
+}
+
+pub fn emit_workspace_done_event_for_session(
+    project_state_root: &Path,
+    work_event_root: &Path,
+    session_id: &str,
+    legacy_work_item_id: &str,
+    updated_at: DateTime<Utc>,
+) -> Result<bool> {
+    let current_path = gwt_workspace_projection_path_for_repo_path(project_state_root);
+    let _ = migrate_legacy_workspace_projection(project_state_root, &current_path)?;
+    emit_workspace_done_event_for_session_paths(
+        &current_path,
+        &gwt_workspace_work_items_path_for_repo_path(work_event_root),
+        &gwt_workspace_work_events_closed_path_for_repo_path(work_event_root),
+        session_id,
+        legacy_work_item_id,
+        updated_at,
+    )
+}
+
+pub fn emit_workspace_discard_event_for_session(
+    project_state_root: &Path,
+    work_event_root: &Path,
+    session_id: &str,
+    legacy_work_item_id: &str,
+    updated_at: DateTime<Utc>,
+) -> Result<bool> {
+    let current_path = gwt_workspace_projection_path_for_repo_path(project_state_root);
+    let _ = migrate_legacy_workspace_projection(project_state_root, &current_path)?;
+    emit_workspace_discard_event_for_session_paths(
+        &current_path,
+        &gwt_workspace_work_items_path_for_repo_path(work_event_root),
+        &gwt_workspace_work_events_closed_path_for_repo_path(work_event_root),
+        session_id,
+        legacy_work_item_id,
+        updated_at,
+    )
+}
+
+fn emit_workspace_terminal_event_for_session_paths(
+    current_path: &Path,
+    work_items_path: &Path,
+    events_path: &Path,
+    session_id: &str,
+    legacy_work_item_id: &str,
+    mut event: WorkEvent,
+) -> Result<bool> {
+    with_workspace_current_and_work_items_lock(current_path, work_items_path, || {
+        let assignment = load_workspace_projection_from_path(current_path)?
+            .as_ref()
+            .map(|projection| workspace_assignment_for_session(projection, session_id))
+            .unwrap_or(WorkspaceSessionAssignment::Missing);
+        let target = match assignment {
+            WorkspaceSessionAssignment::Assigned(work_id) => work_id,
+            WorkspaceSessionAssignment::Unassigned => return Ok(false),
+            WorkspaceSessionAssignment::Missing => legacy_work_item_id.to_string(),
+        };
+        event.work_item_id = target;
+        emit_workspace_terminal_event_if_absent_locked(work_items_path, events_path, event, false)
+    })
+}
+
 /// SPEC-2359 Phase W-12 Slice 4 (FR-352): true when `work_item_id` is already
 /// in a terminal close state (Done or discarded) in the saved projection. Used
 /// to make Done / Discard close emission idempotent.
-fn work_item_is_terminal_in_projection(work_items_path: &Path, work_item_id: &str) -> Result<bool> {
-    let Some(projection) = load_workspace_work_items_from_path(work_items_path)? else {
-        return Ok(false);
-    };
-    Ok(projection
+fn emit_workspace_terminal_event_if_absent_paths(
+    work_items_path: &Path,
+    events_path: &Path,
+    event: WorkEvent,
+) -> Result<bool> {
+    emit_workspace_terminal_event_if_absent_paths_inner(work_items_path, events_path, event, false)
+}
+
+fn emit_workspace_terminal_event_if_absent_paths_inner(
+    work_items_path: &Path,
+    events_path: &Path,
+    event: WorkEvent,
+    allow_missing_target: bool,
+) -> Result<bool> {
+    with_workspace_work_items_lock(work_items_path, || {
+        emit_workspace_terminal_event_if_absent_locked(
+            work_items_path,
+            events_path,
+            event,
+            allow_missing_target,
+        )
+    })
+}
+
+fn emit_workspace_terminal_event_if_absent_locked(
+    work_items_path: &Path,
+    events_path: &Path,
+    event: WorkEvent,
+    allow_missing_target: bool,
+) -> Result<bool> {
+    let mut projection = load_workspace_work_items_from_path(work_items_path)?
+        .unwrap_or_else(|| WorkItemsProjection::empty(event.updated_at));
+    let recovered = recover_unprojected_workspace_work_events_locked(&mut projection, events_path)?;
+    let item = projection
         .work_items
         .iter()
-        .filter(|item| item.id == work_item_id)
-        .any(|item| item.is_terminal()))
+        .find(|item| item.id == event.work_item_id);
+    if item.is_none() && !allow_missing_target {
+        if recovered {
+            save_workspace_work_items_projection_to_path(work_items_path, &projection)?;
+        }
+        return Ok(false);
+    }
+    if item.is_some_and(WorkItem::is_terminal) {
+        if recovered {
+            save_workspace_work_items_projection_to_path(work_items_path, &projection)?;
+        }
+        return Ok(false);
+    }
+    Ok(persist_workspace_work_events_locked(
+        work_items_path,
+        events_path,
+        &mut projection,
+        vec![event],
+    )? == 1)
+}
+
+fn recover_unprojected_workspace_work_events_locked(
+    projection: &mut WorkItemsProjection,
+    events_path: &Path,
+) -> Result<bool> {
+    let content = match fs::read_to_string(events_path) {
+        Ok(content) => content,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+        Err(error) => return Err(error.into()),
+    };
+    let seen_event_ids = projection
+        .work_items
+        .iter()
+        .flat_map(|item| item.events.iter().map(|event| event.id.clone()))
+        .collect::<HashSet<_>>();
+    let mut durable_events = Vec::new();
+    for line in content
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+    {
+        let event: WorkEvent = serde_json::from_str(line).map_err(|error| {
+            GwtError::Other(format!("machine-local lifecycle event json: {error}"))
+        })?;
+        if seen_event_ids.contains(&event.id) {
+            continue;
+        }
+        durable_events.push(event);
+    }
+    if durable_events.is_empty() {
+        return Ok(false);
+    }
+
+    let rebuilt =
+        crate::work_events_intake::refold_work_events_projection(projection, durable_events)?;
+    let changed = rebuilt.work_items != projection.work_items;
+    if changed {
+        *projection = rebuilt;
+    }
+    Ok(changed)
 }
 
 /// SPEC-2359 US-37 / FR-119: Scan WorkItems and the current Workspace
@@ -1240,15 +2218,17 @@ pub fn retroactive_auto_done_scan_paths(
     }
 
     if let Some(current) = load_workspace_projection_from_path(current_path)? {
-        if workspace_projection_is_eligible_for_auto_done(&current)
-            && emit_workspace_done_event_if_absent_paths(
+        if workspace_projection_is_eligible_for_auto_done(&current) {
+            let mut event = WorkEvent::new(WorkEventKind::Done, &current.id, now);
+            event.status_category = Some(WorkspaceStatusCategory::Done);
+            if emit_workspace_terminal_event_if_absent_paths_inner(
                 work_items_path,
                 events_path,
-                &current.id,
-                now,
-            )?
-        {
-            emitted += 1;
+                event,
+                true,
+            )? {
+                emitted += 1;
+            }
         }
     }
 
@@ -1423,29 +2403,32 @@ fn write_agent_identity_reset_marker(path: &Path) -> Result<()> {
 /// already records the current version (so agent-authored values written
 /// after the reset are never cleared again).
 pub fn reset_legacy_agent_identity_at(current_path: &Path) -> Result<bool> {
-    let marker_path = agent_identity_reset_marker_path(current_path);
-    if agent_identity_reset_marker_at_or_above(
-        &marker_path,
-        WORKSPACE_AGENT_IDENTITY_RESET_VERSION,
-    )? {
-        return Ok(false);
-    }
-    if let Some(mut projection) = load_workspace_projection_from_path(current_path)? {
-        let mut changed = false;
-        for agent in &mut projection.agents {
-            if agent.title_summary.take().is_some() {
-                changed = true;
+    let work_items_path = current_path.with_file_name("works.json");
+    with_workspace_work_items_lock(&work_items_path, || {
+        let marker_path = agent_identity_reset_marker_path(current_path);
+        if agent_identity_reset_marker_at_or_above(
+            &marker_path,
+            WORKSPACE_AGENT_IDENTITY_RESET_VERSION,
+        )? {
+            return Ok(false);
+        }
+        if let Some(mut projection) = load_workspace_projection_from_path(current_path)? {
+            let mut changed = false;
+            for agent in &mut projection.agents {
+                if agent.title_summary.take().is_some() {
+                    changed = true;
+                }
+                if agent.current_focus.take().is_some() {
+                    changed = true;
+                }
             }
-            if agent.current_focus.take().is_some() {
-                changed = true;
+            if changed {
+                save_workspace_projection_to_path_unlocked(current_path, &projection)?;
             }
         }
-        if changed {
-            save_workspace_projection_to_path(current_path, &projection)?;
-        }
-    }
-    write_agent_identity_reset_marker(&marker_path)?;
-    Ok(true)
+        write_agent_identity_reset_marker(&marker_path)?;
+        Ok(true)
+    })
 }
 
 /// SPEC-2359 Phase W-11 (US-58 / FR-346): repo-scoped convenience wrapper for
@@ -1559,6 +2542,16 @@ pub fn save_workspace_projection_to_path(
     path: &Path,
     projection: &WorkspaceProjection,
 ) -> Result<()> {
+    let work_items_path = path.with_file_name("works.json");
+    with_workspace_work_items_lock(&work_items_path, || {
+        save_workspace_projection_to_path_unlocked(path, projection)
+    })
+}
+
+fn save_workspace_projection_to_path_unlocked(
+    path: &Path,
+    projection: &WorkspaceProjection,
+) -> Result<()> {
     let bytes = serde_json::to_vec_pretty(projection)
         .map_err(|error| GwtError::Other(format!("workspace projection json: {error}")))?;
     write_atomic(path, &bytes)
@@ -1586,13 +2579,31 @@ pub fn update_workspace_projection_with_journal_paths_at(
     update: WorkspaceProjectionUpdate,
     updated_at: DateTime<Utc>,
 ) -> Result<WorkspaceJournalEntry> {
-    let mut projection =
-        load_or_default_workspace_projection_from_path(current_path, project_root)?;
-    projection.project_root = project_root.to_path_buf();
-    let entry = projection.apply_update(update, updated_at);
-    save_workspace_projection_to_path(current_path, &projection)?;
-    append_workspace_journal_entry_to_path(journal_path, &entry)?;
-    Ok(entry)
+    let work_items_path = current_path.with_file_name("works.json");
+    with_workspace_current_and_work_items_lock(current_path, &work_items_path, || {
+        let current_precondition = workspace_state_file_fingerprint(current_path)?;
+        let work_items_precondition = workspace_state_file_fingerprint(&work_items_path)?;
+        let mut projection =
+            load_or_default_workspace_projection_from_path(current_path, project_root)?;
+        projection.project_root = project_root.to_path_buf();
+        let entry = projection.apply_update(update, updated_at);
+        let transaction = PendingWorkspaceStateTransaction {
+            version: WORKSPACE_STATE_TRANSACTION_VERSION,
+            transaction_id: Some(Uuid::new_v4().to_string()),
+            current_path: current_path.to_path_buf(),
+            work_items_path: work_items_path.clone(),
+            current_precondition: Some(current_precondition),
+            work_items_precondition: Some(work_items_precondition),
+            projection,
+            work_items: None,
+            events_path: None,
+            events: Vec::new(),
+            journal_path: Some(journal_path.to_path_buf()),
+            journal_entries: vec![entry.clone()],
+        };
+        persist_workspace_state_transaction_locked(current_path, &transaction)?;
+        Ok(entry)
+    })
 }
 
 pub fn mark_workspace_agent_stopped_at(
@@ -1602,15 +2613,18 @@ pub fn mark_workspace_agent_stopped_at(
     window_id: Option<&str>,
     updated_at: DateTime<Utc>,
 ) -> Result<bool> {
-    let Some(mut projection) = load_workspace_projection_from_path(current_path)? else {
-        return Ok(false);
-    };
-    projection.project_root = project_root.to_path_buf();
-    let changed = projection.remove_agent_session(session_id, window_id, updated_at);
-    if changed {
-        save_workspace_projection_to_path(current_path, &projection)?;
-    }
-    Ok(changed)
+    let work_items_path = current_path.with_file_name("works.json");
+    with_workspace_work_items_lock(&work_items_path, || {
+        let Some(mut projection) = load_workspace_projection_from_path(current_path)? else {
+            return Ok(false);
+        };
+        projection.project_root = project_root.to_path_buf();
+        let changed = projection.remove_agent_session(session_id, window_id, updated_at);
+        if changed {
+            save_workspace_projection_to_path_unlocked(current_path, &projection)?;
+        }
+        Ok(changed)
+    })
 }
 
 pub fn append_workspace_journal_entry_to_path(
@@ -1632,16 +2646,27 @@ pub fn append_workspace_journal_entry_to_path(
 }
 
 pub fn append_workspace_work_event_to_path(path: &Path, event: &WorkEvent) -> Result<()> {
+    append_workspace_work_events_to_path(path, std::slice::from_ref(event))
+}
+
+fn append_workspace_work_events_to_path(path: &Path, events: &[WorkEvent]) -> Result<()> {
+    if events.is_empty() {
+        return Ok(());
+    }
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)?;
+    }
+    let mut bytes = Vec::new();
+    for event in events {
+        serde_json::to_writer(&mut bytes, event)
+            .map_err(|error| GwtError::Other(format!("workspace work event json: {error}")))?;
+        bytes.push(b'\n');
     }
     let mut file = fs::OpenOptions::new()
         .create(true)
         .append(true)
         .open(path)?;
-    serde_json::to_writer(&mut file, event)
-        .map_err(|error| GwtError::Other(format!("workspace work event json: {error}")))?;
-    file.write_all(b"\n")?;
+    file.write_all(&bytes)?;
     file.sync_all()?;
     Ok(())
 }
@@ -1777,7 +2802,12 @@ fn synthesize_workspace_work_item_from_legacy(
             .unwrap_or_default(),
         related_work_item_ids: Vec::new(),
         events: Vec::new(),
+        legacy_metadata_snapshot: None,
+        legacy_metadata_authoritative: false,
+        legacy_metadata_snapshot_at: None,
+        duplicate_event_containers: Default::default(),
         discarded: false,
+        discarded_at: None,
     };
     if let Some(projection) = projection {
         item.agents
@@ -1902,11 +2932,7 @@ fn workspace_work_event_from_journal_entry_for_root(
     event.next_action = entry.next_action.clone();
     event.agent_session_id = entry.agent_session_id.clone();
     if let Some(session_id) = entry.agent_session_id.as_deref() {
-        if let Some(agent) = projection
-            .agents
-            .iter()
-            .find(|agent| agent.session_id == session_id)
-        {
+        if let Some(agent) = projection.latest_agent_for_session(session_id) {
             event.agent_id = Some(agent.agent_id.clone());
             event.display_name = Some(agent.display_name.clone());
         }
@@ -2022,22 +3048,25 @@ fn workspace_work_event_target_from_projection(
     agent_session_id: Option<&str>,
     work_event_root: &Path,
 ) -> (String, Option<WorkspaceExecutionContainerRef>) {
-    if let Some(container) = agent_session_id
-        .and_then(|session_id| {
-            projection
-                .agents
-                .iter()
-                .find(|agent| agent.session_id == session_id)
-        })
-        .and_then(workspace_execution_container_from_agent)
+    if let Some(agent) = agent_session_id
+        .and_then(|session_id| latest_workspace_agent_for_session(projection, session_id))
     {
-        let work_item_id = canonical_work_id(
-            work_event_root,
-            container.branch.as_deref(),
-            container.worktree_path.as_deref(),
-        )
-        .unwrap_or_else(|| projection.id.clone());
-        return (work_item_id, Some(container));
+        let container = workspace_execution_container_from_agent(agent);
+        let assigned_work_id = (!agent.is_unassigned())
+            .then(|| agent.workspace_id.clone())
+            .flatten();
+        let work_item_id = assigned_work_id
+            .or_else(|| {
+                container.as_ref().and_then(|container| {
+                    canonical_work_id(
+                        work_event_root,
+                        container.branch.as_deref(),
+                        container.worktree_path.as_deref(),
+                    )
+                })
+            })
+            .unwrap_or_else(|| projection.id.clone());
+        return (work_item_id, container);
     }
 
     (
@@ -2339,13 +3368,17 @@ pub fn apply_prune_plan(plan: &[ClassifiedProjection], dry_run: bool) -> Result<
             PruneAction::Archive => {
                 if !dry_run {
                     let current_json = item.workspace_dir.join("current.json");
-                    if let Ok(Some(mut projection)) =
-                        load_workspace_projection_from_path(&current_json)
-                    {
-                        projection.lifecycle_stage = WorkspaceLifecycleStage::Archived;
-                        projection.updated_at = Utc::now();
-                        save_workspace_projection_to_path(&current_json, &projection)?;
-                    }
+                    let work_items_path = current_json.with_file_name("works.json");
+                    with_workspace_work_items_lock(&work_items_path, || {
+                        if let Ok(Some(mut projection)) =
+                            load_workspace_projection_from_path(&current_json)
+                        {
+                            projection.lifecycle_stage = WorkspaceLifecycleStage::Archived;
+                            projection.updated_at = Utc::now();
+                            save_workspace_projection_to_path_unlocked(&current_json, &projection)?;
+                        }
+                        Ok(())
+                    })?;
                 }
                 summary.archived += 1;
             }

@@ -525,7 +525,7 @@ fn save_projection_is_atomic_and_cleans_temp_file() {
 
     save_workspace_projection_to_path(&path, &projection(&project_root)).expect("save projection");
 
-    let entries = std::fs::read_dir(path.parent().unwrap())
+    let mut entries = std::fs::read_dir(path.parent().unwrap())
         .expect("read workspace dir")
         .map(|entry| {
             entry
@@ -535,5 +535,9 @@ fn save_projection_is_atomic_and_cleans_temp_file() {
                 .into_owned()
         })
         .collect::<Vec<_>>();
-    assert_eq!(entries, vec!["current.json".to_string()]);
+    entries.sort();
+    assert_eq!(
+        entries,
+        vec!["current.json".to_string(), "works.lock".to_string()]
+    );
 }

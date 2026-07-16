@@ -251,36 +251,41 @@ pub(super) fn run<E: CliEnv>(
 }
 
 fn sync_workspace_pr_metadata<E: CliEnv>(env: &E, pr: &PrStatus, requested_head: Option<&str>) {
-    let Ok(Some(mut projection)) =
-        gwt_core::workspace_projection::load_workspace_projection(env.repo_path())
-    else {
-        return;
-    };
-    let stored_branch = projection
-        .git_details
-        .as_ref()
-        .and_then(|details| details.branch.as_deref());
-    if !should_sync_workspace_pr_metadata(env.repo_path(), stored_branch, requested_head) {
-        return;
-    }
-
-    let Some(details) = projection.git_details.as_mut() else {
-        return;
-    };
-    details.pr_number = Some(pr.number);
-    details.pr_state = Some(pr.state.to_string());
-    details.pr_url = (!pr.url.trim().is_empty()).then_some(pr.url.clone());
-    details.pr_created_at = pr.created_at;
-    projection.updated_at = chrono::Utc::now();
-    let _ = gwt_core::workspace_projection::save_workspace_projection(env.repo_path(), &projection);
+    let work_item_id = gwt_core::workspace_projection::mutate_existing_workspace_projection(
+        env.repo_path(),
+        |projection| {
+            let stored_branch = projection
+                .git_details
+                .as_ref()
+                .and_then(|details| details.branch.as_deref());
+            if !should_sync_workspace_pr_metadata(env.repo_path(), stored_branch, requested_head) {
+                return Ok(None);
+            }
+            let Some(details) = projection.git_details.as_mut() else {
+                return Ok(None);
+            };
+            details.pr_number = Some(pr.number);
+            details.pr_state = Some(pr.state.to_string());
+            details.pr_url = (!pr.url.trim().is_empty()).then_some(pr.url.clone());
+            details.pr_created_at = pr.created_at;
+            projection.updated_at = chrono::Utc::now();
+            Ok(Some(projection.id.clone()))
+        },
+    )
+    .ok()
+    .flatten()
+    .flatten();
 
     // SPEC-2359 US-37 / FR-117: auto-emit Done for the linked Workspace WorkItem
     // when the PR transitions to merged. The helper is idempotent per work_item_id,
     // so repeated polling does not duplicate Done events.
     if pr.state.to_string().eq_ignore_ascii_case("merged") {
+        let Some(work_item_id) = work_item_id else {
+            return;
+        };
         let _ = gwt_core::workspace_projection::emit_workspace_done_event_if_absent(
             env.repo_path(),
-            &projection.id,
+            &work_item_id,
             chrono::Utc::now(),
         );
     }

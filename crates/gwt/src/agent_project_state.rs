@@ -6,7 +6,7 @@ use gwt_core::{
     error::Result,
     paths::normalize_windows_child_process_path,
     workspace_projection::{
-        load_workspace_projection, save_workspace_projection, WorkspaceAgentSummary,
+        load_workspace_projection, mutate_existing_workspace_projection, WorkspaceAgentSummary,
     },
 };
 
@@ -26,6 +26,20 @@ pub(crate) fn work_event_root_for_agent_session_or_fallback(
     load_session(session_id)
         .map(|session| normalize_project_state_root(&session.worktree_path))
         .unwrap_or_else(|| normalize_project_state_root(fallback_repo_path))
+}
+
+pub(crate) fn agent_session_roots_or_fallback(
+    fallback_repo_path: &Path,
+    session_id: &str,
+) -> std::io::Result<(PathBuf, PathBuf)> {
+    let Some(session) = try_load_session(session_id)? else {
+        let fallback = normalize_project_state_root(fallback_repo_path);
+        return Ok((fallback.clone(), fallback));
+    };
+    Ok((
+        canonical_project_state_root_for_session(&session, fallback_repo_path),
+        normalize_project_state_root(&session.worktree_path),
+    ))
 }
 
 pub(crate) fn canonical_project_state_root_for_session(
@@ -59,43 +73,33 @@ pub(crate) fn repair_split_agent_state_if_needed(
         return Ok(false);
     };
     let Some(split_agent) = split_projection
-        .agents
-        .iter()
-        .find(|agent| agent.session_id == session_id)
+        .latest_agent_for_session(session_id)
         .cloned()
     else {
         return Ok(false);
     };
 
-    let Some(mut canonical_projection) = load_workspace_projection(&canonical_root)? else {
-        return Ok(false);
-    };
-    let Some(index) = canonical_projection
-        .agents
-        .iter()
-        .position(|agent| agent.session_id == session_id)
-    else {
-        return Ok(false);
-    };
-
-    let changed = repair_agent_from_split(&mut canonical_projection.agents[index], &split_agent);
-    if changed {
-        let now = Utc::now();
-        canonical_projection.agents[index].updated_at = now;
-        canonical_projection.updated_at = now;
-        save_workspace_projection(&canonical_root, &canonical_projection)?;
-    }
-    Ok(changed)
+    mutate_existing_workspace_projection(&canonical_root, |canonical_projection| {
+        let Some(canonical_agent) = canonical_projection.latest_agent_for_session_mut(session_id)
+        else {
+            return Ok(false);
+        };
+        let changed = repair_agent_from_split(canonical_agent, &split_agent);
+        if changed {
+            let now = Utc::now();
+            canonical_agent.updated_at = now;
+            canonical_projection.updated_at = now;
+        }
+        Ok(changed)
+    })
+    .map(Option::unwrap_or_default)
 }
 
 fn load_session(session_id: &str) -> Option<Session> {
-    let path = gwt_core::paths::gwt_sessions_dir().join(format!("{session_id}.toml"));
-    if !path.exists() {
-        return None;
-    }
-    match Session::load(&path) {
-        Ok(session) => Some(session),
+    match try_load_session(session_id) {
+        Ok(session) => session,
         Err(error) => {
+            let path = gwt_core::paths::gwt_sessions_dir().join(format!("{session_id}.toml"));
             tracing::debug!(
                 error = %error,
                 session_id,
@@ -105,6 +109,14 @@ fn load_session(session_id: &str) -> Option<Session> {
             None
         }
     }
+}
+
+fn try_load_session(session_id: &str) -> std::io::Result<Option<Session>> {
+    let path = gwt_core::paths::gwt_sessions_dir().join(format!("{session_id}.toml"));
+    if !path.try_exists()? {
+        return Ok(None);
+    }
+    Session::load(&path).map(Some)
 }
 
 fn derive_legacy_project_state_root(worktree_path: &Path) -> Option<PathBuf> {
@@ -345,6 +357,104 @@ mod tests {
         assert_eq!(
             canonical.current_focus.as_deref(),
             Some("New canonical focus")
+        );
+    }
+
+    #[test]
+    fn split_repair_updates_only_latest_duplicate_session_rows() {
+        let _guard = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let home = tempfile::tempdir().expect("home");
+        let _home = gwt_core::test_support::ScopedEnvVar::set("HOME", home.path());
+        let _userprofile = gwt_core::test_support::ScopedEnvVar::set("USERPROFILE", home.path());
+        let temp = tempfile::tempdir().expect("tempdir");
+        let canonical_root = temp.path().join("canonical");
+        let split_root = temp.path().join("split");
+        std::fs::create_dir_all(&canonical_root).expect("create canonical root");
+        std::fs::create_dir_all(&split_root).expect("create split root");
+        let base = Utc::now();
+
+        let canonical_stale = agent_summary(
+            "duplicate-session",
+            Some("Stale canonical title"),
+            Some("Stale canonical focus"),
+            base,
+        );
+        let canonical_current = agent_summary(
+            "duplicate-session",
+            Some("Current canonical title"),
+            Some("Current canonical focus"),
+            base + chrono::Duration::seconds(1),
+        );
+        let split_stale = agent_summary(
+            "duplicate-session",
+            Some("Stale split title"),
+            Some("Stale split focus"),
+            base + chrono::Duration::seconds(2),
+        );
+        let split_current = agent_summary(
+            "duplicate-session",
+            Some("Latest split title"),
+            Some("Latest split focus"),
+            base + chrono::Duration::seconds(3),
+        );
+
+        let mut canonical_projection =
+            gwt_core::workspace_projection::WorkspaceProjection::default_for_project(
+                &canonical_root,
+            );
+        canonical_projection.agents = vec![canonical_stale.clone(), canonical_current];
+        gwt_core::workspace_projection::save_workspace_projection(
+            &canonical_root,
+            &canonical_projection,
+        )
+        .expect("save canonical projection");
+
+        let mut split_projection =
+            gwt_core::workspace_projection::WorkspaceProjection::default_for_project(&split_root);
+        split_projection.agents = vec![split_stale, split_current];
+        gwt_core::workspace_projection::save_workspace_projection(&split_root, &split_projection)
+            .expect("save split projection");
+
+        let saved_canonical =
+            gwt_core::workspace_projection::load_workspace_projection(&canonical_root)
+                .expect("load canonical precondition")
+                .expect("canonical precondition exists");
+        assert_eq!(
+            saved_canonical
+                .latest_agent_for_session("duplicate-session")
+                .and_then(|agent| agent.title_summary.as_deref()),
+            Some("Current canonical title")
+        );
+        let saved_split = gwt_core::workspace_projection::load_workspace_projection(&split_root)
+            .expect("load split precondition")
+            .expect("split precondition exists");
+        assert_eq!(
+            saved_split
+                .latest_agent_for_session("duplicate-session")
+                .and_then(|agent| agent.title_summary.as_deref()),
+            Some("Latest split title")
+        );
+
+        assert!(repair_split_agent_state_if_needed(
+            &canonical_root,
+            &split_root,
+            "duplicate-session"
+        )
+        .expect("repair split state"));
+
+        let repaired = gwt_core::workspace_projection::load_workspace_projection(&canonical_root)
+            .expect("load canonical projection")
+            .expect("canonical projection exists");
+        assert_eq!(repaired.agents[0], canonical_stale);
+        assert_eq!(
+            repaired.agents[1].title_summary.as_deref(),
+            Some("Latest split title")
+        );
+        assert_eq!(
+            repaired.agents[1].current_focus.as_deref(),
+            Some("Latest split focus")
         );
     }
 }
