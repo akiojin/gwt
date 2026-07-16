@@ -16,8 +16,8 @@ use crate::cli::{
     },
     improvement_owner::{
         owner_resolution_failure_from_error, repair_source_success_snapshots,
-        resolve_candidate_owner_with_operation_deadline, retry_pending_owner_status_with_deadline,
-        OwnerResolutionFailure,
+        resolve_candidate_owner_with_operation_deadline,
+        retry_pending_owner_status_with_operation_deadline, OwnerResolutionFailure,
     },
     improvement_store, CliEnv,
 };
@@ -80,7 +80,12 @@ fn evaluate_with_deadline<E: CliEnv>(
     let mut attempt_failure = None;
     if let Some(candidate_id) = select_pending_owner_status_candidate(&candidates) {
         let resolution_deadline = deadline.reserving(DIRECT_STOP_SETTLEMENT_RESERVE);
-        let _ = retry_pending_owner_status_with_deadline(env, &candidate_id, &resolution_deadline);
+        let _ = retry_pending_owner_status_with_operation_deadline(
+            env,
+            &candidate_id,
+            &resolution_deadline,
+            deadline.expires_at(),
+        );
     } else if let Some(candidate_id) = select_attempt_candidate(&candidates) {
         let resolution_deadline = deadline.reserving(DIRECT_STOP_SETTLEMENT_RESERVE);
         if let Err(error) = resolve_candidate_owner_with_operation_deadline(

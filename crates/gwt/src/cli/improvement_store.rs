@@ -11,6 +11,8 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
+#[cfg(test)]
+use super::improvement::ImprovementAuditEntry;
 use super::improvement::{
     transition_candidate, validate_candidate_lifecycle, CandidateState, CandidateStore,
     ImprovementCandidate, ImprovementEligibility, RetryMetadata,
@@ -20,7 +22,7 @@ use super::improvement_contract::{
     OwnerProjectionSnapshot, OWNER_PROJECTION_CONTRACT_REVISION,
 };
 
-pub(super) const STORE_SCHEMA_VERSION: u32 = 3;
+pub(super) const STORE_SCHEMA_VERSION: u32 = 4;
 const OWNER_PROJECTION_SCHEMA_VERSION: u32 = 2;
 const LEGACY_OWNER_PROJECTION_SCHEMA_VERSION: u32 = 1;
 const UPSTREAM_REPOSITORY_KEY: &str = "github.com/akiojin/gwt";
@@ -162,6 +164,25 @@ pub(super) struct ResolutionAttemptLease {
     pub(super) remote_mutation_seen: bool,
     #[serde(default)]
     pub(super) intent: ResolutionAttemptIntent,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub(super) struct OwnerStatusDeliveryClaim {
+    pub(super) claim_id: String,
+    pub(super) generation: u64,
+    pub(super) lease_owner: String,
+    pub(super) started_at: chrono::DateTime<chrono::Utc>,
+    pub(super) expires_at: chrono::DateTime<chrono::Utc>,
+}
+
+#[derive(Debug)]
+pub(super) enum OwnerStatusDeliveryDecision {
+    AlreadyDelivered(ImprovementCandidate),
+    Busy(ImprovementCandidate),
+    Acquired {
+        candidate: ImprovementCandidate,
+        claim_id: String,
+    },
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -1157,6 +1178,18 @@ pub(super) fn fail_next_created_owner_number_save(repo_root: &Path) -> Result<()
     fs::write(marker, b"failure").map_err(io_as_spec_error)
 }
 
+#[cfg(test)]
+pub(super) fn fail_next_manual_owner_finalize_save(
+    repo_root: &Path,
+    candidate_id: &str,
+) -> Result<(), SpecOpsError> {
+    let marker = manual_owner_finalize_save_failure_marker(repo_root);
+    if let Some(parent) = marker.parent() {
+        fs::create_dir_all(parent).map_err(io_as_spec_error)?;
+    }
+    fs::write(marker, candidate_id.as_bytes()).map_err(io_as_spec_error)
+}
+
 pub(super) fn update<T>(
     repo_root: &Path,
     operation: impl FnOnce(&mut CandidateStore) -> Result<T, SpecOpsError>,
@@ -1214,6 +1247,109 @@ pub(super) fn acquire_attempt_lease(
     candidate.attempt = Some(lease.clone());
     candidate.updated_at = now.to_rfc3339();
     Ok(AttemptLeaseDecision::Acquired(lease))
+}
+
+pub(super) fn claim_owner_status_delivery(
+    repo_root: &Path,
+    candidate_id: &str,
+    lease_owner: &str,
+    now: chrono::DateTime<chrono::Utc>,
+    ttl: chrono::Duration,
+) -> Result<OwnerStatusDeliveryDecision, SpecOpsError> {
+    if lease_owner.trim().is_empty() || ttl <= chrono::Duration::zero() {
+        return Err(invalid("owner status delivery claim is invalid"));
+    }
+    update(repo_root, |store| {
+        let candidate = store
+            .candidates
+            .iter_mut()
+            .find(|candidate| candidate.id == candidate_id)
+            .ok_or_else(|| invalid("candidate not found"))?;
+        if candidate.owner_status_delivered_generation >= candidate.owner_status_generation {
+            candidate.owner_status_delivery_claim = None;
+            return Ok(OwnerStatusDeliveryDecision::AlreadyDelivered(
+                candidate.clone(),
+            ));
+        }
+        if !matches!(
+            candidate.state,
+            CandidateState::Linked | CandidateState::Created
+        ) || candidate.owner.is_none()
+        {
+            return Err(invalid(
+                "pending owner status requires a successful durable owner state",
+            ));
+        }
+        if candidate
+            .owner_status_delivery_claim
+            .as_ref()
+            .is_some_and(|claim| claim.expires_at > now)
+        {
+            return Ok(OwnerStatusDeliveryDecision::Busy(candidate.clone()));
+        }
+        let claim = OwnerStatusDeliveryClaim {
+            claim_id: format!("owner-status-{}", Uuid::new_v4().simple()),
+            generation: candidate.owner_status_generation,
+            lease_owner: lease_owner.to_string(),
+            started_at: now,
+            expires_at: now + ttl,
+        };
+        candidate.owner_status_delivery_claim = Some(claim.clone());
+        validate_candidate_lifecycle(candidate)?;
+        Ok(OwnerStatusDeliveryDecision::Acquired {
+            candidate: candidate.clone(),
+            claim_id: claim.claim_id,
+        })
+    })
+}
+
+pub(super) fn acknowledge_owner_status_delivery(
+    repo_root: &Path,
+    candidate_id: &str,
+    claim_id: &str,
+) -> Result<ImprovementCandidate, SpecOpsError> {
+    update(repo_root, |store| {
+        let candidate = store
+            .candidates
+            .iter_mut()
+            .find(|candidate| candidate.id == candidate_id)
+            .ok_or_else(|| invalid("candidate not found"))?;
+        let generation = candidate
+            .owner_status_delivery_claim
+            .as_ref()
+            .filter(|claim| claim.claim_id == claim_id)
+            .map(|claim| claim.generation)
+            .ok_or_else(|| invalid("owner status delivery claim is stale"))?;
+        candidate.owner_status_delivered_generation =
+            candidate.owner_status_delivered_generation.max(generation);
+        candidate.owner_status_delivery_claim = None;
+        validate_candidate_lifecycle(candidate)?;
+        Ok(candidate.clone())
+    })
+}
+
+pub(super) fn release_owner_status_delivery(
+    repo_root: &Path,
+    candidate_id: &str,
+    claim_id: &str,
+) -> Result<ImprovementCandidate, SpecOpsError> {
+    update(repo_root, |store| {
+        let candidate = store
+            .candidates
+            .iter_mut()
+            .find(|candidate| candidate.id == candidate_id)
+            .ok_or_else(|| invalid("candidate not found"))?;
+        if candidate
+            .owner_status_delivery_claim
+            .as_ref()
+            .is_none_or(|claim| claim.claim_id != claim_id)
+        {
+            return Err(invalid("owner status delivery claim is stale"));
+        }
+        candidate.owner_status_delivery_claim = None;
+        validate_candidate_lifecycle(candidate)?;
+        Ok(candidate.clone())
+    })
 }
 
 pub(super) fn mark_attempt_submitted(
@@ -1437,6 +1573,10 @@ fn load_and_repair_unlocked(repo_root: &Path) -> Result<CandidateStore, SpecOpsE
             migrate_v2_store(&mut store)?;
             changed = true;
         }
+        3 => {
+            migrate_v3_store(&mut store)?;
+            changed = true;
+        }
         STORE_SCHEMA_VERSION => {}
         _ => unreachable!("future schema rejected above"),
     }
@@ -1552,6 +1692,22 @@ fn migrate_v2_store(store: &mut CandidateStore) -> Result<(), SpecOpsError> {
     Ok(())
 }
 
+fn migrate_v3_store(store: &mut CandidateStore) -> Result<(), SpecOpsError> {
+    for candidate in &mut store.candidates {
+        if candidate.schema_version != 3 {
+            return Err(invalid(&format!(
+                "candidate schema version {} does not match store schema version 3",
+                candidate.schema_version
+            )));
+        }
+        candidate.owner_status_delivery_claim = None;
+        candidate.schema_version = STORE_SCHEMA_VERSION;
+        validate_candidate_lifecycle(candidate)?;
+    }
+    store.schema_version = STORE_SCHEMA_VERSION;
+    Ok(())
+}
+
 fn validate_current_store(store: &CandidateStore) -> Result<(), SpecOpsError> {
     match store.source_scope_nonce.as_deref() {
         None => return Err(invalid("improvement source scope nonce is missing")),
@@ -1603,6 +1759,26 @@ fn save_unlocked(repo_root: &Path, store: &CandidateStore) -> Result<(), SpecOps
             fs::remove_file(failure_marker).map_err(io_as_spec_error)?;
             return Err(invalid("injected created owner number source save failure"));
         }
+
+        let manual_finalize_failure_marker = manual_owner_finalize_save_failure_marker(repo_root);
+        if manual_finalize_failure_marker.exists() {
+            let candidate_id =
+                fs::read_to_string(&manual_finalize_failure_marker).map_err(io_as_spec_error)?;
+            let saves_manual_owner_finalize = persisted.candidates.iter().any(|candidate| {
+                candidate.id == candidate_id
+                    && candidate.state == CandidateState::Linked
+                    && candidate.pending_manual_owner_selection.is_none()
+                    && candidate.audit.iter().any(|entry| {
+                        matches!(entry, ImprovementAuditEntry::ManualOwnerSelection { .. })
+                    })
+            });
+            if saves_manual_owner_finalize {
+                fs::remove_file(manual_finalize_failure_marker).map_err(io_as_spec_error)?;
+                return Err(invalid(
+                    "injected manual owner finalize source save failure",
+                ));
+            }
+        }
     }
     write_atomic_and_sync_parent(&path, &bytes).map_err(io_as_spec_error)
 }
@@ -1613,6 +1789,14 @@ fn created_owner_number_save_failure_marker(repo_root: &Path) -> PathBuf {
         .parent()
         .expect("candidate store has an improvements parent")
         .join(".fail-next-created-owner-number-save")
+}
+
+#[cfg(test)]
+fn manual_owner_finalize_save_failure_marker(repo_root: &Path) -> PathBuf {
+    candidate_store_path(repo_root)
+        .parent()
+        .expect("candidate store has an improvements parent")
+        .join(".fail-next-manual-owner-finalize-save")
 }
 
 fn with_store_lock<T>(
@@ -2040,7 +2224,7 @@ mod tests {
 
     fn store_with_candidate() -> CandidateStore {
         let candidate = serde_json::from_value(json!({
-            "schema_version": 2,
+            "schema_version": 4,
             "id": "impr-lease",
             "created_at": "2026-07-13T00:00:00Z",
             "updated_at": "2026-07-13T00:00:00Z",
@@ -2076,6 +2260,123 @@ mod tests {
             public_payload_digest: "sha256:regression-payload".to_string(),
             created_owner_number: None,
         }
+    }
+
+    fn persist_pending_owner_status(repo_root: &Path) {
+        let mut store = store_with_candidate();
+        let candidate = &mut store.candidates[0];
+        let fingerprint = format!("v2:{}", "a".repeat(64));
+        candidate.state = CandidateState::Linked;
+        candidate.fingerprint = Some(fingerprint.clone());
+        candidate.owner = Some(super::super::improvement::DurableOwnerSnapshot {
+            number: 3164,
+            kind: super::super::improvement::OwnerKind::Issue,
+            title: "Durable improvement owner".to_string(),
+            active: true,
+            url: "https://github.com/akiojin/gwt/issues/3164".to_string(),
+            fingerprint,
+            readback_verified_at: "2026-07-13T00:00:00Z".to_string(),
+        });
+        candidate.linked_issue = Some(super::super::improvement::LinkedIssue {
+            number: 3164,
+            url: "https://github.com/akiojin/gwt/issues/3164".to_string(),
+            repository: "akiojin/gwt".to_string(),
+        });
+        candidate.owner_status_generation = 1;
+        candidate.owner_status_delivered_generation = 0;
+        candidate.attempt = None;
+        validate_candidate_lifecycle(candidate).expect("pending owner status candidate");
+        save_unlocked(repo_root, &store).expect("persist pending owner status");
+    }
+
+    #[test]
+    fn owner_status_delivery_claim_is_single_winner_and_exact_cas() {
+        let home = tempfile::tempdir().expect("isolated home");
+        let _gwt_home = gwt_core::test_support::ScopedGwtHome::set(home.path());
+        let repo = tempfile::tempdir().expect("repo");
+        persist_pending_owner_status(repo.path());
+        let now = Utc.with_ymd_and_hms(2026, 7, 13, 0, 0, 0).unwrap();
+
+        let first_id = match claim_owner_status_delivery(
+            repo.path(),
+            "impr-lease",
+            "worker-a",
+            now,
+            Duration::seconds(30),
+        )
+        .expect("first delivery claim")
+        {
+            OwnerStatusDeliveryDecision::Acquired { claim_id, .. } => claim_id,
+            other => panic!("expected acquired claim, got {other:?}"),
+        };
+        assert!(matches!(
+            claim_owner_status_delivery(
+                repo.path(),
+                "impr-lease",
+                "worker-b",
+                now + Duration::seconds(1),
+                Duration::seconds(30),
+            )
+            .expect("busy delivery claim"),
+            OwnerStatusDeliveryDecision::Busy(_)
+        ));
+
+        let takeover_id = match claim_owner_status_delivery(
+            repo.path(),
+            "impr-lease",
+            "worker-b",
+            now + Duration::seconds(31),
+            Duration::seconds(30),
+        )
+        .expect("expired claim takeover")
+        {
+            OwnerStatusDeliveryDecision::Acquired { claim_id, .. } => claim_id,
+            other => panic!("expected takeover claim, got {other:?}"),
+        };
+        assert_ne!(takeover_id, first_id);
+        assert!(acknowledge_owner_status_delivery(repo.path(), "impr-lease", &first_id).is_err());
+        assert!(release_owner_status_delivery(repo.path(), "impr-lease", &first_id).is_err());
+
+        let acknowledged =
+            acknowledge_owner_status_delivery(repo.path(), "impr-lease", &takeover_id)
+                .expect("acknowledge current claim");
+        assert_eq!(acknowledged.owner_status_delivered_generation, 1);
+        assert!(acknowledged.owner_status_delivery_claim.is_none());
+        assert!(matches!(
+            claim_owner_status_delivery(
+                repo.path(),
+                "impr-lease",
+                "worker-c",
+                now + Duration::seconds(32),
+                Duration::seconds(30),
+            )
+            .expect("already delivered"),
+            OwnerStatusDeliveryDecision::AlreadyDelivered(_)
+        ));
+    }
+
+    #[test]
+    fn schema_three_store_migrates_with_an_empty_owner_status_claim() {
+        let home = tempfile::tempdir().expect("isolated home");
+        let _gwt_home = gwt_core::test_support::ScopedGwtHome::set(home.path());
+        let repo = tempfile::tempdir().expect("repo");
+        let mut store = store_with_candidate();
+        store.schema_version = 3;
+        store.candidates[0].schema_version = 3;
+        let path = candidate_store_path(repo.path());
+        fs::create_dir_all(path.parent().expect("candidate store parent"))
+            .expect("candidate store directory");
+        fs::write(
+            &path,
+            serde_json::to_vec_pretty(&store).expect("schema three store"),
+        )
+        .expect("write schema three store");
+
+        let migrated = load_and_repair(repo.path()).expect("migrate schema three store");
+
+        assert_eq!(migrated.schema_version, STORE_SCHEMA_VERSION);
+        assert_eq!(migrated.candidates[0].schema_version, STORE_SCHEMA_VERSION);
+        assert!(migrated.candidates[0].owner_status_delivery_claim.is_none());
     }
 
     #[test]

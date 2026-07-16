@@ -24,15 +24,16 @@ use super::{
     improvement::{
         improvement_fingerprint, post_improvement_board_status, transition_candidate,
         typed_evidence_digest, BlockedReason, CandidateState, CaptureBudgetProfile,
-        DurableOwnerSnapshot, FailureSubcode, ImprovementAuditEntry, ImprovementCandidate,
-        LinkedIssue, OccurrenceOrigin, OccurrenceReplayProof, OwnerCandidate, OwnerKind,
-        OwnerMatchBasis, ResolverSnapshot, RetryMetadata, TypedFailureEvidence,
+        DistinctOccurrence, DurableOwnerSnapshot, FailureSubcode, ImprovementAuditEntry,
+        ImprovementCandidate, LinkedIssue, OccurrenceOrigin, OccurrenceReplayProof, OwnerCandidate,
+        OwnerKind, OwnerMatchBasis, PendingManualOwnerSelection, ResolverSnapshot, RetryMetadata,
+        TypedFailureEvidence,
     },
     improvement_contract::{OwnerProjectionOwner, OwnerProjectionOwnerKind},
     improvement_store::{
         AttemptLeaseDecision, AttemptRemotePhase, OwnerProjectionCommit, OwnerProjectionRecord,
         OwnerProjectionResolutionStatus, OwnerProjectionSourceReference, OwnerProjectionStore,
-        ResolutionAttemptIntent,
+        OwnerStatusDeliveryDecision, ResolutionAttemptIntent,
     },
     CliEnv,
 };
@@ -382,10 +383,11 @@ fn candidate_blocks_projection_repair(
     now: chrono::DateTime<Utc>,
 ) -> bool {
     candidate.reconciliation_required
-        || candidate
-            .attempt
-            .as_ref()
-            .is_some_and(|attempt| attempt.expires_at > now)
+        || (candidate.pending_manual_owner_selection.is_none()
+            && candidate
+                .attempt
+                .as_ref()
+                .is_some_and(|attempt| attempt.expires_at > now))
 }
 
 fn ensure_candidate_attempt_current(
@@ -403,6 +405,7 @@ fn ensure_candidate_attempt_current(
         || stored.state != candidate.state
         || stored.dismissed_reason != candidate.dismissed_reason
         || stored.audit != candidate.audit
+        || stored.pending_manual_owner_selection != candidate.pending_manual_owner_selection
     {
         return Err(owner_projection_error(
             "candidate changed while Owner Resolution was running",
@@ -447,6 +450,7 @@ fn commit_owner_projection_and_source_success(
     let expected_reconciliation_required = candidate.reconciliation_required;
     let expected_reconciliation_owner_numbers = candidate.reconciliation_owner_numbers.clone();
     let expected_pending_create_resolution = candidate.pending_create_resolution.clone();
+    let expected_pending_manual_owner_selection = candidate.pending_manual_owner_selection.clone();
     let expected_state = candidate.state;
     let expected_dismissed_reason = candidate.dismissed_reason.clone();
     let expected_audit = candidate.audit.clone();
@@ -469,6 +473,7 @@ fn commit_owner_projection_and_source_success(
             || stored.reconciliation_required != expected_reconciliation_required
             || stored.reconciliation_owner_numbers != expected_reconciliation_owner_numbers
             || stored.pending_create_resolution != expected_pending_create_resolution
+            || stored.pending_manual_owner_selection != expected_pending_manual_owner_selection
             || stored.state != expected_state
             || stored.dismissed_reason != expected_dismissed_reason
             || stored.audit != expected_audit
@@ -776,7 +781,8 @@ fn apply_projection_binding(
         && candidate.blocked_reason.is_none()
         && candidate.failure_subcode.is_none()
         && candidate.retry.is_none()
-        && candidate.attempt.is_none();
+        && candidate.attempt.is_none()
+        && candidate.pending_manual_owner_selection.is_none();
     if already_current {
         return Ok(false);
     }
@@ -809,6 +815,14 @@ fn apply_projection_binding(
             }
         }
     }
+    let pending_manual_selection = candidate.pending_manual_owner_selection.clone();
+    if let Some(pending) = &pending_manual_selection {
+        if target_state != CandidateState::Linked || pending.owner_number != owner.number {
+            return Err(owner_projection_error(
+                "pending manual owner selection conflicts with the projected Durable Owner",
+            ));
+        }
+    }
     candidate.owner = Some(owner);
     candidate.linked_issue = Some(linked_issue);
     candidate.state = target_state;
@@ -822,6 +836,31 @@ fn apply_projection_binding(
             candidate,
             &pending_create_resolution,
         )?;
+    }
+    if let Some(pending) = pending_manual_selection {
+        if !candidate.audit.iter().any(|entry| {
+            matches!(
+                entry,
+                ImprovementAuditEntry::ManualOwnerSelection {
+                    owner_number,
+                    resolver_revision,
+                    corpus_generation,
+                    ..
+                } if *owner_number == pending.owner_number
+                    && resolver_revision == &pending.resolver_revision
+                    && corpus_generation == &pending.corpus_generation
+            )
+        }) {
+            candidate
+                .audit
+                .push(ImprovementAuditEntry::ManualOwnerSelection {
+                    owner_number: pending.owner_number,
+                    resolver_revision: pending.resolver_revision,
+                    corpus_generation: pending.corpus_generation,
+                    recorded_at: Utc::now().to_rfc3339(),
+                });
+        }
+        candidate.pending_manual_owner_selection = None;
     }
     if public_binding_changed || stable_status_changed {
         candidate.owner_status_generation = candidate
@@ -983,6 +1022,37 @@ pub(super) struct OwnerResolutionFailure {
 }
 
 #[derive(Debug)]
+enum ManualOwnerInspectionError {
+    Failure {
+        failure: OwnerResolutionFailure,
+        source: gwt_github::SpecOpsError,
+    },
+    NonAmbiguous {
+        source: gwt_github::SpecOpsError,
+    },
+}
+
+impl ManualOwnerInspectionError {
+    fn into_source(self) -> gwt_github::SpecOpsError {
+        match self {
+            Self::Failure { source, .. } | Self::NonAmbiguous { source } => source,
+        }
+    }
+}
+
+#[derive(Debug)]
+enum ManualOwnerFenceError {
+    Failure {
+        failure: OwnerResolutionFailure,
+        source: gwt_github::SpecOpsError,
+    },
+    Stale {
+        source: gwt_github::SpecOpsError,
+        resolver_snapshot: Option<Box<ResolverSnapshot>>,
+    },
+}
+
+#[derive(Debug)]
 enum OwnerResolutionCommitError {
     PreSubmit {
         failure: OwnerResolutionFailure,
@@ -992,6 +1062,10 @@ enum OwnerResolutionCommitError {
     RemoteOutcomeUnknown {
         failure: OwnerResolutionFailure,
         source: gwt_github::SpecOpsError,
+    },
+    ManualSelectionStale {
+        source: gwt_github::SpecOpsError,
+        resolver_snapshot: Option<Box<ResolverSnapshot>>,
     },
     DurableStatus(gwt_github::SpecOpsError),
 }
@@ -1043,6 +1117,28 @@ enum ResolutionAttemptStart {
     },
 }
 
+struct ManualResolutionExpectation<'a> {
+    selected_owner_number: u64,
+    resolver_revision: &'a str,
+    fingerprint: Option<&'a str>,
+    distinct_occurrences: &'a [DistinctOccurrence],
+}
+
+enum ResolutionAttemptStartInternal {
+    Acquired(ResolutionAttemptStart),
+    AlreadyResolved(ImprovementCandidate),
+}
+
+enum ManualResolutionAttemptStart {
+    Acquired {
+        candidate: ImprovementCandidate,
+        token: ResolutionAttemptToken,
+        recovering_remote_unknown: bool,
+        recovery_intent: ResolutionAttemptIntent,
+    },
+    AlreadyResolved(ImprovementCandidate),
+}
+
 #[derive(Debug)]
 enum NewOwnerPostflight {
     Committed,
@@ -1057,6 +1153,7 @@ impl fmt::Display for OwnerResolutionCommitError {
         match self {
             Self::PreSubmit { source, .. }
             | Self::RemoteOutcomeUnknown { source, .. }
+            | Self::ManualSelectionStale { source, .. }
             | Self::DurableStatus(source) => source.fmt(formatter),
         }
     }
@@ -1937,7 +2034,7 @@ fn commit_active_owner_resolution<E: CliEnv>(
     comments: &[RepositoryComment],
     deadline: &ResolutionDeadline,
 ) -> Result<(), OwnerResolutionCommitError> {
-    commit_active_owner_resolution_with_audit(env, candidate, owner, comments, deadline, None, None)
+    commit_active_owner_resolution_inner(env, candidate, owner, comments, deadline, None, None)
 }
 
 fn commit_active_owner_resolution_for_attempt<E: CliEnv>(
@@ -1948,7 +2045,7 @@ fn commit_active_owner_resolution_for_attempt<E: CliEnv>(
     comments: &[RepositoryComment],
     deadline: &ResolutionDeadline,
 ) -> Result<(), OwnerResolutionCommitError> {
-    commit_active_owner_resolution_with_audit(
+    commit_active_owner_resolution_inner(
         env,
         candidate,
         owner,
@@ -1959,20 +2056,14 @@ fn commit_active_owner_resolution_for_attempt<E: CliEnv>(
     )
 }
 
-#[derive(Clone, Copy)]
-struct ManualOwnerSelectionAudit<'a> {
-    token: &'a ResolutionAttemptToken,
-    snapshot: &'a ResolverSnapshot,
-}
-
-fn commit_active_owner_resolution_with_audit<E: CliEnv>(
+fn commit_active_owner_resolution_inner<E: CliEnv>(
     env: &mut E,
     candidate: &mut ImprovementCandidate,
     owner: &OwnerCandidate,
     comments: &[RepositoryComment],
     deadline: &ResolutionDeadline,
     attempt_token: Option<&ResolutionAttemptToken>,
-    manual_audit: Option<ManualOwnerSelectionAudit<'_>>,
+    manual_selection_fence: Option<&ResolverSnapshot>,
 ) -> Result<(), OwnerResolutionCommitError> {
     if !owner.active || !owner.selectable || owner.match_basis == OwnerMatchBasis::Semantic {
         return Err(pre_submit_commit_error(
@@ -2113,6 +2204,16 @@ fn commit_active_owner_resolution_with_audit<E: CliEnv>(
             }) {
                 continue;
             }
+            if let Some(expected_snapshot) = manual_selection_fence {
+                validate_manual_owner_selection_mutation_fence(
+                    client,
+                    candidate,
+                    owner,
+                    expected_snapshot,
+                    deadline,
+                )
+                .map_err(|error| active_manual_fence_commit_error(error, remote_mutation_seen))?;
+            }
             let intent = ResolutionAttemptIntent::OccurrenceComments {
                 owner_number: owner.number,
                 occurrence_keys: vec![occurrence.opaque_key.clone()],
@@ -2177,6 +2278,17 @@ fn commit_active_owner_resolution_with_audit<E: CliEnv>(
             remote_mutation_seen = false;
         }
 
+        if let Some(expected_snapshot) = manual_selection_fence {
+            validate_manual_owner_selection_owner_fence(
+                client,
+                candidate,
+                owner,
+                expected_snapshot,
+                deadline,
+            )
+            .map_err(|error| active_manual_fence_commit_error(error, remote_mutation_seen))?;
+        }
+
         let final_comments = client
             .list_comments(&repository, IssueNumber(owner.number), deadline)
             .map_err(|error| active_api_commit_error(error, remote_mutation_seen))?;
@@ -2227,6 +2339,16 @@ fn commit_active_owner_resolution_with_audit<E: CliEnv>(
                 )
             },
         )?;
+        if let Some(expected_snapshot) = manual_selection_fence {
+            validate_manual_owner_selection_owner_fence(
+                client,
+                candidate,
+                owner,
+                expected_snapshot,
+                deadline,
+            )
+            .map_err(|error| active_manual_fence_commit_error(error, remote_mutation_seen))?;
+        }
         let projected_owner = owner_projection_owner(&final_owner);
         for commit in &mut projection_commits {
             commit.owner = projected_owner.clone();
@@ -2245,25 +2367,6 @@ fn commit_active_owner_resolution_with_audit<E: CliEnv>(
         }
         projection_commits
     };
-
-    if let Some(manual_audit) = manual_audit {
-        let audited = append_manual_owner_selection_audit(
-            &repo_root,
-            candidate,
-            manual_audit.token,
-            owner.number,
-            manual_audit.snapshot,
-        )
-        .map_err(|error| {
-            active_spec_commit_error(
-                error,
-                remote_mutation_seen,
-                BlockedReason::LocalCommit,
-                "REPAIR_OWNER_PROJECTION",
-            )
-        })?;
-        *candidate = audited;
-    }
 
     let repaired = commit_owner_projection_and_source_success(
         &repo_root,
@@ -3259,74 +3362,139 @@ fn remote_commit_error(
     }
 }
 
-fn pending_owner_status_generation(candidate: &ImprovementCandidate) -> Option<u64> {
-    (candidate.owner_status_delivered_generation < candidate.owner_status_generation)
-        .then_some(candidate.owner_status_generation)
+fn active_failure_commit_error(
+    failure: OwnerResolutionFailure,
+    source: gwt_github::SpecOpsError,
+    remote_mutation_seen: bool,
+) -> OwnerResolutionCommitError {
+    if remote_mutation_seen {
+        OwnerResolutionCommitError::RemoteOutcomeUnknown { failure, source }
+    } else {
+        OwnerResolutionCommitError::PreSubmit {
+            failure,
+            source,
+            clear_create_root: false,
+        }
+    }
 }
 
-fn acknowledge_owner_status(
-    repo_root: &Path,
-    candidate_id: &str,
-    generation: u64,
-    expected_owner_number: u64,
-    expected_state: CandidateState,
-) -> Result<ImprovementCandidate, gwt_github::SpecOpsError> {
-    super::improvement_store::update(repo_root, |store| {
-        let candidate = store
-            .candidates
-            .iter_mut()
-            .find(|candidate| candidate.id == candidate_id)
-            .ok_or_else(|| owner_projection_error("candidate not found"))?;
-        if generation == 0 || generation > candidate.owner_status_generation {
-            return Err(owner_projection_error(
-                "owner status acknowledgement generation is invalid",
-            ));
+fn active_manual_fence_commit_error(
+    error: ManualOwnerFenceError,
+    remote_mutation_seen: bool,
+) -> OwnerResolutionCommitError {
+    match error {
+        ManualOwnerFenceError::Failure { failure, source } => {
+            active_failure_commit_error(failure, source, remote_mutation_seen)
         }
-        if candidate.state != expected_state
-            || candidate
-                .owner
-                .as_ref()
-                .is_none_or(|owner| owner.number != expected_owner_number)
-        {
-            return Err(owner_projection_error(
-                "owner changed before status acknowledgement",
-            ));
-        }
-        candidate.owner_status_delivered_generation =
-            candidate.owner_status_delivered_generation.max(generation);
-        super::improvement::validate_candidate_lifecycle(candidate)?;
-        Ok(candidate.clone())
-    })
+        ManualOwnerFenceError::Stale {
+            source,
+            resolver_snapshot,
+        } => OwnerResolutionCommitError::ManualSelectionStale {
+            source,
+            resolver_snapshot,
+        },
+    }
+}
+
+const OWNER_STATUS_DELIVERY_CAP: Duration = Duration::from_secs(20);
+const OWNER_STATUS_SETTLEMENT_RESERVE: Duration = Duration::from_millis(250);
+const OWNER_STATUS_CLAIM_BUFFER: Duration = Duration::from_secs(1);
+
+fn default_owner_status_delivery_deadline(now: Instant) -> Instant {
+    let capped = now.checked_add(OWNER_STATUS_DELIVERY_CAP).unwrap_or(now);
+    let outer = gwt_core::operation_deadline::current().unwrap_or(capped);
+    let effective = outer.min(capped);
+    let window = effective.saturating_duration_since(now);
+    let reserve = OWNER_STATUS_SETTLEMENT_RESERVE.min(window / 2);
+    effective.checked_sub(reserve).unwrap_or(now)
+}
+
+fn owner_status_claim_ttl(delivery_expires_at: Option<Instant>, now: Instant) -> chrono::Duration {
+    let effective = match (delivery_expires_at, gwt_core::operation_deadline::current()) {
+        (Some(delivery), Some(outer)) => delivery.min(outer),
+        (Some(delivery), None) => delivery,
+        (None, Some(outer)) => outer,
+        (None, None) => now.checked_add(OWNER_STATUS_DELIVERY_CAP).unwrap_or(now),
+    };
+    chrono::Duration::from_std(
+        effective
+            .saturating_duration_since(now)
+            .saturating_add(OWNER_STATUS_CLAIM_BUFFER),
+    )
+    .unwrap_or_else(|_| chrono::Duration::minutes(3))
 }
 
 pub(super) fn deliver_pending_owner_status<E: CliEnv>(
     env: &mut E,
     candidate: &mut ImprovementCandidate,
 ) -> Result<(), gwt_github::SpecOpsError> {
-    let Some(generation) = pending_owner_status_generation(candidate) else {
-        return Ok(());
+    deliver_pending_owner_status_with_delivery_deadline(
+        env,
+        candidate,
+        Some(default_owner_status_delivery_deadline(Instant::now())),
+    )
+}
+
+fn deliver_pending_owner_status_with_delivery_deadline<E: CliEnv>(
+    env: &mut E,
+    candidate: &mut ImprovementCandidate,
+    delivery_expires_at: Option<Instant>,
+) -> Result<(), gwt_github::SpecOpsError> {
+    let claim_ttl = owner_status_claim_ttl(delivery_expires_at, Instant::now());
+    let delivery_deadline =
+        delivery_expires_at.map(gwt_core::operation_deadline::ScopedOperationDeadline::enter);
+    let repo_root = env.repo_path().to_path_buf();
+    let candidate_id = candidate.id.clone();
+    let lease_owner = std::env::var(gwt_agent::GWT_SESSION_ID_ENV)
+        .ok()
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or_else(|| format!("pid-{}", std::process::id()));
+    let (status_candidate, claim_id) = match super::improvement_store::claim_owner_status_delivery(
+        &repo_root,
+        &candidate_id,
+        &lease_owner,
+        Utc::now(),
+        claim_ttl,
+    )? {
+        OwnerStatusDeliveryDecision::AlreadyDelivered(stored)
+        | OwnerStatusDeliveryDecision::Busy(stored) => {
+            *candidate = stored;
+            return Ok(());
+        }
+        OwnerStatusDeliveryDecision::Acquired {
+            candidate,
+            claim_id,
+        } => (candidate, claim_id),
     };
-    let owner_number = candidate
+    let owner_number = status_candidate
         .owner
         .as_ref()
         .map(|owner| owner.number)
         .ok_or_else(|| owner_projection_error("pending owner status has no durable owner"))?;
-    let state = candidate.state;
-    match state {
-        CandidateState::Linked => post_active_owner_linked_status(env, candidate, owner_number)?,
-        CandidateState::Created => post_new_owner_created_status(env, candidate, owner_number)?,
-        _ => {
-            return Err(owner_projection_error(
-                "pending owner status requires a successful owner state",
-            ))
+    let post_result = match status_candidate.state {
+        CandidateState::Linked => {
+            post_active_owner_linked_status(env, &status_candidate, owner_number)
         }
+        CandidateState::Created => {
+            post_new_owner_created_status(env, &status_candidate, owner_number)
+        }
+        _ => Err(owner_projection_error(
+            "pending owner status requires a successful owner state",
+        )),
+    };
+    drop(delivery_deadline);
+    if let Err(error) = post_result {
+        *candidate = super::improvement_store::release_owner_status_delivery(
+            &repo_root,
+            &candidate_id,
+            &claim_id,
+        )?;
+        return Err(error);
     }
-    *candidate = acknowledge_owner_status(
-        env.repo_path(),
-        &candidate.id,
-        generation,
-        owner_number,
-        state,
+    *candidate = super::improvement_store::acknowledge_owner_status_delivery(
+        &repo_root,
+        &candidate_id,
+        &claim_id,
     )?;
     Ok(())
 }
@@ -3336,8 +3504,22 @@ pub(super) fn retry_pending_owner_status_with_deadline<E: CliEnv>(
     candidate_id: &str,
     deadline: &ResolutionDeadline,
 ) -> Result<ImprovementCandidate, gwt_github::SpecOpsError> {
+    retry_pending_owner_status_with_operation_deadline(
+        env,
+        candidate_id,
+        deadline,
+        deadline.expires_at(),
+    )
+}
+
+pub(super) fn retry_pending_owner_status_with_operation_deadline<E: CliEnv>(
+    env: &mut E,
+    candidate_id: &str,
+    deadline: &ResolutionDeadline,
+    operation_expires_at: Instant,
+) -> Result<ImprovementCandidate, gwt_github::SpecOpsError> {
     let _operation_deadline =
-        gwt_core::operation_deadline::ScopedOperationDeadline::enter(deadline.expires_at());
+        gwt_core::operation_deadline::ScopedOperationDeadline::enter(operation_expires_at);
     deadline.remaining("pending owner status entry")?;
     let repo_root = env.repo_path().to_path_buf();
     repair_source_success_snapshots(&repo_root)?;
@@ -3354,8 +3536,17 @@ pub(super) fn retry_pending_owner_status_with_deadline<E: CliEnv>(
             "pending owner status requires a successful owner state",
         ));
     }
-    deliver_pending_owner_status(env, &mut candidate)?;
-    deadline.remaining("pending owner status completion")?;
+    deliver_pending_owner_status_with_delivery_deadline(
+        env,
+        &mut candidate,
+        Some(deadline.expires_at()),
+    )?;
+    operation_expires_at
+        .checked_duration_since(Instant::now())
+        .filter(|remaining| !remaining.is_zero())
+        .ok_or_else(|| GitHubApiError::Timeout {
+            operation: "pending owner status completion".to_string(),
+        })?;
     Ok(candidate)
 }
 
@@ -3408,22 +3599,23 @@ pub(super) fn resolve_candidate_owner<E: CliEnv>(
     candidate_id: &str,
     budget_profile: CaptureBudgetProfile,
 ) -> Result<ImprovementCandidate, gwt_github::SpecOpsError> {
-    let deadline = budget_profile.resolution_deadline();
-    resolve_candidate_owner_with_deadline(env, candidate_id, budget_profile, &deadline)
+    resolve_candidate_owner_with_expected_revision(env, candidate_id, budget_profile, None)
 }
 
-pub(super) fn resolve_candidate_owner_with_deadline<E: CliEnv>(
+pub(super) fn resolve_candidate_owner_with_expected_revision<E: CliEnv>(
     env: &mut E,
     candidate_id: &str,
     budget_profile: CaptureBudgetProfile,
-    deadline: &ResolutionDeadline,
+    expected_resolver_revision: Option<&str>,
 ) -> Result<ImprovementCandidate, gwt_github::SpecOpsError> {
-    resolve_candidate_owner_with_operation_deadline(
+    let deadline = budget_profile.resolution_deadline();
+    resolve_candidate_owner_with_operation_deadline_and_expected_revision(
         env,
         candidate_id,
         budget_profile,
-        deadline,
+        &deadline,
         deadline.expires_at(),
+        expected_resolver_revision,
     )
 }
 
@@ -3433,6 +3625,24 @@ pub(super) fn resolve_candidate_owner_with_operation_deadline<E: CliEnv>(
     budget_profile: CaptureBudgetProfile,
     deadline: &ResolutionDeadline,
     operation_expires_at: Instant,
+) -> Result<ImprovementCandidate, gwt_github::SpecOpsError> {
+    resolve_candidate_owner_with_operation_deadline_and_expected_revision(
+        env,
+        candidate_id,
+        budget_profile,
+        deadline,
+        operation_expires_at,
+        None,
+    )
+}
+
+fn resolve_candidate_owner_with_operation_deadline_and_expected_revision<E: CliEnv>(
+    env: &mut E,
+    candidate_id: &str,
+    budget_profile: CaptureBudgetProfile,
+    deadline: &ResolutionDeadline,
+    operation_expires_at: Instant,
+    expected_resolver_revision: Option<&str>,
 ) -> Result<ImprovementCandidate, gwt_github::SpecOpsError> {
     let _operation_deadline =
         gwt_core::operation_deadline::ScopedOperationDeadline::enter(operation_expires_at);
@@ -3447,6 +3657,14 @@ pub(super) fn resolve_candidate_owner_with_operation_deadline<E: CliEnv>(
         .into_iter()
         .find(|candidate| candidate.id == candidate_id)
         .ok_or_else(|| owner_projection_error("candidate not found"))?;
+    if validate_fresh_expected_resolver_revision(
+        env,
+        &current,
+        expected_resolver_revision,
+        deadline,
+    )? {
+        return Ok(current);
+    }
     if matches!(
         current.state,
         CandidateState::Linked | CandidateState::Created
@@ -3926,6 +4144,63 @@ pub(super) fn resolve_candidate_owner_with_operation_deadline<E: CliEnv>(
     }
 }
 
+fn validate_fresh_expected_resolver_revision<E: CliEnv>(
+    env: &mut E,
+    candidate: &ImprovementCandidate,
+    expected_resolver_revision: Option<&str>,
+    deadline: &ResolutionDeadline,
+) -> Result<bool, gwt_github::SpecOpsError> {
+    let Some(expected_resolver_revision) = expected_resolver_revision else {
+        return Ok(false);
+    };
+    if candidate.state != CandidateState::Blocked
+        || candidate.blocked_reason != Some(BlockedReason::Ambiguity)
+        || candidate
+            .resolver_snapshot
+            .as_ref()
+            .is_none_or(|snapshot| snapshot.resolver_revision != expected_resolver_revision)
+    {
+        return Err(owner_projection_error(
+            "expected resolver revision is stale",
+        ));
+    }
+    deadline.remaining("validate expected resolver revision")?;
+    let inspection = env
+        .improvement_owner_client(deadline)
+        .map_err(gwt_github::SpecOpsError::from)
+        .and_then(|client| {
+            inspect_owner_corpus(
+                client,
+                candidate,
+                &ContractRoutingRegistry::current(),
+                &NoSemanticOwnerAdvisor,
+                deadline,
+            )
+            .map_err(|failure| {
+                owner_projection_error(&format!(
+                    "expected resolver revision refresh failed: {}",
+                    blocked_reason_token(failure.reason)
+                ))
+            })
+        })?;
+    let OwnerInspection::Ambiguous {
+        owner_candidates,
+        corpus_generation,
+    } = inspection
+    else {
+        return Err(owner_projection_error(
+            "expected resolver revision is stale",
+        ));
+    };
+    let fresh_snapshot = ResolverSnapshot::new(corpus_generation, owner_candidates)?;
+    if fresh_snapshot.resolver_revision != expected_resolver_revision {
+        return Err(owner_projection_error(
+            "expected resolver revision is stale",
+        ));
+    }
+    Ok(true)
+}
+
 pub(super) fn select_candidate_owner<E: CliEnv>(
     env: &mut E,
     candidate_id: &str,
@@ -3945,15 +4220,24 @@ pub(super) fn select_candidate_owner<E: CliEnv>(
     }
     let repo_root = env.repo_path().to_path_buf();
     repair_source_success_snapshots(&repo_root)?;
-    let stored_candidate = super::improvement_store::load_and_repair(&repo_root)?
+    let mut stored_candidate = super::improvement_store::load_and_repair(&repo_root)?
         .candidates
         .into_iter()
         .find(|candidate| candidate.id == candidate_id)
         .ok_or_else(|| owner_projection_error("candidate not found"))?;
+    if manual_owner_selection_replay_matches(
+        &stored_candidate,
+        selected_owner_number,
+        resolver_revision,
+    )? {
+        deliver_pending_owner_status(env, &mut stored_candidate)?;
+        return Ok(stored_candidate);
+    }
     let stored_snapshot = stored_candidate
         .resolver_snapshot
         .as_ref()
         .filter(|snapshot| snapshot.resolver_revision == resolver_revision)
+        .cloned()
         .ok_or_else(|| owner_projection_error("manual owner selection revision is stale"))?;
     let stored_owner = stored_snapshot
         .owner_candidates
@@ -3962,20 +4246,36 @@ pub(super) fn select_candidate_owner<E: CliEnv>(
         .filter(|owner| {
             owner.active && owner.selectable && owner.match_basis != OwnerMatchBasis::Semantic
         })
+        .cloned()
         .ok_or_else(|| {
             owner_projection_error(
                 "manual owner selection requires a selectable active authoritative owner",
             )
         })?;
-    if stored_candidate.state != CandidateState::Blocked
-        || stored_candidate.blocked_reason != Some(BlockedReason::Ambiguity)
-    {
+    let recovering_pending_selection = manual_owner_selection_pending_matches(
+        &stored_candidate,
+        selected_owner_number,
+        resolver_revision,
+    );
+    let submitted_comment_recovery = recovering_pending_selection
+        && stored_candidate.attempt.as_ref().is_some_and(|attempt| {
+            attempt.remote_phase == AttemptRemotePhase::Submitted
+                && matches!(
+                    &attempt.intent,
+                    ResolutionAttemptIntent::OccurrenceComments { owner_number, .. }
+                        if *owner_number == selected_owner_number
+                )
+        });
+    let initial_ambiguity = stored_candidate.state == CandidateState::Blocked
+        && stored_candidate.blocked_reason == Some(BlockedReason::Ambiguity);
+    if !initial_ambiguity && !recovering_pending_selection {
         return Err(owner_projection_error(
             "manual owner selection requires a blocked ambiguity candidate",
         ));
     }
 
     let deadline = budget_profile.resolution_deadline();
+    let unhandled_settlement = std::cell::OnceCell::new();
     let _operation_deadline =
         gwt_core::operation_deadline::ScopedOperationDeadline::enter(deadline.expires_at());
     let source_scope_nonce = env.improvement_source_scope_nonce()?;
@@ -3992,40 +4292,452 @@ pub(super) fn select_candidate_owner<E: CliEnv>(
         )));
     }
 
-    let fresh_inspection = env
-        .improvement_owner_client(&deadline)
-        .map_err(gwt_github::SpecOpsError::from)
-        .and_then(|client| {
-            inspect_owner_corpus(
-                client,
-                &stored_candidate,
-                &ContractRoutingRegistry::current(),
-                &NoSemanticOwnerAdvisor,
-                &deadline,
-            )
-            .map_err(|failure| {
-                owner_projection_error(&format!(
-                    "manual owner selection refresh failed: {}",
-                    blocked_reason_token(failure.reason)
-                ))
+    // Submitted comments must settle from authoritative readback before a new
+    // mutation. The durable selection snapshot remains their recovery fence.
+    let fresh_snapshot = if submitted_comment_recovery {
+        stored_snapshot.clone()
+    } else {
+        match inspect_manual_owner_selection_snapshot(env, &stored_candidate, &deadline) {
+            Ok(snapshot) => snapshot,
+            Err(ManualOwnerInspectionError::NonAmbiguous { source })
+                if recovering_pending_selection =>
+            {
+                retire_stale_manual_selection(&repo_root, &mut stored_candidate, None, None)?;
+                return Err(source);
+            }
+            Err(error) => return Err(error.into_source()),
+        }
+    };
+    if recovering_pending_selection {
+        if fresh_snapshot.owner_candidates != stored_snapshot.owner_candidates {
+            retire_stale_manual_selection(
+                &repo_root,
+                &mut stored_candidate,
+                None,
+                Some(fresh_snapshot),
+            )?;
+            return Err(owner_projection_error(
+                "manual owner selection pending owner set is stale",
+            ));
+        }
+        if let Err(error) =
+            matching_manual_owner(&fresh_snapshot, selected_owner_number, &stored_owner)
+        {
+            retire_stale_manual_selection(
+                &repo_root,
+                &mut stored_candidate,
+                None,
+                Some(fresh_snapshot),
+            )?;
+            return Err(error);
+        }
+    } else {
+        if fresh_snapshot.resolver_revision != resolver_revision {
+            return Err(owner_projection_error(
+                "manual owner selection fresh resolver revision is stale",
+            ));
+        }
+        matching_manual_owner(&fresh_snapshot, selected_owner_number, &stored_owner)?;
+    }
+
+    let expectation = ManualResolutionExpectation {
+        selected_owner_number,
+        resolver_revision,
+        fingerprint: stored_candidate.fingerprint.as_deref(),
+        distinct_occurrences: &stored_candidate.distinct_occurrences,
+    };
+    let (mut candidate, token, recovering_remote_unknown, recovery_intent) =
+        match begin_manual_resolution_attempt(
+            &repo_root,
+            candidate_id,
+            budget_profile,
+            &expectation,
+        )? {
+            ManualResolutionAttemptStart::Acquired {
+                candidate,
+                token,
+                recovering_remote_unknown,
+                recovery_intent,
+            } => (candidate, token, recovering_remote_unknown, recovery_intent),
+            ManualResolutionAttemptStart::AlreadyResolved(mut candidate) => {
+                deliver_pending_owner_status(env, &mut candidate)?;
+                return Ok(candidate);
+            }
+        };
+    assert!(
+        unhandled_settlement
+            .set(UnhandledResolutionSettlement {
+                repo_root: repo_root.clone(),
+                token: token.clone(),
+                resolution_deadline: deadline,
             })
-        })?;
+            .is_ok(),
+        "manual owner resolution settlement guard must be installed exactly once"
+    );
+    let mut recovered_comment = None;
+    if recovering_remote_unknown {
+        let recovery_matches_selection = matches!(
+            &recovery_intent,
+            ResolutionAttemptIntent::OccurrenceComments { owner_number, .. }
+                if *owner_number == selected_owner_number
+        );
+        if !recovery_matches_selection {
+            return settle_owner_commit_error(
+                env,
+                candidate,
+                &token,
+                remote_commit_error(
+                    BlockedReason::Readback,
+                    "REFRESH_OWNER_CORPUS",
+                    owner_projection_error(
+                        "manual owner selection has an unsettled incompatible remote intent",
+                    ),
+                ),
+            );
+        }
+        recovered_comment = match adopt_recovered_occurrence_comments_step(
+            env,
+            &mut candidate,
+            &token,
+            &recovery_intent,
+            &deadline,
+        ) {
+            Ok(Some(evidence)) => Some(evidence),
+            Ok(None) => {
+                return settle_owner_commit_error(
+                    env,
+                    candidate,
+                    &token,
+                    remote_commit_error(
+                        BlockedReason::Readback,
+                        "REFRESH_OWNER_CORPUS",
+                        owner_projection_error(
+                            "submitted manual owner comment lacks authoritative evidence",
+                        ),
+                    ),
+                );
+            }
+            Err(error) => return settle_owner_commit_error(env, candidate, &token, error),
+        };
+    }
+    let final_snapshot = match inspect_manual_owner_selection_snapshot(env, &candidate, &deadline) {
+        Ok(snapshot) => snapshot,
+        Err(ManualOwnerInspectionError::Failure { failure, source }) => {
+            return settle_owner_commit_error(
+                env,
+                candidate,
+                &token,
+                active_failure_commit_error(failure, source, false),
+            );
+        }
+        Err(ManualOwnerInspectionError::NonAmbiguous { source }) => {
+            retire_stale_manual_selection(&repo_root, &mut candidate, Some(&token), None)?;
+            return Err(source);
+        }
+    };
+    let final_fence_matches = if submitted_comment_recovery {
+        final_snapshot.owner_candidates == stored_snapshot.owner_candidates
+    } else if recovering_pending_selection {
+        final_snapshot == fresh_snapshot
+    } else {
+        final_snapshot.resolver_revision == resolver_revision
+    };
+    if !final_fence_matches {
+        retire_stale_manual_selection(
+            &repo_root,
+            &mut candidate,
+            Some(&token),
+            Some(final_snapshot),
+        )?;
+        return Err(owner_projection_error(
+            "manual owner selection final resolver revision is stale",
+        ));
+    }
+    let selected_owner =
+        matching_manual_owner(&final_snapshot, selected_owner_number, &stored_owner)?;
+    if !recovering_pending_selection {
+        candidate = arm_pending_manual_owner_selection(
+            &repo_root,
+            &candidate,
+            &token,
+            selected_owner_number,
+            &stored_snapshot,
+        )?;
+    }
+    let selected_comments = match env.improvement_owner_client(&deadline) {
+        Ok(client) => client.list_comments(
+            &RepositoryIdentity::gwt_upstream(),
+            IssueNumber(selected_owner_number),
+            &deadline,
+        ),
+        Err(error) => {
+            return settle_owner_commit_error(
+                env,
+                candidate,
+                &token,
+                pre_submit_commit_error_from_api(error),
+            );
+        }
+    };
+    let selected_comments = match selected_comments {
+        Ok(comments) => comments,
+        Err(error) => {
+            return settle_owner_commit_error(
+                env,
+                candidate,
+                &token,
+                pre_submit_commit_error_from_api(error),
+            );
+        }
+    };
+    if selected_comments.generation().as_str().is_empty() {
+        return settle_owner_commit_error(
+            env,
+            candidate,
+            &token,
+            pre_submit_commit_error(
+                BlockedReason::Readback,
+                "REFRESH_OWNER_CORPUS",
+                owner_projection_error("manual owner selection comment corpus is incomplete"),
+            ),
+        );
+    }
+    let mut selected_comment_items = selected_comments.items().to_vec();
+    if let Some((owner_number, comment)) = recovered_comment {
+        if owner_number == IssueNumber(selected_owner_number)
+            && !selected_comment_items
+                .iter()
+                .any(|existing| existing.id == comment.id || existing.body == comment.body)
+        {
+            selected_comment_items.push(comment);
+        }
+    }
+    match commit_active_owner_resolution_inner(
+        env,
+        &mut candidate,
+        &selected_owner,
+        &selected_comment_items,
+        &deadline,
+        Some(&token),
+        Some(&final_snapshot),
+    ) {
+        Ok(()) => Ok(candidate),
+        Err(error) => {
+            let stale_manual_fence = matches!(
+                &error,
+                OwnerResolutionCommitError::ManualSelectionStale { .. }
+            );
+            let message = error.to_string();
+            let settled = settle_owner_commit_error(env, candidate, &token, error);
+            if stale_manual_fence {
+                settled?;
+                Err(owner_projection_error(&message))
+            } else {
+                settled
+            }
+        }
+    }
+}
+
+fn manual_owner_selection_replay_matches(
+    candidate: &ImprovementCandidate,
+    selected_owner_number: u64,
+    resolver_revision: &str,
+) -> Result<bool, gwt_github::SpecOpsError> {
+    let replay_matches = matches!(candidate.state, CandidateState::Linked)
+        && manual_owner_selection_audit_matches(
+            candidate,
+            selected_owner_number,
+            resolver_revision,
+        );
+    if !replay_matches {
+        return Ok(false);
+    }
+    super::improvement::validate_candidate_lifecycle(candidate)?;
+    super::improvement::validate_verified_owner_binding(candidate)?;
+    if candidate
+        .owner
+        .as_ref()
+        .is_none_or(|owner| owner.number != selected_owner_number)
+    {
+        return Err(owner_projection_error(
+            "MIGRATION_REQUIRED: manual owner replay does not match the Durable Owner",
+        ));
+    }
+    Ok(true)
+}
+
+fn manual_owner_selection_audit_matches(
+    candidate: &ImprovementCandidate,
+    selected_owner_number: u64,
+    resolver_revision: &str,
+) -> bool {
+    candidate.audit.iter().rev().any(|entry| {
+        matches!(
+            entry,
+            ImprovementAuditEntry::ManualOwnerSelection {
+                owner_number,
+                resolver_revision: recorded_revision,
+                ..
+            } if *owner_number == selected_owner_number
+                && recorded_revision == resolver_revision
+        )
+    })
+}
+
+fn manual_owner_selection_pending_matches(
+    candidate: &ImprovementCandidate,
+    selected_owner_number: u64,
+    resolver_revision: &str,
+) -> bool {
+    matches!(
+        candidate.state,
+        CandidateState::Blocked
+            | CandidateState::OwnerResolving
+            | CandidateState::RemoteOutcomeUnknown
+    ) && candidate
+        .pending_manual_owner_selection
+        .as_ref()
+        .is_some_and(|pending| {
+            pending.owner_number == selected_owner_number
+                && pending.resolver_revision == resolver_revision
+        })
+        && candidate
+            .resolver_snapshot
+            .as_ref()
+            .is_some_and(|snapshot| {
+                snapshot.resolver_revision == resolver_revision
+                    && snapshot.owner_candidates.iter().any(|owner| {
+                        owner.number == selected_owner_number
+                            && owner.active
+                            && owner.selectable
+                            && owner.match_basis != OwnerMatchBasis::Semantic
+                    })
+            })
+}
+
+fn inspect_manual_owner_selection_snapshot<E: CliEnv>(
+    env: &mut E,
+    candidate: &ImprovementCandidate,
+    deadline: &ResolutionDeadline,
+) -> Result<ResolverSnapshot, ManualOwnerInspectionError> {
+    let client = env.improvement_owner_client(deadline).map_err(|error| {
+        ManualOwnerInspectionError::Failure {
+            failure: owner_failure_from_api(&error),
+            source: error.into(),
+        }
+    })?;
+    inspect_manual_owner_selection_snapshot_with_client(client, candidate, deadline)
+}
+
+fn inspect_manual_owner_selection_snapshot_with_client<C: OwnerRepositoryClient + ?Sized>(
+    client: &C,
+    candidate: &ImprovementCandidate,
+    deadline: &ResolutionDeadline,
+) -> Result<ResolverSnapshot, ManualOwnerInspectionError> {
+    let inspection = inspect_owner_corpus(
+        client,
+        candidate,
+        &ContractRoutingRegistry::current(),
+        &NoSemanticOwnerAdvisor,
+        deadline,
+    )
+    .map_err(|failure| ManualOwnerInspectionError::Failure {
+        failure,
+        source: owner_projection_error(&format!(
+            "manual owner selection refresh failed: {}",
+            blocked_reason_token(failure.reason)
+        )),
+    })?;
     let OwnerInspection::Ambiguous {
         owner_candidates,
         corpus_generation,
-    } = fresh_inspection
+    } = inspection
     else {
-        return Err(owner_projection_error(
-            "manual owner selection fresh revision has no ambiguous active owner set",
-        ));
+        return Err(ManualOwnerInspectionError::NonAmbiguous {
+            source: owner_projection_error(
+                "manual owner selection fresh revision has no ambiguous active owner set",
+            ),
+        });
     };
-    let fresh_snapshot = ResolverSnapshot::new(corpus_generation, owner_candidates)?;
-    if fresh_snapshot.resolver_revision != resolver_revision {
-        return Err(owner_projection_error(
-            "manual owner selection fresh resolver revision is stale",
-        ));
+    ResolverSnapshot::new(corpus_generation, owner_candidates).map_err(|source| {
+        ManualOwnerInspectionError::Failure {
+            failure: owner_resolution_failure_from_error(&source),
+            source,
+        }
+    })
+}
+
+fn validate_manual_owner_selection_mutation_fence<C: OwnerRepositoryClient + ?Sized>(
+    client: &C,
+    candidate: &ImprovementCandidate,
+    selected_owner: &OwnerCandidate,
+    expected_snapshot: &ResolverSnapshot,
+    deadline: &ResolutionDeadline,
+) -> Result<(), ManualOwnerFenceError> {
+    let current = inspect_manual_owner_selection_snapshot_with_client(client, candidate, deadline)
+        .map_err(|error| match error {
+            ManualOwnerInspectionError::Failure { failure, source } => {
+                ManualOwnerFenceError::Failure { failure, source }
+            }
+            ManualOwnerInspectionError::NonAmbiguous { source } => ManualOwnerFenceError::Stale {
+                source,
+                resolver_snapshot: None,
+            },
+        })?;
+    if &current != expected_snapshot {
+        return Err(ManualOwnerFenceError::Stale {
+            source: owner_projection_error("manual owner selection mutation fence is stale"),
+            resolver_snapshot: Some(Box::new(current)),
+        });
     }
-    let selected_owner = fresh_snapshot
+    matching_manual_owner(&current, selected_owner.number, selected_owner).map_err(|source| {
+        ManualOwnerFenceError::Stale {
+            source,
+            resolver_snapshot: Some(Box::new(current)),
+        }
+    })?;
+    Ok(())
+}
+
+fn validate_manual_owner_selection_owner_fence<C: OwnerRepositoryClient + ?Sized>(
+    client: &C,
+    candidate: &ImprovementCandidate,
+    selected_owner: &OwnerCandidate,
+    expected_snapshot: &ResolverSnapshot,
+    deadline: &ResolutionDeadline,
+) -> Result<(), ManualOwnerFenceError> {
+    let current = inspect_manual_owner_selection_snapshot_with_client(client, candidate, deadline)
+        .map_err(|error| match error {
+            ManualOwnerInspectionError::Failure { failure, source } => {
+                ManualOwnerFenceError::Failure { failure, source }
+            }
+            ManualOwnerInspectionError::NonAmbiguous { source } => ManualOwnerFenceError::Stale {
+                source,
+                resolver_snapshot: None,
+            },
+        })?;
+    if current.owner_candidates != expected_snapshot.owner_candidates {
+        return Err(ManualOwnerFenceError::Stale {
+            source: owner_projection_error("manual owner selection owner fence is stale"),
+            resolver_snapshot: Some(Box::new(current)),
+        });
+    }
+    matching_manual_owner(&current, selected_owner.number, selected_owner).map_err(|source| {
+        ManualOwnerFenceError::Stale {
+            source,
+            resolver_snapshot: Some(Box::new(current)),
+        }
+    })?;
+    Ok(())
+}
+
+fn matching_manual_owner(
+    snapshot: &ResolverSnapshot,
+    selected_owner_number: u64,
+    stored_owner: &OwnerCandidate,
+) -> Result<OwnerCandidate, gwt_github::SpecOpsError> {
+    snapshot
         .owner_candidates
         .iter()
         .find(|owner| owner.number == selected_owner_number)
@@ -4040,74 +4752,111 @@ pub(super) fn select_candidate_owner<E: CliEnv>(
             owner_projection_error(
                 "manual owner selection fresh revision changed the selected active owner",
             )
-        })?;
-    let selected_comments = env
-        .improvement_owner_client(&deadline)
-        .map_err(gwt_github::SpecOpsError::from)?
-        .list_comments(
-            &RepositoryIdentity::gwt_upstream(),
-            IssueNumber(selected_owner_number),
-            &deadline,
-        )
-        .map_err(gwt_github::SpecOpsError::from)?;
-    if selected_comments.generation().as_str().is_empty() {
-        return Err(owner_projection_error(
-            "manual owner selection comment corpus is incomplete",
-        ));
-    }
-
-    let (mut candidate, token) =
-        match begin_resolution_attempt(&repo_root, candidate_id, budget_profile)? {
-            ResolutionAttemptStart::Acquired {
-                candidate, token, ..
-            } => (candidate, token),
-        };
-    if candidate.fingerprint != stored_candidate.fingerprint
-        || candidate.distinct_occurrences != stored_candidate.distinct_occurrences
-        || candidate
-            .resolver_snapshot
-            .as_ref()
-            .is_none_or(|snapshot| snapshot.resolver_revision != resolver_revision)
-    {
-        let error = pre_submit_commit_error(
-            BlockedReason::Store,
-            "RELOAD_CANDIDATE_STORE",
-            owner_projection_error("candidate changed during manual owner selection"),
-        );
-        settle_owner_commit_error(env, candidate, &token, error)?;
-        return Err(owner_projection_error(
-            "candidate changed during manual owner selection",
-        ));
-    }
-    match commit_active_owner_resolution_with_audit(
-        env,
-        &mut candidate,
-        &selected_owner,
-        selected_comments.items(),
-        &deadline,
-        Some(&token),
-        Some(ManualOwnerSelectionAudit {
-            token: &token,
-            snapshot: &fresh_snapshot,
-        }),
-    ) {
-        Ok(()) => Ok(candidate),
-        Err(error) => settle_owner_commit_error(env, candidate, &token, error),
-    }
+        })
 }
 
-fn append_manual_owner_selection_audit(
+fn retire_stale_manual_selection(
+    repo_root: &Path,
+    candidate: &mut ImprovementCandidate,
+    token: Option<&ResolutionAttemptToken>,
+    resolver_snapshot: Option<ResolverSnapshot>,
+) -> Result<(), gwt_github::SpecOpsError> {
+    let expected_pending = candidate.pending_manual_owner_selection.clone();
+    let expected_state = candidate.state;
+    candidate.blocked_reason = Some(BlockedReason::Ambiguity);
+    candidate.failure_subcode = None;
+    candidate.retry = Some(RetryMetadata {
+        retryable: true,
+        remediation: if resolver_snapshot.is_some() {
+            "SELECT_VERIFIED_OWNER".to_string()
+        } else {
+            "REFRESH_OWNER_CORPUS".to_string()
+        },
+        failed_at: Utc::now().to_rfc3339(),
+    });
+    candidate.pending_manual_owner_selection = None;
+    candidate.resolver_snapshot = resolver_snapshot;
+    candidate.attempt = None;
+    candidate.updated_at = Utc::now().to_rfc3339();
+    if candidate.state != CandidateState::Blocked {
+        transition_candidate(candidate, CandidateState::Blocked)?;
+    }
+    *candidate = super::improvement_store::update(repo_root, |store| {
+        let stored = store
+            .candidates
+            .iter_mut()
+            .find(|stored| stored.id == candidate.id)
+            .ok_or_else(|| owner_projection_error("candidate not found"))?;
+        if stored.fingerprint != candidate.fingerprint
+            || stored.distinct_occurrences != candidate.distinct_occurrences
+            || stored.state != expected_state
+            || stored.dismissed_reason != candidate.dismissed_reason
+            || stored.audit != candidate.audit
+            || stored.pending_manual_owner_selection != expected_pending
+            || match token {
+                Some(token) => {
+                    token.candidate_id != candidate.id
+                        || stored
+                            .attempt
+                            .as_ref()
+                            .is_none_or(|attempt| attempt.attempt_id != token.attempt_id)
+                }
+                None => stored.attempt.is_some(),
+            }
+        {
+            return Err(owner_projection_error(
+                "candidate changed while stale manual owner selection was retiring",
+            ));
+        }
+        stored.state = candidate.state;
+        stored.blocked_reason = candidate.blocked_reason;
+        stored.failure_subcode = candidate.failure_subcode;
+        stored.retry = candidate.retry.clone();
+        stored.resolver_snapshot = candidate.resolver_snapshot.clone();
+        stored.pending_manual_owner_selection = None;
+        stored.attempt = None;
+        stored.updated_at = candidate.updated_at.clone();
+        Ok(stored.clone())
+    })?;
+    Ok(())
+}
+
+fn pending_manual_owner_selection_snapshot(
+    candidate: &ImprovementCandidate,
+) -> Option<ResolverSnapshot> {
+    candidate
+        .resolver_snapshot
+        .as_ref()
+        .filter(|snapshot| {
+            candidate
+                .pending_manual_owner_selection
+                .as_ref()
+                .is_some_and(|pending| {
+                    pending.resolver_revision == snapshot.resolver_revision
+                        && pending.corpus_generation == snapshot.corpus_generation
+                        && snapshot.owner_candidates.iter().any(|owner| {
+                            owner.number == pending.owner_number
+                                && owner.active
+                                && owner.selectable
+                                && owner.match_basis != OwnerMatchBasis::Semantic
+                        })
+                })
+        })
+        .cloned()
+}
+
+fn arm_pending_manual_owner_selection(
     repo_root: &Path,
     candidate: &ImprovementCandidate,
     token: &ResolutionAttemptToken,
     owner_number: u64,
     snapshot: &ResolverSnapshot,
 ) -> Result<ImprovementCandidate, gwt_github::SpecOpsError> {
-    let entry = ImprovementAuditEntry::ManualOwnerSelection {
+    let pending = PendingManualOwnerSelection {
         owner_number,
         resolver_revision: snapshot.resolver_revision.clone(),
         corpus_generation: snapshot.corpus_generation.clone(),
-        recorded_at: Utc::now().to_rfc3339(),
+        started_at: Utc::now().to_rfc3339(),
     };
     super::improvement_store::update(repo_root, |store| {
         let stored = store
@@ -4122,6 +4871,7 @@ fn append_manual_owner_selection_audit(
             || stored.state != candidate.state
             || stored.dismissed_reason != candidate.dismissed_reason
             || stored.audit != candidate.audit
+            || stored.pending_manual_owner_selection != candidate.pending_manual_owner_selection
             || stored
                 .attempt
                 .as_ref()
@@ -4134,10 +4884,21 @@ fn append_manual_owner_selection_audit(
                 })
         {
             return Err(owner_projection_error(
-                "candidate changed before manual owner selection audit",
+                "candidate changed before manual owner selection journal",
             ));
         }
-        stored.audit.push(entry);
+        if let Some(existing) = &stored.pending_manual_owner_selection {
+            if existing.owner_number != pending.owner_number
+                || existing.resolver_revision != pending.resolver_revision
+                || existing.corpus_generation != pending.corpus_generation
+            {
+                return Err(owner_projection_error(
+                    "pending manual owner selection cannot change",
+                ));
+            }
+        } else {
+            stored.pending_manual_owner_selection = Some(pending);
+        }
         stored.updated_at = Utc::now().to_rfc3339();
         super::improvement::validate_candidate_lifecycle(stored)?;
         Ok(stored.clone())
@@ -5047,6 +5808,50 @@ fn begin_resolution_attempt(
     candidate_id: &str,
     budget_profile: CaptureBudgetProfile,
 ) -> Result<ResolutionAttemptStart, gwt_github::SpecOpsError> {
+    match begin_resolution_attempt_internal(repo_root, candidate_id, budget_profile, None)? {
+        ResolutionAttemptStartInternal::Acquired(attempt) => Ok(attempt),
+        ResolutionAttemptStartInternal::AlreadyResolved(_) => Err(owner_projection_error(
+            "automatic owner resolution cannot replay a manual selection",
+        )),
+    }
+}
+
+fn begin_manual_resolution_attempt(
+    repo_root: &Path,
+    candidate_id: &str,
+    budget_profile: CaptureBudgetProfile,
+    expectation: &ManualResolutionExpectation<'_>,
+) -> Result<ManualResolutionAttemptStart, gwt_github::SpecOpsError> {
+    match begin_resolution_attempt_internal(
+        repo_root,
+        candidate_id,
+        budget_profile,
+        Some(expectation),
+    )? {
+        ResolutionAttemptStartInternal::Acquired(ResolutionAttemptStart::Acquired {
+            candidate,
+            token,
+            recovering_remote_unknown,
+            recovery_intent,
+            ..
+        }) => Ok(ManualResolutionAttemptStart::Acquired {
+            candidate,
+            token,
+            recovering_remote_unknown,
+            recovery_intent,
+        }),
+        ResolutionAttemptStartInternal::AlreadyResolved(candidate) => {
+            Ok(ManualResolutionAttemptStart::AlreadyResolved(candidate))
+        }
+    }
+}
+
+fn begin_resolution_attempt_internal(
+    repo_root: &Path,
+    candidate_id: &str,
+    budget_profile: CaptureBudgetProfile,
+    manual_expectation: Option<&ManualResolutionExpectation<'_>>,
+) -> Result<ResolutionAttemptStartInternal, gwt_github::SpecOpsError> {
     let lease_owner = std::env::var(gwt_agent::GWT_SESSION_ID_ENV)
         .ok()
         .filter(|value| !value.trim().is_empty())
@@ -5059,6 +5864,55 @@ fn begin_resolution_attempt(
             .iter()
             .position(|candidate| candidate.id == candidate_id)
             .ok_or_else(|| owner_projection_error("candidate not found"))?;
+        if let Some(expectation) = manual_expectation {
+            let candidate = &store.candidates[index];
+            if manual_owner_selection_replay_matches(
+                candidate,
+                expectation.selected_owner_number,
+                expectation.resolver_revision,
+            )? {
+                return Ok(ResolutionAttemptStartInternal::AlreadyResolved(
+                    candidate.clone(),
+                ));
+            }
+            let fresh_ambiguity_matches = candidate.state == CandidateState::Blocked
+                && candidate.blocked_reason == Some(BlockedReason::Ambiguity)
+                && candidate.fingerprint.as_deref() == expectation.fingerprint
+                && candidate.distinct_occurrences == expectation.distinct_occurrences
+                && candidate
+                    .resolver_snapshot
+                    .as_ref()
+                    .is_some_and(|snapshot| {
+                        snapshot.resolver_revision == expectation.resolver_revision
+                            && snapshot.owner_candidates.iter().any(|owner| {
+                                owner.number == expectation.selected_owner_number
+                                    && owner.active
+                                    && owner.selectable
+                                    && owner.match_basis != OwnerMatchBasis::Semantic
+                            })
+                    });
+            let pending_recovery_matches = candidate.fingerprint.as_deref()
+                == expectation.fingerprint
+                && candidate.distinct_occurrences == expectation.distinct_occurrences
+                && manual_owner_selection_pending_matches(
+                    candidate,
+                    expectation.selected_owner_number,
+                    expectation.resolver_revision,
+                );
+            let precondition_matches = fresh_ambiguity_matches || pending_recovery_matches;
+            if !precondition_matches {
+                return Err(owner_projection_error(
+                    "candidate changed during manual owner selection",
+                ));
+            }
+        } else if store.candidates[index]
+            .pending_manual_owner_selection
+            .is_some()
+        {
+            return Err(owner_projection_error(
+                "automatic owner resolution cannot replace a pending manual selection",
+            ));
+        }
         let initial_state = store.candidates[index].state;
         match initial_state {
             CandidateState::Linked | CandidateState::Created => {
@@ -5167,17 +6021,19 @@ fn begin_resolution_attempt(
             transition_candidate(&mut store.candidates[index], CandidateState::OwnerResolving)?;
         }
         let candidate = store.candidates[index].clone();
-        Ok(ResolutionAttemptStart::Acquired {
-            token: ResolutionAttemptToken {
-                candidate_id: candidate.id.clone(),
-                attempt_id: lease.attempt_id,
-                ttl,
+        Ok(ResolutionAttemptStartInternal::Acquired(
+            ResolutionAttemptStart::Acquired {
+                token: ResolutionAttemptToken {
+                    candidate_id: candidate.id.clone(),
+                    attempt_id: lease.attempt_id,
+                    ttl,
+                },
+                candidate,
+                recovering_remote_unknown,
+                recovery_intent,
+                reconciliation_only,
             },
-            candidate,
-            recovering_remote_unknown,
-            recovery_intent,
-            reconciliation_only,
-        })
+        ))
     })
 }
 
@@ -5566,7 +6422,8 @@ fn settle_owner_commit_error<E: CliEnv>(
                     )?;
                 }
             }
-            block_owner_resolution(env, &mut candidate, failure, None, false)?;
+            let resolver_snapshot = pending_manual_owner_selection_snapshot(&candidate);
+            block_owner_resolution(env, &mut candidate, failure, resolver_snapshot, false)?;
             candidate.attempt = None;
             persist_and_post_resolver_failure(env, candidate, token, failure)
         }
@@ -5583,10 +6440,24 @@ fn settle_owner_commit_error<E: CliEnv>(
                 remediation: "REFRESH_OWNER_CORPUS".to_string(),
                 failed_at: Utc::now().to_rfc3339(),
             });
-            candidate.resolver_snapshot = None;
+            if candidate.pending_manual_owner_selection.is_none() {
+                candidate.resolver_snapshot = None;
+            }
             candidate.updated_at = Utc::now().to_rfc3339();
             transition_candidate(&mut candidate, CandidateState::RemoteOutcomeUnknown)?;
             persist_and_post_resolver_failure(env, candidate, token, failure)
+        }
+        OwnerResolutionCommitError::ManualSelectionStale {
+            source: _,
+            resolver_snapshot,
+        } => {
+            retire_stale_manual_selection(
+                env.repo_path(),
+                &mut candidate,
+                Some(token),
+                resolver_snapshot.map(|snapshot| *snapshot),
+            )?;
+            Ok(candidate)
         }
         OwnerResolutionCommitError::DurableStatus(source) => Err(source),
     }
@@ -5620,6 +6491,7 @@ fn persist_resolver_candidate(
             || stored.state != CandidateState::OwnerResolving
             || stored.dismissed_reason != candidate.dismissed_reason
             || stored.audit != candidate.audit
+            || stored.pending_manual_owner_selection != candidate.pending_manual_owner_selection
         {
             return Err(owner_projection_error(
                 "candidate changed while Owner Resolution was running",
@@ -5643,6 +6515,7 @@ fn persist_resolver_candidate(
         stored.reconciliation_required = candidate.reconciliation_required;
         stored.reconciliation_owner_numbers = candidate.reconciliation_owner_numbers.clone();
         stored.pending_create_resolution = candidate.pending_create_resolution.clone();
+        stored.pending_manual_owner_selection = candidate.pending_manual_owner_selection.clone();
         stored.attempt = candidate.attempt.clone();
         stored.updated_at = candidate.updated_at.clone();
         Ok(stored.clone())
@@ -5927,7 +6800,9 @@ fn settle_unhandled_resolution_failure(
         let remote_outcome_unknown = candidate.attempt.as_ref().is_some_and(|attempt| {
             attempt.remote_phase == AttemptRemotePhase::Submitted || attempt.remote_mutation_seen
         });
-        candidate.resolver_snapshot = None;
+        if candidate.pending_manual_owner_selection.is_none() {
+            candidate.resolver_snapshot = None;
+        }
         candidate.updated_at = now.to_rfc3339();
         if remote_outcome_unknown {
             let attempt = candidate
@@ -6877,11 +7752,13 @@ fn code_excerpt_re() -> &'static Regex {
 
 #[cfg(test)]
 mod tests {
-    use std::fs;
+    use std::fs::{self, OpenOptions};
     use std::process::Command;
-    use std::sync::Mutex;
+    use std::sync::{mpsc, Mutex};
+    use std::thread;
     use std::time::{Duration, Instant};
 
+    use fs2::FileExt;
     use serde_json::json;
 
     use super::*;
@@ -6929,7 +7806,7 @@ mod tests {
         let source_scope_nonce = "0".repeat(64);
         let source_event_id = "event-1";
         serde_json::from_value(json!({
-            "schema_version": 3,
+            "schema_version": 4,
             "id": "impr-public-template",
             "created_at": "2026-07-14T00:00:00Z",
             "updated_at": "2026-07-14T00:00:00Z",
@@ -8054,6 +8931,93 @@ mod tests {
         assert_eq!(repaired.state, CandidateState::Linked);
         assert_eq!(repaired.owner.as_ref().unwrap().number, 44);
         assert!(repaired.attempt.is_none());
+    }
+
+    #[test]
+    fn pending_manual_selection_repairs_projection_first_crash_with_live_attempt() {
+        let home = tempfile::tempdir().expect("isolated home");
+        let _gwt_home = gwt_core::test_support::ScopedGwtHome::set(home.path());
+        let source = tempfile::tempdir().expect("source");
+        let candidate_id = "impr-live-manual-projection-repair";
+        let (_env, revision) = blocked_ambiguous_owner_fixture(source.path(), candidate_id);
+        let stored = crate::cli::improvement_store::load_and_repair(source.path())
+            .expect("candidate store")
+            .candidates
+            .remove(0);
+        let snapshot = stored
+            .resolver_snapshot
+            .clone()
+            .expect("manual resolver snapshot");
+        let fingerprint = stored.fingerprint.clone().expect("fingerprint");
+        let occurrence_key = stored.distinct_occurrences[0].opaque_key.clone();
+        let expectation = ManualResolutionExpectation {
+            selected_owner_number: 45,
+            resolver_revision: &revision,
+            fingerprint: stored.fingerprint.as_deref(),
+            distinct_occurrences: &stored.distinct_occurrences,
+        };
+        let ManualResolutionAttemptStart::Acquired {
+            candidate, token, ..
+        } = begin_manual_resolution_attempt(
+            source.path(),
+            candidate_id,
+            CaptureBudgetProfile::Normal,
+            &expectation,
+        )
+        .expect("manual resolution attempt")
+        else {
+            panic!("manual resolution must acquire an attempt");
+        };
+        let pending =
+            arm_pending_manual_owner_selection(source.path(), &candidate, &token, 45, &snapshot)
+                .expect("pending manual selection");
+        assert!(
+            pending
+                .attempt
+                .as_ref()
+                .is_some_and(|attempt| attempt.expires_at > Utc::now()),
+            "fixture must retain a live attempt"
+        );
+        commit_readback_verified_binding(
+            source.path(),
+            &ReadbackVerifiedOwnerBinding {
+                candidate_id: candidate_id.to_string(),
+                owner: verified_projection_owner(45, &fingerprint),
+                occurrence_key,
+                resolution_status: CandidateState::Linked,
+                last_seen: stored.distinct_occurrences[0].captured_at.clone(),
+            },
+        )
+        .expect("simulate projection-first persist before crash");
+
+        assert!(
+            repair_source_success_snapshots(source.path())
+                .expect("repair live manual projection attempt"),
+            "durable matching manual projection must close the crash boundary"
+        );
+        let repaired = crate::cli::improvement_store::load_and_repair(source.path())
+            .expect("repaired source")
+            .candidates
+            .remove(0);
+        assert_eq!(repaired.state, CandidateState::Linked);
+        assert_eq!(repaired.owner.as_ref().map(|owner| owner.number), Some(45));
+        assert!(repaired.attempt.is_none());
+        assert!(repaired.pending_manual_owner_selection.is_none());
+        assert_eq!(
+            repaired
+                .audit
+                .iter()
+                .filter(|entry| matches!(
+                    entry,
+                    ImprovementAuditEntry::ManualOwnerSelection {
+                        owner_number: 45,
+                        resolver_revision,
+                        ..
+                    } if resolver_revision == &revision
+                ))
+                .count(),
+            1
+        );
     }
 
     #[test]
@@ -12259,6 +13223,217 @@ mod tests {
         (env, revision)
     }
 
+    fn pending_linked_owner_status_fixture(
+        source: &Path,
+        candidate_id: &str,
+    ) -> (TestEnv, ImprovementCandidate) {
+        let (mut env, revision) = blocked_ambiguous_owner_fixture(source, candidate_id);
+        select_candidate_owner(
+            &mut env,
+            candidate_id,
+            45,
+            &revision,
+            CaptureBudgetProfile::Normal,
+        )
+        .expect("initial owner status delivery");
+        let candidate = crate::cli::improvement_store::update(source, |store| {
+            let candidate = store
+                .candidates
+                .iter_mut()
+                .find(|candidate| candidate.id == candidate_id)
+                .expect("linked candidate");
+            candidate.owner_status_generation = candidate
+                .owner_status_generation
+                .checked_add(1)
+                .expect("owner status generation");
+            Ok(candidate.clone())
+        })
+        .expect("queue another owner status generation");
+        assert!(
+            candidate.owner_status_delivered_generation < candidate.owner_status_generation,
+            "fixture must leave one owner status generation pending"
+        );
+        (env, candidate)
+    }
+
+    fn owner_status_worker_env(source: &Path, cache_name: &str) -> TestEnv {
+        let mut env = TestEnv::new(source.join(cache_name));
+        env.repo_path = source.to_path_buf();
+        env
+    }
+
+    fn lock_local_board(source: &Path) -> std::fs::File {
+        let coordination_dir = gwt_core::coordination::coordination_dir(source);
+        fs::create_dir_all(&coordination_dir).expect("coordination directory");
+        let lock = OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .read(true)
+            .write(true)
+            .open(coordination_dir.join(".lock"))
+            .expect("Board lock file");
+        FileExt::lock_exclusive(&lock).expect("hold Board lock");
+        lock
+    }
+
+    #[test]
+    fn owner_status_timeout_releases_claim_inside_settlement_reserve() {
+        let home = tempfile::tempdir().expect("isolated home");
+        let _gwt_home = gwt_core::test_support::ScopedGwtHome::set(home.path());
+        let source = tempfile::tempdir().expect("source");
+        let candidate_id = "impr-owner-status-deadline-settlement";
+        let (mut env, _) = pending_linked_owner_status_fixture(source.path(), candidate_id);
+        let baseline = board_bodies(&mut env)
+            .into_iter()
+            .filter(|body| body.contains("was linked to active akiojin/gwt owner #45"))
+            .count();
+        let board_lock = lock_local_board(source.path());
+        let delivery_deadline =
+            ResolutionDeadline::new(Duration::from_millis(20), Duration::from_millis(60));
+        let operation_expires_at = Instant::now() + Duration::from_millis(600);
+
+        retry_pending_owner_status_with_operation_deadline(
+            &mut env,
+            candidate_id,
+            &delivery_deadline,
+            operation_expires_at,
+        )
+        .expect_err("contended Board delivery must time out");
+
+        let pending = crate::cli::improvement_store::load_and_repair(source.path())
+            .expect("candidate after timed-out delivery")
+            .candidates
+            .remove(0);
+        assert!(
+            pending.owner_status_delivery_claim.is_none(),
+            "settlement reserve must release the timed-out claim"
+        );
+        FileExt::unlock(&board_lock).expect("release Board lock");
+
+        let retry_deadline =
+            ResolutionDeadline::new(Duration::from_secs(1), Duration::from_secs(2));
+        let delivered =
+            retry_pending_owner_status_with_deadline(&mut env, candidate_id, &retry_deadline)
+                .expect("immediate retry after timeout");
+        assert_eq!(
+            delivered.owner_status_delivered_generation,
+            delivered.owner_status_generation
+        );
+        assert_eq!(
+            board_bodies(&mut env)
+                .into_iter()
+                .filter(|body| body.contains("was linked to active akiojin/gwt owner #45"))
+                .count(),
+            baseline + 1
+        );
+    }
+
+    #[test]
+    fn default_owner_status_delivery_reserves_claim_settlement() {
+        let home = tempfile::tempdir().expect("isolated home");
+        let _gwt_home = gwt_core::test_support::ScopedGwtHome::set(home.path());
+        let source = tempfile::tempdir().expect("source");
+        let candidate_id = "impr-owner-status-default-settlement";
+        let (mut env, mut candidate) =
+            pending_linked_owner_status_fixture(source.path(), candidate_id);
+        let board_lock = lock_local_board(source.path());
+
+        let result = {
+            let _operation_deadline = gwt_core::operation_deadline::ScopedOperationDeadline::enter(
+                Instant::now() + Duration::from_millis(120),
+            );
+            deliver_pending_owner_status(&mut env, &mut candidate)
+        };
+        result.expect_err("contended default delivery must stop before settlement reserve");
+
+        let pending = crate::cli::improvement_store::load_and_repair(source.path())
+            .expect("candidate after default delivery timeout")
+            .candidates
+            .remove(0);
+        assert!(
+            pending.owner_status_delivery_claim.is_none(),
+            "default delivery must release its claim before the outer deadline"
+        );
+        FileExt::unlock(&board_lock).expect("release Board lock");
+    }
+
+    #[test]
+    fn concurrent_owner_status_delivery_posts_once() {
+        let home = tempfile::tempdir().expect("isolated home");
+        let _gwt_home = gwt_core::test_support::ScopedGwtHome::set(home.path());
+        let source = tempfile::tempdir().expect("source");
+        let candidate_id = "impr-owner-status-concurrent-workers";
+        let (mut env, _) = pending_linked_owner_status_fixture(source.path(), candidate_id);
+        let baseline = board_bodies(&mut env)
+            .into_iter()
+            .filter(|body| body.contains("was linked to active akiojin/gwt owner #45"))
+            .count();
+        let board_lock = lock_local_board(source.path());
+        let source_a = source.path().to_path_buf();
+        let home_a = home.path().to_path_buf();
+        let candidate_a = candidate_id.to_string();
+        let worker_a = thread::spawn(move || {
+            let _gwt_home = gwt_core::test_support::ScopedGwtHome::set(home_a);
+            let mut env = owner_status_worker_env(&source_a, "cache-worker-a");
+            let deadline = ResolutionDeadline::new(Duration::from_secs(1), Duration::from_secs(5));
+            retry_pending_owner_status_with_deadline(&mut env, &candidate_a, &deadline)
+        });
+
+        let claim_visible = (0..200).any(|_| {
+            let claimed = crate::cli::improvement_store::load_and_repair(source.path())
+                .expect("poll delivery claim")
+                .candidates[0]
+                .owner_status_delivery_claim
+                .is_some();
+            if !claimed {
+                thread::sleep(Duration::from_millis(10));
+            }
+            claimed
+        });
+        assert!(claim_visible, "worker A must claim before worker B starts");
+
+        let source_b = source.path().to_path_buf();
+        let home_b = home.path().to_path_buf();
+        let candidate_b = candidate_id.to_string();
+        let (worker_b_tx, worker_b_rx) = mpsc::channel();
+        let worker_b = thread::spawn(move || {
+            let _gwt_home = gwt_core::test_support::ScopedGwtHome::set(home_b);
+            let mut env = owner_status_worker_env(&source_b, "cache-worker-b");
+            let deadline = ResolutionDeadline::new(Duration::from_secs(1), Duration::from_secs(2));
+            worker_b_tx
+                .send(
+                    retry_pending_owner_status_with_deadline(&mut env, &candidate_b, &deadline)
+                        .is_ok(),
+                )
+                .expect("worker B result");
+        });
+        assert!(
+            worker_b_rx
+                .recv_timeout(Duration::from_secs(1))
+                .expect("busy worker B must return before Board unlock"),
+            "busy worker B should be a successful no-op"
+        );
+        FileExt::unlock(&board_lock).expect("release Board lock");
+        worker_b.join().expect("worker B");
+        let delivered = worker_a
+            .join()
+            .expect("worker A")
+            .expect("worker A delivery");
+
+        assert_eq!(
+            delivered.owner_status_delivered_generation,
+            delivered.owner_status_generation
+        );
+        assert!(delivered.owner_status_delivery_claim.is_none());
+        assert_eq!(
+            board_bodies(&mut env)
+                .into_iter()
+                .filter(|body| body.contains("was linked to active akiojin/gwt owner #45"))
+                .count(),
+            baseline + 1
+        );
+    }
+
     #[test]
     fn manual_owner_selection_requires_stored_and_fresh_revision_then_audits_safe_link() {
         let home = tempfile::tempdir().expect("isolated home");
@@ -12288,6 +13463,707 @@ mod tests {
             }) if resolver_revision == &revision
         ));
         assert_eq!(env.owner_client.owner_mutation_count(), 1);
+    }
+
+    #[test]
+    fn manual_owner_selection_replays_same_owner_and_revision_without_mutation() {
+        let home = tempfile::tempdir().expect("isolated home");
+        let _gwt_home = gwt_core::test_support::ScopedGwtHome::set(home.path());
+        let source = tempfile::tempdir().expect("source");
+        let candidate_id = "impr-manual-owner-selection-replay";
+        let (mut env, revision) = blocked_ambiguous_owner_fixture(source.path(), candidate_id);
+
+        let first = select_candidate_owner(
+            &mut env,
+            candidate_id,
+            45,
+            &revision,
+            CaptureBudgetProfile::Normal,
+        )
+        .expect("initial selected owner");
+        let replay = select_candidate_owner(
+            &mut env,
+            candidate_id,
+            45,
+            &revision,
+            CaptureBudgetProfile::Normal,
+        )
+        .expect("idempotent selected owner replay");
+
+        assert_eq!(first.state, CandidateState::Linked);
+        assert_eq!(replay.state, CandidateState::Linked);
+        assert_eq!(replay.owner.as_ref().map(|owner| owner.number), Some(45));
+        assert_eq!(env.owner_client.owner_mutation_count(), 1);
+        assert_eq!(
+            replay
+                .audit
+                .iter()
+                .filter(|entry| matches!(
+                    entry,
+                    ImprovementAuditEntry::ManualOwnerSelection {
+                        owner_number: 45,
+                        resolver_revision,
+                        ..
+                    } if resolver_revision == &revision
+                ))
+                .count(),
+            1
+        );
+    }
+
+    #[test]
+    fn manual_owner_selection_recovers_projection_failure_without_duplicate_mutation_or_audit() {
+        let home = tempfile::tempdir().expect("isolated home");
+        let _gwt_home = gwt_core::test_support::ScopedGwtHome::set(home.path());
+        let source = tempfile::tempdir().expect("source");
+        let candidate_id = "impr-manual-owner-selection-projection-retry";
+        let (mut env, revision) = blocked_ambiguous_owner_fixture(source.path(), candidate_id);
+        crate::cli::improvement_store::fail_next_owner_projection_commit()
+            .expect("arm projection failure");
+
+        let failed = select_candidate_owner(
+            &mut env,
+            candidate_id,
+            45,
+            &revision,
+            CaptureBudgetProfile::Normal,
+        )
+        .expect("projection failure is persisted for replay");
+
+        assert_eq!(failed.state, CandidateState::Blocked);
+        assert_eq!(failed.blocked_reason, Some(BlockedReason::LocalCommit));
+        assert!(failed.audit.is_empty());
+        assert!(failed.pending_manual_owner_selection.is_some());
+        assert_eq!(env.owner_client.owner_mutation_count(), 1);
+
+        let replay = select_candidate_owner(
+            &mut env,
+            candidate_id,
+            45,
+            &revision,
+            CaptureBudgetProfile::Normal,
+        )
+        .expect("same manual selection converges after projection retry");
+
+        assert_eq!(replay.state, CandidateState::Linked);
+        assert!(replay.pending_manual_owner_selection.is_none());
+        assert_eq!(env.owner_client.owner_mutation_count(), 1);
+        assert_eq!(
+            replay
+                .audit
+                .iter()
+                .filter(|entry| matches!(
+                    entry,
+                    ImprovementAuditEntry::ManualOwnerSelection {
+                        owner_number: 45,
+                        resolver_revision,
+                        ..
+                    } if resolver_revision == &revision
+                ))
+                .count(),
+            1
+        );
+    }
+
+    #[test]
+    fn manual_owner_selection_repairs_source_finalize_failure_without_duplicate_mutation_or_audit()
+    {
+        let home = tempfile::tempdir().expect("isolated home");
+        let _gwt_home = gwt_core::test_support::ScopedGwtHome::set(home.path());
+        let source = tempfile::tempdir().expect("source");
+        let candidate_id = "impr-manual-owner-selection-source-finalize-retry";
+        let (mut env, revision) = blocked_ambiguous_owner_fixture(source.path(), candidate_id);
+        crate::cli::improvement_store::fail_next_manual_owner_finalize_save(
+            source.path(),
+            candidate_id,
+        )
+        .expect("arm source finalize failure");
+
+        let failed = select_candidate_owner(
+            &mut env,
+            candidate_id,
+            45,
+            &revision,
+            CaptureBudgetProfile::Normal,
+        )
+        .expect("source finalize failure is persisted for replay");
+
+        assert_eq!(failed.state, CandidateState::Blocked);
+        assert_eq!(failed.blocked_reason, Some(BlockedReason::LocalCommit));
+        assert!(failed.audit.is_empty());
+        assert!(failed.pending_manual_owner_selection.is_some());
+        assert_eq!(env.owner_client.owner_mutation_count(), 1);
+
+        let replay = select_candidate_owner(
+            &mut env,
+            candidate_id,
+            45,
+            &revision,
+            CaptureBudgetProfile::Normal,
+        )
+        .expect("same manual selection repairs the projected binding");
+
+        assert_eq!(replay.state, CandidateState::Linked);
+        assert!(replay.pending_manual_owner_selection.is_none());
+        assert_eq!(env.owner_client.owner_mutation_count(), 1);
+        assert_eq!(
+            replay
+                .audit
+                .iter()
+                .filter(|entry| matches!(
+                    entry,
+                    ImprovementAuditEntry::ManualOwnerSelection {
+                        owner_number: 45,
+                        resolver_revision,
+                        ..
+                    } if resolver_revision == &revision
+                ))
+                .count(),
+            1
+        );
+    }
+
+    #[test]
+    fn manual_owner_selection_final_fence_rejects_corpus_change_without_mutation() {
+        let home = tempfile::tempdir().expect("isolated home");
+        let _gwt_home = gwt_core::test_support::ScopedGwtHome::set(home.path());
+        let source = tempfile::tempdir().expect("source");
+        let candidate_id = "impr-manual-owner-selection-final-fence";
+        let (mut env, revision) = blocked_ambiguous_owner_fixture(source.path(), candidate_id);
+        let fingerprint = crate::cli::improvement_store::load_and_repair(source.path())
+            .expect("candidate store")
+            .candidates[0]
+            .fingerprint
+            .clone()
+            .expect("fingerprint");
+        let issue = owner_issue(45, IssueState::Open, fingerprint_marker(&fingerprint));
+        let mut spec = owner_issue(46, IssueState::Open, fingerprint_marker(&fingerprint));
+        spec.kind = RepositoryIssueKind::Spec;
+        let changed = owner_issue(99, IssueState::Open, "unrelated corpus change");
+        let repository = RepositoryIdentity::gwt_upstream();
+        let stable_generation = env
+            .owner_client
+            .list_issues(&repository, &resolution_deadline())
+            .expect("stable owner corpus")
+            .generation()
+            .as_str()
+            .to_string();
+        env.owner_client.queue_owner_issue_views(
+            &repository,
+            [
+                (vec![issue.clone(), spec.clone()], stable_generation.clone()),
+                (vec![issue.clone(), spec.clone()], stable_generation),
+                (
+                    vec![issue.clone(), spec.clone(), changed.clone()],
+                    "selection-after".to_string(),
+                ),
+                (vec![issue, spec, changed], "selection-after".to_string()),
+            ],
+        );
+
+        let error = select_candidate_owner(
+            &mut env,
+            candidate_id,
+            45,
+            &revision,
+            CaptureBudgetProfile::Normal,
+        )
+        .expect_err("final corpus fence must reject a stale manual selection");
+
+        assert!(error.to_string().contains("stale"), "{error}");
+        assert_eq!(env.owner_client.owner_mutation_count(), 0);
+        let stored = crate::cli::improvement_store::load_and_repair(source.path())
+            .expect("candidate store")
+            .candidates
+            .remove(0);
+        assert_eq!(stored.state, CandidateState::Blocked);
+        assert!(stored.audit.is_empty());
+        assert!(stored.attempt.is_none());
+    }
+
+    #[test]
+    fn manual_owner_selection_mutation_fence_rejects_post_inspection_corpus_change() {
+        let home = tempfile::tempdir().expect("isolated home");
+        let _gwt_home = gwt_core::test_support::ScopedGwtHome::set(home.path());
+        let source = tempfile::tempdir().expect("source");
+        let candidate_id = "impr-manual-owner-selection-mutation-fence";
+        let (mut env, revision) = blocked_ambiguous_owner_fixture(source.path(), candidate_id);
+        let fingerprint = crate::cli::improvement_store::load_and_repair(source.path())
+            .expect("candidate store")
+            .candidates[0]
+            .fingerprint
+            .clone()
+            .expect("fingerprint");
+        let issue = owner_issue(45, IssueState::Open, fingerprint_marker(&fingerprint));
+        let mut spec = owner_issue(46, IssueState::Open, fingerprint_marker(&fingerprint));
+        spec.kind = RepositoryIssueKind::Spec;
+        let changed = owner_issue(99, IssueState::Open, "later corpus entry");
+        let repository = RepositoryIdentity::gwt_upstream();
+        let stable_generation = env
+            .owner_client
+            .list_issues(&repository, &resolution_deadline())
+            .expect("stable owner corpus")
+            .generation()
+            .as_str()
+            .to_string();
+        env.owner_client.queue_owner_issue_views(
+            &repository,
+            [
+                (vec![issue.clone(), spec.clone()], stable_generation.clone()),
+                (vec![issue.clone(), spec.clone()], stable_generation.clone()),
+                (vec![issue.clone(), spec.clone()], stable_generation.clone()),
+                (vec![issue.clone(), spec.clone()], stable_generation),
+                (
+                    vec![issue.clone(), spec.clone(), changed.clone()],
+                    "mutation-fence-after".to_string(),
+                ),
+                (
+                    vec![issue, spec, changed],
+                    "mutation-fence-after".to_string(),
+                ),
+            ],
+        );
+
+        let error = select_candidate_owner(
+            &mut env,
+            candidate_id,
+            45,
+            &revision,
+            CaptureBudgetProfile::Normal,
+        )
+        .expect_err("mutation fence must reject a post-inspection corpus change");
+
+        assert!(error.to_string().contains("stale"), "{error}");
+        assert_eq!(env.owner_client.owner_mutation_count(), 0);
+        let stored = crate::cli::improvement_store::load_and_repair(source.path())
+            .expect("candidate store")
+            .candidates
+            .remove(0);
+        assert_eq!(stored.state, CandidateState::Blocked);
+        assert!(stored.pending_manual_owner_selection.is_none());
+        assert_ne!(
+            stored
+                .resolver_snapshot
+                .as_ref()
+                .expect("refreshed resolver snapshot")
+                .resolver_revision,
+            revision
+        );
+        assert!(stored.audit.is_empty());
+        assert!(stored.attempt.is_none());
+    }
+
+    #[test]
+    fn manual_owner_selection_remote_unknown_waits_for_authoritative_comment_without_duplicate_mutation(
+    ) {
+        let home = tempfile::tempdir().expect("isolated home");
+        let _gwt_home = gwt_core::test_support::ScopedGwtHome::set(home.path());
+        let source = tempfile::tempdir().expect("source");
+        let candidate_id = "impr-manual-owner-selection-remote-unknown";
+        let (mut env, revision) = blocked_ambiguous_owner_fixture(source.path(), candidate_id);
+        env.owner_client.fail_next_owner_operation(
+            OwnerRepositoryOperation::CreateComment,
+            OwnerRepositoryFaultTiming::AfterSubmit,
+            GitHubApiError::Timeout {
+                operation: "manual owner comment response".to_string(),
+            },
+        );
+
+        let unknown = select_candidate_owner(
+            &mut env,
+            candidate_id,
+            45,
+            &revision,
+            CaptureBudgetProfile::Normal,
+        )
+        .expect("submitted manual comment uncertainty is persisted");
+        assert_eq!(unknown.state, CandidateState::RemoteOutcomeUnknown);
+        assert_eq!(env.owner_client.owner_mutation_count(), 1);
+        assert!(unknown.pending_manual_owner_selection.is_some());
+        assert!(unknown.audit.is_empty());
+
+        let repository = RepositoryIdentity::gwt_upstream();
+        env.owner_client
+            .queue_owner_comment_views(&repository, IssueNumber(45), [Vec::new()]);
+        let still_unknown = select_candidate_owner(
+            &mut env,
+            candidate_id,
+            45,
+            &revision,
+            CaptureBudgetProfile::Normal,
+        )
+        .expect("temporarily invisible submitted comment remains unknown");
+        assert_eq!(still_unknown.state, CandidateState::RemoteOutcomeUnknown);
+        assert_eq!(env.owner_client.owner_mutation_count(), 1);
+        assert!(still_unknown.audit.is_empty());
+
+        let replay = select_candidate_owner(
+            &mut env,
+            candidate_id,
+            45,
+            &revision,
+            CaptureBudgetProfile::Normal,
+        )
+        .expect("authoritative submitted comment converges manual selection");
+        assert_eq!(replay.state, CandidateState::Linked);
+        assert_eq!(env.owner_client.owner_mutation_count(), 1);
+        assert_eq!(
+            replay
+                .audit
+                .iter()
+                .filter(|entry| matches!(
+                    entry,
+                    ImprovementAuditEntry::ManualOwnerSelection {
+                        owner_number: 45,
+                        resolver_revision,
+                        ..
+                    } if resolver_revision == &revision
+                ))
+                .count(),
+            1
+        );
+    }
+
+    #[test]
+    fn manual_owner_selection_retires_adopted_pending_when_owner_set_changes() {
+        let home = tempfile::tempdir().expect("isolated home");
+        let _gwt_home = gwt_core::test_support::ScopedGwtHome::set(home.path());
+        let source = tempfile::tempdir().expect("source");
+        let candidate_id = "impr-manual-owner-selection-adopted-stale";
+        let (mut env, revision) = blocked_ambiguous_owner_fixture(source.path(), candidate_id);
+        env.owner_client.fail_next_owner_operation(
+            OwnerRepositoryOperation::CreateComment,
+            OwnerRepositoryFaultTiming::AfterSubmit,
+            GitHubApiError::Timeout {
+                operation: "manual owner comment response".to_string(),
+            },
+        );
+
+        let unknown = select_candidate_owner(
+            &mut env,
+            candidate_id,
+            45,
+            &revision,
+            CaptureBudgetProfile::Normal,
+        )
+        .expect("submitted manual comment uncertainty is persisted");
+        assert_eq!(unknown.state, CandidateState::RemoteOutcomeUnknown);
+        let fingerprint = unknown.fingerprint.as_deref().expect("fingerprint");
+        env.owner_client.seed_repository_issue(owner_issue(
+            47,
+            IssueState::Open,
+            fingerprint_marker(fingerprint),
+        ));
+
+        let error = select_candidate_owner(
+            &mut env,
+            candidate_id,
+            45,
+            &revision,
+            CaptureBudgetProfile::Normal,
+        )
+        .expect_err("changed owner set must retire the adopted stale selection");
+        assert!(error.to_string().contains("stale"), "{error}");
+
+        let retired = crate::cli::improvement_store::load_and_repair(source.path())
+            .expect("candidate store")
+            .candidates
+            .remove(0);
+        assert_eq!(retired.state, CandidateState::Blocked);
+        assert!(retired.pending_manual_owner_selection.is_none());
+        let refreshed = retired.resolver_snapshot.expect("refreshed owner set");
+        assert_ne!(refreshed.resolver_revision, revision);
+        assert!(refreshed
+            .owner_candidates
+            .iter()
+            .any(|owner| owner.number == 47));
+
+        let selected = select_candidate_owner(
+            &mut env,
+            candidate_id,
+            45,
+            &refreshed.resolver_revision,
+            CaptureBudgetProfile::Normal,
+        )
+        .expect("fresh revision remains selectable after stale pending retirement");
+        assert_eq!(selected.state, CandidateState::Linked);
+        assert_eq!(env.owner_client.owner_mutation_count(), 1);
+    }
+
+    #[test]
+    fn manual_owner_selection_retires_stale_pending_before_retry_attempt() {
+        let home = tempfile::tempdir().expect("isolated home");
+        let _gwt_home = gwt_core::test_support::ScopedGwtHome::set(home.path());
+        let source = tempfile::tempdir().expect("source");
+        let candidate_id = "impr-manual-owner-selection-pending-stale-preflight";
+        let (mut env, revision) = blocked_ambiguous_owner_fixture(source.path(), candidate_id);
+        crate::cli::improvement_store::fail_next_owner_projection_commit()
+            .expect("arm projection failure");
+        let failed = select_candidate_owner(
+            &mut env,
+            candidate_id,
+            45,
+            &revision,
+            CaptureBudgetProfile::Normal,
+        )
+        .expect("projection failure is persisted for retry");
+        assert!(failed.pending_manual_owner_selection.is_some());
+        let fingerprint = failed.fingerprint.as_deref().expect("fingerprint");
+        env.owner_client.seed_repository_issue(owner_issue(
+            47,
+            IssueState::Open,
+            fingerprint_marker(fingerprint),
+        ));
+
+        let error = select_candidate_owner(
+            &mut env,
+            candidate_id,
+            45,
+            &revision,
+            CaptureBudgetProfile::Normal,
+        )
+        .expect_err("changed owner set must retire pending selection before retry");
+        assert!(error.to_string().contains("stale"), "{error}");
+
+        let retired = crate::cli::improvement_store::load_and_repair(source.path())
+            .expect("candidate store")
+            .candidates
+            .remove(0);
+        assert!(retired.pending_manual_owner_selection.is_none());
+        let refreshed = retired.resolver_snapshot.expect("refreshed owner set");
+        assert_ne!(refreshed.resolver_revision, revision);
+        let selected = select_candidate_owner(
+            &mut env,
+            candidate_id,
+            45,
+            &refreshed.resolver_revision,
+            CaptureBudgetProfile::Normal,
+        )
+        .expect("fresh revision is selectable after preflight retirement");
+        assert_eq!(selected.state, CandidateState::Linked);
+        assert_eq!(env.owner_client.owner_mutation_count(), 1);
+    }
+
+    #[test]
+    fn manual_owner_selection_finalization_fence_rejects_owner_change_after_readbacks() {
+        let home = tempfile::tempdir().expect("isolated home");
+        let _gwt_home = gwt_core::test_support::ScopedGwtHome::set(home.path());
+        let source = tempfile::tempdir().expect("source");
+        let candidate_id = "impr-manual-owner-selection-finalization-fence";
+        let (mut env, _) = blocked_ambiguous_owner_fixture(source.path(), candidate_id);
+        let candidate = crate::cli::improvement_store::load_and_repair(source.path())
+            .expect("candidate store")
+            .candidates
+            .remove(0);
+        let fingerprint = candidate.fingerprint.as_deref().expect("fingerprint");
+        let occurrence_key = &candidate.distinct_occurrences[0].opaque_key;
+        let comment_body = render_occurrence_comment_payload(
+            &candidate,
+            occurrence_key,
+            &PublicMutationContext::for_repo(source.path()),
+        )
+        .expect("occurrence payload")
+        .body;
+        let repository = RepositoryIdentity::gwt_upstream();
+        env.owner_client.seed_repository_comments(
+            &repository,
+            IssueNumber(45),
+            vec![repository_comment(1, comment_body, "2026-07-16T10:00:00Z")],
+        );
+        let refreshed =
+            resolve_candidate_owner(&mut env, candidate_id, CaptureBudgetProfile::Normal)
+                .expect("refresh ambiguity after seeding the authoritative comment");
+        let revision = refreshed
+            .resolver_snapshot
+            .as_ref()
+            .expect("refreshed resolver snapshot")
+            .resolver_revision
+            .clone();
+        let issue = owner_issue(45, IssueState::Open, fingerprint_marker(fingerprint));
+        let mut spec = owner_issue(46, IssueState::Open, fingerprint_marker(fingerprint));
+        spec.kind = RepositoryIssueKind::Spec;
+        let changed = owner_issue(47, IssueState::Open, fingerprint_marker(fingerprint));
+        let stable_generation = env
+            .owner_client
+            .list_issues(&repository, &resolution_deadline())
+            .expect("stable owner corpus")
+            .generation()
+            .as_str()
+            .to_string();
+        env.owner_client.queue_owner_issue_views(
+            &repository,
+            [
+                (vec![issue.clone(), spec.clone()], stable_generation.clone()),
+                (vec![issue.clone(), spec.clone()], stable_generation.clone()),
+                (vec![issue.clone(), spec.clone()], stable_generation.clone()),
+                (vec![issue.clone(), spec.clone()], stable_generation.clone()),
+                (vec![issue.clone(), spec.clone()], stable_generation.clone()),
+                (vec![issue.clone(), spec.clone()], stable_generation),
+                (
+                    vec![issue.clone(), spec.clone(), changed.clone()],
+                    "finalization-owner-change".to_string(),
+                ),
+                (
+                    vec![issue, spec, changed],
+                    "finalization-owner-change".to_string(),
+                ),
+            ],
+        );
+
+        let error = select_candidate_owner(
+            &mut env,
+            candidate_id,
+            45,
+            &revision,
+            CaptureBudgetProfile::Normal,
+        )
+        .expect_err("owner change after readbacks must fail the finalization fence");
+        assert!(error.to_string().contains("stale"), "{error}");
+        let stored = crate::cli::improvement_store::load_and_repair(source.path())
+            .expect("candidate store")
+            .candidates
+            .remove(0);
+        assert_eq!(stored.state, CandidateState::Blocked);
+        assert!(stored.pending_manual_owner_selection.is_none());
+        assert!(stored.audit.is_empty());
+        assert_eq!(env.owner_client.owner_mutation_count(), 0);
+    }
+
+    #[test]
+    fn manual_owner_selection_fence_transport_failure_preserves_typed_retry() {
+        let home = tempfile::tempdir().expect("isolated home");
+        let _gwt_home = gwt_core::test_support::ScopedGwtHome::set(home.path());
+        let source = tempfile::tempdir().expect("source");
+        let candidate_id = "impr-manual-owner-selection-fence-timeout";
+        let (mut env, revision) = blocked_ambiguous_owner_fixture(source.path(), candidate_id);
+        env.owner_client.fail_owner_operation_on_nth(
+            OwnerRepositoryOperation::ListIssues,
+            5,
+            OwnerRepositoryFaultTiming::BeforeSubmit,
+            GitHubApiError::Timeout {
+                operation: "manual selection mutation fence".to_string(),
+            },
+        );
+
+        let failed = select_candidate_owner(
+            &mut env,
+            candidate_id,
+            45,
+            &revision,
+            CaptureBudgetProfile::Normal,
+        )
+        .expect("transport failure is durably classified");
+
+        assert_eq!(failed.state, CandidateState::Blocked);
+        assert_eq!(failed.blocked_reason, Some(BlockedReason::Timeout));
+        assert_eq!(
+            failed
+                .retry
+                .as_ref()
+                .map(|retry| retry.remediation.as_str()),
+            Some("RETRY_WITHIN_BUDGET")
+        );
+        assert!(failed.pending_manual_owner_selection.is_some());
+        assert!(failed.audit.is_empty());
+        assert_eq!(env.owner_client.owner_mutation_count(), 0);
+    }
+
+    #[test]
+    fn manual_owner_selection_replay_rejects_unverified_durable_binding() {
+        let home = tempfile::tempdir().expect("isolated home");
+        let _gwt_home = gwt_core::test_support::ScopedGwtHome::set(home.path());
+        let source = tempfile::tempdir().expect("source");
+        let candidate_id = "impr-manual-owner-selection-invalid-binding";
+        let (mut env, revision) = blocked_ambiguous_owner_fixture(source.path(), candidate_id);
+        select_candidate_owner(
+            &mut env,
+            candidate_id,
+            45,
+            &revision,
+            CaptureBudgetProfile::Normal,
+        )
+        .expect("initial selected owner");
+        std::fs::remove_file(crate::cli::improvement_store::owner_projection_path())
+            .expect("remove repair source");
+        crate::cli::improvement_store::update(source.path(), |store| {
+            store.candidates[0]
+                .linked_issue
+                .as_mut()
+                .expect("linked issue")
+                .repository = "other/repository".to_string();
+            Ok(())
+        })
+        .expect("corrupt legacy binding fixture");
+
+        let error = select_candidate_owner(
+            &mut env,
+            candidate_id,
+            45,
+            &revision,
+            CaptureBudgetProfile::Normal,
+        )
+        .expect_err("replay must fail closed on an unverified binding");
+
+        assert!(error.to_string().contains("MIGRATION_REQUIRED"), "{error}");
+        assert_eq!(env.owner_client.owner_mutation_count(), 1);
+    }
+
+    #[test]
+    fn expected_resolver_revision_is_a_fresh_no_mutation_fence() {
+        let home = tempfile::tempdir().expect("isolated home");
+        let _gwt_home = gwt_core::test_support::ScopedGwtHome::set(home.path());
+        let source = tempfile::tempdir().expect("source");
+        let candidate_id = "impr-expected-resolver-revision";
+        let (mut env, revision) = blocked_ambiguous_owner_fixture(source.path(), candidate_id);
+        let store_path = crate::cli::improvement_store::candidate_store_path(source.path());
+        let before = std::fs::read(&store_path).expect("candidate store before resolve");
+
+        let unchanged = resolve_candidate_owner_with_expected_revision(
+            &mut env,
+            candidate_id,
+            CaptureBudgetProfile::Normal,
+            Some(&revision),
+        )
+        .expect("same fresh ambiguity revision");
+
+        assert_eq!(unchanged.state, CandidateState::Blocked);
+        assert_eq!(unchanged.blocked_reason, Some(BlockedReason::Ambiguity));
+        assert_eq!(env.owner_client.owner_mutation_count(), 0);
+        assert_eq!(
+            std::fs::read(&store_path).expect("candidate store after resolve"),
+            before
+        );
+    }
+
+    #[test]
+    fn expected_resolver_revision_rejects_changed_fresh_corpus_without_mutation() {
+        let home = tempfile::tempdir().expect("isolated home");
+        let _gwt_home = gwt_core::test_support::ScopedGwtHome::set(home.path());
+        let source = tempfile::tempdir().expect("source");
+        let candidate_id = "impr-stale-expected-resolver-revision";
+        let (mut env, revision) = blocked_ambiguous_owner_fixture(source.path(), candidate_id);
+        env.owner_client.seed_repository_issue(owner_issue(
+            99,
+            IssueState::Open,
+            "unrelated owner corpus change",
+        ));
+        let store_path = crate::cli::improvement_store::candidate_store_path(source.path());
+        let before = std::fs::read(&store_path).expect("candidate store before stale resolve");
+
+        let error = resolve_candidate_owner_with_expected_revision(
+            &mut env,
+            candidate_id,
+            CaptureBudgetProfile::Normal,
+            Some(&revision),
+        )
+        .expect_err("changed fresh corpus must be stale");
+
+        assert!(error.to_string().contains("stale"), "{error}");
+        assert_eq!(env.owner_client.owner_mutation_count(), 0);
+        assert_eq!(
+            std::fs::read(&store_path).expect("candidate store after stale resolve"),
+            before
+        );
     }
 
     #[test]
@@ -12409,6 +14285,52 @@ mod tests {
     }
 
     #[test]
+    fn manual_owner_selection_settles_comment_read_failure_after_pending_journal() {
+        let home = tempfile::tempdir().expect("isolated home");
+        let _gwt_home = gwt_core::test_support::ScopedGwtHome::set(home.path());
+        let source = tempfile::tempdir().expect("source");
+        let candidate_id = "impr-manual-owner-comment-read-settlement";
+        let (mut env, revision) = blocked_ambiguous_owner_fixture(source.path(), candidate_id);
+        env.owner_client.fail_next_owner_operation(
+            OwnerRepositoryOperation::ListComments,
+            OwnerRepositoryFaultTiming::BeforeSubmit,
+            GitHubApiError::Timeout {
+                operation: "manual selection comment corpus read".to_string(),
+            },
+        );
+
+        let failed = select_candidate_owner(
+            &mut env,
+            candidate_id,
+            45,
+            &revision,
+            CaptureBudgetProfile::Normal,
+        )
+        .expect("comment read failure is persisted after journal settlement");
+
+        assert_eq!(failed.state, CandidateState::Blocked);
+        assert_eq!(failed.blocked_reason, Some(BlockedReason::Timeout));
+        assert_eq!(
+            failed
+                .retry
+                .as_ref()
+                .map(|retry| retry.remediation.as_str()),
+            Some("RETRY_WITHIN_BUDGET")
+        );
+
+        let stored = crate::cli::improvement_store::load_and_repair(source.path())
+            .expect("candidate store")
+            .candidates
+            .remove(0);
+        assert_eq!(stored.state, CandidateState::Blocked);
+        assert_eq!(stored.blocked_reason, Some(BlockedReason::Timeout));
+        assert!(stored.attempt.is_none());
+        assert!(stored.pending_manual_owner_selection.is_some());
+        assert!(stored.audit.is_empty());
+        assert_eq!(env.owner_client.owner_mutation_count(), 0);
+    }
+
+    #[test]
     fn manual_owner_selection_does_not_audit_before_final_authoritative_readback() {
         let home = tempfile::tempdir().expect("isolated home");
         let _gwt_home = gwt_core::test_support::ScopedGwtHome::set(home.path());
@@ -12441,6 +14363,34 @@ mod tests {
             .remove(0);
         assert!(stored.attempt.is_none());
         assert!(stored.audit.is_empty());
+        assert!(stored.pending_manual_owner_selection.is_some());
+
+        let replay = select_candidate_owner(
+            &mut env,
+            candidate_id,
+            45,
+            &revision,
+            CaptureBudgetProfile::Normal,
+        )
+        .expect("same selection recovers the readback-verified remote comment");
+        assert_eq!(replay.state, CandidateState::Linked);
+        assert!(replay.pending_manual_owner_selection.is_none());
+        assert_eq!(env.owner_client.owner_mutation_count(), 1);
+        assert_eq!(
+            replay
+                .audit
+                .iter()
+                .filter(|entry| matches!(
+                    entry,
+                    ImprovementAuditEntry::ManualOwnerSelection {
+                        owner_number: 45,
+                        resolver_revision,
+                        ..
+                    } if resolver_revision == &revision
+                ))
+                .count(),
+            1
+        );
     }
 
     #[test]

@@ -38,6 +38,18 @@ pub const EVENT_SEGMENT_MAX_BYTES: u64 = 8 * 1024 * 1024;
 const MIGRATION_MARKER_FILE_NAME: &str = ".migration-complete";
 const EVENT_MANIFEST_VERSION: u32 = 1;
 
+#[cfg(test)]
+thread_local! {
+    static FAIL_NEXT_EVENT_MANIFEST_WRITE: std::cell::Cell<bool> = const {
+        std::cell::Cell::new(false)
+    };
+}
+
+#[cfg(test)]
+fn fail_next_event_manifest_write() {
+    FAIL_NEXT_EVENT_MANIFEST_WRITE.with(|fail| fail.set(true));
+}
+
 /// Who authored a Board entry: the human operator, an agent session, or
 /// gwt itself (system notices).
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -814,11 +826,47 @@ struct EventSegmentMeta {
     last_entry_id: Option<String>,
 }
 
+enum EventAppendOutcome {
+    ManifestUpdated(EventSegmentManifest),
+    CommittedWithoutManifest { error: String },
+}
+
 /// Snapshot of the whole coordination state handed to consumers (currently
 /// just the Board projection).
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 pub struct CoordinationSnapshot {
     pub board: BoardProjection,
+}
+
+/// Result of posting a Board entry when persistence and snapshot refresh have
+/// distinct success boundaries.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum BoardPostOutcome {
+    /// The entry was committed and the refreshed snapshot is available.
+    Refreshed(CoordinationSnapshot),
+    /// The entry was committed, but the derived snapshot could not be loaded
+    /// or updated. Callers must not retry the post solely because of this
+    /// refresh failure.
+    CommittedWithoutSnapshot {
+        entry_id: String,
+        refresh_error: String,
+    },
+}
+
+impl BoardPostOutcome {
+    /// Preserve the legacy `post_entry` contract for callers that require a
+    /// refreshed snapshot and cannot consume the typed commit outcome.
+    pub fn into_snapshot(self) -> Result<CoordinationSnapshot> {
+        match self {
+            Self::Refreshed(snapshot) => Ok(snapshot),
+            Self::CommittedWithoutSnapshot {
+                entry_id,
+                refresh_error,
+            } => Err(GwtError::Other(format!(
+                "board entry {entry_id} was committed but snapshot refresh failed: {refresh_error}"
+            ))),
+        }
+    }
 }
 
 pub fn coordination_dir(worktree_root: &Path) -> PathBuf {
@@ -882,18 +930,29 @@ pub fn load_snapshot(worktree_root: &Path) -> Result<CoordinationSnapshot> {
 }
 
 pub fn post_entry(worktree_root: &Path, entry: BoardEntry) -> Result<CoordinationSnapshot> {
+    post_entry_outcome(worktree_root, entry)?.into_snapshot()
+}
+
+pub fn post_entry_outcome(worktree_root: &Path, entry: BoardEntry) -> Result<BoardPostOutcome> {
     let mut entry = entry;
     entry.normalize_audience();
-    append_event(worktree_root, &CoordinationEvent::MessageAppended { entry })
+    append_event_outcome(worktree_root, &CoordinationEvent::MessageAppended { entry })
 }
 
 pub fn append_event(
     worktree_root: &Path,
     event: &CoordinationEvent,
 ) -> Result<CoordinationSnapshot> {
+    append_event_outcome(worktree_root, event)?.into_snapshot()
+}
+
+fn append_event_outcome(
+    worktree_root: &Path,
+    event: &CoordinationEvent,
+) -> Result<BoardPostOutcome> {
     with_coordination_lock(worktree_root, || {
         ensure_repo_local_files(worktree_root)?;
-        append_event_locked(worktree_root, event)
+        append_event_locked_outcome(worktree_root, event)
     })
 }
 
@@ -919,41 +978,68 @@ fn with_coordination_lock<T>(
     }
 }
 
-fn append_event_locked(
+fn append_event_locked_outcome(
     worktree_root: &Path,
     event: &CoordinationEvent,
-) -> Result<CoordinationSnapshot> {
+) -> Result<BoardPostOutcome> {
     let coordination_root = coordination_dir(worktree_root);
     let imported_legacy = import_late_legacy_event_log_locked(&coordination_root)?;
-    let manifest =
-        append_event_to_segments_root(&coordination_root, event, EVENT_SEGMENT_MAX_BYTES)?;
-    let mut projection: BoardProjection =
-        load_json_or_default(&coordination_board_projection_path(worktree_root))?;
-    match event {
-        CoordinationEvent::MessageAppended { entry } => {
-            projection.entries.push(entry.clone());
-            projection.entries.sort_by_key(|entry| entry.created_at);
-            if projection.entries.len() > HOT_PROJECTION_ENTRY_LIMIT {
-                let start = projection.entries.len() - HOT_PROJECTION_ENTRY_LIMIT;
-                projection.entries = projection.entries.split_off(start);
-            }
-            projection.total_entries = manifest.total_entries();
-            projection.has_more_before = projection.total_entries > projection.entries.len();
-            projection.oldest_entry_id = projection.entries.first().map(|entry| entry.id.clone());
-            projection.newest_entry_id = projection.entries.last().map(|entry| entry.id.clone());
-            projection.updated_at = Utc::now();
-        }
-    }
-    let snapshot = if imported_legacy || projection_needs_rebuild(&projection, &manifest) {
-        rebuild_snapshot_from_segments_root(&coordination_root)?
-    } else {
-        CoordinationSnapshot { board: projection }
+    let entry_id = match event {
+        CoordinationEvent::MessageAppended { entry } => entry.id.clone(),
     };
-    write_atomic_json(
-        &coordination_board_projection_path(worktree_root),
-        &snapshot.board,
-    )?;
-    Ok(snapshot)
+    let manifest = match append_event_to_segments_root_outcome(
+        &coordination_root,
+        event,
+        EVENT_SEGMENT_MAX_BYTES,
+    )? {
+        EventAppendOutcome::ManifestUpdated(manifest) => manifest,
+        EventAppendOutcome::CommittedWithoutManifest { error } => {
+            return Ok(BoardPostOutcome::CommittedWithoutSnapshot {
+                entry_id,
+                refresh_error: error,
+            });
+        }
+    };
+
+    let refresh_result = (|| -> Result<CoordinationSnapshot> {
+        let mut projection: BoardProjection =
+            load_json_or_default(&coordination_board_projection_path(worktree_root))?;
+        match event {
+            CoordinationEvent::MessageAppended { entry } => {
+                projection.entries.push(entry.clone());
+                projection.entries.sort_by_key(|entry| entry.created_at);
+                if projection.entries.len() > HOT_PROJECTION_ENTRY_LIMIT {
+                    let start = projection.entries.len() - HOT_PROJECTION_ENTRY_LIMIT;
+                    projection.entries = projection.entries.split_off(start);
+                }
+                projection.total_entries = manifest.total_entries();
+                projection.has_more_before = projection.total_entries > projection.entries.len();
+                projection.oldest_entry_id =
+                    projection.entries.first().map(|entry| entry.id.clone());
+                projection.newest_entry_id =
+                    projection.entries.last().map(|entry| entry.id.clone());
+                projection.updated_at = Utc::now();
+            }
+        }
+        let snapshot = if imported_legacy || projection_needs_rebuild(&projection, &manifest) {
+            rebuild_snapshot_from_segments_root(&coordination_root)?
+        } else {
+            CoordinationSnapshot { board: projection }
+        };
+        write_atomic_json(
+            &coordination_board_projection_path(worktree_root),
+            &snapshot.board,
+        )?;
+        Ok(snapshot)
+    })();
+
+    Ok(match refresh_result {
+        Ok(snapshot) => BoardPostOutcome::Refreshed(snapshot),
+        Err(error) => BoardPostOutcome::CommittedWithoutSnapshot {
+            entry_id,
+            refresh_error: error.to_string(),
+        },
+    })
 }
 
 fn repair_snapshot_locked(worktree_root: &Path) -> Result<CoordinationSnapshot> {
@@ -1396,6 +1482,17 @@ fn append_event_to_segments_root(
     event: &CoordinationEvent,
     max_segment_bytes: u64,
 ) -> Result<EventSegmentManifest> {
+    match append_event_to_segments_root_outcome(coordination_root, event, max_segment_bytes)? {
+        EventAppendOutcome::ManifestUpdated(manifest) => Ok(manifest),
+        EventAppendOutcome::CommittedWithoutManifest { error } => Err(GwtError::Other(error)),
+    }
+}
+
+fn append_event_to_segments_root_outcome(
+    coordination_root: &Path,
+    event: &CoordinationEvent,
+    max_segment_bytes: u64,
+) -> Result<EventAppendOutcome> {
     ensure_segment_storage(coordination_root)?;
     let segments_dir = coordination_events_segments_dir_from_root(coordination_root);
     let mut manifest = load_event_manifest_from_dir(coordination_root)?;
@@ -1450,8 +1547,14 @@ fn append_event_to_segments_root(
         event_bytes.len() as u64,
     );
     manifest.updated_at = Utc::now();
-    write_event_manifest(coordination_root, &manifest)?;
-    Ok(manifest)
+    Ok(match write_event_manifest(coordination_root, &manifest) {
+        Ok(()) => EventAppendOutcome::ManifestUpdated(manifest),
+        Err(error) => EventAppendOutcome::CommittedWithoutManifest {
+            error: format!(
+                "Board event was committed but its segment manifest refresh failed: {error}"
+            ),
+        },
+    })
 }
 
 fn serialized_event_line(event: &CoordinationEvent) -> Result<Vec<u8>> {
@@ -1486,17 +1589,57 @@ fn load_event_manifest(worktree_root: &Path) -> Result<EventSegmentManifest> {
 fn load_event_manifest_from_dir(coordination_root: &Path) -> Result<EventSegmentManifest> {
     let path = coordination_events_manifest_path_from_root(coordination_root);
     let manifest: EventSegmentManifest = load_json_or_default(&path)?;
-    if manifest.version == 0 || manifest.segments.is_empty() {
-        Ok(initial_event_manifest())
-    } else if manifest
-        .segments
-        .iter()
-        .any(|segment| segment.entries > 0 && segment.max_updated_at.is_none())
-    {
+    if event_manifest_needs_rebuild(coordination_root, &manifest)? {
         rebuild_event_manifest_from_segments(coordination_root)
     } else {
         Ok(manifest)
     }
+}
+
+fn event_manifest_needs_rebuild(
+    coordination_root: &Path,
+    manifest: &EventSegmentManifest,
+) -> Result<bool> {
+    if manifest.version == 0
+        || manifest.segments.is_empty()
+        || manifest
+            .segments
+            .iter()
+            .any(|segment| segment.entries > 0 && segment.max_updated_at.is_none())
+    {
+        return Ok(true);
+    }
+    let segments_dir = coordination_events_segments_dir_from_root(coordination_root);
+    let mut stored_files = manifest
+        .segments
+        .iter()
+        .map(|segment| segment.file.as_str())
+        .collect::<Vec<_>>();
+    stored_files.sort_unstable();
+    let mut actual_files = if segments_dir.exists() {
+        std::fs::read_dir(&segments_dir)?
+            .filter_map(std::result::Result::ok)
+            .filter_map(|entry| {
+                let path = entry.path();
+                (path.extension().and_then(|value| value.to_str()) == Some("jsonl"))
+                    .then(|| entry.file_name())
+            })
+            .filter_map(|name| name.to_str().map(str::to_string))
+            .collect::<Vec<_>>()
+    } else {
+        Vec::new()
+    };
+    actual_files.sort_unstable();
+    if stored_files != actual_files.iter().map(String::as_str).collect::<Vec<_>>() {
+        return Ok(true);
+    }
+    for segment in &manifest.segments {
+        let actual_bytes = segments_dir.join(&segment.file).metadata()?.len();
+        if actual_bytes != segment.bytes {
+            return Ok(true);
+        }
+    }
+    Ok(false)
 }
 
 fn legacy_event_log_needs_import(coordination_root: &Path) -> Result<bool> {
@@ -1580,6 +1723,12 @@ fn projection_needs_rebuild(projection: &BoardProjection, manifest: &EventSegmen
 }
 
 fn write_event_manifest(coordination_root: &Path, manifest: &EventSegmentManifest) -> Result<()> {
+    #[cfg(test)]
+    if FAIL_NEXT_EVENT_MANIFEST_WRITE.with(|fail| fail.replace(false)) {
+        return Err(GwtError::Other(
+            "injected event manifest write failure".to_string(),
+        ));
+    }
     write_atomic_json(
         &coordination_events_manifest_path_from_root(coordination_root),
         manifest,
@@ -1990,6 +2139,16 @@ pub fn load_entries_before_for_scope(
 pub trait BoardProvider {
     /// Append a Board entry and return the refreshed snapshot.
     fn post_entry(&self, worktree_root: &Path, entry: BoardEntry) -> Result<CoordinationSnapshot>;
+    /// Append a Board entry while preserving a confirmed commit when only the
+    /// subsequent snapshot refresh fails.
+    fn post_entry_outcome(
+        &self,
+        worktree_root: &Path,
+        entry: BoardEntry,
+    ) -> Result<BoardPostOutcome> {
+        self.post_entry(worktree_root, entry)
+            .map(BoardPostOutcome::Refreshed)
+    }
     /// Load the hot projection snapshot.
     fn load_snapshot(&self, worktree_root: &Path) -> Result<CoordinationSnapshot>;
     /// Load the snapshot filtered to an audience scope.
@@ -2048,6 +2207,14 @@ pub struct LocalProvider;
 impl BoardProvider for LocalProvider {
     fn post_entry(&self, worktree_root: &Path, entry: BoardEntry) -> Result<CoordinationSnapshot> {
         post_entry(worktree_root, entry)
+    }
+
+    fn post_entry_outcome(
+        &self,
+        worktree_root: &Path,
+        entry: BoardEntry,
+    ) -> Result<BoardPostOutcome> {
+        post_entry_outcome(worktree_root, entry)
     }
 
     fn load_snapshot(&self, worktree_root: &Path) -> Result<CoordinationSnapshot> {
@@ -2197,6 +2364,80 @@ mod tests {
             )
             .unwrap(),
         );
+    }
+
+    #[test]
+    fn post_entry_outcome_reports_commit_when_projection_refresh_fails() {
+        let dir = tempfile::tempdir().unwrap();
+        load_snapshot(dir.path()).unwrap();
+
+        let projection_path = coordination_board_projection_path(dir.path());
+        std::fs::remove_file(&projection_path).unwrap();
+        std::fs::create_dir(&projection_path).unwrap();
+
+        let entry = BoardEntry::new(
+            AuthorKind::Agent,
+            "Codex",
+            BoardEntryKind::Status,
+            "committed entry",
+            None,
+            None,
+            vec![],
+            vec![],
+        );
+        let entry_id = entry.id.clone();
+
+        let outcome = post_entry_outcome(dir.path(), entry).unwrap();
+        match outcome {
+            BoardPostOutcome::CommittedWithoutSnapshot {
+                entry_id: committed_id,
+                refresh_error,
+            } => {
+                assert_eq!(committed_id, entry_id);
+                assert!(!refresh_error.is_empty());
+            }
+            BoardPostOutcome::Refreshed(_) => {
+                panic!("projection refresh failure must preserve the commit outcome")
+            }
+        }
+
+        std::fs::remove_dir(&projection_path).unwrap();
+        let repaired = load_snapshot(dir.path()).unwrap();
+        assert_eq!(repaired.board.entries.len(), 1);
+        assert_eq!(repaired.board.entries[0].id, entry_id);
+    }
+
+    #[test]
+    fn post_entry_outcome_reports_commit_when_manifest_write_fails_after_event_fsync() {
+        let dir = tempfile::tempdir().unwrap();
+        load_snapshot(dir.path()).unwrap();
+        let entry = BoardEntry::new(
+            AuthorKind::Agent,
+            "Codex",
+            BoardEntryKind::Status,
+            "manifest boundary entry",
+            None,
+            None,
+            vec![],
+            vec![],
+        );
+        let entry_id = entry.id.clone();
+        fail_next_event_manifest_write();
+
+        let outcome = post_entry_outcome(dir.path(), entry)
+            .expect("fsynced event must be reported as committed");
+
+        assert!(matches!(
+            outcome,
+            BoardPostOutcome::CommittedWithoutSnapshot {
+                entry_id: committed_id,
+                ..
+            } if committed_id == entry_id
+        ));
+        let repaired = load_snapshot(dir.path()).expect("repair manifest from segments");
+        assert_eq!(repaired.board.entries.len(), 1);
+        assert_eq!(repaired.board.entries[0].id, entry_id);
+        assert_eq!(load_event_manifest(dir.path()).unwrap().total_entries(), 1);
     }
 
     #[test]

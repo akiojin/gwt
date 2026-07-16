@@ -21,6 +21,18 @@
 const DEFAULT_BUDGET_MS = 8;
 export const DEFAULT_MAX_STREAMED_BEFORE_STATE = 32;
 
+// Snapshot kinds that must preserve multiplicity and their position relative
+// to coalesced state. They are not latency-sensitive streams: moving them
+// ahead of workspace_state can make project-scoped snapshots fail their
+// active-project fence.
+export const DEFAULT_ORDERED_STATE_KINDS = Object.freeze(
+  new Set([
+    "improvement_candidates",
+    "improvement_action_result",
+    "improvement_action_error",
+  ]),
+);
+
 // Idempotent kinds where only the latest occurrence carries information. Any
 // kind not in this set preserves original order and every occurrence.
 export const DEFAULT_COALESCE_KINDS = Object.freeze(
@@ -28,7 +40,6 @@ export const DEFAULT_COALESCE_KINDS = Object.freeze(
     "workspace_state",
     "active_work_projection",
     "window_list",
-    "improvement_candidates",
     "provider_usage",
     "runtime_health",
     "project_index_status",
@@ -48,6 +59,7 @@ export function createSocketReceiveDispatcher({
   now,
   budgetMs = DEFAULT_BUDGET_MS,
   coalesceKinds = DEFAULT_COALESCE_KINDS,
+  orderedStateKinds = DEFAULT_ORDERED_STATE_KINDS,
   maxStreamedBeforeState = DEFAULT_MAX_STREAMED_BEFORE_STATE,
   onTrace,
   shouldTrace,
@@ -109,6 +121,7 @@ export function createSocketReceiveDispatcher({
     }
     const ready = coalesceQueuedEntries(queue, coalesceKinds, {
       maxStreamedBeforeState,
+      orderedStateKinds,
     });
     queue.length = 0;
     const start = nowImpl();
@@ -255,10 +268,14 @@ function queuedEntryPayload(entry) {
 function coalesceQueuedEntries(
   queue,
   coalesceKinds = DEFAULT_COALESCE_KINDS,
-  { maxStreamedBeforeState = DEFAULT_MAX_STREAMED_BEFORE_STATE } = {},
+  {
+    maxStreamedBeforeState = DEFAULT_MAX_STREAMED_BEFORE_STATE,
+    orderedStateKinds = DEFAULT_ORDERED_STATE_KINDS,
+  } = {},
 ) {
   return coalesceByKind(queue, coalesceKinds, {
     maxStreamedBeforeState,
+    orderedStateKinds,
     kindFor: queuedEntryKind,
   });
 }
@@ -266,10 +283,14 @@ function coalesceQueuedEntries(
 export function coalesceEvents(
   queue,
   coalesceKinds = DEFAULT_COALESCE_KINDS,
-  { maxStreamedBeforeState = DEFAULT_MAX_STREAMED_BEFORE_STATE } = {},
+  {
+    maxStreamedBeforeState = DEFAULT_MAX_STREAMED_BEFORE_STATE,
+    orderedStateKinds = DEFAULT_ORDERED_STATE_KINDS,
+  } = {},
 ) {
   return coalesceByKind(queue, coalesceKinds, {
     maxStreamedBeforeState,
+    orderedStateKinds,
     kindFor: (event) => event && event.kind,
   });
 }
@@ -277,7 +298,11 @@ export function coalesceEvents(
 function coalesceByKind(
   queue,
   coalesceKinds = DEFAULT_COALESCE_KINDS,
-  { maxStreamedBeforeState = DEFAULT_MAX_STREAMED_BEFORE_STATE, kindFor } = {},
+  {
+    maxStreamedBeforeState = DEFAULT_MAX_STREAMED_BEFORE_STATE,
+    orderedStateKinds = DEFAULT_ORDERED_STATE_KINDS,
+    kindFor,
+  } = {},
 ) {
   if (!queue || queue.length <= 1) {
     return queue ? queue.slice() : [];
@@ -293,33 +318,43 @@ function coalesceByKind(
   if (lastIndexByKind.size === 0) {
     return queue.slice();
   }
-  // Issue #2698 PR 3 — partition the result so streamed (non-
-  // coalesced) events are delivered ahead of idempotent state
-  // updates. terminal_output / notification / error need low
+  // Issue #2698 PR 3 — partition the result so streamed events are
+  // delivered ahead of state updates. terminal_output / notification / error need low
   // round-trip latency; a single rAF tick that flushes 20 piled-up
   // workspace_state messages before the next keystroke echo makes
   // typing feel sluggish on Windows even when CPU is idle. The
   // relative order WITHIN each partition is preserved from the
   // original queue.
   const streamed = [];
-  const idempotent = [];
+  const activationState = [];
+  const state = [];
   for (let i = 0; i < queue.length; i += 1) {
     const event = queue[i];
     const kind = kindFor(event);
     if (kind && coalesceKinds.has(kind)) {
       if (lastIndexByKind.get(kind) === i) {
-        idempotent.push(event);
+        if (kind === "workspace_state") {
+          activationState.push(event);
+        } else {
+          state.push(event);
+        }
       }
+    } else if (kind && orderedStateKinds.has(kind)) {
+      state.push(event);
     } else {
       streamed.push(event);
     }
   }
-  if (streamed.length <= streamedChunkLimit || idempotent.length === 0) {
-    return streamed.concat(idempotent);
+  // Apply the surviving project activation before scoped snapshots and action
+  // outcomes. A dropped intermediate workspace_state must not leave a stale
+  // project outcome ahead of the latest active-project fence.
+  const orderedState = activationState.concat(state);
+  if (streamed.length <= streamedChunkLimit || orderedState.length === 0) {
+    return streamed.concat(orderedState);
   }
   return streamed
     .slice(0, streamedChunkLimit)
-    .concat(idempotent, streamed.slice(streamedChunkLimit));
+    .concat(orderedState, streamed.slice(streamedChunkLimit));
 }
 
 function normalizeStreamedChunkLimit(value) {

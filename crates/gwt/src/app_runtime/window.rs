@@ -66,9 +66,24 @@ impl AppRuntime {
         if !tab.workspace.focus_window(&address.raw_id, bounds) {
             return Vec::new();
         }
-        self.active_tab_id = Some(address.tab_id);
+        self.activate_tab_for_window_events(address.tab_id)
+    }
+
+    fn activate_tab_for_window_events(&mut self, tab_id: String) -> Vec<OutboundEvent> {
+        let previous_tab_id = self.active_tab_id.clone();
+        let wizard_closed = self.set_active_tab(tab_id);
+        let tab_changed = self.active_tab_id != previous_tab_id;
         let _ = self.persist();
-        vec![self.workspace_state_broadcast()]
+        let mut events = vec![self.workspace_state_broadcast()];
+        if tab_changed {
+            if let Some(event) = self.active_work_projection_broadcast_on_tab_change() {
+                events.push(event);
+            }
+        }
+        if wizard_closed {
+            events.push(self.launch_wizard_state_broadcast(None));
+        }
+        events
     }
 
     pub(crate) fn cycle_focus_events(
@@ -179,12 +194,10 @@ impl AppRuntime {
                 })
                 .unwrap_or_else(|| vec![id.to_string(), target_id.to_string()])
         };
-        let _ = self.set_active_tab(address.tab_id);
         for window_id in resize_window_ids {
             self.resize_runtime_to_window(&window_id);
         }
-        let _ = self.persist();
-        vec![self.workspace_state_broadcast()]
+        self.activate_tab_for_window_events(address.tab_id)
     }
 
     pub(crate) fn activate_window_tab_events(&mut self, id: &str) -> Vec<OutboundEvent> {
@@ -200,14 +213,12 @@ impl AppRuntime {
         if !updated {
             return Vec::new();
         }
-        let _ = self.set_active_tab(address.tab_id);
         // Tab activation only changes the active marker/z-order. The revealed
         // terminal's real grid is owned by the frontend xterm fit; resizing
         // from backend geometry here clobbers that fit, especially for
         // maximized tab groups where shared window geometry is only an
         // approximation of the visible terminal body.
-        let _ = self.persist();
-        vec![self.workspace_state_broadcast()]
+        self.activate_tab_for_window_events(address.tab_id)
     }
 
     pub(crate) fn detach_window_tab_events(
@@ -227,10 +238,8 @@ impl AppRuntime {
         if !updated {
             return Vec::new();
         }
-        let _ = self.set_active_tab(address.tab_id);
         self.resize_runtime_to_window(id);
-        let _ = self.persist();
-        vec![self.workspace_state_broadcast()]
+        self.activate_tab_for_window_events(address.tab_id)
     }
 
     pub(crate) fn place_agent_window_in_kanban_events(
@@ -263,9 +272,7 @@ impl AppRuntime {
         if !updated {
             return Vec::new();
         }
-        let _ = self.set_active_tab(address.tab_id);
-        let _ = self.persist();
-        vec![self.workspace_state_broadcast()]
+        self.activate_tab_for_window_events(address.tab_id)
     }
 
     pub(crate) fn move_agent_kanban_card_events(
@@ -298,9 +305,7 @@ impl AppRuntime {
         if !updated {
             return Vec::new();
         }
-        let _ = self.set_active_tab(address.tab_id);
-        let _ = self.persist();
-        vec![self.workspace_state_broadcast()]
+        self.activate_tab_for_window_events(address.tab_id)
     }
 
     pub(crate) fn undock_agent_window_events(
@@ -320,9 +325,7 @@ impl AppRuntime {
         if !updated {
             return Vec::new();
         }
-        let _ = self.set_active_tab(address.tab_id);
-        let _ = self.persist();
-        vec![self.workspace_state_broadcast()]
+        self.activate_tab_for_window_events(address.tab_id)
     }
 
     pub(crate) fn set_agent_kanban_card_collapsed_events(
@@ -343,9 +346,7 @@ impl AppRuntime {
         if !updated {
             return Vec::new();
         }
-        let _ = self.set_active_tab(address.tab_id);
-        let _ = self.persist();
-        vec![self.workspace_state_broadcast()]
+        self.activate_tab_for_window_events(address.tab_id)
     }
 
     pub(crate) fn update_terminal_grid_events(

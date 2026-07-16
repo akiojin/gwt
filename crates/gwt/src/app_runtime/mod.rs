@@ -586,6 +586,11 @@ pub struct AppRuntime {
     /// launch stage banners (formerly the `AGENT_LAUNCH_STAGE_COUNTER`
     /// module static).
     pub(crate) agent_launch_stage_counter: std::sync::atomic::AtomicU64,
+    /// Latest requested Improvement Inbox snapshot per project. Loads run on
+    /// blocking workers; the event loop only accepts the newest epoch so a
+    /// delayed read cannot roll the UI back.
+    pub(crate) improvement_refresh_epoch: u64,
+    pub(crate) improvement_latest_refresh_epochs: HashMap<PathBuf, u64>,
 }
 
 impl ProjectTabRuntime {
@@ -743,6 +748,8 @@ impl AppRuntime {
             usage_refresh: None,
             image_paste_sequence: std::sync::atomic::AtomicU64::new(0),
             agent_launch_stage_counter: std::sync::atomic::AtomicU64::new(1),
+            improvement_refresh_epoch: 0,
+            improvement_latest_refresh_epochs: HashMap::new(),
         };
         app.rebuild_window_lookup();
         app.seed_window_pty_statuses();
@@ -2371,6 +2378,24 @@ impl AppRuntime {
             FrontendEvent::ImprovementPromoteIssue { id } => {
                 self.improvement_promote_issue_events(&client_id, &id)
             }
+            FrontendEvent::ImprovementResolve {
+                id,
+                expected_resolver_revision,
+            } => self.improvement_resolve_events(
+                &client_id,
+                &id,
+                expected_resolver_revision.as_deref(),
+            ),
+            FrontendEvent::ImprovementSelectOwner {
+                id,
+                owner_number,
+                resolver_revision,
+            } => self.improvement_select_owner_events(
+                &client_id,
+                &id,
+                owner_number,
+                &resolver_revision,
+            ),
             FrontendEvent::ImprovementDismiss { id, reason } => {
                 self.improvement_dismiss_events(&client_id, &id, reason.as_deref())
             }
@@ -2502,7 +2527,7 @@ impl AppRuntime {
         }
     }
 
-    pub(crate) fn frontend_sync_events(&self, client_id: &str) -> Vec<OutboundEvent> {
+    pub(crate) fn frontend_sync_events(&mut self, client_id: &str) -> Vec<OutboundEvent> {
         let terminal_statuses = self
             .window_details
             .iter()
@@ -2552,9 +2577,7 @@ impl AppRuntime {
         if let Some(event) = self.active_work_projection_reply(client_id) {
             events.insert(1, event);
         }
-        if let Some(event) = self.improvement_candidates_reply(client_id) {
-            events.push(event);
-        }
+        self.schedule_active_improvement_candidates_refresh();
         // SPEC-1934 US-6.1: surface pending migrations to a newly-connected
         // frontend during state hydration so the modal opens without waiting
         // for another roundtrip.
@@ -2652,16 +2675,6 @@ impl AppRuntime {
         })
     }
 
-    fn improvement_candidates_reply(&self, client_id: &str) -> Option<OutboundEvent> {
-        let project_root = self.active_project_root()?;
-        Some(OutboundEvent::reply(
-            client_id.to_string(),
-            BackendEvent::ImprovementCandidates {
-                candidates: gwt::cli::improvement::candidate_public_values(project_root),
-            },
-        ))
-    }
-
     fn improvement_action_error(
         &self,
         client_id: &str,
@@ -2672,6 +2685,9 @@ impl AppRuntime {
         vec![OutboundEvent::reply(
             client_id.to_string(),
             BackendEvent::ImprovementActionError {
+                project_root: self
+                    .active_project_root()
+                    .map(|root| root.display().to_string()),
                 id: id.map(str::to_string),
                 action: action.to_string(),
                 message: improvement_action_error_message(message.into()),
@@ -2680,18 +2696,10 @@ impl AppRuntime {
     }
 
     fn improvement_promote_issue_events(&self, client_id: &str, id: &str) -> Vec<OutboundEvent> {
-        let Some(project_root) = self.active_project_root() else {
-            return self.improvement_action_error(
-                client_id,
-                "promote_issue",
-                Some(id),
-                "No active project is selected.",
-            );
-        };
-        let mut env = gwt::cli::DefaultCliEnv::new("akiojin", "gwt", project_root.to_path_buf());
-        let mut output = String::new();
-        match gwt::cli::improvement::run(
-            &mut env,
+        self.spawn_improvement_action(
+            client_id,
+            "promote_issue",
+            id,
             gwt::cli::ImprovementCommand::PromoteIssue(
                 gwt::cli::improvement::ImprovementPromoteIssueCommand {
                     id: id.to_string(),
@@ -2699,29 +2707,47 @@ impl AppRuntime {
                     labels: Vec::new(),
                 },
             ),
-            &mut output,
-        ) {
-            Ok(_) => {
-                let mut events = vec![OutboundEvent::reply(
-                    client_id.to_string(),
-                    BackendEvent::ImprovementActionResult {
-                        id: id.to_string(),
-                        action: "promote_issue".to_string(),
-                        message: Some(output.trim().to_string()),
-                    },
-                )];
-                if let Some(event) = self.improvement_candidates_reply(client_id) {
-                    events.push(event);
-                }
-                events
-            }
-            Err(error) => self.improvement_action_error(
-                client_id,
-                "promote_issue",
-                Some(id),
-                error.to_string(),
+        )
+    }
+
+    fn improvement_resolve_events(
+        &self,
+        client_id: &str,
+        id: &str,
+        expected_resolver_revision: Option<&str>,
+    ) -> Vec<OutboundEvent> {
+        self.spawn_improvement_action(
+            client_id,
+            "resolve",
+            id,
+            gwt::cli::ImprovementCommand::Resolve(
+                gwt::cli::improvement::ImprovementResolveCommand {
+                    id: id.to_string(),
+                    expected_resolver_revision: expected_resolver_revision.map(str::to_string),
+                },
             ),
-        }
+        )
+    }
+
+    fn improvement_select_owner_events(
+        &self,
+        client_id: &str,
+        id: &str,
+        owner_number: u64,
+        resolver_revision: &str,
+    ) -> Vec<OutboundEvent> {
+        self.spawn_improvement_action(
+            client_id,
+            "link_issue",
+            id,
+            gwt::cli::ImprovementCommand::LinkIssue(
+                gwt::cli::improvement::ImprovementLinkIssueCommand {
+                    id: id.to_string(),
+                    owner_number,
+                    resolver_revision: resolver_revision.to_string(),
+                },
+            ),
+        )
     }
 
     fn improvement_dismiss_events(
@@ -2730,18 +2756,10 @@ impl AppRuntime {
         id: &str,
         reason: Option<&str>,
     ) -> Vec<OutboundEvent> {
-        let Some(project_root) = self.active_project_root() else {
-            return self.improvement_action_error(
-                client_id,
-                "dismiss",
-                Some(id),
-                "No active project is selected.",
-            );
-        };
-        let mut env = gwt::cli::DefaultCliEnv::new("akiojin", "gwt", project_root.to_path_buf());
-        let mut output = String::new();
-        match gwt::cli::improvement::run(
-            &mut env,
+        self.spawn_improvement_action(
+            client_id,
+            "dismiss",
+            id,
             gwt::cli::ImprovementCommand::Dismiss(
                 gwt::cli::improvement::ImprovementDismissCommand {
                     id: id.to_string(),
@@ -2751,24 +2769,127 @@ impl AppRuntime {
                         .to_string(),
                 },
             ),
-            &mut output,
-        ) {
-            Ok(_) => {
-                let mut events = vec![OutboundEvent::reply(
-                    client_id.to_string(),
+        )
+    }
+
+    fn spawn_improvement_action(
+        &self,
+        client_id: &str,
+        action: &'static str,
+        id: &str,
+        command: gwt::cli::ImprovementCommand,
+    ) -> Vec<OutboundEvent> {
+        let Some(project_root) = self.active_project_root().map(Path::to_path_buf) else {
+            return self.improvement_action_error(
+                client_id,
+                action,
+                Some(id),
+                "No active project is selected.",
+            );
+        };
+        let proxy = self.proxy.clone();
+        let client_id = client_id.to_string();
+        let id = id.to_string();
+        self.blocking_tasks.spawn(move || {
+            let outcome = run_improvement_action_for_project(&project_root, command);
+            proxy.send(UserEvent::ImprovementActionComplete {
+                project_root,
+                client_id,
+                action: action.to_string(),
+                id,
+                outcome,
+            });
+        });
+        Vec::new()
+    }
+
+    pub(crate) fn handle_improvement_action_complete(
+        &mut self,
+        project_root: &Path,
+        client_id: &str,
+        action: &str,
+        id: &str,
+        outcome: ImprovementActionOutcome,
+    ) -> Vec<OutboundEvent> {
+        let project_scope = project_root.display().to_string();
+        self.schedule_improvement_candidates_refresh(project_root.to_path_buf());
+        vec![OutboundEvent::reply(
+            client_id.to_string(),
+            match outcome {
+                ImprovementActionOutcome::Success(message) => {
                     BackendEvent::ImprovementActionResult {
+                        project_root: project_scope.clone(),
                         id: id.to_string(),
-                        action: "dismiss".to_string(),
-                        message: Some(output.trim().to_string()),
-                    },
-                )];
-                if let Some(event) = self.improvement_candidates_reply(client_id) {
-                    events.push(event);
+                        action: action.to_string(),
+                        message: Some(message),
+                    }
                 }
-                events
-            }
+                ImprovementActionOutcome::Error(message) => BackendEvent::ImprovementActionError {
+                    project_root: Some(project_scope.clone()),
+                    id: Some(id.to_string()),
+                    action: action.to_string(),
+                    message: improvement_action_error_message(message),
+                },
+            },
+        )]
+    }
+
+    pub(crate) fn schedule_improvement_candidates_refresh(&mut self, project_root: PathBuf) {
+        if self.improvement_refresh_epoch == u64::MAX {
+            self.improvement_refresh_epoch = 0;
+            self.improvement_latest_refresh_epochs.clear();
+        }
+        self.improvement_refresh_epoch += 1;
+        let epoch = self.improvement_refresh_epoch;
+        self.improvement_latest_refresh_epochs
+            .insert(project_root.clone(), epoch);
+        let proxy = self.proxy.clone();
+        self.blocking_tasks.spawn(move || {
+            let result = gwt::cli::improvement::try_candidate_public_values(&project_root)
+                .map_err(|error| error.to_string());
+            proxy.send(UserEvent::ImprovementCandidatesLoaded {
+                project_root,
+                epoch,
+                result,
+            });
+        });
+    }
+
+    pub(crate) fn schedule_active_improvement_candidates_refresh(&mut self) {
+        if let Some(project_root) = self.active_project_root().map(Path::to_path_buf) {
+            self.schedule_improvement_candidates_refresh(project_root);
+        }
+    }
+
+    pub(crate) fn handle_improvement_candidates_loaded(
+        &mut self,
+        project_root: PathBuf,
+        epoch: u64,
+        result: Result<Vec<serde_json::Value>, String>,
+    ) -> Vec<OutboundEvent> {
+        if self
+            .improvement_latest_refresh_epochs
+            .get(&project_root)
+            .copied()
+            != Some(epoch)
+        {
+            return Vec::new();
+        }
+        self.improvement_latest_refresh_epochs.remove(&project_root);
+        match result {
+            Ok(candidates) => vec![OutboundEvent::broadcast(
+                BackendEvent::ImprovementCandidates {
+                    project_root: project_root.display().to_string(),
+                    candidates,
+                },
+            )],
             Err(error) => {
-                self.improvement_action_error(client_id, "dismiss", Some(id), error.to_string())
+                tracing::warn!(
+                    project_root = %project_root.display(),
+                    error = %error,
+                    "Improvement candidate refresh failed; preserving the previous frontend snapshot"
+                );
+                Vec::new()
             }
         }
     }
@@ -2874,6 +2995,7 @@ impl AppRuntime {
     }
 
     pub(crate) fn set_active_tab(&mut self, tab_id: String) -> bool {
+        let previous_project_root = self.active_project_root().map(Path::to_path_buf);
         let wizard_closed = self
             .launch_wizard
             .as_ref()
@@ -2881,6 +3003,9 @@ impl AppRuntime {
         self.active_tab_id = Some(tab_id);
         if wizard_closed {
             self.launch_wizard = None;
+        }
+        if self.active_project_root().map(Path::to_path_buf) != previous_project_root {
+            self.schedule_active_improvement_candidates_refresh();
         }
         wizard_closed
     }
@@ -3141,6 +3266,18 @@ fn improvement_action_error_message(message: impl Into<String>) -> String {
             .to_string();
     }
     message
+}
+
+fn run_improvement_action_for_project(
+    project_root: &Path,
+    command: gwt::cli::ImprovementCommand,
+) -> ImprovementActionOutcome {
+    let mut env = gwt::cli::DefaultCliEnv::new("akiojin", "gwt", project_root.to_path_buf());
+    let mut output = String::new();
+    match gwt::cli::improvement::run(&mut env, command, &mut output) {
+        Ok(_) => ImprovementActionOutcome::Success(output.trim().to_string()),
+        Err(error) => ImprovementActionOutcome::Error(error.to_string()),
+    }
 }
 
 #[cfg(test)]

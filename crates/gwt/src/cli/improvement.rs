@@ -14,6 +14,7 @@ use uuid::Uuid;
 use super::{
     improvement_owner::{
         deliver_pending_owner_status, render_public_issue_payload, resolve_candidate_owner,
+        resolve_candidate_owner_with_expected_revision, select_candidate_owner,
         PublicMutationContext,
     },
     CliEnv,
@@ -26,6 +27,7 @@ pub enum ImprovementCommand {
     Capture(Box<ImprovementCaptureCommand>),
     List(ImprovementListCommand),
     Dismiss(ImprovementDismissCommand),
+    Resolve(ImprovementResolveCommand),
     LinkIssue(ImprovementLinkIssueCommand),
     PromoteIssue(ImprovementPromoteIssueCommand),
 }
@@ -268,11 +270,16 @@ pub struct ImprovementDismissCommand {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ImprovementResolveCommand {
+    pub id: String,
+    pub expected_resolver_revision: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ImprovementLinkIssueCommand {
     pub id: String,
-    pub number: u64,
-    pub url: Option<String>,
-    pub repository: Option<String>,
+    pub owner_number: u64,
+    pub resolver_revision: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -291,6 +298,14 @@ pub(super) enum ImprovementAuditEntry {
         corpus_generation: String,
         recorded_at: String,
     },
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub(super) struct PendingManualOwnerSelection {
+    pub(super) owner_number: u64,
+    pub(super) resolver_revision: String,
+    pub(super) corpus_generation: String,
+    pub(super) started_at: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -347,6 +362,9 @@ pub(crate) struct ImprovementCandidate {
     pub(super) owner_status_generation: u64,
     #[serde(default)]
     pub(super) owner_status_delivered_generation: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(super) owner_status_delivery_claim:
+        Option<super::improvement_store::OwnerStatusDeliveryClaim>,
     #[serde(default)]
     pub(super) reconciliation_required: bool,
     #[serde(default)]
@@ -361,6 +379,8 @@ pub(crate) struct ImprovementCandidate {
     pub(super) legacy_provenance: Vec<super::improvement_store::LegacyProvenance>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(super) pending_create_resolution: Option<super::improvement_store::ResolutionAttemptIntent>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(super) pending_manual_owner_selection: Option<PendingManualOwnerSelection>,
     #[serde(default)]
     pub(super) attempt: Option<super::improvement_store::ResolutionAttemptLease>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -375,6 +395,12 @@ pub(super) enum ImprovementEligibility {
     #[default]
     NeedsEvidence,
     Ineligible,
+}
+
+impl ImprovementEligibility {
+    fn is_owner_eligible(self) -> bool {
+        matches!(self, Self::Deterministic | Self::InterpretiveCorroboration)
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -560,26 +586,29 @@ pub fn run<E: CliEnv>(
         ImprovementCommand::Capture(command) => capture(env, *command, out)?,
         ImprovementCommand::List(command) => list(env.repo_path(), command, out)?,
         ImprovementCommand::Dismiss(command) => dismiss(env.repo_path(), command, out)?,
-        ImprovementCommand::LinkIssue(command) => link_issue(env.repo_path(), command, out)?,
+        ImprovementCommand::Resolve(command) => resolve(env, command, out)?,
+        ImprovementCommand::LinkIssue(command) => link_issue(env, command, out)?,
         ImprovementCommand::PromoteIssue(command) => promote_issue(env, command, out)?,
     };
     Ok(code)
 }
 
 pub fn candidate_public_values(repo_root: &Path) -> Vec<Value> {
+    try_candidate_public_values(repo_root).unwrap_or_default()
+}
+
+pub fn try_candidate_public_values(repo_root: &Path) -> Result<Vec<Value>, SpecOpsError> {
     let privacy_context = PublicMutationContext::for_repo(repo_root);
-    let mut candidates = load_store_with_projection_fallback(repo_root)
-        .map(|store| store.candidates)
-        .unwrap_or_default();
+    let mut candidates = load_store_with_projection_fallback(repo_root)?.candidates;
     candidates.sort_by(|a, b| {
         b.updated_at
             .cmp(&a.updated_at)
             .then_with(|| a.id.cmp(&b.id))
     });
-    candidates
+    Ok(candidates
         .into_iter()
         .map(|candidate| candidate_public_json(&candidate, &privacy_context))
-        .collect()
+        .collect())
 }
 
 pub(super) fn is_contract_artifact(target_artifact: &str) -> bool {
@@ -869,6 +898,7 @@ fn capture_typed(
             capture_status_delivered_generation: 0,
             owner_status_generation: 0,
             owner_status_delivered_generation: 0,
+            owner_status_delivery_claim: None,
             reconciliation_required: false,
             reconciliation_owner_numbers: Vec::new(),
             sanitized_summary,
@@ -879,6 +909,7 @@ fn capture_typed(
             dismissed_reason: None,
             legacy_provenance: Vec::new(),
             pending_create_resolution: None,
+            pending_manual_owner_selection: None,
             attempt: None,
             audit: Vec::new(),
         };
@@ -1075,6 +1106,7 @@ fn capture_legacy_compatibility(
                 capture_status_delivered_generation: 0,
                 owner_status_generation: 0,
                 owner_status_delivered_generation: 0,
+                owner_status_delivery_claim: None,
                 reconciliation_required: false,
                 reconciliation_owner_numbers: Vec::new(),
                 sanitized_summary: sanitized_summary.clone(),
@@ -1085,6 +1117,7 @@ fn capture_legacy_compatibility(
                 dismissed_reason: None,
                 legacy_provenance: Vec::new(),
                 pending_create_resolution: None,
+                pending_manual_owner_selection: None,
                 attempt: None,
                 audit: Vec::new(),
             };
@@ -1280,6 +1313,17 @@ pub(super) fn validate_candidate_lifecycle(
             "owner status delivery generation exceeds its queued generation",
         ));
     }
+    if let Some(claim) = &candidate.owner_status_delivery_claim {
+        if claim.claim_id.trim().is_empty()
+            || claim.lease_owner.trim().is_empty()
+            || claim.generation == 0
+            || claim.generation <= candidate.owner_status_delivered_generation
+            || claim.generation > candidate.owner_status_generation
+            || claim.expires_at <= claim.started_at
+        {
+            return Err(invalid("owner status delivery claim is invalid"));
+        }
+    }
     if !candidate.reconciliation_required && !candidate.reconciliation_owner_numbers.is_empty() {
         return Err(invalid(
             "reconciliation owner numbers require the reconciliation latch",
@@ -1404,6 +1448,43 @@ pub(super) fn validate_candidate_lifecycle(
         }
     }
 
+    if let Some(pending) = &candidate.pending_manual_owner_selection {
+        if pending.owner_number == 0
+            || pending.resolver_revision.len() != 64
+            || !pending
+                .resolver_revision
+                .bytes()
+                .all(|byte| byte.is_ascii_digit() || matches!(byte, b'a'..=b'f'))
+            || pending.corpus_generation.trim().is_empty()
+        {
+            return Err(invalid("pending manual owner selection is invalid"));
+        }
+        chrono::DateTime::parse_from_rfc3339(&pending.started_at)
+            .map_err(|_| invalid("pending manual owner selection timestamp must be RFC3339"))?;
+        candidate
+            .resolver_snapshot
+            .as_ref()
+            .filter(|snapshot| {
+                snapshot.resolver_revision == pending.resolver_revision
+                    && snapshot.corpus_generation == pending.corpus_generation
+                    && snapshot.owner_candidates.iter().any(|owner| {
+                        owner.number == pending.owner_number
+                            && owner.active
+                            && owner.selectable
+                            && owner.match_basis != OwnerMatchBasis::Semantic
+                    })
+            })
+            .ok_or_else(|| invalid("pending manual owner selection has no resolver snapshot"))?;
+        if matches!(
+            candidate.state,
+            CandidateState::Linked | CandidateState::Created
+        ) {
+            return Err(invalid(
+                "successful candidate cannot retain a pending manual owner selection",
+            ));
+        }
+    }
+
     if matches!(
         candidate.state,
         CandidateState::Linked | CandidateState::Created
@@ -1490,13 +1571,6 @@ pub(super) fn transition_candidate(
     validate_candidate_lifecycle(&next)?;
     *candidate = next;
     Ok(())
-}
-
-fn transition_to_owner_resolving(candidate: &mut ImprovementCandidate) -> Result<(), SpecOpsError> {
-    if candidate.state == CandidateState::Pending {
-        transition_candidate(candidate, CandidateState::NeedsEvidence)?;
-    }
-    transition_candidate(candidate, CandidateState::OwnerResolving)
 }
 
 fn typed_eligibility(candidate: &ImprovementCandidate) -> ImprovementEligibility {
@@ -1850,56 +1924,67 @@ fn dismiss(
         candidate.updated_at = now;
         Ok(candidate_public_json(candidate, &privacy_context))
     })?;
-    write_json(out, response)?;
+    write_json(out, with_operation_contract_version(response))?;
     Ok(0)
 }
 
-fn link_issue(
-    repo_root: &Path,
+fn resolve<E: CliEnv>(
+    env: &mut E,
+    command: ImprovementResolveCommand,
+    out: &mut String,
+) -> Result<i32, SpecOpsError> {
+    let repo_root = env.repo_path().to_path_buf();
+    let mut candidate = resolution_candidate(&repo_root, &command.id)?;
+    validate_expected_resolver_revision(&candidate, command.expected_resolver_revision.as_deref())?;
+    let privacy_context = PublicMutationContext::for_repo(&repo_root);
+    if matches!(
+        candidate.state,
+        CandidateState::Linked | CandidateState::Created
+    ) {
+        validate_verified_owner_binding(&candidate)?;
+        deliver_pending_owner_status(env, &mut candidate)?;
+        let mut response = operation_candidate_json(&candidate, &privacy_context);
+        let object = response
+            .as_object_mut()
+            .expect("candidate projection is an object");
+        object.insert("resolution_outcome".to_string(), json!("already-owned"));
+        object.insert("already_owned".to_string(), json!(true));
+        write_json(out, response)?;
+        return Ok(0);
+    }
+    if !candidate.eligibility.is_owner_eligible()
+        || matches!(
+            candidate.state,
+            CandidateState::Pending | CandidateState::NeedsEvidence | CandidateState::Parked
+        )
+    {
+        write_json(out, operation_candidate_json(&candidate, &privacy_context))?;
+        return Ok(0);
+    }
+    let candidate = resolve_candidate_owner_with_expected_revision(
+        env,
+        &command.id,
+        CaptureBudgetProfile::Normal,
+        command.expected_resolver_revision.as_deref(),
+    )?;
+    write_json(out, operation_candidate_json(&candidate, &privacy_context))?;
+    Ok(0)
+}
+
+fn link_issue<E: CliEnv>(
+    env: &mut E,
     command: ImprovementLinkIssueCommand,
     out: &mut String,
 ) -> Result<i32, SpecOpsError> {
-    if command.number == 0 {
-        return Err(invalid("issue number must be greater than zero"));
-    }
-    let repository = command
-        .repository
-        .filter(|value| !value.trim().is_empty())
-        .unwrap_or_else(|| UPSTREAM_REPOSITORY.to_string());
-    let url = command
-        .url
-        .filter(|value| !value.trim().is_empty())
-        .unwrap_or_else(|| {
-            format!(
-                "https://github.com/{repository}/issues/{number}",
-                number = command.number
-            )
-        });
-    let privacy_context = PublicMutationContext::for_repo(repo_root);
-    let now = Utc::now().to_rfc3339();
-    let response = super::improvement_store::update(repo_root, |store| {
-        let candidate = find_candidate_mut(store, &command.id)?;
-        if matches!(
-            candidate.state,
-            CandidateState::Linked | CandidateState::Created
-        ) && candidate
-            .linked_issue
-            .as_ref()
-            .is_some_and(|owner| owner.number == command.number)
-        {
-            return Ok(candidate_public_json(candidate, &privacy_context));
-        }
-        transition_to_owner_resolving(candidate)?;
-        candidate.updated_at = now;
-        candidate.linked_issue = Some(LinkedIssue {
-            number: command.number,
-            url: sanitize_text(&url),
-            repository: sanitize_text(&repository),
-        });
-        transition_candidate(candidate, CandidateState::Linked)?;
-        Ok(candidate_public_json(candidate, &privacy_context))
-    })?;
-    write_json(out, response)?;
+    let candidate = select_candidate_owner(
+        env,
+        &command.id,
+        command.owner_number,
+        &command.resolver_revision,
+        CaptureBudgetProfile::Normal,
+    )?;
+    let privacy_context = PublicMutationContext::for_repo(env.repo_path());
+    write_json(out, operation_candidate_json(&candidate, &privacy_context))?;
     Ok(0)
 }
 
@@ -1925,46 +2010,39 @@ fn promote_issue<E: CliEnv>(
     else {
         return Err(invalid("candidate not found"));
     };
-    let candidate = store.candidates[index].clone();
+    let mut candidate = store.candidates[index].clone();
     if candidate.state == CandidateState::Dismissed {
         return Err(invalid("dismissed candidates cannot be promoted"));
     }
-    if let Some(linked) = &candidate.linked_issue {
-        if matches!(
+    if matches!(
+        candidate.state,
+        CandidateState::Created | CandidateState::Linked
+    ) {
+        validate_verified_owner_binding(&candidate)?;
+        deliver_pending_owner_status(env, &mut candidate)?;
+        let privacy_context = PublicMutationContext::for_repo(&repo_root);
+        write_json(
+            out,
+            promotion_operation_json(&candidate, &privacy_context, true),
+        )?;
+        return Ok(0);
+    }
+    if !candidate.eligibility.is_owner_eligible()
+        || matches!(
             candidate.state,
-            CandidateState::Created | CandidateState::Linked | CandidateState::Recurrent
-        ) {
-            write_json(
-                out,
-                json!({
-                    "id": candidate.id,
-                    "state": candidate.state.compatibility_state(),
-                    "issue_number": linked.number,
-                    "issue_url": linked.url,
-                    "repository": linked.repository,
-                    "already_linked": true,
-                }),
-            )?;
-            return Ok(0);
-        }
+            CandidateState::Pending | CandidateState::NeedsEvidence | CandidateState::Parked
+        )
+    {
+        let privacy_context = PublicMutationContext::for_repo(&repo_root);
+        write_json(
+            out,
+            promotion_operation_json(&candidate, &privacy_context, false),
+        )?;
+        return Ok(0);
     }
     let candidate = resolve_candidate_owner(env, &command.id, CaptureBudgetProfile::Normal)?;
-    let response = if let Some(linked) = &candidate.linked_issue {
-        json!({
-            "id": candidate.id,
-            "state": candidate.state.compatibility_state(),
-            "repository": linked.repository,
-            "issue_number": linked.number,
-            "issue_url": linked.url,
-        })
-    } else {
-        json!({
-            "id": candidate.id,
-            "state": candidate.state.compatibility_state(),
-            "blocked_reason": candidate.blocked_reason,
-            "failure_subcode": candidate.failure_subcode,
-        })
-    };
+    let privacy_context = PublicMutationContext::for_repo(&repo_root);
+    let response = promotion_operation_json(&candidate, &privacy_context, false);
     write_json(out, response)?;
     Ok(0)
 }
@@ -2090,6 +2168,10 @@ fn candidate_public_json(
         "id": candidate.id,
         "state": candidate.state.compatibility_state(),
         "resolution_state": candidate.state,
+        "subsystem": candidate
+            .typed_evidence
+            .as_ref()
+            .map(|evidence| evidence.subsystem.as_str()),
         "blocked_reason": candidate.blocked_reason,
         "failure_subcode": candidate.failure_subcode,
         "retry": candidate.retry,
@@ -2113,6 +2195,98 @@ fn candidate_public_json(
         "updated_at": candidate.updated_at,
         "issue_preview": issue_preview,
     })
+}
+
+fn operation_candidate_json(
+    candidate: &ImprovementCandidate,
+    privacy_context: &PublicMutationContext,
+) -> Value {
+    with_operation_contract_version(candidate_public_json(candidate, privacy_context))
+}
+
+fn with_operation_contract_version(mut value: Value) -> Value {
+    value
+        .as_object_mut()
+        .expect("candidate projection is an object")
+        .insert("improvement_contract_version".to_string(), json!(2));
+    value
+}
+
+fn resolution_candidate(
+    repo_root: &Path,
+    candidate_id: &str,
+) -> Result<ImprovementCandidate, SpecOpsError> {
+    load_store(repo_root)?
+        .candidates
+        .into_iter()
+        .find(|candidate| candidate.id == candidate_id)
+        .ok_or_else(|| invalid("candidate not found"))
+}
+
+fn validate_expected_resolver_revision(
+    candidate: &ImprovementCandidate,
+    expected: Option<&str>,
+) -> Result<(), SpecOpsError> {
+    let Some(expected) = expected else {
+        return Ok(());
+    };
+    if expected.len() != 64
+        || !expected
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || matches!(byte, b'a'..=b'f'))
+        || candidate
+            .resolver_snapshot
+            .as_ref()
+            .is_none_or(|snapshot| snapshot.resolver_revision != expected)
+    {
+        return Err(invalid("stale resolver revision"));
+    }
+    Ok(())
+}
+
+pub(super) fn validate_verified_owner_binding(
+    candidate: &ImprovementCandidate,
+) -> Result<(), SpecOpsError> {
+    let Some(owner) = candidate.owner.as_ref() else {
+        return Err(invalid(
+            "MIGRATION_REQUIRED: legacy linked candidate has no readback-verified Durable Owner",
+        ));
+    };
+    let Some(linked) = candidate.linked_issue.as_ref() else {
+        return Err(invalid(
+            "MIGRATION_REQUIRED: legacy linked candidate has no canonical upstream link",
+        ));
+    };
+    if !owner.active
+        || owner.number != linked.number
+        || owner.url != linked.url
+        || linked.repository != UPSTREAM_REPOSITORY
+    {
+        return Err(invalid(
+            "MIGRATION_REQUIRED: legacy linked candidate is not a verified upstream owner binding",
+        ));
+    }
+    Ok(())
+}
+
+fn promotion_operation_json(
+    candidate: &ImprovementCandidate,
+    privacy_context: &PublicMutationContext,
+    already_linked: bool,
+) -> Value {
+    let mut value = operation_candidate_json(candidate, privacy_context);
+    let object = value
+        .as_object_mut()
+        .expect("candidate projection is an object");
+    if let Some(linked) = &candidate.linked_issue {
+        object.insert("repository".to_string(), json!(linked.repository));
+        object.insert("issue_number".to_string(), json!(linked.number));
+        object.insert("issue_url".to_string(), json!(linked.url));
+    }
+    if already_linked {
+        object.insert("already_linked".to_string(), json!(true));
+    }
+    value
 }
 
 fn load_store(repo_root: &Path) -> Result<CandidateStore, SpecOpsError> {
@@ -2343,7 +2517,7 @@ mod tests {
     }
 
     #[test]
-    fn promote_issue_rejects_untyped_candidate_without_owner_mutation() {
+    fn promote_issue_returns_needs_evidence_for_untyped_candidate_without_owner_mutation() {
         let project = tempfile::tempdir().expect("project");
         let mut env = TestEnv::new(project.path().join("cache"));
         env.repo_path = project.path().join("target-project");
@@ -2370,7 +2544,7 @@ mod tests {
             .expect("candidate id")
             .to_string();
 
-        let error = run_collect(
+        let (_, output) = run_collect(
             &mut env,
             CliCommand::Improvement(ImprovementCommand::PromoteIssue(
                 ImprovementPromoteIssueCommand {
@@ -2380,11 +2554,13 @@ mod tests {
                 },
             )),
         )
-        .expect_err("untyped candidate must not enter Owner Resolution");
+        .expect("untyped candidate remains needs-evidence");
 
         let bodies = board_bodies(&mut env);
-        assert!(error.to_string().contains("not eligible"));
-        assert_eq!(bodies.len(), 1, "rejected promote must not post status");
+        let response = parse_output(&output);
+        assert_eq!(response["improvement_contract_version"], 2);
+        assert_eq!(response["resolution_state"], "needs-evidence");
+        assert_eq!(bodies.len(), 1, "no-op promote must not post status");
         assert!(bodies[0].contains(&id));
         assert!(env.owner_client.owner_call_log().is_empty());
         assert!(env.owner_client.owner_mutation_call_log().is_empty());
@@ -2483,6 +2659,49 @@ mod tests {
     }
 
     #[test]
+    fn promote_issue_rejects_legacy_link_without_durable_owner() {
+        let home = tempfile::tempdir().expect("isolated home");
+        let _gwt_home = gwt_core::test_support::ScopedGwtHome::set(home.path());
+        let project = tempfile::tempdir().expect("project");
+        let mut env = TestEnv::new(project.path().join("cache"));
+        env.repo_path = project.path().join("source");
+        std::fs::create_dir_all(&env.repo_path).expect("repo path");
+        let mut candidate = lifecycle_test_candidate(CandidateState::Linked);
+        candidate.linked_issue = Some(LinkedIssue {
+            number: 42,
+            url: "https://example.com/issues/42".to_string(),
+            repository: "example/project".to_string(),
+        });
+        crate::cli::improvement_store::update(&env.repo_path, |store| {
+            store.candidates.push(candidate.clone());
+            Ok(())
+        })
+        .expect("legacy linked candidate");
+        let store_path = crate::cli::improvement_store::candidate_store_path(&env.repo_path);
+        let before = std::fs::read(&store_path).expect("candidate store");
+
+        let error = run_collect(
+            &mut env,
+            CliCommand::Improvement(ImprovementCommand::PromoteIssue(
+                ImprovementPromoteIssueCommand {
+                    id: candidate.id,
+                    force: false,
+                    labels: Vec::new(),
+                },
+            )),
+        )
+        .expect_err("legacy owner must be migrated before promote compatibility can succeed");
+
+        assert!(error.to_string().contains("MIGRATION_REQUIRED"));
+        assert!(env.owner_client.owner_call_log().is_empty());
+        assert!(env.owner_client.owner_mutation_call_log().is_empty());
+        assert_eq!(
+            std::fs::read(&store_path).expect("candidate store after rejection"),
+            before
+        );
+    }
+
+    #[test]
     fn list_candidates_includes_sanitized_upstream_issue_preview() {
         let project = tempfile::tempdir().expect("project");
         let mut env = TestEnv::new(project.path().join("cache"));
@@ -2555,7 +2774,7 @@ mod tests {
     }
 
     #[test]
-    fn promote_issue_requires_owner_eligible_candidate() {
+    fn promote_issue_returns_needs_evidence_for_ineligible_candidates() {
         let project = tempfile::tempdir().expect("project");
         let mut env = TestEnv::new(project.path().join("cache"));
         env.repo_path = project.path().join("target-project");
@@ -2582,7 +2801,7 @@ mod tests {
             .expect("low id")
             .to_string();
 
-        let err = run_collect(
+        let (_, output) = run_collect(
             &mut env,
             CliCommand::Improvement(ImprovementCommand::PromoteIssue(
                 ImprovementPromoteIssueCommand {
@@ -2592,11 +2811,8 @@ mod tests {
                 },
             )),
         )
-        .expect_err("low-confidence promotion should be rejected");
-        assert!(
-            err.to_string().contains("not eligible"),
-            "unexpected error: {err}"
-        );
+        .expect("low-confidence promotion remains needs-evidence");
+        assert_eq!(parse_output(&output)["resolution_state"], "needs-evidence");
         assert!(env.owner_client.owner_mutation_call_log().is_empty());
         assert!(env.target_issue_create_call_log.is_empty());
 
@@ -2620,7 +2836,7 @@ mod tests {
             .as_str()
             .expect("target id")
             .to_string();
-        let err = run_collect(
+        let (_, output) = run_collect(
             &mut env,
             CliCommand::Improvement(ImprovementCommand::PromoteIssue(
                 ImprovementPromoteIssueCommand {
@@ -2630,11 +2846,8 @@ mod tests {
                 },
             )),
         )
-        .expect_err("non-gwt-caused promotion should be rejected");
-        assert!(
-            err.to_string().contains("not eligible"),
-            "unexpected error: {err}"
-        );
+        .expect("non-gwt-caused promotion remains needs-evidence");
+        assert_eq!(parse_output(&output)["resolution_state"], "needs-evidence");
         assert!(env.owner_client.owner_mutation_call_log().is_empty());
         assert!(env.target_issue_create_call_log.is_empty());
     }
@@ -2680,6 +2893,8 @@ mod tests {
         )
         .expect("idempotent promote");
         let promoted = parse_output(&promote_out);
+        assert_eq!(promoted["improvement_contract_version"], 2);
+        assert_eq!(promoted["resolution_state"], "linked");
         assert_eq!(promoted["already_linked"], true);
         assert_eq!(
             env.owner_client.owner_mutation_count(),
@@ -2859,7 +3074,7 @@ mod tests {
 
     fn lifecycle_test_candidate(state: CandidateState) -> ImprovementCandidate {
         serde_json::from_value(json!({
-            "schema_version": 3,
+            "schema_version": 4,
             "id": "impr-lifecycle",
             "created_at": "2026-07-14T00:00:00Z",
             "updated_at": "2026-07-14T00:00:00Z",
@@ -3132,6 +3347,15 @@ mod tests {
     #[test]
     fn candidate_public_projection_contains_typed_owner_candidates_without_generation() {
         let mut candidate = lifecycle_test_candidate(CandidateState::Blocked);
+        candidate.typed_evidence = Some(TypedFailureEvidence {
+            subsystem: "coordination".to_string(),
+            contract_id: "coordination.board-status".to_string(),
+            contract_schema_revision: 1,
+            failure_code: "STATUS_NOT_POSTED".to_string(),
+            target_artifact: "coordination".to_string(),
+            expected_outcome: "BOARD_STATUS_POSTED".to_string(),
+            observed_outcome: "BOARD_STATUS_MISSING".to_string(),
+        });
         candidate.blocked_reason = Some(BlockedReason::Ambiguity);
         candidate.failure_subcode = None;
         candidate.retry = Some(retry_metadata());
@@ -3152,6 +3376,7 @@ mod tests {
         );
         let value = candidate_public_json(&candidate, &PublicMutationContext::default());
         assert_eq!(value["resolution_state"], "blocked");
+        assert_eq!(value["subsystem"], "coordination");
         assert_eq!(value["blocked_reason"], "ambiguity");
         assert_eq!(value["owner_candidates"][0]["kind"], "spec");
         assert_eq!(value["owner_candidates"][0]["match_basis"], "contract");
@@ -4934,6 +5159,42 @@ mod tests {
         assert_eq!(stored.owner.as_ref().unwrap().number, 78);
         assert_eq!(stored.owner_status_generation, 1);
         assert_eq!(stored.owner_status_delivered_generation, 0);
+        assert!(
+            stored.owner_status_delivery_claim.is_none(),
+            "failed Board delivery must release its claim for retry"
+        );
+        let claim_id = match super::super::improvement_store::claim_owner_status_delivery(
+            &env.repo_path,
+            &captured.id,
+            "concurrent-worker",
+            Utc::now(),
+            chrono::Duration::minutes(2),
+        )
+        .expect("claim pending owner status")
+        {
+            super::super::improvement_store::OwnerStatusDeliveryDecision::Acquired {
+                claim_id,
+                ..
+            } => claim_id,
+            other => panic!("expected delivery claim, got {other:?}"),
+        };
+        let mut busy_candidate = stored.clone();
+        deliver_pending_owner_status(&mut env, &mut busy_candidate)
+            .expect("concurrent delivery observes busy claim");
+        assert_eq!(
+            board_bodies(&mut env)
+                .iter()
+                .filter(|body| body.contains("owner #78 was created"))
+                .count(),
+            0,
+            "a busy delivery claim must suppress duplicate Board posts"
+        );
+        super::super::improvement_store::release_owner_status_delivery(
+            &env.repo_path,
+            &captured.id,
+            &claim_id,
+        )
+        .expect("release synthetic concurrent claim");
         let recurrent =
             capture_registered_candidate_without_resolution(&mut env, "owner-board-retry-next");
         assert_eq!(recurrent.id, captured.id);
@@ -4950,6 +5211,7 @@ mod tests {
             retried.owner_status_delivered_generation,
             retried.owner_status_generation
         );
+        assert!(retried.owner_status_delivery_claim.is_none());
         let bodies = board_bodies(&mut env);
         assert_eq!(
             bodies

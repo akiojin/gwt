@@ -79,6 +79,9 @@ fn parse(input: &str) -> Result<ParsedEnvelope, CliParseError> {
         ));
     }
     let params = params_object(&envelope.params)?;
+    if envelope.operation.starts_with("improvement.") {
+        reject_improvement_force(params)?;
+    }
     let command = match envelope.operation.as_str() {
         "workspace.update" => workspace_update(params)?,
         "workspace.candidates" => workspace_candidates(params)?,
@@ -105,6 +108,7 @@ fn parse(input: &str) -> Result<ParsedEnvelope, CliParseError> {
         "improvement.capture" => improvement_capture(params)?,
         "improvement.list" => improvement_list(params)?,
         "improvement.dismiss" => improvement_dismiss(params)?,
+        "improvement.resolve" => improvement_resolve(params)?,
         "improvement.link_issue" | "improvement.link-issue" => improvement_link_issue(params)?,
         "improvement.promote_issue" | "improvement.promote-issue" => {
             improvement_promote_issue(params)?
@@ -562,12 +566,29 @@ fn improvement_dismiss(params: &Map<String, Value>) -> Result<CliCommand, CliPar
 }
 
 fn improvement_link_issue(params: &Map<String, Value>) -> Result<CliCommand, CliParseError> {
+    if ["number", "url", "repository"]
+        .iter()
+        .any(|key| params.contains_key(*key))
+    {
+        return Err(CliParseError::InvalidJson(
+            "MIGRATION_REQUIRED: improvement.link_issue v2 accepts id, owner_number, and resolver_revision only"
+                .to_string(),
+        ));
+    }
     Ok(CliCommand::Improvement(ImprovementCommand::LinkIssue(
         super::improvement::ImprovementLinkIssueCommand {
             id: required_string(params, "id")?,
-            number: required_u64(params, "number")?,
-            url: optional_string(params, "url")?,
-            repository: optional_string(params, "repository")?,
+            owner_number: required_u64(params, "owner_number")?,
+            resolver_revision: required_string(params, "resolver_revision")?,
+        },
+    )))
+}
+
+fn improvement_resolve(params: &Map<String, Value>) -> Result<CliCommand, CliParseError> {
+    Ok(CliCommand::Improvement(ImprovementCommand::Resolve(
+        super::improvement::ImprovementResolveCommand {
+            id: required_string(params, "id")?,
+            expected_resolver_revision: optional_string(params, "expected_resolver_revision")?,
         },
     )))
 }
@@ -580,6 +601,15 @@ fn improvement_promote_issue(params: &Map<String, Value>) -> Result<CliCommand, 
             labels: optional_string_vec(params, "labels")?,
         },
     )))
+}
+
+fn reject_improvement_force(params: &Map<String, Value>) -> Result<(), CliParseError> {
+    if optional_bool(params, "force")? == Some(true) {
+        return Err(CliParseError::InvalidJson(
+            "UNSAFE_FORCE_REMOVED".to_string(),
+        ));
+    }
+    Ok(())
 }
 
 fn issue_spec_edit(params: &Map<String, Value>) -> Result<CliCommand, CliParseError> {

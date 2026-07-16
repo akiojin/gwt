@@ -352,7 +352,7 @@ fn write_legacy_store(project: &Path, candidates: Vec<Value>) -> PathBuf {
 
 fn lifecycle_candidate(id: &str, state: &str, updated_at: &str) -> Value {
     json!({
-        "schema_version": 3,
+        "schema_version": 4,
         "id": id,
         "created_at": "2026-07-14T00:00:00Z",
         "updated_at": updated_at,
@@ -533,7 +533,7 @@ fn improvement_store_imports_nineteen_legacy_candidates_without_inventing_occurr
         serde_json::from_slice(&fs::read(&canonical_path).expect("canonical store"))
             .expect("parse canonical store");
     let candidates = first_store["candidates"].as_array().expect("candidates");
-    assert_eq!(first_store["schema_version"], 3);
+    assert_eq!(first_store["schema_version"], 4);
     assert!(candidates.iter().all(|candidate| {
         candidate["state"] == "needs-evidence"
             && candidate["occurrences"] == 0
@@ -859,7 +859,7 @@ fn improvement_store_serializes_concurrent_cross_process_capture() {
         candidates[0]["occurrences"], WORKERS as u64,
         "cross-process read-modify-write must not lose occurrences"
     );
-    assert_eq!(store["schema_version"], 3);
+    assert_eq!(store["schema_version"], 4);
 }
 
 #[test]
@@ -943,10 +943,10 @@ fn improvement_store_migrates_v1_occurrences_to_legacy_aggregate() {
 
     let migrated: Value = serde_json::from_slice(&fs::read(&store_path).expect("migrated store"))
         .expect("parse migrated store");
-    assert_eq!(migrated["schema_version"], 3);
+    assert_eq!(migrated["schema_version"], 4);
     assert_eq!(migrated["source_scope_nonce"].as_str().unwrap().len(), 64);
     let candidate = &migrated["candidates"][0];
-    assert_eq!(candidate["schema_version"], 3);
+    assert_eq!(candidate["schema_version"], 4);
     assert_eq!(candidate["state"], "needs-evidence");
     assert_eq!(candidate["occurrences"], 0);
     assert_eq!(candidate["legacy_occurrence_count"], 3);
@@ -1113,7 +1113,7 @@ fn improvement_legacy_capture_dedupes_without_inventing_typed_occurrences() {
 }
 
 #[test]
-fn improvement_dismiss_and_link_issue_update_lifecycle() {
+fn improvement_legacy_link_returns_migration_required_without_mutation() {
     let fixture = fixture();
     let captured = operation_output(&run_gwtd_json(
         &fixture,
@@ -1123,8 +1123,10 @@ fn improvement_dismiss_and_link_issue_update_lifecycle() {
         ),
     ));
     let id = captured["id"].as_str().expect("id");
+    let store = canonical_candidate_store(fixture.home.path(), fixture.project.path());
+    let before = fs::read(&store).expect("candidate store before legacy link");
 
-    let linked = operation_output(&run_gwtd_json(
+    let legacy = run_gwtd_json_raw(
         &fixture,
         json!({
             "schema_version": 1,
@@ -1136,9 +1138,18 @@ fn improvement_dismiss_and_link_issue_update_lifecycle() {
                 "repository": "akiojin/gwt"
             }
         }),
-    ));
-    assert_eq!(linked["state"], "linked");
-    assert_eq!(linked["linked_issue"]["number"], 3164);
+    );
+    assert!(!legacy.status.success(), "legacy link must fail closed");
+    assert!(
+        String::from_utf8_lossy(&legacy.stderr).contains("MIGRATION_REQUIRED"),
+        "unexpected stderr: {}",
+        String::from_utf8_lossy(&legacy.stderr)
+    );
+    assert_eq!(
+        fs::read(&store).expect("candidate store after legacy link"),
+        before,
+        "legacy link rejection must not mutate the candidate"
+    );
 
     let dismissed = operation_output(&run_gwtd_json(
         &fixture,
@@ -1151,7 +1162,227 @@ fn improvement_dismiss_and_link_issue_update_lifecycle() {
             }
         }),
     ));
+    assert_eq!(dismissed["improvement_contract_version"], 2);
     assert_eq!(dismissed["state"], "dismissed");
+}
+
+#[test]
+fn improvement_operation_v2_recognizes_resolve_and_revision_link() {
+    let fixture = fixture();
+    let revision = "a".repeat(64);
+    let cases = [
+        json!({
+            "schema_version": 1,
+            "operation": "improvement.resolve",
+            "params": {"id": "missing-candidate"}
+        }),
+        json!({
+            "schema_version": 1,
+            "operation": "improvement.link_issue",
+            "params": {
+                "id": "missing-candidate",
+                "owner_number": 3164,
+                "resolver_revision": revision
+            }
+        }),
+    ];
+
+    for payload in cases {
+        let operation = payload["operation"]
+            .as_str()
+            .expect("operation")
+            .to_string();
+        let output = run_gwtd_json_raw(&fixture, payload);
+        assert!(!output.status.success(), "missing candidate must fail");
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(
+            stderr.contains("candidate not found"),
+            "{operation} must reach the v2 command instead of failing envelope parsing: {stderr}"
+        );
+    }
+}
+
+#[test]
+fn improvement_operation_v2_rejects_unsafe_force_without_mutation() {
+    let revision = "a".repeat(64);
+    let mut capture = capture_payload("force:capture", "Force capture must fail");
+    capture["params"]["force"] = json!(true);
+    let cases = [
+        capture,
+        json!({
+            "schema_version": 1,
+            "operation": "improvement.list",
+            "params": {"force": true}
+        }),
+        json!({
+            "schema_version": 1,
+            "operation": "improvement.dismiss",
+            "params": {
+                "id": "missing-candidate",
+                "reason": "must not run",
+                "force": true
+            }
+        }),
+        json!({
+            "schema_version": 1,
+            "operation": "improvement.promote_issue",
+            "params": {"id": "missing-candidate", "force": true}
+        }),
+        json!({
+            "schema_version": 1,
+            "operation": "improvement.resolve",
+            "params": {"id": "missing-candidate", "force": true}
+        }),
+        json!({
+            "schema_version": 1,
+            "operation": "improvement.link_issue",
+            "params": {
+                "id": "missing-candidate",
+                "owner_number": 3164,
+                "resolver_revision": revision,
+                "force": true
+            }
+        }),
+        json!({
+            "schema_version": 1,
+            "operation": "improvement.link_issue",
+            "params": {
+                "id": "missing-candidate",
+                "number": 3164,
+                "url": "https://example.com/issues/3164",
+                "force": true
+            }
+        }),
+    ];
+
+    for payload in cases {
+        let fixture = fixture();
+        let operation = payload["operation"]
+            .as_str()
+            .expect("operation")
+            .to_string();
+        let output = run_gwtd_json_raw(&fixture, payload);
+        assert!(!output.status.success(), "force must fail for {operation}");
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(
+            stderr.contains("UNSAFE_FORCE_REMOVED"),
+            "unexpected {operation} stderr: {stderr}"
+        );
+        assert!(
+            !canonical_candidate_store(fixture.home.path(), fixture.project.path()).exists(),
+            "{operation} force rejection must happen before candidate storage or owner mutation"
+        );
+    }
+}
+
+#[test]
+fn improvement_resolve_rejects_stale_expected_revision_without_mutation() {
+    let fixture = fixture();
+    let captured = operation_output(&run_gwtd_json(
+        &fixture,
+        capture_payload("resolve:stale-revision", "Stale revision"),
+    ));
+    let id = captured["id"].as_str().expect("id");
+    let store = canonical_candidate_store(fixture.home.path(), fixture.project.path());
+    let before = fs::read(&store).expect("candidate store before stale resolve");
+
+    let output = run_gwtd_json_raw(
+        &fixture,
+        json!({
+            "schema_version": 1,
+            "operation": "improvement.resolve",
+            "params": {
+                "id": id,
+                "expected_resolver_revision": "a".repeat(64)
+            }
+        }),
+    );
+
+    assert!(!output.status.success(), "stale revision must fail");
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains("stale resolver revision"),
+        "unexpected stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(
+        fs::read(&store).expect("candidate store after stale resolve"),
+        before,
+        "stale expected revision must not mutate the candidate"
+    );
+}
+
+#[test]
+fn improvement_resolve_and_promote_return_needs_evidence_without_mutation() {
+    for operation in ["improvement.resolve", "improvement.promote_issue"] {
+        let fixture = fixture();
+        let captured = operation_output(&run_gwtd_json(
+            &fixture,
+            capture_payload("resolve:needs-evidence", "Needs evidence"),
+        ));
+        let id = captured["id"].as_str().expect("id");
+        let store = canonical_candidate_store(fixture.home.path(), fixture.project.path());
+        let before = fs::read(&store).expect("candidate store before no-op");
+        let response = operation_output(&run_gwtd_json(
+            &fixture,
+            json!({
+                "schema_version": 1,
+                "operation": operation,
+                "params": {"id": id}
+            }),
+        ));
+
+        assert_eq!(response["improvement_contract_version"], 2, "{operation}");
+        assert_eq!(
+            response["resolution_state"], "needs-evidence",
+            "{operation}"
+        );
+        assert_eq!(
+            fs::read(&store).expect("candidate store after no-op"),
+            before,
+            "{operation} must not mutate needs-evidence"
+        );
+    }
+}
+
+#[test]
+fn improvement_link_v2_rejects_arbitrary_url_or_repository_without_mutation() {
+    let fixture = fixture();
+    let revision = "a".repeat(64);
+    for forbidden in [
+        json!({"url": "https://example.com/issues/3164"}),
+        json!({"repository": "example/project"}),
+    ] {
+        let mut params = json!({
+            "id": "missing-candidate",
+            "owner_number": 3164,
+            "resolver_revision": revision
+        });
+        params
+            .as_object_mut()
+            .expect("params")
+            .extend(forbidden.as_object().expect("forbidden field").clone());
+        let output = run_gwtd_json_raw(
+            &fixture,
+            json!({
+                "schema_version": 1,
+                "operation": "improvement.link_issue",
+                "params": params
+            }),
+        );
+        assert!(
+            !output.status.success(),
+            "arbitrary owner transport must fail"
+        );
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(
+            stderr.contains("MIGRATION_REQUIRED"),
+            "unexpected stderr: {stderr}"
+        );
+    }
+    assert!(
+        !canonical_candidate_store(fixture.home.path(), fixture.project.path()).exists(),
+        "forbidden link fields must be rejected before mutation"
+    );
 }
 
 #[test]
@@ -1584,6 +1815,15 @@ fn improvement_list_v2_filters_typed_lifecycle_and_owner_fields() {
         "remediation": "REFRESH_OWNER_CORPUS",
         "failed_at": "2026-07-14T04:00:00Z"
     });
+    blocked["typed_evidence"] = json!({
+        "subsystem": "coordination",
+        "contract_id": "coordination.board-status",
+        "contract_schema_revision": 1,
+        "failure_code": "STATUS_NOT_POSTED",
+        "target_artifact": "coordination",
+        "expected_outcome": "BOARD_STATUS_POSTED",
+        "observed_outcome": "BOARD_STATUS_MISSING"
+    });
 
     let mut linked = lifecycle_candidate("linked", "linked", "2026-07-14T03:00:00Z");
     let linked_fingerprint = linked["fingerprint"].clone();
@@ -1629,7 +1869,7 @@ fn improvement_list_v2_filters_typed_lifecycle_and_owner_fields() {
     write_canonical_store(
         fixture.home.path(),
         fixture.project.path(),
-        3,
+        4,
         vec![created, needs, linked, blocked],
     );
 
@@ -1652,6 +1892,7 @@ fn improvement_list_v2_filters_typed_lifecycle_and_owner_fields() {
     assert_eq!(newest["candidates"][0]["blocked_reason"], "search");
     assert_eq!(newest["candidates"][0]["failure_subcode"], "partial-page");
     assert_eq!(newest["candidates"][0]["retry"]["retryable"], true);
+    assert_eq!(newest["candidates"][0]["subsystem"], "coordination");
 
     assert_eq!(
         list(json!({"state": "promoted"}))["candidates"][0]["id"],
@@ -1746,7 +1987,7 @@ fn improvement_list_v2_reads_legacy_states_and_remote_retry_metadata() {
     assert_eq!(remote["retry"]["remediation"], "REFRESH_OWNER_CORPUS");
     let migrated: Value = serde_json::from_slice(&fs::read(store_path).expect("migrated store"))
         .expect("parse migrated store");
-    assert_eq!(migrated["schema_version"], 3);
+    assert_eq!(migrated["schema_version"], 4);
 }
 
 #[test]
@@ -1798,7 +2039,7 @@ fn improvement_list_v2_rejects_invalid_filters_and_downstream_states_without_rew
         let path = write_canonical_store(
             fixture.home.path(),
             fixture.project.path(),
-            3,
+            4,
             vec![lifecycle_candidate(
                 "forbidden",
                 forbidden_state,
@@ -2200,7 +2441,7 @@ fn improvement_list_repairs_missing_source_success_from_latest_verified_projecti
     write_canonical_store(
         fixture.home.path(),
         fixture.project.path(),
-        3,
+        4,
         vec![candidate],
     );
     let source_reference = source_reference_digest(&source_scope_nonce, candidate_id, &fingerprint);
@@ -2358,7 +2599,7 @@ fn improvement_list_does_not_repair_when_projection_misses_a_current_occurrence(
     write_canonical_store(
         fixture.home.path(),
         fixture.project.path(),
-        3,
+        4,
         vec![candidate],
     );
     let source_reference = source_reference_digest(&source_scope_nonce, candidate_id, &fingerprint);
@@ -2438,7 +2679,7 @@ fn improvement_list_does_not_downgrade_a_newer_source_snapshot_from_stale_projec
     let store_path = write_canonical_store(
         fixture.home.path(),
         fixture.project.path(),
-        3,
+        4,
         vec![candidate],
     );
     let before = fs::read(&store_path).expect("newer source snapshot");

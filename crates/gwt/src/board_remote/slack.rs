@@ -14,8 +14,8 @@ use chrono::{DateTime, Utc};
 use serde::Deserialize;
 
 use gwt_core::coordination::{
-    BoardAudienceScope, BoardEntry, BoardEntryKind, BoardHistoryPage, BoardProjection,
-    BoardProvider, CoordinationSnapshot,
+    BoardAudienceScope, BoardEntry, BoardEntryKind, BoardHistoryPage, BoardPostOutcome,
+    BoardProjection, BoardProvider, CoordinationSnapshot,
 };
 use gwt_core::{GwtError, Result};
 
@@ -523,6 +523,15 @@ struct SlackPostResponse {
 
 impl BoardProvider for SlackProvider {
     fn post_entry(&self, worktree_root: &Path, entry: BoardEntry) -> Result<CoordinationSnapshot> {
+        self.post_entry_outcome(worktree_root, entry)?
+            .into_snapshot()
+    }
+
+    fn post_entry_outcome(
+        &self,
+        worktree_root: &Path,
+        entry: BoardEntry,
+    ) -> Result<BoardPostOutcome> {
         let channel =
             mapping::resolve_channel(&entry, &self.channel_map, Some(&self.default_channel))
                 .ok_or_else(|| {
@@ -537,7 +546,7 @@ impl BoardProvider for SlackProvider {
         // The reply carries a "who · kind · origin" meta line so a Slack reader
         // can tell who posted and the entry type (SPEC-2963).
         let meta = mapping::board_entry_meta_line(&entry);
-        self.post_message(
+        let entry_id = self.post_message(
             &channel,
             Some(&meta),
             entry.title.as_deref(),
@@ -546,7 +555,13 @@ impl BoardProvider for SlackProvider {
         )?;
         // The post invalidates the read cache so the next load reflects it.
         self.cache.invalidate();
-        self.load_snapshot(worktree_root)
+        Ok(match self.load_snapshot(worktree_root) {
+            Ok(snapshot) => BoardPostOutcome::Refreshed(snapshot),
+            Err(error) => BoardPostOutcome::CommittedWithoutSnapshot {
+                entry_id,
+                refresh_error: error.to_string(),
+            },
+        })
     }
 
     fn load_snapshot(&self, worktree_root: &Path) -> Result<CoordinationSnapshot> {
@@ -1351,6 +1366,33 @@ mod tests {
         let prov = provider(three_message_mock());
         let snapshot = prov.post_entry(&root(), entry("hello")).unwrap();
         assert_eq!(snapshot.board.entries.len(), 3);
+    }
+
+    #[test]
+    fn post_entry_outcome_reports_commit_when_history_refresh_fails() {
+        let mock = MockHttp {
+            history_status: 500,
+            post_body: r#"{"ok":true,"ts":"reply-1"}"#.to_string(),
+            ..Default::default()
+        };
+        let prov = provider(mock);
+
+        let outcome = prov
+            .post_entry_outcome(&root(), entry("committed"))
+            .unwrap();
+
+        match outcome {
+            gwt_core::coordination::BoardPostOutcome::CommittedWithoutSnapshot {
+                entry_id,
+                refresh_error,
+            } => {
+                assert_eq!(entry_id, "reply-1");
+                assert!(refresh_error.contains("history http 500"));
+            }
+            gwt_core::coordination::BoardPostOutcome::Refreshed(_) => {
+                panic!("history failure after chat.postMessage must preserve the commit outcome")
+            }
+        }
     }
 
     #[test]

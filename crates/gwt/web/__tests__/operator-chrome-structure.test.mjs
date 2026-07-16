@@ -1651,6 +1651,48 @@ test("Improvement candidates refresh already-mounted inbox windows without works
   );
 });
 
+test("Improvement async replies are scoped to the active project", () => {
+  const scopeBody = extractFunctionBody(appSource, "improvementEventMatchesActiveProject");
+  assert.match(
+    scopeBody,
+    /event\?\.project_root/,
+    "improvement replies must carry their source project root",
+  );
+  assert.match(
+    scopeBody,
+    /activeProjectTab\(\)\?\.project_root/,
+    "improvement replies must compare against the active project",
+  );
+
+  const receiveBody = extractFunctionBody(appSource, "receive");
+  for (const kind of [
+    "improvement_candidates",
+    "improvement_action_result",
+    "improvement_action_error",
+  ]) {
+    const start = receiveBody.indexOf(`case "${kind}":`);
+    const end = receiveBody.indexOf("case ", start + 5);
+    const arm = receiveBody.slice(start, end);
+    assert.match(
+      arm,
+      /improvementEventMatchesActiveProject\(event\)/,
+      `${kind} must ignore a delayed reply from another project`,
+    );
+  }
+
+  const renderBody = extractFunctionBody(appSource, "renderAppState");
+  assert.match(
+    renderBody,
+    /improvementCandidatesProjectRoot\s*!==\s*activeProjectRoot/,
+    "project switching must clear the prior project's candidate snapshot",
+  );
+  assert.match(
+    renderBody,
+    /improvementCandidates\s*=\s*\[\]/,
+    "stale candidate rows must not remain visible while the new project refresh loads",
+  );
+});
+
 test("SPEC-3038 (2026-06-20): Windows badge counts windows across all project tabs", () => {
   const body = extractFunctionBody(appSource, "recomputeOperatorTelemetry");
   assert.match(

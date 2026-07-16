@@ -907,6 +907,16 @@ pub enum FrontendEvent {
     ImprovementPromoteIssue {
         id: String,
     },
+    ImprovementResolve {
+        id: String,
+        #[serde(default)]
+        expected_resolver_revision: Option<String>,
+    },
+    ImprovementSelectOwner {
+        id: String,
+        owner_number: u64,
+        resolver_revision: String,
+    },
     ImprovementDismiss {
         id: String,
         #[serde(default)]
@@ -1450,14 +1460,17 @@ pub enum BackendEvent {
         windows: Vec<PersistedWindowState>,
     },
     ImprovementCandidates {
+        project_root: String,
         candidates: Vec<serde_json::Value>,
     },
     ImprovementActionResult {
+        project_root: String,
         id: String,
         action: String,
         message: Option<String>,
     },
     ImprovementActionError {
+        project_root: Option<String>,
         id: Option<String>,
         action: String,
         message: String,
@@ -2160,8 +2173,8 @@ pub const BACKEND_EVENT_POLICIES: &[BackendEventPolicy] = &[
     ),
     BackendEventPolicy::new(
         "improvement_candidates",
-        BackendEventDeliveryClass::IdempotentLatest,
-        BackendEventBackpressurePolicy::LatestWins,
+        BackendEventDeliveryClass::Snapshot,
+        BackendEventBackpressurePolicy::PreserveOrder,
     ),
     BackendEventPolicy::new(
         "improvement_action_result",
@@ -3148,10 +3161,17 @@ mod tests {
     #[test]
     fn frontend_coalescing_contract_matches_backend_latest_wins_policy() {
         let frontend_dispatcher = include_str!("../web/socket-receive-dispatcher.js");
+        let coalesce_kinds_source = frontend_dispatcher
+            .split_once("export const DEFAULT_COALESCE_KINDS")
+            .and_then(|(_, suffix)| {
+                suffix.split_once("export function createSocketReceiveDispatcher")
+            })
+            .map(|(source, _)| source)
+            .expect("DEFAULT_COALESCE_KINDS source block");
 
         for policy in BACKEND_EVENT_POLICIES {
             assert_eq!(
-                frontend_dispatcher.contains(&format!("\"{}\"", policy.kind)),
+                coalesce_kinds_source.contains(&format!("\"{}\"", policy.kind)),
                 policy.coalesces_on_frontend(),
                 "{} backend policy disagrees with DEFAULT_COALESCE_KINDS",
                 policy.kind
