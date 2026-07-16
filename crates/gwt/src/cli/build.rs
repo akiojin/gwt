@@ -52,32 +52,63 @@ fn record_current_work_terminal_before_finalize<E: CliEnv>(
     if !state.active || state.session_id.trim() != session_id {
         return Ok(());
     }
-    let work_id = format!("work-session-{session_id}");
-    let Some(projection) = gwt_core::workspace_projection::load_workspace_work_items(repo)
-        .map_err(|error| error.to_string())?
-    else {
-        return Ok(());
-    };
-    let Some(work) = projection.work_items.iter().find(|work| work.id == work_id) else {
-        return Ok(());
-    };
-    if work.is_terminal() {
-        return Ok(());
-    }
+    let (project_state_root, work_event_root) =
+        crate::agent_project_state::agent_session_roots_or_fallback(repo, &session_id)
+            .map_err(|error| error.to_string())?;
+    let legacy_work_id = format!("work-session-{session_id}");
 
     let now = chrono::Utc::now();
-    match close_kind {
+    let applied = match close_kind {
         WorkTerminalKind::Done => {
-            gwt_core::workspace_projection::emit_workspace_done_event_if_absent(repo, &work_id, now)
+            gwt_core::workspace_projection::emit_workspace_done_event_for_session(
+                &project_state_root,
+                &work_event_root,
+                &session_id,
+                &legacy_work_id,
+                now,
+            )
         }
         WorkTerminalKind::Discarded => {
-            gwt_core::workspace_projection::emit_workspace_discard_event_if_absent(
-                repo, &work_id, now,
+            gwt_core::workspace_projection::emit_workspace_discard_event_for_session(
+                &project_state_root,
+                &work_event_root,
+                &session_id,
+                &legacy_work_id,
+                now,
             )
         }
     }
-    .map(|_| ())
-    .map_err(|error| error.to_string())
+    .map_err(|error| error.to_string())?;
+    if applied {
+        return Ok(());
+    }
+
+    match gwt_core::workspace_projection::try_resolve_workspace_assignment_for_session(
+        &project_state_root,
+        &session_id,
+    )
+    .map_err(|error| error.to_string())?
+    {
+        gwt_core::workspace_projection::WorkspaceSessionAssignment::Assigned(work_id) => {
+            let work_items =
+                gwt_core::workspace_projection::load_workspace_work_items(&work_event_root)
+                    .map_err(|error| error.to_string())?;
+            if work_items.as_ref().is_some_and(|projection| {
+                projection
+                    .work_items
+                    .iter()
+                    .any(|item| item.id == work_id && item.is_terminal())
+            }) {
+                Ok(())
+            } else {
+                Err(format!(
+                    "assigned Work {work_id} is not materialized; retry workspace.ensure before finalizing the build"
+                ))
+            }
+        }
+        gwt_core::workspace_projection::WorkspaceSessionAssignment::Missing
+        | gwt_core::workspace_projection::WorkspaceSessionAssignment::Unassigned => Ok(()),
+    }
 }
 
 #[derive(Debug, Clone, Copy)]

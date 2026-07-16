@@ -86,9 +86,7 @@ pub(super) fn merge_active_sessions_into_projection<'a>(
 ) {
     for session in sessions {
         let existing = projection
-            .agents
-            .iter()
-            .find(|agent| agent.session_id == session.session_id)
+            .latest_agent_for_session(&session.session_id)
             .or_else(|| {
                 projection
                     .agents
@@ -144,22 +142,20 @@ pub(super) fn save_shell_work_projection(
     live_session_ids: &std::collections::HashSet<String>,
 ) -> Result<(), String> {
     let now = chrono::Utc::now();
-    let mut projection =
-        gwt_core::workspace_projection::load_or_default_workspace_projection(project_root)
-            .map_err(|error| error.to_string())?;
-    projection.project_root = project_root.to_path_buf();
-    projection.retain_live_agents_keep_shells(live_session_ids.iter().map(String::as_str), now);
-    let summary = gwt_core::workspace_projection::WorkspaceAgentSummary::shell_work(
-        window_id.to_string(),
-        worktree_path,
-        branch,
-        gwt_core::workspace_projection::WorkspaceStatusCategory::Active,
-        now,
-    );
-    projection.upsert_agent_summary(summary);
-    projection.updated_at = now;
-    gwt_core::workspace_projection::save_workspace_projection(project_root, &projection)
-        .map_err(|error| error.to_string())
+    gwt_core::workspace_projection::mutate_workspace_projection(project_root, |projection| {
+        projection.retain_live_agents_keep_shells(live_session_ids.iter().map(String::as_str), now);
+        let summary = gwt_core::workspace_projection::WorkspaceAgentSummary::shell_work(
+            window_id.to_string(),
+            worktree_path,
+            branch,
+            gwt_core::workspace_projection::WorkspaceStatusCategory::Active,
+            now,
+        );
+        projection.upsert_agent_summary(summary);
+        projection.updated_at = now;
+        Ok(())
+    })
+    .map_err(|error| error.to_string())
 }
 
 pub(super) fn workspace_projection_for_current_resume(
@@ -220,17 +216,6 @@ pub(super) fn save_workspace_launch_projection(
     live_session_ids: &std::collections::HashSet<String>,
 ) -> Result<(), String> {
     let now = chrono::Utc::now();
-    let mut projection =
-        gwt_core::workspace_projection::load_or_default_workspace_projection(project_root)
-            .map_err(|error| error.to_string())?;
-    projection.project_root = project_root.to_path_buf();
-    // #3065: drop dead agent entries before computing the running-agents
-    // status text — the shared projection otherwise accumulates one entry
-    // per historical session ("765 active agents").
-    // SPEC-2359 US-80 (FR-429): an agent launch has no authority over shell
-    // liveness, so keep every Shell Work — they are pruned only by their own
-    // PTY / window lifecycle, never by an unrelated agent launch.
-    projection.retain_live_agents_keep_shells(live_session_ids.iter().map(String::as_str), now);
     let work_id = gwt_core::workspace_projection::canonical_work_id(
         project_root,
         Some(session.branch_name.as_str()),
@@ -239,36 +224,42 @@ pub(super) fn save_workspace_launch_projection(
     let owner = workspace_resume_context
         .and_then(|context| non_empty_workspace_text(context.owner.as_deref()))
         .or_else(|| linked_issue_number.map(|issue_number| format!("Issue #{issue_number}")));
-    let agent = active_agent_summary_from_session(session, now);
-    projection.apply_launch(
-        gwt_core::workspace_projection::WorkspaceLaunchUpdate {
-            work_id,
-            title: workspace_resume_context
-                .and_then(|context| non_empty_workspace_text(context.title.as_deref())),
-            summary: workspace_resume_context
-                .and_then(|context| non_empty_workspace_text(context.summary.as_deref())),
-            owner,
-            next_action: workspace_resume_context
-                .and_then(|context| non_empty_workspace_text(context.next_action.as_deref())),
-            branch: session.branch_name.clone(),
-            worktree_path: session.worktree_path.clone(),
-            base_branch: base_branch.map(str::to_string),
-            created_by_start_work: launch_kind.created_by_start_work(),
+    gwt_core::workspace_projection::transact_workspace_state(
+        project_root,
+        |projection, _work_items, _work_items_persisted| {
+            // #3065: drop dead agent entries before computing the running-agents
+            // status text. Agent launch never prunes Shell Work.
+            projection
+                .retain_live_agents_keep_shells(live_session_ids.iter().map(String::as_str), now);
+            projection.apply_launch(
+                gwt_core::workspace_projection::WorkspaceLaunchUpdate {
+                    work_id,
+                    title: workspace_resume_context
+                        .and_then(|context| non_empty_workspace_text(context.title.as_deref())),
+                    summary: workspace_resume_context
+                        .and_then(|context| non_empty_workspace_text(context.summary.as_deref())),
+                    owner,
+                    next_action: workspace_resume_context.and_then(|context| {
+                        non_empty_workspace_text(context.next_action.as_deref())
+                    }),
+                    branch: session.branch_name.clone(),
+                    worktree_path: session.worktree_path.clone(),
+                    base_branch: base_branch.map(str::to_string),
+                    created_by_start_work: launch_kind.created_by_start_work(),
+                },
+                active_agent_summary_from_session(session, now),
+                now,
+            );
+            let work_event = workspace_work_event_from_launch_projection(
+                projection,
+                session,
+                launch_kind.work_event_kind(),
+                now,
+            );
+            Ok(((), vec![work_event]))
         },
-        agent,
-        now,
-    );
-
-    gwt_core::workspace_projection::save_workspace_projection(project_root, &projection)
-        .map_err(|error| error.to_string())?;
-    let work_event = workspace_work_event_from_launch_projection(
-        &projection,
-        session,
-        launch_kind.work_event_kind(),
-        now,
-    );
-    gwt_core::workspace_projection::record_workspace_work_event(project_root, work_event)
-        .map_err(|error| error.to_string())
+    )
+    .map_err(|error| error.to_string())
 }
 
 fn workspace_work_event_from_launch_projection(
@@ -382,20 +373,26 @@ pub(super) fn spawn_workspace_cleanup_async(
 }
 
 fn clear_workspace_cleanup_git_details_event(project_root: &Path) -> Option<OutboundEvent> {
-    let mut projection = gwt_core::workspace_projection::load_workspace_projection(project_root)
+    gwt_core::workspace_projection::load_workspace_projection(project_root)
         .ok()
         .flatten()?;
-    projection.clear_git_details_to_idle(chrono::Utc::now());
-    if let Err(error) =
-        gwt_core::workspace_projection::save_workspace_projection(project_root, &projection)
-    {
-        tracing::warn!(
-            project_root = %project_root.display(),
-            error = %error,
-            "workspace projection cleanup state update skipped"
-        );
-        return None;
-    }
+    let projection = match gwt_core::workspace_projection::mutate_workspace_projection(
+        project_root,
+        |projection| {
+            projection.clear_git_details_to_idle(chrono::Utc::now());
+            Ok(projection.clone())
+        },
+    ) {
+        Ok(projection) => projection,
+        Err(error) => {
+            tracing::warn!(
+                project_root = %project_root.display(),
+                error = %error,
+                "workspace projection cleanup state update skipped"
+            );
+            return None;
+        }
+    };
     let journal_entries = gwt_core::workspace_projection::load_recent_workspace_journal_entries(
         project_root,
         WORKSPACE_OVERVIEW_JOURNAL_LIMIT,

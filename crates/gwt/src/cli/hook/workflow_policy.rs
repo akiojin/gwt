@@ -246,11 +246,7 @@ fn current_agent_workspace_identity_missing(worktree_root: &Path) -> Result<bool
     let Some(projection) = load_workspace_projection(projection_root)? else {
         return Ok(false);
     };
-    let Some(agent) = projection
-        .agents
-        .iter()
-        .find(|agent| agent.session_id == session.id)
-    else {
+    let Some(agent) = projection.latest_agent_for_session(&session.id) else {
         return Ok(false);
     };
     if agent.is_unassigned() {

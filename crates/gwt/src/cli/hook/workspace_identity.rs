@@ -3,9 +3,8 @@ use std::path::{Path, PathBuf};
 use chrono::{DateTime, Utc};
 use gwt_agent::{Session, GWT_SESSION_ID_ENV};
 use gwt_core::workspace_projection::{
-    load_or_default_workspace_projection, save_workspace_projection,
-    WorkspaceAgentAffiliationStatus, WorkspaceAgentSummary, WorkspaceProjection,
-    WorkspaceStatusCategory,
+    mutate_workspace_projection, WorkspaceAgentAffiliationStatus, WorkspaceAgentSummary,
+    WorkspaceProjection, WorkspaceStatusCategory,
 };
 
 use super::HookError;
@@ -40,12 +39,11 @@ pub(crate) fn handle_session_start() -> Result<(), HookError> {
     }
     ensure_coordination_assets_for_session(&session);
     let project_state_root = project_state_root_for_session(&session);
-    let mut projection = load_or_default_workspace_projection(&project_state_root)?;
-    projection.project_root = project_state_root.clone();
     let now = Utc::now();
-    let registered = register_session_in_projection(&mut projection, &session, now);
+    let registered = mutate_workspace_projection(&project_state_root, |projection| {
+        Ok(register_session_in_projection(projection, &session, now))
+    })?;
     if registered {
-        save_workspace_projection(&project_state_root, &projection)?;
         crate::cli::workspace::publish_workspace_change(&project_state_root);
     }
     Ok(())
@@ -315,6 +313,9 @@ mod tests {
     /// the agent (not the hook) authors the purpose.
     #[test]
     fn user_prompt_submit_does_not_write_identity_from_prompt() {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let temp = tempfile::tempdir().expect("tempdir");
         let project_root = temp.path().join("workspace-home");
         let worktree = project_root.join("work").join("20260602-0056");

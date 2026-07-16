@@ -9444,7 +9444,12 @@ fn app_runtime_list_resumable_agents_uses_workspace_branch_ledger_candidates() {
         board_refs: Vec::new(),
         related_work_item_ids: Vec::new(),
         events: Vec::new(),
+        legacy_metadata_snapshot: None,
+        legacy_metadata_authoritative: false,
+        legacy_metadata_snapshot_at: None,
+        duplicate_event_containers: Default::default(),
         discarded: false,
+        discarded_at: None,
     };
     let work_items = gwt_core::workspace_projection::WorkItemsProjection {
         updated_at,
@@ -15355,6 +15360,201 @@ fn app_runtime_board_milestone_from_unassigned_origin_does_not_create_workspace_
 }
 
 #[test]
+fn app_runtime_board_milestone_uses_latest_duplicate_session_assignment() {
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedEnvVar::set("HOME", temp.path());
+    let repo = temp.path().join("repo");
+    fs::create_dir_all(&repo).expect("create repo");
+    let tab = sample_project_tab_with_window_at(
+        "tab-1",
+        "board-1",
+        repo.clone(),
+        WindowPreset::Board,
+        WindowProcessStatus::Ready,
+    );
+    let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+    let old_at = chrono::Utc::now() - chrono::Duration::minutes(2);
+    let current_at = chrono::Utc::now() - chrono::Duration::minutes(1);
+    let stale = gwt_core::workspace_projection::WorkspaceAgentSummary {
+        session_id: "session-duplicate-assigned".to_string(),
+        window_id: None,
+        agent_id: "codex".to_string(),
+        display_name: "Codex".to_string(),
+        status_category: gwt_core::workspace_projection::WorkspaceStatusCategory::Active,
+        current_focus: Some("stale".to_string()),
+        title_summary: None,
+        worktree_path: None,
+        branch: Some("feature/stale".to_string()),
+        last_board_entry_id: None,
+        last_board_entry_kind: None,
+        coordination_scope: None,
+        affiliation_status:
+            gwt_core::workspace_projection::WorkspaceAgentAffiliationStatus::Unassigned,
+        workspace_id: None,
+        updated_at: old_at,
+    };
+    let mut assigned = stale.clone();
+    assigned.current_focus = Some("current".to_string());
+    assigned.branch = Some("feature/current".to_string());
+    assigned.affiliation_status =
+        gwt_core::workspace_projection::WorkspaceAgentAffiliationStatus::Assigned;
+    assigned.workspace_id = Some("work-current-duplicate".to_string());
+    assigned.updated_at = current_at;
+    let mut projection =
+        gwt_core::workspace_projection::WorkspaceProjection::default_for_project(&repo);
+    projection.agents.append(&mut vec![stale, assigned]);
+    gwt_core::workspace_projection::save_workspace_projection(&repo, &projection)
+        .expect("save projection");
+    gwt_core::workspace_projection::record_workspace_work_paused_event(
+        &repo,
+        "work-current-duplicate",
+        Some("Current Work"),
+        None,
+        None,
+        &[],
+        None,
+        Some("session-duplicate-assigned"),
+        current_at,
+    )
+    .expect("seed current Work");
+    let entry = BoardEntry::new(
+        AuthorKind::Agent,
+        "Codex",
+        BoardEntryKind::Status,
+        "Current assigned Session milestone.",
+        None,
+        None,
+        vec!["workspace-assignment".to_string()],
+        vec!["2359".to_string()],
+    )
+    .with_origin_session_id("session-duplicate-assigned");
+
+    runtime.record_workspace_board_milestone_event("tab-1", &repo, &entry);
+
+    let works = gwt_core::workspace_projection::load_workspace_work_items(&repo)
+        .expect("load Work history")
+        .expect("Work history");
+    let current = works
+        .work_items
+        .iter()
+        .find(|item| item.id == "work-current-duplicate")
+        .expect("current assigned Work");
+    assert!(
+        current.board_refs.iter().any(|id| id == &entry.id),
+        "the latest assigned duplicate row must receive the Board event"
+    );
+}
+
+#[test]
+fn app_runtime_old_board_milestone_does_not_rewind_latest_assigned_work() {
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedEnvVar::set("HOME", temp.path());
+    let repo = temp.path().join("repo");
+    fs::create_dir_all(&repo).expect("create repo");
+    let tab = sample_project_tab_with_window_at(
+        "tab-1",
+        "board-1",
+        repo.clone(),
+        WindowPreset::Board,
+        WindowProcessStatus::Ready,
+    );
+    let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+    let stale_agent_at = chrono::Utc::now() - chrono::Duration::minutes(4);
+    let assigned_agent_at = chrono::Utc::now() - chrono::Duration::minutes(3);
+    let replayed_at = chrono::Utc::now() - chrono::Duration::minutes(2);
+    let current_work_at = chrono::Utc::now() - chrono::Duration::minutes(1);
+    let assigned = gwt_core::workspace_projection::WorkspaceAgentSummary {
+        session_id: "session-duplicate-assigned".to_string(),
+        window_id: None,
+        agent_id: "codex".to_string(),
+        display_name: "Codex".to_string(),
+        status_category: gwt_core::workspace_projection::WorkspaceStatusCategory::Blocked,
+        current_focus: Some("Current blocked work".to_string()),
+        title_summary: None,
+        worktree_path: None,
+        branch: Some("feature/current".to_string()),
+        last_board_entry_id: None,
+        last_board_entry_kind: None,
+        coordination_scope: None,
+        affiliation_status:
+            gwt_core::workspace_projection::WorkspaceAgentAffiliationStatus::Assigned,
+        workspace_id: Some("work-current-duplicate".to_string()),
+        updated_at: assigned_agent_at,
+    };
+    let mut stale = assigned.clone();
+    stale.current_focus = Some("Stale work".to_string());
+    stale.branch = Some("feature/stale".to_string());
+    stale.affiliation_status =
+        gwt_core::workspace_projection::WorkspaceAgentAffiliationStatus::Unassigned;
+    stale.workspace_id = None;
+    stale.updated_at = stale_agent_at;
+    let mut projection =
+        gwt_core::workspace_projection::WorkspaceProjection::default_for_project(&repo);
+    projection.agents.append(&mut vec![stale, assigned]);
+    gwt_core::workspace_projection::save_workspace_projection(&repo, &projection)
+        .expect("save projection");
+    gwt_core::workspace_projection::record_workspace_work_paused_event(
+        &repo,
+        "work-current-duplicate",
+        Some("Current Work"),
+        None,
+        None,
+        &[],
+        None,
+        Some("session-duplicate-assigned"),
+        current_work_at,
+    )
+    .expect("seed current Work");
+    let mut replayed = BoardEntry::new(
+        AuthorKind::Agent,
+        "Codex",
+        BoardEntryKind::Status,
+        "Old assigned Session milestone.",
+        None,
+        None,
+        vec!["workspace-assignment".to_string()],
+        vec!["stale-owner".to_string()],
+    )
+    .with_origin_session_id("session-duplicate-assigned");
+    replayed.updated_at = replayed_at;
+
+    runtime.record_workspace_board_milestone_event("tab-1", &repo, &replayed);
+
+    let works = gwt_core::workspace_projection::load_workspace_work_items(&repo)
+        .expect("load Work history")
+        .expect("Work history");
+    let current = works
+        .work_items
+        .iter()
+        .find(|item| item.id == "work-current-duplicate")
+        .expect("current assigned Work");
+    assert_eq!(
+        current.status_category,
+        gwt_core::workspace_projection::WorkspaceStatusCategory::Idle
+    );
+    assert_eq!(current.title, "Current Work");
+    assert_eq!(current.updated_at, current_work_at);
+    assert!(!current.board_refs.iter().any(|id| id == &replayed.id));
+    let current_projection = gwt_core::workspace_projection::load_workspace_projection(&repo)
+        .expect("load current projection")
+        .expect("current projection");
+    assert_eq!(
+        current_projection.status_category,
+        gwt_core::workspace_projection::WorkspaceStatusCategory::Unknown
+    );
+    assert!(current_projection
+        .board_refs
+        .iter()
+        .any(|id| id == &replayed.id));
+}
+
+#[test]
 fn app_runtime_active_work_projection_preserves_blocked_agent_board_state() {
     let _env_lock = env_test_lock()
         .lock()
@@ -19831,7 +20031,12 @@ fn workspace_view_for_tab_omits_work_item_history_from_workspace_state() {
         board_refs: Vec::new(),
         related_work_item_ids: Vec::new(),
         events: Vec::new(),
+        legacy_metadata_snapshot: None,
+        legacy_metadata_authoritative: false,
+        legacy_metadata_snapshot_at: None,
+        duplicate_event_containers: Default::default(),
         discarded: false,
+        discarded_at: None,
     };
     let projection = gwt_core::workspace_projection::WorkItemsProjection {
         updated_at: completed_at,

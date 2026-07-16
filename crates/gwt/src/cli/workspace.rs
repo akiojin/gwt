@@ -1,15 +1,15 @@
 use std::path::Path;
 
 use chrono::{DateTime, Utc};
+use gwt_core::error::GwtError;
 use gwt_core::paths::gwt_projects_dir;
 use gwt_core::workspace_projection::{
     apply_prune_plan, classify_workspace_projections, load_or_default_workspace_projection,
-    load_or_synthesize_workspace_work_items, record_workspace_work_event,
-    save_workspace_projection, update_workspace_projection_with_journal_for_work_event_root,
-    ClassifiedProjection, PruneAction, PruneSkipReason, WorkEvent, WorkEventKind, WorkItem,
-    WorkspaceAgentSummary, WorkspaceExecutionContainerRef, WorkspaceProjection,
-    WorkspaceProjectionUpdate, WorkspaceRetentionConfig, WorkspaceStartUpdate,
-    WorkspaceStatusCategory,
+    load_or_synthesize_workspace_work_items, transact_workspace_state,
+    update_workspace_projection_with_journal_for_work_event_root, ClassifiedProjection,
+    PruneAction, PruneSkipReason, WorkEvent, WorkEventKind, WorkItem, WorkspaceAgentSummary,
+    WorkspaceExecutionContainerRef, WorkspaceProjection, WorkspaceProjectionUpdate,
+    WorkspaceRetentionConfig, WorkspaceStartUpdate, WorkspaceStatusCategory,
 };
 use gwt_github::{ApiError, SpecOpsError};
 
@@ -432,20 +432,28 @@ pub(super) fn run<E: CliEnv>(
             current_focus,
             title_summary,
         } => {
-            let mut projection =
-                load_or_default_workspace_projection(env.repo_path()).map_err(core_error)?;
-            let Some(item) = workspace_item_by_id(env.repo_path(), &workspace_id)? else {
-                return Err(string_error(format!("workspace not found: {workspace_id}")));
-            };
-            assign_agent_to_workspace(
-                &mut projection,
-                &agent_session,
-                &workspace_id,
-                current_focus,
-                title_summary,
-            )?;
-            apply_workspace_item_to_projection(&mut projection, &item);
-            save_workspace_projection(env.repo_path(), &projection).map_err(core_error)?;
+            transact_workspace_state(env.repo_path(), |projection, work_items, _persisted| {
+                let Some(item) = work_items
+                    .work_items
+                    .iter()
+                    .find(|item| item.id == workspace_id)
+                else {
+                    return Err(GwtError::Other(format!(
+                        "workspace not found: {workspace_id}"
+                    )));
+                };
+                assign_agent_to_workspace(
+                    projection,
+                    &agent_session,
+                    &workspace_id,
+                    current_focus,
+                    title_summary,
+                )
+                .map_err(spec_ops_as_core_error)?;
+                apply_workspace_item_to_projection(projection, item);
+                Ok(((), Vec::new()))
+            })
+            .map_err(core_error)?;
             publish_workspace_change(env.repo_path());
             out.push_str(&format!("workspace joined: {workspace_id}\n"));
             Ok(0)
@@ -459,124 +467,106 @@ pub(super) fn run<E: CliEnv>(
             split_from,
             boundary,
         } => {
-            let existing =
-                load_or_synthesize_workspace_work_items(env.repo_path()).map_err(core_error)?;
-            let mut projection =
-                load_or_default_workspace_projection(env.repo_path()).map_err(core_error)?;
-            let Some(agent) = projection
-                .agents
-                .iter()
-                .find(|agent| agent.session_id == agent_session)
-            else {
-                return Err(string_error(format!(
-                    "agent session not found: {agent_session}"
-                )));
-            };
-            let agent_display_name = agent.display_name.clone();
-            // SPEC-2359 W16-2 (FR-389): mint the canonical (machine-
-            // independent, branch-keyed) Work id when the agent has a branch
-            // so every machine's records join the same Workspace.
-            let canonical_id = gwt_core::workspace_projection::canonical_work_id(
-                env.repo_path(),
-                agent.branch.as_deref(),
-                agent.worktree_path.as_deref(),
-            );
-            let canonical_joins_existing = canonical_id.as_deref().is_some_and(|id| {
-                existing
-                    .work_items
-                    .iter()
-                    .any(|item| item.is_incomplete() && item.id == id)
-            });
-            if !canonical_joins_existing
-                && split_from.is_none()
-                && boundary
-                    .as_deref()
-                    .map(str::trim)
-                    .filter(|value| !value.is_empty())
-                    .is_none()
-            {
-                let new_text = [Some(title_summary.as_str()), current_focus.as_deref()]
-                    .into_iter()
-                    .flatten()
-                    .collect::<Vec<_>>()
-                    .join("\n");
-                if let Some(item) = existing.work_items.iter().find(|item| {
-                    item.is_incomplete()
-                        && workspace_similarity_score(&new_text, &workspace_item_text(item)) >= 2
-                }) {
-                    return Err(string_error(format!(
-                        "similar Workspace exists: {} ({})",
-                        item.title, item.id
-                    )));
-                }
-            }
-            let workspace_id = canonical_id
-                .unwrap_or_else(|| format!("workspace-{}", Utc::now().timestamp_millis()));
-            let owner = spec
-                .map(|number| format!("SPEC-{number}"))
-                .or_else(|| issue.map(|number| format!("Issue #{number}")));
-            let now = Utc::now();
-            let mut event = WorkEvent::new(WorkEventKind::Start, workspace_id.clone(), now);
-            event.title = Some(title_summary.clone());
-            event.intent = current_focus.clone();
-            event.summary = current_focus
-                .clone()
-                .or_else(|| Some(title_summary.clone()));
-            event.status_category = Some(WorkspaceStatusCategory::Active);
-            event.owner = owner.clone();
-            event.next_action = Some("Coordinate on Board before implementation".to_string());
-            event.agent_session_id = Some(agent_session.clone());
-            event.agent_id = Some(agent.agent_id.clone());
-            event.display_name = Some(agent.display_name.clone());
-            event.execution_container = Some(WorkspaceExecutionContainerRef {
-                branch: agent.branch.clone(),
-                worktree_path: agent.worktree_path.clone(),
-                pr_number: None,
-                pr_url: None,
-                pr_state: None,
-            });
-            if let Some(split_from) = split_from {
-                event.kind = WorkEventKind::Split;
-                event.related_work_item_id = Some(split_from);
-            }
-            if let Some(boundary) = boundary {
-                event.next_action = Some(format!("Boundary: {boundary}"));
-            }
-            record_workspace_work_event(env.repo_path(), event).map_err(core_error)?;
-            projection.start_work(
-                WorkspaceStartUpdate {
-                    workspace_id: workspace_id.clone(),
-                    title: title_summary.clone(),
-                    status_text: current_focus.clone(),
-                    // SPEC-2359 Phase U-6 (FR-134): when current_focus is
-                    // omitted, fall back to title_summary so the Workspace
-                    // Overview Summary section never renders empty for
-                    // newly-created workspaces.
-                    summary: current_focus
+            let workspace_id =
+                transact_workspace_state(env.repo_path(), |projection, existing, _persisted| {
+                    let Some(agent) = projection.latest_agent_for_session(&agent_session).cloned()
+                    else {
+                        return Err(GwtError::Other(format!(
+                            "agent session not found: {agent_session}"
+                        )));
+                    };
+                    let canonical_id = gwt_core::workspace_projection::canonical_work_id(
+                        env.repo_path(),
+                        agent.branch.as_deref(),
+                        agent.worktree_path.as_deref(),
+                    );
+                    let canonical_joins_existing = canonical_id.as_deref().is_some_and(|id| {
+                        existing
+                            .work_items
+                            .iter()
+                            .any(|item| item.is_incomplete() && item.id == id)
+                    });
+                    if !canonical_joins_existing
+                        && split_from.is_none()
+                        && boundary
+                            .as_deref()
+                            .map(str::trim)
+                            .filter(|value| !value.is_empty())
+                            .is_none()
+                    {
+                        let new_text = [Some(title_summary.as_str()), current_focus.as_deref()]
+                            .into_iter()
+                            .flatten()
+                            .collect::<Vec<_>>()
+                            .join("\n");
+                        if let Some(item) = existing.work_items.iter().find(|item| {
+                            item.is_incomplete()
+                                && workspace_similarity_score(&new_text, &workspace_item_text(item))
+                                    >= 2
+                        }) {
+                            return Err(GwtError::Other(format!(
+                                "similar Workspace exists: {} ({})",
+                                item.title, item.id
+                            )));
+                        }
+                    }
+                    let workspace_id = canonical_id
+                        .unwrap_or_else(|| format!("workspace-{}", Utc::now().timestamp_millis()));
+                    let owner = spec
+                        .map(|number| format!("SPEC-{number}"))
+                        .or_else(|| issue.map(|number| format!("Issue #{number}")));
+                    let now = Utc::now();
+                    let next_action = boundary
+                        .as_deref()
+                        .map(|boundary| format!("Boundary: {boundary}"))
+                        .unwrap_or_else(|| "Coordinate on Board before implementation".to_string());
+                    let mut event = WorkEvent::new(WorkEventKind::Start, workspace_id.clone(), now);
+                    event.title = Some(title_summary.clone());
+                    event.intent = current_focus.clone();
+                    event.summary = current_focus
                         .clone()
-                        .or_else(|| Some(title_summary.clone())),
-                    owner,
-                    next_action: "Coordinate on Board before implementation".to_string(),
-                },
-                now,
-            );
-            // SPEC-2359 Phase U-6 (FR-131, FR-135): record creation metadata
-            // and initial lifecycle stage so the new Card preview / Detail
-            // pane has informative chips from Day-0 without waiting for
-            // retroactive migration.
-            projection.created_at = now;
-            projection.creator = Some(agent_display_name);
-            projection.lifecycle_stage =
-                gwt_core::workspace_projection::WorkspaceLifecycleStage::Active;
-            assign_agent_to_workspace(
-                &mut projection,
-                &agent_session,
-                &workspace_id,
-                current_focus,
-                Some(title_summary),
-            )?;
-            projection.updated_at = now;
-            save_workspace_projection(env.repo_path(), &projection).map_err(core_error)?;
+                        .or_else(|| Some(title_summary.clone()));
+                    event.status_category = Some(WorkspaceStatusCategory::Active);
+                    event.owner = owner.clone();
+                    event.next_action = Some(next_action.clone());
+                    event.agent_session_id = Some(agent_session.clone());
+                    event.agent_id = Some(agent.agent_id.clone());
+                    event.display_name = Some(agent.display_name.clone());
+                    event.execution_container =
+                        Some(workspace_execution_container_from_agent(&agent));
+                    if let Some(split_from) = split_from {
+                        event.kind = WorkEventKind::Split;
+                        event.related_work_item_id = Some(split_from);
+                    }
+                    projection.start_work(
+                        WorkspaceStartUpdate {
+                            workspace_id: workspace_id.clone(),
+                            title: title_summary.clone(),
+                            status_text: current_focus.clone(),
+                            summary: current_focus
+                                .clone()
+                                .or_else(|| Some(title_summary.clone())),
+                            owner,
+                            next_action,
+                        },
+                        now,
+                    );
+                    projection.created_at = now;
+                    projection.creator = Some(agent.display_name.clone());
+                    projection.lifecycle_stage =
+                        gwt_core::workspace_projection::WorkspaceLifecycleStage::Active;
+                    assign_agent_to_workspace(
+                        projection,
+                        &agent_session,
+                        &workspace_id,
+                        current_focus,
+                        Some(title_summary),
+                    )
+                    .map_err(spec_ops_as_core_error)?;
+                    projection.updated_at = now;
+                    Ok((workspace_id, vec![event]))
+                })
+                .map_err(core_error)?;
             publish_workspace_change(env.repo_path());
             out.push_str(&format!("workspace created: {workspace_id}\n"));
             Ok(0)
@@ -806,107 +796,121 @@ pub(super) fn ensure_workspace_for_agent(
     repo_path: &std::path::Path,
     input: WorkspaceEnsureInput,
 ) -> Result<WorkspaceEnsureResult, SpecOpsError> {
-    let mut projection = load_or_default_workspace_projection(repo_path).map_err(core_error)?;
-    let Some(agent) = projection
-        .agents
-        .iter()
-        .find(|agent| agent.session_id == input.agent_session)
-        .cloned()
-    else {
-        return Err(string_error(format!(
-            "agent session not found: {}",
-            input.agent_session
-        )));
-    };
     let owner = owner_from_spec_or_issue(input.spec, input.issue);
-    if agent.is_assigned() {
-        if let Some(workspace_id) = agent.workspace_id.as_deref() {
-            if let Some(item) =
-                workspace_item_by_id(repo_path, workspace_id)?.filter(WorkItem::is_incomplete)
-            {
-                apply_workspace_item_to_projection(&mut projection, &item);
-            }
-            assign_agent_to_workspace(
-                &mut projection,
-                &input.agent_session,
-                workspace_id,
-                input.current_focus,
-                Some(input.title_summary),
-            )?;
-            save_workspace_projection(repo_path, &projection).map_err(core_error)?;
-            publish_workspace_change(repo_path);
-            return Ok(WorkspaceEnsureResult {
-                workspace_id: workspace_id.to_string(),
-                disposition: WorkspaceEnsureDisposition::AlreadyAssigned,
-            });
-        }
-    }
+    let result = transact_workspace_state(repo_path, |projection, existing, persisted| {
+        let Some(agent) = projection
+            .latest_agent_for_session(&input.agent_session)
+            .cloned()
+        else {
+            return Err(GwtError::Other(format!(
+                "agent session not found: {}",
+                input.agent_session
+            )));
+        };
 
-    let existing = load_or_synthesize_workspace_work_items(repo_path).map_err(core_error)?;
-    // SPEC-2359 W16-2 (FR-389): when the canonical (branch-keyed) Work id
-    // already names an incomplete item, join it directly — the similarity
-    // guard never blocks same-branch convergence.
-    if let Some(canonical_id) = gwt_core::workspace_projection::canonical_work_id(
-        repo_path,
-        agent.branch.as_deref(),
-        agent.worktree_path.as_deref(),
-    ) {
-        if existing
-            .work_items
-            .iter()
-            .any(|item| item.is_incomplete() && item.id == canonical_id)
-        {
-            record_workspace_join_event(repo_path, &canonical_id, &input, owner.clone(), &agent)?;
-            assign_agent_to_workspace(
-                &mut projection,
-                &input.agent_session,
-                &canonical_id,
-                input.current_focus,
-                Some(input.title_summary),
-            )?;
-            if let Some(item) = existing
+        if agent.is_assigned() {
+            if let Some(workspace_id) = agent.workspace_id.as_deref() {
+                let existing_item = persisted
+                    .then(|| {
+                        existing
+                            .work_items
+                            .iter()
+                            .find(|item| item.id == workspace_id && item.is_incomplete())
+                    })
+                    .flatten();
+                if let Some(item) = existing_item {
+                    apply_workspace_item_to_projection(projection, item);
+                }
+                assign_agent_to_workspace(
+                    projection,
+                    &input.agent_session,
+                    workspace_id,
+                    input.current_focus.clone(),
+                    Some(input.title_summary.clone()),
+                )
+                .map_err(spec_ops_as_core_error)?;
+                let events = existing_item
+                    .is_none()
+                    .then(|| workspace_start_event(workspace_id, &input, owner.clone(), &agent))
+                    .into_iter()
+                    .collect();
+                return Ok((
+                    WorkspaceEnsureResult {
+                        workspace_id: workspace_id.to_string(),
+                        disposition: WorkspaceEnsureDisposition::AlreadyAssigned,
+                    },
+                    events,
+                ));
+            }
+        }
+
+        let canonical_id = gwt_core::workspace_projection::canonical_work_id(
+            repo_path,
+            agent.branch.as_deref(),
+            agent.worktree_path.as_deref(),
+        );
+        if let Some(item) = canonical_id.as_deref().and_then(|canonical_id| {
+            existing
                 .work_items
                 .iter()
-                .find(|item| item.id == canonical_id)
-            {
-                apply_workspace_item_to_projection(&mut projection, item);
-            }
-            save_workspace_projection(repo_path, &projection).map_err(core_error)?;
-            publish_workspace_change(repo_path);
-            return Ok(WorkspaceEnsureResult {
-                workspace_id: canonical_id,
-                disposition: WorkspaceEnsureDisposition::Joined,
-            });
+                .find(|item| item.is_incomplete() && item.id == canonical_id)
+        }) {
+            let workspace_id = item.id.clone();
+            assign_agent_to_workspace(
+                projection,
+                &input.agent_session,
+                &workspace_id,
+                input.current_focus.clone(),
+                Some(input.title_summary.clone()),
+            )
+            .map_err(spec_ops_as_core_error)?;
+            apply_workspace_item_to_projection(projection, item);
+            let event = workspace_join_event(&workspace_id, &input, owner.clone(), &agent);
+            return Ok((
+                WorkspaceEnsureResult {
+                    workspace_id,
+                    disposition: WorkspaceEnsureDisposition::Joined,
+                },
+                vec![event],
+            ));
         }
-    }
-    let ensure_text = workspace_ensure_text(&input, owner.as_deref());
-    if let Some(item) = best_workspace_candidate(&existing.work_items, &ensure_text) {
-        let workspace_id = item.id.clone();
-        record_workspace_join_event(repo_path, &workspace_id, &input, owner.clone(), &agent)?;
-        assign_agent_to_workspace(
-            &mut projection,
-            &input.agent_session,
-            &workspace_id,
-            input.current_focus,
-            Some(input.title_summary),
-        )?;
-        apply_workspace_item_to_projection(&mut projection, item);
-        save_workspace_projection(repo_path, &projection).map_err(core_error)?;
-        publish_workspace_change(repo_path);
-        return Ok(WorkspaceEnsureResult {
-            workspace_id,
-            disposition: WorkspaceEnsureDisposition::Joined,
-        });
-    }
 
-    let workspace_id =
-        create_workspace_for_agent(repo_path, &mut projection, &input, owner, &agent)?;
-    save_workspace_projection(repo_path, &projection).map_err(core_error)?;
-    publish_workspace_change(repo_path);
-    Ok(WorkspaceEnsureResult {
-        workspace_id,
-        disposition: WorkspaceEnsureDisposition::Created,
+        let ensure_text = workspace_ensure_text(&input, owner.as_deref());
+        if let Some(item) = best_workspace_candidate(&existing.work_items, &ensure_text) {
+            let workspace_id = item.id.clone();
+            assign_agent_to_workspace(
+                projection,
+                &input.agent_session,
+                &workspace_id,
+                input.current_focus.clone(),
+                Some(input.title_summary.clone()),
+            )
+            .map_err(spec_ops_as_core_error)?;
+            apply_workspace_item_to_projection(projection, item);
+            let event = workspace_join_event(&workspace_id, &input, owner.clone(), &agent);
+            return Ok((
+                WorkspaceEnsureResult {
+                    workspace_id,
+                    disposition: WorkspaceEnsureDisposition::Joined,
+                },
+                vec![event],
+            ));
+        }
+
+        let (workspace_id, event) =
+            create_workspace_for_agent(repo_path, projection, &input, owner, &agent)
+                .map_err(spec_ops_as_core_error)?;
+        Ok((
+            WorkspaceEnsureResult {
+                workspace_id,
+                disposition: WorkspaceEnsureDisposition::Created,
+            },
+            vec![event],
+        ))
     })
+    .map_err(core_error)?;
+    publish_workspace_change(repo_path);
+    Ok(result)
 }
 
 fn owner_from_spec_or_issue(spec: Option<u64>, issue: Option<u64>) -> Option<String> {
@@ -948,13 +952,12 @@ fn best_workspace_candidate<'a>(
         .map(|(_, item)| item)
 }
 
-fn record_workspace_join_event(
-    repo_path: &std::path::Path,
+fn workspace_join_event(
     workspace_id: &str,
     input: &WorkspaceEnsureInput,
     owner: Option<String>,
     agent: &WorkspaceAgentSummary,
-) -> Result<(), SpecOpsError> {
+) -> WorkEvent {
     let now = Utc::now();
     let mut event = WorkEvent::new(WorkEventKind::Claim, workspace_id.to_string(), now);
     event.intent = input.current_focus.clone();
@@ -969,7 +972,7 @@ fn record_workspace_join_event(
     event.agent_id = Some(agent.agent_id.clone());
     event.display_name = Some(agent.display_name.clone());
     event.execution_container = Some(workspace_execution_container_from_agent(agent));
-    record_workspace_work_event(repo_path, event).map_err(core_error)
+    event
 }
 
 fn create_workspace_for_agent(
@@ -978,7 +981,7 @@ fn create_workspace_for_agent(
     input: &WorkspaceEnsureInput,
     owner: Option<String>,
     agent: &WorkspaceAgentSummary,
-) -> Result<String, SpecOpsError> {
+) -> Result<(String, WorkEvent), SpecOpsError> {
     // SPEC-2359 W16-2 (FR-389): canonical, machine-independent Work id when
     // the agent has a branch / worktree; millis fallback for branchless agents.
     let workspace_id = gwt_core::workspace_projection::canonical_work_id(
@@ -988,30 +991,7 @@ fn create_workspace_for_agent(
     )
     .unwrap_or_else(|| format!("workspace-{}", Utc::now().timestamp_millis()));
     let now = Utc::now();
-    let mut event = WorkEvent::new(WorkEventKind::Start, workspace_id.clone(), now);
-    event.title = Some(input.title_summary.clone());
-    event.intent = input
-        .current_focus
-        .clone()
-        .or_else(|| Some(input.title_summary.clone()));
-    event.summary = input
-        .current_focus
-        .clone()
-        .or_else(|| Some(input.title_summary.clone()));
-    event.status_category = Some(WorkspaceStatusCategory::Active);
-    event.owner = owner.clone();
-    event.next_action = Some(
-        input
-            .boundary
-            .as_deref()
-            .map(|boundary| format!("Boundary: {boundary}"))
-            .unwrap_or_else(|| "Coordinate on Board before implementation".to_string()),
-    );
-    event.agent_session_id = Some(input.agent_session.clone());
-    event.agent_id = Some(agent.agent_id.clone());
-    event.display_name = Some(agent.display_name.clone());
-    event.execution_container = Some(workspace_execution_container_from_agent(agent));
-    record_workspace_work_event(repo_path, event).map_err(core_error)?;
+    let event = workspace_start_event(&workspace_id, input, owner.clone(), agent);
 
     projection.start_work(
         WorkspaceStartUpdate {
@@ -1035,7 +1015,43 @@ fn create_workspace_for_agent(
         input.current_focus.clone(),
         Some(input.title_summary.clone()),
     )?;
-    Ok(workspace_id)
+    Ok((workspace_id, event))
+}
+
+fn workspace_start_event(
+    workspace_id: &str,
+    input: &WorkspaceEnsureInput,
+    owner: Option<String>,
+    agent: &WorkspaceAgentSummary,
+) -> WorkEvent {
+    let mut event = WorkEvent::new(WorkEventKind::Start, workspace_id, Utc::now());
+    event.title = Some(input.title_summary.clone());
+    event.intent = input
+        .current_focus
+        .clone()
+        .or_else(|| Some(input.title_summary.clone()));
+    event.summary = input
+        .current_focus
+        .clone()
+        .or_else(|| Some(input.title_summary.clone()));
+    event.status_category = Some(WorkspaceStatusCategory::Active);
+    event.owner = owner;
+    event.next_action = Some(
+        input
+            .boundary
+            .as_deref()
+            .map(|boundary| format!("Boundary: {boundary}"))
+            .unwrap_or_else(|| "Coordinate on Board before implementation".to_string()),
+    );
+    event.agent_session_id = Some(input.agent_session.clone());
+    event.agent_id = Some(agent.agent_id.clone());
+    event.display_name = Some(agent.display_name.clone());
+    event.execution_container = Some(workspace_execution_container_from_agent(agent));
+    event
+}
+
+fn spec_ops_as_core_error(error: SpecOpsError) -> GwtError {
+    GwtError::Other(error.to_string())
 }
 
 fn workspace_execution_container_from_agent(
@@ -1070,9 +1086,7 @@ fn current_agent_intent(
 ) -> Result<Option<String>, SpecOpsError> {
     let projection = load_or_default_workspace_projection(repo_path).map_err(core_error)?;
     Ok(projection
-        .agents
-        .iter()
-        .find(|agent| agent.session_id == agent_session)
+        .latest_agent_for_session(agent_session)
         .map(|agent| {
             [
                 agent.title_summary.as_deref(),
@@ -1084,17 +1098,6 @@ fn current_agent_intent(
             .collect::<Vec<_>>()
             .join("\n")
         }))
-}
-
-fn workspace_item_by_id(
-    repo_path: &std::path::Path,
-    workspace_id: &str,
-) -> Result<Option<WorkItem>, SpecOpsError> {
-    Ok(load_or_synthesize_workspace_work_items(repo_path)
-        .map_err(core_error)?
-        .work_items
-        .into_iter()
-        .find(|item| item.id == workspace_id))
 }
 
 fn apply_workspace_item_to_projection(projection: &mut WorkspaceProjection, item: &WorkItem) {
@@ -2172,7 +2175,7 @@ mod tests {
         agent.branch = Some("work/minted".to_string());
         agent.worktree_path = None;
         projection.agents.push(agent.clone());
-        let workspace_id = create_workspace_for_agent(
+        let (workspace_id, event) = create_workspace_for_agent(
             repo.path(),
             &mut projection,
             &WorkspaceEnsureInput {
@@ -2195,6 +2198,7 @@ mod tests {
         )
         .expect("canonical id");
         assert_eq!(workspace_id, expected);
+        assert_eq!(event.work_item_id, expected);
     }
 
     #[test]
@@ -2350,6 +2354,55 @@ mod tests {
             .expect("load workspace history")
             .expect("workspace history");
         assert_eq!(items.work_items.len(), 1);
+    }
+
+    #[test]
+    fn workspace_ensure_repairs_assigned_agent_when_work_creation_was_interrupted() {
+        let _guard = env_guard();
+        let gwt_home = tempfile::tempdir().expect("gwt home");
+        let _home = ScopedHome::set(gwt_home.path());
+        let temp = tempfile::tempdir().expect("tempdir");
+        let repo = temp.path().join("repo");
+        std::fs::create_dir_all(&repo).expect("repo");
+        let mut agent = unassigned_agent("session-interrupted");
+        agent.affiliation_status = WorkspaceAgentAffiliationStatus::Assigned;
+        agent.workspace_id = Some("workspace-interrupted".to_string());
+        let mut projection = WorkspaceProjection::default_for_project(&repo);
+        projection.id = "workspace-interrupted".to_string();
+        projection.agents.push(agent);
+        save_workspace_projection(&repo, &projection).expect("save projection");
+
+        let result = ensure_workspace_for_agent(
+            &repo,
+            WorkspaceEnsureInput {
+                agent_session: "session-interrupted".to_string(),
+                title_summary: "Interrupted materialization".to_string(),
+                current_focus: Some("Repair Work creation".to_string()),
+                spec: Some(2359),
+                issue: None,
+                topic: None,
+                boundary: None,
+            },
+        )
+        .expect("repair ensure");
+
+        assert_eq!(
+            result.disposition,
+            WorkspaceEnsureDisposition::AlreadyAssigned
+        );
+        let items = load_workspace_work_items(&repo)
+            .expect("load workspace history")
+            .expect("workspace history");
+        let repaired = items
+            .work_items
+            .iter()
+            .find(|item| item.id == "workspace-interrupted")
+            .expect("missing Work is recreated");
+        assert_eq!(repaired.title, "Interrupted materialization");
+        assert!(repaired
+            .agents
+            .iter()
+            .any(|agent| agent.session_id == "session-interrupted"));
     }
 
     fn args(values: &[&str]) -> Vec<String> {

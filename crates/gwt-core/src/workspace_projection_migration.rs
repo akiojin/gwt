@@ -26,8 +26,8 @@ use crate::paths::gwt_workspace_projection_path_for_repo_path;
 #[cfg(test)]
 use crate::workspace_projection::WorkspaceProjection;
 use crate::workspace_projection::{
-    load_workspace_projection_from_path, save_workspace_projection_to_path,
-    workspace_projection_default_created_at, WorkspaceLifecycleStage, WorkspaceStatusCategory,
+    load_workspace_projection_from_path, workspace_projection_default_created_at,
+    WorkspaceLifecycleStage, WorkspaceStatusCategory,
 };
 
 /// Schema version recorded in `workspace.migration.json`. When the
@@ -68,73 +68,85 @@ pub enum WorkspaceProjectionMigrationOutcome {
 pub fn migrate_workspace_projection_path(
     workspace_json_path: &Path,
 ) -> Result<WorkspaceProjectionMigrationOutcome> {
-    if !workspace_json_path.exists() {
-        return Ok(WorkspaceProjectionMigrationOutcome::Missing);
-    }
+    let work_items_path = workspace_json_path.with_file_name("works.json");
+    crate::workspace_projection::with_workspace_current_and_work_items_lock(
+        workspace_json_path,
+        &work_items_path,
+        || {
+            if !workspace_json_path.exists() {
+                return Ok(WorkspaceProjectionMigrationOutcome::Missing);
+            }
 
-    let marker_path = marker_path_for_projection(workspace_json_path);
-    if marker_already_current(&marker_path)? {
-        return Ok(WorkspaceProjectionMigrationOutcome::AlreadyMigrated);
-    }
+            let marker_path = marker_path_for_projection(workspace_json_path);
+            if marker_already_current(&marker_path)? {
+                return Ok(WorkspaceProjectionMigrationOutcome::AlreadyMigrated);
+            }
 
-    let Some(mut projection) = load_workspace_projection_from_path(workspace_json_path)? else {
-        return Ok(WorkspaceProjectionMigrationOutcome::Missing);
-    };
+            let Some(mut projection) = load_workspace_projection_from_path(workspace_json_path)?
+            else {
+                return Ok(WorkspaceProjectionMigrationOutcome::Missing);
+            };
 
-    let mut changed = false;
+            let mut changed = false;
 
-    // FR-143: summary <- title when None. Skip if title is the
-    // hard-coded default ("Workspace") so we do not inject the
-    // placeholder into legitimately untitled Workspaces.
-    if projection
-        .summary
-        .as_deref()
-        .is_none_or(|s| s.trim().is_empty())
-        && projection.title.trim() != "Workspace"
-        && !projection.title.trim().is_empty()
-    {
-        projection.summary = Some(projection.title.clone());
-        changed = true;
-    }
+            // FR-143: summary <- title when None. Skip if title is the
+            // hard-coded default ("Workspace") so we do not inject the
+            // placeholder into legitimately untitled Workspaces.
+            if projection
+                .summary
+                .as_deref()
+                .is_none_or(|s| s.trim().is_empty())
+                && projection.title.trim() != "Workspace"
+                && !projection.title.trim().is_empty()
+            {
+                projection.summary = Some(projection.title.clone());
+                changed = true;
+            }
 
-    // FR-143: created_at <- updated_at when sentinel (legacy data).
-    if projection.created_at == workspace_projection_default_created_at() {
-        projection.created_at = projection.updated_at;
-        changed = true;
-    }
+            // FR-143: created_at <- updated_at when sentinel (legacy data).
+            if projection.created_at == workspace_projection_default_created_at() {
+                projection.created_at = projection.updated_at;
+                changed = true;
+            }
 
-    // FR-143: lifecycle_stage <- derived from status_category when the
-    // field is still at the schema default and the projection has any
-    // signal that says "this is real work" (status_category != Unknown).
-    if projection.lifecycle_stage == WorkspaceLifecycleStage::Planning
-        && projection.status_category != WorkspaceStatusCategory::Unknown
-    {
-        projection.lifecycle_stage = lifecycle_stage_from_status(projection.status_category);
-        changed = true;
-    }
+            // FR-143: lifecycle_stage <- derived from status_category when the
+            // field is still at the schema default and the projection has any
+            // signal that says "this is real work" (status_category != Unknown).
+            if projection.lifecycle_stage == WorkspaceLifecycleStage::Planning
+                && projection.status_category != WorkspaceStatusCategory::Unknown
+            {
+                projection.lifecycle_stage =
+                    lifecycle_stage_from_status(projection.status_category);
+                changed = true;
+            }
 
-    // FR-143: creator <- first agent's agent_id (or fallback "system").
-    if projection.creator.is_none() {
-        let candidate = projection
-            .agents
-            .iter()
-            .find(|agent| !agent.agent_id.trim().is_empty())
-            .map(|agent| agent.agent_id.clone())
-            .unwrap_or_else(|| "system".to_string());
-        projection.creator = Some(candidate);
-        changed = true;
-    }
+            // FR-143: creator <- first agent's agent_id (or fallback "system").
+            if projection.creator.is_none() {
+                let candidate = projection
+                    .agents
+                    .iter()
+                    .find(|agent| !agent.agent_id.trim().is_empty())
+                    .map(|agent| agent.agent_id.clone())
+                    .unwrap_or_else(|| "system".to_string());
+                projection.creator = Some(candidate);
+                changed = true;
+            }
 
-    if changed {
-        save_workspace_projection_to_path(workspace_json_path, &projection)?;
-    }
-    write_marker(&marker_path)?;
+            if changed {
+                let bytes = serde_json::to_vec_pretty(&projection).map_err(|error| {
+                    GwtError::Other(format!("workspace projection json: {error}"))
+                })?;
+                crate::workspace_projection::write_atomic(workspace_json_path, &bytes)?;
+            }
+            write_marker(&marker_path)?;
 
-    Ok(if changed {
-        WorkspaceProjectionMigrationOutcome::Applied
-    } else {
-        WorkspaceProjectionMigrationOutcome::NoBackfillNeeded
-    })
+            Ok(if changed {
+                WorkspaceProjectionMigrationOutcome::Applied
+            } else {
+                WorkspaceProjectionMigrationOutcome::NoBackfillNeeded
+            })
+        },
+    )
 }
 
 /// Convenience wrapper used by the daemon startup hook: takes a repository
@@ -177,10 +189,9 @@ fn write_marker(marker_path: &Path) -> Result<()> {
         version: WORKSPACE_PROJECTION_MIGRATION_VERSION,
         migrated_at: Some(Utc::now()),
     };
-    let body = serde_json::to_string_pretty(&marker)
+    let body = serde_json::to_vec_pretty(&marker)
         .map_err(|err| GwtError::Other(format!("serialize migration marker: {err}")))?;
-    std::fs::write(marker_path, body)?;
-    Ok(())
+    crate::workspace_projection::write_atomic(marker_path, &body)
 }
 
 fn lifecycle_stage_from_status(status: WorkspaceStatusCategory) -> WorkspaceLifecycleStage {
@@ -353,5 +364,61 @@ mod tests {
             marker_path.exists(),
             "marker must be written even when no fields changed"
         );
+    }
+
+    #[test]
+    fn migration_locks_before_read_and_preserves_concurrent_writer() {
+        use fs2::FileExt;
+
+        let temp = tempdir().expect("tempdir");
+        let workspace_dir = temp.path().join("workspace");
+        fs::create_dir_all(&workspace_dir).expect("workspace dir");
+        let projection_path = workspace_dir.join("current.json");
+        let legacy_json = serde_json::json!({
+            "id": "legacy-race",
+            "project_root": "/repo",
+            "title": "Legacy title",
+            "status_category": "active",
+            "status_text": "Legacy status",
+            "agents": [],
+            "git_details": null,
+            "board_refs": [],
+            "updated_at": "2026-04-15T10:00:00Z"
+        });
+        fs::write(&projection_path, serde_json::to_vec(&legacy_json).unwrap()).unwrap();
+
+        let lock = fs::OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .read(true)
+            .write(true)
+            .open(workspace_dir.join("works.lock"))
+            .unwrap();
+        lock.lock_exclusive().unwrap();
+
+        let path = projection_path.clone();
+        let handle = std::thread::spawn(move || migrate_workspace_projection_path(&path));
+        std::thread::sleep(std::time::Duration::from_millis(100));
+        assert!(
+            !handle.is_finished(),
+            "migration must acquire the projection lock before loading current.json"
+        );
+
+        let mut writer: WorkspaceProjection =
+            serde_json::from_slice(&fs::read(&projection_path).unwrap()).unwrap();
+        writer.title = "Concurrent writer".to_string();
+        writer.summary = Some("writer summary".to_string());
+        crate::workspace_projection::write_atomic(
+            &projection_path,
+            &serde_json::to_vec_pretty(&writer).unwrap(),
+        )
+        .unwrap();
+        FileExt::unlock(&lock).unwrap();
+        handle.join().unwrap().unwrap();
+
+        let saved: WorkspaceProjection =
+            serde_json::from_slice(&fs::read(&projection_path).unwrap()).unwrap();
+        assert_eq!(saved.title, "Concurrent writer");
+        assert_eq!(saved.summary.as_deref(), Some("writer summary"));
     }
 }

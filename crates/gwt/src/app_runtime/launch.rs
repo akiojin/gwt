@@ -1961,12 +1961,9 @@ impl AppRuntime {
         let projection = gwt_core::workspace_projection::load_workspace_projection(project_root)
             .ok()
             .flatten();
-        let agent_summary = projection.as_ref().and_then(|projection| {
-            projection
-                .agents
-                .iter()
-                .find(|agent| agent.session_id == session_id)
-        });
+        let agent_summary = projection
+            .as_ref()
+            .and_then(|projection| projection.latest_agent_for_session(session_id));
         // #3065: owner / summary / the title fallback must come from the
         // session's own Work item (resolved by branch container inside the
         // background thread below), never from the repo-shared projection —

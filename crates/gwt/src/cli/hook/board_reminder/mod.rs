@@ -183,11 +183,7 @@ fn title_summary_missing_in_projection(
     let Some(projection) = projection else {
         return false;
     };
-    let Some(agent) = projection
-        .agents
-        .iter()
-        .find(|agent| agent.session_id == session_id)
-    else {
+    let Some(agent) = projection.latest_agent_for_session(session_id) else {
         return false;
     };
     agent
@@ -244,11 +240,7 @@ fn compute_title_summary_stale_state(
     let Some(projection) = projection else {
         return (false, new_state);
     };
-    let Some(agent) = projection
-        .agents
-        .iter()
-        .find(|agent| agent.session_id == session_id)
-    else {
+    let Some(agent) = projection.latest_agent_for_session(session_id) else {
         return (false, new_state);
     };
     let current_title = agent
@@ -318,9 +310,7 @@ fn progress_summary_focus_signal(
     session_id: &str,
 ) -> Option<String> {
     let agent_focus = projection
-        .agents
-        .iter()
-        .find(|agent| agent.session_id == session_id)
+        .latest_agent_for_session(session_id)
         .and_then(|agent| agent.current_focus.as_deref());
     let parts = [
         agent_focus,
