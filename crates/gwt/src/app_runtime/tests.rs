@@ -15449,7 +15449,7 @@ fn app_runtime_board_milestone_uses_latest_duplicate_session_assignment() {
 }
 
 #[test]
-fn app_runtime_old_board_milestone_does_not_rewind_latest_assigned_work() {
+fn app_runtime_old_board_milestone_does_not_rewind_latest_assigned_work_or_agent() {
     let _env_lock = env_test_lock()
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -15552,6 +15552,20 @@ fn app_runtime_old_board_milestone_does_not_rewind_latest_assigned_work() {
         .board_refs
         .iter()
         .any(|id| id == &replayed.id));
+    let current_agent = current_projection
+        .latest_agent_for_session("session-duplicate-assigned")
+        .expect("current assigned Agent");
+    assert_eq!(
+        current_agent.current_focus.as_deref(),
+        Some("Current blocked work")
+    );
+    assert_eq!(
+        current_agent.status_category,
+        gwt_core::workspace_projection::WorkspaceStatusCategory::Blocked
+    );
+    assert_eq!(current_agent.last_board_entry_id, None);
+    assert_eq!(current_agent.last_board_entry_kind, None);
+    assert_eq!(current_agent.updated_at, assigned_agent_at);
 }
 
 #[test]

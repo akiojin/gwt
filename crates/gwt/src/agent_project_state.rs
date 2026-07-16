@@ -80,15 +80,27 @@ pub(crate) fn repair_split_agent_state_if_needed(
     };
 
     mutate_existing_workspace_projection(&canonical_root, |canonical_projection| {
+        let projection_updated_at = canonical_projection.updated_at;
         let Some(canonical_agent) = canonical_projection.latest_agent_for_session_mut(session_id)
         else {
             return Ok(false);
         };
+        let agent_updated_at = canonical_agent.updated_at;
         let changed = repair_agent_from_split(canonical_agent, &split_agent);
         if changed {
-            let now = Utc::now();
-            canonical_agent.updated_at = now;
-            canonical_projection.updated_at = now;
+            let repaired_floor = Utc::now()
+                .max(projection_updated_at)
+                .max(agent_updated_at)
+                .max(split_agent.updated_at);
+            let repaired_at = repaired_floor
+                .checked_add_signed(chrono::Duration::nanoseconds(1))
+                .ok_or_else(|| {
+                    gwt_core::GwtError::Other(
+                        "split Agent repair timestamp exceeds the supported range".to_string(),
+                    )
+                })?;
+            canonical_agent.updated_at = repaired_at;
+            canonical_projection.updated_at = repaired_at;
         }
         Ok(changed)
     })
@@ -455,6 +467,217 @@ mod tests {
         assert_eq!(
             repaired.agents[1].current_focus.as_deref(),
             Some("Latest split focus")
+        );
+    }
+
+    #[test]
+    fn split_repair_keeps_future_timestamps_monotonic_and_repaired_row_latest() {
+        let _guard = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let home = tempfile::tempdir().expect("home");
+        let _home = gwt_core::test_support::ScopedEnvVar::set("HOME", home.path());
+        let _userprofile = gwt_core::test_support::ScopedEnvVar::set("USERPROFILE", home.path());
+        let temp = tempfile::tempdir().expect("tempdir");
+        let canonical_root = temp.path().join("canonical");
+        let split_root = temp.path().join("split");
+        std::fs::create_dir_all(&canonical_root).expect("create canonical root");
+        std::fs::create_dir_all(&split_root).expect("create split root");
+
+        let future = Utc::now() + chrono::Duration::days(1);
+        let competing_at = future + chrono::Duration::hours(1);
+        let canonical_at = future + chrono::Duration::hours(2);
+        let split_at = future + chrono::Duration::hours(3);
+        let projection_at = future + chrono::Duration::hours(4);
+        let competing = agent_summary(
+            "duplicate-session",
+            Some("Competing canonical title"),
+            Some("Competing canonical focus"),
+            competing_at,
+        );
+        let canonical = agent_summary(
+            "duplicate-session",
+            Some("Canonical title"),
+            Some("Canonical focus"),
+            canonical_at,
+        );
+        let split = agent_summary(
+            "duplicate-session",
+            Some("Repaired split title"),
+            Some("Repaired split focus"),
+            split_at,
+        );
+
+        let mut canonical_projection =
+            gwt_core::workspace_projection::WorkspaceProjection::default_for_project(
+                &canonical_root,
+            );
+        canonical_projection.agents = vec![competing, canonical];
+        canonical_projection.updated_at = projection_at;
+        gwt_core::workspace_projection::save_workspace_projection(
+            &canonical_root,
+            &canonical_projection,
+        )
+        .expect("save canonical projection");
+
+        let mut split_projection =
+            gwt_core::workspace_projection::WorkspaceProjection::default_for_project(&split_root);
+        split_projection.agents = vec![split];
+        split_projection.updated_at = split_at;
+        gwt_core::workspace_projection::save_workspace_projection(&split_root, &split_projection)
+            .expect("save split projection");
+
+        assert!(repair_split_agent_state_if_needed(
+            &canonical_root,
+            &split_root,
+            "duplicate-session"
+        )
+        .expect("repair split state"));
+
+        let repaired = gwt_core::workspace_projection::load_workspace_projection(&canonical_root)
+            .expect("load canonical projection")
+            .expect("canonical projection exists");
+        let repaired_agent = repaired
+            .agents
+            .iter()
+            .find(|agent| agent.title_summary.as_deref() == Some("Repaired split title"))
+            .expect("repaired agent row");
+        assert!(
+            repaired_agent.updated_at >= projection_at,
+            "repaired Agent timestamp must not regress below Agent/projection inputs"
+        );
+        assert!(
+            repaired.updated_at >= projection_at,
+            "projection timestamp must not regress during split repair"
+        );
+        assert_eq!(
+            repaired.latest_agent_for_session("duplicate-session"),
+            Some(repaired_agent),
+            "the repaired row must remain the latest Session row"
+        );
+    }
+
+    #[test]
+    fn split_repair_makes_repaired_duplicate_strictly_latest_when_timestamps_tie() {
+        let _guard = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let home = tempfile::tempdir().expect("home");
+        let _home = gwt_core::test_support::ScopedEnvVar::set("HOME", home.path());
+        let _userprofile = gwt_core::test_support::ScopedEnvVar::set("USERPROFILE", home.path());
+        let temp = tempfile::tempdir().expect("tempdir");
+        let canonical_root = temp.path().join("canonical");
+        let split_root = temp.path().join("split");
+        std::fs::create_dir_all(&canonical_root).expect("create canonical root");
+        std::fs::create_dir_all(&split_root).expect("create split root");
+        let tied_at = Utc::now() + chrono::Duration::days(1);
+
+        let competing = agent_summary(
+            "duplicate-session",
+            Some("Competing title"),
+            Some("z competing focus"),
+            tied_at,
+        );
+        let repair_target = agent_summary(
+            "duplicate-session",
+            Some("Repair target title"),
+            None,
+            tied_at,
+        );
+        let split = agent_summary(
+            "duplicate-session",
+            Some("Split title"),
+            Some("a repaired focus"),
+            tied_at,
+        );
+
+        let mut canonical =
+            gwt_core::workspace_projection::WorkspaceProjection::default_for_project(
+                &canonical_root,
+            );
+        canonical.agents = vec![competing, repair_target];
+        canonical.updated_at = tied_at;
+        gwt_core::workspace_projection::save_workspace_projection(&canonical_root, &canonical)
+            .expect("save canonical projection");
+
+        let mut split_projection =
+            gwt_core::workspace_projection::WorkspaceProjection::default_for_project(&split_root);
+        split_projection.agents = vec![split];
+        split_projection.updated_at = tied_at;
+        gwt_core::workspace_projection::save_workspace_projection(&split_root, &split_projection)
+            .expect("save split projection");
+
+        assert!(repair_split_agent_state_if_needed(
+            &canonical_root,
+            &split_root,
+            "duplicate-session"
+        )
+        .expect("repair split state"));
+
+        let repaired = gwt_core::workspace_projection::load_workspace_projection(&canonical_root)
+            .expect("load repaired projection")
+            .expect("repaired projection");
+        let latest = repaired
+            .latest_agent_for_session("duplicate-session")
+            .expect("latest repaired Agent");
+        assert_eq!(latest.title_summary.as_deref(), Some("Repair target title"));
+        assert_eq!(latest.current_focus.as_deref(), Some("a repaired focus"));
+        assert!(latest.updated_at > tied_at);
+    }
+
+    #[test]
+    fn split_repair_timestamp_overflow_does_not_persist_partial_update() {
+        let _guard = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let home = tempfile::tempdir().expect("home");
+        let _home = gwt_core::test_support::ScopedEnvVar::set("HOME", home.path());
+        let _userprofile = gwt_core::test_support::ScopedEnvVar::set("USERPROFILE", home.path());
+        let temp = tempfile::tempdir().expect("tempdir");
+        let canonical_root = temp.path().join("canonical");
+        let split_root = temp.path().join("split");
+        std::fs::create_dir_all(&canonical_root).expect("create canonical root");
+        std::fs::create_dir_all(&split_root).expect("create split root");
+        let max = chrono::DateTime::<Utc>::MAX_UTC;
+
+        let mut canonical =
+            gwt_core::workspace_projection::WorkspaceProjection::default_for_project(
+                &canonical_root,
+            );
+        canonical.agents = vec![agent_summary(
+            "overflow-session",
+            Some("Canonical title"),
+            None,
+            max,
+        )];
+        canonical.updated_at = max;
+        gwt_core::workspace_projection::save_workspace_projection(&canonical_root, &canonical)
+            .expect("save canonical projection");
+
+        let mut split =
+            gwt_core::workspace_projection::WorkspaceProjection::default_for_project(&split_root);
+        split.agents = vec![agent_summary(
+            "overflow-session",
+            Some("Split title"),
+            Some("Split focus"),
+            max,
+        )];
+        split.updated_at = max;
+        gwt_core::workspace_projection::save_workspace_projection(&split_root, &split)
+            .expect("save split projection");
+
+        let canonical_path =
+            gwt_core::paths::gwt_workspace_projection_path_for_repo_path(&canonical_root);
+        let before = std::fs::read(&canonical_path).expect("read canonical before repair");
+        let error =
+            repair_split_agent_state_if_needed(&canonical_root, &split_root, "overflow-session")
+                .expect_err("timestamp overflow must fail closed");
+
+        assert!(error.to_string().contains("timestamp exceeds"));
+        assert_eq!(
+            std::fs::read(&canonical_path).expect("read canonical after repair"),
+            before,
+            "failed repair must not persist partially copied Agent fields"
         );
     }
 }

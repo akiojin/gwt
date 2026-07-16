@@ -21,6 +21,7 @@ fn bool_is_false(value: &bool) -> bool {
 /// as chips (`#Issue-1234`) instead of free-text. The number is required;
 /// title / url are populated when known and default to None for legacy data.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct WorkspaceIssueLink {
     pub number: u64,
     #[serde(default)]
@@ -34,6 +35,7 @@ pub struct WorkspaceIssueLink {
 /// closed) so UI can render lifecycle hints alongside `lifecycle_stage`
 /// without re-querying GitHub.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct WorkspacePrLink {
     pub number: u64,
     #[serde(default)]
@@ -46,6 +48,7 @@ pub struct WorkspacePrLink {
 
 /// Reference from a Work item to one agent session that worked on it.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct WorkAgentRef {
     pub session_id: String,
     #[serde(default)]
@@ -63,6 +66,7 @@ pub struct WorkAgentRef {
 
 /// Reference from a Work item to the branch / worktree / PR it executed in.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct WorkspaceExecutionContainerRef {
     #[serde(default)]
     pub branch: Option<String>,
@@ -112,6 +116,7 @@ pub enum WorkEventKind {
 /// One append-only event in a Work item's lifecycle. Events are folded into
 /// [`WorkItem`]s by [`WorkItemsProjection`].
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct WorkEvent {
     pub id: String,
     pub work_item_id: String,
@@ -204,6 +209,7 @@ impl WorkEvent {
 /// agents, execution containers, and its event history. Built by folding
 /// [`WorkEvent`]s.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct WorkItem {
     pub id: String,
     pub title: String,
@@ -292,6 +298,7 @@ impl WorkItem {
 /// Materialized collection of all Work items for one project, rebuilt by
 /// folding the Work event log.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct WorkItemsProjection {
     pub updated_at: DateTime<Utc>,
     #[serde(default)]
@@ -427,9 +434,14 @@ impl WorkItemsProjection {
         if !preserve_terminal {
             item.status_category = new_status;
         }
-        if event.kind == WorkEventKind::Discard {
+        if event.kind == WorkEventKind::Discard
+            && item.status_category != WorkspaceStatusCategory::Done
+        {
             item.discarded = true;
-            item.discarded_at = item.discarded_at.or(Some(event.updated_at));
+            item.discarded_at = Some(
+                item.discarded_at
+                    .map_or(event.updated_at, |current| current.min(event.updated_at)),
+            );
         }
         if item.status_category == WorkspaceStatusCategory::Done {
             // Preserve the first Done timestamp so idempotent Done re-applies
@@ -928,6 +940,73 @@ mod tests {
     }
 
     #[test]
+    fn apply_event_done_then_discard_preserves_done_terminal_kind() {
+        let work_item_id = "test-item-done-then-discard";
+        let done_at = Utc.with_ymd_and_hms(2026, 7, 16, 10, 0, 0).unwrap();
+        let discarded_at = Utc.with_ymd_and_hms(2026, 7, 16, 11, 0, 0).unwrap();
+        let mut projection = WorkItemsProjection::empty(done_at);
+
+        projection.apply_event(WorkEvent::new(WorkEventKind::Done, work_item_id, done_at));
+        projection.apply_event(WorkEvent::new(
+            WorkEventKind::Discard,
+            work_item_id,
+            discarded_at,
+        ));
+
+        let item = projection
+            .work_items
+            .iter()
+            .find(|item| item.id == work_item_id)
+            .expect("Done Work");
+        assert_eq!(
+            (
+                item.status_category,
+                item.discarded,
+                item.completed_at,
+                item.discarded_at,
+            ),
+            (WorkspaceStatusCategory::Done, false, Some(done_at), None,),
+            "Discard after Done must preserve the original Done terminal kind"
+        );
+    }
+
+    #[test]
+    fn apply_event_discard_then_done_preserves_discarded_terminal_kind() {
+        let work_item_id = "test-item-discard-then-done";
+        let discarded_at = Utc.with_ymd_and_hms(2026, 7, 16, 10, 0, 0).unwrap();
+        let done_at = Utc.with_ymd_and_hms(2026, 7, 16, 11, 0, 0).unwrap();
+        let mut projection = WorkItemsProjection::empty(discarded_at);
+
+        projection.apply_event(WorkEvent::new(
+            WorkEventKind::Discard,
+            work_item_id,
+            discarded_at,
+        ));
+        projection.apply_event(WorkEvent::new(WorkEventKind::Done, work_item_id, done_at));
+
+        let item = projection
+            .work_items
+            .iter()
+            .find(|item| item.id == work_item_id)
+            .expect("discarded Work");
+        assert_eq!(
+            (
+                item.status_category,
+                item.discarded,
+                item.completed_at,
+                item.discarded_at,
+            ),
+            (
+                WorkspaceStatusCategory::Idle,
+                true,
+                None,
+                Some(discarded_at),
+            ),
+            "Done after Discard must preserve the original Discarded terminal kind"
+        );
+    }
+
+    #[test]
     fn apply_event_discard_marks_work_terminal_discarded() {
         // SPEC-2359 Phase W-12 Slice 4 (FR-352): a Discard event makes the Work
         // terminal-discarded (not Done) and removes it from the incomplete set.
@@ -962,6 +1041,28 @@ mod tests {
             "discarded Work is not completed, so completed_at stays None"
         );
         assert_eq!(item.discarded_at, Some(t2));
+    }
+
+    #[test]
+    fn apply_event_repeated_discard_keeps_earliest_timestamp() {
+        let work_item_id = "test-item-discard-earliest";
+        let t1 = Utc.with_ymd_and_hms(2026, 7, 16, 9, 0, 0).unwrap();
+        let t2 = Utc.with_ymd_and_hms(2026, 7, 16, 10, 0, 0).unwrap();
+        let mut projection = WorkItemsProjection::empty(t1);
+
+        projection.apply_event(WorkEvent::new(WorkEventKind::Discard, work_item_id, t2));
+        projection.apply_event(WorkEvent::new(WorkEventKind::Discard, work_item_id, t1));
+
+        let item = projection
+            .work_items
+            .iter()
+            .find(|item| item.id == work_item_id)
+            .expect("discarded Work");
+        assert_eq!(
+            item.discarded_at,
+            Some(t1),
+            "out-of-order Discard replay must retain the earliest terminal timestamp"
+        );
     }
 
     #[test]

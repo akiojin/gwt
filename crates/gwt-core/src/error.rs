@@ -1,5 +1,22 @@
 //! Error types for gwt-core.
 
+/// Whether JSON cannot be parsed at all or is valid JSON produced by an
+/// incompatible schema. Recovery may replace only malformed data.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum JsonDecodeKind {
+    Malformed,
+    IncompatibleSchema,
+}
+
+impl std::fmt::Display for JsonDecodeKind {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(match self {
+            Self::Malformed => "malformed",
+            Self::IncompatibleSchema => "incompatible schema",
+        })
+    }
+}
+
 /// Unified error type for all gwt operations.
 #[derive(Debug, thiserror::Error)]
 pub enum GwtError {
@@ -42,6 +59,14 @@ pub enum GwtError {
     /// Clipboard error.
     #[error("Clipboard error: {0}")]
     Clipboard(String),
+
+    /// JSON decode error with a recovery-safe classification.
+    #[error("{context} ({kind}): {message}")]
+    JsonDecode {
+        context: &'static str,
+        kind: JsonDecodeKind,
+        message: String,
+    },
 
     /// Skill execution error.
     #[error("Skill error: {0}")]

@@ -130,7 +130,32 @@ where
 {
     let mut summary = WorkEventsIngestSummary::default();
     let mut state = load_work_events_intake_state(state_path);
-    let rebuild_required = !work_items_path.exists()
+    let projection_requires_rebuild =
+        match gwt_core::workspace_projection::load_workspace_work_items_from_path(work_items_path) {
+            Ok(Some(_)) => false,
+            Ok(None) => true,
+            Err(gwt_core::GwtError::JsonDecode {
+                kind: gwt_core::JsonDecodeKind::Malformed,
+                message: error,
+                ..
+            }) => {
+                tracing::warn!(
+                    %error,
+                    path = %work_items_path.display(),
+                    "work events ingest: corrupt projection requires rebuild"
+                );
+                true
+            }
+            Err(error) => {
+                tracing::warn!(
+                    %error,
+                    path = %work_items_path.display(),
+                    "work events ingest: projection read failed"
+                );
+                return summary;
+            }
+        };
+    let rebuild_required = projection_requires_rebuild
         || !state.projection_is_current(SOURCE_CONTEXT_FINGERPRINT_VERSION);
     let mut pending_sources = Vec::new();
     let mut source_discovery_failed = false;
@@ -620,6 +645,137 @@ mod tests {
         assert_eq!(second.events_applied, 0);
         assert_eq!(second.sources_ingested, 0);
         assert!(second.sources_skipped >= 2, "fingerprint skip: {second:?}");
+    }
+
+    #[test]
+    fn projection_parse_failure_requires_rebuild_with_current_version_and_fingerprints() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let repo = temp.path().join("repo");
+        std::fs::create_dir_all(&repo).expect("repo dir");
+        init_repo(&repo);
+        let events_path = repo.join(EVENTS_TREE_PATH);
+        std::fs::create_dir_all(events_path.parent().unwrap()).expect("work event dir");
+        let content = format!(
+            "{}\n",
+            event_line(
+                "evt-parse-recovery",
+                "work-parse-recovery",
+                "Projection parse recovery",
+                "2026-07-16T07:00:00Z"
+            )
+        );
+        std::fs::write(&events_path, &content).expect("shared event");
+
+        let state_dir = temp.path().join("state");
+        let work_items_path = state_dir.join("works.json");
+        let state_path = state_dir.join("work-events-intake.json");
+        let initial = ingest_project_work_events_paths(&repo, &work_items_path, &state_path);
+        assert!(initial.projection_rebuilt);
+
+        let state = load_work_events_intake_state(&state_path);
+        assert!(state.projection_is_current(SOURCE_CONTEXT_FINGERPRINT_VERSION));
+        let current = ingest_project_work_events_paths(&repo, &work_items_path, &state_path);
+        assert!(!current.projection_rebuilt);
+        assert_eq!(current.sources_ingested, 0);
+        assert!(
+            current.sources_skipped >= 1,
+            "fingerprint skip: {current:?}"
+        );
+
+        std::fs::write(&work_items_path, b"{\"work_items\":")
+            .expect("syntactically corrupt projection");
+
+        let recovered = ingest_project_work_events_paths(&repo, &work_items_path, &state_path);
+
+        assert!(
+            recovered.projection_rebuilt,
+            "projection parse failure must override current cache state: {recovered:?}"
+        );
+        assert_eq!(recovered.sources_ingested, 1);
+        let projection =
+            gwt_core::workspace_projection::load_workspace_work_items_from_path(&work_items_path)
+                .expect("load recovered projection")
+                .expect("recovered projection");
+        assert!(projection
+            .work_items
+            .iter()
+            .any(|item| item.id == "work-parse-recovery"));
+    }
+
+    #[test]
+    fn valid_incompatible_projection_does_not_rebuild_or_advance_intake_state() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let repo = temp.path().join("repo");
+        std::fs::create_dir_all(&repo).expect("repo dir");
+        init_repo(&repo);
+        let events_path = repo.join(EVENTS_TREE_PATH);
+        std::fs::create_dir_all(events_path.parent().unwrap()).expect("work event dir");
+        std::fs::write(
+            &events_path,
+            format!(
+                "{}\n",
+                event_line(
+                    "evt-incompatible-source",
+                    "work-incompatible-source",
+                    "Incompatible source",
+                    "2026-07-16T08:00:00Z"
+                )
+            ),
+        )
+        .expect("shared event");
+
+        let state_dir = temp.path().join("state");
+        let work_items_path = state_dir.join("works.json");
+        let state_path = state_dir.join("work-events-intake.json");
+        let initial = ingest_project_work_events_paths(&repo, &work_items_path, &state_path);
+        assert!(initial.projection_rebuilt);
+
+        let loaded =
+            gwt_core::workspace_projection::load_workspace_work_items_from_path(&work_items_path)
+                .expect("load initial projection")
+                .expect("initial projection");
+        let mut incompatible = serde_json::to_value(&loaded).expect("projection json");
+        incompatible["work_items"][0]["events"][0]
+            .as_object_mut()
+            .expect("Work event object")
+            .insert(
+                "future_schema_field".to_string(),
+                serde_json::json!({ "preserve": true }),
+            );
+        let original_projection =
+            serde_json::to_vec_pretty(&incompatible).expect("incompatible json");
+        std::fs::write(&work_items_path, &original_projection)
+            .expect("write incompatible projection");
+        let original_state = std::fs::read(&state_path).expect("read intake state");
+        let initial_source = std::fs::read_to_string(&events_path).expect("read initial source");
+        std::fs::write(
+            &events_path,
+            format!(
+                "{}{}\n",
+                initial_source,
+                event_line(
+                    "evt-after-incompatible",
+                    "work-after-incompatible",
+                    "Must not advance",
+                    "2026-07-16T09:00:00Z"
+                )
+            ),
+        )
+        .expect("advance shared event source");
+
+        let summary = ingest_project_work_events_paths(&repo, &work_items_path, &state_path);
+
+        assert!(!summary.projection_rebuilt, "must fail closed: {summary:?}");
+        assert_eq!(summary.sources_ingested, 0, "must fail closed: {summary:?}");
+        assert_eq!(summary.events_applied, 0, "must fail closed: {summary:?}");
+        assert_eq!(
+            std::fs::read(&work_items_path).expect("read preserved projection"),
+            original_projection
+        );
+        assert_eq!(
+            std::fs::read(&state_path).expect("read preserved intake state"),
+            original_state
+        );
     }
 
     #[test]
