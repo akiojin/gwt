@@ -9,8 +9,9 @@
 use gwt_github::client::{
     http::{FakeTransport, HttpIssueClient, HttpMethod, HttpResponse},
     ApiError, CommentId, CommitComparisonStatus, CreateRepositoryIssue, FetchResult, IssueClient,
-    IssueNumber, IssueState, OwnerMutationError, OwnerRepositoryClient, RepositoryIdentity,
-    RepositoryIssueKind, ResolutionDeadline, SpecListFilter, UpdatedAt,
+    IssueNumber, IssueState, OwnerMutationError, OwnerRepositoryClient, RepositoryActorType,
+    RepositoryAuthorAssociation, RepositoryIdentity, RepositoryIssueKind, ResolutionDeadline,
+    SpecListFilter, UpdatedAt,
 };
 use std::{
     ffi::{OsStr, OsString},
@@ -514,7 +515,9 @@ fn owner_list_comments_reads_more_than_one_hundred() {
             serde_json::json!({
                 "databaseId": id,
                 "body": format!("comment {id}"),
-                "updatedAt": "2026-07-14T00:00:00Z"
+                "updatedAt": "2026-07-14T00:00:00Z",
+                "author": {"login":"akiojin","__typename":"User"},
+                "authorAssociation":"OWNER"
             })
         })
         .collect::<Vec<_>>();
@@ -527,7 +530,13 @@ fn owner_list_comments_reads_more_than_one_hundred() {
     ));
     transport.enqueue(ok_body(
         &serde_json::json!({"data":{"repository":{"issue":{"comments":{
-            "nodes":[{"databaseId":101,"body":"comment 101","updatedAt":"2026-07-14T00:00:01Z"}],
+            "nodes":[{
+                "databaseId":101,
+                "body":"comment 101",
+                "updatedAt":"2026-07-14T00:00:01Z",
+                "author":{"login":"akiojin","__typename":"User"},
+                "authorAssociation":"OWNER"
+            }],
             "pageInfo":{"hasNextPage":false,"endCursor":null}
         }}}}})
         .to_string(),
@@ -542,6 +551,104 @@ fn owner_list_comments_reads_more_than_one_hundred() {
         .expect("complete comment corpus");
     assert_eq!(collection.items().len(), 101);
     assert_eq!(client.transport().recorded().len(), 2);
+}
+
+#[test]
+fn owner_list_comments_preserves_comment_actor_identity() {
+    let transport = FakeTransport::new();
+    transport.enqueue(ok_body(
+        &serde_json::json!({"data":{"repository":{"issue":{"comments":{
+            "nodes":[{
+                "databaseId":501,
+                "body":"resolution marker",
+                "updatedAt":"2026-07-14T00:00:01Z",
+                "author":{"login":"akiojin","__typename":"User"},
+                "authorAssociation":"OWNER"
+            }],
+            "pageInfo":{"hasNextPage":false,"endCursor":null}
+        }}}}})
+        .to_string(),
+    ));
+    let client = client_with(transport);
+
+    let collection = client
+        .list_comments(
+            &RepositoryIdentity::gwt_upstream(),
+            IssueNumber(42),
+            &owner_deadline(),
+        )
+        .expect("complete comment corpus");
+
+    let comment = &collection.items()[0];
+    assert_eq!(comment.author_login.as_deref(), Some("akiojin"));
+    assert_eq!(comment.author_type, Some(RepositoryActorType::User));
+    assert_eq!(
+        comment.author_association,
+        Some(RepositoryAuthorAssociation::Owner)
+    );
+    let request = &client.transport().recorded()[0];
+    let request_body = request.body.as_deref().expect("GraphQL request body");
+    assert!(request_body.contains("authorAssociation"));
+    assert!(request_body.contains("__typename"));
+    assert!(request_body.contains("login"));
+}
+
+#[test]
+fn owner_list_comments_preserves_unattributed_or_unknown_actor_identity() {
+    let cases = [
+        (
+            serde_json::json!({
+            "databaseId":501,
+            "body":"resolution marker",
+            "updatedAt":"2026-07-14T00:00:01Z",
+            "authorAssociation":"OWNER"
+            }),
+            None,
+            Some(RepositoryAuthorAssociation::Owner),
+        ),
+        (
+            serde_json::json!({
+            "databaseId":501,
+            "body":"resolution marker",
+            "updatedAt":"2026-07-14T00:00:01Z",
+            "author":{"login":"akiojin","__typename":"UnknownActor"},
+            "authorAssociation":"OWNER"
+            }),
+            Some(RepositoryActorType::Unknown("UnknownActor".to_string())),
+            Some(RepositoryAuthorAssociation::Owner),
+        ),
+        (
+            serde_json::json!({
+            "databaseId":501,
+            "body":"resolution marker",
+            "updatedAt":"2026-07-14T00:00:01Z",
+            "author":{"login":"akiojin","__typename":"User"},
+            "authorAssociation":"UNKNOWN"
+            }),
+            Some(RepositoryActorType::User),
+            Some(RepositoryAuthorAssociation::Unknown("UNKNOWN".to_string())),
+        ),
+    ];
+
+    for (node, expected_type, expected_association) in cases {
+        let transport = FakeTransport::new();
+        transport.enqueue(ok_body(
+            &serde_json::json!({"data":{"repository":{"issue":{"comments":{
+                "nodes":[node],
+                "pageInfo":{"hasNextPage":false,"endCursor":null}
+            }}}}})
+            .to_string(),
+        ));
+        let comments = client_with(transport)
+            .list_comments(
+                &RepositoryIdentity::gwt_upstream(),
+                IssueNumber(42),
+                &owner_deadline(),
+            )
+            .expect("untrusted actor must not abort unrelated comments");
+        assert_eq!(comments.items()[0].author_type, expected_type);
+        assert_eq!(comments.items()[0].author_association, expected_association);
+    }
 }
 
 #[test]
@@ -561,6 +668,38 @@ fn owner_pagination_rejects_missing_and_repeated_cursors_as_partial() {
             .list_issues(&RepositoryIdentity::gwt_upstream(), &owner_deadline())
             .expect_err("invalid cursor must not produce a partial collection");
         assert!(matches!(error, ApiError::PartialPage { .. }));
+    }
+}
+
+#[test]
+fn owner_list_comments_rejects_invalid_required_identity_fields() {
+    let cases = [(0, "2026-07-14T00:00:01Z"), (501, "not-rfc3339")];
+
+    for (id, updated_at) in cases {
+        let transport = FakeTransport::new();
+        transport.enqueue(ok_body(
+            &serde_json::json!({"data":{"repository":{"issue":{"comments":{
+                "nodes":[{
+                    "databaseId":id,
+                    "body":"resolution marker",
+                    "updatedAt":updated_at,
+                    "author":{"login":"akiojin","__typename":"User"},
+                    "authorAssociation":"OWNER"
+                }],
+                "pageInfo":{"hasNextPage":false,"endCursor":null}
+            }}}}})
+            .to_string(),
+        ));
+
+        let error = client_with(transport)
+            .list_comments(
+                &RepositoryIdentity::gwt_upstream(),
+                IssueNumber(42),
+                &owner_deadline(),
+            )
+            .expect_err("malformed required comment identity must fail closed");
+
+        assert!(matches!(error, ApiError::Parse { .. }));
     }
 }
 
@@ -632,10 +771,10 @@ fn stalled_gh_auth_is_terminated_at_the_absolute_deadline() {
 fn owner_mutations_are_explicitly_targeted_and_close_is_read_back() {
     let transport = FakeTransport::new();
     transport.enqueue(created(
-        r#"{"id":501,"body":"occurrence","updated_at":"2026-07-14T00:00:00Z"}"#,
+        r#"{"id":501,"body":"occurrence","updated_at":"2026-07-14T00:00:00Z","user":{"login":"akiojin","type":"User"},"author_association":"OWNER"}"#,
     ));
     transport.enqueue(ok_body(
-        r#"{"data":{"repository":{"issue":{"comments":{"nodes":[{"databaseId":501,"body":"occurrence","updatedAt":"2026-07-14T00:00:01Z"}],"pageInfo":{"hasNextPage":false,"endCursor":null}}}}}}"#,
+        r#"{"data":{"repository":{"issue":{"comments":{"nodes":[{"databaseId":501,"body":"occurrence","updatedAt":"2026-07-14T00:00:01Z","author":{"login":"akiojin","__typename":"User"},"authorAssociation":"OWNER"}],"pageInfo":{"hasNextPage":false,"endCursor":null}}}}}}"#,
     ));
     transport.enqueue(created(
         r#"{"number":88,"title":"Created","body":"Body","state":"open","updated_at":"2026-07-14T00:00:00Z","labels":[]}"#,
@@ -696,7 +835,7 @@ fn owner_mutations_are_explicitly_targeted_and_close_is_read_back() {
 fn owner_create_requires_authoritative_readback_match() {
     let transport = FakeTransport::new();
     transport.enqueue(created(
-        r#"{"id":501,"body":"occurrence","updated_at":"2026-07-14T00:00:00Z"}"#,
+        r#"{"id":501,"body":"occurrence","updated_at":"2026-07-14T00:00:00Z","user":{"login":"akiojin","type":"User"},"author_association":"OWNER"}"#,
     ));
     transport.enqueue(ok_body(
         r#"{"data":{"repository":{"issue":{"comments":{"nodes":[],"pageInfo":{"hasNextPage":false,"endCursor":null}}}}}}"#,
@@ -839,6 +978,8 @@ fn owner_pagination_propagates_one_absolute_deadline_to_every_request() {
 
 #[test]
 fn owner_history_lookups_parse_pull_request_release_and_commit_comparison() {
+    let base = "a".repeat(40);
+    let head = "c".repeat(40);
     let transport = FakeTransport::new();
     transport.enqueue(ok_body(
         r#"{"number":7,"merged":true,"merge_commit_sha":"abc123","merged_at":"2026-07-01T00:00:00Z"}"#,
@@ -847,7 +988,15 @@ fn owner_history_lookups_parse_pull_request_release_and_commit_comparison() {
         r#"{"tag_name":"v9.66.0","target_commitish":"abc123","published_at":"2026-07-02T00:00:00Z"}"#,
     ));
     transport.enqueue(ok_body(
-        r#"{"status":"ahead","ahead_by":2,"behind_by":0,"base_commit":{"sha":"abc123"},"merge_base_commit":{"sha":"abc123"},"commits":[]}"#,
+        &serde_json::json!({
+            "status":"ahead",
+            "ahead_by":2,
+            "behind_by":0,
+            "base_commit":{"sha":base},
+            "merge_base_commit":{"sha":base},
+            "commits":[{"sha":"b".repeat(40)},{"sha":head}]
+        })
+        .to_string(),
     ));
     let client = client_with(transport);
     let repository = RepositoryIdentity::gwt_upstream();
@@ -862,10 +1011,309 @@ fn owner_history_lookups_parse_pull_request_release_and_commit_comparison() {
         .expect("published release");
     assert_eq!(release.target_commitish, "abc123");
     let comparison = client
-        .compare_commits(&repository, "abc123", "def456", &owner_deadline())
+        .compare_commits(&repository, &base, &head, &owner_deadline())
         .expect("comparison");
     assert_eq!(comparison.status, CommitComparisonStatus::Ahead);
     assert_eq!(comparison.ahead_by, 2);
+    assert_eq!(comparison.base_commit_sha, base);
+    assert_eq!(comparison.merge_base_commit_sha, base);
+    assert_eq!(comparison.head_commit_sha, head);
+}
+
+#[test]
+fn owner_comparison_derives_identical_head_from_resolved_base() {
+    let commit = "a".repeat(40);
+    let transport = FakeTransport::new();
+    transport.enqueue(ok_body(
+        &serde_json::json!({
+            "status":"identical",
+            "ahead_by":0,
+            "behind_by":0,
+            "base_commit":{"sha":commit},
+            "merge_base_commit":{"sha":commit},
+            "commits":[]
+        })
+        .to_string(),
+    ));
+
+    let comparison = client_with(transport)
+        .compare_commits(
+            &RepositoryIdentity::gwt_upstream(),
+            &commit,
+            &commit,
+            &owner_deadline(),
+        )
+        .expect("identical comparison");
+
+    assert_eq!(comparison.head_commit_sha, commit);
+}
+
+#[test]
+fn owner_comparison_rejects_non_full_resolved_commit_identities() {
+    let valid_base = "a".repeat(40);
+    let valid_merge_base = "b".repeat(40);
+    let valid_head = "c".repeat(40);
+    let cases = [
+        (
+            "short-base".to_string(),
+            valid_merge_base.clone(),
+            valid_head.clone(),
+        ),
+        (
+            valid_base.clone(),
+            "short-merge-base".to_string(),
+            valid_head.clone(),
+        ),
+        (
+            valid_base.clone(),
+            valid_merge_base.clone(),
+            "short-head".to_string(),
+        ),
+    ];
+
+    for (base_commit, merge_base_commit, head_commit) in cases {
+        let transport = FakeTransport::new();
+        transport.enqueue(ok_body(
+            &serde_json::json!({
+                "status":"diverged",
+                "ahead_by":2,
+                "behind_by":1,
+                "base_commit":{"sha":base_commit},
+                "merge_base_commit":{"sha":merge_base_commit},
+                "commits":[{"sha":head_commit}]
+            })
+            .to_string(),
+        ));
+
+        let error = client_with(transport)
+            .compare_commits(
+                &RepositoryIdentity::gwt_upstream(),
+                "refs/tags/v9.66.0",
+                "refs/heads/develop",
+                &owner_deadline(),
+            )
+            .expect_err("resolved commit identities must be full OIDs");
+
+        assert!(matches!(error, ApiError::Parse { .. }));
+    }
+}
+
+#[test]
+fn owner_comparison_rejects_mismatched_resolved_head_identity() {
+    let base = "a".repeat(40);
+    let requested_head = "c".repeat(40);
+    let transport = FakeTransport::new();
+    transport.enqueue(ok_body(
+        &serde_json::json!({
+            "status":"ahead",
+            "ahead_by":2,
+            "behind_by":0,
+            "base_commit":{"sha":base},
+            "merge_base_commit":{"sha":base},
+            "commits":[{"sha":"d".repeat(40)}]
+        })
+        .to_string(),
+    ));
+
+    let error = client_with(transport)
+        .compare_commits(
+            &RepositoryIdentity::gwt_upstream(),
+            &base,
+            &requested_head,
+            &owner_deadline(),
+        )
+        .expect_err("resolved head must match the requested full commit SHA");
+
+    assert!(matches!(error, ApiError::Parse { .. }));
+}
+
+#[test]
+fn owner_comparison_rejects_missing_final_ahead_commit_identity() {
+    let base = "a".repeat(40);
+    let transport = FakeTransport::new();
+    transport.enqueue(ok_body(
+        &serde_json::json!({
+            "status":"ahead",
+            "ahead_by":2,
+            "behind_by":0,
+            "base_commit":{"sha":base},
+            "merge_base_commit":{"sha":base},
+            "commits":[]
+        })
+        .to_string(),
+    ));
+
+    let error = client_with(transport)
+        .compare_commits(
+            &RepositoryIdentity::gwt_upstream(),
+            &base,
+            "refs/tags/v9.66.0",
+            &owner_deadline(),
+        )
+        .expect_err("ahead comparison must resolve its final head commit");
+
+    assert!(matches!(error, ApiError::Parse { .. }));
+}
+
+#[test]
+fn owner_comparison_rejects_ahead_head_equal_to_base() {
+    let base = "a".repeat(40);
+    let transport = FakeTransport::new();
+    transport.enqueue(ok_body(
+        &serde_json::json!({
+            "status":"ahead",
+            "ahead_by":1,
+            "behind_by":0,
+            "base_commit":{"sha":base},
+            "merge_base_commit":{"sha":base},
+            "commits":[{"sha":base}]
+        })
+        .to_string(),
+    ));
+
+    let error = client_with(transport)
+        .compare_commits(
+            &RepositoryIdentity::gwt_upstream(),
+            &base,
+            "refs/heads/develop",
+            &owner_deadline(),
+        )
+        .expect_err("ahead comparison must resolve head beyond base");
+
+    assert!(matches!(error, ApiError::Parse { .. }));
+}
+
+#[test]
+fn owner_history_rejects_missing_merged_flag() {
+    let transport = FakeTransport::new();
+    transport.enqueue(ok_body(
+        r#"{"number":7,"merge_commit_sha":"abc123","merged_at":"2026-07-01T00:00:00Z"}"#,
+    ));
+    let error = client_with(transport)
+        .fetch_merged_pull_request(
+            &RepositoryIdentity::gwt_upstream(),
+            IssueNumber(7),
+            &owner_deadline(),
+        )
+        .expect_err("missing merged identity must fail closed");
+
+    assert!(matches!(error, ApiError::Parse { .. }));
+}
+
+#[test]
+fn owner_history_rejects_mismatched_pull_request_identity() {
+    let pull_transport = FakeTransport::new();
+    pull_transport.enqueue(ok_body(
+        r#"{"number":8,"merged":true,"merge_commit_sha":"abc123","merged_at":"2026-07-01T00:00:00Z"}"#,
+    ));
+    let pull_error = client_with(pull_transport)
+        .fetch_merged_pull_request(
+            &RepositoryIdentity::gwt_upstream(),
+            IssueNumber(7),
+            &owner_deadline(),
+        )
+        .expect_err("mismatched pull request must fail closed");
+    assert!(matches!(pull_error, ApiError::Parse { .. }));
+}
+
+#[test]
+fn owner_history_validates_pull_request_identity_before_unmerged_outcome() {
+    for body in [r#"{"merged":false}"#, r#"{"number":8,"merged":false}"#] {
+        let transport = FakeTransport::new();
+        transport.enqueue(ok_body(body));
+
+        let error = client_with(transport)
+            .fetch_merged_pull_request(
+                &RepositoryIdentity::gwt_upstream(),
+                IssueNumber(7),
+                &owner_deadline(),
+            )
+            .expect_err("unmerged response must still identify the requested pull request");
+
+        assert!(matches!(error, ApiError::Parse { .. }), "{body}");
+    }
+}
+
+#[test]
+fn owner_history_rejects_mismatched_release_identity() {
+    let release_transport = FakeTransport::new();
+    release_transport.enqueue(ok_body(
+        r#"{"tag_name":"v9.65.0","target_commitish":"develop","published_at":"2026-07-02T00:00:00Z"}"#,
+    ));
+    let release_error = client_with(release_transport)
+        .fetch_release_by_tag(
+            &RepositoryIdentity::gwt_upstream(),
+            "v9.66.0",
+            &owner_deadline(),
+        )
+        .expect_err("mismatched release must fail closed");
+    assert!(matches!(release_error, ApiError::Parse { .. }));
+}
+
+#[test]
+fn owner_comparison_rejects_mismatched_resolved_base_identity() {
+    let requested_base = "a".repeat(40);
+    let resolved_base = "b".repeat(40);
+    let resolved_head = "c".repeat(40);
+    let transport = FakeTransport::new();
+    transport.enqueue(ok_body(
+        &serde_json::json!({
+            "status":"ahead",
+            "ahead_by":2,
+            "behind_by":0,
+            "base_commit":{"sha":resolved_base},
+            "merge_base_commit":{"sha":"b".repeat(40)},
+            "commits":[{"sha":resolved_head}]
+        })
+        .to_string(),
+    ));
+
+    let error = client_with(transport)
+        .compare_commits(
+            &RepositoryIdentity::gwt_upstream(),
+            &requested_base,
+            &"c".repeat(40),
+            &owner_deadline(),
+        )
+        .expect_err("resolved base must match the requested full commit SHA");
+
+    assert!(matches!(error, ApiError::Parse { .. }));
+}
+
+#[test]
+fn owner_comparison_rejects_malformed_forward_ancestry_shape() {
+    let base = "a".repeat(40);
+    let resolved_head = "c".repeat(40);
+    let malformed = [
+        ("ahead", 0, 0, base.clone()),
+        ("ahead", 2, 1, base.clone()),
+        ("ahead", 2, 0, "b".repeat(40)),
+        ("identical", 1, 0, base.clone()),
+    ];
+
+    for (status, ahead_by, behind_by, merge_base) in malformed {
+        let transport = FakeTransport::new();
+        transport.enqueue(ok_body(
+            &serde_json::json!({
+                "status":status,
+                "ahead_by":ahead_by,
+                "behind_by":behind_by,
+                "base_commit":{"sha":base},
+                "merge_base_commit":{"sha":merge_base},
+                "commits":[{"sha":resolved_head}]
+            })
+            .to_string(),
+        ));
+        let error = client_with(transport)
+            .compare_commits(
+                &RepositoryIdentity::gwt_upstream(),
+                &base,
+                "refs/heads/develop",
+                &owner_deadline(),
+            )
+            .expect_err("malformed ancestry response must fail closed");
+        assert!(matches!(error, ApiError::Parse { .. }));
+    }
 }
 
 #[test]

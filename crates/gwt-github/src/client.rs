@@ -361,6 +361,32 @@ pub struct RepositoryComment {
     pub id: CommentId,
     pub body: String,
     pub updated_at: UpdatedAt,
+    pub author_login: Option<String>,
+    pub author_type: Option<RepositoryActorType>,
+    pub author_association: Option<RepositoryAuthorAssociation>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub enum RepositoryActorType {
+    User,
+    Bot,
+    Organization,
+    Mannequin,
+    EnterpriseUserAccount,
+    Unknown(String),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub enum RepositoryAuthorAssociation {
+    Owner,
+    Member,
+    Collaborator,
+    Contributor,
+    FirstTimer,
+    FirstTimeContributor,
+    Mannequin,
+    None,
+    Unknown(String),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -396,9 +422,67 @@ pub enum CommitComparisonStatus {
 pub struct CommitComparison {
     pub base: String,
     pub head: String,
+    pub base_commit_sha: String,
+    pub merge_base_commit_sha: String,
+    pub head_commit_sha: String,
     pub status: CommitComparisonStatus,
     pub ahead_by: u64,
     pub behind_by: u64,
+}
+
+impl CommitComparison {
+    pub(crate) fn validate_response(&self, operation: &str) -> Result<(), ApiError> {
+        for (field, oid) in [
+            ("base_commit.sha", self.base_commit_sha.as_str()),
+            ("merge_base_commit.sha", self.merge_base_commit_sha.as_str()),
+            ("head commit sha", self.head_commit_sha.as_str()),
+        ] {
+            if !is_full_commit_oid(oid) {
+                return Err(ApiError::Parse {
+                    operation: operation.to_string(),
+                    message: format!("{field} is not a full commit OID"),
+                });
+            }
+        }
+        if is_full_commit_oid(&self.base) && self.base_commit_sha != self.base {
+            return Err(ApiError::Parse {
+                operation: operation.to_string(),
+                message: "resolved base commit does not match requested commit".to_string(),
+            });
+        }
+        if is_full_commit_oid(&self.head) && self.head_commit_sha != self.head {
+            return Err(ApiError::Parse {
+                operation: operation.to_string(),
+                message: "resolved head commit does not match requested commit".to_string(),
+            });
+        }
+        let valid_forward_shape = match self.status {
+            CommitComparisonStatus::Ahead => {
+                self.ahead_by > 0
+                    && self.behind_by == 0
+                    && self.merge_base_commit_sha == self.base_commit_sha
+                    && self.head_commit_sha != self.base_commit_sha
+            }
+            CommitComparisonStatus::Identical => {
+                self.ahead_by == 0
+                    && self.behind_by == 0
+                    && self.merge_base_commit_sha == self.base_commit_sha
+                    && self.head_commit_sha == self.base_commit_sha
+            }
+            CommitComparisonStatus::Behind | CommitComparisonStatus::Diverged => true,
+        };
+        if !valid_forward_shape {
+            return Err(ApiError::Parse {
+                operation: operation.to_string(),
+                message: "commit comparison ancestry shape is inconsistent".to_string(),
+            });
+        }
+        Ok(())
+    }
+}
+
+fn is_full_commit_oid(value: &str) -> bool {
+    matches!(value.len(), 40 | 64) && value.bytes().all(|byte| byte.is_ascii_hexdigit())
 }
 
 /// Deadline-aware, explicitly repository-targeted operations used by Durable

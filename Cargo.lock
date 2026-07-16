@@ -1433,6 +1433,7 @@ dependencies = [
 name = "gwt-github"
 version = "9.66.0"
 dependencies = [
+ "chrono",
  "gwt-core",
  "hex",
  "regex",

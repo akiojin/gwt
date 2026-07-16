@@ -10,20 +10,23 @@ use std::{
 
 use chrono::Utc;
 use gwt_github::client::{
-    ApiError as GitHubApiError, CreateRepositoryIssue, IssueNumber, IssueState, OwnerMutationError,
-    OwnerRepositoryClient, RepositoryComment, RepositoryIdentity, RepositoryIssue,
+    ApiError as GitHubApiError, CommitComparisonStatus, CreateRepositoryIssue, IssueNumber,
+    IssueState, OwnerMutationError, OwnerRepositoryClient, RepositoryActorType,
+    RepositoryAuthorAssociation, RepositoryComment, RepositoryIdentity, RepositoryIssue,
     RepositoryIssueKind, ResolutionDeadline,
 };
 use regex::Regex;
+use semver::Version;
+use serde::Deserialize;
 use sha2::{Digest, Sha256};
 
 use super::{
     improvement::{
         improvement_fingerprint, post_improvement_board_status, transition_candidate,
         typed_evidence_digest, BlockedReason, CandidateState, CaptureBudgetProfile,
-        DurableOwnerSnapshot, FailureSubcode, ImprovementCandidate, LinkedIssue, OccurrenceOrigin,
-        OccurrenceReplayProof, OwnerCandidate, OwnerKind, OwnerMatchBasis, ResolverSnapshot,
-        RetryMetadata, TypedFailureEvidence,
+        DurableOwnerSnapshot, FailureSubcode, ImprovementAuditEntry, ImprovementCandidate,
+        LinkedIssue, OccurrenceOrigin, OccurrenceReplayProof, OwnerCandidate, OwnerKind,
+        OwnerMatchBasis, ResolverSnapshot, RetryMetadata, TypedFailureEvidence,
     },
     improvement_contract::{OwnerProjectionOwner, OwnerProjectionOwnerKind},
     improvement_store::{
@@ -389,24 +392,41 @@ fn ensure_candidate_attempt_current(
     repo_root: &Path,
     candidate: &ImprovementCandidate,
 ) -> Result<(), gwt_github::SpecOpsError> {
-    let Some(expected) = candidate.attempt.as_ref() else {
-        return Ok(());
-    };
     let store = super::improvement_store::load_and_repair(repo_root)?;
     let stored = store
         .candidates
         .iter()
         .find(|stored| stored.id == candidate.id)
         .ok_or_else(|| owner_projection_error("candidate not found"))?;
-    let attempt = stored
-        .attempt
-        .as_ref()
-        .filter(|attempt| attempt.attempt_id == expected.attempt_id)
-        .ok_or_else(|| owner_projection_error("owner resolution attempt lease is stale"))?;
-    if attempt.expires_at <= Utc::now() {
+    if candidate.state != CandidateState::OwnerResolving
+        || candidate.dismissed_reason.is_some()
+        || stored.state != candidate.state
+        || stored.dismissed_reason != candidate.dismissed_reason
+        || stored.audit != candidate.audit
+    {
         return Err(owner_projection_error(
-            "owner resolution attempt lease has expired",
+            "candidate changed while Owner Resolution was running",
         ));
+    }
+    match candidate.attempt.as_ref() {
+        Some(expected) => {
+            let attempt = stored
+                .attempt
+                .as_ref()
+                .filter(|attempt| attempt.attempt_id == expected.attempt_id)
+                .ok_or_else(|| owner_projection_error("owner resolution attempt lease is stale"))?;
+            if attempt.expires_at <= Utc::now() {
+                return Err(owner_projection_error(
+                    "owner resolution attempt lease has expired",
+                ));
+            }
+        }
+        None if stored.attempt.is_some() => {
+            return Err(owner_projection_error(
+                "owner resolution attempt lease is stale",
+            ));
+        }
+        None => {}
     }
     Ok(())
 }
@@ -426,6 +446,10 @@ fn commit_owner_projection_and_source_success(
     let expected_occurrences = candidate.distinct_occurrences.clone();
     let expected_reconciliation_required = candidate.reconciliation_required;
     let expected_reconciliation_owner_numbers = candidate.reconciliation_owner_numbers.clone();
+    let expected_pending_create_resolution = candidate.pending_create_resolution.clone();
+    let expected_state = candidate.state;
+    let expected_dismissed_reason = candidate.dismissed_reason.clone();
+    let expected_audit = candidate.audit.clone();
     let candidate_id = candidate.id.clone();
 
     // Keep the source lock from the lease fence through both projection and
@@ -444,6 +468,10 @@ fn commit_owner_projection_and_source_success(
             || stored.distinct_occurrences != expected_occurrences
             || stored.reconciliation_required != expected_reconciliation_required
             || stored.reconciliation_owner_numbers != expected_reconciliation_owner_numbers
+            || stored.pending_create_resolution != expected_pending_create_resolution
+            || stored.state != expected_state
+            || stored.dismissed_reason != expected_dismissed_reason
+            || stored.audit != expected_audit
         {
             return Err(owner_projection_error(
                 "candidate changed while Owner Resolution was running",
@@ -787,7 +815,14 @@ fn apply_projection_binding(
     candidate.blocked_reason = None;
     candidate.failure_subcode = None;
     candidate.retry = None;
+    candidate.resolver_snapshot = None;
     candidate.attempt = None;
+    if let Some(pending_create_resolution) = candidate.pending_create_resolution.clone() {
+        super::improvement_store::clear_pending_create_resolution(
+            candidate,
+            &pending_create_resolution,
+        )?;
+    }
     if public_binding_changed || stable_status_changed {
         candidate.owner_status_generation = candidate
             .owner_status_generation
@@ -846,7 +881,11 @@ pub(super) enum OwnerPreflightOutcome {
     },
     Historical {
         owners: Vec<OwnerCandidate>,
+        comments_by_owner: BTreeMap<IssueNumber, Vec<RepositoryComment>>,
         corpus_generation: String,
+    },
+    RegressionCreateAuthorized {
+        authorization: ProvenRegressionAuthorization,
     },
     CreateAuthorized {
         authorization: ProvenZeroAuthorization,
@@ -874,6 +913,34 @@ pub(super) struct ProvenZeroAuthorization {
     payload: PublicIssuePayload,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct ProvenRegressionAuthorization {
+    candidate_id: String,
+    fingerprint: String,
+    corpus_generation: String,
+    historical_owner: OwnerCandidate,
+    recurrence_occurrence_keys: Vec<String>,
+    recurrence_proof_digest: String,
+    payload: PublicIssuePayload,
+}
+
+#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+struct HistoricalResolutionMarker {
+    merged_pr_number: u64,
+    merge_commit_sha: String,
+    verified_at: String,
+    first_fixed_release: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct TrustedHistoricalResolution {
+    marker: HistoricalResolutionMarker,
+    comment_id: u64,
+    comment_updated_at: String,
+    author_login: String,
+}
+
 #[derive(Debug)]
 struct CreatedOwnerMutation {
     readback: RepositoryIssue,
@@ -890,6 +957,7 @@ enum OwnerInspection {
     },
     Historical {
         owners: Vec<OwnerCandidate>,
+        comments_by_owner: BTreeMap<IssueNumber, Vec<RepositoryComment>>,
         corpus_generation: String,
     },
     Zero {
@@ -919,6 +987,7 @@ enum OwnerResolutionCommitError {
     PreSubmit {
         failure: OwnerResolutionFailure,
         source: gwt_github::SpecOpsError,
+        clear_create_root: bool,
     },
     RemoteOutcomeUnknown {
         failure: OwnerResolutionFailure,
@@ -1063,11 +1132,42 @@ where
         }),
         Ok(OwnerInspection::Historical {
             owners,
+            comments_by_owner,
             corpus_generation,
-        }) => Ok(OwnerPreflightOutcome::Historical {
-            owners,
-            corpus_generation,
-        }),
+        }) => {
+            if !candidate
+                .distinct_occurrences
+                .iter()
+                .any(|occurrence| occurrence.recurrence.is_some())
+            {
+                return Ok(OwnerPreflightOutcome::Historical {
+                    owners,
+                    comments_by_owner,
+                    corpus_generation,
+                });
+            }
+            let authorization = match env.improvement_owner_client(deadline) {
+                Ok(client) => authorize_historical_regression(
+                    client,
+                    candidate,
+                    &owners,
+                    &comments_by_owner,
+                    &corpus_generation,
+                    &public_context,
+                    deadline,
+                ),
+                Err(error) => Err(owner_failure_from_api(&error)),
+            };
+            match authorization {
+                Ok(authorization) => {
+                    Ok(OwnerPreflightOutcome::RegressionCreateAuthorized { authorization })
+                }
+                Err(failure) => {
+                    block_owner_resolution(env, candidate, failure, None, publish_failure_status)?;
+                    Ok(owner_failure_outcome(candidate, failure))
+                }
+            }
+        }
         Ok(OwnerInspection::DuplicateExactIssues {
             owners,
             comments_by_owner,
@@ -1151,6 +1251,328 @@ where
             Ok(owner_failure_outcome(candidate, failure))
         }
     }
+}
+
+fn authorize_historical_regression<C: OwnerRepositoryClient + ?Sized>(
+    client: &C,
+    candidate: &ImprovementCandidate,
+    owners: &[OwnerCandidate],
+    comments_by_owner: &BTreeMap<IssueNumber, Vec<RepositoryComment>>,
+    corpus_generation: &str,
+    public_context: &PublicMutationContext,
+    deadline: &ResolutionDeadline,
+) -> Result<ProvenRegressionAuthorization, OwnerResolutionFailure> {
+    let ambiguous = || OwnerResolutionFailure {
+        reason: BlockedReason::Ambiguity,
+        failure_subcode: None,
+        remediation: "VERIFY_HISTORICAL_RECURRENCE",
+    };
+    let durable_owner = candidate.owner.as_ref().ok_or_else(ambiguous)?;
+    let fingerprint = candidate.fingerprint.as_deref().ok_or_else(ambiguous)?;
+    let mut current_generation_owners = owners
+        .iter()
+        .filter(|owner| owner.number == durable_owner.number);
+    let historical_owner = current_generation_owners.next().ok_or_else(ambiguous)?;
+    if current_generation_owners.next().is_some() {
+        return Err(ambiguous());
+    }
+    if corpus_generation.trim().is_empty()
+        || historical_owner.active
+        || historical_owner.selectable
+        || historical_owner.kind != OwnerKind::Issue
+        || historical_owner.match_basis != OwnerMatchBasis::Fingerprint
+        || durable_owner.number != historical_owner.number
+        || durable_owner.kind != historical_owner.kind
+        || durable_owner.fingerprint != fingerprint
+    {
+        return Err(ambiguous());
+    }
+
+    let comments = comments_by_owner
+        .get(&IssueNumber(historical_owner.number))
+        .ok_or_else(ambiguous)?;
+    let resolution = trusted_historical_resolution(comments).ok_or_else(ambiguous)?;
+    if resolution.marker.merged_pr_number == 0
+        || !is_full_git_commit_oid(&resolution.marker.merge_commit_sha)
+        || resolution.marker.first_fixed_release.trim().is_empty()
+    {
+        return Err(ambiguous());
+    }
+
+    let repository = RepositoryIdentity::gwt_upstream();
+    let merged_pr = client
+        .fetch_merged_pull_request(
+            &repository,
+            IssueNumber(resolution.marker.merged_pr_number),
+            deadline,
+        )
+        .map_err(|error| owner_failure_from_api(&error))?
+        .ok_or_else(ambiguous)?;
+    if merged_pr.number != IssueNumber(resolution.marker.merged_pr_number)
+        || merged_pr.merge_commit_sha != resolution.marker.merge_commit_sha
+    {
+        return Err(ambiguous());
+    }
+    let release = client
+        .fetch_release_by_tag(
+            &repository,
+            &resolution.marker.first_fixed_release,
+            deadline,
+        )
+        .map_err(|error| owner_failure_from_api(&error))?
+        .ok_or_else(ambiguous)?;
+    if release.tag_name != resolution.marker.first_fixed_release {
+        return Err(ambiguous());
+    }
+    let release_ref = format!("refs/tags/{}", release.tag_name);
+    let release_contains_merge = client
+        .compare_commits(
+            &repository,
+            &resolution.marker.merge_commit_sha,
+            &release_ref,
+            deadline,
+        )
+        .map_err(|error| owner_failure_from_api(&error))?;
+    if !matches!(
+        release_contains_merge.status,
+        CommitComparisonStatus::Ahead | CommitComparisonStatus::Identical
+    ) {
+        return Err(ambiguous());
+    }
+    let release_commit_sha = release_contains_merge.head_commit_sha.clone();
+
+    let merged_at = parse_history_timestamp(&merged_pr.merged_at).ok_or_else(ambiguous)?;
+    let published_at = parse_history_timestamp(&release.published_at).ok_or_else(ambiguous)?;
+    let verified_at =
+        parse_history_timestamp(&resolution.marker.verified_at).ok_or_else(ambiguous)?;
+    let comment_updated_at =
+        parse_history_timestamp(&resolution.comment_updated_at).ok_or_else(ambiguous)?;
+    let fixed_at = std::cmp::max(merged_at, published_at);
+    if merged_at > published_at || verified_at < fixed_at || verified_at > comment_updated_at {
+        return Err(ambiguous());
+    }
+    let fixed_version = parse_release_version(&release.tag_name).ok_or_else(ambiguous)?;
+
+    let resolution_cutoff = std::cmp::max(fixed_at, verified_at);
+    let mut recurrence_occurrences = Vec::new();
+    for occurrence in candidate
+        .distinct_occurrences
+        .iter()
+        .filter(|occurrence| occurrence.recurrence.is_some() && occurrence.qualifies_unattended)
+    {
+        let recurrence = occurrence.recurrence.as_ref().expect("filtered recurrence");
+        let observed_at = parse_history_timestamp(&recurrence.observed_at).ok_or_else(ambiguous)?;
+        let captured_at = parse_history_timestamp(&occurrence.captured_at).ok_or_else(ambiguous)?;
+        if observed_at > captured_at {
+            return Err(ambiguous());
+        }
+        if observed_at > resolution_cutoff {
+            recurrence_occurrences.push(occurrence);
+        }
+    }
+    recurrence_occurrences.sort_by(|left, right| left.opaque_key.cmp(&right.opaque_key));
+    if recurrence_occurrences.is_empty() {
+        return Err(ambiguous());
+    }
+    for occurrence in &recurrence_occurrences {
+        let recurrence = occurrence.recurrence.as_ref().expect("filtered recurrence");
+        if recurrence.installed_version.is_none() && recurrence.build_commit.is_none() {
+            return Err(ambiguous());
+        }
+        if let Some(installed_version) = recurrence.installed_version.as_deref() {
+            let installed_version =
+                parse_release_version(installed_version).ok_or_else(ambiguous)?;
+            if installed_version <= fixed_version {
+                return Err(ambiguous());
+            }
+        }
+        if let Some(build_commit) = recurrence.build_commit.as_deref() {
+            if !is_full_git_commit_oid(build_commit) {
+                return Err(ambiguous());
+            }
+            let comparison = client
+                .compare_commits(&repository, &release_commit_sha, build_commit, deadline)
+                .map_err(|error| owner_failure_from_api(&error))?;
+            if comparison.status != CommitComparisonStatus::Ahead {
+                return Err(ambiguous());
+            }
+        }
+    }
+
+    let recurrence_occurrence_keys = recurrence_occurrences
+        .iter()
+        .map(|occurrence| occurrence.opaque_key.clone())
+        .collect::<Vec<_>>();
+    let mut proof_fields = vec![
+        historical_owner.number.to_string(),
+        fingerprint.to_string(),
+        resolution.comment_id.to_string(),
+        resolution.comment_updated_at.clone(),
+        resolution.author_login.clone(),
+        resolution.marker.merged_pr_number.to_string(),
+        resolution.marker.merge_commit_sha.clone(),
+        merged_pr.merged_at.clone(),
+        resolution.marker.verified_at.clone(),
+        release.tag_name.clone(),
+        release_commit_sha,
+        release.published_at.clone(),
+    ];
+    for occurrence in &recurrence_occurrences {
+        proof_fields.push(occurrence.opaque_key.clone());
+        proof_fields.push(occurrence.evidence_digest.clone());
+    }
+    let proof_refs = proof_fields.iter().map(String::as_str).collect::<Vec<_>>();
+    let recurrence_proof_digest = public_payload_digest(
+        "gwt.improvement.historical-recurrence-proof.v1",
+        &proof_refs,
+    );
+    let payload = render_regression_issue_payload(
+        candidate,
+        historical_owner.number,
+        &recurrence_proof_digest,
+        public_context,
+    )
+    .map_err(|_| OwnerResolutionFailure {
+        reason: BlockedReason::Privacy,
+        failure_subcode: None,
+        remediation: "RECAPTURE_SAFE_TYPED_EVIDENCE",
+    })?;
+    Ok(ProvenRegressionAuthorization {
+        candidate_id: candidate.id.clone(),
+        fingerprint: fingerprint.to_string(),
+        corpus_generation: corpus_generation.to_string(),
+        historical_owner: historical_owner.clone(),
+        recurrence_occurrence_keys,
+        recurrence_proof_digest,
+        payload,
+    })
+}
+
+fn trusted_historical_resolution(
+    comments: &[RepositoryComment],
+) -> Option<TrustedHistoricalResolution> {
+    let mut resolutions = Vec::new();
+    for comment in comments {
+        let marker_payloads = historical_resolution_marker_payloads(&comment.body)?;
+        if marker_payloads.is_empty() {
+            continue;
+        }
+        let author_login = comment
+            .author_login
+            .as_deref()
+            .filter(|login| !login.trim().is_empty());
+        let actor_is_trusted = matches!(
+            comment.author_type,
+            Some(RepositoryActorType::User | RepositoryActorType::EnterpriseUserAccount)
+        ) && matches!(
+            comment.author_association,
+            Some(
+                RepositoryAuthorAssociation::Owner
+                    | RepositoryAuthorAssociation::Member
+                    | RepositoryAuthorAssociation::Collaborator
+            )
+        );
+        let author_login = author_login.filter(|_| actor_is_trusted)?;
+        for marker_json in marker_payloads {
+            let marker = serde_json::from_str::<HistoricalResolutionMarker>(&marker_json).ok()?;
+            resolutions.push(TrustedHistoricalResolution {
+                marker,
+                comment_id: comment.id.0,
+                comment_updated_at: comment.updated_at.0.clone(),
+                author_login: author_login.to_string(),
+            });
+        }
+    }
+    let [resolution] = resolutions.as_slice() else {
+        return None;
+    };
+    Some(resolution.clone())
+}
+
+fn historical_resolution_marker_payloads(body: &str) -> Option<Vec<String>> {
+    const TOKEN: &str = "gwt-improvement-resolution:v1";
+    const PREFIX: &str = "<!-- gwt-improvement-resolution:v1 ";
+    const SUFFIX: &str = " -->";
+    let mut code_fence: Option<(u8, usize)> = None;
+    let mut payloads = Vec::new();
+    for line in body.lines() {
+        if let Some((delimiter, length, trailing_blank)) = markdown_fence_delimiter(line) {
+            match code_fence {
+                Some((open_delimiter, open_length))
+                    if delimiter == open_delimiter && length >= open_length && trailing_blank =>
+                {
+                    code_fence = None;
+                    continue;
+                }
+                None => {
+                    code_fence = Some((delimiter, length));
+                    continue;
+                }
+                _ => {}
+            }
+        }
+        if code_fence.is_some() || !line.contains(TOKEN) {
+            continue;
+        }
+        let payload = line.strip_prefix(PREFIX)?.strip_suffix(SUFFIX)?;
+        if payload.trim() != payload || payload.is_empty() {
+            return None;
+        }
+        payloads.push(payload.to_string());
+    }
+    Some(payloads)
+}
+
+fn parse_history_timestamp(value: &str) -> Option<chrono::DateTime<chrono::FixedOffset>> {
+    chrono::DateTime::parse_from_rfc3339(value).ok()
+}
+
+fn parse_release_version(value: &str) -> Option<Version> {
+    let normalized = value.strip_prefix('v').unwrap_or(value);
+    if normalized.is_empty() || normalized.starts_with('v') {
+        return None;
+    }
+    Version::parse(normalized).ok()
+}
+
+fn is_full_git_commit_oid(value: &str) -> bool {
+    matches!(value.len(), 40 | 64) && value.bytes().all(|byte| byte.is_ascii_hexdigit())
+}
+
+fn render_regression_issue_payload(
+    candidate: &ImprovementCandidate,
+    historical_owner_number: u64,
+    recurrence_proof_digest: &str,
+    context: &PublicMutationContext,
+) -> Result<PublicIssuePayload, PrivacyViolation> {
+    if historical_owner_number == 0
+        || !recurrence_proof_digest
+            .strip_prefix("sha256:")
+            .is_some_and(|digest| {
+                digest.len() == 64 && digest.bytes().all(|byte| byte.is_ascii_hexdigit())
+            })
+    {
+        return Err(PrivacyViolation::new(
+            PrivacyViolationKind::InvalidTemplateField,
+        ));
+    }
+    let mut payload = render_public_issue_payload(candidate, context)?;
+    payload.body.push_str(&format!(
+        "\n## Verified recurrence\n\n- Historical owner: #{historical_owner_number}\n- Recurrence proof: {recurrence_proof_digest}\n\n<!-- gwt:improvement-regression:v1 historical:{historical_owner_number} proof:{recurrence_proof_digest} -->\n"
+    ));
+    let evidence = candidate
+        .typed_evidence
+        .as_ref()
+        .ok_or_else(|| PrivacyViolation::new(PrivacyViolationKind::InvalidTemplateField))?;
+    let identity = typed_public_identity(candidate, evidence)?;
+    validate_public_payload(
+        &payload,
+        &context.with_candidate(
+            candidate,
+            &[&identity.evidence_digest, &identity.fingerprint],
+        ),
+    )?;
+    Ok(payload)
 }
 
 fn owner_failure_outcome(
@@ -1296,6 +1718,8 @@ where
         });
     let comment_owner_numbers = if active_owner_numbers.len() == 1 || duplicate_exact_issues {
         active_owner_numbers.clone()
+    } else if active_owner_numbers.is_empty() {
+        matches.keys().copied().collect()
     } else {
         Vec::new()
     };
@@ -1386,6 +1810,7 @@ where
         }
         return Ok(OwnerInspection::Historical {
             owners,
+            comments_by_owner,
             corpus_generation,
         });
     }
@@ -1457,6 +1882,21 @@ fn verify_reconciliation_cleanup<E: CliEnv>(
                 "known duplicate owner cleanup is not authoritatively verified",
             ));
         }
+        let comments = client
+            .list_comments(&repository, IssueNumber(duplicate_number), deadline)
+            .map_err(gwt_github::SpecOpsError::from)?;
+        if !comments.items().iter().any(|comment| {
+            comment_matches_reconciliation(
+                comment,
+                canonical_owner_number,
+                duplicate_number,
+                fingerprint,
+            )
+        }) {
+            return Err(owner_projection_error(
+                "known duplicate owner reconciliation comment is not authoritatively verified",
+            ));
+        }
     }
     Ok(true)
 }
@@ -1467,6 +1907,43 @@ fn commit_active_owner_resolution<E: CliEnv>(
     owner: &OwnerCandidate,
     comments: &[RepositoryComment],
     deadline: &ResolutionDeadline,
+) -> Result<(), OwnerResolutionCommitError> {
+    commit_active_owner_resolution_with_audit(env, candidate, owner, comments, deadline, None, None)
+}
+
+fn commit_active_owner_resolution_for_attempt<E: CliEnv>(
+    env: &mut E,
+    candidate: &mut ImprovementCandidate,
+    token: &ResolutionAttemptToken,
+    owner: &OwnerCandidate,
+    comments: &[RepositoryComment],
+    deadline: &ResolutionDeadline,
+) -> Result<(), OwnerResolutionCommitError> {
+    commit_active_owner_resolution_with_audit(
+        env,
+        candidate,
+        owner,
+        comments,
+        deadline,
+        Some(token),
+        None,
+    )
+}
+
+#[derive(Clone, Copy)]
+struct ManualOwnerSelectionAudit<'a> {
+    token: &'a ResolutionAttemptToken,
+    snapshot: &'a ResolverSnapshot,
+}
+
+fn commit_active_owner_resolution_with_audit<E: CliEnv>(
+    env: &mut E,
+    candidate: &mut ImprovementCandidate,
+    owner: &OwnerCandidate,
+    comments: &[RepositoryComment],
+    deadline: &ResolutionDeadline,
+    attempt_token: Option<&ResolutionAttemptToken>,
+    manual_audit: Option<ManualOwnerSelectionAudit<'_>>,
 ) -> Result<(), OwnerResolutionCommitError> {
     if !owner.active || !owner.selectable || owner.match_basis == OwnerMatchBasis::Semantic {
         return Err(pre_submit_commit_error(
@@ -1489,7 +1966,7 @@ fn commit_active_owner_resolution<E: CliEnv>(
                 error,
             )
         })?;
-    let fingerprint = candidate.fingerprint.as_deref().ok_or_else(|| {
+    let fingerprint = candidate.fingerprint.clone().ok_or_else(|| {
         pre_submit_commit_error(
             BlockedReason::Routing,
             "CAPTURE_TYPED_EVIDENCE",
@@ -1522,15 +1999,17 @@ fn commit_active_owner_resolution<E: CliEnv>(
         let initial_readback = client
             .fetch_issue(&repository, IssueNumber(owner.number), deadline)
             .map_err(|error| active_api_commit_error(error, remote_mutation_seen))?;
-        validate_active_owner_readback(owner, fingerprint, &initial_readback).map_err(|error| {
-            active_spec_commit_error(
-                error,
-                remote_mutation_seen,
-                BlockedReason::Readback,
-                "REFRESH_OWNER_CORPUS",
-            )
-        })?;
-        let verified_owner = durable_owner_from_readback(&initial_readback, fingerprint);
+        validate_active_owner_readback(owner, &fingerprint, &initial_readback).map_err(
+            |error| {
+                active_spec_commit_error(
+                    error,
+                    remote_mutation_seen,
+                    BlockedReason::Readback,
+                    "REFRESH_OWNER_CORPUS",
+                )
+            },
+        )?;
+        let verified_owner = durable_owner_from_readback(&initial_readback, &fingerprint);
         validate_projection_owner_for_candidate(candidate, &verified_owner, &public_context)
             .map_err(|error| {
                 active_spec_commit_error(
@@ -1601,10 +2080,29 @@ fn commit_active_owner_resolution<E: CliEnv>(
 
         for (occurrence, payload) in occurrences.iter().zip(&payloads) {
             if comments.iter().any(|comment| {
-                comment_matches_occurrence(comment, &occurrence.opaque_key, fingerprint)
+                comment_matches_occurrence(comment, &occurrence.opaque_key, &fingerprint)
             }) {
                 continue;
             }
+            let intent = ResolutionAttemptIntent::OccurrenceComments {
+                owner_number: owner.number,
+                occurrence_keys: vec![occurrence.opaque_key.clone()],
+                public_payload_digest: public_payload_digest(
+                    "gwt.improvement.owner-comment-intent.v1",
+                    &[&occurrence.opaque_key, &payload.body],
+                ),
+            };
+            if let Some(token) = attempt_token {
+                mark_resolution_attempt_submitted(&repo_root, candidate, token, intent.clone())?;
+            }
+            ensure_candidate_attempt_current(&repo_root, candidate).map_err(|error| {
+                active_spec_commit_error(
+                    error,
+                    remote_mutation_seen,
+                    BlockedReason::Store,
+                    "RELOAD_CANDIDATE_STORE",
+                )
+            })?;
             let created = match client.create_owner_comment(
                 &repository,
                 IssueNumber(owner.number),
@@ -1629,6 +2127,25 @@ fn commit_active_owner_resolution<E: CliEnv>(
                     "REFRESH_OWNER_CORPUS",
                 ));
             }
+            let readback_comments = client
+                .list_comments(&repository, IssueNumber(owner.number), deadline)
+                .map_err(|error| active_api_commit_error(error, remote_mutation_seen))?;
+            if !readback_comments.items().iter().any(|comment| {
+                comment_matches_occurrence(comment, &occurrence.opaque_key, &fingerprint)
+            }) {
+                return Err(active_spec_commit_error(
+                    owner_projection_error(
+                        "active owner occurrence comment was absent from step readback",
+                    ),
+                    remote_mutation_seen,
+                    BlockedReason::Readback,
+                    "REFRESH_OWNER_CORPUS",
+                ));
+            }
+            if let Some(token) = attempt_token {
+                complete_occurrence_comment_step(&repo_root, candidate, token, &intent)?;
+            }
+            remote_mutation_seen = false;
         }
 
         let final_comments = client
@@ -1640,7 +2157,7 @@ fn commit_active_owner_resolution<E: CliEnv>(
                 .items()
                 .iter()
                 .filter(|comment| {
-                    comment_matches_occurrence(comment, &occurrence.opaque_key, fingerprint)
+                    comment_matches_occurrence(comment, &occurrence.opaque_key, &fingerprint)
                 })
                 .map(|comment| comment.id.0)
                 .collect::<Vec<_>>();
@@ -1662,7 +2179,7 @@ fn commit_active_owner_resolution<E: CliEnv>(
         let final_readback = client
             .fetch_issue(&repository, IssueNumber(owner.number), deadline)
             .map_err(|error| active_api_commit_error(error, remote_mutation_seen))?;
-        validate_active_owner_readback(owner, fingerprint, &final_readback).map_err(|error| {
+        validate_active_owner_readback(owner, &fingerprint, &final_readback).map_err(|error| {
             active_spec_commit_error(
                 error,
                 remote_mutation_seen,
@@ -1670,7 +2187,7 @@ fn commit_active_owner_resolution<E: CliEnv>(
                 "REFRESH_OWNER_CORPUS",
             )
         })?;
-        let final_owner = durable_owner_from_readback(&final_readback, fingerprint);
+        let final_owner = durable_owner_from_readback(&final_readback, &fingerprint);
         validate_projection_owner_for_candidate(candidate, &final_owner, &public_context).map_err(
             |error| {
                 active_spec_commit_error(
@@ -1699,6 +2216,25 @@ fn commit_active_owner_resolution<E: CliEnv>(
         }
         projection_commits
     };
+
+    if let Some(manual_audit) = manual_audit {
+        let audited = append_manual_owner_selection_audit(
+            &repo_root,
+            candidate,
+            manual_audit.token,
+            owner.number,
+            manual_audit.snapshot,
+        )
+        .map_err(|error| {
+            active_spec_commit_error(
+                error,
+                remote_mutation_seen,
+                BlockedReason::LocalCommit,
+                "REPAIR_OWNER_PROJECTION",
+            )
+        })?;
+        *candidate = audited;
+    }
 
     let repaired = commit_owner_projection_and_source_success(
         &repo_root,
@@ -1831,6 +2367,110 @@ fn create_new_owner_mutation<E: CliEnv>(
     })
 }
 
+fn create_regression_owner_mutation<E: CliEnv>(
+    env: &mut E,
+    candidate: &mut ImprovementCandidate,
+    authorization: &ProvenRegressionAuthorization,
+    deadline: &ResolutionDeadline,
+) -> Result<CreatedOwnerMutation, OwnerResolutionCommitError> {
+    let repo_root = env.repo_path().to_path_buf();
+    let fingerprint = candidate.fingerprint.clone().ok_or_else(|| {
+        pre_submit_commit_error(
+            BlockedReason::Routing,
+            "CAPTURE_TYPED_EVIDENCE",
+            owner_projection_error("candidate fingerprint is missing"),
+        )
+    })?;
+    let durable_owner_matches = candidate.owner.as_ref().is_some_and(|owner| {
+        owner.number == authorization.historical_owner.number && owner.fingerprint == fingerprint
+    });
+    if candidate.id != authorization.candidate_id
+        || fingerprint != authorization.fingerprint
+        || authorization.corpus_generation.trim().is_empty()
+        || candidate.state != CandidateState::OwnerResolving
+        || authorization.historical_owner.active
+        || authorization.historical_owner.selectable
+        || !durable_owner_matches
+    {
+        return Err(pre_submit_commit_error(
+            BlockedReason::Ambiguity,
+            "VERIFY_HISTORICAL_RECURRENCE",
+            owner_projection_error("regression authorization does not match the candidate"),
+        ));
+    }
+    validate_regression_occurrence_keys(candidate, &authorization.recurrence_occurrence_keys)?;
+
+    let public_context = PublicMutationContext::for_repo_with_deadline(&repo_root, deadline);
+    let rendered = render_regression_issue_payload(
+        candidate,
+        authorization.historical_owner.number,
+        &authorization.recurrence_proof_digest,
+        &public_context,
+    )
+    .map_err(|error| {
+        pre_submit_commit_error(
+            BlockedReason::Privacy,
+            "RECAPTURE_SAFE_TYPED_EVIDENCE",
+            privacy_as_owner_spec_error(error),
+        )
+    })?;
+    if rendered != authorization.payload {
+        return Err(pre_submit_commit_error(
+            BlockedReason::Privacy,
+            "RECAPTURE_SAFE_TYPED_EVIDENCE",
+            owner_projection_error("authorized regression payload changed before owner creation"),
+        ));
+    }
+    validate_source_occurrence_snapshot(&repo_root, candidate, &candidate.distinct_occurrences)
+        .map_err(|error| {
+            pre_submit_commit_error(BlockedReason::Store, "RELOAD_CANDIDATE_STORE", error)
+        })?;
+
+    let repository = RepositoryIdentity::gwt_upstream();
+    let input = CreateRepositoryIssue {
+        title: authorization.payload.title.clone(),
+        body: authorization.payload.body.clone(),
+        labels: Vec::new(),
+    };
+    let readback = env
+        .improvement_owner_client(deadline)
+        .map_err(pre_submit_commit_error_from_api)?
+        .create_owner_issue(&repository, &input, deadline)
+        .map_err(commit_error_from_mutation)?;
+    Ok(CreatedOwnerMutation {
+        readback,
+        input,
+        fingerprint,
+    })
+}
+
+fn validate_regression_occurrence_keys(
+    candidate: &ImprovementCandidate,
+    occurrence_keys: &[String],
+) -> Result<(), OwnerResolutionCommitError> {
+    if occurrence_keys.is_empty()
+        || occurrence_keys.windows(2).any(|pair| pair[0] >= pair[1])
+        || occurrence_keys.iter().any(|key| {
+            candidate
+                .distinct_occurrences
+                .iter()
+                .find(|occurrence| occurrence.opaque_key == *key)
+                .is_none_or(|occurrence| {
+                    occurrence.recurrence.is_none() || !occurrence.qualifies_unattended
+                })
+        })
+    {
+        return Err(pre_submit_commit_error(
+            BlockedReason::Ambiguity,
+            "VERIFY_HISTORICAL_RECURRENCE",
+            owner_projection_error(
+                "regression authorization requires sorted recurrence occurrence keys",
+            ),
+        ));
+    }
+    Ok(())
+}
+
 fn commit_created_owner_readback<E: CliEnv>(
     env: &mut E,
     candidate: &mut ImprovementCandidate,
@@ -1839,6 +2479,43 @@ fn commit_created_owner_readback<E: CliEnv>(
     fingerprint: &str,
     deadline: &ResolutionDeadline,
 ) -> Result<(), OwnerResolutionCommitError> {
+    let occurrence_keys = candidate
+        .distinct_occurrences
+        .iter()
+        .map(|occurrence| occurrence.opaque_key.clone())
+        .collect::<Vec<_>>();
+    commit_created_owner_readback_for_occurrences(
+        env,
+        candidate,
+        readback,
+        input,
+        fingerprint,
+        CreatedOwnerOccurrenceCommit {
+            occurrence_keys: &occurrence_keys,
+            attempt_token: None,
+        },
+        deadline,
+    )
+}
+
+struct CreatedOwnerOccurrenceCommit<'a> {
+    occurrence_keys: &'a [String],
+    attempt_token: Option<&'a ResolutionAttemptToken>,
+}
+
+fn commit_created_owner_readback_for_occurrences<E: CliEnv>(
+    env: &mut E,
+    candidate: &mut ImprovementCandidate,
+    readback: &RepositoryIssue,
+    input: &CreateRepositoryIssue,
+    fingerprint: &str,
+    occurrence_commit: CreatedOwnerOccurrenceCommit<'_>,
+    deadline: &ResolutionDeadline,
+) -> Result<(), OwnerResolutionCommitError> {
+    let CreatedOwnerOccurrenceCommit {
+        occurrence_keys,
+        attempt_token,
+    } = occurrence_commit;
     let repo_root = env.repo_path().to_path_buf();
     ensure_candidate_attempt_current(&repo_root, candidate).map_err(|error| {
         remote_commit_error(BlockedReason::LocalCommit, "REPAIR_OWNER_PROJECTION", error)
@@ -1847,7 +2524,7 @@ fn commit_created_owner_readback<E: CliEnv>(
     validate_new_owner_readback(readback, input, fingerprint).map_err(|error| {
         remote_commit_error(BlockedReason::Readback, "REFRESH_OWNER_CORPUS", error)
     })?;
-    let verified_owner = durable_owner_from_readback(readback, fingerprint);
+    let mut verified_owner = durable_owner_from_readback(readback, fingerprint);
     let reconciliation_cleanup_verified =
         verify_reconciliation_cleanup(env, candidate, verified_owner.number, deadline).map_err(
             |error| {
@@ -1861,8 +2538,37 @@ fn commit_created_owner_readback<E: CliEnv>(
     validate_projection_owner_for_candidate(candidate, &verified_owner, &public_context).map_err(
         |error| remote_commit_error(BlockedReason::LocalCommit, "REPAIR_OWNER_PROJECTION", error),
     )?;
-    let occurrences = candidate.distinct_occurrences.clone();
-    let projection_commits = occurrences
+    let occurrence_key_set = occurrence_keys
+        .iter()
+        .map(String::as_str)
+        .collect::<BTreeSet<_>>();
+    if occurrence_key_set.is_empty() || occurrence_key_set.len() != occurrence_keys.len() {
+        return Err(remote_commit_error(
+            BlockedReason::LocalCommit,
+            "REPAIR_OWNER_PROJECTION",
+            owner_projection_error("created owner projection requires unique occurrence keys"),
+        ));
+    }
+    let occurrences = occurrence_keys
+        .iter()
+        .map(|key| {
+            candidate
+                .distinct_occurrences
+                .iter()
+                .find(|occurrence| occurrence.opaque_key == *key)
+                .cloned()
+                .ok_or_else(|| {
+                    remote_commit_error(
+                        BlockedReason::LocalCommit,
+                        "REPAIR_OWNER_PROJECTION",
+                        owner_projection_error(
+                            "created owner projection occurrence key is absent from the candidate",
+                        ),
+                    )
+                })
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    let mut projection_commits = occurrences
         .iter()
         .map(|occurrence| {
             prepare_owner_projection_commit_with_context(
@@ -1881,6 +2587,228 @@ fn commit_created_owner_readback<E: CliEnv>(
             })
         })
         .collect::<Result<Vec<_>, _>>()?;
+
+    let source_store = super::improvement_store::load_and_repair(&repo_root).map_err(|error| {
+        remote_commit_error(BlockedReason::LocalCommit, "REPAIR_OWNER_PROJECTION", error)
+    })?;
+    let source_scope_nonce = source_store.source_scope_nonce.as_deref().ok_or_else(|| {
+        remote_commit_error(
+            BlockedReason::LocalCommit,
+            "REPAIR_OWNER_PROJECTION",
+            owner_projection_error("source scope nonce is missing"),
+        )
+    })?;
+    let source_reference = super::improvement_store::owner_projection_source_reference_digest(
+        source_scope_nonce,
+        &candidate.id,
+        fingerprint,
+    );
+    let projected_occurrence_keys = super::improvement_store::load_owner_projection()
+        .map_err(|error| {
+            remote_commit_error(BlockedReason::LocalCommit, "REPAIR_OWNER_PROJECTION", error)
+        })?
+        .owners
+        .into_iter()
+        .filter(|record| record.fingerprint == fingerprint)
+        .flat_map(|record| record.source_references)
+        .filter(|source| source.digest == source_reference)
+        .flat_map(|source| source.occurrence_keys)
+        .collect::<BTreeSet<_>>();
+    let additional_occurrences = candidate
+        .distinct_occurrences
+        .iter()
+        .filter(|occurrence| {
+            !occurrence_key_set.contains(occurrence.opaque_key.as_str())
+                && !projected_occurrence_keys.contains(&occurrence.opaque_key)
+        })
+        .cloned()
+        .collect::<Vec<_>>();
+    if !additional_occurrences.is_empty() {
+        let token = attempt_token.ok_or_else(|| {
+            remote_commit_error(
+                BlockedReason::LocalCommit,
+                "REPAIR_OWNER_PROJECTION",
+                owner_projection_error(
+                    "additional regression occurrences require an active resolution attempt",
+                ),
+            )
+        })?;
+        let create_intent = candidate
+            .pending_create_resolution
+            .clone()
+            .or_else(|| {
+                candidate
+                    .attempt
+                    .as_ref()
+                    .filter(|attempt| attempt.remote_phase == AttemptRemotePhase::Submitted)
+                    .map(|attempt| attempt.intent.clone())
+            })
+            .filter(|intent| {
+                matches!(
+                    intent,
+                    ResolutionAttemptIntent::CreateRegressionIssue { .. }
+                )
+            })
+            .ok_or_else(|| {
+                remote_commit_error(
+                    BlockedReason::LocalCommit,
+                    "REPAIR_OWNER_PROJECTION",
+                    owner_projection_error(
+                        "additional regression occurrences require a submitted create journal",
+                    ),
+                )
+            })?;
+        let create_step_is_current = candidate.attempt.as_ref().is_some_and(|attempt| {
+            attempt.remote_phase == AttemptRemotePhase::Submitted && attempt.intent == create_intent
+        });
+        if create_step_is_current {
+            complete_resolution_attempt_step(&repo_root, candidate, token, &create_intent)?;
+        }
+        validate_source_occurrence_snapshot(&repo_root, candidate, &candidate.distinct_occurrences)
+            .map_err(|error| {
+                remote_commit_error(BlockedReason::Store, "RELOAD_CANDIDATE_STORE", error)
+            })?;
+
+        let payloads = additional_occurrences
+            .iter()
+            .map(|occurrence| {
+                render_occurrence_comment_payload(
+                    candidate,
+                    &occurrence.opaque_key,
+                    &public_context,
+                )
+                .map_err(|error| {
+                    remote_commit_error(
+                        BlockedReason::Privacy,
+                        "RECAPTURE_SAFE_TYPED_EVIDENCE",
+                        privacy_as_owner_spec_error(error),
+                    )
+                })
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        let repository = RepositoryIdentity::gwt_upstream();
+        let client = env
+            .improvement_owner_client(deadline)
+            .map_err(|error| active_api_commit_error(error, true))?;
+        let mut comments = client
+            .list_comments(&repository, readback.number, deadline)
+            .map_err(|error| active_api_commit_error(error, true))?
+            .items()
+            .to_vec();
+        for (occurrence, payload) in additional_occurrences.iter().zip(&payloads) {
+            if comments.iter().any(|comment| {
+                comment_matches_occurrence(comment, &occurrence.opaque_key, fingerprint)
+            }) {
+                continue;
+            }
+            let intent = ResolutionAttemptIntent::OccurrenceComments {
+                owner_number: readback.number.0,
+                occurrence_keys: vec![occurrence.opaque_key.clone()],
+                public_payload_digest: public_payload_digest(
+                    "gwt.improvement.owner-comment-intent.v1",
+                    &[&occurrence.opaque_key, &payload.body],
+                ),
+            };
+            mark_resolution_attempt_submitted(&repo_root, candidate, token, intent.clone())?;
+            ensure_candidate_attempt_current(&repo_root, candidate).map_err(|error| {
+                remote_commit_error(BlockedReason::Store, "RELOAD_CANDIDATE_STORE", error)
+            })?;
+            let created = client
+                .create_owner_comment(&repository, readback.number, &payload.body, deadline)
+                .map_err(|error| active_mutation_commit_error(error, true))?;
+            if created.body != payload.body {
+                return Err(remote_commit_error(
+                    BlockedReason::Readback,
+                    "REFRESH_OWNER_CORPUS",
+                    owner_projection_error(
+                        "regression occurrence comment readback did not match its payload",
+                    ),
+                ));
+            }
+            comments = client
+                .list_comments(&repository, readback.number, deadline)
+                .map_err(|error| active_api_commit_error(error, true))?
+                .items()
+                .to_vec();
+            if !comments.iter().any(|comment| {
+                comment_matches_occurrence(comment, &occurrence.opaque_key, fingerprint)
+            }) {
+                return Err(remote_commit_error(
+                    BlockedReason::Readback,
+                    "REFRESH_OWNER_CORPUS",
+                    owner_projection_error(
+                        "regression occurrence comment is absent from authoritative readback",
+                    ),
+                ));
+            }
+            complete_occurrence_comment_step(&repo_root, candidate, token, &intent)?;
+        }
+
+        let final_comments = client
+            .list_comments(&repository, readback.number, deadline)
+            .map_err(|error| active_api_commit_error(error, true))?;
+        let final_readback = client
+            .fetch_issue(&repository, readback.number, deadline)
+            .map_err(|error| active_api_commit_error(error, true))?;
+        validate_new_owner_readback(&final_readback, input, fingerprint).map_err(|error| {
+            remote_commit_error(BlockedReason::Readback, "REFRESH_OWNER_CORPUS", error)
+        })?;
+        verified_owner = durable_owner_from_readback(&final_readback, fingerprint);
+        validate_projection_owner_for_candidate(candidate, &verified_owner, &public_context)
+            .map_err(|error| {
+                remote_commit_error(BlockedReason::LocalCommit, "REPAIR_OWNER_PROJECTION", error)
+            })?;
+        let projected_owner = owner_projection_owner(&verified_owner);
+        for commit in &mut projection_commits {
+            commit.owner = projected_owner.clone();
+        }
+        for occurrence in &additional_occurrences {
+            let mut comment_ids = final_comments
+                .items()
+                .iter()
+                .filter(|comment| {
+                    comment_matches_occurrence(comment, &occurrence.opaque_key, fingerprint)
+                })
+                .map(|comment| comment.id.0)
+                .collect::<Vec<_>>();
+            comment_ids.sort_unstable();
+            comment_ids.dedup();
+            if comment_ids.is_empty() {
+                return Err(remote_commit_error(
+                    BlockedReason::Readback,
+                    "REFRESH_OWNER_CORPUS",
+                    owner_projection_error(
+                        "regression occurrence comment is absent from final readback",
+                    ),
+                ));
+            }
+            let mut commit = prepare_owner_projection_commit_with_context(
+                &repo_root,
+                &ReadbackVerifiedOwnerBinding {
+                    candidate_id: candidate.id.clone(),
+                    owner: verified_owner.clone(),
+                    occurrence_key: occurrence.opaque_key.clone(),
+                    resolution_status: CandidateState::Linked,
+                    last_seen: occurrence.captured_at.clone(),
+                },
+                &public_context,
+            )
+            .map_err(|error| {
+                remote_commit_error(BlockedReason::LocalCommit, "REPAIR_OWNER_PROJECTION", error)
+            })?;
+            commit.occurrence.comment_audit = super::improvement_store::StoredCommentAudit {
+                completeness: super::improvement_store::StoredCommentAuditCompleteness::Complete,
+                physical_comments: comment_ids
+                    .into_iter()
+                    .map(|comment_id| super::improvement_store::StoredCommentRef {
+                        owner_number: verified_owner.number,
+                        comment_id,
+                    })
+                    .collect(),
+            };
+            projection_commits.push(commit);
+        }
+    }
 
     let repaired = commit_owner_projection_and_source_success(
         &repo_root,
@@ -1934,31 +2862,6 @@ fn try_adopt_created_owner_resolution<E: CliEnv>(
     {
         return Ok(false);
     }
-    let repo_root = env.repo_path().to_path_buf();
-    let public_context = PublicMutationContext::for_repo_with_deadline(&repo_root, deadline);
-    let payload = render_public_issue_payload(candidate, &public_context).map_err(|error| {
-        remote_commit_error(
-            BlockedReason::Privacy,
-            "RECAPTURE_SAFE_TYPED_EVIDENCE",
-            privacy_as_owner_spec_error(error),
-        )
-    })?;
-    let actual_digest = public_payload_digest(
-        "gwt.improvement.owner-create-intent.v1",
-        &[&payload.title, &payload.body],
-    );
-    if &actual_digest != expected_digest {
-        return Err(remote_commit_error(
-            BlockedReason::Privacy,
-            "RECAPTURE_SAFE_TYPED_EVIDENCE",
-            owner_projection_error("submitted owner payload no longer matches its attempt intent"),
-        ));
-    }
-    let input = CreateRepositoryIssue {
-        title: payload.title,
-        body: payload.body,
-        labels: Vec::new(),
-    };
     let repository = RepositoryIdentity::gwt_upstream();
     let readback = env
         .improvement_owner_client(deadline)
@@ -1977,11 +2880,253 @@ fn try_adopt_created_owner_resolution<E: CliEnv>(
                 error.into(),
             )
         })?;
-    if !new_owner_readback_matches(&readback, &input, fingerprint) {
+    if !submitted_owner_readback_matches(&readback, fingerprint, expected_digest) {
         return Ok(false);
     }
+    let input = CreateRepositoryIssue {
+        title: readback.title.clone(),
+        body: readback.body.clone(),
+        labels: readback.labels.clone(),
+    };
     commit_created_owner_readback(env, candidate, &readback, &input, fingerprint, deadline)?;
     Ok(true)
+}
+
+fn try_adopt_created_regression_owner_resolution<E: CliEnv>(
+    env: &mut E,
+    candidate: &mut ImprovementCandidate,
+    token: &ResolutionAttemptToken,
+    owner: &OwnerCandidate,
+    recovery_intent: &ResolutionAttemptIntent,
+    deadline: &ResolutionDeadline,
+) -> Result<bool, OwnerResolutionCommitError> {
+    let ResolutionAttemptIntent::CreateRegressionIssue {
+        fingerprint,
+        historical_owner_number,
+        recurrence_occurrence_keys,
+        recurrence_proof_digest,
+        public_payload_digest: expected_digest,
+        created_owner_number,
+    } = recovery_intent
+    else {
+        return Ok(false);
+    };
+    if candidate.fingerprint.as_deref() != Some(fingerprint.as_str())
+        || candidate
+            .owner
+            .as_ref()
+            .is_none_or(|historical| historical.number != *historical_owner_number)
+        || !owner.active
+        || !owner.selectable
+        || owner.kind != OwnerKind::Issue
+        || owner.match_basis != OwnerMatchBasis::Fingerprint
+        || created_owner_number.is_some_and(|number| number != owner.number)
+    {
+        return Ok(false);
+    }
+    if validate_regression_occurrence_keys(candidate, recurrence_occurrence_keys).is_err() {
+        return Err(remote_commit_error(
+            BlockedReason::Ambiguity,
+            "VERIFY_HISTORICAL_RECURRENCE",
+            owner_projection_error("submitted regression occurrence keys are invalid"),
+        ));
+    }
+    let repository = RepositoryIdentity::gwt_upstream();
+    let readback = env
+        .improvement_owner_client(deadline)
+        .map_err(|error| {
+            remote_commit_error(
+                BlockedReason::Readback,
+                "REFRESH_OWNER_CORPUS",
+                error.into(),
+            )
+        })?
+        .fetch_issue(&repository, IssueNumber(owner.number), deadline)
+        .map_err(|error| {
+            remote_commit_error(
+                BlockedReason::Readback,
+                "REFRESH_OWNER_CORPUS",
+                error.into(),
+            )
+        })?;
+    if !submitted_regression_readback_matches(
+        &readback,
+        fingerprint,
+        *historical_owner_number,
+        recurrence_proof_digest,
+        expected_digest,
+    ) {
+        return Ok(false);
+    }
+    let input = CreateRepositoryIssue {
+        title: readback.title.clone(),
+        body: readback.body.clone(),
+        labels: readback.labels.clone(),
+    };
+    commit_created_owner_readback_for_occurrences(
+        env,
+        candidate,
+        &readback,
+        &input,
+        fingerprint,
+        CreatedOwnerOccurrenceCommit {
+            occurrence_keys: recurrence_occurrence_keys,
+            attempt_token: Some(token),
+        },
+        deadline,
+    )?;
+    Ok(true)
+}
+
+fn submitted_regression_readback_matches(
+    readback: &RepositoryIssue,
+    fingerprint: &str,
+    historical_owner_number: u64,
+    recurrence_proof_digest: &str,
+    expected_payload_digest: &str,
+) -> bool {
+    let expected_marker = format!(
+        "<!-- gwt:improvement-regression:v1 historical:{historical_owner_number} proof:{recurrence_proof_digest} -->"
+    );
+    let fingerprint_markers = exact_fingerprint_markers(&readback.body);
+    readback.repository == RepositoryIdentity::gwt_upstream()
+        && readback.number.0 != 0
+        && readback.state == IssueState::Open
+        && readback.kind == RepositoryIssueKind::Plain
+        && readback.labels.is_empty()
+        && fingerprint_markers.len() == 1
+        && fingerprint_markers[0] == fingerprint
+        && readback
+            .body
+            .lines()
+            .filter(|line| *line == expected_marker)
+            .count()
+            == 1
+        && public_payload_digest(
+            "gwt.improvement.regression-create-intent.v1",
+            &[&readback.title, &readback.body],
+        ) == expected_payload_digest
+}
+
+fn submitted_owner_readback_matches(
+    readback: &RepositoryIssue,
+    fingerprint: &str,
+    expected_payload_digest: &str,
+) -> bool {
+    let fingerprint_markers = exact_fingerprint_markers(&readback.body);
+    readback.repository == RepositoryIdentity::gwt_upstream()
+        && readback.number.0 != 0
+        && readback.state == IssueState::Open
+        && readback.kind == RepositoryIssueKind::Plain
+        && readback.labels.is_empty()
+        && fingerprint_markers.len() == 1
+        && fingerprint_markers[0] == fingerprint
+        && public_payload_digest(
+            "gwt.improvement.owner-create-intent.v1",
+            &[&readback.title, &readback.body],
+        ) == expected_payload_digest
+}
+
+fn settle_submitted_create_before_reconciliation<E: CliEnv>(
+    env: &mut E,
+    candidate: &mut ImprovementCandidate,
+    token: &ResolutionAttemptToken,
+    root_intent: &ResolutionAttemptIntent,
+    owners: &[OwnerCandidate],
+    deadline: &ResolutionDeadline,
+) -> Result<ResolutionAttemptIntent, OwnerResolutionCommitError> {
+    let Some(attempt) = candidate.attempt.as_ref() else {
+        return Ok(root_intent.clone());
+    };
+    if attempt.remote_phase != AttemptRemotePhase::Submitted
+        || &attempt.intent != root_intent
+        || !matches!(
+            root_intent,
+            ResolutionAttemptIntent::CreateIssue { .. }
+                | ResolutionAttemptIntent::CreateRegressionIssue { .. }
+        )
+    {
+        return Ok(root_intent.clone());
+    }
+
+    let repository = RepositoryIdentity::gwt_upstream();
+    let matching_owner_numbers = {
+        let client = env.improvement_owner_client(deadline).map_err(|error| {
+            remote_commit_error(
+                BlockedReason::Readback,
+                "REFRESH_OWNER_CORPUS",
+                error.into(),
+            )
+        })?;
+        let mut matching_owner_numbers = Vec::new();
+        for owner in owners {
+            let readback = client
+                .fetch_issue(&repository, IssueNumber(owner.number), deadline)
+                .map_err(|error| {
+                    remote_commit_error(
+                        BlockedReason::Readback,
+                        "REFRESH_OWNER_CORPUS",
+                        error.into(),
+                    )
+                })?;
+            let matches = match root_intent {
+                ResolutionAttemptIntent::CreateIssue {
+                    fingerprint,
+                    public_payload_digest,
+                    ..
+                } => {
+                    submitted_owner_readback_matches(&readback, fingerprint, public_payload_digest)
+                }
+                ResolutionAttemptIntent::CreateRegressionIssue {
+                    fingerprint,
+                    historical_owner_number,
+                    recurrence_proof_digest,
+                    public_payload_digest,
+                    ..
+                } => submitted_regression_readback_matches(
+                    &readback,
+                    fingerprint,
+                    *historical_owner_number,
+                    recurrence_proof_digest,
+                    public_payload_digest,
+                ),
+                _ => false,
+            };
+            if matches {
+                matching_owner_numbers.push(owner.number);
+            }
+        }
+        matching_owner_numbers.sort_unstable();
+        matching_owner_numbers.dedup();
+        matching_owner_numbers
+    };
+
+    let unmatched_readback = || {
+        remote_commit_error(
+            BlockedReason::Readback,
+            "REFRESH_OWNER_CORPUS",
+            owner_projection_error("submitted create result did not match authoritative readback"),
+        )
+    };
+    let settled_owner_number = match recorded_created_owner_number(root_intent) {
+        Some(expected) if matching_owner_numbers.contains(&expected) => expected,
+        None if matching_owner_numbers.len() == 1 => matching_owner_numbers[0],
+        None if matching_owner_numbers.len() > 1 => {
+            // The submitted create is settled, but an unnumbered response cannot
+            // attribute any one of several byte-identical owners to this attempt.
+            complete_resolution_attempt_step(env.repo_path(), candidate, token, root_intent)?;
+            return Ok(root_intent.clone());
+        }
+        None => return Err(unmatched_readback()),
+        _ => {
+            return Err(unmatched_readback());
+        }
+    };
+
+    let settled_intent =
+        record_created_owner_readback(env.repo_path(), candidate, token, settled_owner_number)?;
+    complete_resolution_attempt_step(env.repo_path(), candidate, token, &settled_intent)?;
+    Ok(settled_intent)
 }
 
 fn validate_new_owner_readback(
@@ -2019,6 +3164,7 @@ fn pre_submit_commit_error_from_api(error: GitHubApiError) -> OwnerResolutionCom
     OwnerResolutionCommitError::PreSubmit {
         failure,
         source: error.into(),
+        clear_create_root: false,
     }
 }
 
@@ -2053,7 +3199,20 @@ fn pre_submit_commit_error(
             remediation,
         },
         source,
+        clear_create_root: false,
     }
+}
+
+fn clear_create_root_on_pre_submit(
+    mut error: OwnerResolutionCommitError,
+) -> OwnerResolutionCommitError {
+    if let OwnerResolutionCommitError::PreSubmit {
+        clear_create_root, ..
+    } = &mut error
+    {
+        *clear_create_root = true;
+    }
+    error
 }
 
 fn remote_commit_error(
@@ -2157,6 +3316,36 @@ fn post_new_owner_created_status<E: CliEnv>(
     )
 }
 
+fn merge_recovered_comment_evidence(
+    outcome: &mut OwnerPreflightOutcome,
+    evidence: Vec<(IssueNumber, RepositoryComment)>,
+) {
+    fn merge(comments: &mut Vec<RepositoryComment>, comment: RepositoryComment) {
+        if !comments
+            .iter()
+            .any(|existing| existing.id == comment.id && existing.body == comment.body)
+        {
+            comments.push(comment);
+            comments.sort_by_key(|comment| comment.id);
+        }
+    }
+
+    for (owner_number, comment) in evidence {
+        match outcome {
+            OwnerPreflightOutcome::Active {
+                owner, comments, ..
+            } if owner.number == owner_number.0 => merge(comments, comment),
+            OwnerPreflightOutcome::Historical {
+                comments_by_owner, ..
+            }
+            | OwnerPreflightOutcome::DuplicateExactIssues {
+                comments_by_owner, ..
+            } => merge(comments_by_owner.entry(owner_number).or_default(), comment),
+            _ => {}
+        }
+    }
+}
+
 pub(super) fn resolve_candidate_owner<E: CliEnv>(
     env: &mut E,
     candidate_id: &str,
@@ -2205,18 +3394,75 @@ pub(super) fn resolve_candidate_owner<E: CliEnv>(
             ResolutionDeadline::new(Duration::from_secs(3), Duration::from_secs(15))
         }
     };
-    let outcome = owner_resolution_preflight_deferred(
+    let mut recovery_pending = recovering_remote_unknown;
+    let mut recovered_comment_evidence = Vec::new();
+    if recovery_pending
+        && matches!(
+            recovery_intent,
+            ResolutionAttemptIntent::ReconciliationComment { .. }
+                | ResolutionAttemptIntent::CloseDuplicate { .. }
+        )
+    {
+        match adopt_recovered_reconciliation_step(
+            env,
+            &mut candidate,
+            &attempt_token,
+            &recovery_intent,
+            &deadline,
+        ) {
+            Ok(Some(evidence)) => recovered_comment_evidence.push(evidence),
+            Ok(None) => {}
+            Err(error) => {
+                return settle_owner_commit_error(env, candidate, &attempt_token, error);
+            }
+        }
+        recovery_pending = false;
+    }
+    if recovery_pending
+        && matches!(
+            recovery_intent,
+            ResolutionAttemptIntent::OccurrenceComments { .. }
+        )
+    {
+        match adopt_recovered_occurrence_comments_step(
+            env,
+            &mut candidate,
+            &attempt_token,
+            &recovery_intent,
+            &deadline,
+        ) {
+            Ok(Some(evidence)) => recovered_comment_evidence.push(evidence),
+            Ok(None) => {}
+            Err(error) => {
+                return settle_owner_commit_error(env, candidate, &attempt_token, error);
+            }
+        }
+        recovery_pending = false;
+    }
+    let mut outcome = owner_resolution_preflight_deferred(
         env,
         &mut candidate,
         &ContractRoutingRegistry::current(),
         &NoSemanticOwnerAdvisor,
         &deadline,
     )?;
+    merge_recovered_comment_evidence(&mut outcome, recovered_comment_evidence);
+    let mut create_resolution_intent = candidate.pending_create_resolution.clone().or_else(|| {
+        (recovery_pending
+            && matches!(
+                recovery_intent,
+                ResolutionAttemptIntent::CreateIssue { .. }
+                    | ResolutionAttemptIntent::CreateRegressionIssue { .. }
+            ))
+        .then(|| recovery_intent.clone())
+    });
     match outcome {
         OwnerPreflightOutcome::Active {
             owner, comments, ..
         } => {
-            if let Some(created_owner_number) = recorded_created_owner_number(&recovery_intent)
+            if let Some(created_owner_number) = create_resolution_intent
+                .as_ref()
+                .and_then(recorded_created_owner_number)
                 .filter(|number| *number != owner.number)
             {
                 if let Err(error) = arm_reconciliation_required(
@@ -2243,7 +3489,7 @@ pub(super) fn resolve_candidate_owner<E: CliEnv>(
                 &attempt_token,
                 owner,
                 comments,
-                recovering_remote_unknown.then_some(&recovery_intent),
+                create_resolution_intent.as_ref(),
                 &deadline,
             )
         }
@@ -2252,7 +3498,27 @@ pub(super) fn resolve_candidate_owner<E: CliEnv>(
             comments_by_owner,
             ..
         } => {
-            if let Some(created_owner_number) = recorded_created_owner_number(&recovery_intent) {
+            if let Some(intent) = create_resolution_intent.clone() {
+                match settle_submitted_create_before_reconciliation(
+                    env,
+                    &mut candidate,
+                    &attempt_token,
+                    &intent,
+                    &owners,
+                    &deadline,
+                ) {
+                    Ok(settled_intent) => {
+                        create_resolution_intent = Some(settled_intent);
+                    }
+                    Err(error) => {
+                        return settle_owner_commit_error(env, candidate, &attempt_token, error);
+                    }
+                }
+            }
+            if let Some(created_owner_number) = create_resolution_intent
+                .as_ref()
+                .and_then(recorded_created_owner_number)
+            {
                 let mut known_owner_numbers =
                     owners.iter().map(|owner| owner.number).collect::<Vec<_>>();
                 known_owner_numbers.push(created_owner_number);
@@ -2292,9 +3558,142 @@ pub(super) fn resolve_candidate_owner<E: CliEnv>(
                     &attempt_token,
                     owner,
                     comments,
-                    None,
+                    create_resolution_intent.as_ref(),
                     &deadline,
                 ),
+                Err(error) => settle_owner_commit_error(env, candidate, &attempt_token, error),
+            }
+        }
+        OwnerPreflightOutcome::RegressionCreateAuthorized { authorization } => {
+            if candidate
+                .owner
+                .as_ref()
+                .is_none_or(|owner| owner.number != authorization.historical_owner.number)
+            {
+                let failure = OwnerResolutionFailure {
+                    reason: BlockedReason::Ambiguity,
+                    failure_subcode: None,
+                    remediation: "VERIFY_HISTORICAL_RECURRENCE",
+                };
+                block_owner_resolution(env, &mut candidate, failure, None, false)?;
+                candidate.attempt = None;
+                return persist_and_post_resolver_failure(env, candidate, &attempt_token, failure);
+            }
+            if recovery_pending {
+                return preserve_remote_unknown_recovery(
+                    env,
+                    candidate,
+                    &attempt_token,
+                    &recovery_intent,
+                    OwnerResolutionFailure {
+                        reason: BlockedReason::Readback,
+                        failure_subcode: None,
+                        remediation: "REFRESH_OWNER_CORPUS",
+                    },
+                );
+            }
+            if reconciliation_only {
+                let failure = OwnerResolutionFailure {
+                    reason: BlockedReason::Reconciliation,
+                    failure_subcode: None,
+                    remediation: "RECONCILE_DUPLICATE_OWNERS",
+                };
+                block_owner_resolution(env, &mut candidate, failure, None, false)?;
+                candidate.attempt = None;
+                return persist_and_post_resolver_failure(env, candidate, &attempt_token, failure);
+            }
+            let adoption_intent = regression_owner_attempt_intent(&authorization);
+            let refreshed = owner_resolution_preflight_deferred(
+                env,
+                &mut candidate,
+                &ContractRoutingRegistry::current(),
+                &NoSemanticOwnerAdvisor,
+                &deadline,
+            )?;
+            let authorization = match refreshed {
+                OwnerPreflightOutcome::Active {
+                    owner, comments, ..
+                } => {
+                    return resolve_active_owner_outcome(
+                        env,
+                        candidate,
+                        &attempt_token,
+                        owner,
+                        comments,
+                        Some(&adoption_intent),
+                        &deadline,
+                    );
+                }
+                OwnerPreflightOutcome::DuplicateExactIssues {
+                    owners,
+                    comments_by_owner,
+                    ..
+                } => {
+                    return match reconcile_duplicate_owners(
+                        env,
+                        &mut candidate,
+                        &attempt_token,
+                        owners,
+                        comments_by_owner,
+                        &deadline,
+                    ) {
+                        Ok((owner, comments)) => resolve_active_owner_outcome(
+                            env,
+                            candidate,
+                            &attempt_token,
+                            owner,
+                            comments,
+                            Some(&adoption_intent),
+                            &deadline,
+                        ),
+                        Err(error) => {
+                            settle_owner_commit_error(env, candidate, &attempt_token, error)
+                        }
+                    };
+                }
+                OwnerPreflightOutcome::RegressionCreateAuthorized { authorization } => {
+                    authorization
+                }
+                outcome => {
+                    return settle_non_owner_preflight(
+                        env,
+                        candidate,
+                        &attempt_token,
+                        outcome,
+                        None,
+                        false,
+                    );
+                }
+            };
+            let create_intent = regression_owner_attempt_intent(&authorization);
+            if let Err(error) = mark_resolution_attempt_submitted(
+                &repo_root,
+                &mut candidate,
+                &attempt_token,
+                create_intent.clone(),
+            ) {
+                return settle_owner_commit_error(env, candidate, &attempt_token, error);
+            }
+            match create_regression_owner_with_postflight(
+                env,
+                &mut candidate,
+                &attempt_token,
+                &authorization,
+                &deadline,
+            ) {
+                Ok(NewOwnerPostflight::Committed) => Ok(candidate),
+                Ok(NewOwnerPostflight::Active { owner, comments }) => {
+                    let adoption_intent = candidate.pending_create_resolution.clone();
+                    resolve_active_owner_outcome(
+                        env,
+                        candidate,
+                        &attempt_token,
+                        owner,
+                        comments,
+                        adoption_intent.as_ref(),
+                        &deadline,
+                    )
+                }
                 Err(error) => settle_owner_commit_error(env, candidate, &attempt_token, error),
             }
         }
@@ -2309,7 +3708,7 @@ pub(super) fn resolve_candidate_owner<E: CliEnv>(
                 candidate.attempt = None;
                 return persist_and_post_resolver_failure(env, candidate, &attempt_token, failure);
             }
-            if recovering_remote_unknown {
+            if recovery_pending {
                 return preserve_remote_unknown_recovery(
                     env,
                     candidate,
@@ -2410,15 +3809,18 @@ pub(super) fn resolve_candidate_owner<E: CliEnv>(
                 &deadline,
             ) {
                 Ok(NewOwnerPostflight::Committed) => Ok(candidate),
-                Ok(NewOwnerPostflight::Active { owner, comments }) => resolve_active_owner_outcome(
-                    env,
-                    candidate,
-                    &attempt_token,
-                    owner,
-                    comments,
-                    None,
-                    &deadline,
-                ),
+                Ok(NewOwnerPostflight::Active { owner, comments }) => {
+                    let adoption_intent = candidate.pending_create_resolution.clone();
+                    resolve_active_owner_outcome(
+                        env,
+                        candidate,
+                        &attempt_token,
+                        owner,
+                        comments,
+                        adoption_intent.as_ref(),
+                        &deadline,
+                    )
+                }
                 Err(error) => settle_owner_commit_error(env, candidate, &attempt_token, error),
             }
         }
@@ -2427,10 +3829,233 @@ pub(super) fn resolve_candidate_owner<E: CliEnv>(
             candidate,
             &attempt_token,
             outcome,
-            recovering_remote_unknown.then_some(&recovery_intent),
+            recovery_pending.then_some(&recovery_intent),
             reconciliation_only,
         ),
     }
+}
+
+pub(super) fn select_candidate_owner<E: CliEnv>(
+    env: &mut E,
+    candidate_id: &str,
+    selected_owner_number: u64,
+    resolver_revision: &str,
+    budget_profile: CaptureBudgetProfile,
+) -> Result<ImprovementCandidate, gwt_github::SpecOpsError> {
+    if selected_owner_number == 0
+        || resolver_revision.len() != 64
+        || !resolver_revision
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || matches!(byte, b'a'..=b'f'))
+    {
+        return Err(owner_projection_error(
+            "manual owner selection requires a positive owner and canonical resolver revision",
+        ));
+    }
+    let repo_root = env.repo_path().to_path_buf();
+    repair_source_success_snapshots(&repo_root)?;
+    let stored_candidate = super::improvement_store::load_and_repair(&repo_root)?
+        .candidates
+        .into_iter()
+        .find(|candidate| candidate.id == candidate_id)
+        .ok_or_else(|| owner_projection_error("candidate not found"))?;
+    let stored_snapshot = stored_candidate
+        .resolver_snapshot
+        .as_ref()
+        .filter(|snapshot| snapshot.resolver_revision == resolver_revision)
+        .ok_or_else(|| owner_projection_error("manual owner selection revision is stale"))?;
+    let stored_owner = stored_snapshot
+        .owner_candidates
+        .iter()
+        .find(|owner| owner.number == selected_owner_number)
+        .filter(|owner| {
+            owner.active && owner.selectable && owner.match_basis != OwnerMatchBasis::Semantic
+        })
+        .ok_or_else(|| {
+            owner_projection_error(
+                "manual owner selection requires a selectable active authoritative owner",
+            )
+        })?;
+    if stored_candidate.state != CandidateState::Blocked
+        || stored_candidate.blocked_reason != Some(BlockedReason::Ambiguity)
+    {
+        return Err(owner_projection_error(
+            "manual owner selection requires a blocked ambiguity candidate",
+        ));
+    }
+
+    let deadline = match budget_profile {
+        CaptureBudgetProfile::Normal => {
+            ResolutionDeadline::new(Duration::from_secs(5), Duration::from_secs(120))
+        }
+        CaptureBudgetProfile::StrictStop => {
+            ResolutionDeadline::new(Duration::from_secs(3), Duration::from_secs(15))
+        }
+    };
+    let source_scope_nonce = env.improvement_source_scope_nonce()?;
+    let public_context = PublicMutationContext::for_repo_with_deadline(&repo_root, &deadline);
+    if let Some(failure) = candidate_preflight_failure(
+        &stored_candidate,
+        &repo_root,
+        &source_scope_nonce,
+        &public_context,
+    ) {
+        return Err(owner_projection_error(&format!(
+            "manual owner selection failed the {} safety gate",
+            blocked_reason_token(failure.reason)
+        )));
+    }
+
+    let fresh_inspection = env
+        .improvement_owner_client(&deadline)
+        .map_err(gwt_github::SpecOpsError::from)
+        .and_then(|client| {
+            inspect_owner_corpus(
+                client,
+                &stored_candidate,
+                &ContractRoutingRegistry::current(),
+                &NoSemanticOwnerAdvisor,
+                &deadline,
+            )
+            .map_err(|failure| {
+                owner_projection_error(&format!(
+                    "manual owner selection refresh failed: {}",
+                    blocked_reason_token(failure.reason)
+                ))
+            })
+        })?;
+    let OwnerInspection::Ambiguous {
+        owner_candidates,
+        corpus_generation,
+    } = fresh_inspection
+    else {
+        return Err(owner_projection_error(
+            "manual owner selection fresh revision has no ambiguous active owner set",
+        ));
+    };
+    let fresh_snapshot = ResolverSnapshot::new(corpus_generation, owner_candidates)?;
+    if fresh_snapshot.resolver_revision != resolver_revision {
+        return Err(owner_projection_error(
+            "manual owner selection fresh resolver revision is stale",
+        ));
+    }
+    let selected_owner = fresh_snapshot
+        .owner_candidates
+        .iter()
+        .find(|owner| owner.number == selected_owner_number)
+        .filter(|owner| {
+            owner.active
+                && owner.selectable
+                && owner.match_basis != OwnerMatchBasis::Semantic
+                && *owner == stored_owner
+        })
+        .cloned()
+        .ok_or_else(|| {
+            owner_projection_error(
+                "manual owner selection fresh revision changed the selected active owner",
+            )
+        })?;
+    let selected_comments = env
+        .improvement_owner_client(&deadline)
+        .map_err(gwt_github::SpecOpsError::from)?
+        .list_comments(
+            &RepositoryIdentity::gwt_upstream(),
+            IssueNumber(selected_owner_number),
+            &deadline,
+        )
+        .map_err(gwt_github::SpecOpsError::from)?;
+    if selected_comments.generation().as_str().is_empty() {
+        return Err(owner_projection_error(
+            "manual owner selection comment corpus is incomplete",
+        ));
+    }
+
+    let (mut candidate, token) =
+        match begin_resolution_attempt(&repo_root, candidate_id, budget_profile)? {
+            ResolutionAttemptStart::Acquired {
+                candidate, token, ..
+            } => (candidate, token),
+        };
+    if candidate.fingerprint != stored_candidate.fingerprint
+        || candidate.distinct_occurrences != stored_candidate.distinct_occurrences
+        || candidate
+            .resolver_snapshot
+            .as_ref()
+            .is_none_or(|snapshot| snapshot.resolver_revision != resolver_revision)
+    {
+        let error = pre_submit_commit_error(
+            BlockedReason::Store,
+            "RELOAD_CANDIDATE_STORE",
+            owner_projection_error("candidate changed during manual owner selection"),
+        );
+        settle_owner_commit_error(env, candidate, &token, error)?;
+        return Err(owner_projection_error(
+            "candidate changed during manual owner selection",
+        ));
+    }
+    match commit_active_owner_resolution_with_audit(
+        env,
+        &mut candidate,
+        &selected_owner,
+        selected_comments.items(),
+        &deadline,
+        Some(&token),
+        Some(ManualOwnerSelectionAudit {
+            token: &token,
+            snapshot: &fresh_snapshot,
+        }),
+    ) {
+        Ok(()) => Ok(candidate),
+        Err(error) => settle_owner_commit_error(env, candidate, &token, error),
+    }
+}
+
+fn append_manual_owner_selection_audit(
+    repo_root: &Path,
+    candidate: &ImprovementCandidate,
+    token: &ResolutionAttemptToken,
+    owner_number: u64,
+    snapshot: &ResolverSnapshot,
+) -> Result<ImprovementCandidate, gwt_github::SpecOpsError> {
+    let entry = ImprovementAuditEntry::ManualOwnerSelection {
+        owner_number,
+        resolver_revision: snapshot.resolver_revision.clone(),
+        corpus_generation: snapshot.corpus_generation.clone(),
+        recorded_at: Utc::now().to_rfc3339(),
+    };
+    super::improvement_store::update(repo_root, |store| {
+        let stored = store
+            .candidates
+            .iter_mut()
+            .find(|stored| stored.id == candidate.id)
+            .ok_or_else(|| owner_projection_error("candidate not found"))?;
+        if stored.fingerprint != candidate.fingerprint
+            || stored.distinct_occurrences != candidate.distinct_occurrences
+            || stored.pending_create_resolution != candidate.pending_create_resolution
+            || stored.state != CandidateState::OwnerResolving
+            || stored.state != candidate.state
+            || stored.dismissed_reason != candidate.dismissed_reason
+            || stored.audit != candidate.audit
+            || stored
+                .attempt
+                .as_ref()
+                .is_none_or(|attempt| attempt.attempt_id != token.attempt_id)
+            || stored
+                .resolver_snapshot
+                .as_ref()
+                .is_none_or(|stored_snapshot| {
+                    stored_snapshot.resolver_revision != snapshot.resolver_revision
+                })
+        {
+            return Err(owner_projection_error(
+                "candidate changed before manual owner selection audit",
+            ));
+        }
+        stored.audit.push(entry);
+        stored.updated_at = Utc::now().to_rfc3339();
+        super::improvement::validate_candidate_lifecycle(stored)?;
+        Ok(stored.clone())
+    })
 }
 
 fn resolve_active_owner_outcome<E: CliEnv>(
@@ -2439,12 +4064,95 @@ fn resolve_active_owner_outcome<E: CliEnv>(
     token: &ResolutionAttemptToken,
     owner: OwnerCandidate,
     comments: Vec<RepositoryComment>,
-    adoption_intent: Option<&ResolutionAttemptIntent>,
+    mut adoption_intent: Option<&ResolutionAttemptIntent>,
     deadline: &ResolutionDeadline,
 ) -> Result<ImprovementCandidate, gwt_github::SpecOpsError> {
     let repo_root = env.repo_path().to_path_buf();
     if let Err(error) = renew_resolution_attempt(&repo_root, &mut candidate, token) {
         return settle_owner_commit_error(env, candidate, token, error);
+    }
+    if adoption_intent.is_some_and(|intent| {
+        recorded_created_owner_number(intent).is_none()
+            && candidate.reconciliation_required
+            && candidate.reconciliation_owner_numbers.len() > 1
+    }) {
+        adoption_intent = None;
+    }
+    if let Some(
+        intent @ ResolutionAttemptIntent::CreateRegressionIssue {
+            created_owner_number,
+            ..
+        },
+    ) = adoption_intent
+    {
+        let adoption_is_submitted_recovery = candidate.attempt.as_ref().is_some_and(|attempt| {
+            attempt.remote_phase == AttemptRemotePhase::Submitted && &attempt.intent == intent
+        });
+        let adoption_is_pending_root = candidate.pending_create_resolution.as_ref() == Some(intent);
+        if adoption_is_submitted_recovery || adoption_is_pending_root {
+            match try_adopt_created_regression_owner_resolution(
+                env,
+                &mut candidate,
+                token,
+                &owner,
+                intent,
+                deadline,
+            ) {
+                Ok(true) => return Ok(candidate),
+                Ok(false)
+                    if created_owner_number.is_some_and(|created_owner_number| {
+                        created_owner_number != owner.number
+                            && candidate.reconciliation_required
+                            && candidate
+                                .reconciliation_owner_numbers
+                                .contains(&created_owner_number)
+                            && candidate
+                                .reconciliation_owner_numbers
+                                .contains(&owner.number)
+                    }) => {}
+                Ok(false) => {
+                    let error = remote_commit_error(
+                        BlockedReason::Readback,
+                        "REFRESH_OWNER_CORPUS",
+                        owner_projection_error(
+                            "submitted regression owner did not match authoritative readback",
+                        ),
+                    );
+                    return settle_owner_commit_error(env, candidate, token, error);
+                }
+                Err(error) => return settle_owner_commit_error(env, candidate, token, error),
+            }
+        }
+    }
+    if let Some(
+        intent @ ResolutionAttemptIntent::CreateIssue {
+            created_owner_number,
+            ..
+        },
+    ) = adoption_intent
+    {
+        let adoption_is_submitted_recovery = candidate.attempt.as_ref().is_some_and(|attempt| {
+            attempt.remote_phase == AttemptRemotePhase::Submitted && &attempt.intent == intent
+        });
+        let adoption_is_pending_root = candidate.pending_create_resolution.as_ref() == Some(intent);
+        if adoption_is_submitted_recovery || adoption_is_pending_root {
+            match try_adopt_created_owner_resolution(env, &mut candidate, &owner, intent, deadline)
+            {
+                Ok(true) => return Ok(candidate),
+                Ok(false) if created_owner_number.is_none() => {
+                    let error = remote_commit_error(
+                        BlockedReason::Readback,
+                        "REFRESH_OWNER_CORPUS",
+                        owner_projection_error(
+                            "submitted plain owner did not match authoritative readback",
+                        ),
+                    );
+                    return settle_owner_commit_error(env, candidate, token, error);
+                }
+                Ok(false) => {}
+                Err(error) => return settle_owner_commit_error(env, candidate, token, error),
+            }
+        }
     }
     let (owner, comments) = match reconcile_visible_owner_with_durable_owner(
         env,
@@ -2457,26 +4165,14 @@ fn resolve_active_owner_outcome<E: CliEnv>(
         Ok(resolved) => resolved,
         Err(error) => return settle_owner_commit_error(env, candidate, token, error),
     };
-    if let Some(intent) = adoption_intent {
-        match try_adopt_created_owner_resolution(env, &mut candidate, &owner, intent, deadline) {
-            Ok(true) => return Ok(candidate),
-            Ok(false) => {}
-            Err(error) => return settle_owner_commit_error(env, candidate, token, error),
-        }
-    }
-    let pending_intent =
-        match active_owner_attempt_intent(&candidate, &owner, &comments, &repo_root, deadline) {
-            Ok(intent) => intent,
-            Err(error) => return settle_owner_commit_error(env, candidate, token, error),
-        };
-    if let Some(intent) = pending_intent {
-        if let Err(error) =
-            mark_resolution_attempt_submitted(&repo_root, &mut candidate, token, intent)
-        {
-            return settle_owner_commit_error(env, candidate, token, error);
-        }
-    }
-    match commit_active_owner_resolution(env, &mut candidate, &owner, &comments, deadline) {
+    match commit_active_owner_resolution_for_attempt(
+        env,
+        &mut candidate,
+        token,
+        &owner,
+        &comments,
+        deadline,
+    ) {
         Ok(()) => Ok(candidate),
         Err(error) => settle_owner_commit_error(env, candidate, token, error),
     }
@@ -2521,6 +4217,19 @@ fn reconcile_visible_owner_with_durable_owner<E: CliEnv>(
         .map_err(reconciliation_pre_submit_error_from_api)?
         .fetch_issue(&repository, IssueNumber(durable_owner_number), deadline)
         .map_err(reconciliation_pre_submit_error_from_api)?;
+    if durable_readback.repository == repository
+        && durable_readback.number == IssueNumber(durable_owner_number)
+        && durable_readback.state == IssueState::Closed
+        && matches!(
+            durable_readback.kind,
+            RepositoryIssueKind::Plain | RepositoryIssueKind::Spec
+        )
+        && exact_fingerprint_markers(&durable_readback.body)
+            .iter()
+            .any(|marker| marker == fingerprint)
+    {
+        return Ok((visible_owner, visible_comments));
+    }
     let durable_owner = owner_candidate(&durable_readback, OwnerMatchBasis::Fingerprint);
     validate_active_owner_readback(&durable_owner, fingerprint, &durable_readback)
         .map_err(|error| reconciliation_pre_submit_error(&error.to_string()))?;
@@ -2606,7 +4315,14 @@ fn reconcile_duplicate_owners<E: CliEnv>(
         let comments = comments_by_owner
             .remove(&IssueNumber(duplicate_number))
             .unwrap_or_default();
-        if !comments.iter().any(|comment| comment.body == payload.body) {
+        if !comments.iter().any(|comment| {
+            comment_matches_reconciliation(
+                comment,
+                canonical_number,
+                duplicate_number,
+                &fingerprint,
+            )
+        }) {
             let intent = ResolutionAttemptIntent::ReconciliationComment {
                 canonical_owner_number: canonical_number,
                 duplicate_owner_number: duplicate_number,
@@ -2729,7 +4445,38 @@ fn create_owner_with_postflight<E: CliEnv>(
     authorization: &ProvenZeroAuthorization,
     deadline: &ResolutionDeadline,
 ) -> Result<NewOwnerPostflight, OwnerResolutionCommitError> {
-    let created = create_new_owner_mutation(env, candidate, authorization, deadline)?;
+    let created = create_new_owner_mutation(env, candidate, authorization, deadline)
+        .map_err(clear_create_root_on_pre_submit)?;
+    settle_created_owner_postflight(env, candidate, token, created, None, deadline)
+}
+
+fn create_regression_owner_with_postflight<E: CliEnv>(
+    env: &mut E,
+    candidate: &mut ImprovementCandidate,
+    token: &ResolutionAttemptToken,
+    authorization: &ProvenRegressionAuthorization,
+    deadline: &ResolutionDeadline,
+) -> Result<NewOwnerPostflight, OwnerResolutionCommitError> {
+    let created = create_regression_owner_mutation(env, candidate, authorization, deadline)
+        .map_err(clear_create_root_on_pre_submit)?;
+    settle_created_owner_postflight(
+        env,
+        candidate,
+        token,
+        created,
+        Some(&authorization.recurrence_occurrence_keys),
+        deadline,
+    )
+}
+
+fn settle_created_owner_postflight<E: CliEnv>(
+    env: &mut E,
+    candidate: &mut ImprovementCandidate,
+    token: &ResolutionAttemptToken,
+    created: CreatedOwnerMutation,
+    occurrence_keys: Option<&[String]>,
+    deadline: &ResolutionDeadline,
+) -> Result<NewOwnerPostflight, OwnerResolutionCommitError> {
     let observed_create_intent = record_created_owner_readback(
         env.repo_path(),
         candidate,
@@ -2894,14 +4641,29 @@ fn create_owner_with_postflight<E: CliEnv>(
         }
     };
     if owner.number == created.readback.number.0 {
-        commit_created_owner_readback(
-            env,
-            candidate,
-            &created.readback,
-            &created.input,
-            &created.fingerprint,
-            deadline,
-        )?;
+        if let Some(occurrence_keys) = occurrence_keys {
+            commit_created_owner_readback_for_occurrences(
+                env,
+                candidate,
+                &created.readback,
+                &created.input,
+                &created.fingerprint,
+                CreatedOwnerOccurrenceCommit {
+                    occurrence_keys,
+                    attempt_token: Some(token),
+                },
+                deadline,
+            )?;
+        } else {
+            commit_created_owner_readback(
+                env,
+                candidate,
+                &created.readback,
+                &created.input,
+                &created.fingerprint,
+                deadline,
+            )?;
+        }
         Ok(NewOwnerPostflight::Committed)
     } else {
         Ok(NewOwnerPostflight::Active { owner, comments })
@@ -2939,6 +4701,138 @@ fn complete_resolution_attempt_step(
     })?;
     candidate.attempt = Some(attempt);
     Ok(())
+}
+
+fn complete_occurrence_comment_step(
+    repo_root: &Path,
+    candidate: &mut ImprovementCandidate,
+    token: &ResolutionAttemptToken,
+    intent: &ResolutionAttemptIntent,
+) -> Result<(), OwnerResolutionCommitError> {
+    let attempt = super::improvement_store::update(repo_root, |store| {
+        super::improvement_store::complete_attempt_step(
+            store,
+            &token.candidate_id,
+            &token.attempt_id,
+            intent,
+        )
+    })
+    .map_err(|error| {
+        remote_commit_error(BlockedReason::LocalCommit, "REPAIR_OWNER_PROJECTION", error)
+    })?;
+    candidate.attempt = Some(attempt);
+    Ok(())
+}
+
+fn adopt_recovered_reconciliation_step<E: CliEnv>(
+    env: &mut E,
+    candidate: &mut ImprovementCandidate,
+    token: &ResolutionAttemptToken,
+    recovery_intent: &ResolutionAttemptIntent,
+    deadline: &ResolutionDeadline,
+) -> Result<Option<(IssueNumber, RepositoryComment)>, OwnerResolutionCommitError> {
+    let repository = RepositoryIdentity::gwt_upstream();
+    match recovery_intent {
+        ResolutionAttemptIntent::ReconciliationComment {
+            canonical_owner_number,
+            duplicate_owner_number,
+            public_payload_digest: expected_digest,
+        } => {
+            let fingerprint = candidate
+                .fingerprint
+                .as_deref()
+                .ok_or_else(|| reconciliation_remote_error("candidate fingerprint is missing"))?;
+            let comments = env
+                .improvement_owner_client(deadline)
+                .map_err(|error| {
+                    remote_commit_error(
+                        BlockedReason::Reconciliation,
+                        "RECONCILE_DUPLICATE_OWNERS",
+                        error.into(),
+                    )
+                })?
+                .list_comments(&repository, IssueNumber(*duplicate_owner_number), deadline)
+                .map_err(|error| {
+                    remote_commit_error(
+                        BlockedReason::Reconciliation,
+                        "RECONCILE_DUPLICATE_OWNERS",
+                        error.into(),
+                    )
+                })?;
+            let submitted_comment = comments
+                .items()
+                .iter()
+                .find(|comment| {
+                    comment_matches_reconciliation(
+                        comment,
+                        *canonical_owner_number,
+                        *duplicate_owner_number,
+                        fingerprint,
+                    ) && public_payload_digest(
+                        "gwt.improvement.reconciliation-comment-intent.v1",
+                        &[&comment.body],
+                    ) == *expected_digest
+                })
+                .cloned()
+                .ok_or_else(|| {
+                    reconciliation_remote_error(
+                        "submitted reconciliation comment is absent from authoritative readback",
+                    )
+                })?;
+            complete_resolution_attempt_step(env.repo_path(), candidate, token, recovery_intent)?;
+            Ok(Some((
+                IssueNumber(*duplicate_owner_number),
+                submitted_comment,
+            )))
+        }
+        ResolutionAttemptIntent::CloseDuplicate {
+            duplicate_owner_number,
+            ..
+        } => {
+            let readback = env
+                .improvement_owner_client(deadline)
+                .map_err(|error| {
+                    remote_commit_error(
+                        BlockedReason::Reconciliation,
+                        "RECONCILE_DUPLICATE_OWNERS",
+                        error.into(),
+                    )
+                })?
+                .fetch_issue(&repository, IssueNumber(*duplicate_owner_number), deadline)
+                .map_err(|error| {
+                    remote_commit_error(
+                        BlockedReason::Reconciliation,
+                        "RECONCILE_DUPLICATE_OWNERS",
+                        error.into(),
+                    )
+                })?;
+            let fingerprint = candidate.fingerprint.as_deref().ok_or_else(|| {
+                remote_commit_error(
+                    BlockedReason::Reconciliation,
+                    "RECONCILE_DUPLICATE_OWNERS",
+                    owner_projection_error("candidate fingerprint is missing"),
+                )
+            })?;
+            if readback.repository != repository
+                || readback.number != IssueNumber(*duplicate_owner_number)
+                || readback.kind != RepositoryIssueKind::Plain
+                || !exact_fingerprint_markers(&readback.body)
+                    .iter()
+                    .any(|marker| marker == fingerprint)
+            {
+                return Err(remote_commit_error(
+                    BlockedReason::Reconciliation,
+                    "RECONCILE_DUPLICATE_OWNERS",
+                    owner_projection_error(
+                        "submitted duplicate close could not be matched to authoritative readback",
+                    ),
+                ));
+            }
+            complete_resolution_attempt_step(env.repo_path(), candidate, token, recovery_intent)?;
+            Ok(None)
+        }
+        _ => Ok(None),
+    }
 }
 
 fn reconciliation_pre_submit_error(message: &str) -> OwnerResolutionCommitError {
@@ -3003,6 +4897,7 @@ fn settle_non_owner_preflight<E: CliEnv>(
             remediation: "RETRY_OWNER_RESOLUTION",
         },
         OwnerPreflightOutcome::Active { .. }
+        | OwnerPreflightOutcome::RegressionCreateAuthorized { .. }
         | OwnerPreflightOutcome::CreateAuthorized { .. }
         | OwnerPreflightOutcome::DuplicateExactIssues { .. } => {
             return Err(owner_projection_error(
@@ -3115,12 +5010,17 @@ fn begin_resolution_attempt(
         if reconciliation_only {
             store.candidates[index].reconciliation_required = true;
         }
-        let mut recovering_remote_unknown = initial_state == CandidateState::RemoteOutcomeUnknown;
-        let mut recovery_intent = store.candidates[index]
+        let submitted_recovery_intent = store.candidates[index]
             .attempt
             .as_ref()
             .filter(|attempt| attempt.remote_phase == AttemptRemotePhase::Submitted)
-            .map(|attempt| attempt.intent.clone())
+            .map(|attempt| attempt.intent.clone());
+        let pending_create_recovery_intent =
+            store.candidates[index].pending_create_resolution.clone();
+        let mut recovering_remote_unknown = initial_state == CandidateState::RemoteOutcomeUnknown
+            || (submitted_recovery_intent.is_none() && pending_create_recovery_intent.is_some());
+        let mut recovery_intent = submitted_recovery_intent
+            .or(pending_create_recovery_intent)
             .unwrap_or_default();
         let decision = super::improvement_store::acquire_attempt_lease(
             store,
@@ -3165,6 +5065,14 @@ fn begin_resolution_attempt(
                 }
             }
         };
+        if recovering_remote_unknown && recovery_intent != ResolutionAttemptIntent::Unassigned {
+            super::improvement_store::mark_attempt_submitted(
+                store,
+                candidate_id,
+                &lease.attempt_id,
+                recovery_intent.clone(),
+            )?;
+        }
         if matches!(
             store.candidates[index].state,
             CandidateState::Blocked
@@ -3188,55 +5096,124 @@ fn begin_resolution_attempt(
     })
 }
 
-fn active_owner_attempt_intent(
-    candidate: &ImprovementCandidate,
-    owner: &OwnerCandidate,
-    comments: &[RepositoryComment],
-    repo_root: &Path,
+fn adopt_recovered_occurrence_comments_step<E: CliEnv>(
+    env: &mut E,
+    candidate: &mut ImprovementCandidate,
+    token: &ResolutionAttemptToken,
+    recovery_intent: &ResolutionAttemptIntent,
     deadline: &ResolutionDeadline,
-) -> Result<Option<ResolutionAttemptIntent>, OwnerResolutionCommitError> {
+) -> Result<Option<(IssueNumber, RepositoryComment)>, OwnerResolutionCommitError> {
+    let ResolutionAttemptIntent::OccurrenceComments {
+        owner_number,
+        occurrence_keys,
+        public_payload_digest: expected_digest,
+    } = recovery_intent
+    else {
+        return Ok(None);
+    };
+    let repo_root = env.repo_path().to_path_buf();
     let fingerprint = candidate.fingerprint.as_deref().ok_or_else(|| {
-        pre_submit_commit_error(
-            BlockedReason::Routing,
-            "CAPTURE_TYPED_EVIDENCE",
+        remote_commit_error(
+            BlockedReason::Readback,
+            "REFRESH_OWNER_CORPUS",
             owner_projection_error("candidate fingerprint is missing"),
         )
     })?;
-    let public_context = PublicMutationContext::for_repo_with_deadline(repo_root, deadline);
-    let mut pending = candidate
+    let repository = RepositoryIdentity::gwt_upstream();
+    let client = env.improvement_owner_client(deadline).map_err(|error| {
+        remote_commit_error(
+            BlockedReason::Readback,
+            "REFRESH_OWNER_CORPUS",
+            error.into(),
+        )
+    })?;
+    let owner_readback = client
+        .fetch_issue(&repository, IssueNumber(*owner_number), deadline)
+        .map_err(|error| {
+            remote_commit_error(
+                BlockedReason::Readback,
+                "REFRESH_OWNER_CORPUS",
+                error.into(),
+            )
+        })?;
+    if owner_readback.repository != repository
+        || owner_readback.number != IssueNumber(*owner_number)
+        || !matches!(
+            owner_readback.kind,
+            RepositoryIssueKind::Plain | RepositoryIssueKind::Spec
+        )
+    {
+        return Err(remote_commit_error(
+            BlockedReason::Readback,
+            "REFRESH_OWNER_CORPUS",
+            owner_projection_error(
+                "submitted occurrence owner did not match authoritative readback",
+            ),
+        ));
+    }
+    let comments = client
+        .list_comments(&repository, IssueNumber(*owner_number), deadline)
+        .map_err(|error| {
+            remote_commit_error(
+                BlockedReason::Readback,
+                "REFRESH_OWNER_CORPUS",
+                error.into(),
+            )
+        })?;
+    let [occurrence_key] = occurrence_keys.as_slice() else {
+        return Err(remote_commit_error(
+            BlockedReason::Readback,
+            "REFRESH_OWNER_CORPUS",
+            owner_projection_error(
+                "submitted occurrence recovery requires exactly one immutable comment intent",
+            ),
+        ));
+    };
+    if !candidate
         .distinct_occurrences
         .iter()
-        .filter(|occurrence| {
-            !comments.iter().any(|comment| {
-                comment_matches_occurrence(comment, &occurrence.opaque_key, fingerprint)
-            })
-        })
-        .map(|occurrence| {
-            render_occurrence_comment_payload(candidate, &occurrence.opaque_key, &public_context)
-                .map(|payload| (occurrence.opaque_key.clone(), payload.body))
-                .map_err(|error| {
-                    pre_submit_commit_error(
-                        BlockedReason::Privacy,
-                        "RECAPTURE_SAFE_TYPED_EVIDENCE",
-                        privacy_as_owner_spec_error(error),
-                    )
-                })
-        })
-        .collect::<Result<Vec<_>, _>>()?;
-    pending.sort_by(|left, right| left.0.cmp(&right.0));
-    let occurrence_keys = pending.iter().map(|(key, _)| key.clone()).collect();
-    let digest_fields = pending
+        .any(|occurrence| occurrence.opaque_key == *occurrence_key)
+    {
+        return Err(remote_commit_error(
+            BlockedReason::Readback,
+            "REFRESH_OWNER_CORPUS",
+            owner_projection_error("submitted occurrence comment key is absent from the candidate"),
+        ));
+    }
+    let submitted_comment = comments
+        .items()
         .iter()
-        .flat_map(|(key, body)| [key.as_str(), body.as_str()])
-        .collect::<Vec<_>>();
-    Ok(Some(ResolutionAttemptIntent::OccurrenceComments {
-        owner_number: owner.number,
-        occurrence_keys,
-        public_payload_digest: public_payload_digest(
-            "gwt.improvement.owner-comment-intent.v1",
-            &digest_fields,
-        ),
-    }))
+        .find(|comment| {
+            comment_matches_occurrence(comment, occurrence_key, fingerprint)
+                && public_payload_digest(
+                    "gwt.improvement.owner-comment-intent.v1",
+                    &[occurrence_key, &comment.body],
+                ) == *expected_digest
+        })
+        .cloned()
+        .ok_or_else(|| {
+            remote_commit_error(
+                BlockedReason::Readback,
+                "REFRESH_OWNER_CORPUS",
+                owner_projection_error(
+                    "submitted occurrence comment is absent from authoritative readback",
+                ),
+            )
+        })?;
+
+    let attempt = super::improvement_store::update(&repo_root, |store| {
+        super::improvement_store::complete_attempt_step(
+            store,
+            &token.candidate_id,
+            &token.attempt_id,
+            recovery_intent,
+        )
+    })
+    .map_err(|error| {
+        remote_commit_error(BlockedReason::LocalCommit, "REPAIR_OWNER_PROJECTION", error)
+    })?;
+    candidate.attempt = Some(attempt);
+    Ok(Some((IssueNumber(*owner_number), submitted_comment)))
 }
 
 fn new_owner_attempt_intent(authorization: &ProvenZeroAuthorization) -> ResolutionAttemptIntent {
@@ -3250,9 +5227,29 @@ fn new_owner_attempt_intent(authorization: &ProvenZeroAuthorization) -> Resoluti
     }
 }
 
+fn regression_owner_attempt_intent(
+    authorization: &ProvenRegressionAuthorization,
+) -> ResolutionAttemptIntent {
+    ResolutionAttemptIntent::CreateRegressionIssue {
+        fingerprint: authorization.fingerprint.clone(),
+        historical_owner_number: authorization.historical_owner.number,
+        recurrence_occurrence_keys: authorization.recurrence_occurrence_keys.clone(),
+        recurrence_proof_digest: authorization.recurrence_proof_digest.clone(),
+        public_payload_digest: public_payload_digest(
+            "gwt.improvement.regression-create-intent.v1",
+            &[&authorization.payload.title, &authorization.payload.body],
+        ),
+        created_owner_number: None,
+    }
+}
+
 fn recorded_created_owner_number(intent: &ResolutionAttemptIntent) -> Option<u64> {
     match intent {
         ResolutionAttemptIntent::CreateIssue {
+            created_owner_number,
+            ..
+        }
+        | ResolutionAttemptIntent::CreateRegressionIssue {
             created_owner_number,
             ..
         } => *created_owner_number,
@@ -3267,26 +5264,38 @@ fn record_created_owner_readback(
     owner_number: u64,
 ) -> Result<ResolutionAttemptIntent, OwnerResolutionCommitError> {
     let intent = record_local_created_owner_number(candidate, token, owner_number)?;
-    let attempt = super::improvement_store::update(repo_root, |store| {
-        super::improvement_store::renew_attempt_lease(
-            store,
-            &token.candidate_id,
-            &token.attempt_id,
-            Utc::now(),
-            token.ttl,
-        )?;
-        super::improvement_store::record_created_owner_number(
-            store,
-            &token.candidate_id,
-            &token.attempt_id,
-            owner_number,
-        )
-    })
-    .map_err(|error| {
-        remote_commit_error(BlockedReason::LocalCommit, "REPAIR_OWNER_PROJECTION", error)
-    })?;
+    let (attempt, pending_create_resolution) =
+        super::improvement_store::update(repo_root, |store| {
+            super::improvement_store::renew_attempt_lease(
+                store,
+                &token.candidate_id,
+                &token.attempt_id,
+                Utc::now(),
+                token.ttl,
+            )?;
+            let attempt = super::improvement_store::record_created_owner_number(
+                store,
+                &token.candidate_id,
+                &token.attempt_id,
+                owner_number,
+            )?;
+            let pending_create_resolution = store
+                .candidates
+                .iter()
+                .find(|stored| stored.id == token.candidate_id)
+                .and_then(|stored| stored.pending_create_resolution.clone())
+                .ok_or_else(|| owner_projection_error("pending create resolution is missing"))?;
+            Ok((attempt, Some(pending_create_resolution)))
+        })
+        .map_err(|error| {
+            remote_commit_error(BlockedReason::LocalCommit, "REPAIR_OWNER_PROJECTION", error)
+        })?;
     candidate.attempt = Some(attempt);
-    Ok(intent)
+    candidate.pending_create_resolution = pending_create_resolution;
+    Ok(candidate
+        .pending_create_resolution
+        .clone()
+        .unwrap_or(intent))
 }
 
 fn record_local_created_owner_number(
@@ -3319,14 +5328,21 @@ fn record_local_created_owner_number(
             "created owner number requires a submitted create intent",
         ));
     }
-    let ResolutionAttemptIntent::CreateIssue {
-        created_owner_number,
-        ..
-    } = &mut attempt.intent
-    else {
-        return Err(invalid_readback(
-            "created owner number requires a submitted create intent",
-        ));
+    let original_intent = attempt.intent.clone();
+    let created_owner_number = match &mut attempt.intent {
+        ResolutionAttemptIntent::CreateIssue {
+            created_owner_number,
+            ..
+        }
+        | ResolutionAttemptIntent::CreateRegressionIssue {
+            created_owner_number,
+            ..
+        } => created_owner_number,
+        _ => {
+            return Err(invalid_readback(
+                "created owner number requires a submitted create intent",
+            ));
+        }
     };
     match created_owner_number {
         Some(existing) if *existing != owner_number => {
@@ -3337,7 +5353,18 @@ fn record_local_created_owner_number(
         Some(_) => {}
         None => *created_owner_number = Some(owner_number),
     }
-    Ok(attempt.intent.clone())
+    let recorded_intent = attempt.intent.clone();
+    match candidate.pending_create_resolution.as_mut() {
+        Some(pending) if *pending == original_intent => *pending = recorded_intent.clone(),
+        Some(pending) if *pending == recorded_intent => {}
+        Some(_) => {
+            return Err(invalid_readback(
+                "submitted create intent conflicts with the pending create resolution",
+            ));
+        }
+        None => candidate.pending_create_resolution = Some(recorded_intent.clone()),
+    }
+    Ok(recorded_intent)
 }
 
 fn public_payload_digest(domain: &str, fields: &[&str]) -> String {
@@ -3362,31 +5389,37 @@ fn mark_resolution_attempt_submitted(
             owner_projection_error("owner resolution attempt token candidate mismatch"),
         ));
     }
-    let attempt = super::improvement_store::update(repo_root, |store| {
-        super::improvement_store::renew_attempt_lease(
-            store,
-            &token.candidate_id,
-            &token.attempt_id,
-            Utc::now(),
-            token.ttl,
-        )?;
-        super::improvement_store::mark_attempt_submitted(
-            store,
-            &token.candidate_id,
-            &token.attempt_id,
-            intent.clone(),
-        )?;
-        store
-            .candidates
-            .iter()
-            .find(|stored| stored.id == token.candidate_id)
-            .and_then(|stored| stored.attempt.clone())
-            .ok_or_else(|| owner_projection_error("submitted attempt lease is missing"))
-    })
-    .map_err(|error| {
-        pre_submit_commit_error(BlockedReason::Store, "RELOAD_CANDIDATE_STORE", error)
-    })?;
+    let (attempt, pending_create_resolution) =
+        super::improvement_store::update(repo_root, |store| {
+            super::improvement_store::renew_attempt_lease(
+                store,
+                &token.candidate_id,
+                &token.attempt_id,
+                Utc::now(),
+                token.ttl,
+            )?;
+            super::improvement_store::mark_attempt_submitted(
+                store,
+                &token.candidate_id,
+                &token.attempt_id,
+                intent.clone(),
+            )?;
+            let candidate = store
+                .candidates
+                .iter()
+                .find(|stored| stored.id == token.candidate_id)
+                .ok_or_else(|| owner_projection_error("submitted attempt candidate is missing"))?;
+            let attempt = candidate
+                .attempt
+                .clone()
+                .ok_or_else(|| owner_projection_error("submitted attempt lease is missing"))?;
+            Ok((attempt, candidate.pending_create_resolution.clone()))
+        })
+        .map_err(|error| {
+            pre_submit_commit_error(BlockedReason::Store, "RELOAD_CANDIDATE_STORE", error)
+        })?;
     candidate.attempt = Some(attempt);
+    candidate.pending_create_resolution = pending_create_resolution;
     Ok(())
 }
 
@@ -3425,7 +5458,29 @@ fn settle_owner_commit_error<E: CliEnv>(
     error: OwnerResolutionCommitError,
 ) -> Result<ImprovementCandidate, gwt_github::SpecOpsError> {
     match error {
-        OwnerResolutionCommitError::PreSubmit { failure, source: _ } => {
+        OwnerResolutionCommitError::PreSubmit {
+            failure,
+            source: _,
+            clear_create_root,
+        } => {
+            if clear_create_root {
+                let submitted_create_intent = candidate.attempt.as_ref().and_then(|attempt| {
+                    (attempt.remote_phase == AttemptRemotePhase::Submitted
+                        && matches!(
+                            attempt.intent,
+                            ResolutionAttemptIntent::CreateIssue { .. }
+                                | ResolutionAttemptIntent::CreateRegressionIssue { .. }
+                        )
+                        && candidate.pending_create_resolution.as_ref() == Some(&attempt.intent))
+                    .then(|| attempt.intent.clone())
+                });
+                if let Some(create_intent) = submitted_create_intent {
+                    super::improvement_store::clear_pending_create_resolution(
+                        &mut candidate,
+                        &create_intent,
+                    )?;
+                }
+            }
             block_owner_resolution(env, &mut candidate, failure, None, false)?;
             candidate.attempt = None;
             persist_and_post_resolver_failure(env, candidate, token, failure)
@@ -3476,6 +5531,9 @@ fn persist_resolver_candidate(
             .ok_or_else(|| owner_projection_error("candidate not found"))?;
         if stored.fingerprint != candidate.fingerprint
             || stored.distinct_occurrences != candidate.distinct_occurrences
+            || stored.state != CandidateState::OwnerResolving
+            || stored.dismissed_reason != candidate.dismissed_reason
+            || stored.audit != candidate.audit
         {
             return Err(owner_projection_error(
                 "candidate changed while Owner Resolution was running",
@@ -3498,6 +5556,7 @@ fn persist_resolver_candidate(
         stored.resolver_snapshot = candidate.resolver_snapshot.clone();
         stored.reconciliation_required = candidate.reconciliation_required;
         stored.reconciliation_owner_numbers = candidate.reconciliation_owner_numbers.clone();
+        stored.pending_create_resolution = candidate.pending_create_resolution.clone();
         stored.attempt = candidate.attempt.clone();
         stored.updated_at = candidate.updated_at.clone();
         Ok(stored.clone())
@@ -4275,6 +6334,10 @@ fn exact_occurrence_markers(body: &str) -> Vec<String> {
     exact_marker_values(body, occurrence_marker_re())
 }
 
+fn exact_reconciliation_markers(body: &str) -> Vec<String> {
+    exact_marker_values(body, reconciliation_marker_re())
+}
+
 fn exact_marker_values(body: &str, marker_re: &Regex) -> Vec<String> {
     let mut code_fence: Option<(u8, usize)> = None;
     body.lines()
@@ -4318,6 +6381,21 @@ fn comment_matches_occurrence(
         && exact_fingerprint_markers(&comment.body)
             .iter()
             .any(|marker| marker == fingerprint)
+}
+
+fn comment_matches_reconciliation(
+    comment: &RepositoryComment,
+    canonical_owner_number: u64,
+    duplicate_owner_number: u64,
+    fingerprint: &str,
+) -> bool {
+    let expected = format!("canonical:{canonical_owner_number} duplicate:{duplicate_owner_number}");
+    let reconciliation_markers = exact_reconciliation_markers(&comment.body);
+    let fingerprint_markers = exact_fingerprint_markers(&comment.body);
+    reconciliation_markers.len() == 1
+        && reconciliation_markers[0] == expected
+        && fingerprint_markers.len() == 1
+        && fingerprint_markers[0] == fingerprint
 }
 
 fn markdown_fence_delimiter(line: &str) -> Option<(u8, usize, bool)> {
@@ -4559,6 +6637,16 @@ fn occurrence_marker_re() -> &'static Regex {
     })
 }
 
+fn reconciliation_marker_re() -> &'static Regex {
+    static RE: OnceLock<Regex> = OnceLock::new();
+    RE.get_or_init(|| {
+        Regex::new(
+            r"^<!-- gwt:improvement-reconciliation:v1 (canonical:[1-9][0-9]* duplicate:[1-9][0-9]*) -->$",
+        )
+        .expect("reconciliation marker regex")
+    })
+}
+
 fn authorization_re() -> &'static Regex {
     static RE: OnceLock<Regex> = OnceLock::new();
     RE.get_or_init(|| Regex::new(r"(?i)authorization\s*:").expect("authorization regex"))
@@ -4643,16 +6731,18 @@ mod tests {
     use super::*;
     use crate::cli::{
         improvement::{
-            opaque_occurrence_key, CandidateState, DistinctOccurrence, DurableOwnerSnapshot,
-            ImprovementCandidate, ImprovementEligibility, OccurrenceOrigin, OccurrenceReplayProof,
-            OwnerKind, OwnerMatchBasis,
+            occurrence_evidence_digest, opaque_occurrence_key, CandidateState, DistinctOccurrence,
+            DurableOwnerSnapshot, ImprovementCandidate, ImprovementEligibility, OccurrenceOrigin,
+            OccurrenceReplayProof, OwnerKind, OwnerMatchBasis, TypedRecurrenceEvidence,
         },
         run_collect, BoardCommand, CliCommand, TestEnv,
     };
     use gwt_github::client::{
         fake::{FakeIssueClient, OwnerRepositoryFaultTiming, OwnerRepositoryOperation},
-        ApiError as GitHubApiError, CommentId, IssueNumber, IssueState, RepositoryComment,
-        RepositoryIdentity, RepositoryIssue, RepositoryIssueKind, ResolutionDeadline, UpdatedAt,
+        ApiError as GitHubApiError, CommentId, CommitComparison, CommitComparisonStatus,
+        IssueNumber, IssueState, MergedPullRequest, RepositoryActorType,
+        RepositoryAuthorAssociation, RepositoryComment, RepositoryIdentity, RepositoryIssue,
+        RepositoryIssueKind, RepositoryRelease, ResolutionDeadline, UpdatedAt,
     };
 
     fn commit_binding_with_complete_comment_audit(
@@ -4750,6 +6840,12 @@ mod tests {
         ResolutionDeadline::new(Duration::from_secs(1), Duration::from_secs(5))
     }
 
+    const MERGE_COMMIT_SHA: &str = "1111111111111111111111111111111111111111";
+    const RELEASE_COMMIT_SHA: &str = "2222222222222222222222222222222222222222";
+    const BUILD_COMMIT_SHA: &str = "3333333333333333333333333333333333333333";
+    const OTHER_COMMIT_SHA: &str = "4444444444444444444444444444444444444444";
+    const CONFLICTING_COMMIT_SHA: &str = "5555555555555555555555555555555555555555";
+
     fn implementation_gap_registry(routing_basis_revision: u64) -> ContractRoutingRegistry {
         ContractRoutingRegistry::new(vec![ContractRouteMapping {
             contract_id: "coordination.board-status".to_string(),
@@ -4771,6 +6867,122 @@ mod tests {
             state,
             kind: RepositoryIssueKind::Plain,
             updated_at: UpdatedAt::new(format!("u{number}")),
+        }
+    }
+
+    fn historical_resolution_comment(
+        merged_pr_number: u64,
+        merge_commit_sha: &str,
+        verified_at: &str,
+        first_fixed_release: &str,
+    ) -> String {
+        format!(
+            "<!-- gwt-improvement-resolution:v1 {{\"merged_pr_number\":{merged_pr_number},\"merge_commit_sha\":\"{merge_commit_sha}\",\"verified_at\":\"{verified_at}\",\"first_fixed_release\":\"{first_fixed_release}\"}} -->"
+        )
+    }
+
+    fn repository_comment(
+        id: u64,
+        body: impl Into<String>,
+        updated_at: impl Into<String>,
+    ) -> RepositoryComment {
+        RepositoryComment {
+            id: CommentId(id),
+            body: body.into(),
+            updated_at: UpdatedAt::new(updated_at.into()),
+            author_login: Some("test-owner".to_string()),
+            author_type: Some(RepositoryActorType::User),
+            author_association: Some(RepositoryAuthorAssociation::Owner),
+        }
+    }
+
+    fn historical_regression_fixture(
+        source: &Path,
+        candidate_id: &str,
+        recurrence: TypedRecurrenceEvidence,
+        comments: Vec<RepositoryComment>,
+    ) -> (String, TestEnv) {
+        let nonce = "0".repeat(64);
+        let (fingerprint, _) =
+            store_projection_candidate(source, &nonce, candidate_id, "historical-regression-event");
+        crate::cli::improvement_store::update(source, |store| {
+            let recurrent = &mut store.candidates[0];
+            recurrent.distinct_occurrences[0].evidence_digest = occurrence_evidence_digest(
+                recurrent.typed_evidence.as_ref().expect("typed evidence"),
+                Some(&recurrence),
+            );
+            recurrent.distinct_occurrences[0].captured_at = "2026-07-16T00:00:00Z".to_string();
+            recurrent.distinct_occurrences[0].recurrence = Some(recurrence);
+            recurrent.state = CandidateState::Recurrent;
+            recurrent.owner = Some(DurableOwnerSnapshot {
+                number: 45,
+                kind: OwnerKind::Issue,
+                title: "Owner 45".to_string(),
+                active: true,
+                url: "https://github.com/akiojin/gwt/issues/45".to_string(),
+                fingerprint: fingerprint.clone(),
+                readback_verified_at: "2026-07-10T00:00:00Z".to_string(),
+            });
+            Ok(())
+        })
+        .expect("store recurrent candidate");
+
+        let repository = RepositoryIdentity::gwt_upstream();
+        let mut env = TestEnv::new(source.join("cache"));
+        env.repo_path = source.to_path_buf();
+        env.improvement_source_scope_nonce = nonce;
+        env.owner_client.seed_repository_issue(owner_issue(
+            45,
+            IssueState::Closed,
+            fingerprint_marker(&fingerprint),
+        ));
+        env.owner_client
+            .seed_repository_comments(&repository, IssueNumber(45), comments);
+        env.owner_client.seed_merged_pull_request(
+            &repository,
+            MergedPullRequest {
+                number: IssueNumber(900),
+                merge_commit_sha: MERGE_COMMIT_SHA.to_string(),
+                merged_at: "2026-07-01T00:00:00Z".to_string(),
+            },
+        );
+        env.owner_client.seed_repository_release(
+            &repository,
+            RepositoryRelease {
+                tag_name: "v9.65.0".to_string(),
+                target_commitish: "develop".to_string(),
+                published_at: "2026-07-05T00:00:00Z".to_string(),
+            },
+        );
+        env.owner_client.seed_commit_comparison(
+            &repository,
+            CommitComparison {
+                base: MERGE_COMMIT_SHA.to_string(),
+                head: "refs/tags/v9.65.0".to_string(),
+                base_commit_sha: MERGE_COMMIT_SHA.to_string(),
+                merge_base_commit_sha: MERGE_COMMIT_SHA.to_string(),
+                head_commit_sha: RELEASE_COMMIT_SHA.to_string(),
+                status: CommitComparisonStatus::Ahead,
+                ahead_by: 4,
+                behind_by: 0,
+            },
+        );
+        (fingerprint, env)
+    }
+
+    fn standard_historical_resolution_comment() -> RepositoryComment {
+        repository_comment(
+            501,
+            historical_resolution_comment(900, MERGE_COMMIT_SHA, "2026-07-10T00:00:00Z", "v9.65.0"),
+            "2026-07-10T00:00:00Z",
+        )
+    }
+
+    fn version_recurrence(version: Option<&str>, observed_at: &str) -> TypedRecurrenceEvidence {
+        TypedRecurrenceEvidence {
+            installed_version: version.map(str::to_string),
+            build_commit: None,
+            observed_at: observed_at.to_string(),
         }
     }
 
@@ -5299,11 +7511,7 @@ mod tests {
         )
         .expect("occurrence payload")
         .body;
-        let comment = RepositoryComment {
-            id: CommentId(1),
-            body: comment_body,
-            updated_at: UpdatedAt::new("2026-07-15T10:00:00Z"),
-        };
+        let comment = repository_comment(1, comment_body, "2026-07-15T10:00:00Z");
         env.owner_client.seed_repository_comments(
             &RepositoryIdentity::gwt_upstream(),
             IssueNumber(44),
@@ -5663,17 +7871,13 @@ mod tests {
             fingerprint_marker(candidate.fingerprint.as_deref().expect("fingerprint")),
         ));
         let mut comments = (1..=204)
-            .map(|id| RepositoryComment {
-                id: CommentId(id),
-                body: format!("public comment {id}"),
-                updated_at: UpdatedAt::new(format!("c{id}")),
-            })
+            .map(|id| repository_comment(id, format!("public comment {id}"), format!("c{id}")))
             .collect::<Vec<_>>();
-        comments.push(RepositoryComment {
-            id: CommentId(205),
-            body: occurrence_marker(&candidate.distinct_occurrences[0].opaque_key),
-            updated_at: UpdatedAt::new("c205"),
-        });
+        comments.push(repository_comment(
+            205,
+            occurrence_marker(&candidate.distinct_occurrences[0].opaque_key),
+            "c205",
+        ));
         env.owner_client
             .seed_repository_comments(&repository, IssueNumber(42), comments);
 
@@ -6446,6 +8650,7 @@ mod tests {
                 source_scope_nonce,
                 source_event_id: source_event_id.to_string(),
             }),
+            recurrence: None,
         });
         candidate.occurrences = 2;
         let registry = ContractRoutingRegistry::new(vec![ContractRouteMapping {
@@ -6504,6 +8709,7 @@ mod tests {
                 source_scope_nonce,
                 source_event_id: source_event_id.to_string(),
             }),
+            recurrence: None,
         });
         candidate.occurrences = 2;
         let registry = ContractRoutingRegistry::new(vec![ContractRouteMapping {
@@ -6780,6 +8986,23 @@ mod tests {
         (fingerprint, occurrence_key)
     }
 
+    fn replace_candidate_public_outcomes(repo_root: &Path, expected: &str, observed: &str) {
+        crate::cli::improvement_store::update(repo_root, |store| {
+            let candidate = store.candidates.first_mut().expect("source candidate");
+            let evidence = candidate.typed_evidence.as_mut().expect("typed evidence");
+            evidence.expected_outcome = expected.to_string();
+            evidence.observed_outcome = observed.to_string();
+            let evidence = evidence.clone();
+            candidate.evidence_digest = Some(typed_evidence_digest(&evidence));
+            for occurrence in &mut candidate.distinct_occurrences {
+                occurrence.evidence_digest =
+                    occurrence_evidence_digest(&evidence, occurrence.recurrence.as_ref());
+            }
+            Ok(())
+        })
+        .expect("replace current public evidence");
+    }
+
     fn verified_projection_owner(number: u64, fingerprint: &str) -> DurableOwnerSnapshot {
         DurableOwnerSnapshot {
             number,
@@ -6959,8 +9182,24 @@ mod tests {
             else {
                 panic!("expected active owner on retry");
             };
-            commit_active_owner_resolution(&mut env, &mut candidate, &owner, &comments, &deadline)
-                .expect("idempotent active owner retry");
+            let retry_error = commit_active_owner_resolution(
+                &mut env,
+                &mut candidate,
+                &owner,
+                &comments,
+                &deadline,
+            )
+            .expect_err("successful candidates require a new OwnerResolving lease");
+            assert!(matches!(
+                retry_error,
+                OwnerResolutionCommitError::PreSubmit {
+                    failure: OwnerResolutionFailure {
+                        reason: BlockedReason::Store,
+                        ..
+                    },
+                    ..
+                }
+            ));
             assert_eq!(env.owner_client.owner_mutation_count(), 1);
             assert_eq!(
                 env.owner_client
@@ -7011,16 +9250,8 @@ mod tests {
             &RepositoryIdentity::gwt_upstream(),
             IssueNumber(44),
             vec![
-                RepositoryComment {
-                    id: CommentId(1),
-                    body: comment_body.clone(),
-                    updated_at: UpdatedAt::new("2026-07-15T10:00:00Z"),
-                },
-                RepositoryComment {
-                    id: CommentId(2),
-                    body: comment_body,
-                    updated_at: UpdatedAt::new("2026-07-15T10:00:01Z"),
-                },
+                repository_comment(1, comment_body.clone(), "2026-07-15T10:00:00Z"),
+                repository_comment(2, comment_body, "2026-07-15T10:00:01Z"),
             ],
         );
         let deadline = resolution_deadline();
@@ -7169,24 +9400,24 @@ mod tests {
             &RepositoryIdentity::gwt_upstream(),
             IssueNumber(47),
             vec![
-                RepositoryComment {
-                    id: CommentId(1),
-                    body: format!("{exact_occurrence} suffix\n{exact_fingerprint}"),
-                    updated_at: UpdatedAt::new("2026-07-15T10:00:00Z"),
-                },
-                RepositoryComment {
-                    id: CommentId(2),
-                    body: format!("```\n{exact_occurrence}\n{exact_fingerprint}\n```"),
-                    updated_at: UpdatedAt::new("2026-07-15T10:00:01Z"),
-                },
-                RepositoryComment {
-                    id: CommentId(3),
-                    body: format!(
+                repository_comment(
+                    1,
+                    format!("{exact_occurrence} suffix\n{exact_fingerprint}"),
+                    "2026-07-15T10:00:00Z",
+                ),
+                repository_comment(
+                    2,
+                    format!("```\n{exact_occurrence}\n{exact_fingerprint}\n```"),
+                    "2026-07-15T10:00:01Z",
+                ),
+                repository_comment(
+                    3,
+                    format!(
                         "{exact_occurrence}\n{}",
                         fingerprint_marker(&format!("v2:{}", "f".repeat(64)))
                     ),
-                    updated_at: UpdatedAt::new("2026-07-15T10:00:02Z"),
-                },
+                    "2026-07-15T10:00:02Z",
+                ),
             ],
         );
         let mut candidate = crate::cli::improvement_store::load_and_repair(source.path())
@@ -7513,6 +9744,2474 @@ mod tests {
             )
             .expect("historical owner readback");
         assert_eq!(readback.state, IssueState::Closed);
+    }
+
+    #[test]
+    fn verified_historical_owner_with_newer_version_creates_one_regression_issue() {
+        let home = tempfile::tempdir().expect("isolated home");
+        let _gwt_home = gwt_core::test_support::ScopedGwtHome::set(home.path());
+        let source = tempfile::tempdir().expect("source");
+        let nonce = "0".repeat(64);
+        let (fingerprint, _) = store_projection_candidate(
+            source.path(),
+            &nonce,
+            "impr-historical-regression",
+            "historical-regression-event",
+        );
+        crate::cli::improvement_store::update(source.path(), |store| {
+            let mut recurrent = store.candidates[0].clone();
+            let recurrence = TypedRecurrenceEvidence {
+                installed_version: Some("9.66.0".to_string()),
+                build_commit: None,
+                observed_at: "2026-07-15T09:00:00Z".to_string(),
+            };
+            let evidence_digest = occurrence_evidence_digest(
+                recurrent.typed_evidence.as_ref().expect("typed evidence"),
+                Some(&recurrence),
+            );
+            recurrent.distinct_occurrences[0].captured_at = "2026-07-16T00:00:00Z".to_string();
+            recurrent.distinct_occurrences[0].recurrence = Some(recurrence);
+            recurrent.distinct_occurrences[0].evidence_digest = evidence_digest;
+            recurrent.state = CandidateState::Recurrent;
+            recurrent.owner = Some(DurableOwnerSnapshot {
+                number: 45,
+                kind: OwnerKind::Issue,
+                title: "Owner 45".to_string(),
+                active: true,
+                url: "https://github.com/akiojin/gwt/issues/45".to_string(),
+                fingerprint: fingerprint.clone(),
+                readback_verified_at: "2026-07-10T00:00:00Z".to_string(),
+            });
+            store.candidates[0] = recurrent;
+            Ok(())
+        })
+        .expect("store recurrent candidate");
+
+        let repository = RepositoryIdentity::gwt_upstream();
+        let mut env = TestEnv::new(source.path().join("cache"));
+        env.repo_path = source.path().to_path_buf();
+        env.improvement_source_scope_nonce = nonce;
+        env.owner_client.seed_repository_issue(owner_issue(
+            45,
+            IssueState::Closed,
+            fingerprint_marker(&fingerprint),
+        ));
+        env.owner_client.seed_repository_comments(
+            &repository,
+            IssueNumber(45),
+            vec![repository_comment(
+                501,
+                historical_resolution_comment(
+                    900,
+                    MERGE_COMMIT_SHA,
+                    "2026-07-10T00:00:00Z",
+                    "v9.65.0",
+                ),
+                "2026-07-10T00:00:00Z",
+            )],
+        );
+        env.owner_client.seed_merged_pull_request(
+            &repository,
+            MergedPullRequest {
+                number: IssueNumber(900),
+                merge_commit_sha: MERGE_COMMIT_SHA.to_string(),
+                merged_at: "2026-07-01T00:00:00Z".to_string(),
+            },
+        );
+        env.owner_client.seed_repository_release(
+            &repository,
+            RepositoryRelease {
+                tag_name: "v9.65.0".to_string(),
+                target_commitish: "develop".to_string(),
+                published_at: "2026-07-05T00:00:00Z".to_string(),
+            },
+        );
+        env.owner_client.seed_commit_comparison(
+            &repository,
+            CommitComparison {
+                base: MERGE_COMMIT_SHA.to_string(),
+                head: "refs/tags/v9.65.0".to_string(),
+                base_commit_sha: MERGE_COMMIT_SHA.to_string(),
+                merge_base_commit_sha: MERGE_COMMIT_SHA.to_string(),
+                head_commit_sha: RELEASE_COMMIT_SHA.to_string(),
+                status: CommitComparisonStatus::Ahead,
+                ahead_by: 4,
+                behind_by: 0,
+            },
+        );
+
+        let resolved = resolve_candidate_owner(
+            &mut env,
+            "impr-historical-regression",
+            CaptureBudgetProfile::Normal,
+        )
+        .expect("verified recurrence resolution");
+
+        assert_eq!(
+            resolved.state,
+            CandidateState::Created,
+            "{resolved:?}; calls={:?}",
+            env.owner_client.owner_call_log()
+        );
+        assert_eq!(resolved.owner.as_ref().map(|owner| owner.number), Some(46));
+        let regression = env
+            .owner_client
+            .fetch_issue(&repository, IssueNumber(46), &resolution_deadline())
+            .expect("regression owner readback");
+        assert!(regression.body.contains("Historical owner: #45"));
+        assert!(exact_fingerprint_markers(&regression.body)
+            .iter()
+            .any(|marker| marker == &fingerprint));
+        assert_eq!(
+            env.owner_client
+                .fetch_issue(&repository, IssueNumber(45), &resolution_deadline())
+                .expect("historical owner readback")
+                .state,
+            IssueState::Closed
+        );
+        assert!(env
+            .owner_client
+            .owner_mutation_call_log()
+            .iter()
+            .all(|call| { call.issue_number != Some(IssueNumber(45)) }));
+    }
+
+    #[test]
+    fn historical_recurrence_rejects_untrusted_or_conflicting_resolution_markers() {
+        for (name, comments) in [
+            ("bot", {
+                let mut comment = standard_historical_resolution_comment();
+                comment.author_type = Some(RepositoryActorType::Bot);
+                vec![comment]
+            }),
+            ("untrusted-association", {
+                let mut comment = standard_historical_resolution_comment();
+                comment.author_association = Some(RepositoryAuthorAssociation::Contributor);
+                vec![comment]
+            }),
+            ("missing-association", {
+                let mut comment = standard_historical_resolution_comment();
+                comment.author_association = None;
+                vec![comment]
+            }),
+            ("unknown-association", {
+                let mut comment = standard_historical_resolution_comment();
+                comment.author_association = Some(RepositoryAuthorAssociation::Unknown(
+                    "FUTURE_ROLE".to_string(),
+                ));
+                vec![comment]
+            }),
+            (
+                "multiple-markers",
+                vec![
+                    standard_historical_resolution_comment(),
+                    repository_comment(
+                        502,
+                        historical_resolution_comment(
+                            901,
+                            "other-merge",
+                            "2026-07-11T00:00:00Z",
+                            "v9.65.1",
+                        ),
+                        "2026-07-11T00:00:00Z",
+                    ),
+                ],
+            ),
+            (
+                "malformed-marker",
+                vec![repository_comment(
+                    501,
+                    "<!-- gwt-improvement-resolution:v1 not-json -->",
+                    "2026-07-10T00:00:00Z",
+                )],
+            ),
+        ] {
+            let home = tempfile::tempdir().expect("isolated home");
+            let _gwt_home = gwt_core::test_support::ScopedGwtHome::set(home.path());
+            let source = tempfile::tempdir().expect("source");
+            let candidate_id = format!("impr-historical-{name}");
+            let (_, mut env) = historical_regression_fixture(
+                source.path(),
+                &candidate_id,
+                version_recurrence(Some("9.66.0"), "2026-07-15T09:00:00Z"),
+                comments,
+            );
+
+            let resolved =
+                resolve_candidate_owner(&mut env, &candidate_id, CaptureBudgetProfile::Normal)
+                    .unwrap_or_else(|error| panic!("{name}: resolution failed: {error}"));
+
+            assert_eq!(resolved.state, CandidateState::Blocked, "{name}");
+            assert_eq!(
+                resolved.blocked_reason,
+                Some(BlockedReason::Ambiguity),
+                "{name}"
+            );
+            assert_eq!(env.owner_client.owner_mutation_count(), 0, "{name}");
+        }
+    }
+
+    #[test]
+    fn historical_recurrence_rejects_untrusted_markers_even_with_a_trusted_marker() {
+        let home = tempfile::tempdir().expect("isolated home");
+        let _gwt_home = gwt_core::test_support::ScopedGwtHome::set(home.path());
+        let source = tempfile::tempdir().expect("source");
+        let candidate_id = "impr-historical-ignore-untrusted-markers";
+        let mut bot = repository_comment(
+            502,
+            "<!-- gwt-improvement-resolution:v1 not-json -->",
+            "2026-07-10T00:00:00Z",
+        );
+        bot.author_type = Some(RepositoryActorType::Bot);
+        bot.author_association = Some(RepositoryAuthorAssociation::Owner);
+        let mut contributor = repository_comment(
+            503,
+            historical_resolution_comment(
+                901,
+                CONFLICTING_COMMIT_SHA,
+                "2026-07-11T00:00:00Z",
+                "v9.65.1",
+            ),
+            "2026-07-11T00:00:00Z",
+        );
+        contributor.author_association = Some(RepositoryAuthorAssociation::Contributor);
+        let mut missing_actor = repository_comment(
+            504,
+            "quoted gwt-improvement-resolution:v1 text",
+            "2026-07-11T00:00:00Z",
+        );
+        missing_actor.author_login = None;
+        missing_actor.author_type = None;
+        missing_actor.author_association = None;
+        let (_, mut env) = historical_regression_fixture(
+            source.path(),
+            candidate_id,
+            version_recurrence(Some("9.66.0"), "2026-07-15T09:00:00Z"),
+            vec![
+                bot,
+                contributor,
+                missing_actor,
+                standard_historical_resolution_comment(),
+            ],
+        );
+
+        let resolved =
+            resolve_candidate_owner(&mut env, candidate_id, CaptureBudgetProfile::Normal)
+                .expect("untrusted marker evidence must fail closed");
+
+        assert_eq!(resolved.state, CandidateState::Blocked);
+        assert_eq!(resolved.blocked_reason, Some(BlockedReason::Ambiguity));
+        assert_eq!(env.owner_client.owner_mutation_count(), 0);
+    }
+
+    #[test]
+    fn enterprise_member_can_author_the_unique_historical_resolution_marker() {
+        let home = tempfile::tempdir().expect("isolated home");
+        let _gwt_home = gwt_core::test_support::ScopedGwtHome::set(home.path());
+        let source = tempfile::tempdir().expect("source");
+        let candidate_id = "impr-historical-enterprise-member";
+        let mut comment = standard_historical_resolution_comment();
+        comment.author_type = Some(RepositoryActorType::EnterpriseUserAccount);
+        comment.author_association = Some(RepositoryAuthorAssociation::Member);
+        let (_, mut env) = historical_regression_fixture(
+            source.path(),
+            candidate_id,
+            version_recurrence(Some("9.66.0"), "2026-07-15T09:00:00Z"),
+            vec![comment],
+        );
+
+        let resolved =
+            resolve_candidate_owner(&mut env, candidate_id, CaptureBudgetProfile::Normal)
+                .expect("trusted enterprise member marker");
+
+        assert_eq!(resolved.state, CandidateState::Created);
+        assert_eq!(env.owner_client.owner_mutation_count(), 1);
+    }
+
+    #[test]
+    fn historical_recurrence_rejects_missing_stale_or_contradictory_version_proof() {
+        for (name, recurrence) in [
+            ("missing", version_recurrence(None, "2026-07-15T09:00:00Z")),
+            (
+                "invalid",
+                version_recurrence(Some("not-semver"), "2026-07-15T09:00:00Z"),
+            ),
+            (
+                "equal",
+                version_recurrence(Some("9.65.0"), "2026-07-15T09:00:00Z"),
+            ),
+            (
+                "older",
+                version_recurrence(Some("9.64.9"), "2026-07-15T09:00:00Z"),
+            ),
+            (
+                "pre-resolution",
+                version_recurrence(Some("9.66.0"), "2026-07-10T00:00:00Z"),
+            ),
+            (
+                "invalid-time",
+                version_recurrence(Some("9.66.0"), "not-rfc3339"),
+            ),
+            (
+                "future-observed",
+                version_recurrence(Some("9.66.0"), "2999-07-15T09:00:00Z"),
+            ),
+        ] {
+            let home = tempfile::tempdir().expect("isolated home");
+            let _gwt_home = gwt_core::test_support::ScopedGwtHome::set(home.path());
+            let source = tempfile::tempdir().expect("source");
+            let candidate_id = format!("impr-historical-proof-{name}");
+            let (_, mut env) = historical_regression_fixture(
+                source.path(),
+                &candidate_id,
+                recurrence,
+                vec![standard_historical_resolution_comment()],
+            );
+
+            let resolved =
+                resolve_candidate_owner(&mut env, &candidate_id, CaptureBudgetProfile::Normal)
+                    .unwrap_or_else(|error| panic!("{name}: resolution failed: {error}"));
+
+            assert_eq!(resolved.state, CandidateState::Blocked, "{name}");
+            assert_eq!(
+                resolved.blocked_reason,
+                Some(BlockedReason::Ambiguity),
+                "{name}"
+            );
+            assert_eq!(env.owner_client.owner_mutation_count(), 0, "{name}");
+        }
+    }
+
+    #[test]
+    fn historical_recurrence_rejects_nonqualifying_recurrence_with_prior_qualifying_evidence() {
+        let home = tempfile::tempdir().expect("isolated home");
+        let _gwt_home = gwt_core::test_support::ScopedGwtHome::set(home.path());
+        let source = tempfile::tempdir().expect("source");
+        let candidate_id = "impr-historical-nonqualifying-recurrence";
+        let (fingerprint, mut env) = historical_regression_fixture(
+            source.path(),
+            candidate_id,
+            version_recurrence(Some("9.66.0"), "2026-07-15T09:00:00Z"),
+            vec![standard_historical_resolution_comment()],
+        );
+        crate::cli::improvement_store::update(source.path(), |store| {
+            let candidate = &mut store.candidates[0];
+            candidate.distinct_occurrences[0].qualifies_unattended = false;
+            let mut prior = candidate.distinct_occurrences[0].clone();
+            prior.opaque_key = opaque_occurrence_key(
+                &"0".repeat(64),
+                &fingerprint,
+                "test.coordination-gate.v1",
+                "prior-qualifying-evidence",
+            );
+            prior.evidence_digest = occurrence_evidence_digest(
+                candidate.typed_evidence.as_ref().expect("typed evidence"),
+                None,
+            );
+            prior.captured_at = "2026-07-09T00:00:00Z".to_string();
+            prior.qualifies_unattended = true;
+            prior.recurrence = None;
+            prior.replay_proof = Some(OccurrenceReplayProof::RegisteredEvent {
+                source_scope_nonce: "0".repeat(64),
+                source_event_id: "prior-qualifying-evidence".to_string(),
+            });
+            candidate.distinct_occurrences.push(prior);
+            candidate.occurrences = 2;
+            Ok(())
+        })
+        .expect("append prior qualifying occurrence");
+
+        let resolved =
+            resolve_candidate_owner(&mut env, candidate_id, CaptureBudgetProfile::Normal)
+                .expect("nonqualifying recurrence is persisted as blocked");
+
+        assert_eq!(resolved.state, CandidateState::Blocked);
+        assert_eq!(resolved.blocked_reason, Some(BlockedReason::Ambiguity));
+        assert_eq!(env.owner_client.owner_mutation_count(), 0);
+    }
+
+    #[test]
+    fn verified_historical_owner_accepts_a_strict_descendant_build_commit() {
+        let home = tempfile::tempdir().expect("isolated home");
+        let _gwt_home = gwt_core::test_support::ScopedGwtHome::set(home.path());
+        let source = tempfile::tempdir().expect("source");
+        let candidate_id = "impr-historical-descendant-build";
+        let (_, mut env) = historical_regression_fixture(
+            source.path(),
+            candidate_id,
+            TypedRecurrenceEvidence {
+                installed_version: None,
+                build_commit: Some(BUILD_COMMIT_SHA.to_string()),
+                observed_at: "2026-07-15T09:00:00Z".to_string(),
+            },
+            vec![standard_historical_resolution_comment()],
+        );
+        env.owner_client.seed_commit_comparison(
+            &RepositoryIdentity::gwt_upstream(),
+            CommitComparison {
+                base: RELEASE_COMMIT_SHA.to_string(),
+                head: BUILD_COMMIT_SHA.to_string(),
+                base_commit_sha: RELEASE_COMMIT_SHA.to_string(),
+                merge_base_commit_sha: RELEASE_COMMIT_SHA.to_string(),
+                head_commit_sha: BUILD_COMMIT_SHA.to_string(),
+                status: CommitComparisonStatus::Ahead,
+                ahead_by: 1,
+                behind_by: 0,
+            },
+        );
+
+        let resolved =
+            resolve_candidate_owner(&mut env, candidate_id, CaptureBudgetProfile::Normal)
+                .expect("descendant build recurrence");
+
+        assert_eq!(resolved.state, CandidateState::Created);
+        assert_eq!(resolved.owner.as_ref().map(|owner| owner.number), Some(46));
+        assert_eq!(env.owner_client.owner_mutation_count(), 1);
+    }
+
+    #[test]
+    fn historical_recurrence_rejects_symbolic_build_refs_before_comparison() {
+        let home = tempfile::tempdir().expect("isolated home");
+        let _gwt_home = gwt_core::test_support::ScopedGwtHome::set(home.path());
+        let source = tempfile::tempdir().expect("source");
+        let candidate_id = "impr-historical-symbolic-build";
+        let (_, mut env) = historical_regression_fixture(
+            source.path(),
+            candidate_id,
+            TypedRecurrenceEvidence {
+                installed_version: None,
+                build_commit: Some("develop".to_string()),
+                observed_at: "2026-07-15T09:00:00Z".to_string(),
+            },
+            vec![standard_historical_resolution_comment()],
+        );
+
+        let resolved =
+            resolve_candidate_owner(&mut env, candidate_id, CaptureBudgetProfile::Normal)
+                .expect("symbolic build proof is a typed ambiguity");
+
+        assert_eq!(resolved.state, CandidateState::Blocked);
+        assert_eq!(resolved.blocked_reason, Some(BlockedReason::Ambiguity));
+        assert_eq!(env.owner_client.owner_mutation_count(), 0);
+        assert_eq!(
+            env.owner_client
+                .owner_call_log()
+                .iter()
+                .filter(|call| call.operation == OwnerRepositoryOperation::CompareCommits)
+                .count(),
+            1,
+            "only the release-tag resolution comparison is allowed"
+        );
+    }
+
+    #[test]
+    fn historical_recurrence_rejects_timestamp_and_ancestry_contradictions() {
+        for name in [
+            "verified-before-release",
+            "comment-before-verification",
+            "merge-after-release",
+            "release-behind-merge",
+            "build-not-strictly-ahead",
+        ] {
+            let home = tempfile::tempdir().expect("isolated home");
+            let _gwt_home = gwt_core::test_support::ScopedGwtHome::set(home.path());
+            let source = tempfile::tempdir().expect("source");
+            let candidate_id = format!("impr-historical-contradiction-{name}");
+            let recurrence = if name == "build-not-strictly-ahead" {
+                TypedRecurrenceEvidence {
+                    installed_version: Some("9.66.0".to_string()),
+                    build_commit: Some(BUILD_COMMIT_SHA.to_string()),
+                    observed_at: "2026-07-15T09:00:00Z".to_string(),
+                }
+            } else {
+                version_recurrence(Some("9.66.0"), "2026-07-15T09:00:00Z")
+            };
+            let comment = match name {
+                "verified-before-release" => repository_comment(
+                    501,
+                    historical_resolution_comment(
+                        900,
+                        MERGE_COMMIT_SHA,
+                        "2026-07-04T00:00:00Z",
+                        "v9.65.0",
+                    ),
+                    "2026-07-10T00:00:00Z",
+                ),
+                "comment-before-verification" => repository_comment(
+                    501,
+                    historical_resolution_comment(
+                        900,
+                        MERGE_COMMIT_SHA,
+                        "2026-07-10T00:00:00Z",
+                        "v9.65.0",
+                    ),
+                    "2026-07-09T00:00:00Z",
+                ),
+                _ => standard_historical_resolution_comment(),
+            };
+            let (_, mut env) = historical_regression_fixture(
+                source.path(),
+                &candidate_id,
+                recurrence,
+                vec![comment],
+            );
+            let repository = RepositoryIdentity::gwt_upstream();
+            match name {
+                "merge-after-release" => env.owner_client.seed_merged_pull_request(
+                    &repository,
+                    MergedPullRequest {
+                        number: IssueNumber(900),
+                        merge_commit_sha: MERGE_COMMIT_SHA.to_string(),
+                        merged_at: "2026-07-06T00:00:00Z".to_string(),
+                    },
+                ),
+                "release-behind-merge" => env.owner_client.seed_commit_comparison(
+                    &repository,
+                    CommitComparison {
+                        base: MERGE_COMMIT_SHA.to_string(),
+                        head: "refs/tags/v9.65.0".to_string(),
+                        base_commit_sha: MERGE_COMMIT_SHA.to_string(),
+                        merge_base_commit_sha: OTHER_COMMIT_SHA.to_string(),
+                        head_commit_sha: RELEASE_COMMIT_SHA.to_string(),
+                        status: CommitComparisonStatus::Behind,
+                        ahead_by: 0,
+                        behind_by: 1,
+                    },
+                ),
+                "build-not-strictly-ahead" => env.owner_client.seed_commit_comparison(
+                    &repository,
+                    CommitComparison {
+                        base: RELEASE_COMMIT_SHA.to_string(),
+                        head: BUILD_COMMIT_SHA.to_string(),
+                        base_commit_sha: RELEASE_COMMIT_SHA.to_string(),
+                        merge_base_commit_sha: RELEASE_COMMIT_SHA.to_string(),
+                        head_commit_sha: BUILD_COMMIT_SHA.to_string(),
+                        status: CommitComparisonStatus::Behind,
+                        ahead_by: 0,
+                        behind_by: 1,
+                    },
+                ),
+                _ => {}
+            }
+
+            let resolved =
+                resolve_candidate_owner(&mut env, &candidate_id, CaptureBudgetProfile::Normal)
+                    .unwrap_or_else(|error| panic!("{name}: resolution failed: {error}"));
+
+            assert_eq!(resolved.state, CandidateState::Blocked, "{name}");
+            assert_eq!(
+                resolved.blocked_reason,
+                Some(BlockedReason::Ambiguity),
+                "{name}"
+            );
+            assert_eq!(env.owner_client.owner_mutation_count(), 0, "{name}");
+        }
+    }
+
+    #[test]
+    fn historical_identity_transport_failure_is_typed_and_pre_submit() {
+        for operation in [
+            OwnerRepositoryOperation::FetchMergedPullRequest,
+            OwnerRepositoryOperation::CompareCommits,
+        ] {
+            let home = tempfile::tempdir().expect("isolated home");
+            let _gwt_home = gwt_core::test_support::ScopedGwtHome::set(home.path());
+            let source = tempfile::tempdir().expect("source");
+            let candidate_id =
+                format!("impr-historical-transport-{operation:?}").to_ascii_lowercase();
+            let (_, mut env) = historical_regression_fixture(
+                source.path(),
+                &candidate_id,
+                version_recurrence(Some("9.66.0"), "2026-07-15T09:00:00Z"),
+                vec![standard_historical_resolution_comment()],
+            );
+            env.owner_client.fail_next_owner_operation(
+                operation,
+                OwnerRepositoryFaultTiming::BeforeSubmit,
+                GitHubApiError::Parse {
+                    operation: "historical identity readback".to_string(),
+                    message: "identity mismatch".to_string(),
+                },
+            );
+
+            let resolved =
+                resolve_candidate_owner(&mut env, &candidate_id, CaptureBudgetProfile::Normal)
+                    .expect("typed transport failure is persisted");
+
+            assert_eq!(resolved.state, CandidateState::Blocked);
+            assert_eq!(resolved.blocked_reason, Some(BlockedReason::Parse));
+            assert_eq!(env.owner_client.owner_mutation_count(), 0);
+        }
+    }
+
+    #[test]
+    fn regression_create_remote_outcome_is_adopted_without_a_second_create() {
+        let home = tempfile::tempdir().expect("isolated home");
+        let _gwt_home = gwt_core::test_support::ScopedGwtHome::set(home.path());
+        let source = tempfile::tempdir().expect("source");
+        let candidate_id = "impr-historical-remote-recovery";
+        let (_, mut env) = historical_regression_fixture(
+            source.path(),
+            candidate_id,
+            version_recurrence(Some("9.66.0"), "2026-07-15T09:00:00Z"),
+            vec![standard_historical_resolution_comment()],
+        );
+        env.owner_client.fail_next_owner_operation(
+            OwnerRepositoryOperation::CreateIssue,
+            OwnerRepositoryFaultTiming::AfterSubmit,
+            GitHubApiError::Timeout {
+                operation: "create regression owner".to_string(),
+            },
+        );
+
+        let unknown = resolve_candidate_owner(&mut env, candidate_id, CaptureBudgetProfile::Normal)
+            .expect("unknown result is persisted");
+        assert_eq!(
+            unknown.state,
+            CandidateState::RemoteOutcomeUnknown,
+            "{unknown:?}; mutations={:?}",
+            env.owner_client.owner_mutation_call_log()
+        );
+        assert!(matches!(
+            unknown.attempt.as_ref().map(|attempt| &attempt.intent),
+            Some(ResolutionAttemptIntent::CreateRegressionIssue { .. })
+        ));
+        assert_eq!(env.owner_client.owner_mutation_count(), 1);
+
+        let adopted = resolve_candidate_owner(&mut env, candidate_id, CaptureBudgetProfile::Normal)
+            .expect("retry adopts the submitted regression owner");
+
+        assert_eq!(adopted.state, CandidateState::Created);
+        assert_eq!(adopted.owner.as_ref().map(|owner| owner.number), Some(46));
+        assert_eq!(env.owner_client.owner_mutation_count(), 1);
+    }
+
+    #[test]
+    fn plain_recovery_preserves_unnumbered_root_when_visible_owner_payload_mismatches() {
+        let home = tempfile::tempdir().expect("isolated home");
+        let _gwt_home = gwt_core::test_support::ScopedGwtHome::set(home.path());
+        let source = tempfile::tempdir().expect("source");
+        let candidate_id = "impr-plain-delayed-created-owner";
+        let nonce = "0".repeat(64);
+        let (fingerprint, _) =
+            store_projection_candidate(source.path(), &nonce, candidate_id, "plain-create-event");
+        let mut env = TestEnv::new(source.path().join("cache"));
+        env.repo_path = source.path().to_path_buf();
+        env.improvement_source_scope_nonce = nonce;
+        env.owner_client.seed_repository_issue(owner_issue(
+            45,
+            IssueState::Open,
+            "unrelated owner",
+        ));
+        env.owner_client.fail_next_owner_operation(
+            OwnerRepositoryOperation::CreateIssue,
+            OwnerRepositoryFaultTiming::AfterSubmit,
+            GitHubApiError::Timeout {
+                operation: "create plain owner".to_string(),
+            },
+        );
+
+        let unknown = resolve_candidate_owner(&mut env, candidate_id, CaptureBudgetProfile::Normal)
+            .expect("unknown create result is persisted");
+        let submitted_intent = unknown
+            .pending_create_resolution
+            .clone()
+            .expect("durable submitted create root");
+        assert_eq!(
+            unknown.state,
+            CandidateState::RemoteOutcomeUnknown,
+            "{unknown:?}; mutations={:?}",
+            env.owner_client.owner_mutation_call_log()
+        );
+
+        env.owner_client.seed_repository_issue(owner_issue(
+            46,
+            IssueState::Open,
+            "created owner is hidden from the fingerprint corpus",
+        ));
+        env.owner_client.seed_repository_issue(owner_issue(
+            47,
+            IssueState::Open,
+            fingerprint_marker(&fingerprint),
+        ));
+
+        let retried = resolve_candidate_owner(&mut env, candidate_id, CaptureBudgetProfile::Normal)
+            .expect("mismatched visible owner must remain recoverable");
+
+        assert_eq!(
+            retried.state,
+            CandidateState::RemoteOutcomeUnknown,
+            "{retried:?}; mutations={:?}",
+            env.owner_client.owner_mutation_call_log()
+        );
+        assert_eq!(retried.pending_create_resolution, Some(submitted_intent));
+        assert_eq!(env.owner_client.owner_mutation_count(), 1);
+    }
+
+    #[test]
+    fn generic_pre_submit_settlement_preserves_an_existing_create_root() {
+        let home = tempfile::tempdir().expect("isolated home");
+        let _gwt_home = gwt_core::test_support::ScopedGwtHome::set(home.path());
+        let source = tempfile::tempdir().expect("source");
+        let candidate_id = "impr-create-root-renewal-failure";
+        let nonce = "0".repeat(64);
+        store_projection_candidate(
+            source.path(),
+            &nonce,
+            candidate_id,
+            "create-root-renewal-event",
+        );
+        let mut env = TestEnv::new(source.path().join("cache"));
+        env.repo_path = source.path().to_path_buf();
+        env.improvement_source_scope_nonce = nonce;
+        env.owner_client.seed_repository_issue(owner_issue(
+            77,
+            IssueState::Open,
+            "unrelated public issue",
+        ));
+        let ResolutionAttemptStart::Acquired {
+            mut candidate,
+            token,
+            ..
+        } = begin_resolution_attempt(source.path(), candidate_id, CaptureBudgetProfile::Normal)
+            .expect("resolution attempt");
+        let preflight = owner_resolution_preflight_deferred(
+            &mut env,
+            &mut candidate,
+            &ContractRoutingRegistry::current(),
+            &NoSemanticOwnerAdvisor,
+            &resolution_deadline(),
+        )
+        .expect("plain create authorization");
+        let OwnerPreflightOutcome::CreateAuthorized { authorization } = preflight else {
+            panic!("expected plain create authorization: {preflight:?}");
+        };
+        let create_intent = new_owner_attempt_intent(&authorization);
+        mark_resolution_attempt_submitted(
+            source.path(),
+            &mut candidate,
+            &token,
+            create_intent.clone(),
+        )
+        .expect("persist submitted create root");
+
+        let settled = settle_owner_commit_error(
+            &mut env,
+            candidate,
+            &token,
+            pre_submit_commit_error(
+                BlockedReason::Store,
+                "RELOAD_CANDIDATE_STORE",
+                owner_projection_error("attempt lease expired before renewal"),
+            ),
+        )
+        .expect("generic pre-submit failure is persisted");
+
+        assert_eq!(settled.state, CandidateState::Blocked);
+        assert_eq!(
+            settled.pending_create_resolution,
+            Some(create_intent.clone())
+        );
+
+        let retried = resolve_candidate_owner(&mut env, candidate_id, CaptureBudgetProfile::Normal)
+            .expect("pending plain create root remains recoverable");
+
+        assert_eq!(retried.state, CandidateState::RemoteOutcomeUnknown);
+        assert_eq!(retried.pending_create_resolution, Some(create_intent));
+        assert_eq!(env.owner_client.owner_mutation_count(), 0);
+    }
+
+    #[test]
+    fn generic_pre_submit_settlement_prevents_regression_create_resubmission() {
+        let home = tempfile::tempdir().expect("isolated home");
+        let _gwt_home = gwt_core::test_support::ScopedGwtHome::set(home.path());
+        let source = tempfile::tempdir().expect("source");
+        let candidate_id = "impr-regression-root-renewal-failure";
+        let (_, mut env) = historical_regression_fixture(
+            source.path(),
+            candidate_id,
+            version_recurrence(Some("9.66.0"), "2026-07-15T09:00:00Z"),
+            vec![standard_historical_resolution_comment()],
+        );
+        let ResolutionAttemptStart::Acquired {
+            mut candidate,
+            token,
+            ..
+        } = begin_resolution_attempt(source.path(), candidate_id, CaptureBudgetProfile::Normal)
+            .expect("resolution attempt");
+        let preflight = owner_resolution_preflight_deferred(
+            &mut env,
+            &mut candidate,
+            &ContractRoutingRegistry::current(),
+            &NoSemanticOwnerAdvisor,
+            &resolution_deadline(),
+        )
+        .expect("regression create authorization");
+        let OwnerPreflightOutcome::RegressionCreateAuthorized { authorization } = preflight else {
+            panic!("expected regression create authorization: {preflight:?}");
+        };
+        let create_intent = regression_owner_attempt_intent(&authorization);
+        mark_resolution_attempt_submitted(
+            source.path(),
+            &mut candidate,
+            &token,
+            create_intent.clone(),
+        )
+        .expect("persist submitted regression create root");
+
+        let settled = settle_owner_commit_error(
+            &mut env,
+            candidate,
+            &token,
+            pre_submit_commit_error(
+                BlockedReason::Store,
+                "RELOAD_CANDIDATE_STORE",
+                owner_projection_error("attempt lease expired before renewal"),
+            ),
+        )
+        .expect("generic pre-submit failure is persisted");
+
+        assert_eq!(settled.state, CandidateState::Blocked);
+        assert_eq!(
+            settled.pending_create_resolution,
+            Some(create_intent.clone())
+        );
+
+        let retried = resolve_candidate_owner(&mut env, candidate_id, CaptureBudgetProfile::Normal)
+            .expect("pending regression create root remains recoverable");
+
+        assert_eq!(retried.state, CandidateState::RemoteOutcomeUnknown);
+        assert_eq!(retried.pending_create_resolution, Some(create_intent));
+        assert_eq!(env.owner_client.owner_mutation_count(), 0);
+    }
+
+    #[test]
+    fn unnumbered_pending_create_root_reconciles_multiple_matching_owners() {
+        let home = tempfile::tempdir().expect("isolated home");
+        let _gwt_home = gwt_core::test_support::ScopedGwtHome::set(home.path());
+        let source = tempfile::tempdir().expect("source");
+        let candidate_id = "impr-create-root-multiple";
+        let nonce = "0".repeat(64);
+        store_projection_candidate(
+            source.path(),
+            &nonce,
+            candidate_id,
+            "independent-owner-event",
+        );
+        let mut env = TestEnv::new(source.path().join("cache"));
+        env.repo_path = source.path().to_path_buf();
+        env.improvement_source_scope_nonce = nonce;
+        env.owner_client.seed_repository_issue(owner_issue(
+            77,
+            IssueState::Open,
+            "unrelated public issue",
+        ));
+        let ResolutionAttemptStart::Acquired {
+            mut candidate,
+            token,
+            ..
+        } = begin_resolution_attempt(source.path(), candidate_id, CaptureBudgetProfile::Normal)
+            .expect("resolution attempt");
+        let preflight = owner_resolution_preflight_deferred(
+            &mut env,
+            &mut candidate,
+            &ContractRoutingRegistry::current(),
+            &NoSemanticOwnerAdvisor,
+            &resolution_deadline(),
+        )
+        .expect("plain create authorization");
+        let OwnerPreflightOutcome::CreateAuthorized { authorization } = preflight else {
+            panic!("expected plain create authorization: {preflight:?}");
+        };
+        let payload = authorization.payload.clone();
+        let create_intent = new_owner_attempt_intent(&authorization);
+        mark_resolution_attempt_submitted(
+            source.path(),
+            &mut candidate,
+            &token,
+            create_intent.clone(),
+        )
+        .expect("persist unnumbered create root");
+        settle_owner_commit_error(
+            &mut env,
+            candidate,
+            &token,
+            pre_submit_commit_error(
+                BlockedReason::Store,
+                "RELOAD_CANDIDATE_STORE",
+                owner_projection_error("attempt lease expired before renewal"),
+            ),
+        )
+        .expect("persist blocked unnumbered create root");
+
+        let repository = RepositoryIdentity::gwt_upstream();
+        for number in [78, 79] {
+            env.owner_client.seed_repository_issue(RepositoryIssue {
+                repository: repository.clone(),
+                number: IssueNumber(number),
+                title: payload.title.clone(),
+                body: payload.body.clone(),
+                labels: Vec::new(),
+                state: IssueState::Open,
+                kind: RepositoryIssueKind::Plain,
+                updated_at: UpdatedAt::new(format!("u{number}")),
+            });
+        }
+        env.owner_client.fail_next_owner_operation(
+            OwnerRepositoryOperation::CloseIssue,
+            OwnerRepositoryFaultTiming::AfterSubmit,
+            GitHubApiError::Timeout {
+                operation: "close duplicate owner".to_string(),
+            },
+        );
+
+        let partial = resolve_candidate_owner(&mut env, candidate_id, CaptureBudgetProfile::Normal)
+            .expect("submitted duplicate close remains recoverable");
+        assert_eq!(partial.state, CandidateState::RemoteOutcomeUnknown);
+
+        let resolved =
+            resolve_candidate_owner(&mut env, candidate_id, CaptureBudgetProfile::Normal)
+                .expect("multiple matching create results reconcile after partial success");
+
+        assert_eq!(resolved.state, CandidateState::Linked);
+        assert_eq!(resolved.owner.as_ref().map(|owner| owner.number), Some(78));
+        assert!(resolved.pending_create_resolution.is_none());
+        assert_eq!(
+            env.owner_client
+                .fetch_issue(&repository, IssueNumber(79), &resolution_deadline())
+                .expect("duplicate owner readback")
+                .state,
+            IssueState::Closed
+        );
+        assert_eq!(
+            env.owner_client
+                .owner_mutation_call_log()
+                .iter()
+                .filter(|call| call.operation == OwnerRepositoryOperation::CreateIssue)
+                .count(),
+            0
+        );
+    }
+
+    #[test]
+    fn open_readback_after_unknown_duplicate_close_retries_the_idempotent_close() {
+        let home = tempfile::tempdir().expect("isolated home");
+        let _gwt_home = gwt_core::test_support::ScopedGwtHome::set(home.path());
+        let source = tempfile::tempdir().expect("source");
+        let candidate_id = "impr-create-root-open-close-readback";
+        let nonce = "0".repeat(64);
+        store_projection_candidate(
+            source.path(),
+            &nonce,
+            candidate_id,
+            "open-close-readback-event",
+        );
+        let mut env = TestEnv::new(source.path().join("cache"));
+        env.repo_path = source.path().to_path_buf();
+        env.improvement_source_scope_nonce = nonce;
+        env.owner_client.seed_repository_issue(owner_issue(
+            77,
+            IssueState::Open,
+            "unrelated public issue",
+        ));
+        let ResolutionAttemptStart::Acquired {
+            mut candidate,
+            token,
+            ..
+        } = begin_resolution_attempt(source.path(), candidate_id, CaptureBudgetProfile::Normal)
+            .expect("resolution attempt");
+        let preflight = owner_resolution_preflight_deferred(
+            &mut env,
+            &mut candidate,
+            &ContractRoutingRegistry::current(),
+            &NoSemanticOwnerAdvisor,
+            &resolution_deadline(),
+        )
+        .expect("plain create authorization");
+        let OwnerPreflightOutcome::CreateAuthorized { authorization } = preflight else {
+            panic!("expected plain create authorization: {preflight:?}");
+        };
+        let payload = authorization.payload.clone();
+        let create_intent = new_owner_attempt_intent(&authorization);
+        mark_resolution_attempt_submitted(source.path(), &mut candidate, &token, create_intent)
+            .expect("persist unnumbered create root");
+        settle_owner_commit_error(
+            &mut env,
+            candidate,
+            &token,
+            pre_submit_commit_error(
+                BlockedReason::Store,
+                "RELOAD_CANDIDATE_STORE",
+                owner_projection_error("attempt lease expired before renewal"),
+            ),
+        )
+        .expect("persist blocked unnumbered create root");
+
+        let repository = RepositoryIdentity::gwt_upstream();
+        for number in [78, 79] {
+            env.owner_client.seed_repository_issue(RepositoryIssue {
+                repository: repository.clone(),
+                number: IssueNumber(number),
+                title: payload.title.clone(),
+                body: payload.body.clone(),
+                labels: Vec::new(),
+                state: IssueState::Open,
+                kind: RepositoryIssueKind::Plain,
+                updated_at: UpdatedAt::new(format!("u{number}")),
+            });
+        }
+        env.owner_client.fail_next_owner_operation(
+            OwnerRepositoryOperation::CloseIssue,
+            OwnerRepositoryFaultTiming::AfterSubmit,
+            GitHubApiError::Timeout {
+                operation: "close duplicate owner".to_string(),
+            },
+        );
+
+        let partial = resolve_candidate_owner(&mut env, candidate_id, CaptureBudgetProfile::Normal)
+            .expect("submitted duplicate close remains recoverable");
+        assert_eq!(partial.state, CandidateState::RemoteOutcomeUnknown);
+        env.owner_client.seed_repository_issue(RepositoryIssue {
+            repository: repository.clone(),
+            number: IssueNumber(79),
+            title: payload.title,
+            body: payload.body,
+            labels: Vec::new(),
+            state: IssueState::Open,
+            kind: RepositoryIssueKind::Plain,
+            updated_at: UpdatedAt::new("authoritative-open-readback"),
+        });
+
+        let resolved =
+            resolve_candidate_owner(&mut env, candidate_id, CaptureBudgetProfile::Normal)
+                .expect("authoritative open duplicate is closed idempotently on retry");
+
+        assert_eq!(resolved.state, CandidateState::Linked, "{resolved:?}");
+        assert_eq!(resolved.owner.as_ref().map(|owner| owner.number), Some(78));
+        assert_eq!(
+            env.owner_client
+                .owner_mutation_call_log()
+                .iter()
+                .filter(|call| call.operation == OwnerRepositoryOperation::CloseIssue)
+                .count(),
+            2
+        );
+        assert_eq!(
+            env.owner_client
+                .fetch_issue(&repository, IssueNumber(79), &resolution_deadline())
+                .expect("duplicate owner readback")
+                .state,
+            IssueState::Closed
+        );
+    }
+
+    #[test]
+    fn contract_mapped_occurrence_response_loss_adopts_comment_without_body_fingerprint() {
+        let home = tempfile::tempdir().expect("isolated home");
+        let _gwt_home = gwt_core::test_support::ScopedGwtHome::set(home.path());
+        let source = tempfile::tempdir().expect("source");
+        let candidate_id = "impr-contract-comment-response-loss";
+        let nonce = "0".repeat(64);
+        let (fingerprint, _) =
+            store_projection_candidate(source.path(), &nonce, candidate_id, "route-event-a");
+        crate::cli::improvement_store::update(source.path(), |store| {
+            let occurrence = &mut store.candidates[0].distinct_occurrences[0];
+            occurrence.producer_id = Some("test.owner-route.v1".to_string());
+            occurrence.routing_basis_revision = Some(9);
+            occurrence.opaque_key =
+                opaque_occurrence_key(&nonce, &fingerprint, "test.owner-route.v1", "route-event-a");
+            Ok(())
+        })
+        .expect("route candidate through the pinned contract owner");
+        let mut env = TestEnv::new(source.path().join("cache"));
+        env.repo_path = source.path().to_path_buf();
+        env.improvement_source_scope_nonce = nonce;
+        env.owner_client.seed_repository_issue(owner_issue(
+            77,
+            IssueState::Open,
+            "revision-pinned contract owner without a fingerprint body marker",
+        ));
+        env.owner_client.fail_next_owner_operation(
+            OwnerRepositoryOperation::CreateComment,
+            OwnerRepositoryFaultTiming::AfterSubmit,
+            GitHubApiError::Timeout {
+                operation: "contract owner occurrence response".to_string(),
+            },
+        );
+
+        let unknown = resolve_candidate_owner(&mut env, candidate_id, CaptureBudgetProfile::Normal)
+            .expect("submitted contract owner comment remains recoverable");
+        assert_eq!(
+            unknown.state,
+            CandidateState::RemoteOutcomeUnknown,
+            "{unknown:?}; mutations={:?}",
+            env.owner_client.owner_mutation_call_log()
+        );
+        assert_eq!(env.owner_client.owner_mutation_count(), 1);
+
+        let recovered =
+            resolve_candidate_owner(&mut env, candidate_id, CaptureBudgetProfile::Normal)
+                .expect("authoritative contract owner comment is adopted");
+
+        assert_eq!(recovered.state, CandidateState::Linked, "{recovered:?}");
+        assert_eq!(recovered.owner.as_ref().map(|owner| owner.number), Some(77));
+        assert_eq!(env.owner_client.owner_mutation_count(), 1);
+    }
+
+    #[test]
+    fn closed_duplicate_without_reconciliation_marker_cannot_clear_latch() {
+        let home = tempfile::tempdir().expect("isolated home");
+        let _gwt_home = gwt_core::test_support::ScopedGwtHome::set(home.path());
+        let source = tempfile::tempdir().expect("source");
+        let candidate_id = "impr-reconciliation-marker-cleanup";
+        let nonce = "0".repeat(64);
+        let (fingerprint, _) =
+            store_projection_candidate(source.path(), &nonce, candidate_id, "cleanup-marker");
+        crate::cli::improvement_store::update(source.path(), |store| {
+            let candidate = &mut store.candidates[0];
+            candidate.reconciliation_required = true;
+            candidate.reconciliation_owner_numbers = vec![78, 79];
+            Ok(())
+        })
+        .expect("arm durable reconciliation latch");
+        let mut env = TestEnv::new(source.path().join("cache"));
+        env.repo_path = source.path().to_path_buf();
+        env.improvement_source_scope_nonce = nonce;
+        env.owner_client.seed_repository_issue(owner_issue(
+            78,
+            IssueState::Open,
+            fingerprint_marker(&fingerprint),
+        ));
+        env.owner_client.seed_repository_issue(owner_issue(
+            79,
+            IssueState::Closed,
+            fingerprint_marker(&fingerprint),
+        ));
+
+        let blocked = resolve_candidate_owner(&mut env, candidate_id, CaptureBudgetProfile::Normal)
+            .expect("missing reconciliation proof fails closed");
+
+        assert_eq!(blocked.state, CandidateState::Blocked, "{blocked:?}");
+        assert_eq!(blocked.blocked_reason, Some(BlockedReason::Reconciliation));
+        assert!(blocked.reconciliation_required);
+        assert_eq!(env.owner_client.owner_mutation_count(), 0);
+
+        let payload = render_reconciliation_comment_payload(
+            &blocked,
+            78,
+            79,
+            &PublicMutationContext::for_repo(source.path()),
+        )
+        .expect("reconciliation payload");
+        env.owner_client.seed_repository_comments(
+            &RepositoryIdentity::gwt_upstream(),
+            IssueNumber(79),
+            vec![repository_comment(
+                700,
+                payload.body,
+                "2026-07-16T00:00:00Z",
+            )],
+        );
+
+        let linked = resolve_candidate_owner(&mut env, candidate_id, CaptureBudgetProfile::Normal)
+            .expect("closed duplicate cleanup with marker proof");
+
+        assert_eq!(linked.state, CandidateState::Linked, "{linked:?}");
+        assert!(!linked.reconciliation_required);
+        assert_eq!(env.owner_client.owner_mutation_count(), 1);
+    }
+
+    #[test]
+    fn recovered_reconciliation_comment_survives_a_non_monotonic_preflight_view() {
+        let home = tempfile::tempdir().expect("isolated home");
+        let _gwt_home = gwt_core::test_support::ScopedGwtHome::set(home.path());
+        let source = tempfile::tempdir().expect("source");
+        let candidate_id = "impr-reconciliation-non-monotonic-comments";
+        let nonce = "0".repeat(64);
+        let (fingerprint, _) =
+            store_projection_candidate(source.path(), &nonce, candidate_id, "event-nm-a");
+        let mut env = TestEnv::new(source.path().join("cache"));
+        env.repo_path = source.path().to_path_buf();
+        env.improvement_source_scope_nonce = nonce;
+        for number in [78, 79] {
+            env.owner_client.seed_repository_issue(owner_issue(
+                number,
+                IssueState::Open,
+                fingerprint_marker(&fingerprint),
+            ));
+        }
+        env.owner_client.fail_next_owner_operation(
+            OwnerRepositoryOperation::CreateComment,
+            OwnerRepositoryFaultTiming::AfterSubmit,
+            GitHubApiError::Timeout {
+                operation: "reconciliation comment response".to_string(),
+            },
+        );
+
+        let unknown = resolve_candidate_owner(&mut env, candidate_id, CaptureBudgetProfile::Normal)
+            .expect("unknown reconciliation response is persisted");
+        assert_eq!(
+            unknown.state,
+            CandidateState::RemoteOutcomeUnknown,
+            "{unknown:?}; mutations={:?}",
+            env.owner_client.owner_mutation_call_log()
+        );
+        assert_eq!(env.owner_client.owner_mutation_count(), 1);
+        let repository = RepositoryIdentity::gwt_upstream();
+        let submitted = env
+            .owner_client
+            .list_comments(&repository, IssueNumber(79), &resolution_deadline())
+            .expect("submitted reconciliation comment")
+            .items()
+            .to_vec();
+        env.owner_client.queue_owner_comment_views(
+            &repository,
+            IssueNumber(79),
+            [submitted, Vec::new()],
+        );
+
+        let linked = resolve_candidate_owner(&mut env, candidate_id, CaptureBudgetProfile::Normal)
+            .expect("settled marker evidence is retained for the retry");
+
+        assert_eq!(linked.state, CandidateState::Linked, "{linked:?}");
+        assert_eq!(env.owner_client.owner_mutation_count(), 3);
+        let comments = env
+            .owner_client
+            .list_comments(&repository, IssueNumber(79), &resolution_deadline())
+            .expect("duplicate comments");
+        assert_eq!(
+            comments
+                .items()
+                .iter()
+                .filter(|comment| comment.body.contains("gwt:improvement-reconciliation:v1"))
+                .count(),
+            1
+        );
+    }
+
+    #[test]
+    fn plain_create_recovery_uses_submitted_remote_bytes_after_candidate_evidence_changes() {
+        let home = tempfile::tempdir().expect("isolated home");
+        let _gwt_home = gwt_core::test_support::ScopedGwtHome::set(home.path());
+        let source = tempfile::tempdir().expect("source");
+        let candidate_id = "impr-create-journal-evidence-change";
+        let nonce = "0".repeat(64);
+        store_projection_candidate(source.path(), &nonce, candidate_id, "create-journal-a");
+        let mut env = TestEnv::new(source.path().join("cache"));
+        env.repo_path = source.path().to_path_buf();
+        env.improvement_source_scope_nonce = nonce;
+        env.owner_client.seed_repository_issue(owner_issue(
+            77,
+            IssueState::Open,
+            "unrelated public issue",
+        ));
+        env.owner_client.fail_next_owner_operation(
+            OwnerRepositoryOperation::CreateIssue,
+            OwnerRepositoryFaultTiming::AfterSubmit,
+            GitHubApiError::Timeout {
+                operation: "plain create response".to_string(),
+            },
+        );
+
+        let unknown = resolve_candidate_owner(&mut env, candidate_id, CaptureBudgetProfile::Normal)
+            .expect("unknown plain create is persisted");
+        assert_eq!(unknown.state, CandidateState::RemoteOutcomeUnknown);
+        replace_candidate_public_outcomes(
+            source.path(),
+            "BOARD_STATUS_RESTORED",
+            "BOARD_STATUS_DELAYED",
+        );
+
+        let adopted = resolve_candidate_owner(&mut env, candidate_id, CaptureBudgetProfile::Normal)
+            .expect("submitted plain issue bytes remain authoritative");
+
+        assert_eq!(adopted.state, CandidateState::Created, "{adopted:?}");
+        assert_eq!(env.owner_client.owner_mutation_count(), 1);
+    }
+
+    #[test]
+    fn occurrence_recovery_uses_submitted_remote_bytes_after_candidate_evidence_changes() {
+        let home = tempfile::tempdir().expect("isolated home");
+        let _gwt_home = gwt_core::test_support::ScopedGwtHome::set(home.path());
+        let source = tempfile::tempdir().expect("source");
+        let candidate_id = "impr-occurrence-journal-evidence-change";
+        let nonce = "0".repeat(64);
+        let (fingerprint, _) =
+            store_projection_candidate(source.path(), &nonce, candidate_id, "comment-journal-a");
+        let mut env = TestEnv::new(source.path().join("cache"));
+        env.repo_path = source.path().to_path_buf();
+        env.improvement_source_scope_nonce = nonce;
+        env.owner_client.seed_repository_issue(owner_issue(
+            45,
+            IssueState::Open,
+            fingerprint_marker(&fingerprint),
+        ));
+        env.owner_client.fail_next_owner_operation(
+            OwnerRepositoryOperation::CreateComment,
+            OwnerRepositoryFaultTiming::AfterSubmit,
+            GitHubApiError::Timeout {
+                operation: "occurrence comment response".to_string(),
+            },
+        );
+
+        let unknown = resolve_candidate_owner(&mut env, candidate_id, CaptureBudgetProfile::Normal)
+            .expect("unknown occurrence comment is persisted");
+        assert_eq!(unknown.state, CandidateState::RemoteOutcomeUnknown);
+        replace_candidate_public_outcomes(
+            source.path(),
+            "BOARD_STATUS_RESTORED",
+            "BOARD_STATUS_DELAYED",
+        );
+
+        let linked = resolve_candidate_owner(&mut env, candidate_id, CaptureBudgetProfile::Normal)
+            .expect("submitted occurrence bytes remain authoritative");
+
+        assert_eq!(linked.state, CandidateState::Linked, "{linked:?}");
+        assert_eq!(env.owner_client.owner_mutation_count(), 1);
+    }
+
+    #[test]
+    fn reconciliation_recovery_uses_marker_identity_after_candidate_evidence_changes() {
+        let home = tempfile::tempdir().expect("isolated home");
+        let _gwt_home = gwt_core::test_support::ScopedGwtHome::set(home.path());
+        let source = tempfile::tempdir().expect("source");
+        let candidate_id = "impr-reconciliation-journal-evidence-change";
+        let nonce = "0".repeat(64);
+        let (fingerprint, _) = store_projection_candidate(
+            source.path(),
+            &nonce,
+            candidate_id,
+            "reconciliation-journal-a",
+        );
+        let mut env = TestEnv::new(source.path().join("cache"));
+        env.repo_path = source.path().to_path_buf();
+        env.improvement_source_scope_nonce = nonce;
+        for number in [78, 79] {
+            env.owner_client.seed_repository_issue(owner_issue(
+                number,
+                IssueState::Open,
+                fingerprint_marker(&fingerprint),
+            ));
+        }
+        env.owner_client.fail_next_owner_operation(
+            OwnerRepositoryOperation::CreateComment,
+            OwnerRepositoryFaultTiming::AfterSubmit,
+            GitHubApiError::Timeout {
+                operation: "reconciliation comment response".to_string(),
+            },
+        );
+
+        let unknown = resolve_candidate_owner(&mut env, candidate_id, CaptureBudgetProfile::Normal)
+            .expect("unknown reconciliation comment is persisted");
+        assert_eq!(unknown.state, CandidateState::RemoteOutcomeUnknown);
+        replace_candidate_public_outcomes(
+            source.path(),
+            "BOARD_STATUS_RESTORED",
+            "BOARD_STATUS_DELAYED",
+        );
+
+        let linked = resolve_candidate_owner(&mut env, candidate_id, CaptureBudgetProfile::Normal)
+            .expect("submitted reconciliation marker remains authoritative");
+
+        assert_eq!(linked.state, CandidateState::Linked, "{linked:?}");
+        assert_eq!(env.owner_client.owner_mutation_count(), 3);
+        let comments = env
+            .owner_client
+            .list_comments(
+                &RepositoryIdentity::gwt_upstream(),
+                IssueNumber(79),
+                &resolution_deadline(),
+            )
+            .expect("duplicate comments");
+        assert_eq!(
+            comments
+                .items()
+                .iter()
+                .filter(|comment| comment.body.contains("gwt:improvement-reconciliation:v1"))
+                .count(),
+            1
+        );
+    }
+
+    #[test]
+    fn settled_occurrence_recovery_is_not_rearmed_when_the_owner_closes() {
+        let home = tempfile::tempdir().expect("isolated home");
+        let _gwt_home = gwt_core::test_support::ScopedGwtHome::set(home.path());
+        let source = tempfile::tempdir().expect("source");
+        let candidate_id = "impr-settled-comment-owner-closed";
+        let nonce = "0".repeat(64);
+        let (fingerprint, _) =
+            store_projection_candidate(source.path(), &nonce, candidate_id, "settled-event-a");
+        let mut env = TestEnv::new(source.path().join("cache"));
+        env.repo_path = source.path().to_path_buf();
+        env.improvement_source_scope_nonce = nonce;
+        env.owner_client.seed_repository_issue(owner_issue(
+            45,
+            IssueState::Open,
+            fingerprint_marker(&fingerprint),
+        ));
+        env.owner_client.fail_next_owner_operation(
+            OwnerRepositoryOperation::CreateComment,
+            OwnerRepositoryFaultTiming::AfterSubmit,
+            GitHubApiError::Timeout {
+                operation: "occurrence comment response".to_string(),
+            },
+        );
+
+        let unknown = resolve_candidate_owner(&mut env, candidate_id, CaptureBudgetProfile::Normal)
+            .expect("unknown occurrence comment is persisted");
+        assert_eq!(unknown.state, CandidateState::RemoteOutcomeUnknown);
+        env.owner_client.seed_repository_issue(owner_issue(
+            45,
+            IssueState::Closed,
+            fingerprint_marker(&fingerprint),
+        ));
+
+        let blocked = resolve_candidate_owner(&mut env, candidate_id, CaptureBudgetProfile::Normal)
+            .expect("settled comment is not restored after historical preflight");
+
+        assert_eq!(blocked.state, CandidateState::Blocked, "{blocked:?}");
+        assert_eq!(blocked.blocked_reason, Some(BlockedReason::Ambiguity));
+        assert!(blocked.attempt.is_none());
+        assert_eq!(env.owner_client.owner_mutation_count(), 1);
+    }
+
+    #[test]
+    fn regression_create_recovery_projects_a_recurrence_added_while_remote_unknown() {
+        let home = tempfile::tempdir().expect("isolated home");
+        let _gwt_home = gwt_core::test_support::ScopedGwtHome::set(home.path());
+        let source = tempfile::tempdir().expect("source");
+        let candidate_id = "impr-regression-recovery-new-recurrence";
+        let (_, mut env) = historical_regression_fixture(
+            source.path(),
+            candidate_id,
+            version_recurrence(Some("9.66.0"), "2026-07-15T09:00:00Z"),
+            vec![standard_historical_resolution_comment()],
+        );
+        env.owner_client.fail_next_owner_operation(
+            OwnerRepositoryOperation::CreateIssue,
+            OwnerRepositoryFaultTiming::AfterSubmit,
+            GitHubApiError::Timeout {
+                operation: "regression create response".to_string(),
+            },
+        );
+
+        let unknown = resolve_candidate_owner(&mut env, candidate_id, CaptureBudgetProfile::Normal)
+            .expect("unknown regression create is persisted");
+        assert_eq!(unknown.state, CandidateState::RemoteOutcomeUnknown);
+        let added_occurrence =
+            append_projection_occurrence(source.path(), &"0".repeat(64), "recurrence-event-b");
+
+        let recovered =
+            resolve_candidate_owner(&mut env, candidate_id, CaptureBudgetProfile::Normal)
+                .expect("created regression owner absorbs the later recurrence");
+
+        assert_eq!(recovered.state, CandidateState::Created, "{recovered:?}");
+        assert_eq!(recovered.owner.as_ref().map(|owner| owner.number), Some(46));
+        assert_eq!(recovered.occurrences, 2);
+        assert_eq!(env.owner_client.owner_mutation_count(), 2);
+        let comments = env
+            .owner_client
+            .list_comments(
+                &RepositoryIdentity::gwt_upstream(),
+                IssueNumber(46),
+                &resolution_deadline(),
+            )
+            .expect("regression owner occurrence comments");
+        assert!(comments
+            .items()
+            .iter()
+            .any(|comment| comment_matches_occurrence(
+                comment,
+                &added_occurrence,
+                recovered.fingerprint.as_deref().expect("fingerprint")
+            )));
+    }
+
+    #[test]
+    fn regression_create_recovery_adopts_a_lost_additional_occurrence_comment_response() {
+        let home = tempfile::tempdir().expect("isolated home");
+        let _gwt_home = gwt_core::test_support::ScopedGwtHome::set(home.path());
+        let source = tempfile::tempdir().expect("source");
+        let candidate_id = "impr-regression-recovery-comment-response-loss";
+        let (_, mut env) = historical_regression_fixture(
+            source.path(),
+            candidate_id,
+            version_recurrence(Some("9.66.0"), "2026-07-15T09:00:00Z"),
+            vec![standard_historical_resolution_comment()],
+        );
+        env.owner_client.fail_next_owner_operation(
+            OwnerRepositoryOperation::CreateIssue,
+            OwnerRepositoryFaultTiming::AfterSubmit,
+            GitHubApiError::Timeout {
+                operation: "regression create response".to_string(),
+            },
+        );
+        let unknown = resolve_candidate_owner(&mut env, candidate_id, CaptureBudgetProfile::Normal)
+            .expect("unknown regression create is persisted");
+        assert_eq!(unknown.state, CandidateState::RemoteOutcomeUnknown);
+        let added_occurrence = append_projection_occurrence(
+            source.path(),
+            &"0".repeat(64),
+            "lost-comment-recurrence-event",
+        );
+        env.owner_client.fail_next_owner_operation(
+            OwnerRepositoryOperation::CreateComment,
+            OwnerRepositoryFaultTiming::AfterSubmit,
+            GitHubApiError::Timeout {
+                operation: "additional occurrence comment response".to_string(),
+            },
+        );
+
+        let comment_unknown =
+            resolve_candidate_owner(&mut env, candidate_id, CaptureBudgetProfile::Normal)
+                .expect("unknown additional comment response is persisted");
+        assert_eq!(comment_unknown.state, CandidateState::RemoteOutcomeUnknown);
+
+        let recovered =
+            resolve_candidate_owner(&mut env, candidate_id, CaptureBudgetProfile::Normal)
+                .expect("submitted additional comment is adopted without a second mutation");
+
+        assert_eq!(recovered.state, CandidateState::Created, "{recovered:?}");
+        assert_eq!(recovered.occurrences, 2);
+        assert_eq!(env.owner_client.owner_mutation_count(), 2);
+        let comments = env
+            .owner_client
+            .list_comments(
+                &RepositoryIdentity::gwt_upstream(),
+                IssueNumber(46),
+                &resolution_deadline(),
+            )
+            .expect("regression owner occurrence comments");
+        assert_eq!(
+            comments
+                .items()
+                .iter()
+                .filter(|comment| comment_matches_occurrence(
+                    comment,
+                    &added_occurrence,
+                    recovered.fingerprint.as_deref().expect("fingerprint")
+                ))
+                .count(),
+            1
+        );
+    }
+
+    #[test]
+    fn regression_create_recovery_resumes_after_additional_comment_readback_failures() {
+        for (name, list_comments_call) in [("before-comment", 3), ("final-readback", 5)] {
+            let home = tempfile::tempdir().expect("isolated home");
+            let _gwt_home = gwt_core::test_support::ScopedGwtHome::set(home.path());
+            let source = tempfile::tempdir().expect("source");
+            let candidate_id = format!("impr-regression-recovery-{name}");
+            let (_, mut env) = historical_regression_fixture(
+                source.path(),
+                &candidate_id,
+                version_recurrence(Some("9.66.0"), "2026-07-15T09:00:00Z"),
+                vec![standard_historical_resolution_comment()],
+            );
+            env.owner_client.fail_next_owner_operation(
+                OwnerRepositoryOperation::CreateIssue,
+                OwnerRepositoryFaultTiming::AfterSubmit,
+                GitHubApiError::Timeout {
+                    operation: "regression create response".to_string(),
+                },
+            );
+            let unknown =
+                resolve_candidate_owner(&mut env, &candidate_id, CaptureBudgetProfile::Normal)
+                    .expect("unknown regression create is persisted");
+            assert_eq!(unknown.state, CandidateState::RemoteOutcomeUnknown);
+            append_projection_occurrence(
+                source.path(),
+                &"0".repeat(64),
+                &format!("{name}-occurrence-event"),
+            );
+            env.owner_client.fail_owner_operation_on_nth(
+                OwnerRepositoryOperation::ListComments,
+                list_comments_call,
+                OwnerRepositoryFaultTiming::BeforeSubmit,
+                GitHubApiError::Timeout {
+                    operation: format!("{name} occurrence comment readback"),
+                },
+            );
+
+            let readback_unknown =
+                resolve_candidate_owner(&mut env, &candidate_id, CaptureBudgetProfile::Normal)
+                    .expect("additional comment readback failure is persisted");
+            assert_eq!(
+                readback_unknown.state,
+                CandidateState::RemoteOutcomeUnknown,
+                "{name}: {readback_unknown:?}"
+            );
+
+            let recovered =
+                resolve_candidate_owner(&mut env, &candidate_id, CaptureBudgetProfile::Normal)
+                    .expect("retry resumes from the durable regression create root");
+
+            assert_eq!(
+                recovered.state,
+                CandidateState::Created,
+                "{name}: {recovered:?}"
+            );
+            assert_eq!(recovered.occurrences, 2);
+            assert_eq!(env.owner_client.owner_mutation_count(), 2);
+        }
+    }
+
+    #[test]
+    fn regression_create_recovery_projects_an_added_non_recurrence_occurrence() {
+        let home = tempfile::tempdir().expect("isolated home");
+        let _gwt_home = gwt_core::test_support::ScopedGwtHome::set(home.path());
+        let source = tempfile::tempdir().expect("source");
+        let candidate_id = "impr-regression-recovery-new-standard-occurrence";
+        let (_, mut env) = historical_regression_fixture(
+            source.path(),
+            candidate_id,
+            version_recurrence(Some("9.66.0"), "2026-07-15T09:00:00Z"),
+            vec![standard_historical_resolution_comment()],
+        );
+        env.owner_client.fail_next_owner_operation(
+            OwnerRepositoryOperation::CreateIssue,
+            OwnerRepositoryFaultTiming::AfterSubmit,
+            GitHubApiError::Timeout {
+                operation: "regression create response".to_string(),
+            },
+        );
+        let unknown = resolve_candidate_owner(&mut env, candidate_id, CaptureBudgetProfile::Normal)
+            .expect("unknown regression create is persisted");
+        assert_eq!(unknown.state, CandidateState::RemoteOutcomeUnknown);
+        let added_occurrence = append_projection_occurrence(
+            source.path(),
+            &"0".repeat(64),
+            "standard-occurrence-event",
+        );
+        crate::cli::improvement_store::update(source.path(), |store| {
+            let candidate = store.candidates.first_mut().expect("source candidate");
+            let evidence = candidate.typed_evidence.as_ref().expect("typed evidence");
+            let occurrence = candidate
+                .distinct_occurrences
+                .iter_mut()
+                .find(|occurrence| occurrence.opaque_key == added_occurrence)
+                .expect("added occurrence");
+            occurrence.recurrence = None;
+            occurrence.evidence_digest = occurrence_evidence_digest(evidence, None);
+            Ok(())
+        })
+        .expect("remove recurrence metadata from the added occurrence");
+
+        let recovered =
+            resolve_candidate_owner(&mut env, candidate_id, CaptureBudgetProfile::Normal)
+                .expect("created regression owner absorbs the standard occurrence");
+
+        assert_eq!(recovered.state, CandidateState::Created, "{recovered:?}");
+        assert_eq!(recovered.occurrences, 2);
+        assert_eq!(env.owner_client.owner_mutation_count(), 2);
+        let comments = env
+            .owner_client
+            .list_comments(
+                &RepositoryIdentity::gwt_upstream(),
+                IssueNumber(46),
+                &resolution_deadline(),
+            )
+            .expect("regression owner occurrence comments");
+        assert!(comments.items().iter().any(|comment| {
+            comment_matches_occurrence(
+                comment,
+                &added_occurrence,
+                recovered.fingerprint.as_deref().expect("fingerprint"),
+            )
+        }));
+    }
+
+    #[test]
+    fn active_owner_partial_comment_success_retries_only_the_unsent_occurrence() {
+        let home = tempfile::tempdir().expect("isolated home");
+        let _gwt_home = gwt_core::test_support::ScopedGwtHome::set(home.path());
+        let source = tempfile::tempdir().expect("source");
+        let candidate_id = "impr-active-owner-partial-comments";
+        let nonce = "0".repeat(64);
+        let (fingerprint, _) =
+            store_projection_candidate(source.path(), &nonce, candidate_id, "partial-comment-a");
+        crate::cli::improvement_store::update(source.path(), |store| {
+            let candidate = &mut store.candidates[0];
+            let mut second = candidate.distinct_occurrences[0].clone();
+            second.opaque_key = opaque_occurrence_key(
+                &"0".repeat(64),
+                &fingerprint,
+                "test.coordination-gate.v1",
+                "partial-comment-b",
+            );
+            second.captured_at = "2026-07-15T00:00:00Z".to_string();
+            second.replay_proof = Some(OccurrenceReplayProof::RegisteredEvent {
+                source_scope_nonce: "0".repeat(64),
+                source_event_id: "partial-comment-b".to_string(),
+            });
+            candidate.distinct_occurrences.push(second);
+            candidate.occurrences = 2;
+            Ok(())
+        })
+        .expect("append second occurrence");
+        let mut env = TestEnv::new(source.path().join("cache"));
+        env.repo_path = source.path().to_path_buf();
+        env.improvement_source_scope_nonce = nonce;
+        env.owner_client.seed_repository_issue(owner_issue(
+            45,
+            IssueState::Open,
+            fingerprint_marker(&fingerprint),
+        ));
+        env.owner_client.fail_owner_operation_on_nth(
+            OwnerRepositoryOperation::CreateComment,
+            2,
+            OwnerRepositoryFaultTiming::BeforeSubmit,
+            GitHubApiError::Network("connection refused before submit".to_string()),
+        );
+
+        let partial = resolve_candidate_owner(&mut env, candidate_id, CaptureBudgetProfile::Normal)
+            .expect("partial comment result is persisted");
+        assert_eq!(partial.state, CandidateState::Blocked);
+        assert_eq!(env.owner_client.owner_mutation_count(), 1);
+
+        let recovered =
+            resolve_candidate_owner(&mut env, candidate_id, CaptureBudgetProfile::Normal)
+                .expect("retry creates only the unsent comment");
+
+        assert_eq!(recovered.state, CandidateState::Linked);
+        assert_eq!(env.owner_client.owner_mutation_count(), 2);
+        let comments = env
+            .owner_client
+            .list_comments(
+                &RepositoryIdentity::gwt_upstream(),
+                IssueNumber(45),
+                &resolution_deadline(),
+            )
+            .expect("authoritative comments");
+        assert_eq!(comments.items().len(), 2);
+    }
+
+    #[test]
+    fn regression_recovery_preserves_unnumbered_submitted_intent_when_visible_owner_mismatches() {
+        let home = tempfile::tempdir().expect("isolated home");
+        let _gwt_home = gwt_core::test_support::ScopedGwtHome::set(home.path());
+        let source = tempfile::tempdir().expect("source");
+        let candidate_id = "impr-historical-delayed-regression-owner";
+        let (fingerprint, mut env) = historical_regression_fixture(
+            source.path(),
+            candidate_id,
+            version_recurrence(Some("9.66.0"), "2026-07-15T09:00:00Z"),
+            vec![standard_historical_resolution_comment()],
+        );
+        env.owner_client.fail_next_owner_operation(
+            OwnerRepositoryOperation::CreateIssue,
+            OwnerRepositoryFaultTiming::AfterSubmit,
+            GitHubApiError::Timeout {
+                operation: "create regression owner".to_string(),
+            },
+        );
+        let unknown = resolve_candidate_owner(&mut env, candidate_id, CaptureBudgetProfile::Normal)
+            .expect("unknown result is persisted");
+        let submitted_intent = unknown
+            .attempt
+            .as_ref()
+            .expect("submitted attempt")
+            .intent
+            .clone();
+
+        env.owner_client.seed_repository_issue(owner_issue(
+            46,
+            IssueState::Open,
+            "created owner is not visible in the authoritative fingerprint corpus",
+        ));
+        env.owner_client.seed_repository_issue(owner_issue(
+            47,
+            IssueState::Open,
+            fingerprint_marker(&fingerprint),
+        ));
+
+        let retried = resolve_candidate_owner(&mut env, candidate_id, CaptureBudgetProfile::Normal)
+            .expect("mismatched visibility must remain recoverable");
+
+        assert_eq!(retried.state, CandidateState::RemoteOutcomeUnknown);
+        assert!(retried.pending_create_resolution.is_some());
+        let attempt = retried
+            .attempt
+            .as_ref()
+            .expect("preserved recovery attempt");
+        assert_eq!(attempt.remote_phase, AttemptRemotePhase::Submitted);
+        assert_eq!(attempt.intent, submitted_intent);
+        assert_eq!(env.owner_client.owner_mutation_count(), 1);
+    }
+
+    #[test]
+    fn regression_recovery_fetch_failure_preserves_complete_submitted_intent() {
+        let home = tempfile::tempdir().expect("isolated home");
+        let _gwt_home = gwt_core::test_support::ScopedGwtHome::set(home.path());
+        let source = tempfile::tempdir().expect("source");
+        let candidate_id = "impr-historical-recovery-fetch-failure";
+        let (_, mut env) = historical_regression_fixture(
+            source.path(),
+            candidate_id,
+            version_recurrence(Some("9.66.0"), "2026-07-15T09:00:00Z"),
+            vec![standard_historical_resolution_comment()],
+        );
+        env.owner_client.fail_next_owner_operation(
+            OwnerRepositoryOperation::CreateIssue,
+            OwnerRepositoryFaultTiming::AfterSubmit,
+            GitHubApiError::Timeout {
+                operation: "create regression owner".to_string(),
+            },
+        );
+        let unknown = resolve_candidate_owner(&mut env, candidate_id, CaptureBudgetProfile::Normal)
+            .expect("unknown result is persisted");
+        let submitted_intent = unknown
+            .attempt
+            .as_ref()
+            .expect("submitted attempt")
+            .intent
+            .clone();
+        env.owner_client.fail_next_owner_operation(
+            OwnerRepositoryOperation::FetchIssue,
+            OwnerRepositoryFaultTiming::BeforeSubmit,
+            GitHubApiError::Timeout {
+                operation: "fetch submitted regression owner".to_string(),
+            },
+        );
+
+        let retried = resolve_candidate_owner(&mut env, candidate_id, CaptureBudgetProfile::Normal)
+            .expect("fetch failure must remain recoverable");
+
+        assert_eq!(retried.state, CandidateState::RemoteOutcomeUnknown);
+        assert!(retried.pending_create_resolution.is_some());
+        let attempt = retried
+            .attempt
+            .as_ref()
+            .expect("preserved recovery attempt");
+        assert_eq!(attempt.remote_phase, AttemptRemotePhase::Submitted);
+        assert_eq!(attempt.intent, submitted_intent);
+        assert_eq!(env.owner_client.owner_mutation_count(), 1);
+
+        let adopted = resolve_candidate_owner(&mut env, candidate_id, CaptureBudgetProfile::Normal)
+            .expect("retry after fetch recovery");
+
+        assert_eq!(adopted.state, CandidateState::Created);
+        assert!(adopted.pending_create_resolution.is_none());
+        assert_eq!(env.owner_client.owner_mutation_count(), 1);
+    }
+
+    #[test]
+    fn regression_recovery_projection_failure_preserves_complete_submitted_intent() {
+        let home = tempfile::tempdir().expect("isolated home");
+        let _gwt_home = gwt_core::test_support::ScopedGwtHome::set(home.path());
+        let source = tempfile::tempdir().expect("source");
+        let candidate_id = "impr-historical-recovery-projection-failure";
+        let (_, mut env) = historical_regression_fixture(
+            source.path(),
+            candidate_id,
+            version_recurrence(Some("9.66.0"), "2026-07-15T09:00:00Z"),
+            vec![standard_historical_resolution_comment()],
+        );
+        env.owner_client.fail_next_owner_operation(
+            OwnerRepositoryOperation::CreateIssue,
+            OwnerRepositoryFaultTiming::AfterSubmit,
+            GitHubApiError::Timeout {
+                operation: "create regression owner".to_string(),
+            },
+        );
+        let unknown = resolve_candidate_owner(&mut env, candidate_id, CaptureBudgetProfile::Normal)
+            .expect("unknown result is persisted");
+        let submitted_intent = unknown
+            .attempt
+            .as_ref()
+            .expect("submitted attempt")
+            .intent
+            .clone();
+        crate::cli::improvement_store::fail_next_owner_projection_commit()
+            .expect("arm projection failure");
+
+        let retried = resolve_candidate_owner(&mut env, candidate_id, CaptureBudgetProfile::Normal)
+            .expect("projection failure must remain recoverable");
+
+        assert_eq!(retried.state, CandidateState::RemoteOutcomeUnknown);
+        assert!(retried.pending_create_resolution.is_some());
+        let attempt = retried
+            .attempt
+            .as_ref()
+            .expect("preserved recovery attempt");
+        assert_eq!(attempt.remote_phase, AttemptRemotePhase::Submitted);
+        assert_eq!(attempt.intent, submitted_intent);
+        assert_eq!(env.owner_client.owner_mutation_count(), 1);
+
+        let adopted = resolve_candidate_owner(&mut env, candidate_id, CaptureBudgetProfile::Normal)
+            .expect("retry after projection recovery");
+
+        assert_eq!(adopted.state, CandidateState::Created);
+        assert!(adopted.pending_create_resolution.is_none());
+        assert_eq!(env.owner_client.owner_mutation_count(), 1);
+    }
+
+    #[test]
+    fn regression_recovery_reconciles_a_lower_different_payload_owner_and_clears_root() {
+        let home = tempfile::tempdir().expect("isolated home");
+        let _gwt_home = gwt_core::test_support::ScopedGwtHome::set(home.path());
+        let source = tempfile::tempdir().expect("source");
+        let candidate_id = "impr-historical-lower-regression-owner";
+        let (fingerprint, mut env) = historical_regression_fixture(
+            source.path(),
+            candidate_id,
+            version_recurrence(Some("9.66.0"), "2026-07-15T09:00:00Z"),
+            vec![standard_historical_resolution_comment()],
+        );
+        env.owner_client.fail_next_owner_operation(
+            OwnerRepositoryOperation::CreateIssue,
+            OwnerRepositoryFaultTiming::AfterSubmit,
+            GitHubApiError::Timeout {
+                operation: "create regression owner".to_string(),
+            },
+        );
+        let unknown = resolve_candidate_owner(&mut env, candidate_id, CaptureBudgetProfile::Normal)
+            .expect("unknown result is persisted");
+        assert_eq!(unknown.state, CandidateState::RemoteOutcomeUnknown);
+        assert!(unknown.pending_create_resolution.is_some());
+        env.owner_client.seed_repository_issue(owner_issue(
+            40,
+            IssueState::Open,
+            fingerprint_marker(&fingerprint),
+        ));
+
+        let resolved =
+            resolve_candidate_owner(&mut env, candidate_id, CaptureBudgetProfile::Normal)
+                .expect("lower exact owner reconciliation");
+
+        assert_eq!(resolved.state, CandidateState::Linked, "{resolved:?}");
+        assert_eq!(resolved.owner.as_ref().map(|owner| owner.number), Some(40));
+        assert!(resolved.pending_create_resolution.is_none());
+        assert!(!resolved.reconciliation_required);
+        assert!(resolved.reconciliation_owner_numbers.is_empty());
+        assert_eq!(env.owner_client.owner_mutation_count(), 4);
+        let repository = RepositoryIdentity::gwt_upstream();
+        assert_eq!(
+            env.owner_client
+                .fetch_issue(&repository, IssueNumber(46), &resolution_deadline())
+                .expect("created duplicate readback")
+                .state,
+            IssueState::Closed
+        );
+        assert_eq!(
+            env.owner_client
+                .fetch_issue(&repository, IssueNumber(45), &resolution_deadline())
+                .expect("historical owner readback")
+                .state,
+            IssueState::Closed
+        );
+        let projection = crate::cli::improvement_contract::read_owner_projection()
+            .expect("canonical regression projection");
+        assert_eq!(projection.owners.len(), 1);
+        assert_eq!(projection.owners[0].owner.number, 40);
+        assert_eq!(projection.owners[0].aggregate_count, 1);
+        assert!(env
+            .owner_client
+            .list_comments(&repository, IssueNumber(40), &resolution_deadline())
+            .expect("canonical owner comments")
+            .items()
+            .iter()
+            .any(|comment| comment.body.contains("gwt:improvement-occurrence:v1")));
+    }
+
+    #[test]
+    fn regression_postflight_uses_recorded_create_root_to_adopt_lower_canonical_owner() {
+        let home = tempfile::tempdir().expect("isolated home");
+        let _gwt_home = gwt_core::test_support::ScopedGwtHome::set(home.path());
+        let source = tempfile::tempdir().expect("source");
+        let candidate_id = "impr-historical-postflight-lower-owner";
+        let (fingerprint, mut env) = historical_regression_fixture(
+            source.path(),
+            candidate_id,
+            version_recurrence(Some("9.66.0"), "2026-07-15T09:00:00Z"),
+            vec![standard_historical_resolution_comment()],
+        );
+        let repository = RepositoryIdentity::gwt_upstream();
+        let historical_owner =
+            owner_issue(45, IssueState::Closed, fingerprint_marker(&fingerprint));
+        env.owner_client.seed_repository_issue(owner_issue(
+            40,
+            IssueState::Open,
+            fingerprint_marker(&fingerprint),
+        ));
+        env.owner_client.queue_owner_issue_views(
+            &repository,
+            [
+                (vec![historical_owner.clone()], "initial-before-create"),
+                (vec![historical_owner.clone()], "initial-before-create"),
+                (vec![historical_owner.clone()], "refresh-before-create"),
+                (vec![historical_owner], "refresh-before-create"),
+            ],
+        );
+
+        let resolved =
+            resolve_candidate_owner(&mut env, candidate_id, CaptureBudgetProfile::Normal)
+                .expect("postflight duplicate reconciliation");
+
+        assert_eq!(resolved.state, CandidateState::Linked, "{resolved:?}");
+        assert_eq!(resolved.owner.as_ref().map(|owner| owner.number), Some(40));
+        assert!(resolved.pending_create_resolution.is_none());
+        assert!(!resolved.reconciliation_required);
+        assert!(resolved.reconciliation_owner_numbers.is_empty());
+        assert_eq!(env.owner_client.owner_mutation_count(), 4);
+        assert_eq!(
+            env.owner_client
+                .fetch_issue(&repository, IssueNumber(46), &resolution_deadline())
+                .expect("created duplicate readback")
+                .state,
+            IssueState::Closed
+        );
+        assert!(env
+            .owner_client
+            .list_comments(&repository, IssueNumber(40), &resolution_deadline())
+            .expect("canonical owner comments")
+            .items()
+            .iter()
+            .any(|comment| comment.body.contains("gwt:improvement-occurrence:v1")));
+    }
+
+    #[test]
+    fn regression_projection_uses_authorized_order_for_multiple_recurrences() {
+        let home = tempfile::tempdir().expect("isolated home");
+        let _gwt_home = gwt_core::test_support::ScopedGwtHome::set(home.path());
+        let source = tempfile::tempdir().expect("source");
+        let candidate_id = "impr-historical-multiple-recurrences";
+        let (fingerprint, mut env) = historical_regression_fixture(
+            source.path(),
+            candidate_id,
+            version_recurrence(Some("9.66.0"), "2026-07-15T09:00:00Z"),
+            vec![standard_historical_resolution_comment()],
+        );
+        crate::cli::improvement_store::update(source.path(), |store| {
+            let candidate = &mut store.candidates[0];
+            let mut second = candidate.distinct_occurrences[0].clone();
+            let second_event = "historical-regression-second-event";
+            second.opaque_key = opaque_occurrence_key(
+                &"0".repeat(64),
+                &fingerprint,
+                "test.coordination-gate.v1",
+                second_event,
+            );
+            second.captured_at = "2026-07-15T10:00:00Z".to_string();
+            second.replay_proof = Some(OccurrenceReplayProof::RegisteredEvent {
+                source_scope_nonce: "0".repeat(64),
+                source_event_id: second_event.to_string(),
+            });
+            second.recurrence = Some(version_recurrence(Some("9.66.1"), "2026-07-15T10:00:00Z"));
+            second.evidence_digest = occurrence_evidence_digest(
+                candidate.typed_evidence.as_ref().expect("typed evidence"),
+                second.recurrence.as_ref(),
+            );
+            candidate.distinct_occurrences.push(second);
+            candidate
+                .distinct_occurrences
+                .sort_by(|left, right| right.opaque_key.cmp(&left.opaque_key));
+            candidate.occurrences = candidate.distinct_occurrences.len() as u64;
+            Ok(())
+        })
+        .expect("append second recurrence");
+
+        let resolved =
+            resolve_candidate_owner(&mut env, candidate_id, CaptureBudgetProfile::Normal)
+                .expect("multiple recurrence resolution");
+
+        assert_eq!(resolved.state, CandidateState::Created);
+        assert_eq!(resolved.owner.as_ref().map(|owner| owner.number), Some(46));
+        assert_eq!(env.owner_client.owner_mutation_count(), 1);
+    }
+
+    #[test]
+    fn regression_generation_uses_current_durable_owner_and_only_newer_occurrences() {
+        let home = tempfile::tempdir().expect("isolated home");
+        let _gwt_home = gwt_core::test_support::ScopedGwtHome::set(home.path());
+        let source = tempfile::tempdir().expect("source");
+        let candidate_id = "impr-historical-second-regression-generation";
+        let (fingerprint, mut env) = historical_regression_fixture(
+            source.path(),
+            candidate_id,
+            version_recurrence(Some("9.66.0"), "2026-07-15T09:00:00Z"),
+            vec![standard_historical_resolution_comment()],
+        );
+
+        let first = resolve_candidate_owner(&mut env, candidate_id, CaptureBudgetProfile::Normal)
+            .expect("first regression owner");
+        assert_eq!(first.state, CandidateState::Created);
+        assert_eq!(first.owner.as_ref().map(|owner| owner.number), Some(46));
+
+        let repository = RepositoryIdentity::gwt_upstream();
+        let mut first_regression = env
+            .owner_client
+            .fetch_issue(&repository, IssueNumber(46), &resolution_deadline())
+            .expect("first regression readback");
+        first_regression.state = IssueState::Closed;
+        env.owner_client.seed_repository_issue(first_regression);
+        env.owner_client.seed_repository_comments(
+            &repository,
+            IssueNumber(46),
+            vec![repository_comment(
+                502,
+                historical_resolution_comment(
+                    901,
+                    OTHER_COMMIT_SHA,
+                    "2026-07-20T00:00:00Z",
+                    "v9.66.0",
+                ),
+                "2026-07-20T00:00:00Z",
+            )],
+        );
+        env.owner_client.seed_merged_pull_request(
+            &repository,
+            MergedPullRequest {
+                number: IssueNumber(901),
+                merge_commit_sha: OTHER_COMMIT_SHA.to_string(),
+                merged_at: "2026-07-16T00:00:00Z".to_string(),
+            },
+        );
+        env.owner_client.seed_repository_release(
+            &repository,
+            RepositoryRelease {
+                tag_name: "v9.66.0".to_string(),
+                target_commitish: "develop".to_string(),
+                published_at: "2026-07-18T00:00:00Z".to_string(),
+            },
+        );
+        env.owner_client.seed_commit_comparison(
+            &repository,
+            CommitComparison {
+                base: OTHER_COMMIT_SHA.to_string(),
+                head: "refs/tags/v9.66.0".to_string(),
+                base_commit_sha: OTHER_COMMIT_SHA.to_string(),
+                merge_base_commit_sha: OTHER_COMMIT_SHA.to_string(),
+                head_commit_sha: CONFLICTING_COMMIT_SHA.to_string(),
+                status: CommitComparisonStatus::Ahead,
+                ahead_by: 2,
+                behind_by: 0,
+            },
+        );
+        crate::cli::improvement_store::update(source.path(), |store| {
+            let candidate = &mut store.candidates[0];
+            let mut second = candidate.distinct_occurrences[0].clone();
+            let second_event = "historical-regression-next-generation";
+            second.opaque_key = opaque_occurrence_key(
+                &"0".repeat(64),
+                &fingerprint,
+                "test.coordination-gate.v1",
+                second_event,
+            );
+            second.captured_at = "2026-07-21T09:00:00Z".to_string();
+            second.replay_proof = Some(OccurrenceReplayProof::RegisteredEvent {
+                source_scope_nonce: "0".repeat(64),
+                source_event_id: second_event.to_string(),
+            });
+            second.recurrence = Some(version_recurrence(Some("9.67.0"), "2026-07-21T09:00:00Z"));
+            second.evidence_digest = occurrence_evidence_digest(
+                candidate.typed_evidence.as_ref().expect("typed evidence"),
+                second.recurrence.as_ref(),
+            );
+            candidate.distinct_occurrences.push(second);
+            candidate
+                .distinct_occurrences
+                .sort_by(|left, right| right.opaque_key.cmp(&left.opaque_key));
+            candidate.occurrences = candidate.distinct_occurrences.len() as u64;
+            candidate.state = CandidateState::Recurrent;
+            Ok(())
+        })
+        .expect("append next-generation recurrence");
+
+        let second = resolve_candidate_owner(&mut env, candidate_id, CaptureBudgetProfile::Normal)
+            .expect("second regression owner");
+
+        assert_eq!(second.state, CandidateState::Created, "{second:?}");
+        assert_eq!(second.owner.as_ref().map(|owner| owner.number), Some(47));
+        assert_eq!(env.owner_client.owner_mutation_count(), 2);
+        let second_readback = env
+            .owner_client
+            .fetch_issue(&repository, IssueNumber(47), &resolution_deadline())
+            .expect("second regression readback");
+        assert!(second_readback
+            .body
+            .contains("<!-- gwt:improvement-regression:v1 historical:46 proof:"));
+    }
+
+    fn blocked_ambiguous_owner_fixture(source: &Path, candidate_id: &str) -> (TestEnv, String) {
+        let nonce = "0".repeat(64);
+        let (fingerprint, _) =
+            store_projection_candidate(source, &nonce, candidate_id, "manual-selection-event");
+        let mut env = TestEnv::new(source.join("cache"));
+        env.repo_path = source.to_path_buf();
+        env.improvement_source_scope_nonce = nonce;
+        env.owner_client.seed_repository_issue(owner_issue(
+            45,
+            IssueState::Open,
+            fingerprint_marker(&fingerprint),
+        ));
+        let mut spec = owner_issue(46, IssueState::Open, fingerprint_marker(&fingerprint));
+        spec.kind = RepositoryIssueKind::Spec;
+        env.owner_client.seed_repository_issue(spec);
+        let blocked = resolve_candidate_owner(&mut env, candidate_id, CaptureBudgetProfile::Normal)
+            .expect("ambiguous owner resolution");
+        assert_eq!(blocked.state, CandidateState::Blocked);
+        assert_eq!(blocked.blocked_reason, Some(BlockedReason::Ambiguity));
+        let revision = blocked
+            .resolver_snapshot
+            .as_ref()
+            .expect("resolver snapshot")
+            .resolver_revision
+            .clone();
+        (env, revision)
+    }
+
+    #[test]
+    fn manual_owner_selection_requires_stored_and_fresh_revision_then_audits_safe_link() {
+        let home = tempfile::tempdir().expect("isolated home");
+        let _gwt_home = gwt_core::test_support::ScopedGwtHome::set(home.path());
+        let source = tempfile::tempdir().expect("source");
+        let candidate_id = "impr-manual-owner-selection";
+        let (mut env, revision) = blocked_ambiguous_owner_fixture(source.path(), candidate_id);
+
+        let selected = select_candidate_owner(
+            &mut env,
+            candidate_id,
+            45,
+            &revision,
+            CaptureBudgetProfile::Normal,
+        )
+        .expect("fresh selected owner");
+
+        assert_eq!(selected.state, CandidateState::Linked);
+        assert_eq!(selected.owner.as_ref().map(|owner| owner.number), Some(45));
+        assert!(selected.resolver_snapshot.is_none());
+        assert!(matches!(
+            selected.audit.last(),
+            Some(ImprovementAuditEntry::ManualOwnerSelection {
+                owner_number: 45,
+                resolver_revision,
+                ..
+            }) if resolver_revision == &revision
+        ));
+        assert_eq!(env.owner_client.owner_mutation_count(), 1);
+    }
+
+    #[test]
+    fn manual_owner_selection_rejects_stale_revision_or_closed_owner_without_mutation() {
+        {
+            let home = tempfile::tempdir().expect("isolated home");
+            let _gwt_home = gwt_core::test_support::ScopedGwtHome::set(home.path());
+            let source = tempfile::tempdir().expect("source");
+            let candidate_id = "impr-manual-owner-stored-stale";
+            let (mut env, revision) = blocked_ambiguous_owner_fixture(source.path(), candidate_id);
+            let mut stale_revision = revision.into_bytes();
+            stale_revision[0] = if stale_revision[0] == b'a' {
+                b'b'
+            } else {
+                b'a'
+            };
+            let stale_revision = String::from_utf8(stale_revision).expect("ASCII revision");
+
+            let error = select_candidate_owner(
+                &mut env,
+                candidate_id,
+                45,
+                &stale_revision,
+                CaptureBudgetProfile::Normal,
+            )
+            .expect_err("stored revision mismatch must fail");
+
+            assert!(error.to_string().contains("revision"));
+            assert_eq!(env.owner_client.owner_mutation_count(), 0);
+            let stored = crate::cli::improvement_store::load_and_repair(source.path())
+                .expect("candidate store")
+                .candidates
+                .remove(0);
+            assert_eq!(stored.state, CandidateState::Blocked);
+            assert!(stored.audit.is_empty());
+        }
+
+        for (name, close_selected) in [("stale", false), ("closed", true)] {
+            let home = tempfile::tempdir().expect("isolated home");
+            let _gwt_home = gwt_core::test_support::ScopedGwtHome::set(home.path());
+            let source = tempfile::tempdir().expect("source");
+            let candidate_id = format!("impr-manual-owner-{name}");
+            let (mut env, revision) = blocked_ambiguous_owner_fixture(source.path(), &candidate_id);
+            if close_selected {
+                let fingerprint = crate::cli::improvement_store::load_and_repair(source.path())
+                    .expect("candidate store")
+                    .candidates[0]
+                    .fingerprint
+                    .clone()
+                    .expect("fingerprint");
+                env.owner_client.seed_repository_issue(owner_issue(
+                    45,
+                    IssueState::Closed,
+                    fingerprint_marker(&fingerprint),
+                ));
+            } else {
+                env.owner_client.seed_repository_issue(owner_issue(
+                    99,
+                    IssueState::Open,
+                    "unrelated generation change",
+                ));
+            }
+
+            let error = select_candidate_owner(
+                &mut env,
+                &candidate_id,
+                45,
+                &revision,
+                CaptureBudgetProfile::Normal,
+            )
+            .expect_err("stale or closed selection must fail");
+
+            assert!(
+                error.to_string().contains("revision")
+                    || error.to_string().contains("active owner"),
+                "{name}: {error}"
+            );
+            assert_eq!(env.owner_client.owner_mutation_count(), 0, "{name}");
+            let stored = crate::cli::improvement_store::load_and_repair(source.path())
+                .expect("candidate store")
+                .candidates
+                .remove(0);
+            assert_eq!(stored.state, CandidateState::Blocked, "{name}");
+            assert!(stored.audit.is_empty(), "{name}");
+        }
+    }
+
+    #[test]
+    fn manual_owner_selection_does_not_audit_before_authoritative_readback() {
+        let home = tempfile::tempdir().expect("isolated home");
+        let _gwt_home = gwt_core::test_support::ScopedGwtHome::set(home.path());
+        let source = tempfile::tempdir().expect("source");
+        let candidate_id = "impr-manual-owner-readback-failure";
+        let (mut env, revision) = blocked_ambiguous_owner_fixture(source.path(), candidate_id);
+        env.owner_client.fail_next_owner_operation(
+            OwnerRepositoryOperation::FetchIssue,
+            OwnerRepositoryFaultTiming::BeforeSubmit,
+            GitHubApiError::Timeout {
+                operation: "manual selection owner readback".to_string(),
+            },
+        );
+
+        let failed = select_candidate_owner(
+            &mut env,
+            candidate_id,
+            45,
+            &revision,
+            CaptureBudgetProfile::Normal,
+        )
+        .expect("failed authoritative readback is persisted as retryable state");
+
+        assert_eq!(failed.state, CandidateState::Blocked);
+        assert_eq!(env.owner_client.owner_mutation_count(), 0);
+        let stored = crate::cli::improvement_store::load_and_repair(source.path())
+            .expect("candidate store")
+            .candidates
+            .remove(0);
+        assert!(stored.audit.is_empty());
+    }
+
+    #[test]
+    fn manual_owner_selection_does_not_audit_before_final_authoritative_readback() {
+        let home = tempfile::tempdir().expect("isolated home");
+        let _gwt_home = gwt_core::test_support::ScopedGwtHome::set(home.path());
+        let source = tempfile::tempdir().expect("source");
+        let candidate_id = "impr-manual-owner-final-readback-failure";
+        let (mut env, revision) = blocked_ambiguous_owner_fixture(source.path(), candidate_id);
+        env.owner_client.fail_owner_operation_on_nth(
+            OwnerRepositoryOperation::FetchIssue,
+            2,
+            OwnerRepositoryFaultTiming::BeforeSubmit,
+            GitHubApiError::Timeout {
+                operation: "manual selection final owner readback".to_string(),
+            },
+        );
+
+        let failed = select_candidate_owner(
+            &mut env,
+            candidate_id,
+            45,
+            &revision,
+            CaptureBudgetProfile::Normal,
+        )
+        .expect("failed final readback is persisted as retryable state");
+
+        assert_eq!(failed.state, CandidateState::Blocked);
+        assert_eq!(env.owner_client.owner_mutation_count(), 1);
+        let stored = crate::cli::improvement_store::load_and_repair(source.path())
+            .expect("candidate store")
+            .candidates
+            .remove(0);
+        assert!(stored.attempt.is_none());
+        assert!(stored.audit.is_empty());
+    }
+
+    #[test]
+    fn owner_commit_and_error_settlement_cannot_overwrite_concurrent_dismissal() {
+        let home = tempfile::tempdir().expect("isolated home");
+        let _gwt_home = gwt_core::test_support::ScopedGwtHome::set(home.path());
+        let source = tempfile::tempdir().expect("source");
+        let nonce = "0".repeat(64);
+        let candidate_id = "impr-owner-dismiss-race";
+        let (fingerprint, _) =
+            store_projection_candidate(source.path(), &nonce, candidate_id, "dismiss-race-event");
+        let mut env = TestEnv::new(source.path().join("cache"));
+        env.repo_path = source.path().to_path_buf();
+        env.improvement_source_scope_nonce = nonce;
+        env.owner_client.seed_repository_issue(owner_issue(
+            45,
+            IssueState::Open,
+            fingerprint_marker(&fingerprint),
+        ));
+        let ResolutionAttemptStart::Acquired {
+            mut candidate,
+            token,
+            ..
+        } = begin_resolution_attempt(source.path(), candidate_id, CaptureBudgetProfile::Normal)
+            .expect("owner resolution lease");
+        let OwnerPreflightOutcome::Active {
+            owner, comments, ..
+        } = owner_resolution_preflight(
+            &mut env,
+            &mut candidate,
+            &ContractRoutingRegistry::default(),
+            &NoSemanticOwnerAdvisor,
+            &resolution_deadline(),
+        )
+        .expect("active owner preflight")
+        else {
+            panic!("expected active owner");
+        };
+        crate::cli::improvement_store::update(source.path(), |store| {
+            let stored = &mut store.candidates[0];
+            stored.dismissed_reason = Some("dismissed during owner resolution".to_string());
+            transition_candidate(stored, CandidateState::Dismissed)
+        })
+        .expect("concurrent dismissal");
+
+        let error = commit_active_owner_resolution(
+            &mut env,
+            &mut candidate,
+            &owner,
+            &comments,
+            &resolution_deadline(),
+        )
+        .expect_err("stale resolver must reject the dismissed candidate");
+        settle_owner_commit_error(&mut env, candidate, &token, error)
+            .expect_err("failure persistence must not overwrite dismissal");
+
+        assert_eq!(env.owner_client.owner_mutation_count(), 0);
+        let stored = crate::cli::improvement_store::load_and_repair(source.path())
+            .expect("candidate store")
+            .candidates
+            .remove(0);
+        assert_eq!(stored.state, CandidateState::Dismissed);
+        assert_eq!(
+            stored.dismissed_reason.as_deref(),
+            Some("dismissed during owner resolution")
+        );
+        assert!(stored.audit.is_empty());
     }
 
     #[test]

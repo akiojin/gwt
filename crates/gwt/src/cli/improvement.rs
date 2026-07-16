@@ -279,6 +279,17 @@ pub struct ImprovementPromoteIssueCommand {
     pub labels: Vec<String>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(tag = "kind", rename_all = "kebab-case")]
+pub(super) enum ImprovementAuditEntry {
+    ManualOwnerSelection {
+        owner_number: u64,
+        resolver_revision: String,
+        corpus_generation: String,
+        recorded_at: String,
+    },
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub(super) struct CandidateStore {
     #[serde(default)]
@@ -345,8 +356,12 @@ pub(crate) struct ImprovementCandidate {
     pub(super) dismissed_reason: Option<String>,
     #[serde(default)]
     pub(super) legacy_provenance: Vec<super::improvement_store::LegacyProvenance>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(super) pending_create_resolution: Option<super::improvement_store::ResolutionAttemptIntent>,
     #[serde(default)]
     pub(super) attempt: Option<super::improvement_store::ResolutionAttemptLease>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub(super) audit: Vec<ImprovementAuditEntry>,
 }
 
 #[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
@@ -371,6 +386,13 @@ pub(super) struct TypedFailureEvidence {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub(crate) struct TypedRecurrenceEvidence {
+    pub(super) installed_version: Option<String>,
+    pub(super) build_commit: Option<String>,
+    pub(super) observed_at: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub(super) struct DistinctOccurrence {
     pub(super) opaque_key: String,
     pub(super) evidence_digest: String,
@@ -386,6 +408,8 @@ pub(super) struct DistinctOccurrence {
     pub(super) routing_basis_revision: Option<u64>,
     #[serde(default)]
     pub(super) replay_proof: Option<OccurrenceReplayProof>,
+    #[serde(default)]
+    pub(super) recurrence: Option<TypedRecurrenceEvidence>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -441,6 +465,7 @@ pub(crate) struct RegisteredCaptureInput {
     pub(crate) summary: Option<String>,
     pub(crate) details: Option<String>,
     pub(crate) local_evidence: Vec<Value>,
+    pub(crate) recurrence: Option<TypedRecurrenceEvidence>,
 }
 
 #[cfg_attr(not(test), allow(dead_code))]
@@ -454,6 +479,7 @@ struct ProducerRegistration {
     routing_basis_revision: u64,
     target_artifact: &'static str,
     allowed_budget: CaptureBudgetProfile,
+    recurrence_capable: bool,
 }
 
 #[cfg_attr(not(test), allow(dead_code))]
@@ -471,6 +497,7 @@ const REGISTERED_PRODUCERS: &[ProducerRegistration] = &[
         routing_basis_revision: 1,
         target_artifact: "coordination",
         allowed_budget: CaptureBudgetProfile::Normal,
+        recurrence_capable: true,
     },
     #[cfg(test)]
     ProducerRegistration {
@@ -482,6 +509,7 @@ const REGISTERED_PRODUCERS: &[ProducerRegistration] = &[
         routing_basis_revision: 9,
         target_artifact: "coordination",
         allowed_budget: CaptureBudgetProfile::Normal,
+        recurrence_capable: false,
     },
 ];
 
@@ -695,6 +723,7 @@ enum ValidatedCaptureOrigin {
         source_event_id: String,
         producer_registry_revision: u64,
         routing_basis_revision: u64,
+        recurrence: Option<TypedRecurrenceEvidence>,
     },
 }
 
@@ -739,6 +768,7 @@ fn capture_typed(
                     source_scope_nonce: nonce.to_string(),
                     session_id: session_id.clone(),
                 }),
+                recurrence: None,
             }),
             ValidatedCaptureOrigin::Interpretive { session_id: None } => None,
             ValidatedCaptureOrigin::Registered {
@@ -746,6 +776,7 @@ fn capture_typed(
                 source_event_id,
                 producer_registry_revision,
                 routing_basis_revision,
+                recurrence,
             } => Some(DistinctOccurrence {
                 opaque_key: opaque_occurrence_key(
                     nonce,
@@ -753,7 +784,7 @@ fn capture_typed(
                     producer_id,
                     source_event_id,
                 ),
-                evidence_digest: evidence_digest.clone(),
+                evidence_digest: occurrence_evidence_digest(&evidence, recurrence.as_ref()),
                 captured_at: now.clone(),
                 origin: OccurrenceOrigin::Deterministic,
                 qualifies_unattended,
@@ -764,6 +795,7 @@ fn capture_typed(
                     source_scope_nonce: nonce.to_string(),
                     source_event_id: source_event_id.clone(),
                 }),
+                recurrence: recurrence.clone(),
             }),
         };
 
@@ -854,7 +886,9 @@ fn capture_typed(
             linked_issue: None,
             dismissed_reason: None,
             legacy_provenance: Vec::new(),
+            pending_create_resolution: None,
             attempt: None,
+            audit: Vec::new(),
         };
         candidate.eligibility = typed_eligibility(&candidate);
         let next_state = settled_typed_capture_state(&candidate.state, candidate.eligibility);
@@ -899,6 +933,9 @@ pub(crate) fn capture_registered<E: CliEnv>(
         return Err(invalid(
             "registered producer target artifact does not match its registry entry",
         ));
+    }
+    if input.recurrence.is_some() && !registration.recurrence_capable {
+        return Err(invalid("registered producer is not recurrence-capable"));
     }
     validate_enum(
         "source",
@@ -952,6 +989,7 @@ pub(crate) fn capture_registered<E: CliEnv>(
             source_event_id,
             producer_registry_revision: PRODUCER_REGISTRY_REVISION,
             routing_basis_revision: registration.routing_basis_revision,
+            recurrence: input.recurrence,
         },
     )?;
     let mut candidate = result.candidate;
@@ -1054,7 +1092,9 @@ fn capture_legacy_compatibility(
                 linked_issue: None,
                 dismissed_reason: None,
                 legacy_provenance: Vec::new(),
+                pending_create_resolution: None,
                 attempt: None,
+                audit: Vec::new(),
             };
             store.candidates.push(candidate.clone());
             Ok(CaptureResult {
@@ -1140,6 +1180,35 @@ pub(super) fn typed_evidence_digest(evidence: &TypedFailureEvidence) -> String {
             &evidence.target_artifact,
             &evidence.expected_outcome,
             &evidence.observed_outcome,
+        ],
+    )
+}
+
+pub(super) fn occurrence_evidence_digest(
+    evidence: &TypedFailureEvidence,
+    recurrence: Option<&TypedRecurrenceEvidence>,
+) -> String {
+    let core_digest = typed_evidence_digest(evidence);
+    let Some(recurrence) = recurrence else {
+        return core_digest;
+    };
+    let (version_presence, installed_version) = recurrence
+        .installed_version
+        .as_deref()
+        .map_or(("absent", ""), |value| ("present", value));
+    let (commit_presence, build_commit) = recurrence
+        .build_commit
+        .as_deref()
+        .map_or(("absent", ""), |value| ("present", value));
+    digest_fields(
+        "gwt.improvement.occurrence-evidence.v1",
+        &[
+            &core_digest,
+            version_presence,
+            installed_version,
+            commit_presence,
+            build_commit,
+            &recurrence.observed_at,
         ],
     )
 }
@@ -1234,6 +1303,17 @@ pub(super) fn validate_candidate_lifecycle(
             "reconciliation owner numbers must be sorted unique positive values",
         ));
     }
+    if candidate.pending_create_resolution.as_ref().is_some_and(|intent| {
+        !matches!(
+            intent,
+            super::improvement_store::ResolutionAttemptIntent::CreateIssue { .. }
+                | super::improvement_store::ResolutionAttemptIntent::CreateRegressionIssue { .. }
+        )
+    }) {
+        return Err(invalid(
+            "pending create resolution must contain a create intent",
+        ));
+    }
     match candidate.state {
         CandidateState::Blocked => {
             let reason = candidate
@@ -1305,6 +1385,30 @@ pub(super) fn validate_candidate_lifecycle(
             != resolver_revision(&snapshot.corpus_generation, &snapshot.owner_candidates)?
         {
             return Err(invalid("resolver revision does not match its snapshot"));
+        }
+    }
+
+    for entry in &candidate.audit {
+        match entry {
+            ImprovementAuditEntry::ManualOwnerSelection {
+                owner_number,
+                resolver_revision,
+                corpus_generation,
+                recorded_at,
+            } => {
+                if *owner_number == 0
+                    || resolver_revision.len() != 64
+                    || !resolver_revision
+                        .bytes()
+                        .all(|byte| byte.is_ascii_digit() || matches!(byte, b'a'..=b'f'))
+                    || corpus_generation.trim().is_empty()
+                {
+                    return Err(invalid("manual owner selection audit is invalid"));
+                }
+                chrono::DateTime::parse_from_rfc3339(recorded_at).map_err(|_| {
+                    invalid("manual owner selection audit timestamp must be RFC3339")
+                })?;
+            }
         }
     }
 
@@ -1454,7 +1558,7 @@ pub(super) fn owner_eligibility_is_canonical(
     let mut source_scope_nonces = BTreeSet::new();
     let mut qualifying_deterministic = 0_usize;
     let mut qualifying_interpretive = 0_usize;
-    let canonical_evidence_digest = typed_evidence_digest(evidence);
+    let mut current_evidence_is_bound = false;
     let canonical_fingerprint = improvement_fingerprint(evidence);
     for occurrence in &candidate.distinct_occurrences {
         let opaque_digest = occurrence
@@ -1466,9 +1570,16 @@ pub(super) fn owner_eligibility_is_canonical(
                         .bytes()
                         .all(|byte| byte.is_ascii_digit() || matches!(byte, b'a'..=b'f'))
             });
+        let occurrence_digest_is_canonical = occurrence.evidence_digest.len() == 64
+            && occurrence
+                .evidence_digest
+                .bytes()
+                .all(|byte| byte.is_ascii_digit() || matches!(byte, b'a'..=b'f'));
+        current_evidence_is_bound |= occurrence.evidence_digest
+            == occurrence_evidence_digest(evidence, occurrence.recurrence.as_ref());
         if opaque_digest.is_none()
             || !opaque_keys.insert(occurrence.opaque_key.as_str())
-            || occurrence.evidence_digest != canonical_evidence_digest
+            || !occurrence_digest_is_canonical
         {
             return false;
         }
@@ -1526,6 +1637,7 @@ pub(super) fn owner_eligibility_is_canonical(
                         && evidence.contract_schema_revision
                             == registration.contract_schema_revision
                         && evidence.target_artifact == registration.target_artifact
+                        && (occurrence.recurrence.is_none() || registration.recurrence_capable)
                 });
                 if !registered {
                     return false;
@@ -1536,6 +1648,7 @@ pub(super) fn owner_eligibility_is_canonical(
                 if occurrence.producer_id.is_some()
                     || occurrence.producer_registry_revision.is_some()
                     || occurrence.routing_basis_revision.is_some()
+                    || occurrence.recurrence.is_some()
                 {
                     return false;
                 }
@@ -1544,7 +1657,7 @@ pub(super) fn owner_eligibility_is_canonical(
         }
     }
 
-    if source_scope_nonces.len() != 1 {
+    if source_scope_nonces.len() != 1 || !current_evidence_is_bound {
         return false;
     }
 
@@ -1584,6 +1697,7 @@ fn same_occurrence_replay(existing: &DistinctOccurrence, incoming: &DistinctOccu
         && existing.producer_registry_revision == incoming.producer_registry_revision
         && existing.routing_basis_revision == incoming.routing_basis_revision
         && existing.replay_proof == incoming.replay_proof
+        && existing.recurrence == incoming.recurrence
 }
 
 fn settled_capture_state(
@@ -2648,6 +2762,7 @@ mod tests {
             summary: Some("Local deterministic capture context".to_string()),
             details: None,
             local_evidence: Vec::new(),
+            recurrence: None,
         }
     }
 
@@ -2685,6 +2800,7 @@ mod tests {
                 source_event_id: source_event_id.to_string(),
                 producer_registry_revision: PRODUCER_REGISTRY_REVISION,
                 routing_basis_revision: 1,
+                recurrence: None,
             },
         )
         .expect("capture candidate")
@@ -2865,6 +2981,30 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn candidate_lifecycle_rejects_non_create_pending_resolution_root() {
+        let mut candidate = lifecycle_test_candidate(CandidateState::OwnerResolving);
+        candidate.pending_create_resolution = Some(
+            super::super::improvement_store::ResolutionAttemptIntent::ReconciliationComment {
+                canonical_owner_number: 41,
+                duplicate_owner_number: 42,
+                public_payload_digest: "sha256:reconciliation".to_string(),
+            },
+        );
+
+        assert!(validate_candidate_lifecycle(&candidate).is_err());
+
+        candidate.pending_create_resolution = Some(
+            super::super::improvement_store::ResolutionAttemptIntent::CreateIssue {
+                fingerprint: "v2:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+                    .to_string(),
+                public_payload_digest: "sha256:create".to_string(),
+                created_owner_number: None,
+            },
+        );
+        validate_candidate_lifecycle(&candidate).expect("create root is lifecycle-valid");
     }
 
     #[test]
@@ -3357,16 +3497,16 @@ mod tests {
         .expect("unknown create outcome");
         assert_eq!(unknown.state, CandidateState::RemoteOutcomeUnknown);
 
-        let recaptured = capture_registered(
-            &mut env,
-            registered_capture_input(
-                producer,
-                "unknown-occurrence-b",
-                1,
-                CaptureBudgetProfile::Normal,
-            ),
-        )
-        .expect("new occurrence while outcome is unknown");
+        let mut changed_outcome = registered_capture_input(
+            producer,
+            "unknown-occurrence-b",
+            1,
+            CaptureBudgetProfile::Normal,
+        );
+        changed_outcome.expected_outcome = "BOARD_STATUS_RESTORED".to_string();
+        changed_outcome.observed_outcome = "BOARD_STATUS_DELAYED".to_string();
+        let recaptured = capture_registered(&mut env, changed_outcome)
+            .expect("new occurrence while outcome is unknown");
         assert_eq!(recaptured.state, CandidateState::RemoteOutcomeUnknown);
         assert_eq!(recaptured.occurrences, 2);
 
@@ -3469,6 +3609,7 @@ mod tests {
                 source_event_id: "pre-create-race".to_string(),
                 producer_registry_revision: PRODUCER_REGISTRY_REVISION,
                 routing_basis_revision: 1,
+                recurrence: None,
             },
         )
         .expect("capture candidate")
@@ -3518,9 +3659,9 @@ mod tests {
             resolve_candidate_owner(&mut env, &candidate.id, CaptureBudgetProfile::Normal)
                 .expect("second scan must adopt the owner");
 
-        assert_eq!(resolved.state, CandidateState::Created);
+        assert_eq!(resolved.state, CandidateState::Linked);
         assert_eq!(resolved.owner.as_ref().unwrap().number, 78);
-        assert_eq!(env.owner_client.owner_mutation_count(), 0);
+        assert_eq!(env.owner_client.owner_mutation_count(), 1);
     }
 
     #[test]
@@ -3999,6 +4140,133 @@ mod tests {
     }
 
     #[test]
+    fn reconciliation_post_submit_unknown_waits_for_authoritative_comment_marker() {
+        use gwt_github::client::fake::{OwnerRepositoryFaultTiming, OwnerRepositoryOperation};
+        use gwt_github::client::{IssueNumber, RepositoryIdentity};
+
+        let home = tempfile::tempdir().expect("isolated home");
+        let _gwt_home = gwt_core::test_support::ScopedGwtHome::set(home.path());
+        let project = tempfile::tempdir().expect("project");
+        let mut env = TestEnv::new(project.path().join("cache"));
+        env.repo_path = project.path().join("source");
+        std::fs::create_dir_all(&env.repo_path).expect("repo path");
+        seed_exact_plain_owners(&mut env, &[78, 79]);
+        env.owner_client.fail_next_owner_operation(
+            OwnerRepositoryOperation::CreateComment,
+            OwnerRepositoryFaultTiming::AfterSubmit,
+            gwt_github::client::ApiError::Timeout {
+                operation: "reconciliation comment response".to_string(),
+            },
+        );
+        let producer =
+            registered_producer_token("test.coordination-gate").expect("registered token");
+
+        let unknown = capture_registered(
+            &mut env,
+            registered_capture_input(
+                producer,
+                "duplicate-comment-delayed-readback",
+                1,
+                CaptureBudgetProfile::Normal,
+            ),
+        )
+        .expect("unknown reconciliation must settle");
+        assert_eq!(unknown.state, CandidateState::RemoteOutcomeUnknown);
+        assert_eq!(env.owner_client.owner_mutation_count(), 1);
+
+        env.owner_client.seed_repository_comments(
+            &RepositoryIdentity::gwt_upstream(),
+            IssueNumber(79),
+            Vec::new(),
+        );
+        let still_unknown =
+            resolve_candidate_owner(&mut env, &unknown.id, CaptureBudgetProfile::Normal)
+                .expect("missing authoritative marker must remain unknown");
+
+        assert_eq!(still_unknown.state, CandidateState::RemoteOutcomeUnknown);
+        assert_eq!(env.owner_client.owner_mutation_count(), 1);
+    }
+
+    #[test]
+    fn occurrence_comment_unknown_rebinds_to_lower_canonical_owner_after_readback() {
+        use gwt_github::client::fake::{OwnerRepositoryFaultTiming, OwnerRepositoryOperation};
+        use gwt_github::client::{
+            IssueNumber, IssueState, OwnerRepositoryClient, RepositoryIdentity, ResolutionDeadline,
+        };
+        use std::time::Duration;
+
+        let home = tempfile::tempdir().expect("isolated home");
+        let _gwt_home = gwt_core::test_support::ScopedGwtHome::set(home.path());
+        let project = tempfile::tempdir().expect("project");
+        let mut env = TestEnv::new(project.path().join("cache"));
+        env.repo_path = project.path().join("source");
+        std::fs::create_dir_all(&env.repo_path).expect("repo path");
+        let candidate =
+            capture_registered_candidate_without_resolution(&mut env, "occurrence-owner-race");
+        seed_exact_plain_owners(&mut env, &[79]);
+        env.owner_client.fail_next_owner_operation(
+            OwnerRepositoryOperation::CreateComment,
+            OwnerRepositoryFaultTiming::AfterSubmit,
+            gwt_github::client::ApiError::Timeout {
+                operation: "occurrence comment response".to_string(),
+            },
+        );
+
+        let unknown =
+            resolve_candidate_owner(&mut env, &candidate.id, CaptureBudgetProfile::Normal)
+                .expect("unknown occurrence comment must settle");
+        assert_eq!(unknown.state, CandidateState::RemoteOutcomeUnknown);
+        assert_eq!(env.owner_client.owner_mutation_count(), 1);
+
+        let repository = RepositoryIdentity::gwt_upstream();
+        let deadline = ResolutionDeadline::new(Duration::from_secs(1), Duration::from_secs(5));
+        let submitted_comments = env
+            .owner_client
+            .list_comments(&repository, IssueNumber(79), &deadline)
+            .expect("submitted occurrence comment")
+            .items()
+            .to_vec();
+        env.owner_client
+            .seed_repository_comments(&repository, IssueNumber(79), Vec::new());
+        let still_unknown =
+            resolve_candidate_owner(&mut env, &candidate.id, CaptureBudgetProfile::Normal)
+                .expect("missing occurrence marker must remain unknown");
+        assert_eq!(still_unknown.state, CandidateState::RemoteOutcomeUnknown);
+        assert_eq!(env.owner_client.owner_mutation_count(), 1);
+
+        env.owner_client
+            .seed_repository_comments(&repository, IssueNumber(79), submitted_comments);
+        seed_exact_plain_owners(&mut env, &[78]);
+        let linked = resolve_candidate_owner(&mut env, &candidate.id, CaptureBudgetProfile::Normal)
+            .expect("verified losing-owner comment must rebind to canonical owner");
+
+        assert_eq!(linked.state, CandidateState::Linked);
+        assert_eq!(linked.owner.as_ref().map(|owner| owner.number), Some(78));
+        assert_eq!(env.owner_client.owner_mutation_count(), 4);
+        assert_eq!(
+            env.owner_client
+                .fetch_issue(&repository, IssueNumber(79), &deadline)
+                .expect("losing owner readback")
+                .state,
+            IssueState::Closed
+        );
+        for number in [78, 79] {
+            let comments = env
+                .owner_client
+                .list_comments(&repository, IssueNumber(number), &deadline)
+                .expect("owner comments");
+            assert_eq!(
+                comments
+                    .items()
+                    .iter()
+                    .filter(|comment| comment.body.contains("gwt:improvement-occurrence:v1"))
+                    .count(),
+                1
+            );
+        }
+    }
+
+    #[test]
     fn registered_capture_preserves_active_owner_mutation_certainty() {
         use gwt_github::client::fake::{OwnerRepositoryFaultTiming, OwnerRepositoryOperation};
 
@@ -4052,7 +4320,7 @@ mod tests {
                 let adopted =
                     resolve_candidate_owner(&mut env, &candidate.id, CaptureBudgetProfile::Normal)
                         .expect("authoritative retry must adopt the occurrence comment");
-                assert_eq!(adopted.state, CandidateState::Linked);
+                assert_eq!(adopted.state, CandidateState::Linked, "{adopted:?}");
                 assert_eq!(adopted.owner.as_ref().unwrap().number, 77);
                 assert_eq!(env.owner_client.owner_mutation_count(), 1);
             }
@@ -4221,6 +4489,121 @@ mod tests {
         assert_eq!(second.occurrences, 2);
         assert_eq!(second.state, CandidateState::Blocked);
         assert_eq!(board_bodies(&mut env).len(), 4);
+    }
+
+    #[test]
+    fn distinct_public_outcomes_with_one_fingerprint_remain_owner_eligible() {
+        let project = tempfile::tempdir().expect("project");
+        let mut env = TestEnv::new(project.path().join("cache"));
+        env.repo_path = project.path().join("source");
+        std::fs::create_dir_all(&env.repo_path).expect("repo path");
+        let first = capture_registered_candidate_without_resolution(&mut env, "outcome-event-a");
+        let mut evidence = first.typed_evidence.clone().expect("typed evidence");
+        evidence.expected_outcome = "BOARD_STATUS_RESTORED".to_string();
+        evidence.observed_outcome = "BOARD_STATUS_DELAYED".to_string();
+        let command = ImprovementCaptureCommand {
+            source: "hook-runtime".to_string(),
+            target_artifact: "coordination".to_string(),
+            classification: "gwt-caused".to_string(),
+            confidence: "high".to_string(),
+            summary: "Local deterministic capture context".to_string(),
+            details: None,
+            evidence_digest: None,
+            dedupe_key: None,
+            local_evidence: Vec::new(),
+            typed_evidence: None,
+        };
+
+        let second = capture_typed(
+            &env.repo_path,
+            &command,
+            evidence,
+            ValidatedCaptureOrigin::Registered {
+                producer_id: "test.coordination-gate.v1",
+                source_event_id: "outcome-event-b".to_string(),
+                producer_registry_revision: PRODUCER_REGISTRY_REVISION,
+                routing_basis_revision: 1,
+                recurrence: None,
+            },
+        )
+        .expect("second public outcome")
+        .candidate;
+
+        assert_eq!(second.id, first.id);
+        assert_eq!(second.fingerprint, first.fingerprint);
+        assert_eq!(second.occurrences, 2);
+        assert!(owner_eligibility_is_canonical(
+            &second,
+            &env.repo_path,
+            &env.improvement_source_scope_nonce,
+        ));
+    }
+
+    #[test]
+    fn registered_recurrence_is_occurrence_scoped_digest_bound_and_capability_gated() {
+        let project = tempfile::tempdir().expect("project");
+        let mut env = TestEnv::new(project.path().join("cache"));
+        env.repo_path = project.path().join("source");
+        std::fs::create_dir_all(&env.repo_path).expect("repo path");
+        env.improvement_source_scope_nonce =
+            crate::cli::improvement_store::source_scope_nonce(&env.repo_path)
+                .expect("canonical source scope nonce");
+        let token = registered_producer_token("test.coordination-gate").expect("registered token");
+        let recurrence = TypedRecurrenceEvidence {
+            installed_version: Some("9.66.0".to_string()),
+            build_commit: None,
+            observed_at: "2026-07-15T09:00:00Z".to_string(),
+        };
+        let mut input =
+            registered_capture_input(token, "recurrence-a", 1, CaptureBudgetProfile::Normal);
+        input.recurrence = Some(recurrence.clone());
+
+        let first = capture_registered(&mut env, input.clone()).expect("registered recurrence");
+        let occurrence = &first.distinct_occurrences[0];
+        assert_eq!(occurrence.recurrence.as_ref(), Some(&recurrence));
+        assert_ne!(
+            occurrence.evidence_digest,
+            typed_evidence_digest(first.typed_evidence.as_ref().expect("typed evidence"))
+        );
+        assert!(owner_eligibility_is_canonical(
+            &first,
+            &env.repo_path,
+            &env.improvement_source_scope_nonce,
+        ));
+
+        let replay = capture_registered(&mut env, input).expect("identical recurrence replay");
+        assert_eq!(replay.occurrences, 1);
+
+        let mut conflicting =
+            registered_capture_input(token, "recurrence-a", 1, CaptureBudgetProfile::Normal);
+        conflicting.recurrence = Some(TypedRecurrenceEvidence {
+            installed_version: Some("9.67.0".to_string()),
+            build_commit: None,
+            observed_at: "2026-07-15T09:00:00Z".to_string(),
+        });
+        let error = capture_registered(&mut env, conflicting)
+            .expect_err("same event cannot replace recurrence proof");
+        assert!(error
+            .to_string()
+            .contains("conflicting improvement occurrence replay"));
+
+        let other_project = tempfile::tempdir().expect("other project");
+        let mut other_env = TestEnv::new(other_project.path().join("cache"));
+        other_env.repo_path = other_project.path().join("source");
+        std::fs::create_dir_all(&other_env.repo_path).expect("other repo path");
+        let non_capable = registered_producer_token("test.owner-route").expect("registered token");
+        let mut rejected =
+            registered_capture_input(non_capable, "recurrence-b", 9, CaptureBudgetProfile::Normal);
+        rejected.recurrence = Some(recurrence);
+        let error = capture_registered(&mut other_env, rejected)
+            .expect_err("producer without recurrence capability must be rejected");
+        assert!(error.to_string().contains("recurrence-capable"));
+        assert!(
+            crate::cli::improvement_store::load_and_repair(&other_env.repo_path)
+                .expect("empty store")
+                .candidates
+                .is_empty()
+        );
     }
 
     #[test]
@@ -4465,6 +4848,7 @@ mod tests {
                 source_event_id: "blocked-board".to_string(),
                 producer_registry_revision: 1,
                 routing_basis_revision: 1,
+                recurrence: None,
             },
         )
         .expect("registered capture without status delivery")

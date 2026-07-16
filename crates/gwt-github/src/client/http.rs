@@ -29,9 +29,9 @@ use crate::client::{
     ApiError, CollectionGeneration, CommentId, CommentSnapshot, CommitComparison,
     CommitComparisonStatus, CompleteCollection, CreateRepositoryIssue, FetchResult, IssueClient,
     IssueNumber, IssueSnapshot, IssueState, MergedPullRequest, OwnerMutationError,
-    OwnerMutationResult, OwnerRepositoryClient, RepositoryComment, RepositoryIdentity,
-    RepositoryIssue, RepositoryIssueKind, RepositoryRelease, ResolutionDeadline, SpecListFilter,
-    SpecSummary, UpdatedAt,
+    OwnerMutationResult, OwnerRepositoryClient, RepositoryActorType, RepositoryAuthorAssociation,
+    RepositoryComment, RepositoryIdentity, RepositoryIssue, RepositoryIssueKind, RepositoryRelease,
+    ResolutionDeadline, SpecListFilter, SpecSummary, UpdatedAt,
 };
 
 /// HTTP method.
@@ -1064,6 +1064,9 @@ fn parse_owner_comment(value: &Value, operation: &str) -> Result<RepositoryComme
         .or_else(|| value.get("id"))
         .and_then(Value::as_u64)
         .ok_or_else(|| parse("comment id missing"))?;
+    if id == 0 {
+        return Err(parse("comment id must be positive"));
+    }
     let body = value
         .get("body")
         .and_then(Value::as_str)
@@ -1075,10 +1078,51 @@ fn parse_owner_comment(value: &Value, operation: &str) -> Result<RepositoryComme
         .and_then(Value::as_str)
         .ok_or_else(|| parse("comment updated_at missing"))?
         .to_string();
+    if chrono::DateTime::parse_from_rfc3339(&updated_at).is_err() {
+        return Err(parse("comment updated_at is not RFC3339"));
+    }
+    let author = value
+        .get("author")
+        .or_else(|| value.get("user"))
+        .and_then(Value::as_object);
+    let author_login = author
+        .and_then(|author| author.get("login"))
+        .and_then(Value::as_str)
+        .filter(|login| !login.is_empty())
+        .map(str::to_string);
+    let author_type = author
+        .and_then(|author| author.get("__typename").or_else(|| author.get("type")))
+        .and_then(Value::as_str)
+        .map(|actor_type| match actor_type {
+            "User" => RepositoryActorType::User,
+            "Bot" => RepositoryActorType::Bot,
+            "Organization" => RepositoryActorType::Organization,
+            "Mannequin" => RepositoryActorType::Mannequin,
+            "EnterpriseUserAccount" => RepositoryActorType::EnterpriseUserAccount,
+            other => RepositoryActorType::Unknown(other.to_string()),
+        });
+    let author_association = value
+        .get("authorAssociation")
+        .or_else(|| value.get("author_association"))
+        .and_then(Value::as_str)
+        .map(|association| match association {
+            "OWNER" => RepositoryAuthorAssociation::Owner,
+            "MEMBER" => RepositoryAuthorAssociation::Member,
+            "COLLABORATOR" => RepositoryAuthorAssociation::Collaborator,
+            "CONTRIBUTOR" => RepositoryAuthorAssociation::Contributor,
+            "FIRST_TIMER" => RepositoryAuthorAssociation::FirstTimer,
+            "FIRST_TIME_CONTRIBUTOR" => RepositoryAuthorAssociation::FirstTimeContributor,
+            "MANNEQUIN" => RepositoryAuthorAssociation::Mannequin,
+            "NONE" => RepositoryAuthorAssociation::None,
+            other => RepositoryAuthorAssociation::Unknown(other.to_string()),
+        });
     Ok(RepositoryComment {
         id: CommentId(id),
         body,
         updated_at: UpdatedAt(updated_at),
+        author_login,
+        author_type,
+        author_association,
     })
 }
 
@@ -1121,8 +1165,13 @@ fn comment_generation(comments: &[RepositoryComment]) -> CollectionGeneration {
             .iter()
             .map(|comment| {
                 format!(
-                    "{}\0{}\0{}",
-                    comment.id.0, comment.body, comment.updated_at.0
+                    "{}\0{}\0{}\0{:?}\0{:?}\0{:?}",
+                    comment.id.0,
+                    comment.body,
+                    comment.updated_at.0,
+                    comment.author_login,
+                    comment.author_type,
+                    comment.author_association,
                 )
             })
             .collect(),
@@ -1220,7 +1269,10 @@ query($owner:String!,$repo:String!,$number:Int!,$after:String){
   repository(owner:$owner, name:$repo){
     issue(number:$number){
       comments(first:100, after:$after){
-        nodes{ databaseId body updatedAt }
+        nodes{
+          databaseId body updatedAt authorAssociation
+          author{ login __typename }
+        }
         pageInfo{ hasNextPage endCursor }
       }
     }
@@ -1702,11 +1754,28 @@ impl<T: HttpTransport> OwnerRepositoryClient for HttpIssueClient<T> {
             return Ok(None);
         };
         let value = parse_owner_json(&response.body, operation)?;
-        if value.get("merged").and_then(Value::as_bool) != Some(true) {
+        let merged = value
+            .get("merged")
+            .and_then(Value::as_bool)
+            .ok_or_else(|| ApiError::Parse {
+                operation: operation.to_string(),
+                message: "merged missing".to_string(),
+            })?;
+        let returned_number = IssueNumber(required_u64(&value, "number", operation)?);
+        if returned_number != number {
+            return Err(ApiError::Parse {
+                operation: operation.to_string(),
+                message: format!(
+                    "pull request number mismatch: requested {}, received {}",
+                    number.0, returned_number.0
+                ),
+            });
+        }
+        if !merged {
             return Ok(None);
         }
         Ok(Some(MergedPullRequest {
-            number: IssueNumber(required_u64(&value, "number", operation)?),
+            number: returned_number,
             merge_commit_sha: required_string(&value, "merge_commit_sha", operation)?,
             merged_at: required_string(&value, "merged_at", operation)?,
         }))
@@ -1733,8 +1802,15 @@ impl<T: HttpTransport> OwnerRepositoryClient for HttpIssueClient<T> {
             return Ok(None);
         };
         let value = parse_owner_json(&response.body, operation)?;
+        let returned_tag = required_string(&value, "tag_name", operation)?;
+        if returned_tag != tag {
+            return Err(ApiError::Parse {
+                operation: operation.to_string(),
+                message: format!("release tag mismatch: requested {tag}, received {returned_tag}"),
+            });
+        }
         Ok(Some(RepositoryRelease {
-            tag_name: required_string(&value, "tag_name", operation)?,
+            tag_name: returned_tag,
             target_commitish: required_string(&value, "target_commitish", operation)?,
             published_at: required_string(&value, "published_at", operation)?,
         }))
@@ -1774,13 +1850,49 @@ impl<T: HttpTransport> OwnerRepositoryClient for HttpIssueClient<T> {
                 })
             }
         };
-        Ok(CommitComparison {
+        let base_commit_sha = value
+            .pointer("/base_commit/sha")
+            .and_then(Value::as_str)
+            .map(str::to_string)
+            .ok_or_else(|| ApiError::Parse {
+                operation: operation.to_string(),
+                message: "base_commit.sha missing".to_string(),
+            })?;
+        let merge_base_commit_sha = value
+            .pointer("/merge_base_commit/sha")
+            .and_then(Value::as_str)
+            .map(str::to_string)
+            .ok_or_else(|| ApiError::Parse {
+                operation: operation.to_string(),
+                message: "merge_base_commit.sha missing".to_string(),
+            })?;
+        let head_commit_sha = match status {
+            CommitComparisonStatus::Identical => base_commit_sha.clone(),
+            CommitComparisonStatus::Behind => merge_base_commit_sha.clone(),
+            CommitComparisonStatus::Ahead | CommitComparisonStatus::Diverged => value
+                .get("commits")
+                .and_then(Value::as_array)
+                .and_then(|commits| commits.last())
+                .and_then(|commit| commit.get("sha"))
+                .and_then(Value::as_str)
+                .map(str::to_string)
+                .ok_or_else(|| ApiError::Parse {
+                    operation: operation.to_string(),
+                    message: "final commits[].sha missing".to_string(),
+                })?,
+        };
+        let comparison = CommitComparison {
             base: base.to_string(),
             head: head.to_string(),
+            base_commit_sha,
+            merge_base_commit_sha,
+            head_commit_sha,
             status,
             ahead_by: required_u64(&value, "ahead_by", operation)?,
             behind_by: required_u64(&value, "behind_by", operation)?,
-        })
+        };
+        comparison.validate_response(operation)?;
+        Ok(comparison)
     }
 }
 

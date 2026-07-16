@@ -18,9 +18,9 @@ use crate::client::{
     ApiError, CollectionGeneration, CommentId, CommentSnapshot, CommitComparison,
     CompleteCollection, CreateRepositoryIssue, FetchResult, IssueClient, IssueNumber,
     IssueSnapshot, IssueState, MergedPullRequest, OwnerMutationError, OwnerMutationResult,
-    OwnerRepositoryClient, RepositoryComment, RepositoryIdentity, RepositoryIssue,
-    RepositoryIssueKind, RepositoryRelease, ResolutionDeadline, SpecListFilter, SpecSummary,
-    UpdatedAt,
+    OwnerRepositoryClient, RepositoryActorType, RepositoryAuthorAssociation, RepositoryComment,
+    RepositoryIdentity, RepositoryIssue, RepositoryIssueKind, RepositoryRelease,
+    ResolutionDeadline, SpecListFilter, SpecSummary, UpdatedAt,
 };
 
 /// In-memory fake [`IssueClient`].
@@ -50,6 +50,8 @@ struct FakeState {
     owner_issue_generation_queue: HashMap<RepositoryIdentity, VecDeque<CollectionGeneration>>,
     owner_issue_view_queue:
         HashMap<RepositoryIdentity, VecDeque<(Vec<RepositoryIssue>, CollectionGeneration)>>,
+    owner_comment_view_queue:
+        HashMap<(RepositoryIdentity, IssueNumber), VecDeque<Vec<RepositoryComment>>>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -88,6 +90,7 @@ pub struct OwnerRepositoryCall {
 }
 
 struct OwnerRepositoryFault {
+    calls_to_skip: usize,
     timing: OwnerRepositoryFaultTiming,
     error: ApiError,
 }
@@ -110,6 +113,7 @@ impl FakeIssueClient {
                 owner_generations: HashMap::new(),
                 owner_issue_generation_queue: HashMap::new(),
                 owner_issue_view_queue: HashMap::new(),
+                owner_comment_view_queue: HashMap::new(),
             })),
             next_issue_number: Arc::new(AtomicU64::new(1)),
             next_comment_id: Arc::new(AtomicU64::new(1)),
@@ -240,6 +244,23 @@ impl FakeIssueClient {
             }));
     }
 
+    pub fn queue_owner_comment_views<I>(
+        &self,
+        repository: &RepositoryIdentity,
+        number: IssueNumber,
+        views: I,
+    ) where
+        I: IntoIterator<Item = Vec<RepositoryComment>>,
+    {
+        self.inner
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .owner_comment_view_queue
+            .entry((repository.clone(), number))
+            .or_default()
+            .extend(views);
+    }
+
     pub fn seed_merged_pull_request(
         &self,
         repository: &RepositoryIdentity,
@@ -289,13 +310,28 @@ impl FakeIssueClient {
         timing: OwnerRepositoryFaultTiming,
         error: ApiError,
     ) {
+        self.fail_owner_operation_on_nth(operation, 1, timing, error);
+    }
+
+    pub fn fail_owner_operation_on_nth(
+        &self,
+        operation: OwnerRepositoryOperation,
+        nth_call: usize,
+        timing: OwnerRepositoryFaultTiming,
+        error: ApiError,
+    ) {
+        assert!(nth_call > 0, "owner fault call index must be positive");
         self.inner
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .owner_faults
             .entry(operation)
             .or_default()
-            .push_back(OwnerRepositoryFault { timing, error });
+            .push_back(OwnerRepositoryFault {
+                calls_to_skip: nth_call - 1,
+                timing,
+                error,
+            });
     }
 
     pub fn owner_call_log(&self) -> Vec<OwnerRepositoryCall> {
@@ -342,11 +378,20 @@ impl FakeIssueClient {
             repository: repository.clone(),
             issue_number,
         });
-        let Some(fault) = state
-            .owner_faults
-            .get_mut(&operation)
-            .and_then(VecDeque::pop_front)
-        else {
+        let Some(faults) = state.owner_faults.get_mut(&operation) else {
+            return Ok(None);
+        };
+        if faults.front_mut().is_some_and(|fault| {
+            if fault.calls_to_skip == 0 {
+                false
+            } else {
+                fault.calls_to_skip -= 1;
+                true
+            }
+        }) {
+            return Ok(None);
+        }
+        let Some(fault) = faults.pop_front() else {
             return Ok(None);
         };
         match fault.timing {
@@ -672,10 +717,12 @@ impl OwnerRepositoryClient for FakeIssueClient {
         if !issue_exists {
             return Err(ApiError::NotFound(number));
         }
+        let key = (repository.clone(), number);
         let mut comments = state
-            .owner_comments
-            .get(&(repository.clone(), number))
-            .cloned()
+            .owner_comment_view_queue
+            .get_mut(&key)
+            .and_then(VecDeque::pop_front)
+            .or_else(|| state.owner_comments.get(&key).cloned())
             .unwrap_or_default();
         comments.sort_by_key(|comment| comment.id);
         let generation = Self::owner_generation(&state, repository);
@@ -750,6 +797,9 @@ impl OwnerRepositoryClient for FakeIssueClient {
                 id: CommentId(self.next_owner_comment_id.fetch_add(1, Ordering::SeqCst)),
                 body: body.to_string(),
                 updated_at: self.tick(),
+                author_login: Some("fake-owner".to_string()),
+                author_type: Some(RepositoryActorType::User),
+                author_association: Some(RepositoryAuthorAssociation::Owner),
             };
             state
                 .owner_comments
@@ -975,12 +1025,14 @@ impl OwnerRepositoryClient for FakeIssueClient {
             .commit_comparisons
             .get(&(repository.clone(), base.to_string(), head.to_string()))
             .cloned()
-            .ok_or_else(|| {
-                ApiError::Unexpected(format!("commit comparison not found: {base}...{head}"))
+            .ok_or_else(|| ApiError::Parse {
+                operation: "compare commits".to_string(),
+                message: format!("comparison not found: {base}...{head}"),
             })?;
         if let Some(error) = after_error {
             return Err(error);
         }
+        comparison.validate_response("compare commits")?;
         Ok(comparison)
     }
 }
@@ -1088,6 +1140,9 @@ mod owner_repository_tests {
                     id: CommentId(id),
                     body: format!("comment {id}"),
                     updated_at: UpdatedAt::new(format!("c{id}")),
+                    author_login: Some("fake-owner".to_string()),
+                    author_type: Some(RepositoryActorType::User),
+                    author_association: Some(RepositoryAuthorAssociation::Owner),
                 })
                 .collect(),
         );
@@ -1113,6 +1168,60 @@ mod owner_repository_tests {
             .unwrap();
         assert_eq!(comments.items().len(), 205);
         assert!(!comments.generation().as_str().is_empty());
+    }
+
+    #[test]
+    fn fake_can_queue_non_monotonic_comment_readbacks() {
+        let client = FakeIssueClient::new();
+        let repository = RepositoryIdentity::gwt_upstream();
+        client.seed_repository_issue(repository_issue(
+            &repository,
+            1,
+            RepositoryIssueKind::Plain,
+            IssueState::Open,
+        ));
+        let stored = RepositoryComment {
+            id: CommentId(1),
+            body: "stored".to_string(),
+            updated_at: UpdatedAt::new("stored"),
+            author_login: Some("fake-owner".to_string()),
+            author_type: Some(RepositoryActorType::User),
+            author_association: Some(RepositoryAuthorAssociation::Owner),
+        };
+        let delayed = RepositoryComment {
+            id: CommentId(2),
+            body: "delayed".to_string(),
+            updated_at: UpdatedAt::new("delayed"),
+            author_login: Some("fake-owner".to_string()),
+            author_type: Some(RepositoryActorType::User),
+            author_association: Some(RepositoryAuthorAssociation::Owner),
+        };
+        client.seed_repository_comments(&repository, IssueNumber(1), vec![stored.clone()]);
+        client.queue_owner_comment_views(
+            &repository,
+            IssueNumber(1),
+            [vec![delayed.clone()], Vec::new()],
+        );
+
+        assert_eq!(
+            client
+                .list_comments(&repository, IssueNumber(1), &deadline())
+                .unwrap()
+                .items(),
+            &[delayed]
+        );
+        assert!(client
+            .list_comments(&repository, IssueNumber(1), &deadline())
+            .unwrap()
+            .items()
+            .is_empty());
+        assert_eq!(
+            client
+                .list_comments(&repository, IssueNumber(1), &deadline())
+                .unwrap()
+                .items(),
+            &[stored]
+        );
     }
 
     #[test]
@@ -1540,11 +1649,13 @@ mod owner_repository_tests {
     fn merged_pr_release_and_commit_comparison_lookups_are_typed() {
         let client = FakeIssueClient::new();
         let repository = RepositoryIdentity::gwt_upstream();
+        let merge_sha = "a".repeat(40);
+        let observed_sha = "c".repeat(40);
         client.seed_merged_pull_request(
             &repository,
             MergedPullRequest {
                 number: IssueNumber(42),
-                merge_commit_sha: "merge-sha".to_string(),
+                merge_commit_sha: merge_sha.clone(),
                 merged_at: "2026-07-01T12:00:00Z".to_string(),
             },
         );
@@ -1552,15 +1663,18 @@ mod owner_repository_tests {
             &repository,
             RepositoryRelease {
                 tag_name: "v1.2.3".to_string(),
-                target_commitish: "merge-sha".to_string(),
+                target_commitish: merge_sha.clone(),
                 published_at: "2026-07-02T12:00:00Z".to_string(),
             },
         );
         client.seed_commit_comparison(
             &repository,
             CommitComparison {
-                base: "merge-sha".to_string(),
-                head: "observed-sha".to_string(),
+                base: merge_sha.clone(),
+                head: observed_sha.clone(),
+                base_commit_sha: merge_sha.clone(),
+                merge_base_commit_sha: merge_sha.clone(),
+                head_commit_sha: observed_sha.clone(),
                 status: CommitComparisonStatus::Ahead,
                 ahead_by: 4,
                 behind_by: 0,
@@ -1573,7 +1687,7 @@ mod owner_repository_tests {
                 .unwrap()
                 .unwrap()
                 .merge_commit_sha,
-            "merge-sha"
+            merge_sha
         );
         assert_eq!(
             client
@@ -1581,15 +1695,99 @@ mod owner_repository_tests {
                 .unwrap()
                 .unwrap()
                 .target_commitish,
-            "merge-sha"
+            merge_sha
         );
-        assert_eq!(
-            client
-                .compare_commits(&repository, "merge-sha", "observed-sha", &deadline(),)
-                .unwrap()
-                .status,
-            CommitComparisonStatus::Ahead
+        let comparison = client
+            .compare_commits(&repository, &merge_sha, &observed_sha, &deadline())
+            .unwrap();
+        assert_eq!(comparison.status, CommitComparisonStatus::Ahead);
+        assert_eq!(comparison.head_commit_sha, observed_sha);
+    }
+
+    #[test]
+    fn commit_comparison_lookup_rejects_invalid_resolved_identity() {
+        let client = FakeIssueClient::new();
+        let repository = RepositoryIdentity::gwt_upstream();
+        client.seed_commit_comparison(
+            &repository,
+            CommitComparison {
+                base: "refs/tags/v1.2.3".to_string(),
+                head: "refs/heads/develop".to_string(),
+                base_commit_sha: "a".repeat(40),
+                merge_base_commit_sha: "b".repeat(40),
+                head_commit_sha: "short-head".to_string(),
+                status: CommitComparisonStatus::Diverged,
+                ahead_by: 4,
+                behind_by: 1,
+            },
         );
+
+        let error = client
+            .compare_commits(
+                &repository,
+                "refs/tags/v1.2.3",
+                "refs/heads/develop",
+                &deadline(),
+            )
+            .expect_err("fake comparison must enforce resolved OID validation");
+
+        assert!(matches!(error, ApiError::Parse { .. }));
+    }
+
+    #[test]
+    fn identical_comparison_rejects_contradictory_resolved_head() {
+        let client = FakeIssueClient::new();
+        let repository = RepositoryIdentity::gwt_upstream();
+        client.seed_commit_comparison(
+            &repository,
+            CommitComparison {
+                base: "a".repeat(40),
+                head: "refs/tags/v1.2.3".to_string(),
+                base_commit_sha: "a".repeat(40),
+                merge_base_commit_sha: "a".repeat(40),
+                head_commit_sha: "c".repeat(40),
+                status: CommitComparisonStatus::Identical,
+                ahead_by: 0,
+                behind_by: 0,
+            },
+        );
+
+        let error = client
+            .compare_commits(
+                &repository,
+                &"a".repeat(40),
+                "refs/tags/v1.2.3",
+                &deadline(),
+            )
+            .expect_err("identical comparison must resolve head to base");
+
+        assert!(matches!(error, ApiError::Parse { .. }));
+    }
+
+    #[test]
+    fn ahead_comparison_rejects_resolved_head_equal_to_base() {
+        let client = FakeIssueClient::new();
+        let repository = RepositoryIdentity::gwt_upstream();
+        let base = "a".repeat(40);
+        client.seed_commit_comparison(
+            &repository,
+            CommitComparison {
+                base: base.clone(),
+                head: "refs/heads/develop".to_string(),
+                base_commit_sha: base.clone(),
+                merge_base_commit_sha: base.clone(),
+                head_commit_sha: base.clone(),
+                status: CommitComparisonStatus::Ahead,
+                ahead_by: 1,
+                behind_by: 0,
+            },
+        );
+
+        let error = client
+            .compare_commits(&repository, &base, "refs/heads/develop", &deadline())
+            .expect_err("ahead comparison must resolve head beyond base");
+
+        assert!(matches!(error, ApiError::Parse { .. }));
     }
 
     #[test]

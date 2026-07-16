@@ -180,6 +180,15 @@ pub(super) enum ResolutionAttemptIntent {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         created_owner_number: Option<u64>,
     },
+    CreateRegressionIssue {
+        fingerprint: String,
+        historical_owner_number: u64,
+        recurrence_occurrence_keys: Vec<String>,
+        recurrence_proof_digest: String,
+        public_payload_digest: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        created_owner_number: Option<u64>,
+    },
     OccurrenceComments {
         owner_number: u64,
         occurrence_keys: Vec<String>,
@@ -194,6 +203,55 @@ pub(super) enum ResolutionAttemptIntent {
         canonical_owner_number: u64,
         duplicate_owner_number: u64,
     },
+}
+
+fn is_create_intent(intent: &ResolutionAttemptIntent) -> bool {
+    matches!(
+        intent,
+        ResolutionAttemptIntent::CreateIssue { .. }
+            | ResolutionAttemptIntent::CreateRegressionIssue { .. }
+    )
+}
+
+fn created_owner_number(intent: &ResolutionAttemptIntent) -> Result<Option<u64>, SpecOpsError> {
+    match intent {
+        ResolutionAttemptIntent::CreateIssue {
+            created_owner_number,
+            ..
+        }
+        | ResolutionAttemptIntent::CreateRegressionIssue {
+            created_owner_number,
+            ..
+        } => Ok(*created_owner_number),
+        _ => Err(invalid("created owner number requires a create intent")),
+    }
+}
+
+fn set_created_owner_number(
+    intent: &mut ResolutionAttemptIntent,
+    owner_number: u64,
+) -> Result<(), SpecOpsError> {
+    let created_owner_number = match intent {
+        ResolutionAttemptIntent::CreateIssue {
+            created_owner_number,
+            ..
+        }
+        | ResolutionAttemptIntent::CreateRegressionIssue {
+            created_owner_number,
+            ..
+        } => created_owner_number,
+        _ => return Err(invalid("created owner number requires a create intent")),
+    };
+    match created_owner_number {
+        Some(existing) if *existing != owner_number => {
+            Err(invalid("created owner number cannot change after readback"))
+        }
+        Some(_) => Ok(()),
+        None => {
+            *created_owner_number = Some(owner_number);
+            Ok(())
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1171,7 +1229,7 @@ pub(super) fn mark_attempt_submitted(
         .ok_or_else(|| invalid("candidate not found"))?;
     let attempt = candidate
         .attempt
-        .as_mut()
+        .as_ref()
         .filter(|attempt| attempt.attempt_id == attempt_id)
         .ok_or_else(|| invalid("promotion attempt lease is stale"))?;
     if attempt.remote_phase == AttemptRemotePhase::Submitted && attempt.intent != intent {
@@ -1179,6 +1237,24 @@ pub(super) fn mark_attempt_submitted(
             "promotion attempt intent cannot change after submission",
         ));
     }
+    if is_create_intent(&intent)
+        && candidate
+            .pending_create_resolution
+            .as_ref()
+            .is_some_and(|root| root != &intent)
+    {
+        return Err(invalid(
+            "promotion create intent conflicts with the pending create resolution",
+        ));
+    }
+    if is_create_intent(&intent) && candidate.pending_create_resolution.is_none() {
+        candidate.pending_create_resolution = Some(intent.clone());
+    }
+    let attempt = candidate
+        .attempt
+        .as_mut()
+        .filter(|attempt| attempt.attempt_id == attempt_id)
+        .expect("attempt was validated before mutation");
     attempt.intent = intent;
     attempt.remote_phase = AttemptRemotePhase::Submitted;
     Ok(())
@@ -1200,31 +1276,77 @@ pub(super) fn record_created_owner_number(
         .ok_or_else(|| invalid("candidate not found"))?;
     let attempt = candidate
         .attempt
-        .as_mut()
+        .as_ref()
         .filter(|attempt| attempt.attempt_id == attempt_id)
         .ok_or_else(|| invalid("promotion attempt lease is stale"))?;
-    if attempt.remote_phase != AttemptRemotePhase::Submitted {
+    let current_create_intent = is_create_intent(&attempt.intent);
+    if current_create_intent && attempt.remote_phase != AttemptRemotePhase::Submitted {
         return Err(invalid(
             "created owner number requires a submitted create intent",
         ));
     }
-    let ResolutionAttemptIntent::CreateIssue {
-        created_owner_number,
-        ..
-    } = &mut attempt.intent
-    else {
-        return Err(invalid(
-            "created owner number requires a submitted create intent",
-        ));
-    };
-    match created_owner_number {
-        Some(existing) if *existing != owner_number => {
+    let root = candidate
+        .pending_create_resolution
+        .as_ref()
+        .or_else(|| current_create_intent.then_some(&attempt.intent))
+        .ok_or_else(|| invalid("created owner number requires a pending create resolution"))?;
+    let root_owner_number = created_owner_number(root)?;
+    if root_owner_number.is_some_and(|existing| existing != owner_number) {
+        return Err(invalid("created owner number cannot change after readback"));
+    }
+    if current_create_intent {
+        if candidate
+            .pending_create_resolution
+            .as_ref()
+            .is_some_and(|pending| pending != &attempt.intent)
+        {
+            return Err(invalid(
+                "submitted create intent conflicts with the pending create resolution",
+            ));
+        }
+        let current_owner_number = created_owner_number(&attempt.intent)?;
+        if current_owner_number.is_some_and(|existing| existing != owner_number) {
             return Err(invalid("created owner number cannot change after readback"));
         }
-        Some(_) => {}
-        None => *created_owner_number = Some(owner_number),
+    }
+
+    if candidate.pending_create_resolution.is_none() {
+        candidate.pending_create_resolution = Some(attempt.intent.clone());
+    }
+    set_created_owner_number(
+        candidate
+            .pending_create_resolution
+            .as_mut()
+            .expect("pending create resolution was validated before mutation"),
+        owner_number,
+    )?;
+    let attempt = candidate
+        .attempt
+        .as_mut()
+        .filter(|attempt| attempt.attempt_id == attempt_id)
+        .expect("attempt was validated before mutation");
+    if is_create_intent(&attempt.intent) {
+        set_created_owner_number(&mut attempt.intent, owner_number)?;
     }
     Ok(attempt.clone())
+}
+
+pub(super) fn clear_pending_create_resolution(
+    candidate: &mut ImprovementCandidate,
+    expected: &ResolutionAttemptIntent,
+) -> Result<(), SpecOpsError> {
+    if !is_create_intent(expected) {
+        return Err(invalid(
+            "pending create resolution can only be cleared by a create intent",
+        ));
+    }
+    if candidate.pending_create_resolution.as_ref() != Some(expected) {
+        return Err(invalid(
+            "pending create resolution does not match the expected create intent",
+        ));
+    }
+    candidate.pending_create_resolution = None;
+    Ok(())
 }
 
 pub(super) fn renew_attempt_lease(
@@ -1464,6 +1586,9 @@ fn save_unlocked(repo_root: &Path, store: &CandidateStore) -> Result<(), SpecOps
                 matches!(
                     attempt.intent,
                     ResolutionAttemptIntent::CreateIssue {
+                        created_owner_number: Some(_),
+                        ..
+                    } | ResolutionAttemptIntent::CreateRegressionIssue {
                         created_owner_number: Some(_),
                         ..
                     }
@@ -1938,6 +2063,17 @@ mod tests {
         }
     }
 
+    fn regression_create_intent() -> ResolutionAttemptIntent {
+        ResolutionAttemptIntent::CreateRegressionIssue {
+            fingerprint: "v2:typed-owner-fingerprint".to_string(),
+            historical_owner_number: 45,
+            recurrence_occurrence_keys: vec!["occ:v1:recurrence".to_string()],
+            recurrence_proof_digest: "sha256:recurrence-proof".to_string(),
+            public_payload_digest: "sha256:regression-payload".to_string(),
+            created_owner_number: None,
+        }
+    }
+
     #[test]
     fn schema_one_projection_migrates_to_private_unknown_audit_on_next_persist() {
         let home = tempfile::tempdir().expect("isolated home");
@@ -2196,5 +2332,214 @@ mod tests {
             attempt_id,
             "submitted attempt must not be replaced"
         );
+    }
+
+    #[test]
+    fn regression_create_intent_records_owner_without_changing_pinned_proof() {
+        let mut store = store_with_candidate();
+        let now = Utc.with_ymd_and_hms(2026, 7, 15, 0, 0, 0).unwrap();
+        let attempt_id = match acquire_attempt_lease(
+            &mut store,
+            "impr-lease",
+            "worker-a",
+            now,
+            Duration::seconds(30),
+        )
+        .expect("attempt lease")
+        {
+            AttemptLeaseDecision::Acquired(lease) => lease.attempt_id,
+            other => panic!("expected acquired lease, got {other:?}"),
+        };
+        let intent = regression_create_intent();
+        mark_attempt_submitted(&mut store, "impr-lease", &attempt_id, intent.clone())
+            .expect("mark regression create submitted");
+
+        let recorded = record_created_owner_number(&mut store, "impr-lease", &attempt_id, 46)
+            .expect("record created regression owner");
+
+        assert_eq!(
+            recorded.intent,
+            ResolutionAttemptIntent::CreateRegressionIssue {
+                fingerprint: "v2:typed-owner-fingerprint".to_string(),
+                historical_owner_number: 45,
+                recurrence_occurrence_keys: vec!["occ:v1:recurrence".to_string()],
+                recurrence_proof_digest: "sha256:recurrence-proof".to_string(),
+                public_payload_digest: "sha256:regression-payload".to_string(),
+                created_owner_number: Some(46),
+            }
+        );
+        assert_eq!(
+            store.candidates[0].pending_create_resolution,
+            Some(recorded.intent.clone()),
+            "the durable create root must receive the same monotonic owner number"
+        );
+        record_created_owner_number(&mut store, "impr-lease", &attempt_id, 46)
+            .expect("same readback is idempotent");
+        assert!(record_created_owner_number(&mut store, "impr-lease", &attempt_id, 47).is_err());
+    }
+
+    #[test]
+    fn pending_create_resolution_is_serde_default_and_roundtrips() {
+        let mut candidate = store_with_candidate().candidates.remove(0);
+        assert!(candidate.pending_create_resolution.is_none());
+
+        let intent = regression_create_intent();
+        candidate.pending_create_resolution = Some(intent.clone());
+        let serialized = serde_json::to_value(&candidate).expect("serialize candidate");
+        assert_eq!(
+            serialized["pending_create_resolution"]["kind"],
+            "create-regression-issue"
+        );
+
+        let roundtrip: ImprovementCandidate =
+            serde_json::from_value(serialized).expect("deserialize candidate");
+        assert_eq!(roundtrip.pending_create_resolution, Some(intent));
+    }
+
+    #[test]
+    fn create_root_survives_step_completion_and_expired_lease_takeover() {
+        let mut store = store_with_candidate();
+        let now = Utc.with_ymd_and_hms(2026, 7, 15, 0, 0, 0).unwrap();
+        let attempt_id = match acquire_attempt_lease(
+            &mut store,
+            "impr-lease",
+            "worker-a",
+            now,
+            Duration::seconds(30),
+        )
+        .expect("attempt lease")
+        {
+            AttemptLeaseDecision::Acquired(lease) => lease.attempt_id,
+            other => panic!("expected acquired lease, got {other:?}"),
+        };
+        let intent = regression_create_intent();
+        mark_attempt_submitted(&mut store, "impr-lease", &attempt_id, intent.clone())
+            .expect("mark create submitted");
+
+        complete_attempt_step(&mut store, "impr-lease", &attempt_id, &intent)
+            .expect("complete create step");
+        assert_eq!(
+            store.candidates[0].pending_create_resolution,
+            Some(intent.clone())
+        );
+
+        let takeover = acquire_attempt_lease(
+            &mut store,
+            "impr-lease",
+            "worker-b",
+            now + Duration::seconds(31),
+            Duration::seconds(30),
+        )
+        .expect("take over completed create attempt");
+        assert!(matches!(takeover, AttemptLeaseDecision::Acquired(_)));
+        assert_eq!(
+            store.candidates[0].pending_create_resolution,
+            Some(intent),
+            "lease replacement must not erase the create finalization obligation"
+        );
+    }
+
+    #[test]
+    fn conflicting_create_root_is_rejected_without_changing_attempt() {
+        let mut store = store_with_candidate();
+        let now = Utc.with_ymd_and_hms(2026, 7, 15, 0, 0, 0).unwrap();
+        let attempt_id = match acquire_attempt_lease(
+            &mut store,
+            "impr-lease",
+            "worker-a",
+            now,
+            Duration::seconds(30),
+        )
+        .expect("attempt lease")
+        {
+            AttemptLeaseDecision::Acquired(lease) => lease.attempt_id,
+            other => panic!("expected acquired lease, got {other:?}"),
+        };
+        let intent = regression_create_intent();
+        mark_attempt_submitted(&mut store, "impr-lease", &attempt_id, intent.clone())
+            .expect("mark create submitted");
+        complete_attempt_step(&mut store, "impr-lease", &attempt_id, &intent)
+            .expect("complete create step");
+        let before = store.candidates[0].attempt.clone();
+        let conflicting = ResolutionAttemptIntent::CreateIssue {
+            fingerprint: "v2:different-owner-fingerprint".to_string(),
+            public_payload_digest: "sha256:different-payload".to_string(),
+            created_owner_number: None,
+        };
+
+        assert!(
+            mark_attempt_submitted(&mut store, "impr-lease", &attempt_id, conflicting).is_err()
+        );
+        assert_eq!(store.candidates[0].attempt, before);
+        assert_eq!(store.candidates[0].pending_create_resolution, Some(intent));
+    }
+
+    #[test]
+    fn pending_create_root_can_record_owner_after_current_step_changes() {
+        let mut store = store_with_candidate();
+        let now = Utc.with_ymd_and_hms(2026, 7, 15, 0, 0, 0).unwrap();
+        let attempt_id = match acquire_attempt_lease(
+            &mut store,
+            "impr-lease",
+            "worker-a",
+            now,
+            Duration::seconds(30),
+        )
+        .expect("attempt lease")
+        {
+            AttemptLeaseDecision::Acquired(lease) => lease.attempt_id,
+            other => panic!("expected acquired lease, got {other:?}"),
+        };
+        let root = regression_create_intent();
+        mark_attempt_submitted(&mut store, "impr-lease", &attempt_id, root.clone())
+            .expect("mark create submitted");
+        complete_attempt_step(&mut store, "impr-lease", &attempt_id, &root)
+            .expect("complete create step");
+        let reconciliation = ResolutionAttemptIntent::ReconciliationComment {
+            canonical_owner_number: 46,
+            duplicate_owner_number: 47,
+            public_payload_digest: "sha256:reconciliation".to_string(),
+        };
+        mark_attempt_submitted(
+            &mut store,
+            "impr-lease",
+            &attempt_id,
+            reconciliation.clone(),
+        )
+        .expect("mark reconciliation submitted");
+
+        let attempt = record_created_owner_number(&mut store, "impr-lease", &attempt_id, 47)
+            .expect("record owner in durable root");
+
+        assert_eq!(attempt.intent, reconciliation);
+        assert!(matches!(
+            store.candidates[0].pending_create_resolution,
+            Some(ResolutionAttemptIntent::CreateRegressionIssue {
+                created_owner_number: Some(47),
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn clearing_pending_create_resolution_requires_the_exact_root() {
+        let mut store = store_with_candidate();
+        let root = regression_create_intent();
+        store.candidates[0].pending_create_resolution = Some(root.clone());
+        let different = ResolutionAttemptIntent::CreateIssue {
+            fingerprint: "v2:different-owner-fingerprint".to_string(),
+            public_payload_digest: "sha256:different-payload".to_string(),
+            created_owner_number: None,
+        };
+
+        assert!(clear_pending_create_resolution(&mut store.candidates[0], &different).is_err());
+        assert_eq!(
+            store.candidates[0].pending_create_resolution,
+            Some(root.clone())
+        );
+
+        clear_pending_create_resolution(&mut store.candidates[0], &root)
+            .expect("clear exact durable root");
+        assert!(store.candidates[0].pending_create_resolution.is_none());
     }
 }
