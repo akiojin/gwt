@@ -4107,7 +4107,12 @@ def _search_fetch_count(scope: str, n_results: int, match_mode: str) -> int:
     return base
 
 
-def _search_collection_v2(collection, query: str, n_results: int) -> List[Dict[str, Any]]:
+def _search_collection_v2(
+    collection,
+    query: str,
+    n_results: int,
+    query_embedding: Optional[List[float]] = None,
+) -> List[Dict[str, Any]]:
     try:
         count = collection.count()
     except Exception:
@@ -4115,11 +4120,20 @@ def _search_collection_v2(collection, query: str, n_results: int) -> List[Dict[s
     if count == 0:
         return []
     actual_n = min(n_results, count)
-    results = collection.query(
-        query_texts=[query],
-        n_results=actual_n,
-        include=["metadatas", "documents", "distances"],
-    )
+    if query_embedding is not None:
+        # Phase 70 AS-2: reuse one query embedding across every scope in a
+        # batch request instead of re-encoding per scope.
+        results = collection.query(
+            query_embeddings=[query_embedding],
+            n_results=actual_n,
+            include=["metadatas", "documents", "distances"],
+        )
+    else:
+        results = collection.query(
+            query_texts=[query],
+            n_results=actual_n,
+            include=["metadatas", "documents", "distances"],
+        )
     items: List[Dict[str, Any]] = []
     if results and results.get("ids") and results["ids"][0]:
         for idx, doc_id in enumerate(results["ids"][0]):
@@ -4487,6 +4501,69 @@ def action_search_v2(
     return payload
 
 
+def _classify_scope_for_search(
+    repo_hash: str,
+    worktree_hash: Optional[str],
+    scope: str,
+    db_root: Optional[Path] = None,
+) -> tuple:
+    """Map scope health to the Phase 70 search state (FR-387 / FR-388).
+
+    - ``missing``: store was never built.
+    - ``corrupt``: store exists but needs repair before it can be trusted.
+    - ``stale``: verified store is intact but its source moved on (TTL
+      expiry or source cache drift) — serve it and queue a refresh.
+    - ``fresh``: healthy and current.
+    """
+    if scope == "issues":
+        health = _issue_status_v2(repo_hash, db_root=db_root)
+        if not health.get("exists"):
+            return "missing", health
+        if health.get("healthy"):
+            if health.get("ttl_remaining_seconds") == 0:
+                return "stale", health
+            return "fresh", health
+        if health.get("reason") == "source_cache_changed":
+            return "stale", health
+        return "corrupt", health
+    health = _scope_status_v2(repo_hash, worktree_hash, scope, db_root=db_root)
+    if not health.get("exists"):
+        return "missing", health
+    if health.get("repair_required"):
+        return "corrupt", health
+    return "fresh", health
+
+
+def _search_scope_collection(
+    repo_hash: str,
+    worktree_hash: Optional[str],
+    scope: str,
+    query: str,
+    n_results: int,
+    match_mode: str,
+    db_root: Optional[Path],
+    query_embedding: Optional[List[float]],
+) -> Dict[str, Any]:
+    """Query one verified scope store (no health gating, no auto-build)."""
+    db_path = resolve_db_path(repo_hash, worktree_hash, scope, db_root=db_root)
+    with acquire_lock(db_path, exclusive=False):
+        client, collection = _open_chroma_collection(db_path, _scope_collection_name(scope))
+        try:
+            fetch_n = _search_fetch_count(scope, n_results, match_mode)
+            items = _search_collection_v2(
+                collection, query, fetch_n, query_embedding=query_embedding
+            )
+        finally:
+            _close_chroma_client(client)
+    strict_items, suggestion_items = _apply_match_mode(items, query, match_mode)
+    payload = {
+        _scope_result_key(scope): _format_scope_results(scope, strict_items, n_results),
+    }
+    if match_mode == "all_terms":
+        payload["suggestions"] = _format_scope_results(scope, suggestion_items, n_results)
+    return payload
+
+
 def action_search_multi_v2(
     repo_hash: str,
     worktree_hash: Optional[str],
@@ -4497,50 +4574,76 @@ def action_search_multi_v2(
     db_root: Optional[Path] = None,
     match_mode: str = "semantic",
 ) -> Dict[str, Any]:
-    """Search multiple v2 scopes inside one Python process.
+    """Versioned batch search across v2 scopes (Phase 70 FR-384).
 
-    Interactive UI search must not trigger auto-builds; Health/Rebuild owns
-    index repair. Keeping multiple scopes in one process also avoids loading
-    the embedding model once per scope.
+    One process, one model load, one query encode for every requested scope
+    (AS-2). Each scope is classified (fresh / stale / missing / corrupt)
+    before searching: fresh and stale scopes are served from their verified
+    stores, broken scopes are reported in ``scopes`` instead of failing the
+    whole batch or silently returning empty results (FR-387 / FR-388). The
+    Rust caller owns repair scheduling and the stale refresh queue.
     """
-    action_for_scope = {
-        "issues": "search-issues",
-        "specs": "search-specs",
-        "memory": "search-memory",
-        "discussions": "search-discussions",
-        "board": "search-board",
-        "works": "search-works",
-        "files": "search-files",
-        "files-docs": "search-files-docs",
+    valid_scopes = {
+        "issues",
+        "specs",
+        "memory",
+        "discussions",
+        "board",
+        "works",
+        "files",
+        "files-docs",
     }
     payload: Dict[str, Any] = {"ok": True}
+    scope_states: Dict[str, Dict[str, Any]] = {}
+    scope_results: Dict[str, Any] = {}
+    stale_scopes: List[str] = []
+    query_embedding: Optional[List[float]] = None
     for scope in scopes:
-        action = action_for_scope.get(scope)
-        if action is None:
+        if scope not in valid_scopes:
             return {
                 "ok": False,
                 "error_code": "BAD_ARGS",
                 "error": f"unsupported search scope {scope}",
             }
-        result = action_search_v2(
-            action=action,
-            repo_hash=repo_hash,
-            worktree_hash=worktree_hash if scope in ("files", "files-docs") else None,
-            project_root=project_root,
-            query=query,
-            n_results=n_results,
-            no_auto_build=True,
-            db_root=db_root,
-            match_mode=match_mode,
+        scope_worktree = worktree_hash if scope in WORKTREE_SCOPED else None
+        state, health = _classify_scope_for_search(
+            repo_hash, scope_worktree, scope, db_root=db_root
         )
-        if not result.get("ok"):
-            result["scope"] = scope
-            return result
+        if state in ("missing", "corrupt"):
+            scope_states[scope] = {
+                "state": state,
+                "reason": health.get("reason", state),
+            }
+            continue
+        if query_embedding is None:
+            query_embedding = E5EmbeddingFunction().embed_query([query])[0]
+        try:
+            result = _search_scope_collection(
+                repo_hash,
+                scope_worktree,
+                scope,
+                query,
+                n_results,
+                match_mode,
+                db_root,
+                query_embedding,
+            )
+        except Exception as error:  # store broke between classify and query
+            scope_states[scope] = {"state": "corrupt", "reason": str(error)}
+            continue
+        scope_states[scope] = {"state": state}
+        if state == "stale":
+            stale_scopes.append(scope)
+        scope_results[scope] = result
         for key, value in result.items():
             if key == "suggestions":
                 payload.setdefault("suggestions", {})[scope] = value
-            elif key != "ok":
+            else:
                 payload[key] = value
+    payload["scopes"] = scope_states
+    payload["scope_results"] = scope_results
+    if stale_scopes:
+        payload["stale_scopes"] = stale_scopes
     return payload
 
 
