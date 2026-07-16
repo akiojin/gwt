@@ -135,6 +135,9 @@ fn handle_post_tool_use(event: &str, input: &str) -> Result<HookOutput, HookErro
     Ok(HookOutput::Silent)
 }
 
+/// One lazily-evaluated Stop-check in [`handle_stop`]'s chain.
+type StopCheck<'a> = Box<dyn FnOnce() -> HookOutput + 'a>;
+
 fn handle_stop(
     event: &str,
     input: &str,
@@ -159,7 +162,7 @@ fn handle_stop(
     // intake completion gate (SPEC-3248 P7A) has a persistent side effect
     // (self-improvement auto-capture) that must only fire for the block the
     // agent actually sees.
-    let stop_checks: [(&str, Box<dyn FnOnce() -> HookOutput + '_>); 6] = [
+    let stop_checks: [(&str, StopCheck<'_>); 6] = [
         (
             "skill-discussion-stop-check",
             Box::new(|| skill_discussion_stop_check::handle_with_input(worktree_root, input)),
