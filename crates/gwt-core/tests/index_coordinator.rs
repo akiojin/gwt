@@ -10,7 +10,7 @@
 use std::fs;
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
-use std::process::{Child, Command};
+use std::process::Child;
 use std::time::{Duration, Instant};
 
 use fs2::FileExt;
@@ -269,7 +269,7 @@ struct HelperSpawn {
 
 fn spawn_helper(label: &str, envs: &[(&str, String)]) -> HelperSpawn {
     let exe = std::env::current_exe().expect("current test binary");
-    let mut command = Command::new(exe);
+    let mut command = gwt_core::process::hidden_command(exe);
     command
         .arg("coordinator_helper_entry")
         .arg("--exact")

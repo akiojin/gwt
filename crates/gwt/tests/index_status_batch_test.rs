@@ -93,7 +93,7 @@ fn all_worktree_status_uses_one_batch_runner_process() {
 }
 
 fn init_git_repo(path: &Path) {
-    let output = std::process::Command::new("git")
+    let output = gwt_core::process::hidden_command("git")
         .args(["init", path.to_str().unwrap()])
         .output()
         .expect("git init");
@@ -102,7 +102,7 @@ fn init_git_repo(path: &Path) {
         ("user.email", "test@example.com"),
         ("user.name", "Test User"),
     ] {
-        let output = std::process::Command::new("git")
+        let output = gwt_core::process::hidden_command("git")
             .args(["config", key, value])
             .current_dir(path)
             .output()
@@ -112,7 +112,7 @@ fn init_git_repo(path: &Path) {
 }
 
 fn add_origin(path: &Path, url: &str) {
-    let output = std::process::Command::new("git")
+    let output = gwt_core::process::hidden_command("git")
         .args(["remote", "add", "origin", url])
         .current_dir(path)
         .output()
@@ -122,13 +122,13 @@ fn add_origin(path: &Path, url: &str) {
 
 fn commit_file(path: &Path, name: &str, body: &str) {
     fs::write(path.join(name), body).expect("write commit file");
-    let add = std::process::Command::new("git")
+    let add = gwt_core::process::hidden_command("git")
         .args(["add", name])
         .current_dir(path)
         .output()
         .expect("git add");
     assert!(add.status.success(), "git add failed");
-    let commit = std::process::Command::new("git")
+    let commit = gwt_core::process::hidden_command("git")
         .args(["commit", "-m", "init"])
         .current_dir(path)
         .output()
@@ -137,7 +137,7 @@ fn commit_file(path: &Path, name: &str, body: &str) {
 }
 
 fn add_worktree(repo: &Path, worktree: &Path, branch: &str) {
-    let output = std::process::Command::new("git")
+    let output = gwt_core::process::hidden_command("git")
         .args(["worktree", "add", "-b", branch, worktree.to_str().unwrap()])
         .current_dir(repo)
         .output()
