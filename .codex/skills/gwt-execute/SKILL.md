@@ -45,6 +45,17 @@ The operation names and state file remain compatibility surfaces.
   satisfied for a releaseable slice.
 - `build.abort` with a concrete reason when implementation cannot proceed.
 
+Linked-owner Execution launches also carry an Execution Control Record
+(SPEC-3248 P8a) written at launch, and Stop stays blocked until the record is
+settled — even when `build.start` was never called (plain-Issue fixes
+included):
+
+- done and verified: JSON operation `execution.complete` (a successful
+  `build.complete` settles the record too), or
+- blocked by the environment or missing verification: JSON operation
+  `execution.blocked` with a non-empty `params.reason` and optional
+  `params.missing_verification`. Blocked is not done — report the blocker.
+
 ## Mode detection
 
 1. If the invocation includes `#N` or an Issue URL, read the Issue with JSON

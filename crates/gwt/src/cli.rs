@@ -14,6 +14,7 @@ mod diagnostics;
 mod discuss;
 pub(crate) mod discussion;
 mod env;
+pub mod execution_state;
 pub mod gwtd_resolver;
 pub mod hook;
 pub mod improvement;
@@ -159,6 +160,8 @@ pub enum CliCommand {
     Memory(MemoryCommand),
     Discuss(DiscussCommand),
     Discussion(DiscussionCommand),
+    /// SPEC-3248 P8a: `execution.complete` / `execution.blocked` settlement.
+    Execution(execution_state::ExecutionCommand),
     Plan(PlanCommand),
     Build(BuildCommand),
     Register(RegisterCommand),
@@ -591,6 +594,7 @@ pub(crate) fn run_collect<E: CliEnv>(
         CliCommand::Memory(inner) => memory::run(env, inner, &mut out)?,
         CliCommand::Discuss(action) => discuss::run(env, action, &mut out)?,
         CliCommand::Discussion(inner) => discussion::run(env, inner, &mut out)?,
+        CliCommand::Execution(inner) => execution_state::run(env, inner, &mut out)?,
         CliCommand::Plan(action) => plan::run(env, action, &mut out)?,
         CliCommand::Build(action) => build::run(env, action, &mut out)?,
         CliCommand::Register(action) => register::run(env, action, &mut out)?,

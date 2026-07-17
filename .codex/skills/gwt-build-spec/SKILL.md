@@ -59,6 +59,12 @@ The Stop-block handler honours Claude Code / Codex's built-in
 `stop_hook_active` flag, so each Stop cycle allows at most one forced
 continuation; a genuinely stuck turn still terminates normally.
 
+Linked-owner launches additionally carry an Execution Control Record
+(SPEC-3248 P8a). A successful `build.complete` settles it; when the execution
+must end without completion, run JSON operation `execution.blocked` with a
+non-empty `params.reason` (and optional `params.missing_verification`) so the
+blocked exit is recorded instead of looping the Stop gate.
+
 ## Mode detection
 
 Determine the mode at entry:

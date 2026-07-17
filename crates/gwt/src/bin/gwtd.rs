@@ -85,6 +85,7 @@ fn family_help(family: &str) -> Option<String> {
         "discussion" => Some(format_discussion_help()),
         "plan" => Some(format_plan_help()),
         "build" => Some(format_build_help()),
+        "execution" => Some(format_execution_help()),
         "register" => Some(format_register_help()),
         "pane" => Some(format_pane_help()),
         "workspace" => Some(format_workspace_help()),
@@ -369,6 +370,26 @@ fn format_build_help() -> String {
         "",
         "Key params:",
         "  spec, label, reason",
+        "",
+    ]
+    .join("\n")
+}
+
+fn format_execution_help() -> String {
+    [
+        "execution.* — Execution Control Record settlement via JSON envelope (SPEC-3248 P8a).",
+        "",
+        "Usage:",
+        "  gwtd <<'JSON'",
+        "  {\"schema_version\":1,\"operation\":\"execution.blocked\",\"params\":{\"reason\":\"<blocker>\",\"missing_verification\":\"<what could not run>\"}}",
+        "  JSON",
+        "",
+        "Operations:",
+        "  execution.complete | execution.blocked",
+        "",
+        "Notes:",
+        "  Settlement binds to GWT_SESSION_ID; a successful build.complete also",
+        "  settles the record for gwt-build-spec flows. Blocked is not done.",
         "",
     ]
     .join("\n")
