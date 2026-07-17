@@ -1095,7 +1095,7 @@ mod tests {
     }
 
     fn init_git_repo(worktree: &Path) {
-        assert!(std::process::Command::new("git")
+        assert!(hidden_command("git")
             .arg("init")
             .arg(worktree)
             .status()
@@ -1104,7 +1104,7 @@ mod tests {
     }
 
     fn track_path(worktree: &Path, relative_path: &str) {
-        assert!(std::process::Command::new("git")
+        assert!(hidden_command("git")
             .arg("-C")
             .arg(worktree)
             .arg("add")

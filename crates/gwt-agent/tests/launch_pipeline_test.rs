@@ -227,6 +227,7 @@ fn prepare_agent_launch_composes_session_env_without_spawning() {
         docker_lifecycle_intent: DockerLifecycleIntent::Connect,
         linked_issue_number: None,
         windows_shell: None,
+        suppress_execution_control: false,
     };
 
     let mut refreshed_paths = Vec::new();

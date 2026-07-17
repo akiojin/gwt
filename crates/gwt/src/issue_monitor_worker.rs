@@ -899,13 +899,13 @@ mod tests {
     fn github_remote_owner_and_repo_accepts_workspace_home_with_child_bare_repo() {
         let tmp = tempfile::tempdir().expect("tempdir");
         let bare_repo_path = tmp.path().join("gwt.git");
-        let status = std::process::Command::new("git")
+        let status = gwt_core::process::hidden_command("git")
             .args(["init", "--bare"])
             .arg(&bare_repo_path)
             .status()
             .expect("git init --bare");
         assert!(status.success(), "git init --bare failed");
-        let status = std::process::Command::new("git")
+        let status = gwt_core::process::hidden_command("git")
             .args([
                 "remote",
                 "add",

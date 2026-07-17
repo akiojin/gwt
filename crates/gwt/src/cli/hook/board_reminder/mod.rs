@@ -617,12 +617,29 @@ pub fn compute_plan(
 
     // SPEC-3248 (hooks v2 P4): a lane with the completion gate gets a soft,
     // non-blocking Stop nudge to register the work it curated. It never blocks
-    // Stop — an intake session may legitimately end in no-action.
-    if intent_event == IntentBoundaryEvent::Stop && lane.policy_flags.completion_gate {
+    // Stop — an intake session may legitimately end in no-action. Since P7A
+    // the hard gate owns enforcement; the nudge is skipped once the current
+    // session already holds a fresh, valid outcome so the reminder cannot
+    // contradict the recorded settlement.
+    if intent_event == IntentBoundaryEvent::Stop
+        && lane.policy_flags.completion_gate
+        && !intake_outcome_settled(&session.worktree_path, &session.id)
+    {
         plan.output = append_intake_completion_reminder(plan.output, &language);
     }
 
     Ok(Some(plan))
+}
+
+/// SPEC-3248 P7A: true when the current session already recorded a fresh,
+/// valid intake outcome (the hard gate would pass). Fail-open toward showing
+/// the nudge — unreadable state keeps the reminder.
+fn intake_outcome_settled(worktree: &std::path::Path, session_id: &str) -> bool {
+    let resolved = gwt_core::paths::resolve_current_worktree_root(worktree);
+    match crate::cli::intake_outcome::load(&resolved) {
+        Ok(Some(state)) => state.session_id == session_id && state.has_fresh_valid_outcome(),
+        _ => false,
+    }
 }
 
 /// Append the intake completion nudge to a Stop output (SPEC-3248 P4). Stop
@@ -725,13 +742,13 @@ mod tests {
 
     fn init_repo(path: &Path, origin: &str) {
         std::fs::create_dir_all(path).expect("repo dir");
-        let init = std::process::Command::new("git")
+        let init = gwt_core::process::hidden_command("git")
             .args(["init", "--quiet"])
             .current_dir(path)
             .status()
             .expect("git init");
         assert!(init.success(), "git init failed for {}", path.display());
-        let remote = std::process::Command::new("git")
+        let remote = gwt_core::process::hidden_command("git")
             .args(["remote", "add", "origin", origin])
             .current_dir(path)
             .status()

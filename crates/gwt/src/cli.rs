@@ -14,10 +14,12 @@ mod diagnostics;
 mod discuss;
 pub(crate) mod discussion;
 mod env;
+pub mod execution_state;
 pub mod gwtd_resolver;
 pub mod hook;
 pub mod improvement;
 pub(crate) mod index;
+pub(crate) mod intake_outcome;
 pub(crate) mod issue;
 mod issue_spec;
 mod json_envelope;
@@ -34,6 +36,7 @@ mod test_support;
 mod title_summary_guard;
 pub mod tray;
 pub mod update;
+pub mod verification_record;
 mod workflow;
 mod workspace;
 
@@ -152,14 +155,20 @@ pub enum CliCommand {
     Hook(HookCommand),
     Improvement(ImprovementCommand),
     Index(IndexCommand),
+    /// SPEC-3248 P7A: `intake.outcome.record` JSON operation (FR-012).
+    Intake(intake_outcome::IntakeCommand),
     Diagnostics(DiagnosticsCommand),
     Memory(MemoryCommand),
     Discuss(DiscussCommand),
     Discussion(DiscussionCommand),
+    /// SPEC-3248 P8a: `execution.complete` / `execution.blocked` settlement.
+    Execution(execution_state::ExecutionCommand),
     Plan(PlanCommand),
     Build(BuildCommand),
     Register(RegisterCommand),
     Update(UpdateCommand),
+    /// SPEC-3248 P8b: `verify.run` tool-generated verification records.
+    Verify(verification_record::VerifyCommand),
     Daemon(DaemonCommand),
     Workspace(WorkspaceCommand),
     Workflow(WorkflowCommand),
@@ -584,9 +593,12 @@ pub(crate) fn run_collect<E: CliEnv>(
         CliCommand::Board(inner) => board::run(env, inner, &mut out)?,
         CliCommand::Improvement(inner) => improvement::run(env, inner, &mut out)?,
         CliCommand::Index(inner) => index::run(env, inner, &mut out)?,
+        CliCommand::Intake(inner) => intake_outcome::run(env, inner, &mut out)?,
         CliCommand::Memory(inner) => memory::run(env, inner, &mut out)?,
         CliCommand::Discuss(action) => discuss::run(env, action, &mut out)?,
         CliCommand::Discussion(inner) => discussion::run(env, inner, &mut out)?,
+        CliCommand::Execution(inner) => execution_state::run(env, inner, &mut out)?,
+        CliCommand::Verify(inner) => verification_record::run(env, inner, &mut out)?,
         CliCommand::Plan(action) => plan::run(env, action, &mut out)?,
         CliCommand::Build(action) => build::run(env, action, &mut out)?,
         CliCommand::Register(action) => register::run(env, action, &mut out)?,

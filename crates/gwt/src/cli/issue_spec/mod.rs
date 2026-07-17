@@ -475,12 +475,30 @@ fn write_spec_section<E: CliEnv>(
         },
         cache,
     );
-    ops.write_section(IssueNumber(number), &SectionName(section.clone()), &content)?;
-    out.push_str(&format!(
-        "wrote {} bytes to section '{section}'\n",
-        content.len()
-    ));
+    let receipt =
+        ops.write_section(IssueNumber(number), &SectionName(section.clone()), &content)?;
+    super::intake_outcome::auto_record_issue_operation(
+        env.repo_path(),
+        "issue.spec.edit",
+        super::intake_outcome::IntakeOutcomeKind::SpecUpdated,
+        number,
+    );
+    out.push_str(&render_write_receipt(&section, &receipt));
     Ok(0)
+}
+
+/// Render the committed-write evidence line (SPEC-3248 P7C / #3284): byte
+/// count, storage shape, content hash, and the readback confirmation.
+fn render_write_receipt(section: &str, receipt: &gwt_github::WriteReceipt) -> String {
+    let shape = match receipt.parts {
+        0 => "body".to_string(),
+        1 => "1 comment part".to_string(),
+        n => format!("{n} comment parts"),
+    };
+    format!(
+        "wrote {} bytes to section '{section}' ({shape}, sha256:{}, readback verified)\n",
+        receipt.bytes, receipt.sha256
+    )
 }
 
 fn write_structured_spec_section<E: CliEnv>(
@@ -511,11 +529,15 @@ fn write_structured_spec_section<E: CliEnv>(
     } else {
         merge_structured_spec(&existing, &structured)
     };
-    ops.write_section(IssueNumber(number), &SectionName(section.clone()), &content)?;
-    out.push_str(&format!(
-        "wrote {} bytes to section '{section}'\n",
-        content.len()
-    ));
+    let receipt =
+        ops.write_section(IssueNumber(number), &SectionName(section.clone()), &content)?;
+    super::intake_outcome::auto_record_issue_operation(
+        env.repo_path(),
+        "issue.spec.edit",
+        super::intake_outcome::IntakeOutcomeKind::SpecUpdated,
+        number,
+    );
+    out.push_str(&render_write_receipt(&section, &receipt));
     Ok(0)
 }
 
@@ -540,6 +562,12 @@ fn create_spec_from_markdown<E: CliEnv>(
         .map(|section| (section.name, section.content))
         .collect();
     let snapshot = ops.create_spec(&title, sections, &labels)?;
+    super::intake_outcome::auto_record_issue_operation(
+        env.repo_path(),
+        "issue.spec.create",
+        super::intake_outcome::IntakeOutcomeKind::SpecCreated,
+        snapshot.number.0,
+    );
     out.push_str(&format!(
         "created issue #{} with labels {:?}\n",
         snapshot.number.0, snapshot.labels
@@ -565,6 +593,12 @@ fn create_spec_from_structured_json<E: CliEnv>(
     let spec = render_structured_spec(&normalize_spec_heading_from_title(&title), &structured);
     let sections = BTreeMap::from([(SectionName(SPEC_SECTION_NAME.to_string()), spec)]);
     let snapshot = ops.create_spec(&title, sections, &labels)?;
+    super::intake_outcome::auto_record_issue_operation(
+        env.repo_path(),
+        "issue.spec.create",
+        super::intake_outcome::IntakeOutcomeKind::SpecCreated,
+        snapshot.number.0,
+    );
     out.push_str(&format!(
         "created issue #{} with labels {:?}\n",
         snapshot.number.0, snapshot.labels

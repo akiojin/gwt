@@ -130,7 +130,32 @@ where
 {
     let mut summary = WorkEventsIngestSummary::default();
     let mut state = load_work_events_intake_state(state_path);
-    let rebuild_required = !work_items_path.exists()
+    let projection_requires_rebuild =
+        match gwt_core::workspace_projection::load_workspace_work_items_from_path(work_items_path) {
+            Ok(Some(_)) => false,
+            Ok(None) => true,
+            Err(gwt_core::GwtError::JsonDecode {
+                kind: gwt_core::JsonDecodeKind::Malformed,
+                message: error,
+                ..
+            }) => {
+                tracing::warn!(
+                    %error,
+                    path = %work_items_path.display(),
+                    "work events ingest: corrupt projection requires rebuild"
+                );
+                true
+            }
+            Err(error) => {
+                tracing::warn!(
+                    %error,
+                    path = %work_items_path.display(),
+                    "work events ingest: projection read failed"
+                );
+                return summary;
+            }
+        };
+    let rebuild_required = projection_requires_rebuild
         || !state.projection_is_current(SOURCE_CONTEXT_FINGERPRINT_VERSION);
     let mut pending_sources = Vec::new();
     let mut source_discovery_failed = false;
@@ -458,16 +483,16 @@ mod tests {
     }
 
     fn init_repo(path: &Path) {
-        run(Command::new("git")
+        run(gwt_core::process::hidden_command("git")
             .args(["init", "--initial-branch=main"])
             .current_dir(path));
-        run(Command::new("git")
+        run(gwt_core::process::hidden_command("git")
             .args(["config", "user.email", "test@example.com"])
             .current_dir(path));
-        run(Command::new("git")
+        run(gwt_core::process::hidden_command("git")
             .args(["config", "user.name", "Test User"])
             .current_dir(path));
-        run(Command::new("git")
+        run(gwt_core::process::hidden_command("git")
             .args(["commit", "--allow-empty", "-m", "init"])
             .current_dir(path));
     }
@@ -535,7 +560,7 @@ mod tests {
 
         // Origin ref source: events.jsonl committed on a side branch that is
         // NOT checked out anywhere, forged as a remote tracking ref.
-        run(Command::new("git")
+        run(gwt_core::process::hidden_command("git")
             .args(["checkout", "-b", "work/remote-side"])
             .current_dir(&repo));
         std::fs::write(
@@ -551,16 +576,16 @@ mod tests {
             ),
         )
         .expect("write ref events");
-        run(Command::new("git")
+        run(gwt_core::process::hidden_command("git")
             .args(["add", ".gwt/work/events.jsonl"])
             .current_dir(&repo));
-        run(Command::new("git")
+        run(gwt_core::process::hidden_command("git")
             .args(["commit", "-m", "remote events"])
             .current_dir(&repo));
-        run(Command::new("git")
+        run(gwt_core::process::hidden_command("git")
             .args(["update-ref", "refs/remotes/origin/work/remote-side", "HEAD"])
             .current_dir(&repo));
-        run(Command::new("git")
+        run(gwt_core::process::hidden_command("git")
             .args(["checkout", "main"])
             .current_dir(&repo));
         // Restore the fs source clobbered by the branch dance.
@@ -623,13 +648,144 @@ mod tests {
     }
 
     #[test]
+    fn projection_parse_failure_requires_rebuild_with_current_version_and_fingerprints() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let repo = temp.path().join("repo");
+        std::fs::create_dir_all(&repo).expect("repo dir");
+        init_repo(&repo);
+        let events_path = repo.join(EVENTS_TREE_PATH);
+        std::fs::create_dir_all(events_path.parent().unwrap()).expect("work event dir");
+        let content = format!(
+            "{}\n",
+            event_line(
+                "evt-parse-recovery",
+                "work-parse-recovery",
+                "Projection parse recovery",
+                "2026-07-16T07:00:00Z"
+            )
+        );
+        std::fs::write(&events_path, &content).expect("shared event");
+
+        let state_dir = temp.path().join("state");
+        let work_items_path = state_dir.join("works.json");
+        let state_path = state_dir.join("work-events-intake.json");
+        let initial = ingest_project_work_events_paths(&repo, &work_items_path, &state_path);
+        assert!(initial.projection_rebuilt);
+
+        let state = load_work_events_intake_state(&state_path);
+        assert!(state.projection_is_current(SOURCE_CONTEXT_FINGERPRINT_VERSION));
+        let current = ingest_project_work_events_paths(&repo, &work_items_path, &state_path);
+        assert!(!current.projection_rebuilt);
+        assert_eq!(current.sources_ingested, 0);
+        assert!(
+            current.sources_skipped >= 1,
+            "fingerprint skip: {current:?}"
+        );
+
+        std::fs::write(&work_items_path, b"{\"work_items\":")
+            .expect("syntactically corrupt projection");
+
+        let recovered = ingest_project_work_events_paths(&repo, &work_items_path, &state_path);
+
+        assert!(
+            recovered.projection_rebuilt,
+            "projection parse failure must override current cache state: {recovered:?}"
+        );
+        assert_eq!(recovered.sources_ingested, 1);
+        let projection =
+            gwt_core::workspace_projection::load_workspace_work_items_from_path(&work_items_path)
+                .expect("load recovered projection")
+                .expect("recovered projection");
+        assert!(projection
+            .work_items
+            .iter()
+            .any(|item| item.id == "work-parse-recovery"));
+    }
+
+    #[test]
+    fn valid_incompatible_projection_does_not_rebuild_or_advance_intake_state() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let repo = temp.path().join("repo");
+        std::fs::create_dir_all(&repo).expect("repo dir");
+        init_repo(&repo);
+        let events_path = repo.join(EVENTS_TREE_PATH);
+        std::fs::create_dir_all(events_path.parent().unwrap()).expect("work event dir");
+        std::fs::write(
+            &events_path,
+            format!(
+                "{}\n",
+                event_line(
+                    "evt-incompatible-source",
+                    "work-incompatible-source",
+                    "Incompatible source",
+                    "2026-07-16T08:00:00Z"
+                )
+            ),
+        )
+        .expect("shared event");
+
+        let state_dir = temp.path().join("state");
+        let work_items_path = state_dir.join("works.json");
+        let state_path = state_dir.join("work-events-intake.json");
+        let initial = ingest_project_work_events_paths(&repo, &work_items_path, &state_path);
+        assert!(initial.projection_rebuilt);
+
+        let loaded =
+            gwt_core::workspace_projection::load_workspace_work_items_from_path(&work_items_path)
+                .expect("load initial projection")
+                .expect("initial projection");
+        let mut incompatible = serde_json::to_value(&loaded).expect("projection json");
+        incompatible["work_items"][0]["events"][0]
+            .as_object_mut()
+            .expect("Work event object")
+            .insert(
+                "future_schema_field".to_string(),
+                serde_json::json!({ "preserve": true }),
+            );
+        let original_projection =
+            serde_json::to_vec_pretty(&incompatible).expect("incompatible json");
+        std::fs::write(&work_items_path, &original_projection)
+            .expect("write incompatible projection");
+        let original_state = std::fs::read(&state_path).expect("read intake state");
+        let initial_source = std::fs::read_to_string(&events_path).expect("read initial source");
+        std::fs::write(
+            &events_path,
+            format!(
+                "{}{}\n",
+                initial_source,
+                event_line(
+                    "evt-after-incompatible",
+                    "work-after-incompatible",
+                    "Must not advance",
+                    "2026-07-16T09:00:00Z"
+                )
+            ),
+        )
+        .expect("advance shared event source");
+
+        let summary = ingest_project_work_events_paths(&repo, &work_items_path, &state_path);
+
+        assert!(!summary.projection_rebuilt, "must fail closed: {summary:?}");
+        assert_eq!(summary.sources_ingested, 0, "must fail closed: {summary:?}");
+        assert_eq!(summary.events_applied, 0, "must fail closed: {summary:?}");
+        assert_eq!(
+            std::fs::read(&work_items_path).expect("read preserved projection"),
+            original_projection
+        );
+        assert_eq!(
+            std::fs::read(&state_path).expect("read preserved intake state"),
+            original_state
+        );
+    }
+
+    #[test]
     fn ingest_reprocesses_old_raw_fingerprint_state_to_repair_source_container() {
         let temp = tempfile::tempdir().expect("tempdir");
         let repo = temp.path().join("repo");
         std::fs::create_dir_all(&repo).expect("repo dir");
         init_repo(&repo);
 
-        run(Command::new("git")
+        run(gwt_core::process::hidden_command("git")
             .args(["checkout", "-b", "work/cache-repair"])
             .current_dir(&repo));
         std::fs::create_dir_all(repo.join(".gwt/work")).expect("mk .gwt/work");
@@ -646,13 +802,13 @@ mod tests {
             ),
         )
         .expect("write ref events");
-        run(Command::new("git")
+        run(gwt_core::process::hidden_command("git")
             .args(["add", ".gwt/work/events.jsonl"])
             .current_dir(&repo));
-        run(Command::new("git")
+        run(gwt_core::process::hidden_command("git")
             .args(["commit", "-m", "cache repair events"])
             .current_dir(&repo));
-        run(Command::new("git")
+        run(gwt_core::process::hidden_command("git")
             .args([
                 "update-ref",
                 "refs/remotes/origin/work/cache-repair",
@@ -913,7 +1069,7 @@ mod tests {
         std::fs::create_dir_all(&repo).expect("repo dir");
         init_repo(&repo);
 
-        run(Command::new("git")
+        run(gwt_core::process::hidden_command("git")
             .args(["worktree", "add", "-b", "work/owner"])
             .arg(&owner_worktree)
             .current_dir(&repo));
@@ -1114,7 +1270,7 @@ mod tests {
         let repo = temp.path().join("repo");
         std::fs::create_dir_all(&repo).expect("repo dir");
         init_repo(&repo);
-        run(Command::new("git")
+        run(gwt_core::process::hidden_command("git")
             .args(["checkout", "--detach", "HEAD"])
             .current_dir(&repo));
         let events_path = repo.join(".gwt/work/events.jsonl");
@@ -1344,7 +1500,7 @@ mod tests {
             "a source not folded by rebuild must not retain its old current fingerprint"
         );
 
-        run(Command::new("git")
+        run(gwt_core::process::hidden_command("git")
             .args(["worktree", "add", "-b", "work/restored-source"])
             .arg(&restored_worktree)
             .current_dir(&repo));
@@ -1371,7 +1527,7 @@ mod tests {
         let side_worktree = temp.path().join("side-worktree");
         std::fs::create_dir_all(&repo).expect("repo dir");
         init_repo(&repo);
-        run(Command::new("git")
+        run(gwt_core::process::hidden_command("git")
             .args(["worktree", "add", "-b", "work/unreadable-source"])
             .arg(&side_worktree)
             .current_dir(&repo));

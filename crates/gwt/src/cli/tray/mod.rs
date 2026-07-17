@@ -21,16 +21,19 @@ pub mod menu;
 /// `gwt open` CLI (Phase 6). The launcher is detached so callers do
 /// not block on the spawned process.
 pub fn open_browser_for_url(url: &str) -> std::io::Result<()> {
-    use std::process::Command;
     let child = if cfg!(target_os = "macos") {
-        Command::new("open").arg(url).spawn()?
+        gwt_core::process::hidden_command("open").arg(url).spawn()?
     } else if cfg!(target_os = "windows") {
         // The empty "" before the URL is required by `start` so a URL
         // beginning with quoted text is not interpreted as a window
         // title.
-        Command::new("cmd").args(["/C", "start", "", url]).spawn()?
+        gwt_core::process::hidden_command("cmd")
+            .args(["/C", "start", "", url])
+            .spawn()?
     } else {
-        Command::new("xdg-open").arg(url).spawn()?
+        gwt_core::process::hidden_command("xdg-open")
+            .arg(url)
+            .spawn()?
     };
     std::thread::spawn(move || {
         let mut child = child;

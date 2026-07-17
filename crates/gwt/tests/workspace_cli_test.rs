@@ -9,12 +9,9 @@
 //! ops run the real `gwtd` binary through the stdin JSON envelope with an
 //! isolated HOME.
 
-use std::{
-    io::Write,
-    path::Path,
-    process::{Command, Stdio},
-};
+use std::{io::Write, path::Path, process::Stdio};
 
+use gwt_core::process::hidden_command;
 use gwt_core::{
     paths::project_scope_hash,
     workspace_projection::{load_workspace_projection_from_path, WorkspaceProjection},
@@ -25,13 +22,13 @@ use tempfile::TempDir;
 const SESSION: &str = "ws-cli-session";
 
 fn git_init_with_origin(path: &Path) {
-    assert!(Command::new("git")
+    assert!(hidden_command("git")
         .arg("init")
         .arg(path)
         .status()
         .expect("git init")
         .success());
-    assert!(Command::new("git")
+    assert!(hidden_command("git")
         .arg("-C")
         .arg(path)
         .args([
@@ -58,7 +55,7 @@ fn fixture() -> Fixture {
 }
 
 fn run_ws(fixture: &Fixture, json: &str) -> Value {
-    let mut child = Command::new(env!("CARGO_BIN_EXE_gwtd"))
+    let mut child = hidden_command(env!("CARGO_BIN_EXE_gwtd"))
         .current_dir(fixture.project.path())
         .env("HOME", fixture.home.path())
         .env("USERPROFILE", fixture.home.path())
@@ -97,7 +94,7 @@ fn assert_ok(value: &Value, context: &str) {
 
 /// Run an op without asserting success — for exercising error/guard paths.
 fn run_ws_raw(fixture: &Fixture, json: &str) -> std::process::Output {
-    let mut child = Command::new(env!("CARGO_BIN_EXE_gwtd"))
+    let mut child = hidden_command(env!("CARGO_BIN_EXE_gwtd"))
         .current_dir(fixture.project.path())
         .env("HOME", fixture.home.path())
         .env("USERPROFILE", fixture.home.path())

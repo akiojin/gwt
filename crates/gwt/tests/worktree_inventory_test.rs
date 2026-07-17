@@ -1,13 +1,13 @@
 use std::path::Path;
-use std::process::Command;
 
 use gwt::worktree_inventory::{
     enumerate_worktrees, enumerate_worktrees_with_sessions_dir, WorktreeEntryKind,
 };
+use gwt_core::process::hidden_command;
 use tempfile::tempdir;
 
 fn git(args: &[&str], cwd: &Path) {
-    let status = Command::new("git")
+    let status = hidden_command("git")
         .args(args)
         .current_dir(cwd)
         .status()

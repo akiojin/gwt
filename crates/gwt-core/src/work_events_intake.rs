@@ -24,7 +24,7 @@ use std::path::Path;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
-use crate::error::{GwtError, Result};
+use crate::error::{GwtError, JsonDecodeKind, Result};
 use crate::workspace_projection::{
     load_workspace_work_items_from_path, save_workspace_work_items_projection_to_path,
     DuplicateWorkEventProvenance, WorkEvent, WorkEventApplyOutcome, WorkEventKind, WorkItem,
@@ -160,16 +160,16 @@ fn ingest_work_events_contents_locked<'a>(
         .into_iter()
         .filter(|(event, _)| {
             seen_event_ids.contains(&event.id)
-                || !previous
+                || previous
                     .work_items
                     .iter()
                     .find(|item| item.id == event.work_item_id)
                     .and_then(terminal_close_time)
-                    .is_some_and(|closed_at| event.updated_at <= closed_at)
+                    .is_none_or(|closed_at| event.updated_at > closed_at)
         })
         .collect();
     let mut projection = refold_work_events_projection_with_keys(&previous, replayable)?;
-    let changed = projection.work_items != previous.work_items;
+    let changed = !work_item_sets_equal(&projection, &previous);
     reconcile_refold_report(
         &previous,
         &projection,
@@ -182,6 +182,14 @@ fn ingest_work_events_contents_locked<'a>(
         save_workspace_work_items_projection_to_path(work_items_path, &projection)?;
     }
     Ok(report)
+}
+
+fn work_item_sets_equal(left: &WorkItemsProjection, right: &WorkItemsProjection) -> bool {
+    let mut left_items = left.work_items.iter().collect::<Vec<_>>();
+    let mut right_items = right.work_items.iter().collect::<Vec<_>>();
+    left_items.sort_unstable_by(|left, right| left.id.cmp(&right.id));
+    right_items.sort_unstable_by(|left, right| left.id.cmp(&right.id));
+    left_items == right_items
 }
 
 /// Deterministically replay accepted projection history together with newly
@@ -405,7 +413,22 @@ fn rebuild_work_events_contents_locked<'a>(
     shared_contents: impl IntoIterator<Item = &'a str>,
     close_content: Option<&str>,
 ) -> Result<WorkEventsIntakeReport> {
-    let previous = load_workspace_work_items_from_path(work_items_path)?;
+    let previous = match load_workspace_work_items_from_path(work_items_path) {
+        Ok(previous) => previous,
+        Err(GwtError::JsonDecode {
+            kind: JsonDecodeKind::Malformed,
+            message: error,
+            ..
+        }) => {
+            tracing::warn!(
+                %error,
+                path = %work_items_path.display(),
+                "work events rebuild: discarding corrupt projection"
+            );
+            None
+        }
+        Err(error) => return Err(error),
+    };
     let previous_updated_at = previous.as_ref().map(|projection| projection.updated_at);
     let eventless_items = previous
         .into_iter()
@@ -521,13 +544,8 @@ fn fold_work_events(
 
     let mut processed_event_ids = seen_event_ids.clone();
     let mut reported_applied_event_ids = HashSet::new();
-    let mut rejected_primary_ids = HashSet::new();
     for mut events in event_groups {
         let event_id = events[0].id.clone();
-        if rejected_primary_ids.contains(&event_id) {
-            report.skipped_duplicate += events.len();
-            continue;
-        }
         if processed_event_ids.contains(&event_id) {
             let mut repaired = false;
             for event in events {
@@ -556,7 +574,6 @@ fn fold_work_events(
                 warn_rejected_session_conflict(rejected);
             }
             report.skipped_duplicate += event_count;
-            rejected_primary_ids.insert(event_id);
             continue;
         };
 
@@ -570,7 +587,6 @@ fn fold_work_events(
             if event.updated_at <= closed_at {
                 report.skipped_terminal += 1;
                 report.skipped_duplicate += duplicate_count;
-                rejected_primary_ids.insert(event_id);
                 continue;
             }
         }
@@ -581,7 +597,6 @@ fn fold_work_events(
             processed_event_ids.insert(event_id);
         } else {
             report.skipped_duplicate += event_count;
-            rejected_primary_ids.insert(event_id);
             continue;
         }
         for duplicate in events {
@@ -959,6 +974,7 @@ mod tests {
         let mut projection = WorkItemsProjection::empty(t0);
 
         let mut owner = WorkEvent::new(WorkEventKind::Start, "work-owner", t0);
+        owner.id = "evt-z-owner".to_string();
         owner.agent_session_id = Some("session-owner".to_string());
         owner.execution_container = Some(WorkspaceExecutionContainerRef {
             branch: Some("work/owner".to_string()),
@@ -1122,6 +1138,100 @@ mod tests {
         let report = ingest_work_events_content(&works, &content).expect("ingest");
         assert_eq!(report.applied, 1);
         assert_eq!(report.skipped_invalid, 2);
+    }
+
+    #[test]
+    fn rebuild_propagates_unrelated_projection_io_errors() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let works = tmp.path().join("works-is-a-directory");
+        std::fs::create_dir(&works).expect("projection directory");
+        let shared = event_json(
+            "evt-recovery",
+            "work-recovery",
+            "start",
+            "2026-07-16T10:00:00Z",
+            ",\"title\":\"Recovered from events\",\"status_category\":\"active\"",
+        );
+
+        assert!(
+            rebuild_work_events_contents(&works, [shared.as_str()], None).is_err(),
+            "unrelated projection I/O failures must remain errors"
+        );
+    }
+
+    #[test]
+    fn rebuild_recovers_syntactically_corrupt_projection_from_complete_event_source() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let works = tmp.path().join("works.json");
+        std::fs::write(&works, b"{\"updated_at\":").expect("corrupt projection");
+        let shared = event_json(
+            "evt-recovered",
+            "work-recovered",
+            "start",
+            "2026-07-16T07:00:00Z",
+            ",\"title\":\"Recovered from events\",\"status_category\":\"active\"",
+        );
+
+        let report = rebuild_work_events_contents(&works, [shared.as_str()], None)
+            .expect("complete event history must replace corrupt projection JSON");
+
+        assert_eq!(report.applied, 1);
+        let projection = load_workspace_work_items_from_path(&works)
+            .expect("load rebuilt projection")
+            .expect("rebuilt projection");
+        let recovered = projection
+            .work_items
+            .iter()
+            .find(|item| item.id == "work-recovered")
+            .expect("Work recovered from complete event history");
+        assert_eq!(recovered.title, "Recovered from events");
+        assert!(recovered
+            .events
+            .iter()
+            .any(|event| event.id == "evt-recovered"));
+    }
+
+    #[test]
+    fn rebuild_preserves_syntactically_valid_incompatible_projection() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let works = tmp.path().join("works.json");
+        let now = Utc.with_ymd_and_hms(2026, 7, 16, 7, 30, 0).unwrap();
+        let mut projection = WorkItemsProjection::empty(now);
+        projection.apply_event(WorkEvent::new(
+            WorkEventKind::Start,
+            "work-future-schema",
+            now,
+        ));
+        let mut incompatible = serde_json::to_value(&projection).expect("projection json");
+        incompatible["work_items"][0]
+            .as_object_mut()
+            .expect("Work item object")
+            .insert(
+                "future_schema_field".to_string(),
+                serde_json::json!({ "preserve": true }),
+            );
+        let original = serde_json::to_vec_pretty(&incompatible).expect("incompatible json");
+        std::fs::write(&works, &original).expect("write incompatible projection");
+        let shared = event_json(
+            "evt-known-copy",
+            "work-known-copy",
+            "start",
+            "2026-07-16T08:00:00Z",
+            ",\"title\":\"Known copy\",\"status_category\":\"active\"",
+        );
+
+        let error = rebuild_work_events_contents(&works, [shared.as_str()], None)
+            .expect_err("valid incompatible projection must fail closed");
+
+        assert!(
+            !matches!(error, GwtError::Io(_)),
+            "schema incompatibility must remain distinct from filesystem I/O"
+        );
+        assert_eq!(
+            std::fs::read(&works).expect("read preserved projection"),
+            original,
+            "rebuild must not overwrite valid JSON written by a newer schema"
+        );
     }
 
     #[test]
@@ -1531,6 +1641,75 @@ mod tests {
             .agents
             .iter()
             .all(|agent| agent.session_id != "session-owner"));
+    }
+
+    #[test]
+    fn rejected_same_id_copy_does_not_hide_later_valid_timestamp_copy() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let works = tmp.path().join("works.json");
+        let t0 = Utc.with_ymd_and_hms(2026, 7, 16, 7, 0, 0).unwrap();
+        let t1 = Utc.with_ymd_and_hms(2026, 7, 16, 8, 0, 0).unwrap();
+        let t2 = Utc.with_ymd_and_hms(2026, 7, 16, 9, 0, 0).unwrap();
+
+        let mut owner = WorkEvent::new(WorkEventKind::Start, "work-owner", t0);
+        owner.id = "evt-owner".to_string();
+        owner.agent_session_id = Some("session-owner".to_string());
+        owner.execution_container = Some(WorkspaceExecutionContainerRef {
+            branch: Some("work/owner".to_string()),
+            worktree_path: Some("/repo/work/owner".into()),
+            pr_number: None,
+            pr_url: None,
+            pr_state: None,
+        });
+        let mut conflicting = WorkEvent::new(WorkEventKind::Update, "work-target", t1);
+        conflicting.id = "evt-retried-copy".to_string();
+        conflicting.title = Some("Rejected copy".to_string());
+        conflicting.agent_session_id = Some("session-owner".to_string());
+        conflicting.execution_container = Some(WorkspaceExecutionContainerRef {
+            branch: Some("feature/foreign".to_string()),
+            worktree_path: Some("/repo/feature/foreign".into()),
+            pr_number: None,
+            pr_url: None,
+            pr_state: None,
+        });
+        let mut valid = conflicting.clone();
+        valid.updated_at = t2;
+        valid.title = Some("Accepted later copy".to_string());
+        valid.agent_session_id = Some("session-target".to_string());
+        valid.execution_container = Some(WorkspaceExecutionContainerRef {
+            branch: Some("feature/target".to_string()),
+            worktree_path: Some("/repo/feature/target".into()),
+            pr_number: None,
+            pr_url: None,
+            pr_state: None,
+        });
+        let shared = [owner, conflicting, valid]
+            .into_iter()
+            .map(|event| serde_json::to_string(&event).unwrap())
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        let report = rebuild_work_events_contents(&works, [shared.as_str()], None).unwrap();
+
+        assert_eq!(report.applied, 2, "owner and later valid copy must apply");
+        assert_eq!(report.skipped_duplicate, 1, "only the conflict is skipped");
+        let projection = load_workspace_work_items_from_path(&works)
+            .unwrap()
+            .unwrap();
+        let target = projection
+            .work_items
+            .iter()
+            .find(|item| item.id == "work-target")
+            .expect("later valid copy must create the target Work");
+        assert_eq!(target.title, "Accepted later copy");
+        assert!(target
+            .agents
+            .iter()
+            .any(|agent| agent.session_id == "session-target"));
+        assert!(target
+            .events
+            .iter()
+            .any(|event| event.id == "evt-retried-copy" && event.updated_at == t2));
     }
 
     #[test]

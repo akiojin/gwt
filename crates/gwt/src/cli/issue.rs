@@ -76,6 +76,12 @@ pub(super) fn run<E: CliEnv>(
         } => {
             let body = env.read_file(&file).map_err(super::io_as_api_error)?;
             let snapshot = env.client().create_issue(&title, &body, &labels)?;
+            super::intake_outcome::auto_record_issue_operation(
+                env.repo_path(),
+                "issue.create",
+                super::intake_outcome::IntakeOutcomeKind::IssueCreated,
+                snapshot.number.0,
+            );
             Cache::new(env.cache_root()).write_snapshot(&snapshot)?;
             out.push_str(&format!(
                 "created issue #{} with labels {:?}\n",
@@ -89,6 +95,12 @@ pub(super) fn run<E: CliEnv>(
             labels,
         } => {
             let snapshot = env.client().create_issue(&title, &body, &labels)?;
+            super::intake_outcome::auto_record_issue_operation(
+                env.repo_path(),
+                "issue.create",
+                super::intake_outcome::IntakeOutcomeKind::IssueCreated,
+                snapshot.number.0,
+            );
             Cache::new(env.cache_root()).write_snapshot(&snapshot)?;
             out.push_str(&format!(
                 "created issue #{} with labels {:?}\n",
@@ -99,6 +111,12 @@ pub(super) fn run<E: CliEnv>(
         IssueCommand::Comment { number, file } => {
             let body = env.read_file(&file).map_err(super::io_as_api_error)?;
             let comment = env.client().create_comment(IssueNumber(number), &body)?;
+            super::intake_outcome::auto_record_issue_operation(
+                env.repo_path(),
+                "issue.comment",
+                super::intake_outcome::IntakeOutcomeKind::IssueUpdated,
+                number,
+            );
             let _ = refresh_issue_cache(env, IssueNumber(number))?;
             out.push_str(&format!(
                 "created comment {} on #{}\n",
@@ -108,6 +126,12 @@ pub(super) fn run<E: CliEnv>(
         }
         IssueCommand::CommentBody { number, body } => {
             let comment = env.client().create_comment(IssueNumber(number), &body)?;
+            super::intake_outcome::auto_record_issue_operation(
+                env.repo_path(),
+                "issue.comment",
+                super::intake_outcome::IntakeOutcomeKind::IssueUpdated,
+                number,
+            );
             let _ = refresh_issue_cache(env, IssueNumber(number))?;
             out.push_str(&format!(
                 "created comment {} on #{}\n",

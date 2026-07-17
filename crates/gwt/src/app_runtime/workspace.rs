@@ -373,26 +373,25 @@ pub(super) fn spawn_workspace_cleanup_async(
 }
 
 fn clear_workspace_cleanup_git_details_event(project_root: &Path) -> Option<OutboundEvent> {
-    gwt_core::workspace_projection::load_workspace_projection(project_root)
-        .ok()
-        .flatten()?;
-    let projection = match gwt_core::workspace_projection::mutate_workspace_projection(
-        project_root,
-        |projection| {
-            projection.clear_git_details_to_idle(chrono::Utc::now());
-            Ok(projection.clone())
-        },
-    ) {
-        Ok(projection) => projection,
-        Err(error) => {
-            tracing::warn!(
-                project_root = %project_root.display(),
-                error = %error,
-                "workspace projection cleanup state update skipped"
-            );
-            return None;
-        }
-    };
+    let projection =
+        match gwt_core::workspace_projection::mutate_existing_workspace_projection_for_cleanup(
+            project_root,
+            |projection| {
+                projection.clear_git_details_to_idle(chrono::Utc::now());
+                Ok(projection.clone())
+            },
+        ) {
+            Ok(Some(projection)) => projection,
+            Ok(None) => return None,
+            Err(error) => {
+                tracing::warn!(
+                    project_root = %project_root.display(),
+                    error = %error,
+                    "workspace projection cleanup state update skipped"
+                );
+                return None;
+            }
+        };
     let journal_entries = gwt_core::workspace_projection::load_recent_workspace_journal_entries(
         project_root,
         WORKSPACE_OVERVIEW_JOURNAL_LIMIT,
@@ -610,5 +609,77 @@ impl AppRuntime {
             },
         );
         Vec::new()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use fs2::FileExt;
+    use gwt_core::test_support::{env_lock, ScopedEnvVar};
+
+    #[test]
+    fn cleanup_completion_does_not_recreate_projection_deleted_while_waiting_for_lock() {
+        let _env_guard = env_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let temp = tempfile::tempdir().expect("tempdir");
+        let home = temp.path().join("home");
+        std::fs::create_dir_all(&home).expect("create home");
+        let _home = ScopedEnvVar::set("HOME", &home);
+        let project_root = temp.path().join("repo");
+        std::fs::create_dir_all(&project_root).expect("create project root");
+
+        let projection =
+            gwt_core::workspace_projection::WorkspaceProjection::default_for_project(&project_root);
+        gwt_core::workspace_projection::save_workspace_projection(&project_root, &projection)
+            .expect("save current projection");
+        let legacy_path = gwt_core::paths::gwt_project_dir_for_repo_path(&project_root)
+            .join("workspace/current.json");
+        gwt_core::workspace_projection::save_workspace_projection_to_path(
+            &legacy_path,
+            &projection,
+        )
+        .expect("save remaining legacy projection");
+        let current_path =
+            gwt_core::paths::gwt_workspace_projection_path_for_repo_path(&project_root);
+        let lock = std::fs::OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .read(true)
+            .write(true)
+            .open(current_path.with_file_name("works.lock"))
+            .expect("open project lock");
+        lock.lock_exclusive().expect("lock project state");
+
+        let root_for_cleanup = project_root.clone();
+        let handle = std::thread::spawn(move || {
+            clear_workspace_cleanup_git_details_event(&root_for_cleanup)
+        });
+        std::thread::sleep(std::time::Duration::from_millis(100));
+        assert!(
+            !handle.is_finished(),
+            "cleanup completion must wait for the project lock"
+        );
+
+        std::fs::remove_file(&current_path).expect("remove current projection while locked");
+        FileExt::unlock(&lock).expect("unlock project state");
+        let event = handle.join().expect("join cleanup completion");
+
+        assert_eq!(
+            (event.is_none(), current_path.exists()),
+            (true, false),
+            "a deleted current projection must not be broadcast or recreated by cleanup completion"
+        );
+        assert!(
+            !legacy_path.exists(),
+            "cleanup must invalidate the legacy source that could recreate canonical state"
+        );
+        assert!(
+            gwt_core::workspace_projection::load_workspace_projection(&project_root)
+                .expect("load projection after cleanup")
+                .is_none(),
+            "a normal load after cleanup must not remigrate deleted canonical state"
+        );
     }
 }

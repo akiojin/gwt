@@ -5,6 +5,7 @@ use std::{
 };
 
 use gwt::index_worker::bootstrap_project_index_for_path_with;
+use gwt_core::process::hidden_command;
 use gwt_core::{
     index::runtime::RunnerSpawner, paths::gwt_cache_dir, repo_hash::detect_repo_hash,
     worktree_hash::compute_worktree_hash,
@@ -311,20 +312,20 @@ fn normalize_path(path: impl AsRef<Path>) -> PathBuf {
 }
 
 fn init_git_repo(path: &Path) {
-    let output = std::process::Command::new("git")
+    let output = hidden_command("git")
         .args(["init", path.to_str().unwrap()])
         .output()
         .expect("git init");
     assert!(output.status.success(), "git init failed");
 
-    let email = std::process::Command::new("git")
+    let email = hidden_command("git")
         .args(["config", "user.email", "test@example.com"])
         .current_dir(path)
         .output()
         .expect("git config user.email");
     assert!(email.status.success(), "git config user.email failed");
 
-    let name = std::process::Command::new("git")
+    let name = hidden_command("git")
         .args(["config", "user.name", "Test User"])
         .current_dir(path)
         .output()
@@ -333,7 +334,7 @@ fn init_git_repo(path: &Path) {
 }
 
 fn add_origin(path: &Path, url: &str) {
-    let output = std::process::Command::new("git")
+    let output = hidden_command("git")
         .args(["remote", "add", "origin", url])
         .current_dir(path)
         .output()
@@ -347,14 +348,14 @@ fn add_origin(path: &Path, url: &str) {
 
 fn commit_file(path: &Path, name: &str, body: &str) {
     fs::write(path.join(name), body).expect("write commit file");
-    let add = std::process::Command::new("git")
+    let add = hidden_command("git")
         .args(["add", name])
         .current_dir(path)
         .output()
         .expect("git add");
     assert!(add.status.success(), "git add failed");
 
-    let commit = std::process::Command::new("git")
+    let commit = hidden_command("git")
         .args(["commit", "-m", "init"])
         .current_dir(path)
         .output()
@@ -367,7 +368,7 @@ fn commit_file(path: &Path, name: &str, body: &str) {
 }
 
 fn add_worktree(repo: &Path, worktree: &Path) {
-    let output = std::process::Command::new("git")
+    let output = hidden_command("git")
         .args([
             "worktree",
             "add",

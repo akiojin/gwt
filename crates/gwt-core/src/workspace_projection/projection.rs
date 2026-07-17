@@ -17,6 +17,7 @@ use super::*;
 /// and the linked PR snapshot. Populated by Start Work / Launch
 /// materialization and refreshed when PR state is polled.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct GitDetails {
     pub branch: Option<String>,
     pub worktree_path: Option<PathBuf>,
@@ -79,6 +80,7 @@ pub struct WorkspaceCleanupCandidate {
 /// Board stays the coordination/history log while this projection tracks the
 /// present.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct WorkspaceProjection {
     pub id: String,
     pub project_root: PathBuf,
@@ -149,10 +151,10 @@ impl WorkspaceProjection {
             .iter()
             .enumerate()
             .filter(|(_, agent)| agent.session_id == session_id)
-            .max_by(|(left_index, left), (right_index, right)| {
+            .max_by(|(_, left), (_, right)| {
                 left.updated_at
                     .cmp(&right.updated_at)
-                    .then_with(|| left_index.cmp(right_index))
+                    .then_with(|| stable_agent_key(left).cmp(&stable_agent_key(right)))
             })
             .map(|(index, _)| index)
     }
@@ -318,7 +320,7 @@ impl WorkspaceProjection {
 
         if let Some(session_id) = entry.origin_session_id.as_deref() {
             if let Some(agent) = self.latest_agent_for_session_mut(session_id) {
-                if entry.updated_at >= agent.updated_at {
+                if entry_is_current_for_state && entry.updated_at >= agent.updated_at {
                     agent.last_board_entry_id = Some(entry.id.clone());
                     agent.last_board_entry_kind = Some(entry.kind.clone());
                     agent.coordination_scope = coordination_scope_for_entry(entry);
@@ -828,6 +830,10 @@ impl WorkspaceProjection {
     }
 }
 
+fn stable_agent_key(agent: &WorkspaceAgentSummary) -> String {
+    serde_json::to_string(agent).unwrap_or_default()
+}
+
 /// Partial update applied to a [`WorkspaceProjection`] (e.g. from
 /// `workspace.update`); `None` fields keep their current values.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -881,6 +887,7 @@ pub struct WorkspaceStartUpdate {
 /// One append-only journal record of a Workspace update, kept alongside the
 /// projection so state changes remain auditable.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct WorkspaceJournalEntry {
     pub id: String,
     pub project_root: PathBuf,
@@ -1354,6 +1361,38 @@ mod tests {
         assert_eq!(
             projection.agents[0].current_focus.as_deref(),
             Some("Implementation complete; reviewer should check visual states")
+        );
+    }
+
+    #[test]
+    fn latest_agent_for_session_equal_timestamp_is_vector_order_independent() {
+        let updated_at = Utc.with_ymd_and_hms(2026, 7, 16, 9, 0, 0).unwrap();
+        let mut row_a = us70_agent(
+            "duplicate-session",
+            WorkspaceStatusCategory::Active,
+            WorkspaceAgentAffiliationStatus::Assigned,
+        );
+        row_a.agent_id = "agent-a".to_string();
+        row_a.display_name = "Agent A".to_string();
+        row_a.current_focus = Some("Focus A".to_string());
+        row_a.workspace_id = Some("work-a".to_string());
+        row_a.updated_at = updated_at;
+
+        let mut row_b = row_a.clone();
+        row_b.agent_id = "agent-b".to_string();
+        row_b.display_name = "Agent B".to_string();
+        row_b.current_focus = Some("Focus B".to_string());
+        row_b.workspace_id = Some("work-b".to_string());
+
+        let mut ab = WorkspaceProjection::default_for_project("/repo");
+        ab.agents = vec![row_a.clone(), row_b.clone()];
+        let mut ba = WorkspaceProjection::default_for_project("/repo");
+        ba.agents = vec![row_b, row_a];
+
+        assert_eq!(
+            ab.latest_agent_for_session("duplicate-session"),
+            ba.latest_agent_for_session("duplicate-session"),
+            "equal-time duplicate Session rows must use a stable row-content tie-break"
         );
     }
 

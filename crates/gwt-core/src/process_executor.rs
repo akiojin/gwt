@@ -219,6 +219,10 @@ pub struct SystemProcessExecutor;
 
 impl ProcessExecutor for SystemProcessExecutor {
     fn run(&self, request: ProcessRequest) -> Result<ProcessOutput, String> {
+        // The else branch is the sanctioned visible-window path: callers opt out
+        // of window hiding via ProcessRequest::hide_window, so it deliberately
+        // uses std::process::Command::new without CREATE_NO_WINDOW.
+        #[allow(clippy::disallowed_methods)]
         let mut command = if request.hide_window {
             crate::process::hidden_command(&request.program)
         } else {

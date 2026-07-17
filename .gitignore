@@ -107,3 +107,4 @@ package-lock.json
 # Playwright MCP automation artifacts
 .playwright-mcp/
 .coverage
+crates/gwt/pip/
