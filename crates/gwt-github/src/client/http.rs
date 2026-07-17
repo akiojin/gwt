@@ -31,6 +31,7 @@ pub enum HttpMethod {
     Get,
     Post,
     Patch,
+    Delete,
 }
 
 impl HttpMethod {
@@ -39,6 +40,7 @@ impl HttpMethod {
             HttpMethod::Get => "GET",
             HttpMethod::Post => "POST",
             HttpMethod::Patch => "PATCH",
+            HttpMethod::Delete => "DELETE",
         }
     }
 }
@@ -169,6 +171,7 @@ impl HttpTransport for ReqwestTransport {
             HttpMethod::Get => reqwest::Method::GET,
             HttpMethod::Post => reqwest::Method::POST,
             HttpMethod::Patch => reqwest::Method::PATCH,
+            HttpMethod::Delete => reqwest::Method::DELETE,
         };
         let mut builder = self.client.request(method, &request.url);
         for (k, v) in &request.headers {
@@ -282,6 +285,20 @@ impl<T: HttpTransport> HttpIssueClient<T> {
                 url: format!("{}{}", self.rest_base, path),
                 headers,
                 body: Some(body.to_string()),
+            })
+            .map_err(|e| ApiError::Network(e.to_string()))?;
+        check_status(&resp)?;
+        Ok(resp)
+    }
+
+    fn rest_delete(&self, path: &str) -> Result<HttpResponse, ApiError> {
+        let resp = self
+            .transport
+            .execute(HttpRequest {
+                method: HttpMethod::Delete,
+                url: format!("{}{}", self.rest_base, path),
+                headers: self.auth_headers(),
+                body: None,
             })
             .map_err(|e| ApiError::Network(e.to_string()))?;
         check_status(&resp)?;
@@ -624,6 +641,17 @@ impl<T: HttpTransport> IssueClient for HttpIssueClient<T> {
         let value: Value = serde_json::from_str(&resp.body)
             .map_err(|e| ApiError::Unexpected(format!("create_comment json: {e}")))?;
         parse_rest_comment(&value)
+    }
+
+    fn delete_comment(&self, comment_id: CommentId) -> Result<(), ApiError> {
+        let path = format!(
+            "/repos/{}/{}/issues/comments/{}",
+            self.owner, self.repo, comment_id.0
+        );
+        // GitHub answers 204 No Content on success; 404 maps through
+        // check_status like every other comment operation.
+        let _resp = self.rest_delete(&path)?;
+        Ok(())
     }
 
     fn create_issue(

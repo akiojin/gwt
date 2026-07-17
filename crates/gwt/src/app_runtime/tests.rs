@@ -16204,6 +16204,10 @@ impl IssueClient for PermissionDeniedCreateIssueClient {
         unreachable!("quick register only creates issues")
     }
 
+    fn delete_comment(&self, _comment_id: CommentId) -> Result<(), ApiError> {
+        unreachable!("quick register only creates issues")
+    }
+
     fn create_issue(
         &self,
         _title: &str,

@@ -413,6 +413,13 @@ pub struct LaunchConfig {
     /// Base committish for the ephemeral intake worktree (e.g. `origin/develop`).
     /// `None` defaults to `HEAD`. Only meaningful when `is_ephemeral` is set.
     pub ephemeral_base_ref: Option<String>,
+    /// SPEC-3248 P8a: skip the Execution Control Record materialization for
+    /// this launch even when a linked owner is present. Set for launches that
+    /// are subordinate to another session's execution — e.g. the Issue
+    /// Monitor's independent review dispatch, which links the owner Issue for
+    /// feedback wiring but must not take over (or be gated by) the
+    /// implementing session's execution lifecycle.
+    pub suppress_execution_control: bool,
 }
 
 /// Permission mode for agent launch.
@@ -471,6 +478,7 @@ pub struct AgentLaunchBuilder {
     windows_shell: Option<crate::WindowsShellKind>,
     is_ephemeral: bool,
     ephemeral_base_ref: Option<String>,
+    suppress_execution_control: bool,
 }
 
 impl AgentLaunchBuilder {
@@ -506,6 +514,7 @@ impl AgentLaunchBuilder {
             windows_shell: None,
             is_ephemeral: false,
             ephemeral_base_ref: None,
+            suppress_execution_control: false,
         }
     }
 
@@ -514,6 +523,14 @@ impl AgentLaunchBuilder {
     pub fn ephemeral(mut self, base_ref: Option<String>) -> Self {
         self.is_ephemeral = true;
         self.ephemeral_base_ref = base_ref;
+        self
+    }
+
+    /// SPEC-3248 P8a: mark this launch as subordinate to another session's
+    /// execution (e.g. the Issue Monitor's independent review dispatch) so no
+    /// Execution Control Record is materialized for it.
+    pub fn suppress_execution_control(mut self) -> Self {
+        self.suppress_execution_control = true;
         self
     }
 
@@ -812,6 +829,7 @@ impl AgentLaunchBuilder {
             windows_shell: self.windows_shell,
             is_ephemeral: self.is_ephemeral,
             ephemeral_base_ref: self.ephemeral_base_ref,
+            suppress_execution_control: self.suppress_execution_control,
         }
     }
 

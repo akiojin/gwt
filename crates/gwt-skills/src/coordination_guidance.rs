@@ -361,6 +361,24 @@ Coordinate through curation, not Work updates:
 - Leave implementation, verification, and PRs to Execute-lane sessions, opened
   from a Workspace or picked up by the Issue Monitor.
 
+Every curation prompt must settle in a durable artifact outcome before the
+session stops — the intake artifact gate blocks Stop otherwise (SPEC-3248
+FR-016/FR-017):
+
+- Create or update the owner Issue/SPEC via JSON operations `issue.create`,
+  `issue.comment`, `issue.spec.create`, or `issue.spec.edit` (successful
+  operations record the outcome automatically), or record an explicit
+  decision with JSON operation `intake.outcome.record` — `kind:"no_action"`
+  requires a non-empty `reason`; Issue/SPEC kinds require `number`. Board
+  posts and prose answers never satisfy the gate.
+- When curated work spans multiple Issues/SPECs, select exactly one Primary
+  Execution Owner and classify every related owner before completing the
+  artifact: `bundled-required` (must ship in the Primary's PR — copy its
+  tasks/acceptance into the Primary), `dependent-follow-up` (separate PR with
+  explicit ordering, never a Primary completion blocker), or
+  `reference-only`. A single-Issue Execution launch must be able to implement
+  the full bundled scope from the Primary owner alone.
+
 "#;
 
 /// Render the full SKILL.md content (frontmatter + managed markers + body) for
@@ -520,6 +538,30 @@ mod tests {
                 rendered.contains(phrase),
                 "rendered SKILL.md is missing required canonical phrase: {phrase}\n\n--- rendered (first 4kB) ---\n{}",
                 rendered.chars().take(4096).collect::<String>()
+            );
+        }
+    }
+
+    // SPEC-3248 P7A (T-088/T-091 guidance contract): the intake variant
+    // carries the artifact-outcome gate contract and the multi-owner
+    // classification rules, so a curation session can settle its prompts and
+    // a single-Issue Execution launch can rely on bundled scope living in
+    // the Primary owner.
+    #[test]
+    fn intake_guidance_carries_artifact_outcome_and_owner_classification() {
+        let intake = render_skill_md(SessionKind::Intake);
+        for required in [
+            "intake.outcome.record",
+            "no_action",
+            "Board\n  posts and prose answers never satisfy the gate",
+            "Primary\n  Execution Owner",
+            "bundled-required",
+            "dependent-follow-up",
+            "reference-only",
+        ] {
+            assert!(
+                intake.contains(required),
+                "intake guidance must contain '{required}'"
             );
         }
     }

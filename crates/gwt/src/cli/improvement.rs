@@ -182,11 +182,14 @@ fn is_contract_artifact(target_artifact: &str) -> bool {
     )
 }
 
-fn capture<E: CliEnv>(
-    env: &mut E,
+/// Env-free capture core shared by the `improvement.capture` JSON operation
+/// and the intake artifact gate's auto-capture helper (SPEC-3248 P7A /
+/// SPEC-3164 T-083). Owns validation, sanitization, dedupe, and atomic
+/// storage; the `CliEnv` wrapper adds the Board-status side effect on top.
+fn capture_candidate_core(
+    repo_root: &Path,
     command: ImprovementCaptureCommand,
-    out: &mut String,
-) -> Result<i32, SpecOpsError> {
+) -> Result<(ImprovementCandidate, bool), SpecOpsError> {
     validate_enum(
         "source",
         &command.source,
@@ -230,14 +233,13 @@ fn capture<E: CliEnv>(
 
     let now = Utc::now().to_rfc3339();
     let sanitized_summary = sanitize_text(&command.summary);
-    let repo_root = env.repo_path().to_path_buf();
     let dedupe_key = command
         .dedupe_key
         .as_ref()
         .filter(|value| !value.trim().is_empty())
         .cloned()
         .unwrap_or_else(|| default_dedupe_key(&command, &sanitized_summary));
-    let mut store = load_store(&repo_root)?;
+    let mut store = load_store(repo_root)?;
     let mut updated_existing = false;
     let candidate = if let Some(candidate) = store
         .candidates
@@ -274,7 +276,17 @@ fn capture<E: CliEnv>(
         store.candidates.push(candidate.clone());
         candidate
     };
-    save_store(&repo_root, &store)?;
+    save_store(repo_root, &store)?;
+    Ok((candidate, updated_existing))
+}
+
+fn capture<E: CliEnv>(
+    env: &mut E,
+    command: ImprovementCaptureCommand,
+    out: &mut String,
+) -> Result<i32, SpecOpsError> {
+    let repo_root = env.repo_path().to_path_buf();
+    let (candidate, updated_existing) = capture_candidate_core(&repo_root, command)?;
     if should_publish_capture_status(&candidate) {
         post_candidate_captured_status(env, &candidate, updated_existing)?;
     }
@@ -289,6 +301,51 @@ fn capture<E: CliEnv>(
         }),
     )?;
     Ok(0)
+}
+
+/// Stable dedupe key for the intake artifact gate's auto-captured candidate
+/// (SPEC-3248 P7A T-084): every missing/stale-outcome StopBlock updates the
+/// same `issue-spec-workflow` candidate instead of piling up duplicates.
+pub(crate) const INTAKE_GATE_DEDUPE_KEY: &str = "issue-spec-workflow:intake-artifact-gate";
+
+/// Compact result the intake gate embeds into its StopBlock reason.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct IntakeGateCaptureSummary {
+    pub id: String,
+    pub occurrences: u64,
+    pub updated: bool,
+}
+
+/// SPEC-3164 workflow-violation auto-capture helper used by the intake
+/// artifact gate (SPEC-3248 P7A T-083/T-084, FR-019). Env-free so the Stop
+/// hook can call it; goes through the exact same validation, sanitization,
+/// dedupe, and storage as `improvement.capture`. Confidence stays `medium`,
+/// so the Board-status publish rule (high-confidence only) and the
+/// producing-work self-improvement Stop gate (high-confidence only) are both
+/// deliberately not triggered by the gate's own bookkeeping.
+pub(crate) fn capture_intake_gate_violation(
+    worktree_root: &Path,
+    summary: &str,
+    details: &str,
+) -> Result<IntakeGateCaptureSummary, String> {
+    let command = ImprovementCaptureCommand {
+        source: "hook-runtime".to_string(),
+        target_artifact: "issue-spec-workflow".to_string(),
+        classification: "gwt-caused".to_string(),
+        confidence: "medium".to_string(),
+        summary: summary.to_string(),
+        details: Some(details.to_string()),
+        evidence_digest: None,
+        dedupe_key: Some(INTAKE_GATE_DEDUPE_KEY.to_string()),
+        local_evidence: Vec::new(),
+    };
+    capture_candidate_core(worktree_root, command)
+        .map(|(candidate, updated)| IntakeGateCaptureSummary {
+            id: candidate.id,
+            occurrences: candidate.occurrences,
+            updated,
+        })
+        .map_err(|err| err.to_string())
 }
 
 fn list(

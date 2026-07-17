@@ -21,7 +21,44 @@ pub(super) fn run<E: CliEnv>(
         out.push_str(&format!("{VERB}: Work lifecycle update failed: {error}\n"));
         return Ok(1);
     }
-    skill_state_runtime::run(env, action, SKILL_NAME, SKILL_DISPLAY, VERB, out)
+    // SPEC-3248 P8a: a successful build completion also settles the launch's
+    // Execution Control Record (best-effort — the build-spec skill flow must
+    // not require a second explicit `execution.complete`). Guarded strictly:
+    // the settlement fires only when this `build.complete` actually finalized
+    // an ACTIVE build state for the same spec — a vacuous "nothing to
+    // finalize" exit 0 must not settle the execution — and only when the
+    // record names the same owner. Aborting a build never settles.
+    let completed_spec = match &action {
+        SkillStateAction::Complete { spec } => {
+            let worktree = gwt_core::paths::resolve_current_worktree_root(env.repo_path());
+            let had_active_matching_state = gwt_core::skill_state::load(&worktree, SKILL_NAME)
+                .ok()
+                .flatten()
+                .is_some_and(|state| {
+                    state.active && (state.owner_spec.is_none() || state.owner_spec == Some(*spec))
+                });
+            had_active_matching_state.then_some(*spec)
+        }
+        _ => None,
+    };
+    let code = skill_state_runtime::run(env, action, SKILL_NAME, SKILL_DISPLAY, VERB, out)?;
+    if code == 0 {
+        if let Some(spec) = completed_spec {
+            if let Some(session_id) = std::env::var(gwt_agent::GWT_SESSION_ID_ENV)
+                .ok()
+                .map(|value| value.trim().to_string())
+                .filter(|value| !value.is_empty())
+            {
+                let worktree = gwt_core::paths::resolve_current_worktree_root(env.repo_path());
+                crate::cli::execution_state::settle_completed_best_effort(
+                    &worktree,
+                    &session_id,
+                    spec,
+                );
+            }
+        }
+    }
+    Ok(code)
 }
 
 fn record_current_work_terminal_before_finalize<E: CliEnv>(
