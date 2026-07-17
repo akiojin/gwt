@@ -8,10 +8,10 @@
 use std::{path::Path, time::Instant};
 
 use super::{
-    board_reminder, diagnostics, execution_completion_stop_check, intake_completion_stop_check,
-    skill_build_spec_stop_check, skill_discussion_stop_check, skill_plan_spec_stop_check,
-    skill_register_spec_stop_check, workflow_policy, workspace_identity, HookError, HookOutput,
-    IntentBoundaryEvent,
+    board_reminder, diagnostics, execution_completion_stop_check, execution_control_stop_check,
+    intake_completion_stop_check, skill_build_spec_stop_check, skill_discussion_stop_check,
+    skill_plan_spec_stop_check, skill_register_spec_stop_check, workflow_policy,
+    workspace_identity, HookError, HookOutput, IntentBoundaryEvent,
 };
 use crate::discussion_resume::{load_pending_goal, PendingDiscussionGoal};
 
@@ -162,7 +162,7 @@ fn handle_stop(
     // intake completion gate (SPEC-3248 P7A) has a persistent side effect
     // (self-improvement auto-capture) that must only fire for the block the
     // agent actually sees.
-    let stop_checks: [(&str, StopCheck<'_>); 6] = [
+    let stop_checks: [(&str, StopCheck<'_>); 7] = [
         (
             "skill-discussion-stop-check",
             Box::new(|| skill_discussion_stop_check::handle_with_input(worktree_root, input)),
@@ -199,6 +199,19 @@ fn handle_stop(
             "intake-completion-stop-check",
             Box::new(|| {
                 intake_completion_stop_check::handle_with_input(
+                    worktree_root,
+                    input,
+                    current_session,
+                )
+            }),
+        ),
+        // SPEC-3248 P8a (T-108): launch-written Execution Control Record
+        // keeps the execution session working until it settles via
+        // execution.complete / execution.blocked / build.complete.
+        (
+            "execution-control-stop-check",
+            Box::new(|| {
+                execution_control_stop_check::handle_with_input(
                     worktree_root,
                     input,
                     current_session,
@@ -546,6 +559,69 @@ mod tests {
         assert_eq!(
             candidates[0].get("occurrences").and_then(|v| v.as_u64()),
             Some(2)
+        );
+    }
+
+    // SPEC-3248 P8a (T-108/T-116 subset): a launch-written Execution Control
+    // Record blocks Stop until the session settles it, then passes.
+    #[test]
+    fn execution_control_lifecycle_blocks_until_settled() {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let worktree = tempfile::tempdir().unwrap();
+        let _home = ScopedEnvVar::set("HOME", worktree.path());
+        let _userprofile = ScopedEnvVar::set("USERPROFILE", worktree.path());
+        let sessions_dir = worktree.path().join(".gwt").join("sessions");
+        let mut session = Session::new(worktree.path(), "work/issue-42", AgentId::ClaudeCode);
+        session.agent_session_id = Some("agent-exec".to_string());
+        let session_id = session.id.clone();
+        session.save(&sessions_dir).unwrap();
+        let runtime_path = gwt_agent::runtime_state_path(&sessions_dir, &session_id);
+        let _session_env = ScopedEnvVar::set(GWT_SESSION_ID_ENV, &session_id);
+        let _runtime_env = ScopedEnvVar::set(GWT_SESSION_RUNTIME_PATH_ENV, &runtime_path);
+        let _forward_url = ScopedEnvVar::unset(gwt_agent::GWT_HOOK_FORWARD_URL_ENV);
+        let _forward_token = ScopedEnvVar::unset(gwt_agent::GWT_HOOK_FORWARD_TOKEN_ENV);
+        let _codex_thread_id = ScopedEnvVar::unset("CODEX_THREAD_ID");
+        gwt_skills::write_lane_file(worktree.path(), &gwt_skills::EXECUTION_PROFILE).unwrap();
+
+        // Launch materialization wrote the record (plain Issue — no
+        // build.start was ever called, T-109).
+        crate::cli::execution_state::materialize_at_launch(
+            worktree.path(),
+            crate::cli::execution_state::ExecutionOwnerKind::Issue,
+            42,
+            &session_id,
+            "gwt-execute",
+            false,
+        )
+        .unwrap();
+
+        let stop_input = serde_json::json!({
+            "session_id": "agent-exec",
+            "stop_hook_active": false,
+        })
+        .to_string();
+        let output = handle_with_input("Stop", &stop_input, worktree.path(), Some(&session_id))
+            .expect("stop hook output");
+        let HookOutput::StopBlock { reason } = output else {
+            panic!("expected execution control StopBlock, got {output:?}");
+        };
+        assert!(reason.contains("issue #42"), "{reason}");
+        assert!(reason.contains("execution.complete"), "{reason}");
+
+        // Settlement passes Stop.
+        crate::cli::execution_state::settle(
+            worktree.path(),
+            &session_id,
+            crate::cli::execution_state::ExecutionSettlement::Completed,
+        )
+        .unwrap();
+        let output = handle_with_input("Stop", &stop_input, worktree.path(), Some(&session_id))
+            .expect("stop hook output");
+        assert!(
+            !matches!(output, HookOutput::StopBlock { .. }),
+            "settled execution must pass Stop, got {output:?}"
         );
     }
 

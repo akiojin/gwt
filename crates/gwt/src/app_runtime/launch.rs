@@ -1554,6 +1554,14 @@ impl AppRuntime {
                 }
             }
             install_launch_gwt_bin_env(&mut config.env_vars, config.runtime_target)?;
+            // SPEC-3248 P8a: derive the execution entrypoint from the raw
+            // launch argv BEFORE the Windows host shell wrapper rewrites it
+            // (the `$gwt-*` prompt token moves into an env var / embedded
+            // script on wrapped launches).
+            let execution_entrypoint = gwt::cli::execution_state::entrypoint_from_launch(
+                &config.args,
+                config.session_mode == gwt_agent::SessionMode::Resume,
+            );
             apply_windows_host_shell_wrapper(&mut config)?;
 
             let branch_name = config.branch.clone().unwrap_or_else(|| "work".to_string());
@@ -1640,6 +1648,35 @@ impl AppRuntime {
             gwt_agent::SessionRuntimeState::new(gwt_agent::AgentStatus::Running)
                 .save(&runtime_path)
                 .map_err(|error| error.to_string())?;
+
+            // SPEC-3248 P8a (T-107): materialize the Execution Control Record
+            // for linked-owner execution launches — SPEC and plain Issue alike
+            // — before prompt injection (the prompt rides the argv; the
+            // process spawns after this closure returns). Best-effort like
+            // the lane file: a write failure must not block the launch, and
+            // the Stop gate fails open when the record is absent. Intake
+            // (ephemeral) sessions own no execution lifecycle, and subordinate
+            // launches (independent review dispatch) are opted out.
+            if !config.is_ephemeral && !config.suppress_execution_control {
+                if let Some(owner_number) = config.linked_issue_number {
+                    let owner_kind =
+                        gwt::cli::execution_state::detect_owner_kind(&worktree_path, owner_number);
+                    if let Err(error) = gwt::cli::execution_state::materialize_at_launch(
+                        &worktree_path,
+                        owner_kind,
+                        owner_number,
+                        &session_id,
+                        &execution_entrypoint,
+                        config.session_mode == gwt_agent::SessionMode::Resume,
+                    ) {
+                        tracing::warn!(
+                            ?error,
+                            owner_number,
+                            "execution control record materialization failed"
+                        );
+                    }
+                }
+            }
 
             let process_launch = ProcessLaunch {
                 command: config.command.clone(),

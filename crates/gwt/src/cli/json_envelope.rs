@@ -264,6 +264,15 @@ fn parse(input: &str) -> Result<ParsedEnvelope, CliParseError> {
         "discuss.goal_skipped" | "discuss.goal-skipped" => {
             discuss_proposal(params, DiscussEnvelopeAction::GoalSkipped)?
         }
+        "execution.complete" => {
+            CliCommand::Execution(crate::cli::execution_state::ExecutionCommand::Complete)
+        }
+        "execution.blocked" => {
+            CliCommand::Execution(crate::cli::execution_state::ExecutionCommand::Blocked {
+                reason: required_string(params, "reason")?,
+                missing_verification: optional_string(params, "missing_verification")?,
+            })
+        }
         "build.start" => skill_state(params, SkillActionKind::Start).map(CliCommand::Build)?,
         "build.phase" => skill_state(params, SkillActionKind::Phase).map(CliCommand::Build)?,
         "build.complete" => {
@@ -1365,6 +1374,26 @@ mod tests {
                 json!({"title": "t", "body": ["a", "b"], "structured": true})
             ),
             CliCommand::Issue(IssueCommand::SpecCreateJsonBody { .. })
+        ));
+    }
+
+    // SPEC-3248 P8a: execution settlement parse variants.
+    #[test]
+    fn execution_settlement_variants() {
+        assert!(matches!(
+            ok("execution.complete", json!({})),
+            CliCommand::Execution(crate::cli::execution_state::ExecutionCommand::Complete)
+        ));
+        assert!(matches!(
+            ok(
+                "execution.blocked",
+                json!({"reason": "E2E runner unavailable", "missing_verification": "lifecycle E2E"})
+            ),
+            CliCommand::Execution(crate::cli::execution_state::ExecutionCommand::Blocked { .. })
+        ));
+        assert!(matches!(
+            err("execution.blocked", json!({})),
+            CliParseError::MissingFlag("reason")
         ));
     }
 
