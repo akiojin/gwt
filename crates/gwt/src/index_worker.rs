@@ -11,6 +11,7 @@ use gwt_core::{
         paths::gwt_index_root,
         runtime::{reconcile_repo, PythonRunnerSpawner, ReconcileOptions, RunnerSpawner},
     },
+    index_coordinator::{IndexCoordinator, JobAdmission, JobOutcome, JobPriority, TargetKey},
     repo_hash::RepoHash,
     worktree_hash::compute_worktree_hash,
 };
@@ -683,13 +684,59 @@ fn aggregate_project_index_status_for_path_inner(
     );
 
     let coverage = selection.coverage;
+    // Phase 70 FR-393 / AS-13: one batch status process covers every
+    // selected worktree instead of one serial Python spawn per worktree.
+    let worktree_hashes: Vec<String> = selection
+        .inputs
+        .iter()
+        .map(|input| input.worktree_hash.clone())
+        .collect();
+    let batch = probe_worktrees_status_batch(&repo_root, &repo_hash, &worktree_hashes);
     let mut probes: Vec<WorktreeProbeOutcome> = Vec::with_capacity(selection.inputs.len());
-    for input in selection.inputs {
-        let payload = probe_worktree_status(&repo_root, &repo_hash, &input.worktree_hash);
-        probes.push(WorktreeProbeOutcome {
-            input,
-            status_payload: payload,
-        });
+    match batch {
+        Ok(payload) => {
+            let runtime = payload
+                .get("runtime")
+                .cloned()
+                .unwrap_or(serde_json::Value::Null);
+            let repo_status = payload
+                .get("status")
+                .cloned()
+                .unwrap_or_else(|| serde_json::json!({}));
+            let worktrees = payload
+                .get("worktrees")
+                .cloned()
+                .unwrap_or_else(|| serde_json::json!({}));
+            for input in selection.inputs {
+                let mut status = repo_status.clone();
+                if let (Some(status_obj), Some(worktree_obj)) = (
+                    status.as_object_mut(),
+                    worktrees
+                        .get(&input.worktree_hash)
+                        .and_then(serde_json::Value::as_object),
+                ) {
+                    for (key, value) in worktree_obj {
+                        status_obj.insert(key.clone(), value.clone());
+                    }
+                }
+                probes.push(WorktreeProbeOutcome {
+                    input,
+                    status_payload: Ok(serde_json::json!({
+                        "ok": true,
+                        "runtime": runtime.clone(),
+                        "status": status,
+                    })),
+                });
+            }
+        }
+        Err(error) => {
+            for input in selection.inputs {
+                probes.push(WorktreeProbeOutcome {
+                    input,
+                    status_payload: Err(error.clone()),
+                });
+            }
+        }
     }
 
     let mut view = build_aggregated_status_view(report.runner_hash.as_str(), &probes);
@@ -823,10 +870,11 @@ fn push_worktree_probe_input(
     Ok(())
 }
 
-fn probe_worktree_status(
+/// One batch status process for every selected worktree (FR-393 / AS-13).
+fn probe_worktrees_status_batch(
     repo_root: &Path,
     repo_hash: &RepoHash,
-    worktree_hash: &str,
+    worktree_hashes: &[String],
 ) -> Result<serde_json::Value, String> {
     let runner_started = Instant::now();
     let output = gwt_core::process::hidden_command(project_index_python_path())
@@ -835,19 +883,22 @@ fn probe_worktree_status(
         .arg("status")
         .arg("--repo-hash")
         .arg(repo_hash.as_str())
-        .arg("--worktree-hash")
-        .arg(worktree_hash)
+        .arg("--worktree-hashes")
+        .arg(worktree_hashes.join(","))
         .current_dir(repo_root)
         .output()
         .map_err(|err| format!("run project index status: {err}"))?;
     if !output.status.success() {
+        // FR-393: a failed runner invocation invalidates the positive probe
+        // cache so the next ensure re-verifies the runtime.
+        gwt_core::runtime::invalidate_project_index_probe_cache();
         tracing::warn!(
             target: "gwt::index",
             project_root = %repo_root.display(),
-            worktree_hash,
+            worktree_count = worktree_hashes.len(),
             elapsed_ms = runner_started.elapsed().as_millis() as u64,
             exit_status = %output.status,
-            "project index status runner failed for worktree"
+            "project index batch status runner failed"
         );
         let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
         let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
@@ -857,10 +908,9 @@ fn probe_worktree_status(
     tracing::debug!(
         target: "gwt::index",
         project_root = %repo_root.display(),
-        worktree_hash,
+        worktree_count = worktree_hashes.len(),
         elapsed_ms = runner_started.elapsed().as_millis() as u64,
-        exit_status = %output.status,
-        "project index status runner completed for worktree"
+        "project index batch status runner completed"
     );
     serde_json::from_slice(&output.stdout)
         .map_err(|err| format!("parse project index status: {err}"))
@@ -939,15 +989,155 @@ pub trait IndexRebuildSpawner: Send + 'static {
 pub type IndexRebuildRunnerFn =
     dyn Fn(&Path, IndexRebuildScope, Option<&str>) -> Result<(), String> + Send + Sync;
 
-/// Production rebuild runner that resolves an `IndexContext` for the
-/// requested `(project_root, worktree_hash?)` and invokes the runner via the
-/// same path used by `gwt index rebuild`. Used by both the auto-rebuild
-/// orchestrator and the per-cell IPC entry, so concurrent CLI/GUI calls
-/// funnel through the same `.lock` sentinel.
+/// How long a caller waits for job admission metadata operations.
+const INDEX_JOB_ADMISSION_TIMEOUT: Duration = Duration::from_secs(30);
+/// How long a job owner waits for the host-wide heavy lease. Rebuilds queue
+/// behind whichever embedding build currently owns the model slot (FR-379),
+/// so this must cover a full large-repo build.
+const INDEX_HEAVY_LEASE_TIMEOUT: Duration = Duration::from_secs(30 * 60);
+/// How long a joined caller waits for the shared job outcome.
+const INDEX_SHARED_JOB_WAIT_TIMEOUT: Duration = Duration::from_secs(30 * 60);
+
+/// Result of a coordinated index job (SPEC #1939 Phase 70 FR-382).
+#[derive(Debug)]
+pub(crate) enum CoordinatedRun<T> {
+    /// This process owned the job and ran `build`.
+    Ran(T),
+    /// An equivalent job for the same target completed while we waited; the
+    /// duplicate build was skipped.
+    Coalesced,
+}
+
+/// One round of a coordinated build (FR-389).
+pub(crate) enum BuildStep<T> {
+    Done(T),
+    /// The runner parked a resumable continuation to hand the heavy lease to
+    /// a higher-priority claimant; the owner must re-acquire and resume.
+    Yielded,
+}
+
+/// Backstop against a pathological yield loop; each round is additionally
+/// bounded by the heavy lease timeout.
+const MAX_BUILD_YIELDS: u32 = 1000;
+
+/// Run one index build for `(repo_hash, scope, worktree_hash?)` through the
+/// host-wide coordinator: at most one model-loaded runner tree host-wide
+/// (FR-379), same-target requests coalesce into one shared job (FR-382),
+/// and a yielded background build releases the heavy lease before resuming
+/// (FR-389).
+pub(crate) fn run_coordinated_index_job<T>(
+    repo_hash: &str,
+    scope_label: &str,
+    worktree_hash: Option<&str>,
+    priority: JobPriority,
+    mut build: impl FnMut() -> Result<BuildStep<T>, String>,
+) -> Result<CoordinatedRun<T>, String> {
+    let coordinator = IndexCoordinator::open_default()
+        .map_err(|err| format!("index coordinator unavailable: {err}"))?;
+    let key = match worktree_hash {
+        Some(worktree) => TargetKey::worktree(repo_hash, scope_label, worktree),
+        None => TargetKey::repo_shared(repo_hash, scope_label),
+    };
+    // One retry when the previous owner vanished without publishing.
+    for _ in 0..2 {
+        let admission = coordinator
+            .request_job(&key, priority, INDEX_JOB_ADMISSION_TIMEOUT)
+            .map_err(|err| format!("index job admission failed: {err}"))?;
+        match admission {
+            JobAdmission::Owner(guard) => {
+                let mut yields: u32 = 0;
+                loop {
+                    let heavy = guard
+                        .acquire_heavy(INDEX_HEAVY_LEASE_TIMEOUT)
+                        .map_err(|err| format!("index heavy lease failed: {err}"))?;
+                    let step = build();
+                    drop(heavy);
+                    match step {
+                        Ok(BuildStep::Done(value)) => {
+                            guard
+                                .complete(JobOutcome::Completed)
+                                .map_err(|err| format!("index job completion failed: {err}"))?;
+                            return Ok(CoordinatedRun::Ran(value));
+                        }
+                        Ok(BuildStep::Yielded) => {
+                            yields += 1;
+                            if yields > MAX_BUILD_YIELDS {
+                                let message =
+                                    "index build yielded too many times without completing"
+                                        .to_string();
+                                let _ = guard.complete(JobOutcome::Failed {
+                                    message: message.clone(),
+                                });
+                                return Err(message);
+                            }
+                            // Give the pending higher-priority claimant a
+                            // chance to take the freshly released lease
+                            // before re-queueing; acquire_heavy then defers
+                            // for as long as higher-priority claimants stay
+                            // pending (FR-383).
+                            std::thread::sleep(Duration::from_millis(50));
+                        }
+                        Err(message) => {
+                            guard
+                                .complete(JobOutcome::Failed {
+                                    message: message.clone(),
+                                })
+                                .map_err(|err| format!("index job completion failed: {err}"))?;
+                            return Err(message);
+                        }
+                    }
+                }
+            }
+            JobAdmission::Joined(waiter) => {
+                let outcome = waiter
+                    .wait(INDEX_SHARED_JOB_WAIT_TIMEOUT)
+                    .map_err(|err| format!("shared index job wait failed: {err}"))?;
+                match outcome {
+                    JobOutcome::Completed => return Ok(CoordinatedRun::Coalesced),
+                    JobOutcome::Failed { message } => return Err(message),
+                    JobOutcome::OwnerGone => continue,
+                }
+            }
+        }
+    }
+    Err("index job owner disappeared repeatedly without publishing an outcome".to_string())
+}
+
+/// Production rebuild runner used by the background auto-rebuild
+/// orchestrator. Runs at background priority so interactive and manual work
+/// preempt the heavy lease (FR-383).
 pub fn default_rebuild_runner(
     project_root: &Path,
     scope: IndexRebuildScope,
     worktree_hash: Option<&str>,
+) -> Result<(), String> {
+    rebuild_index_target(project_root, scope, worktree_hash, JobPriority::Background)
+}
+
+/// User-initiated rebuild runner (per-cell GUI rebuild, `gwt index rebuild`).
+pub fn manual_rebuild_runner(
+    project_root: &Path,
+    scope: IndexRebuildScope,
+    worktree_hash: Option<&str>,
+) -> Result<(), String> {
+    rebuild_index_target(
+        project_root,
+        scope,
+        worktree_hash,
+        JobPriority::ManualRebuild,
+    )
+}
+
+/// Resolve an `IndexContext` for the requested `(project_root,
+/// worktree_hash?)` and invoke the runner via the same path used by
+/// `gwt index rebuild`, gated by the host-wide index coordinator so
+/// concurrent CLI/GUI/agent rebuilds coalesce and the heavy runner stays
+/// exclusive host-wide.
+pub fn rebuild_index_target(
+    project_root: &Path,
+    scope: IndexRebuildScope,
+    worktree_hash: Option<&str>,
+    priority: JobPriority,
 ) -> Result<(), String> {
     use crate::cli::index::runtime::{
         format_runner_failure, resolve_index_context, run_runner_rebuild, RebuildAction,
@@ -1013,39 +1203,71 @@ pub fn default_rebuild_runner(
             needs_worktree_hash: true,
         },
     };
-    // Phase 0 perf instrumentation (measure-first; see plan
-    // `launch-agent-ultrathink-shimmering-lake.md`). The auto-repair path
-    // rebuilds the per-worktree `files` / `files-docs` embedding index from
-    // scratch for every new worktree, and this `run_runner_rebuild` blocks on
-    // the Python embedding build. Logging its duration lets us correlate the
-    // heavy build against GUI freeze timestamps and confirm whether the
-    // embedding runner (which currently saturates all cores at normal
-    // priority) is the cause of wizard sluggishness on large repositories.
-    let rebuild_started = Instant::now();
-    let rebuild_label = action.label;
-    let rebuild_action = action.action;
-    let rebuild_worktree_hash = ctx.worktree_hash.clone();
-    tracing::info!(
-        target: "gwt::index",
-        scope = rebuild_label,
-        worktree_hash = %rebuild_worktree_hash,
-        action = rebuild_action,
-        "project index rebuild started"
-    );
-    let output = run_runner_rebuild(&ctx, action).map_err(|err| err.to_string())?;
-    tracing::info!(
-        target: "gwt::index",
-        scope = rebuild_label,
-        worktree_hash = %rebuild_worktree_hash,
-        action = rebuild_action,
-        elapsed_ms = rebuild_started.elapsed().as_millis() as u64,
-        exit_status = %output.status,
-        "project index rebuild completed"
-    );
-    if !output.status.success() {
-        return Err(format_runner_failure(&output));
+    let coordinator_worktree = action
+        .needs_worktree_hash
+        .then(|| ctx.worktree_hash.clone());
+    let qos = match priority {
+        JobPriority::Background => "background",
+        JobPriority::ManualRebuild | JobPriority::InteractiveSearch => "interactive",
+    };
+    let run = run_coordinated_index_job(
+        ctx.repo_hash.as_str(),
+        action.label,
+        coordinator_worktree.as_deref(),
+        priority,
+        || {
+            let rebuild_started = Instant::now();
+            let rebuild_label = action.label;
+            let rebuild_action = action.action;
+            let rebuild_worktree_hash = ctx.worktree_hash.clone();
+            tracing::info!(
+                target: "gwt::index",
+                scope = rebuild_label,
+                worktree_hash = %rebuild_worktree_hash,
+                action = rebuild_action,
+                "project index rebuild started"
+            );
+            let output = run_runner_rebuild(&ctx, action, qos).map_err(|err| err.to_string())?;
+            tracing::info!(
+                target: "gwt::index",
+                scope = rebuild_label,
+                worktree_hash = %rebuild_worktree_hash,
+                action = rebuild_action,
+                elapsed_ms = rebuild_started.elapsed().as_millis() as u64,
+                exit_status = %output.status,
+                "project index rebuild completed"
+            );
+            if !output.status.success() {
+                return Err(format_runner_failure(&output));
+            }
+            if runner_payload_yielded(&output.stdout) {
+                tracing::info!(
+                    target: "gwt::index",
+                    scope = rebuild_label,
+                    "project index rebuild yielded to a higher-priority claimant"
+                );
+                return Ok(BuildStep::Yielded);
+            }
+            Ok(BuildStep::Done(()))
+        },
+    )?;
+    if let CoordinatedRun::Coalesced = run {
+        tracing::info!(
+            target: "gwt::index",
+            scope = action.label,
+            "project index rebuild coalesced into a concurrent equivalent job"
+        );
     }
     Ok(())
+}
+
+/// True when the runner parked a resumable continuation instead of
+/// completing (Phase 70 FR-389 `yielded` payload field).
+pub(crate) fn runner_payload_yielded(stdout: &[u8]) -> bool {
+    serde_json::from_slice::<serde_json::Value>(stdout)
+        .ok()
+        .and_then(|payload| payload.get("yielded").and_then(serde_json::Value::as_bool))
+        .unwrap_or(false)
 }
 
 /// Collect every unhealthy `(scope, worktree_hash?)` cell from an aggregated
@@ -2607,5 +2829,106 @@ detached
         );
         assert_eq!(payload["worktrees"]["wtAhash"]["branch"], "develop");
         assert_eq!(payload["worktrees"]["wtBhash"]["path"], "/abs/wtB");
+    }
+
+    #[test]
+    fn run_coordinated_index_job_runs_the_owner_build() {
+        let run = run_coordinated_index_job(
+            "ownertestrepo001",
+            "files",
+            Some("wt001"),
+            JobPriority::Background,
+            || Ok(BuildStep::Done(7)),
+        )
+        .expect("owner build succeeds");
+        match run {
+            CoordinatedRun::Ran(value) => assert_eq!(value, 7),
+            CoordinatedRun::Coalesced => panic!("no concurrent job exists"),
+        }
+    }
+
+    #[test]
+    fn run_coordinated_index_job_propagates_build_failures() {
+        let error = run_coordinated_index_job::<()>(
+            "failtestrepo0001",
+            "issues",
+            None,
+            JobPriority::Background,
+            || Err("boom".to_string()),
+        )
+        .expect_err("build failure propagates");
+        assert_eq!(error, "boom");
+    }
+
+    #[test]
+    fn run_coordinated_index_job_resumes_after_a_yield() {
+        let mut calls = 0;
+        let run = run_coordinated_index_job(
+            "yieldtestrepo001",
+            "files",
+            Some("wt002"),
+            JobPriority::Background,
+            || {
+                calls += 1;
+                if calls == 1 {
+                    Ok(BuildStep::Yielded)
+                } else {
+                    Ok(BuildStep::Done(()))
+                }
+            },
+        )
+        .expect("yielded build resumes");
+        assert!(matches!(run, CoordinatedRun::Ran(())));
+        assert_eq!(calls, 2, "the build must re-run after releasing the lease");
+    }
+
+    #[test]
+    fn run_coordinated_index_job_coalesces_into_a_running_equivalent_job() {
+        use gwt_core::index_coordinator::{IndexCoordinator, JobAdmission, JobOutcome, TargetKey};
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let started = tmp.path().join("owner-started");
+        let release = tmp.path().join("release-owner");
+        let started_for_thread = started.clone();
+        let release_for_thread = release.clone();
+
+        let owner = std::thread::spawn(move || {
+            let coordinator = IndexCoordinator::open_default().expect("open coordinator");
+            let key = TargetKey::repo_shared("coalescetestrepo", "specs");
+            let guard = match coordinator
+                .request_job(
+                    &key,
+                    JobPriority::Background,
+                    std::time::Duration::from_secs(5),
+                )
+                .expect("request job")
+            {
+                JobAdmission::Owner(guard) => guard,
+                JobAdmission::Joined(_) => panic!("owner thread must win the target"),
+            };
+            std::fs::write(&started_for_thread, b"started").expect("write marker");
+            let deadline = Instant::now() + Duration::from_secs(10);
+            while !release_for_thread.exists() {
+                assert!(Instant::now() < deadline, "release signal never arrived");
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            guard.complete(JobOutcome::Completed).expect("complete");
+        });
+
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while !started.exists() {
+            assert!(Instant::now() < deadline, "owner never started");
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        std::fs::write(&release, b"go").expect("write release");
+        let run = run_coordinated_index_job::<()>(
+            "coalescetestrepo",
+            "specs",
+            None,
+            JobPriority::Background,
+            || panic!("a coalesced caller must not run its own build"),
+        )
+        .expect("coalesced join succeeds");
+        assert!(matches!(run, CoordinatedRun::Coalesced));
+        owner.join().expect("owner thread");
     }
 }

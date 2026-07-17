@@ -122,17 +122,26 @@ pub fn run<E: CliEnv>(
     cmd: SearchCommand,
     out: &mut String,
 ) -> Result<i32, SpecOpsError> {
-    let outcome = crate::index_search::search_project_index(
+    let outcome = match crate::index_search::search_project_index(
         env.repo_path(),
         &cmd.query,
         &cmd.scopes,
         None,
         cmd.match_mode,
-        // No watcher exists on the CLI path: let the runner self-heal
-        // missing or stale indexes inline (SPEC-1942 FR-107).
+        // No watcher exists on the CLI path: the search state machine joins
+        // the coordinated repair and waits before failing (Phase 70 FR-388).
         true,
-    )
-    .map_err(|message| SpecOpsError::from(ApiError::Unexpected(message)))?;
+    ) {
+        Ok(outcome) => outcome,
+        Err(error @ crate::index_search::IndexSearchError::NotReady(_)) => {
+            // FR-388: typed retryable failure, never a silent empty success.
+            render_not_ready(out, cmd.json, &error);
+            return Ok(error.exit_code());
+        }
+        Err(error) => {
+            return Err(SpecOpsError::from(ApiError::Unexpected(error.to_string())));
+        }
+    };
     let mut results = outcome.results;
     let mut suggestions = outcome.suggestions;
     if let Some(limit) = cmd.n_results {
@@ -140,11 +149,45 @@ pub fn run<E: CliEnv>(
         suggestions.truncate(limit);
     }
     if cmd.json {
-        render_json(out, &cmd.query, &results, &suggestions);
+        render_json(
+            out,
+            &cmd.query,
+            &results,
+            &suggestions,
+            &outcome.stale_scopes,
+            outcome.refresh_queued,
+        );
     } else {
         render_text(out, &results, &suggestions);
+        if !outcome.stale_scopes.is_empty() {
+            out.push_str(&format!(
+                "note: stale scopes [{}] served from the last verified index; refresh queued\n",
+                outcome.stale_scopes.join(", ")
+            ));
+        }
     }
     Ok(0)
+}
+
+fn render_not_ready(out: &mut String, json: bool, error: &crate::index_search::IndexSearchError) {
+    let crate::index_search::IndexSearchError::NotReady(not_ready) = error else {
+        return;
+    };
+    if json {
+        let payload = serde_json::json!({
+            "ok": false,
+            "error_code": "INDEX_NOT_READY",
+            "retryable": true,
+            "reason": not_ready.reason,
+            "affected_scopes": not_ready.affected_scopes,
+            "waited_ms": not_ready.waited_ms,
+            "retry_after_ms": not_ready.retry_after_ms,
+        });
+        out.push_str(&payload.to_string());
+        out.push('\n');
+    } else {
+        out.push_str(&format!("index not ready: {error}\n"));
+    }
 }
 
 fn render_json(
@@ -152,13 +195,21 @@ fn render_json(
     query: &str,
     results: &[IndexSearchResult],
     suggestions: &[IndexSearchResult],
+    stale_scopes: &[String],
+    refresh_queued: bool,
 ) {
-    let payload = serde_json::json!({
+    let mut payload = serde_json::json!({
         "ok": true,
         "query": query,
         "results": results,
         "suggestions": suggestions,
     });
+    // Additive freshness metadata (FR-387/FR-398): older clients that do not
+    // understand these fields keep processing the legacy success payload.
+    if !stale_scopes.is_empty() {
+        payload["stale_scopes"] = serde_json::json!(stale_scopes);
+        payload["refresh_queued"] = serde_json::json!(refresh_queued);
+    }
     out.push_str(&payload.to_string());
     out.push('\n');
 }
@@ -361,6 +412,8 @@ mod tests {
             "q",
             &[sample_result(IndexSearchScope::Issues, "issue hit")],
             &[sample_result(IndexSearchScope::Specs, "spec suggestion")],
+            &[],
+            false,
         );
         let payload: serde_json::Value = serde_json::from_str(out.trim()).expect("valid JSON");
         assert_eq!(payload["ok"], serde_json::Value::Bool(true));
@@ -368,6 +421,40 @@ mod tests {
         assert_eq!(payload["results"][0]["scope"], "issues");
         assert_eq!(payload["results"][0]["title"], "issue hit");
         assert_eq!(payload["suggestions"][0]["scope"], "specs");
+        // No stale metadata unless scopes were actually stale (FR-398
+        // additive fields).
+        assert!(payload.get("stale_scopes").is_none());
+    }
+
+    #[test]
+    fn render_json_adds_freshness_metadata_for_stale_scopes() {
+        let mut out = String::new();
+        render_json(&mut out, "q", &[], &[], &["issues".to_string()], true);
+        let payload: serde_json::Value = serde_json::from_str(out.trim()).expect("valid JSON");
+        assert_eq!(payload["ok"], serde_json::Value::Bool(true));
+        assert_eq!(payload["stale_scopes"][0], "issues");
+        assert_eq!(payload["refresh_queued"], serde_json::Value::Bool(true));
+    }
+
+    #[test]
+    fn render_not_ready_json_reports_retryable_error_contract() {
+        use crate::index_search::{IndexSearchError, IndexSearchNotReady};
+        let mut out = String::new();
+        let error = IndexSearchError::NotReady(IndexSearchNotReady {
+            reason: "files index is missing".to_string(),
+            affected_scopes: vec!["files".to_string()],
+            waited_ms: 30_100,
+            retry_after_ms: 5_000,
+        });
+        render_not_ready(&mut out, true, &error);
+        let payload: serde_json::Value = serde_json::from_str(out.trim()).expect("valid JSON");
+        assert_eq!(payload["ok"], serde_json::Value::Bool(false));
+        assert_eq!(payload["error_code"], "INDEX_NOT_READY");
+        assert_eq!(payload["retryable"], serde_json::Value::Bool(true));
+        assert_eq!(payload["affected_scopes"][0], "files");
+        assert_eq!(payload["waited_ms"], 30_100);
+        assert_eq!(payload["retry_after_ms"], 5_000);
+        assert_eq!(error.exit_code(), 75);
     }
 
     #[test]
@@ -392,5 +479,138 @@ mod tests {
         let mut out = String::new();
         render_text(&mut out, &[], &[]);
         assert!(out.contains("no results"), "empty notice missing: {out}");
+    }
+
+    #[test]
+    fn render_not_ready_text_mentions_the_retry_contract() {
+        use crate::index_search::{IndexSearchError, IndexSearchNotReady};
+        let mut out = String::new();
+        let error = IndexSearchError::NotReady(IndexSearchNotReady {
+            reason: "files index is missing".to_string(),
+            affected_scopes: vec!["files".to_string()],
+            waited_ms: 30_000,
+            retry_after_ms: 5_000,
+        });
+        render_not_ready(&mut out, false, &error);
+        assert!(out.contains("index not ready"), "{out}");
+        assert!(out.contains("files"), "{out}");
+        // Non-NotReady errors render nothing (handled by the caller).
+        let mut untouched = String::new();
+        render_not_ready(
+            &mut untouched,
+            true,
+            &IndexSearchError::Other("boom".to_string()),
+        );
+        assert!(untouched.is_empty());
+    }
+
+    /// Phase 70 (Issue #3264): the CLI search surface reports stale scopes
+    /// additively and returns a typed retryable exit for missing scopes.
+    #[cfg(unix)]
+    #[test]
+    fn run_reports_stale_metadata_and_not_ready_exit() {
+        use gwt_core::test_support::ScopedEnvVar;
+        use std::os::unix::fs::PermissionsExt;
+
+        let _lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let home = tmp.path().join("home");
+        std::fs::create_dir_all(&home).expect("home");
+        let _home = ScopedEnvVar::set("HOME", &home);
+        let _userprofile = ScopedEnvVar::set("USERPROFILE", &home);
+
+        let repo = tmp.path().join("repo");
+        std::fs::create_dir_all(&repo).expect("repo dir");
+        let git = |args: &[&str], cwd: &std::path::Path| {
+            let output = gwt_core::process::hidden_command("git")
+                .args(args)
+                .current_dir(cwd)
+                .output()
+                .expect("git");
+            assert!(
+                output.status.success(),
+                "git {args:?}: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+        };
+        git(&["init", repo.to_str().unwrap()], tmp.path());
+        git(&["config", "user.email", "test@example.com"], &repo);
+        git(&["config", "user.name", "Test User"], &repo);
+        git(
+            &[
+                "remote",
+                "add",
+                "origin",
+                "https://github.com/example/project.git",
+            ],
+            &repo,
+        );
+        std::fs::write(repo.join("README.md"), "# repo\n").expect("readme");
+        git(&["add", "README.md"], &repo);
+        git(&["commit", "-m", "init"], &repo);
+
+        let runner_log = tmp.path().join("runner-log.txt");
+        let _log_env = ScopedEnvVar::set("GWT_FAKE_RUNNER_LOG", &runner_log);
+        let payload =
+            r#"{"ok": true, "scopes": {"issues": {"state": "stale"}}, "stale_scopes": ["issues"]}"#;
+        let _payload_env = ScopedEnvVar::set("GWT_FAKE_RUNNER_PAYLOAD", payload);
+        let python = gwt_core::runtime::project_index_python_path();
+        std::fs::create_dir_all(python.parent().expect("venv dir")).expect("create venv dir");
+        std::fs::write(
+            &python,
+            "#!/bin/sh\necho \"$@\" >> \"$GWT_FAKE_RUNNER_LOG\"\nprintf '%s\\n' \"$GWT_FAKE_RUNNER_PAYLOAD\"\n",
+        )
+        .expect("fake python");
+        std::fs::set_permissions(&python, std::fs::Permissions::from_mode(0o755)).expect("chmod");
+
+        let mut env = crate::cli::env::TestEnv::new(tmp.path().join("cache"));
+        env.repo_path = repo.clone();
+
+        // Text mode: verified results + stale note.
+        let mut out = String::new();
+        let command = SearchCommand {
+            query: "stale lookup".to_string(),
+            scopes: vec![IndexSearchScope::Issues],
+            match_mode: IndexSearchMatchMode::Semantic,
+            n_results: Some(5),
+            json: false,
+        };
+        let code = run(&mut env, command.clone(), &mut out).expect("search runs");
+        assert_eq!(code, 0, "{out}");
+        assert!(out.contains("stale scopes [issues]"), "{out}");
+
+        // JSON mode carries the additive freshness metadata.
+        let mut out = String::new();
+        let mut json_command = command.clone();
+        json_command.json = true;
+        let code = run(&mut env, json_command, &mut out).expect("json search runs");
+        assert_eq!(code, 0, "{out}");
+        assert!(out.contains("\"stale_scopes\""), "{out}");
+
+        // Missing scopes return the typed retryable exit code (FR-388).
+        let _wait = ScopedEnvVar::set("GWT_INDEX_SEARCH_REPAIR_WAIT_MS", "100");
+        let missing_payload = r#"{"ok": true, "scopes": {"issues": {"state": "missing"}}}"#;
+        let _missing_env = ScopedEnvVar::set("GWT_FAKE_RUNNER_PAYLOAD", missing_payload);
+        let mut out = String::new();
+        let mut not_ready = command;
+        not_ready.json = true;
+        let code = run(&mut env, not_ready, &mut out).expect("not-ready returns typed exit");
+        assert_eq!(code, 75, "{out}");
+        assert!(out.contains("INDEX_NOT_READY"), "{out}");
+
+        // The stale refresh queued in the background must land before the
+        // scoped HOME reverts (single-flight rebuild against the fake runner).
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        while !std::fs::read_to_string(&runner_log)
+            .unwrap_or_default()
+            .contains("--action index-issues")
+        {
+            if std::time::Instant::now() >= deadline {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(25));
+        }
     }
 }

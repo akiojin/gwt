@@ -28,6 +28,114 @@ def emit(payload: dict) -> None:
     sys.stdout.flush()
 
 
+# ---------------------------------------------------------------------
+# Phase 70 (SPEC #1939 / Issue #3264): QoS thread caps and priority
+# ---------------------------------------------------------------------
+
+# FR-385: thread environment must be configured before torch /
+# sentence-transformers are imported, so this section stays stdlib-only.
+QOS_THREAD_CAPS = {"background": "2", "interactive": "4"}
+QOS_THREAD_ENV_KEYS = (
+    "OMP_NUM_THREADS",
+    "OPENBLAS_NUM_THREADS",
+    "MKL_NUM_THREADS",
+    "NUMEXPR_NUM_THREADS",
+    "VECLIB_MAXIMUM_THREADS",
+)
+
+
+def default_qos_for_action(action: str) -> str:
+    """Index builds are background work; searches and light actions default
+    to interactive so legacy callers keep their latency profile (FR-398)."""
+    return "background" if action.startswith("index") else "interactive"
+
+
+def configure_qos_threads(qos: str) -> None:
+    """Apply the FR-385 QoS profile: embedding thread caps (background=2 /
+    interactive=4), inter-op 1, tokenizer parallelism off, and a lowered
+    process priority for background work. Must run before the lazy model
+    import; it never imports torch itself."""
+    caps = QOS_THREAD_CAPS.get(qos)
+    if caps is None:
+        raise ValueError(f"unknown qos profile: {qos}")
+    for key in QOS_THREAD_ENV_KEYS:
+        os.environ[key] = caps
+    os.environ["TOKENIZERS_PARALLELISM"] = "false"
+    torch = sys.modules.get("torch")
+    if torch is not None:
+        try:
+            torch.set_num_threads(int(caps))
+            torch.set_num_interop_threads(1)
+        except Exception:
+            # set_num_interop_threads raises once parallel work has started;
+            # the env caps above still bound any new thread pools.
+            pass
+    if qos == "background":
+        _lower_process_priority()
+
+
+def _lower_process_priority() -> None:
+    if os.name == "nt":  # pragma: no cover - Windows-only branch
+        try:
+            import ctypes
+
+            below_normal_priority_class = 0x00004000
+            handle = ctypes.windll.kernel32.GetCurrentProcess()
+            ctypes.windll.kernel32.SetPriorityClass(handle, below_normal_priority_class)
+        except Exception:
+            pass
+    else:
+        try:
+            os.nice(10)
+        except OSError:
+            pass
+
+
+# ---------------------------------------------------------------------
+# Phase 70: cooperative yield against the host-wide coordinator
+# ---------------------------------------------------------------------
+
+_QOS_PRIORITY_RANK = {
+    "interactive-search": 0,
+    "manual-rebuild": 1,
+    "background": 2,
+}
+
+
+def _coordinator_root() -> Path:
+    """Coordinator root shared with the Rust side. Resolution mirrors
+    `gwt_index_root` (HOME / USERPROFILE) so both halves observe the same
+    directory; `GWT_INDEX_COORDINATOR_ROOT` is the explicit override."""
+    override = os.environ.get("GWT_INDEX_COORDINATOR_ROOT")
+    if override:
+        return Path(override)
+    home = os.environ.get("HOME") or os.environ.get("USERPROFILE") or str(Path.home())
+    return Path(home) / ".gwt" / "runtime" / "index-coordinator"
+
+
+def _pending_higher_priority(than: str) -> bool:
+    """True when a claimant with priority strictly higher than `than` is
+    pending on the host-wide heavy lease (FR-389). Presence of the pending
+    registration is the signal; stale files are swept by the Rust side, so
+    the worst case is one unnecessary yield."""
+    pending_dir = _coordinator_root() / "heavy.pending"
+    try:
+        entries = list(pending_dir.iterdir())
+    except OSError:
+        return False
+    rank = _QOS_PRIORITY_RANK.get(than, 99)
+    for path in entries:
+        if path.suffix != ".json":
+            continue
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            continue
+        if _QOS_PRIORITY_RANK.get(data.get("priority"), 99) < rank:
+            return True
+    return False
+
+
 INDEX_PATH_POLICY_FILE = "index_path_policy.json"
 FALLBACK_INDEX_PATH_POLICY = {
     "schema_version": 1,
@@ -1536,6 +1644,14 @@ def _scan_files(project_root: Path, bucket_filter: Optional[str]) -> List[Path]:
     return out
 
 
+def _content_hash_for(path: Path) -> Optional[str]:
+    """Stable content hash for FR-391 embedding reuse."""
+    try:
+        return hashlib.sha256(path.read_bytes()).hexdigest()[:16]
+    except OSError:
+        return None
+
+
 def _build_manifest_entries(project_root: Path, paths: List[Path]) -> List[Dict[str, Any]]:
     entries: List[Dict[str, Any]] = []
     for fpath in paths:
@@ -1548,6 +1664,7 @@ def _build_manifest_entries(project_root: Path, paths: List[Path]) -> List[Dict[
             "path": rel,
             "mtime": int(stat.st_mtime),
             "size": int(stat.st_size),
+            "content_hash": _content_hash_for(fpath),
         })
     entries.sort(key=lambda e: e["path"])
     return entries
@@ -1673,6 +1790,246 @@ def build_embedding_document(
 # ---------------------------------------------------------------------
 
 
+EMBED_CHECKPOINT_BATCH = 16
+STAGING_DIR_SUFFIX = ".staging"
+CONTINUATION_FILENAME = "continuation.json"
+GENERATIONS_DIR_SUFFIX = ".gen"
+ACTIVE_POINTER_FILENAME = "active.json"
+GENERATION_GC_SECONDS = 24 * 3600
+
+
+def _staging_dir_for(db_path: Path) -> Path:
+    return db_path.parent / (db_path.name + STAGING_DIR_SUFFIX)
+
+
+# ---------------------------------------------------------------------
+# Phase 70 FR-390: versioned generation store with an atomic active pointer
+# ---------------------------------------------------------------------
+
+
+def generations_root(db_path: Path) -> Path:
+    """Sibling directory holding immutable generations + the active pointer."""
+    return db_path.parent / (db_path.name + GENERATIONS_DIR_SUFFIX)
+
+
+def active_pointer_path(db_path: Path) -> Path:
+    return generations_root(db_path) / ACTIVE_POINTER_FILENAME
+
+
+def _read_active_pointer(db_path: Path) -> Optional[Dict[str, Any]]:
+    pointer_path = active_pointer_path(db_path)
+    try:
+        payload = json.loads(pointer_path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    if not isinstance(payload, dict) or not isinstance(payload.get("generation"), str):
+        return None
+    return payload
+
+
+def _active_pointer_corrupt(db_path: Path) -> bool:
+    """True when an active pointer file exists but cannot be trusted."""
+    pointer_path = active_pointer_path(db_path)
+    if not pointer_path.is_file():
+        return False
+    pointer = _read_active_pointer(db_path)
+    if pointer is None:
+        return True
+    return not (generations_root(db_path) / pointer["generation"]).is_dir()
+
+
+def resolve_active_store(db_path: Path) -> Path:
+    """Directory readers must open: the active generation when the pointer is
+    valid, else the legacy scope directory (AS-17 lazy migration)."""
+    pointer = _read_active_pointer(db_path)
+    if pointer is not None:
+        generation_dir = generations_root(db_path) / pointer["generation"]
+        if generation_dir.is_dir():
+            return generation_dir
+    return db_path
+
+
+def _publish_generation(
+    db_path: Path,
+    staging: Path,
+    scope: str,
+    document_count: int,
+    source_fingerprint: Optional[str] = None,
+) -> Dict[str, Any]:
+    """Atomically publish `staging` as the new active generation (FR-390).
+
+    Under the exclusive target lock: rename the staging store into an
+    immutable generation directory, atomically replace `active.json`, clean
+    the legacy in-place store (lazy migration), and GC generations that have
+    been abandoned for more than 24 hours (keeping the previous active one).
+    Any OS failure returns a typed `PUBLISH_FAILED` payload — the previous
+    active generation stays untouched.
+    """
+    gen_root = generations_root(db_path)
+    generation_name = f"gen-{int(time.time() * 1000)}-{os.getpid()}"
+    try:
+        gen_root.mkdir(parents=True, exist_ok=True)
+        with acquire_lock(db_path, exclusive=True):
+            previous = _read_active_pointer(db_path)
+            generation_dir = gen_root / generation_name
+            os.replace(staging, generation_dir)
+            for residue in (CONTINUATION_FILENAME, LOCK_FILENAME):
+                with contextlib.suppress(OSError):
+                    (generation_dir / residue).unlink()
+            pointer_payload = {
+                "schema_version": INDEX_SCHEMA_VERSION,
+                "generation": generation_name,
+                "scope": scope,
+                "document_count": document_count,
+                "published_at": _now_utc().isoformat(),
+            }
+            if source_fingerprint is not None:
+                pointer_payload["source_fingerprint"] = source_fingerprint
+            pointer_tmp = gen_root / f".{ACTIVE_POINTER_FILENAME}.tmp-{os.getpid()}"
+            pointer_tmp.write_text(
+                json.dumps(pointer_payload, ensure_ascii=True), encoding="utf-8"
+            )
+            os.replace(pointer_tmp, active_pointer_path(db_path))
+            # Lazy migration (AS-17): the legacy in-place store is no longer
+            # read once a pointer exists; drop its chroma files (metadata
+            # like the issues meta.json stays in place).
+            _remove_legacy_chroma_files(db_path)
+            _gc_abandoned_generations(
+                gen_root,
+                keep={
+                    generation_name,
+                    previous.get("generation") if previous else None,
+                },
+            )
+    except OSError as error:
+        return {
+            "ok": False,
+            "error_code": "PUBLISH_FAILED",
+            "error": f"failed to publish index generation: {error}",
+            "scope": scope,
+            "retryable": True,
+        }
+    return {"ok": True, "generation": generation_name}
+
+
+def _gc_abandoned_generations(gen_root: Path, keep: set) -> None:
+    """Remove generation directories abandoned for more than 24 hours.
+
+    The active and previous generations are always kept; recently abandoned
+    directories are retained so a crashed build can be inspected / resumed.
+    Deletion failures (e.g. Windows open handles) are ignored — the next
+    publish retries.
+    """
+    now = time.time()
+    try:
+        entries = list(gen_root.iterdir())
+    except OSError:
+        return
+    for entry in entries:
+        if not entry.is_dir() or entry.name in keep:
+            continue
+        try:
+            abandoned_for = now - entry.stat().st_mtime
+        except OSError:  # pragma: no cover - entry vanished mid-scan
+            continue
+        if abandoned_for > GENERATION_GC_SECONDS:
+            shutil.rmtree(entry, ignore_errors=True)
+
+
+def _looks_like_chroma_segment(name: str) -> bool:
+    return bool(re.fullmatch(r"[0-9a-fA-F-]{36}", name))
+
+
+def _remove_legacy_chroma_files(db_path: Path) -> None:
+    """Drop chroma store artifacts from a legacy scope dir after a
+    generation publish, preserving metadata files (e.g. issues meta.json)."""
+    with contextlib.suppress(OSError):
+        (db_path / "chroma.sqlite3").unlink()
+    try:
+        children = list(db_path.iterdir())
+    except OSError:
+        return
+    for child in children:
+        if child.is_dir() and _looks_like_chroma_segment(child.name):
+            shutil.rmtree(child, ignore_errors=True)
+
+
+def _full_build_store(db_path: Path, mode: str) -> tuple:
+    """Destination store for an index build (FR-390).
+
+    Incremental updates write into the resolved active store; full rebuilds
+    write into a fresh staging dir that is atomically published afterwards —
+    the live store is never reset in place.
+    """
+    if mode == "incremental":
+        return resolve_active_store(db_path), None
+    staging = _staging_dir_for(db_path)
+    shutil.rmtree(staging, ignore_errors=True)
+    staging.mkdir(parents=True, exist_ok=True)
+    return staging, staging
+
+
+def _finish_full_build(db_path: Path, staging: Optional[Path], scope: str):
+    """Publish a staged full build; no-op for incremental builds.
+
+    Returns the typed error payload when publishing failed, else None.
+    """
+    if staging is None:
+        return None
+    document_count = 0
+    try:
+        client, collection = _open_chroma_collection(
+            staging, _scope_collection_name(scope)
+        )
+        try:
+            document_count = _safe_collection_count(collection)
+        finally:
+            _close_chroma_client(client)
+    except Exception:
+        document_count = 0
+    publish = _publish_generation(
+        db_path, staging, scope=scope, document_count=document_count
+    )
+    return None if publish.get("ok") else publish
+
+
+def _manifest_fingerprint(entries: List[Dict[str, Any]]) -> str:
+    payload = json.dumps(entries, sort_keys=True, ensure_ascii=True).encode("utf-8")
+    return hashlib.sha256(payload).hexdigest()[:16]
+
+
+def _write_continuation(
+    continuation_path: Path,
+    scope: str,
+    fingerprint: str,
+    done: int,
+    total: int,
+    reused: int = 0,
+) -> None:
+    continuation_path.parent.mkdir(parents=True, exist_ok=True)
+    continuation_path.write_text(
+        json.dumps(
+            {
+                "schema_version": INDEX_SCHEMA_VERSION,
+                "scope": scope,
+                "fingerprint": fingerprint,
+                "done": done,
+                "total": total,
+                "reused": reused,
+            },
+            ensure_ascii=True,
+        ),
+        encoding="utf-8",
+    )
+
+
+def _read_continuation(continuation_path: Path) -> Optional[Dict[str, Any]]:
+    try:
+        return json.loads(continuation_path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+
+
 def action_index_files_v2(
     project_root: str,
     repo_hash: str,
@@ -1680,8 +2037,16 @@ def action_index_files_v2(
     mode: str = "full",
     db_root: Optional[Path] = None,
     scope: str = "files",
+    qos: str = "background",
 ) -> dict:
-    """Index project files into ChromaDB under the v2 layout."""
+    """Index project files into ChromaDB under the v2 layout.
+
+    Full mode builds into a resumable staging store and only replaces the
+    active store after the staging build finished (Phase 70 FR-389/FR-390):
+    the previous index keeps serving reads during the build, and a
+    background build yields at 16-document checkpoints when a
+    higher-priority claimant is pending on the heavy lease.
+    """
     root = Path(project_root).resolve()
 
     db_path = resolve_db_path(repo_hash, worktree_hash, scope, db_root=db_root)
@@ -1700,47 +2065,42 @@ def action_index_files_v2(
         }
     )
 
-    with acquire_lock(db_path, exclusive=True):
-        if mode != "incremental":
-            _reset_chroma_store(db_path)
-        make_collection = (
-            _make_chroma_collection
-            if mode == "incremental"
-            else _make_chroma_collection_repairing
+    if mode != "incremental":
+        return _index_files_full_with_staging(
+            root=root,
+            db_path=db_path,
+            scope=scope,
+            paths=paths,
+            new_entries=new_entries,
+            repo_hash=repo_hash,
+            worktree_hash=worktree_hash,
+            db_root=db_root,
+            qos=qos,
         )
-        client, collection = make_collection(
+
+    with acquire_lock(db_path, exclusive=True):
+        client, collection = _make_chroma_collection(
             db_path,
             V2_FILES_CODE_COLLECTION if scope == "files" else V2_FILES_DOCS_COLLECTION,
         )
         try:
-            if mode == "incremental":
-                old_entries = read_manifest(db_path, scope=scope)
-                diff = compute_manifest_diff(old_entries, new_entries)
-                to_embed = diff["added"] + diff["changed"]
-                to_delete = diff["removed"]
+            old_entries = read_manifest(db_path, scope=scope)
+            diff = compute_manifest_diff(old_entries, new_entries)
+            to_embed = diff["added"] + diff["changed"]
+            to_delete = diff["removed"]
 
-                embedded_paths = [root / rel for rel in to_embed]
-                count = embed_documents_for_paths(embedded_paths, root, collection)
-                _delete_paths_from_collection(collection, to_delete)
-                emit_progress(
-                    {
-                        "phase": "diff",
-                        "scope": scope,
-                        "added": len(diff["added"]),
-                        "changed": len(diff["changed"]),
-                        "removed": len(diff["removed"]),
-                    }
-                )
-            else:
-                # full mode
-                try:
-                    existing = collection.get()
-                    if existing.get("ids"):
-                        collection.delete(ids=existing["ids"])
-                except Exception:
-                    pass
-
-                count = embed_documents_for_paths(paths, root, collection)
+            embedded_paths = [root / rel for rel in to_embed]
+            newly_embedded = embed_documents_for_paths(embedded_paths, root, collection)
+            _delete_paths_from_collection(collection, to_delete)
+            emit_progress(
+                {
+                    "phase": "diff",
+                    "scope": scope,
+                    "added": len(diff["added"]),
+                    "changed": len(diff["changed"]),
+                    "removed": len(diff["removed"]),
+                }
+            )
 
             write_manifest(db_path, scope=scope, entries=new_entries)
             actual_count = _safe_collection_count(collection)
@@ -1771,6 +2131,242 @@ def action_index_files_v2(
         "scope": scope,
         "indexed": actual_count,
         "total": len(new_entries),
+        "newly_embedded": newly_embedded,
+    }
+
+
+def _copy_unchanged_records(
+    db_path: Path,
+    scope: str,
+    staging_collection,
+    collection_name: str,
+    new_hashes: Dict[str, Optional[str]],
+) -> int:
+    """FR-391: copy records whose content hash is unchanged from the previous
+    verified generation into the staging store, reusing their embeddings."""
+    prev_entries = read_manifest(db_path, scope=scope)
+    prev_hashes = {
+        entry.get("path"): entry.get("content_hash") for entry in prev_entries
+    }
+    unchanged = [
+        rel
+        for rel, content_hash in new_hashes.items()
+        if content_hash and prev_hashes.get(rel) == content_hash
+    ]
+    if not unchanged:
+        return 0
+    prev_store = resolve_active_store(db_path)
+    if not (prev_store / "chroma.sqlite3").exists():
+        return 0
+    copied = 0
+    try:
+        with acquire_lock(db_path, exclusive=False):
+            client, previous = _open_chroma_collection(prev_store, collection_name)
+            try:
+                batch = 64
+                for start in range(0, len(unchanged), batch):
+                    ids = unchanged[start : start + batch]
+                    got = previous.get(
+                        ids=ids, include=["embeddings", "documents", "metadatas"]
+                    )
+                    got_ids = got.get("ids") or []
+                    embeddings = got.get("embeddings")
+                    if not got_ids or embeddings is None:  # pragma: no cover - store drift
+                        continue
+                    staging_collection.upsert(
+                        ids=list(got_ids),
+                        embeddings=[list(vector) for vector in embeddings],
+                        documents=got.get("documents"),
+                        metadatas=got.get("metadatas"),
+                    )
+                    copied += len(got_ids)
+            finally:
+                _close_chroma_client(client)
+    except Exception:
+        # Reuse is an optimization: whatever was not copied is re-embedded.
+        return copied
+    return copied
+
+
+def _index_files_full_with_staging(
+    root: Path,
+    db_path: Path,
+    scope: str,
+    paths: List[Path],
+    new_entries: List[Dict[str, Any]],
+    repo_hash: str,
+    worktree_hash: str,
+    db_root: Optional[Path],
+    qos: str,
+) -> dict:
+    """Full rebuild via a resumable staging store and an atomic generation
+    publish (Phase 70 FR-389/FR-390/FR-391)."""
+    collection_name = (
+        V2_FILES_CODE_COLLECTION if scope == "files" else V2_FILES_DOCS_COLLECTION
+    )
+    bucket = "code" if scope == "files" else "docs"
+    staging = _staging_dir_for(db_path)
+    continuation_path = staging / CONTINUATION_FILENAME
+    fingerprint = _manifest_fingerprint(new_entries)
+    total = len(new_entries)
+
+    continuation = _read_continuation(continuation_path)
+    if continuation is not None and (
+        continuation.get("scope") != scope
+        or continuation.get("fingerprint") != fingerprint
+    ):
+        # Sources changed since the parked build: the staged embeddings can
+        # no longer be trusted wholesale, restart the staging build.
+        shutil.rmtree(staging, ignore_errors=True)
+        continuation = None
+    staging.mkdir(parents=True, exist_ok=True)
+
+    new_hashes: Dict[str, Optional[str]] = {
+        entry["path"]: entry.get("content_hash") for entry in new_entries
+    }
+    newly_embedded = 0
+    reused = 0
+    yielded = False
+    with acquire_lock(staging, exclusive=True):
+        client, collection = _make_chroma_collection_repairing(staging, collection_name)
+        try:
+            staged_ids: set = set()
+            if continuation is not None:
+                reused = int(continuation.get("reused", 0))
+                try:
+                    staged_ids = set(collection.get().get("ids") or [])
+                except Exception:  # pragma: no cover - defensive chroma fallback
+                    staged_ids = set()
+            else:
+                # FR-391: reuse unchanged embeddings from the previous
+                # verified generation instead of re-encoding the corpus.
+                reused = _copy_unchanged_records(
+                    db_path, scope, collection, collection_name, new_hashes
+                )
+                if reused:
+                    try:
+                        staged_ids = set(collection.get().get("ids") or [])
+                    except Exception:  # pragma: no cover - defensive chroma fallback
+                        staged_ids = set()
+            pending_paths: List[Path] = []
+            for fpath in paths:
+                try:
+                    rel = normalize_rel_path(fpath.relative_to(root))
+                except ValueError:
+                    continue
+                if rel not in staged_ids:
+                    pending_paths.append(fpath)
+
+            for start in range(0, len(pending_paths), EMBED_CHECKPOINT_BATCH):
+                batch_paths = pending_paths[start : start + EMBED_CHECKPOINT_BATCH]
+                newly_embedded += embed_documents_for_paths(batch_paths, root, collection)
+                done = len(staged_ids) + newly_embedded
+                _write_continuation(
+                    continuation_path,
+                    scope=scope,
+                    fingerprint=fingerprint,
+                    done=done,
+                    total=total,
+                    reused=reused,
+                )
+                emit_progress(
+                    {
+                        "phase": "indexing",
+                        "scope": scope,
+                        "mode": "full",
+                        "done": done,
+                        "total": total,
+                    }
+                )
+                remaining = len(pending_paths) - (start + len(batch_paths))
+                if remaining > 0 and qos == "background" and _pending_higher_priority("background"):
+                    yielded = True
+                    break
+            staged_count = len(staged_ids) + newly_embedded
+            actual_count = _safe_collection_count(collection)
+        finally:
+            _close_chroma_client(client)
+
+    if yielded:
+        emit_progress(
+            {
+                "phase": "yielded",
+                "scope": scope,
+                "staged": staged_count,
+                "total": total,
+            }
+        )
+        return {
+            "ok": True,
+            "scope": scope,
+            "yielded": True,
+            "resumable": True,
+            "indexed": staged_count,
+            "total": total,
+            "newly_embedded": newly_embedded,
+        }
+
+    # FR-392 / AS-10: late revalidation — the sources may have moved while
+    # the staging build ran; a stale generation must never be published.
+    revalidated_entries = _build_manifest_entries(
+        root, _scan_files(root, bucket_filter=bucket)
+    )
+    if _manifest_fingerprint(revalidated_entries) != fingerprint:
+        return {
+            "ok": False,
+            "error_code": "SOURCE_CHANGED",
+            "error": "source files changed during the index build; retry",
+            "scope": scope,
+            "retryable": True,
+        }
+    if actual_count != total:
+        return {
+            "ok": False,
+            "error_code": "BUILD_VERIFY_FAILED",
+            "error": (
+                f"staging store holds {actual_count} documents, expected {total}"
+            ),
+            "scope": scope,
+            "retryable": True,
+        }
+
+    publish = _publish_generation(
+        db_path,
+        staging,
+        scope=scope,
+        document_count=actual_count,
+        source_fingerprint=fingerprint,
+    )
+    if not publish.get("ok"):
+        return publish
+    write_manifest(db_path, scope=scope, entries=new_entries)
+    _write_scope_meta(
+        repo_hash=repo_hash,
+        worktree_hash=worktree_hash,
+        scope=scope,
+        db_root=db_root,
+        updates={
+            "last_repair_at": _now_utc().isoformat(),
+            "document_count": actual_count,
+        },
+    )
+
+    emit_progress(
+        {
+            "phase": "complete",
+            "scope": scope,
+            "mode": "full",
+            "indexed": actual_count,
+            "total": total,
+        }
+    )
+    return {
+        "ok": True,
+        "scope": scope,
+        "indexed": actual_count,
+        "total": total,
+        "newly_embedded": newly_embedded,
+        "reused_embeddings": reused,
     }
 
 
@@ -1846,15 +2442,14 @@ def action_index_specs_v2(
         }
     )
 
-    with acquire_lock(db_path, exclusive=True):
-        if mode != "incremental":
-            _reset_chroma_store(db_path)
+    build_store, staging = _full_build_store(db_path, mode)
+    with acquire_lock(staging if staging is not None else db_path, exclusive=True):
         make_collection = (
             _make_chroma_collection
             if mode == "incremental"
             else _make_chroma_collection_repairing
         )
-        client, collection = make_collection(db_path, V2_SPECS_COLLECTION)
+        client, collection = make_collection(build_store, V2_SPECS_COLLECTION)
         try:
             if mode == "incremental":
                 old_entries = read_manifest(db_path, scope="specs")
@@ -1911,6 +2506,10 @@ def action_index_specs_v2(
             )
         finally:
             _close_chroma_client(client)
+
+    publish_error = _finish_full_build(db_path, staging, scope="specs")
+    if publish_error is not None:
+        return publish_error
 
     emit_progress(
         {
@@ -2337,15 +2936,14 @@ def action_index_memory_v2(
     )
 
     indexed = 0
-    with acquire_lock(db_path, exclusive=True):
-        if mode != "incremental":
-            _reset_chroma_store(db_path)
+    build_store, staging = _full_build_store(db_path, mode)
+    with acquire_lock(staging if staging is not None else db_path, exclusive=True):
         make_collection = (
             _make_chroma_collection
             if mode == "incremental"
             else _make_chroma_collection_repairing
         )
-        client, collection = make_collection(db_path, V2_MEMORY_COLLECTION)
+        client, collection = make_collection(build_store, V2_MEMORY_COLLECTION)
         try:
             old_entries = read_manifest(db_path, scope="memory")
             diff = compute_manifest_diff(old_entries, new_entries)
@@ -2398,6 +2996,10 @@ def action_index_memory_v2(
             )
         finally:
             _close_chroma_client(client)
+
+    publish_error = _finish_full_build(db_path, staging, scope="memory")
+    if publish_error is not None:
+        return publish_error
 
     emit_progress(
         {
@@ -2570,15 +3172,14 @@ def action_index_discussions_v2(
     )
 
     indexed = 0
-    with acquire_lock(db_path, exclusive=True):
-        if mode != "incremental":
-            _reset_chroma_store(db_path)
+    build_store, staging = _full_build_store(db_path, mode)
+    with acquire_lock(staging if staging is not None else db_path, exclusive=True):
         make_collection = (
             _make_chroma_collection
             if mode == "incremental"
             else _make_chroma_collection_repairing
         )
-        client, collection = make_collection(db_path, V2_DISCUSSIONS_COLLECTION)
+        client, collection = make_collection(build_store, V2_DISCUSSIONS_COLLECTION)
         try:
             old_entries = read_manifest(db_path, scope="discussions")
             diff = compute_manifest_diff(old_entries, new_entries)
@@ -2631,6 +3232,10 @@ def action_index_discussions_v2(
             )
         finally:
             _close_chroma_client(client)
+
+    publish_error = _finish_full_build(db_path, staging, scope="discussions")
+    if publish_error is not None:
+        return publish_error
 
     emit_progress(
         {
@@ -2787,15 +3392,14 @@ def action_index_board_v2(
     )
 
     indexed = 0
-    with acquire_lock(db_path, exclusive=True):
-        if mode != "incremental":
-            _reset_chroma_store(db_path)
+    build_store, staging = _full_build_store(db_path, mode)
+    with acquire_lock(staging if staging is not None else db_path, exclusive=True):
         make_collection = (
             _make_chroma_collection
             if mode == "incremental"
             else _make_chroma_collection_repairing
         )
-        client, collection = make_collection(db_path, V2_BOARD_COLLECTION)
+        client, collection = make_collection(build_store, V2_BOARD_COLLECTION)
         try:
             old_entries = read_manifest(db_path, scope="board")
             diff = compute_manifest_diff(old_entries, new_entries)
@@ -2848,6 +3452,10 @@ def action_index_board_v2(
             )
         finally:
             _close_chroma_client(client)
+
+    publish_error = _finish_full_build(db_path, staging, scope="board")
+    if publish_error is not None:
+        return publish_error
 
     emit_progress(
         {
@@ -3165,15 +3773,14 @@ def action_index_works_v2(
     )
 
     indexed = 0
-    with acquire_lock(db_path, exclusive=True):
-        if mode != "incremental":
-            _reset_chroma_store(db_path)
+    build_store, staging = _full_build_store(db_path, mode)
+    with acquire_lock(staging if staging is not None else db_path, exclusive=True):
         make_collection = (
             _make_chroma_collection
             if mode == "incremental"
             else _make_chroma_collection_repairing
         )
-        client, collection = make_collection(db_path, V2_WORKS_COLLECTION)
+        client, collection = make_collection(build_store, V2_WORKS_COLLECTION)
         try:
             old_entries = read_manifest(db_path, scope="works")
             diff = compute_manifest_diff(old_entries, new_entries)
@@ -3226,6 +3833,10 @@ def action_index_works_v2(
             )
         finally:
             _close_chroma_client(client)
+
+    publish_error = _finish_full_build(db_path, staging, scope="works")
+    if publish_error is not None:
+        return publish_error
 
     emit_progress(
         {
@@ -3479,12 +4090,14 @@ def _close_chroma_client(client) -> None:
 
 
 def _scope_document_count(db_path: Path, scope: str) -> tuple[bool, int]:
-    chroma_sqlite = db_path / "chroma.sqlite3"
+    store = resolve_active_store(db_path)
+    chroma_sqlite = store / "chroma.sqlite3"
     if not chroma_sqlite.exists():
         return False, 0
     try:
         with acquire_lock(db_path, exclusive=False):
-            client, collection = _open_chroma_collection(db_path, _scope_collection_name(scope))
+            store = resolve_active_store(db_path)
+            client, collection = _open_chroma_collection(store, _scope_collection_name(scope))
             try:
                 return True, _safe_collection_count(collection)
             finally:
@@ -3503,7 +4116,8 @@ def _scope_status_v2(
     manifest_path = _manifest_path(db_path, scope)
     manifest_entries = read_manifest(db_path, scope=scope)
     manifest_count = len(manifest_entries)
-    exists = (db_path / "chroma.sqlite3").exists()
+    pointer_corrupt = _active_pointer_corrupt(db_path)
+    exists = (resolve_active_store(db_path) / "chroma.sqlite3").exists()
     count_ok, document_count = _scope_document_count(db_path, scope)
     legacy_detected = _legacy_residue_detected(repo_hash, worktree_hash, db_root=db_root)
     scope_meta = _read_scope_meta(repo_hash, worktree_hash, scope, db_root=db_root)
@@ -3512,7 +4126,13 @@ def _scope_status_v2(
     healthy = True
     repair_required = False
 
-    if not exists or not count_ok:
+    if pointer_corrupt:
+        # Phase 70 FR-390: an unreadable active pointer must classify for
+        # repair instead of silently reading an arbitrary store.
+        reason = "active_pointer_corrupt"
+        healthy = False
+        repair_required = True
+    elif not exists or not count_ok:
         reason = "collection_missing"
         healthy = False
         repair_required = True
@@ -3555,7 +4175,9 @@ def _issue_status_v2(
     db_path = resolve_db_path(repo_hash, None, "issues", db_root=db_root)
     meta = _read_issue_meta(db_path) or {}
     source = _issue_cache_source_snapshot(repo_hash)
-    exists = (db_path / "chroma.sqlite3").exists() or (db_path / META_FILENAME).is_file()
+    exists = (resolve_active_store(db_path) / "chroma.sqlite3").exists() or (
+        db_path / META_FILENAME
+    ).is_file()
     count_ok, document_count = _scope_document_count(db_path, "issues")
 
     reason = "ready"
@@ -3652,20 +4274,15 @@ def action_index_issues_v2(
         }
     )
 
-    with acquire_lock(db_path, exclusive=True):
-        _reset_chroma_store(db_path)
+    staging = _staging_dir_for(db_path)
+    shutil.rmtree(staging, ignore_errors=True)
+    staging.mkdir(parents=True, exist_ok=True)
+    with acquire_lock(staging, exclusive=True):
         issues = _load_cached_issue_documents(repo_hash)
         source = _issue_cache_source_snapshot(repo_hash)
 
-        client, collection = _make_chroma_collection_repairing(db_path, V2_ISSUES_COLLECTION)
+        client, collection = _make_chroma_collection_repairing(staging, V2_ISSUES_COLLECTION)
         try:
-            try:
-                existing = collection.get()
-                if existing.get("ids"):
-                    collection.delete(ids=existing["ids"])
-            except Exception:
-                pass
-
             if issues:
                 ids: List[str] = []
                 documents: List[str] = []
@@ -3695,20 +4312,28 @@ def action_index_issues_v2(
                         metadatas=metadatas[i : i + batch],
                     )
 
-            _write_issue_meta(
-                db_path,
-                {
-                    "schema_version": INDEX_SCHEMA_VERSION,
-                    "last_full_refresh": _now_utc().isoformat(),
-                    "ttl_minutes": ttl_minutes,
-                    "document_count": len(issues),
-                    "source_cache_fingerprint": source["fingerprint"],
-                    "source_document_count": source["document_count"],
-                    "source_cache_refresh_at": source.get("cache_refresh_at"),
-                },
-            )
         finally:
             _close_chroma_client(client)
+
+    publish = _publish_generation(
+        db_path, staging, scope="issues", document_count=len(issues)
+    )
+    if not publish.get("ok"):
+        return publish
+    # Meta (TTL / source fingerprint) is only advanced once the new
+    # generation is actually active (FR-390).
+    _write_issue_meta(
+        db_path,
+        {
+            "schema_version": INDEX_SCHEMA_VERSION,
+            "last_full_refresh": _now_utc().isoformat(),
+            "ttl_minutes": ttl_minutes,
+            "document_count": len(issues),
+            "source_cache_fingerprint": source["fingerprint"],
+            "source_document_count": source["document_count"],
+            "source_cache_refresh_at": source.get("cache_refresh_at"),
+        },
+    )
 
     emit_progress(
         {
@@ -3808,7 +4433,12 @@ def _search_fetch_count(scope: str, n_results: int, match_mode: str) -> int:
     return base
 
 
-def _search_collection_v2(collection, query: str, n_results: int) -> List[Dict[str, Any]]:
+def _search_collection_v2(
+    collection,
+    query: str,
+    n_results: int,
+    query_embedding: Optional[List[float]] = None,
+) -> List[Dict[str, Any]]:
     try:
         count = collection.count()
     except Exception:
@@ -3816,11 +4446,20 @@ def _search_collection_v2(collection, query: str, n_results: int) -> List[Dict[s
     if count == 0:
         return []
     actual_n = min(n_results, count)
-    results = collection.query(
-        query_texts=[query],
-        n_results=actual_n,
-        include=["metadatas", "documents", "distances"],
-    )
+    if query_embedding is not None:
+        # Phase 70 AS-2: reuse one query embedding across every scope in a
+        # batch request instead of re-encoding per scope.
+        results = collection.query(
+            query_embeddings=[query_embedding],
+            n_results=actual_n,
+            include=["metadatas", "documents", "distances"],
+        )
+    else:
+        results = collection.query(
+            query_texts=[query],
+            n_results=actual_n,
+            include=["metadatas", "documents", "distances"],
+        )
     items: List[Dict[str, Any]] = []
     if results and results.get("ids") and results["ids"][0]:
         for idx, doc_id in enumerate(results["ids"][0]):
@@ -4152,7 +4791,8 @@ def action_search_v2(
         emit_progress({"phase": "complete", "scope": scope, "total": build.get("indexed", 0)})
 
     with acquire_lock(db_path, exclusive=False):
-        client, collection = _open_chroma_collection(db_path, _scope_collection_name(scope))
+        store = resolve_active_store(db_path)
+        client, collection = _open_chroma_collection(store, _scope_collection_name(scope))
         try:
             collection_count = _safe_collection_count(collection)
             fetch_n = _search_fetch_count(scope, n_results, match_mode)
@@ -4188,6 +4828,70 @@ def action_search_v2(
     return payload
 
 
+def _classify_scope_for_search(
+    repo_hash: str,
+    worktree_hash: Optional[str],
+    scope: str,
+    db_root: Optional[Path] = None,
+) -> tuple:
+    """Map scope health to the Phase 70 search state (FR-387 / FR-388).
+
+    - ``missing``: store was never built.
+    - ``corrupt``: store exists but needs repair before it can be trusted.
+    - ``stale``: verified store is intact but its source moved on (TTL
+      expiry or source cache drift) — serve it and queue a refresh.
+    - ``fresh``: healthy and current.
+    """
+    if scope == "issues":
+        health = _issue_status_v2(repo_hash, db_root=db_root)
+        if not health.get("exists"):
+            return "missing", health
+        if health.get("healthy"):
+            if health.get("ttl_remaining_seconds") == 0:
+                return "stale", health
+            return "fresh", health
+        if health.get("reason") == "source_cache_changed":
+            return "stale", health
+        return "corrupt", health
+    health = _scope_status_v2(repo_hash, worktree_hash, scope, db_root=db_root)
+    if not health.get("exists"):
+        return "missing", health
+    if health.get("repair_required"):
+        return "corrupt", health
+    return "fresh", health
+
+
+def _search_scope_collection(
+    repo_hash: str,
+    worktree_hash: Optional[str],
+    scope: str,
+    query: str,
+    n_results: int,
+    match_mode: str,
+    db_root: Optional[Path],
+    query_embedding: Optional[List[float]],
+) -> Dict[str, Any]:
+    """Query one verified scope store (no health gating, no auto-build)."""
+    db_path = resolve_db_path(repo_hash, worktree_hash, scope, db_root=db_root)
+    with acquire_lock(db_path, exclusive=False):
+        store = resolve_active_store(db_path)
+        client, collection = _open_chroma_collection(store, _scope_collection_name(scope))
+        try:
+            fetch_n = _search_fetch_count(scope, n_results, match_mode)
+            items = _search_collection_v2(
+                collection, query, fetch_n, query_embedding=query_embedding
+            )
+        finally:
+            _close_chroma_client(client)
+    strict_items, suggestion_items = _apply_match_mode(items, query, match_mode)
+    payload = {
+        _scope_result_key(scope): _format_scope_results(scope, strict_items, n_results),
+    }
+    if match_mode == "all_terms":
+        payload["suggestions"] = _format_scope_results(scope, suggestion_items, n_results)
+    return payload
+
+
 def action_search_multi_v2(
     repo_hash: str,
     worktree_hash: Optional[str],
@@ -4198,50 +4902,76 @@ def action_search_multi_v2(
     db_root: Optional[Path] = None,
     match_mode: str = "semantic",
 ) -> Dict[str, Any]:
-    """Search multiple v2 scopes inside one Python process.
+    """Versioned batch search across v2 scopes (Phase 70 FR-384).
 
-    Interactive UI search must not trigger auto-builds; Health/Rebuild owns
-    index repair. Keeping multiple scopes in one process also avoids loading
-    the embedding model once per scope.
+    One process, one model load, one query encode for every requested scope
+    (AS-2). Each scope is classified (fresh / stale / missing / corrupt)
+    before searching: fresh and stale scopes are served from their verified
+    stores, broken scopes are reported in ``scopes`` instead of failing the
+    whole batch or silently returning empty results (FR-387 / FR-388). The
+    Rust caller owns repair scheduling and the stale refresh queue.
     """
-    action_for_scope = {
-        "issues": "search-issues",
-        "specs": "search-specs",
-        "memory": "search-memory",
-        "discussions": "search-discussions",
-        "board": "search-board",
-        "works": "search-works",
-        "files": "search-files",
-        "files-docs": "search-files-docs",
+    valid_scopes = {
+        "issues",
+        "specs",
+        "memory",
+        "discussions",
+        "board",
+        "works",
+        "files",
+        "files-docs",
     }
     payload: Dict[str, Any] = {"ok": True}
+    scope_states: Dict[str, Dict[str, Any]] = {}
+    scope_results: Dict[str, Any] = {}
+    stale_scopes: List[str] = []
+    query_embedding: Optional[List[float]] = None
     for scope in scopes:
-        action = action_for_scope.get(scope)
-        if action is None:
+        if scope not in valid_scopes:
             return {
                 "ok": False,
                 "error_code": "BAD_ARGS",
                 "error": f"unsupported search scope {scope}",
             }
-        result = action_search_v2(
-            action=action,
-            repo_hash=repo_hash,
-            worktree_hash=worktree_hash if scope in ("files", "files-docs") else None,
-            project_root=project_root,
-            query=query,
-            n_results=n_results,
-            no_auto_build=True,
-            db_root=db_root,
-            match_mode=match_mode,
+        scope_worktree = worktree_hash if scope in WORKTREE_SCOPED else None
+        state, health = _classify_scope_for_search(
+            repo_hash, scope_worktree, scope, db_root=db_root
         )
-        if not result.get("ok"):
-            result["scope"] = scope
-            return result
+        if state in ("missing", "corrupt"):
+            scope_states[scope] = {
+                "state": state,
+                "reason": health.get("reason", state),
+            }
+            continue
+        if query_embedding is None:
+            query_embedding = E5EmbeddingFunction().embed_query([query])[0]
+        try:
+            result = _search_scope_collection(
+                repo_hash,
+                scope_worktree,
+                scope,
+                query,
+                n_results,
+                match_mode,
+                db_root,
+                query_embedding,
+            )
+        except Exception as error:  # store broke between classify and query
+            scope_states[scope] = {"state": "corrupt", "reason": str(error)}
+            continue
+        scope_states[scope] = {"state": state}
+        if state == "stale":
+            stale_scopes.append(scope)
+        scope_results[scope] = result
         for key, value in result.items():
             if key == "suggestions":
                 payload.setdefault("suggestions", {})[scope] = value
-            elif key != "ok":
+            else:
                 payload[key] = value
+    payload["scopes"] = scope_states
+    payload["scope_results"] = scope_results
+    if stale_scopes:
+        payload["stale_scopes"] = stale_scopes
     return payload
 
 
@@ -4268,6 +4998,7 @@ def action_status_v2(
     repo_hash: str,
     worktree_hash: Optional[str],
     db_root: Optional[Path] = None,
+    worktree_hashes: Optional[Sequence[str]] = None,
 ) -> dict:
     out: Dict[str, Any] = {
         "issues": _issue_status_v2(repo_hash, db_root=db_root),
@@ -4281,7 +5012,22 @@ def action_status_v2(
         for scope in ("files", "files-docs"):
             out[scope] = _scope_status_v2(repo_hash, worktree_hash, scope, db_root=db_root)
 
-    return {"ok": True, "runtime": _runtime_status_v2(), "status": out}
+    payload = {"ok": True, "runtime": _runtime_status_v2(), "status": out}
+    if worktree_hashes:
+        # Phase 70 FR-393 / AS-13: one batch process reports every requested
+        # worktree so all-worktree status no longer spawns one Python per
+        # worktree.
+        payload["worktrees"] = {
+            hash_value: {
+                scope: _scope_status_v2(
+                    repo_hash, hash_value, scope, db_root=db_root
+                )
+                for scope in ("files", "files-docs")
+            }
+            for hash_value in worktree_hashes
+            if hash_value
+        }
+    return payload
 
 
 # =====================================================================
@@ -4335,6 +5081,16 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--mode", default="full", choices=["full", "incremental"])
     parser.add_argument("--no-auto-build", dest="no_auto_build", action="store_true")
     parser.add_argument("--respect-ttl", dest="respect_ttl", action="store_true")
+    # Phase 70 (Issue #3264): QoS profile for thread caps / process priority.
+    parser.add_argument(
+        "--qos",
+        default=None,
+        choices=["background", "interactive"],
+    )
+    # Explicit index root override (defaults to ~/.gwt/index).
+    parser.add_argument("--db-root", dest="db_root", default="")
+    # Phase 70 AS-13: batch all-worktree status in one process.
+    parser.add_argument("--worktree-hashes", dest="worktree_hashes", default="")
     return parser.parse_args()
 
 
@@ -4342,10 +5098,23 @@ def _dispatch_v2(action: str, args: argparse.Namespace) -> int:
     """Phase 8 v2 dispatcher."""
     repo_hash = args.repo_hash
     worktree_hash = args.worktree_hash or None
+    db_root = Path(args.db_root) if getattr(args, "db_root", "") else None
 
     try:
         if action == "status":
-            emit(action_status_v2(repo_hash, worktree_hash))
+            worktree_hashes = [
+                value.strip()
+                for value in (args.worktree_hashes or "").split(",")
+                if value.strip()
+            ]
+            emit(
+                action_status_v2(
+                    repo_hash,
+                    worktree_hash,
+                    db_root=db_root,
+                    worktree_hashes=worktree_hashes or None,
+                )
+            )
             return 0
 
         if action == "index-issues":
@@ -4373,6 +5142,8 @@ def _dispatch_v2(action: str, args: argparse.Namespace) -> int:
                     worktree_hash=worktree_hash or "",
                     mode=args.mode,
                     scope=scope,
+                    qos=args.qos or default_qos_for_action(action),
+                    db_root=db_root,
                 )
             )
             return 0
@@ -4500,6 +5271,10 @@ def main() -> int:
             "index": "index-files",
             "search": "search-files",
         }.get(args.action, args.action)
+
+        # Phase 70 FR-385: thread caps / priority must be in place before any
+        # action can trigger the lazy model import.
+        configure_qos_threads(args.qos or default_qos_for_action(action))
 
         # Issue #2933: when the caller omitted --repo-hash (e.g. an agent pane
         # whose launch env did not export GWT_REPO_HASH / GWT_WORKTREE_HASH)
