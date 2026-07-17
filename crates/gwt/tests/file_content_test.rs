@@ -1,9 +1,10 @@
-use std::{path::Path, process::Command};
+use std::path::Path;
 
 use gwt::file_content::{
     file_kind, read_binary_chunk, read_text_file, write_binary_byte, write_text_file,
     ContentLimits, Encoding, ExpectedMetadata, FileContentError, FileKind, Newline,
 };
+use gwt_core::process::hidden_command;
 use tempfile::tempdir;
 
 fn write_at(root: &Path, rel: &str, bytes: &[u8]) {
@@ -178,7 +179,7 @@ fn read_text_file_denies_paths_excluded_by_deny_rule() {
 #[test]
 fn read_text_file_denies_paths_excluded_by_git_info_exclude() {
     let dir = tempdir().expect("tempdir");
-    Command::new("git")
+    hidden_command("git")
         .arg("init")
         .arg(dir.path())
         .output()

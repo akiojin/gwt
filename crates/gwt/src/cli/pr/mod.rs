@@ -904,13 +904,13 @@ mod tests {
     }
 
     fn init_fake_current_branch_repo(repo_path: &std::path::Path) {
-        let init = std::process::Command::new("git")
+        let init = gwt_core::process::hidden_command("git")
             .args(["init", "-b", "main"])
             .current_dir(repo_path)
             .status()
             .expect("git init");
         assert!(init.success());
-        let remote = std::process::Command::new("git")
+        let remote = gwt_core::process::hidden_command("git")
             .args([
                 "remote",
                 "add",
@@ -921,7 +921,7 @@ mod tests {
             .status()
             .expect("git remote add");
         assert!(remote.success());
-        let checkout = std::process::Command::new("git")
+        let checkout = gwt_core::process::hidden_command("git")
             .args(["checkout", "-b", "work/20260507-0808"])
             .current_dir(repo_path)
             .status()

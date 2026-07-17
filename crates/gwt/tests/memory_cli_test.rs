@@ -2,8 +2,10 @@ use std::{
     fs,
     io::Write,
     path::{Path, PathBuf},
-    process::{Command, Stdio},
+    process::Stdio,
 };
+
+use gwt_core::process::hidden_command;
 
 /// Run gwtd with an isolated HOME so `memory.add` writes into the
 /// machine-local work-notes scratch of this test only (SPEC-3214 FR-007).
@@ -12,7 +14,7 @@ fn run_gwtd_json(
     home: &std::path::Path,
     payload: serde_json::Value,
 ) -> std::process::Output {
-    let mut child = Command::new(env!("CARGO_BIN_EXE_gwtd"))
+    let mut child = hidden_command(env!("CARGO_BIN_EXE_gwtd"))
         .current_dir(root)
         .env("HOME", home)
         .env("USERPROFILE", home)
@@ -361,7 +363,7 @@ fn memory_added_from_one_worktree_is_visible_from_another() {
     let repo = tmp.path().join("repo");
     fs::create_dir_all(&repo).expect("create repo");
     let git = |args: &[&str], cwd: &Path| {
-        let output = Command::new("git")
+        let output = hidden_command("git")
             .args(args)
             .current_dir(cwd)
             .env("GIT_CONFIG_GLOBAL", "/dev/null")

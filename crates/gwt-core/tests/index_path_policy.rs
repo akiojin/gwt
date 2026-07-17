@@ -1,4 +1,4 @@
-use std::{fs, process::Command};
+use std::fs;
 
 use gwt_core::index::path_policy::{build_project_ignore_matcher, default_index_path_policy};
 use tempfile::tempdir;
@@ -45,7 +45,7 @@ fn index_path_policy_scopes_nested_gitignore_to_own_directory() {
 #[test]
 fn index_path_policy_honors_git_info_exclude() {
     let dir = tempdir().expect("tempdir");
-    Command::new("git")
+    gwt_core::process::hidden_command("git")
         .arg("init")
         .arg(dir.path())
         .output()

@@ -104,11 +104,10 @@ mod tests {
 
     #[test]
     fn branch_recent_subjects_returns_non_merge_subjects_newest_first() {
-        use std::process::Command;
         let dir = tempfile::TempDir::new().unwrap();
         let repo = dir.path();
         let git = |args: &[&str]| {
-            let ok = Command::new("git")
+            let ok = gwt_core::process::hidden_command("git")
                 .args(args)
                 .current_dir(repo)
                 .output()

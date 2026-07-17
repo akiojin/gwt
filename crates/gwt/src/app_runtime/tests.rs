@@ -11959,7 +11959,7 @@ fn app_runtime_row_cleanup_candidate_hides_workspace_with_live_cwd_process() {
     })
     .expect("record work");
     let _child = KillOnDrop(
-        std::process::Command::new("sh")
+        gwt_core::process::hidden_command("sh")
             .arg("-c")
             .arg("sleep 30")
             .current_dir(&worktree)

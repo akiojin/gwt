@@ -483,16 +483,16 @@ mod tests {
     }
 
     fn init_repo(path: &Path) {
-        run(Command::new("git")
+        run(gwt_core::process::hidden_command("git")
             .args(["init", "--initial-branch=main"])
             .current_dir(path));
-        run(Command::new("git")
+        run(gwt_core::process::hidden_command("git")
             .args(["config", "user.email", "test@example.com"])
             .current_dir(path));
-        run(Command::new("git")
+        run(gwt_core::process::hidden_command("git")
             .args(["config", "user.name", "Test User"])
             .current_dir(path));
-        run(Command::new("git")
+        run(gwt_core::process::hidden_command("git")
             .args(["commit", "--allow-empty", "-m", "init"])
             .current_dir(path));
     }
@@ -560,7 +560,7 @@ mod tests {
 
         // Origin ref source: events.jsonl committed on a side branch that is
         // NOT checked out anywhere, forged as a remote tracking ref.
-        run(Command::new("git")
+        run(gwt_core::process::hidden_command("git")
             .args(["checkout", "-b", "work/remote-side"])
             .current_dir(&repo));
         std::fs::write(
@@ -576,16 +576,16 @@ mod tests {
             ),
         )
         .expect("write ref events");
-        run(Command::new("git")
+        run(gwt_core::process::hidden_command("git")
             .args(["add", ".gwt/work/events.jsonl"])
             .current_dir(&repo));
-        run(Command::new("git")
+        run(gwt_core::process::hidden_command("git")
             .args(["commit", "-m", "remote events"])
             .current_dir(&repo));
-        run(Command::new("git")
+        run(gwt_core::process::hidden_command("git")
             .args(["update-ref", "refs/remotes/origin/work/remote-side", "HEAD"])
             .current_dir(&repo));
-        run(Command::new("git")
+        run(gwt_core::process::hidden_command("git")
             .args(["checkout", "main"])
             .current_dir(&repo));
         // Restore the fs source clobbered by the branch dance.
@@ -785,7 +785,7 @@ mod tests {
         std::fs::create_dir_all(&repo).expect("repo dir");
         init_repo(&repo);
 
-        run(Command::new("git")
+        run(gwt_core::process::hidden_command("git")
             .args(["checkout", "-b", "work/cache-repair"])
             .current_dir(&repo));
         std::fs::create_dir_all(repo.join(".gwt/work")).expect("mk .gwt/work");
@@ -802,13 +802,13 @@ mod tests {
             ),
         )
         .expect("write ref events");
-        run(Command::new("git")
+        run(gwt_core::process::hidden_command("git")
             .args(["add", ".gwt/work/events.jsonl"])
             .current_dir(&repo));
-        run(Command::new("git")
+        run(gwt_core::process::hidden_command("git")
             .args(["commit", "-m", "cache repair events"])
             .current_dir(&repo));
-        run(Command::new("git")
+        run(gwt_core::process::hidden_command("git")
             .args([
                 "update-ref",
                 "refs/remotes/origin/work/cache-repair",
@@ -1069,7 +1069,7 @@ mod tests {
         std::fs::create_dir_all(&repo).expect("repo dir");
         init_repo(&repo);
 
-        run(Command::new("git")
+        run(gwt_core::process::hidden_command("git")
             .args(["worktree", "add", "-b", "work/owner"])
             .arg(&owner_worktree)
             .current_dir(&repo));
@@ -1270,7 +1270,7 @@ mod tests {
         let repo = temp.path().join("repo");
         std::fs::create_dir_all(&repo).expect("repo dir");
         init_repo(&repo);
-        run(Command::new("git")
+        run(gwt_core::process::hidden_command("git")
             .args(["checkout", "--detach", "HEAD"])
             .current_dir(&repo));
         let events_path = repo.join(".gwt/work/events.jsonl");
@@ -1500,7 +1500,7 @@ mod tests {
             "a source not folded by rebuild must not retain its old current fingerprint"
         );
 
-        run(Command::new("git")
+        run(gwt_core::process::hidden_command("git")
             .args(["worktree", "add", "-b", "work/restored-source"])
             .arg(&restored_worktree)
             .current_dir(&repo));
@@ -1527,7 +1527,7 @@ mod tests {
         let side_worktree = temp.path().join("side-worktree");
         std::fs::create_dir_all(&repo).expect("repo dir");
         init_repo(&repo);
-        run(Command::new("git")
+        run(gwt_core::process::hidden_command("git")
             .args(["worktree", "add", "-b", "work/unreadable-source"])
             .arg(&side_worktree)
             .current_dir(&repo));

@@ -118,15 +118,18 @@ pub(crate) fn run_with_home(
 /// detached and a reaper thread waits on the child so repeated
 /// invocations do not accumulate zombies on Unix.
 fn spawn_default_browser_launcher(url: &str) -> std::io::Result<()> {
-    use std::process::Command;
     let child = if cfg!(target_os = "macos") {
-        Command::new("open").arg(url).spawn()?
+        gwt_core::process::hidden_command("open").arg(url).spawn()?
     } else if cfg!(target_os = "windows") {
         // The empty "" before the URL is required by `start` so a URL
         // beginning with quoted text is not treated as a window title.
-        Command::new("cmd").args(["/C", "start", "", url]).spawn()?
+        gwt_core::process::hidden_command("cmd")
+            .args(["/C", "start", "", url])
+            .spawn()?
     } else {
-        Command::new("xdg-open").arg(url).spawn()?
+        gwt_core::process::hidden_command("xdg-open")
+            .arg(url)
+            .spawn()?
     };
     std::thread::spawn(move || {
         let mut child = child;
