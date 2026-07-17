@@ -36,6 +36,7 @@ mod test_support;
 mod title_summary_guard;
 pub mod tray;
 pub mod update;
+pub mod verification_record;
 mod workflow;
 mod workspace;
 
@@ -166,6 +167,8 @@ pub enum CliCommand {
     Build(BuildCommand),
     Register(RegisterCommand),
     Update(UpdateCommand),
+    /// SPEC-3248 P8b: `verify.run` tool-generated verification records.
+    Verify(verification_record::VerifyCommand),
     Daemon(DaemonCommand),
     Workspace(WorkspaceCommand),
     Workflow(WorkflowCommand),
@@ -595,6 +598,7 @@ pub(crate) fn run_collect<E: CliEnv>(
         CliCommand::Discuss(action) => discuss::run(env, action, &mut out)?,
         CliCommand::Discussion(inner) => discussion::run(env, inner, &mut out)?,
         CliCommand::Execution(inner) => execution_state::run(env, inner, &mut out)?,
+        CliCommand::Verify(inner) => verification_record::run(env, inner, &mut out)?,
         CliCommand::Plan(action) => plan::run(env, action, &mut out)?,
         CliCommand::Build(action) => build::run(env, action, &mut out)?,
         CliCommand::Register(action) => register::run(env, action, &mut out)?,

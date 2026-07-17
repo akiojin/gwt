@@ -86,6 +86,7 @@ fn family_help(family: &str) -> Option<String> {
         "plan" => Some(format_plan_help()),
         "build" => Some(format_build_help()),
         "execution" => Some(format_execution_help()),
+        "verify" => Some(format_verify_help()),
         "register" => Some(format_register_help()),
         "pane" => Some(format_pane_help()),
         "workspace" => Some(format_workspace_help()),
@@ -393,6 +394,29 @@ fn format_execution_help() -> String {
         "",
     ]
     .join("\n")
+}
+
+fn format_verify_help() -> String {
+    [
+        "verify.* — Tool-generated verification records via JSON envelope (SPEC-3248 P8b).",
+        "",
+        "Usage:",
+        "  gwtd <<'JSON'",
+        "  {\"schema_version\":1,\"operation\":\"verify.run\",\"params\":{\"commands\":[\"cargo fmt -- --check\",\"cargo test -p gwt --lib\"]}}",
+        "  JSON",
+        "",
+        "Operations:",
+        "  verify.run",
+        "",
+        "Notes:",
+        "  gwtd executes each command itself (one plain command per entry, no",
+        "  shell operators) and records session/owner/worktree-fingerprint-bound",
+        "  evidence. execution.complete and Ready PR handoffs require a fresh,",
+        "  all-passing record.",
+        "",
+    ]
+    .join("
+")
 }
 
 fn format_register_help() -> String {

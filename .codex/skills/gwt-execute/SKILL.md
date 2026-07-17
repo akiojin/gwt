@@ -56,6 +56,14 @@ included):
   `execution.blocked` with a non-empty `params.reason` and optional
   `params.missing_verification`. Blocked is not done — report the blocker.
 
+Completion and Ready PR handoffs consume tool-generated verification
+evidence (SPEC-3248 P8b): run the verification matrix through JSON operation
+`verify.run` with `params.commands:[...]` so gwtd itself executes and records
+it. `execution.complete`, the execution settlement inside `build.complete`,
+non-draft `pr.create`, and `pr.ready` refuse when the latest record is
+missing, failing, stale (worktree changed after the run), from another
+session, or for another owner. Draft PRs stay available mid-work.
+
 ## Mode detection
 
 1. If the invocation includes `#N` or an Issue URL, read the Issue with JSON
