@@ -1,12 +1,13 @@
-use std::{fs, path::Path, process::Command};
+use std::{fs, path::Path};
 
+use gwt_core::process::hidden_command;
 use gwt_git::recovery::{
     ensure_recovery_base_pin, recovery_base_ref_name, recreate_missing_intake_worktree,
     remove_recovery_base_pin, verify_recovery_base_pin, verify_recovery_intake_worktree,
 };
 
 fn git(repo: &Path, args: &[&str]) -> String {
-    let output = Command::new("git")
+    let output = hidden_command("git")
         .args(args)
         .current_dir(repo)
         .output()

@@ -576,7 +576,7 @@ pub struct AppRuntime {
     pub(crate) window_pty_statuses: HashMap<String, WindowProcessStatus>,
     pub(crate) window_hook_states: HashMap<String, WindowProcessStatus>,
     pub(crate) recoverable_agent_error_windows: HashSet<String>,
-    pub(crate) hook_forward_target: Option<HookForwardTarget>,
+    pub(crate) agent_capability_issuer: Option<AgentCapabilityIssuer>,
     pub(crate) issue_link_cache_dir: PathBuf,
     pub(crate) issue_client_factory: RuntimeIssueClientFactory,
     /// Cached update state so late-connecting WebView clients get the toast.
@@ -759,7 +759,7 @@ impl AppRuntime {
             window_pty_statuses: HashMap::new(),
             window_hook_states: HashMap::new(),
             recoverable_agent_error_windows: HashSet::new(),
-            hook_forward_target: None,
+            agent_capability_issuer: None,
             issue_link_cache_dir: gwt_core::paths::gwt_cache_dir(),
             issue_client_factory: default_issue_client_factory(),
             pending_update: None,
@@ -2534,6 +2534,138 @@ impl AppRuntime {
         }
     }
 
+    /// Handle the deliberately small protocol exposed to a gwt-launched
+    /// agent. Project and Session authority comes exclusively from the
+    /// server-side capability principal; payload path/session fields are
+    /// never used to widen this scope.
+    pub(crate) fn handle_agent_frontend_event(
+        &mut self,
+        client_id: ClientId,
+        principal: AgentSessionPrincipal,
+        request: AgentFrontendRequest,
+    ) -> Vec<OutboundEvent> {
+        match request {
+            AgentFrontendRequest::Ready => self.agent_frontend_sync_events(&client_id, &principal),
+            AgentFrontendRequest::CloseWindow { id } => {
+                if !self.agent_principal_authorizes_window(&principal, &id) {
+                    tracing::warn!(
+                        target: "gwt_security",
+                        "cross-project pane lifecycle request denied"
+                    );
+                    return Vec::new();
+                }
+                self.close_window_events(&id)
+            }
+            AgentFrontendRequest::SendInput { text } => {
+                if !self.agent_principal_authorizes_session(&principal) {
+                    return vec![OutboundEvent::reply(
+                        client_id,
+                        BackendEvent::PaneSendResult {
+                            ok: false,
+                            window_id: None,
+                            error: Some(
+                                "authenticated session is not bound to this project".to_string(),
+                            ),
+                        },
+                    )];
+                }
+                self.pane_send_input_events(client_id, principal.session_id(), &text)
+            }
+        }
+    }
+
+    fn agent_principal_authorizes_window(
+        &self,
+        principal: &AgentSessionPrincipal,
+        window_id: &str,
+    ) -> bool {
+        self.window_lookup
+            .get(window_id)
+            .and_then(|address| self.tab(&address.tab_id))
+            .is_some_and(|tab| principal.authorizes_project_root(&tab.main_worktree_root()))
+    }
+
+    fn agent_principal_authorizes_session(&self, principal: &AgentSessionPrincipal) -> bool {
+        self.tabs.iter().any(|tab| {
+            principal.authorizes_project_root(&tab.main_worktree_root())
+                && tab
+                    .workspace
+                    .persisted()
+                    .windows
+                    .iter()
+                    .any(|window| window.session_id.as_deref() == Some(principal.session_id()))
+        })
+    }
+
+    fn agent_frontend_sync_events(
+        &self,
+        client_id: &str,
+        principal: &AgentSessionPrincipal,
+    ) -> Vec<OutboundEvent> {
+        let mut workspace = self.app_state_view();
+        workspace
+            .tabs
+            .retain(|tab| principal.authorizes_project_root(Path::new(&tab.project_root)));
+        workspace.active_tab_id = workspace
+            .active_tab_id
+            .filter(|active| workspace.tabs.iter().any(|tab| &tab.id == active))
+            .or_else(|| workspace.tabs.first().map(|tab| tab.id.clone()));
+        // Recent-project history is process-global and never required by
+        // pane.list/read; exposing it would cross the project boundary.
+        workspace.recent_projects.clear();
+
+        let allowed_window_ids = self
+            .window_lookup
+            .iter()
+            .filter_map(|(window_id, address)| {
+                self.tab(&address.tab_id)
+                    .filter(|tab| principal.authorizes_project_root(&tab.main_worktree_root()))
+                    .map(|_| window_id.clone())
+            })
+            .collect::<std::collections::HashSet<_>>();
+
+        let mut terminal_snapshots = self
+            .runtimes
+            .iter()
+            .filter(|(id, _)| allowed_window_ids.contains(*id))
+            .filter_map(|(id, runtime)| {
+                let snapshot = runtime
+                    .pane
+                    .lock()
+                    .map(|pane| pane.snapshot_bytes())
+                    .unwrap_or_default();
+                (!snapshot.is_empty()).then_some((id.clone(), snapshot))
+            })
+            .collect::<Vec<_>>();
+        let runtime_snapshot_ids = terminal_snapshots
+            .iter()
+            .map(|(id, _)| id.clone())
+            .collect::<std::collections::HashSet<_>>();
+        for (id, detail) in &self.launch_error_terminal_details {
+            if allowed_window_ids.contains(id)
+                && !runtime_snapshot_ids.contains(id)
+                && self.window_status(id) == Some(WindowProcessStatus::Error)
+            {
+                terminal_snapshots.push((id.clone(), Self::launch_error_terminal_bytes(detail)));
+            }
+        }
+
+        let mut events = vec![OutboundEvent::reply(
+            client_id,
+            BackendEvent::WindowCanvasState { workspace },
+        )];
+        events.extend(terminal_snapshots.into_iter().map(|(id, snapshot)| {
+            OutboundEvent::reply(
+                client_id,
+                BackendEvent::TerminalSnapshot {
+                    id,
+                    data_base64: base64::engine::general_purpose::STANDARD.encode(snapshot),
+                },
+            )
+        }));
+        events
+    }
+
     pub(crate) fn frontend_sync_events(&self, client_id: &str) -> Vec<OutboundEvent> {
         let terminal_statuses = self
             .window_details
@@ -2958,18 +3090,19 @@ impl AppRuntime {
     }
 
     fn active_window_for_runtime_event(&self, event: &gwt::RuntimeHookEvent) -> Option<String> {
-        [
-            event.gwt_session_id.as_deref(),
-            event.agent_session_id.as_deref(),
-        ]
-        .into_iter()
-        .flatten()
-        .find_map(|session_id| {
+        let lookup = |session_id: &str| {
             self.active_agent_sessions
                 .iter()
                 .find(|(_, session)| session.session_id == session_id)
                 .map(|(window_id, _)| window_id.clone())
-        })
+        };
+        if let Some(gwt_session_id) = event.gwt_session_id.as_deref() {
+            // A present gwt Session claim is authoritative. Never fall
+            // through to a provider conversation id: a stale authenticated
+            // session could otherwise steer an event into another live pane.
+            return lookup(gwt_session_id);
+        }
+        event.agent_session_id.as_deref().and_then(lookup)
     }
 
     fn recompute_window_state(&mut self, window_id: &str) -> Option<WindowProcessStatus> {

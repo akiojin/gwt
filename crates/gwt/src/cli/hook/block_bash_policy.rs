@@ -29,8 +29,13 @@ pub fn evaluate(event: &HookEvent, worktree_root: &Path) -> Result<HookOutput, H
     Ok(evaluate_bash_command(command, worktree_root).unwrap_or(HookOutput::Silent))
 }
 
-pub(crate) fn evaluate_subagent_intake_checkpoint_call(input: &str) -> Option<HookOutput> {
-    let value = serde_json::from_str::<serde_json::Value>(input).ok()?;
+pub(crate) fn evaluate_intake_checkpoint_authority(
+    input: &str,
+) -> Result<Option<HookOutput>, HookError> {
+    let value = match serde_json::from_str::<serde_json::Value>(input) {
+        Ok(value) => value,
+        Err(_) => return Ok(None),
+    };
     let is_subagent = value
         .get("isSidechain")
         .or_else(|| value.get("is_sidechain"))
@@ -42,32 +47,94 @@ pub(crate) fn evaluate_subagent_intake_checkpoint_call(input: &str) -> Option<Ho
                 .and_then(serde_json::Value::as_str)
                 .is_some_and(|value| !value.trim().is_empty())
         });
-    if !is_subagent {
-        return None;
-    }
     let is_bash = value
         .get("tool_name")
         .or_else(|| value.get("toolName"))
         .and_then(serde_json::Value::as_str)
         == Some("Bash");
-    let command = value
+    let Some(command) = value
         .get("tool_input")
         .or_else(|| value.get("toolInput"))
         .and_then(|tool_input| tool_input.get("command"))
-        .and_then(serde_json::Value::as_str)?;
-    if !is_bash || !invokes_intake_checkpoint_operation(command) {
-        return None;
+        .and_then(serde_json::Value::as_str)
+    else {
+        return Ok(None);
+    };
+    if !is_bash {
+        return Ok(None);
     }
-    Some(HookOutput::pre_tool_use_permission(
-        "Intake discussion durability is root-session owned",
-        "A Claude subagent cannot read or replace the root Intake checkpoint or publish a structured discussion milestone. Return the result to the root agent and let the root invoke discussion.update or intake.checkpoint.current/update.",
-    ))
-}
-
-fn invokes_intake_checkpoint_operation(command: &str) -> bool {
-    command.contains("discussion.update")
-        || command.contains("intake.checkpoint.current")
-        || command.contains("intake.checkpoint.update")
+    let operation = match super::intake_checkpoint_authority::IntakeCheckpointOperation::from_command(command) {
+        Ok(Some(operation)) => operation,
+        Ok(None) => return Ok(None),
+        Err(_) => {
+            return Ok(Some(HookOutput::pre_tool_use_permission(
+                "Intake checkpoint command is ambiguous",
+                "Invoke exactly one of discussion.update, intake.checkpoint.current, or intake.checkpoint.update per Bash tool call.",
+            )))
+        }
+    };
+    if is_subagent {
+        return Ok(Some(HookOutput::pre_tool_use_permission(
+            "Intake discussion durability is root-session owned",
+            "A Claude subagent cannot read or replace the root Intake checkpoint or publish a structured discussion milestone. Return the result to the root agent and let the root invoke discussion.update or intake.checkpoint.current/update.",
+        )));
+    }
+    let is_official_pre_tool_use = value
+        .get("hook_event_name")
+        .or_else(|| value.get("hookEventName"))
+        .and_then(serde_json::Value::as_str)
+        == Some("PreToolUse");
+    let hook_provider_session_id = value
+        .get("session_id")
+        .or_else(|| value.get("sessionId"))
+        .and_then(serde_json::Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
+    let Some(hook_provider_session_id) =
+        hook_provider_session_id.filter(|_| is_official_pre_tool_use)
+    else {
+        // A direct CLI call or an older/partial JSON shape is not a minting
+        // oracle. The checkpoint command itself still fails closed because
+        // no one-shot permit is injected.
+        return Ok(None);
+    };
+    let token = match super::intake_checkpoint_authority::issue_for_current_managed_claude(
+        operation,
+        hook_provider_session_id,
+    ) {
+        Ok(Some(token)) => token,
+        Ok(None) => return Ok(None),
+        Err(_) => {
+            return Ok(Some(HookOutput::pre_tool_use_permission(
+                "Root Intake checkpoint authorization is unavailable",
+                "The managed Claude root session could not create a one-shot checkpoint permit. Retry from the root session after its Session ledger is available.",
+            )))
+        }
+    };
+    let Some(mut updated_input) = value
+        .get("tool_input")
+        .or_else(|| value.get("toolInput"))
+        .cloned()
+    else {
+        return Ok(Some(HookOutput::pre_tool_use_permission(
+            "Root Intake checkpoint authorization is unavailable",
+            "The Bash hook input did not contain an editable tool_input object.",
+        )));
+    };
+    let Some(object) = updated_input.as_object_mut() else {
+        return Ok(Some(HookOutput::pre_tool_use_permission(
+            "Root Intake checkpoint authorization is unavailable",
+            "The Bash hook input did not contain an editable tool_input object.",
+        )));
+    };
+    object.insert(
+        "command".to_string(),
+        serde_json::Value::String(format!(
+            "export {}={token}; {command}",
+            super::intake_checkpoint_authority::INTAKE_CHECKPOINT_PERMIT_ENV
+        )),
+    );
+    Ok(Some(HookOutput::pre_tool_use_updated_input(updated_input)))
 }
 
 pub fn handle() -> Result<HookOutput, HookError> {
@@ -77,7 +144,7 @@ pub fn handle() -> Result<HookOutput, HookError> {
 }
 
 pub fn handle_with_input(input: &str) -> Result<HookOutput, HookError> {
-    if let Some(output) = evaluate_subagent_intake_checkpoint_call(input) {
+    if let Some(output) = evaluate_intake_checkpoint_authority(input)? {
         return Ok(output);
     }
     let Some(event) = HookEvent::read_from_str(input)? else {
@@ -353,6 +420,10 @@ fn gh_api_target<'a>(tokens: &'a [&'a str]) -> Option<&'a str> {
 
 #[cfg(test)]
 mod tests {
+    use gwt_agent::{AgentId, Session, GWT_RECOVERY_ID_ENV, GWT_SESSION_ID_ENV};
+
+    use crate::cli::test_support::ScopedEnvVar;
+
     use super::*;
 
     #[test]
@@ -395,13 +466,17 @@ mod tests {
     #[test]
     fn claude_subagent_cannot_invoke_root_intake_checkpoint_operations() {
         let input = r#"{
+              "hook_event_name":"PreToolUse",
+              "session_id":"provider-root",
               "tool_name":"Bash",
               "tool_input":{"command":"$GWT_BIN < checkpoint.json # intake.checkpoint.update"},
               "agent_id":"child-1",
               "agent_type":"general-purpose"
             }"#;
 
-        let decision = evaluate_subagent_intake_checkpoint_call(input).unwrap();
+        let decision = evaluate_intake_checkpoint_authority(input)
+            .unwrap()
+            .unwrap();
         assert_eq!(
             decision.summary(),
             "Intake discussion durability is root-session owned"
@@ -411,12 +486,16 @@ mod tests {
     #[test]
     fn claude_subagent_cannot_publish_discussion_update_checkpoint() {
         let input = r#"{
+              "hook_event_name":"PreToolUse",
+              "session_id":"provider-root",
               "tool_name":"Bash",
               "tool_input":{"command":"$GWT_BIN < update.json # discussion.update"},
               "agent_id":"child-discussion"
             }"#;
 
-        let decision = evaluate_subagent_intake_checkpoint_call(input).unwrap();
+        let decision = evaluate_intake_checkpoint_authority(input)
+            .unwrap()
+            .unwrap();
         assert_eq!(
             decision.summary(),
             "Intake discussion durability is root-session owned"
@@ -424,13 +503,209 @@ mod tests {
     }
 
     #[test]
-    fn claude_root_can_invoke_intake_checkpoint_operations() {
+    fn unmanaged_root_command_needs_no_managed_checkpoint_permit() {
         let input = r#"{
               "tool_name":"Bash",
               "tool_input":{"command":"$GWT_BIN < checkpoint.json # intake.checkpoint.current"}
             }"#;
 
-        assert!(evaluate_subagent_intake_checkpoint_call(input).is_none());
+        assert!(evaluate_intake_checkpoint_authority(input)
+            .unwrap()
+            .is_none());
+    }
+
+    #[test]
+    fn managed_claude_root_receives_one_shot_checkpoint_permit_in_updated_input() {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let temp = tempfile::tempdir().expect("tempdir");
+        let _home = ScopedEnvVar::set("HOME", temp.path());
+        let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+        let sessions_dir = gwt_core::paths::gwt_sessions_dir();
+        let mut session = Session::new(temp.path(), "intake/root", AgentId::ClaudeCode);
+        session.session_kind = Some(gwt_skills::SessionKind::Intake);
+        session.is_ephemeral = true;
+        session.agent_session_id = Some("provider-root".to_string());
+        session.recovery_id = Some("recovery-root".to_string());
+        let session_id = session.id.clone();
+        session.save(&sessions_dir).expect("save Session");
+        let _session = ScopedEnvVar::set(GWT_SESSION_ID_ENV, &session_id);
+        let _recovery = ScopedEnvVar::set(GWT_RECOVERY_ID_ENV, "recovery-root");
+        let input = r#"{
+              "hook_event_name":"PreToolUse",
+              "session_id":"provider-root",
+              "tool_name":"Bash",
+              "tool_input":{"command":"gwtd <<'JSON'\n{\"operation\":\"intake.checkpoint.current\"}\nJSON","timeout":30}
+            }"#;
+
+        let output = evaluate_intake_checkpoint_authority(input)
+            .expect("authority evaluation")
+            .expect("updated input");
+        let HookOutput::PreToolUseUpdatedInput { tool_input } = output else {
+            panic!("managed Claude root must receive updated input")
+        };
+        let command = tool_input["command"].as_str().expect("updated command");
+        assert!(
+            command.starts_with("export GWT_INTAKE_CHECKPOINT_PERMIT="),
+            "{command}"
+        );
+        assert!(command.ends_with("intake.checkpoint.current\"}\nJSON"));
+        assert_eq!(tool_input["timeout"], 30);
+        let token = command
+            .strip_prefix("export GWT_INTAKE_CHECKPOINT_PERMIT=")
+            .and_then(|tail| tail.split_once(';'))
+            .map(|(token, _)| token)
+            .expect("opaque permit");
+        assert_eq!(token.len(), 64);
+        let stored = std::fs::read_dir(sessions_dir.join(".intake-checkpoint-authority"))
+            .expect("permit inventory")
+            .map(|entry| {
+                std::fs::read_to_string(entry.expect("entry").path()).expect("permit body")
+            })
+            .collect::<String>();
+        assert!(
+            !stored.contains(token),
+            "permit plaintext must not be stored"
+        );
+    }
+
+    #[test]
+    fn managed_claude_root_partial_or_mismatched_hook_cannot_mint_permit() {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let temp = tempfile::tempdir().expect("tempdir");
+        let _home = ScopedEnvVar::set("HOME", temp.path());
+        let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+        let sessions_dir = gwt_core::paths::gwt_sessions_dir();
+        let mut session = Session::new(temp.path(), "intake/root", AgentId::ClaudeCode);
+        session.session_kind = Some(gwt_skills::SessionKind::Intake);
+        session.is_ephemeral = true;
+        session.agent_session_id = Some("provider-root".to_string());
+        session.recovery_id = Some("recovery-root".to_string());
+        let session_id = session.id.clone();
+        session.save(&sessions_dir).expect("save Session");
+        let _session = ScopedEnvVar::set(GWT_SESSION_ID_ENV, &session_id);
+        let _recovery = ScopedEnvVar::set(GWT_RECOVERY_ID_ENV, "recovery-root");
+
+        let missing_event = r#"{
+              "session_id":"provider-root",
+              "tool_name":"Bash",
+              "tool_input":{"command":"gwtd <<'JSON'\n{\"operation\":\"intake.checkpoint.current\"}\nJSON"}
+            }"#;
+        assert!(evaluate_intake_checkpoint_authority(missing_event)
+            .expect("partial hook evaluation")
+            .is_none());
+
+        let mismatched_session = r#"{
+              "hook_event_name":"PreToolUse",
+              "session_id":"forged-provider-root",
+              "tool_name":"Bash",
+              "tool_input":{"command":"gwtd <<'JSON'\n{\"operation\":\"intake.checkpoint.current\"}\nJSON"}
+            }"#;
+        let decision = evaluate_intake_checkpoint_authority(mismatched_session)
+            .expect("mismatched hook evaluation")
+            .expect("mismatched managed hook must fail closed");
+        assert_eq!(
+            decision.summary(),
+            "Root Intake checkpoint authorization is unavailable"
+        );
+        assert!(!sessions_dir.join(".intake-checkpoint-authority").exists());
+    }
+
+    #[test]
+    fn managed_claude_root_requires_exact_recovery_env_except_deterministic_legacy_id() {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let temp = tempfile::tempdir().expect("tempdir");
+        let _home = ScopedEnvVar::set("HOME", temp.path());
+        let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+        let sessions_dir = gwt_core::paths::gwt_sessions_dir();
+        let mut session = Session::new(temp.path(), "intake/root", AgentId::ClaudeCode);
+        session.session_kind = Some(gwt_skills::SessionKind::Intake);
+        session.is_ephemeral = true;
+        session.agent_session_id = Some("provider-root".to_string());
+        session.recovery_id = Some("current-recovery".to_string());
+        let session_id = session.id.clone();
+        session.save(&sessions_dir).expect("save Session");
+        let _session = ScopedEnvVar::set(GWT_SESSION_ID_ENV, &session_id);
+        let _recovery = ScopedEnvVar::unset(GWT_RECOVERY_ID_ENV);
+        let input = r#"{
+              "hook_event_name":"PreToolUse",
+              "session_id":"provider-root",
+              "tool_name":"Bash",
+              "tool_input":{"command":"gwtd <<'JSON'\n{\"operation\":\"intake.checkpoint.current\"}\nJSON"}
+            }"#;
+
+        let rejected = evaluate_intake_checkpoint_authority(input)
+            .expect("current recovery evaluation")
+            .expect("missing current recovery env must fail closed");
+        assert_eq!(
+            rejected.summary(),
+            "Root Intake checkpoint authorization is unavailable"
+        );
+        assert!(!sessions_dir.join(".intake-checkpoint-authority").exists());
+
+        session.recovery_id = Some(format!("legacy-{session_id}"));
+        session.save(&sessions_dir).expect("save legacy Session");
+        let output = evaluate_intake_checkpoint_authority(input)
+            .expect("legacy recovery evaluation")
+            .expect("deterministic legacy recovery may omit the pre-upgrade env");
+        assert!(matches!(output, HookOutput::PreToolUseUpdatedInput { .. }));
+    }
+
+    #[test]
+    fn forged_runtime_path_cannot_select_a_checkpoint_authority_store() {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let temp = tempfile::tempdir().expect("tempdir");
+        let _home = ScopedEnvVar::set("HOME", temp.path().join("canonical-home"));
+        let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path().join("canonical-home"));
+        let forged_sessions = temp.path().join("forged-sessions");
+        let mut forged = Session::new(temp.path(), "intake/root", AgentId::ClaudeCode);
+        forged.session_kind = Some(gwt_skills::SessionKind::Intake);
+        forged.is_ephemeral = true;
+        forged.agent_session_id = Some("provider-root".to_string());
+        forged.recovery_id = Some("recovery-root".to_string());
+        let session_id = forged.id.clone();
+        forged.save(&forged_sessions).expect("save forged Session");
+        let forged_runtime = gwt_agent::runtime_state_path(&forged_sessions, &session_id);
+        let _session = ScopedEnvVar::set(GWT_SESSION_ID_ENV, &session_id);
+        let _recovery = ScopedEnvVar::set(GWT_RECOVERY_ID_ENV, "recovery-root");
+        let _runtime = ScopedEnvVar::set(gwt_agent::GWT_SESSION_RUNTIME_PATH_ENV, &forged_runtime);
+        let input = r#"{
+              "hook_event_name":"PreToolUse",
+              "session_id":"provider-root",
+              "tool_name":"Bash",
+              "tool_input":{"command":"gwtd <<'JSON'\n{\"operation\":\"intake.checkpoint.current\"}\nJSON"}
+            }"#;
+
+        let decision = evaluate_intake_checkpoint_authority(input)
+            .expect("forged runtime evaluation")
+            .expect("forged runtime must fail closed");
+        assert_eq!(
+            decision.summary(),
+            "Root Intake checkpoint authorization is unavailable"
+        );
+        assert!(!forged_sessions
+            .join(".intake-checkpoint-authority")
+            .exists());
+    }
+
+    #[test]
+    fn indirect_subagent_command_gets_no_permit_for_cli_replay() {
+        let input = r#"{
+              "tool_name":"Bash",
+              "tool_input":{"command":"$GWT_BIN < checkpoint-payload.json"},
+              "agent_id":"child-indirect"
+            }"#;
+
+        assert!(evaluate_intake_checkpoint_authority(input)
+            .expect("authority evaluation")
+            .is_none());
     }
 
     #[test]
@@ -441,6 +716,8 @@ mod tests {
               "agent_type":"security-reviewer"
             }"#;
 
-        assert!(evaluate_subagent_intake_checkpoint_call(input).is_none());
+        assert!(evaluate_intake_checkpoint_authority(input)
+            .unwrap()
+            .is_none());
     }
 }

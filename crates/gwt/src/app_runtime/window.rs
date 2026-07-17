@@ -436,6 +436,10 @@ impl AppRuntime {
         let Some(address) = self.window_lookup.get(id).cloned() else {
             return Vec::new();
         };
+        // Stop/Stop All is an explicit operator decision. Keep the durable
+        // Recovery candidate available for a later manual resume, but do not
+        // silently undo that decision during the next application startup.
+        self.clear_agent_window_startup_restore(id);
         // Tear down the live runtime (kills the PTY + joins reader/status
         // threads + deregisters the writer). This reuses the exact same stop
         // primitive that `close_window_events` uses, so no PTY management is

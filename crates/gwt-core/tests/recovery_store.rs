@@ -1582,6 +1582,148 @@ fn ready_recovery_requires_durable_supervisor_stop_proof_and_dedicated_claim() {
 }
 
 #[test]
+fn ready_execution_recovery_accepts_the_same_durable_supervisor_stop_proof() {
+    let temp = tempfile::tempdir().unwrap();
+    let store = RecoveryStore::new(temp.path().join("recovery"));
+    let recovery_id = "recovery-ready-execution";
+    let session_id = "session-ready-execution";
+    let provider_root_id = "provider-ready-execution";
+    let stopped_at = Utc.with_ymd_and_hms(2026, 7, 17, 3, 0, 0).unwrap();
+    let mut request = create_request(recovery_id, &temp.path().join("execution"));
+    request.session_id = session_id.to_string();
+    request.session_kind = RecoverySessionKind::Execution;
+    store.create(request, "create-ready-execution").unwrap();
+    store
+        .bind_root(
+            recovery_id,
+            ProviderRootBinding {
+                root_id: provider_root_id.to_string(),
+                session_tree_id: None,
+                quality: BindingQuality::Verified,
+                bound_at: stopped_at - Duration::seconds(20),
+            },
+            "bind-ready-execution",
+        )
+        .unwrap();
+    store
+        .complete_provider_ready(
+            recovery_id,
+            stopped_at - Duration::seconds(10),
+            "ready-execution",
+        )
+        .unwrap();
+    let ready = store.load(recovery_id).unwrap().unwrap();
+
+    let interrupted = store
+        .interrupt_after_supervisor_stop(
+            recovery_id,
+            ready.generation,
+            session_id,
+            stopped_at,
+            "gwt observed the Execution provider stop",
+            "supervisor-stop-ready-execution",
+        )
+        .unwrap();
+
+    assert_eq!(interrupted.lifecycle, RecoveryLifecycle::Interrupted);
+    assert_eq!(interrupted.launch_stage, RecoveryLaunchStage::Ready);
+    assert_eq!(
+        interrupted
+            .supervisor_stop_proof
+            .as_ref()
+            .map(|proof| proof.session_id.as_str()),
+        Some(session_id)
+    );
+    let claimed = store
+        .claim_interrupted_recovery_with_provider_root(
+            recovery_id,
+            interrupted.generation,
+            provider_root_id,
+            false,
+            recovery_lease("execution-successor", stopped_at),
+            "execution-successor-window",
+            "resume interrupted Execution",
+            "claim-ready-execution",
+        )
+        .unwrap();
+    assert_eq!(claimed.lifecycle, RecoveryLifecycle::Recovering);
+}
+
+#[test]
+fn attention_supervisor_stop_requires_the_same_observed_retry_reason() {
+    let temp = tempfile::tempdir().unwrap();
+    let store = RecoveryStore::new(temp.path().join("recovery"));
+    let recovery_id = "recovery-attention-stop";
+    let session_id = "session-attention-stop";
+    create_exact_recovery(
+        &store,
+        recovery_id,
+        session_id,
+        &temp.path().join("attention-stop"),
+        "provider-attention-stop",
+    );
+    let attention_reason = "legacy_import_attention:missing_intake_worktree";
+    let attention = store
+        .set_lifecycle(
+            recovery_id,
+            RecoveryLifecycle::Attention,
+            Some(attention_reason.to_string()),
+            "attention-stop-state",
+        )
+        .unwrap();
+    let stopped_at = Utc.with_ymd_and_hms(2026, 7, 16, 5, 45, 0).unwrap();
+
+    assert!(matches!(
+        store.interrupt_after_supervisor_stop(
+            recovery_id,
+            attention.generation,
+            session_id,
+            stopped_at,
+            "ordinary live-state proof must not erase Attention",
+            "ordinary-attention-stop",
+        ),
+        Err(RecoveryStoreError::InvalidLease(_))
+    ));
+    assert!(matches!(
+        store.interrupt_attention_after_supervisor_stop(
+            recovery_id,
+            attention.generation,
+            session_id,
+            "legacy_import_attention:multiple_provider_roots",
+            stopped_at,
+            "mismatched evidence must stay closed",
+            "mismatched-attention-stop",
+        ),
+        Err(RecoveryStoreError::InvalidLease(_))
+    ));
+    let unchanged = store.load(recovery_id).unwrap().unwrap();
+    assert_eq!(unchanged.generation, attention.generation);
+    assert_eq!(unchanged.lifecycle, RecoveryLifecycle::Attention);
+    assert!(unchanged.supervisor_stop_proof.is_none());
+
+    let interrupted = store
+        .interrupt_attention_after_supervisor_stop(
+            recovery_id,
+            attention.generation,
+            session_id,
+            attention_reason,
+            stopped_at,
+            "Cold startup classified the missing Intake as retryable",
+            "matching-attention-stop",
+        )
+        .unwrap();
+    assert_eq!(interrupted.lifecycle, RecoveryLifecycle::Interrupted);
+    assert_eq!(interrupted.launch_stage, RecoveryLaunchStage::ProviderBound);
+    assert_eq!(
+        interrupted
+            .supervisor_stop_proof
+            .as_ref()
+            .map(|proof| proof.session_id.as_str()),
+        Some(session_id)
+    );
+}
+
+#[test]
 fn stale_ready_token_cannot_promote_a_target_after_claim_takeover() {
     let temp = tempfile::tempdir().unwrap();
     let store = RecoveryStore::new(temp.path().join("recovery"));

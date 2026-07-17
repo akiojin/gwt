@@ -463,7 +463,12 @@ pub(crate) fn websocket_url_from_hook_forward_url(hook_url: &str) -> Option<Stri
     if host_end == 0 {
         return None;
     }
-    Some(format!("{}{}{}", scheme, &rest[..host_end], "/ws"))
+    Some(format!(
+        "{}{}{}",
+        scheme,
+        &rest[..host_end],
+        "/internal/pane-ws"
+    ))
 }
 
 fn parse_workspace_windows(value: &Value, project_root: &str) -> Option<Vec<PersistedWindowState>> {
@@ -760,11 +765,11 @@ mod tests {
     fn websocket_url_is_derived_from_hook_forward_url() {
         assert_eq!(
             websocket_url_from_hook_forward_url("http://127.0.0.1:61234/internal/hook-live"),
-            Some("ws://127.0.0.1:61234/ws".to_string())
+            Some("ws://127.0.0.1:61234/internal/pane-ws".to_string())
         );
         assert_eq!(
             websocket_url_from_hook_forward_url("https://example.test/internal/hook-live"),
-            Some("wss://example.test/ws".to_string())
+            Some("wss://example.test/internal/pane-ws".to_string())
         );
         assert_eq!(
             websocket_url_from_hook_forward_url("file:///tmp/socket"),
@@ -774,11 +779,16 @@ mod tests {
 
     #[test]
     fn pane_websocket_request_uses_origin_and_bearer_headers_without_url_token() {
-        let request =
-            pane_websocket_request("ws://127.0.0.1:61234/ws", "process-capability-secret")
-                .expect("authenticated request");
+        let request = pane_websocket_request(
+            "ws://127.0.0.1:61234/internal/pane-ws",
+            "process-capability-secret",
+        )
+        .expect("authenticated request");
 
-        assert_eq!(request.uri().to_string(), "ws://127.0.0.1:61234/ws");
+        assert_eq!(
+            request.uri().to_string(),
+            "ws://127.0.0.1:61234/internal/pane-ws"
+        );
         assert_eq!(
             request
                 .headers()

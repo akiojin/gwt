@@ -20,6 +20,9 @@ fn run_gwtd_json(
         .env("USERPROFILE", home)
         .env_remove(gwt_agent::GWT_SESSION_ID_ENV)
         .env_remove(gwt_agent::GWT_RECOVERY_ID_ENV)
+        .env_remove(gwt_agent::GWT_SESSION_RUNTIME_PATH_ENV)
+        .env_remove(gwt_agent::GWT_HOOK_FORWARD_URL_ENV)
+        .env_remove(gwt_agent::GWT_HOOK_FORWARD_TOKEN_ENV)
         .env_remove("CODEX_THREAD_ID")
         .env_remove("CLAUDE_CODE_SESSION_ID")
         .stdin(Stdio::piped())
@@ -92,13 +95,39 @@ fn run_gwtd_json_for_recovery_with_provider_environment(
     provider_identity: Option<&str>,
     payload: serde_json::Value,
 ) -> std::process::Output {
-    let mut command = Command::new(env!("CARGO_BIN_EXE_gwtd"));
+    run_gwtd_json_for_recovery_with_provider_environment_and_permit(
+        root,
+        home,
+        recovery_id,
+        session_id,
+        provider,
+        provider_identity,
+        None,
+        payload,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn run_gwtd_json_for_recovery_with_provider_environment_and_permit(
+    root: &Path,
+    home: &Path,
+    recovery_id: &str,
+    session_id: &str,
+    provider: &str,
+    provider_identity: Option<&str>,
+    checkpoint_permit: Option<&str>,
+    payload: serde_json::Value,
+) -> std::process::Output {
+    let mut command = hidden_command(env!("CARGO_BIN_EXE_gwtd"));
     command
         .current_dir(root)
         .env("HOME", home)
         .env("USERPROFILE", home)
         .env(gwt_agent::GWT_RECOVERY_ID_ENV, recovery_id)
         .env(gwt_agent::GWT_SESSION_ID_ENV, session_id)
+        .env_remove(gwt_agent::GWT_SESSION_RUNTIME_PATH_ENV)
+        .env_remove(gwt_agent::GWT_HOOK_FORWARD_URL_ENV)
+        .env_remove(gwt_agent::GWT_HOOK_FORWARD_TOKEN_ENV)
         .env_remove("CODEX_THREAD_ID")
         .env_remove("CLAUDE_CODE_SESSION_ID")
         .env_remove("CLAUDE_CODE_AGENT_ID")
@@ -114,6 +143,11 @@ fn run_gwtd_json_for_recovery_with_provider_environment(
             command.env("CODEX_THREAD_ID", provider_identity);
         }
     }
+    if let Some(checkpoint_permit) = checkpoint_permit {
+        command.env("GWT_INTAKE_CHECKPOINT_PERMIT", checkpoint_permit);
+    } else {
+        command.env_remove("GWT_INTAKE_CHECKPOINT_PERMIT");
+    }
     let mut child = command.spawn().expect("run recovery-scoped gwtd");
     child
         .stdin
@@ -124,6 +158,94 @@ fn run_gwtd_json_for_recovery_with_provider_environment(
     child.wait_with_output().expect("wait gwtd")
 }
 
+fn mint_claude_checkpoint_permit(
+    root: &Path,
+    home: &Path,
+    recovery_id: &str,
+    session_id: &str,
+    operation: &str,
+) -> String {
+    let session = gwt_agent::Session::load(
+        &home
+            .join(".gwt")
+            .join("sessions")
+            .join(format!("{session_id}.toml")),
+    )
+    .expect("load managed Claude Session for hook provenance");
+    let provider_session_id = session
+        .agent_session_id
+        .as_deref()
+        .expect("managed Claude Session provider identity");
+    let hook_input = serde_json::json!({
+        "hook_event_name": "PreToolUse",
+        "session_id": provider_session_id,
+        "tool_name": "Bash",
+        "tool_input": {
+            "command": format!("gwtd <<'JSON'\n{{\"operation\":\"{operation}\"}}\nJSON")
+        }
+    });
+    let output = hidden_command(env!("CARGO_BIN_EXE_gwtd"))
+        .args(["hook", "event", "PreToolUse"])
+        .current_dir(root)
+        .env("HOME", home)
+        .env("USERPROFILE", home)
+        .env(gwt_agent::GWT_RECOVERY_ID_ENV, recovery_id)
+        .env(gwt_agent::GWT_SESSION_ID_ENV, session_id)
+        .env_remove(gwt_agent::GWT_SESSION_RUNTIME_PATH_ENV)
+        .env_remove(gwt_agent::GWT_HOOK_FORWARD_URL_ENV)
+        .env_remove(gwt_agent::GWT_HOOK_FORWARD_TOKEN_ENV)
+        .env_remove("GWT_INTAKE_CHECKPOINT_PERMIT")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .and_then(|mut child| {
+            child
+                .stdin
+                .as_mut()
+                .expect("hook stdin")
+                .write_all(hook_input.to_string().as_bytes())?;
+            child.wait_with_output()
+        })
+        .expect("run root PreToolUse hook");
+    assert!(
+        output.status.success(),
+        "root PreToolUse hook failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let envelope: serde_json::Value =
+        serde_json::from_slice(&output.stdout).expect("updatedInput hook envelope");
+    let command = envelope["hookSpecificOutput"]["updatedInput"]["command"]
+        .as_str()
+        .expect("updated checkpoint command");
+    command
+        .strip_prefix("export GWT_INTAKE_CHECKPOINT_PERMIT=")
+        .and_then(|tail| tail.split_once(';'))
+        .map(|(token, _)| token.to_string())
+        .expect("one-shot checkpoint permit")
+}
+
+fn run_gwtd_json_for_claude_recovery_with_hook_permit(
+    root: &Path,
+    home: &Path,
+    recovery_id: &str,
+    session_id: &str,
+    operation: &str,
+    payload: serde_json::Value,
+) -> std::process::Output {
+    let permit = mint_claude_checkpoint_permit(root, home, recovery_id, session_id, operation);
+    run_gwtd_json_for_recovery_with_provider_environment_and_permit(
+        root,
+        home,
+        recovery_id,
+        session_id,
+        "claude-code",
+        None,
+        Some(&permit),
+        payload,
+    )
+}
+
 fn run_gwtd_json_for_legacy_session(
     root: &Path,
     home: &Path,
@@ -131,7 +253,7 @@ fn run_gwtd_json_for_legacy_session(
     provider_root_id: Option<&str>,
     payload: serde_json::Value,
 ) -> std::process::Output {
-    let mut command = Command::new(env!("CARGO_BIN_EXE_gwtd"));
+    let mut command = hidden_command(env!("CARGO_BIN_EXE_gwtd"));
     command
         .current_dir(root)
         .env("HOME", home)
@@ -140,6 +262,9 @@ fn run_gwtd_json_for_legacy_session(
         .env("CLAUDE_CONFIG_DIR", home.join(".claude"))
         .env(gwt_agent::GWT_SESSION_ID_ENV, session_id)
         .env_remove(gwt_agent::GWT_RECOVERY_ID_ENV)
+        .env_remove(gwt_agent::GWT_SESSION_RUNTIME_PATH_ENV)
+        .env_remove(gwt_agent::GWT_HOOK_FORWARD_URL_ENV)
+        .env_remove(gwt_agent::GWT_HOOK_FORWARD_TOKEN_ENV)
         .env_remove("CODEX_THREAD_ID")
         .env_remove("CLAUDE_CODE_SESSION_ID")
         .env_remove("CLAUDE_CODE_AGENT_ID")
@@ -199,13 +324,13 @@ fn parse_intake_checkpoint_state(output: &std::process::Output) -> serde_json::V
 }
 
 fn init_repo_with_origin(path: &Path) {
-    assert!(Command::new("git")
+    assert!(hidden_command("git")
         .args(["init", "-q"])
         .arg(path)
         .status()
         .expect("git init")
         .success());
-    assert!(Command::new("git")
+    assert!(hidden_command("git")
         .arg("-C")
         .arg(path)
         .args([
@@ -221,14 +346,14 @@ fn init_repo_with_origin(path: &Path) {
 
 fn commit_repo_head(path: &Path) -> String {
     fs::write(path.join("README.md"), "legacy recovery fixture\n").expect("write fixture");
-    assert!(Command::new("git")
+    assert!(hidden_command("git")
         .arg("-C")
         .arg(path)
         .args(["add", "README.md"])
         .status()
         .expect("git add")
         .success());
-    assert!(Command::new("git")
+    assert!(hidden_command("git")
         .arg("-C")
         .arg(path)
         .args([
@@ -243,7 +368,7 @@ fn commit_repo_head(path: &Path) -> String {
         .status()
         .expect("git commit")
         .success());
-    let output = Command::new("git")
+    let output = hidden_command("git")
         .arg("-C")
         .arg(path)
         .args(["rev-parse", "HEAD"])
@@ -1171,6 +1296,7 @@ fn intake_checkpoint_update_enforces_session_cas_copies_attachments_and_acks_boa
 #[test]
 fn intake_checkpoint_accepts_claude_root_and_rejects_unknown_or_subagent_store_roles() {
     use chrono::Utc;
+    use gwt_agent::{AgentId, Session};
     use gwt_core::recovery::{
         BindingQuality, CreateRecovery, ProviderRootBinding, ProviderRootRole, RecoveryLaunchStage,
         RecoverySessionKind, RecoveryStore,
@@ -1185,6 +1311,7 @@ fn intake_checkpoint_accepts_claude_root_and_rejects_unknown_or_subagent_store_r
     let repo_id = gwt_core::paths::project_scope_hash(&repo).to_string();
     let project_dir = home.join(".gwt").join("projects").join(&repo_id);
     let store = RecoveryStore::for_project_dir(&project_dir);
+    let sessions_dir = home.join(".gwt").join("sessions");
     let create = |recovery_id: &str, session_id: &str| {
         store
             .create(
@@ -1206,6 +1333,13 @@ fn intake_checkpoint_accepts_claude_root_and_rejects_unknown_or_subagent_store_r
                 format!("create-{recovery_id}"),
             )
             .expect("create recovery");
+        let mut session = Session::new(&repo, "intake/root", AgentId::ClaudeCode);
+        session.id = session_id.to_string();
+        session.recovery_id = Some(recovery_id.to_string());
+        session.session_kind = Some(gwt_skills::SessionKind::Intake);
+        session.is_ephemeral = true;
+        session.agent_session_id = Some(format!("provider-{session_id}"));
+        session.save(&sessions_dir).expect("save Claude Session");
     };
     let current_payload = || {
         serde_json::json!({
@@ -1222,7 +1356,7 @@ fn intake_checkpoint_accepts_claude_root_and_rejects_unknown_or_subagent_store_r
         .bind_root(
             root_recovery,
             ProviderRootBinding {
-                root_id: "claude-root-session".to_string(),
+                root_id: format!("provider-{root_session}"),
                 session_tree_id: None,
                 quality: BindingQuality::Verified,
                 bound_at: Utc::now(),
@@ -1230,8 +1364,18 @@ fn intake_checkpoint_accepts_claude_root_and_rejects_unknown_or_subagent_store_r
             "bind-claude-root",
         )
         .expect("bind Claude root");
-    let root =
+    let missing_permit =
         run_gwtd_json_for_recovery(&repo, &home, root_recovery, root_session, current_payload());
+    assert!(!missing_permit.status.success());
+    assert!(String::from_utf8_lossy(&missing_permit.stderr).contains("authorization is missing"));
+    let root = run_gwtd_json_for_claude_recovery_with_hook_permit(
+        &repo,
+        &home,
+        root_recovery,
+        root_session,
+        "intake.checkpoint.current",
+        current_payload(),
+    );
     assert!(
         root.status.success(),
         "Claude root checkpoint read failed: {}",

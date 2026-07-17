@@ -157,7 +157,7 @@ pub fn handle() -> Result<HookOutput, HookError> {
 }
 
 pub fn handle_with_input(input: &str) -> Result<HookOutput, HookError> {
-    if let Some(output) = block_bash_policy::evaluate_subagent_intake_checkpoint_call(input) {
+    if let Some(output) = block_bash_policy::evaluate_intake_checkpoint_authority(input)? {
         return Ok(output);
     }
     let Some(event) = HookEvent::read_from_str(input)? else {
@@ -490,7 +490,13 @@ fn apply_patch_target_paths(patch: &str) -> Vec<String> {
 fn is_documentation_or_guidance_path(path: &str, worktree_root: &Path) -> bool {
     let path = path.trim_matches(|ch| ch == '\'' || ch == '"');
     let path = Path::new(path);
-    let relative = if path.is_absolute() {
+    let externally_rooted = path.is_absolute()
+        || path.has_root()
+        || matches!(
+            path.components().next(),
+            Some(std::path::Component::Prefix(_))
+        );
+    let relative = if externally_rooted {
         if is_plan_mode_plan_file(path) {
             return true;
         }

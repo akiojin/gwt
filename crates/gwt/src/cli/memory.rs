@@ -125,7 +125,8 @@ pub fn run<E: CliEnv>(
     match command {
         MemoryCommand::Add(add) => {
             let path = append_memory_entry(env.repo_path(), &add).map_err(io_as_spec_error)?;
-            out.push_str(&format!("memory updated: {}\n", path.display()));
+            let display_path = path.to_string_lossy().replace('\\', "/");
+            out.push_str(&format!("memory updated: {display_path}\n"));
             Ok(0)
         }
     }

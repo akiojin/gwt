@@ -879,6 +879,8 @@ enum RecoveryMutation {
         expected_generation: u64,
         session_id: String,
         reason: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        expected_attention_reason: Option<String>,
     },
     CompleteClaimedProviderReady {
         claim_holder_recovery_id: String,
@@ -1441,6 +1443,60 @@ impl RecoveryStore {
                 expected_generation,
                 session_id: session_id.to_string(),
                 reason,
+                expected_attention_reason: None,
+            },
+        )
+    }
+
+    /// Atomically record a stopped Intake supervisor while resolving one
+    /// caller-verified Attention state.
+    ///
+    /// The expected Attention reason is part of the generation-CAS mutation:
+    /// startup may opt in only for a narrowly classified, retryable reason,
+    /// while ambiguous or concurrently changed evidence remains untouched.
+    #[allow(clippy::too_many_arguments)]
+    pub fn interrupt_attention_after_supervisor_stop(
+        &self,
+        recovery_id: &str,
+        expected_generation: u64,
+        session_id: &str,
+        expected_attention_reason: &str,
+        observed_at: DateTime<Utc>,
+        reason: &str,
+        operation_id: impl Into<String>,
+    ) -> RecoveryStoreResult<RecoveryRecord> {
+        let session_id = session_id.trim();
+        if session_id.is_empty() {
+            return Err(RecoveryStoreError::InvalidLease(
+                "supervisor stop proof requires a Session identity".to_string(),
+            ));
+        }
+        ensure_text_limit(
+            "supervisor_stop.session_id",
+            session_id,
+            MAX_RECOVERY_IDENTIFIER_CHARS,
+        )?;
+        let expected_attention_reason = sanitize_visible_text(expected_attention_reason);
+        if expected_attention_reason.trim().is_empty() {
+            return Err(RecoveryStoreError::InvalidLease(
+                "attention supervisor stop proof requires the observed reason".to_string(),
+            ));
+        }
+        let reason = sanitize_visible_text(reason);
+        if reason.trim().is_empty() {
+            return Err(RecoveryStoreError::InvalidLease(
+                "supervisor stop proof requires a reason".to_string(),
+            ));
+        }
+        self.persist_mutation(
+            recovery_id,
+            operation_id.into(),
+            observed_at,
+            RecoveryMutation::InterruptAfterSupervisorStop {
+                expected_generation,
+                session_id: session_id.to_string(),
+                reason,
+                expected_attention_reason: Some(expected_attention_reason),
             },
         )
     }
@@ -4559,6 +4615,7 @@ fn apply_mutation(
             expected_generation,
             session_id,
             reason,
+            expected_attention_reason,
         } => {
             let current = require_record_mut(record, recovery_id)?;
             if current.generation != *expected_generation {
@@ -4567,21 +4624,26 @@ fn apply_mutation(
                     actual: current.generation,
                 });
             }
-            if current.session_kind != RecoverySessionKind::Intake
-                || current.session_id != *session_id
-            {
+            if current.session_id != *session_id {
                 return Err(RecoveryStoreError::InvalidLease(
-                    "supervisor stop proof does not match the Intake Session".to_string(),
+                    "supervisor stop proof does not match the Recovery Session".to_string(),
                 ));
             }
+            let expected_attention_matches =
+                expected_attention_reason
+                    .as_ref()
+                    .is_some_and(|expected_reason| {
+                        current.lifecycle == RecoveryLifecycle::Attention
+                            && current.lifecycle_reason.as_ref() == Some(expected_reason)
+                    });
             if current.launch_stage < RecoveryLaunchStage::SpawnRequested
                 || current.launch_stage.is_terminal()
-                || !matches!(
+                || (!matches!(
                     current.lifecycle,
                     RecoveryLifecycle::Launching
                         | RecoveryLifecycle::Running
                         | RecoveryLifecycle::Interrupted
-                )
+                ) && !expected_attention_matches)
                 || current.recovery_lease.is_some()
             {
                 return Err(RecoveryStoreError::InvalidLease(

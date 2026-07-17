@@ -286,7 +286,8 @@ Do not call `intake.checkpoint.update` for the same structured milestone by
 default. Use `intake.checkpoint.current` followed by
 `intake.checkpoint.update` only when this boundary must add or retain a
 continuation-critical attachment or a completed allowlisted visible item. Read
-the current numeric `revision` and state as the merge base, repeat its
+the current numeric `revision` as `expected_revision` and use the current state
+as the merge base, repeat its
 structured fields and title unchanged, retain every still-required
 `attachment_ref`, and add new files through `attachment_paths`. This
 supplemental complete-replacement CAS reuses the automatic Board intent, so it
@@ -302,8 +303,9 @@ it from transcript, argv, bridge text, or Board.
 
 Visible items are restricted to completed root-visible assistant messages,
 plans, or questions and completed user answers or messages. The milestone must
-be public-safe and useful without the private conversation. Do not include
-transcripts, tool output, hidden reasoning, credentials, tokens, environment
+be public-safe and useful without the private conversation.
+Do not include transcripts, tool output, hidden reasoning, credentials, tokens,
+environment
 values, approvals, or unrelated file contents. If either operation fails, keep
 the discussion active, report the durability failure, and retry it before
 treating that answer as checkpointed. The Stop boundary rejects a missing or

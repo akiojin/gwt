@@ -370,13 +370,24 @@ false acknowledgement. The recovery checkpoint still commits, and Recovery
 Center displays the bounded delivery error until a safe delivery path is
 available.
 
-Codex Host recovery uses a dedicated loopback-only bridge that is separate
-from the browser server. Docker and Podman use the mounted `gwtd` sidecar and
-the selected Compose service's own loopback; no published port, host gateway,
-or token-bearing URL is required. Container recovery therefore requires the
-normal gwt Linux bundle mount plus a Codex runner available in that service.
-Runner, bridge, or control-channel mismatches fail closed into Recovery Center
-instead of falling back to an unobserved direct Codex launch.
+Codex root-binding and checkpoint recovery on Host uses a dedicated
+loopback-only bridge that is separate from the browser server. Docker and
+Podman use the mounted `gwtd` sidecar and the selected Compose service's own
+loopback for that durability path; it needs no published port, host gateway,
+or token-bearing URL. Container recovery therefore requires the normal gwt
+Linux bundle mount plus a Codex runner available in that service.
+
+Separately, the managed hook/pane control channel shared by agents uses a
+dedicated agent-only EmbeddedServer listener. Host agents connect through
+`127.0.0.1`. Docker agents use `host.docker.internal` (the gwt-managed Linux
+override adds the host-gateway mapping without changing a user override),
+while Podman agents use its reserved `host.containers.internal` alias. This
+listener exposes only hook and pane-control endpoints and requires an opaque
+capability bound server-side to the canonical project and Session; the
+capability is passed only through the environment, never in argv or the URL.
+Runtime, bridge, project, Session, or control-channel mismatches fail closed
+into Recovery Center instead of falling back to an unobserved direct Codex
+launch.
 
 ## Issue Monitor
 

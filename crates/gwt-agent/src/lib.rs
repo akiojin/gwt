@@ -52,8 +52,9 @@ pub use legacy_recovery::{
 pub use migration::{migrate_legacy_backend_rows, resolve_legacy_backend_remap, MigrationReport};
 pub use prepare::{
     apply_host_package_runner_fallback, apply_host_package_runner_fallback_with_probe,
-    branch_worktree_path, install_launch_gwt_bin_env, install_launch_gwt_bin_env_with_lookup,
-    prepare_agent_launch, register_codex_managed_hook_trust_in_docker, resolve_launch_worktree,
+    branch_worktree_path, hook_forward_url_for_launch_runtime, install_launch_gwt_bin_env,
+    install_launch_gwt_bin_env_with_lookup, prepare_agent_launch,
+    register_codex_managed_hook_trust_in_docker, resolve_launch_worktree,
     resolve_launch_worktree_request, resolve_public_gwt_bin_with_lookup, HookForwardEnv,
     PreparedAgentLaunch, PreparedProcessLaunch,
 };

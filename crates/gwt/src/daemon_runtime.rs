@@ -14,6 +14,8 @@ use crate::cli::hook::{
 };
 
 const HOOK_LIVE_TIMEOUT_MS: u64 = 100;
+pub use gwt_agent::hook_forward_url_for_launch_runtime;
+pub use gwt_docker::{DOCKER_HOST_BRIDGE_NAME, PODMAN_HOST_BRIDGE_NAME};
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -82,11 +84,26 @@ impl HookForwardTarget {
             }
         }
 
+        if !url.username().is_empty() || url.password().is_some() {
+            return Err("hook live URL must not contain user credentials".to_string());
+        }
+
         let Some(host) = url.host_str() else {
             return Err("hook live URL is missing a host".to_string());
         };
-        if !is_loopback_host(host) {
-            return Err(format!("hook live URL must stay on loopback, got: {host}"));
+        if !is_allowed_hook_forward_host(host) {
+            return Err(format!(
+                "hook live URL must stay on loopback or container host bridge, got: {host}"
+            ));
+        }
+        if url.port().is_none() {
+            return Err("hook live URL must include an explicit port".to_string());
+        }
+        if url.path() != "/internal/hook-live" {
+            return Err(format!(
+                "hook live URL path must be /internal/hook-live, got: {}",
+                url.path()
+            ));
         }
 
         Ok(())
@@ -284,8 +301,25 @@ fn session_dir_from_runtime_path_env() -> Option<PathBuf> {
     gwt_agent::sessions_dir_from_runtime_path(&runtime_path)
 }
 
-fn is_loopback_host(host: &str) -> bool {
-    host.eq_ignore_ascii_case("localhost") || host == "127.0.0.1" || host == "::1"
+fn is_allowed_hook_forward_host(host: &str) -> bool {
+    let normalized = host
+        .strip_prefix('[')
+        .and_then(|candidate| candidate.strip_suffix(']'))
+        .unwrap_or(host);
+    normalized.eq_ignore_ascii_case(DOCKER_HOST_BRIDGE_NAME)
+        || normalized.eq_ignore_ascii_case(PODMAN_HOST_BRIDGE_NAME)
+        || is_loopback_hook_forward_host(normalized)
+}
+
+fn is_loopback_hook_forward_host(host: &str) -> bool {
+    let normalized = host
+        .strip_prefix('[')
+        .and_then(|candidate| candidate.strip_suffix(']'))
+        .unwrap_or(host);
+    normalized.eq_ignore_ascii_case("localhost")
+        || normalized
+            .parse::<std::net::IpAddr>()
+            .is_ok_and(|address| address.is_loopback())
 }
 
 #[cfg(test)]
@@ -319,6 +353,76 @@ mod tests {
         };
 
         target.validate().expect("loopback target");
+    }
+
+    #[test]
+    fn hook_forward_target_accepts_only_reserved_container_host_aliases() {
+        for url in [
+            "http://host.docker.internal:45123/internal/hook-live",
+            "https://host.containers.internal:45124/internal/hook-live?generation=7",
+            "http://[::1]:45125/internal/hook-live",
+        ] {
+            HookForwardTarget {
+                url: url.to_string(),
+                token: "secret".to_string(),
+            }
+            .validate()
+            .unwrap_or_else(|error| panic!("expected {url} to be accepted: {error}"));
+        }
+
+        for url in [
+            "http://host.docker.internal.example.com:45123/internal/hook-live",
+            "http://host.containers.internal.evil:45123/internal/hook-live",
+            "http://docker.internal:45123/internal/hook-live",
+        ] {
+            let error = HookForwardTarget {
+                url: url.to_string(),
+                token: "secret".to_string(),
+            }
+            .validate()
+            .expect_err("generic remote host must fail closed");
+            assert!(error.contains("loopback or container host bridge"));
+        }
+    }
+
+    #[test]
+    fn hook_forward_target_requires_explicit_port_and_canonical_path() {
+        for (url, expected) in [
+            (
+                "http://host.docker.internal/internal/hook-live",
+                "explicit port",
+            ),
+            ("ftp://127.0.0.1:45123/internal/hook-live", "scheme"),
+            ("http://127.0.0.1:45123/healthz", "path"),
+            (
+                "http://user@127.0.0.1:45123/internal/hook-live",
+                "credentials",
+            ),
+        ] {
+            let error = HookForwardTarget {
+                url: url.to_string(),
+                token: "secret".to_string(),
+            }
+            .validate()
+            .expect_err("non-canonical hook target must fail closed");
+            assert!(
+                error.contains(expected),
+                "expected {expected:?} in {error:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn hook_forward_target_debug_redacts_bearer_token_for_container_alias() {
+        const TOKEN_SENTINEL: &str = "container-hook-capability-secret-sentinel";
+        let target = HookForwardTarget {
+            url: "http://host.docker.internal:45123/internal/hook-live".to_string(),
+            token: TOKEN_SENTINEL.to_string(),
+        };
+
+        let debug = format!("{target:?}");
+        assert!(!debug.contains(TOKEN_SENTINEL), "token leaked: {debug}");
+        assert!(debug.contains("<redacted>"));
     }
 
     #[test]

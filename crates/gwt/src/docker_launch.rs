@@ -1,5 +1,9 @@
 use super::*;
 
+const DOCKER_GWT_OVERRIDE_HEADER: &str =
+    "# Auto-generated docker-compose override for gwt bundle mounting";
+const DOCKER_GWT_OVERRIDE_FILE_NAME: &str = "docker-compose.gwt.override.yml";
+
 pub fn detect_wizard_docker_context_and_status(
     project_root: &Path,
 ) -> (
@@ -37,7 +41,8 @@ pub fn detect_wizard_docker_context_and_status(
 pub struct DockerLaunchPlan {
     pub(crate) compose_files: Vec<PathBuf>,
     pub(crate) compose_file: PathBuf,
-    pub(crate) override_file: PathBuf,
+    pub(crate) user_override_file: PathBuf,
+    pub(crate) managed_override_file: PathBuf,
     pub(crate) service: String,
     pub(crate) container_cwd: String,
 }
@@ -70,8 +75,10 @@ pub struct DevContainerLaunchDefaults {
 impl DockerLaunchPlan {
     pub(crate) fn compose_files_for_runtime(&self) -> Vec<PathBuf> {
         let mut compose_files = self.compose_files.clone();
-        if self.override_file.exists() {
-            compose_files.push(self.override_file.clone());
+        for override_file in [&self.user_override_file, &self.managed_override_file] {
+            if override_file.exists() && !compose_files.iter().any(|file| file == override_file) {
+                compose_files.push(override_file.clone());
+            }
         }
         compose_files
     }
@@ -174,28 +181,76 @@ fn docker_compose_mount_path(path: &Path) -> String {
     path.to_string_lossy().replace('\\', "/")
 }
 
-pub fn docker_bundle_override_content(service: &str, bundle: &DockerBundleMounts) -> String {
+pub fn docker_bundle_override_content(
+    service: &str,
+    bundle: &DockerBundleMounts,
+    container_runtime_binary: &str,
+) -> Result<String, String> {
+    let runtime = gwt_docker::container_runtime_kind(container_runtime_binary)?;
     let host_gwtd = docker_compose_mount_path(&bundle.host_gwtd);
-    format!(
+    let extra_hosts = runtime
+        .compose_extra_host()
+        .map(|mapping| format!("    extra_hosts:\n      - \"{mapping}\"\n"))
+        .unwrap_or_default();
+    Ok(format!(
         concat!(
-            "# Auto-generated docker-compose override for gwt bundle mounting\n",
+            "{header}\n",
             "services:\n",
             "  {service}:\n",
             "    volumes:\n",
-            "      - \"{host_gwtd}:{path}:ro\"\n"
+            "      - \"{host_gwtd}:{path}:ro\"\n",
+            "{extra_hosts}"
         ),
+        header = DOCKER_GWT_OVERRIDE_HEADER,
         service = service,
         host_gwtd = host_gwtd,
         path = DOCKER_GWTD_BIN_PATH,
-    )
+        extra_hosts = extra_hosts,
+    ))
+}
+
+fn ensure_docker_bundle_override_file(
+    override_path: &Path,
+    service: &str,
+    bundle: &DockerBundleMounts,
+    container_runtime_binary: &str,
+) -> Result<(), String> {
+    use std::fs;
+
+    let override_content =
+        docker_bundle_override_content(service, bundle, container_runtime_binary)?;
+    if let Ok(existing) = fs::read_to_string(override_path) {
+        if existing == override_content {
+            return Ok(());
+        }
+        if !existing.starts_with(DOCKER_GWT_OVERRIDE_HEADER) {
+            return Err(format!(
+                "Refusing to overwrite non-gwt Compose override at {}; move the file or merge the gwt settings manually",
+                override_path.display()
+            ));
+        }
+    }
+    if let Some(parent) = override_path.parent() {
+        fs::create_dir_all(parent).map_err(|err| {
+            format!(
+                "Failed to create Docker override directory {}: {err}",
+                parent.display()
+            )
+        })?;
+    }
+    fs::write(override_path, override_content).map_err(|err| {
+        format!(
+            "Failed to create docker-compose.override.yml: {err}\n\
+             Manually create {} with gwt/gwtd bundle mounts",
+            override_path.display()
+        )
+    })
 }
 
 pub fn ensure_docker_gwt_binary_setup(launch: &DockerLaunchPlan) -> Result<(), String> {
-    use std::fs;
-
     let home = resolve_user_home_dir()?;
     let bundle = docker_bundle_mounts_for_home(&home);
-    let override_path = &launch.override_file;
+    let override_path = &launch.managed_override_file;
 
     if (!bundle.host_gwt.exists() || !bundle.host_gwtd.exists()) && !override_path.exists() {
         eprintln!(
@@ -209,24 +264,12 @@ pub fn ensure_docker_gwt_binary_setup(launch: &DockerLaunchPlan) -> Result<(), S
         );
     }
 
-    if !override_path.exists() {
-        if let Some(parent) = override_path.parent() {
-            fs::create_dir_all(parent).map_err(|err| {
-                format!(
-                    "Failed to create Docker override directory {}: {err}",
-                    parent.display()
-                )
-            })?;
-        }
-        let override_content = docker_bundle_override_content(&launch.service, &bundle);
-        fs::write(override_path, override_content).map_err(|err| {
-            format!(
-                "Failed to create docker-compose.override.yml: {err}\n\
-                 Manually create {} with gwt/gwtd bundle mounts",
-                override_path.display()
-            )
-        })?;
-    }
+    ensure_docker_bundle_override_file(
+        override_path,
+        &launch.service,
+        &bundle,
+        &docker_binary_for_launch(),
+    )?;
 
     Ok(())
 }
@@ -279,9 +322,10 @@ pub fn docker_compose_exec_env_args(env_vars: &HashMap<String, String>) -> Vec<S
             continue;
         }
         args.push("-e".to_string());
-        if key == gwt::codex_bridge::CODEX_REMOTE_AUTH_TOKEN_ENV {
-            // Compose copies this one value from the docker/podman CLI process
-            // environment. The capability must never appear in argv or logs.
+        if private_docker_exec_env_key(key) {
+            // Compose copies private values from the docker/podman CLI process
+            // environment. Capabilities and session identities must never
+            // appear in argv or launch-stage logs.
             args.push(key.to_string());
         } else {
             let value = env_vars.get(key).map(String::as_str).unwrap_or_default();
@@ -289,6 +333,17 @@ pub fn docker_compose_exec_env_args(env_vars: &HashMap<String, String>) -> Vec<S
         }
     }
     args
+}
+
+fn private_docker_exec_env_key(key: &str) -> bool {
+    matches!(
+        key,
+        gwt::codex_bridge::CODEX_REMOTE_AUTH_TOKEN_ENV
+            | gwt_agent::GWT_HOOK_FORWARD_TOKEN_ENV
+            | gwt_agent::GWT_SESSION_ID_ENV
+            | gwt_agent::GWT_RECOVERY_ID_ENV
+            | gwt_agent::GWT_SESSION_RUNTIME_PATH_ENV
+    )
 }
 
 pub fn is_valid_docker_env_key(key: &str) -> bool {
@@ -656,7 +711,8 @@ pub fn resolve_docker_launch_plan(
     Ok(DockerLaunchPlan {
         compose_files,
         compose_file,
-        override_file: worktree.join("docker-compose.override.yml"),
+        user_override_file: worktree.join("docker-compose.override.yml"),
+        managed_override_file: worktree.join(DOCKER_GWT_OVERRIDE_FILE_NAME),
         service: service.name.clone(),
         container_cwd,
     })
@@ -760,6 +816,240 @@ pub fn mount_source_matches_project_root(source: &str, project_root: &Path) -> b
 #[cfg(test)]
 mod docker_exec_env_tests {
     use super::*;
+    use gwt::daemon_runtime::hook_forward_url_for_launch_runtime;
+
+    fn service_definition(content: &str, service: &str) -> serde_yaml::Mapping {
+        let parsed: serde_yaml::Value =
+            serde_yaml::from_str(content).expect("override must parse as YAML");
+        parsed
+            .get("services")
+            .and_then(serde_yaml::Value::as_mapping)
+            .and_then(|services| services.get(serde_yaml::Value::String(service.to_string())))
+            .and_then(serde_yaml::Value::as_mapping)
+            .cloned()
+            .expect("service entry must be a mapping")
+    }
+
+    #[test]
+    fn docker_bundle_override_file_includes_the_docker_host_gateway() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let override_path = temp.path().join("docker-compose.override.yml");
+        let bundle = docker_bundle_mounts_for_home(temp.path());
+
+        ensure_docker_bundle_override_file(
+            &override_path,
+            "app",
+            &bundle,
+            r"C:\Program Files\Docker\docker.exe",
+        )
+        .expect("write Docker override");
+
+        let content = std::fs::read_to_string(&override_path).expect("read Docker override");
+        let service = service_definition(&content, "app");
+        let volumes = service
+            .get(serde_yaml::Value::String("volumes".to_string()))
+            .and_then(serde_yaml::Value::as_sequence)
+            .expect("volumes must be a sequence");
+        assert_eq!(volumes.len(), 1, "existing gwtd volume must be retained");
+        let extra_hosts = service
+            .get(serde_yaml::Value::String("extra_hosts".to_string()))
+            .and_then(serde_yaml::Value::as_sequence)
+            .expect("Docker extra_hosts must be a sequence");
+        assert_eq!(
+            extra_hosts,
+            &[serde_yaml::Value::String(
+                "host.docker.internal:host-gateway".to_string()
+            )]
+        );
+    }
+
+    #[test]
+    fn podman_bundle_override_file_relies_on_the_runtime_host_alias() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let override_path = temp.path().join("docker-compose.override.yml");
+        let bundle = docker_bundle_mounts_for_home(temp.path());
+
+        ensure_docker_bundle_override_file(&override_path, "app", &bundle, "podman")
+            .expect("write Podman override");
+
+        let content = std::fs::read_to_string(&override_path).expect("read Podman override");
+        let service = service_definition(&content, "app");
+        assert!(
+            service
+                .get(serde_yaml::Value::String("extra_hosts".to_string()))
+                .is_none(),
+            "Podman supplies host.containers.internal automatically"
+        );
+        let volumes = service
+            .get(serde_yaml::Value::String("volumes".to_string()))
+            .and_then(serde_yaml::Value::as_sequence)
+            .expect("volumes must be a sequence");
+        assert_eq!(volumes.len(), 1, "existing gwtd volume must be retained");
+    }
+
+    #[test]
+    fn docker_bundle_override_file_fails_closed_without_overwriting_an_unowned_file() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let override_path = temp.path().join("docker-compose.override.yml");
+        let sentinel = "services:\n  app:\n    environment:\n      USER_SETTING: keep\n";
+        std::fs::write(&override_path, sentinel).expect("write user override");
+        let bundle = docker_bundle_mounts_for_home(temp.path());
+
+        let error = ensure_docker_bundle_override_file(&override_path, "app", &bundle, "docker")
+            .expect_err("unowned override must fail closed");
+
+        assert!(error.contains("Refusing to overwrite non-gwt"));
+        assert_eq!(
+            std::fs::read_to_string(&override_path).expect("read existing override"),
+            sentinel
+        );
+    }
+
+    #[test]
+    fn docker_bundle_override_file_refreshes_an_owned_legacy_file() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let override_path = temp.path().join(DOCKER_GWT_OVERRIDE_FILE_NAME);
+        std::fs::write(
+            &override_path,
+            format!("{DOCKER_GWT_OVERRIDE_HEADER}\nservices: {{}}\n"),
+        )
+        .expect("write legacy managed override");
+        let bundle = docker_bundle_mounts_for_home(temp.path());
+
+        ensure_docker_bundle_override_file(&override_path, "app", &bundle, "docker")
+            .expect("refresh managed override");
+
+        let content = std::fs::read_to_string(&override_path).expect("managed override");
+        let service = service_definition(&content, "app");
+        assert_eq!(
+            service
+                .get(serde_yaml::Value::String("extra_hosts".to_string()))
+                .and_then(serde_yaml::Value::as_sequence),
+            Some(&vec![serde_yaml::Value::String(
+                "host.docker.internal:host-gateway".to_string()
+            )])
+        );
+    }
+
+    #[test]
+    fn finalized_compose_exec_includes_user_and_managed_overrides_in_order() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let project = temp.path().join("project");
+        std::fs::create_dir_all(&project).expect("create project");
+        let compose = project.join("docker-compose.yml");
+        let user = project.join("docker-compose.override.yml");
+        let managed = project.join(DOCKER_GWT_OVERRIDE_FILE_NAME);
+        std::fs::write(
+            &compose,
+            "services:\n  app:\n    image: alpine:3.19\n    working_dir: /workspace/app\n",
+        )
+        .expect("base compose");
+        std::fs::write(
+            &user,
+            "services:\n  app:\n    environment:\n      USER_SETTING: keep\n",
+        )
+        .expect("user override");
+        std::fs::write(
+            &managed,
+            format!(
+                "{DOCKER_GWT_OVERRIDE_HEADER}\nservices:\n  app:\n    extra_hosts:\n      - \"host.docker.internal:host-gateway\"\n"
+            ),
+        )
+        .expect("managed override");
+        let mut config = gwt_agent::AgentLaunchBuilder::new(gwt_agent::AgentId::Codex)
+            .working_dir(&project)
+            .build();
+        config.runtime_target = gwt_agent::LaunchRuntimeTarget::Docker;
+        config.docker_service = Some("app".to_string());
+        config.command = "codex".to_string();
+
+        finalize_docker_agent_launch_config(&project, &mut config).expect("finalize Docker launch");
+
+        let file_arguments = config
+            .args
+            .windows(2)
+            .filter_map(|pair| (pair[0] == "-f").then_some(pair[1].clone()))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            file_arguments,
+            vec![
+                compose.display().to_string(),
+                user.display().to_string(),
+                managed.display().to_string(),
+            ]
+        );
+        assert!(std::fs::read_to_string(user)
+            .expect("preserved user override")
+            .contains("USER_SETTING: keep"));
+    }
+
+    #[test]
+    fn hook_forward_url_keeps_host_launch_loopback_and_rewrites_container_host_only() {
+        let source = "http://127.0.0.1:45123/internal/hook-live?generation=7";
+
+        assert_eq!(
+            hook_forward_url_for_launch_runtime(
+                source,
+                gwt_agent::LaunchRuntimeTarget::Host,
+                r"C:\Program Files\Docker\docker.exe",
+            )
+            .expect("host URL"),
+            source,
+        );
+        assert_eq!(
+            hook_forward_url_for_launch_runtime(
+                source,
+                gwt_agent::LaunchRuntimeTarget::Docker,
+                r"C:\Program Files\Docker\DOCKER.EXE",
+            )
+            .expect("Docker bridge URL"),
+            "http://host.docker.internal:45123/internal/hook-live?generation=7",
+        );
+        assert_eq!(
+            hook_forward_url_for_launch_runtime(
+                "https://[::1]:46000/internal/hook-live?generation=8",
+                gwt_agent::LaunchRuntimeTarget::Docker,
+                "/opt/homebrew/bin/podman",
+            )
+            .expect("Podman bridge URL"),
+            "https://host.containers.internal:46000/internal/hook-live?generation=8",
+        );
+    }
+
+    #[test]
+    fn hook_forward_url_fails_closed_for_unsafe_or_unsupported_container_targets() {
+        let docker = gwt_agent::LaunchRuntimeTarget::Docker;
+
+        for (source, runtime, expected) in [
+            (
+                "http://example.com:45123/internal/hook-live",
+                "docker",
+                "loopback",
+            ),
+            (
+                "http://127.0.0.1/internal/hook-live",
+                "docker",
+                "explicit port",
+            ),
+            (
+                "ftp://127.0.0.1:45123/internal/hook-live",
+                "docker",
+                "scheme",
+            ),
+            (
+                "http://127.0.0.1:45123/internal/hook-live",
+                "custom-container-wrapper",
+                "Docker or Podman",
+            ),
+        ] {
+            let error = hook_forward_url_for_launch_runtime(source, docker, runtime)
+                .expect_err("unsafe container hook target must fail closed");
+            assert!(
+                error.contains(expected),
+                "expected {expected:?} in {error:?}"
+            );
+        }
+    }
 
     #[test]
     fn docker_compose_exec_env_args_does_not_override_container_path() {
@@ -796,6 +1086,33 @@ mod docker_exec_env_tests {
             .windows(2)
             .any(|pair| { pair == ["-e", gwt::codex_bridge::CODEX_REMOTE_AUTH_TOKEN_ENV,] }));
         assert!(!args.iter().any(|arg| arg.contains(token)));
+    }
+
+    #[test]
+    fn docker_compose_exec_keeps_agent_capability_and_session_identity_out_of_argv() {
+        const TOKEN_SENTINEL: &str = "agent-capability-secret-sentinel";
+        const SESSION_SENTINEL: &str = "session-secret-sentinel";
+        let env = HashMap::from([
+            (
+                gwt_agent::GWT_HOOK_FORWARD_TOKEN_ENV.to_string(),
+                TOKEN_SENTINEL.to_string(),
+            ),
+            (
+                gwt_agent::GWT_SESSION_ID_ENV.to_string(),
+                SESSION_SENTINEL.to_string(),
+            ),
+        ]);
+
+        let args = docker_compose_exec_env_args(&env);
+
+        for key in [
+            gwt_agent::GWT_HOOK_FORWARD_TOKEN_ENV,
+            gwt_agent::GWT_SESSION_ID_ENV,
+        ] {
+            assert!(args.windows(2).any(|pair| pair == ["-e", key]));
+        }
+        assert!(!args.iter().any(|arg| arg.contains(TOKEN_SENTINEL)));
+        assert!(!args.iter().any(|arg| arg.contains(SESSION_SENTINEL)));
     }
 
     #[test]

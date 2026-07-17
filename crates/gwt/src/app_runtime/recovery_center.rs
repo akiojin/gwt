@@ -218,34 +218,55 @@ fn recovery_handle_key() -> &'static [u8; 32] {
     })
 }
 
-fn recovery_handle_registry() -> &'static Mutex<VecDeque<(String, String, u64)>> {
-    static REGISTRY: OnceLock<Mutex<VecDeque<(String, String, u64)>>> = OnceLock::new();
+#[derive(Clone)]
+struct RegisteredRecoveryAction {
+    handle: String,
+    store_scope: String,
+    recovery_id: String,
+    generation: u64,
+}
+
+fn recovery_handle_registry() -> &'static Mutex<VecDeque<RegisteredRecoveryAction>> {
+    static REGISTRY: OnceLock<Mutex<VecDeque<RegisteredRecoveryAction>>> = OnceLock::new();
     REGISTRY.get_or_init(|| Mutex::new(VecDeque::new()))
 }
 
-fn register_recovery_action_handle(handle: &str, recovery_id: &str, generation: u64) {
+fn register_recovery_action_handle(
+    handle: &str,
+    store_scope: &str,
+    recovery_id: &str,
+    generation: u64,
+) {
     let mut registry = recovery_handle_registry()
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
     if let Some(index) = registry
         .iter()
-        .position(|(known, _, _)| constant_time_eq(known, handle))
+        .position(|known| constant_time_eq(&known.handle, handle))
     {
         registry.remove(index);
     }
-    registry.push_back((handle.to_string(), recovery_id.to_string(), generation));
+    registry.push_back(RegisteredRecoveryAction {
+        handle: handle.to_string(),
+        store_scope: store_scope.to_string(),
+        recovery_id: recovery_id.to_string(),
+        generation,
+    });
     while registry.len() > RECOVERY_ACTION_HANDLE_REGISTRY_CAPACITY {
         registry.pop_front();
     }
 }
 
-fn registered_recovery_action(handle: &str) -> Option<(String, u64)> {
+fn registered_recovery_action(handle: &str, store_scope: &str) -> Option<(String, u64)> {
     recovery_handle_registry()
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
         .iter()
-        .find(|(known, _, _)| constant_time_eq(known, handle))
-        .map(|(_, recovery_id, generation)| (recovery_id.clone(), *generation))
+        .find(|known| {
+            constant_time_eq(&known.handle, handle)
+                && constant_time_eq(&known.store_scope, store_scope)
+        })
+        .map(|known| (known.recovery_id.clone(), known.generation))
 }
 
 fn hmac_sha256(key: &[u8], message: &[u8]) -> [u8; 32] {
@@ -285,26 +306,74 @@ fn constant_time_eq(left: &str, right: &str) -> bool {
         == 0
 }
 
-fn recovery_action_handle(recovery_id: &str, generation: u64) -> String {
-    let message = format!("recovery-candidate-v1\0{recovery_id}\0{generation}");
+fn recovery_store_scope(store: &RecoveryStore) -> String {
+    let canonical =
+        dunce::canonicalize(store.root()).unwrap_or_else(|_| store.root().to_path_buf());
+    let mut digest = Sha256::new();
+    #[cfg(unix)]
+    {
+        use std::os::unix::ffi::OsStrExt;
+        digest.update(canonical.as_os_str().as_bytes());
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::ffi::OsStrExt;
+        for unit in canonical.as_os_str().encode_wide() {
+            digest.update(unit.to_le_bytes());
+        }
+    }
+    #[cfg(not(any(unix, windows)))]
+    digest.update(canonical.to_string_lossy().as_bytes());
+    hex::encode(digest.finalize())
+}
+
+fn recovery_action_handle_for_scope(
+    store_scope: &str,
+    recovery_id: &str,
+    generation: u64,
+) -> String {
+    let message = format!("recovery-candidate-v2\0{store_scope}\0{recovery_id}\0{generation}");
     let handle = format!(
         "{RECOVERY_ACTION_HANDLE_PREFIX}{}",
         hex::encode(hmac_sha256(recovery_handle_key(), message.as_bytes()))
     );
-    register_recovery_action_handle(&handle, recovery_id, generation);
+    register_recovery_action_handle(&handle, store_scope, recovery_id, generation);
     handle
 }
 
-fn provider_choice_handle(recovery_id: &str, generation: u64, provider_root_id: &str) -> String {
-    let message =
-        format!("recovery-provider-choice-v1\0{recovery_id}\0{generation}\0{provider_root_id}");
+#[cfg(test)]
+fn recovery_action_handle_for_store(
+    store: &RecoveryStore,
+    recovery_id: &str,
+    generation: u64,
+) -> String {
+    recovery_action_handle_for_scope(&recovery_store_scope(store), recovery_id, generation)
+}
+
+#[cfg(test)]
+fn recovery_action_handle(recovery_id: &str, generation: u64) -> String {
+    recovery_action_handle_for_scope("unit-test", recovery_id, generation)
+}
+
+fn provider_choice_handle(
+    store_scope: &str,
+    recovery_id: &str,
+    generation: u64,
+    provider_root_id: &str,
+) -> String {
+    let message = format!(
+        "recovery-provider-choice-v2\0{store_scope}\0{recovery_id}\0{generation}\0{provider_root_id}"
+    );
     format!(
         "{RECOVERY_PROVIDER_CHOICE_HANDLE_PREFIX}{}",
         hex::encode(hmac_sha256(recovery_handle_key(), message.as_bytes()))
     )
 }
 
-fn public_recovery_candidate(candidate: &RecoveryCenterCandidate) -> PublicRecoveryCenterCandidate {
+fn public_recovery_candidate(
+    candidate: &RecoveryCenterCandidate,
+    store_scope: &str,
+) -> PublicRecoveryCenterCandidate {
     // Prompts, checkpoint summaries, and root inputs can contain arbitrary
     // credentials. A structural label keeps candidates distinguishable via
     // worktree/provider/time evidence without projecting user content.
@@ -325,6 +394,7 @@ fn public_recovery_candidate(candidate: &RecoveryCenterCandidate) -> PublicRecov
         .enumerate()
         .map(|(index, provider_candidate)| RecoveryCenterProviderChoice {
             choice_handle: provider_choice_handle(
+                store_scope,
                 &candidate.recovery_id,
                 candidate.generation,
                 &provider_candidate.root_id,
@@ -360,7 +430,11 @@ fn public_recovery_candidate(candidate: &RecoveryCenterCandidate) -> PublicRecov
     }
 
     PublicRecoveryCenterCandidate {
-        action_handle: recovery_action_handle(&candidate.recovery_id, candidate.generation),
+        action_handle: recovery_action_handle_for_scope(
+            store_scope,
+            &candidate.recovery_id,
+            candidate.generation,
+        ),
         session_kind: candidate.session_kind,
         lifecycle: candidate.lifecycle,
         attention_required: candidate.attention_required,
@@ -388,7 +462,11 @@ fn public_recovery_candidate(candidate: &RecoveryCenterCandidate) -> PublicRecov
     }
 }
 
-fn public_recovery_center(center: &RecoveryCenterView) -> PublicRecoveryCenterView {
+fn public_recovery_center(
+    center: &RecoveryCenterView,
+    store: &RecoveryStore,
+) -> PublicRecoveryCenterView {
+    let store_scope = recovery_store_scope(store);
     let project_name = Path::new(&center.project_root)
         .file_name()
         .and_then(|name| name.to_str())
@@ -401,7 +479,7 @@ fn public_recovery_center(center: &RecoveryCenterView) -> PublicRecoveryCenterVi
         candidates: center
             .candidates
             .iter()
-            .map(public_recovery_candidate)
+            .map(|candidate| public_recovery_candidate(candidate, &store_scope))
             .collect(),
     }
 }
@@ -419,7 +497,9 @@ fn resolve_public_recovery_action(
             "Recovery candidate is unavailable; refresh before retrying",
         ));
     }
-    let Some((recovery_id, expected_generation)) = registered_recovery_action(&action_handle)
+    let store_scope = recovery_store_scope(store);
+    let Some((recovery_id, expected_generation)) =
+        registered_recovery_action(&action_handle, &store_scope)
     else {
         return Err(recovery_error(
             Some(action_handle),
@@ -463,6 +543,7 @@ fn resolve_public_recovery_action(
             let selected = record.provider_root_candidates.iter().find(|candidate| {
                 constant_time_eq(
                     &provider_choice_handle(
+                        &store_scope,
                         &record.recovery_id,
                         record.generation,
                         &candidate.root_id,
@@ -844,7 +925,11 @@ pub(super) fn handle_recovery_center_action_for_test(
     handle_recovery_center_action(
         store,
         RecoveryCenterActionRequest {
-            action_handle: recovery_action_handle(recovery_id, expected_generation),
+            action_handle: recovery_action_handle_for_store(
+                store,
+                recovery_id,
+                expected_generation,
+            ),
             recovery_id: recovery_id.to_string(),
             expected_generation,
             action,
@@ -1602,7 +1687,7 @@ impl AppRuntime {
                 for candidate in &mut center.candidates {
                     self.post_process_recovery_candidate(candidate);
                 }
-                let center = public_recovery_center(&center);
+                let center = public_recovery_center(&center, &store);
                 vec![OutboundEvent::reply(
                     client_id,
                     BackendEvent::RecoveryCenterState { center },
@@ -1858,7 +1943,10 @@ impl AppRuntime {
                     PublicRecoveryCenterActionResult::Details {
                         action_handle,
                         accepted: true,
-                        candidate: Box::new(public_recovery_candidate(&candidate)),
+                        candidate: Box::new(public_recovery_candidate(
+                            &candidate,
+                            &recovery_store_scope(store),
+                        )),
                     },
                 )]
             }
@@ -2287,6 +2375,7 @@ fn mark_recovery_source_session_discarded(
     gwt_agent::update_session(sessions_dir, source_session_id, |session| {
         session.update_status(gwt_agent::AgentStatus::Stopped);
         session.restore_window_on_startup = false;
+        session.startup_restore_intent_recorded = true;
         session
             .advance_recovery_launch_stage(gwt_agent::session::RecoveryLaunchStage::Discarded)?;
         session.recovery_lease = None;
@@ -2350,7 +2439,6 @@ mod tests {
         collections::HashMap,
         fs,
         path::Path,
-        process::Command,
         sync::{Arc, RwLock},
     };
 
@@ -2369,9 +2457,10 @@ mod tests {
 
     use super::{
         handle_recovery_center_action, load_recovery_center_from_store, public_recovery_center,
-        recovery_action_handle, recovery_launch_config, select_live_recovery_window,
-        RecoveryCenterActionRequest, RecoveryCenterActionResult, RecoveryCenterCandidate,
-        RecoveryCenterLaunchRequest, RecoveryCenterView, CONTINUATION_MAX_CHARS,
+        recovery_action_handle, recovery_action_handle_for_store, recovery_launch_config,
+        resolve_public_recovery_action, select_live_recovery_window, RecoveryCenterActionRequest,
+        RecoveryCenterActionResult, RecoveryCenterCandidate, RecoveryCenterLaunchRequest,
+        RecoveryCenterView, CONTINUATION_MAX_CHARS,
     };
     use crate::{
         app_runtime::{
@@ -2493,7 +2582,8 @@ mod tests {
             .expect("Board error");
 
         let private = load_recovery_center_from_store(&project_root, &store).expect("private view");
-        let wire = serde_json::to_string(&public_recovery_center(&private)).expect("public wire");
+        let wire =
+            serde_json::to_string(&public_recovery_center(&private, &store)).expect("public wire");
 
         assert!(wire.contains("Intake recovery"));
         assert!(wire.contains("Candidate 1"));
@@ -2512,6 +2602,107 @@ mod tests {
                 "public Recovery Center payload exposed {private_marker}: {wire}"
             );
         }
+    }
+
+    #[test]
+    fn opaque_handles_are_bound_to_the_originating_recovery_store() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let project_a = temp.path().join("repo-a");
+        let project_b = temp.path().join("repo-b");
+        fs::create_dir_all(&project_a).expect("project A");
+        fs::create_dir_all(&project_b).expect("project B");
+        let store_a = RecoveryStore::for_project_dir(temp.path().join("project-store-a"));
+        let store_b = RecoveryStore::for_project_dir(temp.path().join("project-store-b"));
+        let recovery_id = "scope-collision";
+        create_record(
+            &store_a,
+            recovery_id,
+            &project_a,
+            &gwt_core::paths::project_scope_hash(&project_a).to_string(),
+        );
+        create_record(
+            &store_b,
+            recovery_id,
+            &project_b,
+            &gwt_core::paths::project_scope_hash(&project_b).to_string(),
+        );
+        for (store, operation_id) in [
+            (&store_a, "scope-collision:a:candidates"),
+            (&store_b, "scope-collision:b:candidates"),
+        ] {
+            store
+                .record_provider_root_candidates(
+                    recovery_id,
+                    vec![ProviderRootCandidate {
+                        root_id: "same-private-provider-root".to_string(),
+                        evidence: vec!["provider history".to_string()],
+                        observed_at: Utc::now(),
+                    }],
+                    operation_id,
+                )
+                .expect("record provider choice");
+        }
+        let generation_a = store_a.load(recovery_id).unwrap().unwrap().generation;
+        let generation_b = store_b.load(recovery_id).unwrap().unwrap().generation;
+        assert_eq!(generation_a, generation_b);
+
+        let center_a = public_recovery_center(
+            &load_recovery_center_from_store(&project_a, &store_a).expect("center A"),
+            &store_a,
+        );
+        let center_b = public_recovery_center(
+            &load_recovery_center_from_store(&project_b, &store_b).expect("center B"),
+            &store_b,
+        );
+        let candidate_a = center_a.candidates.first().expect("candidate A");
+        let candidate_b = center_b.candidates.first().expect("candidate B");
+        assert_ne!(candidate_a.action_handle, candidate_b.action_handle);
+        assert_ne!(
+            candidate_a.provider_choices[0].choice_handle,
+            candidate_b.provider_choices[0].choice_handle
+        );
+
+        let cross_store_action = resolve_public_recovery_action(
+            &store_b,
+            PublicRecoveryCenterActionRequest {
+                action_handle: candidate_a.action_handle.clone(),
+                action: RecoveryCenterAction::Details,
+                provider_choice_handle: None,
+            },
+        )
+        .expect_err("a handle from project A must not resolve in project B");
+        assert_eq!(
+            cross_store_action.code,
+            RecoveryCenterErrorCode::StaleCandidate
+        );
+
+        let cross_store_provider_choice = resolve_public_recovery_action(
+            &store_b,
+            PublicRecoveryCenterActionRequest {
+                action_handle: candidate_b.action_handle.clone(),
+                action: RecoveryCenterAction::ConfirmResume,
+                provider_choice_handle: Some(candidate_a.provider_choices[0].choice_handle.clone()),
+            },
+        )
+        .expect_err("a provider choice from project A must not resolve in project B");
+        assert_eq!(
+            cross_store_provider_choice.code,
+            RecoveryCenterErrorCode::ActionUnavailable
+        );
+
+        let resolved = resolve_public_recovery_action(
+            &store_b,
+            PublicRecoveryCenterActionRequest {
+                action_handle: candidate_b.action_handle.clone(),
+                action: RecoveryCenterAction::ConfirmResume,
+                provider_choice_handle: Some(candidate_b.provider_choices[0].choice_handle.clone()),
+            },
+        )
+        .expect("same-store handles resolve");
+        assert_eq!(
+            resolved.provider_root_id.as_deref(),
+            Some("same-private-provider-root")
+        );
     }
 
     #[test]
@@ -3732,7 +3923,8 @@ mod tests {
             .candidates
             .iter()
             .find(|candidate| {
-                candidate.action_handle == recovery_action_handle("missing-intake", generation)
+                candidate.action_handle
+                    == recovery_action_handle_for_store(&store, "missing-intake", generation)
             })
             .expect("public missing Intake candidate");
         assert!(!candidate.worktree_available);
@@ -3753,6 +3945,7 @@ mod tests {
         let events = runtime.recovery_center_action_events(
             "client-1",
             public_action_request(
+                &store,
                 "missing-intake",
                 generation,
                 RecoveryCenterAction::StartFresh,
@@ -4093,6 +4286,7 @@ mod tests {
         let events = runtime.recovery_center_action_events(
             "client-1",
             public_action_request(
+                &store,
                 "live-discard",
                 interrupted.generation,
                 RecoveryCenterAction::Discard,
@@ -4162,7 +4356,12 @@ mod tests {
 
         let first = runtime.recovery_center_action_events(
             "client-1",
-            public_action_request("discard-pin", generation, RecoveryCenterAction::Discard),
+            public_action_request(
+                &store,
+                "discard-pin",
+                generation,
+                RecoveryCenterAction::Discard,
+            ),
             None,
         );
         assert!(first.iter().any(|event| matches!(
@@ -4194,7 +4393,12 @@ mod tests {
 
         let repeated = runtime.recovery_center_action_events(
             "client-1",
-            public_action_request("discard-pin", generation, RecoveryCenterAction::Discard),
+            public_action_request(
+                &store,
+                "discard-pin",
+                generation,
+                RecoveryCenterAction::Discard,
+            ),
             None,
         );
         assert!(repeated.iter().any(|event| matches!(
@@ -4405,7 +4609,7 @@ mod tests {
             window_pty_statuses: HashMap::new(),
             window_hook_states: HashMap::new(),
             recoverable_agent_error_windows: std::collections::HashSet::new(),
-            hook_forward_target: None,
+            agent_capability_issuer: None,
             issue_link_cache_dir: temp_root.join("cache"),
             issue_client_factory: crate::app_runtime::default_issue_client_factory(),
             pending_update: None,
@@ -4455,7 +4659,7 @@ mod tests {
     }
 
     fn git(path: &Path, args: &[&str]) {
-        let output = Command::new("git")
+        let output = gwt_core::process::hidden_command("git")
             .args(args)
             .current_dir(path)
             .output()
@@ -4468,7 +4672,7 @@ mod tests {
     }
 
     fn git_stdout(path: &Path, args: &[&str]) -> String {
-        let output = Command::new("git")
+        let output = gwt_core::process::hidden_command("git")
             .args(args)
             .current_dir(path)
             .output()
@@ -4514,12 +4718,17 @@ mod tests {
     }
 
     fn public_action_request(
+        store: &RecoveryStore,
         recovery_id: &str,
         expected_generation: u64,
         action: RecoveryCenterAction,
     ) -> PublicRecoveryCenterActionRequest {
         PublicRecoveryCenterActionRequest {
-            action_handle: recovery_action_handle(recovery_id, expected_generation),
+            action_handle: recovery_action_handle_for_store(
+                store,
+                recovery_id,
+                expected_generation,
+            ),
             action,
             provider_choice_handle: None,
         }

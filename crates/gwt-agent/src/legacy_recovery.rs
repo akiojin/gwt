@@ -36,6 +36,10 @@ pub enum LegacyRecoveryAttentionReason {
     /// does not match the original gwt launch window closely enough to bind it
     /// without a user choice.
     ProviderNativeCandidateNeedsConfirmation,
+    /// A current-format Session names a Recovery but never crossed a durable
+    /// provider/lifecycle boundary. A leftover provider id alone must not
+    /// turn stale history into an automatic startup launch.
+    MissingLifecycleEvidence,
     SessionKindAmbiguous,
 }
 
@@ -1015,18 +1019,20 @@ fn import_session(
                     }
                 }
             }
-            if let Err(error) = sync_legacy_session_recovery_metadata(
-                session_path,
-                session,
-                &record.recovery_id,
-                record.session_kind,
-                record
+            let metadata = LegacyRecoverySessionMetadata {
+                recovery_id: &record.recovery_id,
+                repo_id: &record.repo_id,
+                session_kind: record.session_kind,
+                provider_root_id: record
                     .provider_root
                     .as_ref()
                     .map(|root| root.root_id.as_str()),
-                record.provider_root.as_ref().map(|root| root.quality),
-                record.checkpoint_revision,
-            ) {
+                provider_binding_quality: record.provider_root.as_ref().map(|root| root.quality),
+                checkpoint_revision: record.checkpoint_revision,
+            };
+            if let Err(error) =
+                sync_legacy_session_recovery_metadata(session_path, session, metadata)
+            {
                 report.errors.push(import_error(
                     session_path,
                     Some(&session.id),
@@ -1071,13 +1077,13 @@ fn import_session(
             return;
         };
         let measured_repo_id = gwt_core::paths::project_scope_hash(project_root).to_string();
-        let persisted_repo_mismatch = session
-            .repo_hash
-            .as_deref()
-            .is_some_and(|repo_id| repo_id != expected_repo_id);
+        // A missing explicit Intake still has stronger project ownership
+        // evidence than its pre-upgrade repo_hash: the surviving canonical
+        // project state root and the validated generated Intake target. Accept
+        // the measured project and repair stale persisted scope metadata just
+        // as the live-worktree path below does.
         if !explicitly_intake
             || measured_repo_id != expected_repo_id
-            || persisted_repo_mismatch
             || gwt_git::recovery::validate_recovery_intake_target_path(
                 project_root,
                 &session.worktree_path,
@@ -1087,10 +1093,10 @@ fn import_session(
             report.skipped.push(skipped(
                 session,
                 Some(recovery_id),
-                if measured_repo_id != expected_repo_id || persisted_repo_mismatch {
+                if measured_repo_id != expected_repo_id {
                     LegacyRecoverySkipReason::RepoScopeMismatch {
                         expected: expected_repo_id.to_string(),
-                        actual: session.repo_hash.clone().or(Some(measured_repo_id)),
+                        actual: Some(measured_repo_id),
                     }
                 } else {
                     LegacyRecoverySkipReason::MissingWorktree
@@ -1129,23 +1135,16 @@ fn import_session(
         }
         let measured_repo_id =
             gwt_core::paths::project_scope_hash(&session.worktree_path).to_string();
-        let persisted_repo_mismatch = session
-            .repo_hash
-            .as_deref()
-            .is_some_and(|repo_id| repo_id != expected_repo_id);
-        if measured_repo_id != expected_repo_id || persisted_repo_mismatch {
-            let actual = session
-                .repo_hash
-                .as_ref()
-                .filter(|repo_id| repo_id.as_str() != expected_repo_id)
-                .cloned()
-                .or(Some(measured_repo_id));
+        // A live worktree is stronger evidence than legacy persisted scope
+        // metadata. Reject an actually different repository, but repair a
+        // stale repo_hash after the measured repository has been accepted.
+        if measured_repo_id != expected_repo_id {
             report.skipped.push(skipped(
                 session,
                 Some(recovery_id),
                 LegacyRecoverySkipReason::RepoScopeMismatch {
                     expected: expected_repo_id.to_string(),
-                    actual,
+                    actual: Some(measured_repo_id),
                 },
             ));
             return;
@@ -1182,6 +1181,9 @@ fn import_session(
     }
     if missing_intake {
         attention_reasons.push(LegacyRecoveryAttentionReason::MissingIntakeWorktree);
+    }
+    if current_recovery_lifecycle_is_unproven(session) {
+        attention_reasons.push(LegacyRecoveryAttentionReason::MissingLifecycleEvidence);
     }
 
     let launch_base_oid = session
@@ -1304,15 +1306,15 @@ fn import_session(
         return;
     }
 
-    if let Err(error) = sync_legacy_session_recovery_metadata(
-        session_path,
-        session,
-        &recovery_id,
+    let metadata = LegacyRecoverySessionMetadata {
+        recovery_id: &recovery_id,
+        repo_id: expected_repo_id,
         session_kind,
-        provider_root_id.as_deref(),
-        provider_root_id.as_ref().map(|_| BindingQuality::Verified),
-        0,
-    ) {
+        provider_root_id: provider_root_id.as_deref(),
+        provider_binding_quality: provider_root_id.as_ref().map(|_| BindingQuality::Verified),
+        checkpoint_revision: 0,
+    };
+    if let Err(error) = sync_legacy_session_recovery_metadata(session_path, session, metadata) {
         report.errors.push(import_error(
             session_path,
             Some(&session.id),
@@ -1389,6 +1391,7 @@ fn sync_terminal_recovery_session(
         current.recovery_launch_stage = Some(stage);
         current.recovery_lease = None;
         current.restore_window_on_startup = false;
+        current.startup_restore_intent_recorded = true;
         current.status = crate::AgentStatus::Stopped;
         current.updated_at = chrono::Utc::now();
         Ok(())
@@ -1396,14 +1399,19 @@ fn sync_terminal_recovery_session(
     .map(|_| ())
 }
 
+struct LegacyRecoverySessionMetadata<'a> {
+    recovery_id: &'a str,
+    repo_id: &'a str,
+    session_kind: RecoverySessionKind,
+    provider_root_id: Option<&'a str>,
+    provider_binding_quality: Option<BindingQuality>,
+    checkpoint_revision: u64,
+}
+
 fn sync_legacy_session_recovery_metadata(
     session_path: &Path,
     source: &Session,
-    recovery_id: &str,
-    session_kind: RecoverySessionKind,
-    provider_root_id: Option<&str>,
-    provider_binding_quality: Option<BindingQuality>,
-    checkpoint_revision: u64,
+    metadata: LegacyRecoverySessionMetadata<'_>,
 ) -> io::Result<()> {
     let sessions_dir = session_path.parent().ok_or_else(|| {
         io::Error::new(
@@ -1432,17 +1440,18 @@ fn sync_legacy_session_recovery_metadata(
                 ),
             ));
         }
-        current.recovery_id = Some(recovery_id.to_string());
-        current.session_kind = Some(match session_kind {
+        current.recovery_id = Some(metadata.recovery_id.to_string());
+        current.repo_hash = Some(metadata.repo_id.to_string());
+        current.session_kind = Some(match metadata.session_kind {
             RecoverySessionKind::Intake => gwt_skills::SessionKind::Intake,
             RecoverySessionKind::Execution => gwt_skills::SessionKind::Execution,
         });
-        if session_kind == RecoverySessionKind::Intake {
+        if metadata.session_kind == RecoverySessionKind::Intake {
             current.is_ephemeral = true;
         }
-        current.checkpoint_revision = checkpoint_revision;
+        current.checkpoint_revision = metadata.checkpoint_revision;
 
-        if let Some(quality) = provider_binding_quality {
+        if let Some(quality) = metadata.provider_binding_quality {
             current.observe_provider_root_role(crate::session::ProviderRootRole::Root)?;
             current.provider_binding_quality = Some(if quality.is_authoritative() {
                 crate::session::ProviderBindingQuality::Verified
@@ -1457,7 +1466,11 @@ fn sync_legacy_session_recovery_metadata(
                 )?;
             }
             if quality.is_authoritative() {
-                if let Some(root_id) = provider_root_id.map(str::trim).filter(|id| !id.is_empty()) {
+                if let Some(root_id) = metadata
+                    .provider_root_id
+                    .map(str::trim)
+                    .filter(|id| !id.is_empty())
+                {
                     if current.agent_session_id.as_deref() != Some(root_id) {
                         if let Some(previous_root) = current
                             .agent_session_id
@@ -1657,6 +1670,23 @@ fn legacy_import_lifecycle(
             ),
         )
     }
+}
+
+fn current_recovery_lifecycle_is_unproven(session: &Session) -> bool {
+    session
+        .recovery_id
+        .as_deref()
+        .is_some_and(|recovery_id| !recovery_id.starts_with("legacy-"))
+        && !matches!(
+            session.recovery_launch_stage,
+            Some(
+                crate::session::RecoveryLaunchStage::ProcessSpawned
+                    | crate::session::RecoveryLaunchStage::ProviderBound
+                    | crate::session::RecoveryLaunchStage::Ready
+            )
+        )
+        && session.last_hook_event_at.is_none()
+        && session.last_completed_stop_at.is_none()
 }
 
 const MAX_NATIVE_METADATA_LINE_BYTES: usize = 1024 * 1024;
@@ -2314,6 +2344,7 @@ fn attention_reason_code(reason: &LegacyRecoveryAttentionReason) -> &'static str
         LegacyRecoveryAttentionReason::ProviderNativeCandidateNeedsConfirmation => {
             "provider_native_candidate_needs_confirmation"
         }
+        LegacyRecoveryAttentionReason::MissingLifecycleEvidence => "missing_lifecycle_evidence",
         LegacyRecoveryAttentionReason::SessionKindAmbiguous => "ambiguous_session_kind",
     }
 }
@@ -2346,12 +2377,12 @@ fn import_error(
 
 #[cfg(test)]
 mod tests {
-    use std::{fs, process::Command};
+    use std::fs;
 
     use chrono::Utc;
     use gwt_core::{
         paths::project_scope_hash,
-        process::scrub_git_env,
+        process::{hidden_command, scrub_git_env},
         recovery::{
             BindingQuality, CreateRecovery, RecoveryLifecycle, RecoverySessionKind, RecoveryStore,
         },
@@ -3117,6 +3148,44 @@ mod tests {
     }
 
     #[test]
+    fn current_created_session_without_lifecycle_evidence_requires_attention() {
+        let temp = TempDir::new().expect("tempdir");
+        let repo = temp.path().join("repo");
+        init_repo(&repo, ORIGIN, true);
+        let expected_repo_id = project_scope_hash(&repo).to_string();
+        let sessions_dir = temp.path().join("sessions");
+        let store = RecoveryStore::for_project_dir(temp.path().join("project"));
+        let mut session = Session::new(&repo, "work/current-created", AgentId::Codex);
+        session.id = "current-created".to_string();
+        session.agent_session_id = Some("provider-current-created".to_string());
+        session.update_status(crate::AgentStatus::Running);
+        let recovery_id = session
+            .recovery_id
+            .clone()
+            .expect("current Session recovery id");
+        session.save(&sessions_dir).expect("save current Session");
+
+        let report = import_legacy_recovery_sessions(&sessions_dir, &store, &expected_repo_id);
+
+        assert_eq!(report.errors, Vec::new());
+        assert_eq!(report.imported_exact, Vec::new());
+        assert_eq!(report.imported_attention.len(), 1);
+        assert_eq!(
+            attention_reasons(&report, "current-created"),
+            &[LegacyRecoveryAttentionReason::MissingLifecycleEvidence]
+        );
+        let record = store
+            .load(&recovery_id)
+            .expect("load current recovery")
+            .expect("current recovery");
+        assert_eq!(record.lifecycle, RecoveryLifecycle::Attention);
+        assert_eq!(
+            record.lifecycle_reason.as_deref(),
+            Some("legacy_import_attention:missing_lifecycle_evidence")
+        );
+    }
+
+    #[test]
     fn imports_missing_placeholder_and_multiple_roots_as_typed_attention() {
         let temp = TempDir::new().expect("tempdir");
         let repo = temp.path().join("repo");
@@ -3492,6 +3561,44 @@ mod tests {
             &LegacyRecoverySkipReason::MissingWorktree
         );
         assert!(!user_path.exists());
+    }
+
+    #[test]
+    fn imports_missing_explicit_intake_when_persisted_repo_hash_is_stale() {
+        let temp = TempDir::new().expect("tempdir");
+        let repo = temp.path().join("repo");
+        init_repo(&repo, ORIGIN, true);
+        let expected_repo_id = project_scope_hash(&repo).to_string();
+        let launch_base_oid = git_stdout(&repo, &["rev-parse", "HEAD"]);
+        let sessions_dir = temp.path().join("sessions");
+        let store = RecoveryStore::for_project_dir(temp.path().join("project"));
+        let missing_intake = temp.path().join(".intake-55");
+
+        let mut intake = legacy_session("missing-intake-stale-scope", &missing_intake);
+        intake.session_kind = Some(gwt_skills::SessionKind::Intake);
+        intake.is_ephemeral = true;
+        intake.project_state_root = Some(repo);
+        intake.repo_hash = Some("stale-pre-project-scope-hash".to_string());
+        intake.launch_base_oid = Some(launch_base_oid);
+        intake.agent_session_id = Some("provider-root".to_string());
+        intake.save(&sessions_dir).expect("save legacy Intake");
+
+        let report = import_legacy_recovery_sessions(&sessions_dir, &store, &expected_repo_id);
+
+        assert_eq!(report.errors, Vec::new());
+        assert_eq!(report.imported_attention.len(), 1);
+        assert_eq!(
+            attention_reasons(&report, "missing-intake-stale-scope"),
+            &[LegacyRecoveryAttentionReason::MissingIntakeWorktree]
+        );
+        let record = store
+            .load("legacy-missing-intake-stale-scope")
+            .expect("load recovery")
+            .expect("missing Intake recovery");
+        assert_eq!(record.repo_id, expected_repo_id);
+        let synced = Session::load(&sessions_dir.join("missing-intake-stale-scope.toml"))
+            .expect("load migrated Session");
+        assert_eq!(synced.repo_hash.as_deref(), Some(record.repo_id.as_str()));
     }
 
     #[test]
@@ -3954,7 +4061,7 @@ mod tests {
     }
 
     fn git(path: &Path, args: &[&str]) {
-        let mut command = Command::new("git");
+        let mut command = hidden_command("git");
         command.current_dir(path).args(args);
         scrub_git_env(&mut command);
         let output = command.output().expect("run git");
@@ -3966,7 +4073,7 @@ mod tests {
     }
 
     fn git_stdout(path: &Path, args: &[&str]) -> String {
-        let mut command = Command::new("git");
+        let mut command = hidden_command("git");
         command.current_dir(path).args(args);
         scrub_git_env(&mut command);
         let output = command.output().expect("run git");

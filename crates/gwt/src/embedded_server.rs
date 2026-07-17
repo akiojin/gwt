@@ -1,6 +1,7 @@
 use std::{
     collections::HashMap,
     net::{IpAddr, SocketAddr},
+    path::{Path, PathBuf},
     sync::{atomic::AtomicU64, Arc, Mutex, RwLock},
     time::Instant,
 };
@@ -383,16 +384,40 @@ pub struct ClientHubHealthStats {
 
 #[derive(Clone, Default)]
 pub struct ClientHub {
-    clients: Arc<Mutex<HashMap<String, Arc<ClientQueue>>>>,
+    clients: Arc<Mutex<HashMap<String, ClientRegistration>>>,
+}
+
+#[derive(Clone)]
+struct ClientRegistration {
+    queue: Arc<ClientQueue>,
+    receives_broadcasts: bool,
 }
 
 impl ClientHub {
     pub(super) fn register(&self, client_id: String) -> Arc<ClientQueue> {
+        self.register_with_broadcasts(client_id, true)
+    }
+
+    fn register_pane(&self, client_id: String) -> Arc<ClientQueue> {
+        self.register_with_broadcasts(client_id, false)
+    }
+
+    fn register_with_broadcasts(
+        &self,
+        client_id: String,
+        receives_broadcasts: bool,
+    ) -> Arc<ClientQueue> {
         let queue = Arc::new(ClientQueue::default());
         self.clients
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .insert(client_id, queue.clone());
+            .insert(
+                client_id,
+                ClientRegistration {
+                    queue: queue.clone(),
+                    receives_broadcasts,
+                },
+            );
         queue
     }
 
@@ -402,8 +427,8 @@ impl ClientHub {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .remove(client_id);
-        if let Some(queue) = removed {
-            queue.close();
+        if let Some(registration) = removed {
+            registration.queue.close();
         }
     }
 
@@ -426,7 +451,10 @@ impl ClientHub {
                 .clients
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
-            clients.values().cloned().collect()
+            clients
+                .values()
+                .map(|registration| registration.queue.clone())
+                .collect()
         };
 
         let mut stats = ClientHubHealthStats {
@@ -448,14 +476,20 @@ impl ClientHub {
         // and per-client enqueue work happen outside the registry mutex. This
         // keeps register/unregister responsive even when the broadcast batch
         // is large or one client is slow to drain its queue.
-        let snapshot: Vec<(String, Arc<ClientQueue>)> = {
+        let snapshot: Vec<(String, Arc<ClientQueue>, bool)> = {
             let clients = self
                 .clients
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
             clients
                 .iter()
-                .map(|(id, queue)| (id.clone(), queue.clone()))
+                .map(|(id, registration)| {
+                    (
+                        id.clone(),
+                        registration.queue.clone(),
+                        registration.receives_broadcasts,
+                    )
+                })
                 .collect()
         };
 
@@ -464,14 +498,18 @@ impl ClientHub {
             let prepared = prepare_outbound(&outbound.event);
             match outbound.target {
                 DispatchTarget::Broadcast => {
-                    for (client_id, queue) in &snapshot {
+                    for (client_id, queue, receives_broadcasts) in &snapshot {
+                        if !receives_broadcasts {
+                            continue;
+                        }
                         if queue.enqueue(&prepared) {
                             dead_clients.push(client_id.clone());
                         }
                     }
                 }
                 DispatchTarget::Client(client_id) => {
-                    if let Some((_, queue)) = snapshot.iter().find(|(id, _)| id == &client_id) {
+                    if let Some((_, queue, _)) = snapshot.iter().find(|(id, _, _)| id == &client_id)
+                    {
                         if queue.enqueue(&prepared) {
                             dead_clients.push(client_id);
                         }
@@ -499,7 +537,7 @@ impl ClientHub {
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
             for client_id in dead_clients {
                 if let Some(queue) = clients.remove(&client_id) {
-                    queue.close();
+                    queue.queue.close();
                 }
             }
         }
@@ -510,7 +548,7 @@ impl ClientHub {
 struct ServerState {
     proxy: AppEventProxy,
     clients: ClientHub,
-    hook_forward_token: String,
+    agent_capabilities: AgentCapabilityRegistry,
     frontend_bootstrap_token: String,
     frontend_session_cookie_name: String,
     frontend_session_token: String,
@@ -526,13 +564,209 @@ struct ServerState {
 pub struct EmbeddedServer {
     url: String,
     browser_url: String,
-    hook_forward_token: String,
+    agent_capability_issuer: AgentCapabilityIssuer,
     shutdown_tx: Option<oneshot::Sender<()>>,
+    agent_shutdown_tx: Option<oneshot::Sender<()>>,
     // Same rationale as `ServerState::access_log`: tests read it via the
     // `access_log()` accessor; production code (main bootstrap) does not yet
     // surface the sink to the UI.
     #[allow(dead_code)]
     access_log: AccessLogSink,
+}
+
+#[derive(Clone, PartialEq, Eq)]
+pub(crate) struct AgentSessionPrincipal {
+    canonical_project_root: PathBuf,
+    session_id: String,
+}
+
+#[derive(Clone)]
+pub(crate) enum AgentFrontendRequest {
+    Ready,
+    CloseWindow { id: String },
+    SendInput { text: String },
+}
+
+impl AgentFrontendRequest {
+    fn from_authorized_event(event: FrontendEvent) -> Option<Self> {
+        match event {
+            FrontendEvent::FrontendReady => Some(Self::Ready),
+            FrontendEvent::CloseWindow { id } => Some(Self::CloseWindow { id }),
+            FrontendEvent::PaneSendInput { text, .. } => Some(Self::SendInput { text }),
+            _ => None,
+        }
+    }
+}
+
+impl std::fmt::Debug for AgentFrontendRequest {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Ready => formatter.write_str("AgentFrontendRequest::Ready"),
+            Self::CloseWindow { .. } => {
+                formatter.write_str("AgentFrontendRequest::CloseWindow(<redacted>)")
+            }
+            Self::SendInput { .. } => {
+                formatter.write_str("AgentFrontendRequest::SendInput(<redacted>)")
+            }
+        }
+    }
+}
+
+impl AgentSessionPrincipal {
+    fn new(project_root: &Path, session_id: &str) -> Result<Self, String> {
+        if session_id.is_empty() || session_id.trim() != session_id {
+            return Err("agent capability session id must be non-empty and canonical".to_string());
+        }
+        let project_root = gwt_core::paths::resolve_main_worktree_root(project_root);
+        let canonical_project_root = dunce::canonicalize(project_root)
+            .map(|path| gwt_core::paths::normalize_windows_child_process_path(&path))
+            .map_err(|_| "agent capability project scope must be an existing canonical root")?;
+        Ok(Self {
+            canonical_project_root,
+            session_id: session_id.to_string(),
+        })
+    }
+
+    #[cfg(test)]
+    pub(crate) fn for_test(project_root: &Path, session_id: &str) -> Result<Self, String> {
+        Self::new(project_root, session_id)
+    }
+
+    pub(crate) fn session_id(&self) -> &str {
+        &self.session_id
+    }
+
+    pub(crate) fn canonical_project_root(&self) -> &Path {
+        &self.canonical_project_root
+    }
+
+    pub(crate) fn authorizes_project_root(&self, project_root: &Path) -> bool {
+        let project_root = gwt_core::paths::resolve_main_worktree_root(project_root);
+        dunce::canonicalize(project_root)
+            .map(|path| gwt_core::paths::normalize_windows_child_process_path(&path))
+            .is_ok_and(|candidate| candidate == self.canonical_project_root)
+    }
+}
+
+impl std::fmt::Debug for AgentSessionPrincipal {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("AgentSessionPrincipal")
+            .field("canonical_project_root", &"<redacted>")
+            .field("session_id", &"<redacted>")
+            .finish()
+    }
+}
+
+#[derive(Default)]
+struct AgentCapabilityRegistryState {
+    principals_by_token: HashMap<String, AgentSessionPrincipal>,
+    token_by_project_session: HashMap<(PathBuf, String), String>,
+}
+
+/// Process-local registry for agent capabilities accepted by the embedded
+/// server. Tokens are opaque random values; the authenticated session
+/// principal exists only in this server-side map and is never accepted from a
+/// WebSocket payload or request header supplied by the agent.
+#[derive(Clone, Default)]
+struct AgentCapabilityRegistry {
+    inner: Arc<RwLock<AgentCapabilityRegistryState>>,
+}
+
+impl AgentCapabilityRegistry {
+    fn issue(&self, project_root: &Path, session_id: &str) -> Result<String, String> {
+        let principal = AgentSessionPrincipal::new(project_root, session_id)?;
+        let principal_key = (
+            principal.canonical_project_root().to_path_buf(),
+            principal.session_id().to_string(),
+        );
+
+        let mut state = self
+            .inner
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let token = loop {
+            let candidate = format!("gwt_agent_{}{}", Uuid::new_v4(), Uuid::new_v4());
+            if !state.principals_by_token.contains_key(&candidate) {
+                break candidate;
+            }
+        };
+
+        // Reissuing a capability for one project + Session pair rotates it
+        // atomically. A stale child process can no longer authenticate after
+        // its Session is relaunched, while an equal Session id in another
+        // project remains an independent principal.
+        if let Some(previous) = state
+            .token_by_project_session
+            .insert(principal_key, token.clone())
+        {
+            state.principals_by_token.remove(&previous);
+        }
+        state.principals_by_token.insert(token.clone(), principal);
+        Ok(token)
+    }
+
+    fn authenticate(&self, token: &str) -> Option<AgentSessionPrincipal> {
+        self.inner
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .principals_by_token
+            .get(token)
+            .cloned()
+    }
+
+    fn session_count(&self) -> usize {
+        self.inner
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .token_by_project_session
+            .len()
+    }
+}
+
+/// In-process authority handed to [`crate::AppRuntime`] so each spawned agent gets a
+/// distinct bearer bound to its immutable gwt Session id. The registry handle
+/// never crosses the PTY/container boundary; only the concrete
+/// [`HookForwardTarget`] returned by [`Self::issue`] does.
+#[derive(Clone)]
+pub(crate) struct AgentCapabilityIssuer {
+    hook_forward_url: String,
+    registry: AgentCapabilityRegistry,
+}
+
+impl AgentCapabilityIssuer {
+    fn new(hook_forward_url: String, registry: AgentCapabilityRegistry) -> Self {
+        Self {
+            hook_forward_url,
+            registry,
+        }
+    }
+
+    pub(crate) fn issue(
+        &self,
+        project_root: &Path,
+        session_id: &str,
+    ) -> Result<HookForwardTarget, String> {
+        Ok(HookForwardTarget {
+            url: self.hook_forward_url.clone(),
+            token: self.registry.issue(project_root, session_id)?,
+        })
+    }
+
+    #[cfg(test)]
+    pub(crate) fn for_test(hook_forward_url: impl Into<String>) -> Self {
+        Self::new(hook_forward_url.into(), AgentCapabilityRegistry::default())
+    }
+}
+
+impl std::fmt::Debug for AgentCapabilityIssuer {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("AgentCapabilityIssuer")
+            .field("hook_forward_url", &self.hook_forward_url)
+            .field("registered_sessions", &self.registry.session_count())
+            .finish()
+    }
 }
 
 impl EmbeddedServer {
@@ -579,7 +813,16 @@ impl EmbeddedServer {
         let listener = runtime.block_on(TcpListener::bind((bind, port)))?;
         let addr = listener.local_addr()?;
         let (shutdown_tx, shutdown_rx) = oneshot::channel();
-        let hook_forward_token = Uuid::new_v4().to_string();
+        let url = format!("http://{}:{}/", display_host(addr.ip()), addr.port());
+        let agent_listener = runtime.block_on(TcpListener::bind((agent_bridge_bind_ip(), 0)))?;
+        let agent_addr = agent_listener.local_addr()?;
+        let (agent_shutdown_tx, agent_shutdown_rx) = oneshot::channel();
+        let agent_url = format!("http://127.0.0.1:{}/", agent_addr.port());
+        let agent_capabilities = AgentCapabilityRegistry::default();
+        let agent_capability_issuer = AgentCapabilityIssuer::new(
+            format!("{agent_url}internal/hook-live"),
+            agent_capabilities.clone(),
+        );
         let frontend_bootstrap_token = format!("{}{}", Uuid::new_v4(), Uuid::new_v4());
         // Cookies are host-scoped rather than port-scoped. A process-unique
         // name prevents two local/LAN GWT instances on different ports from
@@ -591,6 +834,31 @@ impl EmbeddedServer {
         let frontend_session_token = format!("{}{}", Uuid::new_v4(), Uuid::new_v4());
         let attachment_upload_token = Uuid::new_v4().to_string();
         let access_log = AccessLogSink::default();
+        let server_state = ServerState {
+            proxy,
+            clients,
+            agent_capabilities,
+            frontend_bootstrap_token: frontend_bootstrap_token.clone(),
+            frontend_session_cookie_name,
+            frontend_session_token,
+            attachment_upload_token,
+            attachment_uploads,
+            pty_writers,
+            access_log: access_log.clone(),
+        };
+
+        // The browser listener keeps its operator-selected bind policy. A
+        // second capability-only listener serves the two agent routes so
+        // native Linux containers can reach them through host-gateway without
+        // exposing the browser application on a bridge/LAN interface.
+        let agent_app = Router::new()
+            .route("/internal/hook-live", post(hook_live_handler))
+            .route("/internal/pane-ws", get(pane_websocket_handler))
+            .with_state(server_state.clone())
+            .layer(middleware::from_fn_with_state(
+                access_log.clone(),
+                access_log_middleware,
+            ));
 
         // SPEC-3016: every embedded frontend asset route (entrypoints, root
         // JS modules, vendor JS/CSS, stylesheets, fonts) is registered from
@@ -610,19 +878,9 @@ impl EmbeddedServer {
             )
             .route("/internal/hook-live", post(hook_live_handler))
             .route("/internal/frontend-session", post(frontend_session_handler))
+            .route("/internal/pane-ws", get(pane_websocket_handler))
             .route("/ws", get(websocket_handler))
-            .with_state(ServerState {
-                proxy,
-                clients,
-                hook_forward_token: hook_forward_token.clone(),
-                frontend_bootstrap_token: frontend_bootstrap_token.clone(),
-                frontend_session_cookie_name,
-                frontend_session_token,
-                attachment_upload_token,
-                attachment_uploads,
-                pty_writers,
-                access_log: access_log.clone(),
-            })
+            .with_state(server_state)
             .layer(middleware::from_fn_with_state(
                 access_log.clone(),
                 access_log_middleware,
@@ -681,14 +939,27 @@ impl EmbeddedServer {
             }
         });
 
-        let url = format!("http://{}:{}/", display_host(addr.ip()), addr.port());
+        runtime.spawn(async move {
+            let server = axum::serve(
+                agent_listener,
+                agent_app.into_make_service_with_connect_info::<SocketAddr>(),
+            )
+            .with_graceful_shutdown(async {
+                let _ = agent_shutdown_rx.await;
+            });
+            if let Err(error) = server.await {
+                eprintln!("embedded agent bridge error: {error}");
+            }
+        });
+
         let browser_url =
             format!("{url}#{FRONTEND_BOOTSTRAP_FRAGMENT_KEY}={frontend_bootstrap_token}");
         Ok(Self {
             url,
             browser_url,
-            hook_forward_token,
+            agent_capability_issuer,
             shutdown_tx: Some(shutdown_tx),
+            agent_shutdown_tx: Some(agent_shutdown_tx),
             access_log,
         })
     }
@@ -715,13 +986,21 @@ impl EmbeddedServer {
         if let Some(tx) = self.shutdown_tx.take() {
             let _ = tx.send(());
         }
+        if let Some(tx) = self.agent_shutdown_tx.take() {
+            let _ = tx.send(());
+        }
     }
 
+    pub(crate) fn agent_capability_issuer(&self) -> AgentCapabilityIssuer {
+        self.agent_capability_issuer.clone()
+    }
+
+    #[cfg(test)]
     pub(super) fn hook_forward_target(&self) -> HookForwardTarget {
-        HookForwardTarget {
-            url: format!("{}internal/hook-live", self.url),
-            token: self.hook_forward_token.clone(),
-        }
+        let project_root = std::env::current_dir().expect("embedded-server test project root");
+        self.agent_capability_issuer
+            .issue(&project_root, "session-1")
+            .expect("canonical embedded-server test session")
     }
 }
 
@@ -875,6 +1154,14 @@ async fn attachment_upload_handler(
     if !authorized {
         return StatusCode::UNAUTHORIZED.into_response();
     }
+    let max_attachment_bytes = gwt_core::recovery::MAX_RECOVERY_ATTACHMENT_BYTES;
+    if query.size.is_some_and(|size| size > max_attachment_bytes) {
+        return (
+            StatusCode::PAYLOAD_TOO_LARGE,
+            format!("attachment upload exceeds the {max_attachment_bytes}-byte limit"),
+        )
+            .into_response();
+    }
 
     let filename = query
         .filename
@@ -925,7 +1212,16 @@ async fn attachment_upload_handler(
                     .into_response();
             }
         };
-        total_size += chunk.len() as u64;
+        let next_size = total_size.saturating_add(chunk.len() as u64);
+        if next_size > max_attachment_bytes {
+            let _ = tokio::fs::remove_file(&path).await;
+            return (
+                StatusCode::PAYLOAD_TOO_LARGE,
+                format!("attachment upload exceeds the {max_attachment_bytes}-byte limit"),
+            )
+                .into_response();
+        }
+        total_size = next_size;
         if let Err(error) = file.write_all(&chunk).await {
             let _ = tokio::fs::remove_file(&path).await;
             return (
@@ -981,6 +1277,18 @@ fn display_host(ip: IpAddr) -> String {
     match ip {
         IpAddr::V4(v4) => v4.to_string(),
         IpAddr::V6(v6) => format!("[{v6}]"),
+    }
+}
+
+fn agent_bridge_bind_ip() -> IpAddr {
+    // Docker Desktop and Podman Machine proxy their host aliases to host
+    // loopback. Native Linux host-gateway aliases instead target a bridge
+    // interface, so the capability-only agent listener must accept that local
+    // bridge traffic without widening the browser listener.
+    if cfg!(target_os = "linux") {
+        IpAddr::V4(std::net::Ipv4Addr::UNSPECIFIED)
+    } else {
+        IpAddr::V4(std::net::Ipv4Addr::LOCALHOST)
     }
 }
 
@@ -1068,7 +1376,23 @@ async fn websocket_handler(
     if !websocket_session_authorized(&headers, &state) {
         return StatusCode::UNAUTHORIZED.into_response();
     }
-    ws.on_upgrade(move |socket| client_session(socket, state))
+    ws.on_upgrade(move |socket| client_session(socket, state, WebSocketSessionKind::Frontend))
+}
+
+async fn pane_websocket_handler(
+    headers: HeaderMap,
+    ws: WebSocketUpgrade,
+    State(state): State<ServerState>,
+) -> impl IntoResponse {
+    if !websocket_origin_authorized(&headers) {
+        return StatusCode::FORBIDDEN.into_response();
+    }
+    let Some(principal) = pane_websocket_session_authorized(&headers, &state) else {
+        return StatusCode::UNAUTHORIZED.into_response();
+    };
+    ws.on_upgrade(move |socket| {
+        client_session(socket, state, WebSocketSessionKind::Pane { principal })
+    })
 }
 
 async fn frontend_session_handler(
@@ -1100,29 +1424,197 @@ async fn frontend_session_handler(
 async fn hook_live_handler(
     headers: HeaderMap,
     State(state): State<ServerState>,
-    Json(event): Json<RuntimeHookEvent>,
+    Json(mut event): Json<RuntimeHookEvent>,
 ) -> StatusCode {
-    if !hook_forward_authorized(&headers, &state.hook_forward_token) {
+    let Some(principal) = agent_capability_principal(&headers, &state) else {
+        return StatusCode::UNAUTHORIZED;
+    };
+    if event.gwt_session_id.as_deref() != Some(principal.session_id.as_str()) {
+        tracing::warn!(
+            target: "gwt_security",
+            "hook-live session claim did not match the authenticated agent capability"
+        );
         return StatusCode::UNAUTHORIZED;
     }
+
+    // The child payload is observational data, never routing authority. In
+    // particular Docker reports an in-container cwd that cannot safely name a
+    // host project. Fix both dispatch claims to the server-side capability.
+    event.gwt_session_id = Some(principal.session_id.clone());
+    event.project_root = Some(
+        principal
+            .canonical_project_root()
+            .to_string_lossy()
+            .into_owned(),
+    );
 
     state.proxy.send(UserEvent::RuntimeHook(event));
     StatusCode::NO_CONTENT
 }
 
-async fn client_session(socket: WebSocket, state: ServerState) {
+#[derive(Clone, PartialEq, Eq)]
+enum WebSocketSessionKind {
+    Frontend,
+    Pane { principal: AgentSessionPrincipal },
+}
+
+#[derive(Default)]
+struct PaneOutboundScope {
+    allowed_window_ids: std::collections::HashSet<String>,
+}
+
+impl std::fmt::Debug for WebSocketSessionKind {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Frontend => formatter.write_str("WebSocketSessionKind::Frontend"),
+            Self::Pane { .. } => formatter.write_str("WebSocketSessionKind::Pane(<redacted>)"),
+        }
+    }
+}
+
+impl WebSocketSessionKind {
+    #[cfg(test)]
+    fn pane(project_root: &Path, session_id: impl Into<String>) -> Self {
+        Self::Pane {
+            principal: AgentSessionPrincipal::for_test(project_root, &session_id.into())
+                .expect("canonical pane test principal"),
+        }
+    }
+
+    fn authorizes_frontend_event(&self, event: &FrontendEvent) -> bool {
+        match self {
+            Self::Frontend => true,
+            Self::Pane { principal } => match event {
+                FrontendEvent::FrontendReady => true,
+                FrontendEvent::PaneSendInput { session_id, .. } => {
+                    session_id == &principal.session_id
+                }
+                // gwt-agent deliberately exposes lifecycle management for
+                // other agents in the authenticated project. Runtime owns the
+                // window→project mapping and re-checks this request there;
+                // unlike PaneSendInput, CloseWindow is not self-only.
+                FrontendEvent::CloseWindow { .. } => true,
+                _ => false,
+            },
+        }
+    }
+
+    fn rejects_cross_session_input(&self, event: &FrontendEvent) -> bool {
+        matches!(
+            (self, event),
+            (
+                Self::Pane { principal },
+                FrontendEvent::PaneSendInput { session_id, .. }
+            ) if session_id != &principal.session_id
+        )
+    }
+
+    #[cfg(test)]
+    fn authorizes_backend_payload(&self, payload: &str) -> bool {
+        if matches!(self, Self::Frontend) {
+            return true;
+        }
+
+        #[derive(Deserialize)]
+        struct BackendPayloadEnvelope {
+            kind: String,
+        }
+
+        serde_json::from_str::<BackendPayloadEnvelope>(payload)
+            .ok()
+            .is_some_and(|envelope| {
+                matches!(
+                    envelope.kind.as_str(),
+                    "workspace_state" | "terminal_snapshot" | "pane_send_result"
+                )
+            })
+    }
+
+    fn authorizes_scoped_backend_payload(
+        &self,
+        payload: &str,
+        outbound_scope: &mut PaneOutboundScope,
+    ) -> bool {
+        let Self::Pane { principal } = self else {
+            return true;
+        };
+        let Ok(value) = serde_json::from_str::<serde_json::Value>(payload) else {
+            return false;
+        };
+        match value.get("kind").and_then(serde_json::Value::as_str) {
+            Some("pane_send_result") => true,
+            Some("terminal_snapshot") => value
+                .get("id")
+                .and_then(serde_json::Value::as_str)
+                .is_some_and(|id| outbound_scope.allowed_window_ids.contains(id)),
+            Some("workspace_state") => {
+                let Some(workspace) = value.get("workspace") else {
+                    return false;
+                };
+                if workspace
+                    .get("recent_projects")
+                    .and_then(serde_json::Value::as_array)
+                    .is_some_and(|recent| !recent.is_empty())
+                {
+                    return false;
+                }
+                let Some(tabs) = workspace.get("tabs").and_then(serde_json::Value::as_array) else {
+                    return false;
+                };
+                let mut allowed_window_ids = std::collections::HashSet::new();
+                for tab in tabs {
+                    let Some(project_root) =
+                        tab.get("project_root").and_then(serde_json::Value::as_str)
+                    else {
+                        return false;
+                    };
+                    if !principal.authorizes_project_root(Path::new(project_root)) {
+                        return false;
+                    }
+                    let Some(windows) = tab
+                        .get("workspace")
+                        .and_then(|workspace| workspace.get("windows"))
+                        .and_then(serde_json::Value::as_array)
+                    else {
+                        return false;
+                    };
+                    for window in windows {
+                        let Some(id) = window.get("id").and_then(serde_json::Value::as_str) else {
+                            return false;
+                        };
+                        allowed_window_ids.insert(id.to_string());
+                    }
+                }
+                outbound_scope.allowed_window_ids = allowed_window_ids;
+                true
+            }
+            _ => false,
+        }
+    }
+}
+
+async fn client_session(socket: WebSocket, state: ServerState, session_kind: WebSocketSessionKind) {
     let client_id = Uuid::new_v4().to_string();
-    let outbound = state.clients.register(client_id.clone());
+    let outbound = match &session_kind {
+        WebSocketSessionKind::Frontend => state.clients.register(client_id.clone()),
+        WebSocketSessionKind::Pane { .. } => state.clients.register_pane(client_id.clone()),
+    };
     let (mut sender, mut receiver) = socket.split();
 
     let input_seq = Arc::new(AtomicU64::new(0));
+    let mut pane_outbound_scope = PaneOutboundScope::default();
 
     loop {
         tokio::select! {
             step = outbound.next() => {
                 match step {
                     DrainStep::Message { payload, repair_panes } => {
-                        if sender.send(Message::Text(payload.into())).await.is_err() {
+                        if session_kind.authorizes_scoped_backend_payload(
+                            &payload,
+                            &mut pane_outbound_scope,
+                        )
+                            && sender.send(Message::Text(payload.into())).await.is_err()
+                        {
                             break;
                         }
                         if !repair_panes.is_empty() {
@@ -1150,6 +1642,7 @@ async fn client_session(socket: WebSocket, state: ServerState) {
                                     &client_id,
                                     &input_seq,
                                     text_len,
+                                    &session_kind,
                                     event,
                                 );
                             }
@@ -1177,15 +1670,57 @@ fn handle_frontend_message(
     client_id: &str,
     input_seq: &AtomicU64,
     text_len: usize,
+    session_kind: &WebSocketSessionKind,
     event: FrontendEvent,
 ) {
+    if session_kind.rejects_cross_session_input(&event) {
+        tracing::warn!(
+            target: "gwt_security",
+            client_id = %client_id,
+            "cross-session pane input denied"
+        );
+        state.clients.dispatch(vec![OutboundEvent::reply(
+            client_id,
+            gwt::BackendEvent::PaneSendResult {
+                ok: false,
+                window_id: None,
+                error: Some("pane input target is not bound to the authenticated session".into()),
+            },
+        )]);
+        return;
+    }
+    if !session_kind.authorizes_frontend_event(&event) {
+        tracing::warn!(
+            target: "gwt_security",
+            client_id = %client_id,
+            "event denied on capability-scoped pane WebSocket"
+        );
+        return;
+    }
+
     let (id, data) = match event {
         FrontendEvent::TerminalInput { id, data } => (id, data),
         other => {
-            state.proxy.send(UserEvent::Frontend {
-                client_id: client_id.to_string(),
-                event: other,
-            });
+            match session_kind {
+                WebSocketSessionKind::Frontend => state.proxy.send(UserEvent::Frontend {
+                    client_id: client_id.to_string(),
+                    event: other,
+                }),
+                WebSocketSessionKind::Pane { principal } => {
+                    let Some(request) = AgentFrontendRequest::from_authorized_event(other) else {
+                        tracing::warn!(
+                            target: "gwt_security",
+                            "authorized pane event had no internal request mapping"
+                        );
+                        return;
+                    };
+                    state.proxy.send(UserEvent::AgentFrontend {
+                        client_id: client_id.to_string(),
+                        principal: principal.clone(),
+                        request,
+                    });
+                }
+            }
             return;
         }
     };
@@ -1279,12 +1814,26 @@ fn handle_frontend_message(
     );
 }
 
+#[cfg(test)]
 pub fn hook_forward_authorized(headers: &HeaderMap, expected_token: &str) -> bool {
+    bearer_token(headers).is_some_and(|token| constant_time_token_eq(token, expected_token))
+}
+
+fn bearer_token(headers: &HeaderMap) -> Option<&str> {
     headers
         .get(AUTHORIZATION)
         .and_then(|value| value.to_str().ok())
         .and_then(|value| value.strip_prefix("Bearer "))
-        .is_some_and(|token| constant_time_token_eq(token, expected_token))
+        .filter(|token| !token.is_empty())
+}
+
+fn agent_capability_principal(
+    headers: &HeaderMap,
+    state: &ServerState,
+) -> Option<AgentSessionPrincipal> {
+    state
+        .agent_capabilities
+        .authenticate(bearer_token(headers)?)
 }
 
 pub fn websocket_origin_authorized(headers: &HeaderMap) -> bool {
@@ -1307,7 +1856,13 @@ pub fn websocket_origin_authorized(headers: &HeaderMap) -> bool {
 
 fn websocket_session_authorized(headers: &HeaderMap, state: &ServerState) -> bool {
     frontend_session_cookie_authorized(headers, state)
-        || hook_forward_authorized(headers, &state.hook_forward_token)
+}
+
+fn pane_websocket_session_authorized(
+    headers: &HeaderMap,
+    state: &ServerState,
+) -> Option<AgentSessionPrincipal> {
+    agent_capability_principal(headers, state)
 }
 
 fn frontend_session_cookie_authorized(headers: &HeaderMap, state: &ServerState) -> bool {
@@ -1354,26 +1909,36 @@ mod tests {
         header::{AUTHORIZATION, COOKIE, HOST, ORIGIN},
         HeaderMap,
     };
+    use futures_util::{SinkExt as _, StreamExt as _};
     use gwt::{BackendEvent, FrontendEvent, RuntimeHookEvent, RuntimeHookEventKind};
     use reqwest::StatusCode as HttpStatusCode;
     use tokio::runtime::Runtime;
+    use tokio_tungstenite::{
+        connect_async,
+        tungstenite::{client::IntoClientRequest, Error as WebSocketError},
+    };
 
     use crate::{AppEventProxy, AttachmentUploadStore, OutboundEvent, UserEvent};
 
     use super::{
-        handle_frontend_message, prepare_outbound, queue_class_for_kind,
-        websocket_origin_authorized, websocket_session_authorized, ClientHub, ClientQueue,
-        DrainStep, EmbeddedServer, QueueClass, ServerState, DRAIN_LOW_WATER,
-        FRONTEND_SESSION_COOKIE_PREFIX, LOSSLESS_HARD_CAP, LOSSY_HIGH_WATER,
+        handle_frontend_message, pane_websocket_session_authorized, prepare_outbound,
+        queue_class_for_kind, websocket_origin_authorized, websocket_session_authorized, ClientHub,
+        ClientQueue, DrainStep, EmbeddedServer, QueueClass, ServerState, WebSocketSessionKind,
+        DRAIN_LOW_WATER, FRONTEND_SESSION_COOKIE_PREFIX, LOSSLESS_HARD_CAP, LOSSY_HIGH_WATER,
     };
 
-    fn sample_server_state() -> (ServerState, Arc<Mutex<Vec<UserEvent>>>) {
+    fn sample_server_state() -> (ServerState, Arc<Mutex<Vec<UserEvent>>>, String) {
         let (proxy, events) = AppEventProxy::stub();
+        let agent_capabilities = super::AgentCapabilityRegistry::default();
+        let project_root = std::env::current_dir().expect("test project root");
+        let token = agent_capabilities
+            .issue(&project_root, "session-1")
+            .expect("canonical test session capability");
         (
             ServerState {
                 proxy,
                 clients: ClientHub::default(),
-                hook_forward_token: "token".to_string(),
+                agent_capabilities,
                 frontend_bootstrap_token: "bootstrap-token".to_string(),
                 frontend_session_cookie_name: "gwt_frontend_session_test".to_string(),
                 frontend_session_token: "frontend-token".to_string(),
@@ -1383,6 +1948,7 @@ mod tests {
                 access_log: super::AccessLogSink::default(),
             },
             events,
+            token,
         )
     }
 
@@ -1411,6 +1977,37 @@ mod tests {
             .to_string()
     }
 
+    fn authenticated_websocket_request(
+        url: &str,
+        origin: &str,
+        authorization: Option<&str>,
+        cookie: Option<&str>,
+    ) -> tokio_tungstenite::tungstenite::http::Request<()> {
+        let mut request = url.into_client_request().expect("websocket request");
+        request
+            .headers_mut()
+            .insert(ORIGIN, origin.parse().expect("websocket origin"));
+        if let Some(authorization) = authorization {
+            request.headers_mut().insert(
+                AUTHORIZATION,
+                authorization.parse().expect("websocket authorization"),
+            );
+        }
+        if let Some(cookie) = cookie {
+            request
+                .headers_mut()
+                .insert(COOKIE, cookie.parse().expect("websocket cookie"));
+        }
+        request
+    }
+
+    fn assert_websocket_http_status(error: WebSocketError, expected: u16) {
+        let WebSocketError::Http(response) = error else {
+            panic!("expected HTTP websocket rejection, got {error}");
+        };
+        assert_eq!(response.status().as_u16(), expected);
+    }
+
     fn sample_runtime_hook_event() -> RuntimeHookEvent {
         RuntimeHookEvent {
             kind: RuntimeHookEventKind::RuntimeState,
@@ -1428,13 +2025,14 @@ mod tests {
 
     #[test]
     fn handle_frontend_message_forwards_non_terminal_events_to_proxy() {
-        let (state, events) = sample_server_state();
+        let (state, events, _token) = sample_server_state();
 
         handle_frontend_message(
             &state,
             "client-1",
             &AtomicU64::new(0),
             32,
+            &WebSocketSessionKind::Frontend,
             FrontendEvent::FrontendReady,
         );
 
@@ -1450,13 +2048,14 @@ mod tests {
 
     #[test]
     fn handle_frontend_message_falls_back_to_proxy_when_pty_writer_is_missing() {
-        let (state, events) = sample_server_state();
+        let (state, events, _token) = sample_server_state();
 
         handle_frontend_message(
             &state,
             "client-1",
             &AtomicU64::new(0),
             48,
+            &WebSocketSessionKind::Frontend,
             FrontendEvent::TerminalInput {
                 id: "tab-1::shell-1".to_string(),
                 data: "ls\n".to_string(),
@@ -1486,6 +2085,16 @@ mod tests {
         BackendEvent::TerminalSnapshot {
             id: pane.to_string(),
             data_base64: data.to_string(),
+        }
+    }
+
+    fn recovery_center_state() -> BackendEvent {
+        BackendEvent::RecoveryCenterState {
+            center: gwt::protocol::RecoveryCenterView {
+                project_name: "private project".to_string(),
+                attention_only: true,
+                candidates: Vec::new(),
+            },
         }
     }
 
@@ -1856,8 +2465,8 @@ mod tests {
     }
 
     #[test]
-    fn websocket_session_requires_process_cookie_or_hook_bearer() {
-        let (state, _) = sample_server_state();
+    fn frontend_websocket_session_requires_process_cookie_and_rejects_agent_capability() {
+        let (state, _, _token) = sample_server_state();
         let mut headers = HeaderMap::new();
         assert!(!websocket_session_authorized(&headers, &state));
 
@@ -1881,7 +2490,532 @@ mod tests {
             AUTHORIZATION,
             "Bearer token".parse().expect("authorization"),
         );
-        assert!(websocket_session_authorized(&headers, &state));
+        assert!(
+            !websocket_session_authorized(&headers, &state),
+            "the agent capability must not authenticate the general frontend WebSocket"
+        );
+    }
+
+    #[test]
+    fn pane_websocket_session_requires_agent_capability_and_rejects_frontend_cookie() {
+        let (state, _, token) = sample_server_state();
+        let mut headers = HeaderMap::new();
+        assert!(pane_websocket_session_authorized(&headers, &state).is_none());
+
+        headers.insert(
+            COOKIE,
+            "gwt_frontend_session_test=frontend-token"
+                .parse()
+                .expect("cookie"),
+        );
+        assert!(
+            pane_websocket_session_authorized(&headers, &state).is_none(),
+            "the browser cookie must not authenticate the internal pane WebSocket"
+        );
+
+        headers.remove(COOKIE);
+        headers.insert(
+            AUTHORIZATION,
+            "Bearer wrong".parse().expect("authorization"),
+        );
+        assert!(pane_websocket_session_authorized(&headers, &state).is_none());
+        headers.insert(
+            AUTHORIZATION,
+            format!("Bearer {token}").parse().expect("authorization"),
+        );
+        let principal = pane_websocket_session_authorized(&headers, &state)
+            .expect("agent capability principal");
+        assert_eq!(principal.session_id(), "session-1");
+        assert!(
+            principal.authorizes_project_root(&std::env::current_dir().expect("test project root"))
+        );
+    }
+
+    #[test]
+    fn agent_capability_issuer_mints_distinct_session_bound_tokens() {
+        let projects = tempfile::tempdir().expect("project roots");
+        let project_a = projects.path().join("project-a");
+        let project_b = projects.path().join("project-b");
+        std::fs::create_dir_all(project_a.join("nested")).expect("project A");
+        std::fs::create_dir_all(&project_b).expect("project B");
+        let runtime = Runtime::new().expect("tokio runtime");
+        let (proxy, _events) = AppEventProxy::stub();
+        let mut server = EmbeddedServer::start(
+            &runtime,
+            proxy,
+            ClientHub::default(),
+            Arc::new(RwLock::new(HashMap::new())),
+            AttachmentUploadStore::in_system_temp(),
+        )
+        .expect("embedded server");
+
+        let issuer = server.agent_capability_issuer();
+        let first_a = issuer
+            .issue(&project_a.join("nested").join(".."), "session-a")
+            .expect("session A capability");
+        let session_b = issuer
+            .issue(&project_b, "session-b")
+            .expect("session B capability");
+        let rotated_a = issuer
+            .issue(&project_a, "session-a")
+            .expect("rotated session A capability");
+
+        assert_ne!(first_a.token, session_b.token);
+        assert_ne!(first_a.token, rotated_a.token);
+        assert_ne!(session_b.token, rotated_a.token);
+        assert_eq!(first_a.url, session_b.url);
+        assert_eq!(session_b.url, rotated_a.url);
+        assert!(issuer.registry.authenticate(&first_a.token).is_none());
+        let principal = issuer
+            .registry
+            .authenticate(&rotated_a.token)
+            .expect("rotated principal");
+        assert_eq!(principal.session_id(), "session-a");
+        assert!(principal.authorizes_project_root(&project_a));
+        assert!(!principal.authorizes_project_root(&project_b));
+        let issuer_debug = format!("{issuer:?}");
+        assert!(!issuer_debug.contains(&rotated_a.token));
+        assert!(!issuer_debug.contains("session-a"));
+        assert!(!issuer_debug.contains("session-b"));
+        assert!(!issuer_debug.contains(&project_a.display().to_string()));
+        assert!(!format!("{principal:?}").contains(&project_a.display().to_string()));
+        let request_debug = format!(
+            "{:?}",
+            super::AgentFrontendRequest::SendInput {
+                text: "input-secret-sentinel".to_string(),
+            }
+        );
+        assert!(!request_debug.contains("input-secret-sentinel"));
+
+        server.shutdown();
+    }
+
+    #[test]
+    fn agent_capability_rotation_is_scoped_by_project_and_session() {
+        let projects = tempfile::tempdir().expect("project roots");
+        let project_a = projects.path().join("project-a");
+        let project_b = projects.path().join("project-b");
+        std::fs::create_dir_all(&project_a).expect("project A");
+        std::fs::create_dir_all(&project_b).expect("project B");
+        let issuer =
+            super::AgentCapabilityIssuer::for_test("http://127.0.0.1:45123/internal/hook-live");
+
+        let project_a_target = issuer
+            .issue(&project_a, "shared-session-id")
+            .expect("project A capability");
+        let project_b_target = issuer
+            .issue(&project_b, "shared-session-id")
+            .expect("project B capability");
+
+        let project_a_principal = issuer
+            .registry
+            .authenticate(&project_a_target.token)
+            .expect("project A capability remains valid");
+        let project_b_principal = issuer
+            .registry
+            .authenticate(&project_b_target.token)
+            .expect("project B capability remains valid");
+        assert!(project_a_principal.authorizes_project_root(&project_a));
+        assert!(!project_a_principal.authorizes_project_root(&project_b));
+        assert!(project_b_principal.authorizes_project_root(&project_b));
+        assert!(!project_b_principal.authorizes_project_root(&project_a));
+    }
+
+    #[test]
+    fn agent_bridge_uses_a_dedicated_container_reachable_listener() {
+        let runtime = Runtime::new().expect("tokio runtime");
+        let (proxy, _events) = AppEventProxy::stub();
+        let mut server = EmbeddedServer::start(
+            &runtime,
+            proxy,
+            ClientHub::default(),
+            Arc::new(RwLock::new(HashMap::new())),
+            AttachmentUploadStore::in_system_temp(),
+        )
+        .expect("embedded server");
+
+        let browser_url = reqwest::Url::parse(server.url()).expect("browser URL");
+        let hook_url = reqwest::Url::parse(&server.hook_forward_target().url).expect("hook URL");
+        assert_eq!(hook_url.host_str(), Some("127.0.0.1"));
+        assert_ne!(
+            hook_url.port(),
+            browser_url.port(),
+            "agent bridge must not reuse the browser listener"
+        );
+        assert_eq!(
+            super::agent_bridge_bind_ip(),
+            if cfg!(target_os = "linux") {
+                std::net::IpAddr::V4(std::net::Ipv4Addr::UNSPECIFIED)
+            } else {
+                std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST)
+            }
+        );
+
+        server.shutdown();
+    }
+
+    #[test]
+    fn pane_frontend_events_carry_authenticated_project_principal_to_runtime() {
+        let project = tempfile::tempdir().expect("project root");
+        let (state, events, _token) = sample_server_state();
+        let sequence = AtomicU64::new(0);
+        let pane = WebSocketSessionKind::pane(project.path(), "session-1");
+
+        handle_frontend_message(
+            &state,
+            "pane-client",
+            &sequence,
+            32,
+            &pane,
+            FrontendEvent::CloseWindow {
+                id: "foreign-tab::agent-1".to_string(),
+            },
+        );
+
+        let recorded = events
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        assert!(matches!(
+            recorded.as_slice(),
+            [UserEvent::AgentFrontend { client_id, principal, request: super::AgentFrontendRequest::CloseWindow { .. } }]
+                if client_id == "pane-client"
+                    && principal.session_id() == "session-1"
+                    && principal.authorizes_project_root(project.path())
+        ));
+    }
+
+    #[test]
+    fn pane_clients_never_receive_global_broadcasts() {
+        let clients = ClientHub::default();
+        let browser = clients.register("browser".to_string());
+        let pane = clients.register_pane("pane".to_string());
+
+        clients.dispatch(vec![OutboundEvent::broadcast(terminal_snapshot(
+            "foreign-tab::agent-1",
+            "foreign snapshot",
+        ))]);
+
+        assert!(browser.try_recv().is_some());
+        assert!(pane.try_recv().is_none());
+
+        clients.dispatch(vec![OutboundEvent::reply(
+            "pane",
+            terminal_snapshot("scoped-tab::agent-1", "scoped snapshot"),
+        )]);
+        assert!(pane.try_recv().is_some());
+    }
+
+    #[test]
+    fn pane_session_principal_rejects_cross_session_input_but_keeps_management_close() {
+        const SESSION_SENTINEL: &str = "session-secret-sentinel";
+        let pane = WebSocketSessionKind::pane(std::path::Path::new("."), SESSION_SENTINEL);
+
+        assert!(!format!("{pane:?}").contains(SESSION_SENTINEL));
+
+        assert!(
+            pane.authorizes_frontend_event(&FrontendEvent::PaneSendInput {
+                session_id: SESSION_SENTINEL.to_string(),
+                text: "status\r".to_string(),
+            })
+        );
+        assert!(
+            !pane.authorizes_frontend_event(&FrontendEvent::PaneSendInput {
+                session_id: "session-b".to_string(),
+                text: "malicious\r".to_string(),
+            })
+        );
+        // gwt-agent intentionally supports same-project cross-agent lifecycle
+        // management; runtime applies the project half of this boundary.
+        assert!(pane.authorizes_frontend_event(&FrontendEvent::CloseWindow {
+            id: "tab-1::agent-b".to_string(),
+        }));
+    }
+
+    #[test]
+    fn pane_websocket_rejects_unknown_token_and_cross_session_input_end_to_end() {
+        let runtime = Runtime::new().expect("tokio runtime");
+        let (proxy, events) = AppEventProxy::stub();
+        let mut server = EmbeddedServer::start(
+            &runtime,
+            proxy,
+            ClientHub::default(),
+            Arc::new(RwLock::new(HashMap::new())),
+            AttachmentUploadStore::in_system_temp(),
+        )
+        .expect("embedded server");
+        let session_a = server
+            .agent_capability_issuer()
+            .issue(
+                &std::env::current_dir().expect("test project root"),
+                "session-a",
+            )
+            .expect("session A capability");
+        let origin = server.url().trim_end_matches('/');
+        let pane_url = format!("{}internal/pane-ws", server.url()).replace("http://", "ws://");
+
+        let unknown_request = authenticated_websocket_request(
+            &pane_url,
+            origin,
+            Some("Bearer retired-process-global-token"),
+            None,
+        );
+        let unknown_error = runtime
+            .block_on(connect_async(unknown_request))
+            .expect_err("unknown/global token must fail closed");
+        assert_websocket_http_status(unknown_error, HttpStatusCode::UNAUTHORIZED.as_u16());
+
+        let request = authenticated_websocket_request(
+            &pane_url,
+            origin,
+            Some(&format!("Bearer {}", session_a.token)),
+            None,
+        );
+        let (mut socket, _) = runtime
+            .block_on(connect_async(request))
+            .expect("session A capability authenticates pane websocket");
+        runtime
+            .block_on(
+                socket.send(tokio_tungstenite::tungstenite::Message::Text(
+                    serde_json::json!({
+                        "kind": "pane_send_input",
+                        "session_id": "session-b",
+                        "text": "malicious\r"
+                    })
+                    .to_string()
+                    .into(),
+                )),
+            )
+            .expect("send cross-session input request");
+
+        let reply = runtime.block_on(async {
+            tokio::time::timeout(std::time::Duration::from_secs(1), socket.next())
+                .await
+                .expect("cross-session request receives explicit denial")
+                .expect("pane websocket stays open")
+                .expect("pane websocket denial message")
+        });
+        let payload: serde_json::Value =
+            serde_json::from_str(reply.to_text().expect("text denial")).expect("denial JSON");
+        assert_eq!(
+            payload.get("kind").and_then(serde_json::Value::as_str),
+            Some("pane_send_result")
+        );
+        assert_eq!(
+            payload.get("ok").and_then(serde_json::Value::as_bool),
+            Some(false)
+        );
+        assert!(events
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .is_empty());
+        assert!(server.access_log().snapshot().iter().all(|record| {
+            !record.path.contains(&session_a.token)
+                && !record.path.contains("session-a")
+                && !record.path.contains("session-b")
+        }));
+
+        server.shutdown();
+    }
+
+    #[test]
+    fn websocket_routes_keep_browser_and_pane_capabilities_separate_end_to_end() {
+        let runtime = Runtime::new().expect("tokio runtime");
+        let (proxy, _events) = AppEventProxy::stub();
+        let clients = ClientHub::default();
+        let mut server = EmbeddedServer::start(
+            &runtime,
+            proxy,
+            clients.clone(),
+            Arc::new(RwLock::new(HashMap::new())),
+            AttachmentUploadStore::in_system_temp(),
+        )
+        .expect("embedded server");
+        let hook = server.hook_forward_target();
+        let origin = server.url().trim_end_matches('/');
+        let client = reqwest::blocking::Client::new();
+        let browser_cookie = exchange_frontend_session(&client, &server);
+        let frontend_url = format!("{}ws", server.url()).replace("http://", "ws://");
+        let pane_url = format!("{}internal/pane-ws", server.url()).replace("http://", "ws://");
+
+        let frontend_with_hook = authenticated_websocket_request(
+            &frontend_url,
+            origin,
+            Some(&format!("Bearer {}", hook.token)),
+            None,
+        );
+        let frontend_error = runtime
+            .block_on(connect_async(frontend_with_hook))
+            .expect_err("hook bearer must not authenticate /ws");
+        assert_websocket_http_status(frontend_error, HttpStatusCode::UNAUTHORIZED.as_u16());
+
+        let pane_with_cookie =
+            authenticated_websocket_request(&pane_url, origin, None, Some(&browser_cookie));
+        let pane_error = runtime
+            .block_on(connect_async(pane_with_cookie))
+            .expect_err("browser cookie must not authenticate /internal/pane-ws");
+        assert_websocket_http_status(pane_error, HttpStatusCode::UNAUTHORIZED.as_u16());
+
+        let frontend_with_cookie =
+            authenticated_websocket_request(&frontend_url, origin, None, Some(&browser_cookie));
+        let (frontend_socket, _) = runtime
+            .block_on(connect_async(frontend_with_cookie))
+            .expect("browser cookie authenticates /ws");
+        drop(frontend_socket);
+
+        let pane_with_hook = authenticated_websocket_request(
+            &pane_url,
+            origin,
+            Some(&format!("Bearer {}", hook.token)),
+            None,
+        );
+        let (mut pane_socket, _) = runtime
+            .block_on(connect_async(pane_with_hook))
+            .expect("hook bearer authenticates /internal/pane-ws");
+
+        clients.dispatch(vec![
+            OutboundEvent::broadcast(recovery_center_state()),
+            OutboundEvent::broadcast(terminal_snapshot("tab-1::agent-1", "snapshot")),
+        ]);
+        let broadcast = runtime.block_on(async {
+            tokio::time::timeout(std::time::Duration::from_millis(150), pane_socket.next()).await
+        });
+        assert!(
+            broadcast.is_err(),
+            "internal pane connections must never receive process-global broadcasts"
+        );
+        drop(pane_socket);
+
+        server.shutdown();
+    }
+
+    #[test]
+    fn pane_websocket_event_allowlist_is_fail_closed() {
+        let pane = WebSocketSessionKind::pane(std::path::Path::new("."), "session-1");
+        assert!(pane.authorizes_frontend_event(&FrontendEvent::FrontendReady));
+        assert!(
+            pane.authorizes_frontend_event(&FrontendEvent::PaneSendInput {
+                session_id: "session-1".to_string(),
+                text: "status\r".to_string(),
+            })
+        );
+        assert!(pane.authorizes_frontend_event(&FrontendEvent::CloseWindow {
+            id: "tab-1::agent-1".to_string(),
+        }));
+
+        assert!(!pane.authorizes_frontend_event(&FrontendEvent::ListRecoveryCenter));
+        let recovery_action: FrontendEvent = serde_json::from_value(serde_json::json!({
+            "kind": "recovery_center_action",
+            "request": {
+                "action_handle": "must-not-reach-runtime",
+                "action": "discard"
+            }
+        }))
+        .expect("recovery center action event");
+        assert!(!pane.authorizes_frontend_event(&recovery_action));
+        assert!(
+            !pane.authorizes_frontend_event(&FrontendEvent::TerminalInput {
+                id: "tab-1::agent-1".to_string(),
+                data: "forbidden".to_string(),
+            })
+        );
+    }
+
+    #[test]
+    fn pane_websocket_backend_allowlist_is_exact_and_malformed_payloads_fail_closed() {
+        let pane = WebSocketSessionKind::pane(std::path::Path::new("."), "session-1");
+        for kind in ["workspace_state", "terminal_snapshot", "pane_send_result"] {
+            assert!(pane.authorizes_backend_payload(&format!(r#"{{"kind":"{kind}"}}"#)));
+        }
+
+        let recovery_state =
+            serde_json::to_string(&recovery_center_state()).expect("Recovery Center state payload");
+        assert!(!pane.authorizes_backend_payload(&recovery_state));
+        assert!(!pane.authorizes_backend_payload(r#"{"kind":"recovery_center_action_result"}"#));
+        assert!(!pane.authorizes_backend_payload(r#"{"kind":"system_settings"}"#));
+        assert!(!pane.authorizes_backend_payload(r#"{"message":"missing kind"}"#));
+        assert!(!pane.authorizes_backend_payload("not-json"));
+
+        assert!(
+            WebSocketSessionKind::Frontend.authorizes_backend_payload(&recovery_state),
+            "the browser frontend retains the complete backend protocol"
+        );
+    }
+
+    #[test]
+    fn pane_outbound_scope_requires_authenticated_project_and_known_window() {
+        let projects = tempfile::tempdir().expect("project roots");
+        let project_a = projects.path().join("project-a");
+        let project_b = projects.path().join("project-b");
+        std::fs::create_dir_all(&project_a).expect("project A");
+        std::fs::create_dir_all(&project_b).expect("project B");
+        let pane = WebSocketSessionKind::pane(&project_a, "session-a");
+        let mut scope = super::PaneOutboundScope::default();
+
+        let cross_project = serde_json::json!({
+            "kind": "workspace_state",
+            "workspace": {
+                "tabs": [
+                    { "project_root": project_a.display().to_string(), "workspace": { "windows": [{ "id": "tab-a::agent-a" }] } },
+                    { "project_root": project_b.display().to_string(), "workspace": { "windows": [{ "id": "tab-b::agent-b" }] } }
+                ],
+                "recent_projects": []
+            }
+        })
+        .to_string();
+        assert!(!pane.authorizes_scoped_backend_payload(&cross_project, &mut scope));
+
+        let scoped = serde_json::json!({
+            "kind": "workspace_state",
+            "workspace": {
+                "tabs": [
+                    { "project_root": project_a.display().to_string(), "workspace": { "windows": [{ "id": "tab-a::agent-a" }] } }
+                ],
+                "recent_projects": []
+            }
+        })
+        .to_string();
+        assert!(pane.authorizes_scoped_backend_payload(&scoped, &mut scope));
+        assert!(pane.authorizes_scoped_backend_payload(
+            r#"{"kind":"terminal_snapshot","id":"tab-a::agent-a"}"#,
+            &mut scope
+        ));
+        assert!(!pane.authorizes_scoped_backend_payload(
+            r#"{"kind":"terminal_snapshot","id":"tab-b::agent-b"}"#,
+            &mut scope
+        ));
+    }
+
+    #[test]
+    fn pane_websocket_recovery_events_never_reach_the_runtime_proxy() {
+        let (state, events, _token) = sample_server_state();
+        let sequence = AtomicU64::new(0);
+        let recovery_action: FrontendEvent = serde_json::from_value(serde_json::json!({
+            "kind": "recovery_center_action",
+            "request": {
+                "action_handle": "must-not-reach-runtime",
+                "action": "discard"
+            }
+        }))
+        .expect("recovery center action event");
+
+        for event in [FrontendEvent::ListRecoveryCenter, recovery_action] {
+            handle_frontend_message(
+                &state,
+                "pane-client",
+                &sequence,
+                64,
+                &WebSocketSessionKind::pane(std::path::Path::new("."), "session-1"),
+                event,
+            );
+        }
+
+        let recorded = events
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        assert!(
+            recorded.is_empty(),
+            "pane capability must not dispatch Recovery Center events"
+        );
     }
 
     #[test]
@@ -2003,7 +3137,14 @@ mod tests {
         let hook = server.hook_forward_target();
         let client = reqwest::blocking::Client::new();
 
-        assert_eq!(hook.url, format!("{}internal/hook-live", server.url()));
+        let browser_url = reqwest::Url::parse(server.url()).expect("browser URL");
+        let hook_url = reqwest::Url::parse(&hook.url).expect("hook URL");
+        assert_eq!(hook_url.path(), "/internal/hook-live");
+        assert_ne!(
+            hook_url.port(),
+            browser_url.port(),
+            "hook-live must be served by the dedicated agent listener"
+        );
 
         let health = client
             .get(format!("{}healthz", server.url()))
@@ -2125,6 +3266,20 @@ mod tests {
             .expect("wrong token hook request");
         assert_eq!(wrong_token.status(), HttpStatusCode::UNAUTHORIZED);
 
+        let mut forged_claim = event.clone();
+        forged_claim.gwt_session_id = Some("session-2".to_string());
+        let cross_session = client
+            .post(&hook.url)
+            .bearer_auth(&hook.token)
+            .json(&forged_claim)
+            .send()
+            .expect("cross-session hook claim request");
+        assert_eq!(cross_session.status(), HttpStatusCode::UNAUTHORIZED);
+        assert!(events
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .is_empty());
+
         let accepted = client
             .post(&hook.url)
             .bearer_auth(&hook.token)
@@ -2136,6 +3291,14 @@ mod tests {
         let recorded = events
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let canonical_project_root =
+            dunce::canonicalize(gwt_core::paths::resolve_main_worktree_root(
+                &std::env::current_dir().expect("test project root"),
+            ))
+            .map(|path| gwt_core::paths::normalize_windows_child_process_path(&path))
+            .expect("canonical test project root")
+            .to_string_lossy()
+            .into_owned();
         assert!(recorded.iter().any(|user_event| {
             matches!(
                 user_event,
@@ -2143,6 +3306,8 @@ mod tests {
                     if recorded_event.kind == RuntimeHookEventKind::RuntimeState
                         && recorded_event.source_event.as_deref() == Some("PreToolUse")
                         && recorded_event.agent_session_id.as_deref() == Some("agent-1")
+                        && recorded_event.project_root.as_deref()
+                            == Some(canonical_project_root.as_str())
             )
         }));
 
@@ -2333,6 +3498,56 @@ mod tests {
             HttpStatusCode::UNAUTHORIZED
         );
 
+        server.shutdown();
+    }
+
+    #[test]
+    fn attachment_upload_rejects_an_oversized_declared_body_before_staging() {
+        let runtime = Runtime::new().expect("tokio runtime");
+        let (proxy, _events) = AppEventProxy::stub();
+        let upload_store = AttachmentUploadStore::in_system_temp();
+        let mut server = EmbeddedServer::start(
+            &runtime,
+            proxy,
+            ClientHub::default(),
+            Arc::new(RwLock::new(HashMap::new())),
+            upload_store.clone(),
+        )
+        .expect("embedded server");
+        let client = reqwest::blocking::Client::new();
+        let origin = server.url().trim_end_matches('/').to_string();
+        let session_cookie = exchange_frontend_session(&client, &server);
+        let token = client
+            .post(format!("{}internal/attachment-upload-token", server.url()))
+            .header("origin", &origin)
+            .header("cookie", &session_cookie)
+            .send()
+            .expect("token request")
+            .json::<serde_json::Value>()
+            .expect("token json")
+            .get("token")
+            .and_then(|value| value.as_str())
+            .expect("upload token")
+            .to_string();
+        let oversized = gwt_core::recovery::MAX_RECOVERY_ATTACHMENT_BYTES + 1;
+
+        let response = client
+            .post(format!(
+                "{}internal/attachments/upload?filename=oversized.bin&size={oversized}",
+                server.url()
+            ))
+            .header("origin", &origin)
+            .header("cookie", &session_cookie)
+            .header("x-gwt-upload-token", token)
+            .body(Vec::<u8>::new())
+            .send()
+            .expect("oversized upload request");
+
+        assert_eq!(response.status(), HttpStatusCode::PAYLOAD_TOO_LARGE);
+        assert!(
+            !upload_store.root().exists(),
+            "an impossible upload must not create a staging directory"
+        );
         server.shutdown();
     }
 

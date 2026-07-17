@@ -10,6 +10,50 @@ use std::{
 
 use tracing::{debug, info};
 
+pub const DOCKER_HOST_BRIDGE_NAME: &str = "host.docker.internal";
+pub const PODMAN_HOST_BRIDGE_NAME: &str = "host.containers.internal";
+pub const DOCKER_HOST_GATEWAY_EXTRA_HOST: &str = "host.docker.internal:host-gateway";
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ContainerRuntimeKind {
+    Docker,
+    Podman,
+}
+
+impl ContainerRuntimeKind {
+    pub fn host_bridge_name(self) -> &'static str {
+        match self {
+            Self::Docker => DOCKER_HOST_BRIDGE_NAME,
+            Self::Podman => PODMAN_HOST_BRIDGE_NAME,
+        }
+    }
+
+    pub fn compose_extra_host(self) -> Option<&'static str> {
+        match self {
+            Self::Docker => Some(DOCKER_HOST_GATEWAY_EXTRA_HOST),
+            Self::Podman => None,
+        }
+    }
+}
+
+pub fn container_runtime_kind(
+    container_runtime_binary: &str,
+) -> Result<ContainerRuntimeKind, String> {
+    let binary_name = container_runtime_binary
+        .trim()
+        .rsplit(['/', '\\'])
+        .next()
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+    match binary_name.trim_end_matches(".exe") {
+        "docker" => Ok(ContainerRuntimeKind::Docker),
+        "podman" | "podman-remote" => Ok(ContainerRuntimeKind::Podman),
+        _ => Err(format!(
+            "container launch requires the Docker or Podman CLI, but GWT_DOCKER_BIN resolved to '{container_runtime_binary}'"
+        )),
+    }
+}
+
 /// Detected Docker files in a directory.
 #[derive(Debug, Clone, Default)]
 pub struct DockerFiles {
@@ -184,6 +228,29 @@ mod tests {
     use tempfile::TempDir;
 
     use super::*;
+
+    #[test]
+    fn container_runtime_kind_is_derived_from_the_selected_cli_binary() {
+        for binary in ["docker", r"C:\Program Files\Docker\DOCKER.EXE"] {
+            assert_eq!(
+                container_runtime_kind(binary).expect("Docker runtime"),
+                ContainerRuntimeKind::Docker
+            );
+        }
+        for binary in ["podman", "/opt/homebrew/bin/podman-remote"] {
+            assert_eq!(
+                container_runtime_kind(binary).expect("Podman runtime"),
+                ContainerRuntimeKind::Podman
+            );
+        }
+
+        let error = container_runtime_kind("custom-container-wrapper")
+            .expect_err("unknown container runtime must fail closed");
+        assert!(
+            error.contains("Docker or Podman"),
+            "unexpected error: {error}"
+        );
+    }
 
     #[test]
     fn detect_empty_dir_finds_nothing() {

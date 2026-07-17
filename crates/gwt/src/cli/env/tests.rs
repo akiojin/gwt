@@ -254,7 +254,9 @@ fn default_cli_env_construction_does_not_touch_issue_client_factory() {
 
 #[test]
 fn new_for_hooks_keeps_detached_cache_root() {
-    let _env_lock = crate::env_test_lock().lock().expect("env lock");
+    let _env_lock = crate::env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let env = DefaultCliEnv::new_for_hooks();
 
     assert_eq!(
@@ -426,7 +428,9 @@ fn test_env_records_io_and_pr_side_effects() {
 
 #[test]
 fn dispatch_accepts_json_envelope_workspace_update_without_argv_flags() {
-    let _env_lock = crate::env_test_lock().lock().expect("env lock");
+    let _env_lock = crate::env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let temp = tempfile::tempdir().expect("tempdir");
     let home = tempfile::tempdir().expect("home tempdir");
     let _home = crate::cli::test_support::ScopedEnvVar::set("HOME", home.path());

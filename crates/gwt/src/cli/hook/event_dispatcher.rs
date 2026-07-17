@@ -757,7 +757,7 @@ mod tests {
         assert!(matches!(
             output,
             HookOutput::PreToolUsePermission { ref summary, .. }
-                if summary == "Intake checkpoints are root-session owned"
+                if summary == "Intake discussion durability is root-session owned"
         ));
     }
 }

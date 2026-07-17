@@ -197,7 +197,12 @@ pub fn run<E: CliEnv>(
             let current_intake = resolve_current_intake(env.repo_path(), false)
                 .map_err(discussion_recovery_as_spec_error)?;
             if let Some(current) = current_intake.as_ref() {
-                require_root_provider_caller(&current.record)
+                require_root_provider_caller(
+                    &current.record,
+                    Some(
+                        crate::cli::hook::intake_checkpoint_authority::IntakeCheckpointOperation::DiscussionUpdate,
+                    ),
+                )
                     .map_err(discussion_recovery_as_spec_error)?;
             }
             let projection = current_intake
@@ -476,6 +481,8 @@ pub(crate) enum DiscussionRecoveryError {
         "recovery {recovery_id} root-owned checkpoint rejected caller role {role}; unproven roots remain in Recovery Center Attention and are never backfilled from private content"
     )]
     ProviderCallerRoleRejected { recovery_id: String, role: String },
+    #[error("recovery {recovery_id} root-owned checkpoint authorization failed: {reason}")]
+    CheckpointAuthorityRejected { recovery_id: String, reason: String },
     #[error("recovery {recovery_id} provider {provider} has no trusted root caller identity")]
     UnsupportedProviderIdentity {
         recovery_id: String,
@@ -602,7 +609,10 @@ fn resolve_current_intake(
     }
 
     validate_session_ledger_identity(&caller_session)?;
-    let sessions_dir = gwt_core::paths::gwt_sessions_dir();
+    let sessions_dir = std::env::var_os(gwt_agent::GWT_SESSION_RUNTIME_PATH_ENV)
+        .map(PathBuf::from)
+        .and_then(|path| gwt_agent::sessions_dir_from_runtime_path(&path))
+        .unwrap_or_else(gwt_core::paths::gwt_sessions_dir);
     let session_path = sessions_dir.join(format!("{caller_session}.toml"));
     let session = gwt_agent::Session::load(&session_path).map_err(|_| {
         DiscussionRecoveryError::MissingSessionLedger {
@@ -757,7 +767,7 @@ fn project_discussion_update(
         .load(&record.recovery_id)?
         .ok_or_else(|| RecoveryStoreError::NotFound(record.recovery_id.clone()))?;
     let record = require_intake_session_owner(record, &caller_session)?;
-    require_root_provider_caller(&record)?;
+    require_root_provider_caller(&record, None)?;
     let root = authoritative_root(&record)?;
     if record.recovery_id != projection.recovery_id {
         return Err(DiscussionRecoveryError::LegacyIntakeResolution {
@@ -959,7 +969,13 @@ fn run_intake_checkpoint_update<E: CliEnv>(
         record,
         caller_session,
     } = current;
-    require_root_provider_caller(&record).map_err(discussion_recovery_as_spec_error)?;
+    require_root_provider_caller(
+        &record,
+        Some(
+            crate::cli::hook::intake_checkpoint_authority::IntakeCheckpointOperation::CheckpointUpdate,
+        ),
+    )
+    .map_err(discussion_recovery_as_spec_error)?;
 
     // A previous invocation may have committed the checkpoint but crashed or
     // returned while publishing its Board milestone. Opportunistically drain
@@ -980,7 +996,7 @@ fn run_intake_checkpoint_update<E: CliEnv>(
         .map_err(discussion_recovery_as_spec_error)?;
     let record = require_intake_session_owner(record, &caller_session)
         .map_err(discussion_recovery_as_spec_error)?;
-    require_root_provider_caller(&record).map_err(discussion_recovery_as_spec_error)?;
+    require_root_provider_caller(&record, None).map_err(discussion_recovery_as_spec_error)?;
     let is_same_revision_retry = match record.checkpoint_revision {
         actual if actual == update.expected_revision => false,
         actual if actual == update.expected_revision.saturating_add(1) => true,
@@ -1147,7 +1163,12 @@ fn run_intake_checkpoint_show<E: CliEnv>(
         .expect("required current Intake resolution");
     require_intake_session_owner(current.record, &current.caller_session)
         .and_then(|record| {
-            require_root_provider_caller(&record)?;
+            require_root_provider_caller(
+                &record,
+                Some(
+                    crate::cli::hook::intake_checkpoint_authority::IntakeCheckpointOperation::CheckpointCurrent,
+                ),
+            )?;
             Ok(record)
         })
         .map_err(discussion_recovery_as_spec_error)
@@ -1203,7 +1224,12 @@ fn require_intake_session_owner(
     Ok(record)
 }
 
-fn require_root_provider_caller(record: &RecoveryRecord) -> Result<(), DiscussionRecoveryError> {
+fn require_root_provider_caller(
+    record: &RecoveryRecord,
+    checkpoint_operation: Option<
+        crate::cli::hook::intake_checkpoint_authority::IntakeCheckpointOperation,
+    >,
+) -> Result<(), DiscussionRecoveryError> {
     if record.root_role != gwt_core::recovery::ProviderRootRole::Root {
         return Err(DiscussionRecoveryError::ProviderCallerRoleRejected {
             recovery_id: record.recovery_id.clone(),
@@ -1229,17 +1255,24 @@ fn require_root_provider_caller(record: &RecoveryRecord) -> Result<(), Discussio
             });
         }
     } else if provider.contains("claude") {
-        // Claude exposes the provider session id to hooks, but does not
-        // guarantee a session-id environment variable in Bash subprocesses.
-        // Root/child authority is therefore enforced at the managed
-        // PreToolUse boundary (which carries agent_id/agent_type for a
-        // subagent), while this CLI independently requires the Store's
-        // authoritative root binding and root role above.
         if claude_subagent_environment_present() {
             return Err(DiscussionRecoveryError::ProviderCallerRoleRejected {
                 recovery_id: record.recovery_id.clone(),
                 role: "claude_subagent".to_string(),
             });
+        }
+        if let Some(operation) = checkpoint_operation {
+            crate::cli::hook::intake_checkpoint_authority::consume_for_current_claude(
+                &record.session_id,
+                &record.recovery_id,
+                operation,
+            )
+            .map_err(
+                |error| DiscussionRecoveryError::CheckpointAuthorityRejected {
+                    recovery_id: record.recovery_id.clone(),
+                    reason: error.to_string(),
+                },
+            )?;
         }
     } else {
         return Err(DiscussionRecoveryError::UnsupportedProviderIdentity {
@@ -1262,7 +1295,7 @@ pub(crate) fn current_intake_durability_blocker(
     let Some(current) = resolve_current_intake(repo_root, false)? else {
         return Ok(None);
     };
-    require_root_provider_caller(&current.record)?;
+    require_root_provider_caller(&current.record, None)?;
     let record = current.record;
     let Some(checkpoint) = record.checkpoint.as_ref() else {
         return Ok(Some(format!(

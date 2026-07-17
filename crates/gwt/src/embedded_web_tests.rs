@@ -1726,15 +1726,12 @@ fn embedded_web_socket_protocol_wiring_uses_named_handlers() {
 #[test]
 fn embedded_web_socket_open_replays_frontend_ready_before_flushing_pending_messages() {
     let html = frontend_bundle_source();
-    // Issue #2694 Phase C: handleSocketOpen now also re-initializes the
-    // per-connection dispatcher before the frontend_ready handshake. The
-    // regex below is intentionally `[\s\S]*?` (non-greedy any) between
-    // setConnectionState and the pendingMessages flush so dispatcher
-    // setup is allowed inside the function, but the ordering assertion
-    // — frontend_ready strictly precedes the queued-message replay — is
-    // preserved.
+    // Issue #2694 Phase C: handleSocketOpen also re-initializes the
+    // per-connection dispatcher before the frontend_ready handshake. Recovery
+    // Center inventory is requested after that handshake and before queued
+    // messages replay, so reconnect bootstrap preserves one explicit order.
     let open_flow = regex::Regex::new(
-            r#"function handleSocketOpen\(\)\s*\{[\s\S]*?setConnectionState\(true\);\s*send\(\{\s*kind:\s*"frontend_ready"\s*\}\);\s*while\s*\(\s*pendingMessages\.length\s*>\s*0\s*\)\s*\{\s*socket\.send\(JSON\.stringify\(pendingMessages\.shift\(\)\)\);\s*\}\s*\}"#,
+            r#"function handleSocketOpen\(\)\s*\{[\s\S]*?setConnectionState\(true\);\s*send\(\{\s*kind:\s*"frontend_ready"\s*\}\);\s*send\(\{\s*kind:\s*"list_recovery_center"\s*\}\);\s*while\s*\(\s*pendingMessages\.length\s*>\s*0\s*\)\s*\{\s*socket\.send\(JSON\.stringify\(pendingMessages\.shift\(\)\)\);\s*\}\s*\}"#,
         )
         .expect("valid regex");
 

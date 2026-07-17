@@ -4,6 +4,8 @@ use std::{
     process::Stdio,
 };
 
+use reqwest::Url;
+
 use crate::{
     environment::LaunchEnvironment,
     launch::LaunchConfig,
@@ -41,7 +43,7 @@ impl std::fmt::Debug for PreparedProcessLaunch {
             .map(|(key, value)| {
                 (
                     key.as_str(),
-                    if key == GWT_HOOK_FORWARD_TOKEN_ENV {
+                    if private_launch_env_key(key) {
                         "<redacted>"
                     } else {
                         value.as_str()
@@ -49,13 +51,15 @@ impl std::fmt::Debug for PreparedProcessLaunch {
                 )
             })
             .collect::<std::collections::BTreeMap<_, _>>();
-        let token_assignment_prefix = format!("{GWT_HOOK_FORWARD_TOKEN_ENV}=");
         let redacted_args = self
             .args
             .iter()
             .map(|argument| {
-                if argument.starts_with(&token_assignment_prefix) {
-                    format!("{token_assignment_prefix}<redacted>")
+                let Some((key, _)) = argument.split_once('=') else {
+                    return argument.clone();
+                };
+                if private_launch_env_key(key) {
+                    format!("{key}=<redacted>")
                 } else {
                     argument.clone()
                 }
@@ -71,6 +75,16 @@ impl std::fmt::Debug for PreparedProcessLaunch {
             .field("cwd", &self.cwd)
             .finish()
     }
+}
+
+fn private_launch_env_key(key: &str) -> bool {
+    matches!(
+        key,
+        GWT_HOOK_FORWARD_TOKEN_ENV
+            | GWT_SESSION_ID_ENV
+            | GWT_RECOVERY_ID_ENV
+            | GWT_SESSION_RUNTIME_PATH_ENV
+    )
 }
 
 #[derive(Debug, Clone)]
@@ -96,6 +110,90 @@ impl std::fmt::Debug for HookForwardEnv {
             .field("token", &"<redacted>")
             .finish()
     }
+}
+
+/// Translate a host-only hook endpoint into the selected launch runtime's
+/// container-to-host bridge. Host launches retain the issued URL byte-for-byte.
+pub fn hook_forward_url_for_launch_runtime(
+    host_url: &str,
+    runtime_target: LaunchRuntimeTarget,
+    container_runtime_binary: &str,
+) -> Result<String, String> {
+    if runtime_target == LaunchRuntimeTarget::Host {
+        return Ok(host_url.to_string());
+    }
+
+    let bridge_host =
+        gwt_docker::container_runtime_kind(container_runtime_binary)?.host_bridge_name();
+    let mut url =
+        Url::parse(host_url).map_err(|error| format!("invalid host hook forward URL: {error}"))?;
+    if !matches!(url.scheme(), "http" | "https") {
+        return Err(format!(
+            "container hook forwarding requires an HTTP(S) URL scheme, got '{}'",
+            url.scheme()
+        ));
+    }
+    if !url.username().is_empty() || url.password().is_some() {
+        return Err("container hook forwarding URL must not contain user credentials".to_string());
+    }
+    let host = url
+        .host_str()
+        .ok_or_else(|| "host hook forward URL is missing a host".to_string())?;
+    if !is_loopback_hook_forward_host(host) {
+        return Err(format!(
+            "container hook forwarding requires a loopback host endpoint before bridge translation, got '{host}'"
+        ));
+    }
+    if url.port().is_none() {
+        return Err(
+            "container hook forwarding requires an explicit port before bridge translation"
+                .to_string(),
+        );
+    }
+    if url.path() != "/internal/hook-live" {
+        return Err(format!(
+            "container hook forwarding URL path must be /internal/hook-live, got '{}'",
+            url.path()
+        ));
+    }
+
+    url.set_host(Some(bridge_host)).map_err(|_| {
+        format!("failed to install container host bridge name '{bridge_host}' in hook URL")
+    })?;
+    Ok(url.into())
+}
+
+fn is_loopback_hook_forward_host(host: &str) -> bool {
+    let normalized = host
+        .strip_prefix('[')
+        .and_then(|candidate| candidate.strip_suffix(']'))
+        .unwrap_or(host);
+    normalized.eq_ignore_ascii_case("localhost")
+        || normalized
+            .parse::<std::net::IpAddr>()
+            .is_ok_and(|address| address.is_loopback())
+}
+
+fn install_hook_forward_env(
+    config: &mut LaunchConfig,
+    target: Option<HookForwardEnv>,
+    container_runtime_binary: &str,
+) -> Result<(), String> {
+    let Some(target) = target else {
+        return Ok(());
+    };
+    let url = hook_forward_url_for_launch_runtime(
+        &target.url,
+        config.runtime_target,
+        container_runtime_binary,
+    )?;
+    config
+        .env_vars
+        .insert(GWT_HOOK_FORWARD_URL_ENV.to_string(), url);
+    config
+        .env_vars
+        .insert(GWT_HOOK_FORWARD_TOKEN_ENV.to_string(), target.token);
+    Ok(())
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -337,14 +435,7 @@ where
         GWT_SESSION_RUNTIME_PATH_ENV.to_string(),
         runtime_path.display().to_string(),
     );
-    if let Some(target) = hook_forward {
-        config
-            .env_vars
-            .insert(GWT_HOOK_FORWARD_URL_ENV.to_string(), target.url);
-        config
-            .env_vars
-            .insert(GWT_HOOK_FORWARD_TOKEN_ENV.to_string(), target.token);
-    }
+    install_hook_forward_env(&mut config, hook_forward, &docker_binary_for_launch())?;
     config
         .env_vars
         .entry("COLORTERM".to_string())
@@ -1062,21 +1153,32 @@ fn docker_compose_mount_path(path: &Path) -> String {
     path.to_string_lossy().replace('\\', "/")
 }
 
-fn docker_bundle_override_content(service: &str, bundle: &DockerBundleMounts) -> String {
+fn docker_bundle_override_content(
+    service: &str,
+    bundle: &DockerBundleMounts,
+    container_runtime_binary: &str,
+) -> Result<String, String> {
+    let runtime = gwt_docker::container_runtime_kind(container_runtime_binary)?;
     let host_gwtd = docker_compose_mount_path(&bundle.host_gwtd);
-    format!(
+    let extra_hosts = runtime
+        .compose_extra_host()
+        .map(|mapping| format!("    extra_hosts:\n      - \"{mapping}\"\n"))
+        .unwrap_or_default();
+    Ok(format!(
         concat!(
             "{header}\n",
             "services:\n",
             "  {service}:\n",
             "    volumes:\n",
-            "      - \"{host_gwtd}:{path}:ro\"\n"
+            "      - \"{host_gwtd}:{path}:ro\"\n",
+            "{extra_hosts}"
         ),
         header = DOCKER_GWT_OVERRIDE_HEADER,
         service = service,
         host_gwtd = host_gwtd,
         path = DOCKER_GWTD_BIN_PATH,
-    )
+        extra_hosts = extra_hosts,
+    ))
 }
 
 fn ensure_docker_gwt_binary_setup(
@@ -1085,23 +1187,31 @@ fn ensure_docker_gwt_binary_setup(
     target_arch: &str,
 ) -> Result<PathBuf, String> {
     let gwt_home = gwt_core::paths::gwt_home();
-    ensure_docker_gwt_binary_setup_for_gwt_home(repo_path, service, &gwt_home, |bundle| {
-        eprintln!(
-            "Installing Linux gwt bundle for Docker at {} and {}",
-            bundle.host_gwt.display(),
-            bundle.host_gwtd.display()
-        );
-        let installed = gwt_core::update::UpdateManager::new().install_latest_docker_linux_bundle(
-            target_arch,
-            &bundle.host_gwt,
-            &bundle.host_gwtd,
-        )?;
-        eprintln!(
-            "Installed Linux gwt bundle v{} for Docker",
-            installed.version
-        );
-        Ok(())
-    })
+    let container_runtime_binary = docker_binary_for_launch();
+    ensure_docker_gwt_binary_setup_for_gwt_home(
+        repo_path,
+        service,
+        &gwt_home,
+        &container_runtime_binary,
+        |bundle| {
+            eprintln!(
+                "Installing Linux gwt bundle for Docker at {} and {}",
+                bundle.host_gwt.display(),
+                bundle.host_gwtd.display()
+            );
+            let installed = gwt_core::update::UpdateManager::new()
+                .install_latest_docker_linux_bundle(
+                    target_arch,
+                    &bundle.host_gwt,
+                    &bundle.host_gwtd,
+                )?;
+            eprintln!(
+                "Installed Linux gwt bundle v{} for Docker",
+                installed.version
+            );
+            Ok(())
+        },
+    )
 }
 
 fn docker_compose_override_path(repo_path: &Path) -> PathBuf {
@@ -1122,19 +1232,27 @@ fn ensure_docker_gwt_binary_setup_for_home<F>(
     repo_path: &Path,
     service: &str,
     home: &Path,
+    container_runtime_binary: &str,
     install_bundle: F,
 ) -> Result<PathBuf, String>
 where
     F: FnMut(&DockerBundleMounts) -> Result<(), String>,
 {
     let gwt_home = home.join(".gwt");
-    ensure_docker_gwt_binary_setup_for_gwt_home(repo_path, service, &gwt_home, install_bundle)
+    ensure_docker_gwt_binary_setup_for_gwt_home(
+        repo_path,
+        service,
+        &gwt_home,
+        container_runtime_binary,
+        install_bundle,
+    )
 }
 
 fn ensure_docker_gwt_binary_setup_for_gwt_home<F>(
     repo_path: &Path,
     service: &str,
     gwt_home: &Path,
+    container_runtime_binary: &str,
     mut install_bundle: F,
 ) -> Result<PathBuf, String>
 where
@@ -1168,10 +1286,18 @@ where
     }
 
     let override_path = docker_compose_override_path(repo_path);
-    let override_content = docker_bundle_override_content(service, &bundle);
-    let rewrite_override = fs::read_to_string(&override_path)
-        .map(|existing| existing != override_content)
-        .unwrap_or(true);
+    let override_content =
+        docker_bundle_override_content(service, &bundle, container_runtime_binary)?;
+    let rewrite_override = match fs::read_to_string(&override_path) {
+        Ok(existing) if existing == override_content => false,
+        Ok(existing) if !existing.starts_with(DOCKER_GWT_OVERRIDE_HEADER) => {
+            return Err(format!(
+                "Refusing to overwrite non-gwt Compose override at {}; move the file or merge the gwt settings manually",
+                override_path.display()
+            ));
+        }
+        Ok(_) | Err(_) => true,
+    };
     if rewrite_override {
         fs::write(&override_path, override_content).map_err(|err| {
             format!(
@@ -1233,9 +1359,13 @@ fn docker_compose_exec_env_args(env_vars: &HashMap<String, String>) -> Vec<Strin
         if key.eq_ignore_ascii_case("PATH") {
             continue;
         }
-        let value = env_vars.get(key).map(String::as_str).unwrap_or_default();
         args.push("-e".to_string());
-        args.push(format!("{key}={value}"));
+        if private_launch_env_key(key) {
+            args.push(key.to_string());
+        } else {
+            let value = env_vars.get(key).map(String::as_str).unwrap_or_default();
+            args.push(format!("{key}={value}"));
+        }
     }
     args
 }
@@ -1768,8 +1898,91 @@ mod tests {
     use tempfile::tempdir;
 
     #[test]
+    fn hook_forward_launch_runtime_contract_preserves_host_and_maps_container_aliases() {
+        let source = "http://127.0.0.1:45123/internal/hook-live?generation=7";
+
+        assert_eq!(
+            hook_forward_url_for_launch_runtime(
+                source,
+                LaunchRuntimeTarget::Host,
+                "unknown-host-runtime-is-ignored",
+            )
+            .expect("host URL"),
+            source
+        );
+        assert_eq!(
+            hook_forward_url_for_launch_runtime(source, LaunchRuntimeTarget::Docker, "docker")
+                .expect("Docker URL"),
+            "http://host.docker.internal:45123/internal/hook-live?generation=7"
+        );
+        assert_eq!(
+            hook_forward_url_for_launch_runtime(
+                "https://[::1]:46000/internal/hook-live",
+                LaunchRuntimeTarget::Docker,
+                "/usr/bin/podman-remote",
+            )
+            .expect("Podman URL"),
+            "https://host.containers.internal:46000/internal/hook-live"
+        );
+
+        let error = hook_forward_url_for_launch_runtime(
+            source,
+            LaunchRuntimeTarget::Docker,
+            "custom-container-wrapper",
+        )
+        .expect_err("unknown container runtime must fail closed");
+        assert!(
+            error.contains("Docker or Podman"),
+            "unexpected error: {error}"
+        );
+    }
+
+    #[test]
+    fn hook_forward_launch_runtime_contract_rejects_noncanonical_container_path() {
+        let error = hook_forward_url_for_launch_runtime(
+            "http://127.0.0.1:45123/internal/hook-live/subpath",
+            LaunchRuntimeTarget::Docker,
+            "docker",
+        )
+        .expect_err("a noncanonical hook endpoint must fail closed");
+
+        assert!(error.contains("path"), "unexpected error: {error}");
+    }
+
+    #[test]
+    fn hook_forward_launch_runtime_contract_installs_safe_container_env_without_argv_secrets() {
+        const TOKEN_SENTINEL: &str = "hook-forward-capability-secret-sentinel";
+        let mut config = AgentLaunchBuilder::new(AgentId::ClaudeCode).build();
+        config.runtime_target = LaunchRuntimeTarget::Docker;
+
+        install_hook_forward_env(
+            &mut config,
+            Some(HookForwardEnv {
+                url: "http://localhost:45123/internal/hook-live".to_string(),
+                token: TOKEN_SENTINEL.to_string(),
+            }),
+            r"C:\Program Files\Docker\docker.exe",
+        )
+        .expect("install Docker hook env");
+
+        assert_eq!(
+            config
+                .env_vars
+                .get(GWT_HOOK_FORWARD_URL_ENV)
+                .map(String::as_str),
+            Some("http://host.docker.internal:45123/internal/hook-live")
+        );
+        let args = docker_compose_exec_env_args(&config.env_vars);
+        assert!(args
+            .windows(2)
+            .any(|pair| pair == ["-e", GWT_HOOK_FORWARD_TOKEN_ENV]));
+        assert!(!args.iter().any(|arg| arg.contains(TOKEN_SENTINEL)));
+    }
+
+    #[test]
     fn hook_forward_env_debug_redacts_bearer_token() {
         const SENTINEL: &str = "HOOK_FORWARD_TOKEN_SENTINEL";
+        const SESSION_SENTINEL: &str = "SESSION_ID_SENTINEL";
         let environment = HookForwardEnv {
             url: "http://127.0.0.1:45123/internal/hook-live".to_string(),
             token: SENTINEL.to_string(),
@@ -1789,8 +2002,12 @@ mod tests {
                 "compose".to_string(),
                 "-e".to_string(),
                 format!("{GWT_HOOK_FORWARD_TOKEN_ENV}={SENTINEL}"),
+                format!("{GWT_SESSION_ID_ENV}={SESSION_SENTINEL}"),
             ],
-            env: HashMap::from([(GWT_HOOK_FORWARD_TOKEN_ENV.to_string(), SENTINEL.to_string())]),
+            env: HashMap::from([
+                (GWT_HOOK_FORWARD_TOKEN_ENV.to_string(), SENTINEL.to_string()),
+                (GWT_SESSION_ID_ENV.to_string(), SESSION_SENTINEL.to_string()),
+            ]),
             remove_env: Vec::new(),
             cwd: None,
         };
@@ -1802,6 +2019,10 @@ mod tests {
             "secret leaked from prepared launch via Debug: {prepared_debug}"
         );
         assert!(prepared_debug.contains("<redacted>"));
+        assert!(
+            !prepared_debug.contains(SESSION_SENTINEL),
+            "session identity leaked from prepared launch via Debug: {prepared_debug}"
+        );
     }
 
     #[test]
@@ -1822,6 +2043,27 @@ mod tests {
                 .any(|arg| arg == "GWT_BIN_PATH=/usr/local/bin/gwtd"),
             "non-PATH env vars must still be injected: {args:?}"
         );
+    }
+
+    #[test]
+    fn docker_compose_exec_keeps_agent_capability_and_session_identity_out_of_argv() {
+        const TOKEN_SENTINEL: &str = "agent-capability-secret-sentinel";
+        const SESSION_SENTINEL: &str = "session-secret-sentinel";
+        let env = HashMap::from([
+            (
+                GWT_HOOK_FORWARD_TOKEN_ENV.to_string(),
+                TOKEN_SENTINEL.to_string(),
+            ),
+            (GWT_SESSION_ID_ENV.to_string(), SESSION_SENTINEL.to_string()),
+        ]);
+
+        let args = docker_compose_exec_env_args(&env);
+
+        for key in [GWT_HOOK_FORWARD_TOKEN_ENV, GWT_SESSION_ID_ENV] {
+            assert!(args.windows(2).any(|pair| pair == ["-e", key]));
+        }
+        assert!(!args.iter().any(|arg| arg.contains(TOKEN_SENTINEL)));
+        assert!(!args.iter().any(|arg| arg.contains(SESSION_SENTINEL)));
     }
 
     fn sample_versioned_launch_config(worktree: &Path) -> LaunchConfig {
@@ -2176,7 +2418,8 @@ mod tests {
     fn docker_bundle_override_content_mounts_gwtd_only_for_agents() {
         let home = PathBuf::from("/home/example");
         let bundle = docker_bundle_mounts_for_home(&home);
-        let content = docker_bundle_override_content("app", &bundle);
+        let content = docker_bundle_override_content("app", &bundle, "docker")
+            .expect("Docker override content");
 
         assert!(content.contains("/home/example/.gwt/bin/gwtd-linux:/usr/local/bin/gwtd:ro"));
         assert!(!content.contains("/usr/local/bin/gwt:ro"));
@@ -2205,6 +2448,16 @@ mod tests {
             .and_then(|v| v.as_sequence())
             .expect("volumes must be a sequence");
         assert_eq!(volumes.len(), 1);
+        let extra_hosts = service_def
+            .get(serde_yaml::Value::String("extra_hosts".to_string()))
+            .and_then(|v| v.as_sequence())
+            .expect("Docker extra_hosts must be a sequence");
+        assert_eq!(
+            extra_hosts,
+            &[serde_yaml::Value::String(
+                "host.docker.internal:host-gateway".to_string()
+            )]
+        );
     }
 
     #[test]
@@ -2213,14 +2466,20 @@ mod tests {
         let home = tempdir().expect("home tempdir");
         let mut installer_calls = 0;
 
-        ensure_docker_gwt_binary_setup_for_home(repo.path(), "app", home.path(), |bundle| {
-            installer_calls += 1;
-            fs::create_dir_all(bundle.host_gwt.parent().expect("gwt parent"))
-                .expect("create bin dir");
-            fs::write(&bundle.host_gwt, b"linux-gwt").expect("write gwt");
-            fs::write(&bundle.host_gwtd, b"linux-gwtd").expect("write gwtd");
-            Ok(())
-        })
+        ensure_docker_gwt_binary_setup_for_home(
+            repo.path(),
+            "app",
+            home.path(),
+            "docker",
+            |bundle| {
+                installer_calls += 1;
+                fs::create_dir_all(bundle.host_gwt.parent().expect("gwt parent"))
+                    .expect("create bin dir");
+                fs::write(&bundle.host_gwt, b"linux-gwt").expect("write gwt");
+                fs::write(&bundle.host_gwtd, b"linux-gwtd").expect("write gwtd");
+                Ok(())
+            },
+        )
         .expect("docker setup");
 
         let bundle = docker_bundle_mounts_for_home(home.path());
@@ -2235,6 +2494,92 @@ mod tests {
             .expect("override content");
         assert!(override_content.contains("gwtd-linux:/usr/local/bin/gwtd:ro"));
         assert!(!override_content.contains("/usr/local/bin/gwt:ro"));
+        let parsed: serde_yaml::Value =
+            serde_yaml::from_str(&override_content).expect("override YAML");
+        assert_eq!(
+            parsed["services"]["app"]["extra_hosts"],
+            serde_yaml::Value::Sequence(vec![serde_yaml::Value::String(
+                "host.docker.internal:host-gateway".to_string()
+            )])
+        );
+    }
+
+    #[test]
+    fn podman_binary_setup_writes_an_override_without_extra_hosts() {
+        let repo = tempdir().expect("repo tempdir");
+        let home = tempdir().expect("home tempdir");
+        let bundle = docker_bundle_mounts_for_home(home.path());
+        fs::create_dir_all(bundle.host_gwt.parent().expect("gwt parent")).expect("create bin dir");
+        fs::write(&bundle.host_gwt, b"existing-gwt").expect("write gwt");
+        fs::write(&bundle.host_gwtd, b"existing-gwtd").expect("write gwtd");
+
+        ensure_docker_gwt_binary_setup_for_home(repo.path(), "app", home.path(), "podman", |_| {
+            panic!("installer should not run when the bundle exists")
+        })
+        .expect("Podman setup");
+
+        let content = fs::read_to_string(docker_compose_override_path(repo.path()))
+            .expect("Podman override content");
+        let parsed: serde_yaml::Value = serde_yaml::from_str(&content).expect("override YAML");
+        assert!(parsed["services"]["app"].get("extra_hosts").is_none());
+        assert_eq!(
+            parsed["services"]["app"]["volumes"]
+                .as_sequence()
+                .expect("volumes")
+                .len(),
+            1
+        );
+    }
+
+    #[test]
+    fn docker_binary_setup_preserves_the_user_compose_override() {
+        let repo = tempdir().expect("repo tempdir");
+        let home = tempdir().expect("home tempdir");
+        let bundle = docker_bundle_mounts_for_home(home.path());
+        fs::create_dir_all(bundle.host_gwt.parent().expect("gwt parent")).expect("create bin dir");
+        fs::write(&bundle.host_gwt, b"existing-gwt").expect("write gwt");
+        fs::write(&bundle.host_gwtd, b"existing-gwtd").expect("write gwtd");
+        let user_override = docker_compose_user_override_path(repo.path());
+        let sentinel = "services:\n  app:\n    environment:\n      USER_SETTING: keep\n";
+        fs::write(&user_override, sentinel).expect("write user override");
+
+        ensure_docker_gwt_binary_setup_for_home(repo.path(), "app", home.path(), "docker", |_| {
+            panic!("installer should not run when the bundle exists")
+        })
+        .expect("Docker setup");
+
+        assert_eq!(
+            fs::read_to_string(user_override).expect("user override"),
+            sentinel
+        );
+    }
+
+    #[test]
+    fn docker_binary_setup_refuses_an_unowned_managed_override() {
+        let repo = tempdir().expect("repo tempdir");
+        let home = tempdir().expect("home tempdir");
+        let bundle = docker_bundle_mounts_for_home(home.path());
+        fs::create_dir_all(bundle.host_gwt.parent().expect("gwt parent")).expect("create bin dir");
+        fs::write(&bundle.host_gwt, b"existing-gwt").expect("write gwt");
+        fs::write(&bundle.host_gwtd, b"existing-gwtd").expect("write gwtd");
+        let managed_override = docker_compose_override_path(repo.path());
+        let sentinel = "services:\n  app:\n    environment:\n      USER_SETTING: keep\n";
+        fs::write(&managed_override, sentinel).expect("write unowned managed path");
+
+        let error = ensure_docker_gwt_binary_setup_for_home(
+            repo.path(),
+            "app",
+            home.path(),
+            "docker",
+            |_| panic!("installer should not run when the bundle exists"),
+        )
+        .expect_err("an unowned file at the managed path must fail closed");
+
+        assert!(error.contains("Refusing to overwrite non-gwt"));
+        assert_eq!(
+            fs::read_to_string(managed_override).expect("unowned managed override"),
+            sentinel
+        );
     }
 
     #[test]
@@ -2246,20 +2591,26 @@ mod tests {
         fs::create_dir_all(&bundle.host_gwtd).expect("create gwtd placeholder dir");
         let mut installer_calls = 0;
 
-        ensure_docker_gwt_binary_setup_for_home(repo.path(), "app", home.path(), |bundle| {
-            installer_calls += 1;
-            if bundle.host_gwt.is_dir() {
-                fs::remove_dir_all(&bundle.host_gwt).expect("remove gwt placeholder");
-            }
-            if bundle.host_gwtd.is_dir() {
-                fs::remove_dir_all(&bundle.host_gwtd).expect("remove gwtd placeholder");
-            }
-            fs::create_dir_all(bundle.host_gwt.parent().expect("gwt parent"))
-                .expect("create bin dir");
-            fs::write(&bundle.host_gwt, b"linux-gwt").expect("write gwt");
-            fs::write(&bundle.host_gwtd, b"linux-gwtd").expect("write gwtd");
-            Ok(())
-        })
+        ensure_docker_gwt_binary_setup_for_home(
+            repo.path(),
+            "app",
+            home.path(),
+            "docker",
+            |bundle| {
+                installer_calls += 1;
+                if bundle.host_gwt.is_dir() {
+                    fs::remove_dir_all(&bundle.host_gwt).expect("remove gwt placeholder");
+                }
+                if bundle.host_gwtd.is_dir() {
+                    fs::remove_dir_all(&bundle.host_gwtd).expect("remove gwtd placeholder");
+                }
+                fs::create_dir_all(bundle.host_gwt.parent().expect("gwt parent"))
+                    .expect("create bin dir");
+                fs::write(&bundle.host_gwt, b"linux-gwt").expect("write gwt");
+                fs::write(&bundle.host_gwtd, b"linux-gwtd").expect("write gwtd");
+                Ok(())
+            },
+        )
         .expect("docker setup");
 
         assert_eq!(installer_calls, 1);
@@ -2277,8 +2628,8 @@ mod tests {
         fs::write(&bundle.host_gwt, b"existing-gwt").expect("write gwt");
         fs::write(&bundle.host_gwtd, b"existing-gwtd").expect("write gwtd");
 
-        ensure_docker_gwt_binary_setup_for_home(repo.path(), "app", home.path(), |_| {
-            panic!("installer should not run when both bundle binaries exist");
+        ensure_docker_gwt_binary_setup_for_home(repo.path(), "app", home.path(), "docker", |_| {
+            panic!("installer should not run when both bundle binaries exist")
         })
         .expect("docker setup");
 
@@ -2314,6 +2665,20 @@ mod tests {
             "services:\n  app:\n    image: alpine:3.19\n    working_dir: /workspace/app\n",
         )
         .expect("write compose file");
+        let user_override = docker_compose_user_override_path(&project);
+        let managed_override = docker_compose_override_path(&project);
+        fs::write(
+            &user_override,
+            "services:\n  app:\n    environment:\n      USER_SETTING: keep\n",
+        )
+        .expect("write user override");
+        fs::write(
+            &managed_override,
+            format!(
+                "{DOCKER_GWT_OVERRIDE_HEADER}\nservices:\n  app:\n    extra_hosts:\n      - \"host.docker.internal:host-gateway\"\n"
+            ),
+        )
+        .expect("write managed override");
 
         let mut config = AgentLaunchBuilder::new(AgentId::Codex)
             .working_dir(&project)
@@ -2344,6 +2709,19 @@ mod tests {
         assert!(config.args.contains(&"app".to_string()));
         assert!(config.args.contains(&"codex".to_string()));
         assert!(config.args.contains(&"--no-alt-screen".to_string()));
+        let file_arguments = config
+            .args
+            .windows(2)
+            .filter_map(|pair| (pair[0] == "-f").then_some(pair[1].clone()))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            file_arguments,
+            vec![
+                project.join("docker-compose.yml").display().to_string(),
+                user_override.display().to_string(),
+                managed_override.display().to_string(),
+            ]
+        );
     }
 
     #[test]

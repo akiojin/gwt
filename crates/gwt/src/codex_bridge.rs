@@ -1330,9 +1330,12 @@ async fn proxy_codex_connection(
     socket: WebSocket,
     route: Arc<CodexBridgeRoute>,
 ) -> Result<(), ProxyFailure> {
+    // Sanctioned Tokio construction point: the platform-specific hidden
+    // process flags are applied before the command can be spawned.
+    #[allow(clippy::disallowed_methods)]
     let mut command = tokio::process::Command::new(&route.app_server.command);
     configure_app_server_command(&mut command, &route.app_server);
-    gwt_core::process::configure_hidden_command(command.as_std_mut());
+    gwt_core::process::configure_hidden_tokio_command(&mut command);
 
     let mut child = command.spawn().map_err(|_| ProxyFailure::Spawn)?;
     let mut app_server_input = child.stdin.take().ok_or(ProxyFailure::Input)?;
@@ -3499,7 +3502,9 @@ mod tests {
             remove_env: vec![CODEX_REMOTE_AUTH_TOKEN_ENV.to_string()],
             cwd: None,
         };
+        #[allow(clippy::disallowed_methods)]
         let mut command = tokio::process::Command::new(&launch.command);
+        gwt_core::process::configure_hidden_tokio_command(&mut command);
         // Seed the child command as though gwt itself inherited an outer
         // launch capability. The shared spawn configuration must remove it.
         command.env(CODEX_REMOTE_AUTH_TOKEN_ENV, "outer-route-capability");

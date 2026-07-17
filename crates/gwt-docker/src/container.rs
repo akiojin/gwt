@@ -7,13 +7,13 @@ use std::{
     ffi::OsString,
     io::{BufRead, BufReader, Read},
     path::{Path, PathBuf},
-    process::{Child, Command, Output, Stdio},
+    process::{Child, Output, Stdio},
     sync::mpsc::{self, RecvTimeoutError},
     thread,
     time::{Duration, Instant},
 };
 
-use gwt_core::{GwtError, Result};
+use gwt_core::{process::hidden_command, GwtError, Result};
 use tracing::debug;
 
 /// Status of a Docker container.
@@ -881,7 +881,7 @@ pub fn spawn_compose_service_exec_attached_with_files(
     let _container_id = exact_compose_service_container_id_with_files(compose_files, service)?;
     let docker_args =
         compose_service_exec_attached_args(compose_files, service, working_dir, env, args);
-    let mut command = Command::new(docker_binary());
+    let mut command = hidden_command(docker_binary());
     command
         .args(&docker_args)
         .current_dir(compose_parent_dir_for_files(compose_files))
@@ -1869,7 +1869,13 @@ mod tests {
             let previous_timeout = std::env::var_os("GWT_DOCKER_TIMEOUT_MS");
             let previous_exec_timeout = std::env::var_os("GWT_DOCKER_COMPOSE_EXEC_TIMEOUT_MS");
             std::env::set_var("GWT_DOCKER_TIMEOUT_MS", "50");
-            std::env::set_var("GWT_DOCKER_COMPOSE_EXEC_TIMEOUT_MS", "500");
+            // The full workspace suite can temporarily saturate the Windows
+            // scheduler. Keep the semantic gap from the generic timeout, but
+            // leave enough wall-clock margin that this remains a contract
+            // test rather than a host-load benchmark.
+            std::env::set_var("GWT_DOCKER_COMPOSE_EXEC_TIMEOUT_MS", "30000");
+
+            let compose_exec_timeout = docker_compose_exec_timeout();
 
             let result =
                 compose_service_exec_capture(&compose_path, "app", None, &["true".to_string()]);
@@ -1883,6 +1889,7 @@ mod tests {
                 None => std::env::remove_var("GWT_DOCKER_COMPOSE_EXEC_TIMEOUT_MS"),
             }
 
+            assert_eq!(compose_exec_timeout, std::time::Duration::from_secs(30));
             result.expect("compose exec capture should use compose-exec timeout");
         });
     }
@@ -1891,7 +1898,7 @@ mod tests {
     fn attached_compose_exec_is_single_service_stdin_transport_without_network_flags() {
         let compose = PathBuf::from("/repo/compose.yml");
         let args = compose_service_exec_attached_args(
-            &[compose.clone()],
+            std::slice::from_ref(&compose),
             "app",
             Some("/workspace"),
             &["GWT_SESSION_ID=session-1".to_string()],

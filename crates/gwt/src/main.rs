@@ -23,9 +23,8 @@ use gwt::{
     refresh_managed_gwt_assets_for_agent_with_codex_hook_discovery_mode, resolve_launch_spec,
     workspace_state_path, AttachmentProgressPhase, BackendEvent, BranchCleanupOptions,
     BranchEntriesPhase, BranchListEntry, ContentLimits, DockerWizardContext, FileContentError,
-    FrontendEvent, HookForwardTarget, KnowledgeKind, LaunchWizardState, LiveSessionEntry,
-    ShellLaunchConfig, UiTracePayload, WindowCanvasState, WindowGeometry, WindowPreset,
-    WindowProcessStatus, APP_NAME,
+    FrontendEvent, KnowledgeKind, LaunchWizardState, LiveSessionEntry, ShellLaunchConfig,
+    UiTracePayload, WindowCanvasState, WindowGeometry, WindowPreset, WindowProcessStatus, APP_NAME,
 };
 use gwt_terminal::{Pane, PaneStatus, PtyHandle};
 use tao::{
@@ -88,6 +87,9 @@ pub(crate) use docker_launch::{
 };
 #[cfg(test)]
 use embedded_server::{broadcast_runtime_hook_event, health_handler, hook_forward_authorized};
+pub(crate) use embedded_server::{
+    AgentCapabilityIssuer, AgentFrontendRequest, AgentSessionPrincipal,
+};
 use embedded_server::{ClientHub, EmbeddedServer};
 pub(crate) use launch_runtime::{
     apply_host_package_runner_fallback_checked, apply_windows_host_shell_wrapper,
@@ -1015,6 +1017,14 @@ enum UserEvent {
     Frontend {
         client_id: ClientId,
         event: FrontendEvent,
+    },
+    /// Internal agent-pane request authenticated by the embedded server. The
+    /// capability principal, not any frontend payload field, is the authority
+    /// for project and Session scope.
+    AgentFrontend {
+        client_id: ClientId,
+        principal: AgentSessionPrincipal,
+        request: AgentFrontendRequest,
     },
     /// SPEC #2920 Phase 4: the wry WebView drag/drop handler was the
     /// only producer of this variant. The browser UI now handles
@@ -2559,7 +2569,7 @@ mod tests {
             window_pty_statuses: HashMap::new(),
             window_hook_states: HashMap::new(),
             recoverable_agent_error_windows: std::collections::HashSet::new(),
-            hook_forward_target: None,
+            agent_capability_issuer: None,
             issue_link_cache_dir: gwt_core::paths::gwt_cache_dir(),
             issue_client_factory: crate::app_runtime::default_issue_client_factory(),
             pending_update: None,
@@ -3679,6 +3689,11 @@ mod tests {
             ],
         );
         let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+        let mut durable_session = gwt_agent::Session::new(&repo, "feature/test", AgentId::Codex);
+        durable_session.id = "session-1".to_string();
+        durable_session
+            .save(&runtime.sessions_dir)
+            .expect("save durable Agent session");
         let claude_one_id = window_id_for_preset(&runtime, "tab-1", WindowPreset::Claude, 0);
         let claude_two_id = window_id_for_preset(&runtime, "tab-1", WindowPreset::Claude, 1);
         let shell_id = window_id_for_preset(&runtime, "tab-1", WindowPreset::Shell, 0);
@@ -5393,7 +5408,8 @@ mod tests {
     fn docker_bundle_override_content_mounts_gwtd_only_for_agents() {
         let home = PathBuf::from("/home/example");
         let bundle = docker_bundle_mounts_for_home(&home);
-        let content = docker_bundle_override_content("app", &bundle);
+        let content = docker_bundle_override_content("app", &bundle, "docker")
+            .expect("Docker override content");
 
         assert!(content.contains("/home/example/.gwt/bin/gwtd-linux:/usr/local/bin/gwtd:ro"));
         assert!(!content.contains("/usr/local/bin/gwt:ro"));
@@ -5414,6 +5430,16 @@ mod tests {
             .and_then(|v| v.as_sequence())
             .expect("volumes must be a sequence");
         assert_eq!(volumes.len(), 1);
+        let extra_hosts = service_def
+            .get(serde_yaml::Value::String("extra_hosts".to_string()))
+            .and_then(|v| v.as_sequence())
+            .expect("Docker extra_hosts must be a sequence");
+        assert_eq!(
+            extra_hosts,
+            &[serde_yaml::Value::String(
+                "host.docker.internal:host-gateway".to_string()
+            )]
+        );
     }
 
     #[test]
@@ -6828,6 +6854,70 @@ mod tests {
     }
 
     #[test]
+    fn docker_launch_keeps_user_override_and_adds_managed_host_gateway_compose_file() {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let temp = tempdir().expect("tempdir");
+        let project = temp.path().join("project");
+        let home = temp.path().join("home");
+        fs::create_dir_all(&project).expect("create project");
+        fs::create_dir_all(&home).expect("create home");
+        fs::write(
+            project.join("docker-compose.yml"),
+            "services:\n  app:\n    image: alpine:3.19\n    working_dir: /workspace/app\n",
+        )
+        .expect("write compose file");
+        let user_override = project.join("docker-compose.override.yml");
+        let user_content = "services:\n  app:\n    environment:\n      USER_SETTING: keep\n";
+        fs::write(&user_override, user_content).expect("write user override");
+        let home_key = if cfg!(windows) { "USERPROFILE" } else { "HOME" };
+        let _home = gwt_core::test_support::ScopedEnvVar::set(home_key, &home);
+        let _runtime = gwt_core::test_support::ScopedEnvVar::set("GWT_DOCKER_BIN", "docker");
+
+        let launch = super::resolve_docker_launch_plan(&project, Some("app"))
+            .expect("resolve Docker launch");
+        super::ensure_docker_gwt_binary_setup(&launch).expect("write managed override");
+
+        let managed_override = project.join("docker-compose.gwt.override.yml");
+        let managed_content =
+            fs::read_to_string(&managed_override).expect("managed override content");
+        let managed: serde_yaml::Value =
+            serde_yaml::from_str(&managed_content).expect("managed override YAML");
+        assert_eq!(
+            managed["services"]["app"]["extra_hosts"],
+            serde_yaml::Value::Sequence(vec![serde_yaml::Value::String(
+                "host.docker.internal:host-gateway".to_string()
+            )])
+        );
+        assert_eq!(
+            fs::read_to_string(&user_override).expect("user override content"),
+            user_content
+        );
+
+        let mut config = sample_versioned_launch_config();
+        config.runtime_target = LaunchRuntimeTarget::Docker;
+        config.working_dir = Some(project.clone());
+        config.docker_service = Some("app".to_string());
+        super::finalize_docker_agent_launch_config(&project, &mut config)
+            .expect("finalize Docker launch");
+
+        assert_eq!(
+            config.args[..8],
+            [
+                "compose".to_string(),
+                "-f".to_string(),
+                project.join("docker-compose.yml").display().to_string(),
+                "-f".to_string(),
+                user_override.display().to_string(),
+                "-f".to_string(),
+                managed_override.display().to_string(),
+                "exec".to_string(),
+            ]
+        );
+    }
+
+    #[test]
     fn branch_selection_and_mount_helpers_cover_preferred_paths() {
         assert_eq!(
             super::normalize_branch_name("refs/remotes/origin/feature/coverage"),
@@ -7301,7 +7391,7 @@ fn main() -> std::io::Result<()> {
         attachment_uploads,
     )
     .expect("embedded server");
-    app.set_hook_forward_target(server.hook_forward_target());
+    app.set_agent_capability_issuer(server.agent_capability_issuer());
     // SPEC #2920 Phase 4: own the browser URL so it can survive the
     // tao event_loop closure's 'static requirement (the closure moves
     // `server`, which the previous `&str` borrow blocked).
@@ -7513,6 +7603,14 @@ fn main() -> std::io::Result<()> {
                         app.active_project_root().map(Path::to_path_buf),
                     );
                 }
+            }
+            Event::UserEvent(UserEvent::AgentFrontend {
+                client_id,
+                principal,
+                request,
+            }) => {
+                let events = app.handle_agent_frontend_event(client_id, principal, request);
+                clients.dispatch(events);
             }
             Event::UserEvent(UserEvent::NativeFileDrop { .. }) => {
                 // SPEC #2920: the wry WebView drag/drop handler was the

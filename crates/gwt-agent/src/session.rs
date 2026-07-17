@@ -317,6 +317,12 @@ pub struct Session {
     /// history alone must not reopen a window after the user closed it.
     #[serde(default)]
     pub restore_window_on_startup: bool,
+    /// Distinguishes an explicit current-format restore decision from legacy
+    /// ledgers where `restore_window_on_startup = false` only came from the
+    /// serde default. This preserves old open-window compatibility without
+    /// letting a surviving placeholder undo a current Stop action.
+    #[serde(default)]
+    pub startup_restore_intent_recorded: bool,
     /// Active backend override id, if any (SPEC-1921 FR-102).
     /// `None` means the agent launched against its default upstream
     /// (no env override). Set only for built-in agents that support
@@ -419,6 +425,7 @@ impl Session {
             launch_command: String::new(),
             launch_args: Vec::new(),
             restore_window_on_startup: false,
+            startup_restore_intent_recorded: true,
             backend_id: None,
             windows_shell: None,
             schema_version: Self::CURRENT_SCHEMA_VERSION,
@@ -917,6 +924,22 @@ where
     })
 }
 
+/// Read the Session snapshot used to coordinate a following Recovery Store
+/// mutation under the same per-Session lock as every writer.
+///
+/// Windows cannot replace an existing file through `std::fs::rename`, so the
+/// atomic writer has a short remove/rename interval. An unlocked preliminary
+/// read can otherwise observe that internal interval as a missing Session even
+/// though the logical record is continuously owned by gwt.
+fn load_session_for_coordinated_update(
+    sessions_dir: &Path,
+    session_id: &str,
+) -> io::Result<Session> {
+    with_session_lock(sessions_dir, session_id, || {
+        Session::load_and_migrate(&session_file_path(sessions_dir, session_id))
+    })
+}
+
 /// Inventory-aware variant used by startup scans. The Session is parsed from
 /// the same handle charged to the shared aggregate budget while its normal
 /// per-session lock is held, then persisted without a second content read.
@@ -1164,7 +1187,7 @@ fn persist_recovery_launch_stage_with_project_dir(
     stage: RecoveryLaunchStage,
     recovery_project_dir: Option<&Path>,
 ) -> std::io::Result<()> {
-    let before = Session::load_and_migrate(&session_file_path(sessions_dir, session_id))?;
+    let before = load_session_for_coordinated_update(sessions_dir, session_id)?;
     if let (Some(recovery_id), Some(project_root)) = (
         before.recovery_id.as_deref(),
         before.project_state_root.as_deref(),
@@ -1250,7 +1273,7 @@ fn persist_agent_session_id_with_recovery_project_dir(
         return Ok(());
     }
 
-    let before = Session::load_and_migrate(&session_file_path(sessions_dir, session_id))?;
+    let before = load_session_for_coordinated_update(sessions_dir, session_id)?;
     let mut recovery_bound = false;
     if let (Some(recovery_id), Some(project_root)) = (
         before.recovery_id.as_deref(),
@@ -1330,10 +1353,11 @@ pub fn persist_session_restore_window_on_startup(
     restore: bool,
 ) -> std::io::Result<()> {
     update_session(sessions_dir, session_id, |session| {
-        if session.restore_window_on_startup == restore {
+        if session.restore_window_on_startup == restore && session.startup_restore_intent_recorded {
             return Ok(());
         }
         session.restore_window_on_startup = restore;
+        session.startup_restore_intent_recorded = true;
         session.updated_at = Utc::now();
         Ok(())
     })
@@ -1477,6 +1501,7 @@ mod tests {
         );
         assert!(session.workflow_bypass.is_none());
         assert!(!session.restore_window_on_startup);
+        assert!(session.startup_restore_intent_recorded);
         // SPEC-1921 FR-102: new sessions default to no backend override.
         assert!(session.backend_id.is_none());
         assert_eq!(
@@ -1593,6 +1618,7 @@ display_name = "Codex"
         let session: Session = toml::from_str(legacy).expect("deserialize legacy");
 
         assert!(!session.restore_window_on_startup);
+        assert!(!session.startup_restore_intent_recorded);
     }
 
     #[test]
@@ -1604,6 +1630,7 @@ display_name = "Codex"
         assert!(serialized.contains("restore_window_on_startup = true"));
         let parsed: Session = toml::from_str(&serialized).expect("deserialize");
         assert!(parsed.restore_window_on_startup);
+        assert!(parsed.startup_restore_intent_recorded);
     }
 
     #[test]
@@ -2117,11 +2144,13 @@ display_name = "Claude Code"
 
         let loaded = Session::load(&dir.path().join(format!("{session_id}.toml"))).unwrap();
         assert!(loaded.restore_window_on_startup);
+        assert!(loaded.startup_restore_intent_recorded);
 
         persist_session_restore_window_on_startup(dir.path(), &session_id, false).unwrap();
 
         let loaded = Session::load(&dir.path().join(format!("{session_id}.toml"))).unwrap();
         assert!(!loaded.restore_window_on_startup);
+        assert!(loaded.startup_restore_intent_recorded);
     }
 
     #[test]

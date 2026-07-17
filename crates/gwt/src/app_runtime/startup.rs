@@ -12,7 +12,7 @@
 //! - Restoring open-project windows / paused placeholders
 //!   ([`AppRuntime::restore_open_project_windows`],
 //!   [`AppRuntime::spawn_restored_agent_session`])
-//! - Late runtime wiring setters ([`AppRuntime::set_hook_forward_target`],
+//! - Late runtime wiring setters ([`AppRuntime::set_agent_capability_issuer`],
 //!   [`AppRuntime::set_server_url`], [`AppRuntime::set_usage_refresh`])
 //!
 //! Behavior-preserving move: `AppRuntime::new` and
@@ -38,7 +38,7 @@ use super::launch::launch_checkpoint_continuation_config;
 use super::{
     combined_window_id, launch_config_from_persisted_session, prune_orphan_intake_worktrees,
     same_worktree_path, should_auto_start_restored_window, workspace_resume_context_for_work_item,
-    AppRuntime, HookForwardTarget, OutboundEvent, PendingProviderRootClaim,
+    AgentCapabilityIssuer, AppRuntime, OutboundEvent, PendingProviderRootClaim,
     PendingStartupAutoResumeSession, UserEvent, WindowGeometry, WindowPreset, WindowProcessStatus,
     WorkspaceResumeContext,
 };
@@ -96,6 +96,20 @@ fn recovery_repo_id_for_session(session: &gwt_agent::Session) -> Option<String> 
         .then(|| gwt_core::paths::project_scope_hash(project_root).to_string())
 }
 
+fn recovery_kind_for_session(
+    session: &gwt_agent::Session,
+) -> Option<gwt_core::recovery::RecoverySessionKind> {
+    match (session.session_kind, session.is_ephemeral) {
+        (Some(gwt_skills::SessionKind::Intake), true) => {
+            Some(gwt_core::recovery::RecoverySessionKind::Intake)
+        }
+        (Some(gwt_skills::SessionKind::Execution), false) => {
+            Some(gwt_core::recovery::RecoverySessionKind::Execution)
+        }
+        _ => None,
+    }
+}
+
 fn recovery_session_can_be_interrupted_after_supervisor_stop(session: &gwt_agent::Session) -> bool {
     matches!(
         session.status,
@@ -103,11 +117,60 @@ fn recovery_session_can_be_interrupted_after_supervisor_stop(session: &gwt_agent
             | gwt_agent::AgentStatus::Idle
             | gwt_agent::AgentStatus::WaitingInput
             | gwt_agent::AgentStatus::Interrupted
-    ) && session.session_kind == Some(gwt_skills::SessionKind::Intake)
-        && session.is_ephemeral
+            | gwt_agent::AgentStatus::Stopped
+    ) && recovery_kind_for_session(session).is_some()
 }
 
-/// Reconcile a persisted Intake Session only when this AppRuntime has proved
+fn recovery_launch_stage_has_known_spawned_process(
+    stage: gwt_core::recovery::RecoveryLaunchStage,
+) -> bool {
+    (gwt_core::recovery::RecoveryLaunchStage::ProcessSpawned
+        ..=gwt_core::recovery::RecoveryLaunchStage::Ready)
+        .contains(&stage)
+}
+
+fn recovery_was_interrupted_after_supervisor_stop(
+    session: &gwt_agent::Session,
+    record: &gwt_core::recovery::RecoveryRecord,
+) -> bool {
+    record.lifecycle == gwt_core::recovery::RecoveryLifecycle::Interrupted
+        && recovery_has_matching_supervisor_stop_proof(session, record)
+}
+
+fn recovery_has_matching_supervisor_stop_proof(
+    session: &gwt_agent::Session,
+    record: &gwt_core::recovery::RecoveryRecord,
+) -> bool {
+    recovery_launch_stage_has_known_spawned_process(record.launch_stage)
+        && record
+            .supervisor_stop_proof
+            .as_ref()
+            .is_some_and(|proof| proof.session_id == session.id)
+}
+
+fn recovery_attention_can_record_supervisor_stop(
+    session: &gwt_agent::Session,
+    record: &gwt_core::recovery::RecoveryRecord,
+) -> bool {
+    if record.lifecycle != gwt_core::recovery::RecoveryLifecycle::Attention
+        || record.session_kind != gwt_core::recovery::RecoverySessionKind::Intake
+        || session.session_kind != Some(gwt_skills::SessionKind::Intake)
+        || !session.is_ephemeral
+        || !recovery_launch_stage_has_known_spawned_process(record.launch_stage)
+    {
+        return false;
+    }
+    record.lifecycle_reason.as_deref().is_some_and(|reason| {
+        reason == LEGACY_MISSING_INTAKE_ATTENTION
+            || reason == LEGACY_MISSING_PROVIDER_ROOT_ATTENTION
+            || reason == ATTENTION_WORKTREE_RECREATE_FAILED
+            || reason
+                .strip_prefix(ATTENTION_WORKTREE_RECREATE_FAILED)
+                .is_some_and(|suffix| suffix.starts_with(": "))
+    })
+}
+
+/// Reconcile a persisted Recovery Session only when this AppRuntime has proved
 /// that no live PTY is registered for it.
 ///
 /// Windows providers are attached to a kill-on-close Job Object; Unix
@@ -133,7 +196,7 @@ fn reconcile_stopped_session_recovery(
         return Ok(false);
     };
     if record.session_id != session.id
-        || record.session_kind != gwt_core::recovery::RecoverySessionKind::Intake
+        || recovery_kind_for_session(session) != Some(record.session_kind)
     {
         return Ok(false);
     }
@@ -161,16 +224,41 @@ fn reconcile_stopped_session_recovery(
             .map_err(|error| format!("interrupt expired recovery lease {recovery_id}: {error}"))?;
     }
 
-    if record.lifecycle == gwt_core::recovery::RecoveryLifecycle::Interrupted
-        && record
-            .supervisor_stop_proof
-            .as_ref()
-            .is_some_and(|proof| proof.session_id == session.id)
-    {
+    if recovery_attention_can_record_supervisor_stop(session, &record) {
+        let expected_attention_reason = record
+            .lifecycle_reason
+            .as_deref()
+            .expect("retryable Attention requires a classified reason");
+        return store
+            .interrupt_attention_after_supervisor_stop(
+                recovery_id,
+                record.generation,
+                &session.id,
+                expected_attention_reason,
+                now,
+                INTERRUPTED_SUPERVISOR_STOP_REASON,
+                format!(
+                    "startup-attention-supervisor-stop-v1:{}:{}",
+                    session.id, record.generation
+                ),
+            )
+            .map(|_| true)
+            .map_err(|error| {
+                format!(
+                    "record stopped supervisor for retryable Attention recovery {recovery_id}: {error}"
+                )
+            });
+    }
+
+    if recovery_was_interrupted_after_supervisor_stop(session, &record) {
         return Ok(true);
     }
-    if record.lifecycle != gwt_core::recovery::RecoveryLifecycle::Running
-        || record.launch_stage != gwt_core::recovery::RecoveryLaunchStage::Ready
+    if !matches!(
+        record.lifecycle,
+        gwt_core::recovery::RecoveryLifecycle::Launching
+            | gwt_core::recovery::RecoveryLifecycle::Running
+            | gwt_core::recovery::RecoveryLifecycle::Interrupted
+    ) || !recovery_launch_stage_has_known_spawned_process(record.launch_stage)
     {
         return Ok(false);
     }
@@ -189,6 +277,43 @@ fn reconcile_stopped_session_recovery(
         )
         .map(|_| true)
         .map_err(|error| format!("record stopped supervisor for recovery {recovery_id}: {error}"))
+}
+
+fn reconcile_startup_recovery_supervisors(
+    sessions_dir: &Path,
+    sessions: &[gwt_agent::Session],
+    live_supervised_session_ids: &HashSet<String>,
+) {
+    for session in sessions {
+        let supervisor_stopped = !live_supervised_session_ids.contains(&session.id);
+        match reconcile_stopped_session_recovery(session, supervisor_stopped) {
+            Ok(true) => {
+                // RecoveryStore proof is the launch authority; Session is the
+                // user-visible projection. Publish it second so a crash can
+                // only leave a retryable stale Session marker.
+                if let Err(error) = gwt_agent::persist_session_status(
+                    sessions_dir,
+                    &session.id,
+                    gwt_agent::AgentStatus::Interrupted,
+                ) {
+                    tracing::warn!(
+                        session_id = %session.id,
+                        error = %error,
+                        "failed to project stopped recovery into Session state"
+                    );
+                }
+            }
+            Ok(false) => {}
+            Err(error) => {
+                tracing::warn!(
+                    session_id = %session.id,
+                    recovery_id = ?session.recovery_id,
+                    %error,
+                    "failed to reconcile a stopped recovery supervisor at startup"
+                );
+            }
+        }
+    }
 }
 
 fn recovery_session_identity_hash(repo_id: &str, session_id: &str, recovery_id: &str) -> String {
@@ -221,17 +346,19 @@ fn recovery_attention_allows_missing_intake_retry(
 }
 
 /// A legacy Intake can lack any exact provider root while still retaining a
-/// bounded user-visible checkpoint. In that one pre-spawn state, a fresh
-/// semantic successor is safer than inventing an exact id and preserves the
-/// user's unclosed-window intent. Other Attention reasons remain manual: in
-/// particular ambiguous roots and indeterminate spawn outcomes never pass.
+/// bounded user-visible checkpoint. A pre-spawn record is safe to continue;
+/// after ProcessSpawned, the same path additionally requires durable proof
+/// that its PTY supervisor stopped. Other Attention reasons remain manual: in
+/// particular ambiguous roots and indeterminate SpawnRequested outcomes never
+/// pass.
 fn recovery_attention_allows_checkpoint_continuation(
     session: &gwt_agent::Session,
     record: &gwt_core::recovery::RecoveryRecord,
 ) -> bool {
     record.lifecycle == gwt_core::recovery::RecoveryLifecycle::Attention
         && record.lifecycle_reason.as_deref() == Some(LEGACY_MISSING_PROVIDER_ROOT_ATTENTION)
-        && record.launch_stage < gwt_core::recovery::RecoveryLaunchStage::SpawnRequested
+        && (record.launch_stage < gwt_core::recovery::RecoveryLaunchStage::SpawnRequested
+            || recovery_has_matching_supervisor_stop_proof(session, record))
         && record.session_id == session.id
         && record.session_kind == gwt_core::recovery::RecoverySessionKind::Intake
         && session.session_kind == Some(gwt_skills::SessionKind::Intake)
@@ -254,7 +381,7 @@ fn startup_exact_auto_resume_candidate_without_worktree(session: &gwt_agent::Ses
 /// Managed Recovery v2 does not depend on provider hook timestamps to prove a
 /// cold-start interruption. The RecoveryStore supervisor-stop mutation is the
 /// stronger evidence: it is generation-CAS committed only after AppRuntime
-/// established that no live PTY owns this Intake Session.
+/// established that no live PTY owns this Recovery Session.
 fn startup_managed_recovery_resume_candidate(session: &gwt_agent::Session) -> Result<bool, String> {
     let Some(recovery_id) = session.recovery_id.as_deref() else {
         return Ok(false);
@@ -267,13 +394,9 @@ fn startup_managed_recovery_resume_candidate(session: &gwt_agent::Session) -> Re
         return Ok(false);
     };
     Ok(record.session_id == session.id
-        && record.session_kind == gwt_core::recovery::RecoverySessionKind::Intake
-        && record.lifecycle == gwt_core::recovery::RecoveryLifecycle::Interrupted
-        && record.launch_stage == gwt_core::recovery::RecoveryLaunchStage::Ready
-        && record
-            .supervisor_stop_proof
-            .as_ref()
-            .is_some_and(|proof| proof.session_id == session.id))
+        && recovery_kind_for_session(session) == Some(record.session_kind)
+        && (recovery_was_interrupted_after_supervisor_stop(session, &record)
+            || recovery_attention_allows_checkpoint_continuation(session, &record)))
 }
 
 /// Restore, or re-verify after a crash, the narrowly-scoped Intake worktree
@@ -304,6 +427,11 @@ fn prepare_startup_intake_worktree(
         .project_state_root
         .as_deref()
         .filter(|path| path.is_dir())
+        .or_else(|| {
+            target_exists
+                .then_some(active_project_root)
+                .filter(|path| path.is_dir())
+        })
         .ok_or_else(|| "missing Intake Session has no available Project State root".to_string())?;
     let session_repo_root = gwt_git::worktree::main_worktree_root(project_root)
         .map_err(|error| format!("resolve Intake recovery repository: {error}"))?;
@@ -359,6 +487,7 @@ fn prepare_startup_intake_worktree(
     }
     if record.lifecycle == gwt_core::recovery::RecoveryLifecycle::Attention
         && !recovery_attention_allows_missing_intake_retry(session, &record)
+        && !recovery_attention_allows_checkpoint_continuation(session, &record)
     {
         return Ok(false);
     }
@@ -369,12 +498,17 @@ fn prepare_startup_intake_worktree(
     {
         return Ok(false);
     }
-    let Some(exact_root_id) = session.exact_resume_session_id() else {
-        return Ok(false);
-    };
-    if !record.provider_root.as_ref().is_some_and(|root| {
-        root.quality.is_authoritative() && root.root_id.trim() == exact_root_id.trim()
-    }) {
+    if let Some(exact_root_id) = session.exact_resume_session_id() {
+        if !record.provider_root.as_ref().is_some_and(|root| {
+            root.quality.is_authoritative() && root.root_id.trim() == exact_root_id.trim()
+        }) {
+            return Ok(false);
+        }
+    } else if !recovery_has_matching_supervisor_stop_proof(session, &record) {
+        // A provider process can be durably known to have spawned before its
+        // root id was observed. The cold supervisor boundary makes a bounded
+        // checkpoint/original-intent continuation safe; every other rootless
+        // Intake remains ineligible for automatic launch.
         return Ok(false);
     }
 
@@ -469,6 +603,11 @@ fn startup_exact_resume_allowed_by_recovery_sot(
             .recovery_lease
             .as_ref()
             .is_some_and(|lease| lease.expires_at > chrono::Utc::now())
+        {
+            return Ok(false);
+        }
+        if recovery_launch_stage_has_known_spawned_process(record.launch_stage)
+            && !recovery_has_matching_supervisor_stop_proof(session, &record)
         {
             return Ok(false);
         }
@@ -824,6 +963,14 @@ pub(super) fn claim_startup_recovery(
             record.lifecycle
         ));
     }
+    let interrupted_spawn = recovery_was_interrupted_after_supervisor_stop(session, &record);
+    if recovery_launch_stage_has_known_spawned_process(record.launch_stage)
+        && !recovery_has_matching_supervisor_stop_proof(session, &record)
+    {
+        return Err(format!(
+            "recovery {recovery_id} has a known prior provider process without durable supervisor-stop proof"
+        ));
+    }
     if record.session_kind == gwt_core::recovery::RecoverySessionKind::Intake {
         let project_root = session
             .project_state_root
@@ -857,14 +1004,8 @@ pub(super) fn claim_startup_recovery(
         expires_at: acquired_at + chrono::Duration::minutes(STARTUP_RECOVERY_LEASE_TTL_MINUTES),
     };
     let exact_root = session.exact_resume_session_id();
-    let interrupted_ready = record.lifecycle == gwt_core::recovery::RecoveryLifecycle::Interrupted
-        && record.launch_stage == gwt_core::recovery::RecoveryLaunchStage::Ready
-        && record
-            .supervisor_stop_proof
-            .as_ref()
-            .is_some_and(|proof| proof.session_id == session.id);
     let result = if let Some(exact_root) = exact_root {
-        if interrupted_ready {
+        if interrupted_spawn {
             store.claim_interrupted_recovery_with_provider_root(
                 recovery_id,
                 record.generation,
@@ -887,7 +1028,7 @@ pub(super) fn claim_startup_recovery(
                 format!("startup-recovery-claim-v2:{}:{lease_id}", session.id),
             )
         }
-    } else if interrupted_ready {
+    } else if interrupted_spawn {
         store.claim_interrupted_recovery(
             recovery_id,
             record.generation,
@@ -1050,6 +1191,9 @@ fn startup_auto_resume_is_fresh(
 }
 
 fn startup_auto_resume_window_was_open(session: &gwt_agent::Session) -> bool {
+    if session.startup_restore_intent_recorded {
+        return session.restore_window_on_startup;
+    }
     if session.restore_window_on_startup {
         return true;
     }
@@ -1592,6 +1736,7 @@ pub(super) fn mark_auto_resume_source_completed(
     gwt_agent::update_session(sessions_dir, session_id, |session| {
         session.update_status(gwt_agent::AgentStatus::Stopped);
         session.restore_window_on_startup = false;
+        session.startup_restore_intent_recorded = true;
         if retained_for_board_delivery {
             if !session
                 .recovery_launch_stage
@@ -1709,36 +1854,11 @@ impl AppRuntime {
             .filter(|(window_id, _)| self.runtimes.contains_key(*window_id))
             .map(|(_, active)| active.session_id.clone())
             .collect::<HashSet<_>>();
-        for session in &startup_recovery_sessions {
-            let supervisor_stopped = !live_supervised_session_ids.contains(&session.id);
-            match reconcile_stopped_session_recovery(session, supervisor_stopped) {
-                Ok(true) => {
-                    // RecoveryStore proof is the launch authority; Session is
-                    // the user-visible projection. Publish it second so a
-                    // crash can only leave a retryable stale Session marker.
-                    if let Err(error) = gwt_agent::persist_session_status(
-                        &self.sessions_dir,
-                        &session.id,
-                        gwt_agent::AgentStatus::Interrupted,
-                    ) {
-                        tracing::warn!(
-                            session_id = %session.id,
-                            error = %error,
-                            "failed to project stopped Intake recovery into Session state"
-                        );
-                    }
-                }
-                Ok(false) => {}
-                Err(error) => {
-                    tracing::warn!(
-                        session_id = %session.id,
-                        recovery_id = ?session.recovery_id,
-                        %error,
-                        "failed to reconcile a stopped recovery supervisor at startup"
-                    );
-                }
-            }
-        }
+        reconcile_startup_recovery_supervisors(
+            &self.sessions_dir,
+            &startup_recovery_sessions,
+            &live_supervised_session_ids,
+        );
         let session_protected_paths =
             protected_intake_paths_from_sessions(&startup_recovery_sessions);
         let persisted_session_ids =
@@ -1799,6 +1919,16 @@ impl AppRuntime {
 
         match self.load_recovery_sessions() {
             Ok(startup_recovery_sessions) => {
+                // Legacy import above assigns recovery identities after the
+                // first cold-start pass. Reconcile those newly materialized
+                // records before any exact/semantic eligibility gate reads
+                // them; otherwise the safe supervisor boundary exists only
+                // in memory and every known-spawn record is skipped.
+                reconcile_startup_recovery_supervisors(
+                    &self.sessions_dir,
+                    &startup_recovery_sessions,
+                    &live_supervised_session_ids,
+                );
                 repair_completed_successor_sessions(&self.sessions_dir, &startup_recovery_sessions);
             }
             Err(error) => tracing::warn!(
@@ -1956,7 +2086,7 @@ impl AppRuntime {
                 }
             }
             let worktree_missing = !session.worktree_path.exists();
-            let placeholder_tab = self.paused_placeholder_tab_for_session(&session.id);
+            let placeholder_tab = self.paused_placeholder_tab_for_session(&session);
             let managed_recovery_candidate =
                 match startup_managed_recovery_resume_candidate(&session) {
                     Ok(candidate) => candidate,
@@ -2828,6 +2958,7 @@ impl AppRuntime {
                     gwt_agent::update_session(&self.sessions_dir, &attempt.session_id, |session| {
                         session.update_status(gwt_agent::AgentStatus::Stopped);
                         session.restore_window_on_startup = false;
+                        session.startup_restore_intent_recorded = true;
                         Ok(())
                     });
             }
@@ -2904,6 +3035,51 @@ impl AppRuntime {
                 return Some(Vec::new());
             }
         };
+        let failed_target_recovery_id = failed_target
+            .recovery_id
+            .as_deref()
+            .expect("exact-rejection fallback requires a recovery identity");
+        let failed_target_store = recovery_store_for_session(&failed_target);
+        let failed_target_record = match failed_target_store.load(failed_target_recovery_id) {
+            Ok(Some(record)) => record,
+            Ok(None) => {
+                let _ = mark_session_recovery_attention(&source, ATTENTION_MISSING_CONTEXT);
+                self.preserve_failed_auto_resume_attempt(window_id);
+                return Some(Vec::new());
+            }
+            Err(error) => {
+                tracing::warn!(
+                    source_session_id,
+                    failed_target_session_id,
+                    error = %error,
+                    "rejected exact-resume Recovery Record could not be loaded"
+                );
+                let _ = mark_session_recovery_attention(&source, ATTENTION_MISSING_CONTEXT);
+                self.preserve_failed_auto_resume_attempt(window_id);
+                return Some(Vec::new());
+            }
+        };
+        if let Err(error) = failed_target_store.interrupt_after_supervisor_stop(
+            failed_target_recovery_id,
+            failed_target_record.generation,
+            &failed_target.id,
+            chrono::Utc::now(),
+            CONTINUATION_REASON_DEFINITIVE_REJECTION,
+            format!(
+                "exact-resume-rejected-v1:{}:{}",
+                failed_target.id, failed_target_record.generation
+            ),
+        ) {
+            tracing::warn!(
+                source_session_id,
+                failed_target_session_id,
+                error = %error,
+                "failed to persist definitive exact-resume rejection"
+            );
+            let _ = mark_session_recovery_attention(&source, ATTENTION_LAUNCH_FAILED);
+            self.preserve_failed_auto_resume_attempt(window_id);
+            return Some(Vec::new());
+        }
         if let Err(error) = prepare_startup_successor(
             &failed_target,
             &mut config,
@@ -3099,7 +3275,11 @@ impl AppRuntime {
     /// window backed by `session_id`. Its presence proves the user did not
     /// explicitly close that window (Issue #2942), so the session must restore
     /// regardless of status drift or age.
-    fn paused_placeholder_tab_for_session(&self, session_id: &str) -> Option<String> {
+    fn paused_placeholder_tab_for_session(&self, session: &gwt_agent::Session) -> Option<String> {
+        if session.startup_restore_intent_recorded && !session.restore_window_on_startup {
+            return None;
+        }
+        let session_id = session.id.as_str();
         self.tabs
             .iter()
             .filter(|tab| tab.kind == gwt::ProjectKind::Git && !tab.migration_pending)
@@ -3217,8 +3397,8 @@ impl AppRuntime {
             .collect()
     }
 
-    pub(crate) fn set_hook_forward_target(&mut self, target: HookForwardTarget) {
-        self.hook_forward_target = Some(target);
+    pub(crate) fn set_agent_capability_issuer(&mut self, issuer: AgentCapabilityIssuer) {
+        self.agent_capability_issuer = Some(issuer);
     }
 
     /// SPEC-2785 FR-E: capture the embedded server URL after the axum bind
@@ -3319,6 +3499,237 @@ mod recovery_spawn_boundary_tests {
             gwt_core::recovery::RecoveryLaunchStage::SpawnRequested
         );
         assert!(quarantine_indeterminate_spawn(&session).unwrap());
+    }
+
+    #[test]
+    fn cold_start_proves_supervisor_stop_for_every_known_spawned_stage() {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let temp = tempfile::tempdir().unwrap();
+        let _home = ScopedEnvVar::set("HOME", temp.path());
+        let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+
+        for (index, stage) in [
+            gwt_core::recovery::RecoveryLaunchStage::ProcessSpawned,
+            gwt_core::recovery::RecoveryLaunchStage::ProviderBound,
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let repo = temp.path().join(format!("repo-known-spawn-{index}"));
+            let worktree = repo.join(format!(".intake-{}", index + 2));
+            std::fs::create_dir_all(&worktree).unwrap();
+            let mut session = gwt_agent::Session::new(&worktree, "", gwt_agent::AgentId::Codex);
+            session.id = format!("known-spawn-session-{index}");
+            session.project_state_root = Some(repo.clone());
+            session.session_kind = Some(gwt_skills::SessionKind::Intake);
+            session.is_ephemeral = true;
+            session.status = gwt_agent::AgentStatus::Running;
+            let recovery_id = session.recovery_id.clone().unwrap();
+            let store = recovery_store_for_session(&session);
+            store
+                .create(
+                    gwt_core::recovery::CreateRecovery {
+                        recovery_id: recovery_id.clone(),
+                        session_id: session.id.clone(),
+                        repo_id: gwt_core::paths::project_scope_hash(&repo).to_string(),
+                        session_kind: gwt_core::recovery::RecoverySessionKind::Intake,
+                        worktree_path: worktree,
+                        launch_base_ref: Some("develop".to_string()),
+                        launch_base_oid: "1".repeat(40),
+                        launch_head_oid: "1".repeat(40),
+                        provider: "codex".to_string(),
+                        model: None,
+                        runtime: "host".to_string(),
+                        initial_prompt: "Investigate".to_string(),
+                        created_at: session.created_at,
+                    },
+                    format!("create-known-spawn-{index}"),
+                )
+                .unwrap();
+            if stage == gwt_core::recovery::RecoveryLaunchStage::ProviderBound {
+                store
+                    .bind_root_semantic(
+                        &recovery_id,
+                        &format!("known-spawn-root-{index}"),
+                        None,
+                        gwt_core::recovery::BindingQuality::Verified,
+                        format!("bind-known-spawn-{index}"),
+                    )
+                    .unwrap();
+            } else {
+                store
+                    .advance_launch_stage(
+                        &recovery_id,
+                        stage,
+                        None,
+                        format!("advance-known-spawn-{index}"),
+                    )
+                    .unwrap();
+            }
+
+            assert!(!reconcile_stopped_session_recovery(&session, false).unwrap());
+            assert!(store
+                .load(&recovery_id)
+                .unwrap()
+                .unwrap()
+                .supervisor_stop_proof
+                .is_none());
+
+            assert!(reconcile_stopped_session_recovery(&session, true).unwrap());
+            let interrupted = store.load(&recovery_id).unwrap().unwrap();
+            assert_eq!(
+                interrupted.lifecycle,
+                gwt_core::recovery::RecoveryLifecycle::Interrupted
+            );
+            assert_eq!(interrupted.launch_stage, stage);
+            assert_eq!(
+                interrupted
+                    .supervisor_stop_proof
+                    .as_ref()
+                    .map(|proof| proof.session_id.as_str()),
+                Some(session.id.as_str())
+            );
+        }
+    }
+
+    #[test]
+    fn cold_start_proves_supervisor_stop_for_ready_execution() {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let temp = tempfile::tempdir().unwrap();
+        let _home = ScopedEnvVar::set("HOME", temp.path());
+        let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+        let repo = temp.path().join("repo-ready-execution");
+        let worktree = repo.join("work-execution");
+        std::fs::create_dir_all(&worktree).unwrap();
+        let mut session =
+            gwt_agent::Session::new(&worktree, "work/execution", gwt_agent::AgentId::Codex);
+        session.id = "cold-ready-execution-session".to_string();
+        session.project_state_root = Some(repo.clone());
+        session.session_kind = Some(gwt_skills::SessionKind::Execution);
+        session.is_ephemeral = false;
+        session.status = gwt_agent::AgentStatus::Running;
+        session.restore_window_on_startup = true;
+        session.agent_session_id = Some("cold-ready-execution-root".to_string());
+        let recovery_id = session.recovery_id.clone().unwrap();
+        let store = recovery_store_for_session(&session);
+        store
+            .create(
+                gwt_core::recovery::CreateRecovery {
+                    recovery_id: recovery_id.clone(),
+                    session_id: session.id.clone(),
+                    repo_id: gwt_core::paths::project_scope_hash(&repo).to_string(),
+                    session_kind: gwt_core::recovery::RecoverySessionKind::Execution,
+                    worktree_path: worktree,
+                    launch_base_ref: Some("develop".to_string()),
+                    launch_base_oid: "1".repeat(40),
+                    launch_head_oid: "1".repeat(40),
+                    provider: "codex".to_string(),
+                    model: None,
+                    runtime: "host".to_string(),
+                    initial_prompt: "Continue execution".to_string(),
+                    created_at: session.created_at,
+                },
+                "create-cold-ready-execution",
+            )
+            .unwrap();
+        store
+            .bind_root_semantic(
+                &recovery_id,
+                session.agent_session_id.as_deref().unwrap(),
+                None,
+                gwt_core::recovery::BindingQuality::Verified,
+                "bind-cold-ready-execution",
+            )
+            .unwrap();
+        store
+            .complete_provider_ready(&recovery_id, Utc::now(), "ready-cold-execution")
+            .unwrap();
+
+        assert!(reconcile_stopped_session_recovery(&session, true).unwrap());
+        let interrupted = store.load(&recovery_id).unwrap().unwrap();
+        assert_eq!(
+            interrupted.lifecycle,
+            gwt_core::recovery::RecoveryLifecycle::Interrupted
+        );
+        assert_eq!(
+            interrupted.launch_stage,
+            gwt_core::recovery::RecoveryLaunchStage::Ready
+        );
+        assert!(recovery_was_interrupted_after_supervisor_stop(
+            &session,
+            &interrupted
+        ));
+        assert!(startup_managed_recovery_resume_candidate(&session).unwrap());
+    }
+
+    #[test]
+    fn cold_start_does_not_resolve_unclassified_attention_as_supervisor_stop() {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let temp = tempfile::tempdir().unwrap();
+        let _home = ScopedEnvVar::set("HOME", temp.path());
+        let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+        let repo = temp.path().join("repo-unclassified-attention");
+        let worktree = repo.join(".intake-7");
+        std::fs::create_dir_all(&worktree).unwrap();
+        let mut session = gwt_agent::Session::new(&worktree, "", gwt_agent::AgentId::Codex);
+        session.id = "session-unclassified-attention".to_string();
+        session.project_state_root = Some(repo.clone());
+        session.session_kind = Some(gwt_skills::SessionKind::Intake);
+        session.is_ephemeral = true;
+        session.status = gwt_agent::AgentStatus::Running;
+        let recovery_id = session.recovery_id.clone().unwrap();
+        let store = recovery_store_for_session(&session);
+        store
+            .create(
+                gwt_core::recovery::CreateRecovery {
+                    recovery_id: recovery_id.clone(),
+                    session_id: session.id.clone(),
+                    repo_id: gwt_core::paths::project_scope_hash(&repo).to_string(),
+                    session_kind: gwt_core::recovery::RecoverySessionKind::Intake,
+                    worktree_path: worktree,
+                    launch_base_ref: Some("develop".to_string()),
+                    launch_base_oid: "1".repeat(40),
+                    launch_head_oid: "1".repeat(40),
+                    provider: "codex".to_string(),
+                    model: None,
+                    runtime: "host".to_string(),
+                    initial_prompt: "Investigate".to_string(),
+                    created_at: session.created_at,
+                },
+                "create-unclassified-attention",
+            )
+            .unwrap();
+        store
+            .bind_root_semantic(
+                &recovery_id,
+                "ambiguous-provider-root",
+                None,
+                gwt_core::recovery::BindingQuality::Verified,
+                "bind-unclassified-attention",
+            )
+            .unwrap();
+        store
+            .set_lifecycle(
+                &recovery_id,
+                gwt_core::recovery::RecoveryLifecycle::Attention,
+                Some("legacy_import_attention:multiple_provider_roots".to_string()),
+                "mark-unclassified-attention",
+            )
+            .unwrap();
+
+        assert!(!reconcile_stopped_session_recovery(&session, true).unwrap());
+        let unchanged = store.load(&recovery_id).unwrap().unwrap();
+        assert_eq!(
+            unchanged.lifecycle,
+            gwt_core::recovery::RecoveryLifecycle::Attention
+        );
+        assert!(unchanged.supervisor_stop_proof.is_none());
     }
 
     #[test]

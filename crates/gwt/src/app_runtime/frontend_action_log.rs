@@ -227,7 +227,6 @@ pub(super) fn frontend_user_action_log(event: &FrontendEvent) -> Option<Frontend
         }
         FrontendEvent::RecoveryCenterAction { request, .. } => {
             FrontendUserActionLog::new("recovery_center_action", "recovery_center")
-                .target(&request.action_handle)
                 .mode(request.action.as_str())
         }
         FrontendEvent::CloseWindow { id } => {
@@ -654,10 +653,11 @@ pub(super) fn frontend_user_action_log(event: &FrontendEvent) -> Option<Frontend
         FrontendEvent::ImprovementDismiss { id, .. } => {
             FrontendUserActionLog::new("improvement_dismiss", "improvement").target(id)
         }
-        // SPEC-3050: log the injection request without its text payload —
-        // the injected line lands in the PTY transcript anyway.
-        FrontendEvent::PaneSendInput { session_id, .. } => {
-            FrontendUserActionLog::new("pane_send_input", "terminal").target(session_id)
+        // SPEC-3050: the authenticated endpoint already constrains this to
+        // the caller's own Session. Log only that stable scope, never the raw
+        // Session id or injected text.
+        FrontendEvent::PaneSendInput { .. } => {
+            FrontendUserActionLog::new("pane_send_input", "terminal").target("self")
         }
         FrontendEvent::SetIssueMonitorEnabled { enabled } => {
             FrontendUserActionLog::new("set_issue_monitor_enabled", "issue_monitor")

@@ -30,12 +30,15 @@ impl IntentBoundaryEvent {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub enum HookOutput {
     PreToolUsePermission {
         summary: String,
         detail: String,
         deny_reason: String,
+    },
+    PreToolUseUpdatedInput {
+        tool_input: serde_json::Value,
     },
     HookSpecificAdditionalContext {
         event: IntentBoundaryEvent,
@@ -65,6 +68,58 @@ struct PreToolUsePermissionContent<'a> {
     permission_decision: &'static str,
     #[serde(rename = "permissionDecisionReason")]
     permission_decision_reason: &'a str,
+}
+
+impl std::fmt::Debug for HookOutput {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::PreToolUsePermission {
+                summary,
+                detail,
+                deny_reason,
+            } => formatter
+                .debug_struct("PreToolUsePermission")
+                .field("summary", summary)
+                .field("detail", detail)
+                .field("deny_reason", deny_reason)
+                .finish(),
+            Self::PreToolUseUpdatedInput { .. } => formatter
+                .debug_struct("PreToolUseUpdatedInput")
+                .field("tool_input", &"<redacted>")
+                .finish(),
+            Self::HookSpecificAdditionalContext { event, text } => formatter
+                .debug_struct("HookSpecificAdditionalContext")
+                .field("event", event)
+                .field("text", text)
+                .finish(),
+            Self::SystemMessage(text) => {
+                formatter.debug_tuple("SystemMessage").field(text).finish()
+            }
+            Self::Silent => formatter.write_str("Silent"),
+            Self::StopBlock { reason } => formatter
+                .debug_struct("StopBlock")
+                .field("reason", reason)
+                .finish(),
+        }
+    }
+}
+
+#[derive(Debug, Serialize)]
+struct PreToolUseUpdatedInputPayload<'a> {
+    #[serde(rename = "hookSpecificOutput")]
+    hook_specific_output: PreToolUseUpdatedInputContent<'a>,
+}
+
+#[derive(Debug, Serialize)]
+struct PreToolUseUpdatedInputContent<'a> {
+    #[serde(rename = "hookEventName")]
+    hook_event_name: &'static str,
+    #[serde(rename = "permissionDecision")]
+    permission_decision: &'static str,
+    #[serde(rename = "permissionDecisionReason")]
+    permission_decision_reason: &'static str,
+    #[serde(rename = "updatedInput")]
+    updated_input: &'a serde_json::Value,
 }
 
 #[derive(Debug, Serialize)]
@@ -119,6 +174,10 @@ impl HookOutput {
         }
     }
 
+    pub fn pre_tool_use_updated_input(tool_input: serde_json::Value) -> Self {
+        Self::PreToolUseUpdatedInput { tool_input }
+    }
+
     pub fn system_message(text: impl Into<String>) -> Self {
         Self::SystemMessage(text.into())
     }
@@ -153,7 +212,8 @@ impl HookOutput {
     pub fn exit_code(&self) -> i32 {
         match self {
             Self::PreToolUsePermission { .. } => 2,
-            Self::HookSpecificAdditionalContext { .. }
+            Self::PreToolUseUpdatedInput { .. }
+            | Self::HookSpecificAdditionalContext { .. }
             | Self::SystemMessage(_)
             | Self::Silent
             | Self::StopBlock { .. } => 0,
@@ -168,6 +228,18 @@ impl HookOutput {
                         hook_event_name: "PreToolUse",
                         permission_decision: "deny",
                         permission_decision_reason: deny_reason,
+                    },
+                };
+                serde_json::to_writer(&mut *writer, &payload)?;
+                writer.write_all(b"\n")?;
+            }
+            Self::PreToolUseUpdatedInput { tool_input } => {
+                let payload = PreToolUseUpdatedInputPayload {
+                    hook_specific_output: PreToolUseUpdatedInputContent {
+                        hook_event_name: "PreToolUse",
+                        permission_decision: "allow",
+                        permission_decision_reason: "Authorized root Intake checkpoint operation",
+                        updated_input: tool_input,
                     },
                 };
                 serde_json::to_writer(&mut *writer, &payload)?;
@@ -264,6 +336,53 @@ mod tests {
                     "permissionDecisionReason": "forbidden command\n\npolicy violation"
                 }
             })
+        );
+    }
+
+    #[test]
+    fn pre_tool_use_updated_input_serializes_as_allow_envelope() {
+        let text = serialize(&HookOutput::pre_tool_use_updated_input(serde_json::json!({
+            "command": "export GWT_TEST_PERMIT=opaque; gwtd <<'JSON'",
+            "timeout": 30
+        })));
+        let json: Value = serde_json::from_str(text.trim()).expect("json");
+        assert_eq!(
+            json,
+            serde_json::json!({
+                "hookSpecificOutput": {
+                    "hookEventName": "PreToolUse",
+                    "permissionDecision": "allow",
+                    "permissionDecisionReason": "Authorized root Intake checkpoint operation",
+                    "updatedInput": {
+                        "command": "export GWT_TEST_PERMIT=opaque; gwtd <<'JSON'",
+                        "timeout": 30
+                    }
+                }
+            })
+        );
+        assert_eq!(
+            HookOutput::pre_tool_use_updated_input(serde_json::json!({})).exit_code(),
+            0
+        );
+    }
+
+    #[test]
+    fn pre_tool_use_updated_input_debug_redacts_the_authority_permit() {
+        let output = HookOutput::pre_tool_use_updated_input(serde_json::json!({
+            "command": "export GWT_INTAKE_CHECKPOINT_PERMIT=permit-must-not-leak; gwtd",
+            "timeout": 30
+        }));
+
+        let debug = format!("{output:?}");
+        assert!(
+            debug.contains("<redacted>"),
+            "unexpected debug output: {debug}"
+        );
+        assert!(
+            !debug.contains("permit-must-not-leak")
+                && !debug.contains("GWT_INTAKE_CHECKPOINT_PERMIT")
+                && !debug.contains("gwtd"),
+            "updatedInput must never be rendered through Debug: {debug}"
         );
     }
 

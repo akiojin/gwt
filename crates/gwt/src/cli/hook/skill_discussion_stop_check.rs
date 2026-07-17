@@ -54,24 +54,19 @@ pub fn handle_with_input(worktree: &Path, input: &str) -> HookOutput {
     match crate::cli::discussion::current_intake_durability_blocker(worktree) {
         Ok(Some(reason)) => HookOutput::stop_block(reason),
         Ok(None) => HookOutput::Silent,
-        Err(error) if managed_intake_environment_present() => HookOutput::stop_block(format!(
+        Err(error) if managed_intake_environment_present(worktree) => HookOutput::stop_block(format!(
             "Current Intake durability cannot be verified: {error}. Resolve the candidate in Recovery Center or complete `discussion.update` before stopping; no private transcript or incomplete Board milestone was backfilled."
         )),
         Err(_) => HookOutput::Silent,
     }
 }
 
-fn managed_intake_environment_present() -> bool {
-    [
-        gwt_agent::GWT_SESSION_ID_ENV,
-        gwt_agent::GWT_RECOVERY_ID_ENV,
-    ]
-    .iter()
-    .any(|name| {
-        std::env::var(name)
-            .ok()
-            .is_some_and(|value| !value.trim().is_empty())
-    })
+fn managed_intake_environment_present(worktree: &Path) -> bool {
+    let recovery_is_explicit = std::env::var(gwt_agent::GWT_RECOVERY_ID_ENV)
+        .ok()
+        .is_some_and(|value| !value.trim().is_empty());
+    recovery_is_explicit
+        || gwt_skills::resolve_lane_for_worktree(worktree).id == gwt_skills::INTAKE_PROFILE.id
 }
 
 fn subagent_hook_input(input: &str) -> bool {

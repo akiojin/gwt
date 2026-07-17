@@ -32,27 +32,105 @@ use super::{
     active_agent_session_matches_work, agent_launch_purpose_title,
     apply_docker_runtime_to_launch_config, apply_host_package_runner_fallback_checked,
     apply_windows_host_shell_wrapper, combined_window_id, detect_shell_program,
-    finalize_docker_agent_launch_config, geometry_to_pty_size, install_launch_gwt_bin_env,
-    intake_hook_config_is_disposable, is_ephemeral_intake_worktree, launch_output_mirror,
-    normalize_branch_name, pin_host_codex_latest_runner,
+    docker_binary_for_launch, finalize_docker_agent_launch_config, geometry_to_pty_size,
+    install_launch_gwt_bin_env, intake_hook_config_is_disposable, is_ephemeral_intake_worktree,
+    launch_output_mirror, normalize_branch_name, pin_host_codex_latest_runner,
     refresh_managed_gwt_assets_for_agent_with_codex_hook_discovery_mode,
     resolve_docker_launch_plan, resolve_launch_spec_with_fallback, resolve_launch_worktree,
     same_worktree_path, save_resumed_workspace_projection, save_start_work_workspace_projection,
-    ActiveAgentSession, AgentKanbanLaunchTarget, AppEventProxy, AppRuntime, BackendEvent,
-    HookForwardTarget, LaunchFeedbackContext, LiveSessionEntry, OutboundEvent, Pane, UserEvent,
+    ActiveAgentSession, AgentCapabilityIssuer, AgentKanbanLaunchTarget, AppEventProxy, AppRuntime,
+    BackendEvent, LaunchFeedbackContext, LiveSessionEntry, OutboundEvent, Pane, UserEvent,
     WindowGeometry, WindowPreset, WindowProcessStatus, WindowRuntime, WorkspaceResumeContext,
 };
 
 const RECOVERY_CONTINUATION_MAX_VISIBLE_ITEMS: usize = 12;
 const RECOVERY_CONTINUATION_MAX_CHARS: usize = 12_000;
 
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct ProcessLaunch {
     pub(crate) command: String,
     pub(crate) args: Vec<String>,
     pub(crate) env: HashMap<String, String>,
     pub(crate) remove_env: Vec<String>,
     pub(crate) cwd: Option<PathBuf>,
+}
+
+fn private_launch_env_key(key: &str) -> bool {
+    matches!(
+        key,
+        gwt_agent::GWT_HOOK_FORWARD_TOKEN_ENV
+            | gwt_agent::GWT_SESSION_ID_ENV
+            | gwt_agent::GWT_RECOVERY_ID_ENV
+            | gwt_agent::GWT_SESSION_RUNTIME_PATH_ENV
+            | gwt::codex_bridge::CODEX_REMOTE_AUTH_TOKEN_ENV
+    )
+}
+
+impl std::fmt::Debug for ProcessLaunch {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let redacted_env = self
+            .env
+            .iter()
+            .map(|(key, value)| {
+                (
+                    key.as_str(),
+                    if private_launch_env_key(key) {
+                        "<redacted>"
+                    } else {
+                        value.as_str()
+                    },
+                )
+            })
+            .collect::<std::collections::BTreeMap<_, _>>();
+        let redacted_args = self
+            .args
+            .iter()
+            .map(|argument| {
+                private_launch_env_assignment(argument)
+                    .map(|key| format!("{key}=<redacted>"))
+                    .unwrap_or_else(|| argument.clone())
+            })
+            .collect::<Vec<_>>();
+
+        formatter
+            .debug_struct("ProcessLaunch")
+            .field("command", &self.command)
+            .field("args", &redacted_args)
+            .field("env", &redacted_env)
+            .field("remove_env", &self.remove_env)
+            .field("cwd", &self.cwd)
+            .finish()
+    }
+}
+
+fn private_launch_env_assignment(argument: &str) -> Option<&str> {
+    let (key, _) = argument.split_once('=')?;
+    private_launch_env_key(key).then_some(key)
+}
+
+fn install_agent_capability_env(
+    env: &mut HashMap<String, String>,
+    issuer: Option<&AgentCapabilityIssuer>,
+    project_root: &Path,
+    session_id: &str,
+    runtime_target: gwt_agent::LaunchRuntimeTarget,
+    container_runtime_binary: &str,
+) -> Result<(), String> {
+    let Some(issuer) = issuer else {
+        return Ok(());
+    };
+    let target = issuer.issue(project_root, session_id)?;
+    let forward_url = gwt::daemon_runtime::hook_forward_url_for_launch_runtime(
+        &target.url,
+        runtime_target,
+        container_runtime_binary,
+    )?;
+    env.insert(gwt_agent::GWT_HOOK_FORWARD_URL_ENV.to_string(), forward_url);
+    env.insert(
+        gwt_agent::GWT_HOOK_FORWARD_TOKEN_ENV.to_string(),
+        target.token,
+    );
+    Ok(())
 }
 
 fn executable_basename(command: &str) -> &str {
@@ -1856,7 +1934,7 @@ impl AppRuntime {
 
         let proxy = self.proxy.clone();
         let sessions_dir = self.sessions_dir.clone();
-        let hook_forward_target = self.hook_forward_target.clone();
+        let agent_capability_issuer = self.agent_capability_issuer.clone();
         let profile_config_path = self.profile_config_path()?;
         if let Some(context) = workspace_resume_context {
             self.pending_workspace_resume_contexts
@@ -1875,7 +1953,7 @@ impl AppRuntime {
                 window_id,
                 config,
                 profile_config_path,
-                hook_forward_target,
+                agent_capability_issuer,
             );
         });
 
@@ -1889,7 +1967,7 @@ impl AppRuntime {
         window_id: String,
         mut config: gwt_agent::LaunchConfig,
         profile_config_path: PathBuf,
-        hook_forward_target: Option<HookForwardTarget>,
+        agent_capability_issuer: Option<AgentCapabilityIssuer>,
     ) {
         // SPEC-2014 FR-139..142 — while a Docker launch prepares (preflight,
         // compose ps/up incl. image build, exec probes), mirror docker-kind
@@ -2087,20 +2165,20 @@ impl AppRuntime {
                 gwt_agent::GWT_SESSION_RUNTIME_PATH_ENV.to_string(),
                 runtime_path.display().to_string(),
             );
-            if let Some(target) = hook_forward_target {
-                config
-                    .env_vars
-                    .insert(gwt_agent::GWT_HOOK_FORWARD_URL_ENV.to_string(), target.url);
-                config.env_vars.insert(
-                    gwt_agent::GWT_HOOK_FORWARD_TOKEN_ENV.to_string(),
-                    target.token,
-                );
-            }
+            let runtime_target = config.runtime_target;
+            let container_runtime_binary = docker_binary_for_launch();
+            install_agent_capability_env(
+                &mut config.env_vars,
+                agent_capability_issuer.as_ref(),
+                Path::new(&project_root),
+                &session_id,
+                runtime_target,
+                &container_runtime_binary,
+            )?;
             config
                 .env_vars
                 .entry("COLORTERM".to_string())
                 .or_insert_with(|| "truecolor".to_string());
-            let runtime_target = config.runtime_target;
             let agent_project_root = if runtime_target == gwt_agent::LaunchRuntimeTarget::Docker {
                 resolve_docker_launch_plan(&worktree_path, config.docker_service.as_deref())?
                     .container_cwd
@@ -2448,13 +2526,13 @@ impl AppRuntime {
         let Some(session) = self.active_agent_sessions.remove(window_id) else {
             return;
         };
+        let recovery_retained = self.retain_stopped_recovery(&session);
         // SPEC-3214 (FR-002 / T-005 / T-007): an ephemeral intake session runs
         // in a throwaway detached `.intake-*` worktree and produces NO Work
         // identity. On session end, remove the worktree when clean; keep it
         // when dirty so uncommitted work is never lost. Skip the Paused-Work /
         // projection persistence entirely.
         if self.is_ephemeral_intake_session(&session) {
-            let recovery_retained = self.retain_stopped_intake_recovery(&session);
             if !recovery_retained {
                 self.finalize_ephemeral_intake_worktree(&session);
                 let _ = gwt_agent::persist_session_status(
@@ -2488,19 +2566,20 @@ impl AppRuntime {
                 );
             }
         }
-        let _ = gwt_agent::persist_session_status(
-            &self.sessions_dir,
-            &session.session_id,
-            gwt_agent::AgentStatus::Stopped,
-        );
+        if !recovery_retained {
+            let _ = gwt_agent::persist_session_status(
+                &self.sessions_dir,
+                &session.session_id,
+                gwt_agent::AgentStatus::Stopped,
+            );
+        }
         self.launch_wizard_cache.mark_stopped(&session.session_id);
     }
 
-    /// Persist provider-stop evidence before deciding whether an Intake
-    /// worktree is disposable. Any nonterminal RecoveryRecord owns that
-    /// worktree until successor retirement or explicit discard, even when the
-    /// worktree is perfectly clean.
-    fn retain_stopped_intake_recovery(&self, active: &ActiveAgentSession) -> bool {
+    /// Persist provider-stop evidence before projecting any managed Recovery
+    /// Session as stopped. Intake additionally uses the return value to retain
+    /// its disposable worktree; Execution uses it to preserve resumability.
+    fn retain_stopped_recovery(&self, active: &ActiveAgentSession) -> bool {
         let session_path = self
             .sessions_dir
             .join(format!("{}.toml", active.session_id));
@@ -2510,11 +2589,11 @@ impl AppRuntime {
             Err(error) => {
                 // A running recovery launch always materializes its Session
                 // before spawn. If that ledger is unreadable, cleanup cannot
-                // prove the Intake is unowned and must fail closed.
+                // prove the Recovery is unowned and must fail closed.
                 tracing::warn!(
                     session_id = %active.session_id,
                     error = %error,
-                    "keeping stopped Intake because its Session ledger is unavailable"
+                    "keeping stopped Recovery because its Session ledger is unavailable"
                 );
                 return true;
             }
@@ -2536,11 +2615,28 @@ impl AppRuntime {
                 tracing::warn!(
                     recovery_id,
                     error = %error,
-                    "keeping stopped Intake because RecoveryStore inventory failed"
+                    "keeping stopped Recovery because RecoveryStore inventory failed"
                 );
                 return true;
             }
         };
+        let expected_kind = match (source.session_kind, source.is_ephemeral) {
+            (Some(gwt_skills::SessionKind::Intake), true) => {
+                Some(gwt_core::recovery::RecoverySessionKind::Intake)
+            }
+            (Some(gwt_skills::SessionKind::Execution), false) => {
+                Some(gwt_core::recovery::RecoverySessionKind::Execution)
+            }
+            _ => None,
+        };
+        if record.session_id != source.id || expected_kind != Some(record.session_kind) {
+            tracing::warn!(
+                recovery_id,
+                session_id = %source.id,
+                "keeping stopped Recovery because its Session identity does not match"
+            );
+            return true;
+        }
         if matches!(
             record.lifecycle,
             gwt_core::recovery::RecoveryLifecycle::Resolved
@@ -2550,6 +2646,11 @@ impl AppRuntime {
         }
 
         let stopped_at = chrono::Utc::now();
+        let session_kind = match record.session_kind {
+            gwt_core::recovery::RecoverySessionKind::Intake => "Intake",
+            gwt_core::recovery::RecoverySessionKind::Execution => "Execution",
+        };
+        let stopped_reason = format!("gwt observed the {session_kind} provider process stop");
         let proof_required = record.launch_stage
             >= gwt_core::recovery::RecoveryLaunchStage::SpawnRequested
             && !record.launch_stage.is_terminal()
@@ -2566,7 +2667,7 @@ impl AppRuntime {
                 record.generation,
                 &source.id,
                 stopped_at,
-                "gwt observed the Intake provider process stop",
+                &stopped_reason,
                 format!(
                     "runtime-supervisor-stop-v1:{}:{}",
                     source.id, record.generation
@@ -2583,7 +2684,7 @@ impl AppRuntime {
             store.set_lifecycle(
                 recovery_id,
                 gwt_core::recovery::RecoveryLifecycle::Interrupted,
-                Some("gwt observed the Intake provider process stop".to_string()),
+                Some(stopped_reason),
                 format!(
                     "runtime-provider-stop-v1:{}:{}",
                     source.id, record.generation
@@ -2598,18 +2699,17 @@ impl AppRuntime {
             tracing::warn!(
                 recovery_id,
                 error = %error,
-                "failed to persist stopped Intake recovery; retaining its worktree"
+                "failed to persist stopped Recovery; retaining its durable state"
             );
         }
         if let Err(error) = gwt_agent::update_session(&self.sessions_dir, &source.id, |session| {
             session.update_status(gwt_agent::AgentStatus::Interrupted);
-            session.restore_window_on_startup = true;
             Ok(())
         }) {
             tracing::warn!(
                 session_id = %source.id,
                 error = %error,
-                "failed to project stopped Intake recovery into Session state"
+                "failed to project stopped Recovery into Session state"
             );
         }
         true
@@ -2871,6 +2971,115 @@ impl AppRuntime {
 #[cfg(test)]
 #[path = "agent_launch_stage_tests.rs"]
 mod agent_launch_stage_tests;
+
+#[cfg(test)]
+mod process_launch_privacy_tests {
+    use super::*;
+
+    #[test]
+    fn process_launch_debug_redacts_agent_capability_and_session_identity() {
+        const TOKEN_SENTINEL: &str = "agent-capability-secret-sentinel";
+        const SESSION_SENTINEL: &str = "session-secret-sentinel";
+        let launch = ProcessLaunch {
+            command: "docker".to_string(),
+            args: vec![
+                format!("{}={TOKEN_SENTINEL}", gwt_agent::GWT_HOOK_FORWARD_TOKEN_ENV),
+                format!("{}={SESSION_SENTINEL}", gwt_agent::GWT_SESSION_ID_ENV),
+            ],
+            env: HashMap::from([
+                (
+                    gwt_agent::GWT_HOOK_FORWARD_TOKEN_ENV.to_string(),
+                    TOKEN_SENTINEL.to_string(),
+                ),
+                (
+                    gwt_agent::GWT_SESSION_ID_ENV.to_string(),
+                    SESSION_SENTINEL.to_string(),
+                ),
+            ]),
+            remove_env: Vec::new(),
+            cwd: None,
+        };
+
+        let debug = format!("{launch:?}");
+        assert!(!debug.contains(TOKEN_SENTINEL), "token leaked: {debug}");
+        assert!(!debug.contains(SESSION_SENTINEL), "session leaked: {debug}");
+        assert!(debug.contains("<redacted>"));
+    }
+
+    #[test]
+    fn launch_env_receives_one_capability_bound_to_each_session() {
+        let projects = tempfile::tempdir().expect("project roots");
+        let project_a = projects.path().join("project-a");
+        let project_b = projects.path().join("project-b");
+        std::fs::create_dir_all(&project_a).expect("project A");
+        std::fs::create_dir_all(&project_b).expect("project B");
+        let issuer = AgentCapabilityIssuer::for_test("http://127.0.0.1:45123/internal/hook-live");
+        let mut session_a = HashMap::new();
+        let mut session_b = HashMap::new();
+
+        install_agent_capability_env(
+            &mut session_a,
+            Some(&issuer),
+            &project_a,
+            "session-a",
+            gwt_agent::LaunchRuntimeTarget::Host,
+            "docker",
+        )
+        .expect("session A env");
+        install_agent_capability_env(
+            &mut session_b,
+            Some(&issuer),
+            &project_b,
+            "session-b",
+            gwt_agent::LaunchRuntimeTarget::Host,
+            "docker",
+        )
+        .expect("session B env");
+
+        assert_eq!(
+            session_a.get(gwt_agent::GWT_HOOK_FORWARD_URL_ENV),
+            session_b.get(gwt_agent::GWT_HOOK_FORWARD_URL_ENV)
+        );
+        assert_ne!(
+            session_a.get(gwt_agent::GWT_HOOK_FORWARD_TOKEN_ENV),
+            session_b.get(gwt_agent::GWT_HOOK_FORWARD_TOKEN_ENV)
+        );
+        assert!(session_a
+            .get(gwt_agent::GWT_HOOK_FORWARD_TOKEN_ENV)
+            .is_some_and(|token| !token.is_empty()));
+        assert!(session_b
+            .get(gwt_agent::GWT_HOOK_FORWARD_TOKEN_ENV)
+            .is_some_and(|token| !token.is_empty()));
+    }
+
+    #[test]
+    fn docker_launch_env_receives_the_container_host_gateway_url() {
+        let project = tempfile::tempdir().expect("project root");
+        let issuer = AgentCapabilityIssuer::for_test(
+            "http://127.0.0.1:45123/internal/hook-live?generation=7",
+        );
+        let mut env = HashMap::new();
+
+        install_agent_capability_env(
+            &mut env,
+            Some(&issuer),
+            project.path(),
+            "session-docker",
+            gwt_agent::LaunchRuntimeTarget::Docker,
+            "docker",
+        )
+        .expect("Docker agent capability env");
+
+        assert_eq!(
+            env.get(gwt_agent::GWT_HOOK_FORWARD_URL_ENV)
+                .map(String::as_str),
+            Some("http://host.docker.internal:45123/internal/hook-live?generation=7")
+        );
+        assert!(env
+            .get(gwt_agent::GWT_HOOK_FORWARD_TOKEN_ENV)
+            .is_some_and(|token| !token.is_empty()));
+    }
+}
 
 #[cfg(test)]
 mod fr001_capability_cache_tests {
