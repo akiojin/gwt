@@ -391,7 +391,7 @@ fn hydrate_host_path(env: &mut HashMap<String, String>) {
 
 #[cfg(target_os = "macos")]
 fn macos_path_helper_path(current_path: Option<&str>) -> Option<String> {
-    let mut command = std::process::Command::new("/usr/libexec/path_helper");
+    let mut command = gwt_core::process::hidden_command("/usr/libexec/path_helper");
     command.arg("-s");
     if let Some(path) = current_path {
         command.env("PATH", path);

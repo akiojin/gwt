@@ -172,7 +172,7 @@ match args.as_slice() {
     // Pin the child's working directory: parallel tests may set the
     // process-wide CWD to a tempdir that gets dropped, and rustc refuses to
     // start from a deleted CWD ("Current directory is invalid", #3006).
-    let status = std::process::Command::new("rustc")
+    let status = gwt_core::process::hidden_command("rustc")
         .current_dir(bin_dir)
         .arg(&source_path)
         .arg("-o")

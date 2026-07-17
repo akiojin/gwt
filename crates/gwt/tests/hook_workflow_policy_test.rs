@@ -10,6 +10,7 @@ use gwt::cli::hook::{
     event_dispatcher, gwt_self_improvement_stop, workflow_policy, HookEvent, HookOutput,
 };
 use gwt_agent::{session::GWT_SESSION_ID_ENV, AgentId, Session, GWT_SESSION_RUNTIME_PATH_ENV};
+use gwt_core::process::hidden_command;
 use gwt_core::{
     coordination::{
         post_entry, AuthorKind, BoardEntry, BoardEntryKind, BoardMention, BoardMentionTargetKind,
@@ -94,14 +95,14 @@ fn write_improvement_store(repo_path: &Path, candidates: serde_json::Value) {
 
 fn init_repo_with_origin(remote_url: &str) -> TempDir {
     let repo = tempfile::tempdir().expect("repo");
-    assert!(std::process::Command::new("git")
+    assert!(hidden_command("git")
         .arg("init")
         .arg("-q")
         .arg(repo.path())
         .status()
         .expect("git init")
         .success());
-    assert!(std::process::Command::new("git")
+    assert!(hidden_command("git")
         .arg("-C")
         .arg(repo.path())
         .args(["remote", "add", "origin", remote_url])
@@ -318,13 +319,13 @@ fn common_stop_dispatcher_does_not_run_gwt_self_improvement_stop() {
 fn init_repo(home: &TempDir) -> PathBuf {
     let repo_path = home.path().join("repo");
     std::fs::create_dir_all(&repo_path).expect("create repo dir");
-    assert!(std::process::Command::new("git")
+    assert!(hidden_command("git")
         .arg("init")
         .arg(&repo_path)
         .status()
         .expect("git init")
         .success());
-    assert!(std::process::Command::new("git")
+    assert!(hidden_command("git")
         .arg("-C")
         .arg(&repo_path)
         .args([

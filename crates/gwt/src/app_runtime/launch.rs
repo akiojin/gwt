@@ -509,7 +509,7 @@ fn codex_hook_discovery_mode_from_semver(raw: &str) -> Option<gwt_skills::CodexH
 fn detect_installed_codex_hook_discovery_mode(
     config: &gwt_agent::LaunchConfig,
 ) -> Option<gwt_skills::CodexHookDiscoveryMode> {
-    let mut command = std::process::Command::new(&config.command);
+    let mut command = gwt_core::process::hidden_command(&config.command);
     command.arg("--version").envs(&config.env_vars);
     for key in &config.remove_env {
         command.env_remove(key);

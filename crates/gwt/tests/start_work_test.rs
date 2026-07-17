@@ -1,13 +1,11 @@
-use std::{
-    path::{Path, PathBuf},
-    process::Command,
-};
+use std::path::{Path, PathBuf};
 
 use chrono::{TimeZone, Utc};
+use gwt_core::process::hidden_command;
 use tempfile::tempdir;
 
 fn run_git(repo: &Path, args: &[&str]) {
-    let status = Command::new("git")
+    let status = hidden_command("git")
         .args(args)
         .current_dir(repo)
         .status()
@@ -16,7 +14,7 @@ fn run_git(repo: &Path, args: &[&str]) {
 }
 
 fn git_output(repo: &Path, args: &[&str]) -> String {
-    let output = Command::new("git")
+    let output = hidden_command("git")
         .args(args)
         .current_dir(repo)
         .output()
@@ -26,7 +24,7 @@ fn git_output(repo: &Path, args: &[&str]) -> String {
 }
 
 fn git_ref_exists(repo: &Path, refname: &str) -> bool {
-    let status = Command::new("git")
+    let status = hidden_command("git")
         .args(["show-ref", "--verify", "--quiet", refname])
         .current_dir(repo)
         .status()
@@ -72,7 +70,7 @@ fn init_git_clone_with_origin(repo: &Path) {
     run_git(&seed, &["commit", "-qm", "develop marker"]);
     run_git(&seed, &["checkout", "main"]);
 
-    let status = Command::new("git")
+    let status = hidden_command("git")
         .args(["clone", "--bare"])
         .arg(&seed)
         .arg(&origin)
@@ -80,7 +78,7 @@ fn init_git_clone_with_origin(repo: &Path) {
         .expect("git clone --bare");
     assert!(status.success(), "git clone --bare failed");
 
-    let status = Command::new("git")
+    let status = hidden_command("git")
         .args(["clone"])
         .arg(&origin)
         .arg(repo)
@@ -110,7 +108,7 @@ fn init_main_only_bare_workspace_home(workspace_home: &Path) -> (PathBuf, PathBu
     run_git(&seed, &["add", "main-only.txt"]);
     run_git(&seed, &["commit", "-qm", "init"]);
 
-    let status = Command::new("git")
+    let status = hidden_command("git")
         .args(["clone", "--bare"])
         .arg(&seed)
         .arg(&origin)
@@ -119,7 +117,7 @@ fn init_main_only_bare_workspace_home(workspace_home: &Path) -> (PathBuf, PathBu
     assert!(status.success(), "git clone --bare origin failed");
 
     std::fs::create_dir_all(workspace_home).expect("create workspace home");
-    let status = Command::new("git")
+    let status = hidden_command("git")
         .args(["clone", "--bare"])
         .arg(&origin)
         .arg(&bare_repo)
@@ -127,7 +125,7 @@ fn init_main_only_bare_workspace_home(workspace_home: &Path) -> (PathBuf, PathBu
         .expect("git clone --bare workspace");
     assert!(status.success(), "git clone --bare workspace failed");
 
-    let _ = Command::new("git")
+    let _ = hidden_command("git")
         .args(["config", "--unset-all", "remote.origin.fetch"])
         .current_dir(&bare_repo)
         .status();

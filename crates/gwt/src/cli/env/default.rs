@@ -7,7 +7,7 @@ use std::{
     fs,
     io::{self},
     path::PathBuf,
-    process::{Command, Stdio},
+    process::Stdio,
     sync::{Arc, OnceLock},
 };
 
@@ -372,7 +372,7 @@ impl CliEnv for DefaultCliEnv {
     ) -> io::Result<InternalCommandOutput> {
         let current_exe = std::env::current_exe()?;
         let current_exe = dunce::canonicalize(&current_exe).unwrap_or_else(|_| current_exe.clone());
-        let mut child = Command::new(current_exe)
+        let mut child = gwt_core::process::hidden_command(current_exe)
             .args(args.iter().skip(1))
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())

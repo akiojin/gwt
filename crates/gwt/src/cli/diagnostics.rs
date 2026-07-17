@@ -4,7 +4,6 @@ use std::{
     cmp::Reverse,
     fs,
     path::{Path, PathBuf},
-    process::Command,
     time::{SystemTime, UNIX_EPOCH},
 };
 
@@ -171,7 +170,7 @@ pub fn collect_cpu_diagnostics(repo_path: &Path) -> CpuDiagnostics {
 }
 
 fn collect_process_snapshots() -> Vec<ProcessSnapshot> {
-    let output = match Command::new("ps")
+    let output = match gwt_core::process::hidden_command("ps")
         .args(["axww", "-o", "pid=,ppid=,%cpu=,etime=,command="])
         .output()
     {

@@ -283,6 +283,8 @@ mod tests {
         assert!(matches!(err, AIError::ConfigError(_)));
     }
 
+    // Test-only helper in a crate without a gwt-core dependency; no GUI window risk under cargo test.
+    #[allow(clippy::disallowed_methods)]
     fn is_git_safe_branch_name(name: &str) -> bool {
         Command::new("git")
             .args(["check-ref-format", "--branch", name])
