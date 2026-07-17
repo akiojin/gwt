@@ -96,6 +96,34 @@ pub(super) fn run<E: CliEnv>(
     cmd: PrCommand,
     out: &mut String,
 ) -> Result<i32, SpecOpsError> {
+    // SPEC-3248 P8b (T-112/FR-037/AS-33): Ready handoffs — a non-draft PR
+    // creation or `pr.ready` — require the current session's execution to be
+    // settled or backed by fresh verification evidence. A terminally blocked
+    // execution refuses every PR mutation, draft creation and edits
+    // included; an active execution keeps the mid-work Draft flow available.
+    let is_pr_mutation = matches!(
+        cmd,
+        PrCommand::Create { .. }
+            | PrCommand::CreateBody { .. }
+            | PrCommand::Edit { .. }
+            | PrCommand::EditBody { .. }
+            | PrCommand::Ready { .. }
+    );
+    if is_pr_mutation {
+        let is_ready_handoff = matches!(
+            cmd,
+            PrCommand::Create { draft: false, .. }
+                | PrCommand::CreateBody { draft: false, .. }
+                | PrCommand::Ready { .. }
+        );
+        if let Some(refusal) =
+            crate::cli::execution_state::pr_handoff_refusal(env.repo_path(), is_ready_handoff)
+        {
+            out.push_str(&refusal);
+            out.push('\n');
+            return Ok(2);
+        }
+    }
     let code = match cmd {
         PrCommand::Current => {
             match env.fetch_current_pr().map_err(super::io_as_api_error)? {
@@ -563,6 +591,145 @@ mod tests {
     fn pr_family_parse_directly_handles_current() {
         let cmd = parse(&[s("current")]).expect("parse pr family command");
         assert_eq!(cmd, PrCommand::Current);
+    }
+
+    // SPEC-3248 P8b (T-112/AS-33): Ready handoffs are gated on the current
+    // session's execution state and verification evidence; the Draft flow
+    // stays available.
+    #[test]
+    fn pr_handoff_gate_blocks_ready_paths_until_evidence_or_settlement() {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let _session =
+            gwt_core::test_support::ScopedEnvVar::set(gwt_agent::GWT_SESSION_ID_ENV, "sess-pr");
+        let tmp = tempfile::tempdir().expect("tempdir");
+        crate::cli::execution_state::materialize_at_launch(
+            tmp.path(),
+            crate::cli::execution_state::ExecutionOwnerKind::Issue,
+            42,
+            "sess-pr",
+            "launch",
+            false,
+        )
+        .unwrap();
+
+        let mut env = crate::cli::TestEnv::new(tmp.path().to_path_buf());
+        env.seed_pr(7, seeded_pr());
+        env.seed_created_pr(seeded_pr());
+
+        // Active execution without evidence: non-draft create and Ready refuse.
+        let mut out = String::new();
+        let code = run(
+            &mut env,
+            PrCommand::CreateBody {
+                base: s("develop"),
+                head: None,
+                title: s("t"),
+                body: s("b"),
+                labels: vec![],
+                draft: false,
+            },
+            &mut out,
+        )
+        .expect("run pr create");
+        assert_eq!(code, 2, "{out}");
+        assert!(out.contains("PR handoff refused"), "{out}");
+        assert!(
+            env.pr_create_call_log.is_empty(),
+            "create must not reach gh"
+        );
+
+        let mut out = String::new();
+        let code = run(&mut env, PrCommand::Ready { number: 7 }, &mut out).expect("run pr ready");
+        assert_eq!(code, 2, "{out}");
+        assert!(env.pr_ready_call_log.is_empty(), "ready must not reach gh");
+
+        // Draft creation stays available mid-work.
+        let mut out = String::new();
+        let code = run(
+            &mut env,
+            PrCommand::CreateBody {
+                base: s("develop"),
+                head: None,
+                title: s("t"),
+                body: s("b"),
+                labels: vec![],
+                draft: true,
+            },
+            &mut out,
+        )
+        .expect("run pr create draft");
+        assert_eq!(code, 0, "{out}");
+        assert_eq!(env.pr_create_call_log.len(), 1);
+
+        // Fresh evidence unlocks the Ready handoff.
+        crate::cli::verification_record::run_verification(
+            tmp.path(),
+            "sess-pr",
+            &["git --version".to_string()],
+        )
+        .unwrap();
+        let mut out = String::new();
+        let code = run(&mut env, PrCommand::Ready { number: 7 }, &mut out).expect("run pr ready");
+        assert_eq!(code, 0, "{out}");
+        assert_eq!(env.pr_ready_call_log, vec![7]);
+
+        // A terminally blocked execution refuses entirely, even with evidence.
+        crate::cli::execution_state::materialize_at_launch(
+            tmp.path(),
+            crate::cli::execution_state::ExecutionOwnerKind::Issue,
+            42,
+            "sess-pr",
+            "launch",
+            false,
+        )
+        .unwrap();
+        crate::cli::execution_state::settle(
+            tmp.path(),
+            "sess-pr",
+            crate::cli::execution_state::ExecutionSettlement::Blocked {
+                reason: "environment blocker".to_string(),
+                missing_verification: None,
+            },
+        )
+        .unwrap();
+        let mut out = String::new();
+        let code = run(&mut env, PrCommand::Ready { number: 7 }, &mut out).expect("run pr ready");
+        assert_eq!(code, 2, "{out}");
+        assert!(out.contains("terminally blocked"), "{out}");
+
+        // AS-33: a blocked execution refuses every PR mutation — draft
+        // creation and edits included.
+        let mut out = String::new();
+        let code = run(
+            &mut env,
+            PrCommand::CreateBody {
+                base: s("develop"),
+                head: None,
+                title: s("t"),
+                body: s("b"),
+                labels: vec![],
+                draft: true,
+            },
+            &mut out,
+        )
+        .expect("run pr create draft while blocked");
+        assert_eq!(code, 2, "{out}");
+        let mut out = String::new();
+        let code = run(
+            &mut env,
+            PrCommand::EditBody {
+                number: 7,
+                title: Some(s("t2")),
+                body: None,
+                add_labels: vec![],
+            },
+            &mut out,
+        )
+        .expect("run pr edit while blocked");
+        assert_eq!(code, 2, "{out}");
+        assert!(env.pr_edit_call_log.is_empty(), "edit must not reach gh");
     }
 
     #[test]

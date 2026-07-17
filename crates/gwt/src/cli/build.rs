@@ -50,11 +50,38 @@ pub(super) fn run<E: CliEnv>(
                 .filter(|value| !value.is_empty())
             {
                 let worktree = gwt_core::paths::resolve_current_worktree_root(env.repo_path());
-                crate::cli::execution_state::settle_completed_best_effort(
-                    &worktree,
-                    &session_id,
-                    spec,
-                );
+                // SPEC-3248 P8b (T-111): the execution settlement piggybacked
+                // on build.complete also requires fresh verification
+                // evidence; a build completion without it finalizes the
+                // skill state but leaves the execution active so the Stop
+                // gate keeps the session working toward real evidence.
+                let has_matching_active_record = crate::cli::execution_state::load(&worktree)
+                    .ok()
+                    .flatten()
+                    .is_some_and(|record| {
+                        record.status == crate::cli::execution_state::ExecutionControlStatus::Active
+                            && record.primary_session_id == session_id
+                            && record.owner_number == spec
+                    });
+                if has_matching_active_record {
+                    let status = crate::cli::verification_record::evaluate_evidence(
+                        &worktree,
+                        &session_id,
+                        Some(spec),
+                    );
+                    if status == crate::cli::verification_record::EvidenceStatus::Fresh {
+                        crate::cli::execution_state::settle_completed_best_effort(
+                            &worktree,
+                            &session_id,
+                            spec,
+                        );
+                    } else {
+                        out.push_str(&format!(
+                            "{VERB}: execution control not settled — {}\n",
+                            status.describe()
+                        ));
+                    }
+                }
             }
         }
     }

@@ -65,6 +65,12 @@ must end without completion, run JSON operation `execution.blocked` with a
 non-empty `params.reason` (and optional `params.missing_verification`) so the
 blocked exit is recorded instead of looping the Stop gate.
 
+The settlement consumes tool-generated verification evidence (SPEC-3248
+P8b): run the verification matrix through JSON operation `verify.run` with
+`params.commands:[...]` before `build.complete` / `execution.complete`. A
+completion without a fresh all-passing record leaves the execution active
+and the Stop gate engaged.
+
 ## Mode detection
 
 Determine the mode at entry:
