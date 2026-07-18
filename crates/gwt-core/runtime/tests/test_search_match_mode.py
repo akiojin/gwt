@@ -51,13 +51,16 @@ class SearchMatchModeTests(unittest.TestCase):
     def test_search_multi_returns_suggestions_by_scope(self):
         with mock.patch.object(
             runner,
-            "action_search_v2",
+            "_classify_scope_for_search",
+            return_value=("fresh", {"reason": "ready"}),
+        ), mock.patch.object(
+            runner,
+            "_search_scope_collection",
             return_value={
-                "ok": True,
                 "issueResults": [],
                 "suggestions": [{"number": 1, "title": "Workspace only"}],
             },
-        ) as action:
+        ) as search:
             result = runner.action_search_multi_v2(
                 repo_hash="repo",
                 worktree_hash=None,
@@ -70,7 +73,7 @@ class SearchMatchModeTests(unittest.TestCase):
 
         self.assertTrue(result["ok"])
         self.assertEqual(result["suggestions"]["issues"][0]["title"], "Workspace only")
-        self.assertEqual(action.call_args.kwargs["match_mode"], "all_terms")
+        self.assertEqual(search.call_args.args[5], "all_terms")
 
 
 if __name__ == "__main__":

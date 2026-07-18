@@ -192,6 +192,30 @@ fn ensure_project_index_runtime_with(
         report.dependencies_installed = true;
     }
 
+    // Phase 70 FR-393 (Issue #3264): successful probes are cached for 24h
+    // keyed by runner hash / requirements hash / venv python identity, so
+    // every status / bootstrap / search stops paying two cold Python starts.
+    let probe_cache = runtime_dir.join(PROBE_CACHE_FILE);
+    if !report.venv_created
+        && !report.dependencies_installed
+        && probe_cache_is_valid(&probe_cache, &report, &venv_python)
+    {
+        report.runner_smoke_tested = true;
+        return Ok(report);
+    }
+    // Cross-process probe single-flight: hold the kernel probe lock while
+    // probing / rebuilding, and revalidate the cache after acquiring it —
+    // another process may have finished the same probe while we waited.
+    let _probe_lock = acquire_probe_lock(&runtime_dir)?;
+    if !report.venv_created
+        && !report.dependencies_installed
+        && probe_cache_is_valid(&probe_cache, &report, &venv_python)
+    {
+        report.runner_smoke_tested = true;
+        return Ok(report);
+    }
+    let _ = std::fs::remove_file(&probe_cache);
+
     if let Err(first_probe_error) = provisioner.probe_chromadb(&venv_python) {
         if venv_dir.exists() {
             remove_runtime_dir_for_rebuild(&venv_dir)?;
@@ -228,8 +252,93 @@ fn ensure_project_index_runtime_with(
         }
     }
     report.runner_smoke_tested = true;
+    write_probe_cache(&probe_cache, &report, &venv_python);
 
     Ok(report)
+}
+
+const PROBE_CACHE_FILE: &str = "probe_cache.json";
+const PROBE_LOCK_FILE: &str = "probe.lock";
+const PROBE_CACHE_TTL_SECS: u64 = 24 * 3600;
+
+/// Drop the positive probe cache so the next runtime ensure re-probes.
+/// Callers invoke this when an actual runner invocation failed (FR-393:
+/// invalidate on failure).
+pub fn invalidate_project_index_probe_cache() {
+    let cache = crate::paths::gwt_runtime_dir().join(PROBE_CACHE_FILE);
+    let _ = std::fs::remove_file(cache);
+}
+
+fn acquire_probe_lock(runtime_dir: &Path) -> Result<std::fs::File> {
+    use fs2::FileExt;
+    let lock_path = runtime_dir.join(PROBE_LOCK_FILE);
+    let lock = std::fs::OpenOptions::new()
+        .create(true)
+        .read(true)
+        .write(true)
+        .truncate(false)
+        .open(&lock_path)
+        .map_err(|err| GwtError::Other(format!("open probe lock: {err}")))?;
+    lock.lock_exclusive()
+        .map_err(|err| GwtError::Other(format!("acquire probe lock: {err}")))?;
+    Ok(lock)
+}
+
+fn venv_python_identity(venv_python: &Path) -> String {
+    let modified_ms = std::fs::metadata(venv_python)
+        .and_then(|meta| meta.modified())
+        .ok()
+        .and_then(|modified| modified.duration_since(std::time::UNIX_EPOCH).ok())
+        .map(|duration| duration.as_millis() as u64)
+        .unwrap_or(0);
+    format!("{}:{modified_ms}", venv_python.display())
+}
+
+fn probe_cache_is_valid(
+    cache_path: &Path,
+    report: &ProjectIndexRuntimeReport,
+    venv_python: &Path,
+) -> bool {
+    if !venv_python.exists() {
+        return false;
+    }
+    let Ok(raw) = std::fs::read(cache_path) else {
+        return false;
+    };
+    let Ok(payload) = serde_json::from_slice::<serde_json::Value>(&raw) else {
+        return false;
+    };
+    let field = |key: &str| payload.get(key).and_then(serde_json::Value::as_str);
+    if field("runner_hash") != Some(report.runner_hash.as_str())
+        || field("requirements_hash") != Some(report.requirements_hash.as_str())
+        || field("venv_python_identity") != Some(venv_python_identity(venv_python).as_str())
+    {
+        return false;
+    }
+    let verified_at_ms = payload
+        .get("verified_at_ms")
+        .and_then(serde_json::Value::as_u64)
+        .unwrap_or(0);
+    let now_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|duration| duration.as_millis() as u64)
+        .unwrap_or(0);
+    now_ms.saturating_sub(verified_at_ms) < PROBE_CACHE_TTL_SECS * 1000
+}
+
+fn write_probe_cache(cache_path: &Path, report: &ProjectIndexRuntimeReport, venv_python: &Path) {
+    let now_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|duration| duration.as_millis() as u64)
+        .unwrap_or(0);
+    let payload = serde_json::json!({
+        "schema_version": 1,
+        "runner_hash": report.runner_hash,
+        "requirements_hash": report.requirements_hash,
+        "venv_python_identity": venv_python_identity(venv_python),
+        "verified_at_ms": now_ms,
+    });
+    let _ = std::fs::write(cache_path, payload.to_string());
 }
 
 fn content_hash(contents: &str) -> String {
@@ -806,6 +915,53 @@ mod tests {
         assert!(!second.venv_rebuilt);
         assert!(!second.dependencies_installed);
         assert!(second.runner_smoke_tested);
+        // Phase 70 FR-393: the positive probe cache is still valid, so no
+        // probe Python is spawned at all on the second ensure.
+        assert_eq!(provisioner.calls(), Vec::<&'static str>::new());
+    }
+
+    #[test]
+    fn expired_probe_cache_reprobes_and_refreshes() {
+        let root = tempfile::tempdir().unwrap();
+        let gwt_home = root.path().join(".gwt");
+        let provisioner = FakeProvisioner::new(root.path());
+
+        ensure_project_index_runtime_with(&gwt_home, &provisioner).unwrap();
+        provisioner.calls.borrow_mut().clear();
+
+        // Age the cache past its 24h TTL.
+        let cache_path = gwt_home.join("runtime").join(PROBE_CACHE_FILE);
+        let mut payload: serde_json::Value =
+            serde_json::from_slice(&fs::read(&cache_path).unwrap()).unwrap();
+        payload["verified_at_ms"] = serde_json::json!(0);
+        fs::write(&cache_path, payload.to_string()).unwrap();
+
+        let report = ensure_project_index_runtime_with(&gwt_home, &provisioner).unwrap();
+        assert!(report.runner_smoke_tested);
+        assert_eq!(provisioner.calls(), vec!["probe_chromadb", "probe_runner"]);
+
+        // A fresh cache was written back: the third ensure skips again.
+        provisioner.calls.borrow_mut().clear();
+        ensure_project_index_runtime_with(&gwt_home, &provisioner).unwrap();
+        assert_eq!(provisioner.calls(), Vec::<&'static str>::new());
+    }
+
+    #[test]
+    fn mismatched_probe_cache_identity_reprobes() {
+        let root = tempfile::tempdir().unwrap();
+        let gwt_home = root.path().join(".gwt");
+        let provisioner = FakeProvisioner::new(root.path());
+
+        ensure_project_index_runtime_with(&gwt_home, &provisioner).unwrap();
+        provisioner.calls.borrow_mut().clear();
+
+        let cache_path = gwt_home.join("runtime").join(PROBE_CACHE_FILE);
+        let mut payload: serde_json::Value =
+            serde_json::from_slice(&fs::read(&cache_path).unwrap()).unwrap();
+        payload["venv_python_identity"] = serde_json::json!("another-python:123");
+        fs::write(&cache_path, payload.to_string()).unwrap();
+
+        ensure_project_index_runtime_with(&gwt_home, &provisioner).unwrap();
         assert_eq!(provisioner.calls(), vec!["probe_chromadb", "probe_runner"]);
     }
 
@@ -866,6 +1022,9 @@ mod tests {
         let _ = ensure_project_index_runtime_with(&gwt_home, &provisioner).unwrap();
         provisioner.calls.borrow_mut().clear();
         provisioner.fail_probe_once.set(true);
+        // A failed runner invocation invalidates the positive probe cache
+        // (FR-393), which is what lets the rebuild path run again.
+        fs::remove_file(gwt_home.join("runtime").join(PROBE_CACHE_FILE)).unwrap();
 
         let report = ensure_project_index_runtime_with(&gwt_home, &provisioner).unwrap();
         assert!(report.venv_rebuilt);
@@ -892,6 +1051,9 @@ mod tests {
         let _ = ensure_project_index_runtime_with(&gwt_home, &provisioner).unwrap();
         provisioner.calls.borrow_mut().clear();
         provisioner.fail_runner_probe_once.set(true);
+        // A failed runner invocation invalidates the positive probe cache
+        // (FR-393), which is what lets the rebuild path run again.
+        fs::remove_file(gwt_home.join("runtime").join(PROBE_CACHE_FILE)).unwrap();
 
         let report = ensure_project_index_runtime_with(&gwt_home, &provisioner).unwrap();
         assert!(report.venv_rebuilt);

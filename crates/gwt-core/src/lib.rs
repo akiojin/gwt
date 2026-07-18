@@ -10,6 +10,7 @@ pub mod coordination;
 pub mod daemon;
 pub mod error;
 pub mod index;
+pub mod index_coordinator;
 pub mod logging;
 pub mod migration;
 pub mod paths;

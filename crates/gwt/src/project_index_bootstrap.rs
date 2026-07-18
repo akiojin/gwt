@@ -810,7 +810,9 @@ pub(crate) fn spawn_per_cell_rebuild(
         project_root,
         scope,
         worktree_hash,
-        Arc::new(gwt::default_rebuild_runner),
+        // Per-cell rebuilds are user-initiated: manual priority so they
+        // preempt background repair for the heavy lease (FR-383).
+        Arc::new(gwt::manual_rebuild_runner),
         Arc::new(|path: &Path| -> gwt::ProjectIndexStatusView {
             gwt::global_aggregated_status_cache().invalidate(path);
             gwt::aggregate_project_index_status_for_path(path)
