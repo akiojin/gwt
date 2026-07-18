@@ -6991,6 +6991,8 @@ impl PublicMutationContext {
     }
 
     fn for_repo_until(repo_root: &Path, expires_at: Instant) -> Self {
+        let _operation_deadline =
+            gwt_core::operation_deadline::ScopedOperationDeadline::enter(expires_at);
         let mut denied = BTreeSet::new();
         let mut collection_complete = true;
         add_path(&mut denied, repo_root);
@@ -8200,6 +8202,47 @@ mod tests {
         );
         assert!(configured.contains("configured-value"));
         assert!(!configured.contains("/public/bin"));
+    }
+
+    #[test]
+    fn repository_context_deadline_stops_before_linked_worktree_collection() {
+        let root = tempfile::tempdir().expect("root");
+        let repository = root.path().join("deadline-repo");
+        let worktree = root.path().join("deadline-linked-worktree");
+        std::fs::create_dir_all(&repository).expect("repository");
+        run_git(&repository, &["init"]);
+        run_git(
+            &repository,
+            &["config", "user.email", "test@example.invalid"],
+        );
+        run_git(&repository, &["config", "user.name", "Test"]);
+        std::fs::write(repository.join("README.md"), "fixture\n").expect("README");
+        run_git(&repository, &["add", "README.md"]);
+        run_git(&repository, &["commit", "-m", "test: fixture"]);
+        run_git(
+            &repository,
+            &[
+                "worktree",
+                "add",
+                "--detach",
+                worktree.to_str().expect("worktree path"),
+                "HEAD",
+            ],
+        );
+
+        let context = PublicMutationContext::for_repo_until(
+            &repository,
+            Instant::now() - Duration::from_millis(1),
+        );
+
+        assert!(!context.collection_complete);
+        assert!(
+            !context
+                .denied_values
+                .iter()
+                .any(|value| value.contains("deadline-linked-worktree")),
+            "expired privacy collection must not run a linked-worktree probe"
+        );
     }
 
     #[test]
