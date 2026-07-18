@@ -60,9 +60,15 @@ impl BlockingTaskSpawner {
             }
             #[cfg(test)]
             Self::Thread => {
+                let gwt_home = gwt_core::test_support::gwt_home_override();
                 thread::Builder::new()
                     .name("gwt-blocking-task".to_string())
-                    .spawn(task)
+                    .spawn(move || {
+                        let _gwt_home = gwt_home
+                            .as_ref()
+                            .map(gwt_core::test_support::ScopedGwtHome::set);
+                        task();
+                    })
                     .expect("spawn test blocking task");
             }
         }

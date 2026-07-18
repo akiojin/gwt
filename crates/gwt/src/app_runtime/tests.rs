@@ -29,6 +29,7 @@ use gwt_core::{
     logging::{current_log_file, LogLevel},
     paths::gwt_cache_dir,
     repo_hash::detect_repo_hash,
+    test_support::ScopedGwtHome,
 };
 use gwt_github::{
     ApiError, Cache, CommentId, CommentSnapshot, FakeIssueClient, FetchResult, IssueClient,
@@ -110,6 +111,7 @@ fn improvement_v2_frontend_events_deserialize_safe_owner_fields() {
 #[test]
 fn improvement_v2_frontend_actions_run_off_thread_and_return_typed_errors() {
     let temp = tempdir().expect("runtime root");
+    let _gwt_home = ScopedGwtHome::set(temp.path());
     let project = temp.path().join("project");
     fs::create_dir_all(&project).expect("project root");
     let tab = sample_project_tab("tab-1", "Repo", project.clone(), ProjectKind::Git, &[]);
@@ -243,6 +245,28 @@ fn improvement_v2_frontend_actions_run_off_thread_and_return_typed_errors() {
         BackendEvent::ImprovementCandidates { project_root, .. }
             if project_root == &project.display().to_string()
     ));
+}
+
+#[test]
+fn blocking_task_spawner_propagates_scoped_gwt_home() {
+    let home = tempdir().expect("isolated gwt home");
+    let _gwt_home = ScopedGwtHome::set(home.path());
+    let expected = home.path().join(".gwt");
+    let spawner = BlockingTaskSpawner::thread();
+    let (observed_tx, observed_rx) = mpsc::channel();
+
+    spawner.spawn(move || {
+        observed_tx
+            .send(gwt_core::paths::gwt_home())
+            .expect("report worker gwt home");
+    });
+
+    assert_eq!(
+        observed_rx
+            .recv_timeout(Duration::from_secs(2))
+            .expect("worker reports gwt home"),
+        expected
+    );
 }
 
 #[test]
