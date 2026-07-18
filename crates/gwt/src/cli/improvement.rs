@@ -358,6 +358,9 @@ pub(crate) struct ImprovementCandidate {
     pub(super) capture_status_generation: u64,
     #[serde(default)]
     pub(super) capture_status_delivered_generation: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(super) capture_status_delivery_claim:
+        Option<super::improvement_store::CaptureStatusDeliveryClaim>,
     #[serde(default)]
     pub(super) owner_status_generation: u64,
     #[serde(default)]
@@ -695,18 +698,19 @@ fn capture<E: CliEnv>(
     let updated_existing = result.updated_existing;
     let mut candidate = result.candidate;
     let pending_generation = pending_capture_status_generation(&candidate);
-    if let Some(generation) = pending_generation {
-        post_candidate_captured_status(env, &candidate, updated_existing)?;
-        acknowledge_capture_status(&repo_root, &candidate.id, generation)?;
-        candidate.capture_status_delivered_generation = generation;
-    }
+    let capture_status_settled = deliver_pending_capture_status(
+        env,
+        &mut candidate,
+        updated_existing,
+        CaptureBudgetProfile::Normal,
+    )?;
     if matches!(
         candidate.state,
         CandidateState::Linked | CandidateState::Created
     ) {
         deliver_pending_owner_status(env, &mut candidate)?;
     }
-    if should_resolve_after_capture(&candidate, pending_generation) {
+    if capture_status_settled && should_resolve_after_capture(&candidate, pending_generation) {
         candidate = resolve_candidate_owner(env, &candidate.id, CaptureBudgetProfile::Normal)?;
     }
     write_json(
@@ -871,7 +875,11 @@ fn capture_typed(
             candidate.dedupe_key = format!("fingerprint:{fingerprint}");
             candidate.occurrences = candidate.distinct_occurrences.len() as u64;
             candidate.eligibility = typed_eligibility(candidate);
-            let next_state = settled_typed_capture_state(&candidate.state, candidate.eligibility);
+            let next_state = if qualifies_unattended {
+                settled_typed_capture_state(&candidate.state, candidate.eligibility)
+            } else {
+                settled_capture_state(&candidate.state, candidate.eligibility)
+            };
             transition_candidate(candidate, next_state)?;
             if qualifies_unattended {
                 queue_capture_status(candidate)?;
@@ -907,6 +915,7 @@ fn capture_typed(
             distinct_occurrences,
             capture_status_generation: u64::from(qualifies_unattended),
             capture_status_delivered_generation: 0,
+            capture_status_delivery_claim: None,
             owner_status_generation: 0,
             owner_status_delivered_generation: 0,
             owner_status_delivery_claim: None,
@@ -1028,18 +1037,19 @@ pub(crate) fn capture_registered<E: CliEnv>(
     )?;
     let mut candidate = result.candidate;
     let pending_generation = pending_capture_status_generation(&candidate);
-    if let Some(generation) = pending_generation {
-        post_candidate_captured_status(env, &candidate, result.updated_existing)?;
-        acknowledge_capture_status(&repo_root, &candidate.id, generation)?;
-        candidate.capture_status_delivered_generation = generation;
-    }
+    let capture_status_settled = deliver_pending_capture_status(
+        env,
+        &mut candidate,
+        result.updated_existing,
+        input.budget_profile,
+    )?;
     if matches!(
         candidate.state,
         CandidateState::Linked | CandidateState::Created
     ) {
         deliver_pending_owner_status(env, &mut candidate)?;
     }
-    if should_resolve_after_capture(&candidate, pending_generation) {
+    if capture_status_settled && should_resolve_after_capture(&candidate, pending_generation) {
         candidate = resolve_candidate_owner(env, &candidate.id, input.budget_profile)?;
     }
     Ok(candidate)
@@ -1121,6 +1131,7 @@ fn capture_legacy_compatibility(
                 distinct_occurrences: Vec::new(),
                 capture_status_generation: u64::from(capture_claim_qualifies(command)),
                 capture_status_delivered_generation: 0,
+                capture_status_delivery_claim: None,
                 owner_status_generation: 0,
                 owner_status_delivered_generation: 0,
                 owner_status_delivery_claim: None,
@@ -1324,6 +1335,17 @@ pub(super) fn validate_candidate_lifecycle(
         return Err(invalid(
             "capture status delivery generation exceeds its queued generation",
         ));
+    }
+    if let Some(claim) = &candidate.capture_status_delivery_claim {
+        if claim.claim_id.trim().is_empty()
+            || claim.lease_owner.trim().is_empty()
+            || claim.generation == 0
+            || claim.generation <= candidate.capture_status_delivered_generation
+            || claim.generation > candidate.capture_status_generation
+            || claim.expires_at <= claim.started_at
+        {
+            return Err(invalid("capture status delivery claim is invalid"));
+        }
     }
     if candidate.owner_status_delivered_generation > candidate.owner_status_generation {
         return Err(invalid(
@@ -2137,21 +2159,56 @@ fn should_resolve_after_capture(
         ) && pending_generation.is_some())
 }
 
-fn acknowledge_capture_status(
-    repo_root: &Path,
-    candidate_id: &str,
-    generation: u64,
-) -> Result<(), SpecOpsError> {
-    super::improvement_store::update(repo_root, |store| {
-        let candidate = find_candidate_mut(store, candidate_id)?;
-        if generation == 0 || generation > candidate.capture_status_generation {
-            return Err(invalid("capture status acknowledgement is invalid"));
-        }
-        candidate.capture_status_delivered_generation = candidate
-            .capture_status_delivered_generation
-            .max(generation);
-        Ok(())
-    })
+fn deliver_pending_capture_status<E: CliEnv>(
+    env: &mut E,
+    candidate: &mut ImprovementCandidate,
+    updated_existing: bool,
+    budget_profile: CaptureBudgetProfile,
+) -> Result<bool, SpecOpsError> {
+    if pending_capture_status_generation(candidate).is_none() {
+        return Ok(true);
+    }
+    let repo_root = env.repo_path().to_path_buf();
+    let candidate_id = candidate.id.clone();
+    let lease_owner = std::env::var(gwt_agent::GWT_SESSION_ID_ENV)
+        .ok()
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or_else(|| format!("pid-{}", std::process::id()));
+    let (status_candidate, claim_id) =
+        match super::improvement_store::claim_capture_status_delivery(
+            &repo_root,
+            &candidate_id,
+            &lease_owner,
+            Utc::now(),
+            budget_profile.lease_ttl(),
+        )? {
+            super::improvement_store::CaptureStatusDeliveryDecision::AlreadyDelivered(stored) => {
+                *candidate = stored;
+                return Ok(true);
+            }
+            super::improvement_store::CaptureStatusDeliveryDecision::Busy(stored) => {
+                *candidate = stored;
+                return Ok(false);
+            }
+            super::improvement_store::CaptureStatusDeliveryDecision::Acquired {
+                candidate,
+                claim_id,
+            } => (candidate, claim_id),
+        };
+    if let Err(error) = post_candidate_captured_status(env, &status_candidate, updated_existing) {
+        *candidate = super::improvement_store::release_capture_status_delivery(
+            &repo_root,
+            &candidate_id,
+            &claim_id,
+        )?;
+        return Err(error);
+    }
+    *candidate = super::improvement_store::acknowledge_capture_status_delivery(
+        &repo_root,
+        &candidate_id,
+        &claim_id,
+    )?;
+    Ok(true)
 }
 
 fn post_candidate_captured_status<E: CliEnv>(
@@ -3295,6 +3352,99 @@ mod tests {
             ),
             CandidateState::OwnerResolving
         );
+    }
+
+    #[test]
+    fn nonqualifying_typed_occurrence_preserves_successful_owner_state() {
+        let home = tempfile::tempdir().expect("isolated home");
+        let _gwt_home = gwt_core::test_support::ScopedGwtHome::set(home.path());
+        let project = tempfile::tempdir().expect("project");
+        let evidence = TypedFailureEvidence {
+            subsystem: "coordination".to_string(),
+            contract_id: "coordination.board-status".to_string(),
+            contract_schema_revision: 1,
+            failure_code: "STATUS_NOT_POSTED".to_string(),
+            target_artifact: "coordination".to_string(),
+            expected_outcome: "BOARD_STATUS_POSTED".to_string(),
+            observed_outcome: "BOARD_STATUS_MISSING".to_string(),
+        };
+        let qualifying_command = ImprovementCaptureCommand {
+            source: "hook-runtime".to_string(),
+            target_artifact: "coordination".to_string(),
+            classification: "gwt-caused".to_string(),
+            confidence: "high".to_string(),
+            summary: "Qualifying occurrence".to_string(),
+            details: None,
+            evidence_digest: None,
+            dedupe_key: None,
+            local_evidence: Vec::new(),
+            typed_evidence: None,
+        };
+        let mut nonqualifying_command = qualifying_command.clone();
+        nonqualifying_command.classification = "external".to_string();
+        nonqualifying_command.confidence = "low".to_string();
+        nonqualifying_command.summary = "Nonqualifying occurrence".to_string();
+
+        for state in [CandidateState::Linked, CandidateState::Created] {
+            let repo = project.path().join(state.as_str());
+            std::fs::create_dir_all(&repo).expect("repo path");
+            let initial = capture_typed(
+                &repo,
+                &qualifying_command,
+                evidence.clone(),
+                ValidatedCaptureOrigin::Registered {
+                    producer_id: "test.coordination-gate.v1",
+                    source_event_id: "qualifying-event".to_string(),
+                    producer_registry_revision: PRODUCER_REGISTRY_REVISION,
+                    routing_basis_revision: 1,
+                    recurrence: None,
+                },
+            )
+            .expect("qualifying capture")
+            .candidate;
+            let fingerprint = initial.fingerprint.clone().expect("typed fingerprint");
+            super::super::improvement_store::update(&repo, |store| {
+                let candidate = find_candidate_mut(store, &initial.id)?;
+                candidate.state = state;
+                candidate.capture_status_delivered_generation = candidate.capture_status_generation;
+                candidate.owner = Some(DurableOwnerSnapshot {
+                    number: 77,
+                    kind: OwnerKind::Issue,
+                    title: "Existing durable owner".to_string(),
+                    active: true,
+                    url: "https://github.com/akiojin/gwt/issues/77".to_string(),
+                    fingerprint: fingerprint.clone(),
+                    readback_verified_at: Utc::now().to_rfc3339(),
+                });
+                Ok(())
+            })
+            .expect("persist successful owner state");
+
+            let recaptured = capture_typed(
+                &repo,
+                &nonqualifying_command,
+                evidence.clone(),
+                ValidatedCaptureOrigin::Registered {
+                    producer_id: "test.coordination-gate.v1",
+                    source_event_id: "nonqualifying-event".to_string(),
+                    producer_registry_revision: PRODUCER_REGISTRY_REVISION,
+                    routing_basis_revision: 1,
+                    recurrence: None,
+                },
+            )
+            .expect("nonqualifying capture")
+            .candidate;
+
+            assert_eq!(recaptured.state, state);
+            assert_eq!(
+                recaptured.owner.as_ref().map(|owner| owner.number),
+                Some(77)
+            );
+            assert_eq!(recaptured.capture_status_generation, 1);
+            assert_eq!(recaptured.capture_status_delivered_generation, 1);
+            assert_eq!(recaptured.distinct_occurrences.len(), 2);
+            assert!(!recaptured.distinct_occurrences[1].qualifies_unattended);
+        }
     }
 
     #[test]
@@ -4782,6 +4932,65 @@ mod tests {
     }
 
     #[test]
+    fn registered_capture_observes_a_live_capture_status_delivery_claim() {
+        let home = tempfile::tempdir().expect("isolated home");
+        let _gwt_home = gwt_core::test_support::ScopedGwtHome::set(home.path());
+        let project = tempfile::tempdir().expect("project");
+        let mut env = TestEnv::new(project.path().join("cache"));
+        env.repo_path = project.path().join("source");
+        std::fs::create_dir_all(&env.repo_path).expect("repo path");
+        let candidate =
+            capture_registered_candidate_without_resolution(&mut env, "capture-status-busy");
+        let claim_id = match super::super::improvement_store::claim_capture_status_delivery(
+            &env.repo_path,
+            &candidate.id,
+            "concurrent-worker",
+            Utc::now(),
+            chrono::Duration::seconds(15),
+        )
+        .expect("claim pending capture status")
+        {
+            super::super::improvement_store::CaptureStatusDeliveryDecision::Acquired {
+                claim_id,
+                ..
+            } => claim_id,
+            other => panic!("expected delivery claim, got {other:?}"),
+        };
+        let token = registered_producer_token("test.coordination-gate").expect("registered token");
+
+        let replay = capture_registered(
+            &mut env,
+            registered_capture_input(
+                token,
+                "capture-status-busy",
+                1,
+                CaptureBudgetProfile::Normal,
+            ),
+        )
+        .expect("busy replay");
+
+        assert_eq!(replay.id, candidate.id);
+        assert_eq!(replay.capture_status_delivered_generation, 0);
+        assert_eq!(
+            board_bodies(&mut env)
+                .iter()
+                .filter(|body| {
+                    body.contains(&candidate.id)
+                        && (body.contains("was captured") || body.contains("was updated"))
+                })
+                .count(),
+            0,
+            "a live claim must suppress a duplicate capture status"
+        );
+        super::super::improvement_store::release_capture_status_delivery(
+            &env.repo_path,
+            &candidate.id,
+            &claim_id,
+        )
+        .expect("release synthetic concurrent claim");
+    }
+
+    #[test]
     fn distinct_public_outcomes_with_one_fingerprint_remain_owner_eligible() {
         let home = tempfile::tempdir().expect("isolated home");
         let _gwt_home = gwt_core::test_support::ScopedGwtHome::set(home.path());
@@ -5094,6 +5303,12 @@ mod tests {
         std::fs::set_permissions(&env.repo_path, std::fs::Permissions::from_mode(0o700))
             .expect("restore Board path permissions");
         assert!(first.is_err(), "first Board post must fail");
+        let pending = load_store(&env.repo_path).expect("pending capture after Board failure");
+        assert_eq!(pending.candidates[0].capture_status_generation, 1);
+        assert_eq!(pending.candidates[0].capture_status_delivered_generation, 0);
+        assert!(pending.candidates[0]
+            .capture_status_delivery_claim
+            .is_none());
 
         capture_registered(
             &mut env,
@@ -5986,6 +6201,8 @@ mod tests {
 
     #[test]
     fn capture_status_ack_does_not_clear_a_newer_pending_generation() {
+        let home = tempfile::tempdir().expect("isolated home");
+        let _gwt_home = gwt_core::test_support::ScopedGwtHome::set(home.path());
         let project = tempfile::tempdir().expect("project");
         let token = registered_producer_token("test.coordination-gate").expect("registered token");
         let mut env = TestEnv::new(project.path().join("cache"));
@@ -5999,14 +6216,39 @@ mod tests {
 
         super::super::improvement_store::update(&env.repo_path, |store| {
             let candidate = find_candidate_mut(store, &candidate.id)?;
-            candidate.capture_status_generation = 3;
+            candidate.capture_status_generation = 2;
             candidate.capture_status_delivered_generation = 1;
             Ok(())
         })
-        .expect("simulate two concurrent pending captures");
+        .expect("queue the first concurrent capture");
+        let first_claim = match super::super::improvement_store::claim_capture_status_delivery(
+            &env.repo_path,
+            &candidate.id,
+            "worker-a",
+            Utc::now(),
+            chrono::Duration::seconds(15),
+        )
+        .expect("claim first pending capture")
+        {
+            super::super::improvement_store::CaptureStatusDeliveryDecision::Acquired {
+                claim_id,
+                ..
+            } => claim_id,
+            other => panic!("expected first claim, got {other:?}"),
+        };
+        super::super::improvement_store::update(&env.repo_path, |store| {
+            let candidate = find_candidate_mut(store, &candidate.id)?;
+            candidate.capture_status_generation = 3;
+            Ok(())
+        })
+        .expect("queue a newer capture while the first post is in flight");
 
-        acknowledge_capture_status(&env.repo_path, &candidate.id, 2)
-            .expect("older successful post acknowledgement");
+        super::super::improvement_store::acknowledge_capture_status_delivery(
+            &env.repo_path,
+            &candidate.id,
+            &first_claim,
+        )
+        .expect("older successful post acknowledgement");
         let stored = load_store(&env.repo_path).expect("store after older acknowledgement");
         assert_eq!(stored.candidates[0].capture_status_delivered_generation, 2);
         assert_eq!(
@@ -6014,8 +6256,27 @@ mod tests {
             Some(3)
         );
 
-        acknowledge_capture_status(&env.repo_path, &candidate.id, 3)
-            .expect("newer post acknowledgement");
+        let second_claim = match super::super::improvement_store::claim_capture_status_delivery(
+            &env.repo_path,
+            &candidate.id,
+            "worker-b",
+            Utc::now(),
+            chrono::Duration::seconds(15),
+        )
+        .expect("claim newer pending capture")
+        {
+            super::super::improvement_store::CaptureStatusDeliveryDecision::Acquired {
+                claim_id,
+                ..
+            } => claim_id,
+            other => panic!("expected second claim, got {other:?}"),
+        };
+        super::super::improvement_store::acknowledge_capture_status_delivery(
+            &env.repo_path,
+            &candidate.id,
+            &second_claim,
+        )
+        .expect("newer post acknowledgement");
         let stored = load_store(&env.repo_path).expect("store after newer acknowledgement");
         assert_eq!(
             pending_capture_status_generation(&stored.candidates[0]),

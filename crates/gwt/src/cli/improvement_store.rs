@@ -151,6 +151,8 @@ struct LegacyDiagnostic {
 pub(super) struct LegacyProvenance {
     pub(super) source_id: String,
     pub(super) content_digest: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(super) occurrence_count: Option<u64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -164,6 +166,25 @@ pub(super) struct ResolutionAttemptLease {
     pub(super) remote_mutation_seen: bool,
     #[serde(default)]
     pub(super) intent: ResolutionAttemptIntent,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub(super) struct CaptureStatusDeliveryClaim {
+    pub(super) claim_id: String,
+    pub(super) generation: u64,
+    pub(super) lease_owner: String,
+    pub(super) started_at: chrono::DateTime<chrono::Utc>,
+    pub(super) expires_at: chrono::DateTime<chrono::Utc>,
+}
+
+#[derive(Debug)]
+pub(super) enum CaptureStatusDeliveryDecision {
+    AlreadyDelivered(ImprovementCandidate),
+    Busy(ImprovementCandidate),
+    Acquired {
+        candidate: ImprovementCandidate,
+        claim_id: String,
+    },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -1249,6 +1270,101 @@ pub(super) fn acquire_attempt_lease(
     Ok(AttemptLeaseDecision::Acquired(lease))
 }
 
+pub(super) fn claim_capture_status_delivery(
+    repo_root: &Path,
+    candidate_id: &str,
+    lease_owner: &str,
+    now: chrono::DateTime<chrono::Utc>,
+    ttl: chrono::Duration,
+) -> Result<CaptureStatusDeliveryDecision, SpecOpsError> {
+    if lease_owner.trim().is_empty() || ttl <= chrono::Duration::zero() {
+        return Err(invalid("capture status delivery claim is invalid"));
+    }
+    update(repo_root, |store| {
+        let candidate = store
+            .candidates
+            .iter_mut()
+            .find(|candidate| candidate.id == candidate_id)
+            .ok_or_else(|| invalid("candidate not found"))?;
+        if candidate.capture_status_delivered_generation >= candidate.capture_status_generation {
+            candidate.capture_status_delivery_claim = None;
+            return Ok(CaptureStatusDeliveryDecision::AlreadyDelivered(
+                candidate.clone(),
+            ));
+        }
+        if candidate
+            .capture_status_delivery_claim
+            .as_ref()
+            .is_some_and(|claim| claim.expires_at > now)
+        {
+            return Ok(CaptureStatusDeliveryDecision::Busy(candidate.clone()));
+        }
+        let claim = CaptureStatusDeliveryClaim {
+            claim_id: format!("capture-status-{}", Uuid::new_v4().simple()),
+            generation: candidate.capture_status_generation,
+            lease_owner: lease_owner.to_string(),
+            started_at: now,
+            expires_at: now + ttl,
+        };
+        candidate.capture_status_delivery_claim = Some(claim.clone());
+        validate_candidate_lifecycle(candidate)?;
+        Ok(CaptureStatusDeliveryDecision::Acquired {
+            candidate: candidate.clone(),
+            claim_id: claim.claim_id,
+        })
+    })
+}
+
+pub(super) fn acknowledge_capture_status_delivery(
+    repo_root: &Path,
+    candidate_id: &str,
+    claim_id: &str,
+) -> Result<ImprovementCandidate, SpecOpsError> {
+    update(repo_root, |store| {
+        let candidate = store
+            .candidates
+            .iter_mut()
+            .find(|candidate| candidate.id == candidate_id)
+            .ok_or_else(|| invalid("candidate not found"))?;
+        let generation = candidate
+            .capture_status_delivery_claim
+            .as_ref()
+            .filter(|claim| claim.claim_id == claim_id)
+            .map(|claim| claim.generation)
+            .ok_or_else(|| invalid("capture status delivery claim is stale"))?;
+        candidate.capture_status_delivered_generation = candidate
+            .capture_status_delivered_generation
+            .max(generation);
+        candidate.capture_status_delivery_claim = None;
+        validate_candidate_lifecycle(candidate)?;
+        Ok(candidate.clone())
+    })
+}
+
+pub(super) fn release_capture_status_delivery(
+    repo_root: &Path,
+    candidate_id: &str,
+    claim_id: &str,
+) -> Result<ImprovementCandidate, SpecOpsError> {
+    update(repo_root, |store| {
+        let candidate = store
+            .candidates
+            .iter_mut()
+            .find(|candidate| candidate.id == candidate_id)
+            .ok_or_else(|| invalid("candidate not found"))?;
+        if candidate
+            .capture_status_delivery_claim
+            .as_ref()
+            .is_none_or(|claim| claim.claim_id != claim_id)
+        {
+            return Err(invalid("capture status delivery claim is stale"));
+        }
+        candidate.capture_status_delivery_claim = None;
+        validate_candidate_lifecycle(candidate)?;
+        Ok(candidate.clone())
+    })
+}
+
 pub(super) fn claim_owner_status_delivery(
     repo_root: &Path,
     candidate_id: &str,
@@ -1647,6 +1763,7 @@ fn migrate_pre_v2_store(store: &mut CandidateStore) -> Result<(), SpecOpsError> 
         candidate.eligibility = ImprovementEligibility::NeedsEvidence;
         candidate.capture_status_generation = 0;
         candidate.capture_status_delivered_generation = 0;
+        candidate.capture_status_delivery_claim = None;
         if matches!(
             candidate.state,
             CandidateState::Pending | CandidateState::OwnerResolving
@@ -1701,6 +1818,7 @@ fn migrate_v3_store(store: &mut CandidateStore) -> Result<(), SpecOpsError> {
             )));
         }
         candidate.owner_status_delivery_claim = None;
+        candidate.capture_status_delivery_claim = None;
         candidate.schema_version = STORE_SCHEMA_VERSION;
         validate_candidate_lifecycle(candidate)?;
     }
@@ -1933,6 +2051,7 @@ fn import_legacy_source(
     for mut candidate in legacy.candidates {
         migrate_legacy_evidence(
             repo_root,
+            &root.path,
             source_id,
             &mut candidate,
             &mut store.legacy_import,
@@ -1946,18 +2065,26 @@ fn import_legacy_source(
             .iter_mut()
             .find(|existing| existing.fingerprint.as_deref() == Some(fingerprint.as_str()))
         {
-            if let Some(provenance) = existing
+            if let Some(provenance_index) = existing
                 .legacy_provenance
-                .iter_mut()
-                .find(|provenance| provenance.source_id == source_id)
+                .iter()
+                .position(|provenance| provenance.source_id == source_id)
             {
-                existing.legacy_occurrence_count = Some(
-                    existing
-                        .legacy_occurrence_count
-                        .unwrap_or_default()
-                        .max(aggregate),
-                );
+                let current_total = existing.legacy_occurrence_count.unwrap_or_default();
+                // Early schema-v4 stores lack per-source counts. A single source owns the
+                // aggregate; multiple unknown contributions cannot be reconstructed safely.
+                let previous_contribution = existing.legacy_provenance[provenance_index]
+                    .occurrence_count
+                    .or_else(|| (existing.legacy_provenance.len() == 1).then_some(current_total));
+                existing.legacy_occurrence_count = Some(match previous_contribution {
+                    Some(previous) => current_total
+                        .saturating_sub(previous)
+                        .saturating_add(aggregate),
+                    None => current_total.max(aggregate),
+                });
+                let provenance = &mut existing.legacy_provenance[provenance_index];
                 provenance.content_digest = content_digest.clone();
+                provenance.occurrence_count = Some(aggregate);
             } else {
                 existing.legacy_occurrence_count = Some(
                     existing
@@ -1968,6 +2095,7 @@ fn import_legacy_source(
                 existing.legacy_provenance.push(LegacyProvenance {
                     source_id: source_id.to_string(),
                     content_digest: content_digest.clone(),
+                    occurrence_count: Some(aggregate),
                 });
             }
         } else {
@@ -1986,10 +2114,12 @@ fn import_legacy_source(
             candidate.distinct_occurrences.clear();
             candidate.capture_status_generation = 0;
             candidate.capture_status_delivered_generation = 0;
+            candidate.capture_status_delivery_claim = None;
             candidate.attempt = None;
             candidate.legacy_provenance = vec![LegacyProvenance {
                 source_id: source_id.to_string(),
                 content_digest: content_digest.clone(),
+                occurrence_count: Some(aggregate),
             }];
             store.candidates.push(candidate);
         }
@@ -2009,6 +2139,7 @@ fn import_legacy_source(
 
 fn migrate_legacy_evidence(
     repo_root: &Path,
+    legacy_root: &Path,
     source_id: &str,
     candidate: &mut ImprovementCandidate,
     state: &mut LegacyImportState,
@@ -2021,27 +2152,13 @@ fn migrate_legacy_evidence(
             push_diagnostic(state, source_id, "evidence-unavailable");
             continue;
         }
-        let path = PathBuf::from(&raw_path);
-        let metadata = match fs::symlink_metadata(&path) {
-            Ok(metadata) => metadata,
-            Err(error) if error.kind() == io::ErrorKind::NotFound => {
-                push_diagnostic(state, source_id, "evidence-missing");
-                continue;
-            }
-            Err(error) => {
-                let code = if error.kind() == io::ErrorKind::PermissionDenied {
-                    "evidence-permission-denied"
-                } else {
-                    "evidence-read-failed"
-                };
+        let path = match validated_legacy_evidence_path(legacy_root, &raw_path) {
+            Ok(path) => path,
+            Err(code) => {
                 push_diagnostic(state, source_id, code);
                 continue;
             }
         };
-        if metadata.file_type().is_symlink() {
-            push_diagnostic(state, source_id, "evidence-symlink");
-            continue;
-        }
         let bytes = match fs::read(&path) {
             Ok(bytes) => bytes,
             Err(error) => {
@@ -2065,6 +2182,56 @@ fn migrate_legacy_evidence(
         reference.digest = Some(digest);
     }
     Ok(())
+}
+
+fn validated_legacy_evidence_path(
+    legacy_root: &Path,
+    raw_path: &str,
+) -> Result<PathBuf, &'static str> {
+    let canonical_root = fs::canonicalize(legacy_root).map_err(evidence_io_diagnostic)?;
+    let raw = Path::new(raw_path);
+    let relative = if raw.is_absolute() {
+        raw.strip_prefix(legacy_root)
+            .or_else(|_| raw.strip_prefix(&canonical_root))
+            .map_err(|_| "evidence-outside-source")?
+    } else {
+        raw
+    };
+    let mut path = canonical_root.clone();
+    for component in relative.components() {
+        match component {
+            std::path::Component::CurDir => continue,
+            std::path::Component::ParentDir => {
+                if path == canonical_root {
+                    return Err("evidence-outside-source");
+                }
+                path.pop();
+            }
+            std::path::Component::Normal(segment) => {
+                path.push(segment);
+                let metadata = fs::symlink_metadata(&path).map_err(evidence_io_diagnostic)?;
+                if metadata.file_type().is_symlink() {
+                    return Err("evidence-symlink");
+                }
+            }
+            std::path::Component::RootDir | std::path::Component::Prefix(_) => {
+                return Err("evidence-outside-source")
+            }
+        }
+    }
+    let canonical_path = fs::canonicalize(&path).map_err(evidence_io_diagnostic)?;
+    canonical_path
+        .starts_with(&canonical_root)
+        .then_some(canonical_path)
+        .ok_or("evidence-outside-source")
+}
+
+fn evidence_io_diagnostic(error: io::Error) -> &'static str {
+    match error.kind() {
+        io::ErrorKind::NotFound => "evidence-missing",
+        io::ErrorKind::PermissionDenied => "evidence-permission-denied",
+        _ => "evidence-read-failed",
+    }
 }
 
 fn normalized_source_identity(path: &Path) -> String {
@@ -2251,6 +2418,184 @@ mod tests {
         }
     }
 
+    fn write_legacy_store(root: &Path, legacy: &CandidateStore) {
+        let path = root.join(".gwt/improvements/candidates.json");
+        fs::create_dir_all(path.parent().expect("legacy candidate parent"))
+            .expect("legacy candidate directory");
+        fs::write(
+            path,
+            serde_json::to_vec_pretty(legacy).expect("legacy candidate JSON"),
+        )
+        .expect("legacy candidate store");
+    }
+
+    fn write_legacy_candidate_store(root: &Path, occurrence_count: u64) {
+        let mut legacy = store_with_candidate();
+        legacy.candidates[0].occurrences = occurrence_count;
+        legacy.candidates[0].legacy_occurrence_count = Some(occurrence_count);
+        write_legacy_store(root, &legacy);
+    }
+
+    fn import_legacy_test_source(
+        root: &Path,
+        repo_root: &Path,
+        current: &mut CandidateStore,
+    ) -> String {
+        let source_id = digest_bytes(normalized_source_identity(root).as_bytes());
+        import_legacy_source(
+            &LegacyRoot {
+                path: root.to_path_buf(),
+                kind: LegacyRootKind::Worktree,
+            },
+            &candidate_store_path(repo_root),
+            &source_id,
+            repo_root,
+            current,
+        )
+        .expect("legacy source import");
+        source_id
+    }
+
+    #[test]
+    fn legacy_reimport_replaces_only_the_changed_source_contribution() {
+        let home = tempfile::tempdir().expect("isolated home");
+        let _gwt_home = gwt_core::test_support::ScopedGwtHome::set(home.path());
+        let repo = tempfile::tempdir().expect("canonical repo");
+        let source_a = tempfile::tempdir().expect("legacy source a");
+        let source_b = tempfile::tempdir().expect("legacy source b");
+        let canonical_path = candidate_store_path(repo.path());
+        let mut current = CandidateStore {
+            schema_version: STORE_SCHEMA_VERSION,
+            source_scope_nonce: Some("00".repeat(32)),
+            candidates: Vec::new(),
+            legacy_import: LegacyImportState::default(),
+        };
+
+        write_legacy_candidate_store(source_a.path(), 2);
+        write_legacy_candidate_store(source_b.path(), 3);
+        for source in [source_a.path(), source_b.path()] {
+            let source_id = digest_bytes(normalized_source_identity(source).as_bytes());
+            import_legacy_source(
+                &LegacyRoot {
+                    path: source.to_path_buf(),
+                    kind: LegacyRootKind::Worktree,
+                },
+                &canonical_path,
+                &source_id,
+                repo.path(),
+                &mut current,
+            )
+            .expect("initial legacy import");
+        }
+        assert_eq!(current.candidates[0].legacy_occurrence_count, Some(5));
+
+        write_legacy_candidate_store(source_a.path(), 4);
+        let source_a_id = digest_bytes(normalized_source_identity(source_a.path()).as_bytes());
+        import_legacy_source(
+            &LegacyRoot {
+                path: source_a.path().to_path_buf(),
+                kind: LegacyRootKind::Worktree,
+            },
+            &canonical_path,
+            &source_a_id,
+            repo.path(),
+            &mut current,
+        )
+        .expect("changed legacy source reimport");
+
+        assert_eq!(current.candidates[0].legacy_occurrence_count, Some(7));
+
+        write_legacy_candidate_store(source_a.path(), 1);
+        import_legacy_source(
+            &LegacyRoot {
+                path: source_a.path().to_path_buf(),
+                kind: LegacyRootKind::Worktree,
+            },
+            &canonical_path,
+            &source_a_id,
+            repo.path(),
+            &mut current,
+        )
+        .expect("reduced legacy source reimport");
+
+        assert_eq!(current.candidates[0].legacy_occurrence_count, Some(4));
+    }
+
+    #[test]
+    fn legacy_import_rejects_evidence_outside_the_source_root() {
+        let home = tempfile::tempdir().expect("isolated home");
+        let _gwt_home = gwt_core::test_support::ScopedGwtHome::set(home.path());
+        let repo = tempfile::tempdir().expect("canonical repo");
+        let source = tempfile::tempdir().expect("legacy source");
+        let outside = tempfile::tempdir().expect("outside evidence root");
+        let secret_path = outside.path().join("secret.log");
+        fs::write(&secret_path, b"must remain outside").expect("outside evidence");
+        let mut legacy = store_with_candidate();
+        legacy.candidates[0].local_evidence =
+            vec![super::super::improvement::LocalEvidenceReference {
+                kind: "log".to_string(),
+                path: Some(secret_path.to_string_lossy().into_owned()),
+                digest: None,
+            }];
+        write_legacy_store(source.path(), &legacy);
+        let mut current = CandidateStore {
+            schema_version: STORE_SCHEMA_VERSION,
+            source_scope_nonce: Some("00".repeat(32)),
+            candidates: Vec::new(),
+            legacy_import: LegacyImportState::default(),
+        };
+
+        let source_id = import_legacy_test_source(source.path(), repo.path(), &mut current);
+
+        assert_eq!(current.candidates[0].local_evidence[0].digest, None);
+        assert!(!evidence_dir_path(repo.path())
+            .join(digest_bytes(b"must remain outside"))
+            .exists());
+        assert!(current.legacy_import.diagnostics.iter().any(|diagnostic| {
+            diagnostic.source_id == source_id && diagnostic.code == "evidence-outside-source"
+        }));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn legacy_import_rejects_an_intermediate_evidence_symlink() {
+        use std::os::unix::fs::symlink;
+
+        let home = tempfile::tempdir().expect("isolated home");
+        let _gwt_home = gwt_core::test_support::ScopedGwtHome::set(home.path());
+        let repo = tempfile::tempdir().expect("canonical repo");
+        let source = tempfile::tempdir().expect("legacy source");
+        let actual = source.path().join("actual-evidence");
+        fs::create_dir_all(&actual).expect("actual evidence directory");
+        fs::write(actual.join("capture.log"), b"symlinked evidence").expect("actual evidence");
+        let alias = source.path().join("evidence-alias");
+        symlink(&actual, &alias).expect("intermediate symlink");
+        let mut legacy = store_with_candidate();
+        legacy.candidates[0].local_evidence =
+            vec![super::super::improvement::LocalEvidenceReference {
+                kind: "log".to_string(),
+                path: Some(alias.join("capture.log").to_string_lossy().into_owned()),
+                digest: None,
+            }];
+        write_legacy_store(source.path(), &legacy);
+        let mut current = CandidateStore {
+            schema_version: STORE_SCHEMA_VERSION,
+            source_scope_nonce: Some("00".repeat(32)),
+            candidates: Vec::new(),
+            legacy_import: LegacyImportState::default(),
+        };
+
+        let source_id = import_legacy_test_source(source.path(), repo.path(), &mut current);
+
+        assert_eq!(current.candidates[0].local_evidence[0].digest, None);
+        assert!(!evidence_dir_path(repo.path())
+            .join(digest_bytes(b"symlinked evidence"))
+            .exists());
+        assert!(current.legacy_import.diagnostics.iter().any(|diagnostic| {
+            diagnostic.source_id == source_id && diagnostic.code == "evidence-symlink"
+        }));
+    }
+
     fn regression_create_intent() -> ResolutionAttemptIntent {
         ResolutionAttemptIntent::CreateRegressionIssue {
             fingerprint: "v2:typed-owner-fingerprint".to_string(),
@@ -2287,6 +2632,82 @@ mod tests {
         candidate.attempt = None;
         validate_candidate_lifecycle(candidate).expect("pending owner status candidate");
         save_unlocked(repo_root, &store).expect("persist pending owner status");
+    }
+
+    fn persist_pending_capture_status(repo_root: &Path) {
+        let mut store = store_with_candidate();
+        let candidate = &mut store.candidates[0];
+        candidate.capture_status_generation = 1;
+        candidate.capture_status_delivered_generation = 0;
+        candidate.capture_status_delivery_claim = None;
+        validate_candidate_lifecycle(candidate).expect("pending capture status candidate");
+        save_unlocked(repo_root, &store).expect("persist pending capture status");
+    }
+
+    #[test]
+    fn capture_status_delivery_claim_is_single_winner_and_exact_cas() {
+        let home = tempfile::tempdir().expect("isolated home");
+        let _gwt_home = gwt_core::test_support::ScopedGwtHome::set(home.path());
+        let repo = tempfile::tempdir().expect("repo");
+        persist_pending_capture_status(repo.path());
+        let now = Utc.with_ymd_and_hms(2026, 7, 13, 0, 0, 0).unwrap();
+
+        let first_id = match claim_capture_status_delivery(
+            repo.path(),
+            "impr-lease",
+            "worker-a",
+            now,
+            Duration::seconds(15),
+        )
+        .expect("first delivery claim")
+        {
+            CaptureStatusDeliveryDecision::Acquired { claim_id, .. } => claim_id,
+            other => panic!("expected acquired claim, got {other:?}"),
+        };
+        assert!(matches!(
+            claim_capture_status_delivery(
+                repo.path(),
+                "impr-lease",
+                "worker-b",
+                now + Duration::seconds(1),
+                Duration::seconds(15),
+            )
+            .expect("busy delivery claim"),
+            CaptureStatusDeliveryDecision::Busy(_)
+        ));
+
+        let takeover_id = match claim_capture_status_delivery(
+            repo.path(),
+            "impr-lease",
+            "worker-b",
+            now + Duration::seconds(16),
+            Duration::seconds(15),
+        )
+        .expect("expired claim takeover")
+        {
+            CaptureStatusDeliveryDecision::Acquired { claim_id, .. } => claim_id,
+            other => panic!("expected takeover claim, got {other:?}"),
+        };
+        assert_ne!(takeover_id, first_id);
+        assert!(acknowledge_capture_status_delivery(repo.path(), "impr-lease", &first_id).is_err());
+        assert!(release_capture_status_delivery(repo.path(), "impr-lease", &first_id).is_err());
+
+        let acknowledged =
+            acknowledge_capture_status_delivery(repo.path(), "impr-lease", &takeover_id)
+                .expect("acknowledge current claim");
+        assert_eq!(acknowledged.capture_status_delivered_generation, 1);
+        assert!(acknowledged.capture_status_delivery_claim.is_none());
+        assert!(matches!(
+            claim_capture_status_delivery(
+                repo.path(),
+                "impr-lease",
+                "worker-c",
+                now + Duration::seconds(17),
+                Duration::seconds(15),
+            )
+            .expect("already delivered"),
+            CaptureStatusDeliveryDecision::AlreadyDelivered(_)
+        ));
     }
 
     #[test]
@@ -2376,7 +2797,48 @@ mod tests {
 
         assert_eq!(migrated.schema_version, STORE_SCHEMA_VERSION);
         assert_eq!(migrated.candidates[0].schema_version, STORE_SCHEMA_VERSION);
+        assert!(migrated.candidates[0]
+            .capture_status_delivery_claim
+            .is_none());
         assert!(migrated.candidates[0].owner_status_delivery_claim.is_none());
+    }
+
+    #[test]
+    fn schema_four_store_without_new_optional_fields_remains_readable() {
+        let home = tempfile::tempdir().expect("isolated home");
+        let _gwt_home = gwt_core::test_support::ScopedGwtHome::set(home.path());
+        let repo = tempfile::tempdir().expect("repo");
+        let mut store = store_with_candidate();
+        store.candidates[0].legacy_provenance = vec![LegacyProvenance {
+            source_id: "legacy-source".to_string(),
+            content_digest: "legacy-digest".to_string(),
+            occurrence_count: Some(3),
+        }];
+        let mut value = serde_json::to_value(&store).expect("schema four store JSON");
+        let candidate = value["candidates"][0]
+            .as_object_mut()
+            .expect("candidate object");
+        candidate.remove("capture_status_delivery_claim");
+        candidate["legacy_provenance"][0]
+            .as_object_mut()
+            .expect("legacy provenance object")
+            .remove("occurrence_count");
+        let path = candidate_store_path(repo.path());
+        fs::create_dir_all(path.parent().expect("candidate store parent"))
+            .expect("candidate store directory");
+        fs::write(
+            path,
+            serde_json::to_vec_pretty(&value).expect("schema four fixture JSON"),
+        )
+        .expect("schema four fixture");
+
+        let loaded = load_and_repair(repo.path()).expect("load prior schema four store");
+
+        assert!(loaded.candidates[0].capture_status_delivery_claim.is_none());
+        assert_eq!(
+            loaded.candidates[0].legacy_provenance[0].occurrence_count,
+            None
+        );
     }
 
     #[test]
