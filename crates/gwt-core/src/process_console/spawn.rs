@@ -766,7 +766,7 @@ mod tests {
     fn wait_for_process_exit(pid: u32) {
         let deadline = std::time::Instant::now() + Duration::from_secs(2);
         while std::time::Instant::now() < deadline {
-            let status = std::process::Command::new("kill")
+            let status = crate::process::hidden_command("kill")
                 .args(["-0", &pid.to_string()])
                 .stdout(Stdio::null())
                 .stderr(Stdio::null())
