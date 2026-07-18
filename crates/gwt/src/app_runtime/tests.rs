@@ -2099,6 +2099,36 @@ fn wait_for_recorded_event(
     panic!("timed out waiting for {label}: {snapshot:?}");
 }
 
+/// Issue #3297: `load_knowledge_bridge_events` replies off the GUI event
+/// loop through the stub proxy. Wait for the dispatched knowledge view for
+/// `window_id` and return that dispatch's outbound events so tests can keep
+/// asserting on the entries/detail pair.
+fn wait_for_knowledge_view_dispatch(
+    events: &Arc<Mutex<Vec<UserEvent>>>,
+    window_id: &str,
+) -> Vec<OutboundEvent> {
+    for _ in 0..800 {
+        {
+            let recorded = events.lock().expect("event log");
+            for event in recorded.iter() {
+                if let UserEvent::Dispatch(dispatched) = event {
+                    if dispatched.iter().any(|outbound| {
+                        matches!(
+                            &outbound.event,
+                            BackendEvent::KnowledgeEntries { id, .. } if id == window_id
+                        )
+                    }) {
+                        return dispatched.clone();
+                    }
+                }
+            }
+        }
+        std::thread::sleep(Duration::from_millis(25));
+    }
+    let snapshot = events.lock().expect("event log").clone();
+    panic!("timed out waiting for knowledge view dispatch for {window_id}: {snapshot:?}");
+}
+
 fn dispatch_launch_materialization_request(
     runtime: &mut AppRuntime,
     recorded_events: &Arc<Mutex<Vec<UserEvent>>>,
@@ -13438,18 +13468,22 @@ fn app_runtime_load_knowledge_bridge_replies_with_cache_backed_issue_and_spec_vi
         migration_pending: false,
         main_worktree_root_cache: std::sync::Arc::new(std::sync::OnceLock::new()),
     };
-    let runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+    let (runtime, recorded_events) =
+        sample_runtime_with_events(temp.path(), vec![tab], Some("tab-1"));
 
-    let issue_events = runtime.load_knowledge_bridge_events(
+    let issue_window_id = combined_window_id("tab-1", "issue-1");
+    let immediate = runtime.load_knowledge_bridge_events(
         "client-1",
         KnowledgeLoadRequest {
-            id: &combined_window_id("tab-1", "issue-1"),
+            id: &issue_window_id,
             kind: gwt::KnowledgeKind::Issue,
             request_id: None,
             selected_number: Some(42),
             refresh: false,
         },
     );
+    assert!(immediate.is_empty());
+    let issue_events = wait_for_knowledge_view_dispatch(&recorded_events, &issue_window_id);
     assert_eq!(issue_events.len(), 2);
     assert!(matches!(
         &issue_events[0].event,
@@ -13476,16 +13510,19 @@ fn app_runtime_load_knowledge_bridge_replies_with_cache_backed_issue_and_spec_vi
                     && section.body.contains("feature/issue-bridge"))
     ));
 
-    let spec_events = runtime.load_knowledge_bridge_events(
+    let spec_window_id = combined_window_id("tab-1", "spec-1");
+    let immediate = runtime.load_knowledge_bridge_events(
         "client-1",
         KnowledgeLoadRequest {
-            id: &combined_window_id("tab-1", "spec-1"),
+            id: &spec_window_id,
             kind: gwt::KnowledgeKind::Issue,
             request_id: None,
             selected_number: Some(1930),
             refresh: false,
         },
     );
+    assert!(immediate.is_empty());
+    let spec_events = wait_for_knowledge_view_dispatch(&recorded_events, &spec_window_id);
     assert_eq!(spec_events.len(), 2);
     assert!(matches!(
         &spec_events[0].event,
@@ -13507,6 +13544,108 @@ fn app_runtime_load_knowledge_bridge_replies_with_cache_backed_issue_and_spec_vi
             if detail.sections.iter().any(|section| section.title == "spec"
                 && section.body.contains("Cache-backed issue view"))
     ));
+}
+
+/// Issue #3297: the cache-backed knowledge load must not run on the GUI
+/// event loop. On slow machines the synchronous read blocked the loop past
+/// the frontend's 5s recovery timer, the late reply was discarded, and the
+/// retry escalated into a minutes-long forced sync. The load replies through
+/// the blocking-task proxy instead, like the semantic search path.
+#[test]
+fn app_runtime_load_knowledge_bridge_replies_off_the_gui_event_loop() {
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedEnvVar::set("HOME", temp.path());
+    let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+    let repo = temp.path().join("repo");
+    fs::create_dir_all(&repo).expect("create repo");
+    init_repo(&repo);
+
+    let cache = Cache::new(issue_cache_root(&repo));
+    cache
+        .write_snapshot(&sample_issue_snapshot(
+            42,
+            "Issue bridge",
+            &["bug"],
+            "Issue body",
+            "2026-04-20T10:00:00Z",
+        ))
+        .expect("write issue snapshot");
+
+    let mut persisted = empty_workspace_state();
+    persisted.windows.push(sample_window(
+        "issue-1",
+        WindowPreset::Issue,
+        WindowProcessStatus::Ready,
+    ));
+    persisted.next_z_index = 2;
+    let tab = ProjectTabRuntime {
+        id: "tab-1".to_string(),
+        title: "Repo".to_string(),
+        project_root: repo,
+        kind: ProjectKind::Git,
+        workspace: WindowCanvasState::from_persisted(persisted),
+        migration_pending: false,
+        main_worktree_root_cache: std::sync::Arc::new(std::sync::OnceLock::new()),
+    };
+    let (runtime, events) = sample_runtime_with_events(temp.path(), vec![tab], Some("tab-1"));
+    let window_id = combined_window_id("tab-1", "issue-1");
+
+    let immediate = runtime.load_knowledge_bridge_events(
+        "client-1",
+        KnowledgeLoadRequest {
+            id: &window_id,
+            kind: gwt::KnowledgeKind::Issue,
+            request_id: Some(7),
+            selected_number: Some(42),
+            refresh: false,
+        },
+    );
+
+    assert!(
+        immediate.is_empty(),
+        "cache-backed knowledge load must not reply on the frontend event loop"
+    );
+    wait_for_recorded_event("knowledge entries dispatch", &events, |events| {
+        events.iter().any(|event| {
+            matches!(
+                event,
+                UserEvent::Dispatch(dispatched)
+                    if dispatched.iter().any(|outbound| {
+                        matches!(
+                            &outbound.target,
+                            DispatchTarget::Client(client_id) if client_id == "client-1"
+                        ) && matches!(
+                            &outbound.event,
+                            BackendEvent::KnowledgeEntries {
+                                id,
+                                request_id,
+                                entries,
+                                selected_number,
+                                ..
+                            } if id == &window_id
+                                && *request_id == Some(7)
+                                && entries.iter().any(|entry| entry.number == 42)
+                                && *selected_number == Some(42)
+                        )
+                    })
+            )
+        })
+    });
+    wait_for_recorded_event("knowledge detail dispatch", &events, |events| {
+        events.iter().any(|event| {
+            matches!(
+                event,
+                UserEvent::Dispatch(dispatched)
+                    if dispatched.iter().any(|outbound| matches!(
+                        &outbound.event,
+                        BackendEvent::KnowledgeDetail { id, .. } if id == &window_id
+                    ))
+            )
+        })
+    });
 }
 
 #[test]
@@ -13539,7 +13678,8 @@ fn app_runtime_load_knowledge_bridge_projects_related_issue_work_sessions() {
         WindowPreset::Issue,
         WindowProcessStatus::Ready,
     );
-    let runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+    let (runtime, recorded_events) =
+        sample_runtime_with_events(temp.path(), vec![tab], Some("tab-1"));
 
     let mut session =
         gwt_agent::Session::new(&worktree, "work/issue-3096", gwt_agent::AgentId::Codex);
@@ -13578,7 +13718,7 @@ fn app_runtime_load_knowledge_bridge_projects_related_issue_work_sessions() {
     gwt_core::workspace_projection::record_workspace_work_event(&repo, event)
         .expect("record work event");
 
-    let events = runtime.load_knowledge_bridge_events(
+    let immediate = runtime.load_knowledge_bridge_events(
         "client-1",
         KnowledgeLoadRequest {
             id: &combined_window_id("tab-1", "issue-1"),
@@ -13588,6 +13728,9 @@ fn app_runtime_load_knowledge_bridge_projects_related_issue_work_sessions() {
             refresh: false,
         },
     );
+    assert!(immediate.is_empty());
+    let events =
+        wait_for_knowledge_view_dispatch(&recorded_events, &combined_window_id("tab-1", "issue-1"));
 
     let entries = match &events[0].event {
         BackendEvent::KnowledgeEntries { entries, .. } => entries,
@@ -13642,7 +13785,8 @@ fn app_runtime_load_knowledge_bridge_marks_session_only_stopped_related_session_
         WindowPreset::Issue,
         WindowProcessStatus::Ready,
     );
-    let runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+    let (runtime, recorded_events) =
+        sample_runtime_with_events(temp.path(), vec![tab], Some("tab-1"));
 
     let stopped_at = Utc.with_ymd_and_hms(2026, 6, 20, 9, 5, 0).unwrap();
     let mut session =
@@ -13656,7 +13800,7 @@ fn app_runtime_load_knowledge_bridge_marks_session_only_stopped_related_session_
     session.last_activity_at = stopped_at;
     session.save(&runtime.sessions_dir).expect("save session");
 
-    let events = runtime.load_knowledge_bridge_events(
+    let immediate = runtime.load_knowledge_bridge_events(
         "client-1",
         KnowledgeLoadRequest {
             id: &combined_window_id("tab-1", "issue-1"),
@@ -13666,6 +13810,9 @@ fn app_runtime_load_knowledge_bridge_marks_session_only_stopped_related_session_
             refresh: false,
         },
     );
+    assert!(immediate.is_empty());
+    let events =
+        wait_for_knowledge_view_dispatch(&recorded_events, &combined_window_id("tab-1", "issue-1"));
 
     let detail = match &events[1].event {
         BackendEvent::KnowledgeDetail { detail, .. } => detail,
@@ -13710,7 +13857,8 @@ fn app_runtime_load_knowledge_bridge_dedupes_related_issue_sessions_by_conversat
         WindowPreset::Issue,
         WindowProcessStatus::Ready,
     );
-    let runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+    let (runtime, recorded_events) =
+        sample_runtime_with_events(temp.path(), vec![tab], Some("tab-1"));
 
     let conversation_id = "conv-issue-3133";
     let old_at = Utc.with_ymd_and_hms(2026, 6, 20, 9, 0, 0).unwrap();
@@ -13770,7 +13918,7 @@ fn app_runtime_load_knowledge_bridge_dedupes_related_issue_sessions_by_conversat
     gwt_core::workspace_projection::record_workspace_work_event(&repo, event)
         .expect("record work event");
 
-    let events = runtime.load_knowledge_bridge_events(
+    let immediate = runtime.load_knowledge_bridge_events(
         "client-1",
         KnowledgeLoadRequest {
             id: &combined_window_id("tab-1", "issue-1"),
@@ -13780,6 +13928,9 @@ fn app_runtime_load_knowledge_bridge_dedupes_related_issue_sessions_by_conversat
             refresh: false,
         },
     );
+    assert!(immediate.is_empty());
+    let events =
+        wait_for_knowledge_view_dispatch(&recorded_events, &combined_window_id("tab-1", "issue-1"));
 
     let entries = match &events[0].event {
         BackendEvent::KnowledgeEntries { entries, .. } => entries,
@@ -13835,7 +13986,8 @@ fn app_runtime_load_knowledge_bridge_collapses_related_issue_session_actions_to_
         WindowPreset::Issue,
         WindowProcessStatus::Ready,
     );
-    let runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+    let (runtime, recorded_events) =
+        sample_runtime_with_events(temp.path(), vec![tab], Some("tab-1"));
 
     let stale_at = Utc.with_ymd_and_hms(2026, 6, 20, 9, 0, 0).unwrap();
     let past_at = Utc.with_ymd_and_hms(2026, 6, 20, 9, 1, 0).unwrap();
@@ -13929,7 +14081,7 @@ fn app_runtime_load_knowledge_bridge_collapses_related_issue_session_actions_to_
     gwt_core::workspace_projection::record_workspace_work_event(&repo, empty_agent_event)
         .expect("record empty agent work event");
 
-    let events = runtime.load_knowledge_bridge_events(
+    let immediate = runtime.load_knowledge_bridge_events(
         "client-1",
         KnowledgeLoadRequest {
             id: &combined_window_id("tab-1", "issue-1"),
@@ -13939,6 +14091,9 @@ fn app_runtime_load_knowledge_bridge_collapses_related_issue_session_actions_to_
             refresh: false,
         },
     );
+    assert!(immediate.is_empty());
+    let events =
+        wait_for_knowledge_view_dispatch(&recorded_events, &combined_window_id("tab-1", "issue-1"));
 
     let entries = match &events[0].event {
         BackendEvent::KnowledgeEntries { entries, .. } => entries,
@@ -14000,7 +14155,8 @@ fn app_runtime_load_knowledge_bridge_ignores_ambiguous_branch_only_related_work(
         WindowPreset::Issue,
         WindowProcessStatus::Ready,
     );
-    let runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+    let (runtime, recorded_events) =
+        sample_runtime_with_events(temp.path(), vec![tab], Some("tab-1"));
 
     let live_at = Utc.with_ymd_and_hms(2026, 6, 20, 9, 5, 0).unwrap();
     let mut session = gwt_agent::Session::new(
@@ -14080,7 +14236,7 @@ fn app_runtime_load_knowledge_bridge_ignores_ambiguous_branch_only_related_work(
             .expect("record ambiguous work event");
     }
 
-    let events = runtime.load_knowledge_bridge_events(
+    let immediate = runtime.load_knowledge_bridge_events(
         "client-1",
         KnowledgeLoadRequest {
             id: &combined_window_id("tab-1", "issue-1"),
@@ -14090,6 +14246,9 @@ fn app_runtime_load_knowledge_bridge_ignores_ambiguous_branch_only_related_work(
             refresh: false,
         },
     );
+    assert!(immediate.is_empty());
+    let events =
+        wait_for_knowledge_view_dispatch(&recorded_events, &combined_window_id("tab-1", "issue-1"));
 
     let entries = match &events[0].event {
         BackendEvent::KnowledgeEntries { entries, .. } => entries,
@@ -14559,9 +14718,10 @@ fn app_runtime_load_knowledge_bridge_keeps_pr_surface_disabled_until_cache_suppo
         WindowPreset::Pr,
         WindowProcessStatus::Ready,
     );
-    let runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+    let (runtime, recorded_events) =
+        sample_runtime_with_events(temp.path(), vec![tab], Some("tab-1"));
 
-    let events = runtime.load_knowledge_bridge_events(
+    let immediate = runtime.load_knowledge_bridge_events(
         "client-1",
         KnowledgeLoadRequest {
             id: &combined_window_id("tab-1", "pr-1"),
@@ -14571,6 +14731,9 @@ fn app_runtime_load_knowledge_bridge_keeps_pr_surface_disabled_until_cache_suppo
             refresh: false,
         },
     );
+    assert!(immediate.is_empty());
+    let events =
+        wait_for_knowledge_view_dispatch(&recorded_events, &combined_window_id("tab-1", "pr-1"));
 
     assert_eq!(events.len(), 2);
     assert!(matches!(

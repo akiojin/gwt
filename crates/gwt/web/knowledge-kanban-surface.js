@@ -335,7 +335,11 @@ export function createKnowledgeKanbanSurface({
             state.loadRecoveryRetryCount += 1;
             state.loading = false;
             state.refreshing = false;
-            requestKnowledgeBridge(windowId, knowledgeKind, true);
+            // Issue #3297: the retry must stay a cache read. Escalating to
+            // refresh=true ran a full remote sync that takes minutes and
+            // always outlived the next 5s timer, turning one slow load into
+            // a guaranteed "Timed out loading cache-backed data".
+            requestKnowledgeBridge(windowId, knowledgeKind, false);
             renderKnowledgeBridge(windowId);
             return;
           }
@@ -1750,7 +1754,15 @@ export function createKnowledgeKanbanSurface({
               event.id,
               event.knowledge_kind,
             );
-            if (event.request_id && event.request_id !== state.loadRequestId) {
+            // Issue #3297: a response that lost the race against the 5s
+            // recovery timer carries a superseded request_id, but while the
+            // window still has no data it is strictly better than the empty
+            // view — apply it; a newer in-flight response overwrites it.
+            if (
+              event.request_id &&
+              event.request_id !== state.loadRequestId &&
+              !knowledgeEntriesAreEmpty(state)
+            ) {
               break;
             }
             const queuedQuery = state.query.trim();
