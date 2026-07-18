@@ -483,6 +483,13 @@ fn write_spec_section<E: CliEnv>(
         super::intake_outcome::IntakeOutcomeKind::SpecUpdated,
         number,
     );
+    // T-274: verified writes feed the per-owner operability ledger.
+    super::artifact_operability::record_write_best_effort(
+        env.repo_path(),
+        number,
+        &section,
+        &receipt,
+    );
     out.push_str(&render_write_receipt(&section, &receipt));
     Ok(0)
 }
@@ -536,6 +543,12 @@ fn write_structured_spec_section<E: CliEnv>(
         "issue.spec.edit",
         super::intake_outcome::IntakeOutcomeKind::SpecUpdated,
         number,
+    );
+    super::artifact_operability::record_write_best_effort(
+        env.repo_path(),
+        number,
+        &section,
+        &receipt,
     );
     out.push_str(&render_write_receipt(&section, &receipt));
     Ok(0)
