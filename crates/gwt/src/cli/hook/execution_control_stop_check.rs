@@ -40,6 +40,14 @@ pub fn handle_with_input(
         // Malformed record fails open for hooks.
         Err(_) => return HookOutput::Silent,
     };
+    // P9a (T-122): a record edited outside the canonical operations must not
+    // release the gate — block with the repair path instead of trusting the
+    // edited status.
+    if !execution_state::integrity_ok(&record) {
+        return HookOutput::stop_block(
+            "Execution control record failed integrity validation: it was edited outside the canonical operations. Repair it with JSON operation `execution.adopt` and a non-empty `params.reason`, then settle via `execution.complete` / `execution.blocked` with real verification evidence.",
+        );
+    }
     // Settlement requires GWT_SESSION_ID; a session without one (a bare,
     // non-gwt-launched agent in the worktree) could never satisfy the gate,
     // so blocking it would be an unsatisfiable trap — stay silent.

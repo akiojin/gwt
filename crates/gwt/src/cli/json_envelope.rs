@@ -280,6 +280,11 @@ fn parse(input: &str) -> Result<ParsedEnvelope, CliParseError> {
                 missing_verification: optional_string(params, "missing_verification")?,
             })
         }
+        "execution.adopt" => {
+            CliCommand::Execution(crate::cli::execution_state::ExecutionCommand::Adopt {
+                reason: required_string(params, "reason")?,
+            })
+        }
         "build.start" => skill_state(params, SkillActionKind::Start).map(CliCommand::Build)?,
         "build.phase" => skill_state(params, SkillActionKind::Phase).map(CliCommand::Build)?,
         "build.complete" => {
