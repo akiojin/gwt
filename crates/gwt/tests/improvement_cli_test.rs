@@ -1,9 +1,12 @@
 use std::{
     collections::BTreeSet,
     fs,
-    io::Write,
+    io::{self, Read, Write},
     path::{Path, PathBuf},
-    process::Stdio,
+    process::{Child, ExitStatus, Output, Stdio},
+    sync::{mpsc, Arc, Mutex},
+    thread,
+    time::{Duration, Instant},
 };
 
 use gwt_core::process::hidden_command;
@@ -12,6 +15,300 @@ use sha2::{Digest, Sha256};
 use tempfile::TempDir;
 
 use gwt::cli::improvement_contract::{read_owner_projection, OWNER_PROJECTION_CONTRACT_REVISION};
+
+const GWTD_WAIT_TIMEOUT: Duration = Duration::from_secs(30);
+const GWTD_CLEANUP_GRACE: Duration = Duration::from_secs(2);
+
+#[derive(Debug)]
+enum BoundedChildOutput {
+    Completed(Output),
+    TimedOut(Output),
+}
+
+struct OutputDrain {
+    output: Arc<Mutex<Vec<u8>>>,
+    finished: mpsc::Receiver<io::Result<()>>,
+}
+
+impl OutputDrain {
+    fn snapshot(&self) -> Vec<u8> {
+        self.output
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
+    }
+
+    fn wait_until(&self, deadline: Instant) -> io::Result<bool> {
+        match self.finished.try_recv() {
+            Ok(result) => return result.map(|()| true),
+            Err(mpsc::TryRecvError::Disconnected) => {
+                return Err(io::Error::other("child output reader disconnected"));
+            }
+            Err(mpsc::TryRecvError::Empty) => {}
+        }
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
+            return Ok(false);
+        }
+        match self.finished.recv_timeout(remaining) {
+            Ok(result) => result.map(|()| true),
+            Err(mpsc::RecvTimeoutError::Timeout) => Ok(false),
+            Err(mpsc::RecvTimeoutError::Disconnected) => {
+                Err(io::Error::other("child output reader disconnected"))
+            }
+        }
+    }
+}
+
+fn output_reader<R>(reader: R) -> OutputDrain
+where
+    R: Read + Send + 'static,
+{
+    let output = Arc::new(Mutex::new(Vec::new()));
+    let thread_output = Arc::clone(&output);
+    let (finished_tx, finished) = mpsc::channel();
+    thread::spawn(move || {
+        let mut reader = reader;
+        let result = (|| {
+            let mut chunk = [0_u8; 8 * 1024];
+            loop {
+                let read = reader.read(&mut chunk)?;
+                if read == 0 {
+                    return Ok(());
+                }
+                thread_output
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .extend_from_slice(&chunk[..read]);
+            }
+        })();
+        let _ = finished_tx.send(result);
+    });
+    OutputDrain { output, finished }
+}
+
+fn output_diagnostic_error(
+    kind: io::ErrorKind,
+    message: &str,
+    stdout: &OutputDrain,
+    stderr: &OutputDrain,
+) -> io::Error {
+    io::Error::new(
+        kind,
+        format!(
+            "{message}; stdout={}; stderr={}",
+            String::from_utf8_lossy(&stdout.snapshot()),
+            String::from_utf8_lossy(&stderr.snapshot())
+        ),
+    )
+}
+
+fn wait_for_child_until(child: &mut Child, deadline: Instant) -> io::Result<Option<ExitStatus>> {
+    loop {
+        if let Some(status) = child.try_wait()? {
+            return Ok(Some(status));
+        }
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
+            return Ok(None);
+        }
+        thread::sleep(remaining.min(Duration::from_millis(10)));
+    }
+}
+
+fn collect_output_until(
+    stdout: &OutputDrain,
+    stderr: &OutputDrain,
+    deadline: Instant,
+) -> io::Result<(Vec<u8>, Vec<u8>)> {
+    let stdout_complete = stdout.wait_until(deadline)?;
+    let stderr_complete = stderr.wait_until(deadline)?;
+    if !stdout_complete || !stderr_complete {
+        return Err(output_diagnostic_error(
+            io::ErrorKind::TimedOut,
+            "child output pipes remained open after cleanup grace",
+            stdout,
+            stderr,
+        ));
+    }
+    Ok((stdout.snapshot(), stderr.snapshot()))
+}
+
+fn wait_with_output_timeout(
+    mut child: Child,
+    timeout: Duration,
+    cleanup_grace: Duration,
+) -> io::Result<BoundedChildOutput> {
+    let stdout = output_reader(
+        child
+            .stdout
+            .take()
+            .ok_or_else(|| io::Error::other("child stdout was not piped"))?,
+    );
+    let stderr = output_reader(
+        child
+            .stderr
+            .take()
+            .ok_or_else(|| io::Error::other("child stderr was not piped"))?,
+    );
+    let deadline = Instant::now() + timeout;
+    let status = wait_for_child_until(&mut child, deadline)?;
+    let (status, timed_out, output_deadline) = match status {
+        Some(status) => (status, false, Instant::now() + cleanup_grace),
+        None => {
+            if let Err(kill_error) = child.kill() {
+                if let Some(status) = child.try_wait()? {
+                    (status, true, Instant::now() + cleanup_grace)
+                } else {
+                    return Err(output_diagnostic_error(
+                        kill_error.kind(),
+                        &format!("failed to kill timed-out child: {kill_error}"),
+                        &stdout,
+                        &stderr,
+                    ));
+                }
+            } else {
+                let cleanup_deadline = Instant::now() + cleanup_grace;
+                let status =
+                    wait_for_child_until(&mut child, cleanup_deadline)?.ok_or_else(|| {
+                        output_diagnostic_error(
+                            io::ErrorKind::TimedOut,
+                            "timed-out child was not reaped within cleanup grace",
+                            &stdout,
+                            &stderr,
+                        )
+                    })?;
+                (status, true, cleanup_deadline)
+            }
+        }
+    };
+    let (stdout, stderr) = collect_output_until(&stdout, &stderr, output_deadline)?;
+    let output = Output {
+        status,
+        stdout,
+        stderr,
+    };
+    Ok(if timed_out {
+        BoundedChildOutput::TimedOut(output)
+    } else {
+        BoundedChildOutput::Completed(output)
+    })
+}
+
+#[test]
+#[ignore = "subprocess fixture for bounded child-output tests"]
+fn bounded_child_output_stall_fixture() {
+    if std::env::var_os("GWT_BOUNDED_CHILD_OUTPUT_FIXTURE").is_none() {
+        return;
+    }
+    print!("fixture-stdout");
+    io::stdout().flush().expect("flush fixture stdout");
+    eprint!("fixture-stderr");
+    io::stderr().flush().expect("flush fixture stderr");
+    let ready_path =
+        std::env::var_os("GWT_BOUNDED_CHILD_OUTPUT_READY").expect("fixture ready path");
+    fs::write(ready_path, b"ready").expect("write fixture ready marker");
+    thread::sleep(Duration::from_millis(300));
+}
+
+#[test]
+fn child_output_timeout_kills_reaps_and_collects_both_streams() {
+    let executable = std::env::current_exe().expect("current test executable");
+    let ready_dir = tempfile::tempdir().expect("ready dir");
+    let ready_path = ready_dir.path().join("ready");
+    let mut command = hidden_command(executable);
+    command
+        .args([
+            "--exact",
+            "bounded_child_output_stall_fixture",
+            "--ignored",
+            "--nocapture",
+        ])
+        .env("GWT_BOUNDED_CHILD_OUTPUT_FIXTURE", "1")
+        .env("GWT_BOUNDED_CHILD_OUTPUT_READY", &ready_path)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    let child = command.spawn().expect("spawn stalled child fixture");
+    let ready_deadline = Instant::now() + Duration::from_secs(2);
+    while !ready_path.exists() {
+        assert!(
+            Instant::now() < ready_deadline,
+            "fixture did not become ready"
+        );
+        thread::sleep(Duration::from_millis(5));
+    }
+
+    let output =
+        wait_with_output_timeout(child, Duration::from_millis(20), Duration::from_millis(500))
+            .expect("collect timed-out child output");
+
+    let BoundedChildOutput::TimedOut(output) = output else {
+        panic!("stalled child must time out");
+    };
+    assert!(!output.status.success(), "timed-out child must be killed");
+    assert!(String::from_utf8_lossy(&output.stdout).contains("fixture-stdout"));
+    assert!(String::from_utf8_lossy(&output.stderr).contains("fixture-stderr"));
+}
+
+#[test]
+#[ignore = "subprocess fixture that keeps inherited output pipes open"]
+fn bounded_child_output_pipe_holder_fixture() {
+    if std::env::var_os("GWT_BOUNDED_CHILD_OUTPUT_PIPE_HOLDER").is_some() {
+        thread::sleep(Duration::from_millis(300));
+    }
+}
+
+#[test]
+#[ignore = "subprocess fixture that exits before its pipe-holding child"]
+#[allow(clippy::zombie_processes)]
+fn bounded_child_output_pipe_parent_fixture() {
+    if std::env::var_os("GWT_BOUNDED_CHILD_OUTPUT_PIPE_PARENT").is_none() {
+        return;
+    }
+    print!("parent-stdout");
+    io::stdout().flush().expect("flush parent stdout");
+    eprint!("parent-stderr");
+    io::stderr().flush().expect("flush parent stderr");
+    let executable = std::env::current_exe().expect("current test executable");
+    let mut command = hidden_command(executable);
+    command
+        .args([
+            "--exact",
+            "bounded_child_output_pipe_holder_fixture",
+            "--ignored",
+            "--nocapture",
+        ])
+        .env("GWT_BOUNDED_CHILD_OUTPUT_PIPE_HOLDER", "1")
+        .stdin(Stdio::null());
+    command.spawn().expect("spawn pipe holder");
+}
+
+#[test]
+fn inherited_output_pipe_is_bounded_by_cleanup_grace() {
+    let executable = std::env::current_exe().expect("current test executable");
+    let mut command = hidden_command(executable);
+    command
+        .args([
+            "--exact",
+            "bounded_child_output_pipe_parent_fixture",
+            "--ignored",
+            "--nocapture",
+        ])
+        .env("GWT_BOUNDED_CHILD_OUTPUT_PIPE_PARENT", "1")
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    let child = command.spawn().expect("spawn pipe parent fixture");
+
+    let error = wait_with_output_timeout(child, Duration::from_secs(2), Duration::from_millis(20))
+        .expect_err("inherited output pipe must not block indefinitely");
+
+    assert_eq!(error.kind(), io::ErrorKind::TimedOut);
+    let message = error.to_string();
+    assert!(message.contains("parent-stdout"), "{message}");
+    assert!(message.contains("parent-stderr"), "{message}");
+}
 
 struct Fixture {
     home: TempDir,
@@ -106,7 +403,15 @@ fn run_gwtd_json_raw_in_with_session(
         .expect("stdin")
         .write_all(payload.to_string().as_bytes())
         .expect("write JSON");
-    child.wait_with_output().expect("wait gwtd")
+    match wait_with_output_timeout(child, GWTD_WAIT_TIMEOUT, GWTD_CLEANUP_GRACE).expect("wait gwtd")
+    {
+        BoundedChildOutput::Completed(output) => output,
+        BoundedChildOutput::TimedOut(output) => panic!(
+            "gwtd exceeded {GWTD_WAIT_TIMEOUT:?}; stdout={}; stderr={}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        ),
+    }
 }
 
 fn run_git(repo: &Path, args: &[&str]) {
