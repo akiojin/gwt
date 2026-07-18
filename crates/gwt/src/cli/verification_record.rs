@@ -61,6 +61,28 @@ pub struct VerificationRunRecord {
     pub commands: Vec<VerificationCommandResult>,
     pub all_passed: bool,
     pub created_at: DateTime<Utc>,
+    /// Integrity hash over the record content (SPEC-3248 P9a, T-119/T-122
+    /// core): sha256 of the canonical serialization with this field emptied.
+    /// Gates reject records whose stored hash does not match. Empty = legacy
+    /// pre-P9a record, accepted for one release cycle (see execution_state).
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub content_hash: String,
+}
+
+/// Compute the integrity hash for a record (content with the hash emptied).
+#[must_use]
+pub fn compute_content_hash(record: &VerificationRunRecord) -> String {
+    let mut canonical = record.clone();
+    canonical.content_hash = String::new();
+    let bytes = serde_json::to_vec(&canonical).unwrap_or_default();
+    format!("{:x}", Sha256::digest(&bytes))
+}
+
+/// True when the stored integrity hash matches the content (or the record is
+/// a legacy pre-P9a record without one).
+#[must_use]
+pub fn integrity_ok(record: &VerificationRunRecord) -> bool {
+    record.content_hash.is_empty() || record.content_hash == compute_content_hash(record)
 }
 
 /// Resolve the record path for a worktree.
@@ -84,10 +106,13 @@ pub fn load(worktree: &Path) -> io::Result<Option<VerificationRunRecord>> {
     }
 }
 
-/// Persist the record atomically.
+/// Persist the record atomically. The integrity hash is recomputed on every
+/// save (P9a).
 pub fn save(worktree: &Path, record: &VerificationRunRecord) -> io::Result<()> {
+    let mut record = record.clone();
+    record.content_hash = compute_content_hash(&record);
     let path = state_path(worktree);
-    let serialized = serde_json::to_vec_pretty(record)
+    let serialized = serde_json::to_vec_pretty(&record)
         .map_err(|err| io::Error::new(ErrorKind::InvalidData, err))?;
     gwt_github::cache::write_atomic(&path, &serialized)
 }
@@ -313,6 +338,7 @@ pub fn run_verification(
         commands: results,
         all_passed,
         created_at: Utc::now(),
+        content_hash: String::new(),
     };
     save(worktree, &record).map_err(|err| format!("failed to save verification record: {err}"))?;
     Ok((record, transcript))
@@ -329,6 +355,9 @@ pub enum EvidenceStatus {
     StaleFingerprint,
     Failing,
     Unreadable,
+    /// P9a (T-122): the stored integrity hash does not match the content —
+    /// the record was edited outside `verify.run`.
+    Tampered,
 }
 
 impl EvidenceStatus {
@@ -355,6 +384,9 @@ impl EvidenceStatus {
             Self::Unreadable => {
                 "the verification record is unreadable — rerun `verify.run` to rewrite it"
             }
+            Self::Tampered => {
+                "the verification record failed integrity validation (edited outside `verify.run`) — rerun `verify.run` to produce a genuine record"
+            }
         }
     }
 }
@@ -372,6 +404,9 @@ pub fn evaluate_evidence(
         Ok(None) => return EvidenceStatus::MissingRecord,
         Err(_) => return EvidenceStatus::Unreadable,
     };
+    if !integrity_ok(&record) {
+        return EvidenceStatus::Tampered;
+    }
     if record.session_id != session_id {
         return EvidenceStatus::WrongSession;
     }
@@ -504,9 +539,15 @@ mod tests {
             }],
             all_passed: true,
             created_at: Utc::now(),
+            content_hash: String::new(),
         };
         save(dir.path(), &record).unwrap();
-        assert_eq!(load(dir.path()).unwrap(), Some(record));
+        let loaded = load(dir.path()).unwrap().unwrap();
+        assert!(integrity_ok(&loaded));
+        assert!(!loaded.content_hash.is_empty());
+        let mut normalized = loaded.clone();
+        normalized.content_hash = String::new();
+        assert_eq!(normalized, record);
     }
 
     // T-110: verify.run executes real commands, records exit codes, and the

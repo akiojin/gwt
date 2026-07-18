@@ -72,6 +72,16 @@ pub enum ExecutionControlStatus {
     Blocked,
 }
 
+/// One audited ownership transfer (SPEC-3248 P9a, T-117/T-123): who held the
+/// execution, who took it over, why, and when.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct OwnershipTransfer {
+    pub from_session_id: String,
+    pub to_session_id: String,
+    pub reason: String,
+    pub transferred_at: DateTime<Utc>,
+}
+
 /// The Execution Control Record (T-106).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ExecutionControlRecord {
@@ -94,6 +104,37 @@ pub struct ExecutionControlRecord {
     pub launched_at: DateTime<Utc>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub settled_at: Option<DateTime<Utc>>,
+    /// Audited ownership transfer chain (P9a, T-117/T-123): every takeover —
+    /// `execution.adopt`, launch takeover, resume takeover — appends here.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub transfers: Vec<OwnershipTransfer>,
+    /// Integrity hash over the record content (P9a, T-119/T-122 core):
+    /// sha256 of the canonical serialization with this field emptied. Every
+    /// canonical writer recomputes it; gates reject records whose stored
+    /// hash does not match (naive direct edits). Empty = legacy pre-P9a
+    /// record, accepted for one release cycle so in-flight worktrees keep
+    /// working (sunset is a dependent follow-up; the PreToolUse direct-write
+    /// guard independently blocks agent edits to this file).
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub content_hash: String,
+}
+
+/// Compute the integrity hash for a record (content with the hash field
+/// emptied).
+#[must_use]
+pub fn compute_content_hash(record: &ExecutionControlRecord) -> String {
+    use sha2::{Digest, Sha256};
+    let mut canonical = record.clone();
+    canonical.content_hash = String::new();
+    let bytes = serde_json::to_vec(&canonical).unwrap_or_default();
+    format!("{:x}", Sha256::digest(&bytes))
+}
+
+/// True when the stored integrity hash matches the content (or the record is
+/// a legacy pre-P9a record without one).
+#[must_use]
+pub fn integrity_ok(record: &ExecutionControlRecord) -> bool {
+    record.content_hash.is_empty() || record.content_hash == compute_content_hash(record)
 }
 
 /// Resolve the record path for a worktree.
@@ -117,10 +158,13 @@ pub fn load(worktree: &Path) -> io::Result<Option<ExecutionControlRecord>> {
     }
 }
 
-/// Persist the record atomically (hooks read this file concurrently).
+/// Persist the record atomically (hooks read this file concurrently). The
+/// integrity hash is recomputed on every save (P9a).
 pub fn save(worktree: &Path, record: &ExecutionControlRecord) -> io::Result<()> {
+    let mut record = record.clone();
+    record.content_hash = compute_content_hash(&record);
     let path = state_path(worktree);
-    let serialized = serde_json::to_vec_pretty(record)
+    let serialized = serde_json::to_vec_pretty(&record)
         .map_err(|err| io::Error::new(ErrorKind::InvalidData, err))?;
     gwt_github::cache::write_atomic(&path, &serialized)
 }
@@ -139,13 +183,31 @@ pub fn materialize_at_launch(
     entrypoint: &str,
     resume: bool,
 ) -> io::Result<()> {
-    if resume {
-        if let Ok(Some(existing)) = load(worktree) {
-            if existing.owner_number == owner_number
-                && existing.status != ExecutionControlStatus::Active
-            {
-                return Ok(());
-            }
+    // Carry the audited transfer chain forward (P9a, T-118/T-123): taking
+    // over another session's ACTIVE record — fresh launch or resume — is an
+    // implicit, recorded transfer instead of a silent overwrite.
+    let mut transfers: Vec<OwnershipTransfer> = Vec::new();
+    if let Ok(Some(existing)) = load(worktree) {
+        if resume
+            && existing.owner_number == owner_number
+            && existing.status != ExecutionControlStatus::Active
+        {
+            return Ok(());
+        }
+        if existing.status == ExecutionControlStatus::Active
+            && existing.primary_session_id != session_id
+        {
+            transfers = existing.transfers;
+            transfers.push(OwnershipTransfer {
+                from_session_id: existing.primary_session_id,
+                to_session_id: session_id.to_string(),
+                reason: if resume {
+                    "resume-takeover".to_string()
+                } else {
+                    "launch-takeover".to_string()
+                },
+                transferred_at: Utc::now(),
+            });
         }
     }
     save(
@@ -161,6 +223,8 @@ pub fn materialize_at_launch(
             missing_verification: None,
             launched_at: Utc::now(),
             settled_at: None,
+            transfers,
+            content_hash: String::new(),
         },
     )
 }
@@ -238,6 +302,9 @@ pub enum SettleResult {
     AlreadySettled(ExecutionControlRecord),
     /// The record belongs to another session (T-100 semantics).
     SessionMismatch { record_session_id: String },
+    /// The stored integrity hash does not match the content (P9a, T-122):
+    /// the record was edited outside the canonical operations.
+    Tampered,
 }
 
 /// Settle the current worktree's record for `session_id`.
@@ -249,6 +316,9 @@ pub fn settle(
     let Some(mut record) = load(worktree)? else {
         return Ok(SettleResult::NoRecord);
     };
+    if !integrity_ok(&record) {
+        return Ok(SettleResult::Tampered);
+    }
     if record.primary_session_id != session_id {
         return Ok(SettleResult::SessionMismatch {
             record_session_id: record.primary_session_id,
@@ -316,6 +386,14 @@ pub(crate) fn pr_handoff_refusal(repo_path: &Path, ready_handoff: bool) -> Optio
         .filter(|value| !value.is_empty())?;
     let worktree = gwt_core::paths::resolve_current_worktree_root(repo_path);
     let record = load(&worktree).ok().flatten()?;
+    // P9a (T-122): a tampered record refuses every PR mutation for everyone —
+    // repair it through `execution.adopt` (rewrites the record canonically)
+    // before any handoff.
+    if !integrity_ok(&record) {
+        return Some(
+            "PR handoff refused: the execution control record failed integrity validation (edited outside the canonical operations). Repair it with JSON operation `execution.adopt` and a non-empty `params.reason`, then re-verify.".to_string(),
+        );
+    }
     if record.primary_session_id != session_id {
         return None;
     }
@@ -358,6 +436,12 @@ pub enum ExecutionCommand {
         reason: String,
         missing_verification: Option<String>,
     },
+    /// P9a (T-117): take over the worktree's active record for the current
+    /// session with an audited reason (crash recovery, window handoff,
+    /// tamper repair).
+    Adopt {
+        reason: String,
+    },
 }
 
 /// Run an `execution.*` settlement command. Requires `GWT_SESSION_ID` so the
@@ -378,7 +462,11 @@ pub(super) fn run<E: CliEnv>(
             ))
         })?;
     let worktree = gwt_core::paths::resolve_current_worktree_root(env.repo_path());
+    if let ExecutionCommand::Adopt { reason } = &command {
+        return run_adopt(&worktree, &session_id, reason, out);
+    }
     let settlement = match command {
+        ExecutionCommand::Adopt { .. } => unreachable!("handled above"),
         ExecutionCommand::Complete => {
             // SPEC-3248 P8b (T-111/FR-035/FR-036): completion requires fresh,
             // all-passing, tool-generated verification evidence for this
@@ -454,11 +542,74 @@ pub(super) fn run<E: CliEnv>(
         }
         SettleResult::SessionMismatch { record_session_id } => {
             out.push_str(&format!(
-                "execution: settlement refused — record belongs to session {record_session_id}, not the current session\n",
+                "execution: settlement refused — record belongs to session {record_session_id}, not the current session. Take it over explicitly with JSON operation `execution.adopt` and a non-empty `params.reason` (T-117)\n",
             ));
             Ok(2)
         }
+        SettleResult::Tampered => {
+            out.push_str(
+                "execution: settlement refused — the record failed integrity validation (edited outside the canonical operations). Repair with JSON operation `execution.adopt` and a non-empty `params.reason`, then re-verify\n",
+            );
+            Ok(2)
+        }
     }
+}
+
+/// `execution.adopt` (P9a, T-117): take over the worktree's record for the
+/// current session with an audited transfer entry. Also the repair path for
+/// records that failed integrity validation — the rewrite goes through the
+/// canonical writer, restoring a valid hash while keeping the audit trail.
+fn run_adopt(
+    worktree: &Path,
+    session_id: &str,
+    reason: &str,
+    out: &mut String,
+) -> Result<i32, SpecOpsError> {
+    if reason.trim().is_empty() {
+        return Err(SpecOpsError::from(ApiError::Unexpected(
+            "execution.adopt requires a non-empty params.reason".to_string(),
+        )));
+    }
+    let Some(mut record) =
+        load(worktree).map_err(|err| SpecOpsError::from(ApiError::Network(err.to_string())))?
+    else {
+        out.push_str("execution: no execution control record to adopt — a linked-owner launch materializes one\n");
+        return Ok(0);
+    };
+    if record.status != ExecutionControlStatus::Active {
+        out.push_str(&format!(
+            "execution: record is already settled ({status:?}) — nothing to adopt; a fresh launch takes over\n",
+            status = record.status,
+        ));
+        return Ok(0);
+    }
+    if record.primary_session_id == session_id && integrity_ok(&record) {
+        out.push_str("execution: the current session already owns this record\n");
+        return Ok(0);
+    }
+    let was_tampered = !integrity_ok(&record);
+    record.transfers.push(OwnershipTransfer {
+        from_session_id: record.primary_session_id.clone(),
+        to_session_id: session_id.to_string(),
+        reason: reason.trim().to_string(),
+        transferred_at: Utc::now(),
+    });
+    record.primary_session_id = session_id.to_string();
+    save(worktree, &record)
+        .map_err(|err| SpecOpsError::from(ApiError::Network(err.to_string())))?;
+    out.push_str(&format!(
+        "execution: adopted {kind} #{number} for session {session} ({transfers} transfer(s) on record{repaired})\n",
+        kind = record.owner_kind.as_str(),
+        number = record.owner_number,
+        session = session_id,
+        transfers = record.transfers.len(),
+        repaired = if was_tampered {
+            ", integrity repaired"
+        } else {
+            ""
+        },
+    ));
+    Ok(0)
 }
 
 #[cfg(test)]
@@ -478,6 +629,8 @@ mod tests {
             missing_verification: None,
             launched_at: Utc::now(),
             settled_at: None,
+            transfers: Vec::new(),
+            content_hash: String::new(),
         }
     }
 
@@ -488,7 +641,14 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let record = active_record("sess-1");
         save(dir.path(), &record).unwrap();
-        assert_eq!(load(dir.path()).unwrap(), Some(record));
+        // save() stamps the integrity hash (P9a); content must roundtrip and
+        // the stored hash must validate.
+        let loaded = load(dir.path()).unwrap().unwrap();
+        assert!(integrity_ok(&loaded));
+        assert!(!loaded.content_hash.is_empty());
+        let mut normalized = loaded.clone();
+        normalized.content_hash = String::new();
+        assert_eq!(normalized, record);
     }
 
     #[test]
@@ -657,6 +817,95 @@ mod tests {
         let record = load(dir.path()).unwrap().unwrap();
         assert_eq!(record.status, ExecutionControlStatus::Active);
         assert_eq!(record.primary_session_id, "sess-5");
+    }
+
+    // P9a (T-117/T-118/T-123): takeovers are audited transfers, and the
+    // chain survives subsequent takeovers.
+    #[test]
+    fn takeovers_append_audited_transfer_chain() {
+        let dir = tempfile::tempdir().unwrap();
+        materialize_at_launch(
+            dir.path(),
+            ExecutionOwnerKind::Spec,
+            3248,
+            "sess-1",
+            "launch",
+            false,
+        )
+        .unwrap();
+        // Fresh launch takes over another session's ACTIVE record.
+        materialize_at_launch(
+            dir.path(),
+            ExecutionOwnerKind::Spec,
+            3248,
+            "sess-2",
+            "launch",
+            false,
+        )
+        .unwrap();
+        // Resume takeover of the active record by a third session.
+        materialize_at_launch(
+            dir.path(),
+            ExecutionOwnerKind::Spec,
+            3248,
+            "sess-3",
+            "resume",
+            true,
+        )
+        .unwrap();
+        let record = load(dir.path()).unwrap().unwrap();
+        assert_eq!(record.primary_session_id, "sess-3");
+        assert_eq!(record.transfers.len(), 2);
+        assert_eq!(record.transfers[0].from_session_id, "sess-1");
+        assert_eq!(record.transfers[0].to_session_id, "sess-2");
+        assert_eq!(record.transfers[0].reason, "launch-takeover");
+        assert_eq!(record.transfers[1].from_session_id, "sess-2");
+        assert_eq!(record.transfers[1].to_session_id, "sess-3");
+        assert_eq!(record.transfers[1].reason, "resume-takeover");
+        assert!(integrity_ok(&record));
+    }
+
+    // P9a (T-122): a record edited outside the canonical operations fails
+    // integrity validation — settlement refuses it.
+    #[test]
+    fn tampered_record_refuses_settlement_and_adopt_repairs() {
+        let dir = tempfile::tempdir().unwrap();
+        save(dir.path(), &active_record("sess-1")).unwrap();
+        // Naive direct edit: flip the status without recomputing the hash.
+        let path = state_path(dir.path());
+        let edited = fs::read_to_string(&path)
+            .unwrap()
+            .replace("\"active\"", "\"completed\"");
+        fs::write(&path, edited).unwrap();
+        let loaded = load(dir.path()).unwrap().unwrap();
+        assert!(!integrity_ok(&loaded), "edited record must fail integrity");
+
+        assert_eq!(
+            settle(dir.path(), "sess-1", ExecutionSettlement::Completed).unwrap(),
+            SettleResult::Tampered
+        );
+
+        // adopt (canonical writer) repairs the record with an audited entry.
+        // Tamper a different field this time (editing the status back would
+        // just restore the originally hashed content).
+        let edited = fs::read_to_string(&path)
+            .unwrap()
+            .replace("\"completed\"", "\"active\"")
+            .replace("\"$gwt-execute\"", "\"$gwt-forged\"");
+        fs::write(&path, edited).unwrap();
+        let mut record = load(dir.path()).unwrap().unwrap();
+        assert!(!integrity_ok(&record));
+        record.transfers.push(OwnershipTransfer {
+            from_session_id: record.primary_session_id.clone(),
+            to_session_id: "sess-2".to_string(),
+            reason: "tamper repair".to_string(),
+            transferred_at: Utc::now(),
+        });
+        record.primary_session_id = "sess-2".to_string();
+        save(dir.path(), &record).unwrap();
+        let repaired = load(dir.path()).unwrap().unwrap();
+        assert!(integrity_ok(&repaired));
+        assert_eq!(repaired.transfers.len(), 1);
     }
 
     // T-107 helpers: entrypoint derivation from the launch argv.
@@ -930,6 +1179,51 @@ mod tests {
                 ExecutionControlStatus::Completed,
                 "a real matching finalize with fresh evidence must settle the execution"
             );
+        }
+
+        // P9a (T-117): execution.adopt takes over with an audited reason and
+        // then allows same-session settlement.
+        #[test]
+        fn adopt_op_transfers_ownership_with_reason() {
+            let _env_lock = crate::env_test_lock()
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let _session = ScopedEnvVar::set(gwt_agent::GWT_SESSION_ID_ENV, "sess-new");
+            let dir = tempfile::tempdir().unwrap();
+            save(dir.path(), &active_record("sess-old")).unwrap();
+
+            // Reason is mandatory.
+            assert!(run_cmd(
+                dir.path(),
+                ExecutionCommand::Adopt {
+                    reason: "  ".to_string()
+                }
+            )
+            .is_err());
+
+            let (code, out) = run_cmd(
+                dir.path(),
+                ExecutionCommand::Adopt {
+                    reason: "crash recovery of the implementing window".to_string(),
+                },
+            )
+            .unwrap();
+            assert_eq!(code, 0, "{out}");
+            let record = load(dir.path()).unwrap().unwrap();
+            assert_eq!(record.primary_session_id, "sess-new");
+            assert_eq!(record.transfers.len(), 1);
+            assert_eq!(record.transfers[0].from_session_id, "sess-old");
+            assert!(integrity_ok(&record));
+
+            // Settlement now works from the adopting session (with evidence).
+            crate::cli::verification_record::run_verification(
+                dir.path(),
+                "sess-new",
+                &["git --version".to_string()],
+            )
+            .unwrap();
+            let (code, out) = run_cmd(dir.path(), ExecutionCommand::Complete).unwrap();
+            assert_eq!(code, 0, "{out}");
         }
 
         #[test]
