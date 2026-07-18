@@ -2188,16 +2188,17 @@ fn blocks_gh_run_rerun_without_owner() {
 }
 
 #[test]
-fn blocks_gh_release_create_without_owner() {
+fn blocks_gh_release_create_as_mutation_sink() {
+    // SPEC-3248 P10 (T-217): release publishing is categorically blocked for
+    // agent Bash — the mutation-sink classifier fires before (and subsumes)
+    // the owner guard that used to gate this command.
     let event = event(
         "Bash",
         json!({ "command": "gh release create v9.99.0 --repo akiojin/gwt" }),
     );
     let decision = evaluate(&event, workflow_policy::WorkflowContext::unknown())
         .expect("gh release create mutates release state");
-    assert!(decision
-        .permission_decision_reason()
-        .contains("Owner Issue/SPEC"));
+    assert!(decision.permission_decision_reason().contains("T-217"));
 }
 
 #[test]
