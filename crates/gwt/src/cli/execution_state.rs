@@ -24,9 +24,10 @@
 //!   transfer are P9a. A fresh relaunch takes over with a fresh active
 //!   record; a resume preserves an existing settled record for the same
 //!   owner.
-//! - Saves are atomic file replacements but the read-modify-write cycle is
-//!   not serialized across processes; the owner write lease (T-149) owns
-//!   real serialization.
+//! - Read-modify-write cycles (launch materialization, settlement,
+//!   adoption) run under the owner write lease
+//!   (`trusted_store::with_write_lease`, T-149): a second concurrent gwt
+//!   writer gets an explicit-retry refusal instead of last-writer-wins.
 
 use std::{
     fs,
@@ -191,6 +192,28 @@ pub fn materialize_at_launch(
     entrypoint: &str,
     resume: bool,
 ) -> io::Result<()> {
+    // T-149: the load-modify-save cycle runs under the owner write lease so
+    // concurrent launches cannot interleave into a lost update.
+    crate::cli::trusted_store::with_write_lease(worktree, || {
+        materialize_at_launch_locked(
+            worktree,
+            owner_kind,
+            owner_number,
+            session_id,
+            entrypoint,
+            resume,
+        )
+    })
+}
+
+fn materialize_at_launch_locked(
+    worktree: &Path,
+    owner_kind: ExecutionOwnerKind,
+    owner_number: u64,
+    session_id: &str,
+    entrypoint: &str,
+    resume: bool,
+) -> io::Result<()> {
     // Carry the audited transfer chain forward (P9a, T-118/T-123): taking
     // over another session's ACTIVE record — fresh launch or resume — is an
     // implicit, recorded transfer instead of a silent overwrite.
@@ -317,6 +340,17 @@ pub enum SettleResult {
 
 /// Settle the current worktree's record for `session_id`.
 pub fn settle(
+    worktree: &Path,
+    session_id: &str,
+    settlement: ExecutionSettlement,
+) -> io::Result<SettleResult> {
+    // T-149: settlement is a read-modify-write cycle — leased.
+    crate::cli::trusted_store::with_write_lease(worktree, || {
+        settle_locked(worktree, session_id, settlement)
+    })
+}
+
+fn settle_locked(
     worktree: &Path,
     session_id: &str,
     settlement: ExecutionSettlement,
@@ -612,6 +646,19 @@ fn run_adopt(
             "execution.adopt requires a non-empty params.reason".to_string(),
         )));
     }
+    // T-149: adoption is a read-modify-write cycle — leased.
+    crate::cli::trusted_store::with_write_lease(worktree, || {
+        Ok(run_adopt_locked(worktree, session_id, reason, out))
+    })
+    .map_err(|err| SpecOpsError::from(ApiError::Network(err.to_string())))?
+}
+
+fn run_adopt_locked(
+    worktree: &Path,
+    session_id: &str,
+    reason: &str,
+    out: &mut String,
+) -> Result<i32, SpecOpsError> {
     let Some(mut record) =
         load(worktree).map_err(|err| SpecOpsError::from(ApiError::Network(err.to_string())))?
     else {
@@ -743,6 +790,37 @@ mod tests {
         let loaded = load(dir.path()).unwrap().unwrap();
         assert_eq!(loaded.primary_session_id, "sess-1");
         assert!(!state_path(dir.path()).exists());
+    }
+
+    // T-149 wiring: settlement contends on the owner write lease — while a
+    // concurrent writer holds it past the bounded wait, settle() surfaces
+    // the explicit-retry error instead of interleaving.
+    #[test]
+    fn settle_refuses_with_retry_while_lease_is_held() {
+        let dir = tempfile::tempdir().unwrap();
+        save(dir.path(), &active_record("sess-1")).unwrap();
+
+        let worktree = dir.path().to_path_buf();
+        let (acquired_tx, acquired_rx) = std::sync::mpsc::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel::<()>();
+        let holder = std::thread::spawn(move || {
+            crate::cli::trusted_store::with_write_lease(&worktree, || {
+                acquired_tx.send(()).unwrap();
+                let _ = release_rx.recv_timeout(std::time::Duration::from_secs(10));
+                Ok(())
+            })
+            .unwrap();
+        });
+        acquired_rx.recv().unwrap();
+        let err = settle(dir.path(), "sess-1", ExecutionSettlement::Completed).unwrap_err();
+        assert!(err.to_string().contains("retry"), "{err}");
+        release_tx.send(()).unwrap();
+        holder.join().unwrap();
+        // The record is untouched by the refused settlement.
+        assert_eq!(
+            load(dir.path()).unwrap().unwrap().status,
+            ExecutionControlStatus::Active
+        );
     }
 
     // P9b: a mirror-only record (written before the trusted store existed)

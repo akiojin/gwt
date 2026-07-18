@@ -20,12 +20,12 @@
 //! errors are surfaced so hook callers can fail open (never mis-block) while
 //! explicit writers stay strict (FR-012 validation).
 //!
-//! Concurrency: every save is an atomic file replacement, but the
-//! read-modify-write cycle is not serialized across processes (the
-//! UserPromptSubmit hook and gwtd CLI operations are separate processes).
-//! The sub-millisecond lost-update window this leaves is a known, accepted
-//! bound for P7A — SPEC-3248 P9's Artifact Write Transaction / write-lease
-//! machinery owns real cross-process serialization as a dependent follow-up.
+//! Concurrency: every save is an atomic file replacement, and the
+//! read-modify-write cycles run under the owner write lease
+//! (`trusted_store::with_write_lease`, T-149). The UserPromptSubmit marker
+//! write uses a short lease wait with an unleased fallback — arming the
+//! gate must not be lost to contention (fail-open) while a lost concurrent
+//! outcome update only fails closed.
 
 use std::{
     fs,
@@ -200,7 +200,30 @@ pub fn save(worktree: &Path, state: &IntakeOutcomeState) -> io::Result<()> {
 /// owned by a different (previous) session is replaced wholesale. A
 /// malformed state file is replaced too: restoring the dirty marker restores
 /// the gate.
+/// Arm the intake gate for `session_id`. The only production caller is the
+/// blocking UserPromptSubmit hook, so the T-149 lease uses a short bounded
+/// wait and falls back to an unleased write on refusal: the rare interleave
+/// can only lose a concurrent outcome update, which fails CLOSED (the gate
+/// blocks and the outcome is re-recorded), while a dropped marker would
+/// fail OPEN (T-149 review).
 pub fn mark_required_since(worktree: &Path, session_id: &str, at: DateTime<Utc>) -> io::Result<()> {
+    match crate::cli::trusted_store::with_write_lease_wait(
+        worktree,
+        std::time::Duration::from_millis(300),
+        || mark_required_since_locked(worktree, session_id, at),
+    ) {
+        Err(err) if err.kind() == ErrorKind::WouldBlock => {
+            mark_required_since_locked(worktree, session_id, at)
+        }
+        result => result,
+    }
+}
+
+fn mark_required_since_locked(
+    worktree: &Path,
+    session_id: &str,
+    at: DateTime<Utc>,
+) -> io::Result<()> {
     let state = match load(worktree) {
         Ok(Some(existing)) if existing.session_id == session_id => IntakeOutcomeState {
             required_since: Some(at),
@@ -220,6 +243,19 @@ pub fn mark_required_since(worktree: &Path, session_id: &str, at: DateTime<Utc>)
 /// existing `required_since` for the same session is preserved so freshness
 /// evaluation stays correct.
 pub fn record_outcome(
+    worktree: &Path,
+    session_id: &str,
+    outcome: IntakeOutcome,
+) -> Result<(), String> {
+    // T-149: leased read-modify-write; a held lease surfaces as an
+    // explicit-retry error string.
+    crate::cli::trusted_store::with_write_lease(worktree, || {
+        Ok(record_outcome_locked(worktree, session_id, outcome))
+    })
+    .map_err(|err| err.to_string())?
+}
+
+fn record_outcome_locked(
     worktree: &Path,
     session_id: &str,
     outcome: IntakeOutcome,
@@ -380,6 +416,35 @@ mod tests {
         };
         save(dir.path(), &state).unwrap();
         assert_eq!(load(dir.path()).unwrap(), Some(state));
+    }
+
+    // T-149 review fix: the hook-side gate-arming write survives a wedged
+    // lease holder through the unleased fallback — a dropped marker would
+    // fail OPEN at the Stop gate.
+    #[test]
+    fn hook_marker_write_survives_held_lease() {
+        let dir = tempfile::tempdir().unwrap();
+        let worktree = dir.path().to_path_buf();
+        let (acquired_tx, acquired_rx) = std::sync::mpsc::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel::<()>();
+        let holder = std::thread::spawn(move || {
+            crate::cli::trusted_store::with_write_lease(&worktree, || {
+                acquired_tx.send(()).unwrap();
+                let _ = release_rx.recv_timeout(std::time::Duration::from_secs(10));
+                Ok(())
+            })
+            .unwrap();
+        });
+        acquired_rx.recv().unwrap();
+
+        mark_required_since(dir.path(), "sess-1", t(9, 0)).unwrap();
+        assert_eq!(
+            load(dir.path()).unwrap().unwrap().required_since,
+            Some(t(9, 0)),
+            "marker must be written even while the lease is held"
+        );
+        release_tx.send(()).unwrap();
+        holder.join().unwrap();
     }
 
     #[test]

@@ -21,8 +21,10 @@ use std::{
     fs,
     io::{self, ErrorKind},
     path::{Path, PathBuf},
+    time::{Duration, Instant},
 };
 
+use fs2::FileExt;
 use sha2::{Digest, Sha256};
 
 /// Resolve the repo-scoped trusted directory for a worktree. `None` when the
@@ -113,6 +115,77 @@ pub fn write_with_mirror(
     }
 }
 
+/// Bounded wait before a second concurrent writer is refused (T-149). Long
+/// enough to ride out another writer's normal read-modify-write cycle,
+/// short enough that a stuck holder surfaces as an explicit retry error
+/// instead of a hang.
+const WRITE_LEASE_WAIT: Duration = Duration::from_secs(2);
+const WRITE_LEASE_POLL: Duration = Duration::from_millis(25);
+
+/// SPEC-3248 T-149 owner write lease: serialize gwt-originated
+/// read-modify-write cycles on this worktree's execution/verification/intake
+/// state records across processes. The lease is an fs2 advisory lock on
+/// `.write-lease` in the repo-scoped trusted directory (or, in degenerate
+/// mirror-only mode, in the worktree's `.gwt/skill-state/`), so every
+/// canonical writer for the same worktree contends on the same file. A
+/// second concurrent writer waits briefly, then gets an explicit-retry
+/// refusal — never a silent last-writer-wins interleave.
+///
+/// Callers wrap one whole RMW cycle and must not nest leases (fs2 locks on a
+/// second handle to the same file block within one process too).
+pub fn with_write_lease<T>(
+    worktree: &Path,
+    operation: impl FnOnce() -> io::Result<T>,
+) -> io::Result<T> {
+    with_write_lease_wait(worktree, WRITE_LEASE_WAIT, operation)
+}
+
+/// [`with_write_lease`] with an explicit wait bound (tests use a short one
+/// to assert the refusal path quickly).
+pub fn with_write_lease_wait<T>(
+    worktree: &Path,
+    wait: Duration,
+    operation: impl FnOnce() -> io::Result<T>,
+) -> io::Result<T> {
+    let dir = trusted_dir_for_worktree(worktree)
+        .unwrap_or_else(|| worktree.join(".gwt").join("skill-state"));
+    fs::create_dir_all(&dir)?;
+    let lock = fs::OpenOptions::new()
+        .create(true)
+        .read(true)
+        .write(true)
+        .truncate(false)
+        .open(dir.join(".write-lease"))?;
+    let deadline = Instant::now() + wait;
+    // Contention is WouldBlock on Unix but a raw OS error (33) wrapped as
+    // Uncategorized on Windows — compare against fs2's canonical error.
+    let is_contended = |err: &io::Error| {
+        err.kind() == ErrorKind::WouldBlock
+            || err.raw_os_error() == fs2::lock_contended_error().raw_os_error()
+    };
+    loop {
+        match lock.try_lock_exclusive() {
+            Ok(()) => break,
+            Err(err) if is_contended(&err) => {
+                let now = Instant::now();
+                if now >= deadline {
+                    return Err(io::Error::new(
+                        ErrorKind::WouldBlock,
+                        "owner write lease is held by another gwt writer for this worktree — \
+                         retry the operation after the concurrent write settles (T-149; \
+                         last-writer-wins interleaving is refused)",
+                    ));
+                }
+                std::thread::sleep(WRITE_LEASE_POLL.min(deadline.saturating_duration_since(now)));
+            }
+            Err(err) => return Err(err),
+        }
+    }
+    let result = operation();
+    let _ = FileExt::unlock(&lock);
+    result
+}
+
 /// True when the worktree is under trusted-store management: launch
 /// materialization wrote the Execution Control Record's trusted copy, so
 /// every later canonical `verify.plan` / `verify.run` write produced a
@@ -155,6 +228,72 @@ pub(crate) fn init_git_repo_with_origin(dir: &Path) {
 mod tests {
     use super::*;
     use gwt_core::test_support::ScopedEnvVar;
+
+    // T-149: two concurrent writers serialize — the second waits for the
+    // first and both complete, in order.
+    #[test]
+    fn write_lease_serializes_concurrent_writers() {
+        let dir = tempfile::tempdir().unwrap();
+        let worktree = dir.path().to_path_buf();
+        let order = std::sync::Arc::new(std::sync::Mutex::new(Vec::<&str>::new()));
+
+        let order_a = order.clone();
+        let worktree_a = worktree.clone();
+        let (acquired_tx, acquired_rx) = std::sync::mpsc::channel();
+        let holder = std::thread::spawn(move || {
+            with_write_lease(&worktree_a, || {
+                order_a.lock().unwrap().push("a-start");
+                acquired_tx.send(()).unwrap();
+                std::thread::sleep(Duration::from_millis(300));
+                order_a.lock().unwrap().push("a-end");
+                Ok(())
+            })
+            .unwrap();
+        });
+        // Handshake: contend only after the holder actually holds the lease.
+        acquired_rx.recv().unwrap();
+        with_write_lease(&worktree, || {
+            order.lock().unwrap().push("b");
+            Ok(())
+        })
+        .unwrap();
+        holder.join().unwrap();
+        assert_eq!(*order.lock().unwrap(), vec!["a-start", "a-end", "b"]);
+    }
+
+    // T-149: a second writer that exceeds the bounded wait is refused with
+    // an explicit-retry error and its operation NEVER runs — no
+    // last-writer-wins interleave.
+    #[test]
+    fn write_lease_refuses_second_writer_with_explicit_retry() {
+        let dir = tempfile::tempdir().unwrap();
+        let worktree = dir.path().to_path_buf();
+
+        let worktree_a = worktree.clone();
+        let (acquired_tx, acquired_rx) = std::sync::mpsc::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel::<()>();
+        let holder = std::thread::spawn(move || {
+            with_write_lease(&worktree_a, || {
+                acquired_tx.send(()).unwrap();
+                let _ = release_rx.recv_timeout(Duration::from_secs(10));
+                Ok(())
+            })
+            .unwrap();
+        });
+        acquired_rx.recv().unwrap();
+        let mut ran = false;
+        let err = with_write_lease_wait(&worktree, Duration::from_millis(50), || {
+            ran = true;
+            Ok(())
+        })
+        .unwrap_err();
+        assert_eq!(err.kind(), ErrorKind::WouldBlock);
+        assert!(err.to_string().contains("retry"), "{err}");
+        assert!(err.to_string().contains("T-149"), "{err}");
+        assert!(!ran, "refused writer must not run its operation");
+        release_tx.send(()).unwrap();
+        holder.join().unwrap();
+    }
 
     #[test]
     fn non_git_dir_is_degenerate_mirror_only() {
