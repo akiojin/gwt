@@ -42,6 +42,7 @@ pub mod tray;
 pub mod trusted_store;
 pub mod update;
 pub mod verification_record;
+pub(crate) mod verify_derivation;
 mod workflow;
 mod workspace;
 

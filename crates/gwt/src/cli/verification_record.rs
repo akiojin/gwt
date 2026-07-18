@@ -109,6 +109,10 @@ pub struct VerificationPlanRecord {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub owner_number: Option<u64>,
     pub commands: Vec<String>,
+    /// Full T-130: the matrix was derived from changed surfaces instead of
+    /// hand-picked (`verify.plan` with `params.derive:true`).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub derived: bool,
     pub created_at: DateTime<Utc>,
     /// Integrity hash (P9a convention).
     #[serde(default, skip_serializing_if = "String::is_empty")]
@@ -565,8 +569,11 @@ pub enum VerifyCommand {
         commands: Vec<String>,
     },
     /// T-130-lite: register the required verification matrix before running.
+    /// Full T-130 core: `derive` classifies changed surfaces and derives the
+    /// matrix when no explicit commands are given.
     Plan {
         commands: Vec<String>,
+        derive: bool,
     },
 }
 
@@ -585,13 +592,34 @@ pub(super) fn run<E: CliEnv>(
             ))
         })?;
     match command {
-        VerifyCommand::Plan { commands } => {
-            if commands.is_empty() {
-                return Err(SpecOpsError::from(ApiError::Unexpected(
-                    "verify.plan requires at least one command".to_string(),
-                )));
-            }
+        VerifyCommand::Plan { commands, derive } => {
             let worktree = gwt_core::paths::resolve_current_worktree_root(env.repo_path());
+            let (commands, derived) = if derive {
+                if !commands.is_empty() {
+                    return Err(SpecOpsError::from(ApiError::Unexpected(
+                        "verify.plan takes either params.derive:true or explicit params.commands, not both"
+                            .to_string(),
+                    )));
+                }
+                let plan = crate::cli::verify_derivation::derive(&worktree)
+                    .map_err(|err| SpecOpsError::from(ApiError::Unexpected(err)))?;
+                out.push_str(&format!(
+                    "verify: derived matrix from changed surfaces [{}]\n",
+                    plan.surfaces.join(", ")
+                ));
+                for command in &plan.commands {
+                    out.push_str(&format!("  - {command}\n"));
+                }
+                (plan.commands, true)
+            } else {
+                if commands.is_empty() {
+                    return Err(SpecOpsError::from(ApiError::Unexpected(
+                        "verify.plan requires at least one command (or params.derive:true)"
+                            .to_string(),
+                    )));
+                }
+                (commands, false)
+            };
             let owner_number = execution_state::load(&worktree)
                 .ok()
                 .flatten()
@@ -600,17 +628,19 @@ pub(super) fn run<E: CliEnv>(
                 session_id: session_id.clone(),
                 owner_number,
                 commands: commands.clone(),
+                derived,
                 created_at: Utc::now(),
                 content_hash: String::new(),
             };
             save_plan(&worktree, &plan)
                 .map_err(|err| SpecOpsError::from(ApiError::Network(err.to_string())))?;
             out.push_str(&format!(
-                "verify: plan registered — {count} command(s) for session {session_id} (owner {owner})\n",
+                "verify: plan registered — {count} command(s) for session {session_id} (owner {owner}{derived_note})\n",
                 count = commands.len(),
                 owner = owner_number
                     .map(|n| format!("#{n}"))
                     .unwrap_or_else(|| "none".to_string()),
+                derived_note = if derived { ", derived" } else { "" },
             ));
             Ok(0)
         }
@@ -656,6 +686,7 @@ mod tests {
                 session_id: session.to_string(),
                 owner_number,
                 commands: commands.to_vec(),
+                derived: false,
                 created_at: Utc::now(),
                 content_hash: String::new(),
             },
@@ -709,6 +740,7 @@ mod tests {
             session_id: "sess-1".to_string(),
             owner_number: Some(3248),
             commands: vec!["cargo test -p gwt --lib".to_string()],
+            derived: false,
             created_at: Utc::now(),
             content_hash: String::new(),
         };
@@ -781,6 +813,7 @@ mod tests {
             session_id: "sess-1".to_string(),
             owner_number: Some(3248),
             commands: vec!["git --version".to_string()],
+            derived: false,
             created_at: Utc::now(),
             content_hash: String::new(),
         };
@@ -1044,6 +1077,7 @@ mod tests {
                 session_id: "sess-1".to_string(),
                 owner_number: None,
                 commands: vec!["git --version".to_string(), "git --exec-path".to_string()],
+                derived: false,
                 created_at: Utc::now(),
                 content_hash: String::new(),
             },
@@ -1082,6 +1116,7 @@ mod tests {
                 session_id: "sess-other".to_string(),
                 owner_number: None,
                 commands: vec!["git --version".to_string()],
+                derived: false,
                 created_at: Utc::now(),
                 content_hash: String::new(),
             },
