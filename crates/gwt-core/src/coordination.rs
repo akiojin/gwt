@@ -971,11 +971,21 @@ fn with_coordination_lock<T>(
 
     let result = operation();
     let unlock_result = FileExt::unlock(&lock);
-    match (result, unlock_result) {
-        (Ok(value), Ok(())) => Ok(value),
-        (Err(err), _) => Err(err),
-        (Ok(_), Err(err)) => Err(err.into()),
+    if let Err(error) = &unlock_result {
+        tracing::warn!(
+            path = %coordination_lock_path(worktree_root).display(),
+            %error,
+            "coordination operation completed but explicit unlock failed"
+        );
     }
+    arbitrate_coordination_lock_result(result, unlock_result)
+}
+
+fn arbitrate_coordination_lock_result<T>(
+    operation_result: Result<T>,
+    _unlock_result: std::io::Result<()>,
+) -> Result<T> {
+    operation_result
 }
 
 fn append_event_locked_outcome(
@@ -2289,6 +2299,32 @@ mod tests {
     use super::*;
     use crate::paths::gwt_project_dir_for_repo_path;
     use crate::test_support::{env_lock, ScopedEnvVar};
+
+    #[test]
+    fn committed_operation_result_wins_over_unlock_failure() {
+        let result = arbitrate_coordination_lock_result(
+            Ok("committed"),
+            Err(std::io::Error::other("unlock failed")),
+        );
+
+        assert_eq!(
+            result.expect("committed operation must remain successful"),
+            "committed"
+        );
+    }
+
+    #[test]
+    fn operation_error_wins_when_unlock_also_fails() {
+        let result: Result<()> = arbitrate_coordination_lock_result(
+            Err(GwtError::Other("operation failed".to_string())),
+            Err(std::io::Error::other("unlock failed")),
+        );
+
+        assert!(matches!(
+            result,
+            Err(GwtError::Other(message)) if message == "operation failed"
+        ));
+    }
 
     #[test]
     fn local_provider_matches_free_functions() {
