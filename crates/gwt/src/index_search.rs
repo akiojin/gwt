@@ -161,6 +161,17 @@ pub fn search_project_index(
             }
             let remaining = repair_deadline - elapsed;
             thread::sleep(remaining.min(Duration::from_secs(1)));
+            // PR #3301 review: poll repair progress through the model-free
+            // status action; the full batch search (one model load) runs
+            // only after the broken scopes report healthy again.
+            if broken_scopes_still_unhealthy(
+                &repo_search_root,
+                repo_hash.as_str(),
+                &broken,
+                worktree_hash_arg.as_deref(),
+            ) {
+                continue;
+            }
             payload = run_batch()?;
             broken = broken_scopes(&payload);
             if broken.is_empty() {
@@ -242,6 +253,54 @@ fn broken_scopes(payload: &Value) -> Vec<(String, String)> {
                 .collect()
         })
         .unwrap_or_default()
+}
+
+/// Light repair-progress probe (PR #3301 review): checks the broken scopes
+/// through the model-free `status` action so the repair wait does not pay a
+/// model load per poll. Fails closed: any probe error keeps waiting.
+fn broken_scopes_still_unhealthy(
+    project_root: &Path,
+    repo_hash: &str,
+    broken: &[(String, String)],
+    worktree_hash: Option<&str>,
+) -> bool {
+    let mut command =
+        gwt_core::process::hidden_command(crate::index_worker::project_index_python_path());
+    command
+        .arg(gwt_core::runtime::project_index_runner_path())
+        .arg("--action")
+        .arg("status")
+        .arg("--repo-hash")
+        .arg(repo_hash)
+        .current_dir(project_root);
+    if let Some(hash) = worktree_hash {
+        command.arg("--worktree-hash").arg(hash);
+    }
+    let output = match command.output() {
+        Ok(output) if output.status.success() => output,
+        _ => return true,
+    };
+    let Ok(payload) = serde_json::from_slice::<Value>(&output.stdout) else {
+        return true;
+    };
+    let status = payload.get("status").cloned().unwrap_or(Value::Null);
+    broken.iter().any(|(scope, _)| {
+        let ready = status
+            .get(scope.as_str())
+            .map(|entry| {
+                let healthy = entry
+                    .get("healthy")
+                    .and_then(Value::as_bool)
+                    .unwrap_or(false);
+                let repair_required = entry
+                    .get("repair_required")
+                    .and_then(Value::as_bool)
+                    .unwrap_or(true);
+                healthy && !repair_required
+            })
+            .unwrap_or(false);
+        !ready
+    })
 }
 
 fn build_not_ready_error(broken: &[(String, String)], waited_ms: u64) -> IndexSearchError {

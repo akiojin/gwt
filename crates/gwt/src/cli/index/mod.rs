@@ -154,11 +154,16 @@ fn run_rebuild<E: CliEnv>(
                     .map_err(|err| err.to_string())?;
                 let _ = audit_runner_progress(&log_dir, &context, action.label, &output.stderr);
                 let _ = audit_rebuild_result(&log_dir, &context, action.label, &output);
-                if output.status.success() {
-                    Ok(crate::index_worker::BuildStep::Done(()))
-                } else {
-                    Err(format_runner_failure(&output))
+                if !output.status.success() {
+                    return Err(format_runner_failure(&output));
                 }
+                // PR #3301 review: interactive QoS never yields today, but a
+                // yielded payload must still resume instead of being
+                // recorded as a completed build.
+                if crate::index_worker::runner_payload_yielded(&output.stdout) {
+                    return Ok(crate::index_worker::BuildStep::Yielded);
+                }
+                Ok(crate::index_worker::BuildStep::Done(()))
             },
         );
         match run {

@@ -345,6 +345,7 @@ fn run_coordinated_issue_index(
                 error = %err,
                 "issue index skipped: coordinator unavailable"
             );
+            emit_issue_runner_end(spawn_id, label, false);
             return;
         }
     };
@@ -365,6 +366,7 @@ fn run_coordinated_issue_index(
                     spawn_id = spawn_id,
                     "issue index skipped: refreshed while waiting for the coordinator"
                 );
+                emit_issue_runner_end(spawn_id, label, true);
                 return;
             }
             let heavy = match guard.acquire_heavy(ISSUE_INDEX_HEAVY_TIMEOUT) {
@@ -379,6 +381,7 @@ fn run_coordinated_issue_index(
                     let _ = guard.complete(JobOutcome::Failed {
                         message: format!("heavy lease unavailable: {err}"),
                     });
+                    emit_issue_runner_end(spawn_id, label, false);
                     return;
                 }
             };
@@ -424,12 +427,34 @@ fn run_coordinated_issue_index(
         Ok(JobAdmission::Joined(waiter)) => {
             // An equivalent issue index build is already running host-wide;
             // coalesce instead of spawning a duplicate model load (FR-382).
-            let _ = waiter.wait(ISSUE_INDEX_SHARED_WAIT_TIMEOUT);
-            tracing::info!(
-                target: "gwt::index",
-                spawn_id = spawn_id,
-                "issue index coalesced into a concurrent equivalent job"
-            );
+            match waiter.wait(ISSUE_INDEX_SHARED_WAIT_TIMEOUT) {
+                Ok(crate::index_coordinator::JobOutcome::Completed) => {
+                    tracing::info!(
+                        target: "gwt::index",
+                        spawn_id = spawn_id,
+                        "issue index coalesced into a concurrent equivalent job"
+                    );
+                    emit_issue_runner_end(spawn_id, label, true);
+                }
+                Ok(outcome) => {
+                    tracing::warn!(
+                        target: "gwt::index",
+                        spawn_id = spawn_id,
+                        outcome = ?outcome,
+                        "coalesced issue index job did not complete successfully"
+                    );
+                    emit_issue_runner_end(spawn_id, label, false);
+                }
+                Err(err) => {
+                    tracing::warn!(
+                        target: "gwt::index",
+                        spawn_id = spawn_id,
+                        error = %err,
+                        "waiting on the shared issue index job failed"
+                    );
+                    emit_issue_runner_end(spawn_id, label, false);
+                }
+            }
         }
         Err(err) => {
             tracing::warn!(
@@ -438,8 +463,23 @@ fn run_coordinated_issue_index(
                 error = %err,
                 "issue index skipped: job admission failed"
             );
+            emit_issue_runner_end(spawn_id, label, false);
         }
     }
+}
+
+/// Close the `gwt.process.summary` pair opened at spawn time so the Console
+/// runner tab never shows an orphaned start entry (PR #3301 review).
+fn emit_issue_runner_end(spawn_id: u64, label: &str, success: bool) {
+    tracing::info!(
+        target: "gwt.process.summary",
+        kind = "runner",
+        spawn_id = spawn_id,
+        label = %label,
+        phase = "end",
+        success = success,
+        "process end",
+    );
 }
 
 static RUNNER_SPAWN_COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);

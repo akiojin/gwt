@@ -1855,6 +1855,7 @@ def _publish_generation(
     scope: str,
     document_count: int,
     source_fingerprint: Optional[str] = None,
+    after_publish=None,
 ) -> Dict[str, Any]:
     """Atomically publish `staging` as the new active generation (FR-390).
 
@@ -1890,6 +1891,14 @@ def _publish_generation(
                 json.dumps(pointer_payload, ensure_ascii=True), encoding="utf-8"
             )
             os.replace(pointer_tmp, active_pointer_path(db_path))
+            if after_publish is not None:
+                # PR #3301 review: manifest / meta belong to the same
+                # publication as the pointer swap, so run them while the
+                # exclusive target lock is still held. The pointer is
+                # already committed; a failure here degrades to the
+                # count-mismatch repair path instead of failing the publish.
+                with contextlib.suppress(Exception):
+                    after_publish()
             # Lazy migration (AS-17): the legacy in-place store is no longer
             # read once a pointer exists; drop its chroma files (metadata
             # like the issues meta.json stays in place).
@@ -1976,7 +1985,6 @@ def _finish_full_build(db_path: Path, staging: Optional[Path], scope: str):
     """
     if staging is None:
         return None
-    document_count = 0
     try:
         client, collection = _open_chroma_collection(
             staging, _scope_collection_name(scope)
@@ -1985,8 +1993,16 @@ def _finish_full_build(db_path: Path, staging: Optional[Path], scope: str):
             document_count = _safe_collection_count(collection)
         finally:
             _close_chroma_client(client)
-    except Exception:
-        document_count = 0
+    except Exception as error:
+        # PR #3301 review (Critical): an unverifiable staging build must
+        # never replace the healthy active generation.
+        return {
+            "ok": False,
+            "error_code": "BUILD_VERIFY_FAILED",
+            "error": f"failed to verify staging generation: {error}",
+            "scope": scope,
+            "retryable": True,
+        }
     publish = _publish_generation(
         db_path, staging, scope=scope, document_count=document_count
     )
@@ -2079,8 +2095,12 @@ def action_index_files_v2(
         )
 
     with acquire_lock(db_path, exclusive=True):
+        # PR #3301 review: after full mode published a generation, readers
+        # resolve through the active pointer — incremental updates must land
+        # in that same store, never in the migrated legacy path.
+        store = resolve_active_store(db_path)
         client, collection = _make_chroma_collection(
-            db_path,
+            store,
             V2_FILES_CODE_COLLECTION if scope == "files" else V2_FILES_DOCS_COLLECTION,
         )
         try:
@@ -2330,26 +2350,29 @@ def _index_files_full_with_staging(
             "retryable": True,
         }
 
+    def _commit_manifest_and_meta():
+        write_manifest(db_path, scope=scope, entries=new_entries)
+        _write_scope_meta(
+            repo_hash=repo_hash,
+            worktree_hash=worktree_hash,
+            scope=scope,
+            db_root=db_root,
+            updates={
+                "last_repair_at": _now_utc().isoformat(),
+                "document_count": actual_count,
+            },
+        )
+
     publish = _publish_generation(
         db_path,
         staging,
         scope=scope,
         document_count=actual_count,
         source_fingerprint=fingerprint,
+        after_publish=_commit_manifest_and_meta,
     )
     if not publish.get("ok"):
         return publish
-    write_manifest(db_path, scope=scope, entries=new_entries)
-    _write_scope_meta(
-        repo_hash=repo_hash,
-        worktree_hash=worktree_hash,
-        scope=scope,
-        db_root=db_root,
-        updates={
-            "last_repair_at": _now_utc().isoformat(),
-            "document_count": actual_count,
-        },
-    )
 
     emit_progress(
         {
@@ -4315,25 +4338,32 @@ def action_index_issues_v2(
         finally:
             _close_chroma_client(client)
 
+    def _commit_issue_meta():
+        # Meta (TTL / source fingerprint) is only advanced once the new
+        # generation is actually active (FR-390), inside the same
+        # publication lock as the pointer swap.
+        _write_issue_meta(
+            db_path,
+            {
+                "schema_version": INDEX_SCHEMA_VERSION,
+                "last_full_refresh": _now_utc().isoformat(),
+                "ttl_minutes": ttl_minutes,
+                "document_count": len(issues),
+                "source_cache_fingerprint": source["fingerprint"],
+                "source_document_count": source["document_count"],
+                "source_cache_refresh_at": source.get("cache_refresh_at"),
+            },
+        )
+
     publish = _publish_generation(
-        db_path, staging, scope="issues", document_count=len(issues)
+        db_path,
+        staging,
+        scope="issues",
+        document_count=len(issues),
+        after_publish=_commit_issue_meta,
     )
     if not publish.get("ok"):
         return publish
-    # Meta (TTL / source fingerprint) is only advanced once the new
-    # generation is actually active (FR-390).
-    _write_issue_meta(
-        db_path,
-        {
-            "schema_version": INDEX_SCHEMA_VERSION,
-            "last_full_refresh": _now_utc().isoformat(),
-            "ttl_minutes": ttl_minutes,
-            "document_count": len(issues),
-            "source_cache_fingerprint": source["fingerprint"],
-            "source_document_count": source["document_count"],
-            "source_cache_refresh_at": source.get("cache_refresh_at"),
-        },
-    )
 
     emit_progress(
         {
@@ -5126,6 +5156,7 @@ def _dispatch_v2(action: str, args: argparse.Namespace) -> int:
                     repo_hash=repo_hash,
                     project_root=args.project_root,
                     respect_ttl=args.respect_ttl,
+                    db_root=db_root,
                 )
             )
             return 0
@@ -5158,6 +5189,7 @@ def _dispatch_v2(action: str, args: argparse.Namespace) -> int:
                     repo_hash=repo_hash,
                     worktree_hash=worktree_hash or "",
                     mode=args.mode,
+                    db_root=db_root,
                 )
             )
             return 0
@@ -5172,6 +5204,7 @@ def _dispatch_v2(action: str, args: argparse.Namespace) -> int:
                     repo_hash=repo_hash,
                     worktree_hash=None,
                     mode=args.mode,
+                    db_root=db_root,
                 )
             )
             return 0
@@ -5186,6 +5219,7 @@ def _dispatch_v2(action: str, args: argparse.Namespace) -> int:
                     repo_hash=repo_hash,
                     worktree_hash=None,
                     mode=args.mode,
+                    db_root=db_root,
                 )
             )
             return 0
@@ -5196,6 +5230,7 @@ def _dispatch_v2(action: str, args: argparse.Namespace) -> int:
                     repo_hash=repo_hash,
                     project_root=args.project_root or None,
                     mode=args.mode,
+                    db_root=db_root,
                 )
             )
             return 0
@@ -5207,6 +5242,7 @@ def _dispatch_v2(action: str, args: argparse.Namespace) -> int:
                     repo_hash=repo_hash,
                     worktree_hash=None,
                     mode=args.mode,
+                    db_root=db_root,
                 )
             )
             return 0
@@ -5225,6 +5261,7 @@ def _dispatch_v2(action: str, args: argparse.Namespace) -> int:
                     n_results=args.n_results,
                     scopes=scopes,
                     match_mode=args.match_mode,
+                    db_root=db_root,
                 )
             )
             return 0
@@ -5252,6 +5289,7 @@ def _dispatch_v2(action: str, args: argparse.Namespace) -> int:
                     n_results=args.n_results,
                     no_auto_build=args.no_auto_build,
                     match_mode=args.match_mode,
+                    db_root=db_root,
                 )
             )
             return 0

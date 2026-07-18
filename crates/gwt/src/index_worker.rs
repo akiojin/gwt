@@ -708,13 +708,24 @@ fn aggregate_project_index_status_for_path_inner(
                 .cloned()
                 .unwrap_or_else(|| serde_json::json!({}));
             for input in selection.inputs {
+                let Some(worktree_obj) = worktrees
+                    .get(&input.worktree_hash)
+                    .and_then(serde_json::Value::as_object)
+                else {
+                    // PR #3301 review: a worktree the batch request asked for
+                    // but the response does not cover must degrade to an
+                    // error, never to a Ready view built from repo scopes.
+                    probes.push(WorktreeProbeOutcome {
+                        status_payload: Err(format!(
+                            "batch status response is missing worktree {}",
+                            input.worktree_hash
+                        )),
+                        input,
+                    });
+                    continue;
+                };
                 let mut status = repo_status.clone();
-                if let (Some(status_obj), Some(worktree_obj)) = (
-                    status.as_object_mut(),
-                    worktrees
-                        .get(&input.worktree_hash)
-                        .and_then(serde_json::Value::as_object),
-                ) {
+                if let Some(status_obj) = status.as_object_mut() {
                     for (key, value) in worktree_obj {
                         status_obj.insert(key.clone(), value.clone());
                     }
@@ -2887,9 +2898,7 @@ detached
         use gwt_core::index_coordinator::{IndexCoordinator, JobAdmission, JobOutcome, TargetKey};
         let tmp = tempfile::tempdir().expect("tempdir");
         let started = tmp.path().join("owner-started");
-        let release = tmp.path().join("release-owner");
         let started_for_thread = started.clone();
-        let release_for_thread = release.clone();
 
         let owner = std::thread::spawn(move || {
             let coordinator = IndexCoordinator::open_default().expect("open coordinator");
@@ -2906,9 +2915,11 @@ detached
                 JobAdmission::Joined(_) => panic!("owner thread must win the target"),
             };
             std::fs::write(&started_for_thread, b"started").expect("write marker");
-            let deadline = Instant::now() + Duration::from_secs(10);
-            while !release_for_thread.exists() {
-                assert!(Instant::now() < deadline, "release signal never arrived");
+            // PR #3301 review: only release after the joiner is registered,
+            // so the main thread can never race into ownership.
+            let deadline = Instant::now() + Duration::from_secs(20);
+            while guard.waiter_count().expect("waiter count") == 0 {
+                assert!(Instant::now() < deadline, "joiner never registered");
                 std::thread::sleep(Duration::from_millis(10));
             }
             guard.complete(JobOutcome::Completed).expect("complete");
@@ -2919,7 +2930,6 @@ detached
             assert!(Instant::now() < deadline, "owner never started");
             std::thread::sleep(Duration::from_millis(10));
         }
-        std::fs::write(&release, b"go").expect("write release");
         let run = run_coordinated_index_job::<()>(
             "coalescetestrepo",
             "specs",
