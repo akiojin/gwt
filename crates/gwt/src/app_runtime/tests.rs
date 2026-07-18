@@ -248,20 +248,40 @@ fn improvement_v2_frontend_actions_run_off_thread_and_return_typed_errors() {
 #[test]
 fn blocking_task_spawner_returns_before_a_stalled_task_finishes() {
     let spawner = BlockingTaskSpawner::thread();
+    let (started_tx, started_rx) = mpsc::channel();
+    let (release_tx, release_rx) = mpsc::channel();
     let (finished_tx, finished_rx) = mpsc::channel();
-    let started_at = Instant::now();
+    let (spawn_returned_tx, spawn_returned_rx) = mpsc::channel();
 
-    spawner.spawn(move || {
-        thread::sleep(Duration::from_millis(250));
-        finished_tx
-            .send(())
-            .expect("signal stalled task completion");
+    let caller = thread::spawn(move || {
+        spawner.spawn(move || {
+            started_tx.send(()).expect("signal stalled task start");
+            release_rx.recv().expect("release stalled task");
+            finished_tx
+                .send(())
+                .expect("signal stalled task completion");
+        });
+        spawn_returned_tx.send(()).expect("signal spawn returned");
     });
 
+    started_rx
+        .recv_timeout(Duration::from_secs(2))
+        .expect("stalled task starts");
+    let returned_before_release = spawn_returned_rx
+        .recv_timeout(Duration::from_secs(2))
+        .is_ok();
+    let finished_before_release = finished_rx.try_recv();
+    release_tx.send(()).expect("release stalled task");
+    caller.join().expect("join spawn caller");
+
     assert!(
-        started_at.elapsed() < Duration::from_millis(100),
-        "blocking task scheduling must return before the task completes"
+        returned_before_release,
+        "spawn must return while the task is blocked"
     );
+    assert!(matches!(
+        finished_before_release,
+        Err(mpsc::TryRecvError::Empty)
+    ));
     finished_rx
         .recv_timeout(Duration::from_secs(2))
         .expect("stalled task eventually completes");
