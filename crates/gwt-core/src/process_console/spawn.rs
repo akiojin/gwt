@@ -18,10 +18,11 @@
 //!   forward any line.
 
 use std::ffi::OsString;
+use std::future::Future;
 use std::path::PathBuf;
 use std::process::Stdio;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use tokio::io::{AsyncRead, AsyncReadExt};
 use tokio::process::Command as TokioCommand;
@@ -32,6 +33,7 @@ use super::line::{ProcessLine, ProcessStream};
 use super::redact;
 
 const SUMMARY_TARGET: &str = "gwt.process.summary";
+const PROCESS_CLEANUP_GRACE: Duration = Duration::from_secs(1);
 
 static SPAWN_ID: AtomicU64 = AtomicU64::new(1);
 
@@ -283,9 +285,14 @@ async fn spawn_logged_inner(
     };
 
     let Some(collected) = collected else {
-        process_tree.terminate();
-        let _ = child.kill().await;
-        let _ = child.wait().await;
+        if !cleanup_child_process_with_grace(&mut process_tree, &mut child).await {
+            tracing::warn!(
+                target: SUMMARY_TARGET,
+                spawn_id,
+                cleanup_grace_ms = PROCESS_CLEANUP_GRACE.as_millis() as u64,
+                "process cleanup exceeded its grace period"
+            );
+        }
         let duration_ms = started_at.elapsed().as_millis() as u64;
         crate::process::push_command_summary_to_hub(kind, spawn_id, None, duration_ms);
         tracing::info!(
@@ -307,9 +314,14 @@ async fn spawn_logged_inner(
     let (status, (stdout, stdout_lines), (stderr, stderr_lines)) = match collected {
         Ok(collected) => collected,
         Err(error) => {
-            process_tree.terminate();
-            let _ = child.kill().await;
-            let _ = child.wait().await;
+            if !cleanup_child_process_with_grace(&mut process_tree, &mut child).await {
+                tracing::warn!(
+                    target: SUMMARY_TARGET,
+                    spawn_id,
+                    cleanup_grace_ms = PROCESS_CLEANUP_GRACE.as_millis() as u64,
+                    "process cleanup exceeded its grace period"
+                );
+            }
             return Err(error);
         }
     };
@@ -347,6 +359,41 @@ fn deadline_error() -> std::io::Error {
     std::io::Error::new(std::io::ErrorKind::TimedOut, "process deadline expired")
 }
 
+async fn cleanup_child_process_with_grace(
+    process_tree: &mut ChildProcessTree,
+    child: &mut tokio::process::Child,
+) -> bool {
+    cleanup_child_process_after_tree_termination(
+        PROCESS_CLEANUP_GRACE,
+        process_tree.terminate(),
+        child,
+    )
+    .await
+}
+
+async fn cleanup_child_process_after_tree_termination<F>(
+    grace: Duration,
+    tree_termination: F,
+    child: &mut tokio::process::Child,
+) -> bool
+where
+    F: Future<Output = ()>,
+{
+    run_cleanup_with_grace(grace, async {
+        tree_termination.await;
+        let _ = child.start_kill();
+        let _ = child.wait().await;
+    })
+    .await
+}
+
+async fn run_cleanup_with_grace<F>(grace: Duration, cleanup: F) -> bool
+where
+    F: Future<Output = ()>,
+{
+    tokio::time::timeout(grace, cleanup).await.is_ok()
+}
+
 fn configure_deadline_command(command: &mut TokioCommand) {
     command.kill_on_drop(true);
     configure_process_group(command);
@@ -369,9 +416,16 @@ impl ChildProcessTree {
         Self { pid }
     }
 
-    fn terminate(&mut self) {
+    async fn terminate(&mut self) {
+        if let Some(pid) = self.pid {
+            terminate_process_tree(pid).await;
+            self.pid = None;
+        }
+    }
+
+    fn terminate_on_drop(&mut self) {
         if let Some(pid) = self.pid.take() {
-            terminate_process_tree(pid);
+            terminate_process_tree_on_drop(pid);
         }
     }
 
@@ -382,12 +436,17 @@ impl ChildProcessTree {
 
 impl Drop for ChildProcessTree {
     fn drop(&mut self) {
-        self.terminate();
+        self.terminate_on_drop();
     }
 }
 
 #[cfg(unix)]
-fn terminate_process_tree(pid: u32) {
+async fn terminate_process_tree(pid: u32) {
+    terminate_process_tree_on_drop(pid);
+}
+
+#[cfg(unix)]
+fn terminate_process_tree_on_drop(pid: u32) {
     let process_group = -(pid as libc::pid_t);
     // SAFETY: the deadline command was placed in its own process group and a
     // negative pid targets only that group.
@@ -397,16 +456,33 @@ fn terminate_process_tree(pid: u32) {
 }
 
 #[cfg(windows)]
-fn terminate_process_tree(pid: u32) {
+async fn terminate_process_tree(pid: u32) {
+    let pid = pid.to_string();
+    #[allow(clippy::disallowed_methods)]
+    let mut command = TokioCommand::new("taskkill");
+    crate::process::configure_hidden_tokio_command(&mut command);
+    command
+        .args(["/PID", pid.as_str(), "/T", "/F"])
+        .kill_on_drop(true)
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
+    let _ = command.status().await;
+}
+
+#[cfg(windows)]
+fn terminate_process_tree_on_drop(pid: u32) {
     let _ = crate::process::hidden_command("taskkill")
         .args(["/PID", &pid.to_string(), "/T", "/F"])
         .stdout(Stdio::null())
         .stderr(Stdio::null())
-        .status();
+        .spawn();
 }
 
 #[cfg(not(any(unix, windows)))]
-fn terminate_process_tree(_pid: u32) {}
+async fn terminate_process_tree(_pid: u32) {}
+
+#[cfg(not(any(unix, windows)))]
+fn terminate_process_tree_on_drop(_pid: u32) {}
 
 async fn forward_stream<R>(
     mut reader: R,
@@ -457,6 +533,61 @@ mod tests {
     use std::time::Duration;
 
     use super::*;
+
+    #[tokio::test]
+    async fn cleanup_future_is_abandoned_after_grace() {
+        let started = std::time::Instant::now();
+        let completed = tokio::time::timeout(
+            Duration::from_millis(200),
+            run_cleanup_with_grace(Duration::from_millis(20), std::future::pending()),
+        )
+        .await
+        .expect("cleanup grace must bound a stalled cleanup future");
+
+        assert!(!completed, "stalled cleanup must report incomplete");
+        assert!(started.elapsed() < Duration::from_millis(150));
+    }
+
+    #[tokio::test]
+    async fn stalled_tree_termination_uses_cleanup_grace() {
+        let (program, args) = if cfg!(windows) {
+            (
+                "ping",
+                vec!["-n".to_string(), "30".to_string(), "127.0.0.1".to_string()],
+            )
+        } else {
+            ("sleep", vec!["30".to_string()])
+        };
+        #[allow(clippy::disallowed_methods)]
+        let mut command = TokioCommand::new(program);
+        crate::process::configure_hidden_tokio_command(&mut command);
+        command
+            .args(args)
+            .kill_on_drop(true)
+            .stdout(Stdio::null())
+            .stderr(Stdio::null());
+        let mut child = command.spawn().expect("spawn cleanup test child");
+        let started = std::time::Instant::now();
+
+        let completed = tokio::time::timeout(
+            Duration::from_millis(200),
+            cleanup_child_process_after_tree_termination(
+                Duration::from_millis(20),
+                std::future::pending(),
+                &mut child,
+            ),
+        )
+        .await
+        .expect("tree termination must be inside the cleanup grace");
+
+        assert!(
+            !completed,
+            "stalled tree termination must report incomplete"
+        );
+        assert!(started.elapsed() < Duration::from_millis(150));
+        let _ = child.start_kill();
+        let _ = child.wait().await;
+    }
 
     fn echo_command() -> (String, Vec<String>) {
         if cfg!(windows) {
