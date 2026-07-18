@@ -373,9 +373,8 @@ impl AppRuntime {
             migration_pending: target.needs_migration,
             main_worktree_root_cache: std::sync::Arc::new(std::sync::OnceLock::new()),
         });
-        self.active_tab_id = Some(tab_id);
+        let wizard_closed = self.set_active_tab(tab_id);
         self.remember_recent_project(&target);
-        let wizard_closed = self.clear_launch_wizard().is_some();
         self.persist().map_err(|error| error.to_string())?;
         Ok(wizard_closed)
     }
@@ -509,6 +508,7 @@ impl AppRuntime {
     }
 
     pub(crate) fn close_project_tab_events(&mut self, tab_id: &str) -> Vec<OutboundEvent> {
+        let previous_project_root = self.active_project_root().map(Path::to_path_buf);
         let Some(index) = self.tabs.iter().position(|tab| tab.id == tab_id) else {
             return Vec::new();
         };
@@ -552,6 +552,9 @@ impl AppRuntime {
             .is_some_and(|wizard| wizard.tab_id == tab_id);
         if wizard_closed {
             self.launch_wizard = None;
+        }
+        if self.active_project_root().map(Path::to_path_buf) != previous_project_root {
+            self.schedule_active_improvement_candidates_refresh();
         }
         let _ = self.persist();
 

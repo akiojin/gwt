@@ -1,4 +1,4 @@
-use std::{collections::BTreeSet, fs, io::Write, path::Path, process::Stdio};
+use std::{collections::BTreeSet, env, fs, io::Write, path::Path, process::Stdio};
 
 use gwt_agent::{AgentId, Session};
 use gwt_core::process::hidden_command;
@@ -329,6 +329,58 @@ fn gwtd_gwt_self_improvement_stop_remains_argv_transport_exception() {
         output.stdout.is_empty(),
         "non-gwt repos must receive no hook output, got: {}",
         String::from_utf8_lossy(&output.stdout)
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn gwtd_direct_self_improvement_stop_bypasses_repo_coordinate_bootstrap() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let home = tempfile::tempdir().expect("home tempdir");
+    let repo = tempfile::tempdir().expect("repo tempdir");
+    let fake_bin = tempfile::tempdir().expect("fake bin tempdir");
+    let marker = fake_bin.path().join("remote-v-called");
+    let real_git = env::split_paths(&env::var_os("PATH").expect("PATH"))
+        .map(|directory| directory.join("git"))
+        .find(|path| path.is_file())
+        .expect("real git executable");
+    let fake_git = fake_bin.path().join("git");
+    fs::write(
+        &fake_git,
+        format!(
+            "#!/bin/sh\nif [ \"$1\" = \"remote\" ] && [ \"$2\" = \"-v\" ]; then\n  : > \"$GWT_REMOTE_PROBE_MARKER\"\nfi\nexec \"{}\" \"$@\"\n",
+            real_git.display()
+        ),
+    )
+    .expect("write fake git");
+    fs::set_permissions(&fake_git, fs::Permissions::from_mode(0o755))
+        .expect("make fake git executable");
+    let path = env::join_paths(
+        std::iter::once(fake_bin.path().to_path_buf())
+            .chain(env::split_paths(&env::var_os("PATH").expect("PATH"))),
+    )
+    .expect("compose PATH");
+
+    let output = hidden_command(env!("CARGO_BIN_EXE_gwtd"))
+        .current_dir(repo.path())
+        .args(["hook", "gwt-self-improvement-stop"])
+        .env("HOME", home.path())
+        .env("USERPROFILE", home.path())
+        .env("PATH", path)
+        .env("GWT_REMOTE_PROBE_MARKER", &marker)
+        .stdin(Stdio::null())
+        .output()
+        .expect("run direct self-improvement Stop hook");
+
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        !marker.exists(),
+        "direct Stop must not run the unbounded repo-coordinate `git remote -v` bootstrap"
     );
 }
 

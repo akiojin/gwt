@@ -1,6 +1,7 @@
 use gwt_agent::session::GWT_SESSION_ID_ENV;
 use serde::Deserialize;
 use serde_json::{Map, Value};
+use std::str::FromStr;
 
 use crate::protocol::{IndexSearchMatchMode, IndexSearchScope};
 
@@ -78,6 +79,9 @@ fn parse(input: &str) -> Result<ParsedEnvelope, CliParseError> {
         ));
     }
     let params = params_object(&envelope.params)?;
+    if envelope.operation.starts_with("improvement.") {
+        reject_improvement_force(params)?;
+    }
     let command = match envelope.operation.as_str() {
         "workspace.update" => workspace_update(params)?,
         "workspace.candidates" => workspace_candidates(params)?,
@@ -111,6 +115,7 @@ fn parse(input: &str) -> Result<ParsedEnvelope, CliParseError> {
             })
         }
         "improvement.dismiss" => improvement_dismiss(params)?,
+        "improvement.resolve" => improvement_resolve(params)?,
         "improvement.link_issue" | "improvement.link-issue" => improvement_link_issue(params)?,
         "improvement.promote_issue" | "improvement.promote-issue" => {
             improvement_promote_issue(params)?
@@ -459,28 +464,129 @@ fn board_post(params: &Map<String, Value>) -> Result<CliCommand, CliParseError> 
 }
 
 fn improvement_capture(params: &Map<String, Value>) -> Result<CliCommand, CliParseError> {
+    for key in [
+        "producer_id",
+        "source_event_id",
+        "session_id",
+        "routing_basis_revision",
+        "budget_profile",
+        "fingerprint",
+        "occurrence_key",
+    ] {
+        reject_key(
+            params,
+            key,
+            "untrusted identity field is not accepted by public improvement.capture",
+        )?;
+    }
+    let typed_evidence = improvement_typed_evidence(params)?;
     Ok(CliCommand::Improvement(ImprovementCommand::Capture(
-        super::improvement::ImprovementCaptureCommand {
+        Box::new(super::improvement::ImprovementCaptureCommand {
             source: required_string(params, "source")?,
             target_artifact: required_string(params, "target_artifact")?,
             classification: required_string(params, "classification")?,
             confidence: required_string(params, "confidence")?,
-            summary: required_string(params, "summary")?,
+            summary: optional_string(params, "summary")?.unwrap_or_default(),
             details: optional_string(params, "details")?,
             evidence_digest: optional_string(params, "evidence_digest")?,
             dedupe_key: optional_string(params, "dedupe_key")?,
             local_evidence: optional_json_array(params, "local_evidence")?,
-        },
+            typed_evidence,
+        }),
     )))
 }
 
+fn improvement_typed_evidence(
+    params: &Map<String, Value>,
+) -> Result<Option<super::improvement::ImprovementTypedEvidenceCommand>, CliParseError> {
+    let typed_keys = [
+        "subsystem",
+        "contract_id",
+        "contract_schema_revision",
+        "failure_code",
+        "evidence",
+    ];
+    if !typed_keys.iter().any(|key| params.contains_key(*key)) {
+        return Ok(None);
+    }
+
+    let evidence = params
+        .get("evidence")
+        .and_then(Value::as_object)
+        .ok_or_else(|| CliParseError::InvalidJson("evidence must be an object".to_string()))?;
+    for key in evidence.keys() {
+        if !matches!(key.as_str(), "expected_outcome" | "observed_outcome") {
+            return Err(CliParseError::InvalidJson(format!(
+                "evidence contains unknown field: {key}"
+            )));
+        }
+    }
+
+    Ok(Some(super::improvement::ImprovementTypedEvidenceCommand {
+        subsystem: required_string(params, "subsystem")?,
+        contract_id: required_string(params, "contract_id")?,
+        contract_schema_revision: required_u64(params, "contract_schema_revision")?,
+        failure_code: required_string(params, "failure_code")?,
+        expected_outcome: required_string(evidence, "expected_outcome")?,
+        observed_outcome: required_string(evidence, "observed_outcome")?,
+    }))
+}
+
 fn improvement_list(params: &Map<String, Value>) -> Result<CliCommand, CliParseError> {
+    let state = optional_string(params, "state")?
+        .map(|value| {
+            super::improvement::CandidateState::from_str(&value)
+                .map_err(|message| CliParseError::InvalidJson(message.to_string()))
+        })
+        .transpose()?;
+    let blocked_reason = optional_string(params, "blocked_reason")?
+        .map(|value| {
+            super::improvement::BlockedReason::from_str(&value)
+                .map_err(|message| CliParseError::InvalidJson(message.to_string()))
+        })
+        .transpose()?;
+    let failure_subcode = optional_string(params, "failure_subcode")?
+        .map(|value| {
+            super::improvement::FailureSubcode::from_str(&value)
+                .map_err(|message| CliParseError::InvalidJson(message.to_string()))
+        })
+        .transpose()?;
+    let classification = optional_string(params, "classification")?;
+    if classification.as_deref().is_some_and(|value| {
+        !["gwt-caused", "ambiguous", "target-project", "external"].contains(&value)
+    }) {
+        return Err(CliParseError::InvalidJson(
+            "invalid classification".to_string(),
+        ));
+    }
+    let confidence = optional_string(params, "confidence")?;
+    if confidence
+        .as_deref()
+        .is_some_and(|value| !["low", "medium", "high"].contains(&value))
+    {
+        return Err(CliParseError::InvalidJson("invalid confidence".to_string()));
+    }
+    let owner_number = optional_u64(params, "owner_number")?;
+    if owner_number == Some(0) {
+        return Err(CliParseError::InvalidJson(
+            "owner_number must be greater than zero".to_string(),
+        ));
+    }
+    let limit = optional_usize(params, "limit")?;
+    if limit == Some(0) {
+        return Err(CliParseError::InvalidJson(
+            "limit must be greater than zero".to_string(),
+        ));
+    }
     Ok(CliCommand::Improvement(ImprovementCommand::List(
         super::improvement::ImprovementListCommand {
-            state: optional_string(params, "state")?,
-            classification: optional_string(params, "classification")?,
-            confidence: optional_string(params, "confidence")?,
-            limit: optional_usize(params, "limit")?,
+            state,
+            blocked_reason,
+            failure_subcode,
+            classification,
+            confidence,
+            owner_number,
+            limit,
         },
     )))
 }
@@ -495,12 +601,29 @@ fn improvement_dismiss(params: &Map<String, Value>) -> Result<CliCommand, CliPar
 }
 
 fn improvement_link_issue(params: &Map<String, Value>) -> Result<CliCommand, CliParseError> {
+    if ["number", "url", "repository"]
+        .iter()
+        .any(|key| params.contains_key(*key))
+    {
+        return Err(CliParseError::InvalidJson(
+            "MIGRATION_REQUIRED: improvement.link_issue v2 accepts id, owner_number, and resolver_revision only"
+                .to_string(),
+        ));
+    }
     Ok(CliCommand::Improvement(ImprovementCommand::LinkIssue(
         super::improvement::ImprovementLinkIssueCommand {
             id: required_string(params, "id")?,
-            number: required_u64(params, "number")?,
-            url: optional_string(params, "url")?,
-            repository: optional_string(params, "repository")?,
+            owner_number: required_u64(params, "owner_number")?,
+            resolver_revision: required_string(params, "resolver_revision")?,
+        },
+    )))
+}
+
+fn improvement_resolve(params: &Map<String, Value>) -> Result<CliCommand, CliParseError> {
+    Ok(CliCommand::Improvement(ImprovementCommand::Resolve(
+        super::improvement::ImprovementResolveCommand {
+            id: required_string(params, "id")?,
+            expected_resolver_revision: optional_string(params, "expected_resolver_revision")?,
         },
     )))
 }
@@ -513,6 +636,15 @@ fn improvement_promote_issue(params: &Map<String, Value>) -> Result<CliCommand, 
             labels: optional_string_vec(params, "labels")?,
         },
     )))
+}
+
+fn reject_improvement_force(params: &Map<String, Value>) -> Result<(), CliParseError> {
+    if optional_bool(params, "force")? == Some(true) {
+        return Err(CliParseError::InvalidJson(
+            "UNSAFE_FORCE_REMOVED".to_string(),
+        ));
+    }
+    Ok(())
 }
 
 fn issue_spec_edit(params: &Map<String, Value>) -> Result<CliCommand, CliParseError> {

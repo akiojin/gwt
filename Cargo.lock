@@ -1380,6 +1380,7 @@ dependencies = [
  "fs2",
  "hex",
  "ignore",
+ "libc",
  "notify",
  "notify-debouncer-mini",
  "regex",
@@ -1432,7 +1433,9 @@ dependencies = [
 name = "gwt-github"
 version = "9.68.0"
 dependencies = [
+ "chrono",
  "gwt-core",
+ "hex",
  "regex",
  "reqwest",
  "serde",

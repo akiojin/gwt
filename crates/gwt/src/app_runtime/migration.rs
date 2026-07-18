@@ -79,8 +79,11 @@ impl AppRuntime {
     ) -> Vec<OutboundEvent> {
         let canonical = dunce::canonicalize(branch_worktree_path)
             .unwrap_or_else(|_| branch_worktree_path.to_path_buf());
+        let active_tab = self.active_tab_id.as_deref() == Some(tab_id);
+        let mut active_root_changed = false;
 
         if let Some(tab) = self.tabs.iter_mut().find(|tab| tab.id == tab_id) {
+            active_root_changed = active_tab && tab.project_root != canonical;
             tab.project_root = canonical.clone();
             tab.kind = ProjectKind::Git;
             tab.migration_pending = false;
@@ -95,6 +98,9 @@ impl AppRuntime {
                     );
                 }
             }
+        }
+        if active_root_changed {
+            self.schedule_active_improvement_candidates_refresh();
         }
         let _ = self.persist();
 
