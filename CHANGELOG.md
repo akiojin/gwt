@@ -1,6 +1,51 @@
 # Changelog
 
 All notable changes to this project will be documented in this file.
+## [9.68.0] - 2026-07-18
+
+### Bug Fixes
+
+- **workspace:** Make Work projection updates deterministic
+- **workspace:** Harden Work projection recovery
+- **gui:** Windows で外部コマンド実行のたびにコンソールウィンドウが点滅する問題を修正
+- **github:** Oversized SPEC sectionを分割保存するsupported multipart writerを実装
+- **hooks:** Stopチェックのboxed closure型をtype aliasに整理しclippy type_complexityを解消
+- **gui:** Issue surface が空のままタイムアウトする読み込み喪失連鎖を修正
+- **index:** Coordinator登録sweepの生成直後unlink競合を修正しcoverageを補強
+- **index:** PR #3301レビュー指摘のincremental経路とpublish検証を修正
+
+### Features
+
+- **hooks:** Intake artifact gateを実装しStopをdurable outcomeで強制する
+- **hooks:** Execution Control Recordでlinked-owner実行のStopをsettlementまで強制する
+- **hooks:** Verify.runでtool-generated検証証跡を記録しcompletion/PR handoffに要求する
+- **hooks:** 実行recordの所有権移譲を監査しintegrity検証で直接編集を拒否する
+
+### Miscellaneous Tasks
+
+- **core:** Work_events_intake の nonminimal_bool clippy 警告を解消
+- **core:** Clippy nonminimal_bool警告をis_none_orで解消
+- **test:** #3293のhidden_command lintへ新規テストのCommand利用を移行
+
+### Performance
+
+- **index:** T-IDX-384 host-wide file-ticket coordinatorを実装
+- **index:** T-IDX-387 runner QoSとcooperative yieldを実装
+- **index:** T-IDX-390 versioned batch search-multiとsearch状態機械を実装
+- **index:** T-IDX-393 staging generationとatomic active.json publishを実装
+- **index:** T-IDX-394/395 probe cache・batch status・refresh再検証を実装
+- **runtime:** T-IDX-396/397 health pollerのpoll/broadcast budgetを実装
+
+### Testing
+
+- **index:** T-IDX-382/383 coordinator排他とfault injectionのREDを追加
+- **index:** T-IDX-385/386 runner QoSとcooperative yieldのREDを追加
+- **index:** T-IDX-388/389 batch searchとsearch契約のREDを追加
+- **index:** T-IDX-391/392 generation faultとincrementalのREDを追加
+- **index:** T-IDX-400 Phase 70変更範囲のcoverageを90%以上に引き上げ
+- **index:** PR #3301レビュー指摘のテスト堅牢化と回帰テストを追加
+- **gui:** LoadKnowledgeBridge 非同期化に main.rs の dispatch routing テストを追随
+
 ## [9.67.0] - 2026-07-15
 
 ### Bug Fixes
