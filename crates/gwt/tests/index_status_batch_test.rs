@@ -193,6 +193,23 @@ fn batch_status_merges_worktree_scopes_and_survives_runner_failure() {
         "merged worktree status must reach the aggregated view: {view:?}"
     );
 
+    // PR #3301 review: a worktree the batch request asked for but the
+    // response does not cover must degrade to an error, never to a Ready
+    // view assembled from repo scopes alone.
+    let _empty_payload_env = ScopedEnvVar::set(
+        "GWT_FAKE_RUNNER_PAYLOAD",
+        r#"{"ok": true, "runtime": {"healthy": true}, "status": {}, "worktrees": {}}"#,
+    );
+    gwt::global_aggregated_status_cache().invalidate(&repo);
+    let view = gwt::aggregate_project_index_status_for_path(&repo);
+    assert!(
+        matches!(
+            view.state,
+            gwt::ProjectIndexStatusState::Error | gwt::ProjectIndexStatusState::RepairRequired
+        ),
+        "missing worktree in the batch response must not report Ready: {view:?}"
+    );
+
     // A failing batch runner degrades every probed worktree, never panics,
     // and invalidates the probe cache (FR-393).
     // Only the status action fails; probes stay healthy so the runtime

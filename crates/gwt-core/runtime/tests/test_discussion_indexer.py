@@ -157,7 +157,9 @@ class ActionIndexDiscussionsTests(unittest.TestCase):
                     runner,
                     "_make_chroma_collection_repairing",
                     return_value=(_FakeClient(), collection),
-                ), mock.patch.object(runner, "_close_chroma_client"):
+                ), mock.patch.object(runner, "_close_chroma_client"), mock.patch.object(
+                    runner, "_finish_full_build", return_value=None
+                ):
                     result = runner.action_index_discussions_v2(
                         project_root=str(root),
                         repo_hash="abc1234567890def",

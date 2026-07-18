@@ -170,17 +170,37 @@ class GenerationStoreTests(unittest.TestCase):
             env=env,
         )
         # Kill the rebuild after its first checkpoint (mid-staging-build).
+        # The stderr reader runs on a watchdog thread so a hung runner can
+        # never block the test past its deadline (PR #3301 review).
+        import queue
+        import threading
+
+        assert proc.stderr is not None
+        lines: "queue.Queue[str]" = queue.Queue()
+
+        def _pump(stream, sink):
+            for line in stream:
+                sink.put(line)
+
+        reader = threading.Thread(
+            target=_pump, args=(proc.stderr, lines), daemon=True
+        )
+        reader.start()
         killed = False
         deadline = time.monotonic() + 60
-        assert proc.stderr is not None
         while time.monotonic() < deadline:
-            line = proc.stderr.readline()
-            if not line:
-                break
+            try:
+                line = lines.get(timeout=0.5)
+            except queue.Empty:
+                if proc.poll() is not None:
+                    break
+                continue
             if '"done": 16' in line or '"done":16' in line:
                 proc.kill()
                 killed = True
                 break
+        if not killed:
+            proc.kill()
         proc.wait(timeout=30)
         self.assertTrue(killed, "expected to kill the rebuild at a checkpoint")
 

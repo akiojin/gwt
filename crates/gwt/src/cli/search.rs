@@ -600,16 +600,21 @@ mod tests {
         assert_eq!(code, 75, "{out}");
         assert!(out.contains("INDEX_NOT_READY"), "{out}");
 
-        // The stale refresh queued in the background must land before the
-        // scoped HOME reverts (single-flight rebuild against the fake runner).
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
-        while !std::fs::read_to_string(&runner_log)
-            .unwrap_or_default()
-            .contains("--action index-issues")
-        {
-            if std::time::Instant::now() >= deadline {
+        // The stale refresh queued in the background must actually run the
+        // issues rebuild (single-flight against the fake runner) before the
+        // scoped HOME reverts.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+        loop {
+            if std::fs::read_to_string(&runner_log)
+                .unwrap_or_default()
+                .contains("--action index-issues")
+            {
                 break;
             }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "queued stale refresh never invoked the issues rebuild"
+            );
             std::thread::sleep(std::time::Duration::from_millis(25));
         }
     }
