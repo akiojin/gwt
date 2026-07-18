@@ -386,11 +386,13 @@ fn format_execution_help() -> String {
         "  JSON",
         "",
         "Operations:",
-        "  execution.complete | execution.blocked",
+        "  execution.complete | execution.blocked | execution.adopt",
         "",
         "Notes:",
         "  Settlement binds to GWT_SESSION_ID; a successful build.complete also",
         "  settles the record for gwt-build-spec flows. Blocked is not done.",
+        "  execution.adopt takes over another session's active record with an",
+        "  audited params.reason (crash recovery / handoff / integrity repair).",
         "",
     ]
     .join("\n")
