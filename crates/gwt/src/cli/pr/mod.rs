@@ -670,6 +670,7 @@ mod tests {
                 session_id: "sess-pr".to_string(),
                 owner_number: Some(42),
                 commands: vec!["git --version".to_string()],
+                derived: false,
                 created_at: chrono::Utc::now(),
                 content_hash: String::new(),
             },

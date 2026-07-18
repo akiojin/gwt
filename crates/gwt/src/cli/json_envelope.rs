@@ -278,10 +278,14 @@ fn parse(input: &str) -> Result<ParsedEnvelope, CliParseError> {
         }
         "verify.plan" => {
             let commands = optional_string_vec(params, "commands")?;
-            if commands.is_empty() {
+            let derive = optional_bool(params, "derive")?.unwrap_or(false);
+            if commands.is_empty() && !derive {
                 return Err(CliParseError::MissingFlag("commands"));
             }
-            CliCommand::Verify(crate::cli::verification_record::VerifyCommand::Plan { commands })
+            CliCommand::Verify(crate::cli::verification_record::VerifyCommand::Plan {
+                commands,
+                derive,
+            })
         }
         "execution.complete" => {
             CliCommand::Execution(crate::cli::execution_state::ExecutionCommand::Complete)
