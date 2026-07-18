@@ -22,7 +22,7 @@ REPO_HASH = "abc1234567890def"
 WORKTREE_HASH = "111122223333ffff"
 
 
-class IncrementalGenerationTests(unittest.TestCase):
+class _IncrementalFixture(unittest.TestCase):
     def setUp(self):
         runner._MODEL_CACHE = None
         self._tmp = tempfile.TemporaryDirectory()
@@ -80,6 +80,8 @@ class IncrementalGenerationTests(unittest.TestCase):
         finally:
             runner._close_chroma_client(client)
 
+
+class IncrementalGenerationTests(_IncrementalFixture):
     def test_rebuild_reuses_unchanged_embeddings_and_encodes_only_changes(self):
         baseline = self._build()
         self.assertTrue(baseline.get("ok"), baseline)
@@ -189,6 +191,115 @@ class IncrementalGenerationTests(unittest.TestCase):
             REPO_HASH, WORKTREE_HASH, "files", db_root=self.db_root
         )
         self.assertEqual(status["document_count"], 8, status)
+
+class IncrementalModeRoutingTests(_IncrementalFixture):
+    """PR #3301 review: `mode=\"incremental\"` must update the store that
+    readers actually resolve (the active generation), not the legacy
+    `db_path` that full mode has already migrated away from."""
+
+    def _build_incremental(self) -> dict:
+        return runner.action_index_files_v2(
+            project_root=str(self.project),
+            repo_hash=REPO_HASH,
+            worktree_hash=WORKTREE_HASH,
+            mode="incremental",
+            db_root=self.db_root,
+            scope="files",
+        )
+
+    def test_incremental_mode_updates_the_active_generation(self):
+        baseline = self._build()
+        self.assertTrue(baseline.get("ok"), baseline)
+        db_path = self._db_path()
+        self.assertTrue(
+            runner.active_pointer_path(db_path).is_file(),
+            "full mode must publish an active generation first",
+        )
+
+        self._write_doc(90, "//! module 90 added\nfn feature_90() {}\n")
+        (self.src / "module_07.rs").unlink()
+        result = self._build_incremental()
+        self.assertTrue(result.get("ok"), result)
+
+        ids = self._store_ids()
+        self.assertIn(
+            "src/module_90.rs",
+            ids,
+            "incremental additions must reach the active generation readers use",
+        )
+        self.assertNotIn(
+            "src/module_07.rs",
+            ids,
+            "incremental deletions must reach the active generation readers use",
+        )
+        self.assertFalse(
+            (db_path / "chroma.sqlite3").exists(),
+            "incremental mode must not resurrect the migrated legacy store",
+        )
+
+
+class PublishVerificationTests(unittest.TestCase):
+    """PR #3301 review (Critical): a staging build whose verification read
+    fails must never replace the healthy active generation."""
+
+    def setUp(self):
+        runner._MODEL_CACHE = None
+        self._tmp = tempfile.TemporaryDirectory()
+        self.base = Path(self._tmp.name)
+        self.db_root = self.base / "index"
+        coord = self.base / "coordinator"
+        coord.mkdir()
+        self._env = mock.patch.dict(
+            os.environ,
+            {
+                "GWT_INDEX_COORDINATOR_ROOT": str(coord),
+                "GWT_INDEX_FAKE_EMBEDDING": "1",
+            },
+            clear=False,
+        )
+        self._env.start()
+
+    def tearDown(self):
+        self._env.stop()
+        self._tmp.cleanup()
+        runner._MODEL_CACHE = None
+
+    def test_unverifiable_staging_is_not_published(self):
+        project = self.base / "project"
+        project.mkdir()
+        baseline = runner.action_index_board_v2(
+            repo_hash=REPO_HASH,
+            project_root=str(project),
+            mode="full",
+            db_root=self.db_root,
+        )
+        self.assertTrue(baseline.get("ok"), baseline)
+        db_path = runner.resolve_db_path(REPO_HASH, None, "board", db_root=self.db_root)
+        pointer_before = runner._read_active_pointer(db_path)
+        self.assertIsNotNone(pointer_before)
+
+        with mock.patch.object(
+            runner, "_open_chroma_collection", side_effect=RuntimeError("cannot open")
+        ):
+            result = runner.action_index_board_v2(
+                repo_hash=REPO_HASH,
+                project_root=str(project),
+                mode="full",
+                db_root=self.db_root,
+            )
+
+        self.assertFalse(
+            result.get("ok"),
+            f"an unverifiable staging build must not publish silently: {result}",
+        )
+        self.assertEqual(result.get("error_code"), "BUILD_VERIFY_FAILED", result)
+        pointer_after = runner._read_active_pointer(db_path)
+        self.assertEqual(
+            pointer_before,
+            pointer_after,
+            "the healthy active generation must remain in place",
+        )
+
 
 
 if __name__ == "__main__":

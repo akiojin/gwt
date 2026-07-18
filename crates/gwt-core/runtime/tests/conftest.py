@@ -20,7 +20,8 @@ os.environ.setdefault("GWT_INDEX_FAKE_EMBEDDING", "1")
 # live gwt instance's pending heavy claimants (Phase 70).
 import tempfile as _tempfile  # noqa: E402
 
-os.environ.setdefault(
-    "GWT_INDEX_COORDINATOR_ROOT",
-    _tempfile.mkdtemp(prefix="gwt-index-coordinator-test-"),
+# Unconditional (not setdefault): a developer shell exporting this variable
+# must never leak a live coordinator into the test suite (PR #3301 review).
+os.environ["GWT_INDEX_COORDINATOR_ROOT"] = _tempfile.mkdtemp(
+    prefix="gwt-index-coordinator-test-"
 )
