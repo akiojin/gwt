@@ -7,7 +7,7 @@ use std::{
     fs,
     io::{self},
     path::PathBuf,
-    process::{Command, Stdio},
+    process::Stdio,
     sync::{Arc, OnceLock},
 };
 
@@ -107,6 +107,13 @@ impl IssueClient for LazyIssueClient {
         body: &str,
     ) -> Result<gwt_github::client::CommentSnapshot, gwt_github::client::ApiError> {
         self.resolve()?.create_comment(number, body)
+    }
+
+    fn delete_comment(
+        &self,
+        comment_id: gwt_github::client::CommentId,
+    ) -> Result<(), gwt_github::client::ApiError> {
+        self.resolve()?.delete_comment(comment_id)
     }
 
     fn create_issue(
@@ -528,7 +535,7 @@ impl CliEnv for DefaultCliEnv {
     ) -> io::Result<InternalCommandOutput> {
         let current_exe = std::env::current_exe()?;
         let current_exe = dunce::canonicalize(&current_exe).unwrap_or_else(|_| current_exe.clone());
-        let mut child = Command::new(current_exe)
+        let mut child = gwt_core::process::hidden_command(current_exe)
             .args(args.iter().skip(1))
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())

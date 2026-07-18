@@ -204,7 +204,11 @@ async fn spawn_logged_inner(
         options.current_dir.as_deref(),
     );
 
+    // Sanctioned tokio construction point: immediately wrapped by
+    // configure_hidden_tokio_command to apply CREATE_NO_WINDOW on Windows.
+    #[allow(clippy::disallowed_methods)]
     let mut command = TokioCommand::new(&program);
+    crate::process::configure_hidden_tokio_command(&mut command);
     command.args(args.iter().map(|a| a.as_ref()));
     if let Some(dir) = &options.current_dir {
         command.current_dir(dir);

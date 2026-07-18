@@ -14,24 +14,21 @@
 //! with `board.provider = slack|teams` would fail with "<provider> is not
 //! signed in").
 
-use std::{
-    io::Write,
-    path::Path,
-    process::{Command, Stdio},
-};
+use std::{io::Write, path::Path, process::Stdio};
 
 use gwt_agent::{AgentId, Session};
+use gwt_core::process::hidden_command;
 use serde_json::Value;
 use tempfile::TempDir;
 
 fn git_init_with_origin(path: &Path) {
-    assert!(Command::new("git")
+    assert!(hidden_command("git")
         .arg("init")
         .arg(path)
         .status()
         .expect("git init")
         .success());
-    assert!(Command::new("git")
+    assert!(hidden_command("git")
         .arg("-C")
         .arg(path)
         .args([
@@ -68,7 +65,7 @@ fn fixture() -> Fixture {
 }
 
 fn run_board(fixture: &Fixture, json: &str) -> Value {
-    let mut child = Command::new(env!("CARGO_BIN_EXE_gwtd"))
+    let mut child = hidden_command(env!("CARGO_BIN_EXE_gwtd"))
         .current_dir(fixture.project.path())
         .env("HOME", fixture.home.path())
         .env("USERPROFILE", fixture.home.path())

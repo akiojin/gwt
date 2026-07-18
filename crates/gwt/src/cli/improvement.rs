@@ -625,11 +625,14 @@ pub(super) fn is_contract_artifact(target_artifact: &str) -> bool {
     )
 }
 
-fn capture<E: CliEnv>(
-    env: &mut E,
+/// Env-free capture core shared by the `improvement.capture` JSON operation
+/// and the intake artifact gate's auto-capture helper (SPEC-3248 P7A /
+/// SPEC-3164 T-083). Owns validation, sanitization, dedupe, and atomic
+/// storage; the `CliEnv` wrapper adds the Board-status side effect on top.
+fn capture_candidate_core(
+    repo_root: &Path,
     command: ImprovementCaptureCommand,
-    out: &mut String,
-) -> Result<i32, SpecOpsError> {
+) -> Result<CaptureResult, SpecOpsError> {
     validate_enum(
         "source",
         &command.source,
@@ -676,11 +679,19 @@ fn capture<E: CliEnv>(
         return Err(invalid("summary must not be empty"));
     }
 
+    match typed_evidence {
+        Some(evidence) => capture_typed_interpretive(repo_root, &command, evidence),
+        None => capture_legacy_compatibility(repo_root, &command),
+    }
+}
+
+fn capture<E: CliEnv>(
+    env: &mut E,
+    command: ImprovementCaptureCommand,
+    out: &mut String,
+) -> Result<i32, SpecOpsError> {
     let repo_root = env.repo_path().to_path_buf();
-    let result = match typed_evidence {
-        Some(evidence) => capture_typed_interpretive(&repo_root, &command, evidence)?,
-        None => capture_legacy_compatibility(&repo_root, &command)?,
-    };
+    let result = capture_candidate_core(&repo_root, command)?;
     let updated_existing = result.updated_existing;
     let mut candidate = result.candidate;
     let pending_generation = pending_capture_status_generation(&candidate);
@@ -1075,6 +1086,12 @@ fn capture_legacy_compatibility(
             candidate.sanitized_details = command.details.as_deref().map(sanitize_text);
             candidate.evidence_digest = command.evidence_digest.as_deref().map(sanitize_text);
             candidate.local_evidence = sanitize_local_evidence(&command.local_evidence);
+            candidate.legacy_occurrence_count = Some(
+                candidate
+                    .legacy_occurrence_count
+                    .unwrap_or_default()
+                    .saturating_add(1),
+            );
             Ok(CaptureResult {
                 candidate: candidate.clone(),
                 updated_existing: true,
@@ -1097,7 +1114,7 @@ fn capture_legacy_compatibility(
                 resolver_snapshot: None,
                 dedupe_key: dedupe_key.clone(),
                 occurrences: 0,
-                legacy_occurrence_count: None,
+                legacy_occurrence_count: Some(1),
                 fingerprint: None,
                 eligibility: ImprovementEligibility::NeedsEvidence,
                 typed_evidence: None,
@@ -1839,6 +1856,55 @@ fn interpretive_session_is_verified_for_repo(repo_root: &Path, session_id: &str)
             }),
     };
     scope_matches
+}
+
+/// Stable dedupe key for the intake artifact gate's auto-captured candidate
+/// (SPEC-3248 P7A T-084): every missing/stale-outcome StopBlock updates the
+/// same `issue-spec-workflow` candidate instead of piling up duplicates.
+pub(crate) const INTAKE_GATE_DEDUPE_KEY: &str = "issue-spec-workflow:intake-artifact-gate";
+
+/// Compact result the intake gate embeds into its StopBlock reason.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct IntakeGateCaptureSummary {
+    pub id: String,
+    pub occurrences: u64,
+    pub updated: bool,
+}
+
+/// SPEC-3164 workflow-violation auto-capture helper used by the intake
+/// artifact gate (SPEC-3248 P7A T-083/T-084, FR-019). Env-free so the Stop
+/// hook can call it; goes through the exact same validation, sanitization,
+/// dedupe, and storage as `improvement.capture`. Confidence stays `medium`,
+/// so the Board-status publish rule (high-confidence only) and the
+/// producing-work self-improvement Stop gate (high-confidence only) are both
+/// deliberately not triggered by the gate's own bookkeeping.
+pub(crate) fn capture_intake_gate_violation(
+    worktree_root: &Path,
+    summary: &str,
+    details: &str,
+) -> Result<IntakeGateCaptureSummary, String> {
+    let command = ImprovementCaptureCommand {
+        source: "hook-runtime".to_string(),
+        target_artifact: "issue-spec-workflow".to_string(),
+        classification: "gwt-caused".to_string(),
+        confidence: "medium".to_string(),
+        summary: summary.to_string(),
+        details: Some(details.to_string()),
+        evidence_digest: None,
+        dedupe_key: Some(INTAKE_GATE_DEDUPE_KEY.to_string()),
+        local_evidence: Vec::new(),
+        typed_evidence: None,
+    };
+    capture_candidate_core(worktree_root, command)
+        .map(|result| IntakeGateCaptureSummary {
+            id: result.candidate.id,
+            occurrences: result
+                .candidate
+                .legacy_occurrence_count
+                .unwrap_or(result.candidate.occurrences),
+            updated: result.updated_existing,
+        })
+        .map_err(|err| err.to_string())
 }
 
 fn list(

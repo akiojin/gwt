@@ -187,6 +187,11 @@ pub trait IssueClient: Send + Sync {
 
     fn create_comment(&self, number: IssueNumber, body: &str) -> Result<CommentSnapshot, ApiError>;
 
+    /// Delete an Issue comment. Used by the multipart section writer
+    /// (SPEC-3248 P7C / #3284) to clean up stale part comments after a
+    /// successful index swap.
+    fn delete_comment(&self, comment_id: CommentId) -> Result<(), ApiError>;
+
     fn create_issue(
         &self,
         title: &str,

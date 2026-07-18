@@ -96,6 +96,34 @@ pub(super) fn run<E: CliEnv>(
     cmd: PrCommand,
     out: &mut String,
 ) -> Result<i32, SpecOpsError> {
+    // SPEC-3248 P8b (T-112/FR-037/AS-33): Ready handoffs — a non-draft PR
+    // creation or `pr.ready` — require the current session's execution to be
+    // settled or backed by fresh verification evidence. A terminally blocked
+    // execution refuses every PR mutation, draft creation and edits
+    // included; an active execution keeps the mid-work Draft flow available.
+    let is_pr_mutation = matches!(
+        cmd,
+        PrCommand::Create { .. }
+            | PrCommand::CreateBody { .. }
+            | PrCommand::Edit { .. }
+            | PrCommand::EditBody { .. }
+            | PrCommand::Ready { .. }
+    );
+    if is_pr_mutation {
+        let is_ready_handoff = matches!(
+            cmd,
+            PrCommand::Create { draft: false, .. }
+                | PrCommand::CreateBody { draft: false, .. }
+                | PrCommand::Ready { .. }
+        );
+        if let Some(refusal) =
+            crate::cli::execution_state::pr_handoff_refusal(env.repo_path(), is_ready_handoff)
+        {
+            out.push_str(&refusal);
+            out.push('\n');
+            return Ok(2);
+        }
+    }
     let code = match cmd {
         PrCommand::Current => {
             match env.fetch_current_pr().map_err(super::io_as_api_error)? {
@@ -251,36 +279,41 @@ pub(super) fn run<E: CliEnv>(
 }
 
 fn sync_workspace_pr_metadata<E: CliEnv>(env: &E, pr: &PrStatus, requested_head: Option<&str>) {
-    let Ok(Some(mut projection)) =
-        gwt_core::workspace_projection::load_workspace_projection(env.repo_path())
-    else {
-        return;
-    };
-    let stored_branch = projection
-        .git_details
-        .as_ref()
-        .and_then(|details| details.branch.as_deref());
-    if !should_sync_workspace_pr_metadata(env.repo_path(), stored_branch, requested_head) {
-        return;
-    }
-
-    let Some(details) = projection.git_details.as_mut() else {
-        return;
-    };
-    details.pr_number = Some(pr.number);
-    details.pr_state = Some(pr.state.to_string());
-    details.pr_url = (!pr.url.trim().is_empty()).then_some(pr.url.clone());
-    details.pr_created_at = pr.created_at;
-    projection.updated_at = chrono::Utc::now();
-    let _ = gwt_core::workspace_projection::save_workspace_projection(env.repo_path(), &projection);
+    let work_item_id = gwt_core::workspace_projection::mutate_existing_workspace_projection(
+        env.repo_path(),
+        |projection| {
+            let stored_branch = projection
+                .git_details
+                .as_ref()
+                .and_then(|details| details.branch.as_deref());
+            if !should_sync_workspace_pr_metadata(env.repo_path(), stored_branch, requested_head) {
+                return Ok(None);
+            }
+            let Some(details) = projection.git_details.as_mut() else {
+                return Ok(None);
+            };
+            details.pr_number = Some(pr.number);
+            details.pr_state = Some(pr.state.to_string());
+            details.pr_url = (!pr.url.trim().is_empty()).then_some(pr.url.clone());
+            details.pr_created_at = pr.created_at;
+            projection.updated_at = chrono::Utc::now();
+            Ok(Some(projection.id.clone()))
+        },
+    )
+    .ok()
+    .flatten()
+    .flatten();
 
     // SPEC-2359 US-37 / FR-117: auto-emit Done for the linked Workspace WorkItem
     // when the PR transitions to merged. The helper is idempotent per work_item_id,
     // so repeated polling does not duplicate Done events.
     if pr.state.to_string().eq_ignore_ascii_case("merged") {
+        let Some(work_item_id) = work_item_id else {
+            return;
+        };
         let _ = gwt_core::workspace_projection::emit_workspace_done_event_if_absent(
             env.repo_path(),
-            &projection.id,
+            &work_item_id,
             chrono::Utc::now(),
         );
     }
@@ -560,6 +593,145 @@ mod tests {
         assert_eq!(cmd, PrCommand::Current);
     }
 
+    // SPEC-3248 P8b (T-112/AS-33): Ready handoffs are gated on the current
+    // session's execution state and verification evidence; the Draft flow
+    // stays available.
+    #[test]
+    fn pr_handoff_gate_blocks_ready_paths_until_evidence_or_settlement() {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let _session =
+            gwt_core::test_support::ScopedEnvVar::set(gwt_agent::GWT_SESSION_ID_ENV, "sess-pr");
+        let tmp = tempfile::tempdir().expect("tempdir");
+        crate::cli::execution_state::materialize_at_launch(
+            tmp.path(),
+            crate::cli::execution_state::ExecutionOwnerKind::Issue,
+            42,
+            "sess-pr",
+            "launch",
+            false,
+        )
+        .unwrap();
+
+        let mut env = crate::cli::TestEnv::new(tmp.path().to_path_buf());
+        env.seed_pr(7, seeded_pr());
+        env.seed_created_pr(seeded_pr());
+
+        // Active execution without evidence: non-draft create and Ready refuse.
+        let mut out = String::new();
+        let code = run(
+            &mut env,
+            PrCommand::CreateBody {
+                base: s("develop"),
+                head: None,
+                title: s("t"),
+                body: s("b"),
+                labels: vec![],
+                draft: false,
+            },
+            &mut out,
+        )
+        .expect("run pr create");
+        assert_eq!(code, 2, "{out}");
+        assert!(out.contains("PR handoff refused"), "{out}");
+        assert!(
+            env.pr_create_call_log.is_empty(),
+            "create must not reach gh"
+        );
+
+        let mut out = String::new();
+        let code = run(&mut env, PrCommand::Ready { number: 7 }, &mut out).expect("run pr ready");
+        assert_eq!(code, 2, "{out}");
+        assert!(env.pr_ready_call_log.is_empty(), "ready must not reach gh");
+
+        // Draft creation stays available mid-work.
+        let mut out = String::new();
+        let code = run(
+            &mut env,
+            PrCommand::CreateBody {
+                base: s("develop"),
+                head: None,
+                title: s("t"),
+                body: s("b"),
+                labels: vec![],
+                draft: true,
+            },
+            &mut out,
+        )
+        .expect("run pr create draft");
+        assert_eq!(code, 0, "{out}");
+        assert_eq!(env.pr_create_call_log.len(), 1);
+
+        // Fresh evidence unlocks the Ready handoff.
+        crate::cli::verification_record::run_verification(
+            tmp.path(),
+            "sess-pr",
+            &["git --version".to_string()],
+        )
+        .unwrap();
+        let mut out = String::new();
+        let code = run(&mut env, PrCommand::Ready { number: 7 }, &mut out).expect("run pr ready");
+        assert_eq!(code, 0, "{out}");
+        assert_eq!(env.pr_ready_call_log, vec![7]);
+
+        // A terminally blocked execution refuses entirely, even with evidence.
+        crate::cli::execution_state::materialize_at_launch(
+            tmp.path(),
+            crate::cli::execution_state::ExecutionOwnerKind::Issue,
+            42,
+            "sess-pr",
+            "launch",
+            false,
+        )
+        .unwrap();
+        crate::cli::execution_state::settle(
+            tmp.path(),
+            "sess-pr",
+            crate::cli::execution_state::ExecutionSettlement::Blocked {
+                reason: "environment blocker".to_string(),
+                missing_verification: None,
+            },
+        )
+        .unwrap();
+        let mut out = String::new();
+        let code = run(&mut env, PrCommand::Ready { number: 7 }, &mut out).expect("run pr ready");
+        assert_eq!(code, 2, "{out}");
+        assert!(out.contains("terminally blocked"), "{out}");
+
+        // AS-33: a blocked execution refuses every PR mutation — draft
+        // creation and edits included.
+        let mut out = String::new();
+        let code = run(
+            &mut env,
+            PrCommand::CreateBody {
+                base: s("develop"),
+                head: None,
+                title: s("t"),
+                body: s("b"),
+                labels: vec![],
+                draft: true,
+            },
+            &mut out,
+        )
+        .expect("run pr create draft while blocked");
+        assert_eq!(code, 2, "{out}");
+        let mut out = String::new();
+        let code = run(
+            &mut env,
+            PrCommand::EditBody {
+                number: 7,
+                title: Some(s("t2")),
+                body: None,
+                add_labels: vec![],
+            },
+            &mut out,
+        )
+        .expect("run pr edit while blocked");
+        assert_eq!(code, 2, "{out}");
+        assert!(env.pr_edit_call_log.is_empty(), "edit must not reach gh");
+    }
+
     #[test]
     fn pr_family_run_directly_renders_current_pr() {
         let tmp = tempfile::tempdir().expect("tempdir");
@@ -732,13 +904,13 @@ mod tests {
     }
 
     fn init_fake_current_branch_repo(repo_path: &std::path::Path) {
-        let init = std::process::Command::new("git")
+        let init = gwt_core::process::hidden_command("git")
             .args(["init", "-b", "main"])
             .current_dir(repo_path)
             .status()
             .expect("git init");
         assert!(init.success());
-        let remote = std::process::Command::new("git")
+        let remote = gwt_core::process::hidden_command("git")
             .args([
                 "remote",
                 "add",
@@ -749,7 +921,7 @@ mod tests {
             .status()
             .expect("git remote add");
         assert!(remote.success());
-        let checkout = std::process::Command::new("git")
+        let checkout = gwt_core::process::hidden_command("git")
             .args(["checkout", "-b", "work/20260507-0808"])
             .current_dir(repo_path)
             .status()

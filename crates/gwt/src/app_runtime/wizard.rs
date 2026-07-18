@@ -1940,6 +1940,14 @@ impl AppRuntime {
         {
             config.model = Some(model.clone());
         }
+        // SPEC-3248 P8a: the independent review agent is subordinate to the
+        // implementing session's execution — it must not take over (or be
+        // gated by) the Execution Control Record for the linked owner.
+        if review_prompt.is_some() {
+            if let LaunchWizardLaunchRequest::Agent(config) = &mut launch_request {
+                config.suppress_execution_control = true;
+            }
+        }
         let launch_index = self
             .tab(&session.tab_id)
             .map(|tab| {

@@ -325,6 +325,9 @@ pub fn command_exists(cmd: &str) -> bool {
 /// Create a non-interactive command that does not create an extra console
 /// window when spawned from the Windows GUI front door.
 pub fn hidden_command<S: AsRef<OsStr>>(program: S) -> Command {
+    // The one sanctioned raw constructor; every other call site must go
+    // through this helper (enforced via clippy.toml disallowed-methods).
+    #[allow(clippy::disallowed_methods)]
     let mut command = Command::new(program);
     configure_hidden_command(&mut command);
     command
@@ -337,6 +340,25 @@ pub fn configure_hidden_command(command: &mut Command) -> &mut Command {
     {
         use std::os::windows::process::CommandExt;
 
+        command.creation_flags(flags);
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = flags;
+    }
+    command
+}
+
+/// Apply platform-specific non-interactive process flags to a Tokio command.
+///
+/// Same contract as [`configure_hidden_command`], for the async spawn path
+/// (`process_console::spawn_logged` and friends).
+pub fn configure_hidden_tokio_command(
+    command: &mut tokio::process::Command,
+) -> &mut tokio::process::Command {
+    let flags = hidden_creation_flags();
+    #[cfg(windows)]
+    {
         command.creation_flags(flags);
     }
     #[cfg(not(windows))]
@@ -498,6 +520,32 @@ mod tests {
         } else {
             assert_eq!(hidden_creation_flags(), 0);
         }
+    }
+
+    /// Regression test for Issue #3293: a child spawned through
+    /// `hidden_command` must run under CREATE_NO_WINDOW, i.e. its console
+    /// has no window (`GetConsoleWindow()` returns NULL in the child).
+    #[cfg(windows)]
+    #[test]
+    fn hidden_command_child_has_no_console_window() {
+        let script = "Add-Type -Namespace W -Name K -MemberDefinition '[DllImport(\"kernel32.dll\")] public static extern System.IntPtr GetConsoleWindow();'; [W.K]::GetConsoleWindow().ToInt64()";
+        let output = hidden_command("powershell")
+            .args(["-NoProfile", "-NonInteractive", "-Command", script])
+            .output()
+            .expect("spawn powershell");
+        assert!(
+            output.status.success(),
+            "powershell failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let handle: i64 = String::from_utf8_lossy(&output.stdout)
+            .trim()
+            .parse()
+            .expect("numeric console window handle");
+        assert_eq!(
+            handle, 0,
+            "child console window handle must be NULL under CREATE_NO_WINDOW"
+        );
     }
 
     #[test]

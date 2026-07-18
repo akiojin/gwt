@@ -1,6 +1,7 @@
 use std::{collections::HashMap, fs};
 
 use gwt::{load_knowledge_bridge, KnowledgeKind};
+use gwt_core::process::hidden_command;
 use gwt_core::{paths::gwt_cache_dir, repo_hash::detect_repo_hash};
 use gwt_github::{
     Cache, CommentId, CommentSnapshot, IssueNumber, IssueSnapshot, IssueState, UpdatedAt,
@@ -231,7 +232,7 @@ fn init_repo(repo_path: &std::path::Path) {
         ["init", "-q"].as_slice(),
         ["remote", "add", "origin", remote.as_str()].as_slice(),
     ] {
-        let output = std::process::Command::new("git")
+        let output = hidden_command("git")
             .args(args)
             .current_dir(repo_path)
             .output()

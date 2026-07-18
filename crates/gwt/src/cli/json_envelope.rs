@@ -107,6 +107,13 @@ fn parse(input: &str) -> Result<ParsedEnvelope, CliParseError> {
         }
         "improvement.capture" => improvement_capture(params)?,
         "improvement.list" => improvement_list(params)?,
+        "intake.outcome.record" | "intake.outcome-record" => {
+            CliCommand::Intake(crate::cli::intake_outcome::IntakeCommand::OutcomeRecord {
+                kind: required_string(params, "kind")?,
+                number: optional_u64(params, "number")?,
+                reason: optional_string(params, "reason")?,
+            })
+        }
         "improvement.dismiss" => improvement_dismiss(params)?,
         "improvement.resolve" => improvement_resolve(params)?,
         "improvement.link_issue" | "improvement.link-issue" => improvement_link_issue(params)?,
@@ -261,6 +268,22 @@ fn parse(input: &str) -> Result<ParsedEnvelope, CliParseError> {
         }
         "discuss.goal_skipped" | "discuss.goal-skipped" => {
             discuss_proposal(params, DiscussEnvelopeAction::GoalSkipped)?
+        }
+        "verify.run" => {
+            let commands = optional_string_vec(params, "commands")?;
+            if commands.is_empty() {
+                return Err(CliParseError::MissingFlag("commands"));
+            }
+            CliCommand::Verify(crate::cli::verification_record::VerifyCommand::Run { commands })
+        }
+        "execution.complete" => {
+            CliCommand::Execution(crate::cli::execution_state::ExecutionCommand::Complete)
+        }
+        "execution.blocked" => {
+            CliCommand::Execution(crate::cli::execution_state::ExecutionCommand::Blocked {
+                reason: required_string(params, "reason")?,
+                missing_verification: optional_string(params, "missing_verification")?,
+            })
         }
         "build.start" => skill_state(params, SkillActionKind::Start).map(CliCommand::Build)?,
         "build.phase" => skill_state(params, SkillActionKind::Phase).map(CliCommand::Build)?,
@@ -1490,6 +1513,50 @@ mod tests {
                 json!({"title": "t", "body": ["a", "b"], "structured": true})
             ),
             CliCommand::Issue(IssueCommand::SpecCreateJsonBody { .. })
+        ));
+    }
+
+    // SPEC-3248 P8a: execution settlement parse variants.
+    #[test]
+    fn execution_settlement_variants() {
+        assert!(matches!(
+            ok("execution.complete", json!({})),
+            CliCommand::Execution(crate::cli::execution_state::ExecutionCommand::Complete)
+        ));
+        assert!(matches!(
+            ok(
+                "execution.blocked",
+                json!({"reason": "E2E runner unavailable", "missing_verification": "lifecycle E2E"})
+            ),
+            CliCommand::Execution(crate::cli::execution_state::ExecutionCommand::Blocked { .. })
+        ));
+        assert!(matches!(
+            err("execution.blocked", json!({})),
+            CliParseError::MissingFlag("reason")
+        ));
+    }
+
+    // SPEC-3248 P7A (T-072/FR-012): intake.outcome.record parse variants.
+    #[test]
+    fn intake_outcome_record_variants() {
+        assert!(matches!(
+            ok(
+                "intake.outcome.record",
+                json!({"kind": "no_action", "reason": "duplicate of #3248"})
+            ),
+            CliCommand::Intake(crate::cli::intake_outcome::IntakeCommand::OutcomeRecord { .. })
+        ));
+        assert!(matches!(
+            ok(
+                "intake.outcome-record",
+                json!({"kind": "issue_updated", "number": 3248})
+            ),
+            CliCommand::Intake(crate::cli::intake_outcome::IntakeCommand::OutcomeRecord { .. })
+        ));
+        // kind is required at the parse layer.
+        assert!(matches!(
+            err("intake.outcome.record", json!({"number": 1})),
+            CliParseError::MissingFlag("kind")
         ));
     }
 

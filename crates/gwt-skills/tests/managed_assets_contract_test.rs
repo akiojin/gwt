@@ -9,8 +9,8 @@
 use std::collections::BTreeSet;
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::process::Command;
 
+use gwt_core::process::hidden_command;
 use gwt_skills::coordination_guidance::{generate_coordination_guidance, render_skill_md};
 use gwt_skills::distribute::distribute_to_worktree;
 use gwt_skills::git_exclude::update_git_exclude;
@@ -19,7 +19,7 @@ use gwt_skills::SessionKind;
 /// Create a real (empty) git repository so asset distribution and
 /// `.git/info/exclude` resolution behave as they do in a gwt worktree.
 fn init_git_repo(path: &Path) {
-    let status = Command::new("git")
+    let status = hidden_command("git")
         .args(["init", "--quiet"])
         .current_dir(path)
         .status()

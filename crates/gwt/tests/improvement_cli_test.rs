@@ -3,9 +3,10 @@ use std::{
     fs,
     io::Write,
     path::{Path, PathBuf},
-    process::{Command, Stdio},
+    process::Stdio,
 };
 
+use gwt_core::process::hidden_command;
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use tempfile::TempDir;
@@ -86,7 +87,7 @@ fn run_gwtd_json_raw_in_with_session(
     session_id: Option<&str>,
     payload: Value,
 ) -> std::process::Output {
-    let mut command = Command::new(env!("CARGO_BIN_EXE_gwtd"));
+    let mut command = hidden_command(env!("CARGO_BIN_EXE_gwtd"));
     command
         .current_dir(project)
         .env("HOME", home)
@@ -109,7 +110,7 @@ fn run_gwtd_json_raw_in_with_session(
 }
 
 fn run_git(repo: &Path, args: &[&str]) {
-    let output = Command::new("git")
+    let output = hidden_command("git")
         .current_dir(repo)
         .args(args)
         .output()

@@ -90,23 +90,23 @@ mod tests {
     fn init_repo() -> TempDir {
         let dir = TempDir::new().unwrap();
         let path = dir.path();
-        run(Command::new("git")
+        run(gwt_core::process::hidden_command("git")
             .args(["init", "--initial-branch=main"])
             .current_dir(path));
-        run(Command::new("git")
+        run(gwt_core::process::hidden_command("git")
             .args(["config", "user.email", "test@example.com"])
             .current_dir(path));
-        run(Command::new("git")
+        run(gwt_core::process::hidden_command("git")
             .args(["config", "user.name", "Test User"])
             .current_dir(path));
-        run(Command::new("git")
+        run(gwt_core::process::hidden_command("git")
             .args(["commit", "--allow-empty", "-m", "init"])
             .current_dir(path));
         dir
     }
 
     fn head_sha(repo: &std::path::Path) -> String {
-        let output = Command::new("git")
+        let output = gwt_core::process::hidden_command("git")
             .args(["rev-parse", "HEAD"])
             .current_dir(repo)
             .output()
@@ -120,23 +120,23 @@ mod tests {
         let repo = dir.path();
 
         // Commit with .gwt/work/events.jsonl on a side branch.
-        run(Command::new("git")
+        run(gwt_core::process::hidden_command("git")
             .args(["checkout", "-b", "work/with-events"])
             .current_dir(repo));
         std::fs::create_dir_all(repo.join(".gwt/work")).expect("mk .gwt/work");
         std::fs::write(repo.join(".gwt/work/events.jsonl"), "{\"id\":\"evt-1\"}\n")
             .expect("write events");
-        run(Command::new("git")
+        run(gwt_core::process::hidden_command("git")
             .args(["add", ".gwt/work/events.jsonl"])
             .current_dir(repo));
-        run(Command::new("git")
+        run(gwt_core::process::hidden_command("git")
             .args(["commit", "-m", "events"])
             .current_dir(repo));
         let with_events = head_sha(repo);
 
         // Back to main (no events file) and drop the working copy so a
         // successful read proves checkout-free access.
-        run(Command::new("git")
+        run(gwt_core::process::hidden_command("git")
             .args(["checkout", "main"])
             .current_dir(repo));
         let without_events = head_sha(repo);

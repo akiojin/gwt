@@ -1244,7 +1244,7 @@ mod tests {
     fn init_repo_with_origin(path: &std::path::Path, url: &str) {
         std::fs::create_dir_all(path).unwrap();
         for args in [vec!["init"], vec!["remote", "add", "origin", url]] {
-            let output = std::process::Command::new("git")
+            let output = gwt_core::process::hidden_command("git")
                 .args(&args)
                 .current_dir(path)
                 .output()

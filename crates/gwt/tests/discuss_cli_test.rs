@@ -9,13 +9,9 @@
 //! land in the machine-local home work-notes file (SPEC-3214 FR-007) after the
 //! one-time import, leaving the git-tracked repo-local source untouched.
 
-use std::{
-    fs,
-    io::Write,
-    path::Path,
-    process::{Command, Stdio},
-};
+use std::{fs, io::Write, path::Path, process::Stdio};
 
+use gwt_core::process::hidden_command;
 use serde_json::Value;
 use tempfile::TempDir;
 
@@ -72,7 +68,7 @@ fn read_discussions(fixture: &Fixture) -> String {
 }
 
 fn run_discuss(fixture: &Fixture, json: &str) -> Value {
-    let mut child = Command::new(env!("CARGO_BIN_EXE_gwtd"))
+    let mut child = hidden_command(env!("CARGO_BIN_EXE_gwtd"))
         .current_dir(fixture.project.path())
         .env("HOME", fixture.home.path())
         .env("USERPROFILE", fixture.home.path())

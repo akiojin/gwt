@@ -357,42 +357,36 @@ impl AppRuntime {
         entry: &coordination::BoardEntry,
     ) -> Vec<OutboundEvent> {
         let _ = tab_id;
-        let mut projection =
-            match workspace_projection::load_or_default_workspace_projection(project_root) {
-                Ok(projection) => projection,
-                Err(error) => {
-                    tracing::warn!(
-                        error = %error,
-                        project_root = %project_root.display(),
-                        "failed to load workspace projection for board milestone"
-                    );
-                    return Vec::new();
-                }
-            };
-        projection.record_board_milestone(entry);
-        if let Err(error) =
-            workspace_projection::save_workspace_projection(project_root, &projection)
-        {
-            tracing::warn!(
-                error = %error,
-                project_root = %project_root.display(),
-                "failed to save workspace projection for board milestone"
-            );
-            return Vec::new();
-        }
-        if board_entry_origin_can_record_workspace_work_event(&projection, entry) {
-            let work_event =
-                workspace_projection::workspace_work_event_from_board_entry(&projection, entry);
-            if let Err(error) =
-                workspace_projection::record_workspace_work_event(project_root, work_event)
-            {
+        let projection = match workspace_projection::transact_workspace_state(
+            project_root,
+            |projection, work_items, _work_items_persisted| {
+                let event =
+                    workspace_projection::workspace_work_event_from_board_entry(projection, entry);
+                let state_cutoff = work_items
+                    .work_items
+                    .iter()
+                    .find(|item| item.id == event.work_item_id)
+                    .map(|item| item.updated_at);
+                let event_is_current = state_cutoff.is_none_or(|cutoff| event.updated_at >= cutoff);
+                projection.record_board_milestone_with_state_cutoff(entry, state_cutoff);
+                let events = (event_is_current
+                    && board_entry_origin_can_record_workspace_work_event(projection, entry))
+                .then_some(event)
+                .into_iter()
+                .collect();
+                Ok((projection.clone(), events))
+            },
+        ) {
+            Ok(projection) => projection,
+            Err(error) => {
                 tracing::warn!(
                     error = %error,
                     project_root = %project_root.display(),
-                    "failed to record workspace WorkItem event for board milestone"
+                    "failed to persist workspace board milestone"
                 );
+                return Vec::new();
             }
-        }
+        };
 
         self.apply_workspace_projection_title_sync(project_root, &projection)
     }
@@ -406,10 +400,8 @@ fn board_entry_origin_can_record_workspace_work_event(
         return true;
     };
     projection
-        .agents
-        .iter()
-        .find(|agent| agent.session_id == session_id)
-        .is_some_and(|agent| agent.is_assigned())
+        .latest_agent_for_session(session_id)
+        .is_some_and(|agent| agent.is_assigned() && entry.updated_at >= agent.updated_at)
 }
 
 fn board_error(client_id: &str, id: &str, message: impl Into<String>) -> Vec<OutboundEvent> {

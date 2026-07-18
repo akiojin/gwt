@@ -31,6 +31,12 @@ pub struct FakeIssueClient {
     next_comment_id: Arc<AtomicU64>,
     next_owner_comment_id: Arc<AtomicU64>,
     clock: Arc<AtomicU64>,
+    /// Failure-injection countdown for `create_comment`: `-1` disables the
+    /// knob; `n >= 0` allows `n` more successful creates, then fails.
+    fail_create_comment_after: Arc<std::sync::atomic::AtomicI64>,
+    /// When set, the next `create_comment` stores a corrupted body so tests
+    /// can prove that post-write readback fails closed.
+    corrupt_next_create_comment: Arc<std::sync::atomic::AtomicBool>,
 }
 
 struct FakeState {
@@ -119,7 +125,23 @@ impl FakeIssueClient {
             next_comment_id: Arc::new(AtomicU64::new(1)),
             next_owner_comment_id: Arc::new(AtomicU64::new(1)),
             clock: Arc::new(AtomicU64::new(1)),
+            fail_create_comment_after: Arc::new(std::sync::atomic::AtomicI64::new(-1)),
+            corrupt_next_create_comment: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         }
+    }
+
+    /// Failure injection: allow `n` more successful `create_comment` calls,
+    /// then fail every subsequent call with [`ApiError::Unexpected`].
+    pub fn fail_create_comment_after(&self, n: u64) {
+        self.fail_create_comment_after
+            .store(n as i64, Ordering::SeqCst);
+    }
+
+    /// Corruption injection: the next `create_comment` stores a body whose
+    /// section content differs from what the caller sent.
+    pub fn corrupt_next_create_comment(&self) {
+        self.corrupt_next_create_comment
+            .store(true, Ordering::SeqCst);
     }
 
     /// Preload an Issue snapshot. Used by tests to set up fixtures.
@@ -529,6 +551,26 @@ impl IssueClient for FakeIssueClient {
         if body.len() > 65_536 {
             return Err(ApiError::BodyTooLarge);
         }
+        let countdown = self.fail_create_comment_after.load(Ordering::SeqCst);
+        if countdown >= 0 {
+            if countdown == 0 {
+                return Err(ApiError::Unexpected(
+                    "injected create_comment failure".to_string(),
+                ));
+            }
+            self.fail_create_comment_after
+                .store(countdown - 1, Ordering::SeqCst);
+        }
+        let stored_body = if self
+            .corrupt_next_create_comment
+            .swap(false, Ordering::SeqCst)
+        {
+            // Inject garbage right after the first marker line so the stored
+            // section content no longer matches what the caller sent.
+            body.replacen("-->\n", "-->\nGARBAGE-INJECTED\n", 1)
+        } else {
+            body.to_string()
+        };
         let new_id = CommentId(self.next_comment_id.fetch_add(1, Ordering::SeqCst));
         let mut state = self
             .inner
@@ -541,12 +583,28 @@ impl IssueClient for FakeIssueClient {
             .ok_or(ApiError::NotFound(number))?;
         let snapshot = CommentSnapshot {
             id: new_id,
-            body: body.to_string(),
+            body: stored_body,
             updated_at: self.tick(),
         };
         issue.comments.push(snapshot.clone());
         issue.updated_at = snapshot.updated_at.clone();
         Ok(snapshot)
+    }
+
+    fn delete_comment(&self, comment_id: CommentId) -> Result<(), ApiError> {
+        let mut state = self
+            .inner
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        self.record(&mut state, "delete_comment", &comment_id.to_string());
+        for issue in state.issues.values_mut() {
+            if let Some(pos) = issue.comments.iter().position(|c| c.id == comment_id) {
+                issue.comments.remove(pos);
+                issue.updated_at = self.tick();
+                return Ok(());
+            }
+        }
+        Err(ApiError::CommentNotFound(comment_id))
     }
 
     fn create_issue(

@@ -5,6 +5,7 @@ use std::{
     path::{Path, PathBuf},
 };
 
+use gwt_core::process::hidden_command;
 use serde_json::{json, Value};
 
 use crate::settings_local::{
@@ -608,7 +609,7 @@ fn is_gwt_repository(worktree: &Path) -> bool {
 }
 
 fn origin_remote_url(worktree: &Path) -> Option<String> {
-    let output = std::process::Command::new("git")
+    let output = hidden_command("git")
         .arg("-C")
         .arg(worktree)
         .args(["config", "--get", "remote.origin.url"])

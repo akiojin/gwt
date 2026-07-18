@@ -39,6 +39,7 @@ pub enum WorkKind {
 /// status, current focus, and Board linkage. Updated from agent session
 /// events and the `workspace.update` operation.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct WorkspaceAgentSummary {
     pub session_id: String,
     #[serde(default)]

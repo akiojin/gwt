@@ -41,6 +41,11 @@ pub struct LanePolicyFlags {
     pub emit_work_state_reminders: bool,
     /// Let the gwt self-improvement Stop gate fire. `false` for intake.
     pub self_improvement_stop: bool,
+    /// Allow self-improvement candidate *capture* (SPEC-3248 P7A, FR-018).
+    /// Split from [`Self::self_improvement_stop`]: intake sessions capture
+    /// workflow-violation candidates (e.g. from the intake artifact gate)
+    /// even though the producing-work Stop handling stays disabled there.
+    pub self_improvement_capture: bool,
     /// Block Edit/Write to production source at PreToolUse (P4). `false` today.
     pub block_production_code_edits: bool,
     /// Nudge to register the curated Issue/SPEC before Stop (P4). `false` today.
@@ -72,6 +77,7 @@ pub const EXECUTION_PROFILE: LaneProfile = LaneProfile {
     policy_flags: LanePolicyFlags {
         emit_work_state_reminders: true,
         self_improvement_stop: true,
+        self_improvement_capture: true,
         block_production_code_edits: false,
         completion_gate: false,
         sessionstart_onboarding: false,
@@ -88,9 +94,14 @@ pub const INTAKE_PROFILE: LaneProfile = LaneProfile {
     policy_flags: LanePolicyFlags {
         emit_work_state_reminders: false,
         self_improvement_stop: false,
+        // SPEC-3248 P7A (FR-018): capture stays enabled in intake so the
+        // artifact gate can create/update workflow-violation candidates.
+        self_improvement_capture: true,
         // SPEC-3248 P4: intake registers Issues/SPECs, it does not edit code.
         block_production_code_edits: true,
-        // SPEC-3248 P4: nudge to register curated work before Stop.
+        // SPEC-3248 P4→P7A: intake must leave a durable Issue/SPEC outcome
+        // (or a reasoned No Action) before Stop; hardened to a Stop-block by
+        // the intake completion gate.
         completion_gate: true,
         // SPEC-3248 P4: intake opens with a curation SessionStart 导线.
         sessionstart_onboarding: true,
@@ -261,6 +272,7 @@ mod tests {
                 policy_flags: LanePolicyFlags {
                     emit_work_state_reminders: true,
                     self_improvement_stop: true,
+                    self_improvement_capture: true,
                     block_production_code_edits: false,
                     completion_gate: false,
                     sessionstart_onboarding: false,
@@ -276,6 +288,10 @@ mod tests {
                 policy_flags: LanePolicyFlags {
                     emit_work_state_reminders: false,
                     self_improvement_stop: false,
+                    // FR-018: capture and stop are independent switches —
+                    // intake captures workflow violations without enabling
+                    // the producing-work Stop handling.
+                    self_improvement_capture: true,
                     block_production_code_edits: true,
                     completion_gate: true,
                     sessionstart_onboarding: true,

@@ -3,6 +3,7 @@
 //! fold that turns recorded events into current Work items, plus the legacy
 //! `Workspace*`-prefixed adapter aliases.
 
+use std::collections::BTreeMap;
 use std::path::PathBuf;
 
 use chrono::{DateTime, Utc};
@@ -11,11 +12,16 @@ use uuid::Uuid;
 
 use super::*;
 
+fn bool_is_false(value: &bool) -> bool {
+    !*value
+}
+
 /// SPEC-2359 Phase U-6 (FR-133): structured reference to a GitHub Issue
 /// linked to a Workspace. Workspace Card preview and Detail pane render these
 /// as chips (`#Issue-1234`) instead of free-text. The number is required;
 /// title / url are populated when known and default to None for legacy data.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct WorkspaceIssueLink {
     pub number: u64,
     #[serde(default)]
@@ -29,6 +35,7 @@ pub struct WorkspaceIssueLink {
 /// closed) so UI can render lifecycle hints alongside `lifecycle_stage`
 /// without re-querying GitHub.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct WorkspacePrLink {
     pub number: u64,
     #[serde(default)]
@@ -41,6 +48,7 @@ pub struct WorkspacePrLink {
 
 /// Reference from a Work item to one agent session that worked on it.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct WorkAgentRef {
     pub session_id: String,
     #[serde(default)]
@@ -58,6 +66,7 @@ pub struct WorkAgentRef {
 
 /// Reference from a Work item to the branch / worktree / PR it executed in.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct WorkspaceExecutionContainerRef {
     #[serde(default)]
     pub branch: Option<String>,
@@ -107,6 +116,7 @@ pub enum WorkEventKind {
 /// One append-only event in a Work item's lifecycle. Events are folded into
 /// [`WorkItem`]s by [`WorkItemsProjection`].
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct WorkEvent {
     pub id: String,
     pub work_item_id: String,
@@ -138,6 +148,33 @@ pub struct WorkEvent {
     #[serde(default)]
     pub related_work_item_id: Option<String>,
     pub updated_at: DateTime<Utc>,
+}
+
+/// Durable provenance for an accepted duplicate event copy. New projections
+/// retain the complete event so a later chronological refold can re-evaluate
+/// Session ownership. The container-only variant reads projections written by
+/// the short-lived pre-provenance format without making them unreadable.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum DuplicateWorkEventProvenance {
+    Event(Box<WorkEvent>),
+    LegacyContainer(WorkspaceExecutionContainerRef),
+}
+
+impl DuplicateWorkEventProvenance {
+    pub(crate) fn event(&self) -> Option<&WorkEvent> {
+        match self {
+            Self::Event(event) => Some(event.as_ref()),
+            Self::LegacyContainer(_) => None,
+        }
+    }
+
+    pub(crate) fn container(&self) -> Option<&WorkspaceExecutionContainerRef> {
+        match self {
+            Self::Event(event) => event.execution_container.as_ref(),
+            Self::LegacyContainer(container) => Some(container),
+        }
+    }
 }
 
 impl WorkEvent {
@@ -172,6 +209,7 @@ impl WorkEvent {
 /// agents, execution containers, and its event history. Built by folding
 /// [`WorkEvent`]s.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct WorkItem {
     pub id: String,
     pub title: String,
@@ -198,6 +236,25 @@ pub struct WorkItem {
     pub related_work_item_ids: Vec<String>,
     #[serde(default)]
     pub events: Vec<WorkEvent>,
+    /// Immutable copy of metadata that existed before an eventless legacy row
+    /// first participated in event replay. Later refolds start from this copy
+    /// so an event whose acceptance changes cannot become legacy metadata.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub legacy_metadata_snapshot: Option<Box<WorkItem>>,
+    /// Marks metadata that originated from an eventless legacy projection and
+    /// must remain authoritative across later deterministic rebuild versions.
+    #[serde(default, skip_serializing_if = "bool_is_false")]
+    pub legacy_metadata_authoritative: bool,
+    /// Immutable cutoff of the original eventless legacy metadata snapshot.
+    /// Rebuild-applied events may advance `updated_at`, but must not move this
+    /// boundary or later-discovered events can be incorrectly hidden.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub legacy_metadata_snapshot_at: Option<DateTime<Utc>>,
+    /// Accepted duplicate copies keyed by event id. The canonical history
+    /// stores one event; this provenance preserves enough context to re-check
+    /// Session ownership before restoring a duplicate container after refold.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub duplicate_event_containers: BTreeMap<String, Vec<DuplicateWorkEventProvenance>>,
     /// SPEC-2359 Phase W-12 Slice 4 (FR-352): terminal discarded close. A
     /// discarded Work is removed from the active Work surface but kept in the
     /// history with its provenance. Distinct from `status_category == Done`
@@ -205,6 +262,10 @@ pub struct WorkItem {
     /// Back-compat default is `false` for projections written before W-12.
     #[serde(default)]
     pub discarded: bool,
+    /// First explicit Discard instant. Unlike `updated_at`, this boundary does
+    /// not move when later metadata or heartbeat events are folded.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub discarded_at: Option<DateTime<Utc>>,
 }
 
 impl WorkItem {
@@ -237,10 +298,17 @@ impl WorkItem {
 /// Materialized collection of all Work items for one project, rebuilt by
 /// folding the Work event log.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct WorkItemsProjection {
     pub updated_at: DateTime<Utc>,
     #[serde(default)]
     pub work_items: Vec<WorkItem>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WorkEventApplyOutcome {
+    Applied,
+    RejectedSessionConflict,
 }
 
 impl WorkItemsProjection {
@@ -251,11 +319,37 @@ impl WorkItemsProjection {
         }
     }
 
-    pub fn apply_event(&mut self, event: WorkEvent) {
+    pub fn apply_event(&mut self, event: WorkEvent) -> WorkEventApplyOutcome {
         let existing_index = self
             .work_items
             .iter()
             .position(|item| item.id == event.work_item_id);
+
+        // Issue #3216: FR-348 gives "1 agent session : 1 Work". When an event
+        // would attach a session that another Work already owns AND the two
+        // Works carry conflicting git identities, the pairing is a
+        // mis-attribution. Reject it before creating or mutating the target;
+        // structured tracing is the diagnostic record so derived Work metadata
+        // cannot later consume the suspect event.
+        let stray_session_attach = self.would_reject_session_attach(&event);
+
+        if stray_session_attach {
+            let session_id = event
+                .agent_session_id
+                .as_deref()
+                .map(str::trim)
+                .unwrap_or_default();
+            tracing::warn!(
+                target: "gwt::workspace_projection",
+                work_item_id = %event.work_item_id,
+                session_id,
+                event_kind = ?event.kind,
+                "refused stray session attach: session already bound to a Work \
+                 with a conflicting git identity (Issue #3216)"
+            );
+            return WorkEventApplyOutcome::RejectedSessionConflict;
+        }
+
         let index = existing_index.unwrap_or_else(|| {
             self.work_items.push(WorkItem {
                 id: event.work_item_id.clone(),
@@ -277,32 +371,15 @@ impl WorkItemsProjection {
                 board_refs: Vec::new(),
                 related_work_item_ids: Vec::new(),
                 events: Vec::new(),
+                legacy_metadata_snapshot: None,
+                legacy_metadata_authoritative: false,
+                legacy_metadata_snapshot_at: None,
+                duplicate_event_containers: BTreeMap::new(),
                 discarded: false,
+                discarded_at: None,
             });
             self.work_items.len() - 1
         });
-
-        // Issue #3216: FR-348 gives "1 agent session : 1 Work". When an event
-        // would attach a session that another Work already owns AND the two
-        // Works carry conflicting git identities, the pairing is a
-        // mis-attribution (the event's work_item_id and session were assembled
-        // from divergent sources, e.g. the repo-shared current projection vs
-        // the live session). The attach is refused below; the event itself
-        // stays recorded for diagnosis.
-        let stray_session_attach = event
-            .agent_session_id
-            .as_deref()
-            .map(str::trim)
-            .filter(|value| !value.is_empty())
-            .is_some_and(|session_id| {
-                work_session_attach_conflicts(
-                    &self.work_items,
-                    index,
-                    session_id,
-                    event.execution_container.as_ref(),
-                )
-            });
-
         let item = &mut self.work_items[index];
         // SPEC-2359 Phase W-16 (FR-403): a Backfill event is a synthetic
         // materialization marker, not activity. Applied to an existing item
@@ -322,7 +399,7 @@ impl WorkItemsProjection {
             }
             item.events.push(event);
             refresh_work_item_progress_summary(item);
-            return;
+            return WorkEventApplyOutcome::Applied;
         }
         if let Some(title) = non_empty_clone(event.title.as_deref()) {
             item.title = title;
@@ -339,24 +416,32 @@ impl WorkItemsProjection {
         if let Some(owner) = non_empty_clone(event.owner.as_deref()) {
             item.owner = Some(owner);
         }
-        // SPEC-2359 US-37: Done is a terminal state. Heartbeat update events
-        // (kind=Update with status_category=None) emitted after a Done event
-        // must not regress the WorkItem to Active/Idle. Only events that
-        // carry an explicit `status_category` may transition out of Done.
+        // SPEC-2359 US-37: Done is terminal. Production journal heartbeats
+        // carry an explicit Active status, so status presence alone cannot be
+        // treated as a reopen. Only an explicit Resume event transitions a
+        // completed Work back to a non-terminal status.
         //
         // SPEC-2359 Phase W-12 Slice 4 (FR-352): Discarded is likewise terminal.
         // Once a Work is discarded, subsequent events (heartbeat updates without
         // an explicit status_category) must not regress its runtime status; the
         // `discarded` flag is monotonic and never reset.
         let new_status = workspace_work_event_status(&event);
-        let preserve_terminal = (item.status_category == WorkspaceStatusCategory::Done
-            || item.discarded)
-            && event.status_category.is_none();
+        let explicit_done_resume = item.status_category == WorkspaceStatusCategory::Done
+            && event.kind == WorkEventKind::Resume
+            && event.status_category.is_some();
+        let preserve_terminal = item.discarded
+            || (item.status_category == WorkspaceStatusCategory::Done && !explicit_done_resume);
         if !preserve_terminal {
             item.status_category = new_status;
         }
-        if event.kind == WorkEventKind::Discard {
+        if event.kind == WorkEventKind::Discard
+            && item.status_category != WorkspaceStatusCategory::Done
+        {
             item.discarded = true;
+            item.discarded_at = Some(
+                item.discarded_at
+                    .map_or(event.updated_at, |current| current.min(event.updated_at)),
+            );
         }
         if item.status_category == WorkspaceStatusCategory::Done {
             // Preserve the first Done timestamp so idempotent Done re-applies
@@ -379,15 +464,6 @@ impl WorkItemsProjection {
                 agent.agent_id = event.agent_id.clone().or(agent.agent_id.clone());
                 agent.display_name = event.display_name.clone().or(agent.display_name.clone());
                 agent.updated_at = event.updated_at;
-            } else if stray_session_attach {
-                tracing::warn!(
-                    target: "gwt::workspace_projection",
-                    work_item_id = %event.work_item_id,
-                    session_id = %session_id,
-                    event_kind = ?event.kind,
-                    "refused stray session attach: session already bound to a Work \
-                     with a conflicting git identity (Issue #3216)"
-                );
             } else {
                 item.agents.push(WorkAgentRef {
                     session_id,
@@ -422,6 +498,27 @@ impl WorkItemsProjection {
         }
         self.work_items
             .sort_by_key(|item| std::cmp::Reverse(item.updated_at));
+        WorkEventApplyOutcome::Applied
+    }
+
+    pub(crate) fn would_reject_session_attach(&self, event: &WorkEvent) -> bool {
+        let existing_index = self
+            .work_items
+            .iter()
+            .position(|item| item.id == event.work_item_id);
+        event
+            .agent_session_id
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .is_some_and(|session_id| {
+                work_session_attach_conflicts(
+                    &self.work_items,
+                    existing_index,
+                    session_id,
+                    event.execution_container.as_ref(),
+                )
+            })
     }
 
     pub fn refresh_derived_progress_summaries(&mut self) {
@@ -473,29 +570,41 @@ fn push_unique(values: &mut Vec<String>, value: String) {
 }
 
 /// Issue #3216: true when `session_id` is already bound to a *different* Work
-/// item whose git identity conflicts with the target item's identity (the
-/// target's recorded containers plus the incoming event's container). Mirrors
-/// the view-layer identity-conflict gate: a match on either dimension clears
-/// the conflict, and a side without any identity never conflicts.
+/// item whose git identity conflicts with the incoming event's identity. The
+/// target's recorded containers are only a fallback for identity-less events:
+/// otherwise a historical match could hide a conflicting incoming container.
 fn work_session_attach_conflicts(
     work_items: &[WorkItem],
-    target_index: usize,
+    target_index: Option<usize>,
     session_id: &str,
     event_container: Option<&WorkspaceExecutionContainerRef>,
 ) -> bool {
-    let target_containers = work_items[target_index]
-        .execution_containers
-        .iter()
-        .chain(event_container)
-        .collect::<Vec<_>>();
+    let incoming_has_identity = event_container.is_some_and(container_has_work_identity);
+    let target_containers = if incoming_has_identity {
+        event_container.into_iter().collect::<Vec<_>>()
+    } else {
+        target_index
+            .and_then(|index| work_items.get(index))
+            .into_iter()
+            .flat_map(|item| item.execution_containers.iter())
+            .collect::<Vec<_>>()
+    };
     work_items.iter().enumerate().any(|(index, other)| {
-        index != target_index
+        Some(index) != target_index
             && other
                 .agents
                 .iter()
                 .any(|agent| agent.session_id == session_id)
             && work_container_identities_conflict(&other.execution_containers, &target_containers)
     })
+}
+
+fn container_has_work_identity(container: &WorkspaceExecutionContainerRef) -> bool {
+    normalized_work_branch(container.branch.as_deref()).is_some()
+        || container
+            .worktree_path
+            .as_deref()
+            .is_some_and(|path| !path.as_os_str().is_empty())
 }
 
 fn work_container_identities_conflict(
@@ -831,6 +940,73 @@ mod tests {
     }
 
     #[test]
+    fn apply_event_done_then_discard_preserves_done_terminal_kind() {
+        let work_item_id = "test-item-done-then-discard";
+        let done_at = Utc.with_ymd_and_hms(2026, 7, 16, 10, 0, 0).unwrap();
+        let discarded_at = Utc.with_ymd_and_hms(2026, 7, 16, 11, 0, 0).unwrap();
+        let mut projection = WorkItemsProjection::empty(done_at);
+
+        projection.apply_event(WorkEvent::new(WorkEventKind::Done, work_item_id, done_at));
+        projection.apply_event(WorkEvent::new(
+            WorkEventKind::Discard,
+            work_item_id,
+            discarded_at,
+        ));
+
+        let item = projection
+            .work_items
+            .iter()
+            .find(|item| item.id == work_item_id)
+            .expect("Done Work");
+        assert_eq!(
+            (
+                item.status_category,
+                item.discarded,
+                item.completed_at,
+                item.discarded_at,
+            ),
+            (WorkspaceStatusCategory::Done, false, Some(done_at), None,),
+            "Discard after Done must preserve the original Done terminal kind"
+        );
+    }
+
+    #[test]
+    fn apply_event_discard_then_done_preserves_discarded_terminal_kind() {
+        let work_item_id = "test-item-discard-then-done";
+        let discarded_at = Utc.with_ymd_and_hms(2026, 7, 16, 10, 0, 0).unwrap();
+        let done_at = Utc.with_ymd_and_hms(2026, 7, 16, 11, 0, 0).unwrap();
+        let mut projection = WorkItemsProjection::empty(discarded_at);
+
+        projection.apply_event(WorkEvent::new(
+            WorkEventKind::Discard,
+            work_item_id,
+            discarded_at,
+        ));
+        projection.apply_event(WorkEvent::new(WorkEventKind::Done, work_item_id, done_at));
+
+        let item = projection
+            .work_items
+            .iter()
+            .find(|item| item.id == work_item_id)
+            .expect("discarded Work");
+        assert_eq!(
+            (
+                item.status_category,
+                item.discarded,
+                item.completed_at,
+                item.discarded_at,
+            ),
+            (
+                WorkspaceStatusCategory::Idle,
+                true,
+                None,
+                Some(discarded_at),
+            ),
+            "Done after Discard must preserve the original Discarded terminal kind"
+        );
+    }
+
+    #[test]
     fn apply_event_discard_marks_work_terminal_discarded() {
         // SPEC-2359 Phase W-12 Slice 4 (FR-352): a Discard event makes the Work
         // terminal-discarded (not Done) and removes it from the incomplete set.
@@ -864,6 +1040,29 @@ mod tests {
             item.completed_at, None,
             "discarded Work is not completed, so completed_at stays None"
         );
+        assert_eq!(item.discarded_at, Some(t2));
+    }
+
+    #[test]
+    fn apply_event_repeated_discard_keeps_earliest_timestamp() {
+        let work_item_id = "test-item-discard-earliest";
+        let t1 = Utc.with_ymd_and_hms(2026, 7, 16, 9, 0, 0).unwrap();
+        let t2 = Utc.with_ymd_and_hms(2026, 7, 16, 10, 0, 0).unwrap();
+        let mut projection = WorkItemsProjection::empty(t1);
+
+        projection.apply_event(WorkEvent::new(WorkEventKind::Discard, work_item_id, t2));
+        projection.apply_event(WorkEvent::new(WorkEventKind::Discard, work_item_id, t1));
+
+        let item = projection
+            .work_items
+            .iter()
+            .find(|item| item.id == work_item_id)
+            .expect("discarded Work");
+        assert_eq!(
+            item.discarded_at,
+            Some(t1),
+            "out-of-order Discard replay must retain the earliest terminal timestamp"
+        );
     }
 
     #[test]
@@ -889,7 +1088,33 @@ mod tests {
             item.discarded,
             "heartbeat update must not clear the discarded terminal flag"
         );
+        assert_eq!(item.discarded_at, Some(t1));
         assert!(!item.is_incomplete());
+    }
+
+    #[test]
+    fn legacy_duplicate_container_provenance_remains_deserializable() {
+        let t0 = Utc.with_ymd_and_hms(2026, 7, 15, 7, 0, 0).unwrap();
+        let mut projection = WorkItemsProjection::empty(t0);
+        projection.apply_event(WorkEvent::new(WorkEventKind::Start, "work-legacy", t0));
+        let mut value = serde_json::to_value(&projection.work_items[0]).unwrap();
+        value["duplicate_event_containers"] = serde_json::json!({
+            "evt-legacy": [{
+                "branch": "work/legacy",
+                "worktree_path": "/repo/work/legacy"
+            }]
+        });
+
+        let item: WorkItem = serde_json::from_value(value).unwrap();
+
+        let provenance = &item.duplicate_event_containers["evt-legacy"][0];
+        assert!(provenance.event().is_none());
+        assert_eq!(
+            provenance
+                .container()
+                .and_then(|container| container.branch.as_deref()),
+            Some("work/legacy")
+        );
     }
 
     #[test]
@@ -938,6 +1163,7 @@ mod tests {
     #[test]
     fn apply_event_rejects_stray_session_attach_to_conflicting_branch_item() {
         let t0 = Utc.with_ymd_and_hms(2026, 6, 29, 7, 45, 56).unwrap();
+        let done_at = Utc.with_ymd_and_hms(2026, 6, 29, 8, 0, 0).unwrap();
         let t1 = Utc.with_ymd_and_hms(2026, 6, 29, 8, 24, 29).unwrap();
         let mut projection = WorkItemsProjection::empty(t0);
 
@@ -951,16 +1177,31 @@ mod tests {
 
         let mut other_start = WorkEvent::new(WorkEventKind::Start, "work-work-issue-3184", t0);
         other_start.agent_session_id = Some("session-other".to_string());
+        other_start.title = Some("Issue 3184".to_string());
+        other_start.summary = Some("Original summary".to_string());
+        other_start.owner = Some("3184".to_string());
         other_start.execution_container = Some(container_for_test(
             "work/issue-3184",
             "/repo/work/issue-3184",
         ));
         projection.apply_event(other_start);
 
+        let mut done = WorkEvent::new(WorkEventKind::Done, "work-work-issue-3184", done_at);
+        done.status_category = Some(WorkspaceStatusCategory::Done);
+        projection.apply_event(done);
+
         // The stray event: the owner's session arrives on the OTHER branch's
         // item (mis-attributed work_item_id / session pairing).
         let mut stray = WorkEvent::new(WorkEventKind::Update, "work-work-issue-3184", t1);
         stray.agent_session_id = Some("session-owner".to_string());
+        stray.status_category = Some(WorkspaceStatusCategory::Active);
+        stray.title = Some("Foreign title".to_string());
+        stray.summary = Some("Foreign summary".to_string());
+        stray.owner = Some("3197".to_string());
+        stray.execution_container = Some(container_for_test(
+            "work/issue-3184-stray",
+            "/repo/work/issue-3184-stray",
+        ));
         projection.apply_event(stray);
 
         let other = projection
@@ -975,8 +1216,92 @@ mod tests {
                 .any(|agent| agent.session_id == "session-owner"),
             "conflicting-branch item must not gain the stray session ref"
         );
-        // The suspect event itself stays recorded for diagnosis.
+        assert_eq!(other.status_category, WorkspaceStatusCategory::Done);
+        assert_eq!(other.completed_at, Some(done_at));
+        assert_eq!(other.updated_at, done_at);
+        assert_eq!(other.title, "Issue 3184");
+        assert_eq!(other.summary.as_deref(), Some("Original summary"));
+        assert_eq!(other.owner.as_deref(), Some("3184"));
+        assert_eq!(other.execution_containers.len(), 1);
+        assert_eq!(
+            other.execution_containers[0].branch.as_deref(),
+            Some("work/issue-3184")
+        );
         assert_eq!(other.events.len(), 2);
+        assert!(!other.events.iter().any(|event| {
+            event.kind == WorkEventKind::Update
+                && event.agent_session_id.as_deref() == Some("session-owner")
+        }));
+    }
+
+    #[test]
+    fn apply_event_rejects_stray_session_before_creating_phantom_work() {
+        let t0 = Utc.with_ymd_and_hms(2026, 7, 15, 7, 0, 0).unwrap();
+        let t1 = Utc.with_ymd_and_hms(2026, 7, 15, 8, 0, 0).unwrap();
+        let mut projection = WorkItemsProjection::empty(t0);
+
+        let mut owner = WorkEvent::new(WorkEventKind::Start, "work-owner", t0);
+        owner.agent_session_id = Some("session-owner".to_string());
+        owner.execution_container = Some(container_for_test(
+            "work/issue-3272",
+            "/repo/work/issue-3272",
+        ));
+        projection.apply_event(owner);
+
+        let mut stray = WorkEvent::new(WorkEventKind::Update, "work-phantom", t1);
+        stray.agent_session_id = Some("session-owner".to_string());
+        stray.status_category = Some(WorkspaceStatusCategory::Active);
+        stray.title = Some("Foreign title".to_string());
+        stray.execution_container = Some(container_for_test(
+            "feature/spec-3273",
+            "/repo/feature/spec-3273",
+        ));
+        projection.apply_event(stray);
+
+        assert_eq!(projection.work_items.len(), 1);
+        assert!(projection
+            .work_items
+            .iter()
+            .all(|item| item.id != "work-phantom"));
+    }
+
+    #[test]
+    fn incoming_container_conflict_is_not_masked_by_target_history() {
+        let t0 = Utc.with_ymd_and_hms(2026, 7, 15, 7, 0, 0).unwrap();
+        let done_at = Utc.with_ymd_and_hms(2026, 7, 15, 8, 0, 0).unwrap();
+        let stray_at = Utc.with_ymd_and_hms(2026, 7, 15, 9, 0, 0).unwrap();
+        let mut projection = WorkItemsProjection::empty(t0);
+
+        let shared_container = container_for_test("work/shared", "/repo/work/shared");
+        let mut owner = WorkEvent::new(WorkEventKind::Start, "work-owner", t0);
+        owner.agent_session_id = Some("session-owner".to_string());
+        owner.execution_container = Some(shared_container.clone());
+        projection.apply_event(owner);
+
+        let mut target = WorkEvent::new(WorkEventKind::Start, "work-target", t0);
+        target.agent_session_id = Some("session-target".to_string());
+        target.title = Some("Original target".to_string());
+        target.execution_container = Some(shared_container);
+        projection.apply_event(target);
+        let mut done = WorkEvent::new(WorkEventKind::Done, "work-target", done_at);
+        done.status_category = Some(WorkspaceStatusCategory::Done);
+        projection.apply_event(done);
+        let before = projection.clone();
+
+        let mut stray = WorkEvent::new(WorkEventKind::Update, "work-target", stray_at);
+        stray.agent_session_id = Some("session-owner".to_string());
+        stray.status_category = Some(WorkspaceStatusCategory::Active);
+        stray.title = Some("Foreign target".to_string());
+        stray.execution_container = Some(container_for_test(
+            "feature/foreign",
+            "/repo/feature/foreign",
+        ));
+
+        assert_eq!(
+            projection.apply_event(stray),
+            WorkEventApplyOutcome::RejectedSessionConflict
+        );
+        assert_eq!(projection, before);
     }
 
     /// Issue #3216 contract guard: the attach guard fires only on a genuine

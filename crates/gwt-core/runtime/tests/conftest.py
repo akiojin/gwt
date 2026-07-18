@@ -14,3 +14,14 @@ if str(RUNTIME_DIR) not in sys.path:
 # Use deterministic fake embeddings throughout the unit-test suite to avoid
 # downloading the multilingual-e5-base model and to keep tests fast.
 os.environ.setdefault("GWT_INDEX_FAKE_EMBEDDING", "1")
+
+# Isolate the cooperative-yield coordinator lookup from the developer's real
+# ~/.gwt/runtime/index-coordinator so in-process index builds never observe a
+# live gwt instance's pending heavy claimants (Phase 70).
+import tempfile as _tempfile  # noqa: E402
+
+# Unconditional (not setdefault): a developer shell exporting this variable
+# must never leak a live coordinator into the test suite (PR #3301 review).
+os.environ["GWT_INDEX_COORDINATOR_ROOT"] = _tempfile.mkdtemp(
+    prefix="gwt-index-coordinator-test-"
+)

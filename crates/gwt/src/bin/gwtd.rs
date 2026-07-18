@@ -85,6 +85,8 @@ fn family_help(family: &str) -> Option<String> {
         "discussion" => Some(format_discussion_help()),
         "plan" => Some(format_plan_help()),
         "build" => Some(format_build_help()),
+        "execution" => Some(format_execution_help()),
+        "verify" => Some(format_verify_help()),
         "register" => Some(format_register_help()),
         "pane" => Some(format_pane_help()),
         "workspace" => Some(format_workspace_help()),
@@ -372,6 +374,49 @@ fn format_build_help() -> String {
         "",
     ]
     .join("\n")
+}
+
+fn format_execution_help() -> String {
+    [
+        "execution.* — Execution Control Record settlement via JSON envelope (SPEC-3248 P8a).",
+        "",
+        "Usage:",
+        "  gwtd <<'JSON'",
+        "  {\"schema_version\":1,\"operation\":\"execution.blocked\",\"params\":{\"reason\":\"<blocker>\",\"missing_verification\":\"<what could not run>\"}}",
+        "  JSON",
+        "",
+        "Operations:",
+        "  execution.complete | execution.blocked",
+        "",
+        "Notes:",
+        "  Settlement binds to GWT_SESSION_ID; a successful build.complete also",
+        "  settles the record for gwt-build-spec flows. Blocked is not done.",
+        "",
+    ]
+    .join("\n")
+}
+
+fn format_verify_help() -> String {
+    [
+        "verify.* — Tool-generated verification records via JSON envelope (SPEC-3248 P8b).",
+        "",
+        "Usage:",
+        "  gwtd <<'JSON'",
+        "  {\"schema_version\":1,\"operation\":\"verify.run\",\"params\":{\"commands\":[\"cargo fmt -- --check\",\"cargo test -p gwt --lib\"]}}",
+        "  JSON",
+        "",
+        "Operations:",
+        "  verify.run",
+        "",
+        "Notes:",
+        "  gwtd executes each command itself (one plain command per entry, no",
+        "  shell operators) and records session/owner/worktree-fingerprint-bound",
+        "  evidence. execution.complete and Ready PR handoffs require a fresh,",
+        "  all-passing record.",
+        "",
+    ]
+    .join("
+")
 }
 
 fn format_register_help() -> String {

@@ -516,13 +516,13 @@ fn github_slug_from_remote_url(url: &str) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
-    use std::{fs::OpenOptions, process::Command, time::Duration};
+    use std::{fs::OpenOptions, time::Duration};
 
     #[cfg(unix)]
     use std::os::unix::fs::PermissionsExt;
 
     use fs2::FileExt;
-    use gwt_core::test_support::ScopedGwtHome;
+    use gwt_core::{process::hidden_command, test_support::ScopedGwtHome};
 
     use super::{
         apply_attempt_failure, evaluate_with_deadline, github_slug_from_remote_url,
@@ -832,14 +832,14 @@ mod tests {
         let home = tempfile::tempdir().expect("home");
         let _home = ScopedGwtHome::set(home.path());
         let repo = tempfile::tempdir().expect("repository");
-        assert!(Command::new("git")
+        assert!(hidden_command("git")
             .arg("init")
             .arg("-q")
             .arg(repo.path())
             .status()
             .expect("git init")
             .success());
-        assert!(Command::new("git")
+        assert!(hidden_command("git")
             .arg("-C")
             .arg(repo.path())
             .args([

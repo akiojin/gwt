@@ -1186,7 +1186,7 @@ mod tests {
             command.args(["-NoProfile", "-Command", "Start-Sleep -Milliseconds 250"]);
             command
         } else {
-            let mut command = std::process::Command::new("sh");
+            let mut command = gwt_core::process::hidden_command("sh");
             command.args(["-c", "sleep 0.25"]);
             command
         }
@@ -1202,7 +1202,7 @@ mod tests {
             ]);
             command
         } else {
-            let mut command = std::process::Command::new("sh");
+            let mut command = gwt_core::process::hidden_command("sh");
             command.args(["-c", "yes x | head -c 200000"]);
             command
         }
@@ -1218,7 +1218,7 @@ mod tests {
             ]);
             command
         } else {
-            let mut command = std::process::Command::new("sh");
+            let mut command = gwt_core::process::hidden_command("sh");
             command.args(["-c", "(sleep 3) & sleep 3"]);
             command
         }

@@ -630,6 +630,67 @@ test("Workspace detail shows a Work heading per launch when a Workspace has mult
   assert.equal(fixture.body.querySelectorAll(".workspace-detail-session").length, 2);
 });
 
+test("Workspace detail renders the latest Session for every Agent in one Work", () => {
+  const projection = sampleProjection();
+  const workspace = projection.works[0];
+  projection.works = [workspace];
+  workspace.session_agent_total = 2;
+  workspace.works = [
+    {
+      id: "work-combined",
+      title: "Combined Work",
+      lifecycle_state: "paused",
+      agents: [
+        {
+          session_id: "launch-1",
+          agent_id: "codex",
+          display_name: "Codex",
+          status_category: "idle",
+          sessions: [
+            { agent_session_id: "conv-1", started_at: "2026-05-21T03:20:00Z", is_active: true },
+          ],
+        },
+        {
+          session_id: "launch-2",
+          agent_id: "claude-code",
+          display_name: "Claude Code",
+          status_category: "idle",
+          sessions: [
+            { agent_session_id: "conv-2", started_at: "2026-05-21T05:00:00Z", is_active: false },
+          ],
+        },
+      ],
+    },
+  ];
+  const fixture = createFixture();
+  const surface = createSurface(fixture, projection);
+  surface.mount(fixture.body, fixture.windowData, {
+    focusWindowLocally() {},
+    sendFocus() {},
+  });
+
+  const sessions = Array.from(
+    fixture.body.querySelectorAll(".workspace-detail-session-id"),
+    (node) => node.title,
+  );
+  assert.deepEqual(sessions, ["conv-1", "conv-2"]);
+  const resumes = Array.from(
+    fixture.body.querySelectorAll("[data-action='resume-session']"),
+  );
+  assert.deepEqual(
+    resumes.map((button) => [button.dataset.sessionId, button.dataset.agentSessionId]),
+    [
+      ["launch-1", "conv-1"],
+      ["launch-2", "conv-2"],
+    ],
+  );
+  assert.equal(
+    fixture.body.querySelector(".workspace-detail-more-sessions"),
+    null,
+    "rendered Agents must not also be counted as hidden sessions",
+  );
+});
+
 test("Workspace list selection updates the detail pane", () => {
   const fixture = createFixture();
   const surface = createSurface(fixture, sampleProjection());

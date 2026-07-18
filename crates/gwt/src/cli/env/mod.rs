@@ -157,6 +157,12 @@ impl<'a, C: IssueClient> IssueClient for ClientRef<'a, C> {
     ) -> Result<gwt_github::client::CommentSnapshot, gwt_github::client::ApiError> {
         self.inner.create_comment(number, body)
     }
+    fn delete_comment(
+        &self,
+        comment_id: gwt_github::client::CommentId,
+    ) -> Result<(), gwt_github::client::ApiError> {
+        self.inner.delete_comment(comment_id)
+    }
     fn create_issue(
         &self,
         title: &str,

@@ -60,6 +60,7 @@ mod tests {
     use std::path::PathBuf;
 
     use fs2::FileExt;
+    use gwt_core::process::hidden_command;
 
     use super::*;
 
@@ -1735,7 +1736,7 @@ mod tests {
     }
 
     fn init_git_repo(path: &std::path::Path) {
-        let output = std::process::Command::new("git")
+        let output = hidden_command("git")
             .arg("init")
             .arg(path)
             .output()
@@ -1744,7 +1745,7 @@ mod tests {
     }
 
     fn git_resolved_exclude_path(worktree: &std::path::Path) -> PathBuf {
-        let output = std::process::Command::new("git")
+        let output = hidden_command("git")
             .args(["rev-parse", "--git-path", "info/exclude"])
             .current_dir(worktree)
             .output()

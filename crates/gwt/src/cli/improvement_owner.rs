@@ -6769,10 +6769,16 @@ pub(super) fn owner_resolution_failure_from_error(
         gwt_github::SpecOpsError::Api(error) => owner_failure_from_api(error),
         gwt_github::SpecOpsError::Cache(_)
         | gwt_github::SpecOpsError::Parse(_)
+        | gwt_github::SpecOpsError::Split(_)
         | gwt_github::SpecOpsError::SectionNotFound(_) => OwnerResolutionFailure {
             reason: BlockedReason::Store,
             failure_subcode: None,
             remediation: "RELOAD_CANDIDATE_STORE",
+        },
+        gwt_github::SpecOpsError::ReadbackMismatch { .. } => OwnerResolutionFailure {
+            reason: BlockedReason::Readback,
+            failure_subcode: None,
+            remediation: "REFRESH_OWNER_CORPUS",
         },
     }
 }
@@ -7753,7 +7759,6 @@ fn code_excerpt_re() -> &'static Regex {
 #[cfg(test)]
 mod tests {
     use std::fs::{self, OpenOptions};
-    use std::process::Command;
     use std::sync::{mpsc, Mutex};
     use std::thread;
     use std::time::{Duration, Instant};
@@ -7777,6 +7782,24 @@ mod tests {
         RepositoryAuthorAssociation, RepositoryComment, RepositoryIdentity, RepositoryIssue,
         RepositoryIssueKind, RepositoryRelease, ResolutionDeadline, UpdatedAt,
     };
+
+    #[test]
+    fn multipart_spec_errors_map_to_fail_closed_owner_failures() {
+        let split = gwt_github::SpecOpsError::Split(gwt_github::SplitError::UnsplittableChunk {
+            line: 1,
+            budget: 60 * 1024,
+        });
+        let split_failure = owner_resolution_failure_from_error(&split);
+        assert_eq!(split_failure.reason, BlockedReason::Store);
+        assert_eq!(split_failure.remediation, "RELOAD_CANDIDATE_STORE");
+
+        let mismatch = gwt_github::SpecOpsError::ReadbackMismatch {
+            section: "tasks".to_string(),
+        };
+        let mismatch_failure = owner_resolution_failure_from_error(&mismatch);
+        assert_eq!(mismatch_failure.reason, BlockedReason::Readback);
+        assert_eq!(mismatch_failure.remediation, "REFRESH_OWNER_CORPUS");
+    }
 
     fn commit_binding_with_complete_comment_audit(
         source_repo_root: &Path,
@@ -8095,7 +8118,7 @@ mod tests {
     }
 
     fn run_git(repo: &Path, args: &[&str]) {
-        let output = Command::new("git")
+        let output = gwt_core::process::hidden_command("git")
             .current_dir(repo)
             .args(args)
             .output()
