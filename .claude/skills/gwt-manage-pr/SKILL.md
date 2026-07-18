@@ -149,6 +149,14 @@ Ready for review only when all of the following are true:
 - every PR body checklist item is checked or explicitly marked N/A with
   a reason
 
+In gwt-managed execution worktrees the canonical operations enforce part of
+this mechanically (SPEC-3248 P8b): non-draft `pr.create` and `pr.ready`
+refuse when the session's Execution Control Record is terminally blocked, or
+active without a fresh all-passing Verification Run Record (written by JSON
+operation `verify.run`). Run the pre-PR matrix through `verify.run` so the
+evidence exists before the Ready handoff; Draft PR creation stays available
+mid-work.
+
 `gwt-verify` is a project-agnostic Generic Verification Contract: it
 autodetects the host project's test runners (Cargo.toml / package.json /
 pyproject.toml / go.mod / ProjectSettings / *.sln / etc.), runs the

@@ -298,6 +298,54 @@ pub(crate) fn settle_completed_best_effort(
     }
 }
 
+/// SPEC-3248 P8b (T-112/FR-037/AS-33): PR handoff gate consumed by the
+/// canonical PR operations.
+///
+/// - A terminally **blocked** execution refuses every PR mutation (create —
+///   draft included —, edit, ready): a blocked execution cannot hand off.
+/// - An **active** execution gates only Ready handoffs (`ready_handoff` =
+///   non-draft create or `pr.ready`) on fresh, all-passing verification
+///   evidence. Draft creation and `pr.edit` stay available as the
+///   sanctioned mid-work sharing path (AGENTS Draft policy); the full PR
+///   lifecycle matrix (Draft conversion, head/base drift) is T-199+.
+/// - No record, another session's record, and completed executions pass.
+pub(crate) fn pr_handoff_refusal(repo_path: &Path, ready_handoff: bool) -> Option<String> {
+    let session_id = std::env::var(gwt_agent::GWT_SESSION_ID_ENV)
+        .ok()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())?;
+    let worktree = gwt_core::paths::resolve_current_worktree_root(repo_path);
+    let record = load(&worktree).ok().flatten()?;
+    if record.primary_session_id != session_id {
+        return None;
+    }
+    match record.status {
+        ExecutionControlStatus::Completed => None,
+        ExecutionControlStatus::Blocked => Some(format!(
+            "PR handoff refused: the execution for {kind} #{number} is terminally blocked ({reason}). A blocked execution cannot hand off a PR — resolve the blocker and relaunch, or leave the blocked report as the outcome.",
+            kind = record.owner_kind.as_str(),
+            number = record.owner_number,
+            reason = record
+                .blocked_reason
+                .as_deref()
+                .unwrap_or("no reason recorded"),
+        )),
+        ExecutionControlStatus::Active if ready_handoff => {
+            let status = crate::cli::verification_record::evaluate_evidence(
+                &worktree,
+                &session_id,
+                Some(record.owner_number),
+            );
+            if status == crate::cli::verification_record::EvidenceStatus::Fresh {
+                None
+            } else {
+                Some(format!("PR handoff refused: {}", status.describe()))
+            }
+        }
+        ExecutionControlStatus::Active => None,
+    }
+}
+
 // ---------------------------------------------------------------------------
 // CLI command surface (`execution.complete` / `execution.blocked`)
 // ---------------------------------------------------------------------------
@@ -331,7 +379,32 @@ pub(super) fn run<E: CliEnv>(
         })?;
     let worktree = gwt_core::paths::resolve_current_worktree_root(env.repo_path());
     let settlement = match command {
-        ExecutionCommand::Complete => ExecutionSettlement::Completed,
+        ExecutionCommand::Complete => {
+            // SPEC-3248 P8b (T-111/FR-035/FR-036): completion requires fresh,
+            // all-passing, tool-generated verification evidence for this
+            // session and owner. Blocked exits stay available without
+            // evidence — blocked is the honest path when verification cannot
+            // run.
+            if let Ok(Some(record)) = load(&worktree) {
+                if record.status == ExecutionControlStatus::Active
+                    && record.primary_session_id == session_id
+                {
+                    let status = crate::cli::verification_record::evaluate_evidence(
+                        &worktree,
+                        &session_id,
+                        Some(record.owner_number),
+                    );
+                    if status != crate::cli::verification_record::EvidenceStatus::Fresh {
+                        out.push_str(&format!(
+                            "execution: completion refused — {}\n",
+                            status.describe()
+                        ));
+                        return Ok(2);
+                    }
+                }
+            }
+            ExecutionSettlement::Completed
+        }
         ExecutionCommand::Blocked {
             reason,
             missing_verification,
@@ -641,12 +714,64 @@ mod tests {
             let dir = tempfile::tempdir().unwrap();
             save(dir.path(), &active_record("sess-op")).unwrap();
 
+            // T-111: completion without tool-generated evidence is refused.
+            let (code, out) = run_cmd(dir.path(), ExecutionCommand::Complete).unwrap();
+            assert_eq!(code, 2, "{out}");
+            assert!(out.contains("verify.run"), "{out}");
+            assert_eq!(
+                load(dir.path()).unwrap().unwrap().status,
+                ExecutionControlStatus::Active
+            );
+
+            // Fresh all-passing evidence unlocks completion.
+            crate::cli::verification_record::run_verification(
+                dir.path(),
+                "sess-op",
+                &["git --version".to_string()],
+            )
+            .unwrap();
             let (code, out) = run_cmd(dir.path(), ExecutionCommand::Complete).unwrap();
             assert_eq!(code, 0, "{out}");
             assert!(out.contains("completed"), "{out}");
             assert_eq!(
                 load(dir.path()).unwrap().unwrap().status,
                 ExecutionControlStatus::Completed
+            );
+        }
+
+        // T-111: a failing verification run never unlocks completion, while
+        // execution.blocked stays available without evidence.
+        #[test]
+        fn failing_evidence_refuses_complete_but_blocked_stays_available() {
+            let _env_lock = crate::env_test_lock()
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let _session = ScopedEnvVar::set(gwt_agent::GWT_SESSION_ID_ENV, "sess-op");
+            let dir = tempfile::tempdir().unwrap();
+            save(dir.path(), &active_record("sess-op")).unwrap();
+            crate::cli::verification_record::run_verification(
+                dir.path(),
+                "sess-op",
+                &["git definitely-not-a-subcommand".to_string()],
+            )
+            .unwrap();
+
+            let (code, out) = run_cmd(dir.path(), ExecutionCommand::Complete).unwrap();
+            assert_eq!(code, 2, "{out}");
+            assert!(out.contains("failing"), "{out}");
+
+            let (code, _) = run_cmd(
+                dir.path(),
+                ExecutionCommand::Blocked {
+                    reason: "verification cannot pass in this environment".to_string(),
+                    missing_verification: Some("full cargo matrix".to_string()),
+                },
+            )
+            .unwrap();
+            assert_eq!(code, 0);
+            assert_eq!(
+                load(dir.path()).unwrap().unwrap().status,
+                ExecutionControlStatus::Blocked
             );
         }
 
@@ -755,7 +880,9 @@ mod tests {
                 "a build for another owner must not settle this execution"
             );
 
-            // Real finalize for the SAME owner — settles.
+            // Real finalize for the SAME owner but WITHOUT verification
+            // evidence — build state finalizes, execution stays active
+            // (T-111 evidence requirement piggybacks on build.complete).
             gwt_core::skill_state::save(
                 dir.path(),
                 "build-spec",
@@ -770,10 +897,38 @@ mod tests {
             .unwrap();
             let (code, out) = run_build_complete(dir.path(), 3248);
             assert_eq!(code, 0, "{out}");
+            assert!(out.contains("execution control not settled"), "{out}");
+            assert_eq!(
+                load(dir.path()).unwrap().unwrap().status,
+                ExecutionControlStatus::Active,
+                "build completion without evidence must not settle the execution"
+            );
+
+            // With fresh evidence, a real matching finalize settles.
+            gwt_core::skill_state::save(
+                dir.path(),
+                "build-spec",
+                &gwt_core::skill_state::SkillState {
+                    active: true,
+                    owner_spec: Some(3248),
+                    started_at: Utc::now(),
+                    phase: None,
+                    session_id: "sess-op".to_string(),
+                },
+            )
+            .unwrap();
+            crate::cli::verification_record::run_verification(
+                dir.path(),
+                "sess-op",
+                &["git --version".to_string()],
+            )
+            .unwrap();
+            let (code, out) = run_build_complete(dir.path(), 3248);
+            assert_eq!(code, 0, "{out}");
             assert_eq!(
                 load(dir.path()).unwrap().unwrap().status,
                 ExecutionControlStatus::Completed,
-                "a real matching finalize must settle the execution"
+                "a real matching finalize with fresh evidence must settle the execution"
             );
         }
 

@@ -264,6 +264,13 @@ fn parse(input: &str) -> Result<ParsedEnvelope, CliParseError> {
         "discuss.goal_skipped" | "discuss.goal-skipped" => {
             discuss_proposal(params, DiscussEnvelopeAction::GoalSkipped)?
         }
+        "verify.run" => {
+            let commands = optional_string_vec(params, "commands")?;
+            if commands.is_empty() {
+                return Err(CliParseError::MissingFlag("commands"));
+            }
+            CliCommand::Verify(crate::cli::verification_record::VerifyCommand::Run { commands })
+        }
         "execution.complete" => {
             CliCommand::Execution(crate::cli::execution_state::ExecutionCommand::Complete)
         }

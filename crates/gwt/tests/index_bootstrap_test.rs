@@ -200,6 +200,106 @@ fn bootstrap_preserves_repo_scoped_memory_index_directory() {
     );
 }
 
+/// SPEC #1939 Phase 70 T-IDX-382 (Issue #3264): every rebuild entry must
+/// funnel through the host-wide index coordinator. While another process
+/// holds the heavy lease (a model-loaded runner), `default_rebuild_runner`
+/// must queue instead of spawning a concurrent runner Python.
+#[cfg(unix)]
+#[test]
+fn default_rebuild_runner_waits_for_host_wide_heavy_lease() {
+    use gwt_core::index_coordinator::{IndexCoordinator, JobAdmission, JobPriority, TargetKey};
+    use std::os::unix::fs::PermissionsExt;
+    use std::time::{Duration, Instant};
+
+    let _env_lock = env_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let home = tmp.path().join("home");
+    fs::create_dir_all(&home).expect("create home");
+    let _home = ScopedEnvVar::set("HOME", &home);
+    let _userprofile = ScopedEnvVar::set("USERPROFILE", &home);
+
+    let repo = tmp.path().join("repo");
+    init_git_repo(&repo);
+    add_origin(&repo, "https://github.com/example/project.git");
+    commit_file(&repo, "README.md", "# repo\n");
+
+    // Fake runner python: records each invocation and reports success.
+    let runner_log = tmp.path().join("runner-log.txt");
+    let _runner_log_env = ScopedEnvVar::set("GWT_FAKE_RUNNER_LOG", &runner_log);
+    let python = gwt_core::runtime::project_index_python_path();
+    fs::create_dir_all(python.parent().expect("python parent")).expect("create venv dir");
+    fs::write(
+        &python,
+        "#!/bin/sh\necho \"$@\" >> \"$GWT_FAKE_RUNNER_LOG\"\nprintf '{\"ok\":true}\\n'\n",
+    )
+    .expect("write fake python");
+    fs::set_permissions(&python, fs::Permissions::from_mode(0o755)).expect("chmod fake python");
+
+    // Another process' embedding build holds the host-wide heavy lease.
+    let coordinator = IndexCoordinator::open(gwt_core::index_coordinator::coordinator_root())
+        .expect("open coordinator");
+    let admission = coordinator
+        .request_job(
+            &TargetKey::repo_shared("unrelated-repo", "files"),
+            JobPriority::Background,
+            Duration::from_secs(5),
+        )
+        .expect("request unrelated job");
+    let holder = match admission {
+        JobAdmission::Owner(guard) => guard,
+        JobAdmission::Joined(_) => panic!("expected to own the unrelated target"),
+    };
+    let heavy = holder
+        .acquire_heavy(Duration::from_secs(5))
+        .expect("acquire heavy lease");
+
+    let rebuild_repo = repo.clone();
+    let rebuild = std::thread::spawn(move || {
+        gwt::default_rebuild_runner(
+            &rebuild_repo,
+            gwt::index_worker::IndexRebuildScope::Issues,
+            None,
+        )
+    });
+
+    // While the heavy lease is held elsewhere the rebuild must not spawn the
+    // runner Python (FR-379 host-wide exclusion).
+    let held_window = Instant::now();
+    while held_window.elapsed() < Duration::from_millis(500) {
+        assert!(
+            !runner_log.exists()
+                || fs::read_to_string(&runner_log)
+                    .unwrap_or_default()
+                    .is_empty(),
+            "rebuild spawned a runner while the host-wide heavy lease was held"
+        );
+        std::thread::sleep(Duration::from_millis(25));
+    }
+
+    drop(heavy);
+    drop(holder);
+
+    let join_deadline = Instant::now();
+    while !rebuild.is_finished() {
+        assert!(
+            join_deadline.elapsed() < Duration::from_secs(20),
+            "rebuild did not proceed after the heavy lease was released"
+        );
+        std::thread::sleep(Duration::from_millis(25));
+    }
+    rebuild
+        .join()
+        .expect("join rebuild thread")
+        .expect("rebuild succeeds after lease release");
+    let log = fs::read_to_string(&runner_log).expect("runner log after release");
+    assert!(
+        log.contains("index-issues"),
+        "rebuild must run the issues indexer after acquiring the lease, got {log:?}"
+    );
+}
+
 fn call_project_root_matches(call: &str, expected: &Path) -> bool {
     let Some(actual) = call.split('|').nth(1) else {
         return false;
@@ -284,4 +384,71 @@ fn add_worktree(repo: &Path, worktree: &Path) {
         "git worktree add failed: {}",
         String::from_utf8_lossy(&output.stderr)
     );
+}
+
+/// Phase 70 T-IDX-401 (Issue #3264): the manual rebuild entry coordinates,
+/// passes interactive QoS, resumes after a runner yield, and surfaces
+/// runner failures.
+#[cfg(unix)]
+#[test]
+fn manual_rebuild_runner_resumes_yields_and_surfaces_failures() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let _env_lock = env_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let home = tmp.path().join("home");
+    fs::create_dir_all(&home).expect("create home");
+    let _home = ScopedEnvVar::set("HOME", &home);
+    let _userprofile = ScopedEnvVar::set("USERPROFILE", &home);
+
+    let repo = tmp.path().join("repo");
+    init_git_repo(&repo);
+    add_origin(&repo, "https://github.com/example/project.git");
+    commit_file(&repo, "README.md", "# repo\n");
+
+    let runner_log = tmp.path().join("runner-log.txt");
+    let yield_flag = tmp.path().join("yielded-once");
+    let python = gwt_core::runtime::project_index_python_path();
+    fs::create_dir_all(python.parent().expect("python parent")).expect("create venv dir");
+    // First index invocation reports a cooperative yield; the retry
+    // completes. Probe-style invocations always succeed.
+    fs::write(
+        &python,
+        format!(
+            "#!/bin/sh\necho \"$@\" >> \"{log}\"\nif [ ! -f \"{flag}\" ]; then\n  touch \"{flag}\"\n  printf '{{\"ok\": true, \"yielded\": true, \"resumable\": true}}\\n'\nelse\n  printf '{{\"ok\": true, \"indexed\": 1}}\\n'\nfi\n",
+            log = runner_log.display(),
+            flag = yield_flag.display(),
+        ),
+    )
+    .expect("write fake python");
+    fs::set_permissions(&python, fs::Permissions::from_mode(0o755)).expect("chmod");
+
+    gwt::manual_rebuild_runner(&repo, gwt::index_worker::IndexRebuildScope::Issues, None)
+        .expect("yielded rebuild resumes and completes");
+    let calls = fs::read_to_string(&runner_log).expect("runner log");
+    let rebuild_calls = calls
+        .lines()
+        .filter(|line| line.contains("--action index-issues"))
+        .count();
+    assert_eq!(
+        rebuild_calls, 2,
+        "a yielded rebuild must re-run after releasing the heavy lease: {calls}"
+    );
+    assert!(
+        calls.contains("--qos interactive"),
+        "manual rebuilds run at interactive QoS: {calls}"
+    );
+
+    // Runner failure propagates as an error instead of silent success.
+    fs::write(
+        &python,
+        "#!/bin/sh\ncase \"$*\" in *\"--action index-\"*) echo broken >&2; exit 3;; *) printf '{\"ok\": true}\\n';; esac\n",
+    )
+    .expect("write failing python");
+    let error =
+        gwt::manual_rebuild_runner(&repo, gwt::index_worker::IndexRebuildScope::Issues, None)
+            .expect_err("runner failure must propagate");
+    assert!(error.contains("broken"), "{error}");
 }

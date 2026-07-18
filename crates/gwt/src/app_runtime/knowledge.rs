@@ -1114,7 +1114,7 @@ impl AppRuntime {
                     id: id.clone(),
                     query: query.clone(),
                     request_id,
-                    message: error,
+                    message: error.to_string(),
                 },
             };
             proxy.send(UserEvent::Dispatch(vec![OutboundEvent::reply(
