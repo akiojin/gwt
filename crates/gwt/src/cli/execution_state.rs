@@ -17,17 +17,16 @@
 //! session's record (T-100 semantics — note the pre-existing `build.complete`
 //! owner-only check is intentionally left unchanged for skill state).
 //!
-//! P8a scope notes (dependent follow-ups, phase contract T-263):
-//! - Evidence manifests / provenance validation (T-110..T-114) are not here;
-//!   settlement is session-bound state only.
-//! - The record is worktree-local (`.gwt/skill-state/execution-control.json`);
-//!   the repo-scoped trusted store (T-172+) and authorized ownership transfer
-//!   / concurrent-owner rejection (T-117/T-118) arrive with P9. A fresh
-//!   relaunch takes over with a fresh active record; a resume preserves an
-//!   existing settled record for the same owner.
-//! - Like the P7A intake state, saves are atomic file replacements but the
-//!   read-modify-write cycle is not serialized across processes; P9's write
-//!   lease owns real serialization.
+//! Scope notes (dependent follow-ups, phase contract T-263):
+//! - The authoritative copy lives in the repo-scoped trusted store (P9b,
+//!   T-172/T-173-lite); `.gwt/skill-state/execution-control.json` is the
+//!   human-inspectable mirror. Integrity hashes and audited ownership
+//!   transfer are P9a. A fresh relaunch takes over with a fresh active
+//!   record; a resume preserves an existing settled record for the same
+//!   owner.
+//! - Saves are atomic file replacements but the read-modify-write cycle is
+//!   not serialized across processes; P9's write lease (T-124/T-125) owns
+//!   real serialization.
 
 use std::{
     fs,
@@ -41,7 +40,8 @@ use serde::{Deserialize, Serialize};
 
 use super::CliEnv;
 
-/// Worktree-relative path of the Execution Control Record.
+/// Worktree-relative path of the Execution Control Record's mirror (the
+/// authoritative copy lives in the repo-scoped trusted store, P9b).
 pub const EXECUTION_CONTROL_STATE_RELATIVE: &str = ".gwt/skill-state/execution-control.json";
 
 /// Linked owner kind. A `gwt-spec`-labeled Issue is a SPEC owner; everything
@@ -146,16 +146,19 @@ pub fn state_path(worktree: &Path) -> PathBuf {
 /// Load the record. `Ok(None)` when missing; malformed JSON and I/O failures
 /// propagate so hook readers can fail open while writers surface the error.
 pub fn load(worktree: &Path) -> io::Result<Option<ExecutionControlRecord>> {
-    let path = state_path(worktree);
-    match fs::read_to_string(&path) {
-        Ok(contents) => {
-            let record = serde_json::from_str::<ExecutionControlRecord>(&contents)
-                .map_err(|err| io::Error::new(ErrorKind::InvalidData, err))?;
-            Ok(Some(record))
-        }
-        Err(err) if err.kind() == ErrorKind::NotFound => Ok(None),
-        Err(err) => Err(err),
-    }
+    // P9b: the repo-scoped trusted copy is authoritative; the worktree
+    // mirror is a legacy/degenerate fallback only.
+    let contents = match crate::cli::trusted_store::read(worktree, "execution-control.json")? {
+        Some(contents) => contents,
+        None => match fs::read_to_string(state_path(worktree)) {
+            Ok(contents) => contents,
+            Err(err) if err.kind() == ErrorKind::NotFound => return Ok(None),
+            Err(err) => return Err(err),
+        },
+    };
+    let record = serde_json::from_str::<ExecutionControlRecord>(&contents)
+        .map_err(|err| io::Error::new(ErrorKind::InvalidData, err))?;
+    Ok(Some(record))
 }
 
 /// Persist the record atomically (hooks read this file concurrently). The
@@ -163,10 +166,15 @@ pub fn load(worktree: &Path) -> io::Result<Option<ExecutionControlRecord>> {
 pub fn save(worktree: &Path, record: &ExecutionControlRecord) -> io::Result<()> {
     let mut record = record.clone();
     record.content_hash = compute_content_hash(&record);
-    let path = state_path(worktree);
     let serialized = serde_json::to_vec_pretty(&record)
         .map_err(|err| io::Error::new(ErrorKind::InvalidData, err))?;
-    gwt_github::cache::write_atomic(&path, &serialized)
+    // P9b: trusted copy is authoritative; the mirror is informational.
+    crate::cli::trusted_store::write_with_mirror(
+        worktree,
+        "execution-control.json",
+        &state_path(worktree),
+        &serialized,
+    )
 }
 
 /// T-107: materialize a fresh active record at launch. A fresh launch (or a
@@ -649,6 +657,81 @@ mod tests {
         let mut normalized = loaded.clone();
         normalized.content_hash = String::new();
         assert_eq!(normalized, record);
+    }
+
+    // P9b (T-174 core): once a repo-scoped trusted copy exists, editing the
+    // worktree mirror changes nothing the gates trust — even a forged mirror
+    // with a *valid* integrity hash is ignored.
+    #[test]
+    fn trusted_copy_overrides_worktree_mirror_edits() {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let home = tempfile::tempdir().unwrap();
+        let _home = ScopedEnvVar::set("HOME", home.path());
+        let _userprofile = ScopedEnvVar::set("USERPROFILE", home.path());
+        let dir = tempfile::tempdir().unwrap();
+        crate::cli::trusted_store::init_git_repo_with_origin(dir.path());
+
+        save(dir.path(), &active_record("sess-1")).unwrap();
+
+        let mut forged = active_record("sess-1");
+        forged.status = ExecutionControlStatus::Completed;
+        forged.content_hash = compute_content_hash(&forged);
+        let serialized = serde_json::to_vec_pretty(&forged).unwrap();
+        gwt_github::cache::write_atomic(&state_path(dir.path()), &serialized).unwrap();
+
+        let loaded = load(dir.path()).unwrap().unwrap();
+        assert_eq!(loaded.status, ExecutionControlStatus::Active);
+        assert!(integrity_ok(&loaded));
+    }
+
+    // P9b: once the trusted (authoritative) copy is written, a mirror write
+    // failure must not report the save as failed — the gates already honor
+    // the trusted copy, and "reported failed but actually effective" is the
+    // worse asymmetry.
+    #[test]
+    fn mirror_write_failure_after_trusted_write_is_not_an_error() {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let home = tempfile::tempdir().unwrap();
+        let _home = ScopedEnvVar::set("HOME", home.path());
+        let _userprofile = ScopedEnvVar::set("USERPROFILE", home.path());
+        let dir = tempfile::tempdir().unwrap();
+        crate::cli::trusted_store::init_git_repo_with_origin(dir.path());
+
+        // Make the mirror unwritable: occupy `.gwt` with a plain file so the
+        // mirror's parent directory cannot be created.
+        fs::write(dir.path().join(".gwt"), b"not a directory").unwrap();
+
+        save(dir.path(), &active_record("sess-1")).unwrap();
+        let loaded = load(dir.path()).unwrap().unwrap();
+        assert_eq!(loaded.primary_session_id, "sess-1");
+        assert!(!state_path(dir.path()).exists());
+    }
+
+    // P9b: a mirror-only record (written before the trusted store existed)
+    // still loads — legacy fallback with the same one-release-cycle sunset
+    // policy as the P9a empty integrity hashes.
+    #[test]
+    fn mirror_only_record_loads_as_legacy_fallback() {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let home = tempfile::tempdir().unwrap();
+        let _home = ScopedEnvVar::set("HOME", home.path());
+        let _userprofile = ScopedEnvVar::set("USERPROFILE", home.path());
+        let dir = tempfile::tempdir().unwrap();
+        crate::cli::trusted_store::init_git_repo_with_origin(dir.path());
+
+        let mut legacy = active_record("sess-legacy");
+        legacy.content_hash = compute_content_hash(&legacy);
+        let serialized = serde_json::to_vec_pretty(&legacy).unwrap();
+        gwt_github::cache::write_atomic(&state_path(dir.path()), &serialized).unwrap();
+
+        let loaded = load(dir.path()).unwrap().unwrap();
+        assert_eq!(loaded.primary_session_id, "sess-legacy");
     }
 
     #[test]
