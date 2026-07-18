@@ -12,11 +12,12 @@
 //! session/owner/fingerprint — handwritten claims, stale runs, cross-session
 //! records, and failing runs are rejected (FR-036).
 //!
-//! P8b scope notes (dependent follow-ups, phase contract T-263):
-//! - The record lives in worktree state and is only as tamper-evident as the
-//!   filesystem; hash-chained trusted storage and direct-write blocking are
-//!   P9 (T-119/T-120). Command *selection* is still the agent's — deriving
-//!   the required matrix (Verification Plan / Coverage Map) is T-130+.
+//! Scope notes (dependent follow-ups, phase contract T-263):
+//! - The authoritative copies live in the repo-scoped trusted store (P9b);
+//!   the worktree files are mirrors, direct edits are hook-blocked (P9a
+//!   T-120), and integrity hashes validate whichever copy loads (P9a).
+//!   Deriving the required matrix from changed surfaces (full T-130
+//!   Coverage Map) is still open; `verify.plan` records the declared one.
 //! - Non-git worktrees get a degenerate fingerprint (no freshness signal);
 //!   gwt executions always run in git worktrees.
 
@@ -34,7 +35,8 @@ use sha2::{Digest, Sha256};
 use super::CliEnv;
 use crate::cli::execution_state;
 
-/// Worktree-relative path of the latest verification run record.
+/// Worktree-relative path of the latest verification run record's mirror
+/// (the authoritative copy lives in the repo-scoped trusted store, P9b).
 pub const VERIFICATION_RUN_STATE_RELATIVE: &str = ".gwt/skill-state/verification-run.json";
 
 /// Cap on the per-command output tail echoed back through the envelope.
@@ -136,26 +138,34 @@ pub fn plan_state_path(worktree: &Path) -> PathBuf {
 
 /// Load the registered plan. `Ok(None)` when missing.
 pub fn load_plan(worktree: &Path) -> io::Result<Option<VerificationPlanRecord>> {
-    let path = plan_state_path(worktree);
-    match fs::read_to_string(&path) {
-        Ok(contents) => {
-            let plan = serde_json::from_str::<VerificationPlanRecord>(&contents)
-                .map_err(|err| io::Error::new(ErrorKind::InvalidData, err))?;
-            Ok(Some(plan))
-        }
-        Err(err) if err.kind() == ErrorKind::NotFound => Ok(None),
-        Err(err) => Err(err),
-    }
+    // P9b: trusted copy authoritative; mirror-only plans are refused in
+    // managed worktrees (see `load` — same forgery window otherwise).
+    let contents = match crate::cli::trusted_store::read(worktree, "verification-plan.json")? {
+        Some(contents) => contents,
+        None if crate::cli::trusted_store::under_trusted_management(worktree) => return Ok(None),
+        None => match fs::read_to_string(plan_state_path(worktree)) {
+            Ok(contents) => contents,
+            Err(err) if err.kind() == ErrorKind::NotFound => return Ok(None),
+            Err(err) => return Err(err),
+        },
+    };
+    let plan = serde_json::from_str::<VerificationPlanRecord>(&contents)
+        .map_err(|err| io::Error::new(ErrorKind::InvalidData, err))?;
+    Ok(Some(plan))
 }
 
 /// Persist the plan atomically with a fresh integrity hash.
 pub fn save_plan(worktree: &Path, plan: &VerificationPlanRecord) -> io::Result<()> {
     let mut plan = plan.clone();
     plan.content_hash = compute_plan_hash(&plan);
-    let path = plan_state_path(worktree);
     let serialized = serde_json::to_vec_pretty(&plan)
         .map_err(|err| io::Error::new(ErrorKind::InvalidData, err))?;
-    gwt_github::cache::write_atomic(&path, &serialized)
+    crate::cli::trusted_store::write_with_mirror(
+        worktree,
+        "verification-plan.json",
+        &plan_state_path(worktree),
+        &serialized,
+    )
 }
 
 /// Resolve the record path for a worktree.
@@ -167,16 +177,22 @@ pub fn state_path(worktree: &Path) -> PathBuf {
 /// Load the latest record. `Ok(None)` when missing; malformed JSON and I/O
 /// failures propagate.
 pub fn load(worktree: &Path) -> io::Result<Option<VerificationRunRecord>> {
-    let path = state_path(worktree);
-    match fs::read_to_string(&path) {
-        Ok(contents) => {
-            let record = serde_json::from_str::<VerificationRunRecord>(&contents)
-                .map_err(|err| io::Error::new(ErrorKind::InvalidData, err))?;
-            Ok(Some(record))
-        }
-        Err(err) if err.kind() == ErrorKind::NotFound => Ok(None),
-        Err(err) => Err(err),
-    }
+    // P9b: trusted copy authoritative. The mirror is a legacy fallback for
+    // unmanaged worktrees only — under trusted management every canonical
+    // `verify.run` wrote a trusted copy, so a mirror-only record is not
+    // evidence (T-174).
+    let contents = match crate::cli::trusted_store::read(worktree, "verification-run.json")? {
+        Some(contents) => contents,
+        None if crate::cli::trusted_store::under_trusted_management(worktree) => return Ok(None),
+        None => match fs::read_to_string(state_path(worktree)) {
+            Ok(contents) => contents,
+            Err(err) if err.kind() == ErrorKind::NotFound => return Ok(None),
+            Err(err) => return Err(err),
+        },
+    };
+    let record = serde_json::from_str::<VerificationRunRecord>(&contents)
+        .map_err(|err| io::Error::new(ErrorKind::InvalidData, err))?;
+    Ok(Some(record))
 }
 
 /// Persist the record atomically. The integrity hash is recomputed on every
@@ -184,10 +200,14 @@ pub fn load(worktree: &Path) -> io::Result<Option<VerificationRunRecord>> {
 pub fn save(worktree: &Path, record: &VerificationRunRecord) -> io::Result<()> {
     let mut record = record.clone();
     record.content_hash = compute_content_hash(&record);
-    let path = state_path(worktree);
     let serialized = serde_json::to_vec_pretty(&record)
         .map_err(|err| io::Error::new(ErrorKind::InvalidData, err))?;
-    gwt_github::cache::write_atomic(&path, &serialized)
+    crate::cli::trusted_store::write_with_mirror(
+        worktree,
+        "verification-run.json",
+        &state_path(worktree),
+        &serialized,
+    )
 }
 
 /// Compute the worktree fingerprint at **content level**: sha256 over
@@ -642,6 +662,132 @@ mod tests {
         )
         .unwrap();
         run_verification(worktree, session, commands).unwrap()
+    }
+
+    fn passing_record(session: &str, fingerprint: &str) -> VerificationRunRecord {
+        VerificationRunRecord {
+            record_id: "vr-test".to_string(),
+            session_id: session.to_string(),
+            owner_number: Some(3248),
+            worktree_fingerprint: fingerprint.to_string(),
+            commands: vec![VerificationCommandResult {
+                command: "git --version".to_string(),
+                exit_code: 0,
+            }],
+            all_passed: true,
+            created_at: Utc::now(),
+            plan_covered: true,
+            planned_missing: Vec::new(),
+            content_hash: String::new(),
+        }
+    }
+
+    // P9b (T-174 core): the repo-scoped trusted copy wins over a forged
+    // worktree mirror — for both the run record and the registered plan.
+    #[test]
+    fn trusted_copies_override_worktree_mirror_edits() {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let home = tempfile::tempdir().unwrap();
+        let _home = ScopedEnvVar::set("HOME", home.path());
+        let _userprofile = ScopedEnvVar::set("USERPROFILE", home.path());
+        let dir = tempfile::tempdir().unwrap();
+        crate::cli::trusted_store::init_git_repo_with_origin(dir.path());
+
+        let mut failing = passing_record("sess-1", "fp-1");
+        failing.all_passed = false;
+        save(dir.path(), &failing).unwrap();
+        // Forge an all-passing mirror with a valid integrity hash.
+        let mut forged = passing_record("sess-1", "fp-1");
+        forged.content_hash = compute_content_hash(&forged);
+        let serialized = serde_json::to_vec_pretty(&forged).unwrap();
+        gwt_github::cache::write_atomic(&state_path(dir.path()), &serialized).unwrap();
+        assert!(!load(dir.path()).unwrap().unwrap().all_passed);
+
+        let plan = VerificationPlanRecord {
+            session_id: "sess-1".to_string(),
+            owner_number: Some(3248),
+            commands: vec!["cargo test -p gwt --lib".to_string()],
+            created_at: Utc::now(),
+            content_hash: String::new(),
+        };
+        save_plan(dir.path(), &plan).unwrap();
+        // Forge a trivial (empty-matrix) plan in the mirror.
+        let mut forged_plan = plan.clone();
+        forged_plan.commands = vec!["git --version".to_string()];
+        forged_plan.content_hash = compute_plan_hash(&forged_plan);
+        let serialized = serde_json::to_vec_pretty(&forged_plan).unwrap();
+        gwt_github::cache::write_atomic(&plan_state_path(dir.path()), &serialized).unwrap();
+        assert_eq!(
+            load_plan(dir.path()).unwrap().unwrap().commands,
+            vec!["cargo test -p gwt --lib".to_string()]
+        );
+    }
+
+    // P9b: mirror-only records/plans (pre-P9b) still load as legacy fallback.
+    #[test]
+    fn mirror_only_records_load_as_legacy_fallback() {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let home = tempfile::tempdir().unwrap();
+        let _home = ScopedEnvVar::set("HOME", home.path());
+        let _userprofile = ScopedEnvVar::set("USERPROFILE", home.path());
+        let dir = tempfile::tempdir().unwrap();
+        crate::cli::trusted_store::init_git_repo_with_origin(dir.path());
+
+        let mut legacy = passing_record("sess-legacy", "fp-legacy");
+        legacy.content_hash = compute_content_hash(&legacy);
+        let serialized = serde_json::to_vec_pretty(&legacy).unwrap();
+        gwt_github::cache::write_atomic(&state_path(dir.path()), &serialized).unwrap();
+        assert_eq!(load(dir.path()).unwrap().unwrap().session_id, "sess-legacy");
+    }
+
+    // P9b: in a managed worktree (trusted ECR exists from launch) a
+    // mirror-only record or plan is NOT evidence — before the first real
+    // `verify.run` the mirror must not become authoritative by default.
+    #[test]
+    fn managed_worktree_refuses_mirror_only_records() {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let home = tempfile::tempdir().unwrap();
+        let _home = ScopedEnvVar::set("HOME", home.path());
+        let _userprofile = ScopedEnvVar::set("USERPROFILE", home.path());
+        let dir = tempfile::tempdir().unwrap();
+        crate::cli::trusted_store::init_git_repo_with_origin(dir.path());
+
+        // Launch materialization writes the trusted ECR copy.
+        crate::cli::execution_state::materialize_at_launch(
+            dir.path(),
+            crate::cli::execution_state::ExecutionOwnerKind::Spec,
+            3248,
+            "sess-1",
+            "$gwt-execute",
+            false,
+        )
+        .unwrap();
+
+        // Forge an all-passing mirror-only run record with a valid hash.
+        let mut forged = passing_record("sess-1", "fp-1");
+        forged.content_hash = compute_content_hash(&forged);
+        let serialized = serde_json::to_vec_pretty(&forged).unwrap();
+        gwt_github::cache::write_atomic(&state_path(dir.path()), &serialized).unwrap();
+        assert_eq!(load(dir.path()).unwrap(), None);
+
+        // Same for a forged trivial plan.
+        let mut forged_plan = VerificationPlanRecord {
+            session_id: "sess-1".to_string(),
+            owner_number: Some(3248),
+            commands: vec!["git --version".to_string()],
+            created_at: Utc::now(),
+            content_hash: String::new(),
+        };
+        forged_plan.content_hash = compute_plan_hash(&forged_plan);
+        let serialized = serde_json::to_vec_pretty(&forged_plan).unwrap();
+        gwt_github::cache::write_atomic(&plan_state_path(dir.path()), &serialized).unwrap();
+        assert_eq!(load_plan(dir.path()).unwrap(), None);
     }
 
     #[test]

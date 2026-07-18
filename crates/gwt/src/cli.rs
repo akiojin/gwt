@@ -35,6 +35,7 @@ mod skill_state_runtime;
 mod test_support;
 mod title_summary_guard;
 pub mod tray;
+pub mod trusted_store;
 pub mod update;
 pub mod verification_record;
 mod workflow;
