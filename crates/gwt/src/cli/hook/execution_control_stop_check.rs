@@ -42,11 +42,25 @@ pub fn handle_with_input(
     };
     // P9a (T-122): a record edited outside the canonical operations must not
     // release the gate — block with the repair path instead of trusting the
-    // edited status.
+    // edited status. T-124: repeated tamper blocks feed one deduped
+    // self-improvement candidate (owner id + violation kind only).
     if !execution_state::integrity_ok(&record) {
-        return HookOutput::stop_block(
-            "Execution control record failed integrity validation: it was edited outside the canonical operations. Repair it with JSON operation `execution.adopt` and a non-empty `params.reason`, then settle via `execution.complete` / `execution.blocked` with real verification evidence.",
-        );
+        let capture_note = if lane.policy_flags.self_improvement_capture {
+            crate::cli::improvement::execution_integrity_capture_note(
+                &resolved,
+                "Execution control record failed integrity validation at the Stop gate (edited outside the canonical operations)",
+                &format!(
+                    "{kind} #{number}: stop-gate tamper block (T-124)",
+                    kind = record.owner_kind.as_str(),
+                    number = record.owner_number,
+                ),
+            )
+        } else {
+            String::new()
+        };
+        return HookOutput::stop_block(format!(
+            "Execution control record failed integrity validation: it was edited outside the canonical operations. Repair it with JSON operation `execution.adopt` and a non-empty `params.reason`, then settle via `execution.complete` / `execution.blocked` with real verification evidence.{capture_note}",
+        ));
     }
     // Settlement requires GWT_SESSION_ID; a session without one (a bare,
     // non-gwt-launched agent in the worktree) could never satisfy the gate,
@@ -207,6 +221,50 @@ mod tests {
             handle_with_input(dir.path(), "{}", None),
             HookOutput::Silent
         );
+    }
+
+    // T-124: a tampered record does not just block — repeated tamper blocks
+    // auto-capture one deduped issue-spec-workflow improvement candidate
+    // (same dedupe key across repeats, no secrets in the summary).
+    #[test]
+    fn tampered_record_block_captures_improvement_candidate() {
+        // The capture store lives under gwt home; scope it thread-locally so
+        // parallel tests flipping HOME cannot split the two captures across
+        // different stores (ScopedGwtHome doc convention).
+        let home = tempfile::tempdir().unwrap();
+        let _gwt_home = gwt_core::test_support::ScopedGwtHome::set(home.path());
+        let dir = mk_worktree(Some(&EXECUTION_PROFILE));
+        materialize_at_launch(
+            dir.path(),
+            ExecutionOwnerKind::Spec,
+            3248,
+            "sess-1",
+            "$gwt-execute",
+            false,
+        )
+        .unwrap();
+        let path = crate::cli::execution_state::state_path(dir.path());
+        let tampered = std::fs::read_to_string(&path)
+            .unwrap()
+            .replace("$gwt-execute", "$gwt-forged");
+        std::fs::write(&path, tampered).unwrap();
+
+        for expected_occurrences in [1u64, 2u64] {
+            let output = handle_with_input(dir.path(), "{}", Some("sess-1"));
+            let HookOutput::StopBlock { reason } = output else {
+                panic!("expected StopBlock, got {output:?}");
+            };
+            assert!(reason.contains("integrity validation"), "{reason}");
+            assert!(reason.contains("Self-improvement candidate"), "{reason}");
+            let candidates = crate::cli::improvement::candidate_public_values(dir.path());
+            assert_eq!(candidates.len(), 1, "one deduped candidate expected");
+            assert_eq!(
+                candidates[0]
+                    .get("legacy_occurrence_count")
+                    .and_then(|v| v.as_u64()),
+                Some(expected_occurrences)
+            );
+        }
     }
 
     // Intake lanes are excluded — the intake artifact gate owns them.

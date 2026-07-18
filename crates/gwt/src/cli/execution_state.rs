@@ -25,7 +25,7 @@
 //!   record; a resume preserves an existing settled record for the same
 //!   owner.
 //! - Saves are atomic file replacements but the read-modify-write cycle is
-//!   not serialized across processes; P9's write lease (T-124/T-125) owns
+//!   not serialized across processes; the owner write lease (T-149) owns
 //!   real serialization.
 
 use std::{
@@ -549,15 +549,49 @@ pub(super) fn run<E: CliEnv>(
             Ok(0)
         }
         SettleResult::SessionMismatch { record_session_id } => {
+            // T-124: an unauthorized settlement attempt against an ACTIVE
+            // record is bookkept as a deduped self-improvement candidate
+            // (owner + violation kind). A mismatch against an already
+            // settled record is a harmless retry — refused, not captured.
+            let note = match load(&worktree) {
+                Ok(Some(record)) if record.status == ExecutionControlStatus::Active => {
+                    crate::cli::improvement::execution_integrity_capture_note(
+                        &worktree,
+                        "Execution settlement attempted by a session that does not own the record (unauthorized takeover path)",
+                        &format!(
+                            "{kind} #{number}: settlement session mismatch (T-124)",
+                            kind = record.owner_kind.as_str(),
+                            number = record.owner_number,
+                        ),
+                    )
+                }
+                _ => String::new(),
+            };
             out.push_str(&format!(
-                "execution: settlement refused — record belongs to session {record_session_id}, not the current session. Take it over explicitly with JSON operation `execution.adopt` and a non-empty `params.reason` (T-117)\n",
+                "execution: settlement refused — record belongs to session {record_session_id}, not the current session. Take it over explicitly with JSON operation `execution.adopt` and a non-empty `params.reason` (T-117){note}\n",
             ));
             Ok(2)
         }
         SettleResult::Tampered => {
-            out.push_str(
-                "execution: settlement refused — the record failed integrity validation (edited outside the canonical operations). Repair with JSON operation `execution.adopt` and a non-empty `params.reason`, then re-verify\n",
+            let owner = load(&worktree)
+                .ok()
+                .flatten()
+                .map(|record| {
+                    format!(
+                        "{kind} #{number}",
+                        kind = record.owner_kind.as_str(),
+                        number = record.owner_number,
+                    )
+                })
+                .unwrap_or_else(|| "unknown owner".to_string());
+            let note = crate::cli::improvement::execution_integrity_capture_note(
+                &worktree,
+                "Execution control record failed integrity validation at settlement (edited outside the canonical operations)",
+                &format!("{owner}: settlement tamper refusal (T-124)"),
             );
+            out.push_str(&format!(
+                "execution: settlement refused — the record failed integrity validation (edited outside the canonical operations). Repair with JSON operation `execution.adopt` and a non-empty `params.reason`, then re-verify{note}\n",
+            ));
             Ok(2)
         }
     }
@@ -1035,6 +1069,154 @@ mod tests {
         ) -> Result<(i32, String), gwt_github::SpecOpsError> {
             let mut env = TestEnv::new(repo.to_path_buf());
             run_collect(&mut env, CliCommand::Execution(command))
+        }
+
+        // T-124: unauthorized settlement attempts (session mismatch) and
+        // tampered-record refusals auto-capture one deduped
+        // issue-spec-workflow improvement candidate.
+        #[test]
+        fn settlement_refusals_capture_improvement_candidate() {
+            let _env_lock = crate::env_test_lock()
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let _session = ScopedEnvVar::set(gwt_agent::GWT_SESSION_ID_ENV, "sess-intruder");
+            let dir = tempfile::tempdir().unwrap();
+            save(dir.path(), &active_record("sess-owner")).unwrap();
+
+            // Unauthorized settle from a non-owner session.
+            let (code, out) = run_cmd(dir.path(), ExecutionCommand::Complete).unwrap();
+            assert_eq!(code, 2, "{out}");
+            assert!(out.contains("execution.adopt"), "{out}");
+            assert!(out.contains("Self-improvement candidate"), "{out}");
+
+            // Tampered record refusal (blocked settle has no evidence gate,
+            // so it reaches the integrity check directly).
+            let path = state_path(dir.path());
+            let tampered = fs::read_to_string(&path)
+                .unwrap()
+                .replace("$gwt-execute", "$gwt-forged");
+            fs::write(&path, tampered).unwrap();
+            let (code, out) = run_cmd(
+                dir.path(),
+                ExecutionCommand::Blocked {
+                    reason: "verification runner unavailable".to_string(),
+                    missing_verification: None,
+                },
+            )
+            .unwrap();
+            assert_eq!(code, 2, "{out}");
+            assert!(out.contains("integrity validation"), "{out}");
+            assert!(out.contains("Self-improvement candidate"), "{out}");
+
+            let candidates = crate::cli::improvement::candidate_public_values(dir.path());
+            assert_eq!(candidates.len(), 1, "one deduped candidate expected");
+            assert_eq!(
+                candidates[0]
+                    .get("legacy_occurrence_count")
+                    .and_then(|v| v.as_u64()),
+                Some(2)
+            );
+            // Owner attribution survives in the deduped candidate details.
+            let store_raw = fs::read_to_string(
+                crate::cli::improvement_store::candidate_store_path(dir.path()),
+            )
+            .unwrap();
+            assert!(store_raw.contains("spec #3248"), "{store_raw}");
+
+            // Benign retry: a mismatch against an ALREADY SETTLED record is
+            // refused but not captured as a violation.
+            let mut settled = active_record("sess-owner");
+            settled.status = ExecutionControlStatus::Completed;
+            settled.settled_at = Some(Utc::now());
+            save(dir.path(), &settled).unwrap();
+            let (code, out) = run_cmd(dir.path(), ExecutionCommand::Complete).unwrap();
+            assert_eq!(code, 2, "{out}");
+            assert!(!out.contains("Self-improvement candidate"), "{out}");
+            let candidates = crate::cli::improvement::candidate_public_values(dir.path());
+            assert_eq!(
+                candidates[0]
+                    .get("legacy_occurrence_count")
+                    .and_then(|v| v.as_u64()),
+                Some(2),
+                "benign retry must not add an occurrence"
+            );
+        }
+
+        // T-125: crash/resume handoff lifecycle E2E — the adopt transfer is
+        // audited, verification evidence binds to the adopting session, and
+        // the Ready PR handoff refuses until that session produces fresh
+        // evidence.
+        #[test]
+        fn adopt_handoff_binds_evidence_to_new_session_and_gates_pr() {
+            let _env_lock = crate::env_test_lock()
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let home = tempfile::tempdir().unwrap();
+            let _home = ScopedEnvVar::set("HOME", home.path());
+            let _userprofile = ScopedEnvVar::set("USERPROFILE", home.path());
+            let _session = ScopedEnvVar::set(gwt_agent::GWT_SESSION_ID_ENV, "sess-b");
+            let dir = tempfile::tempdir().unwrap();
+            crate::cli::trusted_store::init_git_repo_with_origin(dir.path());
+
+            // Session A launched the execution, then crashed.
+            materialize_at_launch(
+                dir.path(),
+                ExecutionOwnerKind::Spec,
+                3248,
+                "sess-a",
+                "$gwt-execute",
+                false,
+            )
+            .unwrap();
+
+            // Session B adopts with an audited reason.
+            let mut out = String::new();
+            run_adopt(dir.path(), "sess-b", "crash recovery", &mut out).unwrap();
+            let record = load(dir.path()).unwrap().unwrap();
+            assert_eq!(record.primary_session_id, "sess-b");
+            assert_eq!(record.transfers.len(), 1);
+            assert_eq!(record.transfers[0].from_session_id, "sess-a");
+            assert_eq!(record.transfers[0].reason, "crash recovery");
+            assert!(integrity_ok(&record));
+
+            // Ready handoff refuses: no evidence for the adopting session.
+            let refusal = pr_handoff_refusal(dir.path(), true);
+            assert!(
+                refusal.as_deref().unwrap_or("").contains("verify.run"),
+                "{refusal:?}"
+            );
+
+            // Session B registers the plan and runs it through the canonical
+            // executor — evidence binds to the new owner session.
+            use crate::cli::verification_record as vr;
+            vr::save_plan(
+                dir.path(),
+                &vr::VerificationPlanRecord {
+                    session_id: "sess-b".to_string(),
+                    owner_number: Some(3248),
+                    commands: vec!["git --version".to_string()],
+                    created_at: Utc::now(),
+                    content_hash: String::new(),
+                },
+            )
+            .unwrap();
+            let (run_record, _) =
+                vr::run_verification(dir.path(), "sess-b", &["git --version".to_string()]).unwrap();
+            assert!(run_record.all_passed && run_record.plan_covered);
+            assert_eq!(
+                vr::evaluate_evidence(dir.path(), "sess-b", Some(3248)),
+                vr::EvidenceStatus::Fresh
+            );
+            // The pre-crash session's claim to the same evidence stays dead.
+            assert_ne!(
+                vr::evaluate_evidence(dir.path(), "sess-a", Some(3248)),
+                vr::EvidenceStatus::Fresh
+            );
+
+            // Ready handoff now passes, and session B settles cleanly.
+            assert_eq!(pr_handoff_refusal(dir.path(), true), None);
+            let result = settle(dir.path(), "sess-b", ExecutionSettlement::Completed).unwrap();
+            assert!(matches!(result, SettleResult::Settled(_)));
         }
 
         #[test]
