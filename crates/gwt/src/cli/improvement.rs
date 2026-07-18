@@ -2517,6 +2517,7 @@ fn serde_as_spec_error(err: serde_json::Error) -> SpecOpsError {
 
 #[cfg(test)]
 mod tests {
+    use gwt_core::test_support::ScopedGwtHome;
     use serde_json::Value;
 
     use super::*;
@@ -2528,6 +2529,12 @@ mod tests {
 
     fn capture_command(command: ImprovementCaptureCommand) -> ImprovementCommand {
         ImprovementCommand::Capture(Box::new(command))
+    }
+
+    fn isolated_gwt_home() -> (tempfile::TempDir, ScopedGwtHome) {
+        let home = tempfile::tempdir().expect("isolated home");
+        let gwt_home = ScopedGwtHome::set(home.path());
+        (home, gwt_home)
     }
 
     fn board_entries_json(env: &mut TestEnv) -> Value {
@@ -2559,6 +2566,7 @@ mod tests {
 
     #[test]
     fn high_confidence_capture_posts_board_status() {
+        let (_home, _gwt_home) = isolated_gwt_home();
         let project = tempfile::tempdir().expect("project");
         let mut env = TestEnv::new(project.path().join("cache"));
         env.repo_path = project.path().join("target-project");
@@ -2610,6 +2618,7 @@ mod tests {
 
     #[test]
     fn low_confidence_capture_does_not_post_board_status() {
+        let (_home, _gwt_home) = isolated_gwt_home();
         let project = tempfile::tempdir().expect("project");
         let mut env = TestEnv::new(project.path().join("cache"));
         env.repo_path = project.path().join("target-project");
@@ -2641,6 +2650,7 @@ mod tests {
 
     #[test]
     fn promote_issue_returns_needs_evidence_for_untyped_candidate_without_owner_mutation() {
+        let (_home, _gwt_home) = isolated_gwt_home();
         let project = tempfile::tempdir().expect("project");
         let mut env = TestEnv::new(project.path().join("cache"));
         env.repo_path = project.path().join("target-project");
@@ -2692,6 +2702,7 @@ mod tests {
 
     #[test]
     fn promote_issue_rejects_manual_labels_before_owner_transport() {
+        let (_home, _gwt_home) = isolated_gwt_home();
         let project = tempfile::tempdir().expect("project");
         let mut env = TestEnv::new(project.path().join("cache"));
         env.repo_path = project.path().join("target-project");
@@ -2826,6 +2837,7 @@ mod tests {
 
     #[test]
     fn list_candidates_includes_sanitized_upstream_issue_preview() {
+        let (_home, _gwt_home) = isolated_gwt_home();
         let project = tempfile::tempdir().expect("project");
         let mut env = TestEnv::new(project.path().join("cache"));
         env.repo_path = project.path().join("target-project");
@@ -2898,6 +2910,7 @@ mod tests {
 
     #[test]
     fn promote_issue_returns_needs_evidence_for_ineligible_candidates() {
+        let (_home, _gwt_home) = isolated_gwt_home();
         let project = tempfile::tempdir().expect("project");
         let mut env = TestEnv::new(project.path().join("cache"));
         env.repo_path = project.path().join("target-project");

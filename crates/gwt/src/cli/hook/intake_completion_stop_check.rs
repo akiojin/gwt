@@ -222,16 +222,34 @@ fn is_pure_status_question(prompt: &str) -> bool {
 mod tests {
     use super::*;
     use chrono::{Duration, Utc};
-    use gwt_core::test_support::ScopedEnvVar;
+    use gwt_core::test_support::{ScopedEnvVar, ScopedGwtHome};
     use gwt_skills::{write_lane_file, EXECUTION_PROFILE, INTAKE_PROFILE};
 
-    fn mk_worktree(profile: Option<&gwt_skills::LaneProfile>) -> tempfile::TempDir {
-        let dir = tempfile::tempdir().unwrap();
-        std::fs::create_dir_all(dir.path().join(".gwt")).unwrap();
-        if let Some(profile) = profile {
-            write_lane_file(dir.path(), profile).unwrap();
+    struct TestWorktree {
+        worktree: tempfile::TempDir,
+        _home: tempfile::TempDir,
+        _gwt_home: ScopedGwtHome,
+    }
+
+    impl TestWorktree {
+        fn path(&self) -> &Path {
+            self.worktree.path()
         }
-        dir
+    }
+
+    fn mk_worktree(profile: Option<&gwt_skills::LaneProfile>) -> TestWorktree {
+        let home = tempfile::tempdir().unwrap();
+        let gwt_home = ScopedGwtHome::set(home.path());
+        let worktree = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(worktree.path().join(".gwt")).unwrap();
+        if let Some(profile) = profile {
+            write_lane_file(worktree.path(), profile).unwrap();
+        }
+        TestWorktree {
+            worktree,
+            _home: home,
+            _gwt_home: gwt_home,
+        }
     }
 
     fn record_valid_outcome(worktree: &Path, session: &str, recorded_at: chrono::DateTime<Utc>) {
