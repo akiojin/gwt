@@ -64,6 +64,12 @@ non-draft `pr.create`, and `pr.ready` refuse when the latest record is
 missing, failing, stale (worktree changed after the run), from another
 session, or for another owner. Draft PRs stay available mid-work.
 
+When resuming or recovering another session's execution (crash, closed
+window), take over the record explicitly with JSON operation
+`execution.adopt` and a non-empty `params.reason` — takeovers are audited as
+an ownership transfer chain, and adopt is also the repair path when the
+record fails integrity validation.
+
 ## Mode detection
 
 1. If the invocation includes `#N` or an Issue URL, read the Issue with JSON

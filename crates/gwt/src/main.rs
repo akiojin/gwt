@@ -4175,7 +4175,9 @@ mod tests {
                 .len(),
             0
         );
-        assert!(!runtime
+        // Issue #3297: the cache-backed knowledge load replies off the GUI
+        // event loop through the blocking-task proxy.
+        assert!(runtime
             .handle_frontend_event(
                 "client-1".to_string(),
                 gwt::FrontendEvent::LoadKnowledgeBridge {
@@ -4187,7 +4189,19 @@ mod tests {
                 },
             )
             .is_empty());
-        assert!(!runtime
+        wait_for_recorded_event("knowledge bridge dispatch", &events, |events| {
+            events.iter().any(|event| {
+                matches!(
+                    event,
+                    UserEvent::Dispatch(dispatched)
+                        if dispatched.iter().any(|outbound| matches!(
+                            outbound.event,
+                            BackendEvent::KnowledgeEntries { .. }
+                        ))
+                )
+            })
+        });
+        assert!(runtime
             .handle_frontend_event(
                 "client-1".to_string(),
                 gwt::FrontendEvent::SelectKnowledgeBridgeEntry {
@@ -4198,6 +4212,22 @@ mod tests {
                 },
             )
             .is_empty());
+        wait_for_recorded_event("knowledge bridge selection dispatch", &events, |events| {
+            events
+                .iter()
+                .filter(|event| {
+                    matches!(
+                        event,
+                        UserEvent::Dispatch(dispatched)
+                            if dispatched.iter().any(|outbound| matches!(
+                                outbound.event,
+                                BackendEvent::KnowledgeEntries { .. }
+                            ))
+                    )
+                })
+                .count()
+                >= 2
+        });
 
         let cleanup_events = runtime.handle_frontend_event(
             "client-1".to_string(),
