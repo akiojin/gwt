@@ -548,11 +548,13 @@ mod tests {
 
     use super::{
         apply_attempt_failure, evaluate_with_deadline, github_slug_from_remote_url,
-        load_candidate_store_after_projection_repair_with, origin_remote_url, render_stop_result,
+        load_candidate_store_after_projection_repair_with, render_stop_result,
         select_attempt_candidate, select_pending_owner_status_candidate, BlockedReason,
-        CandidateState, FailureSubcode, HookOutput, OwnerResolutionFailure, RepositoryProbeFailure,
-        ResolutionDeadline, StopCandidate, StopEvaluationFailure,
+        CandidateState, FailureSubcode, HookOutput, OwnerResolutionFailure, ResolutionDeadline,
+        StopCandidate, StopEvaluationFailure,
     };
+    #[cfg(unix)]
+    use super::{origin_remote_url, RepositoryProbeFailure};
     use crate::cli::TestEnv;
 
     fn stop_candidate(

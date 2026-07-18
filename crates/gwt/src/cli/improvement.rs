@@ -1929,6 +1929,68 @@ pub(crate) fn capture_intake_gate_violation(
         .map_err(|err| err.to_string())
 }
 
+/// Stable dedupe key for execution-integrity violations (SPEC-3248 P9,
+/// T-124): repeated tamper detections, unauthorized settlement attempts,
+/// and duplicate-owner takeover attempts all update one candidate.
+pub(crate) const EXECUTION_INTEGRITY_DEDUPE_KEY: &str = "issue-spec-workflow:execution-integrity";
+
+/// T-124 auto-capture for execution-integrity violations. Same env-free
+/// pipeline (validation, sanitization, dedupe, storage) and `medium`
+/// confidence as the intake gate capture; callers keep summaries/details to
+/// owner ids and violation kinds — never tokens, environment values, or
+/// record contents.
+pub(crate) fn capture_execution_integrity_violation(
+    worktree_root: &Path,
+    summary: &str,
+    details: &str,
+) -> Result<IntakeGateCaptureSummary, String> {
+    let command = ImprovementCaptureCommand {
+        source: "hook-runtime".to_string(),
+        target_artifact: "issue-spec-workflow".to_string(),
+        classification: "gwt-caused".to_string(),
+        confidence: "medium".to_string(),
+        summary: summary.to_string(),
+        details: Some(details.to_string()),
+        evidence_digest: None,
+        dedupe_key: Some(EXECUTION_INTEGRITY_DEDUPE_KEY.to_string()),
+        local_evidence: Vec::new(),
+        typed_evidence: None,
+    };
+    capture_candidate_core(worktree_root, command)
+        .map(|result| IntakeGateCaptureSummary {
+            id: result.candidate.id,
+            occurrences: result
+                .candidate
+                .legacy_occurrence_count
+                .unwrap_or(result.candidate.occurrences),
+            updated: result.updated_existing,
+        })
+        .map_err(|err| err.to_string())
+}
+
+/// Format the T-124 capture outcome as a note appended to gate messages:
+/// success → candidate id + occurrence count; failure → manual
+/// `improvement.capture` fallback (a capture failure must not be silent,
+/// T-085 convention).
+pub(crate) fn execution_integrity_capture_note(
+    worktree_root: &Path,
+    summary: &str,
+    details: &str,
+) -> String {
+    match capture_execution_integrity_violation(worktree_root, summary, details) {
+        Ok(result) => format!(
+            "\nSelf-improvement candidate {id} {verb} (occurrences: {count}).",
+            id = result.id,
+            verb = if result.updated { "updated" } else { "captured" },
+            count = result.occurrences,
+        ),
+        Err(error) => format!(
+            "\nSelf-improvement auto-capture failed ({error}). Record it manually: run JSON operation `improvement.capture` with `params.source:\"hook-runtime\"`, `params.target_artifact:\"issue-spec-workflow\"`, `params.classification:\"gwt-caused\"`, `params.confidence:\"medium\"`, `params.summary:\"execution integrity violation\"`, and `params.dedupe_key:\"{key}\"`.",
+            key = EXECUTION_INTEGRITY_DEDUPE_KEY,
+        ),
+    }
+}
+
 fn list(
     repo_root: &Path,
     command: ImprovementListCommand,

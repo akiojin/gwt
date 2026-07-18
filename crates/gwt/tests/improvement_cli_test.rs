@@ -715,6 +715,7 @@ fn write_canonical_store(
     path
 }
 
+#[cfg(unix)]
 fn save_session_path(home: &Path, project: &Path, repo_hash: &str) {
     let mut session = gwt_agent::Session::new(project, "test", gwt_agent::AgentId::Codex);
     session.repo_hash = Some(repo_hash.to_string());
