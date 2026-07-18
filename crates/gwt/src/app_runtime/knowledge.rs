@@ -669,31 +669,6 @@ fn parse_related_time_millis(value: &str) -> i64 {
 }
 
 impl AppRuntime {
-    fn augment_knowledge_bridge_related_works(
-        &self,
-        project_root: &Path,
-        view: &mut gwt::KnowledgeBridgeView,
-    ) {
-        let sessions = self
-            .session_ledger_cache
-            .borrow_mut()
-            .load(&self.sessions_dir);
-        let work_items = self
-            .work_items_cache
-            .borrow_mut()
-            .load_or_synthesize(project_root)
-            .map(|projection| projection.work_items)
-            .unwrap_or_default();
-        let issue_by_branch = load_issue_branch_links(project_root, &self.issue_link_cache_dir);
-        augment_knowledge_bridge_related_works(
-            project_root,
-            view,
-            &work_items,
-            &sessions,
-            &issue_by_branch,
-        );
-    }
-
     pub(crate) fn load_knowledge_bridge_events(
         &self,
         client_id: &str,
@@ -747,35 +722,72 @@ impl AppRuntime {
             return Vec::new();
         }
 
-        match load_knowledge_bridge(&tab.project_root, kind, request.selected_number, false) {
-            Ok(mut view) => {
-                self.augment_knowledge_bridge_related_works(&tab.project_root, &mut view);
-                if request.request_id.is_some() && view.refresh_enabled {
-                    self.spawn_knowledge_bridge_refresh(KnowledgeRefreshTask {
-                        client_id: client_id.to_string(),
-                        id: id.to_string(),
-                        project_root: tab.project_root.clone(),
-                        kind,
-                        request_id: request.request_id,
-                        selected_number: request.selected_number,
-                        force: false,
-                        sessions_dir: self.sessions_dir.clone(),
-                        issue_link_cache_dir: self.issue_link_cache_dir.clone(),
-                    });
+        // Issue #3297: the cache-backed read used to run synchronously here
+        // and block the GUI event loop; on slow machines it outlived the
+        // frontend's 5s recovery timer, the late reply was discarded by
+        // request_id, and the retry escalated into a forced remote sync.
+        // Reply through the blocking-task proxy instead (same shape as the
+        // semantic search path), chaining the staleness refresh in the same
+        // task so its ordering relative to the first reply is preserved.
+        let client_id = client_id.to_string();
+        let id = id.to_string();
+        let project_root = tab.project_root.clone();
+        let request_id = request.request_id;
+        let selected_number = request.selected_number;
+        let sessions_dir = self.sessions_dir.clone();
+        let issue_link_cache_dir = self.issue_link_cache_dir.clone();
+        let proxy = self.proxy.clone();
+        self.blocking_tasks.spawn(move || {
+            let view = match load_knowledge_bridge(&project_root, kind, selected_number, false) {
+                Ok(mut view) => {
+                    augment_knowledge_bridge_related_works_from_paths(
+                        &project_root,
+                        &sessions_dir,
+                        &issue_link_cache_dir,
+                        &mut view,
+                    );
+                    view
                 }
-                knowledge_view_events(
-                    client_id.to_string(),
-                    id.to_string(),
-                    kind,
-                    request.request_id,
-                    view,
-                )
+                Err(error) => {
+                    proxy.send(UserEvent::Dispatch(vec![OutboundEvent::reply(
+                        client_id,
+                        knowledge_error_event(id, kind, error, request_id, None),
+                    )]));
+                    return;
+                }
+            };
+            let refresh_after = request_id.is_some() && view.refresh_enabled;
+            proxy.send(UserEvent::Dispatch(knowledge_view_events(
+                client_id.clone(),
+                id.clone(),
+                kind,
+                request_id,
+                view,
+            )));
+            if !refresh_after {
+                return;
             }
-            Err(error) => vec![OutboundEvent::reply(
-                client_id,
-                knowledge_error_event(id, kind, error, request.request_id, None),
-            )],
-        }
+            let refreshed = match gwt::refresh_knowledge_bridge_cache(&project_root, false) {
+                Ok(refreshed) => refreshed,
+                Err(_) => return,
+            };
+            if !refreshed {
+                return;
+            }
+            if let Ok(mut view) = load_knowledge_bridge(&project_root, kind, selected_number, false)
+            {
+                augment_knowledge_bridge_related_works_from_paths(
+                    &project_root,
+                    &sessions_dir,
+                    &issue_link_cache_dir,
+                    &mut view,
+                );
+                proxy.send(UserEvent::Dispatch(knowledge_view_events(
+                    client_id, id, kind, request_id, view,
+                )));
+            }
+        });
+        Vec::new()
     }
 
     pub(super) fn spawn_knowledge_bridge_refresh(&self, task: KnowledgeRefreshTask) {
