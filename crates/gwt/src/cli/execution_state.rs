@@ -972,7 +972,18 @@ mod tests {
                 ExecutionControlStatus::Active
             );
 
-            // Fresh all-passing evidence unlocks completion.
+            // Fresh all-passing evidence (plan + covering run) unlocks it.
+            crate::cli::verification_record::save_plan(
+                dir.path(),
+                &crate::cli::verification_record::VerificationPlanRecord {
+                    session_id: "sess-op".to_string(),
+                    owner_number: Some(3248),
+                    commands: vec!["git --version".to_string()],
+                    created_at: Utc::now(),
+                    content_hash: String::new(),
+                },
+            )
+            .unwrap();
             crate::cli::verification_record::run_verification(
                 dir.path(),
                 "sess-op",
@@ -1166,6 +1177,17 @@ mod tests {
                 },
             )
             .unwrap();
+            crate::cli::verification_record::save_plan(
+                dir.path(),
+                &crate::cli::verification_record::VerificationPlanRecord {
+                    session_id: "sess-op".to_string(),
+                    owner_number: Some(3248),
+                    commands: vec!["git --version".to_string()],
+                    created_at: Utc::now(),
+                    content_hash: String::new(),
+                },
+            )
+            .unwrap();
             crate::cli::verification_record::run_verification(
                 dir.path(),
                 "sess-op",
@@ -1216,6 +1238,17 @@ mod tests {
             assert!(integrity_ok(&record));
 
             // Settlement now works from the adopting session (with evidence).
+            crate::cli::verification_record::save_plan(
+                dir.path(),
+                &crate::cli::verification_record::VerificationPlanRecord {
+                    session_id: "sess-new".to_string(),
+                    owner_number: Some(3248),
+                    commands: vec!["git --version".to_string()],
+                    created_at: Utc::now(),
+                    content_hash: String::new(),
+                },
+            )
+            .unwrap();
             crate::cli::verification_record::run_verification(
                 dir.path(),
                 "sess-new",

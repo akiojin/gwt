@@ -61,6 +61,13 @@ pub struct VerificationRunRecord {
     pub commands: Vec<VerificationCommandResult>,
     pub all_passed: bool,
     pub created_at: DateTime<Utc>,
+    /// T-130-lite: whether this run covered every command of the registered
+    /// verification plan (`verify.plan`) for the same session/owner.
+    #[serde(default)]
+    pub plan_covered: bool,
+    /// Planned commands the run did not execute (diagnostic for the gates).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub planned_missing: Vec<String>,
     /// Integrity hash over the record content (SPEC-3248 P9a, T-119/T-122
     /// core): sha256 of the canonical serialization with this field emptied.
     /// Gates reject records whose stored hash does not match. Empty = legacy
@@ -83,6 +90,72 @@ pub fn compute_content_hash(record: &VerificationRunRecord) -> String {
 #[must_use]
 pub fn integrity_ok(record: &VerificationRunRecord) -> bool {
     record.content_hash.is_empty() || record.content_hash == compute_content_hash(record)
+}
+
+/// Worktree-relative path of the registered verification plan (SPEC-3248
+/// T-130-lite).
+pub const VERIFICATION_PLAN_STATE_RELATIVE: &str = ".gwt/skill-state/verification-plan.json";
+
+/// The declared verification matrix (T-130-lite): registered through
+/// `verify.plan` BEFORE running, so the planned-vs-ran divergence is
+/// machine-visible. Automatic derivation from changed surfaces / acceptance
+/// scenarios is the full T-130; here the plan is a first-class recorded
+/// contract that `verify.run` must cover.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct VerificationPlanRecord {
+    pub session_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub owner_number: Option<u64>,
+    pub commands: Vec<String>,
+    pub created_at: DateTime<Utc>,
+    /// Integrity hash (P9a convention).
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub content_hash: String,
+}
+
+/// Compute the integrity hash for a plan (content with the hash emptied).
+#[must_use]
+pub fn compute_plan_hash(plan: &VerificationPlanRecord) -> String {
+    let mut canonical = plan.clone();
+    canonical.content_hash = String::new();
+    let bytes = serde_json::to_vec(&canonical).unwrap_or_default();
+    format!("{:x}", Sha256::digest(&bytes))
+}
+
+/// True when the plan's stored integrity hash matches (or is legacy-empty).
+#[must_use]
+pub fn plan_integrity_ok(plan: &VerificationPlanRecord) -> bool {
+    plan.content_hash.is_empty() || plan.content_hash == compute_plan_hash(plan)
+}
+
+/// Resolve the plan path for a worktree.
+#[must_use]
+pub fn plan_state_path(worktree: &Path) -> PathBuf {
+    worktree.join(VERIFICATION_PLAN_STATE_RELATIVE)
+}
+
+/// Load the registered plan. `Ok(None)` when missing.
+pub fn load_plan(worktree: &Path) -> io::Result<Option<VerificationPlanRecord>> {
+    let path = plan_state_path(worktree);
+    match fs::read_to_string(&path) {
+        Ok(contents) => {
+            let plan = serde_json::from_str::<VerificationPlanRecord>(&contents)
+                .map_err(|err| io::Error::new(ErrorKind::InvalidData, err))?;
+            Ok(Some(plan))
+        }
+        Err(err) if err.kind() == ErrorKind::NotFound => Ok(None),
+        Err(err) => Err(err),
+    }
+}
+
+/// Persist the plan atomically with a fresh integrity hash.
+pub fn save_plan(worktree: &Path, plan: &VerificationPlanRecord) -> io::Result<()> {
+    let mut plan = plan.clone();
+    plan.content_hash = compute_plan_hash(&plan);
+    let path = plan_state_path(worktree);
+    let serialized = serde_json::to_vec_pretty(&plan)
+        .map_err(|err| io::Error::new(ErrorKind::InvalidData, err))?;
+    gwt_github::cache::write_atomic(&path, &serialized)
 }
 
 /// Resolve the record path for a worktree.
@@ -330,6 +403,32 @@ pub fn run_verification(
         );
         "invalidated-by-concurrent-change".to_string()
     };
+    // T-130-lite: compare against the registered plan for this session (and
+    // owner). A missing, cross-session, or tampered plan means the run is
+    // unplanned — recorded as uncovered so the gates surface it.
+    let (plan_covered, planned_missing) = match load_plan(worktree) {
+        Ok(Some(plan))
+            if plan_integrity_ok(&plan)
+                && plan.session_id == session_id
+                && plan.owner_number == owner_number =>
+        {
+            let ran: std::collections::HashSet<&str> =
+                commands.iter().map(String::as_str).collect();
+            let missing: Vec<String> = plan
+                .commands
+                .iter()
+                .filter(|planned| !ran.contains(planned.as_str()))
+                .cloned()
+                .collect();
+            (missing.is_empty(), missing)
+        }
+        _ => (false, Vec::new()),
+    };
+    if !plan_covered {
+        transcript.push_str(
+            "note: this run does not cover a registered verification plan for this session — register the matrix with `verify.plan` first, then run it (T-130)\n",
+        );
+    }
     let record = VerificationRunRecord {
         record_id: format!("vrr-{}", uuid::Uuid::new_v4().simple()),
         session_id: session_id.to_string(),
@@ -338,6 +437,8 @@ pub fn run_verification(
         commands: results,
         all_passed,
         created_at: Utc::now(),
+        plan_covered,
+        planned_missing,
         content_hash: String::new(),
     };
     save(worktree, &record).map_err(|err| format!("failed to save verification record: {err}"))?;
@@ -358,6 +459,9 @@ pub enum EvidenceStatus {
     /// P9a (T-122): the stored integrity hash does not match the content —
     /// the record was edited outside `verify.run`.
     Tampered,
+    /// T-130-lite: the run did not cover the registered verification plan
+    /// (or no plan was registered before running).
+    PlanNotCovered,
 }
 
 impl EvidenceStatus {
@@ -386,6 +490,9 @@ impl EvidenceStatus {
             }
             Self::Tampered => {
                 "the verification record failed integrity validation (edited outside `verify.run`) — rerun `verify.run` to produce a genuine record"
+            }
+            Self::PlanNotCovered => {
+                "the last verification run does not cover a registered plan — declare the required matrix with `verify.plan` (params.commands), then run it in full through `verify.run`"
             }
         }
     }
@@ -421,6 +528,9 @@ pub fn evaluate_evidence(
     if !record.all_passed {
         return EvidenceStatus::Failing;
     }
+    if !record.plan_covered {
+        return EvidenceStatus::PlanNotCovered;
+    }
     EvidenceStatus::Fresh
 }
 
@@ -431,7 +541,13 @@ pub fn evaluate_evidence(
 /// Commands of the `verify.*` JSON operation family.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum VerifyCommand {
-    Run { commands: Vec<String> },
+    Run {
+        commands: Vec<String>,
+    },
+    /// T-130-lite: register the required verification matrix before running.
+    Plan {
+        commands: Vec<String>,
+    },
 }
 
 pub(super) fn run<E: CliEnv>(
@@ -439,18 +555,46 @@ pub(super) fn run<E: CliEnv>(
     command: VerifyCommand,
     out: &mut String,
 ) -> Result<i32, SpecOpsError> {
+    let session_id = std::env::var(gwt_agent::GWT_SESSION_ID_ENV)
+        .ok()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| {
+            SpecOpsError::from(ApiError::Unexpected(
+                "verify.* requires GWT_SESSION_ID to bind the record to the session".to_string(),
+            ))
+        })?;
     match command {
-        VerifyCommand::Run { commands } => {
-            let session_id = std::env::var(gwt_agent::GWT_SESSION_ID_ENV)
+        VerifyCommand::Plan { commands } => {
+            if commands.is_empty() {
+                return Err(SpecOpsError::from(ApiError::Unexpected(
+                    "verify.plan requires at least one command".to_string(),
+                )));
+            }
+            let worktree = gwt_core::paths::resolve_current_worktree_root(env.repo_path());
+            let owner_number = execution_state::load(&worktree)
                 .ok()
-                .map(|value| value.trim().to_string())
-                .filter(|value| !value.is_empty())
-                .ok_or_else(|| {
-                    SpecOpsError::from(ApiError::Unexpected(
-                        "verify.run requires GWT_SESSION_ID to bind the record to the session"
-                            .to_string(),
-                    ))
-                })?;
+                .flatten()
+                .map(|record| record.owner_number);
+            let plan = VerificationPlanRecord {
+                session_id: session_id.clone(),
+                owner_number,
+                commands: commands.clone(),
+                created_at: Utc::now(),
+                content_hash: String::new(),
+            };
+            save_plan(&worktree, &plan)
+                .map_err(|err| SpecOpsError::from(ApiError::Network(err.to_string())))?;
+            out.push_str(&format!(
+                "verify: plan registered — {count} command(s) for session {session_id} (owner {owner})\n",
+                count = commands.len(),
+                owner = owner_number
+                    .map(|n| format!("#{n}"))
+                    .unwrap_or_else(|| "none".to_string()),
+            ));
+            Ok(0)
+        }
+        VerifyCommand::Run { commands } => {
             let worktree = gwt_core::paths::resolve_current_worktree_root(env.repo_path());
             let (record, transcript) = run_verification(&worktree, &session_id, &commands)
                 .map_err(|err| SpecOpsError::from(ApiError::Unexpected(err)))?;
@@ -474,6 +618,31 @@ pub(super) fn run<E: CliEnv>(
 mod tests {
     use super::*;
     use gwt_core::test_support::ScopedEnvVar;
+
+    /// Register a plan for the commands, then run them (the standard
+    /// T-130-lite flow used everywhere Fresh evidence is needed).
+    fn plan_and_run(
+        worktree: &Path,
+        session: &str,
+        commands: &[String],
+    ) -> (VerificationRunRecord, String) {
+        let owner_number = crate::cli::execution_state::load(worktree)
+            .ok()
+            .flatten()
+            .map(|record| record.owner_number);
+        save_plan(
+            worktree,
+            &VerificationPlanRecord {
+                session_id: session.to_string(),
+                owner_number,
+                commands: commands.to_vec(),
+                created_at: Utc::now(),
+                content_hash: String::new(),
+            },
+        )
+        .unwrap();
+        run_verification(worktree, session, commands).unwrap()
+    }
 
     #[test]
     fn split_command_line_handles_quotes_and_rejects_shell_operators() {
@@ -539,6 +708,8 @@ mod tests {
             }],
             all_passed: true,
             created_at: Utc::now(),
+            plan_covered: true,
+            planned_missing: Vec::new(),
             content_hash: String::new(),
         };
         save(dir.path(), &record).unwrap();
@@ -587,8 +758,7 @@ mod tests {
             EvidenceStatus::MissingRecord
         );
 
-        let (_, _) =
-            run_verification(dir.path(), "sess-1", &["git --version".to_string()]).unwrap();
+        let (_, _) = plan_and_run(dir.path(), "sess-1", &["git --version".to_string()]);
         assert_eq!(
             evaluate_evidence(dir.path(), "sess-1", None),
             EvidenceStatus::Fresh
@@ -629,8 +799,7 @@ mod tests {
             false,
         )
         .unwrap();
-        let (record, _) =
-            run_verification(dir.path(), "sess-1", &["git --version".to_string()]).unwrap();
+        let (record, _) = plan_and_run(dir.path(), "sess-1", &["git --version".to_string()]);
         assert_eq!(record.owner_number, Some(3248));
         assert_eq!(
             evaluate_evidence(dir.path(), "sess-1", Some(3248)),
@@ -658,7 +827,7 @@ mod tests {
         init(&["add", "."]);
         init(&["commit", "-qm", "init"]);
 
-        run_verification(dir.path(), "sess-1", &["git --version".to_string()]).unwrap();
+        plan_and_run(dir.path(), "sess-1", &["git --version".to_string()]);
         assert_eq!(
             evaluate_evidence(dir.path(), "sess-1", None),
             EvidenceStatus::Fresh
@@ -682,7 +851,7 @@ mod tests {
         // Content-level staleness (FR-036): re-verify on the dirty state,
         // then edit the SAME already-dirty file again — porcelain output is
         // unchanged but the content differs, so evidence must go stale.
-        run_verification(dir.path(), "sess-1", &["git --version".to_string()]).unwrap();
+        plan_and_run(dir.path(), "sess-1", &["git --version".to_string()]);
         assert_eq!(
             evaluate_evidence(dir.path(), "sess-1", None),
             EvidenceStatus::Fresh
@@ -697,7 +866,7 @@ mod tests {
         // Same for a new file inside an already-untracked directory.
         std::fs::create_dir_all(dir.path().join("newdir")).unwrap();
         std::fs::write(dir.path().join("newdir/a.txt"), "a").unwrap();
-        run_verification(dir.path(), "sess-1", &["git --version".to_string()]).unwrap();
+        plan_and_run(dir.path(), "sess-1", &["git --version".to_string()]);
         assert_eq!(
             evaluate_evidence(dir.path(), "sess-1", None),
             EvidenceStatus::Fresh
@@ -708,6 +877,73 @@ mod tests {
             EvidenceStatus::StaleFingerprint,
             "new files inside untracked directories must invalidate evidence"
         );
+    }
+
+    // T-130-lite: evidence requires a registered plan and a covering run.
+    #[test]
+    fn plan_coverage_gates_freshness() {
+        let dir = tempfile::tempdir().unwrap();
+
+        // No plan registered — a passing run is still not Fresh.
+        run_verification(dir.path(), "sess-1", &["git --version".to_string()]).unwrap();
+        assert_eq!(
+            evaluate_evidence(dir.path(), "sess-1", None),
+            EvidenceStatus::PlanNotCovered
+        );
+
+        // Plan with two commands; running only one is not covered.
+        save_plan(
+            dir.path(),
+            &VerificationPlanRecord {
+                session_id: "sess-1".to_string(),
+                owner_number: None,
+                commands: vec!["git --version".to_string(), "git --exec-path".to_string()],
+                created_at: Utc::now(),
+                content_hash: String::new(),
+            },
+        )
+        .unwrap();
+        let (record, transcript) =
+            run_verification(dir.path(), "sess-1", &["git --version".to_string()]).unwrap();
+        assert!(!record.plan_covered, "{transcript}");
+        assert_eq!(record.planned_missing, vec!["git --exec-path"]);
+        assert_eq!(
+            evaluate_evidence(dir.path(), "sess-1", None),
+            EvidenceStatus::PlanNotCovered
+        );
+
+        // Running the full plan (superset allowed) is covered and Fresh.
+        let (record, _) = run_verification(
+            dir.path(),
+            "sess-1",
+            &[
+                "git --version".to_string(),
+                "git --exec-path".to_string(),
+                "git --html-path".to_string(),
+            ],
+        )
+        .unwrap();
+        assert!(record.plan_covered);
+        assert_eq!(
+            evaluate_evidence(dir.path(), "sess-1", None),
+            EvidenceStatus::Fresh
+        );
+
+        // Another session's plan does not count for this session's run.
+        save_plan(
+            dir.path(),
+            &VerificationPlanRecord {
+                session_id: "sess-other".to_string(),
+                owner_number: None,
+                commands: vec!["git --version".to_string()],
+                created_at: Utc::now(),
+                content_hash: String::new(),
+            },
+        )
+        .unwrap();
+        let (record, _) =
+            run_verification(dir.path(), "sess-1", &["git --version".to_string()]).unwrap();
+        assert!(!record.plan_covered);
     }
 
     // verify.run command surface: session binding is required.
