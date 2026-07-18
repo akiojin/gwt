@@ -1729,7 +1729,9 @@ impl<T: HttpTransport> OwnerRepositoryClient for HttpIssueClient<T> {
                     .map_err(|error| remap_partial_page(error, completed_pages))?;
             for node in nodes {
                 deadline.remaining(operation)?;
-                issues.push(parse_owner_issue(node, repository, operation, false)?);
+                let issue = parse_owner_issue(node, repository, operation, false)
+                    .map_err(|error| remap_partial_page(error, completed_pages))?;
+                issues.push(issue);
             }
             deadline.remaining(operation)?;
             completed_pages += 1;

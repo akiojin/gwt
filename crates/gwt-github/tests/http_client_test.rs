@@ -529,6 +529,28 @@ fn owner_issue_listing_rejects_truncated_nested_labels() {
 }
 
 #[test]
+fn owner_issue_listing_preserves_completed_pages_for_truncated_nested_labels() {
+    let transport = FakeTransport::new();
+    transport.enqueue(owner_page(vec![owner_issue(1, &[])], true, Some("next")));
+    let mut truncated = owner_issue(2, &["gwt-spec"]);
+    truncated["labels"]["totalCount"] = serde_json::json!(2);
+    transport.enqueue(owner_page(vec![truncated], false, None));
+    let client = client_with(transport);
+
+    let error = client
+        .list_issues(&RepositoryIdentity::gwt_upstream(), &owner_deadline())
+        .expect_err("truncated labels must preserve completed page count");
+
+    assert_eq!(
+        error,
+        ApiError::PartialPage {
+            operation: "list owner issues".to_string(),
+            completed_pages: 1,
+        }
+    );
+}
+
+#[test]
 fn owner_list_comments_reads_more_than_one_hundred() {
     let transport = FakeTransport::new();
     let comments = (1..=100)

@@ -908,6 +908,11 @@ impl OwnerRepositoryClient for FakeIssueClient {
         if input.body.len() > 65_536 {
             return Err(OwnerMutationError::PreSubmit(ApiError::BodyTooLarge));
         }
+        let expected_kind = if input.labels.iter().any(|label| label == "gwt-spec") {
+            RepositoryIssueKind::Spec
+        } else {
+            RepositoryIssueKind::Plain
+        };
         let number = {
             let mut state = self
                 .inner
@@ -933,7 +938,7 @@ impl OwnerRepositoryClient for FakeIssueClient {
                 body: input.body.clone(),
                 labels: input.labels.clone(),
                 state: IssueState::Open,
-                kind: RepositoryIssueKind::Plain,
+                kind: expected_kind,
                 updated_at: self.tick(),
             };
             state
@@ -952,8 +957,25 @@ impl OwnerRepositoryClient for FakeIssueClient {
             }
             number
         };
-        self.fetch_issue(repository, number, deadline)
-            .map_err(OwnerMutationError::RemoteOutcomeUnknown)
+        let readback = self
+            .fetch_issue(repository, number, deadline)
+            .map_err(OwnerMutationError::RemoteOutcomeUnknown)?;
+        let mut expected_labels = input.labels.clone();
+        expected_labels.sort();
+        let mut actual_labels = readback.labels.clone();
+        actual_labels.sort();
+        if readback.title != input.title
+            || readback.body != input.body
+            || actual_labels != expected_labels
+            || readback.state != IssueState::Open
+            || readback.kind != expected_kind
+        {
+            return Err(OwnerMutationError::RemoteOutcomeUnknown(ApiError::Parse {
+                operation: "read back owner issue".to_string(),
+                message: "created Issue did not match the submitted payload".to_string(),
+            }));
+        }
+        Ok(readback)
     }
 
     fn close_issue_verified(
@@ -1538,6 +1560,28 @@ mod owner_repository_tests {
         );
         assert_eq!(mutations[2].operation, OwnerRepositoryOperation::CloseIssue);
         assert!(mutations.iter().all(|call| call.repository == repository));
+    }
+
+    #[test]
+    fn fake_owner_issue_kind_is_derived_from_requested_labels() {
+        let client = FakeIssueClient::new();
+        let repository = RepositoryIdentity::gwt_upstream();
+        let labels = vec!["triage".to_string(), "gwt-spec".to_string()];
+
+        let created = client
+            .create_owner_issue(
+                &repository,
+                &CreateRepositoryIssue {
+                    title: "SPEC-3305".to_string(),
+                    body: "body".to_string(),
+                    labels: labels.clone(),
+                },
+                &deadline(),
+            )
+            .expect("verified issue readback");
+
+        assert_eq!(created.labels, labels);
+        assert_eq!(created.kind, RepositoryIssueKind::Spec);
     }
 
     #[test]
