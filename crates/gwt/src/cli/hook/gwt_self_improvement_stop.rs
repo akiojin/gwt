@@ -61,6 +61,28 @@ fn evaluate_with_deadline<E: CliEnv>(
     suppressed_by_lane: bool,
     deadline: &ResolutionDeadline,
 ) -> HookOutput {
+    evaluate_with_deadline_and_reserve(
+        env,
+        stop_hook_active,
+        suppressed_by_lane,
+        deadline,
+        DIRECT_STOP_SETTLEMENT_RESERVE,
+    )
+}
+
+/// Evaluate Stop with an injected absolute deadline and settlement reserve.
+///
+/// Production callers use [`evaluate_with_env`]; this narrow seam lets
+/// integration tests exercise the same deadline boundaries without waiting
+/// for the production 15-second budget.
+#[doc(hidden)]
+pub fn evaluate_with_deadline_and_reserve<E: CliEnv>(
+    env: &mut E,
+    stop_hook_active: bool,
+    suppressed_by_lane: bool,
+    deadline: &ResolutionDeadline,
+    settlement_reserve: Duration,
+) -> HookOutput {
     let worktree_root = env.repo_path().to_path_buf();
     if stop_hook_active || suppressed_by_lane {
         return HookOutput::Silent;
@@ -79,7 +101,7 @@ fn evaluate_with_deadline<E: CliEnv>(
     };
     let mut attempt_failure = None;
     if let Some(candidate_id) = select_pending_owner_status_candidate(&candidates) {
-        let resolution_deadline = deadline.reserving(DIRECT_STOP_SETTLEMENT_RESERVE);
+        let resolution_deadline = deadline.reserving(settlement_reserve);
         let _ = retry_pending_owner_status_with_operation_deadline(
             env,
             &candidate_id,
@@ -87,7 +109,7 @@ fn evaluate_with_deadline<E: CliEnv>(
             deadline.expires_at(),
         );
     } else if let Some(candidate_id) = select_attempt_candidate(&candidates) {
-        let resolution_deadline = deadline.reserving(DIRECT_STOP_SETTLEMENT_RESERVE);
+        let resolution_deadline = deadline.reserving(settlement_reserve);
         if let Err(error) = resolve_candidate_owner_with_operation_deadline(
             env,
             &candidate_id,

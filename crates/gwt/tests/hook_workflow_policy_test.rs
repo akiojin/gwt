@@ -39,7 +39,7 @@ use gwt_core::{
 use gwt_github::{
     client::{
         fake::{OwnerRepositoryFaultTiming, OwnerRepositoryOperation},
-        ApiError, IssueNumber, IssueSnapshot, IssueState, UpdatedAt,
+        ApiError, IssueNumber, IssueSnapshot, IssueState, ResolutionDeadline, UpdatedAt,
     },
     Cache,
 };
@@ -49,6 +49,24 @@ use tempfile::TempDir;
 fn env_lock() -> &'static Mutex<()> {
     static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
     LOCK.get_or_init(|| Mutex::new(()))
+}
+
+const DIRECT_STOP_TEST_TOTAL_BUDGET: Duration = Duration::from_millis(900);
+const DIRECT_STOP_TEST_CONNECT_TIMEOUT: Duration = Duration::from_millis(150);
+const DIRECT_STOP_TEST_SETTLEMENT_RESERVE: Duration = Duration::from_millis(250);
+
+fn evaluate_direct_stop_with_test_budget(env: &mut DefaultCliEnv) -> HookOutput {
+    let deadline = ResolutionDeadline::new(
+        DIRECT_STOP_TEST_CONNECT_TIMEOUT,
+        DIRECT_STOP_TEST_TOTAL_BUDGET,
+    );
+    gwt_self_improvement_stop::evaluate_with_deadline_and_reserve(
+        env,
+        false,
+        false,
+        &deadline,
+        DIRECT_STOP_TEST_SETTLEMENT_RESERVE,
+    )
 }
 
 fn root() -> PathBuf {
@@ -486,7 +504,7 @@ fn direct_stop_composes_pagination_and_transport_stall_within_strict_budget() {
             stalled
                 .set_read_timeout(Some(Duration::from_millis(100)))
                 .expect("stall read timeout");
-            let until = Instant::now() + Duration::from_secs(17);
+            let until = Instant::now() + Duration::from_millis(850);
             let mut byte = [0_u8; 1];
             while Instant::now() < until {
                 match stalled.read(&mut byte) {
@@ -508,14 +526,17 @@ fn direct_stop_composes_pagination_and_transport_stall_within_strict_budget() {
         let mut env = DefaultCliEnv::new_for_hooks_at(repo.path().to_path_buf());
         let started = Instant::now();
 
-        let output = gwt_self_improvement_stop::evaluate_with_env(&mut env, false, false);
+        let output = evaluate_direct_stop_with_test_budget(&mut env);
         let elapsed = started.elapsed();
 
         let HookOutput::StopBlock { reason } = output else {
             panic!("stalled direct Stop owner search must block");
         };
         assert!(reason.contains("reason=timeout"), "{reason}");
-        assert!(elapsed < Duration::from_secs(16), "elapsed={elapsed:?}");
+        assert!(
+            elapsed < DIRECT_STOP_TEST_TOTAL_BUDGET + Duration::from_secs(1),
+            "elapsed={elapsed:?}"
+        );
         let persisted = candidate_public_values(repo.path());
         assert_eq!(persisted.len(), 1);
         assert_eq!(persisted[0]["state"], "blocked");
@@ -571,7 +592,7 @@ fn direct_stop_reserves_time_to_settle_after_post_attempt_store_lock_contention(
             )
             .expect("complete owner corpus response");
             request.flush().expect("flush owner corpus response");
-            std::thread::sleep(Duration::from_millis(14_500));
+            std::thread::sleep(Duration::from_millis(700));
             fs2::FileExt::unlock(&candidate_lock).expect("release candidate store lock");
         });
         let _mode = ScopedEnvVar::set("GWT_OWNER_GITHUB_TEST_MODE", "loopback-v1");
@@ -584,7 +605,7 @@ fn direct_stop_reserves_time_to_settle_after_post_attempt_store_lock_contention(
         let mut env = DefaultCliEnv::new_for_hooks_at(repo.path().to_path_buf());
         let started = Instant::now();
 
-        let output = gwt_self_improvement_stop::evaluate_with_env(&mut env, false, false);
+        let output = evaluate_direct_stop_with_test_budget(&mut env);
         let elapsed = started.elapsed();
 
         server.join().expect("loopback server");
@@ -594,7 +615,10 @@ fn direct_stop_reserves_time_to_settle_after_post_attempt_store_lock_contention(
         assert!(reason.contains("state=blocked"), "{reason}");
         assert!(reason.contains("reason=timeout"), "{reason}");
         assert!(reason.contains("RETRY_WITHIN_BUDGET"), "{reason}");
-        assert!(elapsed < Duration::from_secs(16), "elapsed={elapsed:?}");
+        assert!(
+            elapsed < DIRECT_STOP_TEST_TOTAL_BUDGET + Duration::from_secs(1),
+            "elapsed={elapsed:?}"
+        );
         let persisted = candidate_public_values(repo.path());
         assert_eq!(persisted.len(), 1);
         assert_eq!(persisted[0]["state"], "blocked");
@@ -628,7 +652,7 @@ fn direct_stop_terminates_stalled_lazy_auth_and_persists_timeout() {
 
         let fake_bin = tempfile::tempdir().expect("fake bin");
         let fake_gh = fake_bin.path().join("gh");
-        std::fs::write(&fake_gh, "#!/bin/sh\nsleep 20\nprintf 'late-token\\n'\n")
+        std::fs::write(&fake_gh, "#!/bin/sh\nsleep 0.8\nprintf 'late-token\\n'\n")
             .expect("write fake gh");
         std::fs::set_permissions(&fake_gh, std::fs::Permissions::from_mode(0o755))
             .expect("make fake gh executable");
@@ -645,14 +669,17 @@ fn direct_stop_terminates_stalled_lazy_auth_and_persists_timeout() {
         let mut env = DefaultCliEnv::new_for_hooks_at(repo.path().to_path_buf());
         let started = Instant::now();
 
-        let output = gwt_self_improvement_stop::evaluate_with_env(&mut env, false, false);
+        let output = evaluate_direct_stop_with_test_budget(&mut env);
         let elapsed = started.elapsed();
 
         let HookOutput::StopBlock { reason } = output else {
             panic!("stalled direct Stop auth must block");
         };
         assert!(reason.contains("reason=timeout"), "{reason}");
-        assert!(elapsed < Duration::from_secs(16), "elapsed={elapsed:?}");
+        assert!(
+            elapsed < DIRECT_STOP_TEST_TOTAL_BUDGET + Duration::from_secs(1),
+            "elapsed={elapsed:?}"
+        );
         let persisted = candidate_public_values(repo.path());
         assert_eq!(persisted.len(), 1);
         assert_eq!(persisted[0]["state"], "blocked");
