@@ -6,6 +6,7 @@
 //! `gwt-github`, and writes the result to stdout/stderr.
 
 mod actions;
+pub(crate) mod artifact_operability;
 mod board;
 mod build;
 mod commands;

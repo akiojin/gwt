@@ -841,24 +841,27 @@ fn resolve_gh_token_with_deadline(deadline: &ResolutionDeadline) -> Result<Strin
 
 #[cfg(test)]
 mod transport_tests {
-    use std::{
-        ffi::OsString,
-        sync::{Arc, Mutex},
-        time::Duration,
-    };
+    #[cfg(unix)]
+    use std::{ffi::OsString, sync::Mutex};
+    use std::{sync::Arc, time::Duration};
 
     use super::{
-        issue_generation, resolve_gh_token, resolve_gh_token_with_deadline, HttpError, HttpMethod,
-        HttpRequest, HttpTransport, ReqwestTransport, ResolutionDeadline,
+        issue_generation, HttpError, HttpMethod, HttpRequest, HttpTransport, ReqwestTransport,
+        ResolutionDeadline,
     };
+    #[cfg(unix)]
+    use super::{resolve_gh_token, resolve_gh_token_with_deadline};
 
+    #[cfg(unix)]
     static ENV_LOCK: Mutex<()> = Mutex::new(());
 
+    #[cfg(unix)]
     struct ScopedEnvVar {
         name: &'static str,
         previous: Option<OsString>,
     }
 
+    #[cfg(unix)]
     impl ScopedEnvVar {
         fn set(name: &'static str, value: impl AsRef<std::ffi::OsStr>) -> Self {
             let previous = std::env::var_os(name);
@@ -867,6 +870,7 @@ mod transport_tests {
         }
     }
 
+    #[cfg(unix)]
     impl Drop for ScopedEnvVar {
         fn drop(&mut self) {
             match self.previous.take() {
