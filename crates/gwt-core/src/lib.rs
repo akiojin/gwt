@@ -10,6 +10,7 @@ pub mod coordination;
 pub mod daemon;
 pub mod error;
 pub mod index;
+pub mod index_coordinator;
 pub mod logging;
 pub mod migration;
 pub mod paths;
@@ -30,7 +31,7 @@ pub mod workspace_projection;
 pub mod workspace_projection_migration;
 pub mod worktree_hash;
 
-pub use error::{GwtError, Result};
+pub use error::{GwtError, JsonDecodeKind, Result};
 
 #[cfg(test)]
 mod canonical_naming_tests {

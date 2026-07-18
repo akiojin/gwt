@@ -102,32 +102,34 @@ class AutoBuildFallbackTests(unittest.TestCase):
             self.assertFalse(result["ok"])
             self.assertEqual(result.get("error_code"), "INDEX_MISSING")
 
-    def test_search_multi_disables_auto_build_for_each_scope(self):
-        with mock.patch.object(
-            runner,
-            "action_search_v2",
-            side_effect=[
-                {"ok": True, "issueResults": [{"number": 1}]},
-                {"ok": True, "specResults": [{"spec_id": "1939"}]},
-                {"ok": True, "boardResults": [{"entry_id": "board-1"}]},
-            ],
-        ) as search:
-            result = runner.action_search_multi_v2(
-                repo_hash="abc1234567890def",
-                worktree_hash=None,
-                project_root="/repo",
-                query="Git",
-                n_results=5,
-                scopes=["issues", "specs", "board"],
-            )
+    def test_search_multi_never_auto_builds_missing_scopes(self):
+        # Phase 70: search-multi classifies broken scopes instead of building
+        # them inline. Missing stores are reported per scope; no index action
+        # runs (the Rust caller owns repair scheduling).
+        with tempfile.TemporaryDirectory() as tmp:
+            db_root = Path(tmp) / "index"
+            with mock.patch.object(
+                runner, "action_index_issues_v2"
+            ) as build_issues, mock.patch.object(
+                runner, "action_index_specs_v2"
+            ) as build_specs:
+                result = runner.action_search_multi_v2(
+                    repo_hash="abc1234567890def",
+                    worktree_hash=None,
+                    project_root=str(Path(tmp) / "repo"),
+                    query="Git",
+                    n_results=5,
+                    scopes=["issues", "specs", "board"],
+                    db_root=db_root,
+                )
 
         self.assertTrue(result["ok"], result)
-        self.assertEqual(result["issueResults"][0]["number"], 1)
-        self.assertEqual(result["specResults"][0]["spec_id"], "1939")
-        self.assertEqual(result["boardResults"][0]["entry_id"], "board-1")
-        self.assertEqual(search.call_count, 3)
-        for call in search.call_args_list:
-            self.assertTrue(call.kwargs["no_auto_build"])
+        for scope in ("issues", "specs", "board"):
+            self.assertEqual(
+                result["scopes"][scope]["state"], "missing", result
+            )
+        build_issues.assert_not_called()
+        build_specs.assert_not_called()
 
     def test_progress_emitted_on_stderr(self):
         with tempfile.TemporaryDirectory() as tmp:

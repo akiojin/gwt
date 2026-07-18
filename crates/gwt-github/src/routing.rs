@@ -17,6 +17,12 @@ pub const ROUTING_PROMOTE_THRESHOLD_BYTES: usize = 16 * 1024;
 /// The total body budget — beyond this, sections are demoted to comments.
 pub const ROUTING_BODY_BUDGET_BYTES: usize = 60 * 1024;
 
+/// Per-part content budget for comment-resident sections (SPEC-3248 P7C /
+/// #3284). GitHub rejects comments beyond 65,536 characters; keeping each
+/// part's *content* at 60 KiB leaves headroom for the part markers while
+/// staying conservative for both byte- and character-counted limits.
+pub const COMMENT_PART_BUDGET_BYTES: usize = 60 * 1024;
+
 /// Default body-resident sections. Everything else defaults to comment.
 pub const DEFAULT_BODY_SECTIONS: &[&str] = &["spec", "tasks"];
 
@@ -80,4 +86,61 @@ pub fn decide_routing(sections: &BTreeMap<SectionName, String>) -> Routing {
     }
 
     Routing(map)
+}
+
+/// Errors reported by [`split_section_into_parts`].
+#[derive(Debug, thiserror::Error)]
+pub enum SplitError {
+    /// A single line is larger than the per-part budget, so no line-boundary
+    /// cut can fit it. The writer must fail closed instead of truncating.
+    #[error(
+        "section line {line} exceeds the {budget}-byte part budget and \
+         cannot be split at a line boundary"
+    )]
+    UnsplittableChunk { line: usize, budget: usize },
+}
+
+/// Split section content into comment-sized parts (SPEC-3248 P7C / #3284).
+///
+/// Cuts are made only at line boundaries. Losslessness relies on the marker
+/// parser's exact-trim contract for part-marked sections: the writer wraps
+/// each part as `BEGIN part=i/K` + `\n` + part + `\n` + `END part=i/K`, the
+/// parser strips exactly that one newline per side, and
+/// [`crate::body::SpecBody::parse`] rejoins parts with a single `\n` — the
+/// same newline the cut consumed. Parts may therefore begin or end with
+/// blank lines and still roundtrip byte-for-byte.
+///
+/// Content within [`COMMENT_PART_BUDGET_BYTES`] is returned as a single part
+/// byte-for-byte. A single line larger than the budget fails closed with
+/// [`SplitError::UnsplittableChunk`].
+pub fn split_section_into_parts(content: &str) -> Result<Vec<String>, SplitError> {
+    if content.len() <= COMMENT_PART_BUDGET_BYTES {
+        return Ok(vec![content.to_string()]);
+    }
+
+    let lines: Vec<&str> = content.split('\n').collect();
+    let mut parts: Vec<String> = Vec::new();
+    let mut start = 0usize;
+    while start < lines.len() {
+        if lines[start].len() > COMMENT_PART_BUDGET_BYTES {
+            return Err(SplitError::UnsplittableChunk {
+                line: start + 1,
+                budget: COMMENT_PART_BUDGET_BYTES,
+            });
+        }
+        // Grow the window greedily while the joined size fits the budget.
+        let mut end = start;
+        let mut size = lines[start].len();
+        while end + 1 < lines.len() {
+            let next = size + 1 + lines[end + 1].len();
+            if next > COMMENT_PART_BUDGET_BYTES {
+                break;
+            }
+            end += 1;
+            size = next;
+        }
+        parts.push(lines[start..=end].join("\n"));
+        start = end + 1;
+    }
+    Ok(parts)
 }

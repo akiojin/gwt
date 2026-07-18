@@ -7,7 +7,7 @@ use std::{
     ffi::OsString,
     io::{BufRead, BufReader, Read},
     path::{Path, PathBuf},
-    process::{Command, Output, Stdio},
+    process::{Output, Stdio},
     sync::mpsc::{self, RecvTimeoutError},
     thread,
     time::{Duration, Instant},
@@ -336,7 +336,7 @@ where
     let started_at = Instant::now();
     let mut on_line = wrap_on_line_with_hub(on_line, hub.clone(), spawn_id);
 
-    let mut command = Command::new(docker_binary());
+    let mut command = gwt_core::process::hidden_command(docker_binary());
     command
         .args(args)
         .stdout(Stdio::piped())

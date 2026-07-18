@@ -17,6 +17,7 @@ use super::*;
 /// and the linked PR snapshot. Populated by Start Work / Launch
 /// materialization and refreshed when PR state is polled.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct GitDetails {
     pub branch: Option<String>,
     pub worktree_path: Option<PathBuf>,
@@ -79,6 +80,7 @@ pub struct WorkspaceCleanupCandidate {
 /// Board stays the coordination/history log while this projection tracks the
 /// present.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct WorkspaceProjection {
     pub id: String,
     pub project_root: PathBuf,
@@ -144,6 +146,42 @@ pub struct WorkspaceProjection {
 }
 
 impl WorkspaceProjection {
+    fn latest_agent_index_for_session(&self, session_id: &str) -> Option<usize> {
+        self.agents
+            .iter()
+            .enumerate()
+            .filter(|(_, agent)| agent.session_id == session_id)
+            .max_by(|(_, left), (_, right)| {
+                left.updated_at
+                    .cmp(&right.updated_at)
+                    .then_with(|| stable_agent_key(left).cmp(&stable_agent_key(right)))
+            })
+            .map(|(index, _)| index)
+    }
+
+    pub fn latest_agent_for_session(&self, session_id: &str) -> Option<&WorkspaceAgentSummary> {
+        self.latest_agent_index_for_session(session_id)
+            .map(|index| &self.agents[index])
+    }
+
+    pub fn latest_agent_for_session_mut(
+        &mut self,
+        session_id: &str,
+    ) -> Option<&mut WorkspaceAgentSummary> {
+        let index = self.latest_agent_index_for_session(session_id)?;
+        self.agents.get_mut(index)
+    }
+
+    pub(crate) fn latest_agents(&self) -> impl Iterator<Item = &WorkspaceAgentSummary> {
+        self.agents
+            .iter()
+            .enumerate()
+            .filter(|(index, agent)| {
+                self.latest_agent_index_for_session(&agent.session_id) == Some(*index)
+            })
+            .map(|(_, agent)| agent)
+    }
+
     pub fn default_for_project(project_root: impl Into<PathBuf>) -> Self {
         let now = Utc::now();
         Self {
@@ -176,35 +214,33 @@ impl WorkspaceProjection {
     }
 
     pub fn effective_status_category(&self) -> WorkspaceStatusCategory {
-        if self.agents.iter().any(|agent| {
-            agent.is_assigned() && agent.status_category == WorkspaceStatusCategory::Blocked
-        }) {
+        if self
+            .assigned_agents()
+            .any(|agent| agent.status_category == WorkspaceStatusCategory::Blocked)
+        {
             return WorkspaceStatusCategory::Blocked;
         }
-        if self.agents.iter().any(|agent| {
-            agent.is_assigned() && agent.status_category == WorkspaceStatusCategory::Active
-        }) {
+        if self
+            .assigned_agents()
+            .any(|agent| agent.status_category == WorkspaceStatusCategory::Active)
+        {
             return WorkspaceStatusCategory::Active;
         }
         self.status_category
     }
 
     pub fn unassigned_agents(&self) -> impl Iterator<Item = &WorkspaceAgentSummary> {
-        self.agents.iter().filter(|agent| agent.is_unassigned())
+        self.latest_agents().filter(|agent| agent.is_unassigned())
     }
 
     pub fn assigned_agents(&self) -> impl Iterator<Item = &WorkspaceAgentSummary> {
-        self.agents.iter().filter(|agent| agent.is_assigned())
+        self.latest_agents().filter(|agent| agent.is_assigned())
     }
 
     pub fn register_unassigned_agent(&mut self, mut agent: WorkspaceAgentSummary) {
         agent.affiliation_status = WorkspaceAgentAffiliationStatus::Unassigned;
         agent.workspace_id = None;
-        if let Some(existing) = self
-            .agents
-            .iter_mut()
-            .find(|existing| existing.session_id == agent.session_id)
-        {
+        if let Some(existing) = self.latest_agent_for_session_mut(&agent.session_id) {
             *existing = agent;
         } else {
             self.agents.push(agent);
@@ -212,20 +248,28 @@ impl WorkspaceProjection {
     }
 
     pub fn record_board_milestone(&mut self, entry: &BoardEntry) {
+        self.record_board_milestone_with_state_cutoff(entry, None);
+    }
+
+    pub fn record_board_milestone_with_state_cutoff(
+        &mut self,
+        entry: &BoardEntry,
+        state_cutoff: Option<DateTime<Utc>>,
+    ) {
         if !self.board_refs.iter().any(|id| id == &entry.id) {
             self.board_refs.push(entry.id.clone());
         }
-        let origin_agent_is_unassigned = entry
+        let (origin_agent_is_unassigned, entry_is_current_for_origin) = entry
             .origin_session_id
             .as_deref()
-            .and_then(|session_id| {
-                self.agents
-                    .iter()
-                    .find(|agent| agent.session_id == session_id)
-            })
-            .is_some_and(WorkspaceAgentSummary::is_unassigned);
+            .and_then(|session_id| self.latest_agent_for_session(session_id))
+            .map(|agent| (agent.is_unassigned(), entry.updated_at >= agent.updated_at))
+            .unwrap_or((false, true));
+        let entry_is_current_for_state =
+            state_cutoff.is_none_or(|cutoff| entry.updated_at >= cutoff);
 
-        if !origin_agent_is_unassigned {
+        if !origin_agent_is_unassigned && entry_is_current_for_origin && entry_is_current_for_state
+        {
             if let Some(owner) = entry.related_owners.first() {
                 self.owner = Some(owner.clone());
             }
@@ -275,35 +319,35 @@ impl WorkspaceProjection {
         }
 
         if let Some(session_id) = entry.origin_session_id.as_deref() {
-            if let Some(agent) = self
-                .agents
-                .iter_mut()
-                .find(|agent| agent.session_id == session_id)
-            {
-                agent.last_board_entry_id = Some(entry.id.clone());
-                agent.last_board_entry_kind = Some(entry.kind.clone());
-                agent.coordination_scope = coordination_scope_for_entry(entry);
-                agent.current_focus = Some(entry.body.clone());
-                agent.updated_at = entry.updated_at;
-                match entry.kind {
-                    BoardEntryKind::Blocked => {
-                        agent.status_category = WorkspaceStatusCategory::Blocked;
+            if let Some(agent) = self.latest_agent_for_session_mut(session_id) {
+                if entry_is_current_for_state && entry.updated_at >= agent.updated_at {
+                    agent.last_board_entry_id = Some(entry.id.clone());
+                    agent.last_board_entry_kind = Some(entry.kind.clone());
+                    agent.coordination_scope = coordination_scope_for_entry(entry);
+                    agent.current_focus = Some(entry.body.clone());
+                    agent.updated_at = entry.updated_at;
+                    match entry.kind {
+                        BoardEntryKind::Blocked => {
+                            agent.status_category = WorkspaceStatusCategory::Blocked;
+                        }
+                        BoardEntryKind::Status
+                        | BoardEntryKind::Claim
+                        | BoardEntryKind::Handoff
+                        | BoardEntryKind::Decision => {
+                            agent.status_category = WorkspaceStatusCategory::Active;
+                        }
+                        BoardEntryKind::Next
+                        | BoardEntryKind::Request
+                        | BoardEntryKind::Impact
+                        | BoardEntryKind::Question => {}
                     }
-                    BoardEntryKind::Status
-                    | BoardEntryKind::Claim
-                    | BoardEntryKind::Handoff
-                    | BoardEntryKind::Decision => {
-                        agent.status_category = WorkspaceStatusCategory::Active;
-                    }
-                    BoardEntryKind::Next
-                    | BoardEntryKind::Request
-                    | BoardEntryKind::Impact
-                    | BoardEntryKind::Question => {}
                 }
             }
         }
 
-        self.updated_at = entry.updated_at;
+        if entry.updated_at > self.updated_at {
+            self.updated_at = entry.updated_at;
+        }
     }
 
     pub fn apply_update(
@@ -366,11 +410,7 @@ impl WorkspaceProjection {
                 .as_ref()
                 .filter(|value| !value.trim().is_empty())
                 .cloned();
-            if let Some(agent) = self
-                .agents
-                .iter_mut()
-                .find(|agent| agent.session_id == session_id)
-            {
+            if let Some(agent) = self.latest_agent_for_session_mut(session_id) {
                 if let Some(focus) = focus {
                     agent.current_focus = Some(focus);
                     agent.updated_at = updated_at;
@@ -453,12 +493,11 @@ impl WorkspaceProjection {
     /// agent is currently driving this Work (Active or Blocked). Unassigned
     /// or idle agents do not count.
     pub fn has_current_agents(&self) -> bool {
-        self.agents.iter().any(|agent| {
-            agent.is_assigned()
-                && matches!(
-                    agent.status_category,
-                    WorkspaceStatusCategory::Active | WorkspaceStatusCategory::Blocked
-                )
+        self.assigned_agents().any(|agent| {
+            matches!(
+                agent.status_category,
+                WorkspaceStatusCategory::Active | WorkspaceStatusCategory::Blocked
+            )
         })
     }
 
@@ -477,11 +516,7 @@ impl WorkspaceProjection {
     /// incoming identity fields never clear stored values, and `updated_at`
     /// never rewinds.
     pub fn upsert_agent_summary(&mut self, summary: WorkspaceAgentSummary) {
-        if let Some(existing) = self
-            .agents
-            .iter_mut()
-            .find(|agent| agent.session_id == summary.session_id)
-        {
+        if let Some(existing) = self.latest_agent_for_session_mut(&summary.session_id) {
             existing.agent_id = summary.agent_id;
             existing.window_id = summary.window_id;
             existing.display_name = summary.display_name;
@@ -641,11 +676,7 @@ impl WorkspaceProjection {
         title_summary: Option<String>,
         updated_at: DateTime<Utc>,
     ) -> bool {
-        let Some(agent) = self
-            .agents
-            .iter_mut()
-            .find(|agent| agent.session_id == session_id)
-        else {
+        let Some(agent) = self.latest_agent_for_session_mut(session_id) else {
             return false;
         };
         agent.affiliation_status = WorkspaceAgentAffiliationStatus::Assigned;
@@ -799,6 +830,10 @@ impl WorkspaceProjection {
     }
 }
 
+fn stable_agent_key(agent: &WorkspaceAgentSummary) -> String {
+    serde_json::to_string(agent).unwrap_or_default()
+}
+
 /// Partial update applied to a [`WorkspaceProjection`] (e.g. from
 /// `workspace.update`); `None` fields keep their current values.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -852,6 +887,7 @@ pub struct WorkspaceStartUpdate {
 /// One append-only journal record of a Workspace update, kept alongside the
 /// projection so state changes remain auditable.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct WorkspaceJournalEntry {
     pub id: String,
     pub project_root: PathBuf,
@@ -1329,6 +1365,95 @@ mod tests {
     }
 
     #[test]
+    fn latest_agent_for_session_equal_timestamp_is_vector_order_independent() {
+        let updated_at = Utc.with_ymd_and_hms(2026, 7, 16, 9, 0, 0).unwrap();
+        let mut row_a = us70_agent(
+            "duplicate-session",
+            WorkspaceStatusCategory::Active,
+            WorkspaceAgentAffiliationStatus::Assigned,
+        );
+        row_a.agent_id = "agent-a".to_string();
+        row_a.display_name = "Agent A".to_string();
+        row_a.current_focus = Some("Focus A".to_string());
+        row_a.workspace_id = Some("work-a".to_string());
+        row_a.updated_at = updated_at;
+
+        let mut row_b = row_a.clone();
+        row_b.agent_id = "agent-b".to_string();
+        row_b.display_name = "Agent B".to_string();
+        row_b.current_focus = Some("Focus B".to_string());
+        row_b.workspace_id = Some("work-b".to_string());
+
+        let mut ab = WorkspaceProjection::default_for_project("/repo");
+        ab.agents = vec![row_a.clone(), row_b.clone()];
+        let mut ba = WorkspaceProjection::default_for_project("/repo");
+        ba.agents = vec![row_b, row_a];
+
+        assert_eq!(
+            ab.latest_agent_for_session("duplicate-session"),
+            ba.latest_agent_for_session("duplicate-session"),
+            "equal-time duplicate Session rows must use a stable row-content tie-break"
+        );
+    }
+
+    #[test]
+    fn old_board_milestone_does_not_rewind_latest_duplicate_session_row() {
+        let replayed_at = Utc.with_ymd_and_hms(2026, 7, 15, 9, 0, 0).unwrap();
+        let work_a_at = Utc.with_ymd_and_hms(2026, 7, 15, 10, 0, 0).unwrap();
+        let work_b_at = Utc.with_ymd_and_hms(2026, 7, 15, 12, 0, 0).unwrap();
+        let mut projection = WorkspaceProjection::default_for_project("/repo");
+
+        let mut work_a = us70_agent(
+            "duplicate-session",
+            WorkspaceStatusCategory::Active,
+            WorkspaceAgentAffiliationStatus::Assigned,
+        );
+        work_a.workspace_id = Some("work-a".to_string());
+        work_a.current_focus = Some("Work A".to_string());
+        work_a.updated_at = work_a_at;
+
+        let mut work_b = work_a.clone();
+        work_b.workspace_id = Some("work-b".to_string());
+        work_b.current_focus = Some("Work B".to_string());
+        work_b.updated_at = work_b_at;
+        projection.agents = vec![work_a, work_b];
+        projection.owner = Some("work-b-owner".to_string());
+        projection.status_category = WorkspaceStatusCategory::Blocked;
+        projection.status_text = "Work B status".to_string();
+        projection.summary = Some("Work B summary".to_string());
+        projection.updated_at = work_b_at;
+
+        let mut replayed = BoardEntry::new(
+            crate::coordination::AuthorKind::Agent,
+            "codex",
+            BoardEntryKind::Status,
+            "Old Board status",
+            None,
+            None,
+            Vec::new(),
+            vec!["work-a-owner".to_string()],
+        )
+        .with_origin_session_id("duplicate-session");
+        replayed.updated_at = replayed_at;
+
+        projection.record_board_milestone(&replayed);
+
+        assert_eq!(projection.agents[1].updated_at, work_b_at);
+        assert_eq!(
+            projection
+                .latest_agent_for_session("duplicate-session")
+                .and_then(|agent| agent.workspace_id.as_deref()),
+            Some("work-b")
+        );
+        assert_eq!(projection.owner.as_deref(), Some("work-b-owner"));
+        assert_eq!(projection.status_category, WorkspaceStatusCategory::Blocked);
+        assert_eq!(projection.status_text, "Work B status");
+        assert_eq!(projection.summary.as_deref(), Some("Work B summary"));
+        assert_eq!(projection.updated_at, work_b_at);
+        assert!(projection.board_refs.iter().any(|id| id == &replayed.id));
+    }
+
+    #[test]
     fn apply_update_upserts_minimal_agent_when_session_id_not_present() {
         // SPEC-2359 Phase U-6 (real root cause fix): `workspace.update` with
         // `params.agent_session` and `params.title_summary` must not silently
@@ -1430,6 +1555,63 @@ mod tests {
         assert_eq!(agent.branch.as_deref(), Some("work/x"));
         assert_eq!(agent.workspace_id.as_deref(), Some("ws-1"));
         assert!(agent.is_assigned());
+    }
+
+    #[test]
+    fn apply_update_targets_latest_duplicate_session_row() {
+        let old_at = Utc.with_ymd_and_hms(2026, 7, 15, 8, 0, 0).unwrap();
+        let current_at = Utc.with_ymd_and_hms(2026, 7, 15, 9, 0, 0).unwrap();
+        let update_at = Utc.with_ymd_and_hms(2026, 7, 15, 10, 0, 0).unwrap();
+        let mut projection = WorkspaceProjection::default_for_project("/repo");
+        let mut stale = WorkspaceAgentSummary {
+            session_id: "session-duplicate".to_string(),
+            window_id: None,
+            agent_id: "codex".to_string(),
+            display_name: "Codex".to_string(),
+            status_category: WorkspaceStatusCategory::Active,
+            current_focus: Some("stale focus".to_string()),
+            title_summary: None,
+            worktree_path: None,
+            branch: Some("feature/stale".to_string()),
+            last_board_entry_id: None,
+            last_board_entry_kind: None,
+            coordination_scope: None,
+            affiliation_status: WorkspaceAgentAffiliationStatus::Unassigned,
+            workspace_id: None,
+            updated_at: old_at,
+        };
+        let mut current = stale.clone();
+        current.current_focus = Some("current focus".to_string());
+        current.branch = Some("feature/current".to_string());
+        current.affiliation_status = WorkspaceAgentAffiliationStatus::Assigned;
+        current.workspace_id = Some("work-current".to_string());
+        current.updated_at = current_at;
+        projection.agents.append(&mut vec![stale.clone(), current]);
+
+        projection.apply_update(
+            WorkspaceProjectionUpdate {
+                title: None,
+                status_category: None,
+                status_text: None,
+                owner: None,
+                next_action: None,
+                summary: None,
+                progress_summary: None,
+                agent_session_id: Some("session-duplicate".to_string()),
+                agent_current_focus: Some("new focus".to_string()),
+                agent_title_summary: None,
+            },
+            update_at,
+        );
+
+        stale = projection.agents[0].clone();
+        assert_eq!(stale.current_focus.as_deref(), Some("stale focus"));
+        assert_eq!(stale.updated_at, old_at);
+        let current = &projection.agents[1];
+        assert_eq!(current.current_focus.as_deref(), Some("new focus"));
+        assert_eq!(current.updated_at, update_at);
+        assert!(current.is_assigned());
+        assert_eq!(current.workspace_id.as_deref(), Some("work-current"));
     }
 
     #[test]
@@ -1969,7 +2151,12 @@ mod tests {
             board_refs: Vec::new(),
             related_work_item_ids: Vec::new(),
             events: Vec::new(),
+            legacy_metadata_snapshot: None,
+            legacy_metadata_authoritative: false,
+            legacy_metadata_snapshot_at: None,
+            duplicate_event_containers: Default::default(),
             discarded: false,
+            discarded_at: None,
         };
 
         projection.apply_work_item(&item, now);
@@ -2072,6 +2259,38 @@ mod tests {
             WorkspaceAgentAffiliationStatus::Assigned,
         ));
         assert!(projection.has_current_agents());
+    }
+
+    #[test]
+    fn duplicate_session_derived_state_uses_only_latest_row() {
+        let older = Utc.timestamp_opt(10_000, 0).unwrap();
+        let newer = Utc.timestamp_opt(20_000, 0).unwrap();
+        let mut projection = WorkspaceProjection::default_for_project("/repo");
+        projection.status_category = WorkspaceStatusCategory::Idle;
+
+        let mut stale = us70_agent(
+            "duplicate-session",
+            WorkspaceStatusCategory::Blocked,
+            WorkspaceAgentAffiliationStatus::Assigned,
+        );
+        stale.workspace_id = Some("work-stale".to_string());
+        stale.updated_at = older;
+
+        let mut current = us70_agent(
+            "duplicate-session",
+            WorkspaceStatusCategory::Idle,
+            WorkspaceAgentAffiliationStatus::Unassigned,
+        );
+        current.updated_at = newer;
+        projection.agents = vec![stale, current];
+
+        assert_eq!(projection.assigned_agents().count(), 0);
+        assert_eq!(projection.unassigned_agents().count(), 1);
+        assert!(!projection.has_current_agents());
+        assert_eq!(
+            projection.effective_status_category(),
+            WorkspaceStatusCategory::Idle
+        );
     }
 
     // #3065: a launch that re-points the shared projection at a DIFFERENT

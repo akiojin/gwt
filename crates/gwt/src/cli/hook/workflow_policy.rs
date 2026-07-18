@@ -119,6 +119,10 @@ pub fn evaluate_with_context(
     if safety != HookOutput::Silent {
         return Ok(safety);
     }
+    let trusted_state = evaluate_trusted_state_write_guard(event)?;
+    if trusted_state != HookOutput::Silent {
+        return Ok(trusted_state);
+    }
     let lane_code_edit = evaluate_lane_code_edit_guard(event, worktree_root)?;
     if lane_code_edit != HookOutput::Silent {
         return Ok(lane_code_edit);
@@ -246,11 +250,7 @@ fn current_agent_workspace_identity_missing(worktree_root: &Path) -> Result<bool
     let Some(projection) = load_workspace_projection(projection_root)? else {
         return Ok(false);
     };
-    let Some(agent) = projection
-        .agents
-        .iter()
-        .find(|agent| agent.session_id == session.id)
-    else {
+    let Some(agent) = projection.latest_agent_for_session(&session.id) else {
         return Ok(false);
     };
     if agent.is_unassigned() {
@@ -398,6 +398,42 @@ Editing production source is blocked here. Register the work \
 through `gwt-register-issue`, add design artifacts through `gwt-plan-spec` when the Work Item has the `gwt-spec` tag, \
 and let an Execute-lane session run `gwt-execute #N`. \
 Bookkeeping under `.gwt/` and `tasks/`, and documentation edits, are allowed.",
+    ))
+}
+
+/// SPEC-3248 P9a (T-120): the execution/evidence state files are written
+/// only by their canonical gwtd operations. Direct edits through the file
+/// tools are blocked in every lane — an edited record would fail integrity
+/// validation at the gates anyway, so the deny message routes to the
+/// canonical operations up front. (Bash-level writes are out of reach of
+/// path-based blocking and remain covered by the integrity hashes.)
+const TRUSTED_STATE_FILE_NAMES: &[&str] = &[
+    "execution-control.json",
+    "verification-run.json",
+    "intake-outcome.json",
+];
+
+fn evaluate_trusted_state_write_guard(event: &HookEvent) -> Result<HookOutput, HookError> {
+    if !matches!(
+        event.tool_name.as_deref(),
+        Some("Edit" | "MultiEdit" | "Write" | "NotebookEdit" | "apply_patch")
+    ) {
+        return Ok(HookOutput::Silent);
+    }
+    let paths = event_target_paths(event);
+    let targets_trusted_state = paths.iter().any(|path| {
+        let normalized = path.replace('\\', "/");
+        TRUSTED_STATE_FILE_NAMES
+            .iter()
+            .any(|name| normalized.ends_with(&format!(".gwt/skill-state/{name}")))
+    });
+    if !targets_trusted_state {
+        return Ok(HookOutput::Silent);
+    }
+    Ok(HookOutput::pre_tool_use_permission(
+        "Execution/evidence state files are written only by their canonical operations",
+        "This file is trusted execution/evidence state (SPEC-3248 P9a). Direct edits are rejected by integrity validation at the completion/PR gates, so do not edit it. \
+Use the canonical JSON operations instead: `execution.complete` / `execution.blocked` / `execution.adopt` for the execution control record, `verify.run` for verification records, and `intake.outcome.record` for intake outcomes.",
     ))
 }
 
@@ -1435,6 +1471,124 @@ Coverage requirements.
             evaluate_lane_code_edit_guard(&edit_event(&src), repo.path()).expect("guard"),
             HookOutput::Silent,
             "execution may edit production code"
+        );
+    }
+
+    // SPEC-3248 P9a (T-120): direct edits to the execution/evidence state
+    // files are blocked in every lane; normal files pass through this guard.
+    #[test]
+    fn trusted_state_write_guard_blocks_direct_edits_in_all_lanes() {
+        for state_file in [
+            ".gwt/skill-state/execution-control.json",
+            ".gwt/skill-state/verification-run.json",
+            ".gwt/skill-state/intake-outcome.json",
+        ] {
+            let event = HookEvent {
+                tool_name: Some("Edit".to_string()),
+                tool_input: Some(serde_json::json!({
+                    "file_path": format!("E:/work/repo/{state_file}")
+                })),
+                transcript_path: None,
+                cwd: None,
+            };
+            assert!(
+                matches!(
+                    evaluate_trusted_state_write_guard(&event).expect("guard"),
+                    HookOutput::PreToolUsePermission { .. }
+                ),
+                "direct edit of {state_file} must be blocked"
+            );
+        }
+
+        // Windows-style separators are normalized.
+        let event = HookEvent {
+            tool_name: Some("Write".to_string()),
+            tool_input: Some(serde_json::json!({
+                "file_path": "E:\\work\\repo\\.gwt\\skill-state\\execution-control.json"
+            })),
+            transcript_path: None,
+            cwd: None,
+        };
+        assert!(matches!(
+            evaluate_trusted_state_write_guard(&event).expect("guard"),
+            HookOutput::PreToolUsePermission { .. }
+        ));
+
+        // Ordinary files and non-file tools pass.
+        let event = HookEvent {
+            tool_name: Some("Edit".to_string()),
+            tool_input: Some(serde_json::json!({
+                "file_path": "E:/work/repo/crates/gwt/src/main.rs"
+            })),
+            transcript_path: None,
+            cwd: None,
+        };
+        assert_eq!(
+            evaluate_trusted_state_write_guard(&event).expect("guard"),
+            HookOutput::Silent
+        );
+        let bash = HookEvent {
+            tool_name: Some("Bash".to_string()),
+            tool_input: Some(serde_json::json!({ "command": "cargo test" })),
+            transcript_path: None,
+            cwd: None,
+        };
+        assert_eq!(
+            evaluate_trusted_state_write_guard(&bash).expect("guard"),
+            HookOutput::Silent
+        );
+    }
+
+    // SPEC-3248 P7A (T-076): the intake lane still blocks production code
+    // edits while the standalone gwtd JSON envelope operations that settle
+    // curation — Issue/SPEC ops, `intake.outcome.record`,
+    // `improvement.capture`, and `memory.add` — pass the lane guard.
+    #[test]
+    fn intake_lane_allows_curation_json_operations_while_blocking_code_edits() {
+        let repo = tempfile::tempdir().expect("repo");
+        gwt_skills::write_lane_file(repo.path(), &gwt_skills::INTAKE_PROFILE).expect("intake lane");
+
+        let bash_event = |command: &str| HookEvent {
+            tool_name: Some("Bash".to_string()),
+            tool_input: Some(serde_json::json!({ "command": command })),
+            transcript_path: None,
+            cwd: None,
+        };
+
+        for operation in [
+            "issue.create",
+            "issue.comment",
+            "issue.spec.create",
+            "issue.spec.edit",
+            "intake.outcome.record",
+            "improvement.capture",
+            "memory.add",
+        ] {
+            let command = format!(
+                "gwtd <<'JSON'\n{{\"schema_version\":1,\"operation\":\"{operation}\",\"params\":{{}}}}\nJSON"
+            );
+            assert_eq!(
+                evaluate_lane_code_edit_guard(&bash_event(&command), repo.path()).expect("guard"),
+                HookOutput::Silent,
+                "intake must allow standalone JSON operation {operation}"
+            );
+        }
+
+        // Production source edits stay blocked alongside the allowlist.
+        let edit_event = HookEvent {
+            tool_name: Some("Edit".to_string()),
+            tool_input: Some(serde_json::json!({
+                "file_path": repo.path().join("crates/gwt/src/main.rs").to_str().unwrap()
+            })),
+            transcript_path: None,
+            cwd: None,
+        };
+        assert!(
+            matches!(
+                evaluate_lane_code_edit_guard(&edit_event, repo.path()).expect("guard"),
+                HookOutput::PreToolUsePermission { .. }
+            ),
+            "intake must still block production code edits"
         );
     }
 

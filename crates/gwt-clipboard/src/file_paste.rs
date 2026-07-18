@@ -1,9 +1,6 @@
 //! Extract file paths from the system clipboard.
 
-use std::{
-    path::{Path, PathBuf},
-    process::Command,
-};
+use std::path::{Path, PathBuf};
 
 /// Parsed clipboard paste payload.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -248,7 +245,7 @@ fn clipboard_write_command_for_target_os(target_os: &str) -> Option<ClipboardCom
 
 /// Run a command and capture its stdout as a String.
 pub(crate) fn run_command(cmd: &str, args: &[&str]) -> Result<String, ClipboardError> {
-    let output = Command::new(cmd)
+    let output = gwt_core::process::hidden_command(cmd)
         .args(args)
         .output()
         .map_err(|e| ClipboardError::CommandFailed(format!("{cmd}: {e}")))?;
@@ -267,7 +264,7 @@ pub(crate) fn run_command(cmd: &str, args: &[&str]) -> Result<String, ClipboardE
 fn pipe_to_command(cmd: &str, args: &[&str], text: &str) -> Result<(), ClipboardError> {
     use std::{io::Write, process::Stdio};
 
-    let mut child = Command::new(cmd)
+    let mut child = gwt_core::process::hidden_command(cmd)
         .args(args)
         .stdin(Stdio::piped())
         .spawn()

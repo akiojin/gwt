@@ -45,6 +45,31 @@ The operation names and state file remain compatibility surfaces.
   satisfied for a releaseable slice.
 - `build.abort` with a concrete reason when implementation cannot proceed.
 
+Linked-owner Execution launches also carry an Execution Control Record
+(SPEC-3248 P8a) written at launch, and Stop stays blocked until the record is
+settled — even when `build.start` was never called (plain-Issue fixes
+included):
+
+- done and verified: JSON operation `execution.complete` (a successful
+  `build.complete` settles the record too), or
+- blocked by the environment or missing verification: JSON operation
+  `execution.blocked` with a non-empty `params.reason` and optional
+  `params.missing_verification`. Blocked is not done — report the blocker.
+
+Completion and Ready PR handoffs consume tool-generated verification
+evidence (SPEC-3248 P8b): run the verification matrix through JSON operation
+`verify.run` with `params.commands:[...]` so gwtd itself executes and records
+it. `execution.complete`, the execution settlement inside `build.complete`,
+non-draft `pr.create`, and `pr.ready` refuse when the latest record is
+missing, failing, stale (worktree changed after the run), from another
+session, or for another owner. Draft PRs stay available mid-work.
+
+When resuming or recovering another session's execution (crash, closed
+window), take over the record explicitly with JSON operation
+`execution.adopt` and a non-empty `params.reason` — takeovers are audited as
+an ownership transfer chain, and adopt is also the repair path when the
+record fails integrity validation.
+
 ## Mode detection
 
 1. If the invocation includes `#N` or an Issue URL, read the Issue with JSON

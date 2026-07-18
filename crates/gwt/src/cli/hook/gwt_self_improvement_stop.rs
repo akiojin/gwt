@@ -4,7 +4,7 @@
 //! dispatcher. It belongs to the `akiojin/gwt` repository's own development
 //! loop, not to arbitrary projects managed by gwt.
 
-use std::{path::Path, process::Command};
+use std::path::Path;
 
 use super::{envelope::stop_hook_active_from, HookOutput};
 
@@ -69,7 +69,7 @@ pub fn is_gwt_repository(worktree_root: &Path) -> bool {
 
 fn origin_remote_url(worktree_root: &Path) -> Option<String> {
     let root = gwt_core::paths::resolve_current_worktree_root(worktree_root);
-    let output = Command::new("git")
+    let output = gwt_core::process::hidden_command("git")
         .arg("-C")
         .arg(root)
         .args(["config", "--get", "remote.origin.url"])

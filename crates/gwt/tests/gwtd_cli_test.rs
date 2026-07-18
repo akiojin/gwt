@@ -1,12 +1,7 @@
-use std::{
-    collections::BTreeSet,
-    fs,
-    io::Write,
-    path::Path,
-    process::{Command, Stdio},
-};
+use std::{collections::BTreeSet, fs, io::Write, path::Path, process::Stdio};
 
 use gwt_agent::{AgentId, Session};
+use gwt_core::process::hidden_command;
 use gwt_core::{
     paths::project_scope_hash, workspace_projection::load_workspace_projection_from_path,
 };
@@ -25,7 +20,7 @@ fn prepared_hook_session() -> (TempDir, TempDir, String) {
 
 #[test]
 fn gwtd_dispatches_internal_hook_cli_without_gui_output() {
-    let output = Command::new(env!("CARGO_BIN_EXE_gwtd"))
+    let output = hidden_command(env!("CARGO_BIN_EXE_gwtd"))
         .args(["__internal", "daemon-hook", "forward"])
         .stdin(Stdio::null())
         .output()
@@ -45,7 +40,7 @@ fn gwtd_dispatches_internal_hook_cli_without_gui_output() {
 
 #[test]
 fn gwtd_help_describes_the_headless_cli_surface() {
-    let output = Command::new(env!("CARGO_BIN_EXE_gwtd"))
+    let output = hidden_command(env!("CARGO_BIN_EXE_gwtd"))
         .arg("--help")
         .output()
         .expect("run gwtd --help");
@@ -67,7 +62,7 @@ fn gwtd_help_describes_the_headless_cli_surface() {
 fn gwtd_no_args_dispatches_stdin_json_envelope() {
     let home = tempfile::tempdir().expect("home tempdir");
     let project = tempfile::tempdir().expect("project tempdir");
-    let mut child = Command::new(env!("CARGO_BIN_EXE_gwtd"))
+    let mut child = hidden_command(env!("CARGO_BIN_EXE_gwtd"))
         .current_dir(project.path())
         .env("HOME", home.path())
         .env("USERPROFILE", home.path())
@@ -133,7 +128,7 @@ fn gwtd_rejects_legacy_family_argv_invocations() {
         ["index", "--help"].as_slice(),
         ["workspace", "update", "--title-summary", "legacy"].as_slice(),
     ] {
-        let output = Command::new(env!("CARGO_BIN_EXE_gwtd"))
+        let output = hidden_command(env!("CARGO_BIN_EXE_gwtd"))
             .args(args)
             .stdin(Stdio::null())
             .output()
@@ -156,7 +151,7 @@ fn gwtd_rejects_legacy_family_argv_invocations() {
 
 #[test]
 fn gwtd_index_help_lists_every_rebuild_scope() {
-    let output = Command::new(env!("CARGO_BIN_EXE_gwtd"))
+    let output = hidden_command(env!("CARGO_BIN_EXE_gwtd"))
         .args(["--help", "index"])
         .output()
         .expect("run gwtd --help index");
@@ -182,7 +177,7 @@ fn gwtd_hook_register_codex_managed_hook_trust_writes_requested_config() {
         None => std::env::remove_var("GWT_HOOK_BIN"),
     }
 
-    let output = Command::new(env!("CARGO_BIN_EXE_gwtd"))
+    let output = hidden_command(env!("CARGO_BIN_EXE_gwtd"))
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -234,7 +229,7 @@ fn gwtd_hook_register_codex_managed_hook_trust_writes_requested_config() {
 #[test]
 fn gwtd_managed_hook_event_remains_argv_transport_exception() {
     let (home, worktree, session_id) = prepared_hook_session();
-    let output = Command::new(env!("CARGO_BIN_EXE_gwtd"))
+    let output = hidden_command(env!("CARGO_BIN_EXE_gwtd"))
         .current_dir(worktree.path())
         .args(["hook", "event", "SessionStart"])
         .env("HOME", home.path())
@@ -260,7 +255,7 @@ fn gwtd_managed_hook_event_remains_argv_transport_exception() {
 #[test]
 fn gwtd_provider_hook_event_remains_argv_transport_exception() {
     let (home, worktree, session_id) = prepared_hook_session();
-    let mut child = Command::new(env!("CARGO_BIN_EXE_gwtd"))
+    let mut child = hidden_command(env!("CARGO_BIN_EXE_gwtd"))
         .current_dir(worktree.path())
         .args(["hook", "provider-event", "opencode", "session.created"])
         .env("HOME", home.path())
@@ -296,14 +291,14 @@ fn gwtd_provider_hook_event_remains_argv_transport_exception() {
 fn gwtd_gwt_self_improvement_stop_remains_argv_transport_exception() {
     let home = tempfile::tempdir().expect("home tempdir");
     let repo = tempfile::tempdir().expect("repo tempdir");
-    assert!(Command::new("git")
+    assert!(hidden_command("git")
         .arg("init")
         .arg("-q")
         .arg(repo.path())
         .status()
         .expect("git init")
         .success());
-    assert!(Command::new("git")
+    assert!(hidden_command("git")
         .arg("-C")
         .arg(repo.path())
         .args([
@@ -316,7 +311,7 @@ fn gwtd_gwt_self_improvement_stop_remains_argv_transport_exception() {
         .expect("git remote add")
         .success());
 
-    let output = Command::new(env!("CARGO_BIN_EXE_gwtd"))
+    let output = hidden_command(env!("CARGO_BIN_EXE_gwtd"))
         .current_dir(repo.path())
         .args(["hook", "gwt-self-improvement-stop"])
         .env("HOME", home.path())
@@ -340,14 +335,14 @@ fn gwtd_gwt_self_improvement_stop_remains_argv_transport_exception() {
 /// Initialize a worktree whose `origin` is `akiojin/gwt` so generation emits the
 /// repo-owned self-improvement Stop hook alongside the shared managed hooks.
 fn init_gwt_origin_repo(worktree: &Path) {
-    assert!(Command::new("git")
+    assert!(hidden_command("git")
         .arg("init")
         .arg("-q")
         .arg(worktree)
         .status()
         .expect("git init")
         .success());
-    assert!(Command::new("git")
+    assert!(hidden_command("git")
         .arg("-C")
         .arg(worktree)
         .args([
@@ -424,7 +419,7 @@ fn generated_hook_subcommands(corpus: &str) -> BTreeSet<String> {
 fn gwtd_hook_argv_rejected(args: &[&str], stdin: &str) -> (bool, String) {
     let home = tempfile::tempdir().expect("home tempdir");
     let cwd = tempfile::tempdir().expect("cwd tempdir");
-    let mut child = Command::new(env!("CARGO_BIN_EXE_gwtd"))
+    let mut child = hidden_command(env!("CARGO_BIN_EXE_gwtd"))
         .current_dir(cwd.path())
         .args(args)
         .env("HOME", home.path())
@@ -582,7 +577,7 @@ fn committed_self_improvement_stop_hook_degrades_on_unsupported_gwtd() {
     }
 
     for command in &commands {
-        let output = Command::new("sh")
+        let output = hidden_command("sh")
             .arg("-c")
             .arg(command)
             .env("GWT_BIN_PATH", &fake_gwtd)

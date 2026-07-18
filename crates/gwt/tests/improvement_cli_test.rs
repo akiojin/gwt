@@ -2,9 +2,10 @@ use std::{
     fs,
     io::Write,
     path::{Path, PathBuf},
-    process::{Command, Stdio},
+    process::Stdio,
 };
 
+use gwt_core::process::hidden_command;
 use serde_json::{json, Value};
 use tempfile::TempDir;
 
@@ -36,7 +37,7 @@ fn run_gwtd_json(fixture: &Fixture, payload: Value) -> Value {
 }
 
 fn run_gwtd_json_raw(fixture: &Fixture, payload: Value) -> std::process::Output {
-    let mut child = Command::new(env!("CARGO_BIN_EXE_gwtd"))
+    let mut child = hidden_command(env!("CARGO_BIN_EXE_gwtd"))
         .current_dir(fixture.project.path())
         .env("HOME", fixture.home.path())
         .env("USERPROFILE", fixture.home.path())

@@ -2290,14 +2290,12 @@ fn save_unassigned_workspace_launch_projection(
     session: &ActiveAgentSession,
 ) -> Result<(), String> {
     let now = chrono::Utc::now();
-    let mut projection =
-        gwt_core::workspace_projection::load_or_default_workspace_projection(project_root)
-            .map_err(|error| error.to_string())?;
-    projection.project_root = project_root.to_path_buf();
-    projection.register_unassigned_agent(unassigned_agent_summary_from_session(session, now));
-    projection.updated_at = now;
-    gwt_core::workspace_projection::save_workspace_projection(project_root, &projection)
-        .map_err(|error| error.to_string())
+    gwt_core::workspace_projection::mutate_workspace_projection(project_root, |projection| {
+        projection.register_unassigned_agent(unassigned_agent_summary_from_session(session, now));
+        projection.updated_at = now;
+        Ok(())
+    })
+    .map_err(|error| error.to_string())
 }
 
 pub(super) fn save_start_work_workspace_projection(

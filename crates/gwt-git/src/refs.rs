@@ -176,29 +176,31 @@ mod tests {
     fn init_repo() -> TempDir {
         let dir = TempDir::new().unwrap();
         let path = dir.path();
-        run(Command::new("git")
+        run(gwt_core::process::hidden_command("git")
             .args(["init", "--initial-branch=main"])
             .current_dir(path));
-        run(Command::new("git")
+        run(gwt_core::process::hidden_command("git")
             .args(["config", "user.email", "test@example.com"])
             .current_dir(path));
-        run(Command::new("git")
+        run(gwt_core::process::hidden_command("git")
             .args(["config", "user.name", "Test User"])
             .current_dir(path));
-        run(Command::new("git")
+        run(gwt_core::process::hidden_command("git")
             .args(["commit", "--allow-empty", "-m", "init"])
             .current_dir(path));
         dir
     }
 
     fn create_branch(repo: &Path, name: &str) {
-        run(Command::new("git").args(["branch", name]).current_dir(repo));
+        run(gwt_core::process::hidden_command("git")
+            .args(["branch", name])
+            .current_dir(repo));
     }
 
     fn create_remote_tracking_ref(repo: &Path, refname: &str) {
         // Forge a remote tracking ref by writing it directly with `git
         // update-ref` so tests do not need a real remote.
-        run(Command::new("git")
+        run(gwt_core::process::hidden_command("git")
             .args(["update-ref", refname, "HEAD"])
             .current_dir(repo));
     }
@@ -224,7 +226,7 @@ mod tests {
         let dir = init_repo();
         let repo = dir.path();
         // A real conventional-commit subject on the default branch.
-        run(Command::new("git")
+        run(gwt_core::process::hidden_command("git")
             .args([
                 "commit",
                 "--allow-empty",
@@ -254,7 +256,7 @@ mod tests {
         create_remote_tracking_ref(repo, "refs/remotes/origin/develop");
         create_remote_tracking_ref(repo, "refs/remotes/origin/work/x");
         // origin/HEAD symref must be skipped.
-        run(Command::new("git")
+        run(gwt_core::process::hidden_command("git")
             .args([
                 "symbolic-ref",
                 "refs/remotes/origin/HEAD",

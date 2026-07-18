@@ -2099,6 +2099,36 @@ fn wait_for_recorded_event(
     panic!("timed out waiting for {label}: {snapshot:?}");
 }
 
+/// Issue #3297: `load_knowledge_bridge_events` replies off the GUI event
+/// loop through the stub proxy. Wait for the dispatched knowledge view for
+/// `window_id` and return that dispatch's outbound events so tests can keep
+/// asserting on the entries/detail pair.
+fn wait_for_knowledge_view_dispatch(
+    events: &Arc<Mutex<Vec<UserEvent>>>,
+    window_id: &str,
+) -> Vec<OutboundEvent> {
+    for _ in 0..800 {
+        {
+            let recorded = events.lock().expect("event log");
+            for event in recorded.iter() {
+                if let UserEvent::Dispatch(dispatched) = event {
+                    if dispatched.iter().any(|outbound| {
+                        matches!(
+                            &outbound.event,
+                            BackendEvent::KnowledgeEntries { id, .. } if id == window_id
+                        )
+                    }) {
+                        return dispatched.clone();
+                    }
+                }
+            }
+        }
+        std::thread::sleep(Duration::from_millis(25));
+    }
+    let snapshot = events.lock().expect("event log").clone();
+    panic!("timed out waiting for knowledge view dispatch for {window_id}: {snapshot:?}");
+}
+
 fn dispatch_launch_materialization_request(
     runtime: &mut AppRuntime,
     recorded_events: &Arc<Mutex<Vec<UserEvent>>>,
@@ -9444,7 +9474,12 @@ fn app_runtime_list_resumable_agents_uses_workspace_branch_ledger_candidates() {
         board_refs: Vec::new(),
         related_work_item_ids: Vec::new(),
         events: Vec::new(),
+        legacy_metadata_snapshot: None,
+        legacy_metadata_authoritative: false,
+        legacy_metadata_snapshot_at: None,
+        duplicate_event_containers: Default::default(),
         discarded: false,
+        discarded_at: None,
     };
     let work_items = gwt_core::workspace_projection::WorkItemsProjection {
         updated_at,
@@ -11954,7 +11989,7 @@ fn app_runtime_row_cleanup_candidate_hides_workspace_with_live_cwd_process() {
     })
     .expect("record work");
     let _child = KillOnDrop(
-        std::process::Command::new("sh")
+        gwt_core::process::hidden_command("sh")
             .arg("-c")
             .arg("sleep 30")
             .current_dir(&worktree)
@@ -13433,18 +13468,22 @@ fn app_runtime_load_knowledge_bridge_replies_with_cache_backed_issue_and_spec_vi
         migration_pending: false,
         main_worktree_root_cache: std::sync::Arc::new(std::sync::OnceLock::new()),
     };
-    let runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+    let (runtime, recorded_events) =
+        sample_runtime_with_events(temp.path(), vec![tab], Some("tab-1"));
 
-    let issue_events = runtime.load_knowledge_bridge_events(
+    let issue_window_id = combined_window_id("tab-1", "issue-1");
+    let immediate = runtime.load_knowledge_bridge_events(
         "client-1",
         KnowledgeLoadRequest {
-            id: &combined_window_id("tab-1", "issue-1"),
+            id: &issue_window_id,
             kind: gwt::KnowledgeKind::Issue,
             request_id: None,
             selected_number: Some(42),
             refresh: false,
         },
     );
+    assert!(immediate.is_empty());
+    let issue_events = wait_for_knowledge_view_dispatch(&recorded_events, &issue_window_id);
     assert_eq!(issue_events.len(), 2);
     assert!(matches!(
         &issue_events[0].event,
@@ -13471,16 +13510,19 @@ fn app_runtime_load_knowledge_bridge_replies_with_cache_backed_issue_and_spec_vi
                     && section.body.contains("feature/issue-bridge"))
     ));
 
-    let spec_events = runtime.load_knowledge_bridge_events(
+    let spec_window_id = combined_window_id("tab-1", "spec-1");
+    let immediate = runtime.load_knowledge_bridge_events(
         "client-1",
         KnowledgeLoadRequest {
-            id: &combined_window_id("tab-1", "spec-1"),
+            id: &spec_window_id,
             kind: gwt::KnowledgeKind::Issue,
             request_id: None,
             selected_number: Some(1930),
             refresh: false,
         },
     );
+    assert!(immediate.is_empty());
+    let spec_events = wait_for_knowledge_view_dispatch(&recorded_events, &spec_window_id);
     assert_eq!(spec_events.len(), 2);
     assert!(matches!(
         &spec_events[0].event,
@@ -13502,6 +13544,108 @@ fn app_runtime_load_knowledge_bridge_replies_with_cache_backed_issue_and_spec_vi
             if detail.sections.iter().any(|section| section.title == "spec"
                 && section.body.contains("Cache-backed issue view"))
     ));
+}
+
+/// Issue #3297: the cache-backed knowledge load must not run on the GUI
+/// event loop. On slow machines the synchronous read blocked the loop past
+/// the frontend's 5s recovery timer, the late reply was discarded, and the
+/// retry escalated into a minutes-long forced sync. The load replies through
+/// the blocking-task proxy instead, like the semantic search path.
+#[test]
+fn app_runtime_load_knowledge_bridge_replies_off_the_gui_event_loop() {
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedEnvVar::set("HOME", temp.path());
+    let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+    let repo = temp.path().join("repo");
+    fs::create_dir_all(&repo).expect("create repo");
+    init_repo(&repo);
+
+    let cache = Cache::new(issue_cache_root(&repo));
+    cache
+        .write_snapshot(&sample_issue_snapshot(
+            42,
+            "Issue bridge",
+            &["bug"],
+            "Issue body",
+            "2026-04-20T10:00:00Z",
+        ))
+        .expect("write issue snapshot");
+
+    let mut persisted = empty_workspace_state();
+    persisted.windows.push(sample_window(
+        "issue-1",
+        WindowPreset::Issue,
+        WindowProcessStatus::Ready,
+    ));
+    persisted.next_z_index = 2;
+    let tab = ProjectTabRuntime {
+        id: "tab-1".to_string(),
+        title: "Repo".to_string(),
+        project_root: repo,
+        kind: ProjectKind::Git,
+        workspace: WindowCanvasState::from_persisted(persisted),
+        migration_pending: false,
+        main_worktree_root_cache: std::sync::Arc::new(std::sync::OnceLock::new()),
+    };
+    let (runtime, events) = sample_runtime_with_events(temp.path(), vec![tab], Some("tab-1"));
+    let window_id = combined_window_id("tab-1", "issue-1");
+
+    let immediate = runtime.load_knowledge_bridge_events(
+        "client-1",
+        KnowledgeLoadRequest {
+            id: &window_id,
+            kind: gwt::KnowledgeKind::Issue,
+            request_id: Some(7),
+            selected_number: Some(42),
+            refresh: false,
+        },
+    );
+
+    assert!(
+        immediate.is_empty(),
+        "cache-backed knowledge load must not reply on the frontend event loop"
+    );
+    wait_for_recorded_event("knowledge entries dispatch", &events, |events| {
+        events.iter().any(|event| {
+            matches!(
+                event,
+                UserEvent::Dispatch(dispatched)
+                    if dispatched.iter().any(|outbound| {
+                        matches!(
+                            &outbound.target,
+                            DispatchTarget::Client(client_id) if client_id == "client-1"
+                        ) && matches!(
+                            &outbound.event,
+                            BackendEvent::KnowledgeEntries {
+                                id,
+                                request_id,
+                                entries,
+                                selected_number,
+                                ..
+                            } if id == &window_id
+                                && *request_id == Some(7)
+                                && entries.iter().any(|entry| entry.number == 42)
+                                && *selected_number == Some(42)
+                        )
+                    })
+            )
+        })
+    });
+    wait_for_recorded_event("knowledge detail dispatch", &events, |events| {
+        events.iter().any(|event| {
+            matches!(
+                event,
+                UserEvent::Dispatch(dispatched)
+                    if dispatched.iter().any(|outbound| matches!(
+                        &outbound.event,
+                        BackendEvent::KnowledgeDetail { id, .. } if id == &window_id
+                    ))
+            )
+        })
+    });
 }
 
 #[test]
@@ -13534,7 +13678,8 @@ fn app_runtime_load_knowledge_bridge_projects_related_issue_work_sessions() {
         WindowPreset::Issue,
         WindowProcessStatus::Ready,
     );
-    let runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+    let (runtime, recorded_events) =
+        sample_runtime_with_events(temp.path(), vec![tab], Some("tab-1"));
 
     let mut session =
         gwt_agent::Session::new(&worktree, "work/issue-3096", gwt_agent::AgentId::Codex);
@@ -13573,7 +13718,7 @@ fn app_runtime_load_knowledge_bridge_projects_related_issue_work_sessions() {
     gwt_core::workspace_projection::record_workspace_work_event(&repo, event)
         .expect("record work event");
 
-    let events = runtime.load_knowledge_bridge_events(
+    let immediate = runtime.load_knowledge_bridge_events(
         "client-1",
         KnowledgeLoadRequest {
             id: &combined_window_id("tab-1", "issue-1"),
@@ -13583,6 +13728,9 @@ fn app_runtime_load_knowledge_bridge_projects_related_issue_work_sessions() {
             refresh: false,
         },
     );
+    assert!(immediate.is_empty());
+    let events =
+        wait_for_knowledge_view_dispatch(&recorded_events, &combined_window_id("tab-1", "issue-1"));
 
     let entries = match &events[0].event {
         BackendEvent::KnowledgeEntries { entries, .. } => entries,
@@ -13637,7 +13785,8 @@ fn app_runtime_load_knowledge_bridge_marks_session_only_stopped_related_session_
         WindowPreset::Issue,
         WindowProcessStatus::Ready,
     );
-    let runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+    let (runtime, recorded_events) =
+        sample_runtime_with_events(temp.path(), vec![tab], Some("tab-1"));
 
     let stopped_at = Utc.with_ymd_and_hms(2026, 6, 20, 9, 5, 0).unwrap();
     let mut session =
@@ -13651,7 +13800,7 @@ fn app_runtime_load_knowledge_bridge_marks_session_only_stopped_related_session_
     session.last_activity_at = stopped_at;
     session.save(&runtime.sessions_dir).expect("save session");
 
-    let events = runtime.load_knowledge_bridge_events(
+    let immediate = runtime.load_knowledge_bridge_events(
         "client-1",
         KnowledgeLoadRequest {
             id: &combined_window_id("tab-1", "issue-1"),
@@ -13661,6 +13810,9 @@ fn app_runtime_load_knowledge_bridge_marks_session_only_stopped_related_session_
             refresh: false,
         },
     );
+    assert!(immediate.is_empty());
+    let events =
+        wait_for_knowledge_view_dispatch(&recorded_events, &combined_window_id("tab-1", "issue-1"));
 
     let detail = match &events[1].event {
         BackendEvent::KnowledgeDetail { detail, .. } => detail,
@@ -13705,7 +13857,8 @@ fn app_runtime_load_knowledge_bridge_dedupes_related_issue_sessions_by_conversat
         WindowPreset::Issue,
         WindowProcessStatus::Ready,
     );
-    let runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+    let (runtime, recorded_events) =
+        sample_runtime_with_events(temp.path(), vec![tab], Some("tab-1"));
 
     let conversation_id = "conv-issue-3133";
     let old_at = Utc.with_ymd_and_hms(2026, 6, 20, 9, 0, 0).unwrap();
@@ -13765,7 +13918,7 @@ fn app_runtime_load_knowledge_bridge_dedupes_related_issue_sessions_by_conversat
     gwt_core::workspace_projection::record_workspace_work_event(&repo, event)
         .expect("record work event");
 
-    let events = runtime.load_knowledge_bridge_events(
+    let immediate = runtime.load_knowledge_bridge_events(
         "client-1",
         KnowledgeLoadRequest {
             id: &combined_window_id("tab-1", "issue-1"),
@@ -13775,6 +13928,9 @@ fn app_runtime_load_knowledge_bridge_dedupes_related_issue_sessions_by_conversat
             refresh: false,
         },
     );
+    assert!(immediate.is_empty());
+    let events =
+        wait_for_knowledge_view_dispatch(&recorded_events, &combined_window_id("tab-1", "issue-1"));
 
     let entries = match &events[0].event {
         BackendEvent::KnowledgeEntries { entries, .. } => entries,
@@ -13830,7 +13986,8 @@ fn app_runtime_load_knowledge_bridge_collapses_related_issue_session_actions_to_
         WindowPreset::Issue,
         WindowProcessStatus::Ready,
     );
-    let runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+    let (runtime, recorded_events) =
+        sample_runtime_with_events(temp.path(), vec![tab], Some("tab-1"));
 
     let stale_at = Utc.with_ymd_and_hms(2026, 6, 20, 9, 0, 0).unwrap();
     let past_at = Utc.with_ymd_and_hms(2026, 6, 20, 9, 1, 0).unwrap();
@@ -13924,7 +14081,7 @@ fn app_runtime_load_knowledge_bridge_collapses_related_issue_session_actions_to_
     gwt_core::workspace_projection::record_workspace_work_event(&repo, empty_agent_event)
         .expect("record empty agent work event");
 
-    let events = runtime.load_knowledge_bridge_events(
+    let immediate = runtime.load_knowledge_bridge_events(
         "client-1",
         KnowledgeLoadRequest {
             id: &combined_window_id("tab-1", "issue-1"),
@@ -13934,6 +14091,9 @@ fn app_runtime_load_knowledge_bridge_collapses_related_issue_session_actions_to_
             refresh: false,
         },
     );
+    assert!(immediate.is_empty());
+    let events =
+        wait_for_knowledge_view_dispatch(&recorded_events, &combined_window_id("tab-1", "issue-1"));
 
     let entries = match &events[0].event {
         BackendEvent::KnowledgeEntries { entries, .. } => entries,
@@ -13995,7 +14155,8 @@ fn app_runtime_load_knowledge_bridge_ignores_ambiguous_branch_only_related_work(
         WindowPreset::Issue,
         WindowProcessStatus::Ready,
     );
-    let runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+    let (runtime, recorded_events) =
+        sample_runtime_with_events(temp.path(), vec![tab], Some("tab-1"));
 
     let live_at = Utc.with_ymd_and_hms(2026, 6, 20, 9, 5, 0).unwrap();
     let mut session = gwt_agent::Session::new(
@@ -14075,7 +14236,7 @@ fn app_runtime_load_knowledge_bridge_ignores_ambiguous_branch_only_related_work(
             .expect("record ambiguous work event");
     }
 
-    let events = runtime.load_knowledge_bridge_events(
+    let immediate = runtime.load_knowledge_bridge_events(
         "client-1",
         KnowledgeLoadRequest {
             id: &combined_window_id("tab-1", "issue-1"),
@@ -14085,6 +14246,9 @@ fn app_runtime_load_knowledge_bridge_ignores_ambiguous_branch_only_related_work(
             refresh: false,
         },
     );
+    assert!(immediate.is_empty());
+    let events =
+        wait_for_knowledge_view_dispatch(&recorded_events, &combined_window_id("tab-1", "issue-1"));
 
     let entries = match &events[0].event {
         BackendEvent::KnowledgeEntries { entries, .. } => entries,
@@ -14554,9 +14718,10 @@ fn app_runtime_load_knowledge_bridge_keeps_pr_surface_disabled_until_cache_suppo
         WindowPreset::Pr,
         WindowProcessStatus::Ready,
     );
-    let runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+    let (runtime, recorded_events) =
+        sample_runtime_with_events(temp.path(), vec![tab], Some("tab-1"));
 
-    let events = runtime.load_knowledge_bridge_events(
+    let immediate = runtime.load_knowledge_bridge_events(
         "client-1",
         KnowledgeLoadRequest {
             id: &combined_window_id("tab-1", "pr-1"),
@@ -14566,6 +14731,9 @@ fn app_runtime_load_knowledge_bridge_keeps_pr_surface_disabled_until_cache_suppo
             refresh: false,
         },
     );
+    assert!(immediate.is_empty());
+    let events =
+        wait_for_knowledge_view_dispatch(&recorded_events, &combined_window_id("tab-1", "pr-1"));
 
     assert_eq!(events.len(), 2);
     assert!(matches!(
@@ -15355,6 +15523,215 @@ fn app_runtime_board_milestone_from_unassigned_origin_does_not_create_workspace_
 }
 
 #[test]
+fn app_runtime_board_milestone_uses_latest_duplicate_session_assignment() {
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedEnvVar::set("HOME", temp.path());
+    let repo = temp.path().join("repo");
+    fs::create_dir_all(&repo).expect("create repo");
+    let tab = sample_project_tab_with_window_at(
+        "tab-1",
+        "board-1",
+        repo.clone(),
+        WindowPreset::Board,
+        WindowProcessStatus::Ready,
+    );
+    let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+    let old_at = chrono::Utc::now() - chrono::Duration::minutes(2);
+    let current_at = chrono::Utc::now() - chrono::Duration::minutes(1);
+    let stale = gwt_core::workspace_projection::WorkspaceAgentSummary {
+        session_id: "session-duplicate-assigned".to_string(),
+        window_id: None,
+        agent_id: "codex".to_string(),
+        display_name: "Codex".to_string(),
+        status_category: gwt_core::workspace_projection::WorkspaceStatusCategory::Active,
+        current_focus: Some("stale".to_string()),
+        title_summary: None,
+        worktree_path: None,
+        branch: Some("feature/stale".to_string()),
+        last_board_entry_id: None,
+        last_board_entry_kind: None,
+        coordination_scope: None,
+        affiliation_status:
+            gwt_core::workspace_projection::WorkspaceAgentAffiliationStatus::Unassigned,
+        workspace_id: None,
+        updated_at: old_at,
+    };
+    let mut assigned = stale.clone();
+    assigned.current_focus = Some("current".to_string());
+    assigned.branch = Some("feature/current".to_string());
+    assigned.affiliation_status =
+        gwt_core::workspace_projection::WorkspaceAgentAffiliationStatus::Assigned;
+    assigned.workspace_id = Some("work-current-duplicate".to_string());
+    assigned.updated_at = current_at;
+    let mut projection =
+        gwt_core::workspace_projection::WorkspaceProjection::default_for_project(&repo);
+    projection.agents.append(&mut vec![stale, assigned]);
+    gwt_core::workspace_projection::save_workspace_projection(&repo, &projection)
+        .expect("save projection");
+    gwt_core::workspace_projection::record_workspace_work_paused_event(
+        &repo,
+        "work-current-duplicate",
+        Some("Current Work"),
+        None,
+        None,
+        &[],
+        None,
+        Some("session-duplicate-assigned"),
+        current_at,
+    )
+    .expect("seed current Work");
+    let entry = BoardEntry::new(
+        AuthorKind::Agent,
+        "Codex",
+        BoardEntryKind::Status,
+        "Current assigned Session milestone.",
+        None,
+        None,
+        vec!["workspace-assignment".to_string()],
+        vec!["2359".to_string()],
+    )
+    .with_origin_session_id("session-duplicate-assigned");
+
+    runtime.record_workspace_board_milestone_event("tab-1", &repo, &entry);
+
+    let works = gwt_core::workspace_projection::load_workspace_work_items(&repo)
+        .expect("load Work history")
+        .expect("Work history");
+    let current = works
+        .work_items
+        .iter()
+        .find(|item| item.id == "work-current-duplicate")
+        .expect("current assigned Work");
+    assert!(
+        current.board_refs.iter().any(|id| id == &entry.id),
+        "the latest assigned duplicate row must receive the Board event"
+    );
+}
+
+#[test]
+fn app_runtime_old_board_milestone_does_not_rewind_latest_assigned_work_or_agent() {
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedEnvVar::set("HOME", temp.path());
+    let repo = temp.path().join("repo");
+    fs::create_dir_all(&repo).expect("create repo");
+    let tab = sample_project_tab_with_window_at(
+        "tab-1",
+        "board-1",
+        repo.clone(),
+        WindowPreset::Board,
+        WindowProcessStatus::Ready,
+    );
+    let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+    let stale_agent_at = chrono::Utc::now() - chrono::Duration::minutes(4);
+    let assigned_agent_at = chrono::Utc::now() - chrono::Duration::minutes(3);
+    let replayed_at = chrono::Utc::now() - chrono::Duration::minutes(2);
+    let current_work_at = chrono::Utc::now() - chrono::Duration::minutes(1);
+    let assigned = gwt_core::workspace_projection::WorkspaceAgentSummary {
+        session_id: "session-duplicate-assigned".to_string(),
+        window_id: None,
+        agent_id: "codex".to_string(),
+        display_name: "Codex".to_string(),
+        status_category: gwt_core::workspace_projection::WorkspaceStatusCategory::Blocked,
+        current_focus: Some("Current blocked work".to_string()),
+        title_summary: None,
+        worktree_path: None,
+        branch: Some("feature/current".to_string()),
+        last_board_entry_id: None,
+        last_board_entry_kind: None,
+        coordination_scope: None,
+        affiliation_status:
+            gwt_core::workspace_projection::WorkspaceAgentAffiliationStatus::Assigned,
+        workspace_id: Some("work-current-duplicate".to_string()),
+        updated_at: assigned_agent_at,
+    };
+    let mut stale = assigned.clone();
+    stale.current_focus = Some("Stale work".to_string());
+    stale.branch = Some("feature/stale".to_string());
+    stale.affiliation_status =
+        gwt_core::workspace_projection::WorkspaceAgentAffiliationStatus::Unassigned;
+    stale.workspace_id = None;
+    stale.updated_at = stale_agent_at;
+    let mut projection =
+        gwt_core::workspace_projection::WorkspaceProjection::default_for_project(&repo);
+    projection.agents.append(&mut vec![stale, assigned]);
+    gwt_core::workspace_projection::save_workspace_projection(&repo, &projection)
+        .expect("save projection");
+    gwt_core::workspace_projection::record_workspace_work_paused_event(
+        &repo,
+        "work-current-duplicate",
+        Some("Current Work"),
+        None,
+        None,
+        &[],
+        None,
+        Some("session-duplicate-assigned"),
+        current_work_at,
+    )
+    .expect("seed current Work");
+    let mut replayed = BoardEntry::new(
+        AuthorKind::Agent,
+        "Codex",
+        BoardEntryKind::Status,
+        "Old assigned Session milestone.",
+        None,
+        None,
+        vec!["workspace-assignment".to_string()],
+        vec!["stale-owner".to_string()],
+    )
+    .with_origin_session_id("session-duplicate-assigned");
+    replayed.updated_at = replayed_at;
+
+    runtime.record_workspace_board_milestone_event("tab-1", &repo, &replayed);
+
+    let works = gwt_core::workspace_projection::load_workspace_work_items(&repo)
+        .expect("load Work history")
+        .expect("Work history");
+    let current = works
+        .work_items
+        .iter()
+        .find(|item| item.id == "work-current-duplicate")
+        .expect("current assigned Work");
+    assert_eq!(
+        current.status_category,
+        gwt_core::workspace_projection::WorkspaceStatusCategory::Idle
+    );
+    assert_eq!(current.title, "Current Work");
+    assert_eq!(current.updated_at, current_work_at);
+    assert!(!current.board_refs.iter().any(|id| id == &replayed.id));
+    let current_projection = gwt_core::workspace_projection::load_workspace_projection(&repo)
+        .expect("load current projection")
+        .expect("current projection");
+    assert_eq!(
+        current_projection.status_category,
+        gwt_core::workspace_projection::WorkspaceStatusCategory::Unknown
+    );
+    assert!(current_projection
+        .board_refs
+        .iter()
+        .any(|id| id == &replayed.id));
+    let current_agent = current_projection
+        .latest_agent_for_session("session-duplicate-assigned")
+        .expect("current assigned Agent");
+    assert_eq!(
+        current_agent.current_focus.as_deref(),
+        Some("Current blocked work")
+    );
+    assert_eq!(
+        current_agent.status_category,
+        gwt_core::workspace_projection::WorkspaceStatusCategory::Blocked
+    );
+    assert_eq!(current_agent.last_board_entry_id, None);
+    assert_eq!(current_agent.last_board_entry_kind, None);
+    assert_eq!(current_agent.updated_at, assigned_agent_at);
+}
+
+#[test]
 fn app_runtime_active_work_projection_preserves_blocked_agent_board_state() {
     let _env_lock = env_test_lock()
         .lock()
@@ -15987,6 +16364,10 @@ impl IssueClient for PermissionDeniedCreateIssueClient {
         _number: IssueNumber,
         _body: &str,
     ) -> Result<CommentSnapshot, ApiError> {
+        unreachable!("quick register only creates issues")
+    }
+
+    fn delete_comment(&self, _comment_id: CommentId) -> Result<(), ApiError> {
         unreachable!("quick register only creates issues")
     }
 
@@ -19831,7 +20212,12 @@ fn workspace_view_for_tab_omits_work_item_history_from_workspace_state() {
         board_refs: Vec::new(),
         related_work_item_ids: Vec::new(),
         events: Vec::new(),
+        legacy_metadata_snapshot: None,
+        legacy_metadata_authoritative: false,
+        legacy_metadata_snapshot_at: None,
+        duplicate_event_containers: Default::default(),
         discarded: false,
+        discarded_at: None,
     };
     let projection = gwt_core::workspace_projection::WorkItemsProjection {
         updated_at: completed_at,

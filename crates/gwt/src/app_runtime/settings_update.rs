@@ -141,9 +141,10 @@ pub(super) fn os_url_open_command(url: &str) -> (&'static str, Vec<String>) {
 }
 
 fn open_url_with_os_default(url: &str) -> Result<(), std::io::Error> {
-    use std::process::Command;
     let (program, args) = os_url_open_command(url);
-    let child = Command::new(program).args(&args).spawn()?;
+    let child = gwt_core::process::hidden_command(program)
+        .args(&args)
+        .spawn()?;
     std::thread::spawn(move || {
         let mut child = child;
         let _ = child.wait();
@@ -156,21 +157,20 @@ fn open_url_with_os_default(url: &str) -> Result<(), std::io::Error> {
 /// silently dropped so the modal does not surface noise; the path is logged
 /// at the trace level.
 fn open_path_with_os_default(path: &str) -> Result<(), std::io::Error> {
-    use std::process::Command;
     // Reap the spawned opener on a detached thread so repeated invocations
     // do not accumulate zombie processes on Unix. `std::process::Child` has
     // no Drop-time wait, so without this the PID stays in the process table
     // until parent exit (CodeRabbit review on PR #2630).
     let child = if cfg!(target_os = "macos") {
-        let mut cmd = Command::new("open");
+        let mut cmd = gwt_core::process::hidden_command("open");
         cmd.arg(path);
         cmd.spawn()?
     } else if cfg!(target_os = "windows") {
-        let mut cmd = Command::new("cmd");
+        let mut cmd = gwt_core::process::hidden_command("cmd");
         cmd.args(["/C", "start", "", path]);
         cmd.spawn()?
     } else {
-        let mut cmd = Command::new("xdg-open");
+        let mut cmd = gwt_core::process::hidden_command("xdg-open");
         cmd.arg(path);
         cmd.spawn()?
     };

@@ -5,7 +5,7 @@
 //! run (~440 MB) and runs much slower than unit tests. CI invokes it with
 //! `cargo test -- --ignored` after restoring the HuggingFace cache.
 
-use std::{fs, path::PathBuf, process::Command};
+use std::{fs, path::PathBuf};
 
 use gwt_core::{repo_hash::compute_repo_hash, worktree_hash::compute_worktree_hash};
 
@@ -47,7 +47,7 @@ fn search_files_e2e_with_real_e5_auto_builds() {
     let fake_home = tmp.path().join("fake_home");
     fs::create_dir_all(&fake_home).unwrap();
 
-    let output = Command::new(runner_python())
+    let output = gwt_core::process::hidden_command(runner_python())
         .arg(runner_script())
         .arg("--action")
         .arg("search-files")
@@ -117,7 +117,7 @@ fn search_specs_e2e_with_real_e5_auto_builds() {
     )
     .unwrap();
 
-    let output = Command::new(runner_python())
+    let output = gwt_core::process::hidden_command(runner_python())
         .arg(runner_script())
         .arg("--action")
         .arg("search-specs")

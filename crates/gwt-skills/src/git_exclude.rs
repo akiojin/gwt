@@ -433,21 +433,21 @@ user-entry
     }
 
     fn init_git_repo(path: &Path) {
-        let init = std::process::Command::new("git")
+        let init = hidden_command("git")
             .arg("init")
             .arg(path)
             .output()
             .unwrap();
         assert!(init.status.success(), "git init failed: {:?}", init);
 
-        let email = std::process::Command::new("git")
+        let email = hidden_command("git")
             .args(["config", "user.email", "test@example.com"])
             .current_dir(path)
             .output()
             .unwrap();
         assert!(email.status.success(), "git config user.email failed");
 
-        let name = std::process::Command::new("git")
+        let name = hidden_command("git")
             .args(["config", "user.name", "Test User"])
             .current_dir(path)
             .output()
@@ -456,7 +456,7 @@ user-entry
     }
 
     fn git_commit_allow_empty(path: &Path, message: &str) {
-        let output = std::process::Command::new("git")
+        let output = hidden_command("git")
             .args(["commit", "--allow-empty", "-m", message])
             .current_dir(path)
             .output()
@@ -469,7 +469,7 @@ user-entry
     }
 
     fn git_add_worktree(repo: &Path, worktree: &Path, branch: &str) {
-        let output = std::process::Command::new("git")
+        let output = hidden_command("git")
             .args(["worktree", "add", "-b", branch, worktree.to_str().unwrap()])
             .current_dir(repo)
             .output()
@@ -482,7 +482,7 @@ user-entry
     }
 
     fn git_resolved_exclude_path(worktree: &Path) -> std::path::PathBuf {
-        let output = std::process::Command::new("git")
+        let output = hidden_command("git")
             .args(["rev-parse", "--git-path", "info/exclude"])
             .current_dir(worktree)
             .output()
