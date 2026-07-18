@@ -95,12 +95,14 @@ gwt-verify
      server per `references/playwright-runbook.md` before invoking the
      runner. When the runner supports a structured reporter (JSON / TAP /
      list / JUnit XML), use it so test-level results can be extracted.
-     In gwt-managed execution worktrees, run the final command matrix
-     through JSON operation `verify.run` with `params.commands:[...]`
-     (one plain command per entry, no shell operators): gwtd executes the
-     commands itself and writes the tool-generated Verification Run Record
-     that `execution.complete` and Ready PR handoffs require (SPEC-3248
-     P8b). Prose summaries of test runs do not satisfy those gates.
+     In gwt-managed execution worktrees, first register the derived matrix
+     with JSON operation `verify.plan` (`params.commands:[...]`), then run
+     it in full through `verify.run` (one plain command per entry, no shell
+     operators): gwtd executes the commands itself and writes the
+     tool-generated Verification Run Record that `execution.complete` and
+     Ready PR handoffs require (SPEC-3248 P8b/T-130). A run that does not
+     cover the registered plan — or a run without a plan — never satisfies
+     those gates, and prose summaries of test runs do not either.
   7. Extract a Test Inventory from each runner's output: test name,
      describe block, scenario / snapshot title, lint rule name, etc.
      If extraction fails for a runner, record
