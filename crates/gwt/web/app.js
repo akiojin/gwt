@@ -431,6 +431,7 @@
       };
       let improvementCandidates = [];
       let improvementCandidatesRevision = 0;
+      let improvementCandidatesProjectRoot = null;
       let renderedProjectTabsKey = "";
       let renderedWorkspaceWindowsKey = "";
       let renderedAppVersionLabel = null;
@@ -1212,6 +1213,14 @@
         );
       }
 
+      function improvementEventMatchesActiveProject(event) {
+        const eventProjectRoot = event?.project_root;
+        if (!eventProjectRoot) {
+          return true;
+        }
+        return eventProjectRoot === activeProjectTab()?.project_root;
+      }
+
       function activeWorkspace() {
         return activeProjectTab()?.workspace || emptyWorkspace();
       }
@@ -1562,6 +1571,15 @@
               active_tab_id: null,
               recent_projects: [],
             };
+            const activeProjectRoot = activeProjectTab()?.project_root || null;
+            if (
+              improvementCandidatesProjectRoot &&
+              improvementCandidatesProjectRoot !== activeProjectRoot
+            ) {
+              improvementCandidates = [];
+              improvementCandidatesRevision += 1;
+              improvementCandidatesProjectRoot = null;
+            }
             setVersionState(appState.app_version, versionState.latest);
             const nextProjectTabsKey = projectTabsRenderKey(appState);
             if (renderedProjectTabsKey !== nextProjectTabsKey) {
@@ -5304,7 +5322,9 @@
             applyWindowListEvent(event);
             break;
           case "improvement_candidates":
+            if (!improvementEventMatchesActiveProject(event)) break;
             improvementCandidates = Array.isArray(event.candidates) ? event.candidates : [];
+            improvementCandidatesProjectRoot = event.project_root || null;
             improvementCandidatesRevision += 1;
             {
               const workspace = activeWorkspace() || emptyWorkspace();
@@ -5313,10 +5333,12 @@
             }
             break;
           case "improvement_action_result":
+            if (!improvementEventMatchesActiveProject(event)) break;
             // Candidate list refresh is delivered as a separate
             // improvement_candidates snapshot; no extra UI state is needed here.
             break;
           case "improvement_action_error":
+            if (!improvementEventMatchesActiveProject(event)) break;
             window.alert(`Improvement action error: ${event.message}`);
             break;
           case "provider_usage":

@@ -4,7 +4,7 @@ use gwt_agent::{session::GWT_SESSION_ID_ENV, Session};
 use gwt_core::{
     coordination::{
         normalize_board_mentions, AuthorKind, BoardAudienceScope, BoardEntry, BoardEntryDraft,
-        BoardMention, BoardOrigin,
+        BoardMention, BoardOrigin, BoardPostOutcome,
     },
     paths::gwt_sessions_dir,
 };
@@ -14,7 +14,7 @@ use crate::{
     board_audience::{
         current_session_board_scope, gui_default_board_scope, post_audience_for_session,
     },
-    board_provider::{load_snapshot, load_snapshot_for_scope, post_entry, routing_for},
+    board_provider::{load_snapshot, load_snapshot_for_scope, post_entry_outcome, routing_for},
     cli::{CliEnv, CliParseError},
 };
 
@@ -217,13 +217,28 @@ pub(super) fn run<E: CliEnv>(
             let entry = draft
                 .finalize()
                 .map_err(|err| io_as_spec_ops_error(io::Error::other(err.to_string())))?;
-            let snapshot =
-                post_entry(env.repo_path(), entry).map_err(gwt_error_to_spec_ops_error)?;
-            publish_board_change(env.repo_path(), snapshot.board.entries.len());
-            out.push_str(&format!(
-                "board entries: {}\n",
-                snapshot.board.entries.len()
-            ));
+            match post_entry_outcome(env.repo_path(), entry).map_err(gwt_error_to_spec_ops_error)? {
+                BoardPostOutcome::Refreshed(snapshot) => {
+                    publish_board_change(env.repo_path(), snapshot.board.entries.len());
+                    out.push_str(&format!(
+                        "board entries: {}\n",
+                        snapshot.board.entries.len()
+                    ));
+                }
+                BoardPostOutcome::CommittedWithoutSnapshot {
+                    entry_id,
+                    refresh_error,
+                } => {
+                    tracing::warn!(
+                        entry_id,
+                        error = %refresh_error,
+                        "board entry committed but snapshot refresh failed"
+                    );
+                    out.push_str(&format!(
+                        "board entry committed: {entry_id}; snapshot refresh pending\n"
+                    ));
+                }
+            }
             0
         }
         BoardCommand::ConfigShow => {
@@ -495,6 +510,7 @@ mod tests {
         },
     };
 
+    use crate::board_provider::post_entry;
     use crate::cli::test_support::ScopedEnvVar;
 
     use super::*;
@@ -1597,6 +1613,41 @@ mod tests {
         assert_eq!(snapshot.board.entries.len(), 1);
         assert_eq!(snapshot.board.entries[0].body, "Need a board");
         assert!(out.contains("board entries: 1"));
+    }
+
+    #[test]
+    fn board_family_run_post_succeeds_when_entry_commits_without_snapshot() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut env = crate::cli::TestEnv::new(tmp.path().to_path_buf());
+        gwt_core::coordination::load_snapshot(tmp.path()).unwrap();
+        let projection_path =
+            gwt_core::coordination::coordination_board_projection_path(tmp.path());
+        std::fs::remove_file(&projection_path).unwrap();
+        std::fs::create_dir(&projection_path).unwrap();
+
+        let mut out = String::new();
+        let code = run(
+            &mut env,
+            BoardCommand::Post(Box::new(BoardPostCommand {
+                kind: "status".into(),
+                body: Some("Commit survives refresh failure".into()),
+                broadcast: true,
+                ..Default::default()
+            })),
+            &mut out,
+        )
+        .unwrap();
+
+        assert_eq!(code, 0);
+        assert!(out.contains("snapshot refresh pending"), "{out}");
+
+        std::fs::remove_dir(&projection_path).unwrap();
+        let repaired = gwt_core::coordination::load_snapshot(tmp.path()).unwrap();
+        assert_eq!(repaired.board.entries.len(), 1);
+        assert_eq!(
+            repaired.board.entries[0].body,
+            "Commit survives refresh failure"
+        );
     }
 
     #[test]

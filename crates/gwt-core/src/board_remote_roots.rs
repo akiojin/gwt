@@ -340,20 +340,11 @@ mod tests {
         }
     }
 
-    /// Redirect `$HOME` to an isolated temp dir (FR-022..024 tests must never
-    /// touch the real `~/.gwt`; #3022 isolation-leak prevention).
-    fn scoped_home(
-        home: &Path,
-    ) -> (
-        std::sync::MutexGuard<'static, ()>,
-        crate::test_support::ScopedEnvVar,
-    ) {
+    /// Redirect gwt home resolution for this test thread only (FR-022..024
+    /// tests must never touch the real `~/.gwt`; #3022 isolation prevention).
+    fn scoped_home(home: &Path) -> crate::test_support::ScopedGwtHome {
         fs::create_dir_all(home).unwrap();
-        let guard = crate::test_support::env_lock()
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
-        let scoped = crate::test_support::ScopedEnvVar::set("HOME", home);
-        (guard, scoped)
+        crate::test_support::ScopedGwtHome::set(home)
     }
 
     const ORIGIN: &str = "git@github.com:example/board-roots.git";
@@ -363,7 +354,7 @@ mod tests {
         // FR-023: append lands in the worktree store AND the machine-shared
         // home store (`~/.gwt/projects/<repo-hash>/board-remote-roots.jsonl`).
         let dir = tempfile::tempdir().unwrap();
-        let (_lock, _home) = scoped_home(&dir.path().join("home"));
+        let _home = scoped_home(&dir.path().join("home"));
         let repo = dir.path().join("wt-a");
         init_repo_with_origin(&repo, ORIGIN);
 
@@ -392,7 +383,7 @@ mod tests {
         // worktree A created, via the repo-hash-scoped home store. This is the
         // duplicate-General-root regression.
         let dir = tempfile::tempdir().unwrap();
-        let (_lock, _home) = scoped_home(&dir.path().join("home"));
+        let _home = scoped_home(&dir.path().join("home"));
         let wt_a = dir.path().join("wt-a");
         let wt_b = dir.path().join("wt-b");
         init_repo_with_origin(&wt_a, ORIGIN);
@@ -410,7 +401,7 @@ mod tests {
         // FR-022: lookup merges both stores and the newest line per
         // (provider, channel, key) wins, regardless of which store holds it.
         let dir = tempfile::tempdir().unwrap();
-        let (_lock, _home) = scoped_home(&dir.path().join("home"));
+        let _home = scoped_home(&dir.path().join("home"));
         let wt_a = dir.path().join("wt-a");
         let wt_b = dir.path().join("wt-b");
         init_repo_with_origin(&wt_a, ORIGIN);
@@ -433,7 +424,7 @@ mod tests {
         // written under $HOME.
         let dir = tempfile::tempdir().unwrap();
         let home = dir.path().join("home");
-        let (_lock, _home) = scoped_home(&home);
+        let _home = scoped_home(&home);
         let root = dir.path().join("plain");
         fs::create_dir_all(&root).unwrap();
 

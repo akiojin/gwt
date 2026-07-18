@@ -33,5 +33,8 @@ pub use hub::{global, set_global, ProcessConsoleHub, DEFAULT_RING_CAPACITY};
 pub use kind::{ParseProcessKindError, ProcessKind};
 pub use line::{ProcessLine, ProcessStream};
 pub use redact::{redact_line, REDACTED};
-pub use spawn::{spawn_logged, spawn_logged_blocking, SpawnOptions, SpawnOutput};
+pub use spawn::{
+    spawn_logged, spawn_logged_blocking, spawn_logged_blocking_with_deadline,
+    spawn_logged_with_deadline, SpawnOptions, SpawnOutput,
+};
 pub use strip_ansi::strip_ansi;

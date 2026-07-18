@@ -14,8 +14,8 @@ use chrono::{DateTime, Utc};
 use serde::Deserialize;
 
 use gwt_core::coordination::{
-    AuthorKind, BoardAudienceScope, BoardEntry, BoardEntryKind, BoardHistoryPage, BoardProjection,
-    BoardProvider, CoordinationSnapshot,
+    AuthorKind, BoardAudienceScope, BoardEntry, BoardEntryKind, BoardHistoryPage, BoardPostOutcome,
+    BoardProjection, BoardProvider, CoordinationSnapshot,
 };
 use gwt_core::{GwtError, Result};
 
@@ -476,6 +476,15 @@ fn graph_message_to_entry(message: &GraphMessage, workspace: &str) -> BoardEntry
 
 impl BoardProvider for TeamsProvider {
     fn post_entry(&self, worktree_root: &Path, entry: BoardEntry) -> Result<CoordinationSnapshot> {
+        self.post_entry_outcome(worktree_root, entry)?
+            .into_snapshot()
+    }
+
+    fn post_entry_outcome(
+        &self,
+        worktree_root: &Path,
+        entry: BoardEntry,
+    ) -> Result<BoardPostOutcome> {
         let channel =
             mapping::resolve_channel(&entry, &self.channel_map, Some(&self.default_channel))
                 .ok_or_else(|| {
@@ -492,7 +501,7 @@ impl BoardProvider for TeamsProvider {
         // (SPEC-2963). Replies cannot carry a Graph subject, so both live in the
         // body; the title would otherwise be dropped (Slack shows it as a header).
         let meta = mapping::board_entry_meta_line(&entry);
-        self.post_graph_message(
+        let entry_id = self.post_graph_message(
             &team,
             &chan,
             Some(&meta),
@@ -501,7 +510,13 @@ impl BoardProvider for TeamsProvider {
             Some(&root_id),
         )?;
         self.cache.invalidate();
-        self.load_snapshot(worktree_root)
+        Ok(match self.load_snapshot(worktree_root) {
+            Ok(snapshot) => BoardPostOutcome::Refreshed(snapshot),
+            Err(error) => BoardPostOutcome::CommittedWithoutSnapshot {
+                entry_id,
+                refresh_error: error.to_string(),
+            },
+        })
     }
 
     fn load_snapshot(&self, worktree_root: &Path) -> Result<CoordinationSnapshot> {
@@ -1066,6 +1081,32 @@ mod tests {
             .0
             .contains("/teams/team-1/channels/chan-1/messages/m-1/replies"));
         assert!(calls[1].1.contains("threaded"));
+    }
+
+    #[test]
+    fn post_entry_outcome_reports_commit_when_history_refresh_fails() {
+        let mock = MockGraph {
+            messages_status: 500,
+            ..Default::default()
+        };
+        let prov = TeamsProvider::new("tok", "team-1/chan-1", BTreeMap::new(), Box::new(mock), 60);
+
+        let outcome = prov
+            .post_entry_outcome(&root(), entry("committed"))
+            .unwrap();
+
+        match outcome {
+            gwt_core::coordination::BoardPostOutcome::CommittedWithoutSnapshot {
+                entry_id,
+                refresh_error,
+            } => {
+                assert_eq!(entry_id, "m-new");
+                assert!(refresh_error.contains("list messages http 500"));
+            }
+            gwt_core::coordination::BoardPostOutcome::Refreshed(_) => {
+                panic!("history failure after Graph post must preserve the commit outcome")
+            }
+        }
     }
 
     #[test]

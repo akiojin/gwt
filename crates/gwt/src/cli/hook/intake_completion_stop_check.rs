@@ -222,16 +222,34 @@ fn is_pure_status_question(prompt: &str) -> bool {
 mod tests {
     use super::*;
     use chrono::{Duration, Utc};
-    use gwt_core::test_support::ScopedEnvVar;
+    use gwt_core::test_support::{ScopedEnvVar, ScopedGwtHome};
     use gwt_skills::{write_lane_file, EXECUTION_PROFILE, INTAKE_PROFILE};
 
-    fn mk_worktree(profile: Option<&gwt_skills::LaneProfile>) -> tempfile::TempDir {
-        let dir = tempfile::tempdir().unwrap();
-        std::fs::create_dir_all(dir.path().join(".gwt")).unwrap();
-        if let Some(profile) = profile {
-            write_lane_file(dir.path(), profile).unwrap();
+    struct TestWorktree {
+        worktree: tempfile::TempDir,
+        _home: tempfile::TempDir,
+        _gwt_home: ScopedGwtHome,
+    }
+
+    impl TestWorktree {
+        fn path(&self) -> &Path {
+            self.worktree.path()
         }
-        dir
+    }
+
+    fn mk_worktree(profile: Option<&gwt_skills::LaneProfile>) -> TestWorktree {
+        let home = tempfile::tempdir().unwrap();
+        let gwt_home = ScopedGwtHome::set(home.path());
+        let worktree = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(worktree.path().join(".gwt")).unwrap();
+        if let Some(profile) = profile {
+            write_lane_file(worktree.path(), profile).unwrap();
+        }
+        TestWorktree {
+            worktree,
+            _home: home,
+            _gwt_home: gwt_home,
+        }
     }
 
     fn record_valid_outcome(worktree: &Path, session: &str, recorded_at: chrono::DateTime<Utc>) {
@@ -403,8 +421,9 @@ mod tests {
         );
     }
 
-    // T-084 / AS-13 / AS-14: blocking auto-captures ONE issue-spec-workflow
-    // candidate with the stable dedupe key; repeats update the same one.
+    // T-084 / AS-13 / AS-14: blocking auto-captures one legacy-compatible
+    // issue-spec-workflow candidate with the stable dedupe key. Repeats update
+    // only the aggregate legacy count and never invent typed occurrences.
     #[test]
     fn block_auto_captures_single_candidate_with_stable_dedupe() {
         let dir = mk_worktree(Some(&INTAKE_PROFILE));
@@ -422,6 +441,13 @@ mod tests {
             );
             assert_eq!(
                 candidate.get("occurrences").and_then(|v| v.as_u64()),
+                Some(0),
+                "untyped intake captures must not count as distinct evidence"
+            );
+            assert_eq!(
+                candidate
+                    .get("legacy_occurrence_count")
+                    .and_then(|v| v.as_u64()),
                 Some(expected_occurrences)
             );
         }
@@ -435,7 +461,7 @@ mod tests {
         intake_outcome::mark_required_since(dir.path(), "sess-1", Utc::now()).unwrap();
         // Make the candidate store unwritable by planting a directory at the
         // store file path.
-        let store_path = improvement::candidate_store_path(dir.path());
+        let store_path = crate::cli::improvement_store::candidate_store_path(dir.path());
         std::fs::create_dir_all(&store_path).unwrap();
 
         let output = handle_with_input(dir.path(), "{}", Some("sess-1"));

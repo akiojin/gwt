@@ -144,6 +144,7 @@ impl AppRuntime {
         })
     }
 
+    #[cfg(test)]
     pub(crate) fn clear_launch_wizard(&mut self) -> Option<LaunchWizardSession> {
         self.launch_wizard.take()
     }
@@ -521,8 +522,7 @@ impl AppRuntime {
                         lane_id,
                     });
                 }
-                self.active_tab_id = Some(tab_id);
-                vec![self.launch_wizard_state_outbound()]
+                self.activate_tab_for_launch_wizard_events(tab_id)
             }
             Err(error) => start_work_open_error(client_id, error),
         }
@@ -577,11 +577,26 @@ impl AppRuntime {
                     });
                     session.wizard.launch_path = LaunchWizardLaunchPath::ManualSetup;
                 }
-                self.active_tab_id = Some(tab_id);
-                vec![self.launch_wizard_state_outbound()]
+                self.activate_tab_for_launch_wizard_events(tab_id)
             }
             Err(error) => launch_agent_open_error(client_id, error),
         }
+    }
+
+    fn activate_tab_for_launch_wizard_events(&mut self, tab_id: String) -> Vec<OutboundEvent> {
+        let previous_tab_id = self.active_tab_id.clone();
+        self.set_active_tab(tab_id);
+        let tab_changed = self.active_tab_id != previous_tab_id;
+        let mut events = Vec::new();
+        if tab_changed {
+            let _ = self.persist();
+            events.push(self.workspace_state_broadcast());
+            if let Some(event) = self.active_work_projection_broadcast_on_tab_change() {
+                events.push(event);
+            }
+        }
+        events.push(self.launch_wizard_state_outbound());
+        events
     }
 
     pub(crate) fn resume_workspace_events(
@@ -2234,12 +2249,18 @@ impl AppRuntime {
                     self.launch_wizard = Some(session);
                     return vec![self.launch_wizard_state_outbound()];
                 }
-                self.active_tab_id = Some(address.tab_id);
+                let previous_tab_id = self.active_tab_id.clone();
+                self.set_active_tab(address.tab_id);
+                let tab_changed = self.active_tab_id != previous_tab_id;
                 let _ = self.persist();
-                vec![
-                    self.workspace_state_broadcast(),
-                    self.launch_wizard_state_broadcast(None),
-                ]
+                let mut events = vec![self.workspace_state_broadcast()];
+                if tab_changed {
+                    if let Some(event) = self.active_work_projection_broadcast_on_tab_change() {
+                        events.push(event);
+                    }
+                }
+                events.push(self.launch_wizard_state_broadcast(None));
+                events
             }
             Some(LaunchWizardCompletion::ResolveRuntime(config)) => {
                 let Some(project_root) = self
