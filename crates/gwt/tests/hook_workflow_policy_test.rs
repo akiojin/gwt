@@ -1,7 +1,8 @@
 //! T-112 (SPEC #1935) — workflow-policy gating tests.
 
+#[cfg(unix)]
+use std::env;
 use std::{
-    env,
     io::{ErrorKind, Read, Write},
     net::{TcpListener, TcpStream},
     path::{Path, PathBuf},
