@@ -441,7 +441,7 @@ fn evaluate_trusted_state_write_guard(event: &HookEvent) -> Result<HookOutput, H
     Ok(HookOutput::pre_tool_use_permission(
         "Execution/evidence state files are written only by their canonical operations",
         "This file is trusted execution/evidence state (SPEC-3248 P9a/P9b) — the worktree mirror and its repo-scoped trusted store copy alike. Direct edits are ignored or rejected at the completion/PR gates, so do not edit it. \
-Use the canonical JSON operations instead: `execution.complete` / `execution.blocked` / `execution.adopt` for the execution control record, `verify.plan` / `verify.run` for verification plans and records, and `intake.outcome.record` for intake outcomes.",
+Use the canonical JSON operations instead: `execution.complete` / `execution.blocked` / `execution.adopt` / `execution.reopen` for the execution control record, `verify.plan` / `verify.run` for verification plans and records, and `intake.outcome.record` for intake outcomes.",
     ))
 }
 

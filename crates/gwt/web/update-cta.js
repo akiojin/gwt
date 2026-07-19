@@ -30,11 +30,11 @@ export function createUpdateCtaController({
     });
   }
 
-  // User verification 2026-06-12: the SPEC-2356 sidebar Update section was
-  // undiscoverable, so the CTA returns to its previous fixed bottom-right
-  // home — the shell mounts on <body> and the CSS floats it.
+  // User verification 2026-06-12 keeps the CTA in its discoverable
+  // bottom-right home. SPEC-2041 Phase 23 lets one roleless layout host own
+  // that corner with alerts; body remains a fixture/compatibility fallback.
   function ctaMountParent() {
-    return document.body;
+    return document.getElementById("operator-notice-stack") || document.body;
   }
 
   function ensureShell() {
