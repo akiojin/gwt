@@ -44,6 +44,7 @@ use super::CliEnv;
 /// Worktree-relative path of the Execution Control Record's mirror (the
 /// authoritative copy lives in the repo-scoped trusted store, P9b).
 pub const EXECUTION_CONTROL_STATE_RELATIVE: &str = ".gwt/skill-state/execution-control.json";
+const RECOVERY_ENVELOPE_PREFIX: &str = "gwt:execution-recovery:v1:";
 
 /// Linked owner kind. A `gwt-spec`-labeled Issue is a SPEC owner; everything
 /// else is a plain Issue owner.
@@ -104,6 +105,15 @@ pub struct ExecutionRecovery {
     pub verification_started_at: DateTime<Utc>,
     pub verification_created_at: DateTime<Utc>,
     pub reopened_at: DateTime<Utc>,
+    /// Hash of the preceding recovery entry, or empty for the first entry.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub previous_recovery_hash: String,
+    /// Integrity hash over this recovery entry with `content_hash` emptied.
+    /// Recovery history is an extension ignored by pre-recovery binaries, so
+    /// it carries its own append-only hash chain instead of changing the
+    /// rolling-compatible ECR body hash.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub content_hash: String,
 }
 
 /// The Execution Control Record (T-106).
@@ -152,17 +162,147 @@ pub struct ExecutionControlRecord {
 #[must_use]
 pub fn compute_content_hash(record: &ExecutionControlRecord) -> String {
     use sha2::{Digest, Sha256};
+    let canonical = recovery_storage_projection(record);
+    let bytes = serde_json::to_vec(&canonical).unwrap_or_default();
+    format!("{:x}", Sha256::digest(&bytes))
+}
+
+fn compute_legacy_hash_with_recoveries(record: &ExecutionControlRecord) -> String {
+    use sha2::{Digest, Sha256};
     let mut canonical = record.clone();
     canonical.content_hash = String::new();
     let bytes = serde_json::to_vec(&canonical).unwrap_or_default();
     format!("{:x}", Sha256::digest(&bytes))
 }
 
+#[must_use]
+fn compute_recovery_hash(recovery: &ExecutionRecovery) -> String {
+    use sha2::{Digest, Sha256};
+    let mut canonical = recovery.clone();
+    canonical.content_hash = String::new();
+    let bytes = serde_json::to_vec(&canonical).unwrap_or_default();
+    format!("{:x}", Sha256::digest(&bytes))
+}
+
+fn stamp_recovery_chain(recoveries: &mut [ExecutionRecovery]) {
+    let mut previous = String::new();
+    for recovery in recoveries {
+        recovery.previous_recovery_hash.clone_from(&previous);
+        recovery.content_hash = compute_recovery_hash(recovery);
+        previous.clone_from(&recovery.content_hash);
+    }
+}
+
+fn recovery_envelope(recovery: &ExecutionRecovery) -> OwnershipTransfer {
+    OwnershipTransfer {
+        from_session_id: recovery.session_id.clone(),
+        to_session_id: recovery.session_id.clone(),
+        reason: format!(
+            "{RECOVERY_ENVELOPE_PREFIX}{}",
+            serde_json::to_string(recovery).unwrap_or_default()
+        ),
+        transferred_at: recovery.reopened_at,
+    }
+}
+
+fn is_recovery_envelope_transfer(transfer: &OwnershipTransfer) -> bool {
+    transfer.from_session_id == transfer.to_session_id
+        && transfer.reason.starts_with(RECOVERY_ENVELOPE_PREFIX)
+}
+
+fn recovery_storage_projection(record: &ExecutionControlRecord) -> ExecutionControlRecord {
+    let mut canonical = record.clone();
+    stamp_recovery_chain(&mut canonical.recoveries);
+    canonical
+        .transfers
+        .retain(|transfer| !is_recovery_envelope_transfer(transfer));
+    let mut transfers = canonical
+        .recoveries
+        .iter()
+        .map(recovery_envelope)
+        .collect::<Vec<_>>();
+    transfers.append(&mut canonical.transfers);
+    canonical.transfers = transfers;
+    canonical.recoveries.clear();
+    canonical.content_hash = String::new();
+    canonical
+}
+
+fn hydrate_recovery_envelopes(mut record: ExecutionControlRecord) -> ExecutionControlRecord {
+    let mut transfers = Vec::with_capacity(record.transfers.len());
+    let mut recoveries = Vec::new();
+    let mut malformed = false;
+    let mut saw_regular_transfer = false;
+    for transfer in record.transfers {
+        if !is_recovery_envelope_transfer(&transfer) {
+            saw_regular_transfer = true;
+            transfers.push(transfer);
+            continue;
+        }
+        let raw = transfer
+            .reason
+            .strip_prefix(RECOVERY_ENVELOPE_PREFIX)
+            .unwrap_or_default();
+        if saw_regular_transfer {
+            malformed = true;
+        }
+        match serde_json::from_str::<ExecutionRecovery>(raw) {
+            Ok(recovery)
+                if transfer.from_session_id == recovery.session_id
+                    && transfer.transferred_at == recovery.reopened_at =>
+            {
+                recoveries.push(recovery);
+            }
+            Err(_) => malformed = true,
+            Ok(_) => malformed = true,
+        }
+    }
+    if !recoveries.is_empty() {
+        if record.recoveries.is_empty() {
+            record.recoveries = recoveries;
+        } else {
+            malformed = true;
+        }
+    }
+    record.transfers = transfers;
+    if malformed {
+        record.content_hash = format!("invalid-recovery-envelope:{}", record.content_hash);
+    }
+    record
+}
+
+fn recovery_chain_integrity_ok(recoveries: &[ExecutionRecovery]) -> bool {
+    let mut previous = "";
+    for recovery in recoveries {
+        if recovery.content_hash.is_empty()
+            || recovery.previous_recovery_hash != previous
+            || recovery.content_hash != compute_recovery_hash(recovery)
+        {
+            return false;
+        }
+        previous = &recovery.content_hash;
+    }
+    true
+}
+
 /// True when the stored integrity hash matches the content (or the record is
 /// a legacy pre-P9a record without one).
 #[must_use]
 pub fn integrity_ok(record: &ExecutionControlRecord) -> bool {
-    record.content_hash.is_empty() || record.content_hash == compute_content_hash(record)
+    if record.content_hash.is_empty() {
+        return record.recoveries.is_empty();
+    }
+    if record.content_hash == compute_content_hash(record) {
+        return recovery_chain_integrity_ok(&record.recoveries);
+    }
+    // One in-flight development record may have been written by the initial
+    // recovery implementation, whose ECR hash still included the extension
+    // and whose recovery entries had no individual hashes. Accept it only as
+    // a migration source; the next canonical save upgrades it.
+    record.content_hash == compute_legacy_hash_with_recoveries(record)
+        && record.recoveries.iter().all(|recovery| {
+            recovery.previous_recovery_hash.is_empty() && recovery.content_hash.is_empty()
+        })
 }
 
 /// Reachable repair guidance for an integrity failure. Adoption can rewrite
@@ -171,7 +311,7 @@ pub fn integrity_ok(record: &ExecutionControlRecord) -> bool {
 pub(crate) fn integrity_repair_guidance(status: ExecutionControlStatus) -> &'static str {
     match status {
         ExecutionControlStatus::Active => {
-            "Repair it with JSON operation `execution.adopt` and a non-empty `params.reason`, then re-verify."
+            "An integrity-failed Active record cannot be repaired in the same execution lifetime without risking audit loss; use a fresh linked-owner launch."
         }
         ExecutionControlStatus::Blocked | ExecutionControlStatus::Completed => {
             "A terminal record cannot be repaired with `execution.adopt`; start a fresh linked-owner launch to materialize canonical state."
@@ -187,7 +327,7 @@ pub fn state_path(worktree: &Path) -> PathBuf {
 
 /// Load the record. `Ok(None)` when missing; malformed JSON and I/O failures
 /// propagate so hook readers can fail open while writers surface the error.
-pub fn load(worktree: &Path) -> io::Result<Option<ExecutionControlRecord>> {
+fn read_record_contents(worktree: &Path) -> io::Result<Option<String>> {
     // P9b: the repo-scoped trusted copy is authoritative; the worktree
     // mirror is a legacy/degenerate fallback only.
     let contents = match crate::cli::trusted_store::read(worktree, "execution-control.json")? {
@@ -198,17 +338,106 @@ pub fn load(worktree: &Path) -> io::Result<Option<ExecutionControlRecord>> {
             Err(err) => return Err(err),
         },
     };
+    Ok(Some(contents))
+}
+
+pub fn load(worktree: &Path) -> io::Result<Option<ExecutionControlRecord>> {
+    let Some(contents) = read_record_contents(worktree)? else {
+        return Ok(None);
+    };
     let record = serde_json::from_str::<ExecutionControlRecord>(&contents)
         .map_err(|err| io::Error::new(ErrorKind::InvalidData, err))?;
-    Ok(Some(record))
+    Ok(Some(hydrate_recovery_envelopes(record)))
+}
+
+fn same_execution_lifetime(left: &ExecutionControlRecord, right: &ExecutionControlRecord) -> bool {
+    left.owner_kind == right.owner_kind
+        && left.owner_number == right.owner_number
+        && left.launched_at == right.launched_at
+}
+
+fn same_recovery_audit(left: &ExecutionRecovery, right: &ExecutionRecovery) -> bool {
+    let mut left = left.clone();
+    let mut right = right.clone();
+    left.previous_recovery_hash.clear();
+    left.content_hash.clear();
+    right.previous_recovery_hash.clear();
+    right.content_hash.clear();
+    left == right
+}
+
+fn recovery_history_extends(
+    previous: &[ExecutionRecovery],
+    incoming: &[ExecutionRecovery],
+) -> bool {
+    incoming.len() >= previous.len()
+        && previous
+            .iter()
+            .zip(incoming)
+            .all(|(left, right)| same_recovery_audit(left, right))
+}
+
+fn recovery_storage_needs_upgrade(worktree: &Path) -> io::Result<bool> {
+    let Some(contents) = read_record_contents(worktree)? else {
+        return Ok(false);
+    };
+    let stored = serde_json::from_str::<ExecutionControlRecord>(&contents)
+        .map_err(|err| io::Error::new(ErrorKind::InvalidData, err))?;
+    Ok(!stored.recoveries.is_empty())
+}
+
+fn load_existing_for_save(worktree: &Path) -> io::Result<Option<ExecutionControlRecord>> {
+    if crate::cli::trusted_store::trusted_dir_for_worktree(worktree).is_some() {
+        let Some(contents) = crate::cli::trusted_store::read(worktree, "execution-control.json")?
+        else {
+            return Ok(None);
+        };
+        let record = serde_json::from_str::<ExecutionControlRecord>(&contents)
+            .map_err(|err| io::Error::new(ErrorKind::InvalidData, err))?;
+        return Ok(Some(hydrate_recovery_envelopes(record)));
+    }
+    load(worktree)
 }
 
 /// Persist the record atomically (hooks read this file concurrently). The
 /// integrity hash is recomputed on every save (P9a).
 pub fn save(worktree: &Path, record: &ExecutionControlRecord) -> io::Result<()> {
     let mut record = record.clone();
-    record.content_hash = compute_content_hash(&record);
-    let serialized = serde_json::to_vec_pretty(&record)
+    if record.transfers.iter().any(is_recovery_envelope_transfer) {
+        return Err(io::Error::new(
+            ErrorKind::InvalidData,
+            "ownership transfer reason uses the reserved recovery-envelope namespace",
+        ));
+    }
+    if let Some(previous) = load_existing_for_save(worktree)? {
+        if previous
+            .content_hash
+            .starts_with("invalid-recovery-envelope:")
+        {
+            return Err(io::Error::new(
+                ErrorKind::InvalidData,
+                "malformed recovery envelopes require a fresh execution lifetime",
+            ));
+        }
+        if same_execution_lifetime(&previous, &record) {
+            if !integrity_ok(&previous) {
+                return Err(io::Error::new(
+                    ErrorKind::InvalidData,
+                    "an integrity-failed execution record cannot be rewritten in the same lifetime",
+                ));
+            }
+            if !recovery_history_extends(&previous.recoveries, &record.recoveries) {
+                return Err(io::Error::new(
+                    ErrorKind::InvalidData,
+                    "execution recovery history is append-only within one execution lifetime",
+                ));
+            }
+        }
+    }
+    stamp_recovery_chain(&mut record.recoveries);
+    let mut stored = recovery_storage_projection(&record);
+    stored.content_hash = compute_content_hash(&record);
+    let serialized = serde_json::to_vec_pretty(&stored)
         .map_err(|err| io::Error::new(ErrorKind::InvalidData, err))?;
     // P9b: trusted copy is authoritative; the mirror is informational.
     crate::cli::trusted_store::write_with_mirror(
@@ -565,8 +794,7 @@ pub enum ExecutionCommand {
         missing_verification: Option<String>,
     },
     /// P9a (T-117): take over the worktree's active record for the current
-    /// session with an audited reason (crash recovery, window handoff,
-    /// tamper repair).
+    /// session with an audited reason (crash recovery, window handoff).
     Adopt {
         reason: String,
     },
@@ -783,6 +1011,15 @@ fn run_reopen_locked(
                 ));
                 return Ok(2);
             }
+            // Only an in-flight record with embedded recoveries needs the
+            // rolling-upgrade write. A modern idempotent retry stays a true
+            // no-op and cannot fail because of an unnecessary rewrite.
+            if recovery_storage_needs_upgrade(worktree)
+                .map_err(|err| SpecOpsError::from(ApiError::Network(err.to_string())))?
+            {
+                save(worktree, &record)
+                    .map_err(|err| SpecOpsError::from(ApiError::Network(err.to_string())))?;
+            }
             out.push_str(&format!(
                 "execution: {kind} #{number} is already active for session {session}\n",
                 kind = record.owner_kind.as_str(),
@@ -933,6 +1170,8 @@ fn run_reopen_locked(
         verification_started_at,
         verification_created_at: verification.created_at,
         reopened_at,
+        previous_recovery_hash: String::new(),
+        content_hash: String::new(),
     });
     record.status = ExecutionControlStatus::Active;
     record.settled_at = None;
@@ -949,9 +1188,9 @@ fn run_reopen_locked(
 }
 
 /// `execution.adopt` (P9a, T-117): take over the worktree's record for the
-/// current session with an audited transfer entry. Also the repair path for
-/// records that failed integrity validation — the rewrite goes through the
-/// canonical writer, restoring a valid hash while keeping the audit trail.
+/// current session with an audited transfer entry. Integrity-failed records
+/// require a fresh execution lifetime: rewriting one here could canonize a
+/// truncated recovery history.
 fn run_adopt(
     worktree: &Path,
     session_id: &str,
@@ -961,6 +1200,11 @@ fn run_adopt(
     if reason.trim().is_empty() {
         return Err(SpecOpsError::from(ApiError::Unexpected(
             "execution.adopt requires a non-empty params.reason".to_string(),
+        )));
+    }
+    if reason.trim().starts_with(RECOVERY_ENVELOPE_PREFIX) {
+        return Err(SpecOpsError::from(ApiError::Unexpected(
+            "execution.adopt reason uses a reserved recovery-envelope namespace".to_string(),
         )));
     }
     // T-149: adoption is a read-modify-write cycle — leased.
@@ -989,11 +1233,17 @@ fn run_adopt_locked(
         ));
         return Ok(0);
     }
-    if record.primary_session_id == session_id && integrity_ok(&record) {
+    if !integrity_ok(&record) {
+        out.push_str(&format!(
+            "execution: adopt refused — {}\n",
+            integrity_repair_guidance(record.status)
+        ));
+        return Ok(2);
+    }
+    if record.primary_session_id == session_id {
         out.push_str("execution: the current session already owns this record\n");
         return Ok(0);
     }
-    let was_tampered = !integrity_ok(&record);
     record.transfers.push(OwnershipTransfer {
         from_session_id: record.primary_session_id.clone(),
         to_session_id: session_id.to_string(),
@@ -1004,16 +1254,11 @@ fn run_adopt_locked(
     save(worktree, &record)
         .map_err(|err| SpecOpsError::from(ApiError::Network(err.to_string())))?;
     out.push_str(&format!(
-        "execution: adopted {kind} #{number} for session {session} ({transfers} transfer(s) on record{repaired})\n",
+        "execution: adopted {kind} #{number} for session {session} ({transfers} transfer(s) on record)\n",
         kind = record.owner_kind.as_str(),
         number = record.owner_number,
         session = session_id,
         transfers = record.transfers.len(),
-        repaired = if was_tampered {
-            ", integrity repaired"
-        } else {
-            ""
-        },
     ));
     Ok(0)
 }
@@ -1022,6 +1267,52 @@ fn run_adopt_locked(
 mod tests {
     use super::*;
     use gwt_core::test_support::ScopedEnvVar;
+
+    #[derive(Debug, Serialize, Deserialize)]
+    struct PreRecoveryControlRecord {
+        owner_kind: ExecutionOwnerKind,
+        owner_number: u64,
+        primary_session_id: String,
+        entrypoint: String,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        bundled_required_owners: Vec<u64>,
+        status: ExecutionControlStatus,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        blocked_reason: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        missing_verification: Option<String>,
+        launched_at: DateTime<Utc>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        settled_at: Option<DateTime<Utc>>,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        transfers: Vec<OwnershipTransfer>,
+        #[serde(default, skip_serializing_if = "String::is_empty")]
+        content_hash: String,
+    }
+
+    #[derive(Debug, Serialize, Deserialize)]
+    struct InitialRecoveryControlRecord {
+        owner_kind: ExecutionOwnerKind,
+        owner_number: u64,
+        primary_session_id: String,
+        entrypoint: String,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        bundled_required_owners: Vec<u64>,
+        status: ExecutionControlStatus,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        blocked_reason: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        missing_verification: Option<String>,
+        launched_at: DateTime<Utc>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        settled_at: Option<DateTime<Utc>>,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        transfers: Vec<OwnershipTransfer>,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        recoveries: Vec<serde_json::Value>,
+        #[serde(default, skip_serializing_if = "String::is_empty")]
+        content_hash: String,
+    }
 
     fn active_record(session: &str) -> ExecutionControlRecord {
         ExecutionControlRecord {
@@ -1041,6 +1332,28 @@ mod tests {
         }
     }
 
+    fn test_recovery(session: &str, index: usize) -> ExecutionRecovery {
+        let now = Utc::now();
+        ExecutionRecovery {
+            session_id: session.to_string(),
+            reason: format!("recovery {index}"),
+            prior_blocked_reason: Some(format!("blocker {index}")),
+            prior_missing_verification: None,
+            blocked_at: now,
+            verification_record_id: format!("vrr-{index}"),
+            verification_run_hash: format!("run-hash-{index}"),
+            verification_plan_hash: format!("plan-hash-{index}"),
+            verification_plan_created_at: now,
+            plan_derived: true,
+            worktree_fingerprint: format!("fingerprint-{index}"),
+            verification_started_at: now,
+            verification_created_at: now,
+            reopened_at: now,
+            previous_recovery_hash: String::new(),
+            content_hash: String::new(),
+        }
+    }
+
     // T-106: roundtrip with owner kind/number, primary session id,
     // entrypoint, bundled-required owners, state, and timestamps.
     #[test]
@@ -1056,6 +1369,210 @@ mod tests {
         let mut normalized = loaded.clone();
         normalized.content_hash = String::new();
         assert_eq!(normalized, record);
+    }
+
+    #[test]
+    fn recovery_history_is_anchored_in_old_schema_storage_projection() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut record = active_record("sess-1");
+        record.recoveries = vec![test_recovery("sess-1", 1), test_recovery("sess-1", 2)];
+        save(dir.path(), &record).unwrap();
+
+        let raw: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(state_path(dir.path())).unwrap()).unwrap();
+        assert!(
+            raw.get("recoveries").is_none(),
+            "all recovery generations must see the old-schema ECR projection"
+        );
+        let stored_transfers = raw["transfers"].as_array().unwrap();
+        assert_eq!(stored_transfers.len(), 2);
+        assert!(stored_transfers.iter().all(|transfer| transfer["reason"]
+            .as_str()
+            .unwrap()
+            .starts_with("gwt:execution-recovery:v1:")));
+
+        let loaded = load(dir.path()).unwrap().unwrap();
+        assert!(loaded.transfers.is_empty());
+        assert_eq!(loaded.recoveries.len(), 2);
+        assert!(integrity_ok(&loaded));
+
+        let mut truncated = loaded.clone();
+        truncated.recoveries.pop();
+        assert!(!integrity_ok(&truncated));
+        truncated.recoveries.clear();
+        assert!(!integrity_ok(&truncated));
+    }
+
+    #[test]
+    fn canonical_save_refuses_recovery_history_truncation_or_replacement() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut record = active_record("sess-1");
+        record.recoveries = vec![test_recovery("sess-1", 1), test_recovery("sess-1", 2)];
+        save(dir.path(), &record).unwrap();
+        let loaded = load(dir.path()).unwrap().unwrap();
+
+        let mut truncated = loaded.clone();
+        truncated.recoveries.pop();
+        let err = save(dir.path(), &truncated).unwrap_err();
+        assert_eq!(err.kind(), ErrorKind::InvalidData);
+
+        let mut replaced = loaded;
+        replaced.recoveries[0].reason = "replacement".to_string();
+        let err = save(dir.path(), &replaced).unwrap_err();
+        assert_eq!(err.kind(), ErrorKind::InvalidData);
+    }
+
+    #[test]
+    fn old_typed_writers_preserve_recovery_envelopes_and_integrity() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut record = active_record("sess-1");
+        record.recoveries = vec![test_recovery("sess-1", 1), test_recovery("sess-1", 2)];
+        save(dir.path(), &record).unwrap();
+        let path = state_path(dir.path());
+
+        let raw = fs::read_to_string(&path).unwrap();
+        let mut pre_recovery: PreRecoveryControlRecord = serde_json::from_str(&raw).unwrap();
+        let stored_hash = pre_recovery.content_hash.clone();
+        pre_recovery.content_hash.clear();
+        let expected_hash = format!(
+            "{:x}",
+            <sha2::Sha256 as sha2::Digest>::digest(serde_json::to_vec(&pre_recovery).unwrap())
+        );
+        assert_eq!(stored_hash, expected_hash);
+        pre_recovery.transfers.push(OwnershipTransfer {
+            from_session_id: "sess-1".to_string(),
+            to_session_id: "sess-old-writer".to_string(),
+            reason: format!("{RECOVERY_ENVELOPE_PREFIX}legacy-prefix-collision"),
+            transferred_at: Utc::now(),
+        });
+        pre_recovery.primary_session_id = "sess-old-writer".to_string();
+        pre_recovery.content_hash = {
+            let bytes = serde_json::to_vec(&pre_recovery).unwrap();
+            format!("{:x}", <sha2::Sha256 as sha2::Digest>::digest(bytes))
+        };
+        fs::write(&path, serde_json::to_vec_pretty(&pre_recovery).unwrap()).unwrap();
+        let after_pre_recovery = load(dir.path()).unwrap().unwrap();
+        assert_eq!(after_pre_recovery.recoveries.len(), 2);
+        assert_eq!(after_pre_recovery.transfers.len(), 1);
+        assert!(integrity_ok(&after_pre_recovery));
+
+        let raw = fs::read_to_string(&path).unwrap();
+        let mut initial: InitialRecoveryControlRecord = serde_json::from_str(&raw).unwrap();
+        assert!(initial.recoveries.is_empty());
+        initial.content_hash.clear();
+        initial.content_hash = {
+            let bytes = serde_json::to_vec(&initial).unwrap();
+            format!("{:x}", <sha2::Sha256 as sha2::Digest>::digest(bytes))
+        };
+        fs::write(&path, serde_json::to_vec_pretty(&initial).unwrap()).unwrap();
+        let after_initial_writer = load(dir.path()).unwrap().unwrap();
+        assert_eq!(after_initial_writer.recoveries.len(), 2);
+        assert_eq!(after_initial_writer.transfers.len(), 1);
+        assert!(integrity_ok(&after_initial_writer));
+    }
+
+    #[test]
+    fn raw_recovery_envelope_corruption_fails_closed() {
+        let make_raw = || {
+            let dir = tempfile::tempdir().unwrap();
+            let mut record = active_record("sess-1");
+            record.recoveries = vec![test_recovery("sess-1", 1), test_recovery("sess-1", 2)];
+            save(dir.path(), &record).unwrap();
+            let raw: ExecutionControlRecord =
+                serde_json::from_str(&fs::read_to_string(state_path(dir.path())).unwrap()).unwrap();
+            (dir, raw)
+        };
+
+        let (tail_dir, mut tail) = make_raw();
+        tail.transfers.remove(1);
+        fs::write(
+            state_path(tail_dir.path()),
+            serde_json::to_vec_pretty(&tail).unwrap(),
+        )
+        .unwrap();
+        let tail_record = load(tail_dir.path()).unwrap().unwrap();
+        assert!(!integrity_ok(&tail_record));
+        assert_eq!(
+            save(tail_dir.path(), &tail_record).unwrap_err().kind(),
+            ErrorKind::InvalidData,
+            "same-lifetime save must not launder a shortened recovery history"
+        );
+
+        let (all_dir, mut all) = make_raw();
+        all.transfers.clear();
+        fs::write(
+            state_path(all_dir.path()),
+            serde_json::to_vec_pretty(&all).unwrap(),
+        )
+        .unwrap();
+        let all_record = load(all_dir.path()).unwrap().unwrap();
+        assert!(!integrity_ok(&all_record));
+        assert_eq!(
+            save(all_dir.path(), &all_record).unwrap_err().kind(),
+            ErrorKind::InvalidData,
+            "same-lifetime save must not launder a fully deleted recovery history"
+        );
+
+        let (mixed_dir, mut mixed) = make_raw();
+        mixed.recoveries.push(test_recovery("sess-1", 3));
+        fs::write(
+            state_path(mixed_dir.path()),
+            serde_json::to_vec_pretty(&mixed).unwrap(),
+        )
+        .unwrap();
+        assert!(!integrity_ok(&load(mixed_dir.path()).unwrap().unwrap()));
+
+        let (interleaved_dir, mut interleaved) = make_raw();
+        interleaved.transfers.insert(
+            1,
+            OwnershipTransfer {
+                from_session_id: "a".to_string(),
+                to_session_id: "b".to_string(),
+                reason: "real transfer".to_string(),
+                transferred_at: Utc::now(),
+            },
+        );
+        fs::write(
+            state_path(interleaved_dir.path()),
+            serde_json::to_vec_pretty(&interleaved).unwrap(),
+        )
+        .unwrap();
+        assert!(!integrity_ok(
+            &load(interleaved_dir.path()).unwrap().unwrap()
+        ));
+
+        let (malformed_dir, mut malformed) = make_raw();
+        malformed.transfers[0].reason = format!("{RECOVERY_ENVELOPE_PREFIX}not-json");
+        fs::write(
+            state_path(malformed_dir.path()),
+            serde_json::to_vec_pretty(&malformed).unwrap(),
+        )
+        .unwrap();
+        assert!(!integrity_ok(&load(malformed_dir.path()).unwrap().unwrap()));
+
+        let (identity_dir, mut identity) = make_raw();
+        identity.transfers[0].to_session_id = "different-session".to_string();
+        fs::write(
+            state_path(identity_dir.path()),
+            serde_json::to_vec_pretty(&identity).unwrap(),
+        )
+        .unwrap();
+        assert!(!integrity_ok(&load(identity_dir.path()).unwrap().unwrap()));
+    }
+
+    #[test]
+    fn fresh_execution_lifetime_may_reset_recovery_history() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut previous = active_record("sess-1");
+        previous.recoveries.push(test_recovery("sess-1", 1));
+        save(dir.path(), &previous).unwrap();
+
+        let mut fresh = active_record("sess-2");
+        fresh.launched_at = previous.launched_at + chrono::Duration::nanoseconds(1);
+        save(dir.path(), &fresh).unwrap();
+        let loaded = load(dir.path()).unwrap().unwrap();
+        assert!(loaded.recoveries.is_empty());
+        assert!(integrity_ok(&loaded));
     }
 
     // P9b (T-174 core): once a repo-scoped trusted copy exists, editing the
@@ -1381,7 +1898,7 @@ mod tests {
     // P9a (T-122): a record edited outside the canonical operations fails
     // integrity validation — settlement refuses it.
     #[test]
-    fn tampered_record_refuses_settlement_and_adopt_repairs() {
+    fn tampered_record_refuses_settlement_and_same_lifetime_repair() {
         let dir = tempfile::tempdir().unwrap();
         save(dir.path(), &active_record("sess-1")).unwrap();
         // Naive direct edit: flip the status without recomputing the hash.
@@ -1398,14 +1915,21 @@ mod tests {
             SettleResult::Tampered
         );
 
-        // adopt (canonical writer) repairs the record with an audited entry.
-        // Tamper a different field this time (editing the status back would
-        // just restore the originally hashed content).
+        // A same-lifetime canonical rewrite must not launder the tamper: it
+        // could otherwise sign a truncated recovery history as the baseline.
+        // A genuinely fresh launch (new launched_at) remains available.
         let edited = fs::read_to_string(&path)
             .unwrap()
             .replace("\"completed\"", "\"active\"")
             .replace("\"$gwt-execute\"", "\"$gwt-forged\"");
         fs::write(&path, edited).unwrap();
+        let mut out = String::new();
+        assert_eq!(
+            run_adopt(dir.path(), "sess-2", "tamper repair", &mut out).unwrap(),
+            2,
+            "{out}"
+        );
+        assert!(out.contains("fresh linked-owner launch"), "{out}");
         let mut record = load(dir.path()).unwrap().unwrap();
         assert!(!integrity_ok(&record));
         record.transfers.push(OwnershipTransfer {
@@ -1415,10 +1939,13 @@ mod tests {
             transferred_at: Utc::now(),
         });
         record.primary_session_id = "sess-2".to_string();
-        save(dir.path(), &record).unwrap();
-        let repaired = load(dir.path()).unwrap().unwrap();
-        assert!(integrity_ok(&repaired));
-        assert_eq!(repaired.transfers.len(), 1);
+        let err = save(dir.path(), &record).unwrap_err();
+        assert_eq!(err.kind(), ErrorKind::InvalidData);
+
+        let mut fresh = active_record("sess-2");
+        fresh.launched_at = record.launched_at + chrono::Duration::nanoseconds(1);
+        save(dir.path(), &fresh).unwrap();
+        assert!(integrity_ok(&load(dir.path()).unwrap().unwrap()));
     }
 
     // T-107 helpers: entrypoint derivation from the launch argv.
@@ -1564,7 +2091,29 @@ mod tests {
             assert!(recovery.verification_started_at > blocked_at);
             assert!(recovery.verification_created_at > blocked_at);
             assert!(recovery.reopened_at >= recovery.verification_created_at);
+            assert!(recovery.previous_recovery_hash.is_empty());
+            assert!(!recovery.content_hash.is_empty());
             assert!(integrity_ok(&reopened));
+
+            // The stored ECR remains readable by both old typed schemas:
+            // recoveries are logical-only and their versioned envelopes are
+            // anchored in the old-schema-known transfer prefix.
+            let stored: ExecutionControlRecord = serde_json::from_str(
+                &crate::cli::trusted_store::read(dir.path(), "execution-control.json")
+                    .unwrap()
+                    .unwrap(),
+            )
+            .unwrap();
+            assert!(stored.recoveries.is_empty());
+            assert!(stored.transfers[0]
+                .reason
+                .starts_with(RECOVERY_ENVELOPE_PREFIX));
+            let mut tampered_history = reopened.clone();
+            tampered_history.recoveries[0].reason = "forged recovery".to_string();
+            assert!(
+                !integrity_ok(&tampered_history),
+                "recovery extension tamper must fail its independent hash chain"
+            );
 
             // Reopen does not claim completion, but the same fresh evidence
             // unlocks the normal Ready/complete gates.
@@ -1915,6 +2464,79 @@ mod tests {
             .unwrap();
             assert_eq!(code, 0, "{out}");
             assert!(out.contains("already active"), "{out}");
+        }
+
+        #[test]
+        fn idempotent_reopen_upgrades_initial_recovery_schema() {
+            let _env_lock = crate::env_test_lock()
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let _session = ScopedEnvVar::set(gwt_agent::GWT_SESSION_ID_ENV, "sess-reopen");
+            let dir = tempfile::tempdir().unwrap();
+            let now = Utc::now();
+            let mut transitional = active_record("sess-reopen");
+            transitional.recoveries.push(ExecutionRecovery {
+                session_id: "sess-reopen".to_string(),
+                reason: "initial recovery schema".to_string(),
+                prior_blocked_reason: Some("temporary blocker".to_string()),
+                prior_missing_verification: None,
+                blocked_at: now,
+                verification_record_id: "vrr-transition".to_string(),
+                verification_run_hash: "run-hash".to_string(),
+                verification_plan_hash: "plan-hash".to_string(),
+                verification_plan_created_at: now,
+                plan_derived: true,
+                worktree_fingerprint: "fingerprint".to_string(),
+                verification_started_at: now,
+                verification_created_at: now,
+                reopened_at: now,
+                previous_recovery_hash: String::new(),
+                content_hash: String::new(),
+            });
+            transitional.content_hash = compute_legacy_hash_with_recoveries(&transitional);
+            let path = state_path(dir.path());
+            fs::create_dir_all(path.parent().unwrap()).unwrap();
+            fs::write(&path, serde_json::to_vec_pretty(&transitional).unwrap()).unwrap();
+            assert!(integrity_ok(&transitional));
+            assert!(recovery_storage_needs_upgrade(dir.path()).unwrap());
+            let mut forged_transition = transitional.clone();
+            forged_transition.recoveries[0].previous_recovery_hash = "forged".to_string();
+            forged_transition.content_hash =
+                compute_legacy_hash_with_recoveries(&forged_transition);
+            assert!(!integrity_ok(&forged_transition));
+            let mut unsupported_intermediate = transitional.clone();
+            stamp_recovery_chain(&mut unsupported_intermediate.recoveries);
+            let mut old_projection = unsupported_intermediate.clone();
+            old_projection.recoveries.clear();
+            old_projection.content_hash.clear();
+            unsupported_intermediate.content_hash = format!(
+                "{:x}",
+                <sha2::Sha256 as sha2::Digest>::digest(
+                    serde_json::to_vec(&old_projection).unwrap()
+                )
+            );
+            assert!(
+                !integrity_ok(&unsupported_intermediate),
+                "only the initial unchained whole-record schema is migratable"
+            );
+
+            let (code, out) = run_cmd(
+                dir.path(),
+                ExecutionCommand::Reopen {
+                    reason: "normalize rolling-compatible integrity".to_string(),
+                },
+            )
+            .unwrap();
+            assert_eq!(code, 0, "{out}");
+            assert!(out.contains("already active"), "{out}");
+
+            let upgraded = load(dir.path()).unwrap().unwrap();
+            assert_eq!(upgraded.recoveries.len(), 1);
+            assert_ne!(upgraded.content_hash, transitional.content_hash);
+            assert!(!upgraded.recoveries[0].content_hash.is_empty());
+            assert_eq!(upgraded.content_hash, compute_content_hash(&upgraded));
+            assert!(integrity_ok(&upgraded));
+            assert!(!recovery_storage_needs_upgrade(dir.path()).unwrap());
         }
 
         #[test]
@@ -2633,6 +3255,13 @@ mod tests {
                 dir.path(),
                 ExecutionCommand::Adopt {
                     reason: "  ".to_string()
+                }
+            )
+            .is_err());
+            assert!(run_cmd(
+                dir.path(),
+                ExecutionCommand::Adopt {
+                    reason: format!("{RECOVERY_ENVELOPE_PREFIX}collision")
                 }
             )
             .is_err());

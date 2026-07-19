@@ -86,8 +86,9 @@ session, or for another owner. Draft PRs stay available mid-work.
 When resuming or recovering another session's execution (crash, closed
 window), take over the record explicitly with JSON operation
 `execution.adopt` and a non-empty `params.reason` — takeovers are audited as
-an ownership transfer chain, and adopt is also the repair path when the
-record fails integrity validation.
+an ownership transfer chain. Adopt requires a valid integrity record. An
+integrity-failed record cannot be repaired in the same execution lifetime
+without risking audit loss; use a fresh linked-owner launch instead.
 
 ## Mode detection
 
