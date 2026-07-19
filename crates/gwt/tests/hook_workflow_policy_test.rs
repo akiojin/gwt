@@ -251,7 +251,12 @@ fn accept_loopback_with_timeout(listener: &TcpListener, timeout: Duration) -> Tc
     let deadline = Instant::now() + timeout;
     loop {
         match listener.accept() {
-            Ok((stream, _)) => return stream,
+            Ok((stream, _)) => {
+                stream
+                    .set_nonblocking(false)
+                    .expect("blocking accepted loopback stream");
+                return stream;
+            }
             Err(error) if error.kind() == ErrorKind::WouldBlock && Instant::now() < deadline => {
                 std::thread::sleep(Duration::from_millis(10));
             }
@@ -571,6 +576,8 @@ fn direct_stop_reserves_time_to_settle_after_post_attempt_store_lock_contention(
         let candidate_lock_path = gwt_core::paths::gwt_project_dir_for_repo_path(repo.path())
             .join("improvements")
             .join(".lock");
+        let lock_release_at = Arc::new(OnceLock::<Instant>::new());
+        let server_lock_release_at = Arc::clone(&lock_release_at);
         let listener = TcpListener::bind("127.0.0.1:0").expect("loopback listener");
         let address = listener.local_addr().expect("loopback address");
         let server = std::thread::spawn(move || {
@@ -593,7 +600,10 @@ fn direct_stop_reserves_time_to_settle_after_post_attempt_store_lock_contention(
             )
             .expect("complete owner corpus response");
             request.flush().expect("flush owner corpus response");
-            std::thread::sleep(Duration::from_millis(700));
+            let release_at = *server_lock_release_at
+                .get()
+                .expect("absolute candidate lock release deadline");
+            std::thread::sleep(release_at.saturating_duration_since(Instant::now()));
             fs2::FileExt::unlock(&candidate_lock).expect("release candidate store lock");
         });
         let _mode = ScopedEnvVar::set("GWT_OWNER_GITHUB_TEST_MODE", "loopback-v1");
@@ -604,9 +614,28 @@ fn direct_stop_reserves_time_to_settle_after_post_attempt_store_lock_contention(
         );
         let _token = ScopedEnvVar::set("GWT_OWNER_GITHUB_TOKEN", "loopback-test-token");
         let mut env = DefaultCliEnv::new_for_hooks_at(repo.path().to_path_buf());
+        let deadline = ResolutionDeadline::new(
+            DIRECT_STOP_TEST_CONNECT_TIMEOUT,
+            DIRECT_STOP_TEST_TOTAL_BUDGET,
+        );
+        let resolution_deadline = deadline.reserving(DIRECT_STOP_TEST_SETTLEMENT_RESERVE);
+        let release_at = resolution_deadline.expires_at() + Duration::from_millis(25);
+        assert!(
+            release_at < deadline.expires_at(),
+            "fixture must release the lock inside the settlement reserve"
+        );
+        lock_release_at
+            .set(release_at)
+            .expect("set absolute candidate lock release deadline");
         let started = Instant::now();
 
-        let output = evaluate_direct_stop_with_test_budget(&mut env);
+        let output = gwt_self_improvement_stop::evaluate_with_deadline_and_reserve(
+            &mut env,
+            false,
+            false,
+            &deadline,
+            DIRECT_STOP_TEST_SETTLEMENT_RESERVE,
+        );
         let elapsed = started.elapsed();
 
         server.join().expect("loopback server");

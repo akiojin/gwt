@@ -16,6 +16,7 @@ import { createUpdateCtaController } from "../update-cta.js";
 const here = dirname(fileURLToPath(import.meta.url));
 const appSource = readFileSync(resolve(here, "../app.js"), "utf8");
 const indexHtml = readFileSync(resolve(here, "../index.html"), "utf8");
+const appCss = readFileSync(resolve(here, "../styles/app.css"), "utf8");
 const componentsCss = readFileSync(resolve(here, "../styles/components.css"), "utf8");
 
 test("update_state renders one reusable update CTA", () => {
@@ -204,15 +205,20 @@ test("legacy split update toast and button surfaces are removed", () => {
   assert.doesNotMatch(indexHtml, /\.update-button\b/);
 });
 
-test("update CTA floats fixed bottom-right again (user verification 2026-06-12)", () => {
-  // SPEC-2356 moved the CTA into a sidebar Update section, but the user found
-  // it undiscoverable there — the shell returns to its previous fixed
-  // bottom-right home and the sidebar anchor is gone from index.html.
+test("update CTA uses the shared fixed bottom-right notice host", () => {
+  // SPEC-2356 established that the CTA must remain discoverable in the
+  // bottom-right corner. SPEC-2041 Phase 23 keeps that placement while moving
+  // fixed-position ownership to the shared alerts/CTA layout host.
+  assert.match(indexHtml, /id="operator-notice-stack"/);
+  const hostMatch = appCss.match(/\.operator-notice-stack\s*\{[^}]+\}/);
+  assert.ok(hostMatch, "expected .operator-notice-stack rule inside app.css");
+  assert.match(hostMatch[0], /position:\s*fixed/);
+  assert.match(hostMatch[0], /bottom:/);
+  assert.match(hostMatch[0], /right:/);
   const shellMatch = componentsCss.match(/\.update-cta-shell\s*\{[^}]+\}/);
   assert.ok(shellMatch, "expected .update-cta-shell rule inside components.css");
-  assert.match(shellMatch[0], /position:\s*fixed/);
-  assert.match(shellMatch[0], /bottom:/);
-  assert.match(shellMatch[0], /right:/);
+  assert.doesNotMatch(shellMatch[0], /position:\s*fixed/);
+  assert.doesNotMatch(shellMatch[0], /\b(?:bottom|right|z-index)\s*:/);
   assert.doesNotMatch(indexHtml, /id="update-cta-anchor"/);
   const styleMatch = componentsCss.match(/\.update-cta\s*\{[^}]+\}/);
   assert.ok(styleMatch, "expected .update-cta rule inside components.css");
@@ -222,9 +228,9 @@ test("update CTA floats fixed bottom-right again (user verification 2026-06-12)"
   assert.doesNotMatch(indexHtml, /\.update-cta\s*\{/);
 });
 
-test("update CTA shell mounts on document.body (user verification 2026-06-12)", () => {
+test("update CTA shell mounts in the shared notice host", () => {
   const { document } = parseHTML(
-    '<!doctype html><html><body><aside class="op-sidebar"></aside></body></html>',
+    '<!doctype html><html><body><div id="operator-notice-stack"></div></body></html>',
   );
   const sent = [];
   const controller = createUpdateCtaController({
@@ -236,11 +242,17 @@ test("update CTA shell mounts on document.body (user verification 2026-06-12)", 
   controller.showAvailable("9.50.0");
   const shell = document.getElementById("update-cta-shell");
   assert.ok(shell, "expected the update CTA shell to be created");
-  assert.equal(shell.parentElement, document.body, "shell mounts on <body>");
+  assert.equal(
+    shell.parentElement === document.getElementById("operator-notice-stack"),
+    true,
+    "shell mounts in the shared notice host",
+  );
 });
 
 function createFixture({ confirmResult = true } = {}) {
-  const { document } = parseHTML("<!doctype html><html><body></body></html>");
+  const { document } = parseHTML(
+    '<!doctype html><html><body><div id="operator-notice-stack"></div></body></html>',
+  );
   const sent = [];
   const confirmCalls = [];
   const versionUpdates = [];

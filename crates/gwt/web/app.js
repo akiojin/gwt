@@ -4339,7 +4339,8 @@
         levels: ["neutral", "info", "warn", "error", "done"],
         defaultLevel: "neutral",
       });
-      alertsToasts.mount(document.body);
+      const operatorNoticeStack = document.getElementById("operator-notice-stack");
+      alertsToasts.mount(operatorNoticeStack || document.body);
 
       const agentKanbanSurface = createAgentKanbanSurface({
         activeWorkspace,

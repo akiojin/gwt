@@ -671,6 +671,7 @@ mod tests {
                 owner_number: Some(42),
                 commands: vec!["git --version".to_string()],
                 derived: false,
+                worktree_fingerprint: String::new(),
                 created_at: chrono::Utc::now(),
                 content_hash: String::new(),
             },

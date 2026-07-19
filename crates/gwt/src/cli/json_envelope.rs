@@ -301,6 +301,11 @@ fn parse(input: &str) -> Result<ParsedEnvelope, CliParseError> {
                 reason: required_string(params, "reason")?,
             })
         }
+        "execution.reopen" => {
+            CliCommand::Execution(crate::cli::execution_state::ExecutionCommand::Reopen {
+                reason: required_string(params, "reason")?,
+            })
+        }
         "build.start" => skill_state(params, SkillActionKind::Start).map(CliCommand::Build)?,
         "build.phase" => skill_state(params, SkillActionKind::Phase).map(CliCommand::Build)?,
         "build.complete" => {
@@ -1548,6 +1553,14 @@ mod tests {
         ));
         assert!(matches!(
             err("execution.blocked", json!({})),
+            CliParseError::MissingFlag("reason")
+        ));
+        assert!(matches!(
+            ok("execution.reopen", json!({"reason": "blocker resolved"})),
+            CliCommand::Execution(crate::cli::execution_state::ExecutionCommand::Reopen { .. })
+        ));
+        assert!(matches!(
+            err("execution.reopen", json!({})),
             CliParseError::MissingFlag("reason")
         ));
     }

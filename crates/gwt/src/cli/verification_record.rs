@@ -62,6 +62,12 @@ pub struct VerificationRunRecord {
     pub worktree_fingerprint: String,
     pub commands: Vec<VerificationCommandResult>,
     pub all_passed: bool,
+    /// Timestamp captured before the verification commands start. Recovery
+    /// requires this to be later than the terminal block, so a run that was
+    /// merely committed after the block cannot be replayed as post-block
+    /// evidence.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub started_at: Option<DateTime<Utc>>,
     pub created_at: DateTime<Utc>,
     /// T-130-lite: whether this run covered every command of the registered
     /// verification plan (`verify.plan`) for the same session/owner.
@@ -70,6 +76,14 @@ pub struct VerificationRunRecord {
     /// Planned commands the run did not execute (diagnostic for the gates).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub planned_missing: Vec<String>,
+    /// Integrity hash of the exact verification-plan snapshot consumed by
+    /// this run. Replacing the plan invalidates the run even when both plans
+    /// happen to contain commands covered by the run.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub verification_plan_hash: String,
+    /// Whether the exact plan snapshot was derived from changed surfaces.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub plan_derived: bool,
     /// Integrity hash over the record content (SPEC-3248 P9a, T-119/T-122
     /// core): sha256 of the canonical serialization with this field emptied.
     /// Gates reject records whose stored hash does not match. Empty = legacy
@@ -113,6 +127,11 @@ pub struct VerificationPlanRecord {
     /// hand-picked (`verify.plan` with `params.derive:true`).
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub derived: bool,
+    /// Content-level worktree fingerprint at plan registration. Derived
+    /// matrices are valid only for this exact change set; a later surface
+    /// change requires deriving and registering a new plan.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub worktree_fingerprint: String,
     pub created_at: DateTime<Utc>,
     /// Integrity hash (P9a convention).
     #[serde(default, skip_serializing_if = "String::is_empty")]
@@ -160,6 +179,16 @@ pub fn load_plan(worktree: &Path) -> io::Result<Option<VerificationPlanRecord>> 
 
 /// Persist the plan atomically with a fresh integrity hash.
 pub fn save_plan(worktree: &Path, plan: &VerificationPlanRecord) -> io::Result<()> {
+    crate::cli::trusted_store::with_write_lease(worktree, || {
+        let mut plan = plan.clone();
+        if plan.worktree_fingerprint.is_empty() {
+            plan.worktree_fingerprint = worktree_fingerprint(worktree);
+        }
+        save_plan_unleased(worktree, &plan)
+    })
+}
+
+fn save_plan_unleased(worktree: &Path, plan: &VerificationPlanRecord) -> io::Result<()> {
     let mut plan = plan.clone();
     plan.content_hash = compute_plan_hash(&plan);
     let serialized = serde_json::to_vec_pretty(&plan)
@@ -170,6 +199,75 @@ pub fn save_plan(worktree: &Path, plan: &VerificationPlanRecord) -> io::Result<(
         &plan_state_path(worktree),
         &serialized,
     )
+}
+
+/// Register a canonical plan with its current execution owner and integrity
+/// hash captured under the same owner write lease.
+fn register_plan(
+    worktree: &Path,
+    session_id: &str,
+    commands: Vec<String>,
+    derived: bool,
+) -> io::Result<VerificationPlanRecord> {
+    crate::cli::trusted_store::with_write_lease(worktree, || {
+        let fingerprint = worktree_fingerprint(worktree);
+        register_plan_unleased(worktree, session_id, commands, derived, fingerprint)
+    })
+}
+
+fn register_plan_unleased(
+    worktree: &Path,
+    session_id: &str,
+    commands: Vec<String>,
+    derived: bool,
+    worktree_fingerprint: String,
+) -> io::Result<VerificationPlanRecord> {
+    let owner_number = execution_state::load(worktree)?.map(|record| record.owner_number);
+    let mut plan = VerificationPlanRecord {
+        session_id: session_id.to_string(),
+        owner_number,
+        commands,
+        derived,
+        worktree_fingerprint,
+        created_at: Utc::now(),
+        content_hash: String::new(),
+    };
+    plan.content_hash = compute_plan_hash(&plan);
+    save_plan_unleased(worktree, &plan)?;
+    Ok(plan)
+}
+
+fn derive_and_register_plan(
+    worktree: &Path,
+    session_id: &str,
+) -> Result<
+    (
+        crate::cli::verify_derivation::DerivedPlan,
+        VerificationPlanRecord,
+    ),
+    String,
+> {
+    crate::cli::trusted_store::with_write_lease(worktree, || {
+        let fingerprint_before = worktree_fingerprint(worktree);
+        let derived = crate::cli::verify_derivation::derive(worktree)
+            .map_err(|err| io::Error::new(ErrorKind::InvalidData, err))?;
+        let fingerprint_after = worktree_fingerprint(worktree);
+        if fingerprint_before != fingerprint_after {
+            return Err(io::Error::new(
+                ErrorKind::WouldBlock,
+                "the worktree changed while deriving the verification plan — retry verify.plan on a stable change set",
+            ));
+        }
+        let plan = register_plan_unleased(
+            worktree,
+            session_id,
+            derived.commands.clone(),
+            true,
+            fingerprint_after,
+        )?;
+        Ok((derived, plan))
+    })
+    .map_err(|err| err.to_string())
 }
 
 /// Resolve the record path for a worktree.
@@ -397,14 +495,17 @@ pub fn run_verification(
     if commands.is_empty() {
         return Err("verify.run requires at least one command".to_string());
     }
-    let owner_number = execution_state::load(worktree)
-        .ok()
-        .flatten()
-        .map(|record| record.owner_number);
-    // Capture the fingerprint BEFORE running anything: a concurrent edit
-    // during a long run means the commands exercised code that no longer
-    // matches the worktree, so the evidence must come out stale.
-    let fingerprint_before = worktree_fingerprint(worktree);
+    // Snapshot owner, plan, and worktree together. Commands deliberately run
+    // outside the lease; the final commit reacquires it and rejects any
+    // interleaving writer by invalidating the evidence snapshot.
+    let (owner_number, plan_snapshot, fingerprint_before) =
+        crate::cli::trusted_store::with_write_lease(worktree, || {
+            let owner_number = execution_state::load(worktree)?.map(|record| record.owner_number);
+            let plan = load_plan(worktree)?;
+            Ok((owner_number, plan, worktree_fingerprint(worktree)))
+        })
+        .map_err(|err| format!("failed to snapshot verification state: {err}"))?;
+    let started_at = Utc::now();
     let mut results: Vec<VerificationCommandResult> = Vec::new();
     let mut transcript = String::new();
     for command in commands {
@@ -418,54 +519,92 @@ pub fn run_verification(
         });
     }
     let all_passed = results.iter().all(|result| result.exit_code == 0);
-    let fingerprint_after = worktree_fingerprint(worktree);
-    let worktree_fingerprint = if fingerprint_before == fingerprint_after {
-        fingerprint_after
-    } else {
-        transcript.push_str(
-            "warning: the worktree changed while verification ran — the record is invalidated; rerun `verify.run` on the final state\n",
-        );
-        "invalidated-by-concurrent-change".to_string()
+    // T-130: bind coverage to the exact pre-run plan snapshot. A missing,
+    // cross-session, tampered, or legacy-hashless plan remains unplanned.
+    let (plan_covered, planned_missing, verification_plan_hash, plan_derived) =
+        match plan_snapshot.as_ref() {
+            Some(plan)
+                if !plan.content_hash.is_empty()
+                    && plan_integrity_ok(plan)
+                    && plan.session_id == session_id
+                    && plan.owner_number == owner_number =>
+            {
+                let ran: std::collections::HashSet<&str> =
+                    commands.iter().map(String::as_str).collect();
+                let missing: Vec<String> = plan
+                    .commands
+                    .iter()
+                    .filter(|planned| !ran.contains(planned.as_str()))
+                    .cloned()
+                    .collect();
+                (
+                    missing.is_empty() && plan.worktree_fingerprint == fingerprint_before,
+                    missing,
+                    plan.content_hash.clone(),
+                    plan.derived,
+                )
+            }
+            _ => (false, Vec::new(), String::new(), false),
+        };
+    let mut record = VerificationRunRecord {
+        record_id: format!("vrr-{}", uuid::Uuid::new_v4().simple()),
+        session_id: session_id.to_string(),
+        owner_number,
+        worktree_fingerprint: fingerprint_before.clone(),
+        commands: results,
+        all_passed,
+        started_at: Some(started_at),
+        created_at: Utc::now(),
+        plan_covered,
+        planned_missing,
+        verification_plan_hash,
+        plan_derived,
+        content_hash: String::new(),
     };
-    // T-130-lite: compare against the registered plan for this session (and
-    // owner). A missing, cross-session, or tampered plan means the run is
-    // unplanned — recorded as uncovered so the gates surface it.
-    let (plan_covered, planned_missing) = match load_plan(worktree) {
-        Ok(Some(plan))
-            if plan_integrity_ok(&plan)
-                && plan.session_id == session_id
-                && plan.owner_number == owner_number =>
-        {
-            let ran: std::collections::HashSet<&str> =
-                commands.iter().map(String::as_str).collect();
-            let missing: Vec<String> = plan
-                .commands
-                .iter()
-                .filter(|planned| !ran.contains(planned.as_str()))
-                .cloned()
-                .collect();
-            (missing.is_empty(), missing)
+
+    crate::cli::trusted_store::with_write_lease(worktree, || {
+        let current_owner = execution_state::load(worktree)?
+            .map(|execution| execution.owner_number);
+        let current_plan = load_plan(worktree)?;
+        let fingerprint_after = worktree_fingerprint(worktree);
+        if fingerprint_before != fingerprint_after {
+            transcript.push_str(
+                "warning: the worktree changed while verification ran — the record is invalidated; rerun `verify.run` on the final state\n",
+            );
+            record.worktree_fingerprint = "invalidated-by-concurrent-change".to_string();
         }
-        _ => (false, Vec::new()),
-    };
-    if !plan_covered {
+        if current_owner != owner_number {
+            transcript.push_str(
+                "warning: the execution owner changed while verification ran — the record is invalidated; rerun `verify.run` for the current owner\n",
+            );
+            record.plan_covered = false;
+        }
+        let same_plan = match (plan_snapshot.as_ref(), current_plan.as_ref()) {
+            (Some(before), Some(after)) => {
+                !before.content_hash.is_empty()
+                    && before.content_hash == after.content_hash
+                    && plan_integrity_ok(after)
+            }
+            (None, None) => true,
+            _ => false,
+        };
+        if !same_plan {
+            transcript.push_str(
+                "warning: the verification plan changed while verification ran — the record is invalidated; rerun `verify.run` against the current plan\n",
+            );
+            record.plan_covered = false;
+        }
+        record.created_at = Utc::now();
+        record.content_hash = compute_content_hash(&record);
+        save(worktree, &record)
+    })
+    .map_err(|err| format!("failed to save verification record: {err}"))?;
+
+    if !record.plan_covered {
         transcript.push_str(
             "note: this run does not cover a registered verification plan for this session — register the matrix with `verify.plan` first, then run it (T-130)\n",
         );
     }
-    let record = VerificationRunRecord {
-        record_id: format!("vrr-{}", uuid::Uuid::new_v4().simple()),
-        session_id: session_id.to_string(),
-        owner_number,
-        worktree_fingerprint,
-        commands: results,
-        all_passed,
-        created_at: Utc::now(),
-        plan_covered,
-        planned_missing,
-        content_hash: String::new(),
-    };
-    save(worktree, &record).map_err(|err| format!("failed to save verification record: {err}"))?;
     Ok((record, transcript))
 }
 
@@ -486,6 +625,9 @@ pub enum EvidenceStatus {
     /// T-130-lite: the run did not cover the registered verification plan
     /// (or no plan was registered before running).
     PlanNotCovered,
+    /// The currently registered plan is not the exact immutable plan
+    /// snapshot consumed by the run.
+    PlanChanged,
 }
 
 impl EvidenceStatus {
@@ -518,24 +660,26 @@ impl EvidenceStatus {
             Self::PlanNotCovered => {
                 "the last verification run does not cover a registered plan — declare the required matrix with `verify.plan` (params.commands), then run it in full through `verify.run`"
             }
+            Self::PlanChanged => {
+                "the verification plan changed after the last run — rerun `verify.run` against the current plan"
+            }
         }
     }
 }
 
-/// Evaluate the latest record against the current session, the Execution
-/// Control Record's owner, and the current worktree fingerprint (FR-036).
+/// Evaluate one already-loaded plan/run snapshot. Callers that need an
+/// atomic decision (execution completion/recovery) load both records while
+/// holding the owner write lease and use this helper without reopening a
+/// TOCTOU window.
 #[must_use]
-pub fn evaluate_evidence(
+pub fn evaluate_evidence_snapshot(
     worktree: &Path,
     session_id: &str,
     expected_owner_number: Option<u64>,
+    plan: Option<&VerificationPlanRecord>,
+    record: &VerificationRunRecord,
 ) -> EvidenceStatus {
-    let record = match load(worktree) {
-        Ok(Some(record)) => record,
-        Ok(None) => return EvidenceStatus::MissingRecord,
-        Err(_) => return EvidenceStatus::Unreadable,
-    };
-    if !integrity_ok(&record) {
+    if !integrity_ok(record) {
         return EvidenceStatus::Tampered;
     }
     if record.session_id != session_id {
@@ -552,10 +696,55 @@ pub fn evaluate_evidence(
     if !record.all_passed {
         return EvidenceStatus::Failing;
     }
+    if !record.verification_plan_hash.is_empty() {
+        let Some(plan) = plan else {
+            return EvidenceStatus::PlanChanged;
+        };
+        if plan.content_hash.is_empty()
+            || !plan_integrity_ok(plan)
+            || plan.session_id != session_id
+            || plan.owner_number != record.owner_number
+            || plan.worktree_fingerprint.is_empty()
+            || plan.worktree_fingerprint != record.worktree_fingerprint
+            || record.verification_plan_hash != plan.content_hash
+            || record.plan_derived != plan.derived
+        {
+            return EvidenceStatus::PlanChanged;
+        }
+    }
     if !record.plan_covered {
         return EvidenceStatus::PlanNotCovered;
     }
+    if record.verification_plan_hash.is_empty() {
+        return EvidenceStatus::PlanChanged;
+    }
     EvidenceStatus::Fresh
+}
+
+/// Evaluate the latest record against the current session, the Execution
+/// Control Record's owner, and the current worktree fingerprint (FR-036).
+#[must_use]
+pub fn evaluate_evidence(
+    worktree: &Path,
+    session_id: &str,
+    expected_owner_number: Option<u64>,
+) -> EvidenceStatus {
+    let record = match load(worktree) {
+        Ok(Some(record)) => record,
+        Ok(None) => return EvidenceStatus::MissingRecord,
+        Err(_) => return EvidenceStatus::Unreadable,
+    };
+    let plan = match load_plan(worktree) {
+        Ok(plan) => plan,
+        Err(_) => return EvidenceStatus::Unreadable,
+    };
+    evaluate_evidence_snapshot(
+        worktree,
+        session_id,
+        expected_owner_number,
+        plan.as_ref(),
+        &record,
+    )
 }
 
 // ---------------------------------------------------------------------------
@@ -594,23 +783,23 @@ pub(super) fn run<E: CliEnv>(
     match command {
         VerifyCommand::Plan { commands, derive } => {
             let worktree = gwt_core::paths::resolve_current_worktree_root(env.repo_path());
-            let (commands, derived) = if derive {
+            let (commands, plan) = if derive {
                 if !commands.is_empty() {
                     return Err(SpecOpsError::from(ApiError::Unexpected(
                         "verify.plan takes either params.derive:true or explicit params.commands, not both"
                             .to_string(),
                     )));
                 }
-                let plan = crate::cli::verify_derivation::derive(&worktree)
+                let (derived_plan, plan) = derive_and_register_plan(&worktree, &session_id)
                     .map_err(|err| SpecOpsError::from(ApiError::Unexpected(err)))?;
                 out.push_str(&format!(
                     "verify: derived matrix from changed surfaces [{}]\n",
-                    plan.surfaces.join(", ")
+                    derived_plan.surfaces.join(", ")
                 ));
-                for command in &plan.commands {
+                for command in &derived_plan.commands {
                     out.push_str(&format!("  - {command}\n"));
                 }
-                (plan.commands, true)
+                (derived_plan.commands, plan)
             } else {
                 if commands.is_empty() {
                     return Err(SpecOpsError::from(ApiError::Unexpected(
@@ -618,29 +807,18 @@ pub(super) fn run<E: CliEnv>(
                             .to_string(),
                     )));
                 }
-                (commands, false)
+                let plan = register_plan(&worktree, &session_id, commands.clone(), false)
+                    .map_err(|err| SpecOpsError::from(ApiError::Network(err.to_string())))?;
+                (commands, plan)
             };
-            let owner_number = execution_state::load(&worktree)
-                .ok()
-                .flatten()
-                .map(|record| record.owner_number);
-            let plan = VerificationPlanRecord {
-                session_id: session_id.clone(),
-                owner_number,
-                commands: commands.clone(),
-                derived,
-                created_at: Utc::now(),
-                content_hash: String::new(),
-            };
-            save_plan(&worktree, &plan)
-                .map_err(|err| SpecOpsError::from(ApiError::Network(err.to_string())))?;
             out.push_str(&format!(
                 "verify: plan registered — {count} command(s) for session {session_id} (owner {owner}{derived_note})\n",
                 count = commands.len(),
-                owner = owner_number
+                owner = plan
+                    .owner_number
                     .map(|n| format!("#{n}"))
                     .unwrap_or_else(|| "none".to_string()),
-                derived_note = if derived { ", derived" } else { "" },
+                derived_note = if plan.derived { ", derived" } else { "" },
             ));
             Ok(0)
         }
@@ -687,6 +865,7 @@ mod tests {
                 owner_number,
                 commands: commands.to_vec(),
                 derived: false,
+                worktree_fingerprint: String::new(),
                 created_at: Utc::now(),
                 content_hash: String::new(),
             },
@@ -706,9 +885,12 @@ mod tests {
                 exit_code: 0,
             }],
             all_passed: true,
+            started_at: Some(Utc::now()),
             created_at: Utc::now(),
             plan_covered: true,
             planned_missing: Vec::new(),
+            verification_plan_hash: String::new(),
+            plan_derived: false,
             content_hash: String::new(),
         }
     }
@@ -741,6 +923,7 @@ mod tests {
             owner_number: Some(3248),
             commands: vec!["cargo test -p gwt --lib".to_string()],
             derived: false,
+            worktree_fingerprint: String::new(),
             created_at: Utc::now(),
             content_hash: String::new(),
         };
@@ -814,6 +997,7 @@ mod tests {
             owner_number: Some(3248),
             commands: vec!["git --version".to_string()],
             derived: false,
+            worktree_fingerprint: String::new(),
             created_at: Utc::now(),
             content_hash: String::new(),
         };
@@ -886,9 +1070,12 @@ mod tests {
                 exit_code: 0,
             }],
             all_passed: true,
+            started_at: Some(Utc::now()),
             created_at: Utc::now(),
             plan_covered: true,
             planned_missing: Vec::new(),
+            verification_plan_hash: String::new(),
+            plan_derived: false,
             content_hash: String::new(),
         };
         save(dir.path(), &record).unwrap();
@@ -925,6 +1112,47 @@ mod tests {
         assert_ne!(record.commands[1].exit_code, 0);
         // Latest record persisted.
         assert!(!load(dir.path()).unwrap().unwrap().all_passed);
+    }
+
+    // FR-198: canonical plan writes and the final verification-record commit
+    // share the owner write lease with execution transitions. Contention is
+    // an explicit retry, never last-writer-wins.
+    #[test]
+    fn verification_writers_refuse_with_retry_while_owner_lease_is_held() {
+        let dir = tempfile::tempdir().unwrap();
+        let worktree = dir.path().to_path_buf();
+        let (acquired_tx, acquired_rx) = std::sync::mpsc::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel::<()>();
+        let holder = std::thread::spawn(move || {
+            crate::cli::trusted_store::with_write_lease(&worktree, || {
+                acquired_tx.send(()).unwrap();
+                let _ = release_rx.recv_timeout(std::time::Duration::from_secs(10));
+                Ok(())
+            })
+            .unwrap();
+        });
+        acquired_rx.recv().unwrap();
+
+        let plan_result = save_plan(
+            dir.path(),
+            &VerificationPlanRecord {
+                session_id: "sess-1".to_string(),
+                owner_number: None,
+                commands: vec!["git --version".to_string()],
+                derived: true,
+                worktree_fingerprint: String::new(),
+                created_at: Utc::now(),
+                content_hash: String::new(),
+            },
+        );
+        let run_result = run_verification(dir.path(), "sess-1", &["git --version".to_string()]);
+        release_tx.send(()).unwrap();
+        holder.join().unwrap();
+
+        let plan_error = plan_result.expect_err("plan writer must contend on owner lease");
+        assert!(plan_error.to_string().contains("retry"), "{plan_error}");
+        let run_error = run_result.expect_err("run commit must contend on owner lease");
+        assert!(run_error.contains("retry"), "{run_error}");
     }
 
     // T-111/FR-036: evidence evaluation rejects missing, cross-session,
@@ -1078,6 +1306,7 @@ mod tests {
                 owner_number: None,
                 commands: vec!["git --version".to_string(), "git --exec-path".to_string()],
                 derived: false,
+                worktree_fingerprint: String::new(),
                 created_at: Utc::now(),
                 content_hash: String::new(),
             },
@@ -1117,6 +1346,7 @@ mod tests {
                 owner_number: None,
                 commands: vec!["git --version".to_string()],
                 derived: false,
+                worktree_fingerprint: String::new(),
                 created_at: Utc::now(),
                 content_hash: String::new(),
             },
@@ -1125,6 +1355,90 @@ mod tests {
         let (record, _) =
             run_verification(dir.path(), "sess-1", &["git --version".to_string()]).unwrap();
         assert!(!record.plan_covered);
+    }
+
+    // FR-195 / AS-177: Fresh evidence is bound to the exact plan snapshot
+    // used by the run. Re-registering any plan invalidates the old run.
+    #[test]
+    fn evidence_rejects_plan_replacement_after_run() {
+        let dir = tempfile::tempdir().unwrap();
+        let commands = vec!["git --version".to_string()];
+        save_plan(
+            dir.path(),
+            &VerificationPlanRecord {
+                session_id: "sess-1".to_string(),
+                owner_number: None,
+                commands: commands.clone(),
+                derived: true,
+                worktree_fingerprint: String::new(),
+                created_at: Utc::now(),
+                content_hash: String::new(),
+            },
+        )
+        .unwrap();
+        let (run, _) = run_verification(dir.path(), "sess-1", &commands).unwrap();
+        assert!(run.plan_covered);
+        assert!(run.plan_derived);
+        assert!(!run.verification_plan_hash.is_empty());
+        assert!(run
+            .started_at
+            .is_some_and(|started| started <= run.created_at));
+        assert_eq!(
+            evaluate_evidence(dir.path(), "sess-1", None),
+            EvidenceStatus::Fresh
+        );
+
+        save_plan(
+            dir.path(),
+            &VerificationPlanRecord {
+                session_id: "sess-1".to_string(),
+                owner_number: None,
+                commands: vec!["git --exec-path".to_string()],
+                derived: true,
+                worktree_fingerprint: String::new(),
+                created_at: Utc::now(),
+                content_hash: String::new(),
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            evaluate_evidence(dir.path(), "sess-1", None),
+            EvidenceStatus::PlanChanged
+        );
+    }
+
+    // FR-195: a derived matrix belongs to the exact change set from which it
+    // was derived. Adding a new surface after plan registration must not let
+    // the old matrix bind itself to the newer run fingerprint.
+    #[test]
+    fn derived_plan_rejects_worktree_drift_before_run() {
+        let dir = tempfile::tempdir().unwrap();
+        crate::cli::trusted_store::init_git_repo_with_origin(dir.path());
+        let commands = vec!["git --version".to_string()];
+        save_plan(
+            dir.path(),
+            &VerificationPlanRecord {
+                session_id: "sess-1".to_string(),
+                owner_number: None,
+                commands: commands.clone(),
+                derived: true,
+                worktree_fingerprint: String::new(),
+                created_at: Utc::now(),
+                content_hash: String::new(),
+            },
+        )
+        .unwrap();
+        fs::write(dir.path().join("new-rust-surface.rs"), "fn added() {}\n").unwrap();
+
+        let (run, _) = run_verification(dir.path(), "sess-1", &commands).unwrap();
+        assert!(
+            !run.plan_covered,
+            "a drifted derived plan must be invalidated"
+        );
+        assert_eq!(
+            evaluate_evidence(dir.path(), "sess-1", None),
+            EvidenceStatus::PlanChanged
+        );
     }
 
     // verify.run command surface: session binding is required.
