@@ -31,8 +31,9 @@ pub use backend_store::{
     add_backend, delete_backend, load_backends_for_agent, save_backends_for_agent, update_backend,
 };
 pub use claude_capabilities::{
-    claude_ultracode_supported, claude_workflows_enabled, detect_claude_version_raw,
-    parse_claude_semver, supports_ultracode, workflows_enabled_from,
+    claude_capability_snapshot, claude_ultracode_supported, claude_workflows_enabled,
+    detect_claude_version_raw, parse_claude_semver, supports_ultracode, workflows_enabled_from,
+    ClaudeCapabilitySnapshot,
 };
 pub use custom::CustomCodingAgent;
 pub use detect::{AgentDetector, DetectedAgent};
