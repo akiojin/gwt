@@ -12,7 +12,21 @@
 //! it is intentionally NOT exported via `CLAUDE_CODE_EFFORT_LEVEL` because
 //! `ultracode` is not a valid effort-level value.
 
-use std::path::PathBuf;
+use std::{
+    path::PathBuf,
+    sync::{Mutex, OnceLock},
+};
+
+/// Session-stable live Claude Code capability state.
+///
+/// Pure helpers such as [`supports_ultracode`] remain uncached. This snapshot
+/// only covers environment/file/subprocess-backed detection that would
+/// otherwise run on GUI hot paths.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ClaudeCapabilitySnapshot {
+    pub workflows_enabled: bool,
+    pub ultracode_supported: bool,
+}
 
 /// Extract a `MAJOR.MINOR.PATCH` semver from a raw `claude --version` string.
 ///
@@ -73,6 +87,10 @@ pub fn claude_user_settings_path() -> Option<PathBuf> {
 /// environment (env var + user global settings). Defaults to `true` when
 /// nothing can be read.
 pub fn claude_workflows_enabled() -> bool {
+    claude_capability_snapshot().workflows_enabled
+}
+
+fn detect_claude_workflows_enabled() -> bool {
     let env_disable = std::env::var("CLAUDE_CODE_DISABLE_WORKFLOWS").ok();
     let settings = claude_user_settings_path().and_then(|path| std::fs::read_to_string(path).ok());
     workflows_enabled_from(env_disable.as_deref(), settings.as_deref())
@@ -99,15 +117,55 @@ pub fn detect_claude_version_raw() -> Option<String> {
 /// (tested) pure predicates with live environment detection. Returns `false`
 /// when the version cannot be determined (conservative).
 ///
-/// The Launch Wizard computes this once at open time and stores the result, so
-/// the per-render reasoning-option logic stays free of subprocess/file I/O.
+/// The result is cached for the running process, so repeated Launch Wizard
+/// opens and other live callers stay free of repeated subprocess/file I/O.
 pub fn claude_ultracode_supported() -> bool {
+    claude_capability_snapshot().ultracode_supported
+}
+
+/// Detect and cache live Claude Code capability state for this process.
+pub fn claude_capability_snapshot() -> ClaudeCapabilitySnapshot {
+    claude_capability_snapshot_with_detector(detect_claude_capability_snapshot)
+}
+
+fn claude_capability_snapshot_with_detector(
+    detect: impl FnOnce() -> ClaudeCapabilitySnapshot,
+) -> ClaudeCapabilitySnapshot {
+    let mut cache = claude_capability_cache()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    if let Some(snapshot) = *cache {
+        return snapshot;
+    }
+    let snapshot = detect();
+    *cache = Some(snapshot);
+    snapshot
+}
+
+fn detect_claude_capability_snapshot() -> ClaudeCapabilitySnapshot {
     // Cheap checks first: skip the `claude --version` subprocess when
     // workflows are already disabled.
-    if !claude_workflows_enabled() {
-        return false;
+    detect_claude_capability_snapshot_from(
+        detect_claude_workflows_enabled(),
+        detect_claude_version_raw,
+    )
+}
+
+fn detect_claude_capability_snapshot_from(
+    workflows_enabled: bool,
+    detect_version_raw: impl FnOnce() -> Option<String>,
+) -> ClaudeCapabilitySnapshot {
+    let ultracode_supported =
+        workflows_enabled && detect_version_raw().is_some_and(|raw| supports_ultracode(&raw, true));
+    ClaudeCapabilitySnapshot {
+        workflows_enabled,
+        ultracode_supported,
     }
-    detect_claude_version_raw().is_some_and(|raw| supports_ultracode(&raw, true))
+}
+
+fn claude_capability_cache() -> &'static Mutex<Option<ClaudeCapabilitySnapshot>> {
+    static CACHE: OnceLock<Mutex<Option<ClaudeCapabilitySnapshot>>> = OnceLock::new();
+    CACHE.get_or_init(|| Mutex::new(None))
 }
 
 fn env_truthy(value: Option<&str>) -> bool {
@@ -127,6 +185,43 @@ fn home_dir() -> Option<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::{
+        sync::atomic::{AtomicUsize, Ordering},
+        sync::{Mutex, OnceLock},
+    };
+
+    fn env_test_lock() -> &'static Mutex<()> {
+        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+        LOCK.get_or_init(|| Mutex::new(()))
+    }
+
+    fn lock_env_for_test() -> std::sync::MutexGuard<'static, ()> {
+        env_test_lock()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
+    #[cfg(test)]
+    fn reset_claude_capability_snapshot_for_tests() {
+        *claude_capability_cache()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = None;
+    }
+
+    struct CapabilitySnapshotReset;
+
+    impl CapabilitySnapshotReset {
+        fn new() -> Self {
+            reset_claude_capability_snapshot_for_tests();
+            Self
+        }
+    }
+
+    impl Drop for CapabilitySnapshotReset {
+        fn drop(&mut self) {
+            reset_claude_capability_snapshot_for_tests();
+        }
+    }
 
     #[test]
     fn parses_decorated_version() {
@@ -209,5 +304,108 @@ mod tests {
         assert!(!supports_ultracode("2.1.153", true)); // below minimum
         assert!(!supports_ultracode("2.1.156", false)); // workflows disabled
         assert!(!supports_ultracode("garbage", true)); // unparseable version
+    }
+
+    #[test]
+    fn live_capability_checks_reuse_session_snapshot_without_reprobe() {
+        let _guard = lock_env_for_test();
+        let _snapshot_reset = CapabilitySnapshotReset::new();
+        let calls = AtomicUsize::new(0);
+        let supported = ClaudeCapabilitySnapshot {
+            workflows_enabled: true,
+            ultracode_supported: true,
+        };
+
+        assert_eq!(
+            claude_capability_snapshot_with_detector(|| {
+                calls.fetch_add(1, Ordering::SeqCst);
+                supported
+            }),
+            supported
+        );
+        assert_eq!(
+            claude_capability_snapshot_with_detector(|| panic!("snapshot should be cached")),
+            supported
+        );
+        assert!(claude_workflows_enabled());
+        assert!(claude_ultracode_supported());
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn disabled_workflows_are_cached_and_skip_version_probe() {
+        let _guard = lock_env_for_test();
+        let _snapshot_reset = CapabilitySnapshotReset::new();
+        let version_calls = AtomicUsize::new(0);
+        let disabled = detect_claude_capability_snapshot_from(false, || {
+            version_calls.fetch_add(1, Ordering::SeqCst);
+            Some("2.1.156 (Claude Code)".to_string())
+        });
+        assert_eq!(
+            disabled,
+            ClaudeCapabilitySnapshot {
+                workflows_enabled: false,
+                ultracode_supported: false,
+            }
+        );
+        assert_eq!(
+            version_calls.load(Ordering::SeqCst),
+            0,
+            "disabled workflows should skip the version detector"
+        );
+
+        let detector_calls = AtomicUsize::new(0);
+        assert_eq!(
+            claude_capability_snapshot_with_detector(|| {
+                detector_calls.fetch_add(1, Ordering::SeqCst);
+                disabled
+            }),
+            disabled
+        );
+        assert_eq!(
+            claude_capability_snapshot_with_detector(|| panic!(
+                "disabled snapshot should be cached"
+            )),
+            disabled
+        );
+        assert!(!claude_workflows_enabled());
+        assert!(!claude_ultracode_supported());
+        assert_eq!(detector_calls.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn failed_version_probe_is_cached_as_unsupported() {
+        let _guard = lock_env_for_test();
+        let _snapshot_reset = CapabilitySnapshotReset::new();
+        let version_calls = AtomicUsize::new(0);
+        let unsupported = detect_claude_capability_snapshot_from(true, || {
+            version_calls.fetch_add(1, Ordering::SeqCst);
+            None
+        });
+        assert_eq!(
+            unsupported,
+            ClaudeCapabilitySnapshot {
+                workflows_enabled: true,
+                ultracode_supported: false,
+            }
+        );
+        assert_eq!(version_calls.load(Ordering::SeqCst), 1);
+
+        let detector_calls = AtomicUsize::new(0);
+        assert_eq!(
+            claude_capability_snapshot_with_detector(|| {
+                detector_calls.fetch_add(1, Ordering::SeqCst);
+                unsupported
+            }),
+            unsupported
+        );
+        assert!(!claude_ultracode_supported());
+        assert!(!claude_ultracode_supported());
+        assert!(claude_workflows_enabled());
+        assert_eq!(
+            claude_capability_snapshot_with_detector(|| panic!("failed probe should be cached")),
+            unsupported
+        );
+        assert_eq!(detector_calls.load(Ordering::SeqCst), 1);
     }
 }
