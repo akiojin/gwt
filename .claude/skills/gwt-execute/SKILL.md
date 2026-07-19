@@ -56,10 +56,29 @@ included):
   `execution.blocked` with a non-empty `params.reason` and optional
   `params.missing_verification`. Blocked is not done — report the blocker.
 
+`execution.blocked` is a terminal outcome, not a pause. Never use it while
+waiting for a temporary question, owner decision, or verification that can
+still proceed in the current execution. Continue the discussion/workflow
+instead.
+
+If the same owning session later resolves a genuine terminal blocker, recover
+without rewriting trusted state or relaunching: register the changed-surface
+matrix through `verify.plan` with `params.derive:true`, run the entire
+post-block matrix through `verify.run`, then call `execution.reopen` with a
+non-empty `params.reason`. Reopen requires the exact immutable derived-plan
+snapshot, fresh passing evidence that started after the block, the same
+session/owner/worktree fingerprint, and valid integrity hashes. It appends a
+recovery audit entry and returns the execution to Active; it does not claim
+completion. Completed executions remain immutable. Another session must use
+audited `execution.adopt` only while the record is Active. Blocked and
+Completed records are terminal and cannot be adopted; another session must
+use a fresh linked-owner launch.
+
 Completion and Ready PR handoffs consume tool-generated verification
 evidence (SPEC-3248 P8b): run the verification matrix through JSON operation
-`verify.run` with `params.commands:[...]` so gwtd itself executes and records
-it. `execution.complete`, the execution settlement inside `build.complete`,
+`verify.plan` first, then through `verify.run` with `params.commands:[...]` so
+gwtd itself executes and records it. `execution.complete`, the execution
+settlement inside `build.complete`,
 non-draft `pr.create`, and `pr.ready` refuse when the latest record is
 missing, failing, stale (worktree changed after the run), from another
 session, or for another owner. Draft PRs stay available mid-work.

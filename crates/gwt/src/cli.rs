@@ -167,7 +167,7 @@ pub enum CliCommand {
     Memory(MemoryCommand),
     Discuss(DiscussCommand),
     Discussion(DiscussionCommand),
-    /// SPEC-3248 P8a: `execution.complete` / `execution.blocked` settlement.
+    /// SPEC-3248 P8a: execution settlement, adoption, and verified recovery.
     Execution(execution_state::ExecutionCommand),
     Plan(PlanCommand),
     Build(BuildCommand),

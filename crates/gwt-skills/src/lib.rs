@@ -865,6 +865,9 @@ mod tests {
                 "gwt-manage-pr",
                 "User Verification Result",
                 "current user's language",
+                "execution.reopen",
+                "temporary question",
+                "params.derive:true",
             ] {
                 assert!(
                     execute_skill.contains(required),
