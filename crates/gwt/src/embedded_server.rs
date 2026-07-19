@@ -1,6 +1,7 @@
 use std::{
     collections::HashMap,
     net::{IpAddr, SocketAddr},
+    num::NonZeroU16,
     sync::{atomic::AtomicU64, Arc, Mutex, RwLock},
     time::Instant,
 };
@@ -519,6 +520,7 @@ struct ServerState {
 
 pub struct EmbeddedServer {
     url: String,
+    bound_addr: SocketAddr,
     hook_forward_token: String,
     shutdown_tx: Option<oneshot::Sender<()>>,
     // Same rationale as `ServerState::access_log`: tests read it via the
@@ -558,6 +560,7 @@ impl EmbeddedServer {
     /// IP / port and install the access-log middleware. Used by the current
     /// browser-server route for both loopback defaults and operator-chosen
     /// `--bind` / `--port`.
+    #[cfg(test)]
     #[allow(clippy::too_many_arguments)]
     pub(super) fn start_with_bind(
         runtime: &Runtime,
@@ -569,8 +572,43 @@ impl EmbeddedServer {
         pty_writers: PtyWriterRegistry,
         attachment_uploads: AttachmentUploadStore,
     ) -> std::io::Result<Self> {
-        let listener = runtime.block_on(TcpListener::bind((bind, port)))?;
+        let listener = runtime.block_on(TcpListener::bind(SocketAddr::new(bind, port)))?;
+        let listener = listener.into_std()?;
+        Self::start_with_listener(
+            runtime,
+            listener,
+            oauth_redirect_port,
+            proxy,
+            clients,
+            pty_writers,
+            attachment_uploads,
+        )
+    }
+
+    /// Start serving from a listener that was bound and committed by the
+    /// stable-port startup transaction.
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn start_with_listener(
+        runtime: &Runtime,
+        listener: std::net::TcpListener,
+        oauth_redirect_port: u16,
+        proxy: AppEventProxy,
+        clients: ClientHub,
+        pty_writers: PtyWriterRegistry,
+        attachment_uploads: AttachmentUploadStore,
+    ) -> std::io::Result<Self> {
+        listener.set_nonblocking(true)?;
         let addr = listener.local_addr()?;
+        if addr.port() == 0 {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::AddrNotAvailable,
+                "embedded server listener reported bound port 0",
+            ));
+        }
+        let listener = {
+            let _runtime_guard = runtime.enter();
+            TcpListener::from_std(listener)?
+        };
         let (shutdown_tx, shutdown_rx) = oneshot::channel();
         let hook_forward_token = Uuid::new_v4().to_string();
         let attachment_upload_token = Uuid::new_v4().to_string();
@@ -663,6 +701,7 @@ impl EmbeddedServer {
 
         Ok(Self {
             url: format!("http://{}:{}/", display_host(addr.ip()), addr.port()),
+            bound_addr: addr,
             hook_forward_token,
             shutdown_tx: Some(shutdown_tx),
             access_log,
@@ -678,6 +717,11 @@ impl EmbeddedServer {
 
     pub(super) fn url(&self) -> &str {
         &self.url
+    }
+
+    pub(super) fn bound_port(&self) -> NonZeroU16 {
+        NonZeroU16::new(self.bound_addr.port())
+            .expect("EmbeddedServer validates its bound port before construction")
     }
 
     pub(super) fn shutdown(&mut self) {
@@ -2099,6 +2143,8 @@ mod tests {
             "loopback bind must surface 127.0.0.1 url, got {}",
             server.url(),
         );
+        assert_ne!(server.bound_port().get(), 0);
+        assert!(server.url().contains(&format!(":{}/", server.bound_port())));
         server.shutdown();
     }
 
@@ -2154,7 +2200,7 @@ mod tests {
             tray_args.bind,
             std::net::IpAddr::V4(std::net::Ipv4Addr::UNSPECIFIED)
         );
-        assert_eq!(tray_args.port, 0);
+        assert_eq!(tray_args.port, Some(0));
 
         let runtime = Runtime::new().expect("tokio runtime");
         let (proxy, _events) = AppEventProxy::stub();
@@ -2163,7 +2209,7 @@ mod tests {
         let mut server = EmbeddedServer::start_with_bind(
             &runtime,
             tray_args.bind,
-            tray_args.port,
+            tray_args.port.unwrap_or(0),
             0, // no dedicated OAuth listener in tests
             proxy,
             clients,

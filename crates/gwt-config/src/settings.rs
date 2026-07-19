@@ -2,11 +2,13 @@
 
 use std::{
     ffi::OsString,
+    num::NonZeroU16,
     path::{Path, PathBuf},
     sync::Mutex,
 };
 
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize};
+use toml_edit::{value, DocumentMut, Item, Table};
 use tracing::{debug, error, info};
 
 use crate::{
@@ -21,6 +23,25 @@ use crate::{
 };
 
 static UPDATE_LOCK: Mutex<()> = Mutex::new(());
+
+fn deserialize_optional_nonzero_port<'de, D>(
+    deserializer: D,
+) -> std::result::Result<Option<NonZeroU16>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let port = Option::<u16>::deserialize(deserializer)?;
+    Ok(port.and_then(NonZeroU16::new))
+}
+
+/// Embedded browser server settings persisted under `[server]`.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ServerConfig {
+    /// Last successfully bound implicit port. Zero normalizes to absent.
+    #[serde(default, deserialize_with = "deserialize_optional_nonzero_port")]
+    pub embedded_port: Option<NonZeroU16>,
+}
 
 fn resolve_config_home_dir(
     home: Option<OsString>,
@@ -62,6 +83,8 @@ pub struct Settings {
     pub board: BoardConfig,
     /// Provider usage display configuration (SPEC-2970).
     pub usage: UsageConfig,
+    /// Embedded browser server configuration (SPEC-3287).
+    pub server: ServerConfig,
 }
 
 impl Default for Settings {
@@ -82,6 +105,7 @@ impl Default for Settings {
             ai: AISettings::default(),
             board: BoardConfig::default(),
             usage: UsageConfig::default(),
+            server: ServerConfig::default(),
         }
     }
 }
@@ -141,6 +165,54 @@ impl Settings {
         write_atomic(path, &content)?;
 
         info!(path = %path.display(), "Settings saved");
+        Ok(())
+    }
+
+    /// Atomically merge the selected embedded-server port into a config file.
+    ///
+    /// Unlike a full typed-settings rewrite, this preserves comments, unknown
+    /// future keys, and the file's minimal shape. The typed parse still runs
+    /// first so malformed or incompatible settings remain fatal.
+    pub fn persist_embedded_port(path: &Path, port: NonZeroU16) -> Result<()> {
+        let content = match std::fs::read_to_string(path) {
+            Ok(content) => content,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => String::new(),
+            Err(error) => {
+                return Err(ConfigError::ParseError {
+                    reason: error.to_string(),
+                });
+            }
+        };
+
+        toml::from_str::<Self>(&content).map_err(|error| ConfigError::ParseError {
+            reason: error.to_string(),
+        })?;
+        let mut document =
+            content
+                .parse::<DocumentMut>()
+                .map_err(|error| ConfigError::ParseError {
+                    reason: error.to_string(),
+                })?;
+        let existing_decor = document
+            .as_table()
+            .get("server")
+            .and_then(|item| item.as_table_like())
+            .and_then(|table| table.get("embedded_port"))
+            .and_then(|item| item.as_value())
+            .map(|value| value.decor().clone());
+        if document.as_table().get("server").is_none() {
+            document["server"] = Item::Table(Table::new());
+        }
+        document["server"]["embedded_port"] = value(i64::from(port.get()));
+        if let (Some(existing_decor), Some(updated)) = (
+            existing_decor,
+            document["server"]["embedded_port"].as_value_mut(),
+        ) {
+            *updated.decor_mut() = existing_decor;
+        }
+
+        write_atomic(path, &document.to_string())?;
+        info!(path = %path.display(), port = port.get(), "Embedded server port saved");
         Ok(())
     }
 

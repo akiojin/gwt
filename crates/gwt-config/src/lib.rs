@@ -25,6 +25,6 @@ pub use locale::{
     detect_user_locale, detect_user_locale_from, detect_user_locale_from_env_and_system,
 };
 pub use profile::{Profile, ProfilesConfig};
-pub use settings::Settings;
+pub use settings::{ServerConfig, Settings};
 pub use usage_config::UsageConfig;
 pub use voice_config::VoiceConfig;
