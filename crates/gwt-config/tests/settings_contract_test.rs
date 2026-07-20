@@ -163,6 +163,54 @@ fn persist_embedded_port_preserves_unknown_keys_comments_and_minimal_shape() {
     );
 }
 
+#[cfg(unix)]
+#[test]
+fn persist_embedded_port_updates_symlink_target_without_replacing_link() {
+    use std::os::unix::fs::symlink;
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    let managed_dir = dir.path().join("managed");
+    std::fs::create_dir_all(&managed_dir).expect("create managed config directory");
+    let target = managed_dir.join("config.toml");
+    std::fs::write(
+        &target,
+        "# managed target\ndebug = true\nfuture_unknown_key = \"keep\"\n",
+    )
+    .expect("write managed config target");
+
+    let path = dir.path().join("config.toml");
+    let relative_target = Path::new("managed").join("config.toml");
+    symlink(&relative_target, &path).expect("create relative config symlink");
+
+    Settings::persist_embedded_port(
+        &path,
+        NonZeroU16::new(44000).expect("non-zero fixture port"),
+    )
+    .expect("persist embedded port through symlink");
+
+    assert!(
+        std::fs::symlink_metadata(&path)
+            .expect("read config link metadata")
+            .file_type()
+            .is_symlink(),
+        "automatic port persistence must not replace a user-managed config symlink"
+    );
+    assert_eq!(
+        std::fs::read_link(&path).expect("read config symlink"),
+        relative_target,
+        "automatic port persistence must keep the original relative link target"
+    );
+
+    let target_content = std::fs::read_to_string(&target).expect("read managed config target");
+    assert!(target_content.contains("# managed target"));
+    assert!(target_content.contains("future_unknown_key = \"keep\""));
+    assert!(target_content.contains("embedded_port = 44000"));
+    assert_eq!(
+        std::fs::read_to_string(&path).expect("read config through symlink"),
+        target_content
+    );
+}
+
 #[test]
 fn load_from_path_reports_parse_error_for_invalid_toml() {
     let dir = tempfile::tempdir().expect("tempdir");
