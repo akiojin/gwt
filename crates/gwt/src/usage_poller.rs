@@ -22,7 +22,7 @@ use gwt_agent::{AgentId, AgentStatus, Session};
 use gwt_config::{usage_config::UsageConfig, Settings};
 use gwt_core::usage::{
     claude, codex, consumption,
-    state::{apply_staleness, should_fetch_claude, DEFAULT_STALE_AFTER_SECS},
+    state::{age_secs, apply_staleness, should_fetch_claude, DEFAULT_STALE_AFTER_SECS},
     ProviderConsumption, ProviderUsage, SessionUsage, UsageProvider, UsageSnapshot, UsageState,
     WindowKind,
 };
@@ -175,7 +175,7 @@ impl Poller {
 
         if force || should_fetch_claude(self.last_claude_fetch, now) {
             let Some(creds) = claude::resolve_claude_creds(&home) else {
-                return serve_cached_or(
+                return serve_stale_cached_or(
                     &self.cached_claude,
                     now,
                     ProviderUsage::degraded(
@@ -186,10 +186,28 @@ impl Poller {
                     ),
                 );
             };
-            let user_agent = self
-                .cached_user_agent
-                .get_or_insert_with(claude::claude_user_agent)
-                .clone();
+            let user_agent = match self.cached_user_agent.clone() {
+                Some(user_agent) => user_agent,
+                None => match claude::claude_user_agent() {
+                    Ok(user_agent) => {
+                        self.cached_user_agent = Some(user_agent.clone());
+                        user_agent
+                    }
+                    Err(error) => {
+                        self.last_claude_fetch = Some(now);
+                        return serve_stale_cached_or(
+                            &self.cached_claude,
+                            now,
+                            ProviderUsage::degraded(
+                                UsageProvider::ClaudeCode,
+                                UsageState::Unavailable {
+                                    reason: format!("Claude version probe unavailable: {error}"),
+                                },
+                            ),
+                        );
+                    }
+                },
+            };
             let fresh = claude::fetch_claude_account(&creds, &user_agent, now).await;
             self.last_claude_fetch = Some(now);
             // Only a successful fetch (has windows) replaces the cache. A
@@ -199,7 +217,7 @@ impl Poller {
                 self.cached_claude = Some(fresh.clone());
                 return fresh;
             }
-            return serve_cached_or(&self.cached_claude, now, fresh);
+            return serve_stale_cached_or(&self.cached_claude, now, fresh);
         }
 
         // Within the cooldown window: reuse the cached value with staleness.
@@ -224,6 +242,29 @@ fn serve_cached_or(
             let mut c = c.clone();
             c.state = apply_staleness(c.state, c.fetched_at, now, DEFAULT_STALE_AFTER_SECS);
             c
+        }
+        _ => fallback,
+    }
+}
+
+/// Serve the last good account explicitly as stale after a failed refresh.
+/// Unlike [`serve_cached_or`], this does not wait for the normal age threshold:
+/// the attempted refresh already proved the displayed value is no longer fresh.
+fn serve_stale_cached_or(
+    cached: &Option<ProviderUsage>,
+    now: DateTime<Utc>,
+    fallback: ProviderUsage,
+) -> ProviderUsage {
+    match cached {
+        Some(cached) if !cached.windows.is_empty() => {
+            let mut cached = cached.clone();
+            cached.state = UsageState::Stale {
+                age_secs: cached
+                    .fetched_at
+                    .map(|fetched_at| age_secs(fetched_at, now))
+                    .unwrap_or(0),
+            };
+            cached
         }
         _ => fallback,
     }
@@ -350,12 +391,13 @@ mod tests {
             },
         );
         // A transient failure must not wipe a usable cached value.
-        let served = serve_cached_or(&Some(good), when, fail.clone());
+        let served = serve_stale_cached_or(&Some(good), when, fail.clone());
         assert!(!served.windows.is_empty());
         assert_eq!(served.account_label.as_deref(), Some("claude@example.com"));
         assert_eq!(served.plan.as_deref(), Some("max"));
+        assert_eq!(served.state, UsageState::Stale { age_secs: 0 });
         // No cache → fallback is returned.
-        let served2 = serve_cached_or(&None, when, fail);
+        let served2 = serve_stale_cached_or(&None, when, fail);
         assert!(served2.windows.is_empty());
         assert!(matches!(served2.state, UsageState::Unavailable { .. }));
     }
@@ -405,6 +447,49 @@ mod tests {
         assert_eq!(account.state, UsageState::Disabled);
         // No fetch should have happened.
         assert!(poller.last_claude_fetch.is_none());
+    }
+
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn usage_poller_skips_http_for_real_bun_global_placeholder_fixture_without_safe_target() {
+        let _env = gwt_core::test_support::env_lock()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let temp = tempfile::tempdir().expect("tempdir");
+        let fixture =
+            gwt_core::test_support::WindowsBunClaudeFixture::create(temp.path(), "2.1.210")
+                .expect("create real Windows Bun fixture");
+        fixture
+            .remove_safe_targets()
+            .expect("remove safe redirect targets");
+        let claude_home = temp.path().join("claude-home");
+        std::fs::create_dir_all(&claude_home).expect("create Claude home");
+        std::fs::write(
+            claude_home.join(".credentials.json"),
+            r#"{"claudeAiOauth":{"accessToken":"must-not-be-sent"}}"#,
+        )
+        .expect("write credentials");
+        let _path = gwt_core::test_support::ScopedEnvVar::set("PATH", &fixture.bun_bin);
+        let _path_ext = gwt_core::test_support::ScopedEnvVar::set("PATHEXT", ".COM;.EXE;.BAT;.CMD");
+        let _profile = gwt_core::test_support::ScopedEnvVar::set("USERPROFILE", &fixture.profile);
+        let _claude_home =
+            gwt_core::test_support::ScopedEnvVar::set("CLAUDE_CONFIG_DIR", &claude_home);
+        let config = UsageConfig {
+            codex_enabled: true,
+            claude_account_enabled: true,
+        };
+        let mut poller = Poller::default();
+
+        let account = poller.claude_account(&config, now(), false).await;
+
+        assert!(matches!(
+            account.state,
+            UsageState::Unavailable { ref reason }
+                if reason.contains("Claude version probe unavailable")
+                    && reason.contains("native-binary placeholder")
+        ));
+        assert!(poller.last_claude_fetch.is_some());
+        assert!(poller.cached_user_agent.is_none());
     }
 
     fn account_with_weekly_reset(

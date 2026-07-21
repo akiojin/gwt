@@ -25,7 +25,7 @@ use crate::TerminalError;
 pub const SLOW_RESIZE_WARN_MS: u64 = 250;
 
 mod process_group;
-#[cfg(windows)]
+#[cfg(any(windows, test))]
 mod windows_spawn;
 
 use process_group::ProcessGroup;
@@ -73,10 +73,10 @@ impl PtyHandle {
     /// Spawn a child process with a PTY.
     #[instrument(skip_all, fields(cmd = %config.command))]
     pub fn spawn(config: SpawnConfig) -> Result<Self, TerminalError> {
-        let config = normalize_spawn_config(config);
-        if let Some(reason) = reject_non_pe_executable(&config.command) {
-            return Err(TerminalError::PtyCreationFailed { reason });
-        }
+        let config =
+            normalize_spawn_config(config).map_err(|reason| TerminalError::PtyCreationFailed {
+                reason: reason.to_string(),
+            })?;
         let pty_system = native_pty_system();
         let pair = pty_system
             .openpty(PtySize {
@@ -317,15 +317,15 @@ impl PtyHandle {
     }
 }
 
-fn normalize_spawn_config(config: SpawnConfig) -> SpawnConfig {
+fn normalize_spawn_config(config: SpawnConfig) -> Result<SpawnConfig, String> {
     #[cfg(windows)]
     {
-        windows_spawn::normalize_spawn_config(config)
+        windows_spawn::normalize_spawn_config(config).map_err(|failure| failure.to_string())
     }
 
     #[cfg(not(windows))]
     {
-        normalize_non_windows_spawn_config(config)
+        Ok(normalize_non_windows_spawn_config(config))
     }
 }
 
@@ -352,21 +352,36 @@ pub fn reject_non_pe_executable(command: &str) -> Option<String> {
 /// Resolve a Windows command exactly as the PTY spawn path would, without
 /// applying PTY-specific shell wrappers. Host-shell launchers use this before
 /// embedding the command into `cmd.exe` / PowerShell scripts.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NormalizedWindowsHostShellCommand {
+    /// Resolved native program consumed by the outer host shell.
+    pub command: String,
+    /// Resolver-owned prefix followed by the caller arguments.
+    pub args: Vec<String>,
+    /// Effective caller environment plus resolver-owned wrapper values.
+    pub env: HashMap<String, String>,
+}
+
 pub fn normalize_command_for_windows_host_shell(
     command: &str,
     args: &[String],
     env: &HashMap<String, String>,
     remove_env: &[String],
-) -> (String, Vec<String>) {
+) -> Result<NormalizedWindowsHostShellCommand, String> {
     #[cfg(windows)]
     {
         windows_spawn::normalize_host_shell_command(command, args, env, remove_env)
+            .map_err(|failure| failure.to_string())
     }
 
     #[cfg(not(windows))]
     {
-        let _ = (env, remove_env);
-        (command.to_string(), args.to_vec())
+        let _ = remove_env;
+        Ok(NormalizedWindowsHostShellCommand {
+            command: command.to_string(),
+            args: args.to_vec(),
+            env: env.clone(),
+        })
     }
 }
 
@@ -547,7 +562,7 @@ mod tests {
             cwd: None,
         };
 
-        let normalized = normalize_spawn_config(config);
+        let normalized = normalize_spawn_config(config).expect("normalize spawn config");
 
         assert_eq!(PathBuf::from(normalized.command), runner);
     }
