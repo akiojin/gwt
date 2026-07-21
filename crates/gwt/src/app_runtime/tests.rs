@@ -11684,9 +11684,15 @@ fn startup_restore_policy_is_shared_by_intake_and_execution_before_intake_prune(
         .pending_startup_auto_resume_sessions
         .iter()
         .map(|pending| {
+            let queued = gwt_agent::Session::load(
+                &runtime
+                    .sessions_dir
+                    .join(format!("{}.toml", pending.session_id)),
+            )
+            .expect("load queued session");
             (
-                pending.session.id.as_str(),
-                launch_config_from_persisted_session(&pending.session).is_ephemeral,
+                pending.session_id.clone(),
+                launch_config_from_persisted_session(&queued).is_ephemeral,
             )
         })
         .collect::<std::collections::HashMap<_, _>>();
@@ -11818,9 +11824,14 @@ fn startup_queues_unclosed_intake_when_only_persisted_base_remains() {
     runtime.bootstrap();
 
     assert_eq!(runtime.pending_startup_auto_resume_sessions.len(), 1);
-    let config = launch_config_from_persisted_session(
-        &runtime.pending_startup_auto_resume_sessions[0].session,
+    assert_eq!(
+        runtime.pending_startup_auto_resume_sessions[0].session_id,
+        session.id
     );
+    let queued =
+        gwt_agent::Session::load(&runtime.sessions_dir.join(format!("{}.toml", session.id)))
+            .expect("load queued Intake");
+    let config = launch_config_from_persisted_session(&queued);
     assert!(config.is_ephemeral);
     assert_eq!(config.working_dir, None);
     assert_eq!(config.ephemeral_base_ref.as_deref(), Some("HEAD"));
@@ -11857,8 +11868,8 @@ fn startup_queues_unclosed_intake_without_placeholder_from_project_state_root() 
 
     assert_eq!(runtime.pending_startup_auto_resume_sessions.len(), 1);
     assert_eq!(
-        runtime.pending_startup_auto_resume_sessions[0].tab_id,
-        "tab-intake"
+        runtime.pending_startup_auto_resume_sessions[0].session_id,
+        session.id
     );
 }
 
@@ -11910,6 +11921,359 @@ fn app_runtime_close_agent_window_clears_startup_restore_eligibility() {
     .expect("load session");
     assert!(!loaded.restore_window_on_startup);
     assert!(loaded.explicitly_closed_at.is_some());
+}
+
+#[test]
+fn startup_ready_rejects_session_file_with_replaced_embedded_id() {
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedEnvVar::set("HOME", temp.path());
+    let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+    let repo = temp.path().join("repo");
+    init_git_clone_with_origin(&repo);
+    let worktree = temp.path().join("worktrees").join("id-replaced");
+    let branch = "work/startup-ready-id-replaced";
+    run_git(
+        &repo,
+        &[
+            "worktree",
+            "add",
+            "-b",
+            branch,
+            worktree.to_str().expect("worktree path"),
+        ],
+    );
+
+    let tab_id = "tab-1";
+    let raw_window_id = "agent-1";
+    let queued_session_id = "session-startup-ready-queued";
+    let replaced_session_id = "session-startup-ready-replaced";
+    let mut tab = sample_project_tab_with_window_at(
+        tab_id,
+        raw_window_id,
+        worktree.clone(),
+        WindowPreset::Agent,
+        WindowProcessStatus::Stopped,
+    );
+    assert!(tab
+        .workspace
+        .set_session_id(raw_window_id, Some(queued_session_id.to_string())));
+    let mut runtime = sample_runtime(temp.path(), vec![tab], Some(tab_id));
+    let mut session = gwt_agent::Session::new(&worktree, branch, gwt_agent::AgentId::Codex);
+    session.id = queued_session_id.to_string();
+    session.agent_session_id = Some("native-startup-ready-id-replaced".to_string());
+    session.record_hook_event("Stop");
+    session.record_completed_stop();
+    session.update_status(gwt_agent::AgentStatus::Stopped);
+    session
+        .save(&runtime.sessions_dir)
+        .expect("save queued session");
+
+    runtime.bootstrap();
+    assert_eq!(runtime.pending_startup_auto_resume_sessions.len(), 1);
+
+    let queued_path = runtime
+        .sessions_dir
+        .join(format!("{queued_session_id}.toml"));
+    let mut replaced =
+        gwt_agent::Session::load(&queued_path).expect("load queued session for replacement");
+    replaced.id = replaced_session_id.to_string();
+    fs::write(
+        &queued_path,
+        toml::to_string_pretty(&replaced).expect("serialize replaced session"),
+    )
+    .expect("replace queued session file contents");
+
+    runtime.handle_frontend_event(
+        "client-1".to_string(),
+        FrontendEvent::StartupAutoResumeReady {
+            bounds: canvas_bounds(),
+        },
+    );
+
+    assert!(runtime.pending_startup_auto_resume_sessions.is_empty());
+    assert!(
+        runtime.pending_auto_resume_sources.is_empty(),
+        "Ready must fail closed when the file identity no longer matches the queued session"
+    );
+    assert!(runtime.inflight_launches.is_empty());
+    assert!(runtime.runtimes.is_empty());
+    let windows = &runtime
+        .tab(tab_id)
+        .expect("tab")
+        .workspace
+        .persisted()
+        .windows;
+    assert_eq!(windows.len(), 1, "no replacement session window may launch");
+    assert_eq!(windows[0].id, raw_window_id);
+    assert_eq!(windows[0].session_id.as_deref(), Some(queued_session_id));
+}
+
+#[test]
+fn startup_ready_rebuilds_resume_context_from_reloaded_session_snapshot() {
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedEnvVar::set("HOME", temp.path());
+    let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+    let repo = temp.path().join("repo");
+    init_git_clone_with_origin(&repo);
+    let old_worktree = temp.path().join("worktrees").join("context-old");
+    let current_worktree = temp.path().join("worktrees").join("context-current");
+    let old_branch = "work/startup-context-old";
+    let current_branch = "work/startup-context-current";
+    for (branch, worktree) in [
+        (old_branch, old_worktree.as_path()),
+        (current_branch, current_worktree.as_path()),
+    ] {
+        run_git(
+            &repo,
+            &[
+                "worktree",
+                "add",
+                "-b",
+                branch,
+                worktree.to_str().expect("worktree path"),
+            ],
+        );
+    }
+
+    for (branch, worktree, title, owner) in [
+        (
+            old_branch,
+            old_worktree.as_path(),
+            "Old bootstrap Work",
+            "Issue #100",
+        ),
+        (
+            current_branch,
+            current_worktree.as_path(),
+            "Current Ready Work",
+            "Issue #200",
+        ),
+    ] {
+        let work_id =
+            gwt_core::workspace_projection::canonical_work_id(&repo, Some(branch), Some(worktree))
+                .expect("canonical work id");
+        let mut event = gwt_core::workspace_projection::WorkEvent::new(
+            gwt_core::workspace_projection::WorkEventKind::Start,
+            work_id,
+            chrono::Utc::now(),
+        );
+        event.title = Some(title.to_string());
+        event.owner = Some(owner.to_string());
+        event.execution_container = Some(
+            gwt_core::workspace_projection::WorkspaceExecutionContainerRef {
+                branch: Some(branch.to_string()),
+                worktree_path: Some(worktree.to_path_buf()),
+                pr_number: None,
+                pr_url: None,
+                pr_state: None,
+            },
+        );
+        gwt_core::workspace_projection::record_workspace_work_event(&repo, event)
+            .expect("record Work context");
+    }
+
+    let session_id = "session-startup-ready-current-context";
+    let mut old_tab = sample_project_tab_with_window_at(
+        "tab-old",
+        "agent-old",
+        old_worktree.clone(),
+        WindowPreset::Agent,
+        WindowProcessStatus::Stopped,
+    );
+    assert!(old_tab
+        .workspace
+        .set_session_id("agent-old", Some(session_id.to_string())));
+    let current_tab = sample_project_tab(
+        "tab-current",
+        "Current Work",
+        repo.clone(),
+        ProjectKind::Git,
+        &[],
+    );
+    let mut runtime = sample_runtime(temp.path(), vec![old_tab, current_tab], Some("tab-old"));
+    let mut session = gwt_agent::Session::new(&old_worktree, old_branch, gwt_agent::AgentId::Codex);
+    session.id = session_id.to_string();
+    session.agent_session_id = Some("native-startup-ready-current-context".to_string());
+    session.restore_window_on_startup = true;
+    session.record_hook_event("Stop");
+    session.record_completed_stop();
+    session
+        .save(&runtime.sessions_dir)
+        .expect("save bootstrap session");
+
+    runtime.bootstrap();
+    assert_eq!(runtime.pending_startup_auto_resume_sessions.len(), 1);
+    assert_eq!(
+        super::workspace_resume_context_for_work_item(
+            &old_worktree,
+            Some(old_branch),
+            &old_worktree,
+        )
+        .title
+        .as_deref(),
+        Some("Old bootstrap Work"),
+        "fixture must expose the bootstrap-time context"
+    );
+
+    let session_path = runtime.sessions_dir.join(format!("{session_id}.toml"));
+    let mut current = gwt_agent::Session::load(&session_path).expect("load session before Ready");
+    current.worktree_path = current_worktree;
+    current.branch = current_branch.to_string();
+    current.project_state_root = Some(repo);
+    current
+        .save(&runtime.sessions_dir)
+        .expect("save current Ready-time session");
+
+    runtime.handle_frontend_event(
+        "client-1".to_string(),
+        FrontendEvent::StartupAutoResumeReady {
+            bounds: canvas_bounds(),
+        },
+    );
+
+    assert_eq!(runtime.pending_auto_resume_sources.len(), 1);
+    let old_agent_windows = runtime
+        .tab("tab-old")
+        .expect("old tab")
+        .workspace
+        .persisted()
+        .windows
+        .iter()
+        .filter(|window| crate::runtime_support::window_is_agent_pane(window))
+        .count();
+    let current_agent_windows = runtime
+        .tab("tab-current")
+        .expect("current tab")
+        .workspace
+        .persisted()
+        .windows
+        .iter()
+        .filter(|window| crate::runtime_support::window_is_agent_pane(window))
+        .count();
+    assert_eq!(old_agent_windows, 0, "Ready must not use the queued tab");
+    assert_eq!(
+        current_agent_windows, 1,
+        "Ready must resolve the tab from the reloaded Session worktree"
+    );
+    let contexts = runtime
+        .pending_workspace_resume_contexts
+        .values()
+        .collect::<Vec<_>>();
+    assert_eq!(contexts.len(), 1);
+    assert_eq!(contexts[0].title.as_deref(), Some("Current Ready Work"));
+    assert_eq!(contexts[0].owner.as_deref(), Some("Issue #200"));
+}
+
+#[test]
+fn startup_ready_dedupes_native_session_ids_after_reloading() {
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedEnvVar::set("HOME", temp.path());
+    let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+    let repo = temp.path().join("repo");
+    init_git_clone_with_origin(&repo);
+    let first_worktree = temp.path().join("worktrees").join("dedupe-first");
+    let second_worktree = temp.path().join("worktrees").join("dedupe-second");
+    let first_branch = "work/startup-dedupe-first";
+    let second_branch = "work/startup-dedupe-second";
+    for (branch, worktree) in [
+        (first_branch, first_worktree.as_path()),
+        (second_branch, second_worktree.as_path()),
+    ] {
+        run_git(
+            &repo,
+            &[
+                "worktree",
+                "add",
+                "-b",
+                branch,
+                worktree.to_str().expect("worktree path"),
+            ],
+        );
+    }
+
+    let first_tab = sample_project_tab(
+        "tab-first",
+        "First",
+        first_worktree.clone(),
+        ProjectKind::Git,
+        &[],
+    );
+    let second_tab = sample_project_tab(
+        "tab-second",
+        "Second",
+        second_worktree.clone(),
+        ProjectKind::Git,
+        &[],
+    );
+    let mut runtime = sample_runtime(temp.path(), vec![first_tab, second_tab], Some("tab-first"));
+    let now = chrono::Utc::now();
+    for (session_id, native_id, branch, worktree, activity_offset) in [
+        (
+            "session-ready-dedupe-first",
+            "native-ready-dedupe-first",
+            first_branch,
+            first_worktree.as_path(),
+            0,
+        ),
+        (
+            "session-ready-dedupe-second",
+            "native-ready-dedupe-second",
+            second_branch,
+            second_worktree.as_path(),
+            1,
+        ),
+    ] {
+        let mut session = gwt_agent::Session::new(worktree, branch, gwt_agent::AgentId::Codex);
+        session.id = session_id.to_string();
+        session.agent_session_id = Some(native_id.to_string());
+        session.restore_window_on_startup = true;
+        session.record_hook_event("Stop");
+        session.record_completed_stop();
+        session.last_activity_at = now - chrono::Duration::seconds(activity_offset);
+        session.updated_at = session.last_activity_at;
+        session
+            .save(&runtime.sessions_dir)
+            .expect("save dedupe session");
+    }
+
+    runtime.bootstrap();
+    assert_eq!(runtime.pending_startup_auto_resume_sessions.len(), 2);
+
+    let second_path = runtime
+        .sessions_dir
+        .join("session-ready-dedupe-second.toml");
+    let mut second = gwt_agent::Session::load(&second_path).expect("load second queued session");
+    second.agent_session_id = Some("native-ready-dedupe-first".to_string());
+    second
+        .save(&runtime.sessions_dir)
+        .expect("save duplicate current native id");
+
+    runtime.handle_frontend_event(
+        "client-1".to_string(),
+        FrontendEvent::StartupAutoResumeReady {
+            bounds: canvas_bounds(),
+        },
+    );
+
+    let resumed_sources = runtime
+        .pending_auto_resume_sources
+        .values()
+        .cloned()
+        .collect::<std::collections::HashSet<_>>();
+    assert_eq!(
+        resumed_sources,
+        std::collections::HashSet::from(["session-ready-dedupe-first".to_string()]),
+        "Ready must preserve queue order while deduping the current native session ids"
+    );
 }
 
 #[test]

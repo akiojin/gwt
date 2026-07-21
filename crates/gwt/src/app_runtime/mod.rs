@@ -211,9 +211,8 @@ impl WorkspaceResumeContext {
 
 #[derive(Debug, Clone)]
 pub(crate) struct PendingStartupAutoResumeSession {
-    pub(crate) tab_id: String,
-    pub(crate) session: gwt_agent::Session,
-    pub(crate) workspace_resume_context: Option<WorkspaceResumeContext>,
+    /// Identity only: Ready reloads every mutable Session field from disk.
+    pub(crate) session_id: String,
 }
 
 #[derive(Debug, Clone)]
