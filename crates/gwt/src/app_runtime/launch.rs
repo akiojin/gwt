@@ -155,27 +155,21 @@ impl AgentWindowPlacement {
 pub struct LaunchWizardMemoryCache {
     sessions: Vec<gwt_agent::Session>,
     agent_options: Vec<gwt::AgentOption>,
-    // SPEC-3170 FR-001: `claude_ultracode_supported()` spawns `claude --version`
-    // (a Node CLI, ~100-200ms cold) and `claude_workflows_enabled()` reads a
-    // settings file. They are stable for a session, so we resolve them once at
-    // cache load time and reuse the booleans on every wizard open instead of
-    // re-probing on the tao main event-loop thread (the measured open hitch).
+    // SPEC-3170 FR-001: Claude capability detection may read settings and run
+    // `claude --version` once per process. The wizard stores the booleans at
+    // cache load time and reuses them on every open.
     claude_ultracode_supported: bool,
     claude_workflows_enabled: bool,
 }
 
 impl LaunchWizardMemoryCache {
     pub(crate) fn load(sessions_dir: &Path) -> Self {
-        // Resolve the Claude capability probes once here (see field docs). The
-        // wizard open path then reads the cached booleans rather than spawning
-        // `claude --version` per open.
-        let claude_workflows_enabled = gwt_agent::claude_workflows_enabled();
-        let claude_ultracode_supported = gwt_agent::claude_ultracode_supported();
+        let claude_capabilities = gwt_agent::claude_capability_snapshot();
         Self {
             sessions: Self::load_sessions(sessions_dir),
             agent_options: Self::load_agent_options(),
-            claude_ultracode_supported,
-            claude_workflows_enabled,
+            claude_ultracode_supported: claude_capabilities.ultracode_supported,
+            claude_workflows_enabled: claude_capabilities.workflows_enabled,
         }
     }
 

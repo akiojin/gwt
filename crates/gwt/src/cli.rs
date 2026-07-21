@@ -6,6 +6,7 @@
 //! `gwt-github`, and writes the result to stdout/stderr.
 
 mod actions;
+pub(crate) mod artifact_operability;
 mod board;
 mod build;
 mod commands;
@@ -18,6 +19,9 @@ pub mod execution_state;
 pub mod gwtd_resolver;
 pub mod hook;
 pub mod improvement;
+pub mod improvement_contract;
+mod improvement_owner;
+mod improvement_store;
 pub(crate) mod index;
 pub(crate) mod intake_outcome;
 pub(crate) mod issue;
@@ -35,8 +39,10 @@ mod skill_state_runtime;
 mod test_support;
 mod title_summary_guard;
 pub mod tray;
+pub mod trusted_store;
 pub mod update;
 pub mod verification_record;
+pub(crate) mod verify_derivation;
 mod workflow;
 mod workspace;
 
@@ -161,7 +167,7 @@ pub enum CliCommand {
     Memory(MemoryCommand),
     Discuss(DiscussCommand),
     Discussion(DiscussionCommand),
-    /// SPEC-3248 P8a: `execution.complete` / `execution.blocked` settlement.
+    /// SPEC-3248 P8a: execution settlement, adoption, and verified recovery.
     Execution(execution_state::ExecutionCommand),
     Plan(PlanCommand),
     Build(BuildCommand),

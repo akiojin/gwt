@@ -410,6 +410,7 @@ Bookkeeping under `.gwt/` and `tasks/`, and documentation edits, are allowed.",
 const TRUSTED_STATE_FILE_NAMES: &[&str] = &[
     "execution-control.json",
     "verification-run.json",
+    "verification-plan.json",
     "intake-outcome.json",
 ];
 
@@ -422,18 +423,25 @@ fn evaluate_trusted_state_write_guard(event: &HookEvent) -> Result<HookOutput, H
     }
     let paths = event_target_paths(event);
     let targets_trusted_state = paths.iter().any(|path| {
-        let normalized = path.replace('\\', "/");
-        TRUSTED_STATE_FILE_NAMES
-            .iter()
-            .any(|name| normalized.ends_with(&format!(".gwt/skill-state/{name}")))
+        // Lowercase so case-variant spellings on case-insensitive
+        // filesystems cannot slip past the match.
+        let normalized = path.replace('\\', "/").to_lowercase();
+        TRUSTED_STATE_FILE_NAMES.iter().any(|name| {
+            // Worktree mirror (P9a) and the repo-scoped trusted store
+            // copy under `~/.gwt/projects/<hash>/trusted/<key>/` (P9b).
+            normalized.ends_with(&format!(".gwt/skill-state/{name}"))
+                || (normalized.contains("/.gwt/projects/")
+                    && normalized.contains("/trusted/")
+                    && normalized.ends_with(&format!("/{name}")))
+        })
     });
     if !targets_trusted_state {
         return Ok(HookOutput::Silent);
     }
     Ok(HookOutput::pre_tool_use_permission(
         "Execution/evidence state files are written only by their canonical operations",
-        "This file is trusted execution/evidence state (SPEC-3248 P9a). Direct edits are rejected by integrity validation at the completion/PR gates, so do not edit it. \
-Use the canonical JSON operations instead: `execution.complete` / `execution.blocked` / `execution.adopt` for the execution control record, `verify.run` for verification records, and `intake.outcome.record` for intake outcomes.",
+        "This file is trusted execution/evidence state (SPEC-3248 P9a/P9b) — the worktree mirror and its repo-scoped trusted store copy alike. Direct edits are ignored or rejected at the completion/PR gates, so do not edit it. \
+Use the canonical JSON operations instead: `execution.complete` / `execution.blocked` / `execution.adopt` / `execution.reopen` for the execution control record, `verify.plan` / `verify.run` for verification plans and records, and `intake.outcome.record` for intake outcomes.",
     ))
 }
 
@@ -1481,6 +1489,7 @@ Coverage requirements.
         for state_file in [
             ".gwt/skill-state/execution-control.json",
             ".gwt/skill-state/verification-run.json",
+            ".gwt/skill-state/verification-plan.json",
             ".gwt/skill-state/intake-outcome.json",
         ] {
             let event = HookEvent {
@@ -1513,6 +1522,29 @@ Coverage requirements.
             evaluate_trusted_state_write_guard(&event).expect("guard"),
             HookOutput::PreToolUsePermission { .. }
         ));
+
+        // P9b: the repo-scoped trusted store copies are equally protected,
+        // including case-variant spellings on case-insensitive filesystems.
+        for trusted_path in [
+            "C:/Users/u/.gwt/projects/abc123/trusted/0011223344556677/execution-control.json",
+            "C:\\Users\\u\\.gwt\\projects\\abc123\\trusted\\0011223344556677\\verification-run.json",
+            "C:/Users/u/.GWT/Projects/abc123/Trusted/0011223344556677/EXECUTION-CONTROL.JSON",
+            "E:/work/repo/.GWT/Skill-State/Verification-Plan.json",
+        ] {
+            let event = HookEvent {
+                tool_name: Some("Write".to_string()),
+                tool_input: Some(serde_json::json!({ "file_path": trusted_path })),
+                transcript_path: None,
+                cwd: None,
+            };
+            assert!(
+                matches!(
+                    evaluate_trusted_state_write_guard(&event).expect("guard"),
+                    HookOutput::PreToolUsePermission { .. }
+                ),
+                "direct edit of trusted store copy {trusted_path} must be blocked"
+            );
+        }
 
         // Ordinary files and non-file tools pass.
         let event = HookEvent {

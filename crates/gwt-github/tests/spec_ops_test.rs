@@ -278,6 +278,51 @@ fn red_90_multipart_write_creates_part_comments() {
     assert_eq!(got, huge);
 }
 
+// SPEC-3248 P7C T-274: the write receipt carries the operability facts the
+// Artifact Operability Record persists — resident location, comment ids in
+// part order, and the largest single part payload.
+#[test]
+fn t274_write_receipt_carries_operability_fields() {
+    let tmp = TempDir::new().unwrap();
+    let cache = Cache::new(tmp.path().to_path_buf());
+    let client = FakeIssueClient::new();
+    seed_spec(&client, &cache, 1, "v1", "t1");
+
+    let ops = SpecOps::new(client, cache);
+    // Body-resident write: no comment ids, one implicit part.
+    let receipt = ops
+        .write_section(IssueNumber(1), &n("tasks"), "t2")
+        .unwrap();
+    assert_eq!(receipt.location, "body");
+    assert!(receipt.comment_ids.is_empty());
+    assert_eq!(receipt.largest_part_bytes, receipt.bytes);
+
+    // Multipart comment-resident write: ids in part order, bounded parts.
+    let huge = oversized_content(70_000);
+    let receipt = ops
+        .write_section(IssueNumber(1), &n("tasks"), &huge)
+        .unwrap();
+    assert!(
+        receipt.parts >= 2,
+        "expected multipart, got {}",
+        receipt.parts
+    );
+    assert_eq!(receipt.location, "comments");
+    assert_eq!(receipt.comment_ids.len(), receipt.parts);
+    assert!(receipt.largest_part_bytes <= 65_536);
+    assert!(receipt.largest_part_bytes <= receipt.bytes);
+    // The recorded ids must be exactly the part comments, in order.
+    let comments = ops.client().comments(IssueNumber(1));
+    for (i, id) in receipt.comment_ids.iter().enumerate() {
+        let comment = comments.iter().find(|c| c.id.0 == *id).unwrap();
+        assert!(
+            comment.body.contains(&format!("part={}/", i + 1)),
+            "comment {id} must carry part={} marker",
+            i + 1
+        );
+    }
+}
+
 // RED-91: shrinking a multipart section back to a small single-comment
 // section swaps to one fresh comment and deletes the stale part comments.
 #[test]

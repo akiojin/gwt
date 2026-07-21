@@ -52,6 +52,14 @@ pub struct WriteReceipt {
     pub bytes: usize,
     pub parts: usize,
     pub sha256: String,
+    /// Final resident location of the section: `"body"` or `"comments"`
+    /// (SPEC-3248 P7C T-274 operability facts).
+    pub location: String,
+    /// Comment ids now holding the section, in part order (empty for
+    /// body-resident sections).
+    pub comment_ids: Vec<u64>,
+    /// Largest single part payload in bytes (== `bytes` when unsplit).
+    pub largest_part_bytes: usize,
 }
 
 /// High-level SPEC operations backed by an [`IssueClient`] and a [`Cache`].
@@ -161,6 +169,7 @@ impl<C: IssueClient> SpecOps<C> {
         // Whether rolling back means restoring the original body text.
         let mut rollback_body = false;
         let parts_written: usize;
+        let mut largest_part_bytes = canonical.len();
 
         match (&prev_location, &new_location) {
             // Stay in body: rewrite the section between the markers, then patch.
@@ -193,6 +202,7 @@ impl<C: IssueClient> SpecOps<C> {
             (_, SectionLocation::Comments(_)) => {
                 let parts = split_section_into_parts(&canonical)?;
                 let total = parts.len();
+                largest_part_bytes = parts.iter().map(String::len).max().unwrap_or(0);
                 for (i, part) in parts.iter().enumerate() {
                     let comment_body = wrap_comment_part_body(name, part, i + 1, total);
                     let comment: CommentSnapshot =
@@ -252,10 +262,17 @@ impl<C: IssueClient> SpecOps<C> {
         }
         self.force_refresh_cache(number)?;
 
+        let (location, comment_ids) = match new_sections_index.0.get(name) {
+            Some(SectionLocation::Comments(ids)) => ("comments".to_string(), ids.clone()),
+            _ => ("body".to_string(), Vec::new()),
+        };
         Ok(WriteReceipt {
             bytes: canonical.len(),
             parts: parts_written,
             sha256: format!("{:x}", Sha256::digest(canonical.as_bytes())),
+            location,
+            comment_ids,
+            largest_part_bytes,
         })
     }
 

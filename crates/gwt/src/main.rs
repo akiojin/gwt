@@ -958,6 +958,12 @@ pub(crate) struct DockerBundleMounts {
 /// are rare (pane create/destroy), so `RwLock` is the natural fit.
 type PtyWriterRegistry = Arc<RwLock<HashMap<String, Arc<PtyHandle>>>>;
 
+#[derive(Debug, Clone)]
+enum ImprovementActionOutcome {
+    Success(String),
+    Error(String),
+}
+
 #[cfg_attr(
     windows,
     allow(
@@ -1114,6 +1120,18 @@ enum UserEvent {
     },
     IssueLaunchWizardPrepared(IssueLaunchWizardPrepared),
     Dispatch(Vec<OutboundEvent>),
+    ImprovementActionComplete {
+        project_root: PathBuf,
+        client_id: ClientId,
+        action: String,
+        id: String,
+        outcome: ImprovementActionOutcome,
+    },
+    ImprovementCandidatesLoaded {
+        project_root: PathBuf,
+        epoch: u64,
+        result: Result<Vec<serde_json::Value>, String>,
+    },
     /// #2995: a disk-fresh session set loaded off-thread by the branch load.
     /// Applied to the Launch Wizard cache on the main thread so branch Resume
     /// availability/resolution stay fresh without main-thread disk I/O.
@@ -2470,6 +2488,8 @@ mod tests {
             usage_refresh: None,
             image_paste_sequence: std::sync::atomic::AtomicU64::new(0),
             agent_launch_stage_counter: std::sync::atomic::AtomicU64::new(1),
+            improvement_refresh_epoch: 0,
+            improvement_latest_refresh_epochs: HashMap::new(),
         };
         runtime.rebuild_window_lookup();
         runtime.seed_window_pty_statuses();
@@ -2710,7 +2730,8 @@ mod tests {
             .to_string(),
         )
         .expect("write improvement candidates");
-        let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+        let (mut runtime, recorded_events) =
+            sample_runtime_with_events(temp.path(), vec![tab], Some("tab-1"));
         let window_id = window_id_for_preset(&runtime, "tab-1", WindowPreset::FileTree, 0);
         runtime
             .window_details
@@ -2743,9 +2764,36 @@ mod tests {
             event.event,
             BackendEvent::UpdateState(gwt_core::update::UpdateState::UpToDate { .. })
         )));
-        assert!(events.iter().any(|event| matches!(
+        assert!(events
+            .iter()
+            .all(|event| !matches!(event.event, BackendEvent::ImprovementCandidates { .. })));
+        wait_for_recorded_event(
+            "asynchronous improvement candidates",
+            &recorded_events,
+            |events| {
+                events
+                    .iter()
+                    .any(|event| matches!(event, UserEvent::ImprovementCandidatesLoaded { .. }))
+            },
+        );
+        let (project_root, epoch, result) = recorded_events
+            .lock()
+            .expect("event log")
+            .iter()
+            .find_map(|event| match event {
+                UserEvent::ImprovementCandidatesLoaded {
+                    project_root,
+                    epoch,
+                    result,
+                } => Some((project_root.clone(), *epoch, result.clone())),
+                _ => None,
+            })
+            .expect("asynchronous improvement snapshot");
+        let snapshot_events =
+            runtime.handle_improvement_candidates_loaded(project_root, epoch, result);
+        assert!(snapshot_events.iter().any(|event| matches!(
             &event.event,
-            BackendEvent::ImprovementCandidates { candidates }
+            BackendEvent::ImprovementCandidates { candidates, .. }
                 if candidates.first().and_then(|candidate| candidate.get("id")).and_then(serde_json::Value::as_str)
                     == Some("impr-sync")
         )));
@@ -7123,6 +7171,28 @@ fn main() -> std::io::Result<()> {
     };
 
     let runtime = Runtime::new().expect("tokio runtime");
+
+    // SPEC-3287 FR-028..FR-030: commit the embedded-server port before any
+    // server task or browser URL can be published. Explicit `--port` values
+    // and forced secondary instances remain transient; an implicit launch
+    // reuses (or atomically replaces) the persisted port.
+    let prepared_listener = match gwt::cli::tray::port::prepare_stable_listener(
+        runtime.handle(),
+        &gwt_core::paths::gwt_config_path(),
+        tray_args.bind,
+        gwt::cli::tray::port::StablePortRequest::new(
+            tray_args.port,
+            gwt::gui_single_instance::force_new_instance_requested(),
+        ),
+    ) {
+        Ok(prepared) => prepared,
+        Err(error) => {
+            eprintln!("gwt embedded server startup failed: {error}");
+            std::process::exit(1);
+        }
+    };
+    let prepared_port = prepared_listener.port();
+    let stable_port_outcome = prepared_listener.outcome();
     // SPEC #2920 Phase 4: the tray-resident process owns the event loop
     // but never opens a native Window. The `tao::EventLoop` integrates
     // with the OS runloop uniformly across macOS / Windows / Linux.
@@ -7207,11 +7277,6 @@ fn main() -> std::io::Result<()> {
         }));
     }
 
-    // SPEC #2920 Phase 4 partial — `--bind` / `--port` are now honoured
-    // on the GUI route via `gwt::cli::tray::parse_tray_argv` (above).
-    // Defaults preserve the documented loopback + ephemeral behaviour
-    // (see README trust-boundary note).
-    let (bind_addr, bind_port) = (tray_args.bind, tray_args.port);
     // SPEC-2963 FR-005: bind a dedicated fixed loopback port for the OAuth
     // callback so remote Board sign-in works regardless of the (ephemeral or
     // operator-chosen) main port. Read fresh from config so a Settings change
@@ -7219,10 +7284,9 @@ fn main() -> std::io::Result<()> {
     let oauth_redirect_port = gwt_config::Settings::load()
         .map(|settings| settings.board.oauth_redirect_port)
         .unwrap_or(gwt_config::DEFAULT_OAUTH_REDIRECT_PORT);
-    let mut server = EmbeddedServer::start_with_bind(
+    let mut server = EmbeddedServer::start_with_listener(
         &runtime,
-        bind_addr,
-        bind_port,
+        prepared_listener.into_listener(),
         oauth_redirect_port,
         AppEventProxy::new(proxy.clone()),
         clients.clone(),
@@ -7230,6 +7294,18 @@ fn main() -> std::io::Result<()> {
         attachment_uploads,
     )
     .expect("embedded server");
+    debug_assert_eq!(server.bound_port(), prepared_port);
+    if let gwt::cli::tray::port::StablePortOutcome::Replaced { previous } = stable_port_outcome {
+        tracing::warn!(
+            saved_port = previous.get(),
+            bound_port = server.bound_port().get(),
+            "Saved embedded server port was unavailable; using replacement and updating config"
+        );
+        eprintln!(
+            "gwt: saved embedded server port {previous} was unavailable; using {} and updating config",
+            server.bound_port()
+        );
+    }
     app.set_hook_forward_target(server.hook_forward_target());
     // SPEC #2920 Phase 4: own the browser URL so it can survive the
     // tao event_loop closure's 'static requirement (the closure moves
@@ -7620,6 +7696,32 @@ fn main() -> std::io::Result<()> {
             }
             Event::UserEvent(UserEvent::Dispatch(events)) => {
                 clients.dispatch(events);
+            }
+            Event::UserEvent(UserEvent::ImprovementActionComplete {
+                project_root,
+                client_id,
+                action,
+                id,
+                outcome,
+            }) => {
+                clients.dispatch(app.handle_improvement_action_complete(
+                    &project_root,
+                    &client_id,
+                    &action,
+                    &id,
+                    outcome,
+                ));
+            }
+            Event::UserEvent(UserEvent::ImprovementCandidatesLoaded {
+                project_root,
+                epoch,
+                result,
+            }) => {
+                clients.dispatch(app.handle_improvement_candidates_loaded(
+                    project_root,
+                    epoch,
+                    result,
+                ));
             }
             Event::UserEvent(UserEvent::RefreshLaunchWizardSessions(sessions)) => {
                 app.apply_refreshed_launch_wizard_sessions(sessions);

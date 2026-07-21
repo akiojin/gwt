@@ -1,6 +1,67 @@
 # Changelog
 
 All notable changes to this project will be documented in this file.
+## [9.69.0] - 2026-07-21
+
+### Bug Fixes
+
+- 改善候補の公開識別子を補完
+- **improvement:** Bound privacy worktree collection
+- **github:** Verify owner issue readback
+- **improvement:** Harden capture delivery and legacy import
+- **core:** Preserve committed coordination results
+- **core:** Bound process timeout cleanup
+- **tests:** Windowsビルドでunused importになるunix限定テスト補助をcfgで整理する
+- **tests:** Http transport testのunix限定helperをcfgで整理しWindows clippyを直す
+- **gui:** 更新CTAと通知を共有ホストで整列する
+- **workflow:** 検証済みのblocked executionを再開可能にする
+- **workflow:** Recovery履歴のrolling互換性を保つ
+- **config:** ポート保存で設定リンクと更新整合性を守る
+
+### Features
+
+- **hooks:** Verify.planで検証matrixを事前登録しrunのcoverageをgateで強制する
+- **hooks:** 実行/検証recordの正本をrepo-scoped trusted storeへ移動する
+- 改善候補のリポジトリ共通ストアを追加
+- 型付き改善候補の証拠契約を追加
+- 改善候補の型付きライフサイクルを追加
+- 改善候補の公開ペイロードを保護
+- プロセス実行に絶対期限を追加
+- Owner解決の上流通信契約を追加
+- Owner Projection基盤を追加
+- Active Owner解決と監査基盤を追加
+- Owner作成と重複調停を無人化
+- Harden unattended owner recurrence resolution
+- Bound direct owner resolution during Stop
+- 改善操作契約を無人化する
+- **hooks:** 実行integrity違反のself-improvement診断とresume E2Eを追加する
+- **hooks:** Owner write leaseで実行/intake stateのRMWを直列化する
+- **hooks:** GitHub API mutationをmethod-awareで分類しblockする
+- **github:** Artifact Operability Recordで多部構成SPEC書込の台帳を永続化する
+- **hooks:** Verify.planのderiveで変更surfaceから検証matrixを自動導出する
+- 埋め込みサーバーポートを安定化する
+
+### Miscellaneous Tasks
+
+- **work:** Include spec 3170 work event
+- **work:** Record pr check events
+
+### Performance
+
+- **launch:** Cache claude capability probes
+
+### Testing
+
+- **core:** Route process probe through hidden command
+- **gui:** Stabilize blocking task ordering
+- **improvement:** Shorten Stop deadline coverage
+- **improvement:** Bound gwtd subprocess waits
+- **improvement:** Isolate candidate store fixtures
+- **core:** Isolate board remote root home
+- **gui:** Propagate isolated home to workers
+- **hooks:** Gh release createの期待blockをP10 mutation sink分類へ更新する
+- Full検証の期限とHOME fixtureを安定化する
+
 ## [9.68.0] - 2026-07-18
 
 ### Bug Fixes

@@ -663,7 +663,20 @@ mod tests {
         assert_eq!(code, 0, "{out}");
         assert_eq!(env.pr_create_call_log.len(), 1);
 
-        // Fresh evidence unlocks the Ready handoff.
+        // Fresh evidence (plan + covering run) unlocks the Ready handoff.
+        crate::cli::verification_record::save_plan(
+            tmp.path(),
+            &crate::cli::verification_record::VerificationPlanRecord {
+                session_id: "sess-pr".to_string(),
+                owner_number: Some(42),
+                commands: vec!["git --version".to_string()],
+                derived: false,
+                worktree_fingerprint: String::new(),
+                created_at: chrono::Utc::now(),
+                content_hash: String::new(),
+            },
+        )
+        .unwrap();
         crate::cli::verification_record::run_verification(
             tmp.path(),
             "sess-pr",

@@ -383,16 +383,25 @@ fn format_execution_help() -> String {
         "Usage:",
         "  gwtd <<'JSON'",
         "  {\"schema_version\":1,\"operation\":\"execution.blocked\",\"params\":{\"reason\":\"<blocker>\",\"missing_verification\":\"<what could not run>\"}}",
+        "  {\"schema_version\":1,\"operation\":\"execution.reopen\",\"params\":{\"reason\":\"<resolved blocker>\"}}",
         "  JSON",
         "",
         "Operations:",
-        "  execution.complete | execution.blocked | execution.adopt",
+        "  execution.complete | execution.blocked | execution.adopt | execution.reopen",
         "",
         "Notes:",
         "  Settlement binds to GWT_SESSION_ID; a successful build.complete also",
         "  settles the record for gwt-build-spec flows. Blocked is not done.",
         "  execution.adopt takes over another session's active record with an",
-        "  audited params.reason (crash recovery / handoff / integrity repair).",
+        "  audited params.reason (crash recovery / handoff) only when integrity",
+        "  is valid. An integrity-failed record cannot be repaired in the same",
+        "  execution lifetime; use a fresh linked-owner launch to preserve audit.",
+        "  Do not use execution.blocked for temporary questions or decisions.",
+        "  If the same owning session resolves a terminal block, register a",
+        "  derived plan with verify.plan params.derive:true, run the full",
+        "  post-block matrix through verify.run, then call execution.reopen",
+        "  with a non-empty params.reason. Reopen returns to Active; it does",
+        "  not claim completion.",
         "",
     ]
     .join("\n")
@@ -408,9 +417,10 @@ fn format_verify_help() -> String {
         "  JSON",
         "",
         "Operations:",
-        "  verify.run",
+        "  verify.plan | verify.run",
         "",
         "Notes:",
+        "  Register the derived matrix with verify.plan first; a run must cover it.",
         "  gwtd executes each command itself (one plain command per entry, no",
         "  shell operators) and records session/owner/worktree-fingerprint-bound",
         "  evidence. execution.complete and Ready PR handoffs require a fresh,",
@@ -791,6 +801,25 @@ mod tests {
     #[test]
     fn family_help_resolves_search() {
         assert!(family_help("search").is_some());
+    }
+
+    #[test]
+    fn format_execution_help_documents_same_session_recovery() {
+        let help = format_execution_help();
+        for expected in [
+            "execution.reopen",
+            "params.derive:true",
+            "temporary questions",
+            "post-block",
+            "cannot be repaired in the same",
+            "fresh linked-owner launch",
+        ] {
+            assert!(
+                help.contains(expected),
+                "execution help must document recovery contract {expected}. help:\n{help}",
+            );
+        }
+        assert!(!help.contains("integrity repair"), "{help}");
     }
 
     #[test]

@@ -67,6 +67,85 @@ test("non-coalesce kinds preserve order and multiplicity", () => {
   assert.deepEqual(coalesced, queue);
 });
 
+test("project snapshots stay after the workspace state that activates their project", () => {
+  const workspace = {
+    kind: "workspace_state",
+    workspace: { active_tab_id: "project-b" },
+  };
+  const candidates = {
+    kind: "improvement_candidates",
+    project_root: "/projects/b",
+    candidates: [{ id: "impr-b" }],
+  };
+  const otherProjectCandidates = {
+    kind: "improvement_candidates",
+    project_root: "/projects/a",
+    candidates: [{ id: "impr-a" }],
+  };
+
+  assert.deepEqual(
+    coalesceEvents(
+      [workspace, otherProjectCandidates, candidates],
+      DEFAULT_COALESCE_KINDS,
+    ),
+    [workspace, otherProjectCandidates, candidates],
+    "project-scoped snapshots must preserve multiplicity without overtaking activation state",
+  );
+});
+
+test("project action outcomes stay behind the workspace activation fence", () => {
+  const workspace = {
+    kind: "workspace_state",
+    workspace: { active_tab_id: "project-b" },
+  };
+  const staleError = {
+    kind: "improvement_action_error",
+    project_root: "/projects/a",
+    message: "stale project error",
+  };
+  const candidates = {
+    kind: "improvement_candidates",
+    project_root: "/projects/b",
+    candidates: [{ id: "impr-b" }],
+  };
+
+  assert.deepEqual(
+    coalesceEvents([workspace, staleError, candidates], DEFAULT_COALESCE_KINDS),
+    [workspace, staleError, candidates],
+    "the active-project fence must run before scoped action outcomes",
+  );
+});
+
+test("latest workspace activation stays ahead of outcomes across rapid project switches", () => {
+  const workspaceB = {
+    kind: "workspace_state",
+    workspace: { active_tab_id: "project-b" },
+  };
+  const staleError = {
+    kind: "improvement_action_error",
+    project_root: "/projects/a",
+    message: "stale project error",
+  };
+  const workspaceC = {
+    kind: "workspace_state",
+    workspace: { active_tab_id: "project-c" },
+  };
+  const candidatesC = {
+    kind: "improvement_candidates",
+    project_root: "/projects/c",
+    candidates: [{ id: "impr-c" }],
+  };
+
+  assert.deepEqual(
+    coalesceEvents(
+      [workspaceB, staleError, workspaceC, candidatesC],
+      DEFAULT_COALESCE_KINDS,
+    ),
+    [workspaceC, staleError, candidatesC],
+    "the surviving activation must update the frontend fence before stale outcomes",
+  );
+});
+
 test("default coalescing policy mirrors backend latest-wins event policy", () => {
   for (const kind of [
     "workspace_state",
@@ -88,6 +167,7 @@ test("default coalescing policy mirrors backend latest-wins event policy", () =>
     "terminal_output",
     "terminal_snapshot",
     "runtime_hook_event",
+    "improvement_candidates",
   ]) {
     assert.equal(
       DEFAULT_COALESCE_KINDS.has(kind),

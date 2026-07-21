@@ -462,27 +462,64 @@ test("Status Strip hosts the zoom controls so canvas zoom is always reachable (S
   assert.equal(document.getElementById("zoom-reset-button").textContent.trim(), "100%");
 });
 
-test("Update CTA floats fixed bottom-right, not in the rail (user verification 2026-06-12)", () => {
+test("Update CTA and alerts share one fixed bottom-right layout host", () => {
   // SPEC-2356 moved the Update CTA into the sidebar and SPEC-3038 briefly
   // anchored it to the rail, but the user found chrome-docked placements hard
-  // to notice — the CTA returns to its fixed bottom-right home.
+  // to notice. SPEC-2041 Phase 23 retains the bottom-right home while making
+  // one roleless layout host own the corner for both alerts and the CTA.
   assert.equal(
     document.getElementById("update-cta-anchor"),
     null,
     "no chrome-docked update anchor may remain",
   );
+  const noticeHost = document.getElementById("operator-notice-stack");
+  assert.ok(noticeHost, "expected the shared operator notice stack");
+  assert.equal(noticeHost.parentElement, document.body, "notice host is a body child");
+  assert.equal(noticeHost.hasAttribute("role"), false, "layout host has no ARIA role");
+  assert.equal(
+    noticeHost.hasAttribute("aria-live"),
+    false,
+    "layout host is not a live region",
+  );
+
   const updateCtaSource = readFileSync(resolve(here, "../update-cta.js"), "utf8");
   assert.doesNotMatch(
     updateCtaSource,
     /update-cta-anchor/,
-    "update-cta.js mounts on document.body, not a chrome anchor",
+    "update-cta.js does not return to a chrome anchor",
   );
-  const css = readFileSync(resolve(here, "../styles/components.css"), "utf8");
-  assert.match(
-    css,
-    /\.update-cta-shell\s*\{[^}]*position:\s*fixed/,
-    ".update-cta-shell must float fixed bottom-right",
-  );
+  assert.match(updateCtaSource, /getElementById\(["']operator-notice-stack["']\)/);
+  assert.match(appSource, /getElementById\(["']operator-notice-stack["']\)/);
+  assert.match(appSource, /alertsToasts\.mount\(/);
+
+  const hostBlock = inlineStyle.match(/\.operator-notice-stack\s*\{[^}]*\}/)?.[0];
+  assert.ok(hostBlock, "expected operator notice stack CSS");
+  assert.match(hostBlock, /position:\s*fixed/);
+  assert.match(hostBlock, /\bright\s*:/);
+  assert.match(hostBlock, /\bbottom\s*:/);
+  assert.match(hostBlock, /z-index\s*:/);
+
+  const alertsBlock = inlineStyle.match(/\.toast-alerts\s*\{[^}]*\}/)?.[0];
+  assert.ok(alertsBlock, "expected alerts lane CSS");
+  assert.doesNotMatch(alertsBlock, /position:\s*fixed/);
+  assert.doesNotMatch(alertsBlock, /\b(?:right|bottom|z-index)\s*:/);
+
+  const componentsCss = readFileSync(resolve(here, "../styles/components.css"), "utf8");
+  const ctaShellBlock = componentsCss.match(/\.update-cta-shell\s*\{[^}]*\}/)?.[0];
+  assert.ok(ctaShellBlock, "expected update CTA lane CSS");
+  assert.doesNotMatch(ctaShellBlock, /position:\s*fixed/);
+  assert.doesNotMatch(ctaShellBlock, /\b(?:right|bottom|z-index)\s*:/);
+
+  const tokensCss = readFileSync(resolve(here, "../styles/tokens.css"), "utf8");
+  const definedTokens = new Set();
+  for (const source of [tokensCss, inlineStyle]) {
+    for (const match of source.matchAll(/(--[a-z0-9-]+)\s*:/g)) {
+      definedTokens.add(match[1]);
+    }
+  }
+  for (const match of hostBlock.matchAll(/var\(\s*(--[a-z0-9-]+)/g)) {
+    assert.ok(definedTokens.has(match[1]), `undefined notice host token ${match[1]}`);
+  }
 });
 
 test("workspace windows expose role badges and hide panel runtime chips", () => {
@@ -1648,6 +1685,48 @@ test("Improvement candidates refresh already-mounted inbox windows without works
   assert.ok(
     caseIndex >= 0 && revisionIndex > caseIndex && refreshIndex > revisionIndex,
     "improvement_candidates receive path must refresh mounted inbox windows after recording the new revision",
+  );
+});
+
+test("Improvement async replies are scoped to the active project", () => {
+  const scopeBody = extractFunctionBody(appSource, "improvementEventMatchesActiveProject");
+  assert.match(
+    scopeBody,
+    /event\?\.project_root/,
+    "improvement replies must carry their source project root",
+  );
+  assert.match(
+    scopeBody,
+    /activeProjectTab\(\)\?\.project_root/,
+    "improvement replies must compare against the active project",
+  );
+
+  const receiveBody = extractFunctionBody(appSource, "receive");
+  for (const kind of [
+    "improvement_candidates",
+    "improvement_action_result",
+    "improvement_action_error",
+  ]) {
+    const start = receiveBody.indexOf(`case "${kind}":`);
+    const end = receiveBody.indexOf("case ", start + 5);
+    const arm = receiveBody.slice(start, end);
+    assert.match(
+      arm,
+      /improvementEventMatchesActiveProject\(event\)/,
+      `${kind} must ignore a delayed reply from another project`,
+    );
+  }
+
+  const renderBody = extractFunctionBody(appSource, "renderAppState");
+  assert.match(
+    renderBody,
+    /improvementCandidatesProjectRoot\s*!==\s*activeProjectRoot/,
+    "project switching must clear the prior project's candidate snapshot",
+  );
+  assert.match(
+    renderBody,
+    /improvementCandidates\s*=\s*\[\]/,
+    "stale candidate rows must not remain visible while the new project refresh loads",
   );
 });
 

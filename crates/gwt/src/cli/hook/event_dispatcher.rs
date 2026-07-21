@@ -512,6 +512,13 @@ mod tests {
         assert_eq!(candidates.len(), 1);
         assert_eq!(
             candidates[0].get("occurrences").and_then(|v| v.as_u64()),
+            Some(0),
+            "legacy intake capture must not fabricate a typed occurrence"
+        );
+        assert_eq!(
+            candidates[0]
+                .get("legacy_occurrence_count")
+                .and_then(|v| v.as_u64()),
             Some(1)
         );
 
@@ -558,6 +565,13 @@ mod tests {
         assert_eq!(candidates.len(), 1, "dedupe must keep one candidate");
         assert_eq!(
             candidates[0].get("occurrences").and_then(|v| v.as_u64()),
+            Some(0),
+            "legacy intake recapture must not fabricate typed occurrences"
+        );
+        assert_eq!(
+            candidates[0]
+                .get("legacy_occurrence_count")
+                .and_then(|v| v.as_u64()),
             Some(2)
         );
     }

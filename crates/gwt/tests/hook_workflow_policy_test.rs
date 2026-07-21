@@ -1,13 +1,26 @@
 //! T-112 (SPEC #1935) — workflow-policy gating tests.
 
+#[cfg(unix)]
+use std::env;
 use std::{
+    io::{ErrorKind, Read, Write},
+    net::{TcpListener, TcpStream},
     path::{Path, PathBuf},
-    sync::{Mutex, OnceLock},
+    sync::{
+        atomic::{AtomicUsize, Ordering},
+        Arc, Mutex, OnceLock,
+    },
+    time::{Duration, Instant},
 };
 
 use chrono::Utc;
-use gwt::cli::hook::{
-    event_dispatcher, gwt_self_improvement_stop, workflow_policy, HookEvent, HookOutput,
+use gwt::cli::{
+    hook::{event_dispatcher, gwt_self_improvement_stop, workflow_policy, HookEvent, HookOutput},
+    improvement::{
+        candidate_public_values, ImprovementCaptureCommand, ImprovementCommand,
+        ImprovementPromoteIssueCommand, ImprovementTypedEvidenceCommand,
+    },
+    CliCommand, DefaultCliEnv, TestEnv,
 };
 use gwt_agent::{session::GWT_SESSION_ID_ENV, AgentId, Session, GWT_SESSION_RUNTIME_PATH_ENV};
 use gwt_core::process::hidden_command;
@@ -25,7 +38,10 @@ use gwt_core::{
     },
 };
 use gwt_github::{
-    client::{IssueNumber, IssueSnapshot, IssueState, UpdatedAt},
+    client::{
+        fake::{OwnerRepositoryFaultTiming, OwnerRepositoryOperation},
+        ApiError, IssueNumber, IssueSnapshot, IssueState, ResolutionDeadline, UpdatedAt,
+    },
     Cache,
 };
 use serde_json::json;
@@ -34,6 +50,24 @@ use tempfile::TempDir;
 fn env_lock() -> &'static Mutex<()> {
     static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
     LOCK.get_or_init(|| Mutex::new(()))
+}
+
+const DIRECT_STOP_TEST_TOTAL_BUDGET: Duration = Duration::from_millis(900);
+const DIRECT_STOP_TEST_CONNECT_TIMEOUT: Duration = Duration::from_millis(150);
+const DIRECT_STOP_TEST_SETTLEMENT_RESERVE: Duration = Duration::from_millis(250);
+
+fn evaluate_direct_stop_with_test_budget(env: &mut DefaultCliEnv) -> HookOutput {
+    let deadline = ResolutionDeadline::new(
+        DIRECT_STOP_TEST_CONNECT_TIMEOUT,
+        DIRECT_STOP_TEST_TOTAL_BUDGET,
+    );
+    gwt_self_improvement_stop::evaluate_with_deadline_and_reserve(
+        env,
+        false,
+        false,
+        &deadline,
+        DIRECT_STOP_TEST_SETTLEMENT_RESERVE,
+    )
 }
 
 fn root() -> PathBuf {
@@ -85,8 +119,7 @@ fn with_temp_home<T>(f: impl FnOnce(&TempDir) -> T) -> T {
 }
 
 fn write_improvement_store(repo_path: &Path, candidates: serde_json::Value) {
-    let path = repo_path
-        .join(".gwt")
+    let path = gwt_core::paths::gwt_project_dir_for_repo_path(repo_path)
         .join("improvements")
         .join("candidates.json");
     std::fs::create_dir_all(path.parent().expect("parent")).expect("create improvements dir");
@@ -112,12 +145,715 @@ fn init_repo_with_origin(remote_url: &str) -> TempDir {
     repo
 }
 
+fn self_improvement_test_env(repo_path: &Path) -> TestEnv {
+    let mut env = TestEnv::new(repo_path.join("cache"));
+    env.repo_path = repo_path.to_path_buf();
+    env
+}
+
+fn save_verified_improvement_session(repo_path: &Path) -> String {
+    let mut session = Session::new(repo_path, "test", AgentId::Codex);
+    session.repo_hash = Some(gwt_core::paths::project_scope_hash(repo_path).to_string());
+    let id = session.id.clone();
+    session
+        .save(&gwt_sessions_dir())
+        .expect("save verified improvement session");
+    id
+}
+
+fn typed_improvement_capture(failure_code: &str) -> CliCommand {
+    CliCommand::Improvement(ImprovementCommand::Capture(Box::new(
+        ImprovementCaptureCommand {
+            source: "hook-runtime".to_string(),
+            target_artifact: "coordination".to_string(),
+            classification: "gwt-caused".to_string(),
+            confidence: "high".to_string(),
+            summary: "Direct Stop must bound Owner Resolution".to_string(),
+            details: None,
+            evidence_digest: None,
+            dedupe_key: None,
+            local_evidence: Vec::new(),
+            typed_evidence: Some(ImprovementTypedEvidenceCommand {
+                subsystem: "coordination".to_string(),
+                contract_id: "coordination.board-status".to_string(),
+                contract_schema_revision: 1,
+                failure_code: failure_code.to_string(),
+                expected_outcome: "BOARD_STATUS_POSTED".to_string(),
+                observed_outcome: "BOARD_STATUS_MISSING".to_string(),
+            }),
+        },
+    )))
+}
+
+fn capture_interpretive_candidate(env: &mut TestEnv, session_id: &str, failure_code: &str) {
+    std::env::set_var(GWT_SESSION_ID_ENV, session_id);
+    gwt::cli::run(env, typed_improvement_capture(failure_code)).expect("typed capture");
+}
+
+fn sync_test_env_source_scope_nonce(env: &mut TestEnv) {
+    let path = gwt_core::paths::gwt_project_dir_for_repo_path(&env.repo_path)
+        .join("improvements")
+        .join("candidates.json");
+    let store: serde_json::Value = serde_json::from_slice(
+        &std::fs::read(path).expect("read candidate store for test env nonce"),
+    )
+    .expect("parse candidate store for test env nonce");
+    env.improvement_source_scope_nonce = store["source_scope_nonce"]
+        .as_str()
+        .expect("candidate store source scope nonce")
+        .to_string();
+}
+
+fn fail_next_owner_corpus_with_timeout(env: &TestEnv) {
+    env.owner_client.fail_next_owner_operation(
+        OwnerRepositoryOperation::ListIssues,
+        OwnerRepositoryFaultTiming::BeforeSubmit,
+        ApiError::Timeout {
+            operation: "stalled owner corpus".to_string(),
+        },
+    );
+}
+
+fn read_http_request(stream: &mut TcpStream) {
+    stream
+        .set_read_timeout(Some(Duration::from_secs(2)))
+        .expect("request read timeout");
+    let mut bytes = Vec::new();
+    let mut chunk = [0_u8; 4096];
+    let header_end = loop {
+        let read = stream.read(&mut chunk).expect("read request headers");
+        assert!(read > 0, "request closed before headers");
+        bytes.extend_from_slice(&chunk[..read]);
+        if let Some(position) = bytes.windows(4).position(|window| window == b"\r\n\r\n") {
+            break position + 4;
+        }
+    };
+    let headers = String::from_utf8_lossy(&bytes[..header_end]);
+    let content_length = headers
+        .lines()
+        .find_map(|line| {
+            let (name, value) = line.split_once(':')?;
+            name.eq_ignore_ascii_case("content-length")
+                .then(|| value.trim().parse::<usize>().expect("content length"))
+        })
+        .unwrap_or(0);
+    while bytes.len() - header_end < content_length {
+        let read = stream.read(&mut chunk).expect("read request body");
+        assert!(read > 0, "request closed before body");
+        bytes.extend_from_slice(&chunk[..read]);
+    }
+}
+
+fn accept_loopback_with_timeout(listener: &TcpListener, timeout: Duration) -> TcpStream {
+    listener
+        .set_nonblocking(true)
+        .expect("nonblocking loopback listener");
+    let deadline = Instant::now() + timeout;
+    loop {
+        match listener.accept() {
+            Ok((stream, _)) => {
+                stream
+                    .set_nonblocking(false)
+                    .expect("blocking accepted loopback stream");
+                return stream;
+            }
+            Err(error) if error.kind() == ErrorKind::WouldBlock && Instant::now() < deadline => {
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            Err(error) => panic!("loopback accept failed before {timeout:?}: {error}"),
+        }
+    }
+}
+
+fn only_candidate_id(repo_path: &Path) -> String {
+    let candidates = candidate_public_values(repo_path);
+    assert_eq!(candidates.len(), 1, "expected one deduplicated candidate");
+    candidates[0]["id"]
+        .as_str()
+        .expect("candidate id")
+        .to_string()
+}
+
 #[test]
-fn gwt_self_improvement_stop_blocks_high_confidence_gwt_contract_violation_in_gwt_repo() {
-    let repo = init_repo_with_origin("https://github.com/akiojin/gwt.git");
-    write_improvement_store(
-        repo.path(),
-        json!({
+fn gwt_self_improvement_stop_retries_one_candidate_with_the_strict_budget() {
+    with_temp_home(|_| {
+        let repo = init_repo_with_origin("https://github.com/akiojin/gwt.git");
+        let session_a = save_verified_improvement_session(repo.path());
+        let session_b = save_verified_improvement_session(repo.path());
+        let mut env = TestEnv::new(repo.path().join("cache"));
+        env.repo_path = repo.path().to_path_buf();
+
+        capture_interpretive_candidate(&mut env, &session_a, "STATUS_NOT_POSTED");
+        sync_test_env_source_scope_nonce(&mut env);
+        fail_next_owner_corpus_with_timeout(&env);
+        capture_interpretive_candidate(&mut env, &session_b, "STATUS_NOT_POSTED");
+        let candidate_id = only_candidate_id(repo.path());
+
+        assert_eq!(env.owner_client_access_count(), 1);
+        let (normal_connect, normal_total) = env
+            .last_owner_client_budget()
+            .expect("normal capture owner budget");
+        assert!(normal_connect <= Duration::from_secs(5));
+        assert!(normal_total <= Duration::from_secs(120));
+        assert!(normal_total > Duration::from_secs(110));
+        assert_eq!(
+            env.last_owner_client_access_saw_persisted_candidate(),
+            Some(true),
+            "capture must persist the owner-resolving state before client access"
+        );
+        assert_eq!(
+            env.last_owner_client_candidate_id().as_deref(),
+            Some(candidate_id.as_str())
+        );
+
+        env.clear_owner_client_access_log();
+        fail_next_owner_corpus_with_timeout(&env);
+        gwt::cli::run(
+            &mut env,
+            CliCommand::Improvement(ImprovementCommand::PromoteIssue(
+                ImprovementPromoteIssueCommand {
+                    id: candidate_id.clone(),
+                    force: false,
+                    labels: Vec::new(),
+                },
+            )),
+        )
+        .expect("explicit Owner Resolution retry");
+        assert_eq!(env.owner_client_access_count(), 1);
+        let (explicit_connect, explicit_total) = env
+            .last_owner_client_budget()
+            .expect("explicit resolve owner budget");
+        assert!(explicit_connect <= Duration::from_secs(5));
+        assert!(explicit_total <= Duration::from_secs(120));
+        assert!(explicit_total > Duration::from_secs(110));
+
+        env.clear_owner_client_access_log();
+        fail_next_owner_corpus_with_timeout(&env);
+        let output = gwt_self_improvement_stop::evaluate_with_env(&mut env, false, false);
+
+        let HookOutput::StopBlock { reason } = output else {
+            panic!("unresolved strict Stop resolution must block");
+        };
+        assert!(reason.contains("state=blocked"), "{reason}");
+        assert!(reason.contains("reason=timeout"), "{reason}");
+        assert!(reason.contains("RETRY_WITHIN_BUDGET"), "{reason}");
+        assert_eq!(env.owner_client_access_count(), 1);
+        let (strict_connect, strict_total) = env
+            .last_owner_client_budget()
+            .expect("strict Stop owner budget");
+        assert!(strict_connect <= Duration::from_secs(3));
+        assert!(strict_total <= Duration::from_secs(15));
+        assert!(strict_total > Duration::from_secs(10));
+        assert_eq!(
+            env.last_owner_client_candidate_id().as_deref(),
+            Some(candidate_id.as_str())
+        );
+    });
+}
+
+#[cfg(unix)]
+#[test]
+fn direct_stop_retries_pending_owner_status_without_rerunning_owner_resolution() {
+    use std::os::unix::fs::PermissionsExt;
+
+    with_temp_home(|_| {
+        let repo = init_repo_with_origin("https://github.com/akiojin/gwt.git");
+        let session_a = save_verified_improvement_session(repo.path());
+        let session_b = save_verified_improvement_session(repo.path());
+        let mut env = TestEnv::new(repo.path().join("cache"));
+        env.repo_path = repo.path().to_path_buf();
+
+        capture_interpretive_candidate(&mut env, &session_a, "STATUS_NOT_POSTED");
+        sync_test_env_source_scope_nonce(&mut env);
+        let fingerprint = candidate_public_values(repo.path())[0]["fingerprint"]
+            .as_str()
+            .expect("candidate fingerprint")
+            .to_string();
+        env.owner_client
+            .seed_repository_issue(gwt_github::client::RepositoryIssue {
+                repository: gwt_github::client::RepositoryIdentity::gwt_upstream(),
+                number: IssueNumber(77),
+                title: "Existing self-improvement owner".to_string(),
+                body: format!("<!-- gwt:improvement-fingerprint:v1 {fingerprint} -->"),
+                labels: Vec::new(),
+                state: IssueState::Open,
+                kind: gwt_github::client::RepositoryIssueKind::Plain,
+                updated_at: UpdatedAt::new("owner-77"),
+            });
+        capture_interpretive_candidate(&mut env, &session_b, "STATUS_NOT_POSTED");
+
+        let store_path = gwt_core::paths::gwt_project_dir_for_repo_path(repo.path())
+            .join("improvements")
+            .join("candidates.json");
+        let mut store: serde_json::Value = serde_json::from_slice(
+            &std::fs::read(&store_path).expect("read created candidate store"),
+        )
+        .expect("parse created candidate store");
+        let candidate = &mut store["candidates"][0];
+        assert_eq!(candidate["state"], "linked");
+        assert_eq!(candidate["owner_status_generation"], 1);
+        assert_eq!(candidate["owner_status_delivered_generation"], 1);
+        candidate["owner_status_delivered_generation"] = json!(0);
+        std::fs::write(
+            &store_path,
+            serde_json::to_vec_pretty(&store).expect("serialize pending owner status"),
+        )
+        .expect("persist pending owner status");
+        let create_calls_before = env
+            .owner_client
+            .owner_mutation_call_log()
+            .iter()
+            .filter(|call| call.operation == OwnerRepositoryOperation::CreateIssue)
+            .count();
+        env.clear_owner_client_access_log();
+
+        let manifest_path = gwt_core::coordination::coordination_events_manifest_path(repo.path());
+        let manifest: serde_json::Value = serde_json::from_slice(
+            &std::fs::read(&manifest_path).expect("read Board event manifest"),
+        )
+        .expect("parse Board event manifest");
+        let active_segment = gwt_core::coordination::coordination_events_segments_dir(repo.path())
+            .join(
+                manifest["active_segment"]
+                    .as_str()
+                    .expect("active Board event segment"),
+            );
+        std::fs::set_permissions(&active_segment, std::fs::Permissions::from_mode(0o400))
+            .expect("make Board event segment read-only");
+
+        let blocked = gwt_self_improvement_stop::evaluate_with_env(&mut env, false, false);
+
+        std::fs::set_permissions(&active_segment, std::fs::Permissions::from_mode(0o600))
+            .expect("restore Board event segment permissions");
+        let HookOutput::StopBlock { reason } = blocked else {
+            panic!("failed owner status delivery must block Stop");
+        };
+        assert!(reason.contains("state=linked"), "{reason}");
+        assert!(reason.contains("reason=status-delivery"), "{reason}");
+        assert!(
+            reason.contains("remediation=RETRY_OWNER_STATUS"),
+            "{reason}"
+        );
+        let still_pending: serde_json::Value = serde_json::from_slice(
+            &std::fs::read(&store_path).expect("read pending candidate store"),
+        )
+        .expect("parse pending candidate store");
+        assert_eq!(
+            still_pending["candidates"][0]["owner_status_delivered_generation"],
+            0
+        );
+        assert_eq!(env.owner_client_access_count(), 0);
+
+        let output = gwt_self_improvement_stop::evaluate_with_env(&mut env, false, false);
+
+        assert_eq!(output, HookOutput::Silent);
+        assert_eq!(
+            env.owner_client_access_count(),
+            0,
+            "status delivery retry must not rerun Owner Resolution"
+        );
+        let persisted: serde_json::Value = serde_json::from_slice(
+            &std::fs::read(&store_path).expect("read acknowledged candidate store"),
+        )
+        .expect("parse acknowledged candidate store");
+        assert_eq!(
+            persisted["candidates"][0]["owner_status_delivered_generation"],
+            persisted["candidates"][0]["owner_status_generation"]
+        );
+        assert_eq!(
+            env.owner_client
+                .owner_mutation_call_log()
+                .iter()
+                .filter(|call| call.operation == OwnerRepositoryOperation::CreateIssue)
+                .count(),
+            create_calls_before,
+            "status retry must not create another owner"
+        );
+    });
+}
+
+#[test]
+fn direct_stop_composes_pagination_and_transport_stall_within_strict_budget() {
+    with_temp_home(|_| {
+        let repo = init_repo_with_origin("https://github.com/akiojin/gwt.git");
+        let session_a = save_verified_improvement_session(repo.path());
+        let session_b = save_verified_improvement_session(repo.path());
+        let mut seed_env = TestEnv::new(repo.path().join("cache"));
+        seed_env.repo_path = repo.path().to_path_buf();
+        capture_interpretive_candidate(&mut seed_env, &session_a, "STATUS_NOT_POSTED");
+        sync_test_env_source_scope_nonce(&mut seed_env);
+        fail_next_owner_corpus_with_timeout(&seed_env);
+        capture_interpretive_candidate(&mut seed_env, &session_b, "STATUS_NOT_POSTED");
+
+        let listener = TcpListener::bind("127.0.0.1:0").expect("loopback listener");
+        let address = listener.local_addr().expect("loopback address");
+        let requests = Arc::new(AtomicUsize::new(0));
+        let server_requests = Arc::clone(&requests);
+        let server = std::thread::spawn(move || {
+            let mut first = accept_loopback_with_timeout(&listener, Duration::from_secs(2));
+            server_requests.fetch_add(1, Ordering::SeqCst);
+            read_http_request(&mut first);
+            let body = r#"{"data":{"repository":{"issues":{"nodes":[],"pageInfo":{"hasNextPage":true,"endCursor":"cursor-1"}}}}}"#;
+            write!(
+                first,
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                body.len(),
+                body
+            )
+            .expect("first page response");
+            first.flush().expect("flush first page");
+            drop(first);
+
+            let mut stalled = accept_loopback_with_timeout(&listener, Duration::from_secs(2));
+            server_requests.fetch_add(1, Ordering::SeqCst);
+            read_http_request(&mut stalled);
+            stalled
+                .set_read_timeout(Some(Duration::from_millis(100)))
+                .expect("stall read timeout");
+            let until = Instant::now() + Duration::from_millis(850);
+            let mut byte = [0_u8; 1];
+            while Instant::now() < until {
+                match stalled.read(&mut byte) {
+                    Ok(0) => break,
+                    Ok(_) => {}
+                    Err(error)
+                        if matches!(error.kind(), ErrorKind::WouldBlock | ErrorKind::TimedOut) => {}
+                    Err(_) => break,
+                }
+            }
+        });
+        let _mode = ScopedEnvVar::set("GWT_OWNER_GITHUB_TEST_MODE", "loopback-v1");
+        let _rest = ScopedEnvVar::set("GWT_OWNER_GITHUB_REST_BASE", format!("http://{address}"));
+        let _graphql = ScopedEnvVar::set(
+            "GWT_OWNER_GITHUB_GRAPHQL_URL",
+            format!("http://{address}/graphql"),
+        );
+        let _token = ScopedEnvVar::set("GWT_OWNER_GITHUB_TOKEN", "loopback-test-token");
+        let mut env = DefaultCliEnv::new_for_hooks_at(repo.path().to_path_buf());
+        let started = Instant::now();
+
+        let output = evaluate_direct_stop_with_test_budget(&mut env);
+        let elapsed = started.elapsed();
+
+        let HookOutput::StopBlock { reason } = output else {
+            panic!("stalled direct Stop owner search must block");
+        };
+        assert!(reason.contains("reason=timeout"), "{reason}");
+        assert!(
+            elapsed < DIRECT_STOP_TEST_TOTAL_BUDGET + Duration::from_secs(1),
+            "elapsed={elapsed:?}"
+        );
+        let persisted = candidate_public_values(repo.path());
+        assert_eq!(persisted.len(), 1);
+        assert_eq!(persisted[0]["state"], "blocked");
+        assert_eq!(persisted[0]["blocked_reason"], "timeout");
+        let store_path = gwt_core::paths::gwt_project_dir_for_repo_path(repo.path())
+            .join("improvements")
+            .join("candidates.json");
+        let store: serde_json::Value = serde_json::from_slice(
+            &std::fs::read(store_path).expect("read durable candidate store"),
+        )
+        .expect("parse durable candidate store");
+        assert!(store["candidates"][0]["attempt"].is_null());
+        server.join().expect("loopback server");
+        assert_eq!(requests.load(Ordering::SeqCst), 2);
+    });
+}
+
+#[test]
+fn direct_stop_reserves_time_to_settle_after_post_attempt_store_lock_contention() {
+    with_temp_home(|_| {
+        let repo = init_repo_with_origin("https://github.com/akiojin/gwt.git");
+        let session_a = save_verified_improvement_session(repo.path());
+        let session_b = save_verified_improvement_session(repo.path());
+        let mut seed_env = TestEnv::new(repo.path().join("cache"));
+        seed_env.repo_path = repo.path().to_path_buf();
+        capture_interpretive_candidate(&mut seed_env, &session_a, "STATUS_NOT_POSTED");
+        sync_test_env_source_scope_nonce(&mut seed_env);
+        fail_next_owner_corpus_with_timeout(&seed_env);
+        capture_interpretive_candidate(&mut seed_env, &session_b, "STATUS_NOT_POSTED");
+
+        let candidate_lock_path = gwt_core::paths::gwt_project_dir_for_repo_path(repo.path())
+            .join("improvements")
+            .join(".lock");
+        let lock_release_at = Arc::new(OnceLock::<Instant>::new());
+        let server_lock_release_at = Arc::clone(&lock_release_at);
+        let listener = TcpListener::bind("127.0.0.1:0").expect("loopback listener");
+        let address = listener.local_addr().expect("loopback address");
+        let server = std::thread::spawn(move || {
+            let mut request = accept_loopback_with_timeout(&listener, Duration::from_secs(2));
+            read_http_request(&mut request);
+            let candidate_lock = std::fs::OpenOptions::new()
+                .create(true)
+                .read(true)
+                .write(true)
+                .truncate(false)
+                .open(candidate_lock_path)
+                .expect("candidate store lock");
+            fs2::FileExt::lock_exclusive(&candidate_lock).expect("hold candidate store lock");
+            let body = r#"{"data":{"repository":{"issues":{"nodes":[],"pageInfo":{"hasNextPage":false,"endCursor":null}}}}}"#;
+            write!(
+                request,
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                body.len(),
+                body
+            )
+            .expect("complete owner corpus response");
+            request.flush().expect("flush owner corpus response");
+            let release_at = *server_lock_release_at
+                .get()
+                .expect("absolute candidate lock release deadline");
+            std::thread::sleep(release_at.saturating_duration_since(Instant::now()));
+            fs2::FileExt::unlock(&candidate_lock).expect("release candidate store lock");
+        });
+        let _mode = ScopedEnvVar::set("GWT_OWNER_GITHUB_TEST_MODE", "loopback-v1");
+        let _rest = ScopedEnvVar::set("GWT_OWNER_GITHUB_REST_BASE", format!("http://{address}"));
+        let _graphql = ScopedEnvVar::set(
+            "GWT_OWNER_GITHUB_GRAPHQL_URL",
+            format!("http://{address}/graphql"),
+        );
+        let _token = ScopedEnvVar::set("GWT_OWNER_GITHUB_TOKEN", "loopback-test-token");
+        let mut env = DefaultCliEnv::new_for_hooks_at(repo.path().to_path_buf());
+        let deadline = ResolutionDeadline::new(
+            DIRECT_STOP_TEST_CONNECT_TIMEOUT,
+            DIRECT_STOP_TEST_TOTAL_BUDGET,
+        );
+        let resolution_deadline = deadline.reserving(DIRECT_STOP_TEST_SETTLEMENT_RESERVE);
+        let release_at = resolution_deadline.expires_at() + Duration::from_millis(25);
+        assert!(
+            release_at < deadline.expires_at(),
+            "fixture must release the lock inside the settlement reserve"
+        );
+        lock_release_at
+            .set(release_at)
+            .expect("set absolute candidate lock release deadline");
+        let started = Instant::now();
+
+        let output = gwt_self_improvement_stop::evaluate_with_deadline_and_reserve(
+            &mut env,
+            false,
+            false,
+            &deadline,
+            DIRECT_STOP_TEST_SETTLEMENT_RESERVE,
+        );
+        let elapsed = started.elapsed();
+
+        server.join().expect("loopback server");
+        let HookOutput::StopBlock { reason } = output else {
+            panic!("post-attempt store contention must block Stop");
+        };
+        assert!(reason.contains("state=blocked"), "{reason}");
+        assert!(reason.contains("reason=timeout"), "{reason}");
+        assert!(reason.contains("RETRY_WITHIN_BUDGET"), "{reason}");
+        assert!(
+            elapsed < DIRECT_STOP_TEST_TOTAL_BUDGET + Duration::from_secs(1),
+            "elapsed={elapsed:?}"
+        );
+        let persisted = candidate_public_values(repo.path());
+        assert_eq!(persisted.len(), 1);
+        assert_eq!(persisted[0]["state"], "blocked");
+        assert_eq!(persisted[0]["blocked_reason"], "timeout");
+        let store_path = gwt_core::paths::gwt_project_dir_for_repo_path(repo.path())
+            .join("improvements")
+            .join("candidates.json");
+        let store: serde_json::Value = serde_json::from_slice(
+            &std::fs::read(store_path).expect("read settled candidate store"),
+        )
+        .expect("parse settled candidate store");
+        assert!(store["candidates"][0]["attempt"].is_null());
+    });
+}
+
+#[cfg(unix)]
+#[test]
+fn direct_stop_terminates_stalled_lazy_auth_and_persists_timeout() {
+    use std::os::unix::fs::PermissionsExt;
+
+    with_temp_home(|_| {
+        let repo = init_repo_with_origin("https://github.com/akiojin/gwt.git");
+        let session_a = save_verified_improvement_session(repo.path());
+        let session_b = save_verified_improvement_session(repo.path());
+        let mut seed_env = TestEnv::new(repo.path().join("cache"));
+        seed_env.repo_path = repo.path().to_path_buf();
+        capture_interpretive_candidate(&mut seed_env, &session_a, "STATUS_NOT_POSTED");
+        sync_test_env_source_scope_nonce(&mut seed_env);
+        fail_next_owner_corpus_with_timeout(&seed_env);
+        capture_interpretive_candidate(&mut seed_env, &session_b, "STATUS_NOT_POSTED");
+
+        let fake_bin = tempfile::tempdir().expect("fake bin");
+        let fake_gh = fake_bin.path().join("gh");
+        std::fs::write(&fake_gh, "#!/bin/sh\nsleep 0.8\nprintf 'late-token\\n'\n")
+            .expect("write fake gh");
+        std::fs::set_permissions(&fake_gh, std::fs::Permissions::from_mode(0o755))
+            .expect("make fake gh executable");
+        let path = env::join_paths(
+            std::iter::once(fake_bin.path().to_path_buf())
+                .chain(env::split_paths(&env::var_os("PATH").expect("PATH"))),
+        )
+        .expect("compose PATH");
+        let _path = ScopedEnvVar::set("PATH", path);
+        let _mode = ScopedEnvVar::unset("GWT_OWNER_GITHUB_TEST_MODE");
+        let _rest = ScopedEnvVar::unset("GWT_OWNER_GITHUB_REST_BASE");
+        let _graphql = ScopedEnvVar::unset("GWT_OWNER_GITHUB_GRAPHQL_URL");
+        let _token = ScopedEnvVar::unset("GWT_OWNER_GITHUB_TOKEN");
+        let mut env = DefaultCliEnv::new_for_hooks_at(repo.path().to_path_buf());
+        let started = Instant::now();
+
+        let output = evaluate_direct_stop_with_test_budget(&mut env);
+        let elapsed = started.elapsed();
+
+        let HookOutput::StopBlock { reason } = output else {
+            panic!("stalled direct Stop auth must block");
+        };
+        assert!(reason.contains("reason=timeout"), "{reason}");
+        assert!(
+            elapsed < DIRECT_STOP_TEST_TOTAL_BUDGET + Duration::from_secs(1),
+            "elapsed={elapsed:?}"
+        );
+        let persisted = candidate_public_values(repo.path());
+        assert_eq!(persisted.len(), 1);
+        assert_eq!(persisted[0]["state"], "blocked");
+        assert_eq!(persisted[0]["blocked_reason"], "timeout");
+        let store_path = gwt_core::paths::gwt_project_dir_for_repo_path(repo.path())
+            .join("improvements")
+            .join("candidates.json");
+        let store: serde_json::Value = serde_json::from_slice(
+            &std::fs::read(store_path).expect("read durable candidate store"),
+        )
+        .expect("parse durable candidate store");
+        assert!(store["candidates"][0]["attempt"].is_null());
+    });
+}
+
+#[test]
+fn direct_self_improvement_hook_dispatch_uses_the_injected_owner_client() {
+    with_temp_home(|_| {
+        let repo = init_repo_with_origin("https://github.com/akiojin/gwt.git");
+        let session_a = save_verified_improvement_session(repo.path());
+        let session_b = save_verified_improvement_session(repo.path());
+        let mut env = TestEnv::new(repo.path().join("cache"));
+        env.repo_path = repo.path().to_path_buf();
+
+        capture_interpretive_candidate(&mut env, &session_a, "STATUS_NOT_POSTED");
+        sync_test_env_source_scope_nonce(&mut env);
+        fail_next_owner_corpus_with_timeout(&env);
+        capture_interpretive_candidate(&mut env, &session_b, "STATUS_NOT_POSTED");
+
+        env.stdout.clear();
+        env.clear_owner_client_access_log();
+        env.stdin = "{}".to_string();
+        fail_next_owner_corpus_with_timeout(&env);
+        let code = gwt::cli::hook::run_hook(&mut env, "gwt-self-improvement-stop", &[])
+            .expect("direct Stop hook dispatch");
+
+        assert_eq!(code, 0);
+        let output = String::from_utf8(env.stdout.clone()).expect("hook stdout");
+        assert!(output.contains("reason=timeout"), "{output}");
+        assert_eq!(env.owner_client_access_count(), 1);
+    });
+}
+
+#[test]
+fn gwt_self_improvement_stop_attempts_at_most_one_unresolved_candidate() {
+    with_temp_home(|_| {
+        let repo = init_repo_with_origin("https://github.com/akiojin/gwt.git");
+        let session_a = save_verified_improvement_session(repo.path());
+        let session_b = save_verified_improvement_session(repo.path());
+        let mut env = TestEnv::new(repo.path().join("cache"));
+        env.repo_path = repo.path().to_path_buf();
+
+        for failure_code in ["STATUS_NOT_POSTED", "SECOND_STATUS_NOT_POSTED"] {
+            capture_interpretive_candidate(&mut env, &session_a, failure_code);
+            sync_test_env_source_scope_nonce(&mut env);
+            fail_next_owner_corpus_with_timeout(&env);
+            capture_interpretive_candidate(&mut env, &session_b, failure_code);
+        }
+
+        env.clear_owner_client_access_log();
+        fail_next_owner_corpus_with_timeout(&env);
+        let output = gwt_self_improvement_stop::evaluate_with_env(&mut env, false, false);
+        let first_attempted = env
+            .last_owner_client_candidate_id()
+            .expect("first attempted candidate id");
+
+        let HookOutput::StopBlock { reason } = output else {
+            panic!("remaining unresolved candidates must block");
+        };
+        assert_eq!(
+            env.owner_client_access_count(),
+            1,
+            "one Stop invocation may start only one Owner Resolution attempt"
+        );
+        assert_eq!(
+            reason.matches("state=blocked").count(),
+            2,
+            "the blocker must report every unresolved candidate after the single attempt: {reason}"
+        );
+
+        env.clear_owner_client_access_log();
+        fail_next_owner_corpus_with_timeout(&env);
+        let second_output = gwt_self_improvement_stop::evaluate_with_env(&mut env, false, false);
+        let second_attempted = env
+            .last_owner_client_candidate_id()
+            .expect("second attempted candidate id");
+        assert_ne!(
+            first_attempted, second_attempted,
+            "repeated Stop attempts must not starve older unresolved candidates"
+        );
+        assert!(matches!(second_output, HookOutput::StopBlock { .. }));
+    });
+}
+
+#[test]
+fn gwt_self_improvement_stop_fails_closed_for_a_corrupt_candidate_store() {
+    with_temp_home(|_| {
+        let repo = init_repo_with_origin("https://github.com/akiojin/gwt.git");
+        let mut env = TestEnv::new(repo.path().join("cache"));
+        env.repo_path = repo.path().to_path_buf();
+        let store_path = gwt_core::paths::gwt_project_dir_for_repo_path(repo.path())
+            .join("improvements")
+            .join("candidates.json");
+        std::fs::create_dir_all(store_path.parent().expect("candidate store parent"))
+            .expect("create candidate store parent");
+        std::fs::write(&store_path, b"{not-json").expect("write corrupt candidate store");
+
+        let output = gwt_self_improvement_stop::evaluate_with_env(&mut env, false, false);
+
+        let HookOutput::StopBlock { reason } = output else {
+            panic!("a corrupt gwt candidate store must fail closed");
+        };
+        assert!(reason.contains("reason=store"), "{reason}");
+        assert!(reason.contains("REPAIR_CANDIDATE_STORE"), "{reason}");
+        assert_eq!(env.owner_client_access_count(), 0);
+    });
+}
+
+#[test]
+fn gwt_self_improvement_stop_fails_closed_when_repo_probe_cannot_run() {
+    with_temp_home(|_| {
+        let repo = init_repo_with_origin("https://github.com/akiojin/gwt.git");
+        let mut env = self_improvement_test_env(repo.path());
+        let empty_path = tempfile::tempdir().expect("empty PATH directory");
+        let _path = ScopedEnvVar::set("PATH", empty_path.path());
+
+        let output = gwt_self_improvement_stop::evaluate_with_env(&mut env, false, false);
+
+        let HookOutput::StopBlock { reason } = output else {
+            panic!("a failed gwt repository probe must fail closed");
+        };
+        assert!(reason.contains("reason=routing"), "{reason}");
+        assert!(reason.contains("RETRY_REPOSITORY_PROBE"), "{reason}");
+        assert_eq!(env.owner_client_access_count(), 0);
+    });
+}
+
+#[test]
+fn gwt_self_improvement_stop_ignores_legacy_high_confidence_candidate_without_typed_evidence() {
+    with_temp_home(|_| {
+        let repo = init_repo_with_origin("https://github.com/akiojin/gwt.git");
+        write_improvement_store(
+            repo.path(),
+            json!({
             "candidates": [{
                 "id": "impr-high",
                 "created_at": "2026-06-23T00:00:00Z",
@@ -136,33 +872,35 @@ fn gwt_self_improvement_stop_blocks_high_confidence_gwt_contract_violation_in_gw
                 "linked_issue": null,
                 "dismissed_reason": null
             }]
-        }),
-    );
+            }),
+        );
+        let mut env = self_improvement_test_env(repo.path());
 
-    let output = gwt_self_improvement_stop::evaluate(repo.path(), false, false);
-    let HookOutput::StopBlock { reason } = output else {
-        panic!("expected StopBlock, got {output:?}");
-    };
-    assert!(reason.contains("impr-high"));
-    assert!(reason.contains("improvement.promote_issue"));
-    assert!(reason.contains("improvement.dismiss"));
+        assert_eq!(
+            gwt_self_improvement_stop::evaluate_with_env(&mut env, false, false),
+            HookOutput::Silent,
+            "legacy free-form evidence must migrate to needs-evidence without blocking Stop"
+        );
 
-    // SPEC-3247 FR-003 / AS-4: the same high-confidence candidate in an intake
-    // (Curate) session must NOT block Stop — intake owns no Work and is not the
-    // producing-work self-improvement loop.
-    assert_eq!(
-        gwt_self_improvement_stop::evaluate(repo.path(), false, true),
-        HookOutput::Silent,
-        "intake sessions must not be forced to handle improvement candidates"
-    );
+        // SPEC-3247 FR-003 / AS-4: the same high-confidence candidate in an intake
+        // (Curate) session must NOT block Stop — intake owns no Work and is not the
+        // producing-work self-improvement loop.
+        assert_eq!(
+            gwt_self_improvement_stop::evaluate_with_env(&mut env, false, true),
+            HookOutput::Silent,
+            "intake sessions must not be forced to handle improvement candidates"
+        );
+        assert_eq!(env.owner_client_access_count(), 0);
+    });
 }
 
 #[test]
 fn gwt_self_improvement_stop_ignores_low_confidence_or_handled_candidates() {
-    let repo = init_repo_with_origin("git@github.com:akiojin/gwt.git");
-    write_improvement_store(
-        repo.path(),
-        json!({
+    with_temp_home(|_| {
+        let repo = init_repo_with_origin("git@github.com:akiojin/gwt.git");
+        write_improvement_store(
+            repo.path(),
+            json!({
             "candidates": [
                 {
                     "id": "impr-low",
@@ -201,21 +939,25 @@ fn gwt_self_improvement_stop_ignores_low_confidence_or_handled_candidates() {
                     "dismissed_reason": null
                 }
             ]
-        }),
-    );
+            }),
+        );
+        let mut env = self_improvement_test_env(repo.path());
 
-    assert_eq!(
-        gwt_self_improvement_stop::evaluate(repo.path(), false, false),
-        HookOutput::Silent
-    );
+        assert_eq!(
+            gwt_self_improvement_stop::evaluate_with_env(&mut env, false, false),
+            HookOutput::Silent
+        );
+        assert_eq!(env.owner_client_access_count(), 0);
+    });
 }
 
 #[test]
 fn gwt_self_improvement_stop_is_noop_outside_gwt_repo() {
-    let repo = init_repo_with_origin("https://github.com/example/target-project.git");
-    write_improvement_store(
-        repo.path(),
-        json!({
+    with_temp_home(|_| {
+        let repo = init_repo_with_origin("https://github.com/example/target-project.git");
+        write_improvement_store(
+            repo.path(),
+            json!({
             "candidates": [{
                 "id": "impr-target",
                 "created_at": "2026-06-23T00:00:00Z",
@@ -234,21 +976,25 @@ fn gwt_self_improvement_stop_is_noop_outside_gwt_repo() {
                 "linked_issue": null,
                 "dismissed_reason": null
             }]
-        }),
-    );
+            }),
+        );
+        let mut env = self_improvement_test_env(repo.path());
 
-    assert_eq!(
-        gwt_self_improvement_stop::evaluate(repo.path(), false, false),
-        HookOutput::Silent
-    );
+        assert_eq!(
+            gwt_self_improvement_stop::evaluate_with_env(&mut env, false, false),
+            HookOutput::Silent
+        );
+        assert_eq!(env.owner_client_access_count(), 0);
+    });
 }
 
 #[test]
 fn gwt_self_improvement_stop_respects_stop_hook_active() {
-    let repo = init_repo_with_origin("https://github.com/akiojin/gwt.git");
-    write_improvement_store(
-        repo.path(),
-        json!({
+    with_temp_home(|_| {
+        let repo = init_repo_with_origin("https://github.com/akiojin/gwt.git");
+        write_improvement_store(
+            repo.path(),
+            json!({
             "candidates": [{
                 "id": "impr-active-stop",
                 "created_at": "2026-06-23T00:00:00Z",
@@ -267,13 +1013,16 @@ fn gwt_self_improvement_stop_respects_stop_hook_active() {
                 "linked_issue": null,
                 "dismissed_reason": null
             }]
-        }),
-    );
+            }),
+        );
+        let mut env = self_improvement_test_env(repo.path());
 
-    assert_eq!(
-        gwt_self_improvement_stop::evaluate(repo.path(), true, false),
-        HookOutput::Silent
-    );
+        assert_eq!(
+            gwt_self_improvement_stop::evaluate_with_env(&mut env, true, false),
+            HookOutput::Silent
+        );
+        assert_eq!(env.owner_client_access_count(), 0);
+    });
 }
 
 #[test]
@@ -283,6 +1032,8 @@ fn common_stop_dispatcher_does_not_run_gwt_self_improvement_stop() {
         .unwrap_or_else(std::sync::PoisonError::into_inner);
     let _session_id = ScopedEnvVar::unset(GWT_SESSION_ID_ENV);
     let _runtime_path = ScopedEnvVar::unset(GWT_SESSION_RUNTIME_PATH_ENV);
+    let home = tempfile::tempdir().expect("temp home");
+    let _home = ScopedGwtHome::set(home.path());
     let repo = init_repo_with_origin("https://github.com/akiojin/gwt.git");
     write_improvement_store(
         repo.path(),
@@ -1466,16 +2217,17 @@ fn blocks_gh_run_rerun_without_owner() {
 }
 
 #[test]
-fn blocks_gh_release_create_without_owner() {
+fn blocks_gh_release_create_as_mutation_sink() {
+    // SPEC-3248 P10 (T-217): release publishing is categorically blocked for
+    // agent Bash — the mutation-sink classifier fires before (and subsumes)
+    // the owner guard that used to gate this command.
     let event = event(
         "Bash",
         json!({ "command": "gh release create v9.99.0 --repo akiojin/gwt" }),
     );
     let decision = evaluate(&event, workflow_policy::WorkflowContext::unknown())
         .expect("gh release create mutates release state");
-    assert!(decision
-        .permission_decision_reason()
-        .contains("Owner Issue/SPEC"));
+    assert!(decision.permission_decision_reason().contains("T-217"));
 }
 
 #[test]
