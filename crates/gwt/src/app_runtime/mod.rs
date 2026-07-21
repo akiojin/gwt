@@ -211,9 +211,8 @@ impl WorkspaceResumeContext {
 
 #[derive(Debug, Clone)]
 pub(crate) struct PendingStartupAutoResumeSession {
-    pub(crate) tab_id: String,
-    pub(crate) session: gwt_agent::Session,
-    pub(crate) workspace_resume_context: Option<WorkspaceResumeContext>,
+    /// Identity only: Ready reloads every mutable Session field from disk.
+    pub(crate) session_id: String,
 }
 
 #[derive(Debug, Clone)]
@@ -3151,8 +3150,8 @@ impl AppRuntime {
 
     /// True when a restored, stopped Agent-family placeholder is backed by a
     /// persisted session that supports exact resume (real provider session id
-    /// and an existing worktree) — the same gate the startup auto-resume queue
-    /// applies to placeholder-backed sessions (SPEC-1921 Phase 65).
+    /// and a materializable worktree) — the same gate the startup auto-resume
+    /// queue applies to placeholder-backed sessions (SPEC-1921 Phase 65).
     fn restored_window_is_exact_auto_resume_candidate(
         &self,
         window: &gwt::PersistedWindowState,
@@ -3162,7 +3161,8 @@ impl AppRuntime {
         };
         let path = self.sessions_dir.join(format!("{session_id}.toml"));
         gwt_agent::Session::load_and_migrate(&path).is_ok_and(|session| {
-            session.exact_resume_session_id().is_some() && session.worktree_path.exists()
+            session.supports_exact_session_resume()
+                && session.exact_resume_worktree_materializable()
         })
     }
 

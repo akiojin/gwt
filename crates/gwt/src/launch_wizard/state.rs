@@ -884,7 +884,7 @@ impl LaunchWizardState {
             .quick_start_entries
             .get(index)
             .map(|entry| {
-                if entry.can_reuse() {
+                if self.quick_start_entry_can_reuse(entry) {
                     QuickStartLaunchMode::Resume
                 } else {
                     QuickStartLaunchMode::StartNew
@@ -1056,6 +1056,11 @@ impl LaunchWizardState {
                     self.completion = Some(LaunchWizardCompletion::FocusWindow { window_id });
                     false
                 } else if let Some(resume_session_id) = entry.resume_session_id {
+                    if !self.agent_supports_resume_session_id(&entry.agent_id) {
+                        self.error =
+                            Some("Session continuation is unavailable for this agent".to_string());
+                        return false;
+                    }
                     self.mode = "resume".to_string();
                     self.resume_session_id = Some(resume_session_id);
                     true
@@ -1748,6 +1753,25 @@ impl LaunchWizardState {
         }
     }
 
+    pub(super) fn quick_start_reuse_action_label(
+        &self,
+        entry: &QuickStartEntry,
+    ) -> Option<&'static str> {
+        if entry.live_window_id.is_some() {
+            Some("Focus")
+        } else if entry.resume_session_id.is_some()
+            && self.agent_supports_resume_session_id(&entry.agent_id)
+        {
+            Some("Resume")
+        } else {
+            None
+        }
+    }
+
+    pub(super) fn quick_start_entry_can_reuse(&self, entry: &QuickStartEntry) -> bool {
+        self.quick_start_reuse_action_label(entry).is_some()
+    }
+
     pub(super) fn agent_has_models(&self) -> bool {
         self.launch_target_is_agent()
             && matches!(self.effective_agent_id(), "claude" | "codex" | "gemini")
@@ -2019,7 +2043,7 @@ impl LaunchWizardState {
     pub(super) fn quick_start_actions(&self) -> Vec<QuickStartAction> {
         let mut actions = Vec::new();
         for (index, entry) in self.quick_start_entries.iter().enumerate() {
-            if entry.can_reuse() {
+            if self.quick_start_entry_can_reuse(entry) {
                 actions.push(QuickStartAction::ReuseEntry { index });
             }
             actions.push(QuickStartAction::StartNewEntry { index });
@@ -3285,6 +3309,46 @@ mod tests {
 
         state.apply(LaunchWizardAction::UseStartMethod {
             method: LaunchWizardStartMethodKind::ContinueLastSession,
+        });
+
+        assert!(state.completion.is_none());
+        assert_eq!(
+            state.view().error.as_deref(),
+            Some("Session continuation is unavailable for this agent")
+        );
+    }
+
+    #[test]
+    fn quick_start_exact_resume_is_unavailable_when_agent_cannot_consume_the_id() {
+        let mut state = LaunchWizardState::open_with(
+            context(branch("feature/current"), "feature/current"),
+            vec![AgentOption {
+                id: "gemini".to_string(),
+                name: "Gemini CLI".to_string(),
+                available: true,
+                installed_version: Some("1.0.0".to_string()),
+                versions: vec!["1.0.0".to_string()],
+                custom_agent: None,
+            }],
+            vec![quick_start_entry(
+                "legacy-session-1",
+                "gemini",
+                Some("legacy-gemini-id"),
+                None,
+                gwt_agent::LaunchRuntimeTarget::Host,
+                None,
+            )],
+        );
+
+        assert!(state
+            .quick_start_actions()
+            .iter()
+            .all(|action| !matches!(action, QuickStartAction::ReuseEntry { .. })));
+        assert_eq!(state.view().quick_start_entries[0].reuse_action_label, None);
+
+        state.apply(LaunchWizardAction::ApplyQuickStart {
+            index: 0,
+            mode: QuickStartLaunchMode::Resume,
         });
 
         assert!(state.completion.is_none());

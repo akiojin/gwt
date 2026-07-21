@@ -85,17 +85,7 @@ pub fn previous_launch_profiles_for_repo_from_sessions(
 }
 
 pub(super) fn load_launch_sessions(sessions_dir: &Path) -> Vec<gwt_agent::Session> {
-    let Ok(entries) = std::fs::read_dir(sessions_dir) else {
-        return Vec::new();
-    };
-    entries
-        .flatten()
-        .filter_map(|entry| {
-            let path = entry.path();
-            (path.extension().and_then(|ext| ext.to_str()) == Some("toml")).then_some(path)
-        })
-        .filter_map(|path| gwt_agent::Session::load_and_migrate(&path).ok())
-        .collect()
+    gwt_agent::load_sessions_with_legacy_import(sessions_dir)
 }
 
 fn launch_profile_session_cmp(left: &gwt_agent::Session, right: &gwt_agent::Session) -> Ordering {
@@ -164,15 +154,15 @@ impl<'a> LaunchProfileRepoScope<'a> {
     }
 
     fn matches(&self, session: &gwt_agent::Session) -> bool {
-        let session_worktree_path = &session.worktree_path;
-        if same_path_or_exact(self.repo_path, session_worktree_path) {
-            return true;
-        }
-
         if let (Some(current_repo_hash), Some(session_repo_hash)) =
             (self.repo_hash.as_deref(), session.repo_hash.as_deref())
         {
             return current_repo_hash == session_repo_hash;
+        }
+
+        let session_worktree_path = &session.worktree_path;
+        if same_path_or_exact(self.repo_path, session_worktree_path) {
+            return true;
         }
 
         if !session_worktree_path.exists() {
@@ -225,7 +215,22 @@ impl<'a> QuickStartRepoScope<'a> {
     }
 
     fn matches(&self, session: &gwt_agent::Session) -> bool {
-        let candidate = &session.worktree_path;
+        if let (Some(current_repo_hash), Some(session_repo_hash)) =
+            (self.repo_hash.as_deref(), session.repo_hash.as_deref())
+        {
+            return current_repo_hash == session_repo_hash;
+        }
+        if session
+            .project_state_root
+            .as_deref()
+            .is_some_and(|root| self.matches_path(root))
+        {
+            return true;
+        }
+        self.matches_path(&session.worktree_path)
+    }
+
+    fn matches_path(&self, candidate: &Path) -> bool {
         if candidate == self.repo_path {
             return true;
         }
@@ -235,13 +240,6 @@ impl<'a> QuickStartRepoScope<'a> {
                 return true;
             }
         }
-        if matches!(
-            (self.repo_hash.as_deref(), session.repo_hash.as_deref()),
-            (Some(current), Some(session_hash)) if current == session_hash
-        ) {
-            return true;
-        }
-
         if !candidate.exists() {
             return false;
         }
@@ -286,6 +284,7 @@ fn same_path_or_exact(left: &Path, right: &Path) -> bool {
 #[cfg(test)]
 mod tests {
     use chrono::{TimeZone, Utc};
+    use serde_json::json;
     use tempfile::tempdir;
 
     use super::super::test_support::*;
@@ -551,6 +550,56 @@ mod tests {
     }
 
     #[test]
+    fn imported_legacy_session_with_deleted_worktree_matches_originless_project_root() {
+        let temp = tempdir().expect("tempdir");
+        let repo = temp.path().join("repo");
+        std::fs::create_dir_all(&repo).expect("repo dir");
+        let status = gwt_core::process::hidden_command("git")
+            .args(["init"])
+            .current_dir(&repo)
+            .status()
+            .expect("git init");
+        assert!(status.success(), "git init failed");
+        assert_eq!(gwt_core::repo_hash::detect_repo_hash(&repo), None);
+
+        let sessions_dir = temp.path().join(".gwt").join("sessions");
+        let legacy_dir = temp.path().join(".config").join("gwt").join("sessions");
+        std::fs::create_dir_all(&legacy_dir).expect("legacy dir");
+        let removed_worktree = temp.path().join("deleted-worktree");
+        std::fs::write(
+            legacy_dir.join("originless.json"),
+            serde_json::to_vec_pretty(&json!({
+                "repositoryRoot": repo,
+                "lastWorktreePath": removed_worktree,
+                "lastBranch": "main",
+                "lastUsedTool": "codex",
+                "lastSessionId": "legacy-originless-session",
+                "toolLabel": "Codex",
+                "timestamp": 1_710_000_000_000_i64,
+                "history": []
+            }))
+            .expect("serialize fixture"),
+        )
+        .expect("write fixture");
+
+        let sessions = load_launch_sessions(&sessions_dir);
+        assert_eq!(sessions.len(), 1, "legacy JSON should be imported");
+        assert_eq!(
+            sessions[0].project_state_root.as_deref(),
+            Some(repo.as_path())
+        );
+        assert_eq!(sessions[0].repo_hash, None);
+
+        let entries = quick_start_entries_from_sessions(&repo, "main", &sessions);
+
+        assert_eq!(entries.len(), 1);
+        assert_eq!(
+            entries[0].resume_session_id.as_deref(),
+            Some("legacy-originless-session")
+        );
+    }
+
+    #[test]
     fn previous_launch_profile_treats_mismatched_repo_hash_as_authoritative() {
         let dir = tempdir().expect("tempdir");
         let repo = dir.path().join("repo");
@@ -574,6 +623,34 @@ mod tests {
         assert!(
             previous_launch_profile_from_sessions(&repo, &[session]).is_none(),
             "repo_hash mismatch must not fall back to legacy root matching"
+        );
+    }
+
+    #[test]
+    fn repo_hash_conflict_overrides_exact_path_for_profile_and_quick_start_scopes() {
+        let dir = tempdir().expect("tempdir");
+        let repo = dir.path().join("repo");
+        init_repo_with_origin(&repo, "https://github.com/example/project.git");
+        let mut session = sample_session_record(
+            "feature/wrong-repo",
+            &repo,
+            gwt_agent::AgentId::Codex,
+            Utc.with_ymd_and_hms(2026, 5, 22, 11, 0, 0).unwrap(),
+            Some("native-wrong-repo"),
+        );
+        session.repo_hash = Some(
+            gwt_core::repo_hash::compute_repo_hash("https://github.com/example/other.git")
+                .as_str()
+                .to_string(),
+        );
+
+        assert!(
+            previous_launch_profile_from_sessions(&repo, &[session.clone()]).is_none(),
+            "an exact path must not override conflicting authoritative repo identities"
+        );
+        assert!(
+            quick_start_entries_from_sessions(&repo, "feature/wrong-repo", &[session]).is_empty(),
+            "Quick Start profile collection must reject the same repo identity conflict"
         );
     }
 
@@ -650,9 +727,9 @@ mod tests {
 
         assert_eq!(state.step, LaunchWizardStep::QuickStart);
         assert_eq!(state.quick_start_entries.len(), 1);
-        assert!(state.quick_start_entries[0].can_reuse());
+        assert!(state.quick_start_entry_can_reuse(&state.quick_start_entries[0]));
         assert_eq!(
-            state.quick_start_entries[0].reuse_action_label(),
+            state.quick_start_reuse_action_label(&state.quick_start_entries[0]),
             Some("Resume")
         );
         assert!(matches!(

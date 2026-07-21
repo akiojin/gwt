@@ -12,17 +12,7 @@ use super::QuickStartEntry;
 /// agent starts), which the cache — loaded once at startup and only refreshed
 /// per-window at spawn — never picks up (#2995).
 pub fn load_sessions(sessions_dir: &Path) -> Vec<gwt_agent::Session> {
-    let Ok(entries) = std::fs::read_dir(sessions_dir) else {
-        return Vec::new();
-    };
-    entries
-        .flatten()
-        .filter_map(|entry| {
-            let path = entry.path();
-            (path.extension().and_then(|ext| ext.to_str()) == Some("toml")).then_some(path)
-        })
-        .filter_map(|path| gwt_agent::Session::load_and_migrate(&path).ok())
-        .collect()
+    gwt_agent::load_sessions_with_legacy_import(sessions_dir)
 }
 
 pub fn load_quick_start_entries(
@@ -38,12 +28,19 @@ pub(super) fn collect_quick_start_entries_from_sessions(
     branch_name: &str,
     sessions: Vec<gwt_agent::Session>,
 ) -> Vec<QuickStartEntry> {
+    const MAX_ENTRIES_PER_BRANCH: usize = 100;
     let mut latest_resumable_session = None::<gwt_agent::Session>;
     let mut latest_metadata_only_session = None::<gwt_agent::Session>;
+    let mut legacy_unknown_close_sessions = Vec::<gwt_agent::Session>::new();
     let repo_scope = WorktreePathScope::new(repo_path);
 
     for session in sessions {
-        if session.branch != branch_name || !repo_scope.matches(&session.worktree_path) {
+        if session.branch != branch_name || !repo_scope.matches_session(&session) {
+            continue;
+        }
+
+        if session.origin == gwt_agent::SessionOrigin::LegacyJson {
+            legacy_unknown_close_sessions.push(session);
             continue;
         }
 
@@ -66,30 +63,40 @@ pub(super) fn collect_quick_start_entries_from_sessions(
         }
     }
 
-    latest_resumable_session
+    let mut selected = latest_resumable_session
         .or(latest_metadata_only_session)
         .into_iter()
-        .map(|session| QuickStartEntry {
-            session_id: session.id.clone(),
-            agent_id: session.agent_id.command().to_string(),
-            tool_label: session.display_name.clone(),
-            model: session.model.clone(),
-            reasoning: session.reasoning_level.clone(),
-            version: session.tool_version.clone().or_else(|| {
-                session
-                    .agent_id
-                    .package_name()
-                    .map(|_| "installed".to_string())
-            }),
-            resume_session_id: agent_session_resume_id(&session),
-            live_window_id: None,
-            skip_permissions: session.skip_permissions,
-            codex_fast_mode: session.fast_mode_enabled(),
-            runtime_target: session.runtime_target,
-            docker_service: session.docker_service.clone(),
-            docker_lifecycle_intent: session.docker_lifecycle_intent,
-        })
+        .chain(legacy_unknown_close_sessions)
+        .collect::<Vec<_>>();
+    selected.sort_by(|left, right| compare_session_recency(right, left));
+    selected
+        .into_iter()
+        .take(MAX_ENTRIES_PER_BRANCH)
+        .map(quick_start_entry_from_session)
         .collect()
+}
+
+fn quick_start_entry_from_session(session: gwt_agent::Session) -> QuickStartEntry {
+    QuickStartEntry {
+        session_id: session.id.clone(),
+        agent_id: session.agent_id.command().to_string(),
+        tool_label: session.display_name.clone(),
+        model: session.model.clone(),
+        reasoning: session.reasoning_level.clone(),
+        version: session.tool_version.clone().or_else(|| {
+            session
+                .agent_id
+                .package_name()
+                .map(|_| "installed".to_string())
+        }),
+        resume_session_id: agent_session_resume_id(&session),
+        live_window_id: None,
+        skip_permissions: session.skip_permissions,
+        codex_fast_mode: session.fast_mode_enabled(),
+        runtime_target: session.runtime_target,
+        docker_service: session.docker_service.clone(),
+        docker_lifecycle_intent: session.docker_lifecycle_intent,
+    }
 }
 
 fn session_is_newer(candidate: &gwt_agent::Session, current: &gwt_agent::Session) -> bool {
@@ -111,6 +118,7 @@ fn agent_session_resume_id(session: &gwt_agent::Session) -> Option<String> {
 struct WorktreePathScope<'a> {
     original: &'a Path,
     canonical: Option<PathBuf>,
+    repo_hash: Option<String>,
 }
 
 impl<'a> WorktreePathScope<'a> {
@@ -118,10 +126,25 @@ impl<'a> WorktreePathScope<'a> {
         Self {
             original,
             canonical: original.canonicalize().ok(),
+            repo_hash: gwt_core::repo_hash::detect_repo_hash(original)
+                .map(|hash| hash.as_str().to_string()),
         }
     }
 
-    fn matches(&self, candidate: &Path) -> bool {
+    fn matches_session(&self, session: &gwt_agent::Session) -> bool {
+        if let (Some(expected), Some(candidate)) =
+            (self.repo_hash.as_deref(), session.repo_hash.as_deref())
+        {
+            return expected == candidate;
+        }
+        self.matches_path(&session.worktree_path)
+            || session
+                .project_state_root
+                .as_deref()
+                .is_some_and(|path| self.matches_path(path))
+    }
+
+    fn matches_path(&self, candidate: &Path) -> bool {
         if candidate == self.original {
             return true;
         }
@@ -139,6 +162,7 @@ mod tests {
     use chrono::{TimeZone, Utc};
     use tempfile::tempdir;
 
+    use super::super::test_support::init_repo_with_origin;
     use super::*;
 
     fn sample_session(
@@ -238,6 +262,102 @@ mod tests {
     }
 
     #[test]
+    fn collector_rejects_conflicting_repo_hash_even_for_exact_path() {
+        let dir = tempdir().expect("tempdir");
+        let repo = dir.path().join("repo");
+        init_repo_with_origin(&repo, "https://github.com/example/project.git");
+        let mut session = sample_session_record(
+            "feature/gui",
+            &repo,
+            gwt_agent::AgentId::Codex,
+            Utc.with_ymd_and_hms(2026, 4, 14, 10, 0, 0).unwrap(),
+            Some("native-wrong-repo"),
+        );
+        session.repo_hash = Some(
+            gwt_core::repo_hash::compute_repo_hash("https://github.com/example/other.git")
+                .as_str()
+                .to_string(),
+        );
+
+        let entries =
+            collect_quick_start_entries_from_sessions(&repo, "feature/gui", vec![session]);
+
+        assert!(
+            entries.is_empty(),
+            "the direct collector must not let an exact path override conflicting repo identities"
+        );
+    }
+
+    #[test]
+    fn load_quick_start_entries_prewarms_legacy_json_and_uses_exact_resume_id() {
+        let home = tempdir().expect("home");
+        let sessions_dir = home.path().join(".gwt").join("sessions");
+        let legacy_dir = home.path().join(".config").join("gwt").join("sessions");
+        let worktree = home.path().join("repo");
+        std::fs::create_dir_all(&legacy_dir).expect("legacy dir");
+        std::fs::create_dir_all(&worktree).expect("worktree");
+        std::fs::write(
+            legacy_dir.join("repo.json"),
+            serde_json::to_vec_pretty(&serde_json::json!({
+                "repositoryRoot": worktree,
+                "lastWorktreePath": worktree,
+                "lastBranch": "main",
+                "lastUsedTool": "codex",
+                "lastSessionId": "legacy-quick-start-resume",
+                "toolLabel": "Codex",
+                "timestamp": 1_710_000_000_000_i64,
+                "history": []
+            }))
+            .expect("fixture JSON"),
+        )
+        .expect("write legacy fixture");
+
+        let first = load_quick_start_entries(&worktree, &sessions_dir, "main");
+        let second = load_quick_start_entries(&worktree, &sessions_dir, "main");
+
+        assert_eq!(first.len(), 1);
+        assert_eq!(
+            first[0].resume_session_id.as_deref(),
+            Some("legacy-quick-start-resume")
+        );
+        assert_eq!(second.len(), 1, "repeat load must not duplicate the import");
+    }
+
+    #[test]
+    fn legacy_launch_remains_visible_when_recorded_worktree_was_deleted() {
+        let home = tempdir().expect("home");
+        let sessions_dir = home.path().join(".gwt").join("sessions");
+        let legacy_dir = home.path().join(".config").join("gwt").join("sessions");
+        let repo = home.path().join("repo");
+        let deleted_worktree = home.path().join("deleted-worktree");
+        std::fs::create_dir_all(&legacy_dir).expect("legacy dir");
+        std::fs::create_dir_all(&repo).expect("repo");
+        std::fs::write(
+            legacy_dir.join("deleted.json"),
+            serde_json::to_vec_pretty(&serde_json::json!({
+                "repositoryRoot": repo,
+                "lastWorktreePath": deleted_worktree,
+                "lastBranch": "main",
+                "lastUsedTool": "codex",
+                "lastSessionId": "legacy-deleted-worktree",
+                "toolLabel": "Codex",
+                "timestamp": 1_710_000_000_000_i64,
+                "history": []
+            }))
+            .expect("fixture JSON"),
+        )
+        .expect("write legacy fixture");
+
+        let entries = load_quick_start_entries(&repo, &sessions_dir, "main");
+
+        assert_eq!(entries.len(), 1);
+        assert_eq!(
+            entries[0].resume_session_id.as_deref(),
+            Some("legacy-deleted-worktree")
+        );
+    }
+
+    #[test]
     fn load_quick_start_entries_keeps_only_latest_resumable_session() {
         let dir = tempdir().expect("tempdir");
         let worktree = dir.path().join("repo");
@@ -272,6 +392,41 @@ mod tests {
                 .map(|entry| entry.resume_session_id.as_deref())
                 .collect::<Vec<_>>(),
             vec![Some("newer-resume")]
+        );
+    }
+
+    #[test]
+    fn quick_start_keeps_separate_legacy_unknown_close_launches_selectable() {
+        let dir = tempdir().expect("tempdir");
+        let worktree = dir.path().join("repo");
+        std::fs::create_dir_all(&worktree).expect("repo dir");
+        let mut older = sample_session_record(
+            "main",
+            &worktree,
+            gwt_agent::AgentId::Codex,
+            Utc.with_ymd_and_hms(2026, 4, 14, 9, 0, 0).unwrap(),
+            Some("legacy-older"),
+        );
+        older.origin = gwt_agent::SessionOrigin::LegacyJson;
+        let mut newer = sample_session_record(
+            "main",
+            &worktree,
+            gwt_agent::AgentId::Codex,
+            Utc.with_ymd_and_hms(2026, 4, 14, 10, 0, 0).unwrap(),
+            Some("legacy-newer"),
+        );
+        newer.origin = gwt_agent::SessionOrigin::LegacyJson;
+
+        let entries =
+            collect_quick_start_entries_from_sessions(&worktree, "main", vec![older, newer]);
+
+        assert_eq!(entries.len(), 2);
+        assert_eq!(
+            entries
+                .iter()
+                .map(|entry| entry.resume_session_id.as_deref())
+                .collect::<Vec<_>>(),
+            vec![Some("legacy-newer"), Some("legacy-older")]
         );
     }
 

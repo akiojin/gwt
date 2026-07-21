@@ -513,7 +513,7 @@ impl AppRuntime {
             return Vec::new();
         };
 
-        let window_ids = self
+        let windows = self
             .tabs
             .get(index)
             .map(|tab| {
@@ -521,22 +521,70 @@ impl AppRuntime {
                     .persisted()
                     .windows
                     .iter()
-                    .map(|window| combined_window_id(&tab.id, &window.id))
+                    .map(|window| {
+                        (
+                            window.id.clone(),
+                            combined_window_id(&tab.id, &window.id),
+                            crate::runtime_support::window_is_agent_pane(window),
+                        )
+                    })
                     .collect::<Vec<_>>()
             })
             .unwrap_or_default();
-        for window_id in &window_ids {
-            self.clear_agent_window_startup_restore(window_id);
+        let mut closed_window_ids = Vec::with_capacity(windows.len());
+        for (raw_window_id, window_id, _) in windows.iter().filter(|(_, _, is_agent)| *is_agent) {
+            if let Err(error) = self.mark_agent_window_explicitly_closed(window_id) {
+                let failure_events =
+                    self.explicit_close_persistence_failure_events(window_id, &error);
+                if closed_window_ids.is_empty() {
+                    return failure_events;
+                }
+
+                // Keep durable intent and visible state aligned when a later
+                // Session marker fails: windows already marked closed are
+                // committed as a partial success, while the failed window and
+                // project tab stay open for retry.
+                let issue_monitor_events =
+                    self.issue_monitor_windows_closed_events(&closed_window_ids);
+                let _ = self.persist();
+                let mut events = vec![self.workspace_state_broadcast()];
+                if let Some(event) = self.active_work_projection_broadcast_for_active_tab() {
+                    events.push(event);
+                }
+                events.extend(issue_monitor_events);
+                events.extend(failure_events);
+                return events;
+            }
             self.stop_window_runtime(window_id);
             self.remove_window_state_tracking(window_id);
             self.window_lookup.remove(window_id);
+            self.window_details.remove(window_id);
             self.profile_selections.remove(window_id);
+            if let Some(tab) = self.tabs.get_mut(index) {
+                let _ = tab.workspace.close_window(raw_window_id);
+            }
+            closed_window_ids.push(window_id.clone());
+        }
+
+        // Non-agent surfaces have no durable Session marker to commit. Keep
+        // them untouched until every Agent marker succeeds, so a partial
+        // failure cannot orphan a wizard or another tab-scoped UI surface.
+        for (raw_window_id, window_id, _) in windows.iter().filter(|(_, _, is_agent)| !*is_agent) {
+            self.stop_window_runtime(window_id);
+            self.remove_window_state_tracking(window_id);
+            self.window_lookup.remove(window_id);
+            self.window_details.remove(window_id);
+            self.profile_selections.remove(window_id);
+            if let Some(tab) = self.tabs.get_mut(index) {
+                let _ = tab.workspace.close_window(raw_window_id);
+            }
+            closed_window_ids.push(window_id.clone());
         }
 
         // Return any Issue Monitor launched windows to pending before the tab is
         // removed, while the closing project is still the active root. Closing a
         // project pauses (does not complete) its in-flight work.
-        let issue_monitor_events = self.issue_monitor_windows_closed_events(&window_ids);
+        let issue_monitor_events = self.issue_monitor_windows_closed_events(&closed_window_ids);
 
         self.tabs.remove(index);
         if self.tabs.is_empty() {

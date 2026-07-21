@@ -527,22 +527,6 @@ pub struct LiveSessionEntry {
     pub runtime_status: crate::WindowProcessStatus,
 }
 
-impl QuickStartEntry {
-    fn reuse_action_label(&self) -> Option<&'static str> {
-        if self.live_window_id.is_some() {
-            Some("Focus")
-        } else if self.resume_session_id.is_some() {
-            Some("Resume")
-        } else {
-            None
-        }
-    }
-
-    fn can_reuse(&self) -> bool {
-        self.reuse_action_label().is_some()
-    }
-}
-
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct DockerWizardContext {
     pub services: Vec<String>,

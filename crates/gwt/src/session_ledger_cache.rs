@@ -37,6 +37,7 @@ impl SessionLedgerCache {
     /// (mtime, size) are unchanged. Files that fail to stat or parse are
     /// skipped, matching the previous eager loader's semantics.
     pub(crate) fn load(&mut self, sessions_dir: &Path) -> Vec<gwt_agent::Session> {
+        gwt_agent::prewarm_legacy_sessions(sessions_dir);
         let Ok(dir) = std::fs::read_dir(sessions_dir) else {
             self.entries.clear();
             return Vec::new();

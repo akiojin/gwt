@@ -88,7 +88,9 @@ pub(super) fn launch_config_from_persisted_session(
 ) -> gwt_agent::LaunchConfig {
     let agent_id = session.agent_id.clone();
     let mut builder = gwt_agent::AgentLaunchBuilder::new(agent_id);
-    builder = builder.working_dir(session.worktree_path.clone());
+    if session.lane != gwt_agent::SessionLane::Intake || session.worktree_path.exists() {
+        builder = builder.working_dir(session.worktree_path.clone());
+    }
     if !session.branch.is_empty() {
         builder = builder.branch(session.branch.clone());
     }
@@ -118,8 +120,19 @@ pub(super) fn launch_config_from_persisted_session(
     if let Some(linked) = session.linked_issue_number {
         builder = builder.linked_issue_number(linked);
     }
+    if session.lane == gwt_agent::SessionLane::Intake {
+        builder = builder.ephemeral(
+            session
+                .intake_base_oid
+                .clone()
+                .or_else(|| session.intake_base_ref.clone()),
+        );
+    }
 
-    if let Some(resume_id) = session.exact_resume_session_id() {
+    if session.supports_exact_session_resume() {
+        let resume_id = session
+            .exact_resume_session_id()
+            .expect("exact resume capability requires a provider session id");
         builder = builder
             .session_mode(gwt_agent::SessionMode::Resume)
             .resume_session_id(resume_id.to_string());
@@ -197,17 +210,7 @@ impl LaunchWizardMemoryCache {
     }
 
     fn load_sessions(sessions_dir: &Path) -> Vec<gwt_agent::Session> {
-        let Ok(entries) = std::fs::read_dir(sessions_dir) else {
-            return Vec::new();
-        };
-        entries
-            .flatten()
-            .filter_map(|entry| {
-                let path = entry.path();
-                (path.extension().and_then(|ext| ext.to_str()) == Some("toml")).then_some(path)
-            })
-            .filter_map(|path| gwt_agent::Session::load_and_migrate(&path).ok())
-            .collect()
+        gwt_agent::load_sessions_with_legacy_import(sessions_dir)
     }
 
     fn load_agent_options() -> Vec<gwt::AgentOption> {
@@ -1574,30 +1577,17 @@ impl AppRuntime {
             let branch_name = config.branch.clone().unwrap_or_else(|| "work".to_string());
 
             let agent_id = config.agent_id.clone();
-            let mut session =
-                gwt_agent::Session::new(&worktree_path, branch_name.clone(), agent_id.clone());
+            let mut session = gwt_agent::Session::from_launch_config(
+                &worktree_path,
+                branch_name.clone(),
+                &config,
+            );
             session.project_state_root = Some(
                 gwt_core::paths::normalize_windows_child_process_path(Path::new(&project_root)),
             );
-            session.display_name = config.display_name.clone();
-            session.tool_version = config.tool_version.clone();
-            session.model = config.model.clone();
-            session.reasoning_level = config.reasoning_level.clone();
-            session.session_mode = config.session_mode;
-            session.skip_permissions = config.skip_permissions;
-            session.fast_mode = config.fast_mode;
-            session.codex_fast_mode = config.codex_fast_mode;
-            session.runtime_target = config.runtime_target;
-            session.docker_service = config.docker_service.clone();
-            session.docker_lifecycle_intent = config.docker_lifecycle_intent;
-            session.linked_issue_number = config.linked_issue_number;
-            session.launch_command = config.command.clone();
-            session.launch_args = config.args.clone();
-            session.windows_shell = config.windows_shell;
             if session.session_mode == gwt_agent::SessionMode::Resume {
                 session.agent_session_id = config.resume_session_id.clone();
             }
-            session.update_status(gwt_agent::AgentStatus::Running);
 
             let session_id = session.id.clone();
             let runtime_path = gwt_agent::runtime_state_path(&sessions_dir, &session_id);
@@ -2129,15 +2119,49 @@ impl AppRuntime {
         drop(record);
     }
 
-    pub(crate) fn clear_agent_window_startup_restore(&self, window_id: &str) {
-        let Some(session) = self.active_agent_sessions.get(window_id) else {
-            return;
+    pub(crate) fn mark_agent_window_explicitly_closed(
+        &self,
+        window_id: &str,
+    ) -> Result<(), String> {
+        let session_id = self
+            .active_agent_sessions
+            .get(window_id)
+            .map(|session| session.session_id.clone())
+            .or_else(|| {
+                let address = self.window_lookup.get(window_id)?;
+                let tab = self.tab(&address.tab_id)?;
+                let window = tab.workspace.window(&address.raw_id)?;
+                crate::runtime_support::window_is_agent_pane(window)
+                    .then(|| window.session_id.clone())
+                    .flatten()
+            });
+        let Some(session_id) = session_id else {
+            return Ok(());
         };
-        let _ = gwt_agent::persist_session_restore_window_on_startup(
-            &self.sessions_dir,
-            &session.session_id,
-            false,
+        gwt_agent::persist_session_restore_window_on_startup(&self.sessions_dir, &session_id, false)
+            .map_err(|error| error.to_string())
+    }
+
+    pub(crate) fn explicit_close_persistence_failure_events(
+        &self,
+        window_id: &str,
+        error: &str,
+    ) -> Vec<OutboundEvent> {
+        tracing::error!(
+            window_id,
+            error,
+            "explicit Agent close marker could not be persisted; leaving window open"
         );
+        vec![OutboundEvent::broadcast(BackendEvent::TerminalStatus {
+            id: window_id.to_string(),
+            status: self
+                .window_status(window_id)
+                .unwrap_or(WindowProcessStatus::Stopped),
+            detail: Some(
+                "Could not record the explicit close. The window was left open; check session storage and retry."
+                    .to_string(),
+            ),
+        })]
     }
 
     fn refresh_launch_wizard_session_cache(&mut self, window_id: &str) {

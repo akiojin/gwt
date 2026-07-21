@@ -1406,7 +1406,7 @@ pub(super) fn session_exact_resume_materializable(
     project_root: &Path,
     session: &gwt_agent::Session,
 ) -> bool {
-    if session.worktree_path.as_path().exists() {
+    if session.exact_resume_worktree_materializable() {
         return true;
     }
     workspace_resume_branch_exists(project_root, &session.branch)

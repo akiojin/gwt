@@ -1182,7 +1182,7 @@ impl AppRuntime {
         });
 
         let resume_kind_for_session = |session: &gwt_agent::Session| {
-            if session.exact_resume_session_id().is_some() {
+            if session.supports_exact_session_resume() {
                 gwt::ResumableAgentResumeKind::Session
             } else if session.agent_id.supports_resume_picker() {
                 gwt::ResumableAgentResumeKind::NativePicker
@@ -2005,6 +2005,12 @@ impl AppRuntime {
         else {
             return Ok(None);
         };
+        if !session_can_be_silently_reused(&session) {
+            // Legacy aggregate JSON has no close evidence. It may be resumed
+            // only after an explicit Quick Start / Resume choice, never by the
+            // Issue Monitor's silent automatic reuse path.
+            return Ok(None);
+        }
         if !session_exact_resume_materializable(project_root, &session) {
             return Ok(None);
         }
@@ -2910,9 +2916,13 @@ impl AppRuntime {
     }
 }
 
+fn session_can_be_silently_reused(session: &gwt_agent::Session) -> bool {
+    session.origin == gwt_agent::SessionOrigin::Current
+}
+
 #[cfg(test)]
 mod review_dispatch_tests {
-    use super::build_review_dispatch_prompt;
+    use super::{build_review_dispatch_prompt, session_can_be_silently_reused};
 
     #[test]
     fn review_dispatch_prompt_is_adversarial_sha_bound_and_reports_back() {
@@ -2937,6 +2947,16 @@ mod review_dispatch_tests {
             "instructs verdict report-back via the gwtd op"
         );
         assert!(prompt.contains("42"), "names the issue");
+    }
+
+    #[test]
+    fn silent_issue_monitor_reuse_excludes_unknown_close_legacy_json() {
+        let current = gwt_agent::Session::new("/tmp/current", "main", gwt_agent::AgentId::Codex);
+        let mut legacy = current.clone();
+        legacy.origin = gwt_agent::SessionOrigin::LegacyJson;
+
+        assert!(session_can_be_silently_reused(&current));
+        assert!(!session_can_be_silently_reused(&legacy));
     }
 }
 

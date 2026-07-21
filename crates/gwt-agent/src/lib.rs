@@ -12,6 +12,7 @@ pub mod custom;
 pub mod detect;
 pub mod environment;
 pub mod launch;
+pub mod legacy_session;
 pub mod migration;
 pub mod prepare;
 pub mod presets;
@@ -42,6 +43,10 @@ pub use launch::{
     canonical_launch_args, normalize_launch_args, resolve_host_npx_fallback_executable,
     resolve_runner, AgentLaunchBuilder, LaunchConfig, ResolvedRunner,
 };
+pub use legacy_session::{
+    import_legacy_sessions, import_legacy_sessions_from_dir, load_sessions_with_legacy_import,
+    prewarm_legacy_sessions, LegacySessionImportDiagnostic, LegacySessionImportReport,
+};
 pub use migration::{migrate_legacy_backend_rows, resolve_legacy_backend_remap, MigrationReport};
 pub use prepare::{
     apply_host_package_runner_fallback, apply_host_package_runner_fallback_with_probe,
@@ -59,9 +64,9 @@ pub use session::{
     persist_session_restore_window_on_startup, persist_session_status, reset_runtime_state_dir,
     reset_runtime_state_dir_for_pid, runtime_state_dir_for_pid, runtime_state_path,
     runtime_state_path_for_pid, sessions_dir_from_runtime_path, update_session,
-    AgentSessionHistoryEntry, PendingDiscussionResume, Session, SessionRuntimeState,
-    GWT_BIN_PATH_ENV, GWT_HOOK_FORWARD_TOKEN_ENV, GWT_HOOK_FORWARD_URL_ENV, GWT_SESSION_ID_ENV,
-    GWT_SESSION_RUNTIME_PATH_ENV,
+    AgentSessionHistoryEntry, PendingDiscussionResume, Session, SessionCreateOutcome, SessionLane,
+    SessionOrigin, SessionRuntimeState, GWT_BIN_PATH_ENV, GWT_HOOK_FORWARD_TOKEN_ENV,
+    GWT_HOOK_FORWARD_URL_ENV, GWT_SESSION_ID_ENV, GWT_SESSION_RUNTIME_PATH_ENV,
 };
 pub use store::{
     load_custom_agents_from_path, load_stored_custom_agents_from_path,

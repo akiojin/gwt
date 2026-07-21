@@ -92,13 +92,14 @@ use embedded_server::{ClientHub, EmbeddedServer};
 pub(crate) use launch_runtime::{
     apply_host_package_runner_fallback_checked, apply_windows_host_shell_wrapper,
     build_shell_process_launch, ensure_docker_launch_runtime_ready, install_launch_gwt_bin_env,
-    prune_orphan_intake_worktrees, resolve_launch_worktree, resolve_shell_launch_worktree,
+    prune_orphan_intake_worktrees_except, resolve_launch_worktree, resolve_shell_launch_worktree,
 };
 #[cfg(test)]
 pub(crate) use launch_runtime::{
     apply_host_package_runner_fallback_with_probe, command_matches_runner,
     install_launch_gwt_bin_env_with_lookup, probe_host_package_runner_with_timeout,
-    resolve_ephemeral_launch_worktree, resolve_launch_worktree_request,
+    prune_orphan_intake_worktrees, resolve_ephemeral_launch_worktree,
+    resolve_launch_worktree_request,
 };
 #[cfg(test)]
 pub(crate) use runtime_support::{
@@ -1215,7 +1216,7 @@ enum UserEvent {
 #[allow(clippy::items_after_test_module)]
 mod tests {
     use std::{
-        collections::HashMap,
+        collections::{HashMap, HashSet},
         fs,
         path::{Path, PathBuf},
         sync::{Arc, Mutex, RwLock},
@@ -5921,6 +5922,30 @@ mod tests {
         }
         let removed_bounded = super::prune_orphan_intake_worktrees(&repo, 1);
         assert_eq!(removed_bounded, 1, "prune is bounded per run");
+    }
+
+    #[test]
+    fn prune_orphan_intake_worktrees_preserves_reconciled_session_owner() {
+        let temp = tempdir().expect("tempdir");
+        let repo = temp.path().join("repo");
+        init_git_clone_with_origin(&repo);
+        let manager = gwt_git::WorktreeManager::new(&repo);
+        let recoverable = temp.path().join(".intake-recoverable");
+        let orphan = temp.path().join(".intake-orphan");
+        manager
+            .create_detached("HEAD", &recoverable)
+            .expect("recoverable intake");
+        manager
+            .create_detached("HEAD", &orphan)
+            .expect("orphan intake");
+        let protected = HashSet::from([recoverable.clone()]);
+
+        let removed =
+            super::launch_runtime::prune_orphan_intake_worktrees_except(&repo, 10, &protected);
+
+        assert_eq!(removed, 1);
+        assert!(recoverable.exists(), "reconciled Intake must survive prune");
+        assert!(!orphan.exists(), "unowned clean Intake remains pruneable");
     }
 
     #[test]

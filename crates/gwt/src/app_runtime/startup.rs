@@ -18,10 +18,10 @@
 //! Behavior-preserving move: `AppRuntime::new` and
 //! `PendingStartupAutoResumeSession` stay in `mod.rs`.
 
-use std::path::Path;
+use std::{collections::HashSet, path::Path, path::PathBuf};
 
 use super::{
-    combined_window_id, launch_config_from_persisted_session, prune_orphan_intake_worktrees,
+    combined_window_id, launch_config_from_persisted_session, prune_orphan_intake_worktrees_except,
     same_worktree_path, should_auto_start_restored_window, workspace_resume_context_for_work_item,
     AppRuntime, HookForwardTarget, OutboundEvent, PendingStartupAutoResumeSession, WindowGeometry,
     WindowPreset, WindowProcessStatus, WorkspaceResumeContext,
@@ -62,6 +62,12 @@ fn session_project_scope_hash(session: &gwt_agent::Session) -> Option<String> {
         .filter(|value| !value.is_empty())
         .map(str::to_string)
         .or_else(|| {
+            session.project_state_root.as_deref().and_then(|root| {
+                root.exists()
+                    .then(|| gwt_core::paths::project_scope_hash(root).to_string())
+            })
+        })
+        .or_else(|| {
             session
                 .worktree_path
                 .exists()
@@ -78,12 +84,22 @@ fn startup_auto_resume_is_fresh(
 }
 
 fn startup_auto_resume_window_was_open(session: &gwt_agent::Session) -> bool {
+    if session.explicitly_closed_at.is_some() {
+        return false;
+    }
     if session.restore_window_on_startup {
         return true;
     }
     // Compatibility for sessions saved before the explicit GUI restore flag
     // existed, and for files already migrated once with that flag defaulted.
     session.status != gwt_agent::AgentStatus::Stopped
+}
+
+fn startup_auto_resume_shared_gate(session: &gwt_agent::Session) -> bool {
+    session.origin != gwt_agent::SessionOrigin::LegacyJson
+        && session.explicitly_closed_at.is_none()
+        && session.supports_exact_session_resume()
+        && session.exact_resume_worktree_materializable()
 }
 
 pub(super) fn mark_auto_resume_source_completed(sessions_dir: &Path, session_id: &str) {
@@ -96,6 +112,17 @@ pub(super) fn mark_auto_resume_source_completed(sessions_dir: &Path, session_id:
 
 impl AppRuntime {
     pub(crate) fn bootstrap(&mut self) {
+        // Reconcile the persistent Session ledger (including one bounded
+        // legacy prewarm) before Intake cleanup. A crash leaves no in-memory
+        // active session, so runtime state alone cannot prove that a clean
+        // detached Intake is orphaned.
+        let recovery_sessions = self.load_recovery_sessions();
+        let protected_intake_paths = recovery_sessions
+            .iter()
+            .filter(|session| self.should_protect_intake_worktree(session))
+            .map(|session| session.worktree_path.clone())
+            .collect::<HashSet<PathBuf>>();
+
         // SPEC-2359 US-37 / FR-119 / FR-123: One-shot retroactive migration to
         // mark historical merged `work/*` Start Work Workspaces as Done so the
         // Workspace Overview Completed column reflects past completions on the
@@ -146,7 +173,11 @@ impl AppRuntime {
             // a crash (no intake session is live at startup). Clean ones are
             // removed; dirty ones are kept. Bounded so a pile-up cannot stall
             // startup.
-            let pruned = prune_orphan_intake_worktrees(&tab.project_root, MAX_STARTUP_INTAKE_PRUNE);
+            let pruned = prune_orphan_intake_worktrees_except(
+                &tab.project_root,
+                MAX_STARTUP_INTAKE_PRUNE,
+                &protected_intake_paths,
+            );
             if pruned > 0 {
                 tracing::info!(
                     project_root = %tab.project_root.display(),
@@ -156,7 +187,7 @@ impl AppRuntime {
             }
         }
 
-        self.queue_startup_auto_resume_sessions();
+        self.queue_startup_auto_resume_sessions(recovery_sessions);
 
         let windows = self
             .tabs
@@ -180,9 +211,43 @@ impl AppRuntime {
         let _ = self.persist();
     }
 
-    fn queue_startup_auto_resume_sessions(&mut self) {
+    fn should_protect_intake_worktree(&self, session: &gwt_agent::Session) -> bool {
+        if session.origin != gwt_agent::SessionOrigin::Current
+            || session.lane != gwt_agent::SessionLane::Intake
+            || session.explicitly_closed_at.is_some()
+            || !session.worktree_path.exists()
+        {
+            return false;
+        }
+        let has_placeholder = self
+            .paused_placeholder_tab_for_session(&session.id)
+            .is_some();
+        let has_persisted_base = session
+            .intake_base_oid
+            .as_deref()
+            .or(session.intake_base_ref.as_deref())
+            .is_some_and(|value| !value.trim().is_empty());
+        let has_current_ownership_evidence = has_placeholder
+            || has_persisted_base
+            || session.restore_window_on_startup
+            || matches!(
+                session.status,
+                gwt_agent::AgentStatus::Running
+                    | gwt_agent::AgentStatus::Idle
+                    | gwt_agent::AgentStatus::WaitingInput
+                    | gwt_agent::AgentStatus::Interrupted
+            )
+            || session.last_hook_event_at.is_some()
+            || session.last_completed_stop_at.is_some();
+
+        // Provider hooks may not have reported their exact conversation id
+        // yet when gwt crashes. Ownership protects the Intake from cleanup;
+        // exact-resume capability is evaluated separately by the queue below.
+        has_current_ownership_evidence
+    }
+
+    fn queue_startup_auto_resume_sessions(&mut self, mut sessions: Vec<gwt_agent::Session>) {
         self.pending_startup_auto_resume_sessions.clear();
-        let mut sessions = self.load_recovery_sessions();
         sessions.sort_by(|left, right| {
             right
                 .last_activity_at
@@ -193,36 +258,15 @@ impl AppRuntime {
         let now = chrono::Utc::now();
         let mut resumed_native_sessions = std::collections::HashSet::new();
         for session in sessions {
-            // Issue #2942: a persisted Stopped agent placeholder means the user
-            // did not explicitly close the window (closing removes it from the
-            // workspace). Such "still open" windows must restore regardless of
-            // the session's status drift (e.g. idle-timeout -> Stopped) or age,
-            // honoring "restore everything not explicitly closed". Sessions with
-            // no placeholder are orphans (the workspace lost the window); keep
-            // the conservative status / freshness gates so old, windowless
-            // sessions are not resurrected at startup.
-            // SPEC-2359 G: a Session whose worktree no longer exists on this
-            // machine (moved machines, deleted repo, a path from another OS)
-            // cannot be auto-resumed; skip here so a stale path never reaches an
-            // async spawn that fails later. Applies to both placeholder and
-            // orphan sessions (orphans previously skipped this check).
-            if !session.worktree_path.exists() {
+            // Pre-ledger JSON has no explicit close/window intent. Even if a
+            // compatibility field or stale status looks active, imported
+            // records remain manual Quick Start candidates until the user
+            // selects one.
+            if self
+                .startup_auto_resume_tab_id_for_current_session(&session, now)
+                .is_none()
+            {
                 continue;
-            }
-            let placeholder_tab = self.paused_placeholder_tab_for_session(&session.id);
-            // Orphan sessions (workspace lost the window) keep the conservative
-            // status / freshness gates so old, windowless sessions are not
-            // resurrected; placeholder sessions restore regardless (Issue #2942).
-            if placeholder_tab.is_none() {
-                if !startup_auto_resume_window_was_open(&session) {
-                    continue;
-                }
-                if !session.exact_auto_resume_candidate() {
-                    continue;
-                }
-                if !startup_auto_resume_is_fresh(&session, now) {
-                    continue;
-                }
             }
             let Some(native_session_id) = session.exact_resume_session_id() else {
                 continue;
@@ -230,38 +274,9 @@ impl AppRuntime {
             if !resumed_native_sessions.insert(native_session_id.to_string()) {
                 continue;
             }
-            if self
-                .active_agent_sessions
-                .values()
-                .any(|active| active.session_id == session.id)
-            {
-                continue;
-            }
-            let Some(tab_id) =
-                placeholder_tab.or_else(|| self.auto_resume_tab_id_for_session(&session))
-            else {
-                continue;
-            };
-            let Some(tab) = self.tab(&tab_id) else {
-                continue;
-            };
-            if tab.kind != gwt::ProjectKind::Git || tab.migration_pending {
-                continue;
-            }
-            let config = launch_config_from_persisted_session(&session);
-            if config.session_mode != gwt_agent::SessionMode::Resume {
-                continue;
-            }
-            let workspace_resume_context = Some(workspace_resume_context_for_work_item(
-                &session.worktree_path,
-                Some(session.branch.as_str()),
-                &session.worktree_path,
-            ));
             self.pending_startup_auto_resume_sessions
                 .push(PendingStartupAutoResumeSession {
-                    tab_id,
-                    session,
-                    workspace_resume_context,
+                    session_id: session.id,
                 });
         }
     }
@@ -276,14 +291,42 @@ impl AppRuntime {
 
         let pending = std::mem::take(&mut self.pending_startup_auto_resume_sessions);
         let total = pending.len();
+        let now = chrono::Utc::now();
+        let mut resumed_native_sessions = std::collections::HashSet::new();
         let mut events = Vec::new();
         for (index, pending_session) in pending.into_iter().enumerate() {
+            let session_path = self
+                .sessions_dir
+                .join(format!("{}.toml", pending_session.session_id));
+            let Ok(session) = gwt_agent::Session::load_and_migrate(&session_path) else {
+                continue;
+            };
+            // A replaced file must not redirect a queued restore to another
+            // Session identity, even when the replacement is otherwise valid.
+            if session.id != pending_session.session_id {
+                continue;
+            }
+            let Some(tab_id) = self.startup_auto_resume_tab_id_for_current_session(&session, now)
+            else {
+                continue;
+            };
+            let Some(native_session_id) = session.exact_resume_session_id() else {
+                continue;
+            };
+            if !resumed_native_sessions.insert(native_session_id.to_string()) {
+                continue;
+            }
+            let workspace_resume_context = Some(workspace_resume_context_for_work_item(
+                &session.worktree_path,
+                Some(session.branch.as_str()),
+                &session.worktree_path,
+            ));
             let fallback_geometry =
                 startup_auto_resume_window_geometry(index, total, bounds.clone());
             let mut spawned = self.spawn_restored_agent_session(
-                &pending_session.tab_id,
-                pending_session.session,
-                pending_session.workspace_resume_context,
+                &tab_id,
+                session,
+                workspace_resume_context,
                 fallback_geometry,
             );
             events.append(&mut spawned);
@@ -306,7 +349,7 @@ impl AppRuntime {
     ) -> Vec<OutboundEvent> {
         let config = launch_config_from_persisted_session(&session);
         let geometry = self
-            .remove_stale_paused_agent_window(tab_id, &session.id)
+            .remove_stale_paused_agent_windows(tab_id, &session.id)
             .unwrap_or(fallback_geometry);
         // Snapshot the window registry *after* the paused placeholder is
         // removed: the freshly spawned window may reuse the placeholder's id
@@ -371,6 +414,11 @@ impl AppRuntime {
         let Ok(session) = gwt_agent::Session::load_and_migrate(&path) else {
             return Vec::new();
         };
+        if !session.supports_exact_session_resume()
+            || !session.exact_resume_worktree_materializable()
+        {
+            return Vec::new();
+        }
         let workspace_resume_context = Some(workspace_resume_context_for_work_item(
             &session.worktree_path,
             Some(session.branch.as_str()),
@@ -387,11 +435,11 @@ impl AppRuntime {
     }
 
     /// Restore every process window the user did not explicitly close in a
-    /// freshly opened/restored project tab (Issue #2942). Closing a window
-    /// removes it from the persisted workspace, so the persisted process
-    /// windows are exactly the set to restart: agents resume via their native
-    /// session id (or launch fresh when none exists), and non-agent process
-    /// windows (e.g. Shell) launch fresh. Runs synchronously because each
+    /// freshly opened/restored project tab (Issue #2942). Agent placeholders
+    /// additionally require a current Session with no durable close marker and
+    /// an exact provider-resume capability; unsupported/history-only rows stay
+    /// paused. Non-agent process windows (e.g. Shell) launch fresh. Runs
+    /// synchronously because each
     /// placeholder already carries its geometry, so no frontend canvas bounds
     /// round-trip is required. The startup `bootstrap` queue only covers tabs
     /// open at launch, so projects opened via Open Project / Reopen Recent were
@@ -430,7 +478,11 @@ impl AppRuntime {
                 let Ok(session) = gwt_agent::Session::load_and_migrate(&path) else {
                     continue;
                 };
-                if !session.worktree_path.exists() {
+                if session.origin == gwt_agent::SessionOrigin::LegacyJson
+                    || session.explicitly_closed_at.is_some()
+                    || !session.supports_exact_session_resume()
+                    || !session.exact_resume_worktree_materializable()
+                {
                     continue;
                 }
                 if self
@@ -483,33 +535,92 @@ impl AppRuntime {
             .map(|tab| tab.id.clone())
     }
 
-    fn remove_stale_paused_agent_window(
+    fn startup_auto_resume_tab_id_for_current_session(
+        &self,
+        session: &gwt_agent::Session,
+        now: chrono::DateTime<chrono::Utc>,
+    ) -> Option<String> {
+        if !startup_auto_resume_shared_gate(session) {
+            return None;
+        }
+
+        // Issue #2942: a persisted Stopped agent placeholder means the user
+        // did not explicitly close the window. Without one, retain the
+        // conservative status/freshness gates for orphan sessions.
+        let placeholder_tab = self.paused_placeholder_tab_for_session(&session.id);
+        if placeholder_tab.is_none()
+            && (!startup_auto_resume_window_was_open(session)
+                || !session.exact_auto_resume_candidate()
+                || !startup_auto_resume_is_fresh(session, now))
+        {
+            return None;
+        }
+        if self
+            .active_agent_sessions
+            .values()
+            .any(|active| active.session_id == session.id)
+        {
+            return None;
+        }
+        if launch_config_from_persisted_session(session).session_mode
+            != gwt_agent::SessionMode::Resume
+        {
+            return None;
+        }
+
+        // Resolve every current Session field before consulting an old
+        // placeholder. Besides exact worktree paths this covers the persisted
+        // Project State root, main-worktree ownership, and project scope.
+        if let Some(tab_id) = self.auto_resume_tab_id_for_session(session) {
+            return Some(tab_id);
+        }
+
+        // Only a missing Intake may use its old placeholder as a bounded
+        // fallback: the shared gate proves its persisted base can recreate the
+        // ephemeral worktree. Existing Execution worktrees that no longer map
+        // to a current tab fail closed instead of reverting to a stale tab.
+        if session.lane == gwt_agent::SessionLane::Intake && !session.worktree_path.exists() {
+            return placeholder_tab;
+        }
+        None
+    }
+
+    fn remove_stale_paused_agent_windows(
         &mut self,
-        tab_id: &str,
+        preferred_tab_id: &str,
         session_id: &str,
     ) -> Option<WindowGeometry> {
-        let tab = self.tab_mut(tab_id)?;
         // SPEC-1921 Phase 65 (T337): stale placeholder removal must cover the
         // full Agent-family preset set (`Agent`, `Claude`, `Codex`), not just
         // the legacy `Agent` preset — otherwise a resumed Claude/Codex window
         // spawns next to its surviving placeholder and loses the restored
-        // geometry.
-        let stale = tab
-            .workspace
-            .persisted()
-            .windows
+        // geometry. A Ready-time Session can also move to another tab, so every
+        // stale placeholder for the same ledger identity must be retired.
+        let mut stale = Vec::new();
+        for tab in &self.tabs {
+            for window in &tab.workspace.persisted().windows {
+                if crate::runtime_support::window_is_agent_pane(window)
+                    && window.status == WindowProcessStatus::Stopped
+                    && window.session_id.as_deref() == Some(session_id)
+                {
+                    stale.push((tab.id.clone(), window.id.clone(), window.geometry.clone()));
+                }
+            }
+        }
+
+        let geometry = stale
             .iter()
-            .find(|w| {
-                crate::runtime_support::window_is_agent_pane(w)
-                    && w.status == WindowProcessStatus::Stopped
-                    && w.session_id.as_deref() == Some(session_id)
-            })
-            .map(|w| (w.id.clone(), w.geometry.clone()));
-        let (raw_id, geometry) = stale?;
-        tab.workspace.close_window(&raw_id);
-        let combined = combined_window_id(tab_id, &raw_id);
-        self.window_lookup.remove(&combined);
-        self.window_details.remove(&combined);
+            .find(|(tab_id, _, _)| tab_id == preferred_tab_id)
+            .or_else(|| stale.first())
+            .map(|(_, _, geometry)| geometry.clone())?;
+        for (tab_id, raw_id, _) in stale {
+            if let Some(tab) = self.tab_mut(&tab_id) {
+                tab.workspace.close_window(&raw_id);
+            }
+            let combined = combined_window_id(&tab_id, &raw_id);
+            self.window_lookup.remove(&combined);
+            self.window_details.remove(&combined);
+        }
         Some(geometry)
     }
 
@@ -520,6 +631,16 @@ impl AppRuntime {
                 && same_worktree_path(&tab.project_root, &session.worktree_path)
         }) {
             return Some(tab.id.clone());
+        }
+
+        if let Some(project_state_root) = session.project_state_root.as_deref() {
+            if let Some(tab) = self.tabs.iter().find(|tab| {
+                tab.kind == gwt::ProjectKind::Git
+                    && !tab.migration_pending
+                    && same_worktree_path(&tab.project_root, project_state_root)
+            }) {
+                return Some(tab.id.clone());
+            }
         }
 
         // Issue #2942: a session's worktree belongs to the tab whose project
@@ -551,6 +672,7 @@ impl AppRuntime {
     }
 
     fn load_recovery_sessions(&self) -> Vec<gwt_agent::Session> {
+        gwt_agent::prewarm_legacy_sessions(&self.sessions_dir);
         let Ok(entries) = std::fs::read_dir(&self.sessions_dir) else {
             return Vec::new();
         };

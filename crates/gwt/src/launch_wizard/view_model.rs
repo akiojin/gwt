@@ -344,7 +344,9 @@ impl LaunchWizardState {
                 tool_label: entry.tool_label.clone(),
                 summary: quick_start_summary(entry),
                 resume_session_id: entry.resume_session_id.clone(),
-                reuse_action_label: entry.reuse_action_label().map(str::to_string),
+                reuse_action_label: self
+                    .quick_start_reuse_action_label(entry)
+                    .map(str::to_string),
             })
             .collect()
     }
@@ -732,7 +734,7 @@ impl LaunchWizardState {
                 let mut options = Vec::new();
                 for (index, entry) in self.quick_start_entries.iter().enumerate() {
                     let summary = quick_start_summary(entry);
-                    if let Some(reuse_action_label) = entry.reuse_action_label() {
+                    if let Some(reuse_action_label) = self.quick_start_reuse_action_label(entry) {
                         options.push(LaunchWizardOptionView {
                             value: format!("reuse:{index}"),
                             label: format!("{reuse_action_label} {}", entry.tool_label),
@@ -2734,7 +2736,6 @@ mod tests {
 
         assert_eq!(entries.len(), 1);
         assert_eq!(entries[0].resume_session_id, None);
-        assert_eq!(entries[0].reuse_action_label(), None);
     }
 
     #[test]
