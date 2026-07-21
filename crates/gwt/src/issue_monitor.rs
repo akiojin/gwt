@@ -4,6 +4,7 @@ use std::{
     path::Path,
 };
 
+use fs2::FileExt;
 use serde::{Deserialize, Serialize};
 
 use gwt_github::{
@@ -861,7 +862,7 @@ pub fn issue_monitor_launch_plan(issue: &IssueMonitorIssue) -> IssueMonitorLaunc
     }
 }
 
-pub fn load_issue_monitor_prefs(path: &Path) -> io::Result<IssueMonitorPrefs> {
+fn load_issue_monitor_prefs_unlocked(path: &Path) -> io::Result<IssueMonitorPrefs> {
     if !path.exists() {
         return Ok(IssueMonitorPrefs::default());
     }
@@ -895,7 +896,7 @@ fn unique_prefs_tmp_path(path: &Path) -> std::path::PathBuf {
     ))
 }
 
-pub fn save_issue_monitor_prefs(path: &Path, prefs: &IssueMonitorPrefs) -> io::Result<()> {
+fn save_issue_monitor_prefs_unlocked(path: &Path, prefs: &IssueMonitorPrefs) -> io::Result<()> {
     if let Some(parent) = path.parent() {
         if !parent.as_os_str().is_empty() {
             fs::create_dir_all(parent)?;
@@ -905,6 +906,63 @@ pub fn save_issue_monitor_prefs(path: &Path, prefs: &IssueMonitorPrefs) -> io::R
     let tmp = unique_prefs_tmp_path(path);
     fs::write(&tmp, content.as_bytes())?;
     fs::rename(&tmp, path)
+}
+
+fn with_issue_monitor_prefs_lock<T>(
+    path: &Path,
+    operation: impl FnOnce() -> io::Result<T>,
+) -> io::Result<T> {
+    if let Some(parent) = path.parent() {
+        if !parent.as_os_str().is_empty() {
+            fs::create_dir_all(parent)?;
+        }
+    }
+    // Lock a stable sibling inode: locking `path` itself would stop protecting
+    // future writers as soon as the atomic rename replaces that inode. A
+    // compare/retry loop still has a check-to-rename TOCTOU, while making the
+    // daemon the sole writer is beyond this compatibility migration's scope.
+    let lock = fs::OpenOptions::new()
+        .create(true)
+        .read(true)
+        .write(true)
+        .truncate(false)
+        .open(path.with_extension("lock"))?;
+    lock.lock_exclusive()?;
+    let result = operation();
+    let unlock_result = FileExt::unlock(&lock);
+    match (result, unlock_result) {
+        (Ok(value), Ok(())) => Ok(value),
+        (Err(error), _) => Err(error),
+        (Ok(_), Err(error)) => Err(error),
+    }
+}
+
+pub fn load_issue_monitor_prefs(path: &Path) -> io::Result<IssueMonitorPrefs> {
+    load_issue_monitor_prefs_unlocked(path)
+}
+
+/// Replace a complete prefs snapshot while holding the stable writer lock.
+/// Production read-modify-write callers should use
+/// [`mutate_issue_monitor_prefs`] so their mutation is based on the latest
+/// committed snapshot under the same lock.
+pub fn save_issue_monitor_prefs(path: &Path, prefs: &IssueMonitorPrefs) -> io::Result<()> {
+    with_issue_monitor_prefs_lock(path, || save_issue_monitor_prefs_unlocked(path, prefs))
+}
+
+/// Serialize one cross-process prefs transaction from latest load through the
+/// unique-scratch atomic save, returning both the committed snapshot and the
+/// mutation's result. The closure must not call [`save_issue_monitor_prefs`]
+/// recursively because this transaction already owns the sibling lock.
+pub fn mutate_issue_monitor_prefs<T>(
+    path: &Path,
+    mutation: impl FnOnce(&mut IssueMonitorPrefs) -> T,
+) -> io::Result<(IssueMonitorPrefs, T)> {
+    with_issue_monitor_prefs_lock(path, || {
+        let mut prefs = load_issue_monitor_prefs_unlocked(path)?;
+        let result = mutation(&mut prefs);
+        save_issue_monitor_prefs_unlocked(path, &prefs)?;
+        Ok((prefs, result))
+    })
 }
 
 pub fn issue_monitor_prefs_path_for_repo_path(repo_path: &Path) -> std::path::PathBuf {
@@ -1349,6 +1407,30 @@ impl IssueMonitorState {
         self.autonomous_tuning = disk.autonomous_tuning.clone();
     }
 
+    /// Rebase a stale process-local state on the latest committed prefs before
+    /// applying this transaction's explicit lifecycle mutation.
+    ///
+    /// Real launches are merged before migration adoption so they protect the
+    /// same Issue from a stale failure. A strictly newer migration remains an
+    /// authoritative failure snapshot. When markers are equal, disk-only
+    /// failures were necessarily recorded after migration and are unioned so a
+    /// stale full-snapshot writer cannot erase them. A corresponding terminal
+    /// `NeedsHuman` record is carried with an adopted failure; non-terminal
+    /// autonomous state remains process-owned. Callers must apply their explicit
+    /// launch/failure/completion mutation after this method so the current event
+    /// wins conflicts for its Issue.
+    pub fn rebase_cross_process_prefs(&mut self, disk: &IssueMonitorPrefs) {
+        self.merge_inflight_launches_from_disk(disk);
+        let adopted = self.adopt_newer_legacy_git_launch_failure_migration_from_prefs(disk);
+        if !adopted
+            && disk.legacy_git_launch_failure_migration_version
+                == self.legacy_git_launch_failure_migration_version
+        {
+            self.merge_equal_marker_disk_failures(disk);
+        }
+        self.refresh_gui_owned_prefs(disk);
+    }
+
     /// Adopt a strictly newer cross-process migration result. Failure rows
     /// removed by the authoritative disk snapshot are removed before the next
     /// scan can reconcile candidates; retained unrelated failures stay intact.
@@ -1444,6 +1526,68 @@ impl IssueMonitorState {
         self.legacy_git_launch_failure_migration_version =
             disk.legacy_git_launch_failure_migration_version;
         true
+    }
+
+    fn merge_equal_marker_disk_failures(&mut self, disk: &IssueMonitorPrefs) {
+        for failed in &disk.failed_issues {
+            let issue_number = failed.issue_number;
+            if failed.message.trim().is_empty()
+                || self.failed_issues.contains_key(&issue_number)
+                || self.launched_windows.contains_key(&issue_number)
+                || self.merged_issues.contains(&issue_number)
+            {
+                continue;
+            }
+
+            self.failed_issues
+                .insert(issue_number, failed.message.clone());
+            let needs_human = disk
+                .autonomous_records
+                .iter()
+                .find(|record| {
+                    record.issue_number == issue_number
+                        && record.phase == AutonomousPhase::NeedsHuman
+                })
+                .cloned();
+            if let Some(record) = &needs_human {
+                self.autonomous_records.insert(issue_number, record.clone());
+            }
+            match failed.window_id.as_ref().filter(|id| !id.is_empty()) {
+                Some(window_id) => {
+                    self.failed_windows.insert(issue_number, window_id.clone());
+                }
+                None => {
+                    self.failed_windows.remove(&issue_number);
+                }
+            }
+            self.queue.retain(|queued| *queued != issue_number);
+            self.active_launches
+                .retain(|active| *active != issue_number);
+            self.launching_claimed_at.remove(&issue_number);
+            self.pending_launches
+                .retain(|pending| pending.issue_number != issue_number);
+            if let Some(item) = self
+                .inbox
+                .iter_mut()
+                .find(|item| item.issue.number == issue_number)
+            {
+                if matches!(
+                    item.state,
+                    MonitorInboxState::Merged
+                        | MonitorInboxState::Released
+                        | MonitorInboxState::NeedsHuman
+                ) {
+                    continue;
+                }
+                if needs_human.is_some() {
+                    item.state = MonitorInboxState::NeedsHuman;
+                } else if item.state != MonitorInboxState::LaunchFailed {
+                    item.state = MonitorInboxState::AgentFailed;
+                }
+                item.error_message = Some(failed.message.clone());
+                item.launched_window_id = None;
+            }
+        }
     }
 
     fn apply_legacy_git_launch_failure_migration(&mut self, project_root: &Path) {
@@ -2964,6 +3108,188 @@ mod tests {
     }
 
     #[test]
+    fn cross_process_rebase_unions_equal_marker_failures_with_terminal_precedence() {
+        let local_failure = IssueMonitorFailedIssue {
+            issue_number: 45,
+            message: "local explicit failure".to_string(),
+            window_id: None,
+        };
+        let mut monitor = IssueMonitorState::with_prefs(
+            IssueMonitorConfig::default(),
+            IssueMonitorPrefs {
+                merged_issues: vec![44],
+                failed_issues: vec![local_failure.clone()],
+                ..IssueMonitorPrefs::default()
+            },
+        );
+        let profile = IssueMonitorLaunchProfile {
+            agent_id: "claude".to_string(),
+            model: Some("sonnet".to_string()),
+            reasoning: None,
+            version: None,
+            session_mode: Default::default(),
+            skip_permissions: false,
+            codex_fast_mode: false,
+            runtime_target: Default::default(),
+            docker_service: None,
+            docker_lifecycle_intent: Default::default(),
+            windows_shell: None,
+        };
+        let autonomous_record = |issue_number, phase| AutonomousIssueRecord {
+            issue_number,
+            phase,
+            active_launch_id: None,
+            attempts: 2,
+            acceptance_snapshot: None,
+            retry_not_before: None,
+            last_heartbeat: None,
+            pr_number: None,
+            reviewed_sha: None,
+            review_passed: None,
+        };
+        let disk = IssueMonitorPrefs {
+            launch_profile: Some(profile.clone()),
+            launched_issues: vec![IssueMonitorLaunchedIssue {
+                issue_number: 43,
+                window_id: "tab-1::agent-43".to_string(),
+            }],
+            launching_issues: vec![IssueMonitorLaunchingIssue {
+                issue_number: 100,
+                claimed_at: Some("2026-07-21T00:00:00Z".to_string()),
+            }],
+            failed_issues: vec![
+                IssueMonitorFailedIssue {
+                    issue_number: 43,
+                    message: "failure cannot beat a real launch".to_string(),
+                    window_id: None,
+                },
+                IssueMonitorFailedIssue {
+                    issue_number: 44,
+                    message: "failure cannot beat merged state".to_string(),
+                    window_id: None,
+                },
+                IssueMonitorFailedIssue {
+                    issue_number: 45,
+                    message: "disk cannot replace a local explicit failure".to_string(),
+                    window_id: Some("tab-1::agent-45".to_string()),
+                },
+                IssueMonitorFailedIssue {
+                    issue_number: 99,
+                    message: "disk-only unrelated failure".to_string(),
+                    window_id: Some("tab-1::agent-99".to_string()),
+                },
+                IssueMonitorFailedIssue {
+                    issue_number: 100,
+                    message: "failure beats an unbound claim".to_string(),
+                    window_id: None,
+                },
+            ],
+            autonomous_records: vec![
+                autonomous_record(43, AutonomousPhase::NeedsHuman),
+                autonomous_record(44, AutonomousPhase::NeedsHuman),
+                autonomous_record(45, AutonomousPhase::NeedsHuman),
+                autonomous_record(100, AutonomousPhase::Implementing),
+            ],
+            autonomous_tuning: AutonomousTuning {
+                max_attempts: 9,
+                ..AutonomousTuning::default()
+            },
+            ..IssueMonitorPrefs::default()
+        };
+
+        monitor.rebase_cross_process_prefs(&disk);
+
+        let prefs = monitor.prefs();
+        assert_eq!(prefs.launch_profile, Some(profile));
+        assert_eq!(prefs.autonomous_tuning.max_attempts, 9);
+        assert_eq!(monitor.launched_window_issue("tab-1::agent-43"), Some(43));
+        assert!(prefs
+            .failed_issues
+            .iter()
+            .all(|failed| failed.issue_number != 43 && failed.issue_number != 44));
+        assert_eq!(
+            prefs
+                .failed_issues
+                .iter()
+                .find(|failed| failed.issue_number == 45),
+            Some(&local_failure)
+        );
+        assert_eq!(
+            prefs
+                .failed_issues
+                .iter()
+                .find(|failed| failed.issue_number == 99)
+                .map(|failed| (failed.message.as_str(), failed.window_id.as_deref())),
+            Some(("disk-only unrelated failure", Some("tab-1::agent-99")))
+        );
+        assert_eq!(
+            prefs
+                .failed_issues
+                .iter()
+                .find(|failed| failed.issue_number == 100)
+                .map(|failed| failed.message.as_str()),
+            Some("failure beats an unbound claim")
+        );
+        assert!(prefs
+            .launching_issues
+            .iter()
+            .all(|launching| launching.issue_number != 100));
+        assert!(
+            prefs.autonomous_records.is_empty(),
+            "conflicting or non-terminal disk records are not generally merged"
+        );
+    }
+
+    #[test]
+    fn cross_process_rebase_keeps_needs_human_record_with_disk_only_failure() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("issue-monitor.json");
+        let failure = IssueMonitorFailedIssue {
+            issue_number: 99,
+            message: "human review required".to_string(),
+            window_id: Some("tab-1::agent-99".to_string()),
+        };
+        let needs_human = AutonomousIssueRecord {
+            issue_number: 99,
+            phase: AutonomousPhase::NeedsHuman,
+            active_launch_id: None,
+            attempts: 6,
+            acceptance_snapshot: None,
+            retry_not_before: None,
+            last_heartbeat: Some("2026-07-20T00:00:00Z".to_string()),
+            pr_number: None,
+            reviewed_sha: None,
+            review_passed: None,
+        };
+        save_issue_monitor_prefs(
+            &path,
+            &IssueMonitorPrefs {
+                failed_issues: vec![failure.clone()],
+                autonomous_records: vec![needs_human.clone()],
+                ..IssueMonitorPrefs::default()
+            },
+        )
+        .expect("seed equal-marker NeedsHuman state");
+        let mut stale = IssueMonitorState::new(IssueMonitorConfig::default());
+
+        mutate_issue_monitor_prefs(&path, |disk| {
+            stale.rebase_cross_process_prefs(disk);
+            *disk = stale.prefs();
+        })
+        .expect("rebase and save stale writer");
+
+        let persisted = load_issue_monitor_prefs(&path).expect("reload committed prefs");
+        assert_eq!(persisted.failed_issues, vec![failure]);
+        assert_eq!(persisted.autonomous_records, vec![needs_human]);
+        let mut restored = IssueMonitorState::with_prefs(IssueMonitorConfig::default(), persisted);
+        restored.record_candidate(issue(99));
+        assert_eq!(
+            restored.inbox_item(99).map(|item| item.state),
+            Some(MonitorInboxState::NeedsHuman)
+        );
+    }
+
+    #[test]
     fn refresh_gui_owned_prefs_updates_profile_and_tuning_from_disk() {
         // Issue #3222: the daemon loads prefs once at startup, so a launch
         // profile the GUI saves later stays invisible (has_launch_profile=false
@@ -3280,11 +3606,12 @@ mod tests {
         let loaded = load_issue_monitor_prefs(&path).expect("load");
         assert_eq!(loaded.merged_issues, vec![7, 9]);
 
+        let scratch_prefix = ".issue-monitor.json.tmp-";
         let leftovers: Vec<_> = std::fs::read_dir(dir.path())
             .expect("read_dir")
             .filter_map(Result::ok)
             .map(|entry| entry.file_name().to_string_lossy().into_owned())
-            .filter(|name| name != "issue-monitor.json")
+            .filter(|name| name.starts_with(scratch_prefix))
             .collect();
         assert!(
             leftovers.is_empty(),

@@ -628,6 +628,69 @@ enum IssueMonitorScanPolicy {
     Observe,
 }
 
+fn load_mutate_and_persist_issue_monitor_state<T>(
+    prefs_path: &Path,
+    mutation: impl FnOnce(&mut gwt::IssueMonitorState) -> T,
+) -> (gwt::IssueMonitorState, T) {
+    let mut mutation = Some(mutation);
+    let mut monitor = None;
+    let mut result = None;
+    let transaction = gwt::mutate_issue_monitor_prefs(prefs_path, |prefs| {
+        let mut latest =
+            gwt::IssueMonitorState::with_prefs(gwt::IssueMonitorConfig::default(), prefs.clone());
+        let apply = mutation
+            .take()
+            .expect("issue monitor prefs mutation runs once");
+        result = Some(apply(&mut latest));
+        *prefs = latest.prefs();
+        monitor = Some(latest);
+    });
+    if let Err(error) = transaction {
+        tracing::warn!(
+            error = %error,
+            "issue monitor GUI prefs transaction failed"
+        );
+    }
+    let mut monitor = monitor.unwrap_or_else(|| {
+        let prefs = gwt::load_issue_monitor_prefs(prefs_path).unwrap_or_default();
+        gwt::IssueMonitorState::with_prefs(gwt::IssueMonitorConfig::default(), prefs)
+    });
+    let result = result.unwrap_or_else(|| {
+        mutation
+            .take()
+            .expect("issue monitor prefs mutation remains available")(&mut monitor)
+    });
+    (monitor, result)
+}
+
+fn rebase_mutate_and_persist_issue_monitor_state<T>(
+    prefs_path: &Path,
+    monitor: &mut gwt::IssueMonitorState,
+    mutation: impl FnOnce(&mut gwt::IssueMonitorState) -> T,
+) -> T {
+    let mut mutation = Some(mutation);
+    let mut result = None;
+    let transaction = gwt::mutate_issue_monitor_prefs(prefs_path, |disk| {
+        monitor.rebase_cross_process_prefs(disk);
+        let apply = mutation
+            .take()
+            .expect("issue monitor prefs mutation runs once");
+        result = Some(apply(monitor));
+        *disk = monitor.prefs();
+    });
+    if let Err(error) = transaction {
+        tracing::warn!(
+            error = %error,
+            "issue monitor GUI prefs transaction failed"
+        );
+    }
+    result.unwrap_or_else(|| {
+        mutation
+            .take()
+            .expect("issue monitor prefs mutation remains available")(monitor)
+    })
+}
+
 pub(crate) type RuntimeIssueClient = Arc<dyn gwt_github::IssueClient>;
 pub(crate) type RuntimeIssueClientFactory =
     Arc<dyn Fn(&str, &str) -> Result<RuntimeIssueClient, gwt_github::ApiError> + Send + Sync>;
@@ -1504,26 +1567,31 @@ impl AppRuntime {
         };
 
         let prefs_path = gwt::issue_monitor_prefs_path_for_repo_path(&project_root);
-        let prefs = gwt::load_issue_monitor_prefs(&prefs_path).unwrap_or_default();
-        let mut monitor =
-            gwt::IssueMonitorState::with_prefs(gwt::IssueMonitorConfig::default(), prefs);
-        apply(&mut monitor);
-        // #3223 follow-up: release claimed-but-never-acked launches whose claim
-        // anchor exceeded claim_ttl_secs so a crash cannot leak a slot forever.
-        monitor.expire_stale_unbound_launches(&now);
-        let _ = gwt::save_issue_monitor_prefs(&prefs_path, &monitor.prefs());
+        let (mut monitor, ()) =
+            load_mutate_and_persist_issue_monitor_state(&prefs_path, |monitor| {
+                apply(monitor);
+                // #3223 follow-up: release claimed-but-never-acked launches whose
+                // claim anchor exceeded claim_ttl_secs so a crash cannot leak a slot.
+                monitor.expire_stale_unbound_launches(&now);
+            });
         let mut launch_requests = Vec::new();
         let mut settings_required_request = None;
+        let mut loaded_for_commit = None;
 
         match gwt::issue_monitor_worker::github_remote_owner_and_repo(&project_root) {
             Ok((owner, repo)) => {
-                match gwt::issue_monitor_worker::load_open_issue_monitor_candidates_for_repo_path(
+                match gwt::issue_monitor_worker::load_open_issue_monitor_candidates_for_repo_path_with_provenance(
                     &project_root,
                     &owner,
                     &repo,
                 ) {
-                    Ok(issues) => {
-                        gwt::scan_issue_monitor_candidates(&mut monitor, &issues, &now);
+                    Ok(loaded) => {
+                        gwt::issue_monitor_worker::scan_loaded_issue_monitor_candidates(
+                            &mut monitor,
+                            &loaded,
+                            &project_root,
+                            &now,
+                        );
                         gwt::issue_monitor_worker::reconcile_issue_monitor_merges(
                             &mut monitor,
                             &project_root,
@@ -1583,11 +1651,12 @@ impl AppRuntime {
                                             error = %error,
                                             "issue monitor GitHub claim authentication unavailable"
                                         );
-                                        monitor.record_launch_auth_required(now);
+                                        monitor.record_launch_auth_required(now.as_str());
                                     }
                                 }
                             }
                         }
+                        loaded_for_commit = Some(loaded);
                     }
                     Err(error) => {
                         monitor
@@ -1601,6 +1670,7 @@ impl AppRuntime {
         }
 
         let mut launch_events = Vec::new();
+        let mut launch_failures = Vec::new();
         if let Some((issue_number, linked_issue_kind)) = settings_required_request {
             launch_events.extend(self.open_issue_monitor_settings_required_events(
                 client_id,
@@ -1620,7 +1690,7 @@ impl AppRuntime {
                 } if *issue_number == request.issue_number => Some(message.clone()),
                 _ => None,
             }) {
-                monitor.record_launch_failed(request.issue_number, message);
+                launch_failures.push((request.issue_number, message));
             }
             launch_events.extend(request_events);
         }
@@ -1628,7 +1698,19 @@ impl AppRuntime {
         // window yet, plus any recorded launch failures) so the next handler /
         // the async launch ACK sees the in-flight claims and cannot re-claim
         // them into duplicate windows.
-        let _ = gwt::save_issue_monitor_prefs(&prefs_path, &monitor.prefs());
+        rebase_mutate_and_persist_issue_monitor_state(&prefs_path, &mut monitor, |monitor| {
+            if let Some(loaded) = &loaded_for_commit {
+                gwt::issue_monitor_worker::scan_loaded_issue_monitor_candidates(
+                    monitor,
+                    loaded,
+                    &project_root,
+                    &now,
+                );
+            }
+            for (issue_number, message) in launch_failures {
+                monitor.record_launch_failed(issue_number, message);
+            }
+        });
         let mut events = launch_events;
         events.extend(self.issue_monitor_snapshot_events_for(client_id, monitor));
         events
@@ -1679,40 +1761,47 @@ impl AppRuntime {
         let mut monitor =
             gwt::IssueMonitorState::with_prefs(gwt::IssueMonitorConfig::default(), prefs);
 
-        match gwt::issue_monitor_worker::github_remote_owner_and_repo(&project_root) {
-            Ok((owner, repo)) => {
-                match gwt::issue_monitor_worker::load_open_issue_monitor_candidates_for_repo_path(
+        let loaded = gwt::issue_monitor_worker::github_remote_owner_and_repo(&project_root)
+            .map_err(|error| error.to_string())
+            .and_then(|(owner, repo)| {
+                gwt::issue_monitor_worker::load_open_issue_monitor_candidates_for_repo_path_with_provenance(
                     &project_root,
                     &owner,
                     &repo,
-                ) {
-                    Ok(issues) => {
-                        gwt::scan_issue_monitor_candidates(&mut monitor, &issues, &now);
-                    }
-                    Err(error) => {
-                        monitor
-                            .record_scan_error(now.as_str(), format!("issue list failed: {error}"));
-                    }
-                }
-            }
-            Err(error) => {
-                monitor.record_scan_error(now.as_str(), error.to_string());
-            }
-        }
+                )
+                .map_err(|error| format!("issue list failed: {error}"))
+            });
 
-        let issue_number = if let Some(issue_number) = issue_number_hint {
-            monitor.record_agent_issue_failed(issue_number, message.to_string());
-            Some(issue_number)
-        } else {
-            monitor.record_agent_window_failed(window_id, message.to_string())
-        };
-        if issue_number.is_none() {
-            monitor.record_scan_error(
-                now.as_str(),
-                format!("agent window {window_id} failed but no monitored Issue mapping was found: {message}"),
-            );
-        }
-        let _ = gwt::save_issue_monitor_prefs(&prefs_path, &monitor.prefs());
+        let issue_number = rebase_mutate_and_persist_issue_monitor_state(
+            &prefs_path,
+            &mut monitor,
+            |monitor| {
+                match &loaded {
+                    Ok(loaded) => {
+                        gwt::issue_monitor_worker::scan_loaded_issue_monitor_candidates(
+                            monitor,
+                            loaded,
+                            &project_root,
+                            &now,
+                        );
+                    }
+                    Err(error) => monitor.record_scan_error(now.as_str(), error),
+                }
+                let issue_number = if let Some(issue_number) = issue_number_hint {
+                    monitor.record_agent_issue_failed(issue_number, message.to_string());
+                    Some(issue_number)
+                } else {
+                    monitor.record_agent_window_failed(window_id, message.to_string())
+                };
+                if issue_number.is_none() {
+                    monitor.record_scan_error(
+                        now.as_str(),
+                        format!("agent window {window_id} failed but no monitored Issue mapping was found: {message}"),
+                    );
+                }
+                issue_number
+            },
+        );
         if issue_number_hint.is_some() {
             self.pending_launch_feedback_contexts.remove(window_id);
         }

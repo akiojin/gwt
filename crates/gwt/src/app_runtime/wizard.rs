@@ -2465,9 +2465,10 @@ impl AppRuntime {
             return vec![self.launch_wizard_state_outbound()];
         };
         let prefs_path = gwt::issue_monitor_prefs_path_for_repo_path(&project_root);
-        let mut prefs = gwt::load_issue_monitor_prefs(&prefs_path).unwrap_or_default();
-        prefs.launch_profile = Some(gwt::IssueMonitorLaunchProfile::from(config.as_ref()));
-        if let Err(error) = gwt::save_issue_monitor_prefs(&prefs_path, &prefs) {
+        let launch_profile = gwt::IssueMonitorLaunchProfile::from(config.as_ref());
+        if let Err(error) = gwt::mutate_issue_monitor_prefs(&prefs_path, |prefs| {
+            prefs.launch_profile = Some(launch_profile);
+        }) {
             session.wizard.error = Some(format!("Failed to save Issue Monitor settings: {error}"));
             self.launch_wizard = Some(session);
             return vec![self.launch_wizard_state_outbound()];

@@ -1,7 +1,7 @@
 use std::{
     collections::{HashMap, HashSet},
     ffi::OsString,
-    fs,
+    fs::{self, OpenOptions},
     io::Write,
     path::{Path, PathBuf},
     sync::{mpsc, Arc, Mutex, RwLock},
@@ -9,6 +9,7 @@ use std::{
     time::{Duration, Instant},
 };
 
+use fs2::FileExt;
 use tempfile::tempdir;
 
 use base64::Engine;
@@ -2713,6 +2714,29 @@ fn sample_issue_monitor_launch_profile() -> gwt::IssueMonitorLaunchProfile {
         docker_service: None,
         docker_lifecycle_intent: gwt_agent::DockerLifecycleIntent::Connect,
         windows_shell: None,
+    }
+}
+
+fn legacy_issue_monitor_git_failure(project_root: &Path) -> String {
+    format!(
+        "Current branch is unavailable: Git error: Not a git repository: {}",
+        project_root.display()
+    )
+}
+
+fn legacy_issue_monitor_failed_prefs(
+    project_root: &Path,
+    issue_number: u64,
+) -> gwt::IssueMonitorPrefs {
+    gwt::IssueMonitorPrefs {
+        enabled: false,
+        legacy_git_launch_failure_migration_version: 0,
+        failed_issues: vec![gwt::IssueMonitorFailedIssue {
+            issue_number,
+            message: legacy_issue_monitor_git_failure(project_root),
+            window_id: None,
+        }],
+        ..gwt::IssueMonitorPrefs::default()
     }
 }
 
@@ -16671,6 +16695,401 @@ fn app_runtime_issue_monitor_enable_reports_missing_origin_detail() {
         "unexpected error: {error}"
     );
     assert_ne!(error, "GitHub origin remote is unavailable");
+}
+
+#[test]
+fn app_runtime_full_issue_monitor_scan_migrates_legacy_git_failure_and_persists_marker() {
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let _gh_lock = fake_gh_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedEnvVar::set("HOME", temp.path());
+    let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+    let fake_gh = write_fake_gh_issue_list(temp.path());
+    let _path = prepend_fake_gh_to_path(&fake_gh);
+    let _gh = ScopedEnvVar::set("GWT_TEST_GH", &fake_gh);
+    let _mode = ScopedEnvVar::set("GWT_FAKE_GH_MODE", "ok");
+
+    let repo = temp.path().join("repo");
+    fs::create_dir_all(&repo).expect("create repo");
+    init_repo_with_initial_commit(&repo);
+    let prefs_path = gwt::issue_monitor_prefs_path_for_repo_path(&repo);
+    gwt::save_issue_monitor_prefs(&prefs_path, &legacy_issue_monitor_failed_prefs(&repo, 43))
+        .expect("seed legacy prefs");
+    let tab = sample_project_tab("tab-1", "Repo", repo.clone(), ProjectKind::Git, &[]);
+    let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+
+    let events =
+        runtime.handle_frontend_event("client-1".to_string(), FrontendEvent::ListIssueMonitor);
+
+    let status = events
+        .iter()
+        .find_map(|event| match &event.event {
+            BackendEvent::IssueMonitorStatus { status } => Some(status),
+            _ => None,
+        })
+        .expect("issue monitor status");
+    assert_eq!(
+        status.last_error, None,
+        "the stale failure banner is removed"
+    );
+    assert_eq!(
+        status.queue_len, 1,
+        "the live open issue returns to the queue"
+    );
+    let inbox = events
+        .iter()
+        .find_map(|event| match &event.event {
+            BackendEvent::IssueMonitorInbox { items } => Some(items),
+            _ => None,
+        })
+        .expect("issue monitor inbox");
+    let item = inbox
+        .iter()
+        .find(|item| item.issue.number == 43)
+        .expect("live issue row");
+    assert_eq!(item.state, gwt::MonitorInboxState::Queued);
+    assert_eq!(item.error_message, None);
+
+    let persisted = gwt::load_issue_monitor_prefs(&prefs_path).expect("reload migrated prefs");
+    assert_eq!(
+        persisted.legacy_git_launch_failure_migration_version,
+        gwt::issue_monitor::LEGACY_GIT_LAUNCH_FAILURE_MIGRATION_VERSION
+    );
+    assert!(
+        persisted.failed_issues.is_empty(),
+        "marker and cleanup are persisted by the final atomic save"
+    );
+}
+
+#[test]
+fn app_runtime_full_issue_monitor_cache_fallback_does_not_migrate_legacy_failure() {
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let _gh_lock = fake_gh_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedEnvVar::set("HOME", temp.path());
+    let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+    let fake_gh = write_fake_gh_issue_list(temp.path());
+    let _path = prepend_fake_gh_to_path(&fake_gh);
+    let _gh = ScopedEnvVar::set("GWT_TEST_GH", &fake_gh);
+    let _mode = ScopedEnvVar::set("GWT_FAKE_GH_MODE", "fail");
+
+    let repo = temp.path().join("repo");
+    fs::create_dir_all(&repo).expect("create repo");
+    init_repo_with_initial_commit(&repo);
+    Cache::new(issue_cache_root(&repo))
+        .write_snapshot(&sample_issue_snapshot(
+            43,
+            "Cached issue",
+            &["bug"],
+            "Cached body",
+            "2026-07-21T00:00:00Z",
+        ))
+        .expect("write cache fallback");
+    let prefs_path = gwt::issue_monitor_prefs_path_for_repo_path(&repo);
+    gwt::save_issue_monitor_prefs(&prefs_path, &legacy_issue_monitor_failed_prefs(&repo, 43))
+        .expect("seed legacy prefs");
+    let tab = sample_project_tab("tab-1", "Repo", repo.clone(), ProjectKind::Git, &[]);
+    let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+
+    let events =
+        runtime.handle_frontend_event("client-1".to_string(), FrontendEvent::ListIssueMonitor);
+
+    let inbox = events
+        .iter()
+        .find_map(|event| match &event.event {
+            BackendEvent::IssueMonitorInbox { items } => Some(items),
+            _ => None,
+        })
+        .expect("issue monitor inbox");
+    assert_eq!(
+        inbox
+            .iter()
+            .find(|item| item.issue.number == 43)
+            .map(|item| item.state),
+        Some(gwt::MonitorInboxState::AgentFailed)
+    );
+    let persisted = gwt::load_issue_monitor_prefs(&prefs_path).expect("reload cached prefs");
+    assert_eq!(persisted.legacy_git_launch_failure_migration_version, 0);
+    assert_eq!(persisted.failed_issues.len(), 1);
+}
+
+#[test]
+fn app_runtime_quick_issue_monitor_snapshot_does_not_migrate_legacy_failure() {
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedEnvVar::set("HOME", temp.path());
+    let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+    let repo = temp.path().join("repo");
+    fs::create_dir_all(&repo).expect("create repo");
+    init_repo_with_initial_commit(&repo);
+    let snapshot = sample_issue_snapshot(
+        43,
+        "Quick cached issue",
+        &["bug"],
+        "Cached body",
+        "2026-07-21T00:00:00Z",
+    );
+    let cache_root = issue_cache_root(&repo);
+    Cache::new(cache_root.clone())
+        .write_snapshot(&snapshot)
+        .expect("write quick cache");
+    let prefs_path = gwt::issue_monitor_prefs_path_for_repo_path(&repo);
+    gwt::save_issue_monitor_prefs(&prefs_path, &legacy_issue_monitor_failed_prefs(&repo, 43))
+        .expect("seed legacy prefs");
+    let tab = sample_project_tab("tab-1", "Repo", repo.clone(), ProjectKind::Git, &[]);
+    let runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+
+    let events = runtime.quick_issue_monitor_snapshot_events(
+        Some("client-1"),
+        &repo,
+        &cache_root,
+        &snapshot,
+    );
+
+    let inbox = events
+        .iter()
+        .find_map(|event| match &event.event {
+            BackendEvent::IssueMonitorInbox { items } => Some(items),
+            _ => None,
+        })
+        .expect("quick issue monitor inbox");
+    assert_eq!(
+        inbox
+            .iter()
+            .find(|item| item.issue.number == 43)
+            .map(|item| item.state),
+        Some(gwt::MonitorInboxState::AgentFailed)
+    );
+    let persisted = gwt::load_issue_monitor_prefs(&prefs_path).expect("reload quick prefs");
+    assert_eq!(persisted.legacy_git_launch_failure_migration_version, 0);
+    assert_eq!(persisted.failed_issues.len(), 1);
+}
+
+#[test]
+fn app_runtime_agent_failed_full_scan_migrates_then_keeps_new_same_failure() {
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let _gh_lock = fake_gh_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedEnvVar::set("HOME", temp.path());
+    let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+    let fake_gh = write_fake_gh_issue_list(temp.path());
+    let _path = prepend_fake_gh_to_path(&fake_gh);
+    let _gh = ScopedEnvVar::set("GWT_TEST_GH", &fake_gh);
+    let _mode = ScopedEnvVar::set("GWT_FAKE_GH_MODE", "ok");
+
+    let repo = temp.path().join("repo");
+    fs::create_dir_all(&repo).expect("create repo");
+    init_repo_with_initial_commit(&repo);
+    let prefs_path = gwt::issue_monitor_prefs_path_for_repo_path(&repo);
+    gwt::save_issue_monitor_prefs(&prefs_path, &legacy_issue_monitor_failed_prefs(&repo, 43))
+        .expect("seed legacy prefs");
+    let tab = sample_project_tab("tab-1", "Repo", repo.clone(), ProjectKind::Git, &[]);
+    let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+    let window_id = "tab-1::agent-43".to_string();
+    runtime.pending_launch_feedback_contexts.insert(
+        window_id.clone(),
+        LaunchFeedbackContext {
+            client_id: "__issue_monitor__".to_string(),
+            title: "Issue Monitor".to_string(),
+            issue_monitor_issue_number: Some(43),
+        },
+    );
+    let failure = legacy_issue_monitor_git_failure(&repo);
+
+    let events = runtime.issue_monitor_agent_failed_events(&window_id, &failure);
+
+    let inbox = events
+        .iter()
+        .find_map(|event| match &event.event {
+            BackendEvent::IssueMonitorInbox { items } => Some(items),
+            _ => None,
+        })
+        .expect("issue monitor inbox");
+    let item = inbox
+        .iter()
+        .find(|item| item.issue.number == 43)
+        .expect("new failed row");
+    assert_eq!(item.state, gwt::MonitorInboxState::AgentFailed);
+    assert_eq!(item.error_message.as_deref(), Some(failure.as_str()));
+
+    let persisted = gwt::load_issue_monitor_prefs(&prefs_path).expect("reload failed prefs");
+    assert_eq!(
+        persisted.legacy_git_launch_failure_migration_version,
+        gwt::issue_monitor::LEGACY_GIT_LAUNCH_FAILURE_MIGRATION_VERSION
+    );
+    assert_eq!(persisted.failed_issues.len(), 1);
+    assert_eq!(persisted.failed_issues[0].message, failure);
+}
+
+#[test]
+fn app_runtime_agent_failed_rebases_concurrent_daemon_migration_before_fresh_failure() {
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let _gh_lock = fake_gh_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedEnvVar::set("HOME", temp.path());
+    let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+    let fake_gh = write_fake_gh_issue_list(temp.path());
+    let gh_marker = temp.path().join("gh-started");
+    let _path = prepend_fake_gh_to_path(&fake_gh);
+    let _gh = ScopedEnvVar::set("GWT_TEST_GH", &fake_gh);
+    let _mode = ScopedEnvVar::set("GWT_FAKE_GH_MODE", "fail");
+    let _marker = ScopedEnvVar::set("GWT_FAKE_GH_MARKER", &gh_marker);
+
+    let repo = temp.path().join("repo");
+    fs::create_dir_all(&repo).expect("create repo");
+    init_repo_with_initial_commit(&repo);
+    Cache::new(issue_cache_root(&repo))
+        .write_snapshot(&sample_issue_snapshot(
+            43,
+            "Cached issue",
+            &["bug"],
+            "Cached body",
+            "2026-07-21T00:00:00Z",
+        ))
+        .expect("write cache fallback");
+    let prefs_path = gwt::issue_monitor_prefs_path_for_repo_path(&repo);
+    gwt::save_issue_monitor_prefs(&prefs_path, &legacy_issue_monitor_failed_prefs(&repo, 43))
+        .expect("seed legacy prefs");
+    let tab = sample_project_tab("tab-1", "Repo", repo.clone(), ProjectKind::Git, &[]);
+    let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+    let window_id = "tab-1::agent-43".to_string();
+    runtime.pending_launch_feedback_contexts.insert(
+        window_id.clone(),
+        LaunchFeedbackContext {
+            client_id: "__issue_monitor__".to_string(),
+            title: "Issue Monitor".to_string(),
+            issue_monitor_issue_number: Some(43),
+        },
+    );
+    let failure = legacy_issue_monitor_git_failure(&repo);
+
+    let lock = OpenOptions::new()
+        .create(true)
+        .read(true)
+        .write(true)
+        .truncate(false)
+        .open(prefs_path.with_extension("lock"))
+        .expect("open issue monitor prefs lock");
+    lock.lock_exclusive()
+        .expect("hold issue monitor prefs lock");
+    let (done_tx, done_rx) = mpsc::channel();
+    let writer_window = window_id.clone();
+    let writer_failure = failure.clone();
+    let writer = thread::spawn(move || {
+        let events = runtime.issue_monitor_agent_failed_events(&writer_window, &writer_failure);
+        done_tx.send(events).expect("return GUI events");
+    });
+
+    let marker_deadline = Instant::now() + Duration::from_secs(2);
+    while !gh_marker.exists() && Instant::now() < marker_deadline {
+        thread::sleep(Duration::from_millis(5));
+    }
+    assert!(gh_marker.exists(), "GUI reached the fake live fetch");
+    assert!(
+        done_rx.recv_timeout(Duration::from_millis(100)).is_err(),
+        "GUI writer waits at the transaction lock after loading marker 0"
+    );
+
+    let profile = sample_issue_monitor_launch_profile();
+    let migrated = gwt::IssueMonitorPrefs {
+        launch_profile: Some(profile.clone()),
+        autonomous_tuning: gwt::issue_monitor::AutonomousTuning {
+            max_attempts: 9,
+            ..gwt::issue_monitor::AutonomousTuning::default()
+        },
+        ..gwt::IssueMonitorPrefs::default()
+    };
+    fs::write(
+        &prefs_path,
+        serde_json::to_vec_pretty(&migrated).expect("serialize migrated prefs"),
+    )
+    .expect("commit daemon migration while GUI waits");
+    FileExt::unlock(&lock).expect("release issue monitor prefs lock");
+
+    let events = done_rx
+        .recv_timeout(Duration::from_secs(2))
+        .expect("GUI writer completes after unlock");
+    writer.join().expect("GUI writer thread");
+    let inbox = events
+        .iter()
+        .find_map(|event| match &event.event {
+            BackendEvent::IssueMonitorInbox { items } => Some(items),
+            _ => None,
+        })
+        .expect("issue monitor inbox");
+    let item = inbox
+        .iter()
+        .find(|item| item.issue.number == 43)
+        .expect("fresh failed row");
+    assert_eq!(item.state, gwt::MonitorInboxState::AgentFailed);
+    assert_eq!(item.error_message.as_deref(), Some(failure.as_str()));
+
+    let persisted = gwt::load_issue_monitor_prefs(&prefs_path).expect("reload committed prefs");
+    assert_eq!(
+        persisted.legacy_git_launch_failure_migration_version,
+        gwt::issue_monitor::LEGACY_GIT_LAUNCH_FAILURE_MIGRATION_VERSION,
+        "the stale GUI cannot roll the daemon migration marker back"
+    );
+    assert_eq!(persisted.failed_issues.len(), 1);
+    assert_eq!(persisted.failed_issues[0].message, failure);
+    assert_eq!(persisted.launch_profile, Some(profile));
+    assert_eq!(persisted.autonomous_tuning.max_attempts, 9);
+}
+
+#[test]
+fn app_runtime_rebase_keeps_equal_marker_disk_only_fresh_failures() {
+    let temp = tempdir().expect("tempdir");
+    let prefs_path = temp.path().join("issue-monitor.json");
+    let fresh_failure = legacy_issue_monitor_git_failure(temp.path());
+    let disk = gwt::IssueMonitorPrefs {
+        failed_issues: vec![
+            gwt::IssueMonitorFailedIssue {
+                issue_number: 43,
+                message: fresh_failure.clone(),
+                window_id: None,
+            },
+            gwt::IssueMonitorFailedIssue {
+                issue_number: 99,
+                message: "unrelated failure".to_string(),
+                window_id: Some("tab-1::agent-99".to_string()),
+            },
+        ],
+        ..gwt::IssueMonitorPrefs::default()
+    };
+    gwt::save_issue_monitor_prefs(&prefs_path, &disk).expect("seed equal-marker disk failures");
+    let mut stale = gwt::IssueMonitorState::with_prefs(
+        gwt::IssueMonitorConfig::default(),
+        gwt::IssueMonitorPrefs::default(),
+    );
+
+    super::rebase_mutate_and_persist_issue_monitor_state(&prefs_path, &mut stale, |_| {});
+
+    let persisted = gwt::load_issue_monitor_prefs(&prefs_path).expect("reload committed prefs");
+    for prefs in [&persisted, &stale.prefs()] {
+        assert_eq!(
+            prefs.legacy_git_launch_failure_migration_version,
+            gwt::issue_monitor::LEGACY_GIT_LAUNCH_FAILURE_MIGRATION_VERSION
+        );
+        assert_eq!(prefs.failed_issues, disk.failed_issues);
+    }
 }
 
 #[test]
