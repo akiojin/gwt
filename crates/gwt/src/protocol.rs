@@ -2231,10 +2231,15 @@ pub const BACKEND_EVENT_POLICIES: &[BackendEventPolicy] = &[
         BackendEventDeliveryClass::EphemeralStatus,
         BackendEventBackpressurePolicy::BestEffort,
     ),
+    // Issue #3315: attachment progress is a lossless latest-state snapshot
+    // coalesced per operation (`operation_id`), not a droppable ephemeral
+    // status. This guarantees the terminal `Attached` / `Failed` phase reaches
+    // the client even under a lossy terminal-output flood, so the frontend
+    // surface never gets stuck at `Queued · 100%`.
     BackendEventPolicy::new(
         "attachment_progress",
-        BackendEventDeliveryClass::EphemeralStatus,
-        BackendEventBackpressurePolicy::BestEffort,
+        BackendEventDeliveryClass::Snapshot,
+        BackendEventBackpressurePolicy::ClientScopedSnapshot,
     ),
     BackendEventPolicy::new(
         "window_state",
@@ -3996,6 +4001,31 @@ mod tests {
             event.delivery_policy().kind,
             "attachment_progress",
             "attachment progress must be registered in the backend event policy catalog"
+        );
+    }
+
+    // Issue #3315: attachment progress must be delivered as a lossless
+    // latest-state snapshot (coalesced per operation) so the terminal
+    // `Attached` / `Failed` phase is never dropped under a lossy output flood.
+    // The former `EphemeralStatus` / `BestEffort` class treated it as droppable,
+    // which left the frontend surface stuck at `Queued · 100%`.
+    #[test]
+    fn attachment_progress_delivers_as_lossless_snapshot() {
+        let policy =
+            backend_event_policy("attachment_progress").expect("attachment_progress policy");
+        assert_eq!(
+            policy.delivery,
+            BackendEventDeliveryClass::Snapshot,
+            "attachment progress must be a lossless snapshot, not a droppable ephemeral status"
+        );
+        assert_eq!(
+            policy.backpressure,
+            BackendEventBackpressurePolicy::ClientScopedSnapshot,
+            "attachment progress coalesces the latest state per client scope"
+        );
+        assert!(
+            !policy.coalesces_on_frontend(),
+            "snapshot delivery is server-coalesced, not frontend LatestWins"
         );
     }
 
