@@ -552,6 +552,11 @@ pub struct IssueMonitorState {
     pub gui_connected: bool,
     pub inbox: Vec<IssueMonitorInboxItem>,
     legacy_git_launch_failure_migration_version: u32,
+    /// Exact failure fingerprints removed by an in-memory migration that has
+    /// not necessarily committed yet. An older concurrent snapshot may merge
+    /// unrelated failures, but never these exact rows.
+    #[serde(default, skip)]
+    legacy_git_launch_failure_migration_tombstones: BTreeMap<u64, String>,
     last_scan_at: Option<String>,
     last_error: Option<String>,
     launch_auth_required: bool,
@@ -589,6 +594,12 @@ pub struct IssueMonitorState {
     pending_autonomous_notices: VecDeque<AutonomousNotice>,
     /// #3223 follow-up: claim anchors for unbound launches (issue → RFC3339).
     launching_claimed_at: BTreeMap<u64, String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AutonomousRecordRebasePolicy {
+    DiskAuthoritative,
+    LocalSameKeyAuthoritative,
 }
 
 pub fn is_auto_improve_candidate(issue: &IssueMonitorIssue, config: &IssueMonitorConfig) -> bool {
@@ -978,6 +989,7 @@ impl IssueMonitorState {
             inbox: Vec::new(),
             legacy_git_launch_failure_migration_version:
                 LEGACY_GIT_LAUNCH_FAILURE_MIGRATION_VERSION,
+            legacy_git_launch_failure_migration_tombstones: BTreeMap::new(),
             last_scan_at: None,
             last_error: None,
             launch_auth_required: false,
@@ -1396,46 +1408,147 @@ impl IssueMonitorState {
         self.launch_profile.is_some()
     }
 
-    /// Issue #3222: refresh the GUI-owned prefs fields (`launch_profile`,
-    /// `autonomous_tuning`) from a freshly-loaded on-disk snapshot. The daemon
-    /// loads prefs once at startup and has no control frame for these fields, so
-    /// without this refresh a profile the GUI saves later stays invisible
-    /// (`has_launch_profile()==false` ⇒ active cap 0 ⇒ the daemon never refills
-    /// slots and cannot act as the single launch driver).
-    pub fn refresh_gui_owned_prefs(&mut self, disk: &IssueMonitorPrefs) {
+    /// Refresh the user-configured fields from the latest committed snapshot.
+    /// Explicit GUI/control mutations run after rebase, so they still win their
+    /// transaction while stale scan writers cannot roll a newer config back.
+    fn refresh_disk_owned_prefs(&mut self, disk: &IssueMonitorPrefs) {
+        self.config.enabled = disk.enabled;
+        self.config.max_active = disk.max_active_agents.max(1);
+        self.priority_order = disk.priority_order.clone();
+        self.apply_priority_order_to_queue();
+        self.apply_priority_order_to_inbox();
         self.launch_profile = disk.launch_profile.clone();
+        self.autonomous_mode = disk.autonomous_mode;
         self.autonomous_tuning = disk.autonomous_tuning.clone();
     }
 
+    /// Rebase a GUI observer on the latest committed prefs. The GUI does not
+    /// drive autonomous lifecycle transitions, so disk owns the complete
+    /// autonomous record map, including an updated value for an existing key.
+    pub fn rebase_gui_observer_prefs(&mut self, disk: &IssueMonitorPrefs) {
+        self.rebase_cross_process_prefs(disk, AutonomousRecordRebasePolicy::DiskAuthoritative);
+    }
+
+    /// Rebase the daemon driver on the latest committed prefs. A scan result
+    /// already held by the daemon owns an existing autonomous-record key, while
+    /// records written for other Issues are absorbed from disk.
+    pub fn rebase_daemon_driver_prefs(&mut self, disk: &IssueMonitorPrefs) {
+        self.rebase_cross_process_prefs(
+            disk,
+            AutonomousRecordRebasePolicy::LocalSameKeyAuthoritative,
+        );
+    }
+
     /// Rebase a stale process-local state on the latest committed prefs before
-    /// applying this transaction's explicit lifecycle mutation.
-    ///
-    /// Real launches are merged before migration adoption so they protect the
-    /// same Issue from a stale failure. A strictly newer migration remains an
-    /// authoritative failure snapshot. When markers are equal, disk-only
-    /// failures were necessarily recorded after migration and are unioned so a
-    /// stale full-snapshot writer cannot erase them. A corresponding terminal
-    /// `NeedsHuman` record is carried with an adopted failure; non-terminal
-    /// autonomous state remains process-owned. Callers must apply their explicit
-    /// launch/failure/completion mutation after this method so the current event
-    /// wins conflicts for its Issue.
-    pub fn rebase_cross_process_prefs(&mut self, disk: &IssueMonitorPrefs) {
+    /// applying this transaction's explicit lifecycle mutation. Real launches,
+    /// merged completions, and failures are reconciled before the caller's
+    /// mutation, which therefore remains authoritative for its Issue.
+    fn rebase_cross_process_prefs(
+        &mut self,
+        disk: &IssueMonitorPrefs,
+        autonomous_policy: AutonomousRecordRebasePolicy,
+    ) {
         self.merge_inflight_launches_from_disk(disk);
+        for issue_number in &disk.merged_issues {
+            self.apply_merged_terminal_state(*issue_number);
+        }
+        let rejected_terminal_companions = self.rejected_disk_terminal_failure_companions(disk);
+        match autonomous_policy {
+            AutonomousRecordRebasePolicy::DiskAuthoritative => {
+                let protected_local_records = rejected_terminal_companions
+                    .iter()
+                    .filter_map(|issue_number| {
+                        if self.merged_issues.contains(issue_number) {
+                            return None;
+                        }
+                        self.autonomous_records
+                            .get(issue_number)
+                            .cloned()
+                            .map(|record| (*issue_number, record))
+                    })
+                    .collect::<Vec<_>>();
+                self.autonomous_records = disk
+                    .autonomous_records
+                    .iter()
+                    .filter(|record| {
+                        !self.merged_issues.contains(&record.issue_number)
+                            && (record.phase != AutonomousPhase::NeedsHuman
+                                || !rejected_terminal_companions.contains(&record.issue_number))
+                    })
+                    .map(|record| (record.issue_number, record.clone()))
+                    .collect();
+                self.autonomous_records.extend(protected_local_records);
+            }
+            AutonomousRecordRebasePolicy::LocalSameKeyAuthoritative => {
+                for record in &disk.autonomous_records {
+                    if self.merged_issues.contains(&record.issue_number)
+                        || (record.phase == AutonomousPhase::NeedsHuman
+                            && rejected_terminal_companions.contains(&record.issue_number))
+                    {
+                        continue;
+                    }
+                    self.autonomous_records
+                        .entry(record.issue_number)
+                        .or_insert_with(|| record.clone());
+                }
+            }
+        }
         let adopted = self.adopt_newer_legacy_git_launch_failure_migration_from_prefs(disk);
         if !adopted
             && disk.legacy_git_launch_failure_migration_version
                 == self.legacy_git_launch_failure_migration_version
         {
             self.merge_equal_marker_disk_failures(disk);
+        } else if !adopted
+            && disk.legacy_git_launch_failure_migration_version
+                < self.legacy_git_launch_failure_migration_version
+        {
+            self.merge_older_marker_disk_failures(disk);
         }
-        self.refresh_gui_owned_prefs(disk);
+        self.refresh_disk_owned_prefs(disk);
+    }
+
+    /// A terminal record paired with a rejected disk failure is part of the
+    /// same stale terminal transition and must not bypass lifecycle precedence
+    /// through the general autonomous-record merge.
+    fn rejected_disk_terminal_failure_companions(&self, disk: &IssueMonitorPrefs) -> BTreeSet<u64> {
+        disk.failed_issues
+            .iter()
+            .filter(|failed| {
+                disk.autonomous_records.iter().any(|record| {
+                    record.issue_number == failed.issue_number
+                        && record.phase == AutonomousPhase::NeedsHuman
+                })
+            })
+            .filter(|failed| {
+                failed.message.trim().is_empty()
+                    || self.launched_windows.contains_key(&failed.issue_number)
+                    || self.merged_issues.contains(&failed.issue_number)
+                    || (disk.legacy_git_launch_failure_migration_version
+                        < self.legacy_git_launch_failure_migration_version
+                        && self.is_migrated_failure_tombstone(failed))
+                    || (disk.legacy_git_launch_failure_migration_version
+                        <= self.legacy_git_launch_failure_migration_version
+                        && self.failed_issues.contains_key(&failed.issue_number))
+            })
+            .map(|failed| failed.issue_number)
+            .collect()
+    }
+
+    fn is_migrated_failure_tombstone(&self, failed: &IssueMonitorFailedIssue) -> bool {
+        failed.window_id.is_none()
+            && self
+                .legacy_git_launch_failure_migration_tombstones
+                .get(&failed.issue_number)
+                .is_some_and(|message| message == &failed.message)
     }
 
     /// Adopt a strictly newer cross-process migration result. Failure rows
     /// removed by the authoritative disk snapshot are removed before the next
     /// scan can reconcile candidates; retained unrelated failures stay intact.
-    /// Equal/older markers are a complete no-op so a newly recorded same-text
-    /// failure can never be erased by stale disk state.
+    /// This direct adoption path is a no-op for equal/older markers so a newly
+    /// recorded same-text failure can never be erased by stale disk state. The
+    /// outer rebase separately unions safe disk-only failures.
     pub fn adopt_newer_legacy_git_launch_failure_migration_from_prefs(
         &mut self,
         disk: &IssueMonitorPrefs,
@@ -1453,12 +1566,15 @@ impl IssueMonitorState {
             .collect::<BTreeSet<_>>();
         let mut disk_failures = BTreeMap::new();
         let mut disk_windows = BTreeMap::new();
+        let mut disk_needs_human = BTreeMap::new();
         for failed in &disk.failed_issues {
             // A window currently owned by this process is stronger evidence
             // than a newer marker paired with another process's stale failure
             // snapshot. Keep the live launch internally and on the next prefs
             // roundtrip instead of creating a launched+failed split-brain row.
-            if self.launched_windows.contains_key(&failed.issue_number) {
+            if self.launched_windows.contains_key(&failed.issue_number)
+                || self.merged_issues.contains(&failed.issue_number)
+            {
                 continue;
             }
             if failed.message.trim().is_empty() {
@@ -1467,6 +1583,12 @@ impl IssueMonitorState {
             disk_failures.insert(failed.issue_number, failed.message.clone());
             if let Some(window_id) = failed.window_id.as_ref().filter(|id| !id.is_empty()) {
                 disk_windows.insert(failed.issue_number, window_id.clone());
+            }
+            if let Some(record) = disk.autonomous_records.iter().find(|record| {
+                record.issue_number == failed.issue_number
+                    && record.phase == AutonomousPhase::NeedsHuman
+            }) {
+                disk_needs_human.insert(failed.issue_number, record.clone());
             }
         }
         let removed = old_failures
@@ -1479,16 +1601,15 @@ impl IssueMonitorState {
         self.failed_windows = disk_windows;
         for issue_number in self.failed_issues.keys().copied().collect::<Vec<_>>() {
             self.queue.retain(|queued| *queued != issue_number);
-            let had_pending_launch = self
-                .pending_launches
-                .iter()
-                .any(|pending| pending.issue_number == issue_number);
             self.pending_launches
                 .retain(|pending| pending.issue_number != issue_number);
-            if had_pending_launch && !self.launched_windows.contains_key(&issue_number) {
+            if !self.launched_windows.contains_key(&issue_number) {
                 self.active_launches
                     .retain(|active| *active != issue_number);
                 self.launching_claimed_at.remove(&issue_number);
+            }
+            if let Some(record) = disk_needs_human.get(&issue_number) {
+                self.autonomous_records.insert(issue_number, record.clone());
             }
         }
         self.inbox.retain(|item| {
@@ -1504,13 +1625,13 @@ impl IssueMonitorState {
             };
             if matches!(
                 item.state,
-                MonitorInboxState::Merged
-                    | MonitorInboxState::Released
-                    | MonitorInboxState::NeedsHuman
+                MonitorInboxState::Merged | MonitorInboxState::Released
             ) {
                 continue;
             }
-            if item.state != MonitorInboxState::LaunchFailed {
+            if disk_needs_human.contains_key(&item.issue.number) {
+                item.state = MonitorInboxState::NeedsHuman;
+            } else if item.state != MonitorInboxState::LaunchFailed {
                 item.state = MonitorInboxState::AgentFailed;
             }
             item.error_message = Some(message.clone());
@@ -1529,9 +1650,22 @@ impl IssueMonitorState {
     }
 
     fn merge_equal_marker_disk_failures(&mut self, disk: &IssueMonitorPrefs) {
+        self.merge_disk_only_failures(disk, false);
+    }
+
+    fn merge_older_marker_disk_failures(&mut self, disk: &IssueMonitorPrefs) {
+        self.merge_disk_only_failures(disk, true);
+    }
+
+    fn merge_disk_only_failures(
+        &mut self,
+        disk: &IssueMonitorPrefs,
+        skip_migration_tombstones: bool,
+    ) {
         for failed in &disk.failed_issues {
             let issue_number = failed.issue_number;
             if failed.message.trim().is_empty()
+                || (skip_migration_tombstones && self.is_migrated_failure_tombstone(failed))
                 || self.failed_issues.contains_key(&issue_number)
                 || self.launched_windows.contains_key(&issue_number)
                 || self.merged_issues.contains(&issue_number)
@@ -1618,6 +1752,9 @@ impl IssueMonitorState {
             .iter()
             .map(|(issue_number, message)| format!("issue #{issue_number}: {message}"))
             .collect::<BTreeSet<_>>();
+
+        self.legacy_git_launch_failure_migration_tombstones
+            .extend(targets.clone());
 
         for issue_number in targets.keys() {
             self.failed_issues.remove(issue_number);
@@ -2608,6 +2745,8 @@ impl IssueMonitorState {
         self.failed_windows.remove(&issue_number);
         self.pending_launches
             .retain(|pending| pending.issue_number != issue_number);
+        self.pending_review_dispatches
+            .retain(|pending| pending.issue_number != issue_number);
     }
 
     fn set_inbox_state(&mut self, issue_number: u64, state: MonitorInboxState) {
@@ -2636,13 +2775,30 @@ impl IssueMonitorState {
                 format!("Issue #{issue_number} merged autonomously"),
             );
         }
+        self.apply_merged_terminal_state(issue_number);
+    }
+
+    /// Apply persisted merge completion without emitting another autonomous
+    /// notice. Cross-process rebase is state convergence, not a new event.
+    fn apply_merged_terminal_state(&mut self, issue_number: u64) {
+        let removed_failure_banner = self
+            .failed_issues
+            .get(&issue_number)
+            .map(|message| format!("issue #{issue_number}: {message}"));
         self.clear_active_tracking(issue_number);
         self.queue.retain(|queued| *queued != issue_number);
+        self.failed_issues.remove(&issue_number);
         self.merged_issues.insert(issue_number);
         self.set_inbox_state(issue_number, MonitorInboxState::Merged);
         // SPEC #3200 T-022: completion resets the autonomous lifecycle (attempts,
         // phase, snapshot, in-flight launch id) so a future reopen starts clean.
         self.clear_autonomous_record(issue_number);
+        if removed_failure_banner
+            .as_ref()
+            .is_some_and(|banner| self.last_error.as_ref() == Some(banner))
+        {
+            self.last_error = self.first_failed_issue_banner();
+        }
     }
 
     /// Record that the GitHub Issue for `issue_number` was closed (released).
@@ -3197,7 +3353,7 @@ mod tests {
             ..IssueMonitorPrefs::default()
         };
 
-        monitor.rebase_cross_process_prefs(&disk);
+        monitor.rebase_daemon_driver_prefs(&disk);
 
         let prefs = monitor.prefs();
         assert_eq!(prefs.launch_profile, Some(profile));
@@ -3234,9 +3390,10 @@ mod tests {
             .launching_issues
             .iter()
             .all(|launching| launching.issue_number != 100));
-        assert!(
-            prefs.autonomous_records.is_empty(),
-            "conflicting or non-terminal disk records are not generally merged"
+        assert_eq!(
+            prefs.autonomous_records,
+            vec![autonomous_record(100, AutonomousPhase::Implementing)],
+            "disk-only records are absorbed, but rejected terminal failure companions are not"
         );
     }
 
@@ -3273,7 +3430,7 @@ mod tests {
         let mut stale = IssueMonitorState::new(IssueMonitorConfig::default());
 
         mutate_issue_monitor_prefs(&path, |disk| {
-            stale.rebase_cross_process_prefs(disk);
+            stale.rebase_daemon_driver_prefs(disk);
             *disk = stale.prefs();
         })
         .expect("rebase and save stale writer");
@@ -3290,7 +3447,234 @@ mod tests {
     }
 
     #[test]
-    fn refresh_gui_owned_prefs_updates_profile_and_tuning_from_disk() {
+    fn older_marker_rebase_rejects_terminal_companion_for_local_failure() {
+        let local_failure = IssueMonitorFailedIssue {
+            issue_number: 45,
+            message: "local current failure".to_string(),
+            window_id: None,
+        };
+        let mut current = IssueMonitorState::with_prefs(
+            IssueMonitorConfig::default(),
+            IssueMonitorPrefs {
+                failed_issues: vec![local_failure.clone()],
+                ..IssueMonitorPrefs::default()
+            },
+        );
+        let older = IssueMonitorPrefs {
+            legacy_git_launch_failure_migration_version: 0,
+            failed_issues: vec![IssueMonitorFailedIssue {
+                issue_number: 45,
+                message: "older disk failure".to_string(),
+                window_id: None,
+            }],
+            autonomous_records: vec![AutonomousIssueRecord {
+                issue_number: 45,
+                phase: AutonomousPhase::NeedsHuman,
+                active_launch_id: None,
+                attempts: 6,
+                acceptance_snapshot: None,
+                retry_not_before: None,
+                last_heartbeat: None,
+                pr_number: None,
+                reviewed_sha: None,
+                review_passed: None,
+            }],
+            ..IssueMonitorPrefs::default()
+        };
+
+        let mut gui = current.clone();
+        gui.rebase_gui_observer_prefs(&older);
+        current.rebase_daemon_driver_prefs(&older);
+
+        for monitor in [&mut gui, &mut current] {
+            let prefs = monitor.prefs();
+            assert_eq!(prefs.failed_issues, vec![local_failure.clone()]);
+            assert!(
+                prefs.autonomous_records.is_empty(),
+                "an older terminal companion cannot change a current local failure"
+            );
+            monitor.record_candidate(issue(45));
+            assert_eq!(
+                monitor.inbox_item(45).map(|item| item.state),
+                Some(MonitorInboxState::AgentFailed)
+            );
+        }
+    }
+
+    #[test]
+    fn older_marker_rebase_keeps_unrelated_failure_but_not_migrated_fingerprint() {
+        let project_root = Path::new("/tmp/gwt-issue-3314-older-marker");
+        let migrated_message = format!(
+            "{LEGACY_GIT_LAUNCH_FAILURE_PREFIX}{}",
+            project_root.display()
+        );
+        let mut migrated = IssueMonitorState::with_prefs(
+            IssueMonitorConfig::default(),
+            IssueMonitorPrefs {
+                legacy_git_launch_failure_migration_version: 0,
+                failed_issues: vec![IssueMonitorFailedIssue {
+                    issue_number: 43,
+                    message: migrated_message.clone(),
+                    window_id: None,
+                }],
+                ..IssueMonitorPrefs::default()
+            },
+        );
+        migrated.apply_legacy_git_launch_failure_migration(project_root);
+        assert!(migrated.prefs().failed_issues.is_empty());
+
+        let unrelated_failure = IssueMonitorFailedIssue {
+            issue_number: 99,
+            message: "unrelated fresh failure".to_string(),
+            window_id: Some("tab-1::agent-99".to_string()),
+        };
+        let needs_human = AutonomousIssueRecord {
+            issue_number: 99,
+            phase: AutonomousPhase::NeedsHuman,
+            active_launch_id: None,
+            attempts: 4,
+            acceptance_snapshot: None,
+            retry_not_before: None,
+            last_heartbeat: None,
+            pr_number: None,
+            reviewed_sha: None,
+            review_passed: None,
+        };
+        let older_disk = IssueMonitorPrefs {
+            legacy_git_launch_failure_migration_version: 0,
+            failed_issues: vec![
+                IssueMonitorFailedIssue {
+                    issue_number: 43,
+                    message: migrated_message,
+                    window_id: None,
+                },
+                unrelated_failure.clone(),
+            ],
+            autonomous_records: vec![needs_human.clone()],
+            ..IssueMonitorPrefs::default()
+        };
+
+        let mut gui = migrated.clone();
+        gui.rebase_gui_observer_prefs(&older_disk);
+        let mut daemon = migrated;
+        daemon.rebase_daemon_driver_prefs(&older_disk);
+
+        for prefs in [gui.prefs(), daemon.prefs()] {
+            assert_eq!(
+                prefs.legacy_git_launch_failure_migration_version,
+                LEGACY_GIT_LAUNCH_FAILURE_MIGRATION_VERSION
+            );
+            assert_eq!(prefs.failed_issues, vec![unrelated_failure.clone()]);
+            assert_eq!(prefs.autonomous_records, vec![needs_human.clone()]);
+            assert!(
+                prefs
+                    .failed_issues
+                    .iter()
+                    .all(|failure| failure.issue_number != 43),
+                "the exact failure removed by the local migration stays removed"
+            );
+        }
+    }
+
+    #[test]
+    fn disk_merged_rebase_silently_clears_same_issue_nonterminal_state() {
+        let autonomous_record = |issue_number| AutonomousIssueRecord {
+            issue_number,
+            phase: AutonomousPhase::Implementing,
+            active_launch_id: Some(format!("launch-{issue_number}")),
+            attempts: 1,
+            acceptance_snapshot: None,
+            retry_not_before: None,
+            last_heartbeat: None,
+            pr_number: None,
+            reviewed_sha: None,
+            review_passed: None,
+        };
+        let mut stale = IssueMonitorState::with_prefs(
+            IssueMonitorConfig::default(),
+            IssueMonitorPrefs {
+                enabled: true,
+                max_active_agents: 5,
+                launched_issues: vec![IssueMonitorLaunchedIssue {
+                    issue_number: 42,
+                    window_id: "tab-1::agent-42".to_string(),
+                }],
+                launching_issues: vec![IssueMonitorLaunchingIssue {
+                    issue_number: 43,
+                    claimed_at: Some("2026-07-21T00:00:00Z".to_string()),
+                }],
+                failed_issues: vec![IssueMonitorFailedIssue {
+                    issue_number: 44,
+                    message: "stale failure".to_string(),
+                    window_id: Some("tab-1::agent-44".to_string()),
+                }],
+                merged_issues: vec![77],
+                autonomous_mode: true,
+                autonomous_records: vec![
+                    autonomous_record(42),
+                    autonomous_record(43),
+                    autonomous_record(44),
+                    autonomous_record(45),
+                ],
+                ..IssueMonitorPrefs::default()
+            },
+        );
+        stale.set_gui_connected(true);
+        scan_issue_monitor_candidates(
+            &mut stale,
+            &[issue(42), issue(43), issue(44), issue(45)],
+            "2026-07-21T00:01:00Z",
+        );
+        stale
+            .next_launch_request("2026-07-21T00:02:00Z")
+            .expect("issue 45 pending launch");
+        stale.push_review_dispatch(AutonomousReviewDispatch {
+            issue_number: 42,
+            pr_number: 420,
+            reviewed_sha: "merged-sha".to_string(),
+            required_criteria: vec!["AC-1".to_string()],
+            diff: "stale review diff".to_string(),
+            linked_issue_kind: LinkedIssueKind::Issue,
+        });
+        let disk = IssueMonitorPrefs {
+            enabled: true,
+            max_active_agents: 5,
+            merged_issues: vec![42, 43, 44, 45, 88],
+            autonomous_mode: true,
+            ..IssueMonitorPrefs::default()
+        };
+
+        let mut gui = stale.clone();
+        gui.rebase_gui_observer_prefs(&disk);
+        let mut daemon = stale;
+        daemon.rebase_daemon_driver_prefs(&disk);
+
+        for monitor in [&mut gui, &mut daemon] {
+            let prefs = monitor.prefs();
+            assert_eq!(prefs.merged_issues, vec![42, 43, 44, 45, 77, 88]);
+            assert!(prefs.launched_issues.is_empty());
+            assert!(prefs.launching_issues.is_empty());
+            assert!(prefs.failed_issues.is_empty());
+            assert!(prefs.autonomous_records.is_empty());
+            assert_eq!(monitor.active_count(), 0);
+            assert!(monitor.take_pending_launch_requests().is_empty());
+            assert!(
+                monitor.take_pending_review_dispatches().is_empty(),
+                "a merged Issue cannot spawn a queued stale review agent"
+            );
+            assert_eq!(monitor.status_view().last_error, None);
+            assert!(monitor.take_autonomous_notices().is_empty());
+            for issue_number in [42, 43, 44, 45] {
+                assert_eq!(
+                    monitor.inbox_item(issue_number).map(|item| item.state),
+                    Some(MonitorInboxState::Merged)
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn daemon_rebase_updates_profile_and_tuning_from_disk() {
         // Issue #3222: the daemon loads prefs once at startup, so a launch
         // profile the GUI saves later stays invisible (has_launch_profile=false
         // ⇒ cap 0 ⇒ the daemon never refills slots and the GUI's re-entrant
@@ -3318,7 +3702,7 @@ mod tests {
             },
             ..IssueMonitorPrefs::default()
         };
-        monitor.refresh_gui_owned_prefs(&disk);
+        monitor.rebase_daemon_driver_prefs(&disk);
         assert!(monitor.has_launch_profile(), "profile refreshed from disk");
         assert_eq!(monitor.autonomous_tuning.max_attempts, 9);
     }

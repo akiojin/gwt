@@ -403,7 +403,7 @@ fn apply_issue_monitor_control_with_disk_migration(
 ) -> bool {
     let mut applied = None;
     let transaction = crate::mutate_issue_monitor_prefs(prefs_path, |disk| {
-        monitor.rebase_cross_process_prefs(disk);
+        monitor.rebase_daemon_driver_prefs(disk);
         let should_scan = apply_issue_monitor_control(monitor, control.clone());
         applied = Some(should_scan);
         *disk = monitor.prefs();
@@ -587,7 +587,7 @@ async fn scan_and_persist_issue_monitor(
 
 fn persist_daemon_issue_monitor_state(prefs_path: &Path, monitor: &mut crate::IssueMonitorState) {
     if let Err(error) = crate::mutate_issue_monitor_prefs(prefs_path, |disk| {
-        monitor.rebase_cross_process_prefs(disk);
+        monitor.rebase_daemon_driver_prefs(disk);
         *disk = monitor.prefs();
     }) {
         tracing::warn!(
@@ -621,7 +621,7 @@ fn scan_issue_monitor_once_blocking(
     if let Ok(disk) = crate::load_issue_monitor_prefs(
         &crate::issue_monitor_prefs_path_for_repo_path(&scope.project_root),
     ) {
-        monitor.rebase_cross_process_prefs(&disk);
+        monitor.rebase_daemon_driver_prefs(&disk);
     }
     // #3223 follow-up (codex P2): expire claimed-but-never-acked launches past
     // claim_ttl_secs so a crashed launch cannot hold a slot forever.
@@ -1960,6 +1960,73 @@ exit 0
     }
 
     #[test]
+    fn daemon_persist_keeps_local_record_and_unions_latest_disk_owned_state() {
+        let temp = TempDir::new().expect("tempdir");
+        let prefs_path = temp.path().join("issue-monitor.json");
+        let record = |issue_number, phase, attempts| crate::AutonomousIssueRecord {
+            issue_number,
+            phase,
+            active_launch_id: None,
+            attempts,
+            acceptance_snapshot: None,
+            retry_not_before: None,
+            last_heartbeat: None,
+            pr_number: None,
+            reviewed_sha: None,
+            review_passed: None,
+        };
+        let disk_same_key = record(42, crate::AutonomousPhase::Implementing, 1);
+        let local_same_key = record(42, crate::AutonomousPhase::Reviewing, 2);
+        let disk_only = record(99, crate::AutonomousPhase::Implementing, 3);
+        crate::save_issue_monitor_prefs(
+            &prefs_path,
+            &crate::IssueMonitorPrefs {
+                enabled: true,
+                max_active_agents: 4,
+                priority_order: vec![99, 42],
+                merged_issues: vec![88],
+                autonomous_mode: true,
+                autonomous_tuning: crate::issue_monitor::AutonomousTuning {
+                    max_attempts: 9,
+                    ..crate::issue_monitor::AutonomousTuning::default()
+                },
+                autonomous_records: vec![disk_same_key, disk_only.clone()],
+                ..crate::IssueMonitorPrefs::default()
+            },
+        )
+        .expect("seed latest disk state");
+        let mut daemon = crate::IssueMonitorState::with_prefs(
+            crate::IssueMonitorConfig::default(),
+            crate::IssueMonitorPrefs {
+                enabled: false,
+                max_active_agents: 1,
+                priority_order: vec![42],
+                merged_issues: vec![77],
+                autonomous_mode: false,
+                autonomous_records: vec![local_same_key.clone()],
+                ..crate::IssueMonitorPrefs::default()
+            },
+        );
+
+        super::persist_daemon_issue_monitor_state(&prefs_path, &mut daemon);
+
+        let persisted = crate::load_issue_monitor_prefs(&prefs_path).expect("reload daemon state");
+        for prefs in [&persisted, &daemon.prefs()] {
+            assert!(prefs.enabled, "latest disk enabled flag wins");
+            assert_eq!(prefs.max_active_agents, 4);
+            assert_eq!(prefs.priority_order, vec![99, 42]);
+            assert!(prefs.autonomous_mode);
+            assert_eq!(prefs.autonomous_tuning.max_attempts, 9);
+            assert_eq!(prefs.merged_issues, vec![77, 88], "merged state is unioned");
+            assert_eq!(
+                prefs.autonomous_records,
+                vec![local_same_key.clone(), disk_only.clone()],
+                "daemon keeps its same-key scan result and absorbs disk-only records"
+            );
+        }
+    }
+
+    #[test]
     fn daemon_persist_waits_for_sibling_lock_and_rebases_committed_state() {
         let temp = TempDir::new().expect("tempdir");
         let prefs_path = temp.path().join("issue-monitor.json");
@@ -2052,10 +2119,10 @@ exit 0
             );
             assert_eq!(prefs.launch_profile.as_ref(), Some(&disk_profile));
             assert_eq!(prefs.autonomous_tuning.max_attempts, 9);
-            assert!(prefs.enabled);
-            assert_eq!(prefs.max_active_agents, 3);
-            assert_eq!(prefs.priority_order, vec![99, 43]);
-            assert!(prefs.autonomous_mode);
+            assert!(!prefs.enabled, "latest committed disk config wins");
+            assert_eq!(prefs.max_active_agents, 1);
+            assert!(prefs.priority_order.is_empty());
+            assert!(!prefs.autonomous_mode);
             assert_eq!(
                 prefs.launched_issues,
                 vec![crate::IssueMonitorLaunchedIssue {
@@ -2111,6 +2178,18 @@ exit 0
                     window_id: "tab-1::agent-43".to_string(),
                 }],
                 failed_issues: vec![competing_failure],
+                autonomous_records: vec![crate::AutonomousIssueRecord {
+                    issue_number: 43,
+                    phase: crate::AutonomousPhase::NeedsHuman,
+                    active_launch_id: None,
+                    attempts: 6,
+                    acceptance_snapshot: None,
+                    retry_not_before: None,
+                    last_heartbeat: None,
+                    pr_number: None,
+                    reviewed_sha: None,
+                    review_passed: None,
+                }],
                 ..crate::IssueMonitorPrefs::default()
             },
         )
@@ -2140,6 +2219,13 @@ exit 0
                 .iter()
                 .all(|failed| failed.issue_number != 43),
             "migration adoption cannot create a launched+failed split-brain row"
+        );
+        assert!(
+            prefs
+                .autonomous_records
+                .iter()
+                .all(|record| record.issue_number != 43),
+            "a rejected failure cannot smuggle its NeedsHuman companion past a real launch"
         );
     }
 
@@ -2225,6 +2311,85 @@ exit 0
         assert!(
             persisted.failed_issues.is_empty(),
             "a stale daemon cannot restore the failure removed by the GUI"
+        );
+    }
+
+    #[test]
+    fn daemon_newer_failure_adoption_keeps_needs_human_and_clears_restored_launch() {
+        let temp = TempDir::new().expect("tempdir");
+        let prefs_path = temp.path().join("issue-monitor.json");
+        let failure = crate::IssueMonitorFailedIssue {
+            issue_number: 100,
+            message: "human review required".to_string(),
+            window_id: None,
+        };
+        let needs_human = crate::AutonomousIssueRecord {
+            issue_number: 100,
+            phase: crate::AutonomousPhase::NeedsHuman,
+            active_launch_id: None,
+            attempts: 6,
+            acceptance_snapshot: None,
+            retry_not_before: None,
+            last_heartbeat: Some("2026-07-21T00:00:00Z".to_string()),
+            pr_number: None,
+            reviewed_sha: None,
+            review_passed: None,
+        };
+        crate::save_issue_monitor_prefs(
+            &prefs_path,
+            &crate::IssueMonitorPrefs {
+                failed_issues: vec![failure.clone()],
+                autonomous_records: vec![needs_human.clone()],
+                ..crate::IssueMonitorPrefs::default()
+            },
+        )
+        .expect("seed newer NeedsHuman migration");
+        let mut daemon = crate::IssueMonitorState::with_prefs(
+            crate::IssueMonitorConfig::default(),
+            crate::IssueMonitorPrefs {
+                enabled: true,
+                legacy_git_launch_failure_migration_version: 0,
+                launching_issues: vec![crate::IssueMonitorLaunchingIssue {
+                    issue_number: 100,
+                    claimed_at: None,
+                }],
+                ..crate::IssueMonitorPrefs::default()
+            },
+        );
+        assert_eq!(
+            daemon.active_count(),
+            1,
+            "legacy launch restores an active slot"
+        );
+        assert!(
+            daemon.take_pending_launch_requests().is_empty(),
+            "the restored launch deliberately has no pending request"
+        );
+
+        super::persist_daemon_issue_monitor_state(&prefs_path, &mut daemon);
+
+        assert_eq!(
+            daemon.active_count(),
+            0,
+            "adopted failure releases the active slot"
+        );
+        assert!(daemon.take_pending_launch_requests().is_empty());
+        let persisted = crate::load_issue_monitor_prefs(&prefs_path).expect("reload adopted state");
+        assert!(persisted.launching_issues.is_empty());
+        assert_eq!(persisted.failed_issues, vec![failure]);
+        assert_eq!(persisted.autonomous_records, vec![needs_human]);
+
+        let mut restored =
+            crate::IssueMonitorState::with_prefs(crate::IssueMonitorConfig::default(), persisted);
+        crate::scan_issue_monitor_candidates(
+            &mut restored,
+            &[sample_issue_monitor_issue(100)],
+            "2026-07-21T00:01:00Z",
+        );
+        assert_eq!(
+            restored.inbox_item(100).map(|item| item.state),
+            Some(crate::MonitorInboxState::NeedsHuman),
+            "save/load reconstructs the terminal NeedsHuman row"
         );
     }
 

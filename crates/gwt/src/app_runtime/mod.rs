@@ -671,7 +671,7 @@ fn rebase_mutate_and_persist_issue_monitor_state<T>(
     let mut mutation = Some(mutation);
     let mut result = None;
     let transaction = gwt::mutate_issue_monitor_prefs(prefs_path, |disk| {
-        monitor.rebase_cross_process_prefs(disk);
+        monitor.rebase_gui_observer_prefs(disk);
         let apply = mutation
             .take()
             .expect("issue monitor prefs mutation runs once");

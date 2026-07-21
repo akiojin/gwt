@@ -2740,6 +2740,25 @@ fn legacy_issue_monitor_failed_prefs(
     }
 }
 
+fn issue_monitor_autonomous_record(
+    issue_number: u64,
+    phase: gwt::AutonomousPhase,
+    attempts: u32,
+) -> gwt::AutonomousIssueRecord {
+    gwt::AutonomousIssueRecord {
+        issue_number,
+        phase,
+        active_launch_id: None,
+        attempts,
+        acceptance_snapshot: None,
+        retry_not_before: None,
+        last_heartbeat: None,
+        pr_number: None,
+        reviewed_sha: None,
+        review_passed: None,
+    }
+}
+
 fn run_git(repo: &Path, args: &[&str]) {
     let status = gwt_core::process::hidden_command("git")
         .args(args)
@@ -17009,12 +17028,20 @@ fn app_runtime_agent_failed_rebases_concurrent_daemon_migration_before_fresh_fai
     );
 
     let profile = sample_issue_monitor_launch_profile();
+    let reviewing = issue_monitor_autonomous_record(42, gwt::AutonomousPhase::Reviewing, 2);
+    let implementing = issue_monitor_autonomous_record(99, gwt::AutonomousPhase::Implementing, 1);
     let migrated = gwt::IssueMonitorPrefs {
+        enabled: true,
+        max_active_agents: 4,
+        priority_order: vec![99, 42],
         launch_profile: Some(profile.clone()),
+        merged_issues: vec![88],
+        autonomous_mode: true,
         autonomous_tuning: gwt::issue_monitor::AutonomousTuning {
             max_attempts: 9,
             ..gwt::issue_monitor::AutonomousTuning::default()
         },
+        autonomous_records: vec![reviewing.clone(), implementing.clone()],
         ..gwt::IssueMonitorPrefs::default()
     };
     fs::write(
@@ -17050,8 +17077,18 @@ fn app_runtime_agent_failed_rebases_concurrent_daemon_migration_before_fresh_fai
     );
     assert_eq!(persisted.failed_issues.len(), 1);
     assert_eq!(persisted.failed_issues[0].message, failure);
+    assert!(persisted.enabled, "latest daemon config is preserved");
+    assert_eq!(persisted.max_active_agents, 4);
+    assert_eq!(persisted.priority_order, vec![99, 42]);
+    assert!(persisted.autonomous_mode);
     assert_eq!(persisted.launch_profile, Some(profile));
     assert_eq!(persisted.autonomous_tuning.max_attempts, 9);
+    assert_eq!(persisted.merged_issues, vec![88]);
+    assert_eq!(
+        persisted.autonomous_records,
+        vec![reviewing, implementing],
+        "the actual GUI final writer must not roll back daemon lifecycle records"
+    );
 }
 
 #[test]
@@ -17089,6 +17126,58 @@ fn app_runtime_rebase_keeps_equal_marker_disk_only_fresh_failures() {
             gwt::issue_monitor::LEGACY_GIT_LAUNCH_FAILURE_MIGRATION_VERSION
         );
         assert_eq!(prefs.failed_issues, disk.failed_issues);
+    }
+}
+
+#[test]
+fn app_runtime_gui_rebase_uses_latest_disk_config_and_autonomous_records() {
+    let temp = tempdir().expect("tempdir");
+    let prefs_path = temp.path().join("issue-monitor.json");
+    let stale_record = issue_monitor_autonomous_record(42, gwt::AutonomousPhase::Implementing, 1);
+    let reviewing = issue_monitor_autonomous_record(42, gwt::AutonomousPhase::Reviewing, 2);
+    let disk_only = issue_monitor_autonomous_record(99, gwt::AutonomousPhase::Implementing, 3);
+    let disk = gwt::IssueMonitorPrefs {
+        enabled: true,
+        max_active_agents: 4,
+        priority_order: vec![99, 42],
+        merged_issues: vec![88],
+        autonomous_mode: true,
+        autonomous_tuning: gwt::issue_monitor::AutonomousTuning {
+            max_attempts: 9,
+            ..gwt::issue_monitor::AutonomousTuning::default()
+        },
+        autonomous_records: vec![reviewing.clone(), disk_only.clone()],
+        ..gwt::IssueMonitorPrefs::default()
+    };
+    gwt::save_issue_monitor_prefs(&prefs_path, &disk).expect("seed latest daemon state");
+    let mut stale = gwt::IssueMonitorState::with_prefs(
+        gwt::IssueMonitorConfig::default(),
+        gwt::IssueMonitorPrefs {
+            enabled: false,
+            max_active_agents: 1,
+            priority_order: vec![42],
+            merged_issues: vec![77],
+            autonomous_mode: false,
+            autonomous_records: vec![stale_record],
+            ..gwt::IssueMonitorPrefs::default()
+        },
+    );
+
+    super::rebase_mutate_and_persist_issue_monitor_state(&prefs_path, &mut stale, |_| {});
+
+    let persisted = gwt::load_issue_monitor_prefs(&prefs_path).expect("reload GUI rebase");
+    for prefs in [&persisted, &stale.prefs()] {
+        assert!(prefs.enabled, "latest disk enabled flag wins");
+        assert_eq!(prefs.max_active_agents, 4);
+        assert_eq!(prefs.priority_order, vec![99, 42]);
+        assert!(prefs.autonomous_mode);
+        assert_eq!(prefs.autonomous_tuning.max_attempts, 9);
+        assert_eq!(prefs.merged_issues, vec![77, 88], "merged state is unioned");
+        assert_eq!(
+            prefs.autonomous_records,
+            vec![reviewing.clone(), disk_only.clone()],
+            "GUI observer takes the latest disk record for the same key"
+        );
     }
 }
 
