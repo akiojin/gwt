@@ -42,6 +42,52 @@ pub(crate) fn agent_session_roots_or_fallback(
     ))
 }
 
+/// A detected conflict between the worktree an agent session records and the
+/// worktree the current process actually runs in (Issue #3278).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct WorktreeIdentityConflict {
+    /// The `GWT_SESSION_ID` whose recorded worktree disagrees with the cwd.
+    pub session_id: String,
+    /// The worktree recorded in the session metadata.
+    pub expected_worktree: PathBuf,
+    /// The worktree the process is actually running in.
+    pub actual_worktree: PathBuf,
+}
+
+/// Detect when the agent session named by `session_id` records a `worktree_path`
+/// that disagrees with the worktree the current process runs in (`cwd`).
+///
+/// A `workspace.update` writes the git-tracked `events.jsonl` — and derives the
+/// event's Work identity — from the session metadata. When `GWT_SESSION_ID`
+/// leaks in from another worktree, that write lands in, and is attributed to, a
+/// foreign Work. Callers use a returned conflict to refuse the write.
+///
+/// Returns `None` (no conflict, proceed) when:
+/// - the session cannot be loaded — the write path already falls back to `cwd`,
+///   so there is nothing to cross-check;
+/// - the session runs in a non-Host runtime — a container / devcontainer cwd is
+///   legitimately a different spelling than the host `worktree_path`;
+/// - the normalized session worktree equals the normalized current worktree.
+pub(crate) fn agent_session_worktree_conflict(
+    cwd: &Path,
+    session_id: &str,
+) -> Option<WorktreeIdentityConflict> {
+    let session = try_load_session(session_id).ok().flatten()?;
+    if session.runtime_target != gwt_agent::LaunchRuntimeTarget::Host {
+        return None;
+    }
+    let expected = normalize_project_state_root(&session.worktree_path);
+    let actual = normalize_project_state_root(&gwt_core::paths::resolve_current_worktree_root(cwd));
+    if expected == actual {
+        return None;
+    }
+    Some(WorktreeIdentityConflict {
+        session_id: session_id.to_string(),
+        expected_worktree: expected,
+        actual_worktree: actual,
+    })
+}
+
 pub(crate) fn canonical_project_state_root_for_session(
     session: &Session,
     fallback_repo_path: &Path,
@@ -679,5 +725,69 @@ mod tests {
             before,
             "failed repair must not persist partially copied Agent fields"
         );
+    }
+
+    fn save_session(session_id: &str, worktree: &Path, runtime: gwt_agent::LaunchRuntimeTarget) {
+        let mut session = Session::new(worktree, "work/test", gwt_agent::AgentId::Codex);
+        session.id = session_id.to_string();
+        session.runtime_target = runtime;
+        session
+            .save(&gwt_core::paths::gwt_sessions_dir())
+            .expect("save session");
+    }
+
+    /// Issue #3278: only a Host session whose recorded worktree differs from the
+    /// process cwd is a conflict. A missing session, a matching worktree, and a
+    /// non-Host (container) runtime all proceed without a false positive.
+    #[test]
+    fn agent_session_worktree_conflict_flags_host_mismatch_only() {
+        let _guard = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let home = tempfile::tempdir().expect("home");
+        let _home = gwt_core::test_support::ScopedEnvVar::set("HOME", home.path());
+        let _userprofile = gwt_core::test_support::ScopedEnvVar::set("USERPROFILE", home.path());
+        let temp = tempfile::tempdir().expect("tempdir");
+        let session_worktree = temp.path().join("work").join("session");
+        let actual_worktree = temp.path().join("work").join("actual");
+        std::fs::create_dir_all(&session_worktree).expect("session worktree");
+        std::fs::create_dir_all(&actual_worktree).expect("actual worktree");
+
+        // Unknown session → no conflict (the write path already falls back to cwd).
+        assert!(agent_session_worktree_conflict(&actual_worktree, "missing-session").is_none());
+
+        // Host session whose worktree matches cwd → no conflict.
+        save_session(
+            "host-match",
+            &actual_worktree,
+            gwt_agent::LaunchRuntimeTarget::Host,
+        );
+        assert!(agent_session_worktree_conflict(&actual_worktree, "host-match").is_none());
+
+        // Host session bound to a different worktree → conflict naming both paths.
+        save_session(
+            "host-mismatch",
+            &session_worktree,
+            gwt_agent::LaunchRuntimeTarget::Host,
+        );
+        let conflict = agent_session_worktree_conflict(&actual_worktree, "host-mismatch")
+            .expect("host mismatch is a conflict");
+        assert_eq!(conflict.session_id, "host-mismatch");
+        assert_eq!(
+            conflict.expected_worktree,
+            normalize_project_state_root(&session_worktree)
+        );
+        assert_eq!(
+            conflict.actual_worktree,
+            normalize_project_state_root(&actual_worktree)
+        );
+
+        // Docker session cwd is legitimately a container-internal path → skip.
+        save_session(
+            "docker-mismatch",
+            &session_worktree,
+            gwt_agent::LaunchRuntimeTarget::Docker,
+        );
+        assert!(agent_session_worktree_conflict(&actual_worktree, "docker-mismatch").is_none());
     }
 }
